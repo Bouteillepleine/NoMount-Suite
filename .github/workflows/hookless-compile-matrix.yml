@@ -109,7 +109,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libc6:i386 libstdc++6:i386 zlib1g:i386
-          git clone --depth 1 \
+          # NB: the repo's default branch is empty (OWNERS only); the toolchain
+          # binaries live on release branches. android10-release has bin/*-gcc.
+          git clone --depth 1 -b android10-release \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
             "$HOME/gcc49"
           GCC="$HOME/gcc49/bin/aarch64-linux-android-gcc"
