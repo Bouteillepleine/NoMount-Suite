@@ -35,13 +35,30 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
 bool nomount_hide_mount(struct vfsmount *mnt)
 {
     const char *dev;
+    uid_t uid = current_uid().val;
 
     if (unlikely(!mnt))
         return false;
-    if (current_uid().val == 0)          /* root/su: no hiding */
+    if (uid == 0)                        /* root/su: no hiding */
         return false;
     dev = real_mount(mnt)->mnt_devname;
-    return dev && strncmp(dev, "nomount_", 8) == 0;
+    if (!dev)
+        return false;
+    /* Always hide the Suite's own mounts (nomount_ov, work tmpfs, ...) from non-root. */
+    if (strncmp(dev, "nomount_", 8) == 0)
+        return true;
+    /* For a per-UID BLOCKED reader (a detector added via `nm block <uid>`), also hide
+     * the STOCK OnePlus RRO overlays it flags as "inconsistent mounts": overlay-overlay
+     * on /product/{overlay,app,priv-app} and oplus_overlay on /system_ext/**/oplusex.
+     * This only filters the /proc mount LISTING for that UID — the mounts stay in the
+     * namespace, so the app's resources/theming are unaffected. */
+    if (nomount_is_uid_blocked(uid)) {
+        if (strcmp(dev, "overlay-overlay") == 0)
+            return true;
+        if (strcmp(dev, "oplus_overlay") == 0)
+            return true;
+    }
+    return false;
 }
 
 #define __get_nm(ptr, type, member) ({ \
