@@ -36,6 +36,18 @@ const SAR_ALIAS_PARTITIONS: &[&str] = &[
     "system/odm",
 ];
 
+// Top-level module roots that exist on-device but must NEVER be injected into
+// (writable, virtual, or ramdisk mounts). Any OTHER top-level module dir whose
+// "/<name>" is a real directory is treated as a partition to inject — so partition
+// discovery is dynamic (product/, my_*/, vendor/, whatever THIS device ships) with
+// no hardcoded per-OEM list. Module-metadata dirs (META-INF/, webroot/, common/…)
+// are excluded for free: their "/<name>" doesn't exist on the device.
+const NON_PARTITION_ROOTS: &[&str] = &[
+    "data", "mnt", "dev", "proc", "sys", "cache", "metadata", "config",
+    "storage", "sdcard", "apex", "tmp", "debug_ramdisk", "linkerconfig",
+    "postinstall", "second_stage_resources", "bin", "sbin",
+];
+
 /// Resolve a module-relative path ("system/app/Foo.apk") to its absolute target
 /// ("/system/app/Foo.apk", or "/vendor/..." for SAR aliases).
 fn resolve_target_path(relative: &Path) -> Option<PathBuf> {
@@ -53,6 +65,28 @@ fn resolve_target_path(relative: &Path) -> Option<PathBuf> {
         }
     }
     Some(PathBuf::from(format!("/{s}")))
+}
+
+/// True if `target` is a partition ROOT (`/product`, `/system`, `/vendor`, …) rather than
+/// something inside one.
+///
+/// A rule on a partition root would redirect the WHOLE partition to the module's copy,
+/// masking every stock entry under it — never what a module means. Modules commonly ship
+/// `system/product` (etc.) as a SYMLINK to their own top-level `product/` to make the
+/// classic and auto_mount layouts converge (e.g. OxygenCustomizer: `system/product ->
+/// ../product`). `file_type()` does not follow symlinks, so such an entry is not seen as a
+/// directory and would otherwise be injected as a "file", and `resolve_target_path` maps
+/// `system/product` through the SAR alias to exactly `/product`.
+///
+/// Concretely that produced `nm add /product <mod>/system/product`, which made
+/// `/product/overlay` resolve to the module's overlay dir — hiding the stock overlays. At
+/// boot, zygote's OverlayConfig then could not see `/product/overlay/OplusGmsConfigOverlayCommon`
+/// and fell back to the `/my_product/cust/<region>/overlay` twin, which is NOT in zygote's FD
+/// allowlist -> `FileDescriptorInfo::CreateFromFd` JNI FatalError at the first
+/// `forkSystemServer` -> SIGABRT -> bootloop. Skipping partition-root targets fixes it; the
+/// real content is still injected via the module's own top-level partition dirs.
+fn is_partition_root(target: &Path) -> bool {
+    target.components().skip(1).count() == 1
 }
 
 fn module_enabled(dir: &Path) -> bool {
@@ -124,6 +158,13 @@ fn inject_tree(nm: &Nm, module_root: &Path, dir: &Path, st: &mut Stats) {
                 Ok(()) => st.whiteouts += 1,
                 Err(_) => st.failed += 1,
             }
+        } else if is_partition_root(&target) {
+            // A non-directory entry resolving to a bare partition root — a module's
+            // layout-convergence symlink (e.g. `system/product -> ../product`). Injecting it
+            // would redirect the entire partition; skip it. The real content still comes from
+            // the module's own top-level partition dir. Real `system/<partition>` DIRECTORIES
+            // are unaffected: they take the is_dir() branch above and recurse as before.
+            continue;
         } else {
             match nm.add(&target, &source) {
                 Ok(()) => st.applied += 1,
@@ -168,12 +209,43 @@ pub fn run_mount() -> Result<()> {
                 skipped += 1;
                 continue;
             }
-            let sysroot = mdir.join("system");
-            if !sysroot.is_dir() {
-                continue;
+            // "system/" is the classic layout; auto_mount modules (e.g. OxygenCustomizer)
+            // ship content directly under module-root partition dirs. Process every
+            // top-level dir that maps to a real on-device partition — dynamically, so any
+            // OEM's partitions are handled. resolve_target_path maps "<root>/…" -> "/<root>/…"
+            // (and applies the SAR aliases for "system/vendor" etc.).
+            let mut had_content = false;
+            if let Ok(entries) = fs::read_dir(&mdir) {
+                for e in entries.flatten() {
+                    if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    let name = e.file_name();
+                    let Some(name) = name.to_str() else {
+                        continue;
+                    };
+                    // Skip non-injectable roots, and OnePlus/Oppo `my_*` feature partitions.
+                    // `my_*` is deliberate: those paths are NOT in zygote's FD allowlist
+                    // (`FileDescriptorInfo::CreateFromFd`), so anything zygote preloads from
+                    // there — an RRO overlay APK in particular — aborts the first
+                    // `forkSystemServer` with "Not allowlisted" and bootloops. Modules that
+                    // need `my_*` content handle it themselves (e.g. OxygenCustomizer's
+                    // post-fs-data.sh binds); NoMount serves the /product, /system, … trees.
+                    if NON_PARTITION_ROOTS.contains(&name) || name.starts_with("my_") {
+                        continue;
+                    }
+                    // A partition iff "/<name>" is a real directory on this device;
+                    // module-metadata dirs (META-INF/, webroot/, …) fail this and are skipped.
+                    if !Path::new(&format!("/{name}")).is_dir() {
+                        continue;
+                    }
+                    had_content = true;
+                    inject_tree(&nm, &mdir, &e.path(), &mut st);
+                }
             }
-            modules += 1;
-            inject_tree(&nm, &mdir, &sysroot, &mut st);
+            if had_content {
+                modules += 1;
+            }
         }
     }
 
