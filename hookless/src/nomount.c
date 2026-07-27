@@ -1341,7 +1341,12 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
     if (kern_path(nm_get_vpath(rule), LOOKUP_FOLLOW, &v_path_struct) == 0) {
         struct kstat temp_stat;
         rule->v_ino = d_backing_inode(v_path_struct.dentry)->i_ino;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
         vfs_getattr(&v_path_struct, &temp_stat, (STATX_BASIC_STATS | STATX_BTIME), AT_STATX_SYNC_AS_STAT);
+#else
+        /* pre-4.11: statx did not exist; vfs_getattr is 2-arg */
+        vfs_getattr(&v_path_struct, &temp_stat);
+#endif
 
         rule->flags |= NM_FLAG_HAS_STAT;
         rule->v_size = temp_stat.size;
@@ -1639,8 +1644,14 @@ static int nomount_genl_del_uid(struct sk_buff *skb, struct genl_info *info)
     uid = nla_get_u32(info->attrs[NOMOUNT_ATTR_UID]);
 
     mutex_lock(&nomount_write_mutex);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
     if (idr_remove(&nomount_uid_idr, uid)) {
-        if (idr_is_empty(&nomount_uid_idr)) 
+#else
+    /* pre-4.11 idr_remove() returns void; probe presence first */
+    if (idr_find(&nomount_uid_idr, uid)) {
+        idr_remove(&nomount_uid_idr, uid);
+#endif
+        if (idr_is_empty(&nomount_uid_idr))
             static_branch_disable(&nomount_active_uids);
 
         nm_info("Successfully removed blocked UID: %u\n", uid);
