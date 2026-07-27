@@ -78,9 +78,12 @@ jobs:
             kref: 'linux-6.18.y'
             tc: clang
     env:
-      # Pinned toolchains for reproducibility (runner image is also pinned above).
-      CLANG_VER: '18'
+      # Toolchains are pinned via the pinned ubuntu-24.04 runner image
+      # (clang/lld/llvm 18, gcc-13). NB: the versioned LLVM=-18 suffix is NOT
+      # understood by pre-6.1 kbuild (it then looks for a plain 'ld.lld'), so we
+      # use LLVM=1 + the unversioned clang/lld/llvm packages across the matrix.
       CCACHE_MAXSIZE: '2G'
+      CCACHE_DIR: /home/runner/.ccache
     steps:
       - name: Select
         id: sel
@@ -99,25 +102,30 @@ jobs:
         with:
           path: repo
 
-      - name: Install build deps (pinned)
+      - name: Install build deps
         if: steps.sel.outputs.run == '1'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev cpio kmod \
-            build-essential git ca-certificates rsync ccache sparse
+            build-essential git ca-certificates rsync ccache sparse \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           if [ "${{ matrix.tc }}" = "clang" ]; then
-            sudo apt-get install -y --no-install-recommends \
-              clang-${CLANG_VER} lld-${CLANG_VER} llvm-${CLANG_VER} \
-              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
-            clang-${CLANG_VER} --version | head -1
+            # unversioned packages -> clang/ld.lld/llvm-* 18 on ubuntu-24.04;
+            # LLVM=1 finds them by plain name (works on every kernel in the set).
+            sudo apt-get install -y --no-install-recommends clang lld llvm
+            clang --version | head -1
           else
-            # distro aarch64 GCC (gcc-13 on ubuntu-24.04) — satisfies the kernels'
-            # compiler-gcc.h >=5.1 requirement (the AOSP gcc-4.9 prebuilt is too old).
-            sudo apt-get install -y --no-install-recommends \
-              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+            # distro aarch64 GCC (gcc-13) — satisfies compiler-gcc.h >=5.1 (the AOSP
+            # gcc-4.9 prebuilt is GCC 4.9, rejected as too old).
             aarch64-linux-gnu-gcc --version | head -1
           fi
+          # ccache masquerade: make the compilers we invoke resolve to ccache
+          # (which then finds the real one further down PATH). No CC override needed.
+          for n in clang clang++ gcc g++ cc c++ aarch64-linux-gnu-gcc aarch64-linux-gnu-g++; do
+            sudo ln -sf /usr/bin/ccache "/usr/lib/ccache/$n"
+          done
+          echo "/usr/lib/ccache" >> "$GITHUB_PATH"
 
       - name: Restore ccache
         if: steps.sel.outputs.run == '1'
@@ -167,25 +175,22 @@ jobs:
           set -o pipefail
           cd ksrc
           if [ "${{ matrix.tc }}" = "clang" ]; then
-            BASECC="clang-${CLANG_VER}"
-            MAKEOPTS="ARCH=arm64 O=out LLVM=-${CLANG_VER} LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+            MAKEOPTS="ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
           else
-            BASECC="aarch64-linux-gnu-gcc"
             MAKEOPTS="ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
           fi
-          # persist for the advisory step
+          # persist for the advisory step (ccache is applied via the PATH masquerade)
           echo "MAKEOPTS=$MAKEOPTS" >> "$GITHUB_ENV"
-          echo "BASECC=$BASECC" >> "$GITHUB_ENV"
           echo "== defconfig =="
           make $MAKEOPTS defconfig 2>&1 | tail -5
           ./scripts/config --file out/.config -e NOMOUNT
           make $MAKEOPTS olddefconfig 2>&1 | tail -5
           echo "== prepare =="
-          make $MAKEOPTS CC="ccache $BASECC" prepare 2>&1 | tail -20
+          make $MAKEOPTS prepare 2>&1 | tail -20
           echo "== compile fs/nomount.o =="
-          make $MAKEOPTS CC="ccache $BASECC" fs/nomount.o 2>&1 | tee /tmp/nm_build.log
+          make $MAKEOPTS fs/nomount.o 2>&1 | tee /tmp/nm_build.log
           ls -l out/fs/nomount.o && echo "COMPILE_OK ${{ matrix.ver }}"
-          ccache -s | grep -iE 'hits|misses' || true
+          ccache -s 2>/dev/null | grep -iE 'hit|miss' || true
 
       - name: Advisory W=1 + sparse (non-blocking)
         if: steps.sel.outputs.run == '1' && steps.build.outcome == 'success'
@@ -194,10 +199,10 @@ jobs:
           cd ksrc
           echo "== W=1 (advisory) =="
           rm -f out/fs/nomount.o
-          make $MAKEOPTS CC="ccache $BASECC" W=1 fs/nomount.o 2>&1 | tee /tmp/nm_w1.log || true
+          make $MAKEOPTS W=1 fs/nomount.o 2>&1 | tee /tmp/nm_w1.log || true
           echo "== sparse C=2 (advisory) =="
           rm -f out/fs/nomount.o
-          make $MAKEOPTS CC="ccache $BASECC" C=2 CHECK="sparse" fs/nomount.o 2>&1 | tee /tmp/nm_sparse.log || true
+          make $MAKEOPTS C=2 CHECK="sparse" fs/nomount.o 2>&1 | tee /tmp/nm_sparse.log || true
           w=$(grep -c 'warning:' /tmp/nm_w1.log 2>/dev/null || echo 0)
           s=$(grep -c 'warning:\|error:' /tmp/nm_sparse.log 2>/dev/null || echo 0)
           echo "::notice::${{ matrix.ver }} advisory — W=1 warnings: $w, sparse notes: $s"
