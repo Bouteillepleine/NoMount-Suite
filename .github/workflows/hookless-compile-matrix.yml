@@ -97,27 +97,13 @@ jobs:
             sudo apt-get install -y --no-install-recommends clang lld llvm \
               gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
             clang --version | head -1
+          else
+            # distro aarch64 GCC (>=5.1, satisfies compiler-gcc.h) for 4.9/4.14/4.19.
+            # The AOSP aarch64-linux-android-4.9 prebuilt is GCC *4.9* -> too old.
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+            aarch64-linux-gnu-gcc --version | head -1
           fi
-
-      - name: Fetch AOSP gcc-4.9 toolchain
-        if: steps.sel.outputs.run == '1' && matrix.tc == 'gcc49'
-        run: |
-          set -e
-          # The AOSP aarch64-linux-android-4.9 host binaries are 32-bit x86 — the
-          # runner needs the i386 loader/libs or execve() returns ENOENT.
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libc6:i386 libstdc++6:i386 zlib1g:i386
-          # NB: the repo's default branch is empty (OWNERS only); the toolchain
-          # binaries live on release branches. android10-release has bin/*-gcc.
-          git clone --depth 1 -b android10-release \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
-            "$HOME/gcc49"
-          GCC="$HOME/gcc49/bin/aarch64-linux-android-gcc"
-          file "$GCC" || true
-          # no '| head' — this MUST fail loudly if the toolchain cannot execute
-          "$GCC" --version
 
       - name: Fetch kernel source (${{ matrix.kref }})
         if: steps.sel.outputs.run == '1'
@@ -148,8 +134,8 @@ jobs:
             # --target triple; 5.15+ auto-derive it from ARCH but it is harmless there.
             MAKEOPTS="ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
           else
-            # absolute prefix — do not rely on PATH resolution inside sub-makes
-            MAKEOPTS="ARCH=arm64 O=out CROSS_COMPILE=$HOME/gcc49/bin/aarch64-linux-android- KCFLAGS=-Wno-error"
+            # distro aarch64 GCC (gcc-13); satisfies the kernels' >=5.1 requirement.
+            MAKEOPTS="ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
           fi
           echo "== defconfig =="
           make $MAKEOPTS defconfig 2>&1 | tail -5
