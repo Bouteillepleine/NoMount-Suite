@@ -1,0 +1,151 @@
+name: NoMount hookless — compile-test matrix
+
+# Validates the hookless kernel patch (fs/nomount.c + fs/nomount.h) against the
+# canonical source tree for each of the 10 supported kernel versions.
+# This is a COMPILE TEST (builds fs/nomount.o only), not a full device build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Comma-separated versions to build (empty = all). e.g. 4.9,6.12'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: ${{ matrix.ver }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ver: '4.9'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'deprecated/android-4.9-q'
+            tc: gcc49
+          - ver: '4.14'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'deprecated/android-4.14-stable'
+            tc: gcc49
+          - ver: '4.19'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'deprecated/android-4.19-stable'
+            tc: gcc49
+          - ver: '5.4'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android11-5.4'
+            tc: clang
+          - ver: '5.10'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android12-5.10'
+            tc: clang
+          - ver: '5.15'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android13-5.15'
+            tc: clang
+          - ver: '6.1'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android14-6.1'
+            tc: clang
+          - ver: '6.6'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android15-6.6'
+            tc: clang
+          - ver: '6.12'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android16-6.12'
+            tc: clang
+          - ver: '6.18'
+            krepo: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git'
+            kref: 'linux-6.18.y'
+            tc: clang
+    steps:
+      - name: Select
+        id: sel
+        run: |
+          only="${{ github.event.inputs.only }}"
+          if [ -z "$only" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          for v in ${only//,/ }; do
+            if [ "$v" = "${{ matrix.ver }}" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          done
+          echo "run=0" >> "$GITHUB_OUTPUT"
+          echo "::notice::Skipped ${{ matrix.ver }} (not in 'only' filter)"
+
+      - name: Checkout hookless (src + patches)
+        if: steps.sel.outputs.run == '1'
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Install build deps
+        if: steps.sel.outputs.run == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev cpio kmod \
+            build-essential git ca-certificates rsync
+          if [ "${{ matrix.tc }}" = "clang" ]; then
+            sudo apt-get install -y --no-install-recommends clang lld llvm
+            clang --version | head -1
+          fi
+
+      - name: Fetch AOSP gcc-4.9 toolchain
+        if: steps.sel.outputs.run == '1' && matrix.tc == 'gcc49'
+        run: |
+          git clone --depth 1 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+            "$HOME/gcc49"
+          "$HOME/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
+
+      - name: Fetch kernel source (${{ matrix.kref }})
+        if: steps.sel.outputs.run == '1'
+        id: ksrc
+        run: |
+          set -e
+          git clone --depth 1 -b "${{ matrix.kref }}" "${{ matrix.krepo }}" ksrc
+          echo "ok=1" >> "$GITHUB_OUTPUT"
+          echo "Kernel: $(head -3 ksrc/Makefile | tr '\n' ' ')"
+
+      - name: Apply hookless patch + drop in source
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -e
+          cd ksrc
+          patch -p1 --forward --fuzz=3 < "$GITHUB_WORKSPACE/repo/hookless/patches/nomount_${{ matrix.ver }}_kernel_integration.patch"
+          cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.c" fs/nomount.c
+          cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.h" fs/nomount.h
+          grep -n 'CONFIG_NOMOUNT' fs/Makefile fs/Kconfig || true
+
+      - name: Configure + compile fs/nomount.o
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -o pipefail
+          cd ksrc
+          if [ "${{ matrix.tc }}" = "clang" ]; then
+            MAKEOPTS="ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 KCFLAGS=-Wno-error"
+          else
+            export PATH="$HOME/gcc49/bin:$PATH"
+            MAKEOPTS="ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-android- KCFLAGS=-Wno-error"
+          fi
+          echo "== defconfig =="
+          make $MAKEOPTS defconfig 2>&1 | tail -5
+          ./scripts/config --file out/.config -e NOMOUNT
+          make $MAKEOPTS olddefconfig 2>&1 | tail -5
+          echo "== prepare =="
+          make $MAKEOPTS prepare 2>&1 | tail -20
+          echo "== compile fs/nomount.o =="
+          make $MAKEOPTS fs/nomount.o 2>&1 | tee /tmp/nm_build.log
+          echo "== result =="
+          ls -l out/fs/nomount.o && echo "COMPILE_OK ${{ matrix.ver }}"
+
+      - name: Upload build log
+        if: always() && steps.sel.outputs.run == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ matrix.ver }}
+          path: /tmp/nm_build.log
+          if-no-files-found: ignore

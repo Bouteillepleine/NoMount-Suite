@@ -1,0 +1,29 @@
+diff --git a/fs/Kconfig b/fs/Kconfig
+index c34b9d4e0..8ec1f2b07 100644
+--- a/fs/Kconfig
++++ b/fs/Kconfig
+@@ -351,4 +351,11 @@ source "fs/unicode/Kconfig"
+ config IO_WQ
+ 	bool
+ 
++config NOMOUNT
++	bool "NoMount Path Redirection Subsystem"
++	default y
++	help
++	  NoMount allows path redirection and virtual file injection
++	  without mounting filesystems. Useful for systemless modifications.
++
+ endmenu
+diff --git a/fs/Makefile b/fs/Makefile
+index c7851875b..73a93d57f 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -24,6 +24,8 @@ else
+ obj-y +=	no-block.o
+ endif
+ 
++obj-$(CONFIG_NOMOUNT) += nomount.o
++
+ obj-$(CONFIG_PROC_FS) += proc_namespace.o
+ 
+ obj-y				+= notify/
