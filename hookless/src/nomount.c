@@ -12,6 +12,16 @@ static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mos
 static const struct cred *nm_root_cred;
 static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
+/* --- TEMP DEBUG (readdir enumerate stall) --- remove before release --- */
+#define NMDBG(fmt, ...) pr_info("NMDBG: " fmt, ##__VA_ARGS__)
+static int nmdbg_count(struct nomount_dir_node *dn)
+{
+    struct nomount_child_node *c; int id, n = 0;
+    if (!dn) return -1;
+    idr_for_each_entry(&dn->children_idr, c, id) n++;
+    return n;
+}
+
 /*** Helpers ***/
 
 static __always_inline bool nomount_is_uid_blocked(uid_t uid) 
@@ -115,16 +125,23 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
     if (!nm_is_virtual_pos(ctx->pos)) ctx->pos = nm_pack_pos(0);
     id = nm_unpack_pos(ctx->pos);
 
+    NMDBG("emit  dir=%px pos_in=%lld start_id=%d nchild=%d\n",
+          dir_node, (long long)ctx->pos, id, nmdbg_count(dir_node));
     rcu_read_lock();
     idr_for_each_entry_continue(&dir_node->children_idr, child, id) {
         ctx->pos = nm_pack_pos(id);
         if (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val) {
+            NMDBG("emit  +try id=%d name=%.*s\n", id, (int)child->name_len, child->name);
             if (!(child->flags & NM_FLAG_WHITEOUT) &&
-                !dir_emit(ctx, child->name, child->name_len, child->fake_ino, child->d_type)) break;
+                !dir_emit(ctx, child->name, child->name_len, child->fake_ino, child->d_type)) {
+                NMDBG("emit  STOP id=%d (dir_emit returned false)\n", id);
+                break;
+            }
         }
         ctx->pos = nm_pack_pos(id + 1);
     }
     rcu_read_unlock();
+    NMDBG("emit  dir=%px pos_out=%lld DONE\n", dir_node, (long long)ctx->pos);
 }
 
 static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nomount_rule *rule)
@@ -746,7 +763,12 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
     struct file *real_file = file->private_data;
     int res = 0;
 
+    NMDBG("iter  dir=%px pos=%lld real_file=%d vdir=%d dnode=%px\n",
+          dir_node, (long long)ctx->pos, real_file ? 1 : 0,
+          (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) ? 1 : 0, dir_node);
+
     if (unlikely(nm_is_virtual_pos(ctx->pos))) {
+        NMDBG("iter  -> virtual_pos branch\n");
         nomount_emit_virtual_children(ctx, dir_node);
         return 0;
     }
@@ -761,13 +783,16 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         if (res < 0 || proxy_ctx.emitted > 0) return res;
         ctx->pos = nm_pack_pos(0);
     } else if (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) {
-        if (ctx->pos < 2 && !dir_emit_dots(file, ctx)) return 0;
+        NMDBG("iter  -> vdir branch, after dots pos=%lld\n", (long long)ctx->pos);
+        if (ctx->pos < 2 && !dir_emit_dots(file, ctx)) { NMDBG("iter  dots returned 0\n"); return 0; }
         ctx->pos = nm_pack_pos(0);
     } else {
         return -ENOTDIR;
     }
 
+    NMDBG("iter  -> calling emit, pos=%lld\n", (long long)ctx->pos);
     nomount_emit_virtual_children(ctx, dir_node);
+    NMDBG("iter  emit returned, pos=%lld res=%d\n", (long long)ctx->pos, res);
     return res;
 }
 
