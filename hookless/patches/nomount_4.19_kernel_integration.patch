@@ -8,7 +8,7 @@ index 75592af84..5ae026177 100644
  
 +config NOMOUNT
 +	bool "NoMount Path Redirection Subsystem"
-+	default y
++	default n
 +	help
 +	  NoMount allows path redirection and virtual file injection
 +	  without mounting filesystems. Useful for systemless modifications.

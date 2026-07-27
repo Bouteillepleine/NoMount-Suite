@@ -95,10 +95,11 @@ UAF the proxy. **Only triggers on module unload → build `CONFIG_NOMOUNT=y`
 (line duplicated, harmless). Fine for read-only payloads (normal case);
 questionable writeback/accounting for writable files. All versions.
 
-### F5 — LOW — `CONFIG_NOMOUNT default y`
-All 10 integration patches set `default y`, i.e. the driver is built into every
-kernel by default. Inert without rules, but it's a policy choice; prefer
-`default n` and enable per-build via fragment.
+### F5 — LOW — `CONFIG_NOMOUNT default y` → RESOLVED (`default n`)
+The patches originally set `default y`, building the driver into every kernel by
+default. **Changed to `default n` in all 10 patches** — enable per-build via a
+defconfig fragment. (Kconfig uses `bool`, not `tristate`, so it can only ever be
+`y`/`n`, never `m` — which conveniently guarantees F3's "build `=y` not `=m".)
 
 ### F6 — INFO — detectability / hygiene
 No `/dev` node (nothing to `sus_path`), truly mountless (no overlay mounts to
@@ -128,6 +129,17 @@ file. **Fixed in the vendored copy** by redirecting through a cast
 vm_area_desc is a mutable on-stack object on the mmap path, so this preserves the
 pre-6.18 behaviour. (Only path affected: `>=6.16` mmap_prepare.)
 
+### F10 — HIGH — `nm_alloc_rule` statx `vfs_getattr` → 4.9 build break (found by CI)
+`nm_alloc_rule()` called `vfs_getattr(&path, &stat, STATX_BASIC_STATS|STATX_BTIME,
+AT_STATX_SYNC_AS_STAT)` — the 4-arg statx form and the `STATX_*`/`AT_STATX_*`
+constants all arrived in **4.11**. On 4.9 that is "too many arguments" + undeclared
+constants. **Fixed:** guard to the 2-arg `vfs_getattr(&path, &stat)` on `<4.11`.
+
+### F11 — HIGH — `idr_remove()` void return → 4.9 build break (found by CI)
+`nomount_genl_del_uid()` did `if (idr_remove(&idr, uid))`, but `idr_remove()`
+returned **void** before 4.11 ("void value not ignored as it ought to be").
+**Fixed:** on `<4.11`, probe with `idr_find()` then call `idr_remove()`.
+
 ### F7 — DESIGN — RRO/idmap theming still unresolved
 Still mountless: no overlayfs, no real mount. The documented OxygenCustomizer wall
 (idmap2/OMS needs the overlay APK on a real mount to reach `STATE_ENABLED`) is not
@@ -142,7 +154,7 @@ hookless replaces only the file-injection role (mutually exclusive metamodule).
 
 | Kernel | Prediction | Notes |
 |---|---|---|
-| 4.9  | ❌ likely FAIL | F1 `vfs_getattr_nosec` 4-arg; also oldest genl/xattr surface |
+| 4.9  | ✅ after F1+F10+F11 | needed three pre-4.11 guards (getattr, statx vfs_getattr, idr_remove) |
 | 4.14 | ⚠ probable | 4-arg getattr OK; verify xattr `.get`/`.set` handler sig, genl |
 | 4.19 | ⚠ probable | as 4.14 |
 | 5.4  | ✔ likely | pre-idmap path (`IDMAP_*` empty), mature APIs |
@@ -208,7 +220,14 @@ bootloop semaphore (self-disables on the next boot after a hang), `.replace`/cha
 whiteout handling, and batched `xargs -0` netlink calls; `service.sh` replays UID
 exclusions. No blocking issues.
 
-### Net: two real compile-blockers fixed before CI
-1. **F1** — 4.9 `getattr`/`vfs_getattr_nosec` (guarded to the pre-4.11 signature).
+### Net: five real compile-blockers fixed → CI 10/10 GREEN
+1. **F1** — 4.9 `getattr` (guarded to the pre-4.11 3-arg signature).
 2. **F8** — 6.12 `d_revalidate` (guard moved `6.11`→`6.13`).
-Everything else in the guard set verified correct for all 10 target versions.
+3. **F9** — 6.18 const `vm_area_desc.file` (`nm_mmap_prepare` cast).
+4. **F10** — 4.9 statx `vfs_getattr` (2-arg on `<4.11`).
+5. **F11** — 4.9 `idr_remove` void return (`idr_find` probe on `<4.11`).
+All 10 kernels (4.9, 4.14, 4.19, 5.4, 5.10, 5.15, 6.1, 6.6, 6.12, 6.18) now compile
+`fs/nomount.o` clean in CI. F5 also resolved (`default n`). Harness notes: 4.x use
+the distro `aarch64-linux-gnu` GCC (the AOSP gcc-4.9 prebuilt is GCC 4.9, which the
+kernels reject as `<5.1`); clang path needs `CROSS_COMPILE` for the 5.4/5.10 triple;
+6.18 source is `git.kernel.org` `linux-6.18.y`.

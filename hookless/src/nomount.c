@@ -188,7 +188,6 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
                 inode->i_fop = &nm_file_fops;
         }
         inode->i_mapping = real_inode->i_mapping;
-        inode->i_mapping = real_inode->i_mapping;
     }
 
     inode->i_flags |= S_PRIVATE | S_NOATIME | S_NOCMTIME | S_NOSEC;

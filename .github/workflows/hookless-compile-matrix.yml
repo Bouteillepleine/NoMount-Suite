@@ -2,13 +2,16 @@ name: NoMount hookless — compile-test matrix
 
 # Validates the hookless kernel patch (fs/nomount.c + fs/nomount.h) against the
 # canonical source tree for each of the 10 supported kernel versions.
-# This is a COMPILE TEST (builds fs/nomount.o only), not a full device build.
+# Compile test (builds fs/nomount.o only), not a full device build.
 
 on:
   push:
     branches: [hookless]
+    # Only rebuild when the patch/source or this workflow changes — NOT for docs
+    # (e.g. hookless/AUDIT.md), so documentation edits don't re-run all ten.
     paths:
-      - 'hookless/**'
+      - 'hookless/src/**'
+      - 'hookless/patches/**'
       - '.github/workflows/hookless-compile-matrix.yml'
   workflow_dispatch:
     inputs:
@@ -19,6 +22,12 @@ on:
 
 permissions:
   contents: read
+  actions: read
+
+# Supersede an in-flight matrix when a newer commit lands on the branch.
+concurrency:
+  group: hookless-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   compile:
@@ -31,15 +40,15 @@ jobs:
           - ver: '4.9'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'deprecated/android-4.9-q'
-            tc: gcc49
+            tc: gcc
           - ver: '4.14'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'deprecated/android-4.14-stable'
-            tc: gcc49
+            tc: gcc
           - ver: '4.19'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'deprecated/android-4.19-stable'
-            tc: gcc49
+            tc: gcc
           - ver: '5.4'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'android11-5.4'
@@ -68,6 +77,10 @@ jobs:
             krepo: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git'
             kref: 'linux-6.18.y'
             tc: clang
+    env:
+      # Pinned toolchains for reproducibility (runner image is also pinned above).
+      CLANG_VER: '18'
+      CCACHE_MAXSIZE: '2G'
     steps:
       - name: Select
         id: sel
@@ -86,33 +99,56 @@ jobs:
         with:
           path: repo
 
-      - name: Install build deps
+      - name: Install build deps (pinned)
         if: steps.sel.outputs.run == '1'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev cpio kmod \
-            build-essential git ca-certificates rsync
+            build-essential git ca-certificates rsync ccache sparse
           if [ "${{ matrix.tc }}" = "clang" ]; then
-            sudo apt-get install -y --no-install-recommends clang lld llvm \
+            sudo apt-get install -y --no-install-recommends \
+              clang-${CLANG_VER} lld-${CLANG_VER} llvm-${CLANG_VER} \
               gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
-            clang --version | head -1
+            clang-${CLANG_VER} --version | head -1
           else
-            # distro aarch64 GCC (>=5.1, satisfies compiler-gcc.h) for 4.9/4.14/4.19.
-            # The AOSP aarch64-linux-android-4.9 prebuilt is GCC *4.9* -> too old.
+            # distro aarch64 GCC (gcc-13 on ubuntu-24.04) — satisfies the kernels'
+            # compiler-gcc.h >=5.1 requirement (the AOSP gcc-4.9 prebuilt is too old).
             sudo apt-get install -y --no-install-recommends \
               gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
             aarch64-linux-gnu-gcc --version | head -1
           fi
 
-      - name: Fetch kernel source (${{ matrix.kref }})
+      - name: Restore ccache
         if: steps.sel.outputs.run == '1'
-        id: ksrc
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ matrix.ver }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.ver }}-
+
+      - name: Restore kernel clone
+        if: steps.sel.outputs.run == '1'
+        id: kcache
+        uses: actions/cache/restore@v4
+        with:
+          path: ksrc
+          key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+
+      - name: Clone kernel source (${{ matrix.kref }}) on cache miss
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
         run: |
           set -e
           git clone --depth 1 -b "${{ matrix.kref }}" "${{ matrix.krepo }}" ksrc
-          echo "ok=1" >> "$GITHUB_OUTPUT"
           echo "Kernel: $(head -3 ksrc/Makefile | tr '\n' ' ')"
+
+      - name: Save kernel clone (pristine) on cache miss
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ksrc
+          key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
 
       - name: Apply hookless patch + drop in source
         if: steps.sel.outputs.run == '1'
@@ -125,33 +161,81 @@ jobs:
           grep -n 'CONFIG_NOMOUNT' fs/Makefile fs/Kconfig || true
 
       - name: Configure + compile fs/nomount.o
+        id: build
         if: steps.sel.outputs.run == '1'
         run: |
           set -o pipefail
           cd ksrc
           if [ "${{ matrix.tc }}" = "clang" ]; then
-            # CROSS_COMPILE is needed so older kernels (5.4/5.10) derive the clang
-            # --target triple; 5.15+ auto-derive it from ARCH but it is harmless there.
-            MAKEOPTS="ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+            BASECC="clang-${CLANG_VER}"
+            MAKEOPTS="ARCH=arm64 O=out LLVM=-${CLANG_VER} LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
           else
-            # distro aarch64 GCC (gcc-13); satisfies the kernels' >=5.1 requirement.
+            BASECC="aarch64-linux-gnu-gcc"
             MAKEOPTS="ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
           fi
+          # persist for the advisory step
+          echo "MAKEOPTS=$MAKEOPTS" >> "$GITHUB_ENV"
+          echo "BASECC=$BASECC" >> "$GITHUB_ENV"
           echo "== defconfig =="
           make $MAKEOPTS defconfig 2>&1 | tail -5
           ./scripts/config --file out/.config -e NOMOUNT
           make $MAKEOPTS olddefconfig 2>&1 | tail -5
           echo "== prepare =="
-          make $MAKEOPTS prepare 2>&1 | tail -20
+          make $MAKEOPTS CC="ccache $BASECC" prepare 2>&1 | tail -20
           echo "== compile fs/nomount.o =="
-          make $MAKEOPTS fs/nomount.o 2>&1 | tee /tmp/nm_build.log
-          echo "== result =="
+          make $MAKEOPTS CC="ccache $BASECC" fs/nomount.o 2>&1 | tee /tmp/nm_build.log
           ls -l out/fs/nomount.o && echo "COMPILE_OK ${{ matrix.ver }}"
+          ccache -s | grep -iE 'hits|misses' || true
 
-      - name: Upload build log
-        if: always() && steps.sel.outputs.run == '1'
+      - name: Advisory W=1 + sparse (non-blocking)
+        if: steps.sel.outputs.run == '1' && steps.build.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cd ksrc
+          echo "== W=1 (advisory) =="
+          rm -f out/fs/nomount.o
+          make $MAKEOPTS CC="ccache $BASECC" W=1 fs/nomount.o 2>&1 | tee /tmp/nm_w1.log || true
+          echo "== sparse C=2 (advisory) =="
+          rm -f out/fs/nomount.o
+          make $MAKEOPTS CC="ccache $BASECC" C=2 CHECK="sparse" fs/nomount.o 2>&1 | tee /tmp/nm_sparse.log || true
+          w=$(grep -c 'warning:' /tmp/nm_w1.log 2>/dev/null || echo 0)
+          s=$(grep -c 'warning:\|error:' /tmp/nm_sparse.log 2>/dev/null || echo 0)
+          echo "::notice::${{ matrix.ver }} advisory — W=1 warnings: $w, sparse notes: $s"
+
+      - name: Save ccache
+        if: ${{ always() && steps.sel.outputs.run == '1' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ matrix.ver }}-${{ github.run_id }}
+
+      - name: Upload logs
+        if: ${{ always() && steps.sel.outputs.run == '1' }}
         uses: actions/upload-artifact@v4
         with:
           name: log-${{ matrix.ver }}
-          path: /tmp/nm_build.log
+          path: |
+            /tmp/nm_build.log
+            /tmp/nm_w1.log
+            /tmp/nm_sparse.log
           if-no-files-found: ignore
+
+  summary:
+    name: summary
+    needs: compile
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Render result grid
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "## NoMount hookless — compile matrix"
+            echo ""
+            echo "| kernel | fs/nomount.o |"
+            echo "|--------|--------------|"
+            gh run view "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --json jobs \
+              --jq '.jobs[] | select(.name|test("^[0-9]")) | "| \(.name) | \(if .conclusion=="success" then "✅ pass" elif .conclusion=="skipped" then "⏭ skip" else "❌ "+(.conclusion//"?") end) |"' \
+              | sort -V
+          } >> "$GITHUB_STEP_SUMMARY"
