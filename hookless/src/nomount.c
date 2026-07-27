@@ -782,10 +782,16 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
         u32 v_hash = full_name_hash(NULL, name, len);
         struct nomount_rule *c_rule = nomount_find_child_rule(info->dir_node, name, len, v_hash);
         if (c_rule) {
-            if (c_rule->flags & NM_FLAG_WHITEOUT) { d_add(dentry, NULL); return NULL; }
+            /* Install our dentry ops on every dentry we manage. Without this the
+             * child inherits sb->s_d_op: harmless on a normal fs (NULL), but on an
+             * overlayfs sb it is ovl_dentry_operations, whose d_revalidate/d_real
+             * run against our synthetic inode (no ovl_entry) and return -ECHILD.
+             * nomount_hijacked_lookup already does this for the first level; the
+             * synthesized deeper subtree (a new dir over overlay) needs it too. */
+            if (c_rule->flags & NM_FLAG_WHITEOUT) { dentry->d_op = &nm_dops; d_add(dentry, NULL); return NULL; }
             if ((c_rule->flags & NM_FLAG_VIRTUAL_DIR) || c_rule->r_path.dentry) {
                 struct inode *new_inode = nomount_create_new_inode(dir->i_sb, c_rule);
-                if (new_inode) return d_splice_alias(new_inode, dentry);
+                if (new_inode) { dentry->d_op = &nm_dops; return d_splice_alias(new_inode, dentry); }
             }
         }
     }
@@ -794,6 +800,7 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
         return r_dir->i_op->lookup(r_dir, dentry, flags);
 
     if (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) {
+        dentry->d_op = &nm_dops;
         d_add(dentry, NULL);
         return NULL;
     }
