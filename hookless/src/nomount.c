@@ -266,6 +266,17 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
     }
 
 fallback:
+    /* If we bailed because THIS reader's UID is blocked (not because there's no
+     * rule), tag the real/negative dentry we're about to cache with nm_dops so
+     * nm_d_revalidate re-checks it per-UID -- otherwise a blocked reader's cached
+     * dentry pollutes other UIDs' view. Gate on a rule actually existing, else a
+     * normal real file (no rule) would loop on invalidation. */
+    if (nm_iop && nm_iop->dir_node &&
+        nomount_is_uid_blocked(current_uid().val) &&
+        nomount_find_child_rule(nm_iop->dir_node, name, len,
+                                full_name_hash(NULL, name, len)))
+        NM_SET_DOPS(dentry);
+
     if (nm_iop && nm_iop->orig_iop && nm_iop->orig_iop->lookup) {
         return nm_iop->orig_iop->lookup(dir, dentry, flags);
     }
@@ -880,9 +891,16 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     struct nomount_dir_node *pdir = NULL;
     struct nomount_rule *rule;
     u32 hash;
+    bool injected;
 
     if (flags & LOOKUP_RCU)
         return -ECHILD;
+
+    /* Is this a dentry WE instantiated (an injected file/dir inode)? Used below to
+     * drop stale ghosts and to keep the per-UID view consistent. */
+    injected = dentry->d_inode &&
+        (dentry->d_inode->i_op == &nm_file_iops ||
+         dentry->d_inode->i_op == &nm_dir_iops);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
     parent_dir = dir;
@@ -905,15 +923,27 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         struct nm_inode_info *pinfo = parent_dir->i_private;
         if (pinfo) pdir = pinfo->dir_node;
     }
-    if (!pdir) return 1;
+    /* Parent is no longer hijacked (its rule/dir_node was removed by del or clear,
+     * and the dir was restored). A cached INJECTED child dentry is now stale --
+     * invalidate it so the path re-resolves to the real fs. This kills the
+     * "ghost dentry" that otherwise survived del/clear (even drop_caches) until a
+     * reboot or a re-hijack of the parent. */
+    if (!pdir)
+        return injected ? 0 : 1;
 
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
     rule = nomount_find_child_rule(pdir, dentry->d_name.name, dentry->d_name.len, hash);
 
-    if (!rule) return 0;
+    if (!rule) return 0;                                              /* rule gone -> re-resolve */
     if (rule->flags & NM_FLAG_WHITEOUT) return d_is_negative(dentry) ? 1 : 0;
 
-    return d_is_positive(dentry) ? 1 : 0;
+    /* Per-UID consistency: a BLOCKED reader must see the stock fs (non-injected),
+     * so an injected dentry is invalid for it; a NORMAL reader must see the
+     * injection, so a stock/negative dentry (e.g. one a blocked reader's fallback
+     * cached in the shared dcache) is invalid for it. Re-resolving fixes both. */
+    if (nomount_is_uid_blocked(current_uid().val))
+        return injected ? 0 : 1;
+    return injected ? 1 : 0;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
