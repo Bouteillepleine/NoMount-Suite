@@ -5,6 +5,11 @@ name: NoMount hookless — compile-test matrix
 # This is a COMPILE TEST (builds fs/nomount.o only), not a full device build.
 
 on:
+  push:
+    branches: [hookless]
+    paths:
+      - 'hookless/**'
+      - '.github/workflows/hookless-compile-matrix.yml'
   workflow_dispatch:
     inputs:
       only:
