@@ -1,7 +1,6 @@
 mod cli;
 mod mount;
 mod nm;
-mod overlay;
 
 use anyhow::Result;
 use clap::Parser;

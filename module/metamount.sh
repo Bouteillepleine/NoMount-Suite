@@ -60,12 +60,11 @@ elif [ -x "$BIN" ]; then
 fi
 
 # --- hiding ---
-# Nothing to do here. Hookless VFS injections are mountless. The RRO overlays are
-# real overlayfs mounts (idmap2 needs them) but are mounted with a "nomount_" source
-# name, and the NoMount kernel auto-hides any nomount_* mount from non-root readers
-# of /proc/<pid>/{mounts,mountinfo,mountstats} (root/su still sees everything). So a
-# mount scanner (e.g. Native Detector) sees only the stock /product/overlay. This is
-# self-contained in the kernel — no SUSFS, no kernel_umount (which broke root on OP15).
+# Nothing to hide: the Suite is now FULLY MOUNTLESS. Hookless VFS injection covers
+# regular files AND RRO overlay APKs (injected into /product/overlay etc.; OMS +
+# idmap2 pick them up at the system_server scan, which runs after this post-fs-data
+# pass). su is sucompat (mountless). There is no overlayfs mount and no work tmpfs,
+# so a mount scanner sees only stock mounts — nothing to hide, no SUSFS, no umount.
 
 # --- tag managed modules in the manager with how the Suite serves them ---
 if command -v ksud >/dev/null 2>&1; then
@@ -86,7 +85,7 @@ if command -v ksud >/dev/null 2>&1; then
         KSU_MODULE="$mid" ksud module config set --temp override.description "[NoMount - $_t] $_orig" >/dev/null 2>&1
     done
     KSU_MODULE=meta-nomount ksud module config set --temp override.description \
-        "NoMount Suite - hookless mountless VFS + RRO overlays (SUSFS-hidden). vfs:$_vf | overlay:$_ov" >/dev/null 2>&1
+        "NoMount Suite - fully mountless: hookless VFS + hookless RRO overlays. vfs:$_vf | overlay:$_ov" >/dev/null 2>&1
 fi
 
 ksud kernel notify-module-mounted 2>/dev/null

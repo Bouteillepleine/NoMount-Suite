@@ -357,8 +357,13 @@
       $("mRules").textContent = "—";
       return 0;
     }
-    const rules = list.stdout.split("\n").map(s => s.trim()).filter(Boolean).length;
+    const ruleLines = list.stdout.split("\n").map(s => s.trim()).filter(Boolean);
+    const rules = ruleLines.length;
     $("mRules").textContent = rules;
+    // RRO overlays are now hookless rules (virtual path under */overlay/ ending .apk),
+    // not overlayfs mounts — count them from the rule list.
+    const rro = ruleLines.filter(l => /\/overlay\/[^\s]*\.apk$/.test((l.split(" ->")[0] || "").trim())).length;
+    $("mOv").textContent = rro;
     $("state").textContent = rules > 0 ? "Active" : "Idle";
     $("substate").textContent = rules > 0 ? "modules injected" : "no rules — re-apply";
     dot.className = "dot " + (rules > 0 ? "ok" : "warn");
@@ -388,7 +393,8 @@
     const appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
 
     $("mSu").innerHTML = sucompat ? 'sucompat <small>kernel · mountless</small>' : 'external <small>unmanaged</small>';
-    $("mOv").textContent = rootOv;
+    // mOv (RRO overlay count) is set from the rule list in refreshStatus — RRO is now
+    // hookless (mountless), so it is NOT counted from nomount_ov mounts (which are 0).
 
     // posture rows (label | value | tag)
     const rows = [
@@ -407,21 +413,27 @@
     ).join("");
 
     const shield = $("shield");
-    if (appNm === 0) {
-      shield.className = "shield clean";
-      $("stealthT").textContent = "Clean — nothing visible to apps";
-      $("stealthD").textContent = rootNm > 0 ? `${rootNm} mount${rootNm > 1 ? "s" : ""} hidden from non-root` : "fully mountless";
-      $("stealthNote").innerHTML = "Live check as uid&nbsp;2000 sees <b>zero</b> <code>nomount_*</code> mounts: injections are mountless, su is sucompat (mountless), and the RRO overlay is <b>kernel-hidden</b> from non-root readers of <code>/proc/*/mountinfo</code>. Root still sees everything.";
-    } else if (appNm > 0) {
+    if (appNm > 0) {
       shield.className = "shield warn";
       $("stealthT").textContent = "Mount visible to apps";
       $("stealthD").textContent = `uid 2000 sees ${appNm} nomount_* mount${appNm > 1 ? "s" : ""}`;
-      $("stealthNote").innerHTML = "A live non-root check still sees <code>nomount_*</code> mounts — the <b>mount-hiding kernel isn't active yet</b>. Flash the NoMount kernel with the proc mount-hide hook and this flips to hidden.";
+      $("stealthNote").innerHTML = "A live non-root check sees <code>nomount_*</code> mounts. v2.3.7+ is <b>fully mountless</b> (hookless RRO) — if you see this, an older overlay build is still active; re-run the mount pass or reboot.";
+    } else if (appNm === 0) {
+      shield.className = "shield clean";
+      if (rootNm === 0) {
+        $("stealthT").textContent = "Fully mountless";
+        $("stealthD").textContent = "zero mounts — nothing to hide";
+        $("stealthNote").innerHTML = "The Suite adds <b>zero mounts</b>: file injections are hookless, su is sucompat (kernel&nbsp;· mountless), and RRO overlays are hookless too — OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> mount table, so there is no mount-gap for a scanner to flag.";
+      } else {
+        $("stealthT").textContent = "Clean — nothing visible to apps";
+        $("stealthD").textContent = `${rootNm} mount${rootNm > 1 ? "s" : ""} hidden from non-root`;
+        $("stealthNote").innerHTML = "Injections are mountless and su is sucompat. Any remaining <code>nomount_*</code> mount is kernel-hidden from non-root readers of <code>/proc/*/mountinfo</code>; root still sees everything.";
+      }
     } else {
       shield.className = "shield clean";
       $("stealthT").textContent = "Detection posture";
       $("stealthD").textContent = "app-view check unavailable";
-      $("stealthNote").innerHTML = `Injections are mountless and su is sucompat. Couldn't drop to a non-root uid to verify mount-hiding here; root sees ${rootNm} <code>nomount_*</code> mount(s).`;
+      $("stealthNote").innerHTML = `File injections and RRO are hookless; su is sucompat. Couldn't drop to a non-root uid to verify here; root sees ${rootNm} <code>nomount_*</code> mount(s).`;
     }
   }
 
@@ -482,14 +494,28 @@
     $("mMod").textContent = served;
   }
 
-  // ---- overlays ----
+  // ---- overlays (now hookless: injected overlay APKs, no overlayfs mount) ----
   async function refreshOverlays() {
     const box = $("overlays");
-    const out = (await exec("grep '^nomount_ov ' /proc/1/mounts | cut -d' ' -f2")).stdout.trim();
-    const dirs = out ? out.split("\n").filter(Boolean) : [];
-    $("ovcount").textContent = dirs.length;
-    if (!dirs.length) { box.innerHTML = '<div class="empty">No RRO overlay modules mounted.</div>'; return; }
-    box.innerHTML = dirs.map((d) => `<div class="row"><span class="name mono">${esc(d)}</span><span class="tag ov">mounted</span></div>`).join("");
+    const list = await nm("vfs list");
+    const lines = (list.errno === 0 ? list.stdout : "").split("\n").map(s => s.trim()).filter(Boolean);
+    const dirs = {};
+    for (const l of lines) {
+      const vp = (l.split(" ->")[0] || "").trim();
+      if (/\/overlay\/[^\s]*\.apk$/.test(vp)) {
+        const dir = vp.replace(/\/[^/]*$/, "");
+        dirs[dir] = (dirs[dir] || 0) + 1;
+      }
+    }
+    const keys = Object.keys(dirs).sort();
+    const total = keys.reduce((a, k) => a + dirs[k], 0);
+    $("ovcount").textContent = total;
+    if (!keys.length) { box.innerHTML = '<div class="empty">No RRO overlays.</div>'; return; }
+    box.innerHTML = keys.map((d) =>
+      `<div class="row"><span class="name mono">${esc(d)}</span>` +
+      `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} apk${dirs[d] > 1 ? "s" : ""}</span>` +
+      `<span class="tag ov">hookless</span></div>`
+    ).join("");
   }
 
   // ---- rules ----

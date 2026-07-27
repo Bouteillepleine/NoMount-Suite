@@ -10,7 +10,7 @@
 //! root can never break from a Suite bug, and there is no su mount for a scanner
 //! to flag.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::nm::Nm;
-use crate::overlay;
 
 const MODULES_DIR: &str = "/data/adb/modules";
 
@@ -82,16 +81,13 @@ struct Stats {
 }
 
 /// Recursively route a module subtree rooted at `dir`.
-/// RRO overlay dirs are collected in `overlays` (target -> source) for real
-/// mounting; `.replace`/char-device markers become whiteouts; other files get a
-/// hookless redirect. Symlinks are treated as files (file_type does not follow).
-fn inject_tree(
-    nm: &Nm,
-    module_root: &Path,
-    dir: &Path,
-    st: &mut Stats,
-    overlays: &mut Vec<(PathBuf, PathBuf)>,
-) {
+/// `.replace`/char-device markers become whiteouts; every other file — including
+/// RRO overlay APKs — gets a hookless redirect. Symlinks are treated as files
+/// (file_type does not follow). RRO overlay dirs are NOT special-cased: their APKs
+/// are hookless-injected into e.g. `/product/overlay`, and OverlayManagerService +
+/// idmap2 pick them up at the system_server scan (which runs after this
+/// post-fs-data pass). So RRO works with no overlayfs mount — zero mounts total.
+fn inject_tree(nm: &Nm, module_root: &Path, dir: &Path, st: &mut Stats) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -113,18 +109,7 @@ fn inject_tree(
         let name = name.to_string_lossy();
 
         if ft.is_dir() {
-            // Only RRO overlay dirs go to the real overlay engine. NB: routing a
-            // whole live overlayfs partition subdir (e.g. /product/priv-app) here
-            // to fix the new-subtree-over-overlayfs ECHILD gap was tried in v2.2.2
-            // and BOOTLOOPS OP15 — remounting overlayfs over the stock priv-app at
-            // early boot breaks PMS. The real fix belongs in the kernel engine
-            // (nomount.c: synthetic dir ops over overlay parents), not here.
-            // `overlay::should_route` remains available but is deliberately unused.
-            if overlay::is_overlay_target(&target) {
-                overlays.push((target, source));
-                continue;
-            }
-            inject_tree(nm, module_root, &source, st, overlays);
+            inject_tree(nm, module_root, &source, st);
         } else if name == ".replace" {
             // Whiteout the parent dir (module wants to replace, not merge, it).
             if let Some(parent) = target.parent() {
@@ -169,8 +154,6 @@ pub fn run_mount() -> Result<()> {
         failed: 0,
         whiteouts: 0,
     };
-    let mut overlays: Vec<(PathBuf, PathBuf)> = Vec::new();
-
     if let Ok(dirs) = fs::read_dir(MODULES_DIR) {
         for entry in dirs.flatten() {
             let mdir = entry.path();
@@ -190,21 +173,13 @@ pub fn run_mount() -> Result<()> {
                 continue;
             }
             modules += 1;
-            inject_tree(&nm, &mdir, &sysroot, &mut st, &mut overlays);
+            inject_tree(&nm, &mdir, &sysroot, &mut st);
         }
     }
 
-    // Real-mount RRO overlay dirs (grouped by target; several modules may
-    // contribute APKs to the same partition overlay dir).
-    let mut by_target: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
-    for (target, source) in overlays {
-        by_target.entry(target).or_default().push(source);
-    }
-    let (ov_ok, ov_fail) = overlay::setup(&by_target);
-
     println!(
         "nomount(suite): {modules} modules | {} rules, {} whiteouts, {} failed, {skipped} skipped \
-         | {ov_ok} RRO overlays ({ov_fail} failed)",
+         | mountless (RRO via hookless)",
         st.applied, st.whiteouts, st.failed
     );
     Ok(())
