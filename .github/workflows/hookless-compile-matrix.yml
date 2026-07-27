@@ -203,9 +203,12 @@ jobs:
           echo "== sparse C=2 (advisory) =="
           rm -f out/fs/nomount.o
           make $MAKEOPTS C=2 CHECK="sparse" fs/nomount.o 2>&1 | tee /tmp/nm_sparse.log || true
-          w=$(grep -c 'warning:' /tmp/nm_w1.log 2>/dev/null || echo 0)
-          s=$(grep -c 'warning:\|error:' /tmp/nm_sparse.log 2>/dev/null || echo 0)
-          echo "::notice::${{ matrix.ver }} advisory — W=1 warnings: $w, sparse notes: $s"
+          # Count only OUR file's diagnostics — the W=1/sparse build can drag in
+          # kernel-tree noise (arm64 vdso missing-prototypes, defconfig quirks)
+          # that is not ours and not actionable here.
+          w=$(grep 'warning:' /tmp/nm_w1.log 2>/dev/null | grep -c 'nomount\.[ch]' || true)
+          s=$(grep 'warning:\|error:' /tmp/nm_sparse.log 2>/dev/null | grep -c 'nomount\.[ch]' || true)
+          echo "::notice::${{ matrix.ver }} advisory (nomount.c only) — W=1 warnings: ${w:-0}, sparse notes: ${s:-0}"
 
       - name: Save ccache
         if: ${{ always() && steps.sel.outputs.run == '1' }}
