@@ -6,7 +6,6 @@
 #include <linux/version.h>
 #include <linux/module.h>
 #include "nomount.h"
-#include "mount.h"   /* real_mount(), struct mount->mnt_devname (mount hiding) */
 
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
 static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mostly;
@@ -23,25 +22,6 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
     is_blocked = (idr_find(&nomount_uid_idr, uid) != NULL);
     rcu_read_unlock();
     return is_blocked;
-}
-
-/* Mount hiding: hide the Suite's OWN real mounts (RRO overlays etc., all mounted
- * with a "nomount_" source/device name) from non-root readers of
- * /proc/<pid>/{mounts,mountinfo,mountstats}. Root/su (uid 0) still sees everything
- * so root tooling keeps working. Called from the patched proc_namespace.c show
- * functions. Hookless VFS injections are mountless and need no hiding; this only
- * covers the unavoidable real overlay mount idmap2 requires. Non-static: resolved
- * by the built-in proc_namespace.c hook. */
-bool nomount_hide_mount(struct vfsmount *mnt)
-{
-    const char *dev;
-
-    if (unlikely(!mnt))
-        return false;
-    if (current_uid().val == 0)          /* root/su: no hiding */
-        return false;
-    dev = real_mount(mnt)->mnt_devname;
-    return dev && strncmp(dev, "nomount_", 8) == 0;
 }
 
 #define __get_nm(ptr, type, member) ({ \

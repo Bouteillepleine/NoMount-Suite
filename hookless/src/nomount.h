@@ -17,12 +17,6 @@
 #endif
 #include <linux/jump_label.h>
 
-/* Mount hiding: hide the Suite's own nomount_* real mounts from non-root readers
- * of /proc/<pid>/{mounts,mountinfo,mountstats}. Defined in nomount.c, called from
- * the integration hook in fs/proc_namespace.c. */
-struct vfsmount;
-bool nomount_hide_mount(struct vfsmount *mnt);
-
 #define NM_MODULE_VERSION "12"
 #define NOMOUNT_VERSION    12
 #define NOMOUNT_HASH_BITS  12
