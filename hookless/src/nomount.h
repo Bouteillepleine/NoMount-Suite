@@ -29,7 +29,6 @@ bool nomount_hide_mount(struct vfsmount *mnt);
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
 #define NM_FLAG_WHITEOUT    (1 << 2)
-#define NM_FLAG_HAS_STAT    (1 << 3)
 
 /* logs */
 #define nm_debug(fmt, ...) printk(KERN_DEBUG "NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
@@ -81,8 +80,6 @@ struct nm_inode_info {
     struct path r_path;
     struct nomount_dir_node *dir_node;
     unsigned long v_ino;
-    loff_t v_size;
-    blkcnt_t v_blocks;
     u8 flags;
 };
 
@@ -121,8 +118,6 @@ struct nomount_rule {
     struct nomount_dir_node *parent_dir;
     struct nomount_dir_node *this_dir;
     struct path r_path;
-    loff_t v_size;
-    blkcnt_t v_blocks;
     unsigned long v_ino;
     u32 v_hash;
     u16 v_len;
