@@ -30,6 +30,21 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
     (__o && nm_probe_read(&__sig, &__o->signature, sizeof(__sig)) == 0 && __sig == NOMOUNT_MAGIC_SIG) ? __o : NULL; \
 })
 
+/* Install our dentry ops on a dentry we manage. Setting d_op alone is NOT enough:
+ * a dentry allocated on a hijacked sb (e.g. overlayfs, whose s_d_op is
+ * ovl_dentry_operations) already has the sb's DCACHE_OP_* flags set, so the VFS
+ * would keep calling ops (d_weak_revalidate/d_real/d_release/...) that nm_dops
+ * does not provide -> NULL deref (seen as an OOPS in path_lookupat when resolving
+ * '..' of a synthesized virtual dir). Clear the inherited op flags and set only
+ * the ones nm_dops actually implements (d_revalidate). */
+#define NM_SET_DOPS(d) do { \
+    (d)->d_flags &= ~(DCACHE_OP_HASH | DCACHE_OP_COMPARE | DCACHE_OP_REVALIDATE | \
+                      DCACHE_OP_WEAK_REVALIDATE | DCACHE_OP_DELETE | DCACHE_OP_PRUNE | \
+                      DCACHE_OP_REAL); \
+    (d)->d_op = &nm_dops; \
+    (d)->d_flags |= DCACHE_OP_REVALIDATE; \
+} while (0)
+
 static __always_inline struct nomount_dir_node *nomount_get_dir_node(struct inode *inode) 
 {
     struct nm_iop *nm_iop;
@@ -215,7 +230,7 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
     rule = nomount_find_child_rule(nm_iop->dir_node, name, len, v_hash);
     if (likely(rule)) {
         if (rule->flags & NM_FLAG_WHITEOUT) {
-            dentry->d_op = &nm_dops;
+            NM_SET_DOPS(dentry);
             d_add(dentry, NULL); 
             return NULL;
         }
@@ -223,7 +238,7 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
         if ((rule->flags & NM_FLAG_VIRTUAL_DIR) || rule->r_path.dentry) {
             struct inode *new_inode = nomount_create_new_inode(dir->i_sb, rule);
             if (likely(new_inode)) {
-                dentry->d_op = &nm_dops;
+                NM_SET_DOPS(dentry);
                 nm_debug("Lookup hijacked! Splicing inode %lu into dentry '%s'\n", new_inode->i_ino, name);
                 return d_splice_alias(new_inode, dentry);
             }
@@ -788,10 +803,10 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
              * run against our synthetic inode (no ovl_entry) and return -ECHILD.
              * nomount_hijacked_lookup already does this for the first level; the
              * synthesized deeper subtree (a new dir over overlay) needs it too. */
-            if (c_rule->flags & NM_FLAG_WHITEOUT) { dentry->d_op = &nm_dops; d_add(dentry, NULL); return NULL; }
+            if (c_rule->flags & NM_FLAG_WHITEOUT) { NM_SET_DOPS(dentry); d_add(dentry, NULL); return NULL; }
             if ((c_rule->flags & NM_FLAG_VIRTUAL_DIR) || c_rule->r_path.dentry) {
                 struct inode *new_inode = nomount_create_new_inode(dir->i_sb, c_rule);
-                if (new_inode) { dentry->d_op = &nm_dops; return d_splice_alias(new_inode, dentry); }
+                if (new_inode) { NM_SET_DOPS(dentry); return d_splice_alias(new_inode, dentry); }
             }
         }
     }
@@ -800,7 +815,7 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
         return r_dir->i_op->lookup(r_dir, dentry, flags);
 
     if (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) {
-        dentry->d_op = &nm_dops;
+        NM_SET_DOPS(dentry);
         d_add(dentry, NULL);
         return NULL;
     }
