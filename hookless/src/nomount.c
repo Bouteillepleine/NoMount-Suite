@@ -12,20 +12,6 @@ static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mos
 static const struct cred *nm_root_cred;
 static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
-/* --- TEMP DEBUG (multi-child virtual-dir bug) --- remove before release --- */
-#define NMDBG(fmt, ...) pr_info("NMDBG: " fmt, ##__VA_ARGS__)
-static __always_inline bool nmdbg_name(const char *n, size_t l)
-{
-    return l > 3 && n[l-3] == '.' && n[l-2] == 's' && n[l-1] == 'o';
-}
-static __always_inline int nmdbg_count(struct nomount_dir_node *dn)
-{
-    struct nomount_child_node *c; int id, n = 0;
-    if (!dn) return -1;
-    idr_for_each_entry(&dn->children_idr, c, id) n++;
-    return n;
-}
-
 /*** Helpers ***/
 
 static __always_inline bool nomount_is_uid_blocked(uid_t uid) 
@@ -74,9 +60,6 @@ static __always_inline struct nomount_rule *nomount_find_child_rule(struct nomou
         }
     }
     rcu_read_unlock();
-    if (nmdbg_name(name, len))
-        NMDBG("find  dir=%px name=%.*s hash=%08x found=%d children=%d\n",
-              dir_node, (int)len, name, hash, found ? 1 : 0, nmdbg_count(dir_node));
     return found;
 }
 
@@ -132,25 +115,16 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
     if (!nm_is_virtual_pos(ctx->pos)) ctx->pos = nm_pack_pos(0);
     id = nm_unpack_pos(ctx->pos);
 
-    NMDBG("emit  dir=%px pos_in=%lld start_id=%d children=%d\n",
-          dir_node, (long long)ctx->pos, id, nmdbg_count(dir_node));
-
     rcu_read_lock();
     idr_for_each_entry_continue(&dir_node->children_idr, child, id) {
         ctx->pos = nm_pack_pos(id);
         if (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val) {
             if (!(child->flags & NM_FLAG_WHITEOUT) &&
-                !dir_emit(ctx, child->name, child->name_len, child->fake_ino, child->d_type)) {
-                NMDBG("emit  dir=%px STOP at id=%d name=%.*s (dir_emit full)\n",
-                      dir_node, id, (int)child->name_len, child->name);
-                break;
-            }
-            NMDBG("emit  dir=%px id=%d name=%.*s\n", dir_node, id, (int)child->name_len, child->name);
+                !dir_emit(ctx, child->name, child->name_len, child->fake_ino, child->d_type)) break;
         }
         ctx->pos = nm_pack_pos(id + 1);
     }
     rcu_read_unlock();
-    NMDBG("emit  dir=%px pos_out=%lld\n", dir_node, (long long)ctx->pos);
 }
 
 static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nomount_rule *rule)
@@ -868,6 +842,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
 {
     struct inode *parent_dir;
     struct nm_iop *nm_iop;
+    struct nomount_dir_node *pdir = NULL;
     struct nomount_rule *rule;
     u32 hash;
 
@@ -881,11 +856,24 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
 #endif
     if (!parent_dir) return 1;
 
+    /* Resolve the parent's dir_node. A REAL hijacked dir carries it in a
+     * per-inode fake_iop; a SYNTHESIZED virtual dir uses the shared const
+     * nm_dir_iops (no fake_iop) and keeps its dir_node in the inode's private
+     * info. Missing the virtual-dir case made revalidate return 1 (valid) for a
+     * stale NEGATIVE child dentry — created by a transient lookup-before-inject
+     * during `nm add` — so that child (e.g. the 2nd+ .so in a new arm64/ dir)
+     * stayed ENOENT forever and its readdir path-walk could spin. */
     nm_iop = __get_nm(smp_load_acquire(&parent_dir->i_op), struct nm_iop, fake_iop);
-    if (!nm_iop || !nm_iop->dir_node) return 1; 
+    if (nm_iop) {
+        pdir = nm_iop->dir_node;
+    } else if (parent_dir->i_op == &nm_dir_iops) {
+        struct nm_inode_info *pinfo = parent_dir->i_private;
+        if (pinfo) pdir = pinfo->dir_node;
+    }
+    if (!pdir) return 1;
 
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
-    rule = nomount_find_child_rule(nm_iop->dir_node, dentry->d_name.name, dentry->d_name.len, hash);
+    rule = nomount_find_child_rule(pdir, dentry->d_name.name, dentry->d_name.len, hash);
 
     if (!rule) return 0;
     if (rule->flags & NM_FLAG_WHITEOUT) return d_is_negative(dentry) ? 1 : 0;
@@ -1140,8 +1128,6 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
         if (child->name_len == name_len && memcmp(child->name, name, name_len) == 0) {
             child->flags = rule->flags;
             child->rule = rule;
-            if (nmdbg_name(name, name_len))
-                NMDBG("inject DEDUP dir=%px name=%.*s (updated existing)\n", dir_node, (int)name_len, name);
             return;
         }
     }
@@ -1163,17 +1149,11 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
     idr_preload_end();
 
     if (child->id < 0) {
-        if (nmdbg_name(name, name_len))
-            NMDBG("inject FAIL dir=%px name=%.*s idr_alloc=%d\n", dir_node, (int)name_len, name, child->id);
         kfree(child);
         return;
     }
 
     dir_node->bloom_mask |= (1ULL << (child->name_hash & 63));
-    if (nmdbg_name(name, name_len))
-        NMDBG("inject OK    dir=%px name=%.*s id=%d total=%d bloom=%016llx\n",
-              dir_node, (int)name_len, name, child->id, nmdbg_count(dir_node),
-              (unsigned long long)dir_node->bloom_mask);
 }
 
 static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, unsigned long fake_ino)
