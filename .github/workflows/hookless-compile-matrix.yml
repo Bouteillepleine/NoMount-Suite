@@ -102,10 +102,20 @@ jobs:
       - name: Fetch AOSP gcc-4.9 toolchain
         if: steps.sel.outputs.run == '1' && matrix.tc == 'gcc49'
         run: |
+          set -e
+          # The AOSP aarch64-linux-android-4.9 host binaries are 32-bit x86 — the
+          # runner needs the i386 loader/libs or execve() returns ENOENT.
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libc6:i386 libstdc++6:i386 zlib1g:i386
           git clone --depth 1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
             "$HOME/gcc49"
-          "$HOME/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
+          GCC="$HOME/gcc49/bin/aarch64-linux-android-gcc"
+          file "$GCC" || true
+          # no '| head' — this MUST fail loudly if the toolchain cannot execute
+          "$GCC" --version
 
       - name: Fetch kernel source (${{ matrix.kref }})
         if: steps.sel.outputs.run == '1'
