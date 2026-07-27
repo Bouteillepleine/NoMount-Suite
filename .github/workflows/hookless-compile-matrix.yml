@@ -94,7 +94,8 @@ jobs:
             bc bison flex libssl-dev libelf-dev cpio kmod \
             build-essential git ca-certificates rsync
           if [ "${{ matrix.tc }}" = "clang" ]; then
-            sudo apt-get install -y --no-install-recommends clang lld llvm
+            sudo apt-get install -y --no-install-recommends clang lld llvm \
+              gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
             clang --version | head -1
           fi
 
@@ -131,10 +132,12 @@ jobs:
           set -o pipefail
           cd ksrc
           if [ "${{ matrix.tc }}" = "clang" ]; then
-            MAKEOPTS="ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 KCFLAGS=-Wno-error"
+            # CROSS_COMPILE is needed so older kernels (5.4/5.10) derive the clang
+            # --target triple; 5.15+ auto-derive it from ARCH but it is harmless there.
+            MAKEOPTS="ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
           else
-            export PATH="$HOME/gcc49/bin:$PATH"
-            MAKEOPTS="ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-android- KCFLAGS=-Wno-error"
+            # absolute prefix — do not rely on PATH resolution inside sub-makes
+            MAKEOPTS="ARCH=arm64 O=out CROSS_COMPILE=$HOME/gcc49/bin/aarch64-linux-android- KCFLAGS=-Wno-error"
           fi
           echo "== defconfig =="
           make $MAKEOPTS defconfig 2>&1 | tail -5

@@ -119,6 +119,15 @@ error. The original audit's "6.12 ✔ confirmed" was wrong (it trusted the guard
 lies in (6.12, 6.18]; 6.12 verified 2-arg, 6.18 verified 4-arg). Both the function
 signature and the `parent_dir = dir` guard were updated.
 
+### F9 — HIGH — `nm_mmap_prepare` assigns const `desc->file` → 6.18 build break (found by CI)
+CI round 1 flagged `fs/nomount.c:586: cannot assign to non-static data member 'file'
+with const-qualified type`. `struct vm_area_desc.file` became `struct file *const`
+in **6.18**, but `nm_mmap_prepare()` swaps `desc->file` to redirect to the backing
+file. **Fixed in the vendored copy** by redirecting through a cast
+(`*(struct file **)&desc->file = real_file;`) and restoring afterwards — the
+vm_area_desc is a mutable on-stack object on the mmap path, so this preserves the
+pre-6.18 behaviour. (Only path affected: `>=6.16` mmap_prepare.)
+
 ### F7 — DESIGN — RRO/idmap theming still unresolved
 Still mountless: no overlayfs, no real mount. The documented OxygenCustomizer wall
 (idmap2/OMS needs the overlay APK on a real mount to reach `STATE_ENABLED`) is not

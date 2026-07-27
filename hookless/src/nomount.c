@@ -583,9 +583,12 @@ static int nm_mmap_prepare(struct vm_area_desc *desc)
     int ret;
     if (!real_file || !real_file->f_op->mmap_prepare) return -ENODEV;
 
-    desc->file = real_file;
+    /* desc->file is const-qualified as of 6.18. The vm_area_desc is a mutable
+     * on-stack object on the mmap path, so redirect through a cast (preserving
+     * the pre-6.18 behaviour) and restore it afterwards. */
+    *(struct file **)&desc->file = real_file;
     ret = real_file->f_op->mmap_prepare(desc);
-    desc->file = file;
+    *(struct file **)&desc->file = file;
 
     return ret;
 }
