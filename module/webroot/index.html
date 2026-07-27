@@ -458,12 +458,23 @@
       '[ "$id" = meta-nomount ] && { echo "$id|suite"; continue; }; ' +
       '[ "$id" = kernelnosu ] && { echo "$id|su"; continue; }; ' +
       'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && st=off; ' +
-      '[ -d "$d/system" ] || st=nosys; ' +
+      // Mirror the injector (src/mount.rs): content lives under ANY top-level dir that maps to
+      // a real partition, not just system/. auto_mount modules ship product/ etc. directly.
+      // Plain `find` (no -L) is deliberate: a module's `system/product -> ../product`
+      // layout-convergence symlink must not be followed, or its files count twice.
+      // `[ -L ]` mirrors the injector's non-following file_type(): a top-level symlink
+      // (e.g. OnePlus_Dialer_Universal's `product -> ./system/product`) is NOT a partition
+      // root to walk — counting it would double-count the files it points at.
+      'roots=""; for pd in "$d"*/; do [ -d "$pd" ] || continue; [ -L "${pd%/}" ] && continue; n=$(basename "$pd"); ' +
+      'case "$n" in data|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp' +
+      '|debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin) continue;; ' +
+      'my_*) continue;; esac; [ -d "/$n" ] || continue; roots="$roots $pd"; done; ' +
+      '[ -z "$roots" ] && [ "$st" = on ] && st=nopart; ' +
       'mech=""; cnt=0; ' +
       'if [ "$st" = on ]; then ov=0; vf=0; ' +
-      'cnt=$(find "$d/system" -type f 2>/dev/null | wc -l); ' +
-      '[ -n "$(find "$d/system" -path "*/overlay/*.apk" -print -quit 2>/dev/null)" ] && ov=1; ' +
-      '[ -n "$(find "$d/system" -type f ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
+      'cnt=$(find $roots -type f 2>/dev/null | wc -l); ' +
+      '[ -n "$(find $roots -path "*/overlay/*.apk" -print -quit 2>/dev/null)" ] && ov=1; ' +
+      '[ -n "$(find $roots -type f ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
       'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
       'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
       'echo "$id|$st|$mech|$cnt"; done'
@@ -481,7 +492,7 @@
       else if (p[1] === "su") { label = "su backend"; cls = "su"; served++; }
       else {
         const st = p[1], mech = p[2];
-        if (st === "nosys") { label = "no /system"; cls = "off"; }
+        if (st === "nopart") { label = "no files"; cls = "off"; }
         else if (st === "off") { label = "skipped"; cls = "off"; }
         else if (mech === "overlay") { label = "overlay"; cls = "ov"; served++; showCnt = true; }
         else if (mech === "vfs+overlay") { label = "vfs + overlay"; cls = "ov"; served++; showCnt = true; }

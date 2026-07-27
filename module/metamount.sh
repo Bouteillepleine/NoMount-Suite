@@ -73,10 +73,31 @@ if command -v ksud >/dev/null 2>&1; then
         [ -d "$d" ] || continue
         mid=$(basename "$d")
         { [ "$mid" = "meta-nomount" ] || [ "$mid" = "kernelnosu" ]; } && continue
-        { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ] || [ ! -d "$d/system" ]; } && continue
+        { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && continue
+        # Mirror the injector (src/mount.rs): content lives under ANY top-level dir that maps
+        # to a real partition, not just system/ (auto_mount modules ship product/ directly).
+        # Plain `find` (no -L) is deliberate: a module's `system/product -> ../product`
+        # layout-convergence symlink must not be followed, or its files count twice.
+        _roots=""
+        for _pd in "$d"*/; do
+            [ -d "$_pd" ] || continue
+            # Mirrors the injector's non-following file_type(): a top-level symlink (e.g.
+            # OnePlus_Dialer_Universal's `product -> ./system/product`) is not a root to walk;
+            # counting it would double-count the files it points at.
+            [ -L "${_pd%/}" ] && continue
+            _n=$(basename "$_pd")
+            case "$_n" in
+                data|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp|\
+                debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin) continue ;;
+                my_*) continue ;;
+            esac
+            [ -d "/$_n" ] || continue
+            _roots="$_roots $_pd"
+        done
+        [ -z "$_roots" ] && continue
         _o=0; _v=0
-        [ -n "$(find "$d/system" -path '*/overlay/*.apk' -print -quit 2>/dev/null)" ] && _o=1
-        [ -n "$(find "$d/system" -type f ! -path '*/overlay/*' -print -quit 2>/dev/null)" ] && _v=1
+        [ -n "$(find $_roots -path '*/overlay/*.apk' -print -quit 2>/dev/null)" ] && _o=1
+        [ -n "$(find $_roots -type f ! -path '*/overlay/*' -print -quit 2>/dev/null)" ] && _v=1
         [ "$_o" = 0 ] && [ "$_v" = 0 ] && continue
         if [ "$_o" = 1 ] && [ "$_v" = 1 ]; then _t="vfs + overlay"; _ov="$_ov $mid";
         elif [ "$_o" = 1 ]; then _t="overlay"; _ov="$_ov $mid";
