@@ -3,22 +3,28 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>NoMount</title>
+<title>NoMount Suite</title>
+<!-- WebUI shortcut icon is driven by webroot/config.json + icon.png (KernelSU/MMRL WebUI) -->
+<link rel="icon" type="image/png" href="icon.png" />
 <style>
   :root {
-    --bg: #0a0c12;
-    --bg2: #0f131c;
-    --card: rgba(255, 255, 255, 0.045);
-    --card-brd: rgba(255, 255, 255, 0.09);
-    --txt: #e8ecf4;
-    --muted: #8b93a7;
-    --acc: #7c9cff;
-    --acc2: #57e6c3;
-    --ok: #35d29a;
-    --warn: #fbbf24;
-    --bad: #f8717a;
-    --radius: 18px;
-    --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    --bg:      #080a11;
+    --bg2:     #0e1220;
+    --card:    rgba(255,255,255,0.045);
+    --card2:   rgba(255,255,255,0.028);
+    --brd:     rgba(255,255,255,0.085);
+    --brd2:    rgba(255,255,255,0.055);
+    --txt:     #eaeef7;
+    --muted:   #8a93a9;
+    --faint:   #616a80;
+    --acc:     #7c9cff;
+    --acc2:    #57e6c3;
+    --ok:      #35d29a;
+    --warn:    #fbbf24;
+    --bad:     #f8717a;
+    --mono:    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --radius:  20px;
+    --shadow:  0 12px 34px rgba(0,0,0,0.42);
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; padding: 0; overflow-x: hidden; }
@@ -26,204 +32,256 @@
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     color: var(--txt);
     background:
-      radial-gradient(1200px 700px at 15% -10%, rgba(124, 156, 255, 0.15), transparent 60%),
-      radial-gradient(1000px 600px at 110% 10%, rgba(87, 230, 195, 0.10), transparent 55%),
-      linear-gradient(180deg, var(--bg2), var(--bg));
+      radial-gradient(1100px 640px at 12% -12%, rgba(124,156,255,0.16), transparent 58%),
+      radial-gradient(940px 560px at 112% 6%, rgba(87,230,195,0.11), transparent 54%),
+      linear-gradient(180deg, var(--bg2), var(--bg) 60%);
+    background-attachment: fixed;
     min-height: 100vh;
-    padding: max(18px, env(safe-area-inset-top)) 16px calc(40px + env(safe-area-inset-bottom));
+    padding: 0 15px calc(46px + env(safe-area-inset-bottom));
+    -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 640px; margin: 0 auto; }
+  .wrap { max-width: 660px; margin: 0 auto; }
 
-  header { display: flex; align-items: center; gap: 14px; padding: 8px 4px 22px; }
-  .logo {
-    width: 46px; height: 46px; border-radius: 14px; flex: none;
-    display: grid; place-items: center;
-    background: linear-gradient(135deg, var(--acc), var(--acc2));
-    box-shadow: 0 8px 22px rgba(124, 156, 255, 0.35);
+  /* ---------- header ---------- */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 13px;
+    padding: max(16px, env(safe-area-inset-top)) 4px 14px;
+    background: linear-gradient(180deg, var(--bg2) 55%, rgba(14,18,32,0));
+    margin: 0 -15px 6px; padding-left: 19px; padding-right: 19px;
   }
-  .logo svg { width: 26px; height: 26px; }
+  .logo {
+    width: 44px; height: 44px; border-radius: 13px; flex: none; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--acc), var(--acc2));
+    box-shadow: 0 8px 22px rgba(124,156,255,0.34);
+  }
+  .logo svg { width: 25px; height: 25px; }
   .brand h1 {
-    margin: 0; font-size: 26px; font-weight: 750; letter-spacing: -0.4px;
-    background: linear-gradient(90deg, #fff, #b9c6ff);
+    margin: 0; font-size: 22px; font-weight: 760; letter-spacing: -0.4px; line-height: 1.1;
+    background: linear-gradient(90deg, #fff, #bcc8ff);
     -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
   }
-  .brand p { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
-  .chip {
-    margin-left: auto; font-size: 12px; color: var(--muted);
-    background: var(--card); border: 1px solid var(--card-brd);
+  .brand p { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); letter-spacing: 0.2px; }
+  .hbtns { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .ver {
+    font-size: 12px; color: var(--muted); background: var(--card); border: 1px solid var(--brd);
     padding: 6px 11px; border-radius: 999px; font-variant-numeric: tabular-nums;
   }
+  .iconbtn {
+    width: 38px; height: 38px; border-radius: 12px; flex: none; display: grid; place-items: center;
+    background: var(--card); border: 1px solid var(--brd); color: var(--txt); cursor: pointer;
+    transition: transform .1s, background .2s;
+  }
+  .iconbtn:active { transform: scale(0.92); }
+  .iconbtn svg { width: 19px; height: 19px; }
 
+  /* ---------- cards ---------- */
   .card {
-    background: var(--card); border: 1px solid var(--card-brd);
-    border-radius: var(--radius); box-shadow: var(--shadow);
-    padding: 18px; margin-bottom: 14px; backdrop-filter: blur(8px);
+    background: var(--card); border: 1px solid var(--brd); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 17px 17px 18px; margin-bottom: 13px; backdrop-filter: blur(10px);
   }
-  .card-h { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-  .card-h h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: 0.2px; }
-  .card-h .ic { width: 18px; height: 18px; color: var(--acc); flex: none; }
-  .spacer { flex: 1; }
-
-  .status-row { display: flex; align-items: center; gap: 14px; }
-  .pill { display: inline-flex; align-items: center; gap: 8px; font-weight: 650; font-size: 15px; }
-  .dot { width: 11px; height: 11px; border-radius: 50%; box-shadow: 0 0 0 4px rgba(255,255,255,0.05); }
-  .dot.ok { background: var(--ok); box-shadow: 0 0 12px var(--ok), 0 0 0 4px rgba(53,210,154,0.15); }
-  .dot.off { background: var(--muted); }
-  .dot.bad { background: var(--bad); box-shadow: 0 0 12px var(--bad), 0 0 0 4px rgba(248,113,122,0.15); }
-  .dot.warn { background: var(--warn); box-shadow: 0 0 12px var(--warn), 0 0 0 4px rgba(251,191,36,0.15); }
-
-  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
-  .metric { background: rgba(255,255,255,0.03); border: 1px solid var(--card-brd); border-radius: 12px; padding: 12px 14px; }
-  .metric .k { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
-  .metric .v { font-size: 20px; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
-
-  /* toggle */
-  .toggle { position: relative; width: 52px; height: 30px; flex: none; }
-  .toggle input { opacity: 0; width: 0; height: 0; }
-  .track {
-    position: absolute; inset: 0; border-radius: 999px; cursor: pointer;
-    background: rgba(255,255,255,0.12); transition: 0.25s;
+  .card-h { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
+  .card-h h2 { margin: 0; font-size: 14px; font-weight: 680; letter-spacing: 0.2px; }
+  .card-h .ic { width: 17px; height: 17px; color: var(--acc); flex: none; }
+  .card-h .chip {
+    margin-left: auto; font-size: 11.5px; color: var(--muted); background: var(--card2);
+    border: 1px solid var(--brd2); padding: 4px 10px; border-radius: 999px; font-variant-numeric: tabular-nums;
   }
-  .track::before {
-    content: ""; position: absolute; height: 24px; width: 24px; left: 3px; top: 3px;
-    background: #fff; border-radius: 50%; transition: 0.25s; box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-  }
-  .toggle input:checked + .track { background: linear-gradient(135deg, var(--acc), var(--acc2)); }
-  .toggle input:checked + .track::before { transform: translateX(22px); }
-  .toggle input:disabled + .track { opacity: 0.5; cursor: default; }
 
-  .btns { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+  /* hero */
+  .hero { padding: 20px 18px; position: relative; overflow: hidden; }
+  .hero::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(420px 180px at 88% -30%, rgba(124,156,255,0.18), transparent 70%);
+  }
+  .statusline { display: flex; align-items: center; gap: 12px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--muted); transition: .3s; }
+  .dot.ok   { background: var(--ok);   box-shadow: 0 0 13px var(--ok),   0 0 0 5px rgba(53,210,154,0.14); }
+  .dot.warn { background: var(--warn); box-shadow: 0 0 13px var(--warn), 0 0 0 5px rgba(251,191,36,0.14); }
+  .dot.bad  { background: var(--bad);  box-shadow: 0 0 13px var(--bad),  0 0 0 5px rgba(248,113,122,0.14); }
+  .dot.off  { background: var(--muted); }
+  .statusline .st { font-size: 19px; font-weight: 720; letter-spacing: -0.2px; }
+  .statusline .sub { margin-left: auto; font-size: 12px; color: var(--muted); text-align: right; }
+
+  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 17px; }
+  .metric { background: var(--card2); border: 1px solid var(--brd2); border-radius: 13px; padding: 12px 13px; }
+  .metric .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.7px; }
+  .metric .v { font-size: 21px; font-weight: 750; margin-top: 4px; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; }
+  .metric .v small { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
+
+  /* actions */
+  .btns { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 16px; }
   button.act {
-    appearance: none; border: 1px solid var(--card-brd); cursor: pointer;
-    color: var(--txt); background: rgba(255,255,255,0.05);
-    padding: 11px 16px; border-radius: 12px; font-size: 14px; font-weight: 600;
-    transition: transform 0.08s, background 0.2s, border-color 0.2s; flex: 1; min-width: 120px;
+    appearance: none; border: 1px solid var(--brd); cursor: pointer; color: var(--txt);
+    background: rgba(255,255,255,0.05); padding: 12px 15px; border-radius: 13px;
+    font-size: 13.5px; font-weight: 640; transition: transform .08s, background .2s, border-color .2s;
+    flex: 1; min-width: 120px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   }
+  button.act svg { width: 16px; height: 16px; }
   button.act:active { transform: scale(0.97); }
-  button.act.primary { background: linear-gradient(135deg, var(--acc), var(--acc2)); border-color: transparent; color: #0a0c12; }
-  button.act.danger { border-color: rgba(248,113,122,0.35); color: #ffd7d9; background: rgba(248,113,122,0.10); }
+  button.act.primary { background: linear-gradient(135deg, var(--acc), var(--acc2)); border-color: transparent; color: #08101c; }
+  button.act.danger { border-color: rgba(248,113,122,0.34); color: #ffd7d9; background: rgba(248,113,122,0.10); }
   button.act:disabled { opacity: 0.45; cursor: default; }
 
-  .list { margin-top: 4px; }
-  .row { display: flex; align-items: center; gap: 10px; padding: 10px 2px; border-top: 1px solid rgba(255,255,255,0.06); font-size: 13.5px; }
+  /* rows / lists */
+  .list { margin-top: 2px; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 11px 2px; border-top: 1px solid rgba(255,255,255,0.055); font-size: 13.5px; }
   .row:first-child { border-top: none; }
   .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tag { font-size: 11px; padding: 3px 9px; border-radius: 999px; font-weight: 600; }
-  .tag.on { background: rgba(53,210,154,0.14); color: var(--ok); }
-  .tag.ov { background: rgba(124,156,255,0.16); color: var(--acc); }
-  .tag.off { background: rgba(139,147,167,0.16); color: var(--muted); }
-  .empty { color: var(--muted); font-size: 13px; padding: 8px 2px; }
-  pre.rules {
-    margin: 6px 0 0; max-height: 220px; overflow: auto; font-size: 12px; line-height: 1.6;
-    font-family: ui-monospace, "SF Mono", Menlo, monospace; color: #c8d2ea;
-    background: rgba(0,0,0,0.25); border: 1px solid var(--card-brd); border-radius: 12px; padding: 12px;
-  }
-  .uidbar { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
-  .uidbar input {
-    flex: 1 1 100%; min-width: 0; width: 100%;
-    background: rgba(0,0,0,0.25); border: 1px solid var(--card-brd); color: var(--txt);
-    border-radius: 12px; padding: 11px 14px; font-size: 14px; outline: none;
-  }
-  .uidbar .act { flex: 1 1 0; min-width: 0; }
-  .uidbar input:focus { border-color: var(--acc); }
+  .row .name.mono { font-family: var(--mono); font-size: 12.5px; }
+  .tag { font-size: 10.5px; padding: 3px 9px; border-radius: 999px; font-weight: 680; letter-spacing: 0.2px; white-space: nowrap; }
+  .tag.vfs   { background: rgba(53,210,154,0.14);  color: var(--ok); }
+  .tag.ov    { background: rgba(124,156,255,0.16); color: var(--acc); }
+  .tag.su    { background: rgba(87,230,195,0.15);  color: var(--acc2); }
+  .tag.suite { background: rgba(255,255,255,0.08); color: var(--txt); }
+  .tag.off   { background: rgba(139,147,167,0.15); color: var(--muted); }
+  .tag.warn  { background: rgba(251,191,36,0.15);  color: var(--warn); }
+  .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
+  .note { color: var(--muted); font-size: 12px; line-height: 1.55; margin: 12px 0 0; }
+  code { font-family: var(--mono); background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
 
-  .foot { text-align: center; color: var(--muted); font-size: 11.5px; margin-top: 18px; }
+  pre.rules {
+    margin: 4px 0 0; max-height: 260px; overflow: auto; font-size: 11.5px; line-height: 1.65;
+    font-family: var(--mono); color: #c8d2ea; background: rgba(0,0,0,0.28);
+    border: 1px solid var(--brd2); border-radius: 13px; padding: 13px; white-space: pre; word-break: break-all;
+  }
+
+  /* stealth readout */
+  .stealth-head { display: flex; align-items: center; gap: 11px; }
+  .shield { width: 40px; height: 40px; border-radius: 12px; flex: none; display: grid; place-items: center; border: 1px solid var(--brd2); }
+  .shield.clean { background: rgba(53,210,154,0.12); color: var(--ok); }
+  .shield.warn  { background: rgba(251,191,36,0.12); color: var(--warn); }
+  .shield svg { width: 21px; height: 21px; }
+  .stealth-head .t { font-size: 15px; font-weight: 700; }
+  .stealth-head .d { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  /* uid */
+  .uidbar { display: flex; flex-wrap: wrap; gap: 9px; }
+  .uidbar input {
+    flex: 1 1 100%; min-width: 0; background: rgba(0,0,0,0.26); border: 1px solid var(--brd2);
+    color: var(--txt); border-radius: 13px; padding: 12px 14px; font-size: 14px; outline: none;
+  }
+  .uidbar input:focus { border-color: var(--acc); }
+  .uidbar .act { flex: 1 1 0; }
+
+  .banner { background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.3); color: #ffe6a8; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: none; line-height: 1.5; }
+  .foot { text-align: center; color: var(--faint); font-size: 11px; margin-top: 16px; line-height: 1.7; }
 
   #toast {
     position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom));
-    transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
-    background: #161b26; border: 1px solid var(--card-brd); color: var(--txt);
-    padding: 12px 18px; border-radius: 12px; font-size: 13.5px; font-weight: 600;
-    box-shadow: var(--shadow); transition: 0.28s; max-width: 90vw; z-index: 50;
+    transform: translate(-50%, 22px); opacity: 0; pointer-events: none;
+    background: #141926; border: 1px solid var(--brd); color: var(--txt); padding: 12px 18px;
+    border-radius: 13px; font-size: 13px; font-weight: 640; box-shadow: var(--shadow);
+    transition: .28s cubic-bezier(.2,.8,.2,1); max-width: 90vw; z-index: 60; text-align: center;
   }
   #toast.show { opacity: 1; transform: translate(-50%, 0); }
-  #toast.ok { border-color: rgba(53,210,154,0.4); }
-  #toast.bad { border-color: rgba(248,113,122,0.4); }
+  #toast.ok  { border-color: rgba(53,210,154,0.42); }
+  #toast.bad { border-color: rgba(248,113,122,0.42); }
 
-  .banner { background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.3); color: #ffe6a8; padding: 12px 14px; border-radius: 12px; font-size: 13px; margin-bottom: 14px; display: none; }
-  .spin { animation: spin 0.9s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <div class="logo">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#0a0c12" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#08101c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M4 7l8-4 8 4v6c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/>
       </svg>
     </div>
     <div class="brand">
-      <h1>NoMount</h1>
-      <p>Mountless VFS metamodule</p>
+      <h1>NoMount Suite</h1>
+      <p>hookless VFS · RRO overlays · sucompat root</p>
     </div>
-    <div class="chip" id="ver">v…</div>
+    <div class="hbtns">
+      <span class="ver" id="ver">v…</span>
+      <button class="iconbtn" id="refreshBtn" onclick="refreshAll(this)" title="Refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+      </button>
+    </div>
   </header>
 
-  <div class="banner" id="banner">Open this page from the KernelSU / APatch manager to control the module.</div>
+  <div class="banner" id="banner">Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
 
-  <!-- Engine -->
-  <div class="card">
-    <div class="card-h">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-      <h2>Engine</h2>
-      <div class="spacer"></div>
-      <label class="toggle"><input type="checkbox" id="engine" onchange="toggleEngine()"><span class="track"></span></label>
-    </div>
-    <div class="status-row">
-      <span class="pill"><span class="dot off" id="dot"></span><span id="state">Checking…</span></span>
+  <!-- HERO: engine status -->
+  <div class="card hero">
+    <div class="statusline">
+      <span class="dot off" id="dot"></span>
+      <span class="st" id="state">Checking…</span>
+      <span class="sub" id="substate"></span>
     </div>
     <div class="metrics">
-      <div class="metric"><div class="k">Active rules</div><div class="v" id="rules">—</div></div>
-      <div class="metric"><div class="k">Driver</div><div class="v" id="drv">—</div></div>
+      <div class="metric"><div class="k">Injection rules</div><div class="v" id="mRules">—</div></div>
+      <div class="metric"><div class="k">RRO overlays</div><div class="v" id="mOv">—</div></div>
+      <div class="metric"><div class="k">Root · su</div><div class="v" id="mSu">—</div></div>
+      <div class="metric"><div class="k">Modules served</div><div class="v" id="mMod">—</div></div>
     </div>
     <div class="btns">
-      <button class="act primary" onclick="remount(this)">Remount modules</button>
-      <button class="act" onclick="refreshAll(this)">Refresh</button>
+      <button class="act primary" onclick="remount(this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+        Re-apply
+      </button>
+      <button class="act danger" onclick="clearRules(this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
+        Clear rules
+      </button>
     </div>
   </div>
 
-  <!-- Bootguard -->
+  <!-- DETECTION POSTURE -->
+  <div class="card">
+    <div class="stealth-head">
+      <div class="shield clean" id="shield">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
+      </div>
+      <div>
+        <div class="t" id="stealthT">Detection posture</div>
+        <div class="d" id="stealthD">Checking what apps can see…</div>
+      </div>
+    </div>
+    <div class="list" id="posture"></div>
+    <p class="note" id="stealthNote"></p>
+  </div>
+
+  <!-- BOOTGUARD -->
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
-      <h2>Bootloop guard</h2>
+      <h2>Bootloop guard</h2><span class="chip" id="gchip">—</span>
     </div>
-    <div class="status-row">
-      <span class="pill"><span class="dot ok" id="gdot"></span><span id="gstate">Armed</span></span>
+    <div class="statusline">
+      <span class="dot ok" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Armed</span>
+      <span class="sub">trips at boot #3</span>
     </div>
-    <div class="metrics">
-      <div class="metric"><div class="k">Boot count</div><div class="v" id="gcount">—</div></div>
-      <div class="metric"><div class="k">Trips at</div><div class="v">3</div></div>
-    </div>
-    <div class="btns">
-      <button class="act danger" id="rearm" onclick="rearm(this)">Re-arm &amp; enable</button>
-    </div>
+    <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
   </div>
 
-  <!-- Modules -->
+  <!-- MODULES -->
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-      <h2>Modules</h2><div class="spacer"></div><span class="chip" id="modcount">0</span>
+      <h2>Modules</h2><span class="chip" id="modcount">0</span>
     </div>
     <div class="list" id="modules"><div class="empty">Loading…</div></div>
   </div>
 
-  <!-- Rules -->
+  <!-- RULES -->
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-      <h2>Active rules</h2><div class="spacer"></div>
-      <button class="act" style="flex:none;min-width:0;padding:7px 12px" onclick="toggleRules(this)" id="rulesBtn">Show</button>
+      <h2>Active rules</h2>
+      <button class="act" style="flex:none;min-width:0;padding:7px 13px;font-size:12.5px" onclick="toggleRules(this)" id="rulesBtn">Show</button>
     </div>
     <pre class="rules" id="ruleslist" style="display:none">…</pre>
   </div>
 
-  <!-- Overlay mounts -->
+  <!-- OVERLAYS -->
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
-      <h2>Overlay mounts</h2><div class="spacer"></div><span class="chip" id="ovcount">0</span>
+      <h2>Overlay mounts</h2><span class="chip" id="ovcount">0</span>
     </div>
     <div class="list" id="overlays"><div class="empty">Loading…</div></div>
   </div>
@@ -232,185 +290,262 @@
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
-      <h2>UID exclusions</h2>
+      <h2>Per-UID hiding</h2>
     </div>
     <div class="uidbar">
-      <input id="uid" type="number" inputmode="numeric" placeholder="UID (e.g. 10123)" />
-      <button class="act" onclick="uidOp('block',this)">Block</button>
-      <button class="act" onclick="uidOp('unblock',this)">Unblock</button>
+      <input id="uid" type="number" inputmode="numeric" placeholder="App UID (e.g. 10123)" />
+      <button class="act" onclick="uidOp('block',this)">Hide</button>
+      <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
     </div>
-    <p class="empty" style="margin-top:12px">Blocked UIDs never see injected files (useful for hiding from specific apps).</p>
+    <p class="note">A blocked UID sees the stock filesystem — injected files and the su path become invisible to that app. The sus_path substitute; useful for a specific detector app.</p>
   </div>
 
-  <div class="foot">NoMount · driven via <code>/dev/nomount</code></div>
+  <div class="foot">NoMount Suite · hookless engine via netlink <code>nm</code><br/><span id="footver"></span></div>
 </div>
 
 <div id="toast"></div>
 
 <script>
+  "use strict";
   let execId = 0;
   const KSU = window.ksu;
-  document.getElementById('banner').style.display = (KSU && KSU.exec) ? 'none' : 'block';
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  document.getElementById("banner").style.display = (KSU && KSU.exec) ? "none" : "block";
 
   function exec(cmd, opts = {}) {
     return new Promise((resolve) => {
-      if (!KSU || !KSU.exec) { resolve({ errno: -1, stdout: '', stderr: 'no webui env' }); return; }
-      const name = '__nmcb' + (execId++);
+      if (!KSU || !KSU.exec) { resolve({ errno: -1, stdout: "", stderr: "no webui env" }); return; }
+      const name = "__nmcb" + (execId++);
       window[name] = (errno, stdout, stderr) => {
         delete window[name];
-        resolve({ errno: Number(errno), stdout: stdout || '', stderr: stderr || '' });
+        resolve({ errno: Number(errno), stdout: stdout || "", stderr: stderr || "" });
       };
       try { KSU.exec(cmd, JSON.stringify(opts), name); }
-      catch (e) { delete window[name]; resolve({ errno: -1, stdout: '', stderr: String(e) }); }
+      catch (e) { delete window[name]; resolve({ errno: -1, stdout: "", stderr: String(e) }); }
     });
   }
 
   let NMBIN = null;
   async function bin() {
     if (NMBIN) return NMBIN;
-    const abi = (await exec('getprop ro.product.cpu.abi')).stdout.trim() || 'arm64-v8a';
+    const abi = (await exec("getprop ro.product.cpu.abi")).stdout.trim() || "arm64-v8a";
     NMBIN = `/data/adb/modules/meta-nomount/bin/${abi}/nomount`;
     return NMBIN;
   }
-  async function nm(args) { return exec(`${await bin()} ${args}`); }
-
-  function toast(msg, kind = '') {
-    const t = document.getElementById('toast');
-    t.textContent = msg; t.className = 'show ' + kind;
-    clearTimeout(t._t); t._t = setTimeout(() => { t.className = ''; }, 2200);
+  // The Suite binary shells to the `nm` netlink client beside it.
+  async function nm(args) {
+    const b = await bin();
+    const nmClient = b.replace(/nomount$/, "nm");
+    return exec(`NM_BIN='${nmClient}' ${b} ${args}`);
   }
-  const $ = (id) => document.getElementById(id);
 
+  function toast(msg, kind = "") {
+    const t = $("toast");
+    t.textContent = msg; t.className = "show " + kind;
+    clearTimeout(t._t); t._t = setTimeout(() => { t.className = ""; }, 2400);
+  }
+
+  // ---- status ----
   async function refreshStatus() {
-    const r = await nm('vfs query-status');
-    const dot = $('dot'), engine = $('engine');
-    if (r.errno !== 0) {
-      $('state').textContent = 'Kernel driver not found';
-      dot.className = 'dot bad'; engine.checked = false; engine.disabled = true;
-      $('rules').textContent = '—'; $('drv').textContent = '—';
-      return;
+    const list = await nm("vfs list");
+    const dot = $("dot");
+    if (list.errno !== 0) {
+      $("state").textContent = "Engine offline";
+      $("substate").textContent = "kernel driver not responding";
+      dot.className = "dot bad";
+      $("mRules").textContent = "—";
+      return 0;
     }
-    engine.disabled = false;
-    const out = r.stdout;
-    const active = /engine:\s*active/i.test(out);
-    const mRules = out.match(/rules:\s*(\d+)/i);
-    const mVer = out.match(/driver:\s*v(\d+)/i);
-    engine.checked = active;
-    $('state').textContent = active ? 'Active' : 'Inactive';
-    dot.className = 'dot ' + (active ? 'ok' : 'off');
-    $('rules').textContent = mRules ? mRules[1] : '0';
-    $('drv').textContent = mVer ? ('v' + mVer[1]) : '?';
+    const rules = list.stdout.split("\n").map(s => s.trim()).filter(Boolean).length;
+    $("mRules").textContent = rules;
+    $("state").textContent = rules > 0 ? "Active" : "Idle";
+    $("substate").textContent = rules > 0 ? "modules injected" : "no rules — re-apply";
+    dot.className = "dot " + (rules > 0 ? "ok" : "warn");
+    return rules;
   }
 
-  async function refreshGuard() {
-    const c = (await exec('cat /data/adb/nomount/bootcount 2>/dev/null')).stdout.trim();
-    const disabled = (await exec('[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0')).stdout.trim() === '1';
-    $('gcount').textContent = c === '' ? '0' : c;
-    if (disabled) {
-      $('gstate').textContent = 'Tripped — disabled'; $('gdot').className = 'dot bad';
-      $('rearm').style.display = '';
+  // ---- detection posture (live root-view vs non-root app-view) ----
+  async function refreshStealth() {
+    // root view (ksu.exec runs as root -> sees every mount)
+    const r = await exec(
+      'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
+      'echo "root_ov=$(grep -c \'^nomount_ov \' /proc/self/mounts 2>/dev/null)"; ' +
+      'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)";'
+    );
+    const kv = {};
+    r.stdout.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1).trim(); });
+    const sucompat = kv.sucompat === "1";
+    const rootOv = parseInt(kv.root_ov || "0", 10);
+    const rootNm = parseInt(kv.root_nm || "0", 10);
+
+    // app view: drop to a non-root uid and count nomount_* mounts. If the kernel
+    // mount-hide hook is active, non-root readers get them filtered out (-> 0).
+    // NB: grep -c exits 1 when the count is 0 (the hidden case!), so don't gate on
+    // errno — parse stdout as a number instead.
+    const appR = await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"');
+    const appOut = (appR.stdout || "").trim();
+    const appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
+
+    $("mSu").innerHTML = sucompat ? 'sucompat <small>kernel · mountless</small>' : 'external <small>unmanaged</small>';
+    $("mOv").textContent = rootOv;
+
+    // posture rows (label | value | tag)
+    const rows = [
+      { k: "File injections", v: "mountless", t: "vfs" },
+      { k: "Root · su", v: sucompat ? "sucompat · mountless" : "external", t: sucompat ? "vfs" : "off" },
+    ];
+    if (rootNm > 0) {
+      if (appNm === 0) rows.push({ k: "Real mounts", v: `root ${rootNm} · apps 0 — hidden`, t: "vfs" });
+      else if (appNm > 0) rows.push({ k: "Real mounts", v: `apps see ${appNm} — VISIBLE`, t: "warn" });
+      else rows.push({ k: "Real mounts", v: `root ${rootNm} · app-view n/a`, t: "off" });
     } else {
-      $('gstate').textContent = 'Armed'; $('gdot').className = 'dot ok';
-      $('rearm').style.display = 'none';
+      rows.push({ k: "Real mounts", v: "none — pure hookless", t: "vfs" });
+    }
+    $("posture").innerHTML = rows.map((x) =>
+      `<div class="row"><span class="name">${x.k}</span><span class="tag ${x.t}">${esc(x.v)}</span></div>`
+    ).join("");
+
+    const shield = $("shield");
+    if (appNm === 0) {
+      shield.className = "shield clean";
+      $("stealthT").textContent = "Clean — nothing visible to apps";
+      $("stealthD").textContent = rootNm > 0 ? `${rootNm} mount${rootNm > 1 ? "s" : ""} hidden from non-root` : "fully mountless";
+      $("stealthNote").innerHTML = "Live check as uid&nbsp;2000 sees <b>zero</b> <code>nomount_*</code> mounts: injections are mountless, su is sucompat (mountless), and the RRO overlay is <b>kernel-hidden</b> from non-root readers of <code>/proc/*/mountinfo</code>. Root still sees everything.";
+    } else if (appNm > 0) {
+      shield.className = "shield warn";
+      $("stealthT").textContent = "Mount visible to apps";
+      $("stealthD").textContent = `uid 2000 sees ${appNm} nomount_* mount${appNm > 1 ? "s" : ""}`;
+      $("stealthNote").innerHTML = "A live non-root check still sees <code>nomount_*</code> mounts — the <b>mount-hiding kernel isn't active yet</b>. Flash the NoMount kernel with the proc mount-hide hook and this flips to hidden.";
+    } else {
+      shield.className = "shield clean";
+      $("stealthT").textContent = "Detection posture";
+      $("stealthD").textContent = "app-view check unavailable";
+      $("stealthNote").innerHTML = `Injections are mountless and su is sucompat. Couldn't drop to a non-root uid to verify mount-hiding here; root sees ${rootNm} <code>nomount_*</code> mount(s).`;
     }
   }
 
+  // ---- guard ----
+  async function refreshGuard() {
+    const c = (await exec("cat /data/adb/nomount/bootcount 2>/dev/null")).stdout.trim();
+    const disabled = (await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0")).stdout.trim() === "1";
+    $("gchip").textContent = "boot " + (c === "" ? "0" : c) + "/3";
+    if (disabled) {
+      $("gstate").textContent = "Tripped — disabled"; $("gdot").className = "dot bad"; $("rearm").style.display = "";
+    } else {
+      $("gstate").textContent = "Armed"; $("gdot").className = "dot ok"; $("rearm").style.display = "none";
+    }
+  }
+
+  // ---- modules ----
   async function refreshModules() {
-    const box = $('modules');
+    const box = $("modules");
     const out = (await exec(
       'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; ' +
       'id=$(basename "$d"); ' +
+      '[ "$id" = meta-nomount ] && { echo "$id|suite"; continue; }; ' +
+      '[ "$id" = kernelnosu ] && { echo "$id|su"; continue; }; ' +
       'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && st=off; ' +
       '[ -d "$d/system" ] || st=nosys; ' +
-      'mech=""; ' +
+      'mech=""; cnt=0; ' +
       'if [ "$st" = on ]; then ov=0; vf=0; ' +
+      'cnt=$(find "$d/system" -type f 2>/dev/null | wc -l); ' +
       '[ -n "$(find "$d/system" -path "*/overlay/*.apk" -print -quit 2>/dev/null)" ] && ov=1; ' +
       '[ -n "$(find "$d/system" -type f ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
       'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
       'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
-      'echo "$id|$st|$mech"; done'
+      'echo "$id|$st|$mech|$cnt"; done'
     )).stdout.trim();
-    if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $('modcount').textContent = '0'; return; }
-    const rows = out.split('\n').filter(Boolean);
-    $('modcount').textContent = rows.length;
+    if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
+    const rows = out.split("\n").filter(Boolean);
+    $("modcount").textContent = rows.length;
+    let served = 0;
     box.innerHTML = rows.map((l) => {
-      const [id, st, mech] = l.split('|');
-      const on = st === 'on';
-      let label, cls;
-      if (st === 'nosys') { label = 'no /system'; cls = 'off'; }
-      else if (!on) { label = 'skipped'; cls = 'off'; }
-      else if (mech === 'overlay') { label = 'overlay'; cls = 'ov'; }
-      else if (mech === 'vfs+overlay') { label = 'vfs + overlay'; cls = 'ov'; }
-      else { label = 'vfs'; cls = 'on'; }
-      return `<div class="row"><span class="name">${id.replace(/</g, '&lt;')}</span>` +
-             `<span class="tag ${cls}">${label}</span></div>`;
-    }).join('');
+      const p = l.split("|");
+      const id = p[0];
+      const cnt = parseInt(p[3] || "0", 10);
+      let label, cls, showCnt = false;
+      if (p[1] === "suite") { label = "suite"; cls = "suite"; }
+      else if (p[1] === "su") { label = "su backend"; cls = "su"; served++; }
+      else {
+        const st = p[1], mech = p[2];
+        if (st === "nosys") { label = "no /system"; cls = "off"; }
+        else if (st === "off") { label = "skipped"; cls = "off"; }
+        else if (mech === "overlay") { label = "overlay"; cls = "ov"; served++; showCnt = true; }
+        else if (mech === "vfs+overlay") { label = "vfs + overlay"; cls = "ov"; served++; showCnt = true; }
+        else if (mech === "vfs") { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
+        else { label = "empty"; cls = "off"; }
+      }
+      const files = (showCnt && cnt > 0) ? `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${cnt} file${cnt > 1 ? "s" : ""}</span>` : "";
+      return `<div class="row"><span class="name">${esc(id)}</span>${files}<span class="tag ${cls}">${label}</span></div>`;
+    }).join("");
+    $("mMod").textContent = served;
   }
 
+  // ---- overlays ----
   async function refreshOverlays() {
-    const box = $('overlays');
+    const box = $("overlays");
     const out = (await exec("grep '^nomount_ov ' /proc/1/mounts | cut -d' ' -f2")).stdout.trim();
-    const dirs = out ? out.split('\n').filter(Boolean) : [];
-    $('ovcount').textContent = dirs.length;
+    const dirs = out ? out.split("\n").filter(Boolean) : [];
+    $("ovcount").textContent = dirs.length;
     if (!dirs.length) { box.innerHTML = '<div class="empty">No RRO overlay modules mounted.</div>'; return; }
-    box.innerHTML = dirs.map((d) =>
-      `<div class="row"><span class="name">${d.replace(/</g, '&lt;')}</span><span class="tag on">mounted</span></div>`
-    ).join('');
+    box.innerHTML = dirs.map((d) => `<div class="row"><span class="name mono">${esc(d)}</span><span class="tag ov">mounted</span></div>`).join("");
   }
 
-  async function refreshAll(btn) {
-    if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
-    $('ver').textContent = ((await nm('version')).stdout.trim().replace(/^nomount\s*/i, '')) || 'v?';
-    await Promise.all([refreshStatus(), refreshGuard(), refreshModules(), refreshOverlays()]);
-    if ($('ruleslist').style.display !== 'none') loadRules();
-    if (btn) { btn.disabled = false; btn.textContent = 'Refresh'; }
-  }
-
-  async function toggleEngine() {
-    const on = $('engine').checked;
-    const r = await nm(on ? 'vfs enable' : 'vfs disable');
-    if (r.errno === 0) toast(on ? 'Engine enabled' : 'Engine disabled', 'ok');
-    else toast('Failed: ' + (r.stderr || 'error'), 'bad');
-    refreshStatus();
-  }
-
-  async function remount(btn) {
-    btn.disabled = true; const old = btn.textContent; btn.textContent = 'Remounting…';
-    const r = await nm('mount');
-    if (r.errno === 0) toast(r.stdout.replace(/^nomount:\s*/, '') || 'Remounted', 'ok');
-    else toast('Remount failed: ' + (r.stderr || 'error'), 'bad');
-    btn.disabled = false; btn.textContent = old;
-    refreshStatus();
-  }
-
-  async function rearm(btn) {
-    btn.disabled = true;
-    await exec('rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount');
-    toast('Guard re-armed — reboot to re-enable', 'ok');
-    btn.disabled = false;
-    refreshGuard();
-  }
-
+  // ---- rules ----
   let rulesShown = false;
   async function loadRules() {
-    const r = await nm('vfs list');
-    $('ruleslist').textContent = (r.errno === 0 && r.stdout.trim()) ? r.stdout.trim() : 'no rules';
+    const r = await nm("vfs list");
+    $("ruleslist").textContent = (r.errno === 0 && r.stdout.trim()) ? r.stdout.trim() : "no rules";
   }
   async function toggleRules(btn) {
     rulesShown = !rulesShown;
-    $('ruleslist').style.display = rulesShown ? '' : 'none';
-    btn.textContent = rulesShown ? 'Hide' : 'Show';
-    if (rulesShown) { $('ruleslist').textContent = 'Loading…'; loadRules(); }
+    $("ruleslist").style.display = rulesShown ? "" : "none";
+    btn.textContent = rulesShown ? "Hide" : "Show";
+    if (rulesShown) { $("ruleslist").textContent = "Loading…"; loadRules(); }
   }
 
+  // ---- actions ----
+  async function remount(btn) {
+    const svg = btn.querySelector("svg");
+    btn.disabled = true; if (svg) svg.classList.add("spin");
+    const r = await nm("mount");
+    if (r.errno === 0) toast(r.stdout.replace(/^nomount\(suite\):\s*/, "").trim() || "Re-applied", "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    if (svg) svg.classList.remove("spin"); btn.disabled = false;
+    refreshAll();
+  }
+  async function clearRules(btn) {
+    btn.disabled = true;
+    const r = await nm("vfs clear");
+    if (r.errno === 0) toast("Rules cleared", "ok"); else toast("Failed: " + (r.stderr || "error"), "bad");
+    btn.disabled = false; refreshStatus(); if (rulesShown) loadRules();
+  }
+  async function rearm(btn) {
+    btn.disabled = true;
+    await exec("rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount");
+    toast("Guard re-armed — reboot to re-enable", "ok");
+    btn.disabled = false; refreshGuard();
+  }
   async function uidOp(op, btn) {
-    const v = $('uid').value.trim();
-    if (!/^\d+$/.test(v)) { toast('Enter a numeric UID', 'bad'); return; }
+    const v = $("uid").value.trim();
+    if (!/^\d+$/.test(v)) { toast("Enter a numeric UID", "bad"); return; }
     btn.disabled = true;
     const r = await nm(`uid ${op} ${v}`);
-    if (r.errno === 0) toast(`UID ${v} ${op}ed`, 'ok');
-    else toast('Failed: ' + (r.stderr || 'error'), 'bad');
+    if (r.errno === 0) toast(`UID ${v} ${op === "block" ? "hidden" : "unhidden"}`, "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
     btn.disabled = false;
+  }
+
+  async function refreshAll(btn) {
+    const ic = btn && btn.querySelector("svg");
+    if (ic) ic.classList.add("spin");
+    const v = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
+    $("ver").textContent = v || "v?";
+    $("footver").textContent = v ? ("Suite " + v) : "";
+    await Promise.all([refreshStatus(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays()]);
+    if (rulesShown) loadRules();
+    if (ic) ic.classList.remove("spin");
   }
 
   refreshAll();

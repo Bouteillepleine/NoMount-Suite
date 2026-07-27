@@ -46,11 +46,15 @@ for mp in /data/adb/modules/*/module.prop; do
     fi
 done
 
-# Make the per-ABI binary executable.
+# Make the per-ABI binaries executable — BOTH the Suite driver (nomount) and the
+# hookless netlink client (nm) it shells out to. Missing +x on nm makes the boot
+# mount pass abort before it can inject.
 for abi in arm64-v8a armeabi-v7a x86_64 x86; do
-    if [ -f "$MODPATH/bin/$abi/nomount" ]; then
-        set_perm "$MODPATH/bin/$abi/nomount" 0 0 0755
-    fi
+    for b in nomount nm; do
+        if [ -f "$MODPATH/bin/$abi/$b" ]; then
+            set_perm "$MODPATH/bin/$abi/$b" 0 0 0755
+        fi
+    done
 done
 
-ui_print "- Modules under /data/adb/modules are injected via /dev/nomount at boot."
+ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."

@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "nomount",
     version = env!("CARGO_PKG_VERSION"),
-    about = "NoMount metamodule + CLI for the kernel VFS driver (/dev/nomount)"
+    about = "NoMount Suite metamodule + CLI for the hookless VFS engine (nm netlink)"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -15,14 +15,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Metamodule mount pass: scan /data/adb/modules, inject rules, enable engine
+    /// Metamodule mount pass: classify enabled modules and route them
+    /// (hookless inject / RRO overlay). su is external (sucompat).
     Mount,
-    /// VFS driver operations (add/del/clear rules, enable/disable engine)
+    /// Direct VFS-engine operations via the hookless `nm` client
     Vfs {
         #[command(subcommand)]
         action: VfsAction,
     },
-    /// UID exclusion management
+    /// Per-UID hiding (sus_path substitute)
     Uid {
         #[command(subcommand)]
         action: UidAction,
@@ -33,28 +34,22 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum VfsAction {
-    /// Add a redirection rule (virtual_path -> real_path)
+    /// Add a redirect (virtual_path -> real_path)
     Add { virtual_path: String, real_path: String },
-    /// Delete a rule by virtual path
+    /// Delete a redirect by virtual path
     Del { virtual_path: String },
+    /// Whiteout a path (make it appear absent)
+    Whiteout { path: String },
     /// Clear all rules
     Clear,
-    /// Enable the VFS engine
-    Enable,
-    /// Disable the VFS engine
-    Disable,
-    /// Flush the dcache
-    Refresh,
     /// List active rules
     List,
-    /// Query engine enabled state + rule count
-    QueryStatus,
 }
 
 #[derive(Subcommand)]
 pub enum UidAction {
-    /// Exclude a UID from redirection
+    /// Hide injections from a UID
     Block { uid: u32 },
-    /// Re-include a UID in redirection
+    /// Re-show injections to a UID
     Unblock { uid: u32 },
 }

@@ -40,6 +40,41 @@ pub fn is_overlay_target(target: &Path) -> bool {
     target.to_str().is_some_and(|s| OVERLAY_TARGETS.contains(&s))
 }
 
+/// True if `target` is currently a live overlayfs mountpoint.
+fn is_overlay_mount(target: &str) -> bool {
+    let Ok(mounts) = fs::read_to_string("/proc/self/mounts") else {
+        return false;
+    };
+    mounts.lines().any(|line| {
+        let mut f = line.split(' ');
+        let _src = f.next();
+        let mp = f.next();
+        let fstype = f.next();
+        mp == Some(target) && fstype == Some("overlay")
+    })
+}
+
+/// Should a module directory targeting `target` be real-overlay-mounted rather
+/// than hookless-injected? Yes for the known RRO overlay dirs, and for any live
+/// overlayfs-backed partition subdir at least two components deep (e.g.
+/// `/product/priv-app`, `/product/app`) — hookless returns ECHILD when it has to
+/// synthesize a new intermediate directory on top of an overlayfs inode, so a
+/// module planting a new app there must be served by a real stacked overlay.
+///
+/// NB: currently UNUSED — routing partition subdirs here bootloops OP15 (see
+/// mount.rs); kept for reference / a future boot-safe variant.
+#[allow(dead_code)]
+pub fn should_route(target: &Path) -> bool {
+    if is_overlay_target(target) {
+        return true;
+    }
+    let Some(s) = target.to_str() else {
+        return false;
+    };
+    let depth = s.split('/').filter(|c| !c.is_empty()).count();
+    depth >= 2 && is_overlay_mount(s)
+}
+
 fn cstr(s: &str) -> io::Result<CString> {
     CString::new(s).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "nul in string"))
 }
@@ -101,14 +136,6 @@ fn set_secontext(path: &Path, ctx: &str) -> io::Result<()> {
     }
 }
 
-/// "/product/overlay" -> "product"; "" if malformed.
-fn partition_name(target: &str) -> &str {
-    target
-        .trim_start_matches('/')
-        .strip_suffix("/overlay")
-        .unwrap_or("")
-}
-
 /// lowerdir= list of an overlayfs already mounted at `target` (OnePlus stacks
 /// its regional my_* overlay dirs there). None if `target` isn't an overlay.
 fn stock_lowerdirs(target: &str) -> Option<String> {
@@ -144,19 +171,28 @@ fn nomount_mounted_at(target: &str) -> bool {
     })
 }
 
-/// Copy a module overlay dir's APKs onto the tmpfs stage, labelled system_file.
-fn copy_apks(src: &Path, stage: &Path) -> io::Result<()> {
+/// Copy a module overlay/subtree dir onto the tmpfs stage, labelled system_file.
+/// Recursive so it handles both flat RRO `.apk` piles and nested app trees
+/// (e.g. `priv-app/Mms/lib/arm64/*.so`). tmpfs is non-casefold so overlayfs
+/// accepts the result as a lowerdir. Directories and files both get the
+/// system_file context (as the stock overlays beside them carry).
+fn stage_tree(src: &Path, stage: &Path) -> io::Result<()> {
     fs::create_dir_all(stage)?;
     let _ = set_secontext(stage, SECONTEXT);
     for entry in fs::read_dir(src)? {
         let entry = entry?;
-        // Overlay dirs are flat piles of .apk; skip anything that isn't a file.
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
+        let ft = entry.file_type()?;
         let dst = stage.join(entry.file_name());
-        fs::copy(entry.path(), &dst)?;
-        let _ = set_secontext(&dst, SECONTEXT);
+        if ft.is_symlink() {
+            let tgt = fs::read_link(entry.path())?;
+            let _ = fs::remove_file(&dst);
+            std::os::unix::fs::symlink(&tgt, &dst)?;
+        } else if ft.is_dir() {
+            stage_tree(&entry.path(), &dst)?;
+        } else {
+            fs::copy(entry.path(), &dst)?;
+            let _ = set_secontext(&dst, SECONTEXT);
+        }
     }
     Ok(())
 }
@@ -195,17 +231,26 @@ pub fn setup(targets: &BTreeMap<PathBuf, Vec<PathBuf>>) -> (u32, u32) {
             fail += 1;
             continue;
         };
-        let part = partition_name(target_s);
-        if part.is_empty() {
+        // Split "/product/priv-app" -> part="product", subdir="priv-app"
+        // ("/product/overlay" -> part="product", subdir="overlay"). Both must be
+        // present; a bare partition root has no subdir to overlay.
+        let trimmed = target_s.trim_start_matches('/');
+        let mut comps = trimmed.splitn(2, '/');
+        let part = comps.next().unwrap_or("");
+        let subdir = comps.next().unwrap_or("");
+        if part.is_empty() || subdir.is_empty() {
             fail += 1;
             continue;
         }
+        // Per-target stage key, so /product/overlay and /product/priv-app don't
+        // collide on the tmpfs.
+        let key = trimmed.replace('/', "_");
 
-        // 1. Stage all contributing overlay APKs onto tmpfs.
-        let stage = PathBuf::from(format!("{WORK}/stage/{part}"));
+        // 1. Stage all contributing module dirs (recursively) onto tmpfs.
+        let stage = PathBuf::from(format!("{WORK}/stage/{key}"));
         let mut staged = false;
         for src in sources {
-            if copy_apks(src, &stage).is_ok() {
+            if stage_tree(src, &stage).is_ok() {
                 staged = true;
             }
         }
@@ -215,21 +260,23 @@ pub fn setup(targets: &BTreeMap<PathBuf, Vec<PathBuf>>) -> (u32, u32) {
         }
         let stage_s = stage.to_string_lossy();
 
-        // 2. Build the lowerdir list: staged APKs on top, then either the
+        // 2. Build the lowerdir list: staged files on top, then either the
         //    partition's existing overlay stack (with its self-referential base
-        //    entry re-pointed at a bind of the real partition, since the base is
-        //    shadowed by the stock overlay), or just the target dir itself.
+        //    entry re-pointed at a bind of the real partition subdir, since the
+        //    base is shadowed by the stock overlay), or just the target itself.
         let lower = match stock_lowerdirs(target_s) {
             Some(stock) => {
                 let base_bind = format!("{WORK}/base/{part}");
                 let partition = format!("/{part}");
                 let _ = fs::create_dir_all(&base_bind);
+                // Non-recursive bind of the partition root exposes the *underlying*
+                // subdir (before the stock overlay was mounted over it).
                 let base_ok =
                     mount(&partition, &base_bind, "", libc::MS_BIND, None).is_ok();
                 let mut parts = vec![stage_s.into_owned()];
                 for elem in stock.split(':') {
                     if elem == target_s && base_ok {
-                        parts.push(format!("{base_bind}/overlay"));
+                        parts.push(format!("{base_bind}/{subdir}"));
                     } else {
                         parts.push(elem.to_string());
                     }

@@ -1,7 +1,7 @@
 id=meta-nomount
-name=NoMount
-version=v2.1.0
-versionCode=21000
-author=Bouteillepleine
-description=NoMount metamodule — mountless module loading via /dev/nomount VFS redirection. 🫥
+name=NoMount Suite
+version=v2.3.6
+versionCode=23006
+author=maxsteeel, XxxY
+description=NoMount Suite — hookless (mountless) VFS injection + RRO overlays; drops SUSFS. Root/su is independent (sucompat). 🫥
 metamodule=1
