@@ -276,9 +276,13 @@
       0 2px 6px rgba(0,0,0,.42),
       inset 0 1px 0 rgba(255,255,255,.38),
       inset 0 -2px 7px rgba(0,0,0,.30);
+    /* Springy overshoot: the y1 term (1.9) is what makes it rebound past the
+       target and settle back. Transform leads, width trails slightly, so the
+       pill stretches into the move and snaps up — reads as elastic rather than
+       as two properties animating in lockstep. */
     transition:
-      transform .38s cubic-bezier(.34,1.28,.42,1),
-      width .38s cubic-bezier(.34,1.28,.42,1),
+      transform .52s cubic-bezier(.18,1.9,.34,1),
+      width .58s cubic-bezier(.16,2.05,.36,1),
       opacity .2s ease;
   }
   .navpill.noanim { transition: none; }
@@ -295,6 +299,8 @@
   @media (prefers-reduced-motion: reduce) {
     .navb, .navb svg { transition: none; }
     .navb.on { transform: none; }
+    /* the overshoot is the point of the pill, so drop it entirely here */
+    .navpill { transition: opacity .2s ease; }
   }
 
   .navb .nbdot { display: none; }
