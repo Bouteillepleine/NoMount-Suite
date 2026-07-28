@@ -13,9 +13,10 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-/// Default location of the bundled `nm` binary (installed by the module under
-/// its own `bin/`). Overridable via `NM_BIN` for testing / relocation.
-const DEFAULT_NM_BIN: &str = "/data/adb/modules/nomount/bin/nm";
+/// Last-resort location of the bundled `nm` binary. Only used if `NM_BIN` is
+/// unset AND we cannot resolve our own path; both normal callers (metamount.sh
+/// and the WebUI) export `NM_BIN`.
+const DEFAULT_NM_BIN: &str = "/data/adb/modules/meta-nomount/bin/arm64-v8a/nm";
 
 pub struct Nm {
     bin: String,
@@ -23,7 +24,23 @@ pub struct Nm {
 
 impl Nm {
     pub fn new() -> Self {
-        let bin = std::env::var("NM_BIN").unwrap_or_else(|_| DEFAULT_NM_BIN.to_string());
+        // Resolution order:
+        //   1. $NM_BIN                     — explicit override (what callers set)
+        //   2. `nm` beside this executable — the module ships bin/<abi>/{nomount,nm}
+        //      as siblings, so this stays correct for any module id and any ABI.
+        //   3. DEFAULT_NM_BIN              — fixed path, arm64 layout
+        // The old default was "/data/adb/modules/nomount/bin/nm", which was wrong
+        // twice over: the module id is meta-nomount, and the binaries live under a
+        // per-ABI subdirectory. It never fired in practice (callers set NM_BIN) but
+        // made a bare `nomount uid ...` from a root shell fail with ENOENT.
+        let bin = std::env::var("NM_BIN").ok().unwrap_or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("nm")))
+                .filter(|p| p.exists())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| DEFAULT_NM_BIN.to_string())
+        });
         Self { bin }
     }
 
