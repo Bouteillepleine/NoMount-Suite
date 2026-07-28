@@ -227,16 +227,28 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
     }
 
 fallback:
-    /* If we bailed because THIS reader's UID is blocked (not because there's no
-     * rule), tag the real/negative dentry we're about to cache with nm_dops so
-     * nm_d_revalidate re-checks it per-UID -- otherwise a blocked reader's cached
-     * dentry pollutes other UIDs' view. Gate on a rule actually existing, else a
-     * normal real file (no rule) would loop on invalidation. */
+    /* We bailed to the real fs because THIS reader's UID is blocked (not because
+     * there's no rule). The dentry the real lookup is about to cache is the STOCK
+     * view for a path that IS injected -- if it persists in the shared dcache it
+     * hides the injection from every other UID (root included) until drop_caches.
+     * Relying on nm_d_revalidate to re-resolve it later is not enough: the VFS's
+     * d_invalidate() is a no-op on a negative, so the stale negative just stays.
+     * So do not let it persist at all: DCACHE_DONTCACHE evicts the dentry on the
+     * last dput, so the blocked reader gets its stock/negative view for this call
+     * and the next lookup by anyone re-resolves cleanly. Still tag it with nm_dops
+     * so d_revalidate keeps the per-UID verdict for the window it is alive.
+     * DCACHE_DONTCACHE exists from 5.13; on older trees nm_reval_stale() in
+     * d_revalidate is the fallback. Gate on a rule existing, else a normal real
+     * file (no rule) would be needlessly uncached. */
     if (nm_iop && nm_iop->dir_node &&
         nomount_is_uid_blocked(current_uid().val) &&
         nomount_find_child_rule(nm_iop->dir_node, name, len,
-                                full_name_hash(NULL, name, len)))
+                                full_name_hash(NULL, name, len))) {
         nm_install_dentry_ops(dentry);
+#ifdef DCACHE_DONTCACHE
+        dentry->d_flags |= DCACHE_DONTCACHE;
+#endif
+    }
 
     if (nm_iop && nm_iop->orig_iop && nm_iop->orig_iop->lookup) {
         return nm_iop->orig_iop->lookup(dir, dentry, flags);
