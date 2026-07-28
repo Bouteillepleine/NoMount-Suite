@@ -848,6 +848,19 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
     return proxy->orig->set(proxy->orig, IDMAP_CALL dentry, inode, name, buffer, size, flags);
 }
 
+/* Return 0 from d_revalidate to force a re-resolve, but unhash a NEGATIVE dentry
+ * first. The VFS's d_invalidate() is a no-op on negatives, so a stale negative
+ * otherwise stays hashed and the re-lookup just finds it again -- the path stays
+ * ENOENT until drop_caches/reboot. That is what let a blocked reader's fallback-
+ * cached negative hide an injected path from unblocked readers too. Positive
+ * dentries are unhashed correctly by the VFS, so they need nothing extra. */
+static inline int nm_reval_stale(struct dentry *dentry)
+{
+    if (d_is_negative(dentry))
+        d_drop(dentry);
+    return 0;
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 static int nm_d_revalidate(struct inode *dir, const struct qstr *name, struct dentry *dentry, unsigned int flags)
 #else
@@ -902,16 +915,17 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
     rule = nomount_find_child_rule(pdir, dentry->d_name.name, dentry->d_name.len, hash);
 
-    if (!rule) return 0;                                              /* rule gone -> re-resolve */
+    if (!rule) return nm_reval_stale(dentry);                        /* rule gone -> re-resolve */
     if (rule->flags & NM_FLAG_WHITEOUT) return d_is_negative(dentry) ? 1 : 0;
 
     /* Per-UID consistency: a BLOCKED reader must see the stock fs (non-injected),
      * so an injected dentry is invalid for it; a NORMAL reader must see the
      * injection, so a stock/negative dentry (e.g. one a blocked reader's fallback
-     * cached in the shared dcache) is invalid for it. Re-resolving fixes both. */
+     * cached in the shared dcache) is invalid for it. Re-resolving fixes both --
+     * and nm_reval_stale() unhashes the negative so the re-resolve actually runs. */
     if (nomount_is_uid_blocked(current_uid().val))
         return injected ? 0 : 1;
-    return injected ? 1 : 0;
+    return injected ? 1 : nm_reval_stale(dentry);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
