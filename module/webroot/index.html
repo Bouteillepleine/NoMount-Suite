@@ -241,6 +241,7 @@
     appearance: none; border: 1px solid transparent; cursor: pointer;
     position: relative; isolation: isolate;
     background: transparent; color: var(--muted);
+    position: relative; z-index: 1;
     min-width: 60px; height: 58px; padding: 0 12px;
     border-radius: 19px;
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
@@ -259,20 +260,29 @@
   .navb:active { transform: scale(.93); }
   .navb:not(.on):hover { color: #b7c0d4; }
 
-  /* ACTIVE: the bounding capsule — module gradient, raised, lit from top-left */
-  .navb.on {
-    color: var(--txt);
-    border-color: rgba(124,156,255,.42);
+  /* ACTIVE: the bounding capsule is a separate element that SLIDES between tabs.
+     Keeping it out of the button lets one pill animate across, instead of the
+     highlight blinking off one button and on to the next. */
+  .navpill {
+    position: absolute; left: 0; top: 7px; z-index: 0;
+    width: 0; height: 58px; border-radius: 19px;
+    opacity: 0; pointer-events: none;
+    border: 1px solid rgba(124,156,255,.55);
     background:
-      linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.02)),
-      linear-gradient(135deg, rgba(124,156,255,.34), rgba(87,230,195,.22));
+      linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.02)),
+      linear-gradient(135deg, rgba(124,156,255,.42), rgba(87,230,195,.28));
     box-shadow:
-      0 6px 16px rgba(124,156,255,.30),
-      0 2px 6px rgba(0,0,0,.40),
-      inset 0 1px 0 rgba(255,255,255,.30),
-      inset 0 -2px 6px rgba(0,0,0,.28);
-    transform: translateY(-2px);
+      0 8px 20px rgba(124,156,255,.38),
+      0 2px 6px rgba(0,0,0,.42),
+      inset 0 1px 0 rgba(255,255,255,.38),
+      inset 0 -2px 7px rgba(0,0,0,.30);
+    transition:
+      transform .38s cubic-bezier(.34,1.28,.42,1),
+      width .38s cubic-bezier(.34,1.28,.42,1),
+      opacity .2s ease;
   }
+  .navpill.noanim { transition: none; }
+  .navb.on { color: var(--txt); }
   .navb.on svg {
     stroke: url(#navGrad);
     transform: translateY(-.5px) scale(1.06);
@@ -346,13 +356,13 @@
     background: linear-gradient(90deg, transparent, rgba(16,26,48,.16), transparent);
   }
   html[data-theme="light"] .navb svg { filter: drop-shadow(0 1px 0 rgba(255,255,255,.9)); }
-  html[data-theme="light"] .navb.on {
-    border-color: rgba(63,99,224,.45);
+  html[data-theme="light"] .navpill {
+    border-color: rgba(63,99,224,.55);
     background:
-      linear-gradient(180deg, rgba(255,255,255,.85), rgba(255,255,255,.45)),
-      linear-gradient(135deg, rgba(63,99,224,.26), rgba(15,158,132,.20));
+      linear-gradient(180deg, rgba(255,255,255,.92), rgba(255,255,255,.55)),
+      linear-gradient(135deg, rgba(63,99,224,.30), rgba(15,158,132,.24));
     box-shadow:
-      0 6px 16px rgba(63,99,224,.26),
+      0 8px 18px rgba(63,99,224,.28),
       0 2px 6px rgba(20,32,64,.16),
       inset 0 1px 0 rgba(255,255,255,.95),
       inset 0 -2px 6px rgba(16,26,48,.10);
@@ -550,6 +560,7 @@
 </svg>
 <nav class="navwrap" role="tablist" aria-label="Sections">
   <div class="nav">
+    <span class="navpill noanim" id="navpill"></span>
     <button class="navb on" id="nb-status" role="tab" aria-selected="true" onclick="showTab('status',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
       <span>Status</span><span class="nbdot"></span>
@@ -736,6 +747,27 @@
     document.documentElement.setAttribute("data-theme", t);
   })();
 
+
+  // Slide the capsule to whichever tab is active. Measured from layout rather than
+  // hard-coded, so it stays correct at any width / font scale.
+  function movePill(animate) {
+    const pill = document.getElementById("navpill");
+    const btn = document.querySelector(".navb.on");
+    if (!pill || !btn) return;
+    if (animate === false) pill.classList.add("noanim");
+    pill.style.width = btn.offsetWidth + "px";
+    pill.style.height = btn.offsetHeight + "px";
+    pill.style.transform = "translateX(" + btn.offsetLeft + "px)";
+    pill.style.opacity = "1";
+    if (animate === false) {
+      // drop the no-animation guard once this position has been painted
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { pill.classList.remove("noanim"); });
+      });
+    }
+  }
+  window.addEventListener("resize", function () { movePill(false); });
+
   // ---- tabs ----
   function showTab(name, btn) {
     document.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("on"); });
@@ -745,6 +777,7 @@
       b.classList.remove("on"); b.setAttribute("aria-selected", "false");
     });
     if (btn) { btn.classList.add("on"); btn.setAttribute("aria-selected", "true"); }
+    movePill(true);
     try { sessionStorage.setItem("nm_tab", name); } catch (e) {}
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -916,12 +949,7 @@
     if (r.errno === 0) toast(r.stdout.replace(/^nomount\(suite\):\s*/, "").trim() || "Re-applied", "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
     if (svg) svg.classList.remove("spin"); btn.disabled = false;
-    (function restoreTab() {
-    let t = null;
-    try { t = sessionStorage.getItem("nm_tab"); } catch (e) {}
-    if (t && document.getElementById("tab-" + t)) showTab(t, document.getElementById("nb-" + t));
-  })();
-  refreshAll();
+    refreshAll();
   }
   async function clearRules(btn) {
     btn.disabled = true;
@@ -955,6 +983,17 @@
     if (rulesShown) loadRules();
     if (ic) ic.classList.remove("spin");
   }
+
+  // ---- init (top level: must not live inside an action handler) ----
+  (function restoreTab() {
+    let t = null;
+    try { t = sessionStorage.getItem("nm_tab"); } catch (e) {}
+    if (t && document.getElementById("tab-" + t)) showTab(t, document.getElementById("nb-" + t));
+  })();
+  // Place the capsule now, and again after load in case metrics shift once
+  // fonts/layout settle. Both are unanimated so it never slides in from 0.
+  movePill(false);
+  window.addEventListener("load", function () { movePill(false); });
 
   refreshAll();
 </script>
