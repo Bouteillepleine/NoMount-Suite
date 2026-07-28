@@ -201,5 +201,24 @@ main() {
     find_resetprop || log "resetprop not found (vbmeta.digest set will be skipped)"
     do_vbmeta "$vbmeta_digest"
 }
+
+# `verify` / `compute` inspect without changing anything, so the UI can show
+# whether the current prop already matches the real chain before Apply is used.
+#   compute -> the freshly computed digest, or empty on failure
+#   verify  -> "match <d>" | "mismatch <d>" | "absent <d>" | "error"
+case "${1:-}" in
+    compute)
+        compute_vbmeta_digest
+        exit 0 ;;
+    verify)
+        cur=$(getprop ro.boot.vbmeta.digest 2>/dev/null)
+        dg=$(compute_vbmeta_digest)
+        if [ -z "$dg" ]; then echo "error";
+        elif [ -z "$cur" ]; then echo "absent $dg";
+        elif [ "$cur" = "$dg" ]; then echo "match $dg";
+        else echo "mismatch $dg"; fi
+        exit 0 ;;
+esac
+
 main
 exit 0

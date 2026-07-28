@@ -8,7 +8,7 @@ mkdir -p "$NMDIR"
 ABI=$(getprop ro.product.cpu.abi)
 BIN="$MODDIR/bin/$ABI/nomount"
 
-# --- spoof add-on (dynamic vbmeta.digest + uname) ---
+# --- spoof add-on (dynamic vbmeta.digest) ---
 # Same stage as the KSU/APatch metamount hook, but for the Magisk path.
 [ -f "$MODDIR/spoof.sh" ] && sh "$MODDIR/spoof.sh" 2>/dev/null
 

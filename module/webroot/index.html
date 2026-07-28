@@ -628,6 +628,7 @@
         <div class="swi">
           <div class="lbl">Verified-boot hash</div>
           <div class="val" id="spVbVal">…</div>
+          <div class="val" id="spVbCheck" style="margin-top:2px"></div>
         </div>
         <label class="switch"><input type="checkbox" id="spVb" onchange="toggleSpoof('vbmeta_digest',this)"><span class="sl"></span></label>
       </div>
@@ -1141,7 +1142,7 @@
     btn.disabled = false;
   }
 
-  // ---- spoofing (vbmeta.digest + uname) ----
+  // ---- spoofing (vbmeta.digest) ----
   async function refreshSpoof() {
     const conf = (await exec("cat /data/adb/nomount/spoof.conf 2>/dev/null")).stdout;
     const get = (k, d) => { const m = conf.match(new RegExp("^" + k + "=(.*)$", "m")); return m ? m[1].trim() : d; };
@@ -1153,9 +1154,32 @@
       ? dig.slice(0, 16) + "… (" + dig.length + " hex)"
       : "empty — set at next boot";
 
+    // Compare the current property against a fresh compute so the user knows,
+    // before touching anything, whether it is already correct.
+    const chk = $("spVbCheck");
+    chk.textContent = "checking against the AVB chain…";
+    chk.style.color = "var(--muted)";
+    const v = (await exec("sh /data/adb/modules/meta-nomount/spoof.sh verify 2>/dev/null")).stdout.trim();
+    const st = v.split(" ")[0];
+    if (st === "match") {
+      chk.textContent = "✓ matches the bootloader — nothing to fix";
+      chk.style.color = "var(--ok)";
+    } else if (st === "mismatch") {
+      chk.textContent = "⚠ differs from the real chain — Apply now will correct it";
+      chk.style.color = "var(--warn)";
+    } else if (st === "absent") {
+      chk.textContent = "not set — Apply now (or a reboot) will set it";
+      chk.style.color = "var(--muted)";
+    } else {
+      chk.textContent = "could not compute the digest on this device";
+      chk.style.color = "var(--muted)";
+    }
+
     const chip = $("spchip");
-    chip.textContent = vb === "off" ? "off" : (dig ? "present" : "set at boot");
-    chip.className = "chip " + (vb === "off" ? "" : "ok");
+    if (vb === "off") { chip.textContent = "off"; chip.className = "chip"; }
+    else if (st === "match") { chip.textContent = "verified"; chip.className = "chip ok"; }
+    else if (st === "mismatch") { chip.textContent = "needs apply"; chip.className = "chip warn"; }
+    else { chip.textContent = dig ? "present" : "set at boot"; chip.className = "chip ok"; }
   }
   // single-quote a string for safe use in a shell command
   function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
