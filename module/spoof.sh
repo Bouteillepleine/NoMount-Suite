@@ -1,29 +1,18 @@
 #!/system/bin/sh
-# NoMount Suite — spoof add-on (dynamic, SUSFS-free where possible).
+# NoMount Suite — spoof add-on.
 #
-# Handles two things that used to require hand-editing, now derived on-device:
+# Recomputes ro.boot.vbmeta.digest from the real AVB vbmeta chain on this device
+# (no "paste it from the Key Attestation demo" step). Set only when the property
+# is missing/empty, unless forced. Cached for boot-to-boot stability.
 #
-#   1. ro.boot.vbmeta.digest  — computed from the real AVB vbmeta chain on this
-#      device (no "paste it from the Key Attestation demo" step). Set only when
-#      the property is missing/empty, unless forced. Cached for boot-to-boot
-#      stability.
-#
-#   2. Kernel uname (uname -r / uname -v) — a clean, stock-looking string derived
-#      from the running kernel + build date, applied through NoMount's own
-#      /sys/kernel/nomount/uname_* interface (SUSFS-free). Falls back to the susfs
-#      hook (ksu_susfs set_uname) only if this kernel happens to expose it; with
-#      neither, it is logged and skipped — it never fails the boot, and the rest
-#      of the Suite stays fully mountless.
-#
-# Everything here is best-effort: a failure must never abort boot. Called from
-# metamount.sh (KSU/APatch) and post-fs-data.sh (Magisk), in the post-fs-data
-# stage so props are set and uname is spoofed before zygote/system_server start.
+# Best-effort: a failure must never abort boot. Called from metamount.sh
+# (KSU/APatch) and post-fs-data.sh (Magisk), in the post-fs-data stage so the
+# property is in place before zygote/system_server start.
 
 PATH=/data/adb/ksu/bin:/data/adb/magisk:/system/bin:/system/xbin:$PATH
 NMDIR=/data/adb/nomount
 CONF="$NMDIR/spoof.conf"
 LOG="$NMDIR/spoof.log"
-SUSFS_BIN=/data/adb/ksu/bin/ksu_susfs
 
 mkdir -p "$NMDIR" 2>/dev/null
 # Trim the log so it can't grow unbounded across boots.
@@ -38,9 +27,6 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---- config (persistent, seeded by customize.sh) --------------------------
 vbmeta_digest=auto     # auto = set only when missing | force = always | off
-spoof_uname=auto       # auto = derive clean uname   | custom = use fields | off
-kernel_version=default # custom mode only; 'default' keeps the real value
-kernel_build=default   # custom mode only; 'default' keeps the real value
 [ -f "$CONF" ] && . "$CONF"
 
 # ---- resetprop locator ----------------------------------------------------
@@ -211,87 +197,9 @@ do_vbmeta() {
 }
 
 # ===========================================================================
-#  uname — dynamic clean release/version via ksu_susfs set_uname
-# ===========================================================================
-derive_uname_release() {
-    local r
-    r=$(uname -r)
-    r=${r%-dirty}
-    case "$r" in
-        *-ab[0-9]*)
-            # stock-shaped already: keep up to the -abNNN token, drop any junk after
-            r=$(echo "$r" | sed -E 's/(-ab[0-9]+).*/\1/') ;;
-        *-g[0-9a-f]*)
-            # has a git hash token (self-compiled): keep up to -g<hash>, drop the rest
-            r=${r%+}
-            r=$(echo "$r" | sed -E 's/(-g[0-9a-f]{7,}).*/\1/') ;;
-        *)
-            r=${r%+} ;;
-    esac
-    echo "$r"
-}
-
-fmt_build_date() {
-    local secs=$1 out=""
-    if [ -n "$secs" ]; then
-        out=$(date -u -d "@$secs" '+%a %b %e %H:%M:%S UTC %Y' 2>/dev/null)
-        [ -z "$out" ] && out=$(date -u -D %s -d "$secs" '+%a %b %e %H:%M:%S UTC %Y' 2>/dev/null)
-    fi
-    [ -z "$out" ] && out=$(date -u '+%a %b %e %H:%M:%S UTC %Y' 2>/dev/null)
-    echo "$out"
-}
-
-derive_uname_version() {
-    echo "#1 SMP PREEMPT $(fmt_build_date "$(getprop ro.build.date.utc 2>/dev/null)")"
-}
-
-# NoMount-native uname override (SUSFS-free). Present when the kernel was built
-# with the NoMount uname sysfs interface. The kernel treats an empty write, or
-# the literal 'default', as "leave this field unchanged".
-NM_UNAME_REL=/sys/kernel/nomount/uname_release
-NM_UNAME_VER=/sys/kernel/nomount/uname_version
-
-do_uname() {
-    local mode=$1 kv kb
-    [ "$mode" = "off" ] && { log "uname spoof: off"; return 0; }
-    if [ "$mode" = "custom" ]; then
-        # configured values straight through; the literal 'default' means
-        # "keep the real value for this field" (both mechanisms honour it).
-        kv=$kernel_version
-        kb=$kernel_build
-    else
-        kv=$(derive_uname_release)
-        kb=$(derive_uname_version)
-    fi
-    [ -z "$kv" ] && kv=default
-    [ -z "$kb" ] && kb=default
-
-    # Primary: NoMount-native kernel override via /sys/kernel/nomount. No SUSFS.
-    if [ -w "$NM_UNAME_REL" ] && [ -w "$NM_UNAME_VER" ]; then
-        printf '%s' "$kv" > "$NM_UNAME_REL" 2>/dev/null
-        printf '%s' "$kb" > "$NM_UNAME_VER" 2>/dev/null
-        log "uname via NoMount sysfs: release='$kv' version='$kb' ($mode)"
-        return 0
-    fi
-
-    # Fallback: susfs kernel hook, only if this kernel happens to expose it.
-    if [ -x "$SUSFS_BIN" ]; then
-        if "$SUSFS_BIN" set_uname "$kv" "$kb" 2>/dev/null; then
-            log "uname via ksu_susfs set_uname: release='$kv' version='$kb' ($mode)"
-        else
-            log "set_uname failed (release='$kv')"
-        fi
-        return 0
-    fi
-
-    log "uname spoof: no mechanism available (need a NoMount kernel with the uname sysfs, or susfs) — skipped"
-}
-
-# ===========================================================================
 main() {
     find_resetprop || log "resetprop not found (vbmeta.digest set will be skipped)"
     do_vbmeta "$vbmeta_digest"
-    do_uname "$spoof_uname"
 }
 main
 exit 0

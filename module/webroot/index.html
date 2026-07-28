@@ -600,6 +600,14 @@
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+      <h2>File redirects</h2><span class="chip" id="vfscount">0</span>
+    </div>
+    <div class="list" id="vfsdirs"><div class="empty">Loading…</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
       <h2>RRO overlays</h2><span class="chip" id="ovcount">0</span>
     </div>
     <div class="list" id="overlays"><div class="empty">Loading…</div></div>
@@ -623,39 +631,10 @@
         </div>
         <label class="switch"><input type="checkbox" id="spVb" onchange="toggleSpoof('vbmeta_digest',this)"><span class="sl"></span></label>
       </div>
-      <div class="swrow">
-        <div class="swi">
-          <div class="lbl">Kernel uname</div>
-          <div class="val" id="spUnVal">…</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="spUn" onchange="toggleUname(this)"><span class="sl"></span></label>
-      </div>
-    </div>
-
-    <!-- advanced: pin exact uname strings (spoof_uname=custom) -->
-    <div id="unadv" style="display:none">
-      <div class="list">
-        <div class="swrow">
-          <div class="swi">
-            <div class="lbl">Pin exact strings</div>
-            <div class="val">override the auto-derived clean uname</div>
-          </div>
-          <label class="switch"><input type="checkbox" id="spUnCustom" onchange="toggleCustomUname(this)"><span class="sl"></span></label>
-        </div>
-      </div>
-      <div id="unfields" style="display:none">
-        <input class="txin" id="spKv" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="uname -r  ·  e.g. 6.1.75-android14-11-gccd1a99a2b3c-ab12345678" />
-        <input class="txin" id="spKb" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="uname -v  ·  e.g. #1 SMP PREEMPT Fri Aug 23 03:08:10 UTC 2024" />
-        <div class="btns">
-          <button class="act" onclick="fillCurrentUname()">Use current</button>
-          <button class="act primary" onclick="saveCustomUname(this)">Save strings</button>
-        </div>
-        <p class="note">Leave a field as <code>default</code> (or empty) to keep the real value for that one. Saved to <code>spoof.conf</code>; applied at next boot or via <b>Apply now</b>.</p>
-      </div>
     </div>
 
     <div class="btns"><button class="act primary" onclick="applySpoof(this)">Apply now</button></div>
-    <p class="note" id="spNote">Dynamic <code>ro.boot.vbmeta.digest</code> — computed on-device from the AVB chain, no manual paste — and a clean kernel <code>uname</code> via NoMount's own kernel hook (no SUSFS). Changes take effect at next boot; <b>Apply now</b> re-runs them immediately where possible.</p>
+    <p class="note" id="spNote">Recomputes <code>ro.boot.vbmeta.digest</code> on-device from the real AVB vbmeta chain — no pasting it from the Key Attestation demo. Only set when the property is missing (unless forced). <b>Apply now</b> runs it immediately.</p>
   </div>
 
   <!-- HEALTH CHECK -->
@@ -1060,6 +1039,31 @@
       : "No rules active.";
   }
 
+  // The non-overlay half of the rule set, grouped by target directory — the same
+  // shape as the overlay card, so the Rules tab shows both halves rather than
+  // burying the redirects inside the collapsed raw list.
+  async function refreshVfs() {
+    const box = $("vfsdirs");
+    const list = await nm("vfs list");
+    const lines = (list.errno === 0 ? list.stdout : "").split("\n").map(x => x.trim()).filter(Boolean);
+    const dirs = {};
+    for (const l of lines) {
+      const vp = (l.split(" ->")[0] || "").trim();
+      if (!vp || /\/overlay\/[^\s]*\.apk$/.test(vp)) continue;
+      const dir = vp.replace(/\/[^/]*$/, "") || "/";
+      dirs[dir] = (dirs[dir] || 0) + 1;
+    }
+    const keys = Object.keys(dirs).sort((a, b) => dirs[b] - dirs[a] || a.localeCompare(b));
+    const total = keys.reduce((a, k) => a + dirs[k], 0);
+    $("vfscount").textContent = total;
+    if (!keys.length) { box.innerHTML = '<div class="empty">No file redirects.</div>'; return; }
+    box.innerHTML = keys.map((d) =>
+      `<div class="row"><span class="name mono">${esc(d)}</span>` +
+      `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} file${dirs[d] > 1 ? "s" : ""}</span>` +
+      `<span class="tag vfs">hookless</span></div>`
+    ).join("");
+  }
+
   // ---- overlays (now hookless: injected overlay APKs, no overlayfs mount) ----
   async function refreshOverlays() {
     const box = $("overlays");
@@ -1142,32 +1146,16 @@
     const conf = (await exec("cat /data/adb/nomount/spoof.conf 2>/dev/null")).stdout;
     const get = (k, d) => { const m = conf.match(new RegExp("^" + k + "=(.*)$", "m")); return m ? m[1].trim() : d; };
     const vb = get("vbmeta_digest", "auto");
-    const un = get("spoof_uname", "auto");
     $("spVb").checked = vb !== "off";
-    $("spUn").checked = un !== "off";
-    $("spUnCustom").checked = un === "custom";
-    $("unadv").style.display = un !== "off" ? "" : "none";
-    $("unfields").style.display = un === "custom" ? "" : "none";
-    const kvC = get("kernel_version", "default");
-    const kbC = get("kernel_build", "default");
-    $("spKv").value = kvC === "default" ? "" : kvC;
-    $("spKb").value = kbC === "default" ? "" : kbC;
 
     const dig = (await exec("getprop ro.boot.vbmeta.digest")).stdout.trim();
     $("spVbVal").textContent = dig
       ? dig.slice(0, 16) + "… (" + dig.length + " hex)"
       : "empty — set at next boot";
 
-    const r = (await exec("uname -r")).stdout.trim();
-    $("spUnVal").textContent = r || "?";
-
-    // which uname mechanism is available on this kernel
-    const sysfs = (await exec("[ -w /sys/kernel/nomount/uname_release ] && echo 1")).stdout.trim() === "1";
-    const susfs = (await exec("[ -x /data/adb/ksu/bin/ksu_susfs ] && echo 1")).stdout.trim() === "1";
     const chip = $("spchip");
-    if (sysfs) { chip.textContent = "kernel · SUSFS-free"; chip.className = "chip ok"; }
-    else if (susfs) { chip.textContent = "susfs fallback"; chip.className = "chip warn"; }
-    else { chip.textContent = "uname: no hook"; chip.className = "chip"; }
+    chip.textContent = vb === "off" ? "off" : (dig ? "present" : "set at boot");
+    chip.className = "chip " + (vb === "off" ? "" : "ok");
   }
   // single-quote a string for safe use in a shell command
   function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
@@ -1184,40 +1172,6 @@
     await setConf(key, el.checked ? "auto" : "off");
     toast(el.checked ? "Enabled — reboot or Apply now" : "Off at next boot", "ok");
   }
-
-  // uname: main switch (off | auto | custom) + advanced "pin exact strings"
-  async function toggleUname(el) {
-    const mode = el.checked ? ($("spUnCustom").checked ? "custom" : "auto") : "off";
-    await setConf("spoof_uname", mode);
-    $("unadv").style.display = el.checked ? "" : "none";
-    toast(el.checked ? "uname spoof on — reboot or Apply now" : "uname spoof off at next boot", "ok");
-  }
-  async function toggleCustomUname(el) {
-    $("unfields").style.display = el.checked ? "" : "none";
-    if (el.checked && !$("spKv").value && !$("spKb").value) {
-      $("spKv").value = (await exec("uname -r")).stdout.trim();
-      $("spKb").value = (await exec("uname -v")).stdout.trim();
-    }
-    await setConf("spoof_uname", $("spUn").checked ? (el.checked ? "custom" : "auto") : "off");
-    toast(el.checked ? "Custom uname — edit the strings, then Save" : "Back to auto-derived uname", "ok");
-  }
-  async function fillCurrentUname() {
-    $("spKv").value = (await exec("uname -r")).stdout.trim();
-    $("spKb").value = (await exec("uname -v")).stdout.trim();
-    toast("Filled from current kernel", "ok");
-  }
-  async function saveCustomUname(btn) {
-    btn.disabled = true;
-    const kv = $("spKv").value.trim() || "default";
-    const kb = $("spKb").value.trim() || "default";
-    await setConf("kernel_version", kv);
-    await setConf("kernel_build", kb);
-    await setConf("spoof_uname", "custom");
-    $("spUn").checked = true; $("spUnCustom").checked = true;
-    $("unadv").style.display = ""; $("unfields").style.display = "";
-    toast("Saved — reboot or Apply now", "ok");
-    btn.disabled = false;
-  }
   async function applySpoof(btn) {
     btn.disabled = true; const t = btn.textContent; btn.textContent = "Applying…";
     await exec("sh /data/adb/modules/meta-nomount/spoof.sh 2>&1");
@@ -1232,7 +1186,7 @@
     const v = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
     $("ver").textContent = v || "v?";
     $("footver").textContent = v ? ("Suite " + v) : "";
-    await Promise.all([refreshStatus(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshRuleSummary(), refreshIncident(), refreshSpoof()]);
+    await Promise.all([refreshStatus(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof()]);
     if (rulesShown) loadRules();
     if (ic) ic.classList.remove("spin");
   }

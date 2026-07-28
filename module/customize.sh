@@ -57,7 +57,7 @@ for abi in arm64-v8a armeabi-v7a x86_64 x86; do
     done
 done
 
-# --- spoof add-on: dynamic vbmeta.digest + uname ---
+# --- spoof add-on: dynamic vbmeta.digest ---
 # Seed the persistent config (append-only so user edits survive an update), and
 # make the add-on script executable. The work itself happens at boot in spoof.sh.
 NMDIR=/data/adb/nomount
@@ -66,19 +66,12 @@ CONF="$NMDIR/spoof.conf"
 [ -f "$CONF" ] || cat > "$CONF" <<'EOF'
 # NoMount Suite — spoof add-on config
 # vbmeta_digest: auto (set only when the prop is missing) | force | off
-# spoof_uname:   auto (derive a clean stock uname via NoMount's uname sysfs,
-#                      falling back to susfs if present) | custom | off
-# kernel_version / kernel_build: used only when spoof_uname=custom.
-#   'default' keeps the real value for that field.
 EOF
 seed_conf() { grep -q "^$1=" "$CONF" 2>/dev/null || echo "$1=$2" >> "$CONF"; }
 seed_conf vbmeta_digest auto
-seed_conf spoof_uname auto
-seed_conf kernel_version default
-seed_conf kernel_build default
 set_perm "$CONF" 0 0 0644
 [ -f "$MODPATH/spoof.sh" ] && set_perm "$MODPATH/spoof.sh" 0 0 0755
-ui_print "- Spoof add-on enabled: dynamic vbmeta.digest + uname"
+ui_print "- Spoof add-on enabled: dynamic vbmeta.digest"
 ui_print "  config: $CONF"
 
 ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
