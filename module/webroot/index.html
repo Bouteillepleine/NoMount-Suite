@@ -276,13 +276,14 @@
       0 2px 6px rgba(0,0,0,.42),
       inset 0 1px 0 rgba(255,255,255,.38),
       inset 0 -2px 7px rgba(0,0,0,.30);
-    /* Springy overshoot: the y1 term (1.9) is what makes it rebound past the
-       target and settle back. Transform leads, width trails slightly, so the
-       pill stretches into the move and snaps up — reads as elastic rather than
-       as two properties animating in lockstep. */
+    /* Springy overshoot: the y1 term is what makes it rebound past the target
+       and settle back. 1.55 lands between a flat slide (1.0) and the bouncy
+       1.9 — enough to feel elastic without drawing attention to itself.
+       Transform leads, width trails slightly, so the pill stretches into the
+       move rather than both properties animating in lockstep. */
     transition:
-      transform .52s cubic-bezier(.18,1.9,.34,1),
-      width .58s cubic-bezier(.16,2.05,.36,1),
+      transform .42s cubic-bezier(.22,1.55,.36,1),
+      width .46s cubic-bezier(.22,1.62,.38,1),
       opacity .2s ease;
   }
   .navpill.noanim { transition: none; }
