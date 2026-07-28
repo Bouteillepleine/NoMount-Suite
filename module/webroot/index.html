@@ -83,6 +83,9 @@
   .card-h { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
   .card-h h2 { margin: 0; font-size: 14px; font-weight: 680; letter-spacing: 0.2px; }
   .card-h .ic { width: 17px; height: 17px; color: var(--acc); flex: none; }
+  .card-h .chip.ok   { background: rgba(53,210,154,0.15);  color: var(--ok); }
+  .card-h .chip.warn { background: rgba(251,191,36,0.15);  color: var(--warn); }
+  .card-h .chip.bad  { background: rgba(248,113,122,0.15); color: var(--bad); }
   .card-h .chip {
     margin-left: auto; font-size: 11.5px; color: var(--muted); background: var(--card2);
     border: 1px solid var(--brd2); padding: 4px 10px; border-radius: 999px; font-variant-numeric: tabular-nums;
@@ -181,6 +184,61 @@
   .spin { animation: spin .9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+  /* ---- tabbed panes + floating capsule bar ------------------------------
+     Visual language mirrors the ReSukiSU manager's liquid-glass capsule:
+     24px radius, hairline white gradient border, soft elevation, and a
+     backdrop blur where the WebView supports it. */
+  .wrap { padding-bottom: 108px; }
+  .tab { display: none; }
+  .tab.on { display: block; animation: tabin .18s ease both; }
+  @keyframes tabin { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .navwrap {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+    display: flex; justify-content: center;
+    padding: 0 16px calc(14px + env(safe-area-inset-bottom)) 16px;
+    pointer-events: none;
+  }
+  @media (min-width: 400px) { .navwrap { padding-left: 24px; padding-right: 24px; } }
+  @media (min-width: 600px) { .navwrap { padding-left: 32px; padding-right: 32px; } }
+
+  .nav {
+    pointer-events: auto;
+    display: flex; gap: 4px; padding: 7px;
+    border-radius: 24px;
+    background: color-mix(in srgb, var(--card) 88%, transparent);
+    border: 1px solid transparent;
+    background-image:
+      linear-gradient(color-mix(in srgb, var(--card) 88%, transparent), color-mix(in srgb, var(--card) 88%, transparent)),
+      linear-gradient(140deg, rgba(255,255,255,.45), rgba(255,255,255,.10) 45%, rgba(255,255,255,.18));
+    background-origin: border-box;
+    background-clip: padding-box, border-box;
+    box-shadow: 0 8px 28px rgba(0,0,0,.45), 0 1px 0 rgba(255,255,255,.05) inset;
+    max-width: 100%;
+  }
+  @supports (backdrop-filter: blur(20px)) {
+    .nav { backdrop-filter: blur(22px) saturate(150%); -webkit-backdrop-filter: blur(22px) saturate(150%); }
+  }
+  .navb {
+    -webkit-tap-highlight-color: transparent;
+    appearance: none; border: 0; cursor: pointer;
+    background: transparent; color: var(--muted);
+    min-width: 56px; height: 58px; padding: 0 12px;
+    border-radius: 18px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    font: 600 11px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: .01em;
+    transition: background .18s ease, color .18s ease, transform .18s ease;
+  }
+  .navb svg { width: 21px; height: 21px; }
+  .navb:active { transform: scale(.94); }
+  .navb.on { color: var(--fg); background: color-mix(in srgb, var(--accent) 20%, transparent); }
+  .navb .nbdot { display: none; }
+  .navb.alert .nbdot {
+    display: block; position: absolute; margin: -26px 0 0 22px;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--bad);
+  }
 </style>
 </head>
 <body>
@@ -203,6 +261,7 @@
     </div>
   </header>
 
+  <section class="tab on" id="tab-status">
   <div class="banner" id="banner">Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
 
   <!-- HERO: engine status -->
@@ -258,7 +317,9 @@
     <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
   </div>
 
-  <!-- MODULES -->
+  </section>
+
+  <section class="tab" id="tab-modules">
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
@@ -267,14 +328,21 @@
     <div class="list" id="modules"><div class="empty">Loading…</div></div>
   </div>
 
-  <!-- RULES -->
+  </section>
+
+  <section class="tab" id="tab-rules">
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <h2>Active rules</h2>
       <button class="act" style="flex:none;min-width:0;padding:7px 13px;font-size:12.5px" onclick="toggleRules(this)" id="rulesBtn">Show</button>
     </div>
+    <div class="uidbar" id="rulefilterbar" style="display:none">
+      <input id="rulefilter" type="text" placeholder="Filter by path or module…" oninput="filterRules()" />
+      <button class="act" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
+    </div>
     <pre class="rules" id="ruleslist" style="display:none">…</pre>
+    <p class="note" id="rulecount" style="display:none"></p>
   </div>
 
   <!-- OVERLAYS -->
@@ -286,7 +354,31 @@
     <div class="list" id="overlays"><div class="empty">Loading…</div></div>
   </div>
 
-  <!-- UID -->
+  </section>
+
+  <section class="tab" id="tab-tools">
+
+  <!-- HEALTH CHECK -->
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
+      <h2>Health check</h2><span class="chip" id="dchip">—</span>
+    </div>
+    <p class="note">Lints the mount plan the way it will actually be applied, plus the live rules — partition-root redirects, overlay APKs on partitions zygote will not accept, missing backings, and targets two modules both claim. Run it before rebooting after a module change.</p>
+    <div class="btns"><button class="act primary" onclick="runDoctor(this)">Run health check</button></div>
+    <pre class="rules" id="doctorout" style="display:none">…</pre>
+  </div>
+
+  <!-- LAST INCIDENT -->
+  <div class="card" id="incidentcard" style="display:none">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+      <h2>Last incident</h2><span class="chip bad">guard tripped</span>
+    </div>
+    <p class="note">Recorded when the bootloop guard self-disabled the Suite — including the newest native crash and its abort message, which usually names the offending path outright.</p>
+    <pre class="rules" id="incidentout">…</pre>
+  </div>
+
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
@@ -300,8 +392,32 @@
     <p class="note">A blocked UID sees the stock filesystem — injected files and the su path become invisible to that app. The sus_path substitute; useful for a specific detector app.</p>
   </div>
 
+  </section>
+
   <div class="foot">NoMount Suite · hookless engine via netlink <code>nm</code><br/><span id="footver"></span></div>
 </div>
+
+
+<nav class="navwrap" role="tablist" aria-label="Sections">
+  <div class="nav">
+    <button class="navb on" id="nb-status" role="tab" aria-selected="true" onclick="showTab('status',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
+      <span>Status</span><span class="nbdot"></span>
+    </button>
+    <button class="navb" id="nb-modules" role="tab" aria-selected="false" onclick="showTab('modules',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <span>Modules</span><span class="nbdot"></span>
+    </button>
+    <button class="navb" id="nb-rules" role="tab" aria-selected="false" onclick="showTab('rules',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      <span>Rules</span><span class="nbdot"></span>
+    </button>
+    <button class="navb" id="nb-tools" role="tab" aria-selected="false" onclick="showTab('tools',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5-1.4-1.4 2.5-2.5z"/></svg>
+      <span>Tools</span><span class="nbdot"></span>
+    </button>
+  </div>
+</nav>
 
 <div id="toast"></div>
 
@@ -449,6 +565,70 @@
     }
   }
 
+
+  // ---- tabs ----
+  function showTab(name, btn) {
+    document.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("on"); });
+    var pane = document.getElementById("tab-" + name);
+    if (pane) pane.classList.add("on");
+    document.querySelectorAll(".navb").forEach(function (b) {
+      b.classList.remove("on"); b.setAttribute("aria-selected", "false");
+    });
+    if (btn) { btn.classList.add("on"); btn.setAttribute("aria-selected", "true"); }
+    try { sessionStorage.setItem("nm_tab", name); } catch (e) {}
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  // ---- rules filter ----
+  let _rulesRaw = "";
+  function filterRules() {
+    const q = ($("rulefilter").value || "").trim().toLowerCase();
+    const lines = _rulesRaw.split("\n").filter(Boolean);
+    const keep = q ? lines.filter(function (l) { return l.toLowerCase().indexOf(q) !== -1; }) : lines;
+    $("ruleslist").textContent = keep.length ? keep.join("\n") : "(no match)";
+    $("rulecount").style.display = "";
+    $("rulecount").textContent = q
+      ? keep.length + " of " + lines.length + " rules match"
+      : lines.length + " rules";
+  }
+
+  // ---- health check ----
+  async function runDoctor(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+    const out = $("doctorout");
+    out.style.display = "";
+    out.textContent = "Running…";
+    const r = await nm("doctor");
+    const txt = ((r.stdout || "") + (r.stderr || "")).trim() || "(no output)";
+    out.textContent = txt;
+    const m = txt.match(/summary:\s*(\d+)\s*errors?,\s*(\d+)\s*warnings?/i);
+    const chip = $("dchip");
+    const nb = $("nb-tools");
+    if (m) {
+      const errs = parseInt(m[1], 10), warns = parseInt(m[2], 10);
+      chip.textContent = errs ? errs + " error" + (errs > 1 ? "s" : "")
+                       : warns ? warns + " warning" + (warns > 1 ? "s" : "")
+                       : "healthy";
+      chip.className = "chip " + (errs ? "bad" : warns ? "warn" : "ok");
+      if (nb) nb.classList.toggle("alert", errs > 0);
+    } else {
+      chip.textContent = "—"; chip.className = "chip";
+    }
+    if (btn) { btn.disabled = false; btn.textContent = "Run health check"; }
+  }
+
+  // ---- last incident ----
+  async function refreshIncident() {
+    const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
+    const txt = (r.stdout || "").trim();
+    const card = $("incidentcard");
+    if (!txt) { card.style.display = "none"; return; }
+    card.style.display = "";
+    $("incidentout").textContent = txt;
+    const nb = $("nb-tools");
+    if (nb) nb.classList.add("alert");
+  }
+
   // ---- modules ----
   async function refreshModules() {
     const box = $("modules");
@@ -533,11 +713,19 @@
   let rulesShown = false;
   async function loadRules() {
     const r = await nm("vfs list");
-    $("ruleslist").textContent = (r.errno === 0 && r.stdout.trim()) ? r.stdout.trim() : "no rules";
+    _rulesRaw = (r.errno === 0 && r.stdout.trim()) ? r.stdout.trim() : "";
+    if (!_rulesRaw) {
+      $("ruleslist").textContent = "no rules";
+      $("rulecount").style.display = "none";
+      return;
+    }
+    filterRules();
   }
   async function toggleRules(btn) {
     rulesShown = !rulesShown;
     $("ruleslist").style.display = rulesShown ? "" : "none";
+    $("rulefilterbar").style.display = rulesShown ? "" : "none";
+    $("rulecount").style.display = rulesShown ? "" : "none";
     btn.textContent = rulesShown ? "Hide" : "Show";
     if (rulesShown) { $("ruleslist").textContent = "Loading…"; loadRules(); }
   }
@@ -550,7 +738,12 @@
     if (r.errno === 0) toast(r.stdout.replace(/^nomount\(suite\):\s*/, "").trim() || "Re-applied", "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
     if (svg) svg.classList.remove("spin"); btn.disabled = false;
-    refreshAll();
+    (function restoreTab() {
+    let t = null;
+    try { t = sessionStorage.getItem("nm_tab"); } catch (e) {}
+    if (t && document.getElementById("tab-" + t)) showTab(t, document.getElementById("nb-" + t));
+  })();
+  refreshAll();
   }
   async function clearRules(btn) {
     btn.disabled = true;
@@ -580,7 +773,7 @@
     const v = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
     $("ver").textContent = v || "v?";
     $("footver").textContent = v ? ("Suite " + v) : "";
-    await Promise.all([refreshStatus(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays()]);
+    await Promise.all([refreshStatus(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshIncident()]);
     if (rulesShown) loadRules();
     if (ic) ic.classList.remove("spin");
   }

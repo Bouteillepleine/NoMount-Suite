@@ -55,6 +55,29 @@ if [ -f "$NMDIR/disabled" ]; then
 elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
     echo "nomount: bootloop guard tripped (count=$COUNT) -> self-disabling" > /dev/kmsg 2>/dev/null
     : > "$NMDIR/disabled"
+    # Record WHY, while the evidence is still fresh. Without this a trip leaves only an
+    # empty `disabled` file and the user has to dig through tombstones by hand to find out
+    # what crashed (that is exactly how the /my_product FD-allowlist bootloop was found).
+    # Everything here is best-effort and must never fail the boot.
+    {
+        echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
+        echo "bootcount=$COUNT guard_max=$GUARD_MAX"
+        echo "kernel=$(uname -r)"
+        echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
+        echo "rules_at_trip=$("$NM_BIN" list 2>/dev/null | wc -l)"
+        echo "modules_enabled=$(for m in /data/adb/modules/*/; do
+                [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ] && continue
+                basename "$m"
+            done | tr '\n' ' ')"
+        # Newest native crash + its abort line: for an early-boot bootloop this is almost
+        # always zygote/system_server and names the offending path outright.
+        _t=$(ls -t /data/tombstones/tombstone_* 2>/dev/null | grep -v '\.pb$' | head -1)
+        if [ -n "$_t" ]; then
+            echo "tombstone=$_t"
+            echo "  $(grep -m1 '>>> ' "$_t" 2>/dev/null)"
+            echo "  $(grep -m1 'Abort message' "$_t" 2>/dev/null)"
+        fi
+    } > "$NMDIR/incident.log" 2>/dev/null
 elif [ -x "$BIN" ]; then
     timeout 60 "$BIN" mount 2>/dev/null
 fi

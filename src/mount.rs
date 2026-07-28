@@ -114,14 +114,35 @@ struct Stats {
     whiteouts: u32,
 }
 
-/// Recursively route a module subtree rooted at `dir`.
+/// What the Suite intends to do for one module entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanKind {
+    /// Redirect `target` at `source`.
+    Inject,
+    /// Make `target` appear absent (`.replace` marker or 0:0 char device).
+    Whiteout,
+}
+
+/// One intended operation, resolved but not yet applied.
+///
+/// Separating "what we would do" from "doing it" is what lets `nomount doctor`
+/// lint the exact same decisions the mount pass will make, before a reboot
+/// turns a bad rule into a bootloop.
+pub(crate) struct PlanEntry {
+    pub module: String,
+    pub target: PathBuf,
+    pub source: PathBuf,
+    pub kind: PlanKind,
+}
+
+/// Recursively resolve a module subtree rooted at `dir` into plan entries.
 /// `.replace`/char-device markers become whiteouts; every other file — including
-/// RRO overlay APKs — gets a hookless redirect. Symlinks are treated as files
+/// RRO overlay APKs — becomes a hookless redirect. Symlinks are treated as files
 /// (file_type does not follow). RRO overlay dirs are NOT special-cased: their APKs
 /// are hookless-injected into e.g. `/product/overlay`, and OverlayManagerService +
 /// idmap2 pick them up at the system_server scan (which runs after this
 /// post-fs-data pass). So RRO works with no overlayfs mount — zero mounts total.
-fn inject_tree(nm: &Nm, module_root: &Path, dir: &Path, st: &mut Stats) {
+fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -143,21 +164,25 @@ fn inject_tree(nm: &Nm, module_root: &Path, dir: &Path, st: &mut Stats) {
         let name = name.to_string_lossy();
 
         if ft.is_dir() {
-            inject_tree(nm, module_root, &source, st);
+            plan_tree(module, module_root, &source, out);
         } else if name == ".replace" {
             // Whiteout the parent dir (module wants to replace, not merge, it).
             if let Some(parent) = target.parent() {
-                match nm.whiteout(parent) {
-                    Ok(()) => st.whiteouts += 1,
-                    Err(_) => st.failed += 1,
-                }
+                out.push(PlanEntry {
+                    module: module.to_string(),
+                    target: parent.to_path_buf(),
+                    source: source.clone(),
+                    kind: PlanKind::Whiteout,
+                });
             }
         } else if ft.is_char_device() {
             // A 0:0 char device is Magisk's whiteout marker.
-            match nm.whiteout(&target) {
-                Ok(()) => st.whiteouts += 1,
-                Err(_) => st.failed += 1,
-            }
+            out.push(PlanEntry {
+                module: module.to_string(),
+                target,
+                source,
+                kind: PlanKind::Whiteout,
+            });
         } else if is_partition_root(&target) {
             // A non-directory entry resolving to a bare partition root — a module's
             // layout-convergence symlink (e.g. `system/product -> ../product`). Injecting it
@@ -166,12 +191,72 @@ fn inject_tree(nm: &Nm, module_root: &Path, dir: &Path, st: &mut Stats) {
             // are unaffected: they take the is_dir() branch above and recurse as before.
             continue;
         } else {
-            match nm.add(&target, &source) {
-                Ok(()) => st.applied += 1,
-                Err(_) => st.failed += 1,
+            out.push(PlanEntry {
+                module: module.to_string(),
+                target,
+                source,
+                kind: PlanKind::Inject,
+            });
+        }
+    }
+}
+
+/// Build the full plan for every enabled, non-blocklisted module.
+/// Returns the entries plus how many modules were skipped by the blocklist.
+pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
+    let blocklist = load_blocklist();
+    let mut plan = Vec::new();
+    let mut skipped = 0u32;
+    let Ok(dirs) = fs::read_dir(MODULES_DIR) else {
+        return (plan, skipped);
+    };
+    for entry in dirs.flatten() {
+        let mdir = entry.path();
+        if !mdir.is_dir() || !module_enabled(&mdir) {
+            continue;
+        }
+        let Some(id) = mdir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if blocklist.contains(id) {
+            skipped += 1;
+            continue;
+        }
+        let id = id.to_string();
+        // "system/" is the classic layout; auto_mount modules (e.g. OxygenCustomizer)
+        // ship content directly under module-root partition dirs. Process every
+        // top-level dir that maps to a real on-device partition — dynamically, so any
+        // OEM's partitions are handled. resolve_target_path maps "<root>/…" -> "/<root>/…"
+        // (and applies the SAR aliases for "system/vendor" etc.).
+        if let Ok(entries) = fs::read_dir(&mdir) {
+            for e in entries.flatten() {
+                if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = e.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                // Skip non-injectable roots, and OnePlus/Oppo `my_*` feature partitions.
+                // `my_*` is deliberate: those paths are NOT in zygote's FD allowlist
+                // (`FileDescriptorInfo::CreateFromFd`), so anything zygote preloads from
+                // there — an RRO overlay APK in particular — aborts the first
+                // `forkSystemServer` with "Not allowlisted" and bootloops. Modules that
+                // need `my_*` content handle it themselves (e.g. OxygenCustomizer's
+                // post-fs-data.sh binds); NoMount serves the /product, /system, … trees.
+                if NON_PARTITION_ROOTS.contains(&name) || name.starts_with("my_") {
+                    continue;
+                }
+                // A partition iff "/<name>" is a real directory on this device;
+                // module-metadata dirs (META-INF/, webroot/, …) fail this and are skipped.
+                if !Path::new(&format!("/{name}")).is_dir() {
+                    continue;
+                }
+                plan_tree(&id, &mdir, &e.path(), &mut plan);
             }
         }
     }
+    (plan, skipped)
 }
 
 /// Metamodule entry point (`nomount mount`): rebuild rules from the current set
@@ -187,67 +272,27 @@ pub fn run_mount() -> Result<()> {
     // Start clean so uninstalled/updated modules don't leave stale rules.
     let _ = nm.clear();
 
-    let blocklist = load_blocklist();
-    let mut modules = 0u32;
-    let mut skipped = 0u32;
+    let (plan, skipped) = collect_plan();
+    let mut served: HashSet<&str> = HashSet::new();
     let mut st = Stats {
         applied: 0,
         failed: 0,
         whiteouts: 0,
     };
-    if let Ok(dirs) = fs::read_dir(MODULES_DIR) {
-        for entry in dirs.flatten() {
-            let mdir = entry.path();
-            if !mdir.is_dir() || !module_enabled(&mdir) {
-                continue;
-            }
-            if mdir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|id| blocklist.contains(id))
-            {
-                skipped += 1;
-                continue;
-            }
-            // "system/" is the classic layout; auto_mount modules (e.g. OxygenCustomizer)
-            // ship content directly under module-root partition dirs. Process every
-            // top-level dir that maps to a real on-device partition — dynamically, so any
-            // OEM's partitions are handled. resolve_target_path maps "<root>/…" -> "/<root>/…"
-            // (and applies the SAR aliases for "system/vendor" etc.).
-            let mut had_content = false;
-            if let Ok(entries) = fs::read_dir(&mdir) {
-                for e in entries.flatten() {
-                    if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        continue;
-                    }
-                    let name = e.file_name();
-                    let Some(name) = name.to_str() else {
-                        continue;
-                    };
-                    // Skip non-injectable roots, and OnePlus/Oppo `my_*` feature partitions.
-                    // `my_*` is deliberate: those paths are NOT in zygote's FD allowlist
-                    // (`FileDescriptorInfo::CreateFromFd`), so anything zygote preloads from
-                    // there — an RRO overlay APK in particular — aborts the first
-                    // `forkSystemServer` with "Not allowlisted" and bootloops. Modules that
-                    // need `my_*` content handle it themselves (e.g. OxygenCustomizer's
-                    // post-fs-data.sh binds); NoMount serves the /product, /system, … trees.
-                    if NON_PARTITION_ROOTS.contains(&name) || name.starts_with("my_") {
-                        continue;
-                    }
-                    // A partition iff "/<name>" is a real directory on this device;
-                    // module-metadata dirs (META-INF/, webroot/, …) fail this and are skipped.
-                    if !Path::new(&format!("/{name}")).is_dir() {
-                        continue;
-                    }
-                    had_content = true;
-                    inject_tree(&nm, &mdir, &e.path(), &mut st);
-                }
-            }
-            if had_content {
-                modules += 1;
-            }
+    for e in &plan {
+        served.insert(e.module.as_str());
+        match e.kind {
+            PlanKind::Whiteout => match nm.whiteout(&e.target) {
+                Ok(()) => st.whiteouts += 1,
+                Err(_) => st.failed += 1,
+            },
+            PlanKind::Inject => match nm.add(&e.target, &e.source) {
+                Ok(()) => st.applied += 1,
+                Err(_) => st.failed += 1,
+            },
         }
     }
+    let modules = served.len();
 
     println!(
         "nomount(suite): {modules} modules | {} rules, {} whiteouts, {} failed, {skipped} skipped \

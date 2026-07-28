@@ -28,6 +28,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: UidAction,
     },
+    /// Lint the mount plan (and live rules) for known bootloop/no-op hazards
+    Doctor,
     /// Print version
     Version,
 }
