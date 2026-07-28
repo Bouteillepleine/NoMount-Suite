@@ -77,8 +77,37 @@
 
   /* ---------- cards ---------- */
   .card {
-    background: var(--card); border: 1px solid var(--brd); border-radius: var(--radius);
-    box-shadow: var(--shadow); padding: 17px 17px 18px; margin-bottom: 13px; backdrop-filter: blur(10px);
+    position: relative;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.012) 42%, rgba(0,0,0,.05)),
+      var(--card);
+    border: 1px solid var(--brd); border-radius: var(--radius);
+    /* layered: ambient drop, contact shadow, lit top bevel, dark bottom bevel */
+    box-shadow:
+      var(--shadow),
+      0 2px 6px rgba(0,0,0,.28),
+      inset 0 1px 0 rgba(255,255,255,.11),
+      inset 0 -1px 0 rgba(0,0,0,.30);
+    padding: 17px 17px 18px; margin-bottom: 13px; backdrop-filter: blur(10px);
+  }
+  /* catch-light along the top edge — the cue that sells a raised surface */
+  .card::before {
+    content: ""; position: absolute; left: 12%; right: 12%; top: 0; height: 1px;
+    pointer-events: none; border-radius: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.26), transparent);
+  }
+  html[data-theme="light"] .card {
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.85), rgba(255,255,255,.35) 45%, rgba(16,26,48,.02)),
+      var(--card);
+    box-shadow:
+      var(--shadow),
+      0 2px 6px rgba(20,32,64,.10),
+      inset 0 1px 0 rgba(255,255,255,.95),
+      inset 0 -1px 0 rgba(16,26,48,.07);
+  }
+  html[data-theme="light"] .card::before {
+    background: linear-gradient(90deg, transparent, rgba(16,26,48,.10), transparent);
   }
   .card-h { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
   .card-h h2 { margin: 0; font-size: 14px; font-weight: 680; letter-spacing: 0.2px; }
@@ -132,7 +161,27 @@
   .row:first-child { border-top: none; }
   .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .name.mono { font-family: var(--mono); font-size: 12.5px; }
-  .tag { font-size: 10.5px; padding: 3px 9px; border-radius: 999px; font-weight: 680; letter-spacing: 0.2px; white-space: nowrap; }
+  .tag {
+    font-size: 10.5px; padding: 4px 10px; border-radius: 999px; font-weight: 680;
+    letter-spacing: 0.2px; white-space: nowrap;
+    border: 1px solid rgba(255,255,255,.10);
+    /* domed: light from above, seated by a soft contact shadow */
+    background-image: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,0) 62%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.26),
+      inset 0 -1px 2px rgba(0,0,0,.22),
+      0 1px 2px rgba(0,0,0,.30);
+    text-shadow: 0 1px 0 rgba(0,0,0,.28);
+  }
+  html[data-theme="light"] .tag {
+    border-color: rgba(16,26,48,.10);
+    background-image: linear-gradient(180deg, rgba(255,255,255,.75), rgba(255,255,255,0) 65%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.90),
+      inset 0 -1px 2px rgba(16,26,48,.10),
+      0 1px 2px rgba(20,32,64,.12);
+    text-shadow: none;
+  }
   .tag.vfs   { background: rgba(53,210,154,0.14);  color: var(--ok); }
   .tag.ov    { background: rgba(124,156,255,0.16); color: var(--acc); }
   .tag.su    { background: rgba(87,230,195,0.15);  color: var(--acc2); }
@@ -141,6 +190,31 @@
   .tag.warn  { background: rgba(251,191,36,0.15);  color: var(--warn); }
   .tag.ok    { background: rgba(53,210,154,0.15);  color: var(--ok); }
   .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
+
+  /* module list: name on its own line so it is never truncated */
+  .mrow {
+    display: block; padding: 11px 12px; margin: 8px 0; border-radius: 14px;
+    border: 1px solid var(--brd2);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.008)),
+      var(--card2);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 1px 3px rgba(0,0,0,.22);
+  }
+  .mrow:first-child { margin-top: 2px; }
+  .mname {
+    font-size: 13.5px; font-weight: 620; color: var(--txt); line-height: 1.35;
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+  .mmeta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .mmeta .files {
+    font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-right: auto;
+  }
+  html[data-theme="light"] .mrow {
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.80), rgba(255,255,255,.30)),
+      var(--card2);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.90), 0 1px 3px rgba(20,32,64,.08);
+  }
   .note { color: var(--muted); font-size: 12px; line-height: 1.55; margin: 12px 0 0; }
   code { font-family: var(--mono); background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
 
@@ -958,14 +1032,15 @@
         else if (mech === "vfs") { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
         else { label = "empty"; cls = "off"; }
       }
-      const files = (showCnt && cnt > 0) ? `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${cnt} file${cnt > 1 ? "s" : ""}</span>` : "";
+      const files = (showCnt && cnt > 0) ? `<span class="files">${cnt} file${cnt > 1 ? "s" : ""}</span>` : `<span class="files"></span>`;
       // Visibility: a module is only "hidden" if nothing it owns appears in the mount
       // table. NoMount-served modules are mountless by construction; a module that
       // mounts on its own is visible to any scanner reading /proc/*/mountinfo.
       const vis = mnt > 0
         ? `<span class="tag warn" title="This module has ${mnt} mount(s) of its own in the mount table — visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
         : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
-      return `<div class="row"><span class="name">${esc(id)}</span>${files}${vis}<span class="tag ${cls}">${label}</span></div>`;
+      return `<div class="mrow"><div class="mname">${esc(id)}</div>` +
+             `<div class="mmeta">${files}${vis}<span class="tag ${cls}">${label}</span></div></div>`;
     }).join("");
     $("mMod").textContent = served;
   }
