@@ -6,6 +6,9 @@
 #include <linux/version.h>
 #include <linux/module.h>
 #include "nomount.h"
+#include <linux/utsname.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
 
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
 static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mostly;
@@ -1785,6 +1788,117 @@ static struct genl_family nomount_genl_family = {
     .n_ops = ARRAY_SIZE(nomount_genl_ops),
 };
 
+/*
+ * uname spoofing (SUSFS-free) — NoMount-native.
+ *
+ * Writing the spoofed release/version straight into init_uts_ns makes every
+ * later uname()/newuname() and /proc/version report them, system-wide, with no
+ * syscall hook and no dependency on SUSFS. Driven from userspace via
+ *   /sys/kernel/nomount/uname_release
+ *   /sys/kernel/nomount/uname_version
+ * An empty write, or the literal string "default", leaves that field unchanged.
+ */
+static struct kobject *nomount_kobj;
+
+static ssize_t nm_uname_show(char *buf, const char *field)
+{
+	ssize_t n;
+
+	down_read(&uts_sem);
+	n = scnprintf(buf, PAGE_SIZE, "%s\n", field);
+	up_read(&uts_sem);
+	return n;
+}
+
+static ssize_t nm_uname_store(const char *buf, size_t count,
+			      char *field, size_t fieldsz)
+{
+	char tmp[__NEW_UTS_LEN + 1];
+	size_t len = count;
+
+	if (len && buf[len - 1] == '\n')
+		len--;
+	if (len >= sizeof(tmp))
+		return -EINVAL;
+	memcpy(tmp, buf, len);
+	tmp[len] = '\0';
+	if (len == 0 || strcmp(tmp, "default") == 0)
+		return count;			/* leave the field unchanged */
+	down_write(&uts_sem);
+	strscpy(field, tmp, fieldsz);
+	up_write(&uts_sem);
+	return count;
+}
+
+static ssize_t uname_release_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	return nm_uname_show(buf, init_uts_ns.name.release);
+}
+
+static ssize_t uname_release_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	return nm_uname_store(buf, count, init_uts_ns.name.release,
+			      sizeof(init_uts_ns.name.release));
+}
+
+static ssize_t uname_version_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buf)
+{
+	return nm_uname_show(buf, init_uts_ns.name.version);
+}
+
+static ssize_t uname_version_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	return nm_uname_store(buf, count, init_uts_ns.name.version,
+			      sizeof(init_uts_ns.name.version));
+}
+
+static struct kobj_attribute uname_release_attr =
+	__ATTR(uname_release, 0600, uname_release_show, uname_release_store);
+static struct kobj_attribute uname_version_attr =
+	__ATTR(uname_version, 0600, uname_version_show, uname_version_store);
+
+static struct attribute *nomount_uname_attrs[] = {
+	&uname_release_attr.attr,
+	&uname_version_attr.attr,
+	NULL,
+};
+
+static const struct attribute_group nomount_uname_group = {
+	.attrs = nomount_uname_attrs,
+};
+
+static void nomount_uname_sysfs_init(void)
+{
+	int ret;
+
+	nomount_kobj = kobject_create_and_add("nomount", kernel_kobj);
+	if (!nomount_kobj) {
+		nm_err("uname: failed to create /sys/kernel/nomount\n");
+		return;
+	}
+	ret = sysfs_create_group(nomount_kobj, &nomount_uname_group);
+	if (ret) {
+		nm_err("uname: sysfs group failed (%d)\n", ret);
+		kobject_put(nomount_kobj);
+		nomount_kobj = NULL;
+	}
+}
+
+static void nomount_uname_sysfs_exit(void)
+{
+	if (nomount_kobj) {
+		sysfs_remove_group(nomount_kobj, &nomount_uname_group);
+		kobject_put(nomount_kobj);
+		nomount_kobj = NULL;
+	}
+}
+
 static int __init nomount_init(void)
 {
     int ret;
@@ -1824,6 +1938,8 @@ static int __init nomount_init(void)
         return ret;
     }
 
+    nomount_uname_sysfs_init();
+
     nm_info("Loaded successfully\n");
     return 0;
 }
@@ -1841,6 +1957,8 @@ static void __exit nomount_exit(void)
     kmem_cache_destroy(nm_iop_cachep);
     kmem_cache_destroy(nm_fop_cachep);
     put_cred(nm_root_cred);
+
+    nomount_uname_sysfs_exit();
 
     nm_info("Unloaded successfully\n");
 }
