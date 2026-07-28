@@ -38,4 +38,38 @@ if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
         rm -f "$SUSFS_BIN.nm_new" 2>/dev/null
     fi
 fi
+
+# --- refresh the manager card with the settled state ---
+# metamount.sh tags the card in post-fs-data, when the mount table is not final and
+# health cannot be judged yet. Now that boot is complete both are knowable, so restate
+# the card with the real mount count and the health-check verdict — that turns the
+# module list into a status readout you can trust without opening the WebUI.
+MODDIR="${0%/*}"
+ABI=$(getprop ro.product.cpu.abi)
+BIN="$MODDIR/bin/$ABI/nomount"
+export NM_BIN="$MODDIR/bin/$ABI/nm"
+if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+    _rules=$("$NM_BIN" list 2>/dev/null | wc -l)
+    _rro=$("$NM_BIN" list 2>/dev/null | grep -c '/overlay/[^ ]*\.apk')
+    _mnt=$(grep -c '/data/adb/modules' /proc/self/mountinfo 2>/dev/null || echo 0)
+    _doc=$(timeout 30 "$BIN" doctor 2>/dev/null | sed -n 's/^summary: \([0-9]*\) errors, \([0-9]*\) warnings$/\1 \2/p')
+    _err=$(echo "$_doc" | awk '{print $1+0}')
+    _wrn=$(echo "$_doc" | awk '{print $2+0}')
+    if [ "${_err:-0}" -gt 0 ]; then
+        _health="⚠️ $_err error(s) — see WebUI › Tools"
+    elif [ "${_wrn:-0}" -gt 0 ]; then
+        _health="$_wrn warning(s)"
+    else
+        _health="healthy"
+    fi
+    if [ "${_mnt:-0}" -gt 0 ]; then
+        _mstate="⚠ $_mnt module mount(s)"
+    else
+        _mstate="0 mounts"
+    fi
+    KSU_MODULE=meta-nomount ksud module config set --temp override.description \
+        "[NoMount ✅ $_rules rules · $_rro RRO · $_mstate] $_health — fully mountless: hookless VFS + RRO, su via sucompat" \
+        >/dev/null 2>&1
+    echo "nomount: card refreshed ($_rules rules, $_mstate, $_health)" > /dev/kmsg 2>/dev/null
+fi
 exit 0

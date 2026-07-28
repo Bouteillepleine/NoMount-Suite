@@ -125,11 +125,34 @@ if command -v ksud >/dev/null 2>&1; then
         if [ "$_o" = 1 ] && [ "$_v" = 1 ]; then _t="vfs + overlay"; _ov="$_ov $mid";
         elif [ "$_o" = 1 ]; then _t="overlay"; _ov="$_ov $mid";
         else _t="vfs"; _vf="$_vf $mid"; fi
+        # How many rules this module actually got, and whether it owns any mount. The
+        # rule count is the honest measure of "is this module being served" — a module
+        # can be enabled and still contribute nothing. A non-zero mount count is the only
+        # thing that breaks the zero-mount posture, so it is called out per module.
+        _n=$("$NM_BIN" list 2>/dev/null | grep -c "/data/adb/modules/$mid/")
+        _m=$(grep -cE "/data/adb/modules/$mid(/|$)" /proc/self/mountinfo 2>/dev/null || echo 0)
+        _badge="$_t · $_n served"
+        [ "${_m:-0}" -gt 0 ] && _badge="$_badge · ⚠ $_m mount(s)"
         _orig=$(sed -n 's/^description=//p' "$d/module.prop" | head -1)
-        KSU_MODULE="$mid" ksud module config set --temp override.description "[NoMount - $_t] $_orig" >/dev/null 2>&1
+        KSU_MODULE="$mid" ksud module config set --temp override.description \
+            "[NoMount · $_badge] $_orig" >/dev/null 2>&1
     done
-    KSU_MODULE=meta-nomount ksud module config set --temp override.description \
-        "NoMount Suite - fully mountless: hookless VFS + hookless RRO overlays. vfs:$_vf | overlay:$_ov" >/dev/null 2>&1
+
+    # The Suite's own card doubles as the at-a-glance status readout, so put the live
+    # numbers there rather than restating the tagline the module.prop already carries.
+    _rules=$("$NM_BIN" list 2>/dev/null | wc -l)
+    _rro=$("$NM_BIN" list 2>/dev/null | grep -c '/overlay/[^ ]*\.apk')
+    _mods=0
+    for _x in $_vf $_ov; do _mods=$((_mods + 1)); done
+    _list=""
+    [ -n "$_vf" ] && _list="vfs:$_vf"
+    [ -n "$_ov" ] && _list="$_list${_list:+ | }overlay:$_ov"
+    if [ -f "$NMDIR/disabled" ]; then
+        _desc="[NoMount ⛔ disabled] bootloop guard tripped — open WebUI › Tools › Last incident"
+    else
+        _desc="[NoMount ✅ $_rules rules · $_rro RRO · $_mods modules] fully mountless — hookless VFS + RRO, no overlayfs, su via sucompat${_list:+. $_list}"
+    fi
+    KSU_MODULE=meta-nomount ksud module config set --temp override.description "$_desc" >/dev/null 2>&1
 fi
 
 ksud kernel notify-module-mounted 2>/dev/null
