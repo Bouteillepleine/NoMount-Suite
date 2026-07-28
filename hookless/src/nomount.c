@@ -788,11 +788,20 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
     struct nm_inode_info *info = dir->i_private;
     const char *name = dentry->d_name.name;
     size_t len = dentry->d_name.len;
+    bool blocked = nomount_is_uid_blocked(current_uid().val);
+    bool have_rule = false;
 
     if (info && info->dir_node) {
         u32 v_hash = full_name_hash(NULL, name, len);
         struct nomount_rule *c_rule = nomount_find_child_rule(info->dir_node, name, len, v_hash);
-        if (c_rule) {
+        have_rule = (c_rule != NULL);
+        /* A blocked reader must get the stock view here too, not just at the top
+         * level: skip the injection and fall through to the real dir below (or to
+         * a negative for a purely synthesized dir). In practice such a reader
+         * cannot resolve the virtual parent in the first place, so this is the
+         * belt to that braces -- it keeps the per-UID rule true of this path on
+         * its own terms rather than by relying on the parent lookup failing. */
+        if (c_rule && !blocked) {
             /* Install our dentry ops on every dentry we manage. Without this the
              * child inherits sb->s_d_op: harmless on a normal fs (NULL), but on an
              * overlayfs sb it is ovl_dentry_operations, whose d_revalidate/d_real
@@ -805,6 +814,18 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
                 if (new_inode) { nm_install_dentry_ops(dentry); return d_splice_alias(new_inode, dentry); }
             }
         }
+    }
+
+    /* Blocked reader on a name we DO inject: tag the stock/negative dentry that is
+     * about to be cached so it is evicted on last dput and cannot hide the
+     * injection from other UIDs (same reasoning as the top-level fallback). Gate on
+     * a rule existing, else ordinary files under this dir would be needlessly
+     * uncached. */
+    if (blocked && have_rule) {
+        nm_install_dentry_ops(dentry);
+#ifdef DCACHE_DONTCACHE
+        dentry->d_flags |= DCACHE_DONTCACHE;
+#endif
     }
 
     if (r_dir && r_dir->i_op && r_dir->i_op->lookup)
