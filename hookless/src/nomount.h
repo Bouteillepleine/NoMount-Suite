@@ -24,8 +24,19 @@
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
 #define NM_FLAG_WHITEOUT    (1 << 2)
 
-/* logs */
+/* logs
+ *
+ * nm_debug is compiled OUT by default. The hijacked lookup path logs once per
+ * injected file, so a normal module set produced ~300 lines a boot, and the
+ * per-rule messages additionally spelled out every target -> backing mapping in
+ * the kernel ring buffer. Build with -DNOMOUNT_DEBUG to get them back.
+ * no_printk() keeps the format string and arguments type-checked (so the calls
+ * cannot rot) while generating no code. */
+#ifdef NOMOUNT_DEBUG
 #define nm_debug(fmt, ...) printk(KERN_DEBUG "NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
+#else
+#define nm_debug(fmt, ...) no_printk("NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
+#endif
 #define nm_info(fmt, ...) printk(KERN_INFO "NoMount: " fmt, ##__VA_ARGS__)
 #define nm_warn(fmt, ...) printk(KERN_WARNING "NoMount: [WARN] " fmt, ##__VA_ARGS__)
 #define nm_err(fmt, ...)  printk(KERN_ERR "NoMount: [ERROR] " fmt, ##__VA_ARGS__)

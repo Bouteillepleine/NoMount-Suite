@@ -1460,7 +1460,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
              memcmp(nm_get_vpath(existing), nm_get_vpath(rule), v_len) == 0) {
             hash_del_rcu(&existing->vpath_node);
             victim = existing;
-            nm_info("Shadowing existing rule for: %s\n", nm_get_vpath(rule));
+            nm_debug("Shadowing existing rule for: %s\n", nm_get_vpath(rule));
             break;
         }
     }
@@ -1485,9 +1485,9 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     }
 
     if (flags & NM_FLAG_WHITEOUT)
-        nm_info("Successfully added whiteout rule: %s\n", nm_get_vpath(rule));
+        nm_debug("Successfully added whiteout rule: %s\n", nm_get_vpath(rule));
     else
-        nm_info("Successfully added injection rule: %s -> %s\n", nm_get_vpath(rule), nm_get_rpath(rule));
+        nm_debug("Successfully added injection rule: %s -> %s\n", nm_get_vpath(rule), nm_get_rpath(rule));
         
     return 0;
 }
@@ -1603,7 +1603,7 @@ static int nomount_genl_del_rule(struct sk_buff *skb, struct genl_info *info)
     synchronize_rcu();
 
     hlist_for_each_entry_safe(rule, tmp, &r_victims, vpath_node) {
-        nm_info("Deleted rule for: %s\n", nm_get_vpath(rule));
+        nm_debug("Deleted rule for: %s\n", nm_get_vpath(rule));
         nm_free_rule(rule);
     }
 
