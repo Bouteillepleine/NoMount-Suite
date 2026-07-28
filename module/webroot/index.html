@@ -263,16 +263,28 @@
   .banner { background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.3); color: #ffe6a8; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: none; line-height: 1.5; }
   .foot { text-align: center; color: var(--faint); font-size: 11px; margin-top: 16px; line-height: 1.7; }
 
+  /* The surface is themed, not hardcoded: it used to be a fixed dark #141926 with
+     color:var(--txt), so in light mode it became near-black text on a near-black
+     box — an unreadable black rectangle. It also has to clear the floating nav
+     capsule (same z-index, bottom:24px) instead of landing on top of it. */
   #toast {
-    position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom));
+    position: fixed; left: 50%;
+    bottom: calc(96px + env(safe-area-inset-bottom));
     transform: translate(-50%, 22px); opacity: 0; pointer-events: none;
-    background: #141926; border: 1px solid var(--brd); color: var(--txt); padding: 12px 18px;
+    background: #141926; border: 1px solid var(--brd); color: #eaeef7; padding: 12px 18px;
     border-radius: 13px; font-size: 13px; font-weight: 640; box-shadow: var(--shadow);
-    transition: .28s cubic-bezier(.2,.8,.2,1); max-width: 90vw; z-index: 60; text-align: center;
+    transition: .28s cubic-bezier(.2,.8,.2,1); max-width: 90vw; z-index: 80; text-align: center;
   }
   #toast.show { opacity: 1; transform: translate(-50%, 0); }
   #toast.ok  { border-color: rgba(53,210,154,0.42); }
   #toast.bad { border-color: rgba(248,113,122,0.42); }
+  html[data-theme="light"] #toast {
+    background: #ffffff; color: #101725;
+    border-color: rgba(16,26,48,.12);
+    box-shadow: 0 12px 30px rgba(20,32,64,.20), 0 2px 6px rgba(20,32,64,.10);
+  }
+  html[data-theme="light"] #toast.ok  { border-color: rgba(14,154,108,.45); }
+  html[data-theme="light"] #toast.bad { border-color: rgba(210,58,68,.45); }
 
   .spin { animation: spin .9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
