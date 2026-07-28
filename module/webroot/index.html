@@ -168,6 +168,24 @@
   .uidbar input:focus { border-color: var(--acc); }
   .uidbar .act { flex: 1 1 0; }
 
+  /* toggle switch (spoofing controls) */
+  .swrow { display: flex; align-items: center; gap: 12px; padding: 12px 2px; border-top: 1px solid rgba(255,255,255,0.055); }
+  .swrow:first-child { border-top: none; }
+  .swrow .swi { flex: 1; min-width: 0; }
+  .swrow .swi .lbl { font-size: 13.5px; font-weight: 640; }
+  .swrow .swi .val { font-size: 11.5px; color: var(--muted); margin-top: 3px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .switch { position: relative; width: 46px; height: 27px; flex: none; }
+  .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .switch .sl { position: absolute; inset: 0; border-radius: 999px; background: rgba(255,255,255,0.14); border: 1px solid var(--brd2); transition: .22s; pointer-events: none; }
+  .switch .sl::before { content: ""; position: absolute; width: 21px; height: 21px; left: 2px; top: 2px; border-radius: 50%; background: #fff; transition: .22s; box-shadow: 0 2px 5px rgba(0,0,0,.35); }
+  .switch input:checked + .sl { background: linear-gradient(135deg, var(--acc), var(--acc2)); border-color: transparent; }
+  .switch input:checked + .sl::before { transform: translateX(19px); }
+  html[data-theme="light"] .switch .sl { background: rgba(16,26,48,0.14); }
+  .txin { display: block; width: 100%; background: rgba(0,0,0,0.26); border: 1px solid var(--brd2); color: var(--txt); border-radius: 13px; padding: 12px 14px; font-size: 12.5px; outline: none; margin-top: 9px; font-family: var(--mono); }
+  .txin:focus { border-color: var(--acc); }
+  .txin::placeholder { color: var(--faint); }
+  html[data-theme="light"] .txin { background: rgba(16,26,48,0.05); }
+
   .banner { background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.3); color: #ffe6a8; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: none; line-height: 1.5; }
   .foot { text-align: center; color: var(--faint); font-size: 11px; margin-top: 16px; line-height: 1.7; }
 
@@ -515,6 +533,55 @@
   </section>
 
   <section class="tab" id="tab-tools">
+
+  <!-- SPOOFING -->
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>
+      <h2>Spoofing</h2><span class="chip" id="spchip">—</span>
+    </div>
+    <div class="list">
+      <div class="swrow">
+        <div class="swi">
+          <div class="lbl">Verified-boot hash</div>
+          <div class="val" id="spVbVal">…</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="spVb" onchange="toggleSpoof('vbmeta_digest',this)"><span class="sl"></span></label>
+      </div>
+      <div class="swrow">
+        <div class="swi">
+          <div class="lbl">Kernel uname</div>
+          <div class="val" id="spUnVal">…</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="spUn" onchange="toggleUname(this)"><span class="sl"></span></label>
+      </div>
+    </div>
+
+    <!-- advanced: pin exact uname strings (spoof_uname=custom) -->
+    <div id="unadv" style="display:none">
+      <div class="list">
+        <div class="swrow">
+          <div class="swi">
+            <div class="lbl">Pin exact strings</div>
+            <div class="val">override the auto-derived clean uname</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="spUnCustom" onchange="toggleCustomUname(this)"><span class="sl"></span></label>
+        </div>
+      </div>
+      <div id="unfields" style="display:none">
+        <input class="txin" id="spKv" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="uname -r  ·  e.g. 6.1.75-android14-11-gccd1a99a2b3c-ab12345678" />
+        <input class="txin" id="spKb" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="uname -v  ·  e.g. #1 SMP PREEMPT Fri Aug 23 03:08:10 UTC 2024" />
+        <div class="btns">
+          <button class="act" onclick="fillCurrentUname()">Use current</button>
+          <button class="act primary" onclick="saveCustomUname(this)">Save strings</button>
+        </div>
+        <p class="note">Leave a field as <code>default</code> (or empty) to keep the real value for that one. Saved to <code>spoof.conf</code>; applied at next boot or via <b>Apply now</b>.</p>
+      </div>
+    </div>
+
+    <div class="btns"><button class="act primary" onclick="applySpoof(this)">Apply now</button></div>
+    <p class="note" id="spNote">Dynamic <code>ro.boot.vbmeta.digest</code> — computed on-device from the AVB chain, no manual paste — and a clean kernel <code>uname</code> via NoMount's own kernel hook (no SUSFS). Changes take effect at next boot; <b>Apply now</b> re-runs them immediately where possible.</p>
+  </div>
 
   <!-- HEALTH CHECK -->
   <div class="card">
@@ -980,13 +1047,102 @@
     btn.disabled = false;
   }
 
+  // ---- spoofing (vbmeta.digest + uname) ----
+  async function refreshSpoof() {
+    const conf = (await exec("cat /data/adb/nomount/spoof.conf 2>/dev/null")).stdout;
+    const get = (k, d) => { const m = conf.match(new RegExp("^" + k + "=(.*)$", "m")); return m ? m[1].trim() : d; };
+    const vb = get("vbmeta_digest", "auto");
+    const un = get("spoof_uname", "auto");
+    $("spVb").checked = vb !== "off";
+    $("spUn").checked = un !== "off";
+    $("spUnCustom").checked = un === "custom";
+    $("unadv").style.display = un !== "off" ? "" : "none";
+    $("unfields").style.display = un === "custom" ? "" : "none";
+    const kvC = get("kernel_version", "default");
+    const kbC = get("kernel_build", "default");
+    $("spKv").value = kvC === "default" ? "" : kvC;
+    $("spKb").value = kbC === "default" ? "" : kbC;
+
+    const dig = (await exec("getprop ro.boot.vbmeta.digest")).stdout.trim();
+    $("spVbVal").textContent = dig
+      ? dig.slice(0, 16) + "… (" + dig.length + " hex)"
+      : "empty — set at next boot";
+
+    const r = (await exec("uname -r")).stdout.trim();
+    $("spUnVal").textContent = r || "?";
+
+    // which uname mechanism is available on this kernel
+    const sysfs = (await exec("[ -w /sys/kernel/nomount/uname_release ] && echo 1")).stdout.trim() === "1";
+    const susfs = (await exec("[ -x /data/adb/ksu/bin/ksu_susfs ] && echo 1")).stdout.trim() === "1";
+    const chip = $("spchip");
+    if (sysfs) { chip.textContent = "kernel · SUSFS-free"; chip.className = "chip ok"; }
+    else if (susfs) { chip.textContent = "susfs fallback"; chip.className = "chip warn"; }
+    else { chip.textContent = "uname: no hook"; chip.className = "chip"; }
+  }
+  // single-quote a string for safe use in a shell command
+  function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+  async function setConf(key, val) {
+    // rewrite the key line without sed, so arbitrary values (spaces, / # &, the
+    // '#1 SMP PREEMPT …' build string) are written verbatim and safely.
+    await exec(
+      "f=/data/adb/nomount/spoof.conf; [ -f \"$f\" ] || : > \"$f\"; " +
+      "grep -v '^" + key + "=' \"$f\" > \"$f.tmp\" 2>/dev/null; mv \"$f.tmp\" \"$f\"; " +
+      "printf '%s=%s\\n' " + shq(key) + " " + shq(val) + " >> \"$f\""
+    );
+  }
+  async function toggleSpoof(key, el) {
+    await setConf(key, el.checked ? "auto" : "off");
+    toast(el.checked ? "Enabled — reboot or Apply now" : "Off at next boot", "ok");
+  }
+
+  // uname: main switch (off | auto | custom) + advanced "pin exact strings"
+  async function toggleUname(el) {
+    const mode = el.checked ? ($("spUnCustom").checked ? "custom" : "auto") : "off";
+    await setConf("spoof_uname", mode);
+    $("unadv").style.display = el.checked ? "" : "none";
+    toast(el.checked ? "uname spoof on — reboot or Apply now" : "uname spoof off at next boot", "ok");
+  }
+  async function toggleCustomUname(el) {
+    $("unfields").style.display = el.checked ? "" : "none";
+    if (el.checked && !$("spKv").value && !$("spKb").value) {
+      $("spKv").value = (await exec("uname -r")).stdout.trim();
+      $("spKb").value = (await exec("uname -v")).stdout.trim();
+    }
+    await setConf("spoof_uname", $("spUn").checked ? (el.checked ? "custom" : "auto") : "off");
+    toast(el.checked ? "Custom uname — edit the strings, then Save" : "Back to auto-derived uname", "ok");
+  }
+  async function fillCurrentUname() {
+    $("spKv").value = (await exec("uname -r")).stdout.trim();
+    $("spKb").value = (await exec("uname -v")).stdout.trim();
+    toast("Filled from current kernel", "ok");
+  }
+  async function saveCustomUname(btn) {
+    btn.disabled = true;
+    const kv = $("spKv").value.trim() || "default";
+    const kb = $("spKb").value.trim() || "default";
+    await setConf("kernel_version", kv);
+    await setConf("kernel_build", kb);
+    await setConf("spoof_uname", "custom");
+    $("spUn").checked = true; $("spUnCustom").checked = true;
+    $("unadv").style.display = ""; $("unfields").style.display = "";
+    toast("Saved — reboot or Apply now", "ok");
+    btn.disabled = false;
+  }
+  async function applySpoof(btn) {
+    btn.disabled = true; const t = btn.textContent; btn.textContent = "Applying…";
+    await exec("sh /data/adb/modules/meta-nomount/spoof.sh 2>&1");
+    toast("Applied", "ok");
+    btn.textContent = t; btn.disabled = false;
+    refreshSpoof();
+  }
+
   async function refreshAll(btn) {
     const ic = btn && btn.querySelector("svg");
     if (ic) ic.classList.add("spin");
     const v = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
     $("ver").textContent = v || "v?";
     $("footver").textContent = v ? ("Suite " + v) : "";
-    await Promise.all([refreshStatus(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshIncident()]);
+    await Promise.all([refreshStatus(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshIncident(), refreshSpoof()]);
     if (rulesShown) loadRules();
     if (ic) ic.classList.remove("spin");
   }

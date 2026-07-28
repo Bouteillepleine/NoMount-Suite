@@ -65,6 +65,7 @@ SCRIPTS=(
     metamount.sh
     post-fs-data.sh
     service.sh
+    spoof.sh
 )
 
 declare -A ABI_TARGET=(

@@ -44,6 +44,12 @@ if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
     fi
 fi
 
+# --- spoof add-on (dynamic vbmeta.digest + uname) ---
+# Runs in this post-fs-data stage so the props are in place and uname is spoofed
+# before zygote/system_server come up. Best-effort: it never aborts the boot, and
+# it is kept separate from the mount pass so a spoof failure can't affect mounting.
+[ -f "$MODDIR/spoof.sh" ] && sh "$MODDIR/spoof.sh" 2>/dev/null
+
 # --- bootloop guard ---
 GUARD_MAX=3
 COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
