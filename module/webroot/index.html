@@ -139,6 +139,7 @@
   .tag.suite { background: rgba(255,255,255,0.08); color: var(--txt); }
   .tag.off   { background: rgba(139,147,167,0.15); color: var(--muted); }
   .tag.warn  { background: rgba(251,191,36,0.15);  color: var(--warn); }
+  .tag.ok    { background: rgba(53,210,154,0.15);  color: var(--ok); }
   .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
   .note { color: var(--muted); font-size: 12px; line-height: 1.55; margin: 12px 0 0; }
   code { font-family: var(--mono); background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
@@ -205,40 +206,176 @@
 
   .nav {
     pointer-events: auto;
+    position: relative;
     display: flex; gap: 4px; padding: 7px;
-    border-radius: 24px;
-    background: color-mix(in srgb, var(--card) 88%, transparent);
-    border: 1px solid transparent;
-    background-image:
-      linear-gradient(color-mix(in srgb, var(--card) 88%, transparent), color-mix(in srgb, var(--card) 88%, transparent)),
-      linear-gradient(140deg, rgba(255,255,255,.45), rgba(255,255,255,.10) 45%, rgba(255,255,255,.18));
-    background-origin: border-box;
-    background-clip: padding-box, border-box;
-    box-shadow: 0 8px 28px rgba(0,0,0,.45), 0 1px 0 rgba(255,255,255,.05) inset;
+    border-radius: 26px;
+    border: 1px solid var(--brd);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.018)),
+      linear-gradient(180deg, rgba(14,18,32,.92), rgba(8,10,17,.96));
+    box-shadow:
+      0 14px 38px rgba(0,0,0,.55),
+      0 2px 10px rgba(0,0,0,.35),
+      inset 0 1px 0 rgba(255,255,255,.10),
+      inset 0 -1px 0 rgba(0,0,0,.35);
     max-width: 100%;
   }
   @supports (backdrop-filter: blur(20px)) {
-    .nav { backdrop-filter: blur(22px) saturate(150%); -webkit-backdrop-filter: blur(22px) saturate(150%); }
+    .nav {
+      backdrop-filter: blur(24px) saturate(160%);
+      -webkit-backdrop-filter: blur(24px) saturate(160%);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)),
+        linear-gradient(180deg, rgba(14,18,32,.62), rgba(8,10,17,.72));
+    }
   }
+  /* top edge catch-light — sells the glass as a raised surface */
+  .nav::before {
+    content: ""; position: absolute; inset: 0 14% auto 14%; height: 1px;
+    border-radius: 1px; pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.34), transparent);
+  }
+
   .navb {
     -webkit-tap-highlight-color: transparent;
-    appearance: none; border: 0; cursor: pointer;
+    appearance: none; border: 1px solid transparent; cursor: pointer;
+    position: relative; isolation: isolate;
     background: transparent; color: var(--muted);
-    min-width: 56px; height: 58px; padding: 0 12px;
-    border-radius: 18px;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    min-width: 60px; height: 58px; padding: 0 12px;
+    border-radius: 19px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
     font: 600 11px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     letter-spacing: .01em;
-    transition: background .18s ease, color .18s ease, transform .18s ease;
+    transition: color .2s ease, transform .2s cubic-bezier(.2,.7,.3,1),
+                border-color .2s ease, box-shadow .2s ease;
   }
-  .navb svg { width: 21px; height: 21px; }
-  .navb:active { transform: scale(.94); }
-  .navb.on { color: var(--fg); background: color-mix(in srgb, var(--accent) 20%, transparent); }
+  .navb svg {
+    width: 21px; height: 21px;
+    stroke: currentColor;
+    /* engraved look when idle: a dark bottom edge under the stroke */
+    filter: drop-shadow(0 1.5px 0 rgba(0,0,0,.55));
+    transition: transform .2s cubic-bezier(.2,.7,.3,1), filter .2s ease;
+  }
+  .navb:active { transform: scale(.93); }
+  .navb:not(.on):hover { color: #b7c0d4; }
+
+  /* ACTIVE: the bounding capsule — module gradient, raised, lit from top-left */
+  .navb.on {
+    color: var(--txt);
+    border-color: rgba(124,156,255,.42);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.02)),
+      linear-gradient(135deg, rgba(124,156,255,.34), rgba(87,230,195,.22));
+    box-shadow:
+      0 6px 16px rgba(124,156,255,.30),
+      0 2px 6px rgba(0,0,0,.40),
+      inset 0 1px 0 rgba(255,255,255,.30),
+      inset 0 -2px 6px rgba(0,0,0,.28);
+    transform: translateY(-2px);
+  }
+  .navb.on svg {
+    stroke: url(#navGrad);
+    transform: translateY(-.5px) scale(1.06);
+    filter: drop-shadow(0 1px 0 rgba(0,0,0,.5)) drop-shadow(0 0 7px rgba(124,156,255,.55));
+  }
+  .navb.on span:not(.nbdot) {
+    background: linear-gradient(135deg, #ffffff, #cfe0ff 60%, #9df0dc);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .navb, .navb svg { transition: none; }
+    .navb.on { transform: none; }
+  }
+
   .navb .nbdot { display: none; }
   .navb.alert .nbdot {
-    display: block; position: absolute; margin: -26px 0 0 22px;
-    width: 7px; height: 7px; border-radius: 50%; background: var(--bad);
+    display: block; position: absolute; top: 9px; right: 12px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--bad);
+    box-shadow: 0 0 0 2px rgba(8,10,17,.9), 0 0 8px rgba(248,113,122,.8);
   }
+
+  /* ---- light theme -------------------------------------------------------
+     Same hues, re-weighted for a light ground: the accents are darkened so they
+     still pass as readable text/!icon colour on white, which the dark-theme
+     values (#7c9cff / #57e6c3) do not. */
+  html[data-theme="light"] {
+    --bg:      #eef1f8;
+    --bg2:     #ffffff;
+    --card:    rgba(16,26,48,0.040);
+    --card2:   rgba(16,26,48,0.022);
+    --brd:     rgba(16,26,48,0.105);
+    --brd2:    rgba(16,26,48,0.070);
+    --txt:     #101725;
+    --muted:   #576179;
+    --faint:   #7a8497;
+    --acc:     #3f63e0;
+    --acc2:    #0f9e84;
+    --ok:      #0e9a6c;
+    --warn:    #a46a00;
+    --bad:     #d23a44;
+    --shadow:  0 12px 30px rgba(20,32,64,0.13);
+  }
+  html[data-theme="light"] body { color: var(--txt); }
+  html[data-theme="light"] h1 {
+    background-image: linear-gradient(90deg, #0d1220, #33499f);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  html[data-theme="light"] .metric { background: rgba(16,26,48,0.045); }
+  html[data-theme="light"] .row { border-top-color: rgba(16,26,48,0.075); }
+  html[data-theme="light"] .tag.suite { background: rgba(16,26,48,0.075); }
+  html[data-theme="light"] code { background: rgba(16,26,48,0.06); }
+  html[data-theme="light"] .nav {
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.90), rgba(255,255,255,.72)),
+      linear-gradient(180deg, rgba(236,240,250,.95), rgba(226,232,245,.98));
+    box-shadow:
+      0 14px 34px rgba(20,32,64,.18),
+      0 2px 8px rgba(20,32,64,.10),
+      inset 0 1px 0 rgba(255,255,255,.85),
+      inset 0 -1px 0 rgba(16,26,48,.10);
+  }
+  @supports (backdrop-filter: blur(20px)) {
+    html[data-theme="light"] .nav {
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.72), rgba(255,255,255,.52)),
+        linear-gradient(180deg, rgba(236,240,250,.60), rgba(226,232,245,.70));
+    }
+  }
+  html[data-theme="light"] .nav::before {
+    background: linear-gradient(90deg, transparent, rgba(16,26,48,.16), transparent);
+  }
+  html[data-theme="light"] .navb svg { filter: drop-shadow(0 1px 0 rgba(255,255,255,.9)); }
+  html[data-theme="light"] .navb.on {
+    border-color: rgba(63,99,224,.45);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.85), rgba(255,255,255,.45)),
+      linear-gradient(135deg, rgba(63,99,224,.26), rgba(15,158,132,.20));
+    box-shadow:
+      0 6px 16px rgba(63,99,224,.26),
+      0 2px 6px rgba(20,32,64,.16),
+      inset 0 1px 0 rgba(255,255,255,.95),
+      inset 0 -2px 6px rgba(16,26,48,.10);
+  }
+  html[data-theme="light"] .navb.on svg {
+    filter: drop-shadow(0 1px 0 rgba(255,255,255,.9)) drop-shadow(0 0 6px rgba(63,99,224,.45));
+  }
+  html[data-theme="light"] .navb.on span:not(.nbdot) {
+    background-image: linear-gradient(135deg, #0d1220, #2b3f96 60%, #0c7f6b);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  html[data-theme="light"] .navb.alert .nbdot { box-shadow: 0 0 0 2px #fff, 0 0 8px rgba(210,58,68,.7); }
+  html[data-theme="light"] .banner { color: #6b4d00; }
+  html[data-theme="light"] button.act.danger {
+    color: #a3252e; border-color: rgba(210,58,68,0.40); background: rgba(210,58,68,0.08);
+  }
+  html[data-theme="light"] button.act.primary { color: #ffffff; }
+  html[data-theme="light"] .logo svg { stroke: #ffffff; }
+
+  /* theme toggle icon swap */
+  .iconbtn .ico-moon { display: none; }
+  html[data-theme="light"] .iconbtn .ico-moon { display: block; }
+  html[data-theme="light"] .iconbtn .ico-sun  { display: none; }
 </style>
 </head>
 <body>
@@ -255,6 +392,10 @@
     </div>
     <div class="hbtns">
       <span class="ver" id="ver">v…</span>
+      <button class="iconbtn" id="themeBtn" onclick="toggleTheme()" title="Light / dark theme" aria-label="Toggle theme">
+        <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2.4M12 19.2v2.4M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2.4 12h2.4M19.2 12h2.4M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7"/></svg>
+        <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.4 8.4 0 1 0 10.5 10.5z"/></svg>
+      </button>
       <button class="iconbtn" id="refreshBtn" onclick="refreshAll(this)" title="Refresh">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
       </button>
@@ -394,10 +535,19 @@
 
   </section>
 
-  <div class="foot">NoMount Suite · hookless engine via netlink <code>nm</code><br/><span id="footver"></span></div>
+  <div class="foot">NoMount Suite · hookless engine via netlink <code>nm</code><br/>by maxsteeel &amp; XxxY<br/><span id="footver"></span></div>
 </div>
 
 
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <defs>
+    <linearGradient id="navGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="#a9c0ff"/>
+      <stop offset="55%"  stop-color="#7c9cff"/>
+      <stop offset="100%" stop-color="#57e6c3"/>
+    </linearGradient>
+  </defs>
+</svg>
 <nav class="navwrap" role="tablist" aria-label="Sections">
   <div class="nav">
     <button class="navb on" id="nb-status" role="tab" aria-selected="true" onclick="showTab('status',this)">
@@ -566,6 +716,26 @@
   }
 
 
+
+  // ---- theme ----
+  // Default follows the system; an explicit choice is remembered.
+  function applyTheme(t) {
+    document.documentElement.setAttribute("data-theme", t);
+    try { localStorage.setItem("nm_theme", t); } catch (e) {}
+  }
+  function toggleTheme() {
+    const cur = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+    applyTheme(cur === "light" ? "dark" : "light");
+  }
+  (function initTheme() {
+    let t = null;
+    try { t = localStorage.getItem("nm_theme"); } catch (e) {}
+    if (t !== "light" && t !== "dark") {
+      t = (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) ? "light" : "dark";
+    }
+    document.documentElement.setAttribute("data-theme", t);
+  })();
+
   // ---- tabs ----
   function showTab(name, btn) {
     document.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("on"); });
@@ -657,7 +827,8 @@
       '[ -n "$(find $roots -type f ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
       'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
       'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
-      'echo "$id|$st|$mech|$cnt"; done'
+      'mnt=$(grep -cE "/data/adb/modules/$id(/|$)" /proc/self/mountinfo 2>/dev/null); ' +
+      'echo "$id|$st|$mech|$cnt|$mnt"; done'
     )).stdout.trim();
     if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
     const rows = out.split("\n").filter(Boolean);
@@ -667,6 +838,7 @@
       const p = l.split("|");
       const id = p[0];
       const cnt = parseInt(p[3] || "0", 10);
+      const mnt = parseInt(p[4] || "0", 10);
       let label, cls, showCnt = false;
       if (p[1] === "suite") { label = "suite"; cls = "suite"; }
       else if (p[1] === "su") { label = "su backend"; cls = "su"; served++; }
@@ -680,7 +852,13 @@
         else { label = "empty"; cls = "off"; }
       }
       const files = (showCnt && cnt > 0) ? `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${cnt} file${cnt > 1 ? "s" : ""}</span>` : "";
-      return `<div class="row"><span class="name">${esc(id)}</span>${files}<span class="tag ${cls}">${label}</span></div>`;
+      // Visibility: a module is only "hidden" if nothing it owns appears in the mount
+      // table. NoMount-served modules are mountless by construction; a module that
+      // mounts on its own is visible to any scanner reading /proc/*/mountinfo.
+      const vis = mnt > 0
+        ? `<span class="tag warn" title="This module has ${mnt} mount(s) of its own in the mount table — visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
+        : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
+      return `<div class="row"><span class="name">${esc(id)}</span>${files}${vis}<span class="tag ${cls}">${label}</span></div>`;
     }).join("");
     $("mMod").textContent = served;
   }
