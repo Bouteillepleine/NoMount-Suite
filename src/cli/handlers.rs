@@ -45,14 +45,6 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
         }
         UidAction::Unblock { uid } => {
             nm.uid_unblock(uid)?;
-            // While a UID is blocked, its lookup of an injected path installs a shared
-            // negative dentry that also hides that path from unblocked readers (root and
-            // other apps) until the dcache is evicted — verified on-device: the injected
-            // file stays ENOENT after unblock until `drop_caches`. Drop dentries+inodes
-            // here (mode 2, slab only — not page cache) so unhiding actually restores the
-            // injected view. This is a stopgap for a kernel-side d_revalidate limitation;
-            // it does not stop re-poisoning while the block is still active.
-            let _ = std::fs::write("/proc/sys/vm/drop_caches", "2\n");
             println!("ok");
         }
     }
