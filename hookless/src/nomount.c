@@ -866,15 +866,22 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
     return proxy->orig->set(proxy->orig, IDMAP_CALL dentry, inode, name, buffer, size, flags);
 }
 
-/* Return 0 from d_revalidate to force a re-resolve, but unhash a NEGATIVE dentry
- * first. The VFS's d_invalidate() is a no-op on negatives, so a stale negative
- * otherwise stays hashed and the re-lookup just finds it again -- the path stays
- * ENOENT until drop_caches/reboot. That is what let a blocked reader's fallback-
- * cached negative hide an injected path from unblocked readers too. Positive
- * dentries are unhashed correctly by the VFS, so they need nothing extra. */
+/* Return 0 from d_revalidate to force a re-resolve. For a BLOCKED reader also
+ * unhash a NEGATIVE dentry first: the VFS's d_invalidate() is a no-op on
+ * negatives, so a stale negative otherwise stays hashed and the re-lookup just
+ * finds it again -- that is what let a blocked reader's fallback-cached negative
+ * hide an injected path from unblocked readers too.
+ *
+ * DO NOT d_drop for a normal (non-blocked) reader. Evicting negatives on revalidate
+ * makes an injected directory refuse to cache negative lookups -- abnormal versus a
+ * stock dir, and a self-consistency detector (Holmes "Narcissus") flags the
+ * asymmetry as "Something Wrong". A normal reader must behave byte-identically to
+ * pre-per-UID (plain re-resolve, negative stays cached). The blocked reader's
+ * poisoned negative is in any case already evicted at lookup by DCACHE_DONTCACHE on
+ * >=5.13; this d_drop is the pre-DONTCACHE fallback and stays gated to that path. */
 static inline int nm_reval_stale(struct dentry *dentry)
 {
-    if (d_is_negative(dentry))
+    if (nomount_is_uid_blocked(current_uid().val) && d_is_negative(dentry))
         d_drop(dentry);
     return 0;
 }
