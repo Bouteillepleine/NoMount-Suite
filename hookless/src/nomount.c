@@ -44,7 +44,45 @@ static __always_inline struct nomount_dir_node *nomount_get_dir_node(struct inod
     return NULL;
 }
 
-static __always_inline struct nomount_rule *nomount_find_child_rule(struct nomount_dir_node *dir_node, const char *name, size_t len, u32 hash)
+/* Lockless read path: snapshot the needed fields under RCU and path_get() the
+ * backing path, so callers never dereference the rule after rcu_read_unlock().
+ * Returns true if a rule visible to the current UID was found; on true the caller
+ * owns rule_info->r_path and must path_put() it (when r_path.dentry != NULL). */
+static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_node, const char *name, size_t len, u32 hash, struct nm_rule_info *rule_info)
+{
+    struct nomount_child_node *child;
+    bool found = false;
+    int id;
+
+    if (unlikely(!dir_node)) return false;
+    rule_info->r_path.dentry = NULL;
+    rule_info->r_path.mnt = NULL;
+
+    rcu_read_lock();
+    idr_for_each_entry(&dir_node->children_idr, child, id) {
+        if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
+            struct nomount_rule *rule = child->rule;
+            if (rule && (rule->target_uid == 0 || rule->target_uid == current_uid().val)) {
+                rule_info->flags = rule->flags;
+                rule_info->v_ino = rule->v_ino;
+                rule_info->this_dir = rule->this_dir;
+                if (rule->r_path.dentry) {
+                    rule_info->r_path = rule->r_path;
+                    path_get(&rule_info->r_path);
+                }
+                found = true;
+            }
+            break;
+        }
+    }
+    rcu_read_unlock();
+    return found;
+}
+
+/* Write path: returns the raw rule pointer. ONLY safe to call while holding
+ * nomount_write_mutex, which blocks the detach+free path -- so the returned rule
+ * cannot be freed while the caller uses it. Also guards against a NULL child->rule. */
+static __always_inline struct nomount_rule *nomount_get_rule_locked(struct nomount_dir_node *dir_node, const char *name, size_t len, u32 hash)
 {
     struct nomount_child_node *child;
     struct nomount_rule *found = NULL;
@@ -53,7 +91,7 @@ static __always_inline struct nomount_rule *nomount_find_child_rule(struct nomou
     rcu_read_lock();
     idr_for_each_entry(&dir_node->children_idr, child, id) {
         if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
-            if (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val) {
+            if (child->rule && (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val)) {
                 found = child->rule;
             }
             break;
@@ -127,7 +165,7 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
     rcu_read_unlock();
 }
 
-static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nomount_rule *rule)
+static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nm_rule_info *rule_info)
 {
     struct inode *inode;
     struct nm_inode_info *info;
@@ -141,21 +179,21 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         return NULL;
     }
 
-    info->flags = rule->flags;
-    info->dir_node = rule->this_dir;
-    if (rule->flags & NM_FLAG_VIRTUAL_DIR) {
+    info->flags = rule_info->flags;
+    info->dir_node = rule_info->this_dir;
+    if (rule_info->flags & NM_FLAG_VIRTUAL_DIR) {
         info->r_path.dentry = NULL;
         info->r_path.mnt = NULL;
     } else {
-        info->r_path = rule->r_path;
+        info->r_path = rule_info->r_path;
         path_get(&info->r_path);
     }
 
-    info->v_ino = rule->v_ino;
+    info->v_ino = rule_info->v_ino;
 
     inode->i_private = info;
-    inode->i_ino = rule->v_ino;
-    if (rule->flags & NM_FLAG_VIRTUAL_DIR) {
+    inode->i_ino = rule_info->v_ino;
+    if (rule_info->flags & NM_FLAG_VIRTUAL_DIR) {
         inode->i_mode = S_IFDIR | 0755;
         inode->i_size = 4096;
         inode->i_blocks = 8;
@@ -164,7 +202,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         inode->i_op = &nm_dir_iops;
         inode->i_fop = &nm_dir_fops;
     } else {
-        struct inode *real_inode = d_backing_inode(rule->r_path.dentry);
+        struct inode *real_inode = d_backing_inode(rule_info->r_path.dentry);
         inode->i_mode = real_inode->i_mode;
         inode->i_size = i_size_read(real_inode);
         inode->i_blocks = real_inode->i_blocks;
@@ -199,7 +237,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
 static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
     struct nm_iop *nm_iop = __get_nm(smp_load_acquire(&dir->i_op), struct nm_iop, fake_iop);
-    struct nomount_rule *rule;
+    struct nm_rule_info rule_info;
     const char *name = dentry->d_name.name;
     size_t len = dentry->d_name.len;
     u32 v_hash;
@@ -208,22 +246,24 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
         goto fallback;
 
     v_hash = full_name_hash(NULL, name, len);
-    rule = nomount_find_child_rule(nm_iop->dir_node, name, len, v_hash);
-    if (likely(rule)) {
-        if (rule->flags & NM_FLAG_WHITEOUT) {
+    if (nomount_get_rule_info(nm_iop->dir_node, name, len, v_hash, &rule_info)) {
+        if (rule_info.flags & NM_FLAG_WHITEOUT) {
             nm_install_dentry_ops(dentry);
-            d_add(dentry, NULL); 
+            d_add(dentry, NULL);
+            if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
             return NULL;
         }
 
-        if ((rule->flags & NM_FLAG_VIRTUAL_DIR) || rule->r_path.dentry) {
-            struct inode *new_inode = nomount_create_new_inode(dir->i_sb, rule);
+        if ((rule_info.flags & NM_FLAG_VIRTUAL_DIR) || rule_info.r_path.dentry) {
+            struct inode *new_inode = nomount_create_new_inode(dir->i_sb, &rule_info);
             if (likely(new_inode)) {
                 nm_install_dentry_ops(dentry);
                 nm_debug("Lookup hijacked! Splicing inode %lu into dentry '%s'\n", new_inode->i_ino, name);
+                if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
                 return d_splice_alias(new_inode, dentry);
             }
         }
+        if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
     }
 
 fallback:
@@ -240,14 +280,14 @@ fallback:
      * DCACHE_DONTCACHE exists from 5.13; on older trees nm_reval_stale() in
      * d_revalidate is the fallback. Gate on a rule existing, else a normal real
      * file (no rule) would be needlessly uncached. */
-    if (nm_iop && nm_iop->dir_node &&
-        nomount_is_uid_blocked(current_uid().val) &&
-        nomount_find_child_rule(nm_iop->dir_node, name, len,
-                                full_name_hash(NULL, name, len))) {
+    if (nm_iop && nm_iop->dir_node && nomount_is_uid_blocked(current_uid().val) &&
+        nomount_get_rule_info(nm_iop->dir_node, name, len,
+                              full_name_hash(NULL, name, len), &rule_info)) {
         nm_install_dentry_ops(dentry);
 #ifdef DCACHE_DONTCACHE
         dentry->d_flags |= DCACHE_DONTCACHE;
 #endif
+        if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
     }
 
     if (nm_iop && nm_iop->orig_iop && nm_iop->orig_iop->lookup) {
@@ -261,6 +301,7 @@ static int nomount_hijacked_unlink(struct inode *dir, struct dentry *dentry)
 {
     struct nm_iop *nm_iop = __get_nm(smp_load_acquire(&dir->i_op), struct nm_iop, fake_iop);
     struct nomount_rule *rule, *new_rule = NULL, *victim_rule;
+    struct nm_rule_info rule_info;
     bool lower_exists = false;
     struct hlist_node *tmp;
     u32 hash;
@@ -269,9 +310,8 @@ static int nomount_hijacked_unlink(struct inode *dir, struct dentry *dentry)
     if (unlikely(!nm_iop || !nm_iop->dir_node)) return -EPERM;
 
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
-    rule = nomount_find_child_rule(nm_iop->dir_node, dentry->d_name.name, dentry->d_name.len, hash);
-
-    if (rule) {
+    if (nomount_get_rule_info(nm_iop->dir_node, dentry->d_name.name, dentry->d_name.len, hash, &rule_info)) {
+        if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
         if (nm_iop->orig_iop->lookup) {
             struct dentry *probe_dentry = d_alloc(dentry->d_parent, &dentry->d_name);
             if (probe_dentry) {
@@ -289,13 +329,19 @@ static int nomount_hijacked_unlink(struct inode *dir, struct dentry *dentry)
             }
         }
 
-        if (lower_exists) {
-            new_rule = nm_clone_rule(rule, NULL, NULL, rule->flags | NM_FLAG_WHITEOUT);
-            if (IS_ERR(new_rule)) return PTR_ERR(new_rule);
+        mutex_lock(&nomount_write_mutex);
+        rule = nomount_get_rule_locked(nm_iop->dir_node, dentry->d_name.name, dentry->d_name.len, hash);
+        if (!rule) {
+            mutex_unlock(&nomount_write_mutex);
+            return -ENOENT;
         }
 
-        mutex_lock(&nomount_write_mutex);
-        if (new_rule) {
+        if (lower_exists) {
+            new_rule = nm_clone_rule(rule, NULL, NULL, rule->flags | NM_FLAG_WHITEOUT);
+            if (IS_ERR(new_rule)) {
+                mutex_unlock(&nomount_write_mutex);
+                return PTR_ERR(new_rule);
+            }
             if (nomount_generate_virtual_topology(new_rule) != 0) {
                 mutex_unlock(&nomount_write_mutex);
                 nm_free_rule(new_rule);
@@ -330,6 +376,7 @@ static int nomount_hijacked_rename(IDMAP_ARG struct inode *old_dir, struct dentr
     struct nm_iop *old_nm = __get_nm(smp_load_acquire(&old_dir->i_op), struct nm_iop, fake_iop), *new_nm;
     struct nomount_rule *old_rule, *new_rule = NULL, *whiteout_rule = NULL, *victim_rule, *target_rule;
     char *path_buf = NULL, *new_v_path;
+    struct nm_rule_info rule_info;
     bool lower_exists = false;
     struct hlist_node *tmp;
     u32 hash;
@@ -340,9 +387,8 @@ static int nomount_hijacked_rename(IDMAP_ARG struct inode *old_dir, struct dentr
     if (unlikely(!old_nm || !old_nm->dir_node)) goto do_real_rename;
 
     hash = full_name_hash(NULL, old_dentry->d_name.name, old_dentry->d_name.len);
-    old_rule = nomount_find_child_rule(old_nm->dir_node, old_dentry->d_name.name, old_dentry->d_name.len, hash);
-
-    if (old_rule) {
+    if (nomount_get_rule_info(old_nm->dir_node, old_dentry->d_name.name, old_dentry->d_name.len, hash, &rule_info)) {
+        if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
         path_buf = kmalloc(PATH_MAX, GFP_KERNEL);
         if (!path_buf) return -ENOMEM;
 
@@ -363,8 +409,17 @@ static int nomount_hijacked_rename(IDMAP_ARG struct inode *old_dir, struct dentr
             }
         }
 
+        mutex_lock(&nomount_write_mutex);
+        old_rule = nomount_get_rule_locked(old_nm->dir_node, old_dentry->d_name.name, old_dentry->d_name.len, hash);
+        if (!old_rule) {
+            mutex_unlock(&nomount_write_mutex);
+            kfree(path_buf);
+            return -ENOENT;
+        }
+
         new_rule = nm_clone_rule(old_rule, new_v_path, NULL, old_rule->flags & ~NM_FLAG_WHITEOUT);
         if (IS_ERR(new_rule)) {
+            mutex_unlock(&nomount_write_mutex);
             kfree(path_buf);
             return PTR_ERR(new_rule);
         }
@@ -373,16 +428,16 @@ static int nomount_hijacked_rename(IDMAP_ARG struct inode *old_dir, struct dentr
             whiteout_rule = nm_clone_rule(old_rule, NULL, NULL, old_rule->flags | NM_FLAG_WHITEOUT);
             if (IS_ERR(whiteout_rule)) {
                 nm_free_rule(new_rule);
+                mutex_unlock(&nomount_write_mutex);
                 kfree(path_buf);
                 return PTR_ERR(whiteout_rule);
             }
         }
 
-        mutex_lock(&nomount_write_mutex);
         new_nm = __get_nm(smp_load_acquire(&new_dir->i_op), struct nm_iop, fake_iop);
         if (new_nm && new_nm->dir_node) {
             u32 new_hash = full_name_hash(NULL, new_dentry->d_name.name, new_dentry->d_name.len);
-            target_rule = nomount_find_child_rule(new_nm->dir_node, new_dentry->d_name.name, new_dentry->d_name.len, new_hash);
+            target_rule = nomount_get_rule_locked(new_nm->dir_node, new_dentry->d_name.name, new_dentry->d_name.len, new_hash);
             if (target_rule) nm_detach_rule_locked(target_rule, &victims, false);
         }
 
@@ -391,7 +446,7 @@ static int nomount_hijacked_rename(IDMAP_ARG struct inode *old_dir, struct dentr
         if (err != 0) {
             mutex_unlock(&nomount_write_mutex);
             nm_free_rule(new_rule);
-            nm_free_rule(whiteout_rule);
+            if (whiteout_rule) nm_free_rule(whiteout_rule);
             kfree(path_buf);
             return err;
         }
@@ -793,26 +848,37 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
 
     if (info && info->dir_node) {
         u32 v_hash = full_name_hash(NULL, name, len);
-        struct nomount_rule *c_rule = nomount_find_child_rule(info->dir_node, name, len, v_hash);
-        have_rule = (c_rule != NULL);
+        struct nm_rule_info rule_info;
         /* A blocked reader must get the stock view here too, not just at the top
          * level: skip the injection and fall through to the real dir below (or to
          * a negative for a purely synthesized dir). In practice such a reader
          * cannot resolve the virtual parent in the first place, so this is the
          * belt to that braces -- it keeps the per-UID rule true of this path on
          * its own terms rather than by relying on the parent lookup failing. */
-        if (c_rule && !blocked) {
-            /* Install our dentry ops on every dentry we manage. Without this the
-             * child inherits sb->s_d_op: harmless on a normal fs (NULL), but on an
-             * overlayfs sb it is ovl_dentry_operations, whose d_revalidate/d_real
-             * run against our synthetic inode (no ovl_entry) and return -ECHILD.
-             * nomount_hijacked_lookup already does this for the first level; the
-             * synthesized deeper subtree (a new dir over overlay) needs it too. */
-            if (c_rule->flags & NM_FLAG_WHITEOUT) { nm_install_dentry_ops(dentry); d_add(dentry, NULL); return NULL; }
-            if ((c_rule->flags & NM_FLAG_VIRTUAL_DIR) || c_rule->r_path.dentry) {
-                struct inode *new_inode = nomount_create_new_inode(dir->i_sb, c_rule);
-                if (new_inode) { nm_install_dentry_ops(dentry); return d_splice_alias(new_inode, dentry); }
+        if (nomount_get_rule_info(info->dir_node, name, len, v_hash, &rule_info)) {
+            have_rule = true;
+            if (!blocked) {
+                /* Install our dentry ops on every dentry we manage. Without this the
+                 * child inherits sb->s_d_op: harmless on a normal fs (NULL), but on an
+                 * overlayfs sb it is ovl_dentry_operations, whose d_revalidate/d_real
+                 * run against our synthetic inode (no ovl_entry) and return -ECHILD.
+                 * nomount_hijacked_lookup already does this for the first level; the
+                 * synthesized deeper subtree (a new dir over overlay) needs it too. */
+                if (rule_info.flags & NM_FLAG_WHITEOUT) {
+                    nm_install_dentry_ops(dentry); d_add(dentry, NULL);
+                    if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
+                    return NULL;
+                }
+                if ((rule_info.flags & NM_FLAG_VIRTUAL_DIR) || rule_info.r_path.dentry) {
+                    struct inode *new_inode = nomount_create_new_inode(dir->i_sb, &rule_info);
+                    if (new_inode) {
+                        nm_install_dentry_ops(dentry);
+                        if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
+                        return d_splice_alias(new_inode, dentry);
+                    }
+                }
             }
+            if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
         }
     }
 
@@ -895,7 +961,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     struct inode *parent_dir;
     struct nm_iop *nm_iop;
     struct nomount_dir_node *pdir = NULL;
-    struct nomount_rule *rule;
+    struct nm_rule_info rule_info;
     u32 hash;
     bool injected;
 
@@ -938,19 +1004,20 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         return injected ? 0 : 1;
 
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
-    rule = nomount_find_child_rule(pdir, dentry->d_name.name, dentry->d_name.len, hash);
+    if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info)) {
+        if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
+        if (rule_info.flags & NM_FLAG_WHITEOUT) return d_is_negative(dentry) ? 1 : 0;
 
-    if (!rule) return nm_reval_stale(dentry);                        /* rule gone -> re-resolve */
-    if (rule->flags & NM_FLAG_WHITEOUT) return d_is_negative(dentry) ? 1 : 0;
-
-    /* Per-UID consistency: a BLOCKED reader must see the stock fs (non-injected),
-     * so an injected dentry is invalid for it; a NORMAL reader must see the
-     * injection, so a stock/negative dentry (e.g. one a blocked reader's fallback
-     * cached in the shared dcache) is invalid for it. Re-resolving fixes both --
-     * and nm_reval_stale() unhashes the negative so the re-resolve actually runs. */
-    if (nomount_is_uid_blocked(current_uid().val))
-        return injected ? 0 : 1;
-    return injected ? 1 : nm_reval_stale(dentry);
+        /* Per-UID consistency: a BLOCKED reader must see the stock fs (non-injected),
+         * so an injected dentry is invalid for it; a NORMAL reader must see the
+         * injection, so a stock/negative dentry (e.g. one a blocked reader's fallback
+         * cached in the shared dcache) is invalid for it. Re-resolving fixes both --
+         * and nm_reval_stale() unhashes the negative so the re-resolve actually runs. */
+        if (nomount_is_uid_blocked(current_uid().val))
+            return injected ? 0 : 1;
+        return injected ? 1 : nm_reval_stale(dentry);
+    }
+    return nm_reval_stale(dentry);                        /* rule gone -> re-resolve */
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)

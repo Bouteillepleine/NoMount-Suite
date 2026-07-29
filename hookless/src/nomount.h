@@ -151,8 +151,20 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
 static struct nomount_rule *nm_clone_rule(struct nomount_rule *old_rule, const char *new_v_path, const char *new_r_path, u32 new_flags);
 static void nm_free_rule(struct nomount_rule *rule);
 static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *victims, bool prune);
-static struct nomount_rule *nomount_find_child_rule(struct nomount_dir_node *dir_node, const char *name, size_t len, u32 hash);
-static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nomount_rule *rule);
+/* A lockless snapshot of the fields a reader needs from a rule, taken under RCU
+ * by nomount_get_rule_info(). The r_path (if any) is path_get()'d into the
+ * snapshot, so the caller can use it safely even if the rule is freed
+ * concurrently, and MUST path_put() it when done. This replaces returning a bare
+ * rule pointer that lockless readers then dereferenced after rcu_read_unlock()
+ * -- a use-after-free if a concurrent nm del/clear/COW freed the rule. */
+struct nm_rule_info {
+    u32 flags;
+    unsigned long v_ino;
+    struct path r_path;
+    struct nomount_dir_node *this_dir;
+};
+
+static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nm_rule_info *rule_info);
 
 /* =====================================================================
  * NoMount VFS Offset Protocol
