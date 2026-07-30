@@ -34,10 +34,14 @@
  * cannot rot) while generating no code. */
 #ifdef NOMOUNT_DEBUG
 #define nm_debug(fmt, ...) printk(KERN_DEBUG "NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
+#define nm_info(fmt, ...)  printk(KERN_INFO "NoMount: " fmt, ##__VA_ARGS__)
 #else
+/* Production: compile out the message strings entirely (no_printk still
+ * type-checks the format but the literal is dead-code-eliminated), so they do
+ * not sit in nomount.o naming functions/logic to anyone disassembling the image. */
 #define nm_debug(fmt, ...) no_printk("NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
+#define nm_info(fmt, ...)  no_printk("NoMount: " fmt, ##__VA_ARGS__)
 #endif
-#define nm_info(fmt, ...) printk(KERN_INFO "NoMount: " fmt, ##__VA_ARGS__)
 #define nm_warn(fmt, ...) printk(KERN_WARNING "NoMount: [WARN] " fmt, ##__VA_ARGS__)
 #define nm_err(fmt, ...)  printk(KERN_ERR "NoMount: [ERROR] " fmt, ##__VA_ARGS__)
 
@@ -148,7 +152,6 @@ static const struct dentry_operations nm_dops;
 /*** Rule Operations ***/
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule);
 static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid);
-static struct nomount_rule *nm_clone_rule(struct nomount_rule *old_rule, const char *new_v_path, const char *new_r_path, u32 new_flags);
 static void nm_free_rule(struct nomount_rule *rule);
 static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *victims, bool prune);
 /* A lockless snapshot of the fields a reader needs from a rule, taken under RCU
