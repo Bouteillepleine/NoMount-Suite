@@ -96,6 +96,20 @@ impl Nm {
         self.run(&["unblock", &uid.to_string()]).map(drop)
     }
 
+    /// `nm l u` — the kernel's **live** blocked-UID set (authoritative, straight
+    /// from the driver's idr via `NM_CMD_GET_UIDS`), independent of the on-disk
+    /// block list. The client prints a JSON array; we just harvest the integers.
+    pub fn uid_list_live(&self) -> Result<Vec<u32>> {
+        let out = self.run(&["l", "u"])?;
+        let mut uids = Vec::new();
+        for tok in out.split(|c: char| !c.is_ascii_digit()) {
+            if let Ok(u) = tok.parse::<u32>() {
+                uids.push(u);
+            }
+        }
+        Ok(uids)
+    }
+
     /// `nm clear` — drop all rules. (No enable/refresh: hookless activates a
     /// rule the moment it's added, via per-inode ops hijack.)
     pub fn clear(&self) -> Result<()> {

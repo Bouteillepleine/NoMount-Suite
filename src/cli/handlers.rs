@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use super::{UidAction, VfsAction};
+use crate::blocklist::{self, Resolved};
 use crate::nm::Nm;
 
 pub fn handle_vfs(action: VfsAction) -> Result<()> {
@@ -39,13 +40,104 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
 pub fn handle_uid(action: UidAction) -> Result<()> {
     let nm = Nm::new();
     match action {
-        UidAction::Block { uid } => {
-            nm.uid_block(uid)?;
-            println!("ok");
+        // Block: persist the target, then block it live if it resolves right now.
+        // A package that isn't installed yet is still recorded so `apply` picks it
+        // up when it appears — the block "sticks" the moment the app exists.
+        UidAction::Block { target } => {
+            blocklist::add(&target)?;
+            match blocklist::resolve(&target)? {
+                Resolved::Uid(uid) => {
+                    // Skip the block call if the kernel is already enforcing this
+                    // UID — a second block returns EEXIST (non-zero), which would
+                    // surface as a spurious failure on the drift→Save path even
+                    // though the persist (the point of Save) succeeded.
+                    let already = nm.uid_list_live().unwrap_or_default().contains(&uid);
+                    if already {
+                        println!("ok: {target} (uid {uid}) already hidden — saved so it persists");
+                    } else {
+                        nm.uid_block(uid)?;
+                        println!("ok: {target} (uid {uid}) hidden — persists across reboots");
+                    }
+                }
+                Resolved::NotInstalled => {
+                    println!("ok: {target} saved — not installed now, will apply when it is");
+                }
+            }
         }
-        UidAction::Unblock { uid } => {
-            nm.uid_unblock(uid)?;
-            println!("ok");
+        // Unblock: drop from the persistent list AND unblock live if it's actually
+        // blocked (unblocking a UID the kernel isn't hiding also returns non-zero).
+        UidAction::Unblock { target } => {
+            blocklist::remove(&target)?;
+            match blocklist::resolve(&target)? {
+                Resolved::Uid(uid) => {
+                    if nm.uid_list_live().unwrap_or_default().contains(&uid) {
+                        nm.uid_unblock(uid)?;
+                    }
+                    println!("ok: {target} (uid {uid}) unhidden");
+                }
+                Resolved::NotInstalled => {
+                    println!("ok: {target} removed from list");
+                }
+            }
+        }
+        // List: the persistent set cross-referenced against the kernel's LIVE set,
+        // so drift is visible. Each line is `<name>\t<state>` for the WebUI:
+        //   uid N · live               — saved AND the kernel is enforcing it
+        //   uid N · saved, not applied — in the file but not live (reboot/apply pending)
+        //   not installed              — saved package with no current UID
+        //   uid N · live, not saved    — kernel is hiding it but it's NOT in the file
+        //                                (won't survive a reboot)
+        UidAction::List => {
+            let persisted = blocklist::read()?;
+            let live = nm.uid_list_live().unwrap_or_default();
+            let mut covered: Vec<u32> = Vec::new();
+
+            for e in &persisted {
+                match blocklist::resolve(e)? {
+                    Resolved::Uid(uid) => {
+                        covered.push(uid);
+                        let state = if live.contains(&uid) {
+                            "live"
+                        } else {
+                            "saved, not applied"
+                        };
+                        println!("{e}\tuid {uid} · {state}");
+                    }
+                    Resolved::NotInstalled => println!("{e}\tnot installed"),
+                }
+            }
+            // Live-only: enforced by the kernel but absent from the file.
+            for uid in &live {
+                if !covered.contains(uid) {
+                    let name =
+                        blocklist::package_for_uid(*uid).unwrap_or_else(|| format!("uid {uid}"));
+                    println!("{name}\tuid {uid} · live, not saved");
+                }
+            }
+
+            if persisted.is_empty() && live.is_empty() {
+                println!("no blocked apps");
+            }
+        }
+        // Apply: re-assert a block for every installed entry; skip only the ones
+        // that aren't installed right now. The kernel returns an error when a UID
+        // is *already* blocked (EEXIST) — that's the desired end state, not a
+        // failure, so a resolved app counts as applied regardless of that. Called
+        // from service.sh once packages.list is populated; the boot idr is empty
+        // so the first pass genuinely blocks each, and re-runs stay idempotent.
+        UidAction::Apply => {
+            let mut applied = 0u32;
+            let mut skipped = 0u32;
+            for e in blocklist::read()? {
+                match blocklist::resolve(&e)? {
+                    Resolved::Uid(uid) => {
+                        let _ = nm.uid_block(uid);
+                        applied += 1;
+                    }
+                    Resolved::NotInstalled => skipped += 1,
+                }
+            }
+            println!("applied {applied}, skipped {skipped}");
         }
     }
     Ok(())

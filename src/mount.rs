@@ -12,8 +12,17 @@
 
 use std::collections::HashSet;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+
+/// Magisk's whiteout marker is a 0:0 char device. Unix-only; on non-unix hosts
+/// (the Windows `cargo test` build) this is always false — the crate only *runs*
+/// on Android, this just lets the pure-logic tests compile here.
+#[cfg(unix)]
+fn is_char_dev(ft: &fs::FileType) -> bool { ft.is_char_device() }
+#[cfg(not(unix))]
+fn is_char_dev(_ft: &fs::FileType) -> bool { false }
 
 use anyhow::{Context, Result};
 
@@ -175,7 +184,7 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                     kind: PlanKind::Whiteout,
                 });
             }
-        } else if ft.is_char_device() {
+        } else if is_char_dev(&ft) {
             // A 0:0 char device is Magisk's whiteout marker.
             out.push(PlanEntry {
                 module: module.to_string(),

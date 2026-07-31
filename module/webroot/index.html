@@ -241,6 +241,58 @@
   }
   .uidbar input:focus { border-color: var(--acc); }
   .uidbar .act { flex: 1 1 0; }
+  /* custom app-picker dropdown — replaces the native <datalist> (which the WebView
+     renders as a mispositioned overlay that bleeds over the page). Solid bg, capped
+     height, absolutely positioned inside its own relative wrapper so it can't leak. */
+  .pkgwrap { position: relative; flex: 1 1 100%; min-width: 0; }
+  .pkgwrap input { width: 100%; }
+  .pkgdd {
+    position: absolute; left: 0; right: 0; top: calc(100% + 5px); z-index: 70;
+    max-height: 264px; overflow-y: auto; display: none;
+    background: var(--bg2); border: 1px solid var(--brd2); border-radius: 13px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+  }
+  .pkgdd.show { display: block; }
+  .pkgdd .opt {
+    padding: 11px 13px; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 8px;
+    border-top: 1px solid rgba(255,255,255,0.05);
+  }
+  .pkgdd .opt:first-child { border-top: none; }
+  .pkgdd .opt.sel, .pkgdd .opt:hover { background: rgba(255,255,255,0.07); }
+  .pkgdd .opt .pn { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pkgdd .opt .pu { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .pkgdd .none { padding: 11px 13px; font-size: 12.5px; color: var(--dim); }
+  .pkgdd .pkghead {
+    position: sticky; top: 0; z-index: 1; padding: 8px 13px; font-size: 10.5px; font-weight: 640;
+    letter-spacing: .04em; text-transform: uppercase; color: var(--dim);
+    background: var(--bg2); border-bottom: 1px solid var(--brd2);
+  }
+  .blocklist { display: flex; flex-direction: column; gap: 6px; margin-top: 11px; }
+  .blocklist:empty { display: none; }
+  .blk-none { font-size: 12.5px; color: var(--dim); padding: 9px 11px; border: 1px dashed var(--brd2);
+              border-radius: 11px; text-align: center; }
+  .blk-head { font-size: 11px; font-weight: 640; letter-spacing: .04em; text-transform: uppercase;
+              color: var(--dim); margin: 2px 2px 1px; }
+  .blk {
+    display: flex; align-items: center; gap: 9px;
+    background: rgba(0,0,0,0.22); border: 1px solid var(--brd2);
+    border-radius: 11px; padding: 8px 10px 8px 12px;
+  }
+  .blk .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .blk .bn { flex: 1 1 auto; min-width: 0; font-size: 13px; word-break: break-all; }
+  .blk .bs { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .blk.live    .dot { background: var(--acc2, #57e6c3); }
+  .blk.live    .bs  { color: var(--acc2, #57e6c3); }
+  .blk.pending .dot, .blk.drift .dot { background: var(--warn, #d9a441); }
+  .blk.pending .bs,  .blk.drift .bs  { color: var(--warn, #d9a441); }
+  .blk .bx {
+    flex: 0 0 auto; width: 24px; height: 24px; line-height: 22px; text-align: center;
+    border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
+    background: rgba(255,255,255,0.06); color: var(--dim);
+  }
+  .blk .bx:hover { background: rgba(255,90,90,0.16); color: #ff6b6b; }
+  .blk .bx.save:hover { background: rgba(90,220,150,0.16); color: #57e6c3; }
+  .blk .bx:disabled { opacity: 0.4; }
 
   /* toggle switch (spoofing controls) */
   .swrow { display: flex; align-items: center; gap: 12px; padding: 12px 2px; border-top: 1px solid rgba(255,255,255,0.055); }
@@ -248,6 +300,12 @@
   .swrow .swi { flex: 1; min-width: 0; }
   .swrow .swi .lbl { font-size: 13.5px; font-weight: 640; }
   .swrow .swi .val { font-size: 11.5px; color: var(--muted); margin-top: 3px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The verify status is a full sentence, not a hash — let it wrap in full.
+     NB: do NOT call this modifier `.wrap` — that is the page wrapper, which
+     carries `padding-bottom: 108px` to clear the floating nav; reusing the name
+     injected 108px of dead space into the card (the old `overflow:hidden` had
+     been hiding it). */
+  .swrow .swi .val.multiline { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.45; }
   .switch { position: relative; width: 46px; height: 27px; flex: none; }
   .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
   .switch .sl { position: absolute; inset: 0; border-radius: 999px; background: rgba(255,255,255,0.14); border: 1px solid var(--brd2); transition: .22s; pointer-events: none; }
@@ -551,19 +609,18 @@
     </div>
   </div>
 
-  <!-- DETECTION POSTURE -->
+  <!-- DEVICE -->
   <div class="card">
-    <div class="stealth-head">
-      <div class="shield clean" id="shield">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
-      </div>
-      <div>
-        <div class="t" id="stealthT">Detection posture</div>
-        <div class="d" id="stealthD">Checking what apps can see…</div>
-      </div>
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
+      <h2>Device</h2>
     </div>
-    <div class="list" id="posture"></div>
-    <p class="note" id="stealthNote"></p>
+    <div class="metrics">
+      <div class="metric"><div class="k">Model</div><div class="v" id="dModel" style="font-size:15px">—</div></div>
+      <div class="metric"><div class="k">Android</div><div class="v" id="dAndroid" style="font-size:15px">—</div></div>
+      <div class="metric"><div class="k">API level</div><div class="v" id="dApi" style="font-size:15px">—</div></div>
+      <div class="metric"><div class="k">Kernel</div><div class="v" id="dKernel" style="font-size:11px;word-break:break-all;line-height:1.35">—</div></div>
+    </div>
   </div>
 
   <!-- BOOTGUARD -->
@@ -582,12 +639,29 @@
   </section>
 
   <section class="tab" id="tab-modules">
+
+  <!-- DETECTION POSTURE (moved from Status) -->
+  <div class="card">
+    <div class="stealth-head">
+      <div class="shield clean" id="shield">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
+      </div>
+      <div>
+        <div class="t" id="stealthT">Detection posture</div>
+        <div class="d" id="stealthD">Checking what apps can see…</div>
+      </div>
+    </div>
+    <div class="list" id="posture"></div>
+    <p class="note" id="stealthNote"></p>
+  </div>
+
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
       <h2>Modules</h2><span class="chip" id="modcount">0</span>
+      <button class="act" style="flex:none;min-width:0;padding:7px 13px;font-size:12.5px" onclick="toggleModules(this)" id="modBtn">Show</button>
     </div>
-    <div class="list" id="modules"><div class="empty">Loading…</div></div>
+    <div class="list" id="modules" style="display:none"></div>
   </div>
 
   </section>
@@ -602,7 +676,8 @@
     <p class="note" id="rulebreak" style="margin-top:0">—</p>
     <div class="uidbar" id="rulefilterbar" style="display:none">
       <input id="rulefilter" type="text" placeholder="Filter by path or module…" oninput="filterRules()" />
-      <button class="act" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
+      <button class="act" id="rulegroupBtn" style="flex:1 1 0" onclick="toggleRuleGroup(this)">Group by module</button>
+      <button class="act" style="flex:1 1 0" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
     </div>
     <pre class="rules" id="ruleslist" style="display:none">…</pre>
     <p class="note" id="rulecount" style="display:none"></p>
@@ -613,16 +688,26 @@
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
       <h2>File redirects</h2><span class="chip" id="vfscount">0</span>
+      <button class="act" style="flex:none;min-width:0;padding:7px 13px;font-size:12.5px" onclick="toggleVfsFull(this)" id="vfsFullBtn">Show</button>
     </div>
-    <div class="list" id="vfsdirs"><div class="empty">Loading…</div></div>
+    <div class="uidbar" id="vfsfilterbar" style="display:none;margin-bottom:11px">
+      <input id="vfsfilter" type="text" placeholder="Filter files…" oninput="renderVfsFull()" />
+    </div>
+    <div class="list" id="vfsdirs" style="display:none"></div>
+    <div class="list" id="vfsfull" style="display:none"></div>
   </div>
 
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
       <h2>RRO overlays</h2><span class="chip" id="ovcount">0</span>
+      <button class="act" style="flex:none;min-width:0;padding:7px 13px;font-size:12.5px" onclick="toggleOvFull(this)" id="ovFullBtn">Show</button>
     </div>
-    <div class="list" id="overlays"><div class="empty">Loading…</div></div>
+    <div class="uidbar" id="ovfilterbar" style="display:none;margin-bottom:11px">
+      <input id="ovfilter" type="text" placeholder="Filter overlays…" oninput="renderOvFull()" />
+    </div>
+    <div class="list" id="overlays" style="display:none"></div>
+    <div class="list" id="overlaysfull" style="display:none"></div>
   </div>
 
   </section>
@@ -640,7 +725,7 @@
         <div class="swi">
           <div class="lbl">Verified-boot hash</div>
           <div class="val" id="spVbVal">…</div>
-          <div class="val" id="spVbCheck" style="margin-top:2px"></div>
+          <div class="val multiline" id="spVbCheck" style="margin-top:2px"></div>
         </div>
         <label class="switch"><input type="checkbox" id="spVb" onchange="toggleSpoof('vbmeta_digest',this)"><span class="sl"></span></label>
       </div>
@@ -661,6 +746,22 @@
     <pre class="rules" id="doctorout" style="display:none">…</pre>
   </div>
 
+  <!-- RUNTIME HEALTH -->
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>
+      <h2>Runtime health</h2><span class="chip" id="hchip">—</span>
+    </div>
+    <p class="note">The live counterpart to the plan-time check above. <b>Self-check</b> runs the per-UID consistency canary — does a normal app see the same injected files as root? — and reports engine, mounts and guard. <b>Snapshot</b> freezes today's healthy state; <b>Verify</b> diffs the live system against it and names any drift. <b>Export</b> dumps diagnostics to <code>/sdcard/Download</code>.</p>
+    <div class="btns" style="flex-wrap:wrap">
+      <button class="act primary" onclick="runSelfcheck(this)">Self-check</button>
+      <button class="act" onclick="runSnapshot(this)">Snapshot</button>
+      <button class="act" onclick="runVerify(this)">Verify</button>
+      <button class="act" onclick="runExport(this)">Export</button>
+    </div>
+    <pre class="rules" id="healthout" style="display:none">…</pre>
+  </div>
+
   <!-- LAST INCIDENT -->
   <div class="card" id="incidentcard" style="display:none">
     <div class="card-h">
@@ -677,11 +778,18 @@
       <h2>Per-UID hiding</h2>
     </div>
     <div class="uidbar">
-      <input id="uid" type="number" inputmode="numeric" placeholder="App UID (e.g. 10123)" />
+      <div class="pkgwrap">
+        <input id="uid" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+               placeholder="Package name or UID — start typing to pick an app"
+               oninput="pkgFilter()" onfocus="pkgFilter()" onblur="pkgBlur()" onkeydown="pkgKey(event)" />
+        <div id="pkgdd" class="pkgdd"></div>
+      </div>
       <button class="act" onclick="uidOp('block',this)">Hide</button>
       <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
     </div>
-    <p class="note">A blocked UID sees the stock filesystem — injected files and the su path become invisible to that app, with no effect on any other app. The sus_path substitute; useful for a specific detector app.</p>
+    <div id="blocked" class="blocklist"></div>
+    <p class="note">A blocked app sees the stock filesystem — injected files and the su path become invisible to it, with no effect on any other app (the sus_path substitute for a specific detector). Enter a <b>package name</b> and the block <b>persists across reboots</b>; raw UIDs also work but don't survive a reinstall.
+    <b>Does not cover SELinux-policy detection</b> (live policy is global kernel state, not a per-UID view). Detectors that query the loaded policy — KSU/LSPosed type existence, dirty allow-rules, seqno split — are unaffected by hiding. Apps declaring <code>isolatedProcess</code>+<code>useAppZygote</code> also run their probe under an ephemeral isolated UID this rule can't match.</p>
   </div>
 
   </section>
@@ -789,6 +897,15 @@
   }
 
   // ---- detection posture (live root-view vs non-root app-view) ----
+  async function refreshDevice() {
+    const r = await exec('echo "$(getprop ro.product.marketname)|$(getprop ro.product.manufacturer)|$(getprop ro.product.model)|$(getprop ro.build.version.release)|$(getprop ro.build.version.sdk)|$(uname -r)"');
+    const p = (r.stdout || "").trim().split("|");
+    const name = (p[0] && p[0].trim()) ? p[0] : (((p[1] ? p[1] + " " : "")) + (p[2] || "—"));
+    $("dModel").textContent = name || "—";
+    $("dAndroid").textContent = p[3] || "—";
+    $("dApi").textContent = p[4] || "—";
+    $("dKernel").textContent = p[5] || "—";
+  }
   async function refreshStealth() {
     // root view (ksu.exec runs as root -> sees every mount)
     const r = await exec(
@@ -925,11 +1042,34 @@
 
   // ---- rules filter ----
   let _rulesRaw = "";
+  var _ruleGroup = false;
+  // Owning module = the <name> in a backing path /data/adb/modules/<name>/...
+  function _ruleModule(line) {
+    const m = line.match(/\/data\/adb\/modules(?:_update)?\/([^/ ]+)/);
+    return m ? m[1] : "(other)";
+  }
+  function toggleRuleGroup(btn) {
+    _ruleGroup = !_ruleGroup;
+    btn.textContent = _ruleGroup ? "Flat list" : "Group by module";
+    btn.classList.toggle("primary", _ruleGroup);
+    filterRules();
+  }
   function filterRules() {
     const q = ($("rulefilter").value || "").trim().toLowerCase();
     const lines = _rulesRaw.split("\n").filter(Boolean);
     const keep = q ? lines.filter(function (l) { return l.toLowerCase().indexOf(q) !== -1; }) : lines;
-    $("ruleslist").textContent = keep.length ? keep.join("\n") : "(no match)";
+    if (!keep.length) {
+      $("ruleslist").textContent = "(no match)";
+    } else if (_ruleGroup) {
+      const groups = {};
+      keep.forEach(function (l) { (groups[_ruleModule(l)] = groups[_ruleModule(l)] || []).push(l); });
+      const names = Object.keys(groups).sort();
+      $("ruleslist").textContent = names.map(function (n) {
+        return "── " + n + " (" + groups[n].length + ") ──\n" + groups[n].join("\n");
+      }).join("\n\n");
+    } else {
+      $("ruleslist").textContent = keep.join("\n");
+    }
     $("rulecount").style.display = "";
     $("rulecount").textContent = q
       ? keep.length + " of " + lines.length + " rules match"
@@ -959,6 +1099,46 @@
       chip.textContent = "—"; chip.className = "chip";
     }
     if (btn) { btn.disabled = false; btn.textContent = "Run health check"; }
+  }
+
+  // ---- runtime health (selfcheck / snapshot / verify / export) ----
+  function _healthShow(txt) { const o = $("healthout"); o.style.display = ""; o.textContent = txt.trim() || "(no output)"; }
+  async function runSelfcheck(btn) {
+    const t = btn.textContent; btn.disabled = true; btn.textContent = "…";
+    const r = await nm("selfcheck");
+    const txt = ((r.stdout || "") + (r.stderr || ""));
+    _healthShow(txt);
+    const v = (txt.match(/verdict=(.+)/) || [])[1] || "";
+    const chip = $("hchip");
+    const bad = /INCONSISTENCY|DOWN|TRIPPED/.test(v);
+    chip.textContent = bad ? "attention" : "healthy";
+    chip.className = "chip " + (bad ? "bad" : "ok");
+    btn.disabled = false; btn.textContent = t;
+  }
+  async function runSnapshot(btn) {
+    const t = btn.textContent; btn.disabled = true; btn.textContent = "…";
+    const r = await nm("snapshot");
+    _healthShow((r.stdout || "") + (r.stderr || ""));
+    toast(r.errno === 0 ? "Snapshot saved as baseline" : "Snapshot failed", r.errno === 0 ? "ok" : "bad");
+    btn.disabled = false; btn.textContent = t;
+  }
+  async function runVerify(btn) {
+    const t = btn.textContent; btn.disabled = true; btn.textContent = "…";
+    const r = await nm("verify");
+    const txt = (r.stdout || "") + (r.stderr || "");
+    _healthShow(txt);
+    const drift = /DRIFT/.test(txt);
+    toast(drift ? "Drift from snapshot — see output" : "Matches snapshot", drift ? "bad" : "ok");
+    btn.disabled = false; btn.textContent = t;
+  }
+  async function runExport(btn) {
+    const t = btn.textContent; btn.disabled = true; btn.textContent = "…";
+    const r = await nm("export");
+    const txt = (r.stdout || "") + (r.stderr || "");
+    _healthShow(txt);
+    const path = (txt.match(/exported to (\S+)/) || [])[1];
+    toast(path ? "Exported to " + path : "Export failed", path ? "ok" : "bad");
+    btn.disabled = false; btn.textContent = t;
   }
 
   // ---- last incident ----
@@ -1055,26 +1235,58 @@
   // The non-overlay half of the rule set, grouped by target directory — the same
   // shape as the overlay card, so the Rules tab shows both halves rather than
   // burying the redirects inside the collapsed raw list.
+  var _vfsFiles = [], _ovFiles = [];
   async function refreshVfs() {
     const box = $("vfsdirs");
     const list = await nm("vfs list");
     const lines = (list.errno === 0 ? list.stdout : "").split("\n").map(x => x.trim()).filter(Boolean);
     const dirs = {};
+    _vfsFiles = [];
     for (const l of lines) {
-      const vp = (l.split(" ->")[0] || "").trim();
-      if (!vp || /\/overlay\/[^\s]*\.apk$/.test(vp)) continue;
+      const raw = (l.split(" ->")[0] || "").trim();
+      if (!raw || /\/overlay\/[^\s]*\.apk$/.test(raw)) continue;
+      const vp = raw.replace(/\s*\(virtual dir\)$/, ""); // structural entries count as rules too
+      _vfsFiles.push(vp);
       const dir = vp.replace(/\/[^/]*$/, "") || "/";
       dirs[dir] = (dirs[dir] || 0) + 1;
     }
+    _vfsFiles.sort();
     const keys = Object.keys(dirs).sort((a, b) => dirs[b] - dirs[a] || a.localeCompare(b));
     const total = keys.reduce((a, k) => a + dirs[k], 0);
     $("vfscount").textContent = total;
-    if (!keys.length) { box.innerHTML = '<div class="empty">No file redirects.</div>'; return; }
-    box.innerHTML = keys.map((d) =>
+    if (!keys.length) { box.innerHTML = '<div class="empty">No file redirects.</div>'; }
+    else box.innerHTML = keys.map((d) =>
       `<div class="row"><span class="name mono">${esc(d)}</span>` +
       `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} file${dirs[d] > 1 ? "s" : ""}</span>` +
       `<span class="tag vfs">hookless</span></div>`
     ).join("");
+    if ($("vfsfull").style.display !== "none") renderVfsFull();
+  }
+  // full per-file list (basename shown, full path in title), each with a hookless capsule
+  function _fileRows(paths, q) {
+    const f = q ? paths.filter(p => p.toLowerCase().indexOf(q) !== -1) : paths;
+    if (!f.length) return '<div class="empty">(no match)</div>';
+    return f.map(p => {
+      const base = p.replace(/^.*\//, "");
+      return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(base)}</span>` +
+             `<span class="tag vfs">hookless</span></div>`;
+    }).join("");
+  }
+  function renderVfsFull() {
+    $("vfsfull").innerHTML = _fileRows(_vfsFiles, ($("vfsfilter").value || "").trim().toLowerCase());
+  }
+  function toggleModules(btn) {
+    const on = $("modules").style.display === "none";
+    $("modules").style.display = on ? "" : "none";
+    btn.textContent = on ? "Hide" : "Show";
+  }
+  function toggleVfsFull(btn) {
+    const on = $("vfsfull").style.display === "none";
+    $("vfsdirs").style.display = on ? "" : "none";
+    $("vfsfull").style.display = on ? "" : "none";
+    $("vfsfilterbar").style.display = on ? "" : "none";
+    btn.textContent = on ? "Hide" : "Show";
+    if (on) renderVfsFull();
   }
 
   // ---- overlays (now hookless: injected overlay APKs, no overlayfs mount) ----
@@ -1083,22 +1295,37 @@
     const list = await nm("vfs list");
     const lines = (list.errno === 0 ? list.stdout : "").split("\n").map(s => s.trim()).filter(Boolean);
     const dirs = {};
+    _ovFiles = [];
     for (const l of lines) {
       const vp = (l.split(" ->")[0] || "").trim();
       if (/\/overlay\/[^\s]*\.apk$/.test(vp)) {
+        _ovFiles.push(vp);
         const dir = vp.replace(/\/[^/]*$/, "");
         dirs[dir] = (dirs[dir] || 0) + 1;
       }
     }
+    _ovFiles.sort();
     const keys = Object.keys(dirs).sort();
     const total = keys.reduce((a, k) => a + dirs[k], 0);
     $("ovcount").textContent = total;
-    if (!keys.length) { box.innerHTML = '<div class="empty">No RRO overlays.</div>'; return; }
-    box.innerHTML = keys.map((d) =>
+    if (!keys.length) { box.innerHTML = '<div class="empty">No RRO overlays.</div>'; }
+    else box.innerHTML = keys.map((d) =>
       `<div class="row"><span class="name mono">${esc(d)}</span>` +
       `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} apk${dirs[d] > 1 ? "s" : ""}</span>` +
       `<span class="tag ov">hookless</span></div>`
     ).join("");
+    if ($("overlaysfull").style.display !== "none") renderOvFull();
+  }
+  function renderOvFull() {
+    $("overlaysfull").innerHTML = _fileRows(_ovFiles, ($("ovfilter").value || "").trim().toLowerCase());
+  }
+  function toggleOvFull(btn) {
+    const on = $("overlaysfull").style.display === "none";
+    $("overlays").style.display = on ? "" : "none";
+    $("overlaysfull").style.display = on ? "" : "none";
+    $("ovfilterbar").style.display = on ? "" : "none";
+    btn.textContent = on ? "Hide" : "Show";
+    if (on) renderOvFull();
   }
 
   // ---- rules ----
@@ -1146,12 +1373,118 @@
   }
   async function uidOp(op, btn) {
     const v = $("uid").value.trim();
-    if (!/^\d+$/.test(v)) { toast("Enter a numeric UID", "bad"); return; }
+    if (!v) { toast("Enter a package name or UID", "bad"); return; }
+    // Package names can contain dots/underscores/digits; only reject whitespace
+    // and shell metacharacters so we never build a broken command.
+    if (/[\s'"`;|&$<>()]/.test(v)) { toast("Invalid characters in name", "bad"); return; }
     btn.disabled = true;
     const r = await nm(`uid ${op} ${v}`);
-    if (r.errno === 0) toast(`UID ${v} ${op === "block" ? "hidden" : "unhidden"}`, "ok");
-    else toast("Failed: " + (r.stderr || "error"), "bad");
+    if (r.errno === 0) {
+      toast((r.stdout || "").replace(/^ok:\s*/, "").trim() || `${v} ${op === "block" ? "hidden" : "unhidden"}`, "ok");
+      if (op === "block") $("uid").value = "";
+      refreshBlocked();
+    } else {
+      toast("Failed: " + (r.stderr || "error"), "bad");
+    }
     btn.disabled = false;
+  }
+  // Blocked apps, cross-referenced against the kernel's LIVE set (nm l u) so
+  // drift shows: live = enforced now; pending = saved but not yet applied;
+  // drift = kernel is hiding it but it isn't saved (won't survive a reboot).
+  async function refreshBlocked() {
+    const box = $("blocked");
+    const r = await nm("uid list");
+    const lines = (r.stdout || "").split("\n").map(s => s.trim()).filter(Boolean);
+    if (!lines.length || lines[0] === "no blocked apps") {
+      box.innerHTML = `<div class="blk-none">No per-UID hiding active — no apps hidden.</div>`;
+      return;
+    }
+    const rows = lines.map(l => {
+      const [name, stateRaw] = l.split("\t");
+      const s = (stateRaw || "").trim();
+      let cls = "live";
+      if (/not installed/.test(s)) cls = "gone";
+      else if (/not applied/.test(s)) cls = "pending";
+      else if (/not saved/.test(s)) cls = "drift";
+      // Target for actions: package name when known, else the bare UID.
+      const uidM = s.match(/uid (\d+)/);
+      const target = /^uid \d+$/.test(name) ? (uidM ? uidM[1] : name) : name;
+      const t = target.replace(/'/g, "");
+      const save = cls === "drift"
+        ? `<button class="bx save" title="Save so it survives reboot" onclick="saveOne('${t}',this)">💾</button>` : "";
+      return `<div class="blk ${cls}">
+        <span class="dot"></span>
+        <span class="bn">${name}</span>
+        <span class="bs">${s}</span>
+        ${save}
+        <button class="bx" title="Unhide" onclick="unblockOne('${t}',this)">✕</button>
+      </div>`;
+    }).join("");
+    const n = lines.length;
+    box.innerHTML = `<div class="blk-head">Hidden apps · ${n}</div>` + rows;
+  }
+  // Load installed third-party packages with their UIDs (once), for the custom
+  // app-picker dropdown below. Best-effort — the field still accepts free text.
+  var _pkgsLoaded = false, _pkgs = [], _pkgSel = -1;
+  async function loadPkgList() {
+    if (_pkgsLoaded) return;
+    // -U adds the uid so we can show it inline: "package:com.foo uid:10123"
+    const r = await exec("pm list packages -3 -U 2>/dev/null | sort");
+    _pkgs = (r.stdout || "").split("\n").map(function (l) {
+      const m = l.match(/^package:(\S+)\s+uid:(\d+)/);
+      return m ? { name: m[1], uid: m[2] } : null;
+    }).filter(Boolean);
+    if (_pkgs.length) _pkgsLoaded = true;
+  }
+  function pkgHide() { const d = $("pkgdd"); d.classList.remove("show"); d.innerHTML = ""; _pkgSel = -1; }
+  function pkgBlur() { setTimeout(pkgHide, 130); } // let a click/mousedown land first
+  function pkgFilter() {
+    const q = ($("uid").value || "").trim().toLowerCase();
+    const d = $("pkgdd"); _pkgSel = -1;
+    if (!_pkgs.length) { pkgHide(); return; }
+    // No cap — the whole list is browsable by scroll; typing narrows it. The box
+    // is height-limited in CSS and scrolls internally.
+    const matches = q
+      ? _pkgs.filter(function (p) { return p.name.toLowerCase().indexOf(q) !== -1 || p.uid.indexOf(q) !== -1; })
+      : _pkgs;
+    if (!matches.length) { d.innerHTML = '<div class="none">No matching installed app</div>'; d.classList.add("show"); return; }
+    const head = '<div class="pkghead">' + matches.length + ' app' + (matches.length > 1 ? 's' : '') +
+                 (q ? ' match' : '') + ' · type to filter</div>';
+    d.innerHTML = head + matches.map(function (p) {
+      const nm = p.name.replace(/'/g, "");
+      return '<div class="opt" data-nm="' + nm + '" onmousedown="pkgPick(this)">' +
+             '<span class="pn">' + p.name + '</span><span class="pu">uid ' + p.uid + '</span></div>';
+    }).join("");
+    d.classList.add("show");
+  }
+  function pkgPick(el) { $("uid").value = el.getAttribute("data-nm"); pkgHide(); }
+  function pkgKey(e) {
+    const d = $("pkgdd"); if (!d.classList.contains("show")) return;
+    const opts = d.querySelectorAll(".opt");
+    if (e.key === "Escape") { pkgHide(); return; }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!opts.length) return;
+      _pkgSel = (_pkgSel + (e.key === "ArrowDown" ? 1 : -1) + opts.length) % opts.length;
+      opts.forEach(function (o, i) { o.classList.toggle("sel", i === _pkgSel); });
+      opts[_pkgSel].scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter" && _pkgSel >= 0 && opts[_pkgSel]) {
+      e.preventDefault(); pkgPick(opts[_pkgSel]);
+    }
+  }
+  async function unblockOne(target, btn) {
+    btn.disabled = true;
+    const r = await nm(`uid unblock ${target}`);
+    if (r.errno === 0) toast(`${target} unhidden`, "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    refreshBlocked();
+  }
+  async function saveOne(target, btn) {
+    btn.disabled = true;
+    const r = await nm(`uid block ${target}`);
+    if (r.errno === 0) toast(`${target} saved`, "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    refreshBlocked();
   }
 
   // ---- spoofing (vbmeta.digest) ----
@@ -1222,8 +1555,9 @@
     const v = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
     $("ver").textContent = v || "v?";
     $("footver").textContent = v ? ("Suite " + v) : "";
-    await Promise.all([refreshStatus(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof()]);
+    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked()]);
     if (rulesShown) loadRules();
+    loadPkgList();
     if (ic) ic.classList.remove("spin");
   }
 

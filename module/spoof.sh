@@ -104,6 +104,9 @@ vbmeta_base() {
     [ "$(dd if="$dev" bs=1 count=4 2>/dev/null)" = "AVB0" ] && { echo 0; return 0; }
     sz=$(blockdev --getsize64 "$dev" 2>/dev/null)
     [ -z "$sz" ] && sz=$(( $(cat "/sys/class/block/$(basename "$(readlink -f "$dev")")/size" 2>/dev/null || echo 0) * 512 ))
+    # regular-file fallback (an extracted vbmeta image, or the test harness) —
+    # block-device size ioctls above return nothing for a plain file.
+    [ "${sz:-0}" -gt 0 ] || sz=$(stat -c %s "$dev" 2>/dev/null || wc -c < "$dev" 2>/dev/null)
     [ "${sz:-0}" -gt 64 ] || return 1
     foot=$(( sz - 64 ))
     magic=$(dd if="$dev" bs=1 skip="$foot" count=4 2>/dev/null)
@@ -206,6 +209,10 @@ main() {
 # whether the current prop already matches the real chain before Apply is used.
 #   compute -> the freshly computed digest, or empty on failure
 #   verify  -> "match <d>" | "mismatch <d>" | "absent <d>" | "error"
+# A test harness sources this to unit-test the AVB parser functions without
+# running the pass or touching props. Return early when sourced with the flag.
+[ -n "${NM_SPOOF_SOURCE:-}" ] && return 0 2>/dev/null
+
 case "${1:-}" in
     compute)
         compute_vbmeta_digest

@@ -48,6 +48,27 @@ MODDIR="${0%/*}"
 ABI=$(getprop ro.product.cpu.abi)
 BIN="$MODDIR/bin/$ABI/nomount"
 export NM_BIN="$MODDIR/bin/$ABI/nm"
+
+# --- re-apply the persistent per-app block list ---
+# Per-UID hiding lives in kernel memory and is empty after every reboot; the
+# block list on disk (package names / UIDs) is the durable record. Now that boot
+# is complete, packages.list is populated and app UIDs are stable, so resolve the
+# list and re-block each app. Runs only when the guard hasn't tripped.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/blocklist" ]; then
+    _bl=$("$BIN" uid apply 2>/dev/null)
+    echo "nomount: block list re-applied ($_bl)" > /dev/kmsg 2>/dev/null
+fi
+
+# --- runtime health canary (writes health.txt; complements plan-time doctor) ---
+# Runs the per-UID self-consistency probe that the d_drop regression would have
+# failed on the first boot: does a normal app see the same injected files as root?
+# Non-fatal; the verdict is surfaced on the card and in WebUI > Tools.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+    "$BIN" selfcheck --write >/dev/null 2>&1
+    _hv=$(sed -n 's/^verdict=//p' "$NMDIR/health.txt" 2>/dev/null)
+    echo "nomount: selfcheck verdict = ${_hv:-unknown}" > /dev/kmsg 2>/dev/null
+fi
+
 if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     _rules=$("$NM_BIN" list 2>/dev/null | wc -l)
     _rro=$("$NM_BIN" list 2>/dev/null | grep -c '/overlay/[^ ]*\.apk')
@@ -55,7 +76,12 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     _doc=$(timeout 30 "$BIN" doctor 2>/dev/null | sed -n 's/^summary: \([0-9]*\) errors, \([0-9]*\) warnings$/\1 \2/p')
     _err=$(echo "$_doc" | awk '{print $1+0}')
     _wrn=$(echo "$_doc" | awk '{print $2+0}')
-    if [ "${_err:-0}" -gt 0 ]; then
+    # runtime consistency canary trumps plan-time doctor for card health: a
+    # per-UID inconsistency is a live regression, not a plan hazard.
+    _cons=$(sed -n 's/^consistency=//p' "$NMDIR/health.txt" 2>/dev/null)
+    if [ -n "$_cons" ] && [ "$_cons" != "ok" ] && [ "$_cons" != "unchecked" ]; then
+        _health="⚠️ per-UID inconsistency — see WebUI › Tools"
+    elif [ "${_err:-0}" -gt 0 ]; then
         _health="⚠️ $_err error(s) — see WebUI › Tools"
     elif [ "${_wrn:-0}" -gt 0 ]; then
         _health="$_wrn warning(s)"

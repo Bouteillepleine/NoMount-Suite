@@ -226,3 +226,43 @@ pub fn run_doctor() -> Result<()> {
     println!("summary: {errors} errors, {warns} warnings");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partition_of_extracts_top_level() {
+        assert_eq!(partition_of(Path::new("/product/overlay/x.apk")).as_deref(), Some("product"));
+        assert_eq!(partition_of(Path::new("/system/etc/y.xml")).as_deref(), Some("system"));
+        assert_eq!(partition_of(Path::new("/vendor/lib/z.so")).as_deref(), Some("vendor"));
+        assert_eq!(partition_of(Path::new("/")), None);
+    }
+
+    #[test]
+    fn is_partition_root_only_for_bare_roots() {
+        assert!(is_partition_root(Path::new("/product")));
+        assert!(is_partition_root(Path::new("/system")));
+        assert!(!is_partition_root(Path::new("/product/overlay")));
+        assert!(!is_partition_root(Path::new("/product/overlay/x.apk")));
+    }
+
+    #[test]
+    fn parse_live_keeps_only_arrow_pairs() {
+        let s = "/product/x.apk -> /data/adb/modules/M/product/x.apk\n\
+                 /system/y (whiteout)\n\
+                 not a rule line\n\
+                 /product/z -> /data/adb/modules/M/product/z\n";
+        let v = parse_live(s);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].0, PathBuf::from("/product/x.apk"));
+        assert_eq!(v[0].1, PathBuf::from("/data/adb/modules/M/product/x.apk"));
+        assert_eq!(v[1].0, PathBuf::from("/product/z"));
+    }
+
+    #[test]
+    fn parse_live_drops_empty_sides() {
+        assert!(parse_live(" -> /data/x").is_empty());
+        assert!(parse_live("/product/x -> ").is_empty());
+    }
+}

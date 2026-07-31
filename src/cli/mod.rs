@@ -30,6 +30,22 @@ pub enum Commands {
     },
     /// Lint the mount plan (and live rules) for known bootloop/no-op hazards
     Doctor,
+    /// Runtime health check: engine liveness, injection consistency, per-UID
+    /// self-consistency canary, guard state. `--write` persists to health.txt.
+    Selfcheck {
+        /// Persist the result to /data/adb/nomount/health.txt (used at boot)
+        #[arg(long)]
+        write: bool,
+    },
+    /// Freeze the current healthy fingerprint as the baseline for `verify`
+    Snapshot,
+    /// Diff the live fingerprint against the saved snapshot; name what drifted
+    Verify,
+    /// Dump diagnostics to a timestamped folder (default /sdcard/Download)
+    Export {
+        /// Destination directory (a nm-diag-<ts> subfolder is created inside)
+        dir: Option<String>,
+    },
     /// Print version
     Version,
 }
@@ -50,8 +66,14 @@ pub enum VfsAction {
 
 #[derive(Subcommand)]
 pub enum UidAction {
-    /// Hide injections from a UID
-    Block { uid: u32 },
-    /// Re-show injections to a UID
-    Unblock { uid: u32 },
+    /// Hide injections from an app — accepts a package name (durable) or a bare
+    /// UID. Persists across reboots.
+    Block { target: String },
+    /// Re-show injections to an app — package name or bare UID. Also removes it
+    /// from the persistent list.
+    Unblock { target: String },
+    /// Show the persistent block list with each entry's resolved UID and state
+    List,
+    /// Re-apply the persistent block list to the kernel (run at boot)
+    Apply,
 }
