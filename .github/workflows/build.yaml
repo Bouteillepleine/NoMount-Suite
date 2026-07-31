@@ -2,6 +2,8 @@ name: Build
 
 on:
   workflow_dispatch:
+  push:
+    branches: [suite]
 
 env:
   CARGO_TERM_COLOR: always
