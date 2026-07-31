@@ -235,10 +235,18 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
         if ((rule_info.flags & NM_FLAG_VIRTUAL_DIR) || rule_info.r_path.dentry) {
             struct inode *new_inode = nomount_create_new_inode(dir->i_sb, &rule_info);
             if (likely(new_inode)) {
+                struct dentry *res;
                 nm_install_dentry_ops(dentry);
                 nm_debug("Lookup hijacked! Splicing inode %lu into dentry '%s'\n", new_inode->i_ino, name);
                 if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-                return d_splice_alias(new_inode, dentry);
+                /* d_splice_alias may return a DIFFERENT (existing) alias dentry; our
+                 * ops must ride on THAT one too, else d_revalidate never runs on the
+                 * spliced dentry and the per-UID / ghost-dentry verdict is lost for
+                 * it. (Ported from upstream c4fcdac; the DONTCACHE fallback below is
+                 * deliberately kept -- upstream's rewrite dropped it.) */
+                res = d_splice_alias(new_inode, dentry);
+                if (!IS_ERR(res) && res) nm_install_dentry_ops(res);
+                return res;
             }
         }
         if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
@@ -671,9 +679,13 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
                 if ((rule_info.flags & NM_FLAG_VIRTUAL_DIR) || rule_info.r_path.dentry) {
                     struct inode *new_inode = nomount_create_new_inode(dir->i_sb, &rule_info);
                     if (new_inode) {
+                        struct dentry *res;
                         nm_install_dentry_ops(dentry);
                         if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-                        return d_splice_alias(new_inode, dentry);
+                        /* ops on the spliced-alias result too (same as hijacked_lookup) */
+                        res = d_splice_alias(new_inode, dentry);
+                        if (!IS_ERR(res) && res) nm_install_dentry_ops(res);
+                        return res;
                     }
                 }
             }
