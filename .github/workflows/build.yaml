@@ -16,20 +16,13 @@ jobs:
     strategy:
       matrix:
         profile: [debug, release]
-        target:
-          - aarch64-linux-android
-          - armv7-linux-androideabi
-          - x86_64-linux-android
-          - i686-linux-android
+        # OnePlus (and anything that can run this kernel) is arm64-v8a only, and
+        # the module loads bin/$(getprop ro.product.cpu.abi) = arm64-v8a at
+        # runtime — so build and ship just arm64. Re-add targets for wider reach.
+        target: [aarch64-linux-android]
         include:
           - target: aarch64-linux-android
             abi: arm64-v8a
-          - target: armv7-linux-androideabi
-            abi: armeabi-v7a
-          - target: x86_64-linux-android
-            abi: x86_64
-          - target: i686-linux-android
-            abi: x86
 
     steps:
       - uses: actions/checkout@v4
@@ -118,12 +111,9 @@ jobs:
         run: |
           declare -A ABI_TARGET=(
             [arm64-v8a]=aarch64-linux-android
-            [armeabi-v7a]=armv7-linux-androideabi
-            [x86_64]=x86_64-linux-android
-            [x86]=i686-linux-android
           )
           for profile in debug release; do
-            for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            for abi in "${!ABI_TARGET[@]}"; do
               target="${ABI_TARGET[$abi]}"
               src="artifacts/bin-${abi}-${profile}/nomount"
               dst="target/${target}/${profile}/nomount"
@@ -131,6 +121,28 @@ jobs:
               cp "$src" "$dst"
               chmod +x "$dst"
             done
+          done
+
+      - name: Setup zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Build nm (freestanding netlink client)
+        run: |
+          # The module shells out to bin/<abi>/nm; it is arch-shared C, built
+          # once here. Same zig incantation as the nomount source repo, then
+          # sstrip to ~3 KB. Placed next to nomount so package.sh bundles it.
+          curl -fsSL https://www.muppetlabs.com/~breadbox/pub/software/ELFkickers-3.2.tar.gz -o sstrip.tar.gz
+          tar xf sstrip.tar.gz
+          make -C ELFkickers-3.2 sstrip
+          zig cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
+            -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
+            userspace/src/nm.c -o nm-arm64
+          ELFkickers-3.2/sstrip/sstrip -z nm-arm64
+          file nm-arm64; wc -c nm-arm64
+          for profile in debug release; do
+            install -Dm755 nm-arm64 "target/aarch64-linux-android/${profile}/nm"
           done
 
       - name: Read version

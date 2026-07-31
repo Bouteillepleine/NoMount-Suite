@@ -68,11 +68,11 @@ SCRIPTS=(
     spoof.sh
 )
 
+# OnePlus (and any device that can run this kernel) is arm64-v8a only — the
+# module loads bin/$(getprop ro.product.cpu.abi) at runtime, which is always
+# arm64-v8a, so the other ABIs are dead weight. Add entries back for wider reach.
 declare -A ABI_TARGET=(
     [arm64-v8a]=aarch64-linux-android
-    [armeabi-v7a]=armv7-linux-androideabi
-    [x86_64]=x86_64-linux-android
-    [x86]=i686-linux-android
 )
 
 setup_toolchain() {
@@ -146,29 +146,40 @@ package_zip() {
     fi
     cp "$MODULE_DIR/module.prop" "$staging/module.prop"
 
+    # Sync the human-readable version string to the build version, but PRESERVE
+    # the committed versionCode (KSU's update key) verbatim. Deriving it from the
+    # semver (v1.0.0 -> 100) silently downgrades the intended value (10000) and
+    # can break update detection, so leave module.prop's versionCode untouched.
     sed -i "s/^version=.*/version=${VERSION}/" "$staging/module.prop"
-    local vcode="${VERSION#v}"
-    vcode="${vcode%%-*}"
-    vcode="${vcode//.}"
-    sed -i "s/^versionCode=.*/versionCode=${vcode}/" "$staging/module.prop"
 
-    local found_bins=0
+    # Every ABI needs BOTH the Rust manager (nomount) and the freestanding
+    # netlink client (nm) that the WebUI and metamount.sh shell out to. A zip
+    # with nomount but no nm installs fine but never injects, so require both.
+    local want=${#ABI_TARGET[@]}
+    local found_nomount=0 found_nm=0
     for abi in "${!ABI_TARGET[@]}"; do
         local target="${ABI_TARGET[$abi]}"
-        local bin_src="$PROJECT_ROOT/target/$target/$target_subdir/nomount"
         mkdir -p "$staging/bin/$abi"
 
-        if [ -f "$bin_src" ]; then
-            cp "$bin_src" "$staging/bin/$abi/nomount"
-            found_bins=$((found_bins + 1))
+        local nomount_src="$PROJECT_ROOT/target/$target/$target_subdir/nomount"
+        if [ -f "$nomount_src" ]; then
+            cp "$nomount_src" "$staging/bin/$abi/nomount"; found_nomount=$((found_nomount + 1))
         elif [ -f "$MODULE_DIR/bin/$abi/nomount" ]; then
-            cp "$MODULE_DIR/bin/$abi/nomount" "$staging/bin/$abi/nomount"
-            found_bins=$((found_bins + 1))
+            cp "$MODULE_DIR/bin/$abi/nomount" "$staging/bin/$abi/nomount"; found_nomount=$((found_nomount + 1))
+        fi
+
+        # nm is arch-shared C, built once (by CI) into the target dir next to
+        # nomount; fall back to a committed prebuilt for local packaging.
+        local nm_src="$PROJECT_ROOT/target/$target/$target_subdir/nm"
+        if [ -f "$nm_src" ]; then
+            cp "$nm_src" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
+        elif [ -f "$MODULE_DIR/bin/$abi/nm" ]; then
+            cp "$MODULE_DIR/bin/$abi/nm" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
         fi
     done
 
-    if [ "$found_bins" -ne 4 ]; then
-        echo "FATAL: [$profile] found $found_bins/4 binaries" >&2
+    if [ "$found_nomount" -ne "$want" ] || [ "$found_nm" -ne "$want" ]; then
+        echo "FATAL: [$profile] nomount ${found_nomount}/${want}, nm ${found_nm}/${want}" >&2
         rm -rf "$staging"
         exit 1
     fi
@@ -198,7 +209,7 @@ ui_print() { echo -e "ui_print $1\nui_print" >> $OUTFD; }
 MODPATH="${MODPATH:-/data/adb/modules/meta-nomount}"
 mkdir -p "$MODPATH"
 unzip -o "$ZIPFILE" -d "$MODPATH" >&2
-chmod 755 "$MODPATH"/*.sh "$MODPATH"/bin/*/nomount 2>/dev/null || true
+chmod 755 "$MODPATH"/*.sh "$MODPATH"/bin/*/nomount "$MODPATH"/bin/*/nm 2>/dev/null || true
 ui_print "NoMount installed via recovery"
 exit 0
 UPDATER
@@ -233,7 +244,7 @@ UPDATER
 
     echo "    Output:  $out_path"
     echo "    Size:    $(du -h "$out_path" | cut -f1)"
-    echo "    Bins:    $found_bins/4"
+    echo "    Bins:    nomount+nm x${want} ($(printf '%s ' "${!ABI_TARGET[@]}"))"
     echo "    WebUI:   present"
 }
 
