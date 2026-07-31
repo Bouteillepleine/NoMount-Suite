@@ -788,8 +788,7 @@
       <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
     </div>
     <div id="blocked" class="blocklist"></div>
-    <p class="note">A blocked app sees the stock filesystem — injected files and the su path become invisible to it, with no effect on any other app (the sus_path substitute for a specific detector). Enter a <b>package name</b> and the block <b>persists across reboots</b>; raw UIDs also work but don't survive a reinstall.
-    <b>Does not cover SELinux-policy detection</b> (live policy is global kernel state, not a per-UID view). Detectors that query the loaded policy — KSU/LSPosed type existence, dirty allow-rules, seqno split — are unaffected by hiding. Apps declaring <code>isolatedProcess</code>+<code>useAppZygote</code> also run their probe under an ephemeral isolated UID this rule can't match.</p>
+    <p class="note">Hides injected files and su from <b>one</b> app only. Use a <b>package name</b> to persist across reboots (raw UIDs reset on reinstall). Doesn't cover SELinux-policy detection or isolated-process probes.</p>
   </div>
 
   </section>
