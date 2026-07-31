@@ -321,25 +321,6 @@
   .banner { background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.3); color: #ffe6a8; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: none; line-height: 1.5; }
   .foot { text-align: center; color: var(--faint); font-size: 11px; margin-top: 16px; line-height: 1.7; }
 
-  /* ---- at-a-glance health pill (top of Status) --------------------------
-     One line that folds the cheap signals (engine, guard, incident, app-view
-     mounts, rules) into a single ●Healthy / ⚠Attention verdict, so the state
-     reads without opening Tools. Full check additionally runs selfcheck+doctor. */
-  .healthpill { padding: 14px 16px; }
-  .healthpill .hp-main { display: flex; align-items: center; gap: 13px; }
-  .healthpill .hp-txt { flex: 1; min-width: 0; }
-  .healthpill .hp-label { font-size: 16px; font-weight: 720; letter-spacing: -0.2px; }
-  .healthpill .hp-detail {
-    font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.4;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .healthpill.ok   { border-color: rgba(53,210,154,0.34); }
-  .healthpill.warn { border-color: rgba(251,191,36,0.34); }
-  .healthpill.bad  { border-color: rgba(248,113,122,0.40); }
-  html[data-theme="light"] .healthpill.ok   { border-color: rgba(14,154,108,0.40); }
-  html[data-theme="light"] .healthpill.warn { border-color: rgba(164,106,0,0.40); }
-  html[data-theme="light"] .healthpill.bad  { border-color: rgba(210,58,68,0.42); }
-
   /* ---- rules-by-module breakdown bar (Rules tab) ------------------------- */
   .rmbar {
     display: flex; height: 13px; border-radius: 7px; overflow: hidden;
@@ -614,18 +595,6 @@
 
   <section class="tab on" id="tab-status">
   <div class="banner" id="banner">Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
-
-  <!-- AT-A-GLANCE HEALTH: one verdict folded from engine · guard · incident · app-view mounts · rules -->
-  <div class="card healthpill" id="healthPillCard">
-    <div class="hp-main">
-      <span class="dot off" id="hpDot"></span>
-      <div class="hp-txt">
-        <div class="hp-label" id="hpLabel">Checking…</div>
-        <div class="hp-detail" id="hpDetail">reading engine, guard and mounts…</div>
-      </div>
-      <button class="act" id="hpBtn" onclick="runFullCheck(this)" style="flex:none;min-width:0;padding:9px 13px;font-size:12.5px">Full check</button>
-    </div>
-  </div>
 
   <!-- HERO: engine status -->
   <div class="card hero">
@@ -924,7 +893,6 @@
       $("substate").textContent = "kernel driver not responding";
       dot.className = "dot bad";
       $("mRules").textContent = "—";
-      _health.engine = false; _health.rules = 0;
       return 0;
     }
     const ruleLines = list.stdout.split("\n").map(s => s.trim()).filter(Boolean);
@@ -937,7 +905,6 @@
     $("state").textContent = rules > 0 ? "Active" : "Idle";
     $("substate").textContent = rules > 0 ? "modules injected" : "no rules — re-apply";
     dot.className = "dot " + (rules > 0 ? "ok" : "warn");
-    _health.engine = true; _health.rules = rules;
     return rules;
   }
 
@@ -971,7 +938,6 @@
     const appR = await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"');
     const appOut = (appR.stdout || "").trim();
     const appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
-    _health.appMounts = appNm;
 
     $("mSu").innerHTML = sucompat ? 'sucompat <small>kernel · mountless</small>' : 'external <small>unmanaged</small>';
     // mOv (RRO overlay count) is set from the rule list in refreshStatus — RRO is now
@@ -1022,66 +988,12 @@
   async function refreshGuard() {
     const c = (await exec("cat /data/adb/nomount/bootcount 2>/dev/null")).stdout.trim();
     const disabled = (await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0")).stdout.trim() === "1";
-    _health.guard = disabled ? "tripped" : "armed";
     $("gchip").textContent = "boot " + (c === "" ? "0" : c) + "/3";
     if (disabled) {
       $("gstate").textContent = "Tripped — disabled"; $("gdot").className = "dot bad"; $("rearm").style.display = "";
     } else {
       $("gstate").textContent = "Armed"; $("gdot").className = "dot ok"; $("rearm").style.display = "none";
     }
-  }
-
-  // ---- at-a-glance health pill --------------------------------------------
-  // Aggregates the signals the other refreshers already gathered this cycle into
-  // one verdict. The cheap signals (engine/guard/incident/app-mounts/rules) paint
-  // automatically; the slower selfcheck+doctor fold in only after "Full check"
-  // (or if the Tools-tab chips were run this session).
-  let _health = { engine: null, rules: null, guard: null, appMounts: null, incident: null };
-  function paintHealthPill() {
-    const card = $("healthPillCard"); if (!card) return;
-    const dot = $("hpDot"), label = $("hpLabel"), detail = $("hpDetail");
-    const bad = [], warn = [];
-    if (_health.engine === false) bad.push("engine offline");
-    if (_health.guard === "tripped") bad.push("guard tripped");
-    if (_health.incident) bad.push("last boot incident");
-    if (_health.appMounts > 0) bad.push(_health.appMounts + " mount" + (_health.appMounts > 1 ? "s" : "") + " visible to apps");
-    // fold in the on-demand checks if their chips have been populated this session
-    const dchip = $("dchip"), hchip = $("hchip");
-    if (dchip && dchip.classList.contains("bad")) bad.push("health-check errors");
-    if (hchip && hchip.classList.contains("bad")) bad.push("self-check inconsistency");
-    if (dchip && dchip.classList.contains("warn")) warn.push("health-check warnings");
-    if (_health.rules === 0 && _health.engine !== false) warn.push("no rules — idle");
-
-    let state, text;
-    if (_health.engine === null) { state = "off"; text = "Checking…"; }
-    else if (bad.length) { state = "bad"; text = "Attention needed"; }
-    else if (warn.length) { state = "warn"; text = "Minor attention"; }
-    else { state = "ok"; text = "Healthy"; }
-
-    dot.className = "dot " + state;
-    card.className = "card healthpill" + (state === "ok" || state === "warn" || state === "bad" ? " " + state : "");
-    label.textContent = text;
-    const parts = bad.length ? bad : warn;
-    detail.textContent = parts.length ? parts.join(" · ")
-      : (state === "ok" ? "engine active · guard armed · mountless · apps see nothing" : "reading engine, guard and mounts…");
-
-    // mirror a bad verdict onto the Status nav tab as a red dot
-    const nb = $("nb-status");
-    if (nb) nb.classList.toggle("alert", state === "bad");
-  }
-  // Full check: additionally run the slower selfcheck + doctor (which set the
-  // Tools-tab chips), then re-fold. Kept behind a tap so the tab loads fast.
-  async function runFullCheck(btn) {
-    const label = $("hpLabel"), detail = $("hpDetail"), dot = $("hpDot");
-    const old = btn ? btn.textContent : "";
-    if (btn) { btn.disabled = true; btn.textContent = "…"; }
-    dot.className = "dot off";
-    label.textContent = "Running full check…";
-    detail.textContent = "self-check + health check may take a few seconds";
-    await runSelfcheck({});
-    await runDoctor({});
-    paintHealthPill();
-    if (btn) { btn.disabled = false; btn.textContent = old || "Full check"; }
   }
 
 
@@ -1246,7 +1158,6 @@
     const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
-    _health.incident = !!txt;
     if (!txt) { card.style.display = "none"; return; }
     card.style.display = "";
     $("incidentout").textContent = txt;
@@ -1687,7 +1598,6 @@
     $("ver").textContent = v || "v?";
     $("footver").textContent = v ? ("Suite " + v) : "";
     await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked()]);
-    paintHealthPill();
     if (rulesShown) loadRules();
     loadPkgList();
     if (ic) ic.classList.remove("spin");
