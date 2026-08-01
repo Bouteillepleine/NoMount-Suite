@@ -16,15 +16,11 @@ void c_main(long *sp) {
         goto do_exit;
     }
 
-    int fd = sys3(SYS_SOCKET, AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+    int fd = sys3(SYS_SOCKET, AF_NETLINK, SOCK_RAW, NOMOUNT_NL_PROTO);
     if (fd < 0) { exit_code = 2; goto do_exit; }
 
-    int nm_family = -1;
-    if (do_nm_cmd(fd, 16, 3, 2, "nomount", 8, 1, &mem) > 0) {
-        unsigned short *fam_id = get_attr(mem.rx_buf, 1);
-        if (fam_id) nm_family = *fam_id;
-    }
-    if (nm_family < 0) { exit_code = 3; goto do_exit; }
+    /* No family resolution: the private raw-netlink protocol is addressed
+     * directly (kernel is portid 0); the command rides in nlmsg_type. */
 
     char cmd = argv[1][0];
     unsigned int target_uid = 0;
@@ -64,7 +60,7 @@ void c_main(long *sp) {
 
             int header_size = (target_cmd == 2) ? 12 : 6;
             if ((cursor - mem.payload) + header_size + v_len + r_len > MAX_PAYLOAD) {
-                exit_code |= (do_nm_cmd(fd, nm_family, target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem) < 0);
+                exit_code |= (do_nm_cmd(fd,target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem) < 0);
                 cursor = mem.payload;
             }
 
@@ -85,7 +81,7 @@ void c_main(long *sp) {
         }
 
         if (cursor > mem.payload)
-            exit_code |= (do_nm_cmd(fd, nm_family, target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem) < 0);
+            exit_code |= (do_nm_cmd(fd,target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem) < 0);
 
         goto do_exit;
 
@@ -93,15 +89,15 @@ void c_main(long *sp) {
         if (p_count < 1) goto do_exit;
         unsigned int uid = 0; const char *s = p_args[0];
         while (*s) uid = (uid << 3) + (uid << 1) + (*s++ - '0');
-        exit_code = (do_nm_cmd(fd, nm_family, 6 - (cmd == 'b'), 4, &uid, 4, 5, &mem) < 0);
+        exit_code = (do_nm_cmd(fd,6 - (cmd == 'b'), 4, &uid, 4, 5, &mem) < 0);
         goto do_exit;
 
     } else if (cmd == 'c') {
-        exit_code = (do_nm_cmd(fd, nm_family, 4, 0, (void *)0, 0, 5, &mem) < 0);
+        exit_code = (do_nm_cmd(fd,4, 0, (void *)0, 0, 5, &mem) < 0);
         goto do_exit;
 
     } else if (cmd == 'v') {
-        if (do_nm_cmd(fd, nm_family, 1, 0, (void *)0, 0, 1, &mem) > 0) {
+        if (do_nm_cmd(fd,1, 0, (void *)0, 0, 1, &mem) > 0) {
             unsigned int *ver = get_attr(mem.rx_buf, 5);
             if (ver) {
                 unsigned int v = *ver; char v_str[4] = {0};
@@ -122,7 +118,7 @@ void c_main(long *sp) {
         if (is_uids) is_json = 1;
 
         int target_cmd = is_uids ? 8 : 7;
-        unsigned int len = do_nm_cmd(fd, nm_family, target_cmd, 0, (void *)0, 0, 0x301, &mem);
+        unsigned int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
         int offset = 2;
         if (is_json) print_str("[\n");
 

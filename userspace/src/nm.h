@@ -62,6 +62,11 @@
 #define AF_NETLINK 16
 #define SOCK_RAW 3
 #define NETLINK_GENERIC 16
+/* Private raw-netlink protocol — MUST match kernel nomount.h NOMOUNT_NL_PROTO.
+ * Replaces the old genl family "nomount" (enumerable via CTRL_CMD_GETFAMILY).
+ * The command now travels in nlmsg_type as NM_TYPE_BASE + cmd (no genlmsghdr). */
+#define NOMOUNT_NL_PROTO 29
+#define NM_TYPE_BASE 0x10
 
 struct nlmsghdr {
     unsigned int   nlmsg_len;
@@ -136,7 +141,8 @@ static noinline char* resolve_path(char *p, const char *cwd, const char *rel) {
 
 static noinline void *get_attr(const void *nh, int type) {
     unsigned int max_len = ((struct nlmsghdr *)nh)->nlmsg_len;
-    char *attr = (char *)nh + 20;
+    /* attrs sit directly after the nlmsghdr (16B) — no genlmsghdr (was +20) */
+    char *attr = (char *)nh + 16;
     while ((attr - (char *)nh) + 4 <= max_len) {
         unsigned short alen = *(unsigned short *)attr;
         if (alen < 4) break;
@@ -146,20 +152,21 @@ static noinline void *get_attr(const void *nh, int type) {
     return (void *)0;
 }
 
-/* init_msg + add_attr + send_and_recv unified */
-static noinline int do_nm_cmd(int fd, int fam, int cmd, int atype, const void *data, int len, int flags, struct nm_mem *mem) {
+/* init_msg + add_attr + send_and_recv unified (raw netlink: command in
+ * nlmsg_type = NM_TYPE_BASE + cmd, attrs directly after the nlmsghdr) */
+static noinline int do_nm_cmd(int fd, int cmd, int atype, const void *data, int len, int flags, struct nm_mem *mem) {
     struct nlmsghdr *nlh = (void *)mem->tx_buf;
-    nlh->nlmsg_type = fam;
+    nlh->nlmsg_type = NM_TYPE_BASE + cmd;
     nlh->nlmsg_flags = flags;
-    nlh->nlmsg_len = 20;
-    mem->tx_buf[16] = cmd;
-    mem->tx_buf[17] = 1;
+    nlh->nlmsg_seq = 0;
+    nlh->nlmsg_pid = 0;
+    nlh->nlmsg_len = 16;
 
     if (data) {
-        unsigned short *nla = (void *)(mem->tx_buf + 20);
+        unsigned short *nla = (void *)(mem->tx_buf + 16);
         nla[0] = 4 + len; nla[1] = atype;
         memcpy(nla + 2, data, len);
-        nlh->nlmsg_len = 20 + nla[0];
+        nlh->nlmsg_len = 16 + nla[0];
     }
 
     int res = sys3(SYS_WRITE, fd, (long)nlh, nlh->nlmsg_len);
