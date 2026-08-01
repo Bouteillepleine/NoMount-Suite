@@ -198,11 +198,28 @@ static inline int nm_unpack_pos(loff_t pos) {
 }
 
 /* ========================================================================= */
-/* NETLINK GENERIC PROTOCOL DEFINITIONS */
+/* NETLINK CONTROL PROTOCOL DEFINITIONS (private raw netlink, not generic) */
 /* ========================================================================= */
 
-#define NOMOUNT_GENL_NAME "nomount"
-#define NOMOUNT_GENL_VERSION 1
+/*
+ * Control plane is a PRIVATE raw-netlink protocol, not a named Generic Netlink
+ * family. A genl family ("nomount") was enumerable/name-resolvable by any
+ * caller via CTRL_CMD_GETFAMILY (an on-device detection oracle). A raw netlink
+ * protocol number is neither listed by the genl controller nor resolvable by
+ * name, so NoMount's control channel no longer advertises itself.
+ *
+ * NOMOUNT_NL_PROTO is overridable at build time (e.g. randomize per build);
+ * the userspace `nm` client MUST be built with the same value.
+ */
+#ifndef NOMOUNT_NL_PROTO
+#define NOMOUNT_NL_PROTO 29
+#endif
+#define NOMOUNT_NL_VERSION 1
+
+/* The command travels in nlmsg_type, offset past the reserved control range
+ * (0..NLMSG_MIN_TYPE-1). Kernel and client agree on this mapping. */
+#define NM_CMD_TO_TYPE(c) (NLMSG_MIN_TYPE + (c))
+#define NM_TYPE_TO_CMD(t) ((int)(t) - NLMSG_MIN_TYPE)
 
 /* Commands */
 enum {
@@ -230,17 +247,20 @@ enum {
     __NOMOUNT_ATTR_MAX,
 };
 
-static struct genl_family nomount_genl_family;
-static const struct genl_ops nomount_genl_ops[];
 static const struct nla_policy nomount_genl_policy[__NOMOUNT_ATTR_MAX];
 
 /* * Compat macros * */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0)
-    #define NM_OPS_POLICY(p)    .policy = (p),
-    #define NM_FAMILY_POLICY(p)
+/* nlmsg attribute parse: attrs sit directly after nlmsghdr (hdrlen 0). The
+ * signature gained an extack arg at 4.12 and split strict/deprecated at 5.2. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
+    #define NM_NLMSG_PARSE(nlh, tb) \
+        nlmsg_parse_deprecated((nlh), 0, (tb), __NOMOUNT_ATTR_MAX - 1, nomount_genl_policy, NULL)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+    #define NM_NLMSG_PARSE(nlh, tb) \
+        nlmsg_parse((nlh), 0, (tb), __NOMOUNT_ATTR_MAX - 1, nomount_genl_policy, NULL)
 #else
-    #define NM_OPS_POLICY(p)
-    #define NM_FAMILY_POLICY(p) .policy = (p),
+    #define NM_NLMSG_PARSE(nlh, tb) \
+        nlmsg_parse((nlh), 0, (tb), __NOMOUNT_ATTR_MAX - 1, nomount_genl_policy)
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)

@@ -1421,12 +1421,14 @@ static void __nomount_clear_all(bool is_exit)
     if (is_exit) nomount_restore_superblocks();
 }
 
-/*** Generic Netlink API ***/
+/*** Netlink control API (private raw netlink) ***/
 
-static int nomount_genl_add_rule(struct sk_buff *skb, struct genl_info *info)
+static struct sock *nm_nl_sk;
+
+static int nomount_nl_add_rule(struct nlattr **attrs)
 {
-    if (info->attrs[NOMOUNT_ATTR_PAYLOAD]) {
-        struct nlattr *attr = info->attrs[NOMOUNT_ATTR_PAYLOAD];
+    if (attrs[NOMOUNT_ATTR_PAYLOAD]) {
+        struct nlattr *attr = attrs[NOMOUNT_ATTR_PAYLOAD];
         const char *data = nla_data(attr), *v_ptr, *r_ptr;
         int len = nla_len(attr);
         int pos = 0, err = 0;
@@ -1448,27 +1450,27 @@ static int nomount_genl_add_rule(struct sk_buff *skb, struct genl_info *info)
         }
         return 0;
 
-    } else if (info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH] && info->attrs[NOMOUNT_ATTR_REAL_PATH]) {
-        char *v_str = nla_data(info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
-        char *r_str = nla_data(info->attrs[NOMOUNT_ATTR_REAL_PATH]);
-        int v_len = nla_len(info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) - 1;
-        int r_len = nla_len(info->attrs[NOMOUNT_ATTR_REAL_PATH]) - 1;
-        u32 flags = info->attrs[NOMOUNT_ATTR_FLAGS] ? nla_get_u32(info->attrs[NOMOUNT_ATTR_FLAGS]) : 0;
-        u32 target_uid = info->attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(info->attrs[NOMOUNT_ATTR_UID]) : 0;
+    } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH] && attrs[NOMOUNT_ATTR_REAL_PATH]) {
+        char *v_str = nla_data(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
+        char *r_str = nla_data(attrs[NOMOUNT_ATTR_REAL_PATH]);
+        int v_len = nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) - 1;
+        int r_len = nla_len(attrs[NOMOUNT_ATTR_REAL_PATH]) - 1;
+        u32 flags = attrs[NOMOUNT_ATTR_FLAGS] ? nla_get_u32(attrs[NOMOUNT_ATTR_FLAGS]) : 0;
+        u32 target_uid = attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID]) : 0;
 
         return __nomount_add_rule(v_str, r_str, v_len, r_len, flags, target_uid);
     }
     return -EINVAL;
 }
 
-static int nomount_genl_del_rule(struct sk_buff *skb, struct genl_info *info)
+static int nomount_nl_del_rule(struct nlattr **attrs)
 {
     struct nomount_rule *rule;
     struct hlist_node *tmp;
     HLIST_HEAD(r_victims);
 
-    if (info->attrs[NOMOUNT_ATTR_PAYLOAD]) {
-        struct nlattr *attr = info->attrs[NOMOUNT_ATTR_PAYLOAD];
+    if (attrs[NOMOUNT_ATTR_PAYLOAD]) {
+        struct nlattr *attr = attrs[NOMOUNT_ATTR_PAYLOAD];
         const char *data = nla_data(attr);
         int len = nla_len(attr);
         int pos = 0;
@@ -1482,10 +1484,10 @@ static int nomount_genl_del_rule(struct sk_buff *skb, struct genl_info *info)
             pos += vp_len;
         }
         mutex_unlock(&nomount_write_mutex);
-    } else if (info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) {
-        char *v_path = nla_data(info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
-        int v_len = nla_len(info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) - 1;
-        u32 target_uid = info->attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(info->attrs[NOMOUNT_ATTR_UID]) : 0;
+    } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) {
+        char *v_path = nla_data(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
+        int v_len = nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) - 1;
+        u32 target_uid = attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID]) : 0;
 
         mutex_lock(&nomount_write_mutex);
         __nomount_del_rule(v_path, v_len, target_uid, &r_victims);
@@ -1505,7 +1507,7 @@ static int nomount_genl_del_rule(struct sk_buff *skb, struct genl_info *info)
     return 0;
 }
 
-static int nomount_genl_clear_rules(struct sk_buff *skb, struct genl_info *info)
+static int nomount_nl_clear_rules(void)
 {
     mutex_lock(&nomount_write_mutex);
     __nomount_clear_all(false);
@@ -1514,7 +1516,7 @@ static int nomount_genl_clear_rules(struct sk_buff *skb, struct genl_info *info)
     return 0;
 }
 
-static int nomount_genl_dump_rules(struct sk_buff *skb, struct netlink_callback *cb)
+static int nomount_nl_dump_rules(struct sk_buff *skb, struct netlink_callback *cb)
 {
     struct nomount_rule *rule;
     int current_bkt = cb->args[0];
@@ -1527,18 +1529,18 @@ static int nomount_genl_dump_rules(struct sk_buff *skb, struct netlink_callback 
         node_idx = 0;
         hlist_for_each_entry_rcu(rule, &nomount_rules_ht[bkt], vpath_node) {
             if (node_idx < skip_nodes) { node_idx++; continue; }
-            hdr = genlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
-                              &nomount_genl_family, NLM_F_MULTI, NM_CMD_GET_LIST);
+            hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
+                            NM_CMD_TO_TYPE(NM_CMD_GET_LIST), 0, NLM_F_MULTI);
             if (!hdr) goto out;
 
             if (nla_put_string(skb, NOMOUNT_ATTR_VIRTUAL_PATH, nm_get_vpath(rule)) ||
                 nla_put_string(skb, NOMOUNT_ATTR_REAL_PATH, nm_get_rpath(rule)) ||
                 nla_put_u32(skb, NOMOUNT_ATTR_FLAGS, rule->flags) ||
                 nla_put_u32(skb, NOMOUNT_ATTR_UID, rule->target_uid)) {
-                genlmsg_cancel(skb, hdr);
+                nlmsg_cancel(skb, hdr);
                 goto out;
             }
-            genlmsg_end(skb, hdr);
+            nlmsg_end(skb, hdr);
             node_idx++;
         }
         skip_nodes = 0;
@@ -1551,15 +1553,15 @@ out:
     return skb->len;
 }
 
-static int nomount_genl_add_uid(struct sk_buff *skb, struct genl_info *info)
+static int nomount_nl_add_uid(struct nlattr **attrs)
 {
     unsigned int uid;
     int ret;
 
-    if (!info->attrs[NOMOUNT_ATTR_UID])
+    if (!attrs[NOMOUNT_ATTR_UID])
         return -EINVAL;
 
-    uid = nla_get_u32(info->attrs[NOMOUNT_ATTR_UID]);
+    uid = nla_get_u32(attrs[NOMOUNT_ATTR_UID]);
 
     if (nomount_is_uid_blocked(uid)) 
         return -EEXIST;
@@ -1581,15 +1583,15 @@ static int nomount_genl_add_uid(struct sk_buff *skb, struct genl_info *info)
     return ret;
 }
 
-static int nomount_genl_del_uid(struct sk_buff *skb, struct genl_info *info)
+static int nomount_nl_del_uid(struct nlattr **attrs)
 {
     unsigned int uid;
     int ret = -ENOENT;
 
-    if (!info->attrs[NOMOUNT_ATTR_UID])
+    if (!attrs[NOMOUNT_ATTR_UID])
         return -EINVAL;
 
-    uid = nla_get_u32(info->attrs[NOMOUNT_ATTR_UID]);
+    uid = nla_get_u32(attrs[NOMOUNT_ATTR_UID]);
 
     mutex_lock(&nomount_write_mutex);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
@@ -1610,7 +1612,7 @@ static int nomount_genl_del_uid(struct sk_buff *skb, struct genl_info *info)
     return ret;
 }
 
-static int nomount_genl_dump_uids(struct sk_buff *skb, struct netlink_callback *cb)
+static int nomount_nl_dump_uids(struct sk_buff *skb, struct netlink_callback *cb)
 {
     int id = cb->args[0];
     void *ptr;
@@ -1619,14 +1621,14 @@ static int nomount_genl_dump_uids(struct sk_buff *skb, struct netlink_callback *
     rcu_read_lock();
     while ((ptr = idr_get_next(&nomount_uid_idr, &id)) != NULL) {
         void *hdr;
-        hdr = genlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
-                          &nomount_genl_family, NLM_F_MULTI, 8);
+        hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
+                        NM_CMD_TO_TYPE(NM_CMD_GET_UIDS), 0, NLM_F_MULTI);
         if (!hdr) break;
         if (nla_put_u32(skb, NOMOUNT_ATTR_UID, id)) {
-            genlmsg_cancel(skb, hdr);
+            nlmsg_cancel(skb, hdr);
             break;
         }
-        genlmsg_end(skb, hdr);
+        nlmsg_end(skb, hdr);
         id++;
     }
     rcu_read_unlock();
@@ -1634,30 +1636,29 @@ static int nomount_genl_dump_uids(struct sk_buff *skb, struct netlink_callback *
     return skb->len;
 }
 
-static int nomount_genl_get_version(struct sk_buff *skb, struct genl_info *info)
+static int nomount_nl_get_version(struct sk_buff *req, struct nlmsghdr *req_nlh)
 {
+    u32 portid = NETLINK_CB(req).portid;
     struct sk_buff *msg;
     void *hdr;
-    int ret;
 
-    msg = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+    msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
     if (!msg) return -ENOMEM;
 
-    hdr = genlmsg_put_reply(msg, info, &nomount_genl_family, 0, info->genlhdr->cmd);
+    hdr = nlmsg_put(msg, portid, req_nlh->nlmsg_seq,
+                    NM_CMD_TO_TYPE(NM_CMD_GET_VERSION), 0, 0);
     if (!hdr) {
         nlmsg_free(msg);
         return -EMSGSIZE;
     }
 
-    ret = nla_put_u32(msg, NOMOUNT_ATTR_VERSION, NOMOUNT_VERSION);
-    if (ret) {
-        genlmsg_cancel(msg, hdr);
+    if (nla_put_u32(msg, NOMOUNT_ATTR_VERSION, NOMOUNT_VERSION)) {
         nlmsg_free(msg);
-        return ret;
+        return -EMSGSIZE;
     }
 
-    genlmsg_end(msg, hdr);
-    return genlmsg_reply(msg, info);
+    nlmsg_end(msg, hdr);
+    return nlmsg_unicast(nm_nl_sk, msg, portid);
 }
 
 static const struct nla_policy nomount_genl_policy[__NOMOUNT_ATTR_MAX] = {
@@ -1669,32 +1670,55 @@ static const struct nla_policy nomount_genl_policy[__NOMOUNT_ATTR_MAX] = {
     [NOMOUNT_ATTR_PAYLOAD]      = { .type = NLA_BINARY },
 };
 
-static const struct genl_ops nomount_genl_ops[] = {
-{ .cmd = NM_CMD_ADD_RULE, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_add_rule, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
-{ .cmd = NM_CMD_DEL_RULE, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_del_rule, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
-{ .cmd = NM_CMD_CLEAR_ALL, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_clear_rules, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
-{ .cmd = NM_CMD_ADD_UID, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_add_uid, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
-{ .cmd = NM_CMD_DEL_UID, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_del_uid, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
-{ .cmd = NM_CMD_GET_LIST, .flags = GENL_ADMIN_PERM, .doit = NULL, .dumpit = nomount_genl_dump_rules, NM_OPS_POLICY(nomount_genl_policy) },
-{ .cmd = NM_CMD_GET_UIDS, .flags = GENL_ADMIN_PERM, .doit = NULL, .dumpit = nomount_genl_dump_uids, NM_OPS_POLICY(nomount_genl_policy) },
-{ .cmd = NM_CMD_GET_VERSION, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_get_version, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
-};
+/*
+ * Dispatch one control request. The command is carried in nlmsg_type; the two
+ * GET_* commands are streamed via the standard dump machinery. CAP_NET_ADMIN
+ * is required on every command (replaces the genl GENL_ADMIN_PERM flag).
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
+                         struct netlink_ext_ack *extack)
+#else
+static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
+#endif
+{
+    struct nlattr *attrs[__NOMOUNT_ATTR_MAX];
+    int cmd = NM_TYPE_TO_CMD(nlh->nlmsg_type);
+    int ret;
 
-static struct genl_family nomount_genl_family = {
-    .name = NOMOUNT_GENL_NAME,
-    .version = NOMOUNT_GENL_VERSION,
-    .maxattr = (__NOMOUNT_ATTR_MAX - 1),
-     NM_FAMILY_POLICY(nomount_genl_policy)
-    .netnsok = true,
-    .module = THIS_MODULE,
-    .ops = nomount_genl_ops,
-    .n_ops = ARRAY_SIZE(nomount_genl_ops),
-};
+    if (!netlink_capable(skb, CAP_NET_ADMIN))
+        return -EPERM;
+
+    if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS) {
+        struct netlink_dump_control c = {
+            .dump = (cmd == NM_CMD_GET_LIST) ? nomount_nl_dump_rules
+                                             : nomount_nl_dump_uids,
+        };
+        return netlink_dump_start(nm_nl_sk, skb, nlh, &c);
+    }
+
+    ret = NM_NLMSG_PARSE(nlh, attrs);
+    if (ret < 0)
+        return ret;
+
+    switch (cmd) {
+    case NM_CMD_ADD_RULE:    return nomount_nl_add_rule(attrs);
+    case NM_CMD_DEL_RULE:    return nomount_nl_del_rule(attrs);
+    case NM_CMD_CLEAR_ALL:   return nomount_nl_clear_rules();
+    case NM_CMD_ADD_UID:     return nomount_nl_add_uid(attrs);
+    case NM_CMD_DEL_UID:     return nomount_nl_del_uid(attrs);
+    case NM_CMD_GET_VERSION: return nomount_nl_get_version(skb, nlh);
+    default:                 return -EINVAL;
+    }
+}
+
+static void nm_nl_rcv(struct sk_buff *skb)
+{
+    netlink_rcv_skb(skb, &nm_nl_rcv_msg);
+}
 
 static int __init nomount_init(void)
 {
-    int ret;
-
     struct cred *cred = prepare_creds();
     if (!cred) { return -ENOMEM; }
     cred->uid = cred->euid = cred->suid = cred->fsuid = GLOBAL_ROOT_UID;
@@ -1719,15 +1743,18 @@ static int __init nomount_init(void)
         return -ENOMEM;
     }
 
-    ret = genl_register_family(&nomount_genl_family);
-    if (ret) {
-        nm_err("Failed to register Generic Netlink family (err: %d)\n", ret);
+    {
+        struct netlink_kernel_cfg cfg = { .input = nm_nl_rcv, };
+        nm_nl_sk = netlink_kernel_create(&init_net, NOMOUNT_NL_PROTO, &cfg);
+    }
+    if (!nm_nl_sk) {
+        nm_err("Failed to create netlink socket (proto %d)\n", NOMOUNT_NL_PROTO);
         kmem_cache_destroy(nm_dir_cachep);
         kmem_cache_destroy(nm_inode_cachep);
         kmem_cache_destroy(nm_iop_cachep);
         kmem_cache_destroy(nm_fop_cachep);
         put_cred(nm_root_cred);
-        return ret;
+        return -ENOMEM;
     }
 
     nm_info("Loaded successfully\n");
@@ -1736,7 +1763,7 @@ static int __init nomount_init(void)
 
 static void __exit nomount_exit(void)
 {
-    genl_unregister_family(&nomount_genl_family);
+    netlink_kernel_release(nm_nl_sk);
 
     mutex_lock(&nomount_write_mutex);
     __nomount_clear_all(true);
