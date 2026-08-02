@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.1
+
+### Fixed
+- **False "per-UID inconsistency" on the manager card at boot.** The runtime
+  self-consistency canary ran a single probe shortly after `boot_completed`, but
+  app UIDs have not all launched and materialised their per-UID injection that
+  early, so a transient disagreement stamped a scary "⚠️ per-UID inconsistency"
+  on the card every boot even when the steady state was healthy. `service.sh`
+  now retries the probe across a settle window (up to 6 × 15 s) and keeps the
+  *settled* verdict; only a divergence that persists through the whole window —
+  a real d_drop-style regression — reaches the card.
+
 ## v2.1.0
 
 First release of the reworked hybrid metamodule.

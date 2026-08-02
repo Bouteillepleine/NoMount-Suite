@@ -62,11 +62,24 @@ fi
 # --- runtime health canary (writes health.txt; complements plan-time doctor) ---
 # Runs the per-UID self-consistency probe that the d_drop regression would have
 # failed on the first boot: does a normal app see the same injected files as root?
-# Non-fatal; the verdict is surfaced on the card and in WebUI > Tools.
+# The probe can transiently disagree right after boot, before every app UID has
+# launched and materialised its per-UID injection, so retry across a settle window
+# and keep the *settled* verdict — a boot-time blip must not stamp a scary
+# "inconsistency" on the card. Only a verdict that PERSISTS through the whole
+# window is a real d_drop-style regression. Non-fatal; surfaced on the card / WebUI.
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
-    "$BIN" selfcheck --write >/dev/null 2>&1
+    _try=0
+    while [ "$_try" -lt 6 ]; do
+        "$BIN" selfcheck --write >/dev/null 2>&1
+        _cons=$(sed -n 's/^consistency=//p' "$NMDIR/health.txt" 2>/dev/null)
+        if [ "$_cons" = "ok" ] || [ "$_cons" = "unchecked" ] || [ -z "$_cons" ]; then
+            break
+        fi
+        _try=$((_try + 1))
+        sleep 15
+    done
     _hv=$(sed -n 's/^verdict=//p' "$NMDIR/health.txt" 2>/dev/null)
-    echo "nomount: selfcheck verdict = ${_hv:-unknown}" > /dev/kmsg 2>/dev/null
+    echo "nomount: selfcheck verdict=${_hv:-unknown} consistency=${_cons:-unknown} (settle tries=$_try)" > /dev/kmsg 2>/dev/null
 fi
 
 if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
