@@ -32,6 +32,11 @@ if [ -e /proc/pathhide ]; then
     fi
 fi
 
+# Pre-build the Cloak Xposed-module cache in the background so the WebUI opens
+# instantly (reads the cache) instead of scanning ~all installed APKs on open.
+[ -f /data/adb/modules/meta-nomount/scan.sh ] && \
+    (sh /data/adb/modules/meta-nomount/scan.sh >/dev/null 2>&1 &)
+
 # --- ksud de-link re-assertion (self-heal of the susfs-action guard) ---
 # metamount.sh de-links ksu_susfs from the ksud multicall at mount time; re-assert it
 # here post-boot as a belt-and-suspenders against any timing race (e.g. ksud finishing

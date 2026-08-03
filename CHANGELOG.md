@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.4
+
+### Changed
+- **Cloak scanner is fast and no longer hangs.** The Xposed-module probe now runs in parallel (8 APKs at a time) with a per-APK `timeout`, and caches the result to `/data/adb/nomount/xposed_cache`. The WebUI reads the cache on open (~20 ms) instead of scanning ~all installed APKs; `service.sh` rebuilds the cache in the background at boot; the **Scan** button forces a refresh.
+
 ## v1.0.3
 
 ### Fixed

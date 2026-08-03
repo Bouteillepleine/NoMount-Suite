@@ -1635,6 +1635,11 @@
     r.stdout.split("\n").map(function (l) { return l.replace(/\r/g, "").trim(); })
       .filter(function (l) { return l && l[0] !== "#"; })
       .forEach(function (rule) { PH.set(rule, { hidden: true, xposed: false, label: rule }); });
+    // Instant: cached Xposed-module list (rebuilt in the background at boot / by Scan).
+    const c = await exec("sh /data/adb/modules/meta-nomount/scan.sh --cached 2>/dev/null");
+    c.stdout.split("\n").map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (p) {
+      const e = PH.get(p) || { hidden: false, label: p }; e.xposed = true; e.label = p; PH.set(p, e);
+    });
     renderCloak();
   }
   async function scanCloak(btn) {
