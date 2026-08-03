@@ -74,4 +74,14 @@ set_perm "$CONF" 0 0 0644
 ui_print "- Spoof add-on enabled: dynamic vbmeta.digest"
 ui_print "  config: $CONF"
 
+# --- Cloak (pathhide maps/fd) add-on ---
+[ -f "$MODPATH/scan.sh" ] && set_perm "$MODPATH/scan.sh" 0 0 0755
+[ -f "$NMDIR/pathhide.conf" ] || echo "# NoMount Cloak — pathhide rule list (managed by WebUI › Tools › Cloak)" > "$NMDIR/pathhide.conf"
+set_perm "$NMDIR/pathhide.conf" 0 0 0644
+if [ -e /proc/pathhide ]; then
+    ui_print "- Cloak add-on: kernel pathhide FOUND — pick modules in WebUI › Tools › Cloak"
+else
+    ui_print "- Cloak add-on: /proc/pathhide not present (needs a pathhide-enabled kernel)"
+fi
+
 ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."

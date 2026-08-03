@@ -66,6 +66,7 @@ SCRIPTS=(
     post-fs-data.sh
     service.sh
     spoof.sh
+    scan.sh
 )
 
 # OnePlus (and any device that can run this kernel) is arm64-v8a only — the

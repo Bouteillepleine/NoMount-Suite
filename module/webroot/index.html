@@ -785,6 +785,25 @@
     <pre class="rules" id="incidentout">…</pre>
   </div>
 
+  <!-- CLOAK (pathhide maps/fd) -->
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>
+      <h2>Cloak (maps / fd)</h2><span class="chip" id="phchip">—</span>
+    </div>
+    <p class="note">Hide selected Xposed/LSPosed module APKs from every process's <code>/proc/&lt;pid&gt;/maps</code> and <code>/proc/&lt;pid&gt;/fd</code> via the kernel <code>pathhide</code> interface — applied live and re-applied on boot.</p>
+    <div class="btns">
+      <button class="act" id="phScan" onclick="scanCloak(this)">Scan Xposed modules</button>
+      <button class="act" id="phShow" onclick="phShowList(this)">Show list</button>
+    </div>
+    <div style="display:flex;gap:8px;margin:8px 0 2px">
+      <input class="txin" id="phManual" placeholder="add package / substring" autocapitalize="off" autocorrect="off" spellcheck="false" style="flex:1">
+      <button class="act" style="flex:none;min-width:0;padding:7px 13px" onclick="addCloak()">Add</button>
+    </div>
+    <div class="list" id="phList" style="display:none"></div>
+    <div class="btns"><button class="act primary" id="phApply" onclick="applyCloak(this)">Apply &amp; save</button></div>
+  </div>
+
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
@@ -1603,6 +1622,79 @@
     if (ic) ic.classList.remove("spin");
   }
 
+  // ---- Cloak (pathhide maps/fd) ------------------------------------------
+  const PH_CONF = "/data/adb/nomount/pathhide.conf";
+  let PH = new Map(); let phShown = false;
+  function phClean(s) { return (s || "").replace(/[^A-Za-z0-9._:\/\-]/g, "").trim(); }
+  async function loadCloak() {
+    const ok = (await exec("[ -e /proc/pathhide ] && echo y")).stdout.indexOf("y") >= 0;
+    document.getElementById("phApply").disabled = !ok;
+    document.getElementById("phScan").disabled = !ok;
+    if (!ok) document.getElementById("phchip").textContent = "no kernel";
+    const r = await exec("cat " + PH_CONF + " 2>/dev/null");
+    r.stdout.split("\n").map(function (l) { return l.replace(/\r/g, "").trim(); })
+      .filter(function (l) { return l && l[0] !== "#"; })
+      .forEach(function (rule) { PH.set(rule, { hidden: true, xposed: false, label: rule }); });
+    renderCloak();
+  }
+  async function scanCloak(btn) {
+    const o = btn.textContent; btn.disabled = true; btn.textContent = "Scanning…";
+    const r = await exec("sh /data/adb/modules/meta-nomount/scan.sh 2>/dev/null");
+    r.stdout.split("\n").map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (p) {
+      const e = PH.get(p) || { hidden: false, label: p }; e.xposed = true; e.label = p; PH.set(p, e);
+    });
+    btn.disabled = false; btn.textContent = o;
+    if (!phShown) phShowList(document.getElementById("phShow"));
+    renderCloak();
+    toast("Found " + [...PH.values()].filter(function (e) { return e.xposed; }).length + " Xposed module(s)", "ok");
+  }
+  function phShowList(btn) {
+    phShown = !phShown;
+    document.getElementById("phList").style.display = phShown ? "" : "none";
+    btn.textContent = phShown ? "Hide list" : "Show list";
+  }
+  function addCloak() {
+    const el = document.getElementById("phManual"); const v = phClean(el.value);
+    if (!v) { toast("Enter a package or substring", "bad"); return; }
+    const e = PH.get(v) || { xposed: false, label: v }; e.hidden = true; PH.set(v, e); el.value = "";
+    if (!phShown) phShowList(document.getElementById("phShow"));
+    renderCloak();
+  }
+  function renderCloak() {
+    const items = [...PH.entries()].sort(function (a, b) {
+      return (b[1].xposed ? 1 : 0) - (a[1].xposed ? 1 : 0) || a[0].localeCompare(b[0]);
+    });
+    const hid = items.filter(function (x) { return x[1].hidden; }).length;
+    const chip = document.getElementById("phchip");
+    if (chip.textContent !== "no kernel") chip.textContent = items.length ? (hid + " / " + items.length) : "0";
+    const list = document.getElementById("phList");
+    if (!items.length) { list.innerHTML = '<div class="note" style="padding:8px 2px">No rules — scan or add a package.</div>'; return; }
+    list.innerHTML = items.map(function (it) {
+      const rule = it[0], e = it[1];
+      return '<div class="swrow"><div class="swi"><div class="lbl">' + e.label + '</div><div class="val">' +
+        (e.xposed ? 'xposed · ' : '') + rule + '</div></div>' +
+        '<label class="switch"><input type="checkbox" data-r="' + encodeURIComponent(rule) + '" ' +
+        (e.hidden ? 'checked' : '') + ' onchange="phToggle(this)"><span class="sl"></span></label></div>';
+    }).join("");
+  }
+  function phToggle(cb) {
+    const k = decodeURIComponent(cb.dataset.r); const e = PH.get(k);
+    if (e) { e.hidden = cb.checked; PH.set(k, e); } renderCloak();
+  }
+  async function applyCloak(btn) {
+    const rules = [...PH.entries()].filter(function (x) { return x[1].hidden; })
+      .map(function (x) { return phClean(x[0]); }).filter(Boolean);
+    const o = btn.textContent; btn.disabled = true; btn.textContent = "Applying…";
+    let cmd = "mkdir -p /data/adb/nomount; { echo '# NoMount Cloak — pathhide rule list (managed by WebUI)'; ";
+    rules.forEach(function (r) { cmd += "echo '" + r + "'; "; });
+    cmd += "} > " + PH_CONF + "; if [ -e /proc/pathhide ]; then echo - > /proc/pathhide; ";
+    rules.forEach(function (r) { cmd += "echo '+" + r + "' > /proc/pathhide; "; });
+    cmd += "fi; echo OK";
+    const r = await exec(cmd); btn.disabled = false; btn.textContent = o;
+    const ok = r.stdout.indexOf("OK") >= 0;
+    toast(ok ? (rules.length ? "Cloaking " + rules.length + " — live & saved" : "Cleared all rules") : "Failed", ok ? "ok" : "bad");
+  }
+
   // ---- init (top level: must not live inside an action handler) ----
   (function restoreTab() {
     let t = null;
@@ -1615,6 +1707,7 @@
   window.addEventListener("load", function () { movePill(false); });
 
   refreshAll();
+  loadCloak();
 </script>
 </body>
 </html>

@@ -16,6 +16,22 @@ sleep 10
 rm -f "$NMDIR/bootcount"
 echo "nomount: boot completed, guard counter reset" > /dev/kmsg 2>/dev/null
 
+# --- Cloak: re-apply the pathhide maps/fd rule list (managed by the WebUI) ---
+# Hides selected module APKs from every /proc/<pid>/maps and /proc/<pid>/fd via
+# the kernel pathhide interface. Inert on a kernel without /proc/pathhide.
+if [ -e /proc/pathhide ]; then
+    echo - > /proc/pathhide 2>/dev/null
+    if [ -f "$NMDIR/pathhide.conf" ]; then
+        while IFS= read -r _phr; do
+            _phr=$(echo "$_phr" | tr -d '\r')
+            [ -z "$_phr" ] && continue
+            case "$_phr" in \#*) continue ;; esac
+            echo "+$_phr" > /proc/pathhide 2>/dev/null
+        done < "$NMDIR/pathhide.conf"
+        echo "nomount: pathhide cloak rules re-applied" > /dev/kmsg 2>/dev/null
+    fi
+fi
+
 # --- ksud de-link re-assertion (self-heal of the susfs-action guard) ---
 # metamount.sh de-links ksu_susfs from the ksud multicall at mount time; re-assert it
 # here post-boot as a belt-and-suspenders against any timing race (e.g. ksud finishing
