@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.3
+
+### Fixed
+- **Cloak scanner found no Xposed modules.** The manifest probe grep'd the compiled `AndroidManifest.xml` for `xposedmodule`, but binary XML stores pool strings as UTF-16 (null bytes between chars) so the ASCII grep never matched. `scan.sh` now strips nulls (`tr -d '\000'`) before the grep.
+
 ## v1.0.2
 
 ### Added

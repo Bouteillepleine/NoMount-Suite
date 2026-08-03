@@ -7,7 +7,7 @@ pm list packages -3 -f 2>/dev/null | sed 's/^package://' | while IFS= read -r li
     pkg=${line##*=}
     apk=${line%=*}
     [ -f "$apk" ] || continue
-    if unzip -p "$apk" AndroidManifest.xml 2>/dev/null | grep -qa "xposedmodule"; then
+    if unzip -p "$apk" AndroidManifest.xml 2>/dev/null | tr -d '\000' | grep -qa "xposedmodule"; then
         echo "$pkg"
     fi
 done | sort -u
