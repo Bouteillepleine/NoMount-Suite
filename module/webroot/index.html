@@ -781,8 +781,9 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
       <h2>Last incident</h2><span class="chip bad">guard tripped</span>
     </div>
-    <p class="note">Recorded when the bootloop guard self-disabled the Suite — including the newest native crash and its abort message, which usually names the offending path outright.</p>
+    <p class="note">Recorded when the bootloop guard self-disabled the Suite — including the newest native crash and its abort message, which usually names the offending path outright. This is a saved record, not live state — it survives reboots until a new trip overwrites it or you clear it. Whether the Suite is disabled <em>right now</em> is the guard chip on Status.</p>
     <pre class="rules" id="incidentout">…</pre>
+    <div class="btns"><button class="act danger" onclick="clearIncident(this)">Clear incident</button></div>
   </div>
 
   <!-- CLOAK (pathhide maps/fd) -->
@@ -1177,11 +1178,17 @@
     const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
-    if (!txt) { card.style.display = "none"; return; }
+    const nb = $("nb-tools");
+    if (!txt) { card.style.display = "none"; if (nb) nb.classList.remove("alert"); return; }
     card.style.display = "";
     $("incidentout").textContent = txt;
-    const nb = $("nb-tools");
     if (nb) nb.classList.add("alert");
+  }
+  async function clearIncident(btn) {
+    btn.disabled = true;
+    await exec("rm -f /data/adb/nomount/incident.log");
+    toast("Incident record cleared", "ok");
+    btn.disabled = false; refreshIncident();
   }
 
   // ---- modules ----
@@ -1428,9 +1435,11 @@
   }
   async function rearm(btn) {
     btn.disabled = true;
-    await exec("rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount");
+    // Also drop the incident record: re-arming means acknowledging the trip, so the
+    // saved card should not linger past the fix (it only made sense while disabled).
+    await exec("rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
     toast("Guard re-armed — reboot to re-enable", "ok");
-    btn.disabled = false; refreshGuard();
+    btn.disabled = false; refreshGuard(); refreshIncident();
   }
   async function uidOp(op, btn) {
     const v = $("uid").value.trim();
