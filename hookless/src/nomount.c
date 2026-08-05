@@ -65,6 +65,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
             if (rule && (rule->target_uid == 0 || rule->target_uid == current_uid().val)) {
                 rule_info->flags = rule->flags;
                 rule_info->v_ino = rule->v_ino;
+                rule_info->v_dev = rule->v_dev;
                 rule_info->this_dir = rule->this_dir;
                 if (rule->r_path.dentry) {
                     rule_info->r_path = rule->r_path;
@@ -168,6 +169,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     }
 
     info->v_ino = rule_info->v_ino;
+    info->v_dev = rule_info->v_dev;
 
     inode->i_private = info;
     inode->i_ino = rule_info->v_ino;
@@ -522,6 +524,20 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
     return d_backing_inode(info->r_path.dentry)->i_op->listxattr(info->r_path.dentry, buffer, size);
 }
 
+/* Reported (getattr-level) stat of a path — i.e. what a userspace detector
+ * sees, not the raw backing inode->i_sb->s_dev. On an overlay mount this yields
+ * the underlying layer's dev; on plain erofs it equals the sb dev. We mirror
+ * this dev onto injected inodes so they don't stand out as an st_dev outlier
+ * against their stock siblings (OnePlus /product is overlay-backed). */
+static int nm_path_stat(const struct path *p, struct kstat *st)
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+    return vfs_getattr_nosec(p, st);
+#else
+    return vfs_getattr_nosec(p, st, STATX_INO, AT_STATX_SYNC_AS_STAT);
+#endif
+}
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
 /* Pre-4.11 inode_operations->getattr signature: (vfsmount, dentry, kstat).
  * vfs_getattr_nosec()/generic_fillattr() are the 2-arg forms here. */
@@ -535,14 +551,14 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
         generic_fillattr(v_inode, stat);
         stat->ino = info->v_ino;
-        stat->dev = v_inode->i_sb->s_dev;
+        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
         return 0;
     }
 
     res = vfs_getattr_nosec(&info->r_path, stat);
     if (likely(res == 0)) {
         stat->ino = info->v_ino;
-        stat->dev = v_inode->i_sb->s_dev;
+        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
     }
     return res;
 }
@@ -561,14 +577,14 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
         generic_fillattr(IDMAP_CALL v_inode, stat);
 #endif
         stat->ino = info->v_ino;
-        stat->dev = v_inode->i_sb->s_dev;
+        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
         return 0;
     }
 
     res = vfs_getattr_nosec(&info->r_path, stat, request_mask, query_flags);
     if (likely(res == 0)) {
         stat->ino = info->v_ino;
-        stat->dev = v_inode->i_sb->s_dev;
+        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
     }
     return res;
 }
@@ -1307,10 +1323,38 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
          S_ISDIR(d_backing_inode(rule->r_path.dentry)->i_mode)) rule->flags |= NM_FLAG_IS_DIR;
 
     if (kern_path(nm_get_vpath(rule), LOOKUP_FOLLOW, &v_path_struct) == 0) {
+        struct kstat kst;
         rule->v_ino = d_backing_inode(v_path_struct.dentry)->i_ino;
+        /* Mirror the dev a *stock* file at this path reports (what a detector's
+         * stat() returns) rather than the raw backing i_sb->s_dev, which on
+         * overlay-mounted partitions is the overlay-top dev and makes injected
+         * inodes an st_dev outlier vs their stock siblings. */
+        rule->v_dev = (nm_path_stat(&v_path_struct, &kst) == 0)
+                          ? kst.dev
+                          : d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
         path_put(&v_path_struct);
     } else {
-         rule->v_ino = (unsigned long)rule->v_hash;
+        /* Pure injection (no stock file): mirror the parent directory's
+         * reported dev so the new entry blends with its siblings. */
+        char *vp = nm_get_vpath(rule);
+        char *slash = strrchr(vp, '/');
+
+        rule->v_ino = (unsigned long)rule->v_hash;
+        rule->v_dev = 0;
+        if (slash && slash != vp) {
+            char *parent = kstrndup(vp, slash - vp, GFP_KERNEL);
+
+            if (parent) {
+                if (kern_path(parent, LOOKUP_FOLLOW, &v_path_struct) == 0) {
+                    struct kstat kst;
+
+                    if (nm_path_stat(&v_path_struct, &kst) == 0)
+                        rule->v_dev = kst.dev;
+                    path_put(&v_path_struct);
+                }
+                kfree(parent);
+            }
+        }
     }
 
     return rule;
