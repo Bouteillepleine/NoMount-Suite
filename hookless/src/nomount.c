@@ -1809,6 +1809,29 @@ static int __init nomount_init(void)
     return 0;
 }
 
+/* Rewrite the (dev, ino) pair /proc/<pid>/maps reports for a mapped injected
+ * file. show_map_vma() reads inode->i_sb->s_dev/i_ino RAW — it never calls
+ * ->getattr — so without this an injected mapping shows the overlay-top dev
+ * (major 0), an outlier vs stock file-backed mappings. Only our own created
+ * inodes (nm_file_iops/nm_dir_iops + nm_inode_info in i_private) are touched;
+ * hijacked real inodes and everything else are left alone. */
+void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
+                                 unsigned long *ino)
+{
+    const struct nm_inode_info *info;
+
+    if (unlikely(!inode || !dev || !ino))
+        return;
+    if (inode->i_op != &nm_file_iops && inode->i_op != &nm_dir_iops)
+        return;
+    info = inode->i_private;
+    if (unlikely(!info))
+        return;
+    if (info->v_dev)
+        *dev = info->v_dev;
+    *ino = info->v_ino;
+}
+
 static void __exit nomount_exit(void)
 {
     netlink_kernel_release(nm_nl_sk);

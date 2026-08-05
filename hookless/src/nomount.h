@@ -171,6 +171,10 @@ struct nm_rule_info {
 };
 
 static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nm_rule_info *rule_info);
+/* Maps (/proc/<pid>/maps) dev/ino spoof for mapped injected inodes; called from
+ * fs/proc/task_mmu.c show_map_vma() via a guarded extern there. */
+void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
+				 unsigned long *ino);
 
 /* =====================================================================
  * NoMount VFS Offset Protocol

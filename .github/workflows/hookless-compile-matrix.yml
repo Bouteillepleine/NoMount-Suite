@@ -190,6 +190,17 @@ jobs:
           echo "== compile fs/nomount.o =="
           make $MAKEOPTS fs/nomount.o 2>&1 | tee /tmp/nm_build.log
           ls -l out/fs/nomount.o && echo "COMPILE_OK ${{ matrix.ver }}"
+          # Also compile the maps-cloak consumer when the integration patch carries
+          # the task_mmu.c hunk (device versions 5.10..6.12). show_map_vma() reads
+          # inode->i_sb->s_dev/i_ino raw, so nomount_spoof_mmap_metadata() runs there;
+          # this gates that hunk on every GKI version that ships it.
+          if grep -q 'nomount_spoof_mmap_metadata' fs/proc/task_mmu.c; then
+            echo "== compile fs/proc/task_mmu.o (maps hook present) =="
+            make $MAKEOPTS fs/proc/task_mmu.o 2>&1 | tee /tmp/tm_build.log
+            ls -l out/fs/proc/task_mmu.o && echo "TASK_MMU_OK ${{ matrix.ver }}"
+          else
+            echo "== task_mmu.c has no NoMount hook for ${{ matrix.ver }} — skipping =="
+          fi
           ccache -s 2>/dev/null | grep -iE 'hit|miss' || true
 
       - name: Advisory W=1 + sparse (non-blocking)
