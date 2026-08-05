@@ -1930,10 +1930,10 @@ static int __init nomount_init(void)
     nm_root_cred = cred;
 
     hash_init(nomount_rules_ht);
-    nm_dir_cachep = kmem_cache_create("nm_dirs", sizeof(struct nomount_dir_node), 0, SLAB_HWCACHE_ALIGN, NULL);
-    nm_inode_cachep = kmem_cache_create("nm_inodes", sizeof(struct nm_inode_info), 0, SLAB_HWCACHE_ALIGN, NULL);
-    nm_iop_cachep = kmem_cache_create("nomount_iop_cache", sizeof(struct nm_iop), 0, SLAB_HWCACHE_ALIGN, NULL);
-    nm_fop_cachep = kmem_cache_create("nomount_fop_cache", sizeof(struct nm_fop), 0, SLAB_HWCACHE_ALIGN, NULL);
+    nm_dir_cachep = kmem_cache_create("vext_dnode", sizeof(struct nomount_dir_node), 0, SLAB_HWCACHE_ALIGN, NULL);
+    nm_inode_cachep = kmem_cache_create("vext_inode", sizeof(struct nm_inode_info), 0, SLAB_HWCACHE_ALIGN, NULL);
+    nm_iop_cachep = kmem_cache_create("vext_iop", sizeof(struct nm_iop), 0, SLAB_HWCACHE_ALIGN, NULL);
+    nm_fop_cachep = kmem_cache_create("vext_fop", sizeof(struct nm_fop), 0, SLAB_HWCACHE_ALIGN, NULL);
 
     if (!nm_dir_cachep || !nm_inode_cachep || !nm_iop_cachep || !nm_fop_cachep) {
         nm_err("Failed to allocate memory slab caches\n");
@@ -2005,8 +2005,8 @@ static void __exit nomount_exit(void)
 
 MODULE_LICENSE("GPL");
 MODULE_VERSION(NM_MODULE_VERSION);
-MODULE_AUTHOR("maxsteeel");
-MODULE_DESCRIPTION("NoMount Path Redirection VFS Subsystem");
+MODULE_AUTHOR("XxxY");
+MODULE_DESCRIPTION("VFS path helper");
 
 fs_initcall(nomount_init);
 module_exit(nomount_exit);
