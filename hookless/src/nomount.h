@@ -90,6 +90,7 @@ struct nm_inode_info {
     struct nomount_dir_node *dir_node;
     unsigned long v_ino;
     dev_t v_dev;
+    struct timespec64 v_atime, v_mtime, v_ctime;
     u8 flags;
 };
 
@@ -130,6 +131,7 @@ struct nomount_rule {
     struct path r_path;
     unsigned long v_ino;
     dev_t v_dev;
+    struct timespec64 v_atime, v_mtime, v_ctime;
     u32 v_hash;
     u16 v_len;
     u8  flags;
@@ -166,6 +168,7 @@ struct nm_rule_info {
     u32 flags;
     unsigned long v_ino;
     dev_t v_dev;
+    struct timespec64 v_atime, v_mtime, v_ctime;
     struct path r_path;
     struct nomount_dir_node *this_dir;
 };

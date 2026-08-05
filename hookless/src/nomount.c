@@ -66,6 +66,9 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->flags = rule->flags;
                 rule_info->v_ino = rule->v_ino;
                 rule_info->v_dev = rule->v_dev;
+                rule_info->v_atime = rule->v_atime;
+                rule_info->v_mtime = rule->v_mtime;
+                rule_info->v_ctime = rule->v_ctime;
                 rule_info->this_dir = rule->this_dir;
                 if (rule->r_path.dentry) {
                     rule_info->r_path = rule->r_path;
@@ -170,6 +173,9 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
 
     info->v_ino = rule_info->v_ino;
     info->v_dev = rule_info->v_dev;
+    info->v_atime = rule_info->v_atime;
+    info->v_mtime = rule_info->v_mtime;
+    info->v_ctime = rule_info->v_ctime;
 
     inode->i_private = info;
     inode->i_ino = rule_info->v_ino;
@@ -534,7 +540,7 @@ static int nm_path_stat(const struct path *p, struct kstat *st)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
     return vfs_getattr_nosec(p, st);
 #else
-    return vfs_getattr_nosec(p, st, STATX_INO, AT_STATX_SYNC_AS_STAT);
+    return vfs_getattr_nosec(p, st, STATX_BASIC_STATS, AT_STATX_SYNC_AS_STAT);
 #endif
 }
 
@@ -552,6 +558,11 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
         generic_fillattr(v_inode, stat);
         stat->ino = info->v_ino;
         stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
+        if (info->v_mtime.tv_sec) {   /* mirror the stock/sibling times (see nm_alloc_rule) */
+            stat->atime = info->v_atime;
+            stat->mtime = info->v_mtime;
+            stat->ctime = info->v_ctime;
+        }
         return 0;
     }
 
@@ -559,6 +570,11 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
     if (likely(res == 0)) {
         stat->ino = info->v_ino;
         stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
+        if (info->v_mtime.tv_sec) {   /* mirror the stock/sibling times (see nm_alloc_rule) */
+            stat->atime = info->v_atime;
+            stat->mtime = info->v_mtime;
+            stat->ctime = info->v_ctime;
+        }
     }
     return res;
 }
@@ -578,6 +594,11 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
 #endif
         stat->ino = info->v_ino;
         stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
+        if (info->v_mtime.tv_sec) {   /* mirror the stock/sibling times (see nm_alloc_rule) */
+            stat->atime = info->v_atime;
+            stat->mtime = info->v_mtime;
+            stat->ctime = info->v_ctime;
+        }
         return 0;
     }
 
@@ -585,6 +606,11 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     if (likely(res == 0)) {
         stat->ino = info->v_ino;
         stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
+        if (info->v_mtime.tv_sec) {   /* mirror the stock/sibling times (see nm_alloc_rule) */
+            stat->atime = info->v_atime;
+            stat->mtime = info->v_mtime;
+            stat->ctime = info->v_ctime;
+        }
     }
     return res;
 }
@@ -1290,6 +1316,117 @@ static void nomount_prune_empty_virtual_dirs(struct nomount_dir_node *dir_node, 
 
 /*** Rule Operations ***/
 
+/* ---- Pure-injection dev/ino/time mirroring --------------------------------
+ * A pure injection (no stock file at its vpath) has nothing to mirror at its
+ * own path, and every parent directory reports the overlay-TOP dev (OnePlus
+ * /product = 0x1b/0x38) with a synthetic ino — an outlier vs stock *files*,
+ * which carry a lowerdir dev + small ino + the ROM-build times. So we locate a
+ * real sibling FILE (walk up to the nearest real ancestor, scan it, descend one
+ * level when a level holds only dirs) and mirror its dev + times, deriving an
+ * in-range ino. Read-only, privileged (nm_root_cred), bounded depth/fanout. */
+struct nm_sib_scan {
+    struct dir_context ctx;
+    dev_t dir_dev;                       /* this dir's overlay-top dev, to skip */
+    char files[6][NAME_MAX + 1];
+    char subdirs[4][NAME_MAX + 1];
+    int n_files, n_subdirs;
+};
+
+static NM_ACTOR_RET nm_sib_actor(struct dir_context *ctx, const char *name,
+                                 int namelen, loff_t off, u64 ino, unsigned int dt)
+{
+    struct nm_sib_scan *s = container_of(ctx, struct nm_sib_scan, ctx);
+
+    if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
+        return NM_ACTOR_CONTINUE;
+    if (dt == DT_REG && s->n_files < 6) {
+        memcpy(s->files[s->n_files], name, namelen);
+        s->files[s->n_files][namelen] = '\0';
+        s->n_files++;
+    } else if (dt == DT_DIR && s->n_subdirs < 4) {
+        memcpy(s->subdirs[s->n_subdirs], name, namelen);
+        s->subdirs[s->n_subdirs][namelen] = '\0';
+        s->n_subdirs++;
+    }
+    return NM_ACTOR_CONTINUE;
+}
+
+static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int depth)
+{
+    struct nm_sib_scan *sc;
+    struct path dp;
+    struct kstat dkst;
+    struct file *dir;
+    const struct cred *old;
+    int i, ret = -ENOENT;
+
+    if (depth > 2)
+        return -ENOENT;
+    if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
+        return -ENOENT;
+
+    sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+    if (!sc) { path_put(&dp); return -ENOMEM; }
+    sc->ctx.actor = nm_sib_actor;
+    if (nm_path_stat(&dp, &dkst) == 0)
+        sc->dir_dev = dkst.dev;
+
+    old = override_creds(nm_root_cred);
+    dir = dentry_open(&dp, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+    path_put(&dp);
+    if (!IS_ERR(dir)) {
+        iterate_dir(dir, &sc->ctx);
+        fput(dir);
+    }
+    revert_creds(old);
+
+    /* prefer a real file at this level (dev != the overlay-top dir dev) */
+    for (i = 0; i < sc->n_files; i++) {
+        char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->files[i]);
+        struct path fp;
+        struct kstat fk;
+
+        if (!cp) continue;
+        if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
+            int r = nm_path_stat(&fp, &fk);
+
+            path_put(&fp);
+            if (r == 0 && fk.dev != sc->dir_dev) { *out = fk; kfree(cp); ret = 0; goto done; }
+        }
+        kfree(cp);
+    }
+    /* else descend into a real subdir (bounded) */
+    for (i = 0; i < sc->n_subdirs; i++) {
+        char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->subdirs[i]);
+
+        if (!cp) continue;
+        if (nm_scan_dir_for_file(cp, out, depth + 1) == 0) { kfree(cp); ret = 0; goto done; }
+        kfree(cp);
+    }
+done:
+    kfree(sc);
+    return ret;
+}
+
+static int nm_find_sibling_meta(const char *vpath, struct kstat *out)
+{
+    char *path = kstrdup(vpath, GFP_KERNEL);
+    int ret = -ENOENT;
+
+    if (!path)
+        return -ENOENT;
+    for (;;) {
+        char *slash = strrchr(path, '/');
+
+        if (!slash || slash == path)
+            break;
+        *slash = '\0';                   /* ascend to parent */
+        if (nm_scan_dir_for_file(path, out, 0) == 0) { ret = 0; break; }
+    }
+    kfree(path);
+    return ret;
+}
+
 static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid)
 {
     struct nomount_rule *rule;
@@ -1332,31 +1469,48 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         if (nm_path_stat(&v_path_struct, &kst) == 0) {
             rule->v_ino = kst.ino;
             rule->v_dev = kst.dev;
+            rule->v_atime = kst.atime;   /* mirror the stock file's times too */
+            rule->v_mtime = kst.mtime;
+            rule->v_ctime = kst.ctime;
         } else {
             rule->v_ino = d_backing_inode(v_path_struct.dentry)->i_ino;
             rule->v_dev = d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
         }
         path_put(&v_path_struct);
     } else {
-        /* Pure injection (no stock file): mirror the parent directory's
-         * reported dev so the new entry blends with its siblings. */
-        char *vp = nm_get_vpath(rule);
-        char *slash = strrchr(vp, '/');
+        /* Pure injection (no stock file): mirror a real sibling FILE's dev +
+         * times, and derive an ino in the sibling's magnitude band. Mirroring
+         * the parent *directory* would leak the overlay-top dev, so we hunt for
+         * a real file instead (see nm_find_sibling_meta). */
+        struct kstat sib;
 
-        rule->v_ino = (unsigned long)rule->v_hash;
-        rule->v_dev = 0;
-        if (slash && slash != vp) {
-            char *parent = kstrndup(vp, slash - vp, GFP_KERNEL);
+        if (nm_find_sibling_meta(nm_get_vpath(rule), &sib) == 0) {
+            rule->v_dev   = sib.dev;
+            rule->v_atime = sib.atime;
+            rule->v_mtime = sib.mtime;
+            rule->v_ctime = sib.ctime;
+            rule->v_ino   = (unsigned long)((sib.ino & ~0xFFFFFULL) |
+                                            ((u64)rule->v_hash & 0xFFFFF));
+        } else {
+            /* last resort: previous parent-dir dev fallback */
+            char *vp = nm_get_vpath(rule);
+            char *slash = strrchr(vp, '/');
 
-            if (parent) {
-                if (kern_path(parent, LOOKUP_FOLLOW, &v_path_struct) == 0) {
-                    struct kstat kst;
+            rule->v_ino = (unsigned long)rule->v_hash;
+            rule->v_dev = 0;
+            if (slash && slash != vp) {
+                char *parent = kstrndup(vp, slash - vp, GFP_KERNEL);
 
-                    if (nm_path_stat(&v_path_struct, &kst) == 0)
-                        rule->v_dev = kst.dev;
-                    path_put(&v_path_struct);
+                if (parent) {
+                    if (kern_path(parent, LOOKUP_FOLLOW, &v_path_struct) == 0) {
+                        struct kstat kst;
+
+                        if (nm_path_stat(&v_path_struct, &kst) == 0)
+                            rule->v_dev = kst.dev;
+                        path_put(&v_path_struct);
+                    }
+                    kfree(parent);
                 }
-                kfree(parent);
             }
         }
     }
