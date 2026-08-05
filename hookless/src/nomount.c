@@ -780,13 +780,40 @@ struct nm_xattr_proxy {
     const struct xattr_handler *orig;
 };
 
+/* xattr .get/.set receive the name with the handler prefix stripped on most
+ * kernels ("selinux"), but vfs_get/setxattr need the FULL name
+ * ("security.selinux") — otherwise the backing lookup returns empty and the
+ * injected inode is left unlabeled ('?') on erofs. Re-prepend the prefix when
+ * missing (robust to versions that pass the full name). *allocp is set to a
+ * heap copy the caller must kfree(), or NULL when the original name is reused. */
+static const char *nm_full_xattr_name(const struct nm_xattr_proxy *proxy,
+                                      const char *name, char **allocp)
+{
+    const char *pfx = xattr_prefix(proxy->orig);
+
+    *allocp = NULL;
+    if (pfx && *pfx && strncmp(name, pfx, strlen(pfx)) != 0) {
+        char *full = kasprintf(GFP_KERNEL, "%s%s", pfx, name);
+
+        if (full) { *allocp = full; return full; }
+    }
+    return name;
+}
+
 static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dentry, struct inode *inode, const char *name, void *buffer, size_t size FLAGS_ARG)
 {
     struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         struct nm_inode_info *info = inode->i_private;
+        char *alloc;
+        const char *full;
+        int r;
+
         if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
-        return vfs_getxattr(IDMAP_PATH(info->r_path) info->r_path.dentry, name, buffer, size);
+        full = nm_full_xattr_name(proxy, name, &alloc);
+        r = vfs_getxattr(IDMAP_PATH(info->r_path) info->r_path.dentry, full, buffer, size);
+        kfree(alloc);
+        return r;
     }
     return proxy->orig->get(proxy->orig, dentry, inode, name, buffer, size FLAGS_VAL);
 }
@@ -796,8 +823,15 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
     struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         struct nm_inode_info *info = inode->i_private;
+        char *alloc;
+        const char *full;
+        int r;
+
         if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
-        return vfs_setxattr(IDMAP_CALL info->r_path.dentry, name, buffer, size, flags);
+        full = nm_full_xattr_name(proxy, name, &alloc);
+        r = vfs_setxattr(IDMAP_CALL info->r_path.dentry, full, buffer, size, flags);
+        kfree(alloc);
+        return r;
     }
     return proxy->orig->set(proxy->orig, IDMAP_CALL dentry, inode, name, buffer, size, flags);
 }
