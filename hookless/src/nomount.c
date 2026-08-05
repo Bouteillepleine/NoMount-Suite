@@ -3,6 +3,7 @@
 #include <linux/slab.h>
 #include <linux/cred.h>
 #include <linux/xattr.h>
+#include <linux/security.h>
 #include <linux/version.h>
 #include <linux/module.h>
 #include "nomount.h"
@@ -208,6 +209,22 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
                 inode->i_fop = &nm_file_fops;
         }
         inode->i_mapping = real_inode->i_mapping;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
+        /* Mirror the backing file's SELinux context onto the synthetic inode.
+         * getfilecon()/ls -Z read the label from SELinux's i_security (the SID
+         * assigned at new_inode time), NOT via our xattr proxy — on plain erofs
+         * that SID is unlabeled ('?'), a detection tell. Overlay copies it for
+         * free; erofs does not. (secctx API changed to lsmcontext post-6.12.) */
+        {
+            void *ctx = NULL;
+            u32 ctxlen = 0;
+
+            if (security_inode_getsecctx(real_inode, &ctx, &ctxlen) == 0) {
+                security_inode_notifysecctx(inode, ctx, ctxlen);
+                security_release_secctx(ctx, ctxlen);
+            }
+        }
+#endif
     }
 
     inode->i_flags |= S_PRIVATE | S_NOATIME | S_NOCMTIME | S_NOSEC;
@@ -1367,7 +1384,9 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int dept
 
     sc = kzalloc(sizeof(*sc), GFP_KERNEL);
     if (!sc) { path_put(&dp); return -ENOMEM; }
-    sc->ctx.actor = nm_sib_actor;
+    /* dir_context.actor is const; heap alloc can't use a designated initializer,
+     * so assign through a cast (matches how the VFS treats it internally). */
+    *((filldir_t *)&sc->ctx.actor) = nm_sib_actor;
     if (nm_path_stat(&dp, &dkst) == 0)
         sc->dir_dev = dkst.dev;
 
@@ -1408,20 +1427,48 @@ done:
     return ret;
 }
 
+/* One-entry cache: pure injections in the same directory (e.g. the ~139
+ * /product/overlay APKs, or the 25 Mms libs) share a sibling, so we avoid
+ * re-scanning. Rule-add is serialized under nomount_write_mutex, so the static
+ * state needs no extra locking; a stale hit at worst yields another valid file
+ * dev on the same partition. */
+static char nm_sib_cache_dir[PATH_MAX];
+static struct kstat nm_sib_cache_kst;
+static bool nm_sib_cache_valid;
+
 static int nm_find_sibling_meta(const char *vpath, struct kstat *out)
 {
     char *path = kstrdup(vpath, GFP_KERNEL);
+    char *slash;
     int ret = -ENOENT;
 
     if (!path)
         return -ENOENT;
-    for (;;) {
-        char *slash = strrchr(path, '/');
+    slash = strrchr(path, '/');
+    if (slash && slash != path)
+        *slash = '\0';                   /* path = immediate parent dir */
 
+    if (nm_sib_cache_valid && strcmp(nm_sib_cache_dir, path) == 0) {
+        *out = nm_sib_cache_kst;
+        kfree(path);
+        return 0;
+    }
+
+    for (;;) {
+        if (nm_scan_dir_for_file(path, out, 0) == 0) { ret = 0; break; }
+        slash = strrchr(path, '/');
         if (!slash || slash == path)
             break;
-        *slash = '\0';                   /* ascend to parent */
-        if (nm_scan_dir_for_file(path, out, 0) == 0) { ret = 0; break; }
+        *slash = '\0';                   /* ascend */
+    }
+    if (ret == 0) {                      /* cache keyed on vpath's immediate parent */
+        strscpy(nm_sib_cache_dir, vpath, PATH_MAX);
+        slash = strrchr(nm_sib_cache_dir, '/');
+        if (slash && slash != nm_sib_cache_dir) {
+            *slash = '\0';
+            nm_sib_cache_kst = *out;
+            nm_sib_cache_valid = true;
+        }
     }
     kfree(path);
     return ret;
