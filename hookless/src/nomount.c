@@ -1324,14 +1324,18 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
 
     if (kern_path(nm_get_vpath(rule), LOOKUP_FOLLOW, &v_path_struct) == 0) {
         struct kstat kst;
-        rule->v_ino = d_backing_inode(v_path_struct.dentry)->i_ino;
-        /* Mirror the dev a *stock* file at this path reports (what a detector's
-         * stat() returns) rather than the raw backing i_sb->s_dev, which on
-         * overlay-mounted partitions is the overlay-top dev and makes injected
-         * inodes an st_dev outlier vs their stock siblings. */
-        rule->v_dev = (nm_path_stat(&v_path_struct, &kst) == 0)
-                          ? kst.dev
-                          : d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
+        /* Mirror both the dev AND ino a *stock* file at this path reports (what
+         * a detector's stat()/maps sees) rather than the raw backing values.
+         * On overlay-mounted partitions the raw i_sb->s_dev is the overlay-top
+         * dev and the raw i_ino skips overlay xino remapping, so injected
+         * inodes become dev/ino outliers vs their stock siblings. */
+        if (nm_path_stat(&v_path_struct, &kst) == 0) {
+            rule->v_ino = kst.ino;
+            rule->v_dev = kst.dev;
+        } else {
+            rule->v_ino = d_backing_inode(v_path_struct.dentry)->i_ino;
+            rule->v_dev = d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
+        }
         path_put(&v_path_struct);
     } else {
         /* Pure injection (no stock file): mirror the parent directory's
