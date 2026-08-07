@@ -57,7 +57,7 @@ mkdir -p "$RELEASE_DIR/debug" "$RELEASE_DIR/release"
 
 if [ "$CLEAN" = true ]; then
     echo "==> Cleaning old releases"
-    rm -f "$RELEASE_DIR"/debug/nomount-*.zip "$RELEASE_DIR"/release/nomount-*.zip
+    rm -f "$RELEASE_DIR"/debug/00_NoMount-Module-*.zip "$RELEASE_DIR"/release/00_NoMount-Module-*.zip
 fi
 
 SCRIPTS=(
@@ -122,7 +122,7 @@ package_zip() {
     local suffix=""
     [ "$profile" = "debug" ] && suffix="-debug"
 
-    local out_name="nomount-${VERSION}${suffix}.zip"
+    local out_name="00_NoMount-Module-${VERSION}${suffix}.zip"
     local out_path="$RELEASE_DIR/$profile/$out_name"
     local staging
     staging="$(mktemp -d)"
@@ -265,14 +265,14 @@ package_zip "release"
 
 echo ""
 echo "==> Build complete"
-echo "    Debug:   $RELEASE_DIR/debug/nomount-${VERSION}-debug.zip"
-echo "    Release: $RELEASE_DIR/release/nomount-${VERSION}.zip"
+echo "    Debug:   $RELEASE_DIR/debug/00_NoMount-Module-${VERSION}-debug.zip"
+echo "    Release: $RELEASE_DIR/release/00_NoMount-Module-${VERSION}.zip"
 
 if [ "$DEPLOY" = true ]; then
     if [ "$DEPLOY_PROFILE" = "release" ]; then
-        ZIP="$RELEASE_DIR/release/nomount-${VERSION}.zip"
+        ZIP="$RELEASE_DIR/release/00_NoMount-Module-${VERSION}.zip"
     else
-        ZIP="$RELEASE_DIR/debug/nomount-${VERSION}-debug.zip"
+        ZIP="$RELEASE_DIR/debug/00_NoMount-Module-${VERSION}-debug.zip"
     fi
     if [ ! -f "$ZIP" ]; then
         echo "FATAL: ${DEPLOY_PROFILE} zip not found at $ZIP" >&2

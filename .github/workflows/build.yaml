@@ -159,13 +159,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: nomount-release-zip
-          path: release/release/nomount-*.zip
+          path: release/release/00_NoMount-Module-*.zip
           retention-days: 30
 
       - uses: actions/upload-artifact@v4
         with:
           name: nomount-debug-zip
-          path: release/debug/nomount-*.zip
+          path: release/debug/00_NoMount-Module-*.zip
           retention-days: 30
 
   release:
