@@ -10,17 +10,6 @@
 #include <net/sock.h>
 #include <net/genetlink.h>
 #include <linux/version.h>
-/* refcount.h arrived in 4.11; the deprecated android-4.9 tree lacks it. Fall back
- * to the atomic_t helpers (functionally equivalent for our refs here, and ancient). */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-#include <linux/refcount.h>
-#else
-#define refcount_t              atomic_t
-#define refcount_set            atomic_set
-#define refcount_inc            atomic_inc
-#define refcount_inc_not_zero   atomic_inc_not_zero
-#define refcount_dec_and_test   atomic_dec_and_test
-#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 #include <linux/unaligned.h>
 #else
@@ -129,10 +118,6 @@ struct nomount_dir_node {
     struct idr children_idr;
     u64 bloom_mask;
     struct rcu_head rcu;
-    /* P2: keeps the node alive while a synthesized inode caches it in
-     * i_private->dir_node past the topology teardown (fd-pinned virtual dir vs
-     * concurrent nm del/clear). 1 = topology's own ref; each caching inode +1. */
-    refcount_t refs;
     union {
         struct inode *dir_inode;
         struct nomount_rule *owner_rule;
@@ -152,14 +137,11 @@ struct nomount_rule {
     u16 v_len;
     u8  flags;
     unsigned int target_uid;
-    /* P2: rule freed via kfree_rcu so a cached-inode reader mid-RCU can still
-     * deref child->rule (a sibling rule freed in the same nm clear/del batch). */
-    struct rcu_head rcu;
 
-    /* * FLEXIBLE ARRAY MEMBER:
+    /* * FLEXIBLE ARRAY MEMBER: 
      * Memory Layout: [ struct ] "virtual_path\0real_path\0"
      */
-    char paths[];
+    char paths[]; 
 };
 
 /*** Operaction Vectors ***/

@@ -13,11 +13,6 @@ static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mos
 static const struct cred *nm_root_cred;
 static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
-/* P0/P2: dir_node teardown is refcounted + RCU-deferred; used by readers well
- * before the definitions further down. */
-static void nm_dir_node_rcu_free(struct rcu_head *head);
-static void nomount_dir_node_put(struct nomount_dir_node *dir_node);
-
 /*** Helpers ***/
 
 static __always_inline bool nomount_is_uid_blocked(uid_t uid)
@@ -76,12 +71,6 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_mtime = rule->v_mtime;
                 rule_info->v_ctime = rule->v_ctime;
                 rule_info->this_dir = rule->this_dir;
-                /* P2: pin the snapshot under RCU so it survives being cached in a
-                 * synthesized inode past a concurrent teardown. refs==0 => already
-                 * being freed, don't hand it out. Caller releases via
-                 * nomount_dir_node_put at every exit (mirrors r_path's path_put). */
-                if (rule_info->this_dir && !refcount_inc_not_zero(&rule_info->this_dir->refs))
-                    rule_info->this_dir = NULL;
                 if (rule->r_path.dentry) {
                     rule_info->r_path = rule->r_path;
                     path_get(&rule_info->r_path);
@@ -174,11 +163,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     }
 
     info->flags = rule_info->flags;
-    /* P2: the inode's own ref on the cached dir_node (released in destroy_inode).
-     * The caller still holds + releases its snapshot ref, so refs>0 -> inc safe. */
     info->dir_node = rule_info->this_dir;
-    if (info->dir_node)
-        refcount_inc(&info->dir_node->refs);
     if (rule_info->flags & NM_FLAG_VIRTUAL_DIR) {
         info->r_path.dentry = NULL;
         info->r_path.mnt = NULL;
@@ -269,7 +254,6 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
             nm_install_dentry_ops(dentry);
             d_add(dentry, NULL);
             if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-            nomount_dir_node_put(rule_info.this_dir);
             return NULL;
         }
 
@@ -280,7 +264,6 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
                 nm_install_dentry_ops(dentry);
                 nm_debug("Lookup hijacked! Splicing inode %lu into dentry '%s'\n", new_inode->i_ino, name);
                 if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-                nomount_dir_node_put(rule_info.this_dir);
                 /* d_splice_alias may return a DIFFERENT (existing) alias dentry; our
                  * ops must ride on THAT one too, else d_revalidate never runs on the
                  * spliced dentry and the per-UID / ghost-dentry verdict is lost for
@@ -292,7 +275,6 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
             }
         }
         if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-        nomount_dir_node_put(rule_info.this_dir);
     }
 
 fallback:
@@ -317,7 +299,6 @@ fallback:
         dentry->d_flags |= DCACHE_DONTCACHE;
 #endif
         if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-        nomount_dir_node_put(rule_info.this_dir);
     }
 
     if (nm_iop && nm_iop->orig_iop && nm_iop->orig_iop->lookup) {
@@ -369,7 +350,6 @@ static void nomount_hijacked_destroy_inode(struct inode *inode)
             if (info->r_path.dentry) {
                 path_put(&info->r_path);
             }
-            nomount_dir_node_put(info->dir_node);   /* P2: release cached dir_node ref */
             kmem_cache_free(nm_inode_cachep, info);
             inode->i_private = NULL;
         }
@@ -753,7 +733,6 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
                 if (rule_info.flags & NM_FLAG_WHITEOUT) {
                     nm_install_dentry_ops(dentry); d_add(dentry, NULL);
                     if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-                    nomount_dir_node_put(rule_info.this_dir);
                     return NULL;
                 }
                 if ((rule_info.flags & NM_FLAG_VIRTUAL_DIR) || rule_info.r_path.dentry) {
@@ -762,7 +741,6 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
                         struct dentry *res;
                         nm_install_dentry_ops(dentry);
                         if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-                        nomount_dir_node_put(rule_info.this_dir);
                         /* ops on the spliced-alias result too (same as hijacked_lookup) */
                         res = d_splice_alias(new_inode, dentry);
                         if (!IS_ERR(res) && res) nm_install_dentry_ops(res);
@@ -771,7 +749,6 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
                 }
             }
             if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-            nomount_dir_node_put(rule_info.this_dir);
         }
     }
 
@@ -933,7 +910,6 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
     if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info)) {
         if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
-        nomount_dir_node_put(rule_info.this_dir);
         if (rule_info.flags & NM_FLAG_WHITEOUT) return d_is_negative(dentry) ? 1 : 0;
 
         /* Per-UID consistency: a BLOCKED reader must see the stock fs (non-injected),
@@ -1134,14 +1110,6 @@ static void nm_dir_node_rcu_free(struct rcu_head *head)
     kmem_cache_free(nm_dir_cachep, dir_node);
 }
 
-/* Drop a dir_node ref; RCU-defer the free once the last ref (topology + any
- * synthesized inode caching it in i_private->dir_node) is gone. NULL-safe. */
-static void nomount_dir_node_put(struct nomount_dir_node *dir_node)
-{
-    if (dir_node && refcount_dec_and_test(&dir_node->refs))
-        call_rcu(&dir_node->rcu, nm_dir_node_rcu_free);
-}
-
 static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
 {
     struct inode *t_inode = dir_node->_tag_ptr & 1UL ? NULL : dir_node->dir_inode;
@@ -1205,7 +1173,6 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
     dir_node->dir_inode = inode ? igrab(inode) : NULL;
     idr_init(&dir_node->children_idr);
     dir_node->bloom_mask = 0;
-    refcount_set(&dir_node->refs, 1);   /* topology's own ref */
     return dir_node;
 }
 
@@ -1266,7 +1233,7 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, uns
         struct inode *dir_inode = dir_node->_tag_ptr & 1UL ? NULL : dir_node->dir_inode;
         if (dir_inode) {
             nomount_restore_dir_node(dir_node);
-            nomount_dir_node_put(dir_node);   /* drop topology ref */
+            call_rcu(&dir_node->rcu, nm_dir_node_rcu_free);
         }
     } else {
         dir_node->bloom_mask = 0;
@@ -1652,13 +1619,13 @@ static void nm_free_rule(struct nomount_rule *rule)
 {
     if (unlikely(!rule)) return;
     if (rule->r_path.dentry) path_put(&rule->r_path);
-    /* Drop the topology's ref on this_dir; it (and its remaining children) is
-     * RCU-freed once the last caching inode is gone (P0/P1: lockless readers walk
-     * children_idr under RCU; P1: children freed in the callback, not eagerly;
-     * P2: refcount defers past a fd-pinned inode). rule itself is kfree_rcu so a
-     * cached reader mid-RCU can still deref child->rule. */
-    nomount_dir_node_put(rule->this_dir);
-    kfree_rcu(rule, rcu);
+    /* Defer the dir_node (and its remaining children) to an RCU grace period:
+     * lockless readers can still be walking children_idr. The plain kfree of the
+     * children here previously raced kfree_rcu'd siblings; the callback frees them
+     * post-grace instead. */
+    if (rule->this_dir)
+        call_rcu(&rule->this_dir->rcu, nm_dir_node_rcu_free);
+    kfree(rule);
 }
 
 static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *victims, bool prune)
