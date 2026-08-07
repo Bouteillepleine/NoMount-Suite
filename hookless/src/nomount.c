@@ -555,7 +555,7 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
 static int nm_path_stat(const struct path *p, struct kstat *st)
 {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
-    return vfs_getattr_nosec(p, st);
+    return vfs_getattr_nosec((struct path *)p, st);
 #else
     return vfs_getattr_nosec(p, st, STATX_BASIC_STATS, AT_STATX_SYNC_AS_STAT);
 #endif
