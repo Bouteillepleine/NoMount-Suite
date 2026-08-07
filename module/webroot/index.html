@@ -1653,6 +1653,7 @@
   }
   async function scanCloak(btn) {
     const o = btn.textContent; btn.disabled = true; btn.textContent = "Scanning…";
+    toast("Scanning Xposed modules…");
     const r = await exec("sh /data/adb/modules/meta-nomount/scan.sh 2>/dev/null");
     r.stdout.split("\n").map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (p) {
       const e = PH.get(p) || { hidden: false, label: p }; e.xposed = true; e.label = p; PH.set(p, e);
