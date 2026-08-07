@@ -6,11 +6,21 @@
 #include <linux/list.h>
 #include <linux/hashtable.h>
 #include <linux/atomic.h>
-#include <linux/refcount.h>
 #include <linux/file.h>
 #include <net/sock.h>
 #include <net/genetlink.h>
 #include <linux/version.h>
+/* refcount.h arrived in 4.11; the deprecated android-4.9 tree lacks it. Fall back
+ * to the atomic_t helpers (functionally equivalent for our refs here, and ancient). */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <linux/refcount.h>
+#else
+#define refcount_t              atomic_t
+#define refcount_set            atomic_set
+#define refcount_inc            atomic_inc
+#define refcount_inc_not_zero   atomic_inc_not_zero
+#define refcount_dec_and_test   atomic_dec_and_test
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 #include <linux/unaligned.h>
 #else
