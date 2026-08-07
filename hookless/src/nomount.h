@@ -6,6 +6,7 @@
 #include <linux/list.h>
 #include <linux/hashtable.h>
 #include <linux/atomic.h>
+#include <linux/refcount.h>
 #include <linux/file.h>
 #include <net/sock.h>
 #include <net/genetlink.h>
@@ -117,6 +118,11 @@ struct nomount_child_node {
 struct nomount_dir_node {
     struct idr children_idr;
     u64 bloom_mask;
+    struct rcu_head rcu;
+    /* P2: keeps the node alive while a synthesized inode caches it in
+     * i_private->dir_node past the topology teardown (fd-pinned virtual dir vs
+     * concurrent nm del/clear). 1 = topology's own ref; each caching inode +1. */
+    refcount_t refs;
     union {
         struct inode *dir_inode;
         struct nomount_rule *owner_rule;
@@ -136,11 +142,14 @@ struct nomount_rule {
     u16 v_len;
     u8  flags;
     unsigned int target_uid;
+    /* P2: rule freed via kfree_rcu so a cached-inode reader mid-RCU can still
+     * deref child->rule (a sibling rule freed in the same nm clear/del batch). */
+    struct rcu_head rcu;
 
-    /* * FLEXIBLE ARRAY MEMBER: 
+    /* * FLEXIBLE ARRAY MEMBER:
      * Memory Layout: [ struct ] "virtual_path\0real_path\0"
      */
-    char paths[]; 
+    char paths[];
 };
 
 /*** Operaction Vectors ***/
