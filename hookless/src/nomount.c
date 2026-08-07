@@ -1866,7 +1866,7 @@ static int nomount_nl_add_uid(struct nlattr **attrs)
 
     mutex_lock(&nomount_write_mutex);
     idr_preload(GFP_KERNEL);
-    ret = idr_alloc(&nomount_uid_idr, (void *)1, uid, uid + 1, GFP_NOWAIT);
+    ret = idr_alloc(&nomount_uid_idr, (void *)8, uid, uid + 1, GFP_NOWAIT);
     idr_preload_end();
 
     if (ret >= 0) {
