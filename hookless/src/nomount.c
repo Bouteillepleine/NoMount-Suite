@@ -49,7 +49,7 @@ static __always_inline struct nomount_dir_node *nomount_get_dir_node(struct inod
  * backing path, so callers never dereference the rule after rcu_read_unlock().
  * Returns true if a rule visible to the current UID was found; on true the caller
  * owns rule_info->r_path and must path_put() it (when r_path.dentry != NULL). */
-static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_node, const char *name, size_t len, u32 hash, struct nm_rule_info *rule_info)
+static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_node, const char *name, size_t len, u32 hash, struct nm_rule_info *rule_info, bool get_path)
 {
     struct nomount_child_node *child;
     bool found = false;
@@ -71,7 +71,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_mtime = rule->v_mtime;
                 rule_info->v_ctime = rule->v_ctime;
                 rule_info->this_dir = rule->this_dir;
-                if (rule->r_path.dentry) {
+                if (get_path && rule->r_path.dentry) {
                     rule_info->r_path = rule->r_path;
                     path_get(&rule_info->r_path);
                 }
@@ -249,7 +249,7 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
         goto fallback;
 
     v_hash = full_name_hash(NULL, name, len);
-    if (nomount_get_rule_info(nm_iop->dir_node, name, len, v_hash, &rule_info)) {
+    if (nomount_get_rule_info(nm_iop->dir_node, name, len, v_hash, &rule_info, true)) {
         if (rule_info.flags & NM_FLAG_WHITEOUT) {
             nm_install_dentry_ops(dentry);
             d_add(dentry, NULL);
@@ -293,7 +293,7 @@ fallback:
      * file (no rule) would be needlessly uncached. */
     if (nm_iop && nm_iop->dir_node && nomount_is_uid_blocked(current_uid().val) &&
         nomount_get_rule_info(nm_iop->dir_node, name, len,
-                              full_name_hash(NULL, name, len), &rule_info)) {
+                              full_name_hash(NULL, name, len), &rule_info, false)) {
         nm_install_dentry_ops(dentry);
 #ifdef DCACHE_DONTCACHE
         dentry->d_flags |= DCACHE_DONTCACHE;
@@ -683,7 +683,7 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         return 0;
     }
 
-    if (real_file && real_file->f_op->iterate_shared) {
+    if (real_file) {
         struct nomount_proxy_ctx proxy_ctx = {
             .ctx.actor = nomount_actor_proxy, .ctx.pos = ctx->pos,
             .orig_ctx = ctx, .dir_node = dir_node, .emitted = 0
@@ -721,7 +721,7 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
          * cannot resolve the virtual parent in the first place, so this is the
          * belt to that braces -- it keeps the per-UID rule true of this path on
          * its own terms rather than by relying on the parent lookup failing. */
-        if (nomount_get_rule_info(info->dir_node, name, len, v_hash, &rule_info)) {
+        if (nomount_get_rule_info(info->dir_node, name, len, v_hash, &rule_info, true)) {
             have_rule = true;
             if (!blocked) {
                 /* Install our dentry ops on every dentry we manage. Without this the
@@ -908,7 +908,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         return injected ? 0 : 1;
 
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
-    if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info)) {
+    if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info, false)) {
         if (rule_info.r_path.dentry) path_put(&rule_info.r_path);
         if (rule_info.flags & NM_FLAG_WHITEOUT) return d_is_negative(dentry) ? 1 : 0;
 
