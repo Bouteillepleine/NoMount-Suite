@@ -62,7 +62,6 @@ struct nm_iop {
     const struct inode_operations *orig_iop;
     u64 signature;
     struct nomount_dir_node *dir_node;
-    bool had_private_flag;
     struct rcu_head rcu;
 };
 

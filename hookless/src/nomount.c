@@ -1008,6 +1008,10 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
     nm_sop->fake_sop.destroy_inode = nomount_hijacked_destroy_inode;
     nm_sop->fake_sop.drop_inode = nomount_hijacked_drop_inode;
     nm_sop->fake_sop.evict_inode = nomount_hijacked_evict_inode;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
+    if (!nm_sop->orig_sop->destroy_inode && !nm_sop->orig_sop->free_inode)
+        nm_sop->fake_sop.free_inode = free_inode_nonrcu;
+#endif
 
     if (sb->s_xattr && !nm_sop->orig_xattr) {
         const struct xattr_handler **new_array;
@@ -1073,11 +1077,9 @@ static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, s
         nm_iop->orig_iop = inode->i_op;
         nm_iop->signature = NOMOUNT_MAGIC_SIG;
         nm_iop->dir_node = dir_node;
-        nm_iop->had_private_flag = (inode->i_flags & S_PRIVATE) != 0;
 
         if (nm_iop->orig_iop->lookup) nm_iop->fake_iop.lookup = nomount_hijacked_lookup;
         smp_store_release(&inode->i_op, &nm_iop->fake_iop);
-        inode->i_flags |= S_PRIVATE;
         nm_debug("i_op successfully hijacked for parent dir (ino: %lu)\n", inode->i_ino);
     }
 }
@@ -1122,7 +1124,6 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
     nm_iop = __get_nm(smp_load_acquire(&t_inode->i_op), struct nm_iop, fake_iop);
     if (nm_iop && nm_iop->dir_node == dir_node) {
         smp_store_release(&t_inode->i_op, nm_iop->orig_iop);
-        if (!nm_iop->had_private_flag) t_inode->i_flags &= ~S_PRIVATE;
         nm_debug("Successfully cured i_op for dir %lu\n", t_inode->i_ino);
         call_rcu(&nm_iop->rcu, nm_iop_rcu_free);
     }
