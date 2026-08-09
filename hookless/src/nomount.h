@@ -54,13 +54,10 @@ static DEFINE_MUTEX(nomount_write_mutex);
 #define nm_get_vpath(rule) ((rule)->paths)
 #define nm_get_rpath(rule) ((rule)->paths + (rule)->v_len + 1)
 
-/* Magic signature "NOMOUNT" in hex to safely identify our structures */
-#define NOMOUNT_MAGIC_SIG 0x4E4F4D4F554E54ULL
 
 struct nm_iop {
     struct inode_operations fake_iop; /* MUST be exactly at offset 0 */
     const struct inode_operations *orig_iop;
-    u64 signature;
     struct nomount_dir_node *dir_node;
     struct rcu_head rcu;
 };
@@ -68,7 +65,6 @@ struct nm_iop {
 struct nm_fop {
     struct file_operations fake_fop;  /* MUST be exactly at offset 0 */
     const struct file_operations *orig_fop;
-    u64 signature;
     struct nomount_dir_node *dir_node;
     struct rcu_head rcu;
 };
@@ -78,7 +74,6 @@ struct nm_sop {
     const struct super_operations *orig_sop;
     const struct xattr_handler **orig_xattr;
     const struct xattr_handler **fake_xattr;
-    u64 signature;
     struct super_block *sb;
     struct rcu_head rcu;
     struct list_head list;
@@ -303,12 +298,6 @@ static const struct nla_policy nomount_genl_policy[__NOMOUNT_ATTR_MAX];
     #define FLAGS_VAL /* Nothing */
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
-    #define nm_probe_read(dst, src, size) probe_kernel_read(dst, src, size)
-#else
-    #define nm_probe_read(dst, src, size) copy_from_kernel_nofault(dst, src, size)
-#endif
-
 static inline void nm_sync_inode_times(struct inode *v_inode, struct inode *r_inode)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
@@ -339,14 +328,6 @@ static inline int nm_call_iterate(struct file *file, struct dir_context *ctx, co
 #endif
     return -ENOTDIR;
 }
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
-    #define nm_init_private_list(inode) /* Nothing */
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-    #define nm_init_private_list(inode) INIT_LIST_HEAD(&(inode)->i_data.i_private_list);
-#else
-    #define nm_init_private_list(inode) INIT_LIST_HEAD(&(inode)->i_data.private_list);
-#endif
 
 /* Install our dentry ops on a dentry we manage. Setting d_op alone is NOT enough:
  * a dentry allocated on a hijacked sb (e.g. overlayfs, whose s_d_op is
