@@ -113,7 +113,7 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     rcu_read_lock();
     idr_for_each_entry(&proxy->dir_node->children_idr, child, id) {
         if (child->name_hash == hash && child->name_len == namelen && memcmp(child->name, name, namelen) == 0) {
-            if (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val) {
+            if (child->rule && (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val)) {
                 rcu_read_unlock();
                 proxy->ctx.pos = offset;
                 return NM_ACTOR_CONTINUE;
@@ -143,7 +143,7 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
     rcu_read_lock();
     idr_for_each_entry_continue(&dir_node->children_idr, child, id) {
         ctx->pos = nm_pack_pos(id);
-        if (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val) {
+        if (child->rule && (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val)) {
             if (!(child->flags & NM_FLAG_WHITEOUT) &&
                 !dir_emit(ctx, child->name, child->name_len, child->fake_ino, child->d_type)) break;
         }
@@ -1022,7 +1022,7 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
         if (new_array) {
             for (i = 0; i < count; i++) {
                 struct nm_xattr_proxy *proxy = kzalloc(sizeof(*proxy), GFP_KERNEL);
-                if (!proxy) continue;
+                if (!proxy) break;
                 proxy->orig = sb->s_xattr[i];
                 proxy->fake.name = proxy->orig->name;
                 proxy->fake.prefix = proxy->orig->prefix;
@@ -1032,10 +1032,17 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
                 if (proxy->orig->set) proxy->fake.set = nm_xattr_set;
                 new_array[i] = &proxy->fake;
             }
-            nm_sop->orig_xattr = (const struct xattr_handler **)sb->s_xattr;
-            nm_sop->fake_xattr = new_array;
-            smp_store_release((const struct xattr_handler ***)&sb->s_xattr, new_array);
-            nm_debug("xattr handlers successfully hijacked for dev: 0x%x\n", sb->s_dev);
+            if (i == count) {
+                nm_sop->orig_xattr = (const struct xattr_handler **)sb->s_xattr;
+                nm_sop->fake_xattr = new_array;
+                smp_store_release((const struct xattr_handler ***)&sb->s_xattr, new_array);
+                nm_debug("xattr handlers successfully hijacked for dev: 0x%x\n", sb->s_dev);
+            } else {
+                int j;
+                for (j = 0; j < i; j++)
+                    kfree(container_of(new_array[j], struct nm_xattr_proxy, fake));
+                kfree(new_array);
+            }
         }
     }
 
@@ -1215,14 +1222,14 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
     dir_node->bloom_mask |= (1ULL << (child->name_hash & 63));
 }
 
-static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, unsigned long fake_ino)
+static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule)
 {
     struct nomount_child_node *child;
     int id;
 
     if (unlikely(!dir_node)) return;
     idr_for_each_entry(&dir_node->children_idr, child, id) {
-        if (child->fake_ino == fake_ino) {
+        if (child->rule == rule) {
             idr_remove(&dir_node->children_idr, id);
             kfree_rcu(child, rcu);
             break;
@@ -1279,6 +1286,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 dir_node = ex->this_dir;
                 if (!dir_node) {
                     dir_node = __nomount_alloc_dir_node(NULL);
+                    if (unlikely(!dir_node)) { err = -ENOMEM; break; }
                     dir_node->owner_rule = ex;
                     dir_node->_tag_ptr = (unsigned long)ex | 1UL;
                     ex->this_dir = dir_node;
@@ -1288,6 +1296,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 break;
             }
         }
+
+        if (unlikely(err)) { if (i > 0) v_path[i] = orig_v_path; break; }
 
         if (found_virtual) {
             if (i > 0) v_path[i] = orig_v_path; 
@@ -1342,6 +1352,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         nm_get_rpath(irule)[0] = '\0';
 
         dir_node = __nomount_alloc_dir_node(NULL);
+        if (unlikely(!dir_node)) { kfree(irule); err = -ENOMEM; if (i > 0) v_path[i] = orig_v_path; break; }
         dir_node->_tag_ptr = (unsigned long)irule | 1UL;
         irule->this_dir = dir_node;
         __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
@@ -1375,7 +1386,7 @@ static void nomount_prune_empty_virtual_dirs(struct nomount_dir_node *dir_node, 
         if (!owner) break;
 
         hash_del_rcu(&owner->vpath_node);
-        if (owner->parent_dir) __nomount_delete_child_locked(owner->parent_dir, owner->v_hash);
+        if (owner->parent_dir) __nomount_delete_child_locked(owner->parent_dir, owner);
         nm_debug("Pruned empty virtual directory: %s\n", nm_get_vpath(owner));
         dir_node = owner->parent_dir;
         hlist_add_head(&owner->vpath_node, victims);
@@ -1633,7 +1644,7 @@ static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *
     hash_del_rcu(&rule->vpath_node);
     if (rule->parent_dir) {
         struct nomount_dir_node *p_dir = rule->parent_dir;
-        __nomount_delete_child_locked(p_dir, rule->v_hash);
+        __nomount_delete_child_locked(p_dir, rule);
         if (prune) nomount_prune_empty_virtual_dirs(p_dir, victims); 
     }
     hlist_add_head(&rule->vpath_node, victims);
