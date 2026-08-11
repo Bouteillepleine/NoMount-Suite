@@ -121,10 +121,10 @@
   }
 
   /* collapsible cards (Tools accordion) */
-  .card-h.clp { cursor: pointer; user-select: none; }
+  .card-h.clp { cursor: pointer; user-select: none; transition: transform .1s ease; }
+  .card-h.clp:active { transform: scale(0.985); }
   .card-h .chev { margin-left: auto; flex: none; color: var(--muted); font-size: 17px; line-height: 1; transition: transform .2s; }
   .card-h .chip + .chev { margin-left: 8px; }
-  .card:not(.collapsed) > .card-h .chev { transform: rotate(90deg); }
   .card-h.open .chev { transform: rotate(90deg); }
   .card.collapsed > .card-h { margin-bottom: 0; }
   .card.collapsed > :not(.card-h) { display: none !important; }
@@ -1719,13 +1719,17 @@
   function toggleCard(h) {
     const card = h.closest(".card");
     const on = card.classList.toggle("collapsed");
+    h.classList.toggle("open", !on);
     if (card.id) { try { localStorage.setItem("nmcol:" + card.id, on ? "1" : "0"); } catch (e) {} }
   }
   function applyCardState() {
     document.querySelectorAll("#tab-tools .card[id]").forEach(card => {
       let v = null;
       try { v = localStorage.getItem("nmcol:" + card.id); } catch (e) {}
-      card.classList.toggle("collapsed", v !== "0"); // default collapsed unless explicitly expanded
+      const collapsed = v !== "0"; // default collapsed unless explicitly expanded
+      card.classList.toggle("collapsed", collapsed);
+      const h = card.querySelector(".card-h");
+      if (h) h.classList.toggle("open", !collapsed);
     });
   }
 
