@@ -6,6 +6,9 @@
 #include <linux/security.h>
 #include <linux/version.h>
 #include <linux/module.h>
+#include <linux/utsname.h>
+#include <linux/kobject.h>
+#include <linux/sysfs.h>
 #include "nomount.h"
 
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
@@ -2026,6 +2029,83 @@ static void nm_nl_rcv(struct sk_buff *skb)
     netlink_rcv_skb(skb, &nm_nl_rcv_msg);
 }
 
+/*** uname override — write-through into init_uts_ns via /sys/kernel/nomount/ ***/
+/* Root-only (0600). A non-empty write that isn't the literal "default" replaces
+ * that field in the initial UTS namespace, so every uname()/`/proc/version`
+ * reader reflects it (Android apps share init's UTS ns). Empty/"default" = leave.
+ * Built-in only (CONFIG_NOMOUNT=y): uts_sem/init_uts_ns are not exported. */
+static struct kobject *nm_uname_kobj;
+
+static ssize_t nm_uts_store(char *field, size_t fieldsz, const char *buf, size_t count)
+{
+    char tmp[__NEW_UTS_LEN + 1];
+    size_t n = count;
+
+    if (n && buf[n - 1] == '\n') n--;
+    if (n > __NEW_UTS_LEN) return -EINVAL;
+    memcpy(tmp, buf, n);
+    tmp[n] = '\0';
+    if (n == 0 || strcmp(tmp, "default") == 0) return count;
+
+    down_write(&uts_sem);
+    memset(field, 0, fieldsz);
+    memcpy(field, tmp, n);
+    up_write(&uts_sem);
+    return count;
+}
+
+static ssize_t nm_uts_show(const char *field, char *buf)
+{
+    ssize_t r;
+    down_read(&uts_sem);
+    r = scnprintf(buf, PAGE_SIZE, "%s\n", field);
+    up_read(&uts_sem);
+    return r;
+}
+
+static ssize_t uname_release_show(struct kobject *k, struct kobj_attribute *a, char *buf)
+{ return nm_uts_show(init_uts_ns.name.release, buf); }
+static ssize_t uname_release_store(struct kobject *k, struct kobj_attribute *a, const char *buf, size_t c)
+{ return nm_uts_store(init_uts_ns.name.release, sizeof(init_uts_ns.name.release), buf, c); }
+static ssize_t uname_version_show(struct kobject *k, struct kobj_attribute *a, char *buf)
+{ return nm_uts_show(init_uts_ns.name.version, buf); }
+static ssize_t uname_version_store(struct kobject *k, struct kobj_attribute *a, const char *buf, size_t c)
+{ return nm_uts_store(init_uts_ns.name.version, sizeof(init_uts_ns.name.version), buf, c); }
+
+static struct kobj_attribute nm_uname_release_attr =
+    __ATTR(uname_release, 0600, uname_release_show, uname_release_store);
+static struct kobj_attribute nm_uname_version_attr =
+    __ATTR(uname_version, 0600, uname_version_show, uname_version_store);
+
+static struct attribute *nm_uname_attrs[] = {
+    &nm_uname_release_attr.attr,
+    &nm_uname_version_attr.attr,
+    NULL,
+};
+static const struct attribute_group nm_uname_group = { .attrs = nm_uname_attrs };
+
+static void nm_uname_sysfs_init(void)
+{
+    int err;
+    nm_uname_kobj = kobject_create_and_add("nomount", kernel_kobj);
+    if (!nm_uname_kobj) { nm_err("uname: kobject create failed\n"); return; }
+    err = sysfs_create_group(nm_uname_kobj, &nm_uname_group);
+    if (err) {
+        nm_err("uname: sysfs group failed (%d)\n", err);
+        kobject_put(nm_uname_kobj);
+        nm_uname_kobj = NULL;
+    }
+}
+
+static void nm_uname_sysfs_exit(void)
+{
+    if (nm_uname_kobj) {
+        sysfs_remove_group(nm_uname_kobj, &nm_uname_group);
+        kobject_put(nm_uname_kobj);
+        nm_uname_kobj = NULL;
+    }
+}
+
 static int __init nomount_init(void)
 {
     struct cred *cred = prepare_creds();
@@ -2066,6 +2146,8 @@ static int __init nomount_init(void)
         return -ENOMEM;
     }
 
+    nm_uname_sysfs_init();
+
     nm_info("Loaded successfully\n");
     return 0;
 }
@@ -2095,6 +2177,8 @@ void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
 
 static void __exit nomount_exit(void)
 {
+    nm_uname_sysfs_exit();
+
     netlink_kernel_release(nm_nl_sk);
 
     mutex_lock(&nomount_write_mutex);
