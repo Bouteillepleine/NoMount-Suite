@@ -125,6 +125,7 @@
   .card-h .chev { margin-left: auto; flex: none; color: var(--muted); font-size: 17px; line-height: 1; transition: transform .2s; }
   .card-h .chip + .chev { margin-left: 8px; }
   .card:not(.collapsed) > .card-h .chev { transform: rotate(90deg); }
+  .card-h.open .chev { transform: rotate(90deg); }
   .card.collapsed > .card-h { margin-bottom: 0; }
   .card.collapsed > :not(.card-h) { display: none !important; }
   .group-label {
@@ -681,10 +682,9 @@
   </div>
 
   <div class="card">
-    <div class="card-h">
+    <div class="card-h clp" onclick="toggleModules(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-      <h2>Modules</h2><span class="chip" id="modcount">0</span>
-      <button class="act" style="flex:none;min-width:0;padding:7px 13px;font-size:12.5px" onclick="toggleModules(this)" id="modBtn">Show</button>
+      <h2>Modules</h2><span class="chip" id="modcount">0</span><span class="chev">›</span>
     </div>
     <div class="list" id="modules" style="display:none"></div>
   </div>
@@ -693,10 +693,9 @@
 
   <section class="tab" id="tab-rules">
   <div class="card">
-    <div class="card-h">
+    <div class="card-h clp" onclick="toggleRules(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-      <h2>Active rules</h2><span class="chip" id="rulechip">—</span>
-      <button class="act" style="flex:none;min-width:0;padding:7px 13px;font-size:12.5px" onclick="toggleRules(this)" id="rulesBtn">Show</button>
+      <h2>Active rules</h2><span class="chip" id="rulechip">—</span><span class="chev">›</span>
     </div>
     <p class="note" id="rulebreak" style="margin-top:0">—</p>
     <div id="ruleModuleBar" style="display:none"></div>
@@ -711,10 +710,9 @@
 
   <!-- OVERLAYS -->
   <div class="card">
-    <div class="card-h">
+    <div class="card-h clp" onclick="toggleVfsFull(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
-      <h2>File redirects</h2><span class="chip" id="vfscount">0</span>
-      <button class="act" style="flex:none;min-width:0;padding:7px 13px;font-size:12.5px" onclick="toggleVfsFull(this)" id="vfsFullBtn">Show</button>
+      <h2>File redirects</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
     </div>
     <div class="uidbar" id="vfsfilterbar" style="display:none;margin-bottom:11px">
       <input id="vfsfilter" type="text" placeholder="Filter files…" oninput="renderVfsFull()" />
@@ -724,10 +722,9 @@
   </div>
 
   <div class="card">
-    <div class="card-h">
+    <div class="card-h clp" onclick="toggleOvFull(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
-      <h2>RRO overlays</h2><span class="chip" id="ovcount">0</span>
-      <button class="act" style="flex:none;min-width:0;padding:7px 13px;font-size:12.5px" onclick="toggleOvFull(this)" id="ovFullBtn">Show</button>
+      <h2>RRO overlays</h2><span class="chip" id="ovcount">0</span><span class="chev">›</span>
     </div>
     <div class="uidbar" id="ovfilterbar" style="display:none;margin-bottom:11px">
       <input id="ovfilter" type="text" placeholder="Filter overlays…" oninput="renderOvFull()" />
@@ -1388,17 +1385,15 @@
   function renderVfsFull() {
     $("vfsfull").innerHTML = _fileRows(_vfsFiles, ($("vfsfilter").value || "").trim().toLowerCase());
   }
-  function toggleModules(btn) {
-    const on = $("modules").style.display === "none";
+  function toggleModules(h) {
+    const on = h.classList.toggle("open");
     $("modules").style.display = on ? "" : "none";
-    btn.textContent = on ? "Hide" : "Show";
   }
-  function toggleVfsFull(btn) {
-    const on = $("vfsfull").style.display === "none";
+  function toggleVfsFull(h) {
+    const on = h.classList.toggle("open");
     $("vfsdirs").style.display = on ? "" : "none";
     $("vfsfull").style.display = on ? "" : "none";
     $("vfsfilterbar").style.display = on ? "" : "none";
-    btn.textContent = on ? "Hide" : "Show";
     if (on) renderVfsFull();
   }
 
@@ -1432,12 +1427,11 @@
   function renderOvFull() {
     $("overlaysfull").innerHTML = _fileRows(_ovFiles, ($("ovfilter").value || "").trim().toLowerCase());
   }
-  function toggleOvFull(btn) {
-    const on = $("overlaysfull").style.display === "none";
+  function toggleOvFull(h) {
+    const on = h.classList.toggle("open");
     $("overlays").style.display = on ? "" : "none";
     $("overlaysfull").style.display = on ? "" : "none";
     $("ovfilterbar").style.display = on ? "" : "none";
-    btn.textContent = on ? "Hide" : "Show";
     if (on) renderOvFull();
   }
 
@@ -1453,12 +1447,11 @@
     }
     filterRules();
   }
-  async function toggleRules(btn) {
-    rulesShown = !rulesShown;
+  async function toggleRules(h) {
+    rulesShown = h.classList.toggle("open");
     $("ruleslist").style.display = rulesShown ? "" : "none";
     $("rulefilterbar").style.display = rulesShown ? "" : "none";
     $("rulecount").style.display = rulesShown ? "" : "none";
-    btn.textContent = rulesShown ? "Hide" : "Show";
     if (rulesShown) { $("ruleslist").textContent = "Loading…"; loadRules(); }
   }
 
