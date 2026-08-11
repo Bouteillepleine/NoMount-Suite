@@ -290,6 +290,41 @@ do_uname() {
 }
 
 # ===========================================================================
+# dry-run for the UI: how many target props are present-and-wrong (i.e. would be
+# changed by do_props)? Writes nothing. "clean" = nothing to fix. Same present-
+# and-differs rule do_props uses, so absent OEM-specific props never count.
+props_status() {
+    local n=0 c
+    _d() { c=$(getprop "$1" 2>/dev/null); [ -n "$c" ] && [ "$c" != "$2" ] && n=$((n + 1)); }
+    _d ro.boot.vbmeta.device_state    locked
+    _d ro.boot.verifiedbootstate      green
+    _d ro.boot.flash.locked           1
+    _d ro.boot.veritymode             enforcing
+    _d ro.boot.warranty_bit           0
+    _d ro.warranty_bit                0
+    _d ro.vendor.boot.warranty_bit    0
+    _d ro.vendor.warranty_bit         0
+    _d vendor.boot.vbmeta.device_state locked
+    _d vendor.boot.verifiedbootstate  green
+    _d ro.debuggable                  0
+    _d ro.force.debuggable            0
+    _d ro.secure                      1
+    _d ro.adb.secure                  1
+    _d ro.build.type                  user
+    _d ro.build.tags                  release-keys
+    _d ro.crypto.state                encrypted
+    _d ro.secureboot.lockstate        locked
+    _d ro.boot.realmebootstate        green
+    _d ro.boot.realme.lockstate       1
+    [ -n "$(getprop ro.boot.verifiedbooterror 2>/dev/null)" ] && n=$((n + 1))
+    [ -n "$(getprop crashrecovery.rescue_boot_count 2>/dev/null)" ] && n=$((n + 1))
+    case "$(getprop ro.bootmode 2>/dev/null)" in *recovery*) n=$((n + 1)) ;; esac
+    [ -n "$(getprop ro.kernel.qemu 2>/dev/null)" ] && n=$((n + 1))
+    [ "$(getprop ro.build.version.sdk 2>/dev/null)" -ge 36 ] 2>/dev/null \
+        && [ -n "$(getprop sys.oem_unlock_allowed 2>/dev/null)" ] && n=$((n + 1))
+    [ "$n" = 0 ] && echo clean || echo "dirty $n"
+}
+
 main() {
     find_resetprop || log "resetprop not found (prop spoofing skipped)"
     do_vbmeta "$vbmeta_digest"
@@ -316,6 +351,9 @@ case "${1:-}" in
         elif [ -z "$cur" ]; then echo "absent $dg";
         elif [ "$cur" = "$dg" ]; then echo "match $dg";
         else echo "mismatch $dg"; fi
+        exit 0 ;;
+    props)
+        props_status
         exit 0 ;;
 esac
 

@@ -1622,7 +1622,15 @@
       chk.style.color = "var(--muted)";
     }
 
-    $("spPropsVal").textContent = $("spProps").checked ? "normalizing on boot" : "off";
+    const ps = (await exec("sh /data/adb/modules/meta-nomount/spoof.sh props 2>/dev/null")).stdout.trim();
+    const pv = $("spPropsVal");
+    if (ps === "clean") {
+      pv.textContent = "✓ all props already clean — nothing to fix"; pv.style.color = "var(--ok)";
+    } else if (ps.indexOf("dirty") === 0) {
+      pv.textContent = "⚠ " + (ps.split(" ")[1] || "?") + " prop(s) differ — Apply now will normalize"; pv.style.color = "var(--warn)";
+    } else {
+      pv.textContent = $("spProps").checked ? "on" : "off"; pv.style.color = "var(--muted)";
+    }
 
     const ur = (await exec("uname -r")).stdout.trim();
     const uv = (await exec("uname -v")).stdout.trim();
