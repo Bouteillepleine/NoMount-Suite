@@ -746,7 +746,7 @@
       <div class="swrow">
         <div class="swi">
           <div class="lbl">Boot-state props</div>
-          <div class="val" id="spPropsVal">…</div>
+          <div class="val multiline" id="spPropsVal">…</div>
         </div>
         <label class="switch"><input type="checkbox" id="spProps" onchange="toggleSpoofBool('spoof_props',this)"><span class="sl"></span></label>
       </div>
@@ -1588,7 +1588,13 @@
   // ---- spoofing (vbmeta.digest) ----
   async function refreshSpoof() {
     const conf = (await exec("cat /data/adb/nomount/spoof.conf 2>/dev/null")).stdout;
-    const get = (k, d) => { const m = conf.match(new RegExp("^" + k + "=(.*)$", "m")); return m ? m[1].trim() : d; };
+    const get = (k, d) => {
+      const m = conf.match(new RegExp("^" + k + "=(.*)$", "m"));
+      if (!m) return d;
+      let v = m[1].trim();
+      if (v.length >= 2 && v[0] === "'" && v[v.length - 1] === "'") v = v.slice(1, -1).replace(/'\\''/g, "'");
+      return v;
+    };
     const vb = get("vbmeta_digest", "auto");
     $("spVb").checked = vb !== "off";
     $("spProps").checked = get("spoof_props", "0") === "1";
@@ -1627,7 +1633,7 @@
     if (ps === "clean") {
       pv.textContent = "✓ all props already clean — nothing to fix"; pv.style.color = "var(--ok)";
     } else if (ps.indexOf("dirty") === 0) {
-      pv.textContent = "⚠ " + (ps.split(" ")[1] || "?") + " prop(s) differ — Apply now will normalize"; pv.style.color = "var(--warn)";
+      pv.textContent = "⚠ " + (ps.split(" ")[1] || "?") + " prop(s) differ — Apply to fix"; pv.style.color = "var(--warn)";
     } else {
       pv.textContent = $("spProps").checked ? "on" : "off"; pv.style.color = "var(--muted)";
     }
@@ -1644,11 +1650,10 @@
     else if (!$("spUname").checked) { uvl.textContent = "off"; }
     else { uvl.textContent = (get("uname_tail", "") || get("uname_date", "")) ? "active" : "on — keeping current"; }
 
+    const anyOn = $("spVb").checked || $("spProps").checked || $("spUname").checked;
     const chip = $("spchip");
-    if (vb === "off") { chip.textContent = "off"; chip.className = "chip"; }
-    else if (st === "match") { chip.textContent = "verified"; chip.className = "chip ok"; }
-    else if (st === "mismatch") { chip.textContent = "needs apply"; chip.className = "chip warn"; }
-    else { chip.textContent = dig ? "present" : "set at boot"; chip.className = "chip ok"; }
+    if (!anyOn) { chip.textContent = "off"; chip.className = "chip"; }
+    else { chip.textContent = "on"; chip.className = "chip ok"; }
   }
   // single-quote a string for safe use in a shell command
   function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
@@ -1658,7 +1663,7 @@
     await exec(
       "f=/data/adb/nomount/spoof.conf; [ -f \"$f\" ] || : > \"$f\"; " +
       "grep -v '^" + key + "=' \"$f\" > \"$f.tmp\" 2>/dev/null; mv \"$f.tmp\" \"$f\"; " +
-      "printf '%s=%s\\n' " + shq(key) + " " + shq(val) + " >> \"$f\""
+      "printf '%s=%s\\n' " + shq(key) + " " + shq("'" + String(val).replace(/'/g, "'\\''") + "'") + " >> \"$f\""
     );
   }
   async function toggleSpoof(key, el) {

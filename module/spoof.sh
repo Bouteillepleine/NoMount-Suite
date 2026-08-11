@@ -254,7 +254,6 @@ do_props() {
         && $RESETPROP -n ro.kernel.qemu "" 2>/dev/null && log "prop ro.kernel.qemu cleared"
 
     rp_del ro.boot.verifiedbooterror
-    rp_del crashrecovery.rescue_boot_count
     if [ "$(getprop ro.build.version.sdk 2>/dev/null)" -ge 36 ] 2>/dev/null; then
         rp_del sys.oem_unlock_allowed
     else
@@ -317,7 +316,6 @@ props_status() {
     _d ro.boot.realmebootstate        green
     _d ro.boot.realme.lockstate       1
     [ -n "$(getprop ro.boot.verifiedbooterror 2>/dev/null)" ] && n=$((n + 1))
-    [ -n "$(getprop crashrecovery.rescue_boot_count 2>/dev/null)" ] && n=$((n + 1))
     case "$(getprop ro.bootmode 2>/dev/null)" in *recovery*) n=$((n + 1)) ;; esac
     [ -n "$(getprop ro.kernel.qemu 2>/dev/null)" ] && n=$((n + 1))
     [ "$(getprop ro.build.version.sdk 2>/dev/null)" -ge 36 ] 2>/dev/null \
