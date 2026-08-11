@@ -120,6 +120,19 @@
     border: 1px solid var(--brd2); padding: 4px 10px; border-radius: 999px; font-variant-numeric: tabular-nums;
   }
 
+  /* collapsible cards (Tools accordion) */
+  .card-h.clp { cursor: pointer; user-select: none; }
+  .card-h .chev { margin-left: auto; flex: none; color: var(--muted); font-size: 17px; line-height: 1; transition: transform .2s; }
+  .card-h .chip + .chev { margin-left: 8px; }
+  .card:not(.collapsed) > .card-h .chev { transform: rotate(90deg); }
+  .card.collapsed > .card-h { margin-bottom: 0; }
+  .card.collapsed > :not(.card-h) { display: none !important; }
+  .group-label {
+    font-size: 11px; font-weight: 700; letter-spacing: 1.3px; text-transform: uppercase;
+    color: var(--faint); margin: 20px 6px 9px;
+  }
+  .group-label:first-of-type { margin-top: 2px; }
+
   /* hero */
   .hero { padding: 20px 18px; position: relative; overflow: hidden; }
   .hero::after {
@@ -727,11 +740,12 @@
 
   <section class="tab" id="tab-tools">
 
+  <div class="group-label">Spoofing</div>
   <!-- SPOOFING -->
-  <div class="card">
-    <div class="card-h">
+  <div class="card collapsed" id="cardSpoof">
+    <div class="card-h clp" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>
-      <h2>Spoofing</h2><span class="chip" id="spchip">—</span>
+      <h2>Spoofing</h2><span class="chip" id="spchip">—</span><span class="chev">›</span>
     </div>
     <div class="list">
       <div class="swrow">
@@ -767,6 +781,7 @@
         <input class="txin" id="spUnameDate" placeholder="date  —  blank = keep · paste stock uname -v (or a date)">
         <div class="btns" style="flex-wrap:wrap;margin-top:9px">
           <button class="act" onclick="fillUnameRomDate()">Use ROM date</button>
+          <button class="act" onclick="resetUname(this)">Reset to kernel default</button>
           <button class="act primary" onclick="saveUname(this)">Save</button>
         </div>
       </div>
@@ -776,11 +791,12 @@
     <p class="note" id="spNote">Verified boot recomputes <code>ro.boot.vbmeta.digest</code> and <code>.size</code> from the real AVB chain on-device. Boot-state props normalize lock-state/warranty/debuggable — and only ever change a prop that already exists. Kernel uname keeps the running kernel's base and swaps the tail + build date so <code>uname</code> matches the ROM; blank keeps the current values, or paste them from a stock device. <b>Apply now</b> runs it immediately.</p>
   </div>
 
+  <div class="group-label">Diagnostics</div>
   <!-- HEALTH CHECK -->
-  <div class="card">
-    <div class="card-h">
+  <div class="card collapsed" id="cardHealth">
+    <div class="card-h clp" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
-      <h2>Health check</h2><span class="chip" id="dchip">—</span>
+      <h2>Health check</h2><span class="chip" id="dchip">—</span><span class="chev">›</span>
     </div>
     <p class="note">Lints the mount plan the way it will actually be applied, plus the live rules — partition-root redirects, overlay APKs on partitions zygote will not accept, missing backings, and targets two modules both claim. Run it before rebooting after a module change.</p>
     <div class="btns"><button class="act primary" onclick="runDoctor(this)">Run health check</button></div>
@@ -788,10 +804,10 @@
   </div>
 
   <!-- RUNTIME HEALTH -->
-  <div class="card">
-    <div class="card-h">
+  <div class="card collapsed" id="cardRuntime">
+    <div class="card-h clp" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>
-      <h2>Runtime health</h2><span class="chip" id="hchip">—</span>
+      <h2>Runtime health</h2><span class="chip" id="hchip">—</span><span class="chev">›</span>
     </div>
     <p class="note">The live counterpart to the plan-time check above. <b>Self-check</b> runs the per-UID consistency canary — does a normal app see the same injected files as root? — and reports engine, mounts and guard. <b>Snapshot</b> freezes today's healthy state; <b>Verify</b> diffs the live system against it and names any drift. <b>Export</b> dumps diagnostics to <code>/sdcard/Download</code>.</p>
     <div class="btns" style="flex-wrap:wrap">
@@ -804,21 +820,22 @@
   </div>
 
   <!-- LAST INCIDENT -->
-  <div class="card" id="incidentcard" style="display:none">
-    <div class="card-h">
+  <div class="card collapsed" id="incidentcard" style="display:none">
+    <div class="card-h clp" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
-      <h2>Last incident</h2><span class="chip bad">guard tripped</span>
+      <h2>Last incident</h2><span class="chip bad">guard tripped</span><span class="chev">›</span>
     </div>
     <p class="note">Recorded when the bootloop guard self-disabled the Suite — including the newest native crash and its abort message, which usually names the offending path outright. This is a saved record, not live state — it survives reboots until a new trip overwrites it or you clear it. Whether the Suite is disabled <em>right now</em> is the guard chip on Status.</p>
     <pre class="rules" id="incidentout">…</pre>
     <div class="btns"><button class="act danger" onclick="clearIncident(this)">Clear incident</button></div>
   </div>
 
+  <div class="group-label">Hiding</div>
   <!-- CLOAK (pathhide maps/fd) -->
-  <div class="card">
-    <div class="card-h">
+  <div class="card collapsed" id="cardCloak">
+    <div class="card-h clp" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>
-      <h2>Cloak (maps / fd)</h2><span class="chip" id="phchip">—</span>
+      <h2>Cloak (maps / fd)</h2><span class="chip" id="phchip">—</span><span class="chev">›</span>
     </div>
     <p class="note">Hide selected Xposed/LSPosed module APKs from every process's <code>/proc/&lt;pid&gt;/maps</code> and <code>/proc/&lt;pid&gt;/fd</code> via the kernel <code>pathhide</code> interface — applied live and re-applied on boot.</p>
     <div class="btns">
@@ -833,10 +850,10 @@
     <div class="btns"><button class="act primary" id="phApply" onclick="applyCloak(this)">Apply &amp; save</button></div>
   </div>
 
-  <div class="card">
-    <div class="card-h">
+  <div class="card collapsed" id="cardPerUID">
+    <div class="card-h clp" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
-      <h2>Per-UID hiding</h2>
+      <h2>Per-UID hiding</h2><span class="chip" id="uidchip">—</span><span class="chev">›</span>
     </div>
     <div class="uidbar">
       <div class="pkgwrap">
@@ -1493,7 +1510,9 @@
     const box = $("blocked");
     const r = await nm("uid list");
     const lines = (r.stdout || "").split("\n").map(s => s.trim()).filter(Boolean);
-    if (!lines.length || lines[0] === "no blocked apps") {
+    const none = !lines.length || lines[0] === "no blocked apps";
+    const uc = $("uidchip"); if (uc) uc.textContent = none ? "0" : String(lines.length);
+    if (none) {
       box.innerHTML = `<div class="blk-none">No per-UID hiding active — no apps hidden.</div>`;
       return;
     }
@@ -1696,6 +1715,26 @@
     toast("uname strings saved — reboot or Apply now", "ok");
     refreshSpoof();
   }
+  async function resetUname(btn) {
+    const r = (await exec("sh /data/adb/modules/meta-nomount/spoof.sh reset-uname 2>/dev/null")).stdout.trim();
+    if (r === "no-baseline") { toast("Reboot once so the stock uname is captured, then Reset is instant", "bad"); return; }
+    $("spUnameTail").value = ""; $("spUnameDate").value = "";
+    toast("Reset to kernel default", "ok");
+    refreshSpoof();
+  }
+  // ---- Tools accordion: collapse/expand cards, remembered per card ----
+  function toggleCard(h) {
+    const card = h.closest(".card");
+    const on = card.classList.toggle("collapsed");
+    if (card.id) { try { localStorage.setItem("nmcol:" + card.id, on ? "1" : "0"); } catch (e) {} }
+  }
+  function applyCardState() {
+    document.querySelectorAll("#tab-tools .card[id]").forEach(card => {
+      let v = null;
+      try { v = localStorage.getItem("nmcol:" + card.id); } catch (e) {}
+      card.classList.toggle("collapsed", v !== "0"); // default collapsed unless explicitly expanded
+    });
+  }
 
   async function refreshAll(btn) {
     const ic = btn && btn.querySelector("svg");
@@ -1799,6 +1838,7 @@
   movePill(false);
   window.addEventListener("load", function () { movePill(false); });
 
+  applyCardState();
   refreshAll();
   loadCloak();
 </script>

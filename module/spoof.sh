@@ -323,8 +323,20 @@ props_status() {
     [ "$n" = 0 ] && echo clean || echo "dirty $n"
 }
 
+# Capture the pristine kernel uname once per boot (before any override), so the
+# WebUI "Reset to kernel default" can restore it without a reboot. boot-id guarded.
+capture_uname_orig() {
+    local cache=$NMDIR/uname_orig bid
+    bid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    [ -n "$bid" ] || return 0
+    if [ ! -f "$cache" ] || [ "$(sed -n 1p "$cache" 2>/dev/null)" != "$bid" ]; then
+        { echo "$bid"; uname -r; uname -v; } > "$cache" 2>/dev/null
+    fi
+}
+
 main() {
     find_resetprop || log "resetprop not found (prop spoofing skipped)"
+    capture_uname_orig
     do_vbmeta "$vbmeta_digest"
     do_props
     do_uname
@@ -352,6 +364,17 @@ case "${1:-}" in
         exit 0 ;;
     props)
         props_status
+        exit 0 ;;
+    reset-uname)
+        orig=$NMDIR/uname_orig
+        [ -s "$orig" ] || { echo "no-baseline"; exit 0; }
+        rel=$(sed -n 2p "$orig"); ver=$(sed -n 3p "$orig")
+        [ -w /sys/kernel/nomount/uname_release ] && [ -n "$rel" ] && printf '%s' "$rel" > /sys/kernel/nomount/uname_release
+        [ -w /sys/kernel/nomount/uname_version ] && [ -n "$ver" ] && printf '%s' "$ver" > /sys/kernel/nomount/uname_version
+        if grep -v -E '^(uname_tail|uname_date)=' "$CONF" > "$CONF.t" 2>/dev/null; then
+            printf "uname_tail=''\nuname_date=''\n" >> "$CONF.t"; mv "$CONF.t" "$CONF"
+        fi
+        echo "reset"
         exit 0 ;;
 esac
 
