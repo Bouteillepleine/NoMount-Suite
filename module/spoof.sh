@@ -27,6 +27,11 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---- config (persistent, seeded by customize.sh) --------------------------
 vbmeta_digest=auto     # auto = set only when missing | force = always | off
+vbmeta_size=auto       # auto = set alongside digest | off
+spoof_props=0          # 1 = normalize boot-state props (conditional writes only)
+spoof_uname=0          # 1 = apply the uname override
+uname_tail=""          # blank = keep; a bare tail or a whole pasted uname -r
+uname_date=""          # blank = keep; a bare date or a whole pasted uname -v
 [ -f "$CONF" ] && . "$CONF"
 
 # ---- resetprop locator ----------------------------------------------------
@@ -167,42 +172,129 @@ compute_vbmeta_digest() {
     alg=$(getprop ro.boot.vbmeta.hash_alg 2>/dev/null)
     [ "$alg" = "sha512" ] && dg=$(sha512_of "$ACC")
     [ -z "$dg" ] && dg=$(sha256_of "$ACC")
+    VB_SIZE=$(wc -c < "$ACC" 2>/dev/null | tr -d ' \n')
     rm -f "$ACC" 2>/dev/null
     [ -n "$dg" ] && printf '%s' "$dg" | tr 'A-F' 'a-f'
 }
 
 do_vbmeta() {
-    local mode=$1 cur cache="$NMDIR/vbmeta_digest.cache" dg=""
+    local mode=$1 cur cache="$NMDIR/vbmeta_digest.cache" szcache="$NMDIR/vbmeta_size.cache" dg="" sz=""
     [ "$mode" = "off" ] && { log "vbmeta.digest: off"; return 0; }
+
     cur=$(getprop ro.boot.vbmeta.digest 2>/dev/null)
     if [ -n "$cur" ] && [ "$mode" != "force" ]; then
         log "vbmeta.digest already present (len ${#cur}); leaving as-is"
+    else
+        [ -s "$cache" ] && [ "$mode" != "force" ] && dg=$(cat "$cache" 2>/dev/null)
+        if [ -z "$dg" ]; then
+            dg=$(compute_vbmeta_digest)
+            [ -n "$dg" ] && { echo "$dg" > "$cache" 2>/dev/null; [ -n "$VB_SIZE" ] && echo "$VB_SIZE" > "$szcache" 2>/dev/null; }
+        fi
+        if [ -z "$dg" ]; then
+            log "vbmeta.digest: could not compute (left unset)"
+        elif [ -z "$RESETPROP" ]; then
+            log "vbmeta.digest: resetprop unavailable, cannot set"
+        else
+            $RESETPROP -n ro.boot.vbmeta.digest "$dg" 2>/dev/null \
+                && log "vbmeta.digest set = $dg ($mode)" || log "vbmeta.digest: resetprop failed"
+        fi
+    fi
+
+    # ro.boot.vbmeta.size — the same chain bytes the digest is computed over.
+    # Set only when missing (unless forced). VALIDATE once against the real prop.
+    [ "${vbmeta_size:-auto}" = "off" ] && return 0
+    [ -n "$RESETPROP" ] || return 0
+    sz=$VB_SIZE
+    [ -z "$sz" ] && [ -s "$szcache" ] && sz=$(cat "$szcache" 2>/dev/null)
+    [ -n "$sz" ] || return 0
+    cur=$(getprop ro.boot.vbmeta.size 2>/dev/null)
+    if [ -z "$cur" ] || [ "$mode" = "force" ]; then
+        $RESETPROP -n ro.boot.vbmeta.size "$sz" 2>/dev/null && log "vbmeta.size set = $sz ($mode)"
+    fi
+}
+
+# ---- boot-state props — conditional writes only (never create a missing prop) --
+rp_reset_if_present() {
+    local name=$1 want=$2 cur
+    cur=$(getprop "$name" 2>/dev/null)
+    [ -n "$cur" ] && [ "$cur" != "$want" ] \
+        && $RESETPROP -n "$name" "$want" 2>/dev/null && log "prop $name -> $want"
+}
+rp_del() { [ -n "$(getprop "$1" 2>/dev/null)" ] && $RESETPROP -d "$1" 2>/dev/null && log "prop $1 deleted"; }
+
+do_props() {
+    [ "${spoof_props:-0}" = "1" ] || return 0
+    [ -n "$RESETPROP" ] || { log "props: resetprop unavailable"; return 0; }
+
+    rp_reset_if_present ro.boot.vbmeta.device_state    locked
+    rp_reset_if_present ro.boot.verifiedbootstate      green
+    rp_reset_if_present ro.boot.flash.locked           1
+    rp_reset_if_present ro.boot.veritymode             enforcing
+    rp_reset_if_present ro.boot.warranty_bit           0
+    rp_reset_if_present ro.warranty_bit                0
+    rp_reset_if_present ro.vendor.boot.warranty_bit    0
+    rp_reset_if_present ro.vendor.warranty_bit         0
+    rp_reset_if_present vendor.boot.vbmeta.device_state locked
+    rp_reset_if_present vendor.boot.verifiedbootstate  green
+    rp_reset_if_present ro.debuggable                  0
+    rp_reset_if_present ro.force.debuggable            0
+    rp_reset_if_present ro.secure                      1
+    rp_reset_if_present ro.adb.secure                  1
+    rp_reset_if_present ro.build.type                  user
+    rp_reset_if_present ro.build.tags                  release-keys
+    rp_reset_if_present ro.crypto.state                encrypted
+    rp_reset_if_present ro.secureboot.lockstate        locked
+    rp_reset_if_present ro.boot.realmebootstate        green
+    rp_reset_if_present ro.boot.realme.lockstate       1
+
+    case "$(getprop ro.bootmode 2>/dev/null)" in
+        *recovery*) $RESETPROP -n ro.bootmode unknown 2>/dev/null && log "prop ro.bootmode -> unknown" ;;
+    esac
+    [ -n "$(getprop ro.kernel.qemu 2>/dev/null)" ] \
+        && $RESETPROP -n ro.kernel.qemu "" 2>/dev/null && log "prop ro.kernel.qemu cleared"
+
+    rp_del ro.boot.verifiedbooterror
+    rp_del crashrecovery.rescue_boot_count
+    if [ "$(getprop ro.build.version.sdk 2>/dev/null)" -ge 36 ] 2>/dev/null; then
+        rp_del sys.oem_unlock_allowed
+    else
+        rp_reset_if_present sys.oem_unlock_allowed 0
+    fi
+}
+
+# ---- uname override via /sys/kernel/nomount (blank = keep) ------------------
+do_uname() {
+    [ "${spoof_uname:-0}" = "1" ] || return 0
+    local sysd=/sys/kernel/nomount
+    if [ ! -w "$sysd/uname_release" ]; then
+        log "uname: kernel interface absent (needs the nomount uname build)"
         return 0
     fi
-    if [ -s "$cache" ] && [ "$mode" != "force" ]; then
-        dg=$(cat "$cache" 2>/dev/null)
+
+    if [ -n "$uname_tail" ]; then
+        local tail prefix rel
+        tail=$(printf '%s' "$uname_tail" | sed -E 's/^[0-9][0-9.]*-android[0-9]+-//')
+        prefix=$(uname -r | grep -oE '^[0-9][0-9.]*-android[0-9]+-')
+        rel="${prefix}${tail}"
+        printf '%s' "$rel" > "$sysd/uname_release" 2>/dev/null && log "uname release=$rel"
     fi
-    if [ -z "$dg" ]; then
-        dg=$(compute_vbmeta_digest)
-        [ -n "$dg" ] && echo "$dg" > "$cache" 2>/dev/null
+
+    if [ -n "$uname_date" ]; then
+        local d head ver
+        d=$(printf '%s' "$uname_date" | grep -oE '(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*$')
+        [ -z "$d" ] && d=$uname_date
+        head=$(uname -v | sed -E 's/^(#[0-9]+ SMP( [A-Z_]*PREEMPT[A-Z_]*)?).*/\1/')
+        ver="$head $d"
+        printf '%s' "$ver" > "$sysd/uname_version" 2>/dev/null && log "uname version=$ver"
     fi
-    if [ -z "$dg" ]; then
-        log "vbmeta.digest: could not compute (left unset)"
-        return 0
-    fi
-    if [ -z "$RESETPROP" ]; then
-        log "vbmeta.digest: resetprop unavailable, cannot set"
-        return 0
-    fi
-    $RESETPROP -n ro.boot.vbmeta.digest "$dg" 2>/dev/null \
-        && log "vbmeta.digest set = $dg ($mode)" \
-        || log "vbmeta.digest: resetprop failed"
 }
 
 # ===========================================================================
 main() {
-    find_resetprop || log "resetprop not found (vbmeta.digest set will be skipped)"
+    find_resetprop || log "resetprop not found (prop spoofing skipped)"
     do_vbmeta "$vbmeta_digest"
+    do_props
+    do_uname
 }
 
 # `verify` / `compute` inspect without changing anything, so the UI can show

@@ -69,6 +69,11 @@ CONF="$NMDIR/spoof.conf"
 EOF
 seed_conf() { grep -q "^$1=" "$CONF" 2>/dev/null || echo "$1=$2" >> "$CONF"; }
 seed_conf vbmeta_digest auto
+seed_conf vbmeta_size auto
+seed_conf spoof_props 0
+seed_conf spoof_uname 0
+seed_conf uname_tail ""
+seed_conf uname_date ""
 set_perm "$CONF" 0 0 0644
 [ -f "$MODPATH/spoof.sh" ] && set_perm "$MODPATH/spoof.sh" 0 0 0755
 ui_print "- Spoof add-on enabled: dynamic vbmeta.digest"
