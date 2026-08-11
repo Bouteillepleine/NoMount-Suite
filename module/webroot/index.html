@@ -112,12 +112,29 @@
   .card-h { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
   .card-h h2 { margin: 0; font-size: 14px; font-weight: 680; letter-spacing: 0.2px; }
   .card-h .ic { width: 17px; height: 17px; color: var(--acc); flex: none; }
-  .card-h .chip.ok   { background: rgba(53,210,154,0.15);  color: var(--ok); }
-  .card-h .chip.warn { background: rgba(251,191,36,0.15);  color: var(--warn); }
-  .card-h .chip.bad  { background: rgba(248,113,122,0.15); color: var(--bad); }
+  .card-h .chip.ok   { background-color: rgba(53,210,154,0.15);  color: var(--ok); }
+  .card-h .chip.warn { background-color: rgba(251,191,36,0.15);  color: var(--warn); }
+  .card-h .chip.bad  { background-color: rgba(248,113,122,0.15); color: var(--bad); }
+  /* domed 3D — same treatment as .tag pills, so chips and pills read alike */
   .card-h .chip {
-    margin-left: auto; font-size: 11.5px; color: var(--muted); background: var(--card2);
-    border: 1px solid var(--brd2); padding: 4px 10px; border-radius: 999px; font-variant-numeric: tabular-nums;
+    margin-left: auto; font-size: 11px; font-weight: 680; letter-spacing: 0.2px; white-space: nowrap;
+    color: var(--muted); background-color: var(--card2); border: 1px solid rgba(255,255,255,.10);
+    padding: 4px 10px; border-radius: 999px; font-variant-numeric: tabular-nums;
+    background-image: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,0) 62%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.26),
+      inset 0 -1px 2px rgba(0,0,0,.22),
+      0 1px 2px rgba(0,0,0,.30);
+    text-shadow: 0 1px 0 rgba(0,0,0,.28);
+  }
+  html[data-theme="light"] .card-h .chip {
+    border-color: rgba(16,26,48,.10);
+    background-image: linear-gradient(180deg, rgba(255,255,255,.75), rgba(255,255,255,0) 65%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.90),
+      inset 0 -1px 2px rgba(16,26,48,.10),
+      0 1px 2px rgba(20,32,64,.12);
+    text-shadow: none;
   }
 
   /* collapsible cards (Tools accordion) */
