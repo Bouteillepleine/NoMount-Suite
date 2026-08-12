@@ -85,6 +85,11 @@ struct nm_inode_info {
     unsigned long v_ino;
     dev_t v_dev;
     struct timespec64 v_atime, v_mtime, v_ctime;
+    u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
+    u32 v_blksize;                   /* mirrored st_blksize */
+    kuid_t v_uid;                    /* virtual-dir owner (mirrored from nearest real ancestor) */
+    kgid_t v_gid;
+    umode_t v_mode;                  /* virtual-dir mode bits (0 => default 0755) */
     u8 flags;
 };
 
@@ -127,6 +132,11 @@ struct nomount_rule {
     unsigned long v_ino;
     dev_t v_dev;
     struct timespec64 v_atime, v_mtime, v_ctime;
+    u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
+    u32 v_blksize;                   /* mirrored st_blksize */
+    kuid_t v_uid;                    /* virtual-dir owner (mirrored from nearest real ancestor) */
+    kgid_t v_gid;
+    umode_t v_mode;                  /* virtual-dir mode bits (0 => default 0755) */
     u32 v_hash;
     u16 v_len;
     u8  flags;
@@ -164,6 +174,11 @@ struct nm_rule_info {
     unsigned long v_ino;
     dev_t v_dev;
     struct timespec64 v_atime, v_mtime, v_ctime;
+    u64 v_attributes, v_attr_mask;
+    u32 v_blksize;
+    kuid_t v_uid;
+    kgid_t v_gid;
+    umode_t v_mode;
     struct path r_path;
     struct nomount_dir_node *this_dir;
 };

@@ -77,6 +77,12 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_atime = rule->v_atime;
                 rule_info->v_mtime = rule->v_mtime;
                 rule_info->v_ctime = rule->v_ctime;
+                rule_info->v_attributes = rule->v_attributes;
+                rule_info->v_attr_mask = rule->v_attr_mask;
+                rule_info->v_blksize = rule->v_blksize;
+                rule_info->v_uid = rule->v_uid;
+                rule_info->v_gid = rule->v_gid;
+                rule_info->v_mode = rule->v_mode;
                 rule_info->this_dir = rule->this_dir;
                 if (get_path && rule->r_path.dentry) {
                     rule_info->r_path = rule->r_path;
@@ -184,15 +190,25 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     info->v_atime = rule_info->v_atime;
     info->v_mtime = rule_info->v_mtime;
     info->v_ctime = rule_info->v_ctime;
+    info->v_attributes = rule_info->v_attributes;
+    info->v_attr_mask = rule_info->v_attr_mask;
+    info->v_blksize = rule_info->v_blksize;
 
     inode->i_private = info;
     inode->i_ino = rule_info->v_ino;
     if (rule_info->flags & NM_FLAG_VIRTUAL_DIR) {
-        inode->i_mode = S_IFDIR | 0755;
+        /* Mirror the nearest real ancestor's owner/mode (captured at rule build)
+         * instead of a hardcoded root:root 0755, which is an outlier under any
+         * tree whose dirs are not 0755 root. v_mode == 0 => ancestor unknown,
+         * fall back to the 0755 default. */
+        inode->i_mode = S_IFDIR | (rule_info->v_mode ? rule_info->v_mode : 0755);
         inode->i_size = 4096;
         inode->i_blocks = 8;
-        inode->i_uid = GLOBAL_ROOT_UID;
-        inode->i_gid = GLOBAL_ROOT_GID;
+        inode->i_uid = rule_info->v_uid;
+        inode->i_gid = rule_info->v_gid;
+        /* Real directories report st_nlink >= 2 (self + '.'); a synthesized dir
+         * left at new_inode()'s default of 1 is a stat self-consistency outlier. */
+        set_nlink(inode, 2);
         inode->i_op = &nm_dir_iops;
         inode->i_fop = &nm_dir_fops;
     } else {
@@ -436,7 +452,17 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
 {
     struct file *real_file = file->private_data;
     loff_t res;
-    if (!real_file) return -EINVAL;
+    if (!real_file) {
+        /* Virtual (purely synthesized) directory: no backing file to seek.
+         * Returning -EINVAL breaks rewinddir()/seekdir() (glibc rewinddir is
+         * lseek(fd,0,SEEK_SET)), a behavioural tell vs a real directory.
+         * Handle the directory-cookie seek on our own f_pos instead. */
+        switch (whence) {
+        case SEEK_SET: file->f_pos = offset; return file->f_pos;
+        case SEEK_CUR: file->f_pos += offset; return file->f_pos;
+        default:       return -EINVAL;
+        }
+    }
 
     real_file->f_pos = file->f_pos;
     res = vfs_llseek(real_file, offset, whence);
@@ -537,6 +563,17 @@ static ssize_t nm_splice_write(struct pipe_inode_info *pipe, struct file *out,
     return real_file->f_op->splice_write(pipe, real_file, ppos, len, flags);
 }
 
+/* Forward fallocate to the backing file: without this an injected file returns
+ * -EOPNOTSUPP where a stock file returns whatever the backing fs does (usually
+ * -EOPNOTSUPP/-EPERM on read-only ROM libs) -- either way, matching the backing
+ * removes the "missing op" divergence a detector can probe. */
+static long nm_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
+{
+    struct file *real_file = file->private_data;
+    if (!real_file || !real_file->f_op->fallocate) return -EOPNOTSUPP;
+    return real_file->f_op->fallocate(real_file, mode, offset, len);
+}
+
 static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
     struct file *real_file = file->private_data;
@@ -586,6 +623,13 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
             stat->mtime = info->v_mtime;
             stat->ctime = info->v_ctime;
         }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        if (info->v_attr_mask) {      /* replay the stock/sibling statx attributes (guarded: 0 for virtual dirs) */
+            stat->attributes = info->v_attributes;
+            stat->attributes_mask = info->v_attr_mask;
+        }
+#endif
+        if (info->v_blksize) stat->blksize = info->v_blksize;
         return 0;
     }
 
@@ -598,6 +642,13 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
             stat->mtime = info->v_mtime;
             stat->ctime = info->v_ctime;
         }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        if (info->v_attr_mask) {      /* replay the stock/sibling statx attributes (guarded: 0 for virtual dirs) */
+            stat->attributes = info->v_attributes;
+            stat->attributes_mask = info->v_attr_mask;
+        }
+#endif
+        if (info->v_blksize) stat->blksize = info->v_blksize;
     }
     return res;
 }
@@ -622,6 +673,13 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
             stat->mtime = info->v_mtime;
             stat->ctime = info->v_ctime;
         }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        if (info->v_attr_mask) {      /* replay the stock/sibling statx attributes (guarded: 0 for virtual dirs) */
+            stat->attributes = info->v_attributes;
+            stat->attributes_mask = info->v_attr_mask;
+        }
+#endif
+        if (info->v_blksize) stat->blksize = info->v_blksize;
         return 0;
     }
 
@@ -634,6 +692,13 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
             stat->mtime = info->v_mtime;
             stat->ctime = info->v_ctime;
         }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        if (info->v_attr_mask) {      /* replay the stock/sibling statx attributes (guarded: 0 for virtual dirs) */
+            stat->attributes = info->v_attributes;
+            stat->attributes_mask = info->v_attr_mask;
+        }
+#endif
+        if (info->v_blksize) stat->blksize = info->v_blksize;
     }
     return res;
 }
@@ -675,6 +740,24 @@ static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struc
     }
 
     return ERR_PTR(-EINVAL);
+}
+
+/* Forward FS_IOC_FIEMAP to the backing inode. ioctl_fiemap() dispatches on
+ * inode->i_op->fiemap before reaching f_op->unlocked_ioctl, so without this an
+ * injected .so returns -EOPNOTSUPP where every real erofs/ext4 lib returns
+ * extents -- a cheap, app-reachable detection tell. */
+static int nm_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
+                     u64 start, u64 len)
+{
+    struct nm_inode_info *info = inode->i_private;
+    struct inode *real_inode;
+
+    if (unlikely(!info || (info->flags & NM_FLAG_VIRTUAL_DIR) || !info->r_path.dentry))
+        return -EOPNOTSUPP;
+    real_inode = d_backing_inode(info->r_path.dentry);
+    if (!real_inode || !real_inode->i_op || !real_inode->i_op->fiemap)
+        return -EOPNOTSUPP;
+    return real_inode->i_op->fiemap(real_inode, fieinfo, start, len);
 }
 
 static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
@@ -945,6 +1028,7 @@ static const struct file_operations nm_file_fops_mmap_prepare = {
 #endif
     .splice_read = nm_splice_read,
     .splice_write = nm_splice_write,
+    .fallocate = nm_fallocate,
     .fsync = nm_fsync,
 };
 #endif
@@ -963,6 +1047,7 @@ static const struct file_operations nm_file_fops = {
 #endif
     .splice_read = nm_splice_read,
     .splice_write = nm_splice_write,
+    .fallocate = nm_fallocate,
     .fsync = nm_fsync,
 };
 
@@ -971,6 +1056,7 @@ static const struct inode_operations nm_file_iops = {
     .setattr = nm_setattr,
     .listxattr = nm_listxattr,
     .get_link = nm_get_link,
+    .fiemap = nm_fiemap,
 };
 
 static const struct file_operations nm_dir_fops = {
@@ -1270,6 +1356,10 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     int i, err = 0;
     u32 h_parent;
     HLIST_HEAD(pending_list);
+    kuid_t anc_uid = GLOBAL_ROOT_UID;   /* nearest real ancestor owner/mode, to */
+    kgid_t anc_gid = GLOBAL_ROOT_GID;   /* stamp onto synthesized virtual dirs   */
+    umode_t anc_mode = 0755;
+    bool have_anc = false;
 
     while (p_len > 1) {
         for (i = p_len - 1; i >= 0; i--) {
@@ -1310,6 +1400,12 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         lookup_path = (parent_len == 1) ? "/" : v_path;
         if (kern_path(lookup_path, LOOKUP_FOLLOW, &p_path) == 0) {
             v_inode = d_backing_inode(p_path.dentry);
+            if (S_ISDIR(v_inode->i_mode)) {   /* nearest real ancestor -> mirror onto virtual dirs below it */
+                anc_uid = v_inode->i_uid;
+                anc_gid = v_inode->i_gid;
+                anc_mode = v_inode->i_mode & 0777;
+                have_anc = true;
+            }
             dir_node = nomount_get_dir_node(v_inode);
             if (!dir_node) dir_node = __nomount_alloc_dir_node(v_inode);
             if (likely(dir_node)) {
@@ -1349,6 +1445,9 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         irule->flags = NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR;
         irule->v_ino = (unsigned long)h_parent;
         irule->target_uid = 0;
+        irule->v_uid = GLOBAL_ROOT_UID;   /* defaults; overwritten below if a real ancestor was found */
+        irule->v_gid = GLOBAL_ROOT_GID;
+        irule->v_mode = 0755;
 
         memcpy(nm_get_vpath(irule), v_path, parent_len);
         nm_get_vpath(irule)[parent_len] = '\0';
@@ -1367,7 +1466,12 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 
     if (likely(err == 0)) {
         hlist_for_each_entry_safe(irule, tmp, &pending_list, vpath_node) {
-            hlist_del_init(&irule->vpath_node); 
+            hlist_del_init(&irule->vpath_node);
+            if (have_anc) {   /* stamp the nearest real ancestor's owner/mode */
+                irule->v_uid = anc_uid;
+                irule->v_gid = anc_gid;
+                irule->v_mode = anc_mode;
+            }
             hash_add_rcu(nomount_rules_ht, &irule->vpath_node, irule->v_hash);
         }
     } else {
@@ -1584,6 +1688,11 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_atime = kst.atime;   /* mirror the stock file's times too */
             rule->v_mtime = kst.mtime;
             rule->v_ctime = kst.ctime;
+            rule->v_blksize = kst.blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+            rule->v_attributes = kst.attributes;   /* STATX_ATTR_* only exist >= 4.11 */
+            rule->v_attr_mask = kst.attributes_mask;
+#endif
         } else {
             rule->v_ino = d_backing_inode(v_path_struct.dentry)->i_ino;
             rule->v_dev = d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
@@ -1601,6 +1710,11 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_atime = sib.atime;
             rule->v_mtime = sib.mtime;
             rule->v_ctime = sib.ctime;
+            rule->v_blksize    = sib.blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+            rule->v_attributes = sib.attributes;
+            rule->v_attr_mask  = sib.attributes_mask;
+#endif
             rule->v_ino   = (unsigned long)((sib.ino & ~0xFFFFFULL) |
                                             ((u64)rule->v_hash & 0xFFFFF));
         } else {
@@ -1617,8 +1731,15 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
                     if (kern_path(parent, LOOKUP_FOLLOW, &v_path_struct) == 0) {
                         struct kstat kst;
 
-                        if (nm_path_stat(&v_path_struct, &kst) == 0)
+                        if (nm_path_stat(&v_path_struct, &kst) == 0) {
                             rule->v_dev = kst.dev;
+                            /* Mirror the parent dir's times too: leaving these 0
+                             * makes getattr fall through to the backing file's
+                             * (module-install) mtime -- a fresh-timestamp tell. */
+                            rule->v_atime = kst.atime;
+                            rule->v_mtime = kst.mtime;
+                            rule->v_ctime = kst.ctime;
+                        }
                         path_put(&v_path_struct);
                     }
                     kfree(parent);
