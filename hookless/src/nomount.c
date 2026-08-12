@@ -1658,13 +1658,31 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     struct nomount_rule *rule, *existing, *victim = NULL;
     int err = 0;
 
-    rule = nm_alloc_rule(v_path, r_path, v_len, r_len, flags, target_uid);
-    if (IS_ERR(rule)) return PTR_ERR(rule);
-
     mutex_lock(&nomount_write_mutex);
+
+    /* nm_alloc_rule() reads/writes the static sibling-metadata cache, which is
+     * only safe under nomount_write_mutex; allocate inside the lock. */
+    rule = nm_alloc_rule(v_path, r_path, v_len, r_len, flags, target_uid);
+    if (IS_ERR(rule)) {
+        mutex_unlock(&nomount_write_mutex);
+        return PTR_ERR(rule);
+    }
+
     hash_for_each_possible(nomount_rules_ht, existing, vpath_node, rule->v_hash) {
         if (existing->v_hash == rule->v_hash && existing->v_len == v_len &&
+             existing->target_uid == target_uid &&
              memcmp(nm_get_vpath(existing), nm_get_vpath(rule), v_len) == 0) {
+            /* Refuse to shadow a rule that still owns a populated virtual
+             * subtree: freeing its dir_node (nm_free_rule -> call_rcu) would
+             * leave descendant rules' parent_dir dangling and UAF on a later
+             * del. The caller must remove the children first. Leaf/file rules
+             * (this_dir NULL or empty) are safe to shadow. */
+            if (existing->this_dir &&
+                !idr_is_empty(&existing->this_dir->children_idr)) {
+                mutex_unlock(&nomount_write_mutex);
+                nm_free_rule(rule);
+                return -EBUSY;
+            }
             hash_del_rcu(&existing->vpath_node);
             victim = existing;
             nm_debug("Shadowing existing rule for: %s\n", nm_get_vpath(rule));
@@ -1721,11 +1739,14 @@ static void __nomount_clear_all(bool is_exit)
     HLIST_HEAD(r_victims);
 
     static_branch_disable(&nomount_active_uids);
-    idr_destroy(&nomount_uid_idr);
     hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {
         nm_detach_rule_locked(rule, &r_victims, false);
     }
     synchronize_rcu();
+    /* Destroy the uid idr only after the grace period: nomount_is_uid_blocked()
+     * does a lockless idr_find() under rcu_read_lock(), and a reader that already
+     * passed the static-branch check may still be walking the radix nodes. */
+    idr_destroy(&nomount_uid_idr);
     hlist_for_each_entry_safe(rule, tmp, &r_victims, vpath_node) {
         nm_free_rule(rule);
     }
