@@ -247,6 +247,17 @@ do_props() {
     rp_reset_if_present ro.boot.realmebootstate        green
     rp_reset_if_present ro.boot.realme.lockstate       1
 
+    # harmonize build.date.utc across partitions to ro.build.date.utc — a custom
+    # build often bumps only some, and a mismatch across partitions is a tell.
+    base_utc=$(getprop ro.build.date.utc 2>/dev/null)
+    if [ -n "$base_utc" ]; then
+        for p in ro.bootimage.build.date.utc ro.odm.build.date.utc ro.odm_dlkm.build.date.utc \
+                 ro.product.build.date.utc ro.system.build.date.utc ro.system_dlkm.build.date.utc \
+                 ro.system_ext.build.date.utc ro.vendor.build.date.utc ro.vendor_dlkm.build.date.utc; do
+            rp_reset_if_present "$p" "$base_utc"
+        done
+    fi
+
     case "$(getprop ro.bootmode 2>/dev/null)" in
         *recovery*) $RESETPROP -n ro.bootmode unknown 2>/dev/null && log "prop ro.bootmode -> unknown" ;;
     esac
