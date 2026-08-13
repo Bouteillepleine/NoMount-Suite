@@ -86,6 +86,11 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
     int id;
 
     if (unlikely(!dir_node)) return false;
+    /* Bloom fast-reject: a name whose hash bit is clear is definitely not an
+     * injected child here, so skip the O(children) idr walk (mirrors the readdir
+     * proxy fast path). Large-fanout dirs saturate the 64-bit filter; those still
+     * fall through to the walk (a per-node hash table is the fuller fix). */
+    if (!(dir_node->bloom_mask & (1ULL << (hash & 63)))) return false;
     rule_info->r_path.dentry = NULL;
     rule_info->r_path.mnt = NULL;
 
@@ -188,16 +193,45 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
     if (!nm_is_virtual_pos(ctx->pos)) ctx->pos = nm_pack_pos(0);
     id = nm_unpack_pos(ctx->pos);
 
-    rcu_read_lock();
-    idr_for_each_entry_continue(&dir_node->children_idr, child, id) {
-        ctx->pos = nm_pack_pos(id);
-        if (child->rule && (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val)) {
-            if (!(child->flags & NM_FLAG_WHITEOUT) &&
-                !dir_emit(ctx, child->name, child->name_len, child->fake_ino, child->d_type)) break;
+    /* Keep the node alive across the dir_emit sleeps below without holding RCU. */
+    if (!atomic_inc_not_zero(&dir_node->refcount)) return;
+
+    for (;;) {
+        char name[NAME_MAX + 1];
+        int found = -1, nlen = 0;
+        u32 fino = 0;
+        unsigned char dt = 0;
+
+        /* Pick the next emittable child and SNAPSHOT it under RCU. dir_emit ->
+         * filldir -> copy_to_user can fault and SLEEP; doing that under
+         * rcu_read_lock is illegal (grace-period stall / mmap_lock inversion),
+         * so the emit below runs with RCU dropped and only the stack snapshot. */
+        rcu_read_lock();
+        while ((child = idr_get_next(&dir_node->children_idr, &id)) != NULL) {
+            if (child->rule &&
+                (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val) &&
+                !(child->flags & NM_FLAG_WHITEOUT)) {
+                found = id;
+                nlen = min_t(int, (int)child->name_len, NAME_MAX);
+                memcpy(name, child->name, nlen);
+                fino = child->fake_ino;
+                dt = child->d_type;
+                break;
+            }
+            id++;
         }
-        ctx->pos = nm_pack_pos(id + 1);
+        rcu_read_unlock();
+
+        if (found < 0)
+            break;
+        ctx->pos = nm_pack_pos(found);
+        if (!dir_emit(ctx, name, nlen, fino, dt))
+            break;
+        id = found + 1;
+        ctx->pos = nm_pack_pos(id);
     }
-    rcu_read_unlock();
+
+    nm_dir_node_put(dir_node);
 }
 
 static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nm_rule_info *rule_info)
@@ -1324,7 +1358,19 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
 {
     struct nomount_dir_node *dir_node = kmem_cache_alloc(nm_dir_cachep, GFP_KERNEL);
     if (unlikely(!dir_node)) return NULL;
-    dir_node->dir_inode = inode ? igrab(inode) : NULL;
+    if (inode) {
+        /* A dying inode (I_FREEING/I_WILL_FREE) makes igrab return NULL. Refuse
+         * the node then: proceeding would hijack the inode's vtable but leave
+         * dir_inode NULL, so the restore path (gated on dir_inode) never cures it
+         * -> leaked node + an uncured fake vtable -> UAF after module unload. */
+        dir_node->dir_inode = igrab(inode);
+        if (unlikely(!dir_node->dir_inode)) {
+            kmem_cache_free(nm_dir_cachep, dir_node);
+            return NULL;
+        }
+    } else {
+        dir_node->dir_inode = NULL;
+    }
     idr_init(&dir_node->children_idr);
     dir_node->bloom_mask = 0;
     atomic_set(&dir_node->refcount, 1);   /* structural owner ref */
@@ -1548,13 +1594,23 @@ static void nomount_prune_empty_virtual_dirs(struct nomount_dir_node *dir_node, 
     struct nomount_rule *owner;
 
     while (dir_node && idr_is_empty(&dir_node->children_idr)) {
+        struct nomount_dir_node *parent;
+        bool parent_virtual;
+
         owner = dir_node->_tag_ptr & 1UL ? (struct nomount_rule *)(dir_node->_tag_ptr & ~1UL) : NULL;
         if (!owner) break;
 
+        /* Capture the parent's kind BEFORE the delete: __nomount_delete_child_locked
+         * can empty and free a REAL (tag 0) parent via call_rcu, so re-reading it
+         * after would be a UAF. A VIRTUAL (tag 1) parent is freed only via its
+         * owner's nm_free_rule, so it survives and is the only one safe to walk to. */
+        parent = owner->parent_dir;
+        parent_virtual = parent && (parent->_tag_ptr & 1UL);
+
         hash_del_rcu(&owner->vpath_node);
-        if (owner->parent_dir) __nomount_delete_child_locked(owner->parent_dir, owner);
+        if (parent) __nomount_delete_child_locked(parent, owner);
         nm_debug("Pruned empty virtual directory: %s\n", nm_get_vpath(owner));
-        dir_node = owner->parent_dir;
+        dir_node = parent_virtual ? parent : NULL;
         hlist_add_head(&owner->vpath_node, victims);
     }
 }
