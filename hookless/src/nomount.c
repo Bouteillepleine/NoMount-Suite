@@ -2313,16 +2313,26 @@ static ssize_t bootconfig_store(struct kobject *k, struct kobj_attribute *a, con
 {
     char *nb = nm_dup_trim(buf, c);
     mutex_lock(&nm_procspoof_mutex);
-    kfree(nm_fake_bootconfig);
-    nm_fake_bootconfig = nb;
     if (!nm_bootconfig_pde) {
         if (!nm_orig_bootconfig) nm_orig_bootconfig = nm_snapshot_bootconfig();
+        /* Never take over into an empty /proc/bootconfig: if we have neither a fake
+         * (empty write) nor a snapshot to passthrough, serving nothing is itself a
+         * tell (stock is never empty). Leave the genuine entry in place. */
+        if (!nb && !nm_orig_bootconfig) {
+            mutex_unlock(&nm_procspoof_mutex);
+            return c;
+        }
+        kfree(nm_fake_bootconfig);
+        nm_fake_bootconfig = nb;
         remove_proc_entry("bootconfig", NULL);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
         nm_bootconfig_pde = proc_create_single("bootconfig", 0444, NULL, nm_bootconfig_show);
 #else
         nm_bootconfig_pde = proc_create("bootconfig", 0444, NULL, &nm_bootconfig_fops);
 #endif
+    } else {
+        kfree(nm_fake_bootconfig);
+        nm_fake_bootconfig = nb;
     }
     mutex_unlock(&nm_procspoof_mutex);
     return c;
@@ -2403,15 +2413,29 @@ static void nm_uname_sysfs_init(void)
 
 static void nm_uname_sysfs_exit(void)
 {
+    struct proc_dir_entry *cpde;
+#ifdef CONFIG_BOOT_CONFIG
+    struct proc_dir_entry *bpde;
+#endif
+    /* Detach and free under the lock, but call remove_proc_entry OUTSIDE it:
+     * remove_proc_entry blocks until in-flight readers finish, and those readers
+     * (nm_cmdline_show/nm_bootconfig_show) take nm_procspoof_mutex themselves --
+     * holding it across the removal would be an ABBA deadlock. Once the pointer is
+     * NULLed under the lock, show falls back to saved_command_line (never freed). */
     mutex_lock(&nm_procspoof_mutex);
-    if (nm_cmdline_pde) { remove_proc_entry("cmdline", NULL); nm_cmdline_pde = NULL; }
+    cpde = nm_cmdline_pde; nm_cmdline_pde = NULL;
     kfree(nm_fake_cmdline); nm_fake_cmdline = NULL;
 #ifdef CONFIG_BOOT_CONFIG
-    if (nm_bootconfig_pde) { remove_proc_entry("bootconfig", NULL); nm_bootconfig_pde = NULL; }
+    bpde = nm_bootconfig_pde; nm_bootconfig_pde = NULL;
     kfree(nm_fake_bootconfig); nm_fake_bootconfig = NULL;
     kfree(nm_orig_bootconfig); nm_orig_bootconfig = NULL;
 #endif
     mutex_unlock(&nm_procspoof_mutex);
+
+    if (cpde) remove_proc_entry("cmdline", NULL);
+#ifdef CONFIG_BOOT_CONFIG
+    if (bpde) remove_proc_entry("bootconfig", NULL);
+#endif
 
     if (nm_uname_kobj) {
         sysfs_remove_group(nm_uname_kobj, &nm_uname_group);
