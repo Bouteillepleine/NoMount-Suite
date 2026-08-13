@@ -135,9 +135,17 @@ fn is_partition_root(target: &Path) -> bool {
 fn self_binds_my(mdir: &Path) -> bool {
     for s in ["post-fs-data.sh", "service.sh", "post-mount.sh"] {
         if let Ok(body) = fs::read_to_string(mdir.join(s)) {
-            let lower = body.to_lowercase();
-            if lower.contains("my_") && (lower.contains("mount") || lower.contains("bind")) {
-                return true;
+            for line in body.lines() {
+                let l = line.trim_start();
+                if l.starts_with('#') {
+                    continue; // skip comments -- a commented-out my_ mention is not a bind
+                }
+                let l = l.to_lowercase();
+                // Both tokens on ONE real line = an actual mount/bind of a my_ path,
+                // not just "my_" and "mount" happening to appear anywhere in the file.
+                if l.contains("my_") && (l.contains("mount") || l.contains("bind")) {
+                    return true;
+                }
             }
         }
     }
@@ -396,11 +404,11 @@ pub fn run_reload() -> Result<()> {
 
     // Desired, split by handling: hookless leaf rules vs my_* binds.
     let mut desired_hookless: HashMap<&Path, &PlanEntry> = HashMap::new();
-    let mut desired_binds: HashSet<&Path> = HashSet::new();
+    let mut desired_bind_src: HashMap<&Path, &Path> = HashMap::new();
     for e in &plan {
         match e.kind {
             PlanKind::Bind => {
-                desired_binds.insert(e.target.as_path());
+                desired_bind_src.insert(e.target.as_path(), e.source.as_path());
             }
             _ => {
                 desired_hookless.insert(e.target.as_path(), e);
@@ -450,7 +458,7 @@ pub fn run_reload() -> Result<()> {
     }
     // Remove live rules no longer desired (skip any that are now bind targets).
     for t in live.keys() {
-        if !desired_hookless.contains_key(t.as_path()) && !desired_binds.contains(t.as_path()) {
+        if !desired_hookless.contains_key(t.as_path()) && !desired_bind_src.contains_key(t.as_path()) {
             if nm.del(t).is_ok() {
                 removed += 1;
             } else {
@@ -459,18 +467,26 @@ pub fn run_reload() -> Result<()> {
         }
     }
 
-    // Reconcile my_* binds against binds.list.
+    // Reconcile my_* binds against binds.list, keyed on (target, source): a bind
+    // whose backing source changed must re-bind, not just added/removed targets.
     let live_binds = crate::bind::tracked();
     let (mut bind_added, mut bind_removed) = (0u32, 0u32);
-    for t in &live_binds {
-        if !desired_binds.contains(t.as_path()) {
+    // Umount any live bind not desired at its current source (removed OR changed);
+    // a changed backing is dropped here so apply() below re-binds the new source.
+    for (t, s) in &live_binds {
+        if desired_bind_src.get(t.as_path()).copied() != Some(s.as_path()) {
             crate::bind::umount_one(t);
             bind_removed += 1;
         }
     }
-    let live_bind_set: HashSet<&Path> = live_binds.iter().map(|p| p.as_path()).collect();
+    // Still-correct binds (right target AND source) are already mounted; skip them.
+    let live_ok: HashSet<&Path> = live_binds
+        .iter()
+        .filter(|(t, s)| desired_bind_src.get(t.as_path()).copied() == Some(s.as_path()))
+        .map(|(t, _)| t.as_path())
+        .collect();
     for e in plan.iter().filter(|e| e.kind == PlanKind::Bind) {
-        if !live_bind_set.contains(e.target.as_path()) {
+        if !live_ok.contains(e.target.as_path()) {
             match crate::bind::apply(&e.source, &e.target) {
                 Ok(_) => bind_added += 1,
                 Err(_) => failed += 1,

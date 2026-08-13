@@ -87,7 +87,7 @@ fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
 /// File-over-file bind of `source` onto an existing `target`.
 pub fn apply(source: &Path, target: &Path) -> Result<()> {
     // Reject non-UTF8 up front so the recorded/umounted path round-trips exactly.
-    source.to_str().context("non-utf8 bind source")?;
+    let s = source.to_str().context("non-utf8 bind source")?.to_string();
     let t = target.to_str().context("non-utf8 bind target")?.to_string();
     // New-file binds would need a tmpfs/overlay; my_* content is overrides of
     // existing OnePlus files, so require the target to exist.
@@ -113,31 +113,40 @@ pub fn apply(source: &Path, target: &Path) -> Result<()> {
         bail!("bind {} -> {t}: {}", source.display(), std::io::Error::last_os_error());
     }
     // Track it; if we can't, unbind rather than leak an untracked mount.
-    if let Err(e) = append_locked(&t) {
+    if let Err(e) = append_locked(&t, &s) {
         unsafe { libc::umount2(tc.as_ptr(), libc::MNT_DETACH) };
         bail!("bind of {t} recorded failed ({e}); unbound");
     }
     Ok(())
 }
 
-/// Append a target to binds.list. Caller must hold the Lock.
-fn append_locked(target: &str) -> std::io::Result<()> {
+/// Append a "target\tsource" record to binds.list. Caller must hold the Lock.
+/// Storing the source lets a reload detect a changed backing (re-bind), not just
+/// an added/removed target.
+fn append_locked(target: &str, source: &str) -> std::io::Result<()> {
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(BINDS_LIST)?;
-    writeln!(f, "{target}")
+    writeln!(f, "{target}\t{source}")
 }
 
-/// Targets we currently have bound (from binds.list). Read-only.
-pub fn tracked() -> Vec<PathBuf> {
+/// Parse one binds.list line into (target, source). Tolerates the legacy
+/// target-only format (source comes back empty), so an upgrade-in-place reload
+/// simply re-binds every legacy row once to backfill its source.
+fn parse_line(l: &str) -> Option<(PathBuf, PathBuf)> {
+    let l = l.trim();
+    if l.is_empty() {
+        return None;
+    }
+    let (t, s) = l.split_once('\t').unwrap_or((l, ""));
+    Some((PathBuf::from(t), PathBuf::from(s)))
+}
+
+/// (target, source) pairs we currently have bound (from binds.list). Read-only.
+pub fn tracked() -> Vec<(PathBuf, PathBuf)> {
     fs::read_to_string(BINDS_LIST)
-        .map(|s| {
-            s.lines()
-                .map(|l| PathBuf::from(l.trim()))
-                .filter(|p| !p.as_os_str().is_empty())
-                .collect()
-        })
+        .map(|s| s.lines().filter_map(parse_line).collect())
         .unwrap_or_default()
 }
 
@@ -149,8 +158,8 @@ pub fn umount_one(target: &Path) {
     }
     let remaining: String = tracked()
         .into_iter()
-        .filter(|p| p != target)
-        .map(|p| format!("{}\n", p.display()))
+        .filter(|(t, _)| t != target)
+        .map(|(t, s)| format!("{}\t{}\n", t.display(), s.display()))
         .collect();
     let _ = fs::write(BINDS_LIST, remaining);
 }
@@ -163,11 +172,10 @@ pub fn teardown_all() {
         return;
     };
     for line in list.lines() {
-        let t = line.trim();
-        if t.is_empty() {
+        let Some((t, _)) = parse_line(line) else {
             continue;
-        }
-        if let Ok(c) = CString::new(t) {
+        };
+        if let Ok(c) = CString::new(t.to_string_lossy().as_bytes()) {
             unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
         }
     }

@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.1.1
+
+Follow-up audit cleanup of two v1.1.0 P2s.
+
+### Fixed
+- **Self-manage detection no longer trips on comments.** `self_binds_my` now requires `my_` and `mount`/`bind` on the *same non-comment line* (an actual bind), instead of matching those tokens anywhere in a boot script -- a commented-out `my_` mention next to an unrelated `mount` no longer causes a module's my_* overrides to be dropped.
+- **reload re-binds a my_* backing whose source changed.** binds.list now records `target\tsource`, so a hot `reload` detects a bind whose backing file moved and re-binds it, instead of only reconciling added/removed targets (source changes previously waited for a full mount). Legacy target-only rows are backfilled on first reload.
+
 ## v1.1.0
 
 Audit fix pass over the v1.0.11-1.0.13 additions (dynamic resolver, my_* bind hybrid, gap-free reload).
