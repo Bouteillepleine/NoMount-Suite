@@ -1003,7 +1003,9 @@
       'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
       'echo "root_ov=$(grep -c \'^nomount_ov \' /proc/self/mounts 2>/dev/null)"; ' +
       'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
-      'echo "vbs=$(grep -hoE \'verifiedbootstate[ ="]*(green|orange|yellow|red)\' /proc/cmdline /proc/bootconfig 2>/dev/null | grep -oE \'green|orange|yellow|red\' | head -1)"; ' +
+      'vb=$(grep -hoE \'verifiedbootstate[ ="]*(green|orange|yellow|red)\' /proc/cmdline /proc/bootconfig 2>/dev/null | grep -oE \'green|orange|yellow|red\'); ' +
+      'vbad=$(printf \'%s\\n\' "$vb" | grep -E \'orange|yellow|red\' | head -1); ' +
+      'echo "vbs=${vbad:-$(printf \'%s\\n\' "$vb" | grep green | head -1)}"; ' +
       'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
       'echo "se=$(getenforce 2>/dev/null)";'
     );
@@ -1084,11 +1086,18 @@
     if (seTell) extraTells.push("SELinux " + se);
     if (extraTells.length) {
       shield.className = "shield warn";
-      $("stealthT").textContent = "Residual tells present";
-      $("stealthD").textContent = extraTells.join(" · ");
-      $("stealthNote").innerHTML = "Mount surface is clean, but a scanner can still read: " +
-        extraTells.map(esc).join(", ") +
-        ". <code>/proc/cmdline</code> verified-boot needs the kernel cmdline filter; build keys are handled by the fingerprint harmonizer in Spoof.";
+      if (appNm > 0) {
+        // A visible mount is the more actionable problem — keep its title/desc and
+        // just append the residual tells rather than clobbering the mount warning.
+        $("stealthNote").innerHTML +=
+          " Also readable by a scanner: " + extraTells.map(esc).join(", ") + ".";
+      } else {
+        $("stealthT").textContent = "Residual tells present";
+        $("stealthD").textContent = extraTells.join(" · ");
+        $("stealthNote").innerHTML = "Mount surface is clean, but a scanner can still read: " +
+          extraTells.map(esc).join(", ") +
+          ". <code>/proc/cmdline</code> verified-boot needs the kernel cmdline filter; build keys are handled by the fingerprint harmonizer in Spoof.";
+      }
     }
   }
 

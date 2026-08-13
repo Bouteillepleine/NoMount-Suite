@@ -340,31 +340,45 @@ do_cmdline() {
         log "cmdline: skipped (needs spoof_props=1 to stay consistent)"
         return 0
     fi
+    # do_props already ran (main order). If the boot-state prop is not actually
+    # green — resetprop missing, or a prop that could not be set — spoofing the
+    # cmdline/bootconfig green would flip the inconsistency the other way (green
+    # cmdline vs orange props). Confirm props landed before touching procfs.
+    if [ "$(getprop ro.boot.verifiedbootstate 2>/dev/null)" != "green" ]; then
+        log "cmdline: skipped (props not normalized to green; check resetprop)"
+        return 0
+    fi
     local sysd=/sys/kernel/nomount dg
     dg=$(getprop ro.boot.vbmeta.digest 2>/dev/null)
 
     # /proc/cmdline: androidboot.key=value, space-separated
     if [ -w "$sysd/cmdline" ] && [ -r /proc/cmdline ]; then
         local c
-        c=$(sed -E 's/androidboot\.verifiedbootstate=[^ ]*/androidboot.verifiedbootstate=green/g;
-                    s/androidboot\.vbmeta\.device_state=[^ ]*/androidboot.vbmeta.device_state=locked/g;
-                    s/androidboot\.flash\.locked=[^ ]*/androidboot.flash.locked=1/g;
-                    s/androidboot\.warranty_bit=[^ ]*/androidboot.warranty_bit=0/g;
-                    s/androidboot\.veritymode=[^ ]*/androidboot.veritymode=enforcing/g;
-                    s/ androidboot\.verifiedbooterror=[^ ]*//g' /proc/cmdline)
-        [ -n "$dg" ] && c=$(printf '%s' "$c" | sed -E "s/androidboot\.vbmeta\.digest=[^ ]*/androidboot.vbmeta.digest=$dg/g")
+        # Prefix-agnostic: OnePlus/OEM boot state rides oplusboot.* (and others use
+        # their own prefix), not just androidboot.*, in /proc/cmdline. Capture the
+        # prefix and reuse it so the token keeps its original name.
+        c=$(sed -E 's/([a-z]*boot\.verifiedbootstate)=[^ ]*/\1=green/g;
+                    s/([a-z]*boot\.vbmeta\.device_state)=[^ ]*/\1=locked/g;
+                    s/([a-z]*boot\.flash\.locked)=[^ ]*/\1=1/g;
+                    s/([a-z]*boot\.warranty_bit)=[^ ]*/\1=0/g;
+                    s/([a-z]*boot\.veritymode)=[^ ]*/\1=enforcing/g;
+                    s/ [a-z]*boot\.verifiedbooterror=[^ ]*//g' /proc/cmdline)
+        [ -n "$dg" ] && c=$(printf '%s' "$c" | sed -E "s/([a-z]*boot\.vbmeta\.digest)=[^ ]*/\1=$dg/g")
         printf '%s' "$c" > "$sysd/cmdline" 2>/dev/null && log "cmdline sanitized (green/locked)"
     fi
 
     # /proc/bootconfig: androidboot.key = "value" (GKI 5.10+); knob absent otherwise
     if [ -w "$sysd/bootconfig" ] && [ -r /proc/bootconfig ]; then
         local b
-        b=$(sed -E 's/(androidboot\.verifiedbootstate[[:space:]]*=[[:space:]]*")[^"]*/\1green/g;
-                    s/(androidboot\.vbmeta\.device_state[[:space:]]*=[[:space:]]*")[^"]*/\1locked/g;
-                    s/(androidboot\.flash\.locked[[:space:]]*=[[:space:]]*")[^"]*/\11/g;
-                    s/(androidboot\.warranty_bit[[:space:]]*=[[:space:]]*")[^"]*/\10/g;
-                    s/(androidboot\.veritymode[[:space:]]*=[[:space:]]*")[^"]*/\1enforcing/g' /proc/bootconfig)
-        [ -n "$dg" ] && b=$(printf '%s' "$b" | sed -E "s/(androidboot\.vbmeta\.digest[[:space:]]*=[[:space:]]*\")[^\"]*/\1$dg/g")
+        # Prefix-agnostic like the cmdline branch: bootconfig is androidboot.* on GKI,
+        # but keep symmetry so an OEM that namespaces it differently is still covered.
+        b=$(sed -E '/[a-z]*boot\.verifiedbooterror[[:space:]]*=/d;
+                    s/([a-z]*boot\.verifiedbootstate[[:space:]]*=[[:space:]]*")[^"]*/\1green/g;
+                    s/([a-z]*boot\.vbmeta\.device_state[[:space:]]*=[[:space:]]*")[^"]*/\1locked/g;
+                    s/([a-z]*boot\.flash\.locked[[:space:]]*=[[:space:]]*")[^"]*/\11/g;
+                    s/([a-z]*boot\.warranty_bit[[:space:]]*=[[:space:]]*")[^"]*/\10/g;
+                    s/([a-z]*boot\.veritymode[[:space:]]*=[[:space:]]*")[^"]*/\1enforcing/g' /proc/bootconfig)
+        [ -n "$dg" ] && b=$(printf '%s' "$b" | sed -E "s/([a-z]*boot\.vbmeta\.digest[[:space:]]*=[[:space:]]*\")[^\"]*/\1$dg/g")
         printf '%s' "$b" > "$sysd/bootconfig" 2>/dev/null && log "bootconfig sanitized (green/locked)"
     fi
 }
