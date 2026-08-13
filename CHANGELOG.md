@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.13
+
+### Fixed
+- **Dynamic resolver mistook `/system`-symlinks for partitions.** `/etc -> /system/etc` (and `/bin`) are symlinks, and the resolver's `is_dir()` check followed them, so classic-layout `system/etc/...` wrongly canonicalized to `/etc/...` (a harmless-but-wrong target on the same inode, which tripped doctor's zygote FD-allowlist warning). Now uses `symlink_metadata` (lstat) so only a real partition mount (`/vendor`, `/product`, `/odm`, `/my_product`, …) canonicalizes; `system/etc` correctly stays `/system/etc`.
+
 ## v1.0.12
 
 ### Added

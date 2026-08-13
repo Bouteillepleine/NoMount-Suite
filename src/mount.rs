@@ -53,9 +53,15 @@ const NON_PARTITION_ROOTS: &[&str] = &[
 /// is the same test used both to discover top-level partition dirs and to
 /// canonicalize the classic `system/<name>` layout.
 fn is_real_partition(name: &str) -> bool {
+    // symlink_metadata (lstat), NOT is_dir(): a /system-symlink like `/etc ->
+    // /system/etc` or `/bin -> /system/bin` must NOT be treated as a partition,
+    // or `system/etc/...` would wrongly canonicalize to `/etc/...`. Only a real
+    // directory (a mount point: /vendor, /product, /odm, /my_product) qualifies.
     !name.is_empty()
         && !NON_PARTITION_ROOTS.contains(&name)
-        && Path::new(&format!("/{name}")).is_dir()
+        && fs::symlink_metadata(format!("/{name}"))
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
 }
 
 /// Resolve a module-relative path to its absolute target.
