@@ -30,6 +30,9 @@ pub enum Commands {
     },
     /// Lint the mount plan (and live rules) for known bootloop/no-op hazards
     Doctor,
+    /// Print what the mount pass would do (resolved target, kind, source) without
+    /// applying anything. Read-only.
+    Plan,
     /// Runtime health check: engine liveness, injection consistency, per-UID
     /// self-consistency canary, guard state. `--write` persists to health.txt.
     Selfcheck {

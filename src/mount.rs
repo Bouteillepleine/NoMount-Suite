@@ -36,15 +36,6 @@ const MODULES_DIR: &str = "/data/adb/modules";
 const BUILTIN_BLOCKLIST: &[&str] = &["kernelnosu", "scene_swap_controller", "AAaTempSpoof"];
 const BLOCKLIST_FILE: &str = "/data/adb/nomount/blocklist";
 
-// On System-as-Root devices these live under /vendor, /product, etc. Canonicalize
-// so rules target the real inode instead of the /system/<x> symlink alias.
-const SAR_ALIAS_PARTITIONS: &[&str] = &[
-    "system/vendor",
-    "system/product",
-    "system/system_ext",
-    "system/odm",
-];
-
 // Top-level module roots that exist on-device but must NEVER be injected into
 // (writable, virtual, or ramdisk mounts). Any OTHER top-level module dir whose
 // "/<name>" is a real directory is treated as a partition to inject — so partition
@@ -57,23 +48,48 @@ const NON_PARTITION_ROOTS: &[&str] = &[
     "postinstall", "second_stage_resources", "bin", "sbin",
 ];
 
-/// Resolve a module-relative path ("system/app/Foo.apk") to its absolute target
-/// ("/system/app/Foo.apk", or "/vendor/..." for SAR aliases).
+/// A module top-level dir name that maps to a real, separate partition on THIS
+/// device: not a non-injectable root, and `/<name>` exists as a directory. This
+/// is the same test used both to discover top-level partition dirs and to
+/// canonicalize the classic `system/<name>` layout.
+fn is_real_partition(name: &str) -> bool {
+    !name.is_empty()
+        && !NON_PARTITION_ROOTS.contains(&name)
+        && Path::new(&format!("/{name}")).is_dir()
+}
+
+/// Resolve a module-relative path to its absolute target.
+///
+/// Classic layout ships everything under `system/`, but `system/<X>` where `<X>`
+/// is really a separate top-level partition (`/vendor`, `/product`, `/odm`,
+/// `/system_ext`, `/system_dlkm`, `/my_product`, …) must land on `/<X>`, like
+/// magic-mount does. This is dynamic (any partition THIS device has), so it also
+/// covers `system_dlkm`/`oem`/`my_*` that a hardcoded alias list would miss. A
+/// plain /system subdir (`system/app`, `system/bin`) is not a root partition, so
+/// it stays under `/system`.
 fn resolve_target_path(relative: &Path) -> Option<PathBuf> {
     let s = relative.to_str()?;
     if s.is_empty() {
         return None;
     }
-    for alias in SAR_ALIAS_PARTITIONS {
-        let canonical = &alias["system/".len()..];
-        if s == *alias {
-            return Some(PathBuf::from(format!("/{canonical}")));
-        }
-        if let Some(rest) = s.strip_prefix(alias).and_then(|r| r.strip_prefix('/')) {
-            return Some(PathBuf::from(format!("/{canonical}/{rest}")));
+    if let Some(rest) = s.strip_prefix("system/") {
+        let x = rest.split('/').next().unwrap_or("");
+        if is_real_partition(x) {
+            return Some(PathBuf::from(format!("/{rest}")));
         }
     }
     Some(PathBuf::from(format!("/{s}")))
+}
+
+/// A target on an OnePlus/Oppo `my_*` partition, which must be served by a real
+/// bind (see bind.rs) because hookless injection there bootloops zygote.
+fn is_my_partition(target: &Path) -> bool {
+    target
+        .components()
+        .nth(1)
+        .and_then(|c| c.as_os_str().to_str())
+        .map(|s| s.starts_with("my_"))
+        .unwrap_or(false)
 }
 
 /// True if `target` is a partition ROOT (`/product`, `/system`, `/vendor`, …) rather than
@@ -126,10 +142,12 @@ struct Stats {
 /// What the Suite intends to do for one module entry.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlanKind {
-    /// Redirect `target` at `source`.
+    /// Redirect `target` at `source` (hookless, mountless).
     Inject,
     /// Make `target` appear absent (`.replace` marker or 0:0 char device).
     Whiteout,
+    /// Real file-over-file bind (my_* partitions hookless can't serve).
+    Bind,
 }
 
 /// One intended operation, resolved but not yet applied.
@@ -151,7 +169,7 @@ pub(crate) struct PlanEntry {
 /// are hookless-injected into e.g. `/product/overlay`, and OverlayManagerService +
 /// idmap2 pick them up at the system_server scan (which runs after this
 /// post-fs-data pass). So RRO works with no overlayfs mount — zero mounts total.
-fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
+fn plan_tree(module: &str, module_root: &Path, dir: &Path, self_manages: bool, out: &mut Vec<PlanEntry>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -173,13 +191,14 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
         let name = name.to_string_lossy();
 
         if ft.is_dir() {
-            plan_tree(module, module_root, &source, out);
+            plan_tree(module, module_root, &source, self_manages, out);
         } else if name == ".replace" {
             // Whiteout the parent dir (module wants to replace, not merge, it).
             // Never whiteout a bare partition root: masking a whole partition bootloops
             // (forkSystemServer SIGABRT), exactly as an inject on a root does below.
             if let Some(parent) = target.parent() {
-                if is_partition_root(parent) {
+                // Skip a partition root (bootloop) and my_* (bind can't whiteout).
+                if is_partition_root(parent) || is_my_partition(parent) {
                     continue;
                 }
                 out.push(PlanEntry {
@@ -191,8 +210,8 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             }
         } else if is_char_dev(&ft) {
             // A 0:0 char device is Magisk's whiteout marker. Refuse it on a partition
-            // root for the same bootloop reason.
-            if is_partition_root(&target) {
+            // root for the same bootloop reason, and on my_* (bind can't whiteout).
+            if is_partition_root(&target) || is_my_partition(&target) {
                 continue;
             }
             out.push(PlanEntry {
@@ -208,6 +227,20 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             // the module's own top-level partition dir. Real `system/<partition>` DIRECTORIES
             // are unaffected: they take the is_dir() branch above and recurse as before.
             continue;
+        } else if is_my_partition(&target) {
+            // my_* bootloops under hookless (zygote FD allowlist), so it needs a real
+            // bind. But a module that ships its own post-fs-data.sh/service.sh already
+            // binds its my_* content (often a processed copy); binding it again would
+            // double-mount and could shadow the wrong version, so leave those to it.
+            if self_manages {
+                continue;
+            }
+            out.push(PlanEntry {
+                module: module.to_string(),
+                target,
+                source,
+                kind: PlanKind::Bind,
+            });
         } else {
             out.push(PlanEntry {
                 module: module.to_string(),
@@ -241,6 +274,11 @@ pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
             continue;
         }
         let id = id.to_string();
+        // A module with its own post-fs-data.sh/service.sh manages its own mounts,
+        // so we do not add my_* binds for it (see plan_tree); its hookless-injectable
+        // content is still served normally.
+        let self_manages =
+            mdir.join("post-fs-data.sh").exists() || mdir.join("service.sh").exists();
         // "system/" is the classic layout; auto_mount modules (e.g. OxygenCustomizer)
         // ship content directly under module-root partition dirs. Process every
         // top-level dir that maps to a real on-device partition — dynamically, so any
@@ -255,26 +293,35 @@ pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
                 let Some(name) = name.to_str() else {
                     continue;
                 };
-                // Skip non-injectable roots, and OnePlus/Oppo `my_*` feature partitions.
-                // `my_*` is deliberate: those paths are NOT in zygote's FD allowlist
-                // (`FileDescriptorInfo::CreateFromFd`), so anything zygote preloads from
-                // there — an RRO overlay APK in particular — aborts the first
-                // `forkSystemServer` with "Not allowlisted" and bootloops. Modules that
-                // need `my_*` content handle it themselves (e.g. OxygenCustomizer's
-                // post-fs-data.sh binds); NoMount serves the /product, /system, … trees.
-                if NON_PARTITION_ROOTS.contains(&name) || name.starts_with("my_") {
+                // A partition iff "/<name>" is a real directory on this device and not a
+                // non-injectable root; module-metadata dirs (META-INF/, webroot/, …) fail
+                // this and are skipped. my_* partitions ARE walked now: hookless bootloops
+                // on them (zygote FD allowlist), so plan_tree routes their files to a real
+                // bind (PlanKind::Bind) instead of injection.
+                if !is_real_partition(name) {
                     continue;
                 }
-                // A partition iff "/<name>" is a real directory on this device;
-                // module-metadata dirs (META-INF/, webroot/, …) fail this and are skipped.
-                if !Path::new(&format!("/{name}")).is_dir() {
-                    continue;
-                }
-                plan_tree(&id, &mdir, &e.path(), &mut plan);
+                plan_tree(&id, &mdir, &e.path(), self_manages, &mut plan);
             }
         }
     }
     (plan, skipped)
+}
+
+/// `nomount plan`: print the resolved plan (target, kind, source) without applying.
+pub fn run_plan() -> Result<()> {
+    let (plan, skipped) = collect_plan();
+    for e in &plan {
+        let k = match e.kind {
+            PlanKind::Inject => "inject",
+            PlanKind::Whiteout => "whiteout",
+            PlanKind::Bind => "bind",
+        };
+        println!("{k:8} {} <- {} [{}]", e.target.display(), e.source.display(), e.module);
+    }
+    let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
+    println!("({} entries: {} binds, {skipped} blocklisted)", plan.len(), binds);
+    Ok(())
 }
 
 /// Metamodule entry point (`nomount mount`): rebuild rules from the current set
@@ -287,11 +334,14 @@ pub fn run_mount() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding -- is the CONFIG_NOMOUNT kernel loaded?")?;
 
-    // Start clean so uninstalled/updated modules don't leave stale rules.
+    // Start clean so uninstalled/updated modules don't leave stale rules, and tear
+    // down any my_* binds from the previous pass so removed modules don't leak one.
     let _ = nm.clear();
+    crate::bind::teardown_all();
 
     let (plan, skipped) = collect_plan();
     let mut served: HashSet<&str> = HashSet::new();
+    let mut binds = 0u32;
     let mut st = Stats {
         applied: 0,
         failed: 0,
@@ -308,13 +358,18 @@ pub fn run_mount() -> Result<()> {
                 Ok(()) => st.applied += 1,
                 Err(_) => st.failed += 1,
             },
+            PlanKind::Bind => match crate::bind::apply(&e.source, &e.target) {
+                Ok(()) => binds += 1,
+                Err(_) => st.failed += 1,
+            },
         }
     }
     let modules = served.len();
+    let surface = if binds > 0 { "hookless + my_* bind" } else { "mountless (RRO via hookless)" };
 
     println!(
-        "nomount(suite): {modules} modules | {} rules, {} whiteouts, {} failed, {skipped} skipped \
-         | mountless (RRO via hookless)",
+        "nomount(suite): {modules} modules | {} rules, {} whiteouts, {binds} my_* binds, {} failed, \
+         {skipped} skipped | {surface}",
         st.applied, st.whiteouts, st.failed
     );
     Ok(())

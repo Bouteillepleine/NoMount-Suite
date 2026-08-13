@@ -197,7 +197,8 @@ pub fn run_doctor() -> Result<()> {
 
     // ---- report ------------------------------------------------------------
     let injects = plan.iter().filter(|e| e.kind == PlanKind::Inject).count();
-    let whiteouts = plan.len() - injects;
+    let whiteouts = plan.iter().filter(|e| e.kind == PlanKind::Whiteout).count();
+    let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
     let modules = {
         let mut m: Vec<&str> = plan.iter().map(|e| e.module.as_str()).collect();
         m.sort_unstable();
@@ -206,7 +207,7 @@ pub fn run_doctor() -> Result<()> {
     };
     println!(
         "nomount doctor: {modules} modules planned | {injects} injects, {whiteouts} whiteouts, \
-         {skipped} blocklisted | live: {}",
+         {binds} my_* binds, {skipped} blocklisted | live: {}",
         if live_ok {
             format!("{live_count} rules")
         } else {

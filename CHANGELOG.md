@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.11
+
+### Added
+- **my_* partition support via a scoped bind hybrid.** OnePlus/Oppo `my_*` partitions are in zygote's FD allowlist, so hookless injection there bootloops (`CreateFromFd` rejects the spoofed inode). Those files were silently dropped before; now a module's `my_*` content is served by a real file-over-file bind (which keeps the true inode and passes the check), with the source SELinux-relabeled to the partition's context and the mount tracked for teardown on the next pass. **Scoped:** a module that ships its own `post-fs-data.sh`/`service.sh` already binds its `my_*` content, so those are left to it (no double-mount). Everything hookless can reach stays mountless.
+- **`nomount plan`** — read-only: prints exactly what the mount pass would do (resolved target, kind, source) without applying. `doctor` now also reports the my_* bind count.
+
+### Changed
+- **`system/<X>` resolution is now dynamic.** The classic layout maps `system/<X>/…` to `/<X>/…` for any real separate partition on the device (`/vendor`, `/product`, `/odm`, `/system_ext`, `/system_dlkm`, `/oem`, `/my_product`, …), matching magic-mount — replacing a hardcoded four-partition list that mis-targeted `system/system_dlkm`, `system/oem`, etc. to a literal `/system/<X>`. Plain `/system` subdirs (`system/app`, `system/bin`) are unaffected.
+
 ## v1.0.10
 
 ### Changed

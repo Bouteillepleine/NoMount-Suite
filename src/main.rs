@@ -1,3 +1,4 @@
+mod bind;
 mod blocklist;
 mod cli;
 mod doctor;
@@ -17,6 +18,7 @@ fn main() -> Result<()> {
         Commands::Vfs { action } => cli::handlers::handle_vfs(action),
         Commands::Uid { action } => cli::handlers::handle_uid(action),
         Commands::Doctor => doctor::run_doctor(),
+        Commands::Plan => mount::run_plan(),
         Commands::Selfcheck { write } => health::run_selfcheck(write),
         Commands::Snapshot => health::run_snapshot(),
         Commands::Verify => health::run_verify(),
