@@ -159,7 +159,6 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     struct nomount_child_node *child;
     NM_ACTOR_RET ret;
     u32 hash;
-    int id;
 
     proxy->emitted++;
     if (!proxy->dir_node) goto do_real_actor;
@@ -167,8 +166,12 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     if (!(proxy->dir_node->bloom_mask & (1ULL << (hash & 63))))
         goto do_real_actor;
 
+    /* By-name lookup: use the per-dir hash table, not an O(children) idr scan.
+     * This is the hottest by-name path -- called once per real dirent during a
+     * readdir of a hijacked large dir -- so the O(bucket) table is what keeps the
+     * "at any fanout" property on the dir that motivates it (/product/overlay). */
     rcu_read_lock();
-    idr_for_each_entry(&proxy->dir_node->children_idr, child, id) {
+    hash_for_each_possible_rcu(proxy->dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == namelen && memcmp(child->name, name, namelen) == 0) {
             if (child->rule && (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val)) {
                 rcu_read_unlock();
@@ -1498,8 +1501,13 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
         return;
     }
 
+    /* Set the bloom bit BEFORE publishing the child via hash_add_rcu: a lockless
+     * reader that already sees the child in the table must also see its bloom bit,
+     * else the fast-reject would drop a present child. (The reverse window -- bit
+     * set, child not yet visible -- is harmless: the reader just falls through to
+     * an empty table walk.) */
+    dir_node->bloom_mask |= (1ULL << (name_hash & 63));
     hash_add_rcu(dir_node->children_ht, &child->hnode, name_hash);
-    dir_node->bloom_mask |= (1ULL << (child->name_hash & 63));
 }
 
 static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule)
@@ -1524,10 +1532,15 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
             nm_dir_node_put(dir_node);
         }
     } else {
-        dir_node->bloom_mask = 0;
-        idr_for_each_entry(&dir_node->children_idr, child, id) {
-            dir_node->bloom_mask |= (1ULL << (child->name_hash & 63));
-        }
+        /* Rebuild into a local, publish once: zeroing bloom_mask in place then
+         * re-ORing leaves a transient window where a lockless reader sees a
+         * subset/zero mask and false-rejects a STILL-PRESENT child. One store means
+         * a racing reader sees the old or the new complete mask -- both cover every
+         * remaining child. */
+        u64 mask = 0;
+        idr_for_each_entry(&dir_node->children_idr, child, id)
+            mask |= (1ULL << (child->name_hash & 63));
+        WRITE_ONCE(dir_node->bloom_mask, mask);
     }
 }
 
