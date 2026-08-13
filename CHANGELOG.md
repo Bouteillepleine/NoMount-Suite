@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.10
+
+### Changed
+- **Procfs boot-state spoof now rides on the Boot-state toggle.** The `/proc/cmdline` + `/proc/bootconfig` sanitizer (previously the config-only `spoof_cmdline`) now follows `spoof_props`, so enabling **Boot-state (props + procfs)** in Tools › Spoofing normalizes the raw procfs boot-state alongside the props in one switch. It always required props to be on anyway, so a separate toggle was just a footgun. The procfs half is a no-op when the kernel has no `/sys/kernel/nomount` knobs. Advanced: set `spoof_cmdline=0` in `spoof.conf` to keep procfs untouched while still spoofing props.
+
 ## v1.0.9
 
 ### Added

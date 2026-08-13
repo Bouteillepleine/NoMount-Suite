@@ -30,7 +30,8 @@ vbmeta_digest=auto     # auto = set only when missing | force = always | off
 vbmeta_size=auto       # auto = set alongside digest | off
 spoof_props=0          # 1 = normalize boot-state props (conditional writes only)
 spoof_uname=0          # 1 = apply the uname override
-spoof_cmdline=0        # 1 = sanitize /proc/cmdline + /proc/bootconfig via /sys/kernel/nomount
+# spoof_cmdline: sanitize /proc/cmdline + /proc/bootconfig. Unset = follow spoof_props
+# (so Boot-state props covers procfs too); set 0 in spoof.conf to keep procfs untouched.
 uname_tail=""          # blank = keep; a bare tail or a whole pasted uname -r
 uname_date=""          # blank = keep; a bare date or a whole pasted uname -v
 [ -f "$CONF" ] && . "$CONF"
@@ -332,10 +333,10 @@ do_uname() {
 # so this is a graceful no-op). The digest is taken from the prop do_vbmeta/do_props
 # already set, so cmdline/bootconfig agree with the props.
 do_cmdline() {
-    [ "${spoof_cmdline:-0}" = "1" ] || return 0
-    # Must run alongside prop spoofing: it reuses the digest do_props set and the two
-    # have to tell the same story. On its own it would flip the inconsistency the other
-    # way (cmdline green vs props still orange), so require spoof_props and skip loudly.
+    # Rides on Boot-state props: follows spoof_props unless spoof_cmdline is set
+    # explicitly in spoof.conf. Reuses the digest do_props set; the two must tell the
+    # same story, so it also requires spoof_props (skips loudly otherwise).
+    [ "${spoof_cmdline:-$spoof_props}" = "1" ] || return 0
     if [ "${spoof_props:-0}" != "1" ]; then
         log "cmdline: skipped (needs spoof_props=1 to stay consistent)"
         return 0

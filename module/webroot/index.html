@@ -773,7 +773,7 @@
 
       <div class="swrow">
         <div class="swi">
-          <div class="lbl">Boot-state props</div>
+          <div class="lbl">Boot-state (props + procfs)</div>
           <div class="val multiline" id="spPropsVal">…</div>
         </div>
         <label class="switch"><input type="checkbox" id="spProps" onchange="toggleSpoofBool('spoof_props',this)"><span class="sl"></span></label>
@@ -802,7 +802,7 @@
     </div>
 
     <div class="btns"><button class="act primary" onclick="applySpoof(this)">Apply now</button></div>
-    <p class="note" id="spNote">Verified boot recomputes <code>ro.boot.vbmeta.digest</code> and <code>.size</code> from the real AVB chain on-device. Boot-state props normalize lock-state/warranty/debuggable — and only ever change a prop that already exists. Kernel uname keeps the running kernel's base and swaps the tail + build date so <code>uname</code> matches the ROM; blank keeps the current values, or paste them from a stock device. <b>Apply now</b> runs it immediately.</p>
+    <p class="note" id="spNote">Verified boot recomputes <code>ro.boot.vbmeta.digest</code> and <code>.size</code> from the real AVB chain on-device. Boot-state normalizes the lock-state/warranty/debuggable props and, where the kernel exposes it, the raw <code>/proc/cmdline</code> + <code>/proc/bootconfig</code> boot-state to match — only ever changing a prop that already exists, and skipping procfs if the kernel has no nomount knobs. Kernel uname keeps the running kernel's base and swaps the tail + build date so <code>uname</code> matches the ROM; blank keeps the current values, or paste them from a stock device. <b>Apply now</b> runs it immediately.</p>
   </div>
 
   <div class="group-label">Diagnostics</div>
@@ -1096,7 +1096,7 @@
         $("stealthD").textContent = extraTells.join(" · ");
         $("stealthNote").innerHTML = "Mount surface is clean, but a scanner can still read: " +
           extraTells.map(esc).join(", ") +
-          ". <code>/proc/cmdline</code> verified-boot needs the kernel cmdline filter; build keys are handled by the fingerprint harmonizer in Spoof.";
+          ". Verified-boot (props + <code>/proc/cmdline</code>/<code>bootconfig</code>) and build keys are both handled by <b>Boot-state (props + procfs)</b> in Tools › Spoofing.";
       }
     }
   }
