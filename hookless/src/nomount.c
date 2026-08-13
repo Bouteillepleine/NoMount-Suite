@@ -1200,6 +1200,39 @@ static const struct dentry_operations nm_dops = {
 
 /* --- Hijacking Management --- */
 
+/* Runtime umount hook. generic_shutdown_super() evicts all inodes and then calls
+ * ->put_super while the sb is still valid, so cure it here: restore s_op/s_xattr,
+ * free our per-sb allocations, and mark the entry dead (sb = NULL) so the
+ * unload-time nomount_restore_superblocks() never dereferences this soon-to-be-
+ * freed sb. Without this, umounting a hijacked partition left nm_sop->sb dangling
+ * until module unload (a UAF at unload). Android ~never umounts these, so it is a
+ * rarely-hit safety net; the small nm_sop node is reclaimed at unload. */
+static void nomount_hijacked_put_super(struct super_block *sb)
+{
+    struct nm_sop *nm_sop = __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
+    void (*orig_put)(struct super_block *) = NULL;
+
+    if (nm_sop) {
+        int i = 0;
+        orig_put = nm_sop->orig_sop ? nm_sop->orig_sop->put_super : NULL;
+        smp_store_release(&sb->s_op, nm_sop->orig_sop);
+        if (nm_sop->fake_xattr) {
+            smp_store_release((const struct xattr_handler ***)&sb->s_xattr, nm_sop->orig_xattr);
+            while (nm_sop->orig_xattr[i]) {
+                if (nm_sop->fake_xattr[i])
+                    kfree(container_of(nm_sop->fake_xattr[i], struct nm_xattr_proxy, fake));
+                i++;
+            }
+            kfree(nm_sop->fake_xattr);
+            nm_sop->fake_xattr = NULL;
+        }
+        /* Dead-mark last: restore_superblocks() skips the sb block once this is
+         * NULL, so everything above (which needs a live sb) must run first. */
+        WRITE_ONCE(nm_sop->sb, NULL);
+    }
+    if (orig_put) orig_put(sb);
+}
+
 static inline void nomount_hijack_superblock(struct super_block *sb)
 {
     struct nm_sop *nm_sop;
@@ -1215,6 +1248,7 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
     nm_sop->fake_sop.destroy_inode = nomount_hijacked_destroy_inode;
     nm_sop->fake_sop.drop_inode = nomount_hijacked_drop_inode;
     nm_sop->fake_sop.evict_inode = nomount_hijacked_evict_inode;
+    nm_sop->fake_sop.put_super = nomount_hijacked_put_super;   /* cure on runtime umount */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
     if (!nm_sop->orig_sop->destroy_inode && !nm_sop->orig_sop->free_inode)
         nm_sop->fake_sop.free_inode = free_inode_nonrcu;
