@@ -30,6 +30,7 @@ vbmeta_digest=auto     # auto = set only when missing | force = always | off
 vbmeta_size=auto       # auto = set alongside digest | off
 spoof_props=0          # 1 = normalize boot-state props (conditional writes only)
 spoof_uname=0          # 1 = apply the uname override
+spoof_cmdline=0        # 1 = sanitize /proc/cmdline + /proc/bootconfig via /sys/kernel/nomount
 uname_tail=""          # blank = keep; a bare tail or a whole pasted uname -r
 uname_date=""          # blank = keep; a bare date or a whole pasted uname -v
 [ -f "$CONF" ] && . "$CONF"
@@ -323,6 +324,51 @@ do_uname() {
     fi
 }
 
+# ---- /proc/cmdline + /proc/bootconfig spoof via /sys/kernel/nomount ----------
+# resetprop only moves the derived ro.boot.* props; the raw androidboot.* in
+# /proc/cmdline (and /proc/bootconfig on GKI) still carry the real boot state, so
+# a detector reading them sees the opposite of the props. The kernel serves a
+# sanitized copy once we write it to these knobs (absent knob = feature not built,
+# so this is a graceful no-op). The digest is taken from the prop do_vbmeta/do_props
+# already set, so cmdline/bootconfig agree with the props.
+do_cmdline() {
+    [ "${spoof_cmdline:-0}" = "1" ] || return 0
+    # Must run alongside prop spoofing: it reuses the digest do_props set and the two
+    # have to tell the same story. On its own it would flip the inconsistency the other
+    # way (cmdline green vs props still orange), so require spoof_props and skip loudly.
+    if [ "${spoof_props:-0}" != "1" ]; then
+        log "cmdline: skipped (needs spoof_props=1 to stay consistent)"
+        return 0
+    fi
+    local sysd=/sys/kernel/nomount dg
+    dg=$(getprop ro.boot.vbmeta.digest 2>/dev/null)
+
+    # /proc/cmdline: androidboot.key=value, space-separated
+    if [ -w "$sysd/cmdline" ] && [ -r /proc/cmdline ]; then
+        local c
+        c=$(sed -E 's/androidboot\.verifiedbootstate=[^ ]*/androidboot.verifiedbootstate=green/g;
+                    s/androidboot\.vbmeta\.device_state=[^ ]*/androidboot.vbmeta.device_state=locked/g;
+                    s/androidboot\.flash\.locked=[^ ]*/androidboot.flash.locked=1/g;
+                    s/androidboot\.warranty_bit=[^ ]*/androidboot.warranty_bit=0/g;
+                    s/androidboot\.veritymode=[^ ]*/androidboot.veritymode=enforcing/g;
+                    s/ androidboot\.verifiedbooterror=[^ ]*//g' /proc/cmdline)
+        [ -n "$dg" ] && c=$(printf '%s' "$c" | sed -E "s/androidboot\.vbmeta\.digest=[^ ]*/androidboot.vbmeta.digest=$dg/g")
+        printf '%s' "$c" > "$sysd/cmdline" 2>/dev/null && log "cmdline sanitized (green/locked)"
+    fi
+
+    # /proc/bootconfig: androidboot.key = "value" (GKI 5.10+); knob absent otherwise
+    if [ -w "$sysd/bootconfig" ] && [ -r /proc/bootconfig ]; then
+        local b
+        b=$(sed -E 's/(androidboot\.verifiedbootstate[[:space:]]*=[[:space:]]*")[^"]*/\1green/g;
+                    s/(androidboot\.vbmeta\.device_state[[:space:]]*=[[:space:]]*")[^"]*/\1locked/g;
+                    s/(androidboot\.flash\.locked[[:space:]]*=[[:space:]]*")[^"]*/\11/g;
+                    s/(androidboot\.warranty_bit[[:space:]]*=[[:space:]]*")[^"]*/\10/g;
+                    s/(androidboot\.veritymode[[:space:]]*=[[:space:]]*")[^"]*/\1enforcing/g' /proc/bootconfig)
+        [ -n "$dg" ] && b=$(printf '%s' "$b" | sed -E "s/(androidboot\.vbmeta\.digest[[:space:]]*=[[:space:]]*\")[^\"]*/\1$dg/g")
+        printf '%s' "$b" > "$sysd/bootconfig" 2>/dev/null && log "bootconfig sanitized (green/locked)"
+    fi
+}
+
 # ===========================================================================
 # dry-run for the UI: how many target props are present-and-wrong (i.e. would be
 # changed by do_props)? Writes nothing. "clean" = nothing to fix. Same present-
@@ -375,6 +421,7 @@ main() {
     do_vbmeta "$vbmeta_digest"
     do_props
     do_uname
+    do_cmdline
 }
 
 # `verify` / `compute` inspect without changing anything, so the UI can show
