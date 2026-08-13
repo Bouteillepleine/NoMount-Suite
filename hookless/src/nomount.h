@@ -97,8 +97,15 @@ struct nm_inode_info {
     (((v_inode)->i_private && ((struct nm_inode_info *)(v_inode)->i_private)->r_path.dentry) ? \
         d_backing_inode(((struct nm_inode_info *)(v_inode)->i_private)->r_path.dentry) : NULL)
 
+/* Per-dir name-lookup hash table: bloom rejects misses, this resolves hits in
+ * O(bucket) instead of O(children) so large-fanout dirs (whiteout-heavy
+ * /product/overlay etc.) don't linear-scan on every path lookup. The idr stays
+ * for stable readdir cookies; this table is only for by-name resolution. */
+#define NM_CHILD_HT_BITS 5
+
 struct nomount_child_node {
     struct rcu_head rcu;
+    struct hlist_node hnode;   /* link in the owning dir_node's children_ht */
     u32 name_hash;
     u32 fake_ino;
     int id;
@@ -115,6 +122,7 @@ struct nomount_child_node {
 
 struct nomount_dir_node {
     struct idr children_idr;
+    DECLARE_HASHTABLE(children_ht, NM_CHILD_HT_BITS);
     u64 bloom_mask;
     atomic_t refcount;   /* owner ref (alloc) + one per synthetic inode caching this node */
     struct rcu_head rcu;

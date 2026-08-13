@@ -83,19 +83,18 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
 {
     struct nomount_child_node *child;
     bool found = false;
-    int id;
 
     if (unlikely(!dir_node)) return false;
     /* Bloom fast-reject: a name whose hash bit is clear is definitely not an
-     * injected child here, so skip the O(children) idr walk (mirrors the readdir
-     * proxy fast path). Large-fanout dirs saturate the 64-bit filter; those still
-     * fall through to the walk (a per-node hash table is the fuller fix). */
+     * injected child here, so skip the lookup entirely. On a hit we resolve via
+     * the per-dir hash table (O(bucket)) rather than a full O(children) scan, so
+     * large-fanout dirs stay fast even once the 64-bit bloom filter saturates. */
     if (!(dir_node->bloom_mask & (1ULL << (hash & 63)))) return false;
     rule_info->r_path.dentry = NULL;
     rule_info->r_path.mnt = NULL;
 
     rcu_read_lock();
-    idr_for_each_entry(&dir_node->children_idr, child, id) {
+    hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
             struct nomount_rule *rule = child->rule;
             if (rule && (rule->target_uid == 0 || rule->target_uid == current_uid().val)) {
@@ -1372,6 +1371,7 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
         dir_node->dir_inode = NULL;
     }
     idr_init(&dir_node->children_idr);
+    hash_init(dir_node->children_ht);
     dir_node->bloom_mask = 0;
     atomic_set(&dir_node->refcount, 1);   /* structural owner ref */
     return dir_node;
@@ -1380,12 +1380,14 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
 static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule, const char *name, size_t name_len)
 {
     struct nomount_child_node *child;
-    int id;
+    u32 name_hash;
 
     if (unlikely(!dir_node)) return;
+    name_hash = full_name_hash(NULL, name, name_len);
     rule->parent_dir = dir_node;
-    idr_for_each_entry(&dir_node->children_idr, child, id) {
-        if (child->name_len == name_len && memcmp(child->name, name, name_len) == 0) {
+    hash_for_each_possible(dir_node->children_ht, child, hnode, name_hash) {
+        if (child->name_hash == name_hash && child->name_len == name_len &&
+            memcmp(child->name, name, name_len) == 0) {
             child->flags = rule->flags;
             child->rule = rule;
             return;
@@ -1396,7 +1398,7 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
     if (unlikely(!child)) return;
 
     child->fake_ino = rule->v_hash;
-    child->name_hash = full_name_hash(NULL, name, name_len);
+    child->name_hash = name_hash;
     child->d_type = (rule->flags & NM_FLAG_IS_DIR) ? DT_DIR : DT_REG;
     child->flags = rule->flags;
     child->name_len = name_len;
@@ -1413,6 +1415,7 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
         return;
     }
 
+    hash_add_rcu(dir_node->children_ht, &child->hnode, name_hash);
     dir_node->bloom_mask |= (1ULL << (child->name_hash & 63));
 }
 
@@ -1424,6 +1427,7 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
     if (unlikely(!dir_node)) return;
     idr_for_each_entry(&dir_node->children_idr, child, id) {
         if (child->rule == rule) {
+            hash_del_rcu(&child->hnode);
             idr_remove(&dir_node->children_idr, id);
             kfree_rcu(child, rcu);
             break;
