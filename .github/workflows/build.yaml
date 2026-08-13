@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [suite]
+    tags: ['v*']
 
 env:
   CARGO_TERM_COLOR: always
@@ -170,7 +171,7 @@ jobs:
 
   release:
     needs: [build, package]
-    if: github.ref == 'refs/heads/master'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -179,9 +180,8 @@ jobs:
 
       - name: Read version
         id: ver
-        run: |
-          ver=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "version=v${ver}" >> "$GITHUB_OUTPUT"
+        # Tag-triggered: the tag name IS the version (e.g. v1.0.12).
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
         with:
