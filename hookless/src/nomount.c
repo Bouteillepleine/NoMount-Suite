@@ -1,7 +1,7 @@
 #include <linux/init.h>
 #include <linux/namei.h>
 #include <linux/slab.h>
-#include <linux/refcount.h>
+#include <linux/atomic.h>
 #include <linux/cred.h>
 #include <linux/xattr.h>
 #include <linux/security.h>
@@ -111,7 +111,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                  * freed (refcount hit 0, call_rcu pending) fails not_zero -> treat
                  * as absent. The caller releases this ref via nm_put_rule_info(). */
                 rule_info->this_dir = rule->this_dir;
-                if (rule_info->this_dir && !refcount_inc_not_zero(&rule_info->this_dir->refcount))
+                if (rule_info->this_dir && !atomic_inc_not_zero(&rule_info->this_dir->refcount))
                     rule_info->this_dir = NULL;
                 if (get_path && rule->r_path.dentry) {
                     rule_info->r_path = rule->r_path;
@@ -219,7 +219,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
      * ref (so the node is live here), and releases it via nm_put_rule_info(). This
      * ref is dropped in nomount_hijacked_destroy_inode(). */
     info->dir_node = rule_info->this_dir;
-    if (info->dir_node) refcount_inc(&info->dir_node->refcount);
+    if (info->dir_node) atomic_inc(&info->dir_node->refcount);
     if (rule_info->flags & NM_FLAG_VIRTUAL_DIR) {
         info->r_path.dentry = NULL;
         info->r_path.mnt = NULL;
@@ -1261,7 +1261,7 @@ static void nm_dir_node_rcu_free(struct rcu_head *head)
  * children_idr under rcu_read_lock. */
 static void nm_dir_node_put(struct nomount_dir_node *dir_node)
 {
-    if (dir_node && refcount_dec_and_test(&dir_node->refcount))
+    if (dir_node && atomic_dec_and_test(&dir_node->refcount))
         call_rcu(&dir_node->rcu, nm_dir_node_rcu_free);
 }
 
@@ -1327,7 +1327,7 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
     dir_node->dir_inode = inode ? igrab(inode) : NULL;
     idr_init(&dir_node->children_idr);
     dir_node->bloom_mask = 0;
-    refcount_set(&dir_node->refcount, 1);   /* structural owner ref */
+    atomic_set(&dir_node->refcount, 1);   /* structural owner ref */
     return dir_node;
 }
 

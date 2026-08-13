@@ -116,7 +116,7 @@ struct nomount_child_node {
 struct nomount_dir_node {
     struct idr children_idr;
     u64 bloom_mask;
-    refcount_t refcount;   /* owner ref (alloc) + one per synthetic inode caching this node */
+    atomic_t refcount;   /* owner ref (alloc) + one per synthetic inode caching this node */
     struct rcu_head rcu;
     union {
         struct inode *dir_inode;
