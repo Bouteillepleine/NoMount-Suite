@@ -7,6 +7,9 @@
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/utsname.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <linux/sizes.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include "nomount.h"
@@ -2197,6 +2200,142 @@ static void nm_nl_rcv(struct sk_buff *skb)
  * Built-in only (CONFIG_NOMOUNT=y): uts_sem/init_uts_ns are not exported. */
 static struct kobject *nm_uname_kobj;
 
+/* ---- /proc/cmdline + /proc/bootconfig spoofing --------------------------------
+ * androidboot.* boot state (verifiedbootstate, lock, warranty, vbmeta.digest) lives in
+ * /proc/cmdline and, on GKI, /proc/bootconfig. resetprop only moves the derived
+ * ro.boot.* props, leaving these procfs sources contradicting them -- a detection tell.
+ * A procfs seq-file has no backing inode to vtable-hijack, so on the first write to the
+ * sysfs knob we take over the proc entry itself and serve the sanitized string. This
+ * happens at post-fs-data (procfs long up), and init's early parse of the real kernel
+ * command line is untouched. Empty write => passthrough (the real value). */
+static char *nm_fake_cmdline;
+static struct proc_dir_entry *nm_cmdline_pde;
+static DEFINE_MUTEX(nm_procspoof_mutex);
+
+static int nm_cmdline_show(struct seq_file *m, void *v)
+{
+    mutex_lock(&nm_procspoof_mutex);
+    seq_printf(m, "%s\n", nm_fake_cmdline ? nm_fake_cmdline : saved_command_line);
+    mutex_unlock(&nm_procspoof_mutex);
+    return 0;
+}
+
+#ifdef CONFIG_BOOT_CONFIG
+static char *nm_fake_bootconfig, *nm_orig_bootconfig;
+static struct proc_dir_entry *nm_bootconfig_pde;
+
+static int nm_bootconfig_show(struct seq_file *m, void *v)
+{
+    mutex_lock(&nm_procspoof_mutex);
+    if (nm_fake_bootconfig)      seq_puts(m, nm_fake_bootconfig);
+    else if (nm_orig_bootconfig) seq_puts(m, nm_orig_bootconfig);
+    mutex_unlock(&nm_procspoof_mutex);
+    return 0;
+}
+
+/* Snapshot the real /proc/bootconfig once, before we replace it, so an empty write can
+ * fall back to the genuine text (bootconfig is not reproducible from a global). */
+static char *nm_snapshot_bootconfig(void)
+{
+    struct file *f;
+    char *buf;
+    loff_t pos = 0;
+    ssize_t n;
+
+    f = filp_open("/proc/bootconfig", O_RDONLY, 0);
+    if (IS_ERR(f)) return NULL;
+    buf = kmalloc(SZ_64K, GFP_KERNEL);
+    if (!buf) { filp_close(f, NULL); return NULL; }
+    n = kernel_read(f, buf, SZ_64K - 1, &pos);
+    filp_close(f, NULL);
+    if (n <= 0) { kfree(buf); return NULL; }
+    buf[n] = '\0';
+    return buf;
+}
+#endif /* CONFIG_BOOT_CONFIG */
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 17, 0)
+static int nm_cmdline_open(struct inode *i, struct file *f) { return single_open(f, nm_cmdline_show, NULL); }
+static const struct file_operations nm_cmdline_fops = {
+    .open = nm_cmdline_open, .read = seq_read, .llseek = seq_lseek, .release = single_release,
+};
+#ifdef CONFIG_BOOT_CONFIG
+static int nm_bootconfig_open(struct inode *i, struct file *f) { return single_open(f, nm_bootconfig_show, NULL); }
+static const struct file_operations nm_bootconfig_fops = {
+    .open = nm_bootconfig_open, .read = seq_read, .llseek = seq_lseek, .release = single_release,
+};
+#endif
+#endif /* < 4.17 */
+
+/* trim trailing newline/CR then dup; empty => NULL (passthrough) */
+static char *nm_dup_trim(const char *buf, size_t count)
+{
+    while (count && (buf[count - 1] == '\n' || buf[count - 1] == '\r')) count--;
+    return count ? kstrndup(buf, count, GFP_KERNEL) : NULL;
+}
+
+static ssize_t cmdline_show(struct kobject *k, struct kobj_attribute *a, char *buf)
+{
+    ssize_t r;
+    mutex_lock(&nm_procspoof_mutex);
+    r = scnprintf(buf, PAGE_SIZE, "%s\n", nm_fake_cmdline ? nm_fake_cmdline : "");
+    mutex_unlock(&nm_procspoof_mutex);
+    return r;
+}
+static ssize_t cmdline_store(struct kobject *k, struct kobj_attribute *a, const char *buf, size_t c)
+{
+    char *nb = nm_dup_trim(buf, c);
+    mutex_lock(&nm_procspoof_mutex);
+    kfree(nm_fake_cmdline);
+    nm_fake_cmdline = nb;
+    if (!nm_cmdline_pde) {
+        remove_proc_entry("cmdline", NULL);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
+        nm_cmdline_pde = proc_create_single("cmdline", 0444, NULL, nm_cmdline_show);
+#else
+        nm_cmdline_pde = proc_create("cmdline", 0444, NULL, &nm_cmdline_fops);
+#endif
+    }
+    mutex_unlock(&nm_procspoof_mutex);
+    return c;
+}
+
+#ifdef CONFIG_BOOT_CONFIG
+static ssize_t bootconfig_show(struct kobject *k, struct kobj_attribute *a, char *buf)
+{
+    ssize_t r;
+    mutex_lock(&nm_procspoof_mutex);
+    r = scnprintf(buf, PAGE_SIZE, "%s", nm_fake_bootconfig ? "set\n" : "off\n");
+    mutex_unlock(&nm_procspoof_mutex);
+    return r;
+}
+static ssize_t bootconfig_store(struct kobject *k, struct kobj_attribute *a, const char *buf, size_t c)
+{
+    char *nb = nm_dup_trim(buf, c);
+    mutex_lock(&nm_procspoof_mutex);
+    kfree(nm_fake_bootconfig);
+    nm_fake_bootconfig = nb;
+    if (!nm_bootconfig_pde) {
+        if (!nm_orig_bootconfig) nm_orig_bootconfig = nm_snapshot_bootconfig();
+        remove_proc_entry("bootconfig", NULL);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
+        nm_bootconfig_pde = proc_create_single("bootconfig", 0444, NULL, nm_bootconfig_show);
+#else
+        nm_bootconfig_pde = proc_create("bootconfig", 0444, NULL, &nm_bootconfig_fops);
+#endif
+    }
+    mutex_unlock(&nm_procspoof_mutex);
+    return c;
+}
+#endif /* CONFIG_BOOT_CONFIG */
+
+static struct kobj_attribute nm_cmdline_attr =
+    __ATTR(cmdline, 0600, cmdline_show, cmdline_store);
+#ifdef CONFIG_BOOT_CONFIG
+static struct kobj_attribute nm_bootconfig_attr =
+    __ATTR(bootconfig, 0600, bootconfig_show, bootconfig_store);
+#endif
+
 static ssize_t nm_uts_store(char *field, size_t fieldsz, const char *buf, size_t count)
 {
     char tmp[__NEW_UTS_LEN + 1];
@@ -2241,6 +2380,10 @@ static struct kobj_attribute nm_uname_version_attr =
 static struct attribute *nm_uname_attrs[] = {
     &nm_uname_release_attr.attr,
     &nm_uname_version_attr.attr,
+    &nm_cmdline_attr.attr,
+#ifdef CONFIG_BOOT_CONFIG
+    &nm_bootconfig_attr.attr,
+#endif
     NULL,
 };
 static const struct attribute_group nm_uname_group = { .attrs = nm_uname_attrs };
@@ -2260,6 +2403,16 @@ static void nm_uname_sysfs_init(void)
 
 static void nm_uname_sysfs_exit(void)
 {
+    mutex_lock(&nm_procspoof_mutex);
+    if (nm_cmdline_pde) { remove_proc_entry("cmdline", NULL); nm_cmdline_pde = NULL; }
+    kfree(nm_fake_cmdline); nm_fake_cmdline = NULL;
+#ifdef CONFIG_BOOT_CONFIG
+    if (nm_bootconfig_pde) { remove_proc_entry("bootconfig", NULL); nm_bootconfig_pde = NULL; }
+    kfree(nm_fake_bootconfig); nm_fake_bootconfig = NULL;
+    kfree(nm_orig_bootconfig); nm_orig_bootconfig = NULL;
+#endif
+    mutex_unlock(&nm_procspoof_mutex);
+
     if (nm_uname_kobj) {
         sysfs_remove_group(nm_uname_kobj, &nm_uname_group);
         kobject_put(nm_uname_kobj);
