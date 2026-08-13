@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.9
+
+### Added
+- **`/proc/cmdline` + `/proc/bootconfig` boot-state sanitizer** (`spoof_cmdline`, opt-in, off by default). `resetprop` only moves the derived `ro.boot.*` props; the raw `androidboot.*`/`oplusboot.*` boot state in `/proc/cmdline` (and `/proc/bootconfig` on GKI) still contradicts them, which a detector can read directly. When the kernel exposes the `nomount` cmdline/bootconfig knobs, the module now serves a sanitized copy (verifiedbootstate=green, device_state=locked, flash.locked=1, warranty_bit=0, veritymode=enforcing, `verifiedbooterror` stripped, digest matched to the props). Prefix-agnostic, so it covers OnePlus `oplusboot.*` as well as generic `androidboot.*`. Requires `spoof_props=1` and only runs once the boot-state prop is actually normalized, so it can never flip the inconsistency the other way.
+- **Detection-posture card** (WebUI › Status). Reports the residual tells a scanner can still read on a mountless engine — verified-boot state (worst of cmdline/bootconfig), build keys, SELinux — instead of a mount-only "clean" that was always green on a mountless build.
+
+### Changed
+- **Fingerprint harmonization.** `do_props` now rewrites `:userdebug`/`test-keys` tails in the composite fingerprint, description and flavor to `:user`/`release-keys` across all partitions, matching the `ro.build.type`/`tags` it already sets — closing a tags-vs-fingerprint inconsistency.
+
+### Fixed
+- Whiteout of a partition root is now refused in the plan builder and the doctor (a `product/.replace` marker could otherwise hide a whole partition and bootloop).
+- A single malformed block-list entry no longer aborts the boot-time UID-apply (which would leave every app un-hidden); bad entries are skipped.
+- `nm` path resolution is bounded to `PATH_MAX` and the list walk is signedness-safe, closing an out-of-bounds read on an over-long path or a negative reply.
+
 ## v1.0.6
 
 ### Changed
