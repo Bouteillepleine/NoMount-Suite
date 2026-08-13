@@ -11,6 +11,15 @@
 #include <linux/sysfs.h>
 #include "nomount.h"
 
+/* Android packs (user_id, appid) into a uid: uid = user_id*NM_PER_USER_RANGE + appid.
+ * Matching a blocklist entry on the appid (uid % NM_PER_USER_RANGE) therefore covers
+ * the same app across every user, work profile and clone with a single entry. Isolated
+ * processes carry a pool-allocated appid in [NM_ISOLATED_START, NM_ISOLATED_END] that is
+ * not tied to the parent app, so they are hidden whenever any app is blocked. */
+#define NM_PER_USER_RANGE   100000
+#define NM_ISOLATED_START   90000
+#define NM_ISOLATED_END     99999
+
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
 static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mostly;
 static const struct cred *nm_root_cred;
@@ -20,10 +29,15 @@ static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
 static __always_inline bool nomount_is_uid_blocked(uid_t uid)
 {
+    unsigned int appid;
     bool is_blocked;
     if (!static_branch_unlikely(&nomount_active_uids)) return false;
+    /* Reaching here means the static branch is on, i.e. at least one appid is blocked. */
+    appid = uid % NM_PER_USER_RANGE;
+    if (appid >= NM_ISOLATED_START && appid <= NM_ISOLATED_END)
+        return true; /* pool-allocated isolated process: hide from all of them */
     rcu_read_lock();
-    is_blocked = (idr_find(&nomount_uid_idr, uid) != NULL);
+    is_blocked = (idr_find(&nomount_uid_idr, appid) != NULL);
     rcu_read_unlock();
     return is_blocked;
 }
@@ -2020,7 +2034,7 @@ static int nomount_nl_add_uid(struct nlattr **attrs)
     if (!attrs[NOMOUNT_ATTR_UID])
         return -EINVAL;
 
-    uid = nla_get_u32(attrs[NOMOUNT_ATTR_UID]);
+    uid = nla_get_u32(attrs[NOMOUNT_ATTR_UID]) % NM_PER_USER_RANGE; /* store/match appid */
 
     if (nomount_is_uid_blocked(uid)) 
         return -EEXIST;
@@ -2050,7 +2064,7 @@ static int nomount_nl_del_uid(struct nlattr **attrs)
     if (!attrs[NOMOUNT_ATTR_UID])
         return -EINVAL;
 
-    uid = nla_get_u32(attrs[NOMOUNT_ATTR_UID]);
+    uid = nla_get_u32(attrs[NOMOUNT_ATTR_UID]) % NM_PER_USER_RANGE; /* store/match appid */
 
     mutex_lock(&nomount_write_mutex);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
