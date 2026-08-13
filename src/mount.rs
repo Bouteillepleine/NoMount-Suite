@@ -136,14 +136,13 @@ fn self_binds_my(mdir: &Path) -> bool {
     for s in ["post-fs-data.sh", "service.sh", "post-mount.sh"] {
         if let Ok(body) = fs::read_to_string(mdir.join(s)) {
             for line in body.lines() {
-                let l = line.trim_start();
-                if l.starts_with('#') {
-                    continue; // skip comments -- a commented-out my_ mention is not a bind
-                }
-                let l = l.to_lowercase();
-                // Both tokens on ONE real line = an actual mount/bind of a my_ path,
+                // Drop any comment (full-line or inline trailing `#...`) before the
+                // check, so a commented-out my_ mention -- even on the same line as an
+                // unrelated `mount` -- isn't read as a real bind.
+                let code = line.split('#').next().unwrap_or("").to_lowercase();
+                // Both tokens on ONE code line = an actual mount/bind of a my_ path,
                 // not just "my_" and "mount" happening to appear anywhere in the file.
-                if l.contains("my_") && (l.contains("mount") || l.contains("bind")) {
+                if code.contains("my_") && (code.contains("mount") || code.contains("bind")) {
                     return true;
                 }
             }
