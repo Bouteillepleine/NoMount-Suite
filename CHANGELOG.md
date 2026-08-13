@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.0
+
+Audit fix pass over the v1.0.11-1.0.13 additions (dynamic resolver, my_* bind hybrid, gap-free reload).
+
+### Fixed
+- **reload reconciles changed source/kind, not just presence.** A target that moves between modules, or flips inject<->whiteout on the same path, is now re-applied (`~changed`) instead of frozen at the old rule until a full mount. `parse_live` captures source+kind; `reload` diffs them.
+- **my_* bind hardening.** Aborts the bind if the SELinux relabel fails (never exposes a mislabeled `adb_data_file` override -> avc + tell); unbinds if the mount can't be recorded (no untracked-leak/stacking); and skips a target another module already mounted. binds.list read-modify-write is now flock-serialized against a concurrent mount/reload.
+- **Self-manage detection narrowed.** A module's my_* content is left to it only if one of its boot scripts actually mounts/binds a my_* path -- previously *any* `service.sh`/`post-fs-data.sh` (very common) wrongly caused its my_* overrides to be dropped. Also checks `post-mount.sh`.
+- **Partition discovery follows symlinks again.** Split from canonicalization after v1.0.13: discovery walks a symlinked top-level root (so `system_ext/` etc. isn't dropped where that root is a symlink), while `system/<X>` canonicalization keeps lstat.
+- **reload safety + robustness.** Propagates an `nm list` failure instead of silently mass-re-adding; parses live rules by suffix/rsplit so paths with spaces/parens/arrows aren't mis-split; excludes `/data_mirror` from partition detection.
+
 ## v1.0.13
 
 ### Fixed

@@ -43,20 +43,26 @@ const BLOCKLIST_FILE: &str = "/data/adb/nomount/blocklist";
 // no hardcoded per-OEM list. Module-metadata dirs (META-INF/, webroot/, common/…)
 // are excluded for free: their "/<name>" doesn't exist on the device.
 const NON_PARTITION_ROOTS: &[&str] = &[
-    "data", "mnt", "dev", "proc", "sys", "cache", "metadata", "config",
+    "data", "data_mirror", "mnt", "dev", "proc", "sys", "cache", "metadata", "config",
     "storage", "sdcard", "apex", "tmp", "debug_ramdisk", "linkerconfig",
     "postinstall", "second_stage_resources", "bin", "sbin",
 ];
 
-/// A module top-level dir name that maps to a real, separate partition on THIS
-/// device: not a non-injectable root, and `/<name>` exists as a directory. This
-/// is the same test used both to discover top-level partition dirs and to
-/// canonicalize the classic `system/<name>` layout.
+/// DISCOVERY: should we walk a top-level module dir `<name>`? Yes if `/<name>`
+/// resolves to a directory (following symlinks, so a device where `/system_ext`
+/// is a symlink into /system is still walked), and it isn't a non-injectable root.
+fn is_partition_dir(name: &str) -> bool {
+    !name.is_empty()
+        && !NON_PARTITION_ROOTS.contains(&name)
+        && Path::new(&format!("/{name}")).is_dir()
+}
+
+/// CANONICALIZATION: is `<name>` a REAL separate partition, so `system/<name>/...`
+/// should be rewritten to `/<name>/...`? Uses symlink_metadata (lstat), NOT
+/// is_dir(): a /system-symlink like `/etc -> /system/etc` must NOT canonicalize
+/// (that would send `system/etc/...` to `/etc/...`); only a real mount (/vendor,
+/// /product, /odm, /my_product) qualifies. A symlinked root keeps `/system/<name>`.
 fn is_real_partition(name: &str) -> bool {
-    // symlink_metadata (lstat), NOT is_dir(): a /system-symlink like `/etc ->
-    // /system/etc` or `/bin -> /system/bin` must NOT be treated as a partition,
-    // or `system/etc/...` would wrongly canonicalize to `/etc/...`. Only a real
-    // directory (a mount point: /vendor, /product, /odm, /my_product) qualifies.
     !name.is_empty()
         && !NON_PARTITION_ROOTS.contains(&name)
         && fs::symlink_metadata(format!("/{name}"))
@@ -118,6 +124,24 @@ fn is_my_partition(target: &Path) -> bool {
 /// real content is still injected via the module's own top-level partition dirs.
 fn is_partition_root(target: &Path) -> bool {
     target.components().skip(1).count() == 1
+}
+
+/// Does this module bind its OWN my_* content (so we must not bind it too and
+/// stack a duplicate mount)? A module only counts as self-managing if one of its
+/// boot scripts actually references mounting/binding a my_* path -- checking for
+/// mere script *existence* (the old heuristic) wrongly skipped my_* for any module
+/// that ships a service.sh for an unrelated reason. bind::apply() also skips a
+/// target that is already mounted, as a second guard.
+fn self_binds_my(mdir: &Path) -> bool {
+    for s in ["post-fs-data.sh", "service.sh", "post-mount.sh"] {
+        if let Ok(body) = fs::read_to_string(mdir.join(s)) {
+            let lower = body.to_lowercase();
+            if lower.contains("my_") && (lower.contains("mount") || lower.contains("bind")) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn module_enabled(dir: &Path) -> bool {
@@ -280,11 +304,10 @@ pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
             continue;
         }
         let id = id.to_string();
-        // A module with its own post-fs-data.sh/service.sh manages its own mounts,
-        // so we do not add my_* binds for it (see plan_tree); its hookless-injectable
+        // A module that binds its own my_* content manages it itself; we skip its
+        // my_* binds (see plan_tree) to avoid a duplicate mount. Its hookless
         // content is still served normally.
-        let self_manages =
-            mdir.join("post-fs-data.sh").exists() || mdir.join("service.sh").exists();
+        let self_manages = self_binds_my(&mdir);
         // "system/" is the classic layout; auto_mount modules (e.g. OxygenCustomizer)
         // ship content directly under module-root partition dirs. Process every
         // top-level dir that maps to a real on-device partition — dynamically, so any
@@ -303,8 +326,9 @@ pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
                 // non-injectable root; module-metadata dirs (META-INF/, webroot/, …) fail
                 // this and are skipped. my_* partitions ARE walked now: hookless bootloops
                 // on them (zygote FD allowlist), so plan_tree routes their files to a real
-                // bind (PlanKind::Bind) instead of injection.
-                if !is_real_partition(name) {
+                // bind (PlanKind::Bind) instead of injection. Discovery follows symlinks so
+                // a symlinked top-level root is still walked (canonicalization uses lstat).
+                if !is_partition_dir(name) {
                     continue;
                 }
                 plan_tree(&id, &mdir, &e.path(), self_manages, &mut plan);
@@ -330,23 +354,33 @@ pub fn run_plan() -> Result<()> {
     Ok(())
 }
 
-/// Live leaf-rule targets from `nm list`: injects (`t -> s`) and whiteouts
-/// (`t (whiteout)`). Skips engine-managed virtual dirs (`t (virtual dir)`) and any
-/// `[UID: N]` suffix. These are the rules the reload owns; the engine auto-creates
-/// and prunes virtual parent dirs as children are added/removed.
-fn parse_live_targets(list: &str) -> HashSet<PathBuf> {
-    list.lines()
-        .filter_map(|l| {
-            let l = l.split(" [UID:").next().unwrap_or(l).trim();
-            if let Some((t, _)) = l.split_once(" -> ") {
-                return Some(PathBuf::from(t.trim()));
-            }
-            if let Some((t, _)) = l.split_once(" (whiteout)") {
-                return Some(PathBuf::from(t.trim()));
-            }
-            None
-        })
-        .collect()
+/// A live leaf rule from `nm list`.
+enum LiveRule {
+    Inject(PathBuf),
+    Whiteout,
+}
+
+/// Parse `nm list` into live leaf rules keyed by target: injects (`T -> S`) and
+/// whiteouts (`T (whiteout)`). Engine-managed virtual dirs (`T (virtual dir)`) and
+/// any ` [UID: N]` suffix are ignored. Suffix/rsplit matching so a target path
+/// containing spaces/parens/arrows is not mis-split (source is after the LAST
+/// ` -> `; whiteout is a suffix).
+fn parse_live_rules(list: &str) -> HashMap<PathBuf, LiveRule> {
+    let mut out = HashMap::new();
+    for l in list.lines() {
+        let l = l.split(" [UID:").next().unwrap_or(l).trim();
+        if l.is_empty() {
+            continue;
+        }
+        if let Some(t) = l.strip_suffix(" (whiteout)") {
+            out.insert(PathBuf::from(t.trim()), LiveRule::Whiteout);
+        } else if l.ends_with(" (virtual dir)") {
+            continue;
+        } else if let Some((t, s)) = l.rsplit_once(" -> ") {
+            out.insert(PathBuf::from(t.trim()), LiveRule::Inject(PathBuf::from(s.trim())));
+        }
+    }
+    out
 }
 
 /// `nomount reload`: gap-free hot load/unload. Diffs the desired plan against the
@@ -374,14 +408,29 @@ pub fn run_reload() -> Result<()> {
         }
     }
 
-    let live_txt = nm.list().unwrap_or_default();
-    let live = parse_live_targets(&live_txt);
+    // An unreadable live set means the delta can't be computed safely -- fail
+    // rather than silently mass-re-add and stop pruning.
+    let live_txt = nm.list().context("nm list failed during reload")?;
+    let live = parse_live_rules(&live_txt);
 
-    let (mut added, mut removed, mut failed) = (0u32, 0u32, 0u32);
-    // Add desired hookless rules not already live.
+    let (mut added, mut changed, mut removed, mut failed) = (0u32, 0u32, 0u32, 0u32);
+    // Add new rules, and re-apply a live rule whose SOURCE or KIND changed (not
+    // just presence): a target moving between modules or flipping inject<->whiteout
+    // must update, or the stale rule would be frozen until a full mount.
     for (t, e) in &desired_hookless {
-        if live.contains(*t) {
+        let up_to_date = match live.get(*t) {
+            Some(LiveRule::Inject(src)) => {
+                e.kind == PlanKind::Inject && src.as_path() == e.source.as_path()
+            }
+            Some(LiveRule::Whiteout) => e.kind == PlanKind::Whiteout,
+            None => false,
+        };
+        if up_to_date {
             continue;
+        }
+        let existed = live.contains_key(*t);
+        if existed {
+            let _ = nm.del(&e.target); // drop the stale rule before re-adding
         }
         let r = match e.kind {
             PlanKind::Inject => nm.add(&e.target, &e.source),
@@ -389,12 +438,18 @@ pub fn run_reload() -> Result<()> {
             PlanKind::Bind => unreachable!(),
         };
         match r {
-            Ok(_) => added += 1,
+            Ok(_) => {
+                if existed {
+                    changed += 1;
+                } else {
+                    added += 1;
+                }
+            }
             Err(_) => failed += 1,
         }
     }
     // Remove live rules no longer desired (skip any that are now bind targets).
-    for t in &live {
+    for t in live.keys() {
         if !desired_hookless.contains_key(t.as_path()) && !desired_binds.contains(t.as_path()) {
             if nm.del(t).is_ok() {
                 removed += 1;
@@ -424,7 +479,7 @@ pub fn run_reload() -> Result<()> {
     }
 
     println!(
-        "nomount reload: +{added} -{removed} rules, +{bind_added} -{bind_removed} binds, \
+        "nomount reload: +{added} ~{changed} -{removed} rules, +{bind_added} -{bind_removed} binds, \
          {failed} failed, {skipped} blocklisted (gap-free)"
     );
     Ok(())
