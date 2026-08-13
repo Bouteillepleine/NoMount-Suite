@@ -641,9 +641,9 @@
       <div class="metric"><div class="k">Modules served</div><div class="v" id="mMod">—</div></div>
     </div>
     <div class="btns">
-      <button class="act primary" onclick="remount(this)">
+      <button class="act primary" onclick="reloadRules(this)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
-        Re-apply
+        Reload
       </button>
       <button class="act danger" onclick="clearRules(this)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
@@ -1511,11 +1511,14 @@
   }
 
   // ---- actions ----
-  async function remount(btn) {
+  // Gap-free hot load/unload: reconciles live rules to the installed module set
+  // (adds new modules' files, drops removed ones) without clearing, so nothing
+  // un-hides mid-reload. Install/remove a module, tap Reload, no reboot.
+  async function reloadRules(btn) {
     const svg = btn.querySelector("svg");
     btn.disabled = true; if (svg) svg.classList.add("spin");
-    const r = await nm("mount");
-    if (r.errno === 0) toast(r.stdout.replace(/^nomount\(suite\):\s*/, "").trim() || "Re-applied", "ok");
+    const r = await nm("reload");
+    if (r.errno === 0) toast(r.stdout.replace(/^nomount reload:\s*/, "").trim() || "Reloaded", "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
     if (svg) svg.classList.remove("spin"); btn.disabled = false;
     refreshAll();

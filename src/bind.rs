@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Targets we bound this boot, so the next mount pass can tear them down before
 /// re-applying (binds do not survive reboot; a removed module must not leak one).
@@ -70,6 +70,34 @@ fn record(target: &Path) {
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(BINDS_LIST) {
         let _ = writeln!(f, "{}", target.display());
     }
+}
+
+/// Targets we currently have bound (from binds.list). Used by the gap-free
+/// reload to diff live binds against the desired set.
+pub fn tracked() -> Vec<PathBuf> {
+    fs::read_to_string(BINDS_LIST)
+        .map(|s| {
+            s.lines()
+                .map(|l| PathBuf::from(l.trim()))
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Umount a single tracked bind and drop it from the list (gap-free reload).
+pub fn umount_one(target: &Path) {
+    if let Ok(c) = CString::new(target.to_string_lossy().as_bytes()) {
+        unsafe {
+            libc::umount2(c.as_ptr(), libc::MNT_DETACH);
+        }
+    }
+    let remaining: Vec<PathBuf> = tracked().into_iter().filter(|p| p != target).collect();
+    let body: String = remaining
+        .iter()
+        .map(|p| format!("{}\n", p.display()))
+        .collect();
+    let _ = fs::write(BINDS_LIST, body);
 }
 
 /// Umount every bind we recorded, then clear the list. Run at the start of each

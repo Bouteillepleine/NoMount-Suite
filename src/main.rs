@@ -19,6 +19,7 @@ fn main() -> Result<()> {
         Commands::Uid { action } => cli::handlers::handle_uid(action),
         Commands::Doctor => doctor::run_doctor(),
         Commands::Plan => mount::run_plan(),
+        Commands::Reload => mount::run_reload(),
         Commands::Selfcheck { write } => health::run_selfcheck(write),
         Commands::Snapshot => health::run_snapshot(),
         Commands::Verify => health::run_verify(),

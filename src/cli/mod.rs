@@ -33,6 +33,9 @@ pub enum Commands {
     /// Print what the mount pass would do (resolved target, kind, source) without
     /// applying anything. Read-only.
     Plan,
+    /// Gap-free hot load/unload: reconcile live rules to the current module set,
+    /// applying only the delta (no clear). Run after installing/removing a module.
+    Reload,
     /// Runtime health check: engine liveness, injection consistency, per-UID
     /// self-consistency canary, guard state. `--write` persists to health.txt.
     Selfcheck {

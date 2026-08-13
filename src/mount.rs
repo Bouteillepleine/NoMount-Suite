@@ -10,7 +10,7 @@
 //! root can never break from a Suite bug, and there is no su mount for a scanner
 //! to flag.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
@@ -321,6 +321,106 @@ pub fn run_plan() -> Result<()> {
     }
     let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
     println!("({} entries: {} binds, {skipped} blocklisted)", plan.len(), binds);
+    Ok(())
+}
+
+/// Live leaf-rule targets from `nm list`: injects (`t -> s`) and whiteouts
+/// (`t (whiteout)`). Skips engine-managed virtual dirs (`t (virtual dir)`) and any
+/// `[UID: N]` suffix. These are the rules the reload owns; the engine auto-creates
+/// and prunes virtual parent dirs as children are added/removed.
+fn parse_live_targets(list: &str) -> HashSet<PathBuf> {
+    list.lines()
+        .filter_map(|l| {
+            let l = l.split(" [UID:").next().unwrap_or(l).trim();
+            if let Some((t, _)) = l.split_once(" -> ") {
+                return Some(PathBuf::from(t.trim()));
+            }
+            if let Some((t, _)) = l.split_once(" (whiteout)") {
+                return Some(PathBuf::from(t.trim()));
+            }
+            None
+        })
+        .collect()
+}
+
+/// `nomount reload`: gap-free hot load/unload. Diffs the desired plan against the
+/// live rule set and applies ONLY the delta -- no `clear`, so injections never
+/// drop. Install a module then reload => just its files go live; remove a module
+/// then reload => just its files go away. Also reconciles my_* binds.
+pub fn run_reload() -> Result<()> {
+    let nm = Nm::new();
+    nm.version()
+        .context("hookless NoMount engine not responding -- is the CONFIG_NOMOUNT kernel loaded?")?;
+
+    let (plan, skipped) = collect_plan();
+
+    // Desired, split by handling: hookless leaf rules vs my_* binds.
+    let mut desired_hookless: HashMap<&Path, &PlanEntry> = HashMap::new();
+    let mut desired_binds: HashSet<&Path> = HashSet::new();
+    for e in &plan {
+        match e.kind {
+            PlanKind::Bind => {
+                desired_binds.insert(e.target.as_path());
+            }
+            _ => {
+                desired_hookless.insert(e.target.as_path(), e);
+            }
+        }
+    }
+
+    let live_txt = nm.list().unwrap_or_default();
+    let live = parse_live_targets(&live_txt);
+
+    let (mut added, mut removed, mut failed) = (0u32, 0u32, 0u32);
+    // Add desired hookless rules not already live.
+    for (t, e) in &desired_hookless {
+        if live.contains(*t) {
+            continue;
+        }
+        let r = match e.kind {
+            PlanKind::Inject => nm.add(&e.target, &e.source),
+            PlanKind::Whiteout => nm.whiteout(&e.target),
+            PlanKind::Bind => unreachable!(),
+        };
+        match r {
+            Ok(_) => added += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    // Remove live rules no longer desired (skip any that are now bind targets).
+    for t in &live {
+        if !desired_hookless.contains_key(t.as_path()) && !desired_binds.contains(t.as_path()) {
+            if nm.del(t).is_ok() {
+                removed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+    }
+
+    // Reconcile my_* binds against binds.list.
+    let live_binds = crate::bind::tracked();
+    let (mut bind_added, mut bind_removed) = (0u32, 0u32);
+    for t in &live_binds {
+        if !desired_binds.contains(t.as_path()) {
+            crate::bind::umount_one(t);
+            bind_removed += 1;
+        }
+    }
+    let live_bind_set: HashSet<&Path> = live_binds.iter().map(|p| p.as_path()).collect();
+    for e in plan.iter().filter(|e| e.kind == PlanKind::Bind) {
+        if !live_bind_set.contains(e.target.as_path()) {
+            match crate::bind::apply(&e.source, &e.target) {
+                Ok(_) => bind_added += 1,
+                Err(_) => failed += 1,
+            }
+        }
+    }
+
+    println!(
+        "nomount reload: +{added} -{removed} rules, +{bind_added} -{bind_removed} binds, \
+         {failed} failed, {skipped} blocklisted (gap-free)"
+    );
     Ok(())
 }
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.12
+
+### Added
+- **Gap-free hot load / unload** (`nomount reload`, WebUI **Reload** button). Reconciles the live rule set to the currently installed modules and applies only the delta — no `clear`, so injections never drop mid-reload. Install a module and tap Reload: just its files go live. Remove one and Reload: just its files go away. No reboot. Also reconciles my_* binds incrementally (umount removed, bind new). The old full-rebuild pass still runs at boot; the WebUI's "Re-apply" button is now the gap-free "Reload".
+
 ## v1.0.11
 
 ### Added
