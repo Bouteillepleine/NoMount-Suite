@@ -61,7 +61,12 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
 static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags);
 static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *ctx);
 
-static __always_inline struct nomount_dir_node *nomount_get_dir_node(struct inode *inode) 
+/* Returns the raw (unpinned) dir_node behind a hijacked inode. Safe ONLY under
+ * nomount_write_mutex, which excludes the del/clear paths that call_rcu-free a
+ * dir_node -- its sole caller (nomount_generate_virtual_topology) holds it. Any
+ * lockless/RCU-walk caller must instead pin via atomic_inc_not_zero (see
+ * nm_d_revalidate / the hijacked handlers). */
+static __always_inline struct nomount_dir_node *nomount_get_dir_node(struct inode *inode)
 {
     struct nm_iop *nm_iop;
     struct nm_fop *nm_fop;
@@ -1097,6 +1102,12 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
      * stale NEGATIVE child dentry — created by a transient lookup-before-inject
      * during `nm add` — so that child (e.g. the 2nd+ .so in a new arm64/ dir)
      * stayed ENOENT forever and its readdir path-walk could spin. */
+    /* Resolve + pin the parent dir_node under RCU (same discipline as the hijacked
+     * handlers): a concurrent del/clear can call_rcu-free nm_iop / the dir_node, and
+     * this runs outside any rcu section, so read + inc_not_zero under one and never
+     * touch nm_iop after. A node mid-free fails inc_not_zero -> pdir NULL -> the
+     * ghost-dentry path below (treated as "parent no longer hijacked"). */
+    rcu_read_lock();
     nm_iop = __get_nm(smp_load_acquire(&parent_dir->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
     if (nm_iop) {
         pdir = nm_iop->dir_node;
@@ -1104,6 +1115,8 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         struct nm_inode_info *pinfo = parent_dir->i_private;
         if (pinfo) pdir = pinfo->dir_node;
     }
+    if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
+    rcu_read_unlock();
     /* Parent is no longer hijacked (its rule/dir_node was removed by del or clear,
      * and the dir was restored). A cached INJECTED child dentry is now stale --
      * invalidate it so the path re-resolves to the real fs. This kills the
@@ -1115,6 +1128,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
     if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info, false)) {
         nm_put_rule_info(&rule_info);
+        nm_dir_node_put(pdir);                            /* pin no longer needed past the lookup */
         if (rule_info.flags & NM_FLAG_WHITEOUT) return d_is_negative(dentry) ? 1 : 0;
 
         /* Per-UID consistency: a BLOCKED reader must see the stock fs (non-injected),
@@ -1126,6 +1140,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
             return injected ? 0 : 1;
         return injected ? 1 : nm_reval_stale(dentry);
     }
+    nm_dir_node_put(pdir);                                /* pin no longer needed past the lookup */
     return nm_reval_stale(dentry);                        /* rule gone -> re-resolve */
 }
 
