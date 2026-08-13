@@ -77,17 +77,23 @@ pub fn run_doctor() -> Result<()> {
             .or_default()
             .push(e.module.as_str());
 
+        // A rule on a bare partition root redirects/masks the WHOLE partition, hiding
+        // every stock entry under it. Fatal for a whiteout just as much as an inject, so
+        // this is checked for both kinds (a whiteout on a root was previously unguarded).
+        if is_partition_root(&e.target) {
+            f.push(Finding {
+                level: Level::Error,
+                check: "partition-root target",
+                detail: format!(
+                    "{} would {} all of {}",
+                    e.module,
+                    if e.kind == PlanKind::Whiteout { "hide" } else { "replace" },
+                    e.target.display()
+                ),
+            });
+        }
+
         if e.kind == PlanKind::Inject {
-            // A rule on a bare partition root redirects the WHOLE partition, hiding every
-            // stock entry under it. Bind-mount semantics make that correct for the rule as
-            // written, so the engine will not stop you — but a module never means it.
-            if is_partition_root(&e.target) {
-                f.push(Finding {
-                    level: Level::Error,
-                    check: "partition-root target",
-                    detail: format!("{} would replace all of {}", e.module, e.target.display()),
-                });
-            }
             // Backing gone (module updated/removed underneath us) -> rule serves nothing.
             if !e.source.exists() {
                 f.push(Finding {

@@ -48,13 +48,13 @@ void c_main(long *sp) {
 
         for (int i = 0; i + step - 1 < p_count; i += step) {
             char *v_end = resolve_path(mem.v_resolved, cwd, p_args[i]);
-            int v_len = v_end - mem.v_resolved;
+            int v_len = v_end ? (int)(v_end - mem.v_resolved) : 0; /* NULL = overran PATH_MAX */
             if (!v_len) { exit_code = 3; continue; }
 
             int r_len = 0;
             if (cmd == 'a') {
                 char *r_end = resolve_path(mem.r_resolved, cwd, p_args[i+1]);
-                r_len = r_end - mem.r_resolved;
+                r_len = r_end ? (int)(r_end - mem.r_resolved) : 0;
                 if (!r_len) { exit_code = 3; continue; }
             }
 
@@ -118,7 +118,9 @@ void c_main(long *sp) {
         if (is_uids) is_json = 1;
 
         int target_cmd = is_uids ? 8 : 7;
-        unsigned int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
+        /* signed: a negative errno from do_nm_cmd()/read() must fail the while(len>0)
+         * guard, not wrap to a huge unsigned length that walks rx_buf out of bounds. */
+        int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
         int offset = 2;
         if (is_json) print_str("[\n");
 

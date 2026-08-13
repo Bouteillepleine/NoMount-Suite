@@ -93,7 +93,14 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             let mut covered: Vec<u32> = Vec::new();
 
             for e in &persisted {
-                match blocklist::resolve(e)? {
+                let resolved = match blocklist::resolve(e) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        eprintln!("nomount: skipping blocklist entry {e:?}: {err:#}");
+                        continue;
+                    }
+                };
+                match resolved {
                     Resolved::Uid(uid) => {
                         covered.push(uid);
                         let state = if live.contains(&uid) {
@@ -129,12 +136,19 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             let mut applied = 0u32;
             let mut skipped = 0u32;
             for e in blocklist::read()? {
-                match blocklist::resolve(&e)? {
-                    Resolved::Uid(uid) => {
+                // Skip-and-continue on a malformed entry: one bad line (e.g. a hand-edited
+                // out-of-range UID) must NOT abort the boot-time apply and leave every
+                // later UID un-hidden -- the exact failure this module exists to prevent.
+                match blocklist::resolve(&e) {
+                    Ok(Resolved::Uid(uid)) => {
                         let _ = nm.uid_block(uid);
                         applied += 1;
                     }
-                    Resolved::NotInstalled => skipped += 1,
+                    Ok(Resolved::NotInstalled) => skipped += 1,
+                    Err(err) => {
+                        eprintln!("nomount: skipping blocklist entry {e:?}: {err:#}");
+                        skipped += 1;
+                    }
                 }
             }
             println!("applied {applied}, skipped {skipped}");

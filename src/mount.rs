@@ -176,7 +176,12 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             plan_tree(module, module_root, &source, out);
         } else if name == ".replace" {
             // Whiteout the parent dir (module wants to replace, not merge, it).
+            // Never whiteout a bare partition root: masking a whole partition bootloops
+            // (forkSystemServer SIGABRT), exactly as an inject on a root does below.
             if let Some(parent) = target.parent() {
+                if is_partition_root(parent) {
+                    continue;
+                }
                 out.push(PlanEntry {
                     module: module.to_string(),
                     target: parent.to_path_buf(),
@@ -185,7 +190,11 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                 });
             }
         } else if is_char_dev(&ft) {
-            // A 0:0 char device is Magisk's whiteout marker.
+            // A 0:0 char device is Magisk's whiteout marker. Refuse it on a partition
+            // root for the same bootloop reason.
+            if is_partition_root(&target) {
+                continue;
+            }
             out.push(PlanEntry {
                 module: module.to_string(),
                 target,

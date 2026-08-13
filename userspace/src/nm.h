@@ -131,12 +131,16 @@ static noinline void print_uint(unsigned int n) {
 
 /* path resolution */
 static noinline char* resolve_path(char *p, const char *cwd, const char *rel) {
+    char *end = p + PATH_MAX - 1; /* leave room for the terminating NUL */
     if (cwd && *rel != '/') {
-        while (*cwd) *p++ = *cwd++;
-        *p++ = '/'; /* Linux VFS treats "//" exactly as "/" */
+        while (*cwd && p < end) *p++ = *cwd++;
+        if (*cwd) return (char *)0;        /* cwd alone overran the buffer */
+        if (p < end) *p++ = '/'; /* Linux VFS treats "//" exactly as "/" */
     }
-    while ((*p++ = *rel++));
-    return p - 1; /* Points exactly to '\0' */
+    while (*rel && p < end) *p++ = *rel++;
+    if (*rel) return (char *)0;            /* path too long -> refuse, do not truncate */
+    *p = '\0';
+    return p; /* Points exactly to '\0' */
 }
 
 static noinline void *get_attr(const void *nh, int type) {
