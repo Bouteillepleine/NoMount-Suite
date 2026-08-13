@@ -337,22 +337,40 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
 
 static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
-    struct nm_iop *nm_iop = __get_nm(smp_load_acquire(&dir->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
+    struct nm_iop *nm_iop;
+    struct nomount_dir_node *pdir;
+    const struct inode_operations *orig_iop;
     struct nm_rule_info rule_info;
     const char *name = dentry->d_name.name;
     size_t len = dentry->d_name.len;
+    struct dentry *ret = ERR_PTR(-EOPNOTSUPP);
     u32 v_hash;
 
-    if (unlikely(nomount_is_uid_blocked(current_uid().val) || !nm_iop || !nm_iop->dir_node))
+    /* Recover our vtable and pin the parent dir_node under RCU, then copy out
+     * everything we need: a concurrent del/clear can store_release the inode's
+     * i_op back and call_rcu-free nm_iop while this (sleeping) handler runs, so
+     * nm_iop must NOT be dereferenced past here. orig_iop points into the real
+     * fs's const ops (alive for the whole mount), so the copy is safe; the
+     * dir_node needs an explicit ref to outlive create_new_inode's sleeping
+     * alloc. A node already being freed fails inc_not_zero -> treat as unhijacked. */
+    rcu_read_lock();
+    nm_iop = __get_nm(smp_load_acquire(&dir->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
+    orig_iop = nm_iop ? nm_iop->orig_iop : NULL;
+    pdir = nm_iop ? nm_iop->dir_node : NULL;
+    if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
+    rcu_read_unlock();
+
+    if (unlikely(nomount_is_uid_blocked(current_uid().val) || !pdir))
         goto fallback;
 
     v_hash = full_name_hash(NULL, name, len);
-    if (nomount_get_rule_info(nm_iop->dir_node, name, len, v_hash, &rule_info, true)) {
+    if (nomount_get_rule_info(pdir, name, len, v_hash, &rule_info, true)) {
         if (rule_info.flags & NM_FLAG_WHITEOUT) {
             nm_install_dentry_ops(dentry);
             d_add(dentry, NULL);
             nm_put_rule_info(&rule_info);
-            return NULL;
+            ret = NULL;
+            goto out;
         }
 
         if ((rule_info.flags & NM_FLAG_VIRTUAL_DIR) || rule_info.r_path.dentry) {
@@ -369,7 +387,8 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
                  * deliberately kept -- upstream's rewrite dropped it.) */
                 res = d_splice_alias(new_inode, dentry);
                 if (!IS_ERR(res) && res) nm_install_dentry_ops(res);
-                return res;
+                ret = res;
+                goto out;
             }
         }
         nm_put_rule_info(&rule_info);
@@ -389,8 +408,8 @@ fallback:
      * DCACHE_DONTCACHE exists from 5.13; on older trees nm_reval_stale() in
      * d_revalidate is the fallback. Gate on a rule existing, else a normal real
      * file (no rule) would be needlessly uncached. */
-    if (nm_iop && nm_iop->dir_node && nomount_is_uid_blocked(current_uid().val) &&
-        nomount_get_rule_info(nm_iop->dir_node, name, len,
+    if (pdir && nomount_is_uid_blocked(current_uid().val) &&
+        nomount_get_rule_info(pdir, name, len,
                               full_name_hash(NULL, name, len), &rule_info, false)) {
         nm_install_dentry_ops(dentry);
 #ifdef DCACHE_DONTCACHE
@@ -399,44 +418,59 @@ fallback:
         nm_put_rule_info(&rule_info);
     }
 
-    if (nm_iop && nm_iop->orig_iop && nm_iop->orig_iop->lookup) {
-        return nm_iop->orig_iop->lookup(dir, dentry, flags);
-    }
+    if (orig_iop && orig_iop->lookup)
+        ret = orig_iop->lookup(dir, dentry, flags);
 
-    return ERR_PTR(-EOPNOTSUPP);
+out:
+    if (pdir) nm_dir_node_put(pdir);
+    return ret;
 }
 static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *ctx)
 {
-    struct nm_fop *nm_fop = __get_nm(smp_load_acquire(&file->f_op), struct nm_fop, fake_fop, iterate_shared, nomount_hijacked_iterate_dir);
+    struct nm_fop *nm_fop;
+    struct nomount_dir_node *pdir;
+    const struct file_operations *orig_fop;
     struct nomount_proxy_ctx proxy_ctx = {
         .ctx.actor = nomount_actor_proxy,
     };
     int res = 0;
 
-    if (unlikely(nomount_is_uid_blocked(current_uid().val) || !nm_fop || !nm_fop->orig_fop || !nm_fop->dir_node))
+    /* Same lifetime discipline as nomount_hijacked_lookup: recover + pin under
+     * RCU, copy orig_fop (real fs const ops), never deref nm_fop after -- a
+     * concurrent del/clear can call_rcu-free it across nm_call_iterate's sleep. */
+    rcu_read_lock();
+    nm_fop = __get_nm(smp_load_acquire(&file->f_op), struct nm_fop, fake_fop, iterate_shared, nomount_hijacked_iterate_dir);
+    orig_fop = nm_fop ? nm_fop->orig_fop : NULL;
+    pdir = nm_fop ? nm_fop->dir_node : NULL;
+    if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
+    rcu_read_unlock();
+
+    if (unlikely(nomount_is_uid_blocked(current_uid().val) || !orig_fop || !pdir))
         goto do_real_iterate;
 
     if (unlikely(nm_is_virtual_pos(ctx->pos))) {
-        nomount_emit_virtual_children(ctx, nm_fop->dir_node);
-        return 0;
+        nomount_emit_virtual_children(ctx, pdir);
+        goto out;
     }
 
     proxy_ctx.ctx.pos = ctx->pos;
     proxy_ctx.orig_ctx = ctx;
-    proxy_ctx.dir_node = nm_fop->dir_node;
+    proxy_ctx.dir_node = pdir;
     proxy_ctx.emitted = 0;
 
-    res = nm_call_iterate(file, &proxy_ctx.ctx, nm_fop->orig_fop);
+    res = nm_call_iterate(file, &proxy_ctx.ctx, orig_fop);
     ctx->pos = proxy_ctx.ctx.pos;
-    if (res < 0 || proxy_ctx.emitted > 0) return res;
+    if (res < 0 || proxy_ctx.emitted > 0) goto out;
 
     ctx->pos = nm_pack_pos(0);
-    nomount_emit_virtual_children(ctx, nm_fop->dir_node);
-    return res;
+    nomount_emit_virtual_children(ctx, pdir);
+    goto out;
 
 do_real_iterate:
-    if (nm_fop && nm_fop->orig_fop) return nm_call_iterate(file, ctx, nm_fop->orig_fop);
-    return -ENOTDIR;
+    res = orig_fop ? nm_call_iterate(file, ctx, orig_fop) : -ENOTDIR;
+out:
+    if (pdir) nm_dir_node_put(pdir);
+    return res;
 }
 
 static void nomount_hijacked_destroy_inode(struct inode *inode)
