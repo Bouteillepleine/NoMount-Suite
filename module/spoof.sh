@@ -258,6 +258,30 @@ do_props() {
         done
     fi
 
+    # harmonize the build-type/tags tail on every fingerprint so it agrees with the
+    # ro.build.type=user / ro.build.tags=release-keys set above. A custom ROM often
+    # leaves :userdebug/test-keys inside the composite fingerprint (and in
+    # description/flavor) — a classic tags-vs-fingerprint inconsistency a RASP checks.
+    for fp in ro.build.fingerprint ro.system.build.fingerprint ro.vendor.build.fingerprint \
+              ro.product.build.fingerprint ro.odm.build.fingerprint ro.system_ext.build.fingerprint \
+              ro.bootimage.build.fingerprint ro.vendor_dlkm.build.fingerprint \
+              ro.odm_dlkm.build.fingerprint ro.system_dlkm.build.fingerprint; do
+        cur=$(getprop "$fp" 2>/dev/null)
+        [ -n "$cur" ] || continue
+        new=$(echo "$cur" | sed -E 's#:(user|userdebug|eng)/(release-keys|test-keys|dev-keys)$#:user/release-keys#')
+        [ "$new" != "$cur" ] && rp_reset_if_present "$fp" "$new"
+    done
+    d_cur=$(getprop ro.build.description 2>/dev/null)
+    if [ -n "$d_cur" ]; then
+        d_new=$(echo "$d_cur" | sed -E 's#-userdebug #-user #; s#-eng #-user #; s# (test-keys|dev-keys)$# release-keys#')
+        [ "$d_new" != "$d_cur" ] && rp_reset_if_present ro.build.description "$d_new"
+    fi
+    f_cur=$(getprop ro.build.flavor 2>/dev/null)
+    if [ -n "$f_cur" ]; then
+        f_new=$(echo "$f_cur" | sed -E 's#-(userdebug|eng)$#-user#')
+        [ "$f_new" != "$f_cur" ] && rp_reset_if_present ro.build.flavor "$f_new"
+    fi
+
     case "$(getprop ro.bootmode 2>/dev/null)" in
         *recovery*) $RESETPROP -n ro.bootmode unknown 2>/dev/null && log "prop ro.bootmode -> unknown" ;;
     esac

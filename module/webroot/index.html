@@ -1002,7 +1002,10 @@
     const r = await exec(
       'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
       'echo "root_ov=$(grep -c \'^nomount_ov \' /proc/self/mounts 2>/dev/null)"; ' +
-      'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)";'
+      'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
+      'echo "vbs=$(grep -hoE \'verifiedbootstate[ ="]*(green|orange|yellow|red)\' /proc/cmdline /proc/bootconfig 2>/dev/null | grep -oE \'green|orange|yellow|red\' | head -1)"; ' +
+      'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
+      'echo "se=$(getenforce 2>/dev/null)";'
     );
     const kv = {};
     r.stdout.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1).trim(); });
@@ -1017,6 +1020,14 @@
     const appR = await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"');
     const appOut = (appR.stdout || "").trim();
     const appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
+
+    // Residual tells a scanner can still read even when the mount surface is clean.
+    const vbs = (kv.vbs || "").toLowerCase();
+    const fp = kv.fp || "";
+    const se = (kv.se || "").trim();
+    const vbTell = vbs !== "" && vbs !== "green";
+    const keyTell = /test-keys|userdebug|:eng\//.test(fp);
+    const seTell = se !== "" && se !== "Enforcing";
 
     $("mSu").innerHTML = sucompat ? 'sucompat <small>kernel · mountless</small>' : 'external <small>unmanaged</small>';
     // mOv (RRO overlay count) is set from the rule list in refreshStatus — RRO is now
@@ -1034,6 +1045,9 @@
     } else {
       rows.push({ k: "Real mounts", v: "none — pure hookless", t: "vfs" });
     }
+    rows.push({ k: "Verified boot", v: vbs ? (vbTell ? vbs + " · tell" : vbs) : "n/a", t: vbTell ? "warn" : (vbs ? "vfs" : "off") });
+    rows.push({ k: "Build keys", v: keyTell ? "test-keys · tell" : "release-keys", t: keyTell ? "warn" : "vfs" });
+    rows.push({ k: "SELinux", v: se || "n/a", t: seTell ? "warn" : (se ? "vfs" : "off") });
     $("posture").innerHTML = rows.map((x) =>
       `<div class="row"><span class="name">${x.k}</span><span class="tag ${x.t}">${esc(x.v)}</span></div>`
     ).join("");
@@ -1060,6 +1074,21 @@
       $("stealthT").textContent = "Detection posture";
       $("stealthD").textContent = "app-view check unavailable";
       $("stealthNote").innerHTML = `File injections and RRO are hookless; su is sucompat. Couldn't drop to a non-root uid to verify here; root sees ${rootNm} <code>nomount_*</code> mount(s).`;
+    }
+
+    // Residual tells override the mount-only verdict: even with a clean mount surface,
+    // these are directly readable by a scanner.
+    const extraTells = [];
+    if (vbTell) extraTells.push("verified-boot=" + vbs);
+    if (keyTell) extraTells.push("build keys");
+    if (seTell) extraTells.push("SELinux " + se);
+    if (extraTells.length) {
+      shield.className = "shield warn";
+      $("stealthT").textContent = "Residual tells present";
+      $("stealthD").textContent = extraTells.join(" · ");
+      $("stealthNote").innerHTML = "Mount surface is clean, but a scanner can still read: " +
+        extraTells.map(esc).join(", ") +
+        ". <code>/proc/cmdline</code> verified-boot needs the kernel cmdline filter; build keys are handled by the fingerprint harmonizer in Spoof.";
     }
   }
 
