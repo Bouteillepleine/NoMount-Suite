@@ -104,6 +104,20 @@ fn is_my_partition(target: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// EXPERIMENTAL: route `my_*` targets through hookless inject instead of a real
+/// bind. Off by default (bind). Enabled by `NM_MY_HOOKLESS=1` in the metamount
+/// env or a `/data/adb/nomount/my_hookless` marker. Safe to trial because the
+/// GUARD_MAX=3 self-disable recovers a bootloop and records incident.log: if a
+/// leaf my_* inject really trips zygote's FD allowlist at forkSystemServer, boot
+/// fails <=3x and the Suite disables itself. If it boots clean, the bind fallback
+/// was unnecessary and my_* can be served mountlessly like every other partition.
+fn my_hookless_enabled() -> bool {
+    std::env::var_os("NM_MY_HOOKLESS")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(false)
+        || Path::new("/data/adb/nomount/my_hookless").exists()
+}
+
 /// True if `target` is a partition ROOT (`/product`, `/system`, `/vendor`, …) rather than
 /// something inside one.
 ///
@@ -126,25 +140,63 @@ fn is_partition_root(target: &Path) -> bool {
     target.components().skip(1).count() == 1
 }
 
-/// Does this module bind its OWN my_* content (so we must not bind it too and
-/// stack a duplicate mount)? A module only counts as self-managing if one of its
-/// boot scripts actually references mounting/binding a my_* path -- checking for
-/// mere script *existence* (the old heuristic) wrongly skipped my_* for any module
-/// that ships a service.sh for an unrelated reason. bind::apply() also skips a
-/// target that is already mounted, as a second guard.
+/// Does this module bind its OWN my_* content (so we must not double-handle it)?
+/// A module counts as self-managing if a boot script actually mounts/binds a my_*
+/// path. The old heuristic required `my_` and `mount`/`bind` on ONE line, which
+/// missed the common real-world pattern of assigning the path to a variable and
+/// mounting the variable on a later line:
+///     DST=/my_product/etc/extension/com.oplus.app-features.xml
+///     mount --bind "$SRC" "$DST"
+/// (op15_3d_lockscreen_wp, OxygenCustomizer, OnePlus_Dialer_Universal all do this).
+/// So we now match ACROSS the script: first collect vars assigned a my_* value,
+/// then flag any mount/bind line that references a my_* path directly OR through
+/// one of those vars. Still precise — an unrelated `mount` plus an unrelated `my_`
+/// mention elsewhere won't trip it (the mount line itself must reach a my_* path).
+/// Deep indirection (mounting inside a function looped over a my_* var) can still
+/// slip; the cost there is only a redundant rule, and bind::apply() skips an
+/// already-mounted target as a second guard.
 fn self_binds_my(mdir: &Path) -> bool {
-    for s in ["post-fs-data.sh", "service.sh", "post-mount.sh"] {
-        if let Ok(body) = fs::read_to_string(mdir.join(s)) {
-            for line in body.lines() {
-                // Drop any comment (full-line or inline trailing `#...`) before the
-                // check, so a commented-out my_ mention -- even on the same line as an
-                // unrelated `mount` -- isn't read as a real bind.
-                let code = line.split('#').next().unwrap_or("").to_lowercase();
-                // Both tokens on ONE code line = an actual mount/bind of a my_ path,
-                // not just "my_" and "mount" happening to appear anywhere in the file.
-                if code.contains("my_") && (code.contains("mount") || code.contains("bind")) {
-                    return true;
-                }
+    ["post-fs-data.sh", "service.sh", "post-mount.sh"]
+        .iter()
+        .filter_map(|s| fs::read_to_string(mdir.join(s)).ok())
+        .any(|body| script_binds_my(&body))
+}
+
+/// Pure text analysis (unit-tested): does this one boot script mount/bind a my_*
+/// path? Split out from [`self_binds_my`] so the cross-line + variable-resolution
+/// logic can be tested without a temp module tree on disk.
+fn script_binds_my(body: &str) -> bool {
+    // Comment-stripped code lines (drop full-line and inline trailing `#...`).
+    let code: Vec<String> = body
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or("").to_string())
+        .collect();
+    // Vars assigned a value that references a my_* path: `NAME=…my_…`.
+    let mut my_vars: HashSet<String> = HashSet::new();
+    for line in &code {
+        if let Some((name, val)) = line.trim().split_once('=') {
+            let name = name.trim();
+            if !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && val.contains("my_")
+            {
+                my_vars.insert(name.to_string());
+            }
+        }
+    }
+    // A mount/bind line that reaches a my_* path — literally, or via a my_* var
+    // as `$VAR`, `${VAR}`, or `"$VAR"`.
+    for line in &code {
+        let low = line.to_lowercase();
+        if !(low.contains("mount") || low.contains("bind")) {
+            continue;
+        }
+        if low.contains("my_") {
+            return true;
+        }
+        for v in &my_vars {
+            if line.contains(&format!("${v}")) || line.contains(&format!("${{{v}}}")) {
+                return true;
             }
         }
     }
@@ -265,18 +317,23 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, self_manages: bool, o
             // are unaffected: they take the is_dir() branch above and recurse as before.
             continue;
         } else if is_my_partition(&target) {
-            // my_* bootloops under hookless (zygote FD allowlist), so it needs a real
-            // bind. But a module that ships its own post-fs-data.sh/service.sh already
-            // binds its my_* content (often a processed copy); binding it again would
-            // double-mount and could shadow the wrong version, so leave those to it.
+            // A module that ships its own post-fs-data.sh/service.sh already binds its
+            // my_* content (often a processed copy); double-handling it would stack a
+            // duplicate mount or shadow the wrong version, so leave those to it —
+            // whichever mode we're in.
             if self_manages {
                 continue;
             }
+            // Default: real bind (my_* historically excluded from hookless). With
+            // NM_MY_HOOKLESS, route it through the same hookless inject as every other
+            // partition and let the boot guard adjudicate whether the bind was ever
+            // needed. Partition-root/overlay-fallback hazards are handled above.
+            let kind = if my_hookless_enabled() { PlanKind::Inject } else { PlanKind::Bind };
             out.push(PlanEntry {
                 module: module.to_string(),
                 target,
                 source,
-                kind: PlanKind::Bind,
+                kind,
             });
         } else {
             out.push(PlanEntry {
@@ -549,4 +606,48 @@ pub fn run_mount() -> Result<()> {
         st.applied, st.whiteouts, st.failed
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::script_binds_my;
+
+    #[test]
+    fn var_indirect_my_bind_detected() {
+        // The exact op15_3d_lockscreen_wp pattern the one-line heuristic missed.
+        let s = "SRC=$MODDIR/my_product/etc/extension/foo.xml\n\
+                 DST=/my_product/etc/extension/foo.xml\n\
+                 mount --bind \"$SRC\" \"$DST\"\n";
+        assert!(script_binds_my(s));
+    }
+
+    #[test]
+    fn literal_my_on_mount_line_detected() {
+        assert!(script_binds_my("mount --bind $MODDIR/my_product/x /my_product/x\n"));
+    }
+
+    #[test]
+    fn mount_folders_var_assignment_detected() {
+        // extreme_gt: `mount_folders='my_product my_heytap my_stock'` — the assignment
+        // line itself carries both tokens, so it's caught even before the loop body.
+        assert!(script_binds_my("mount_folders='my_product my_heytap my_stock'\n"));
+    }
+
+    #[test]
+    fn commented_out_not_detected() {
+        assert!(!script_binds_my("# mount --bind $SRC /my_product/x\nDST=/my_product/x\n"));
+    }
+
+    #[test]
+    fn unrelated_mount_and_my_not_tripped() {
+        // A my_ mention on a non-mount line + an unrelated mount of /system: no my_ var
+        // reaches the mount line, so it must NOT be flagged (a false positive would make
+        // NoMount wrongly skip serving that module's my_ content).
+        assert!(!script_binds_my("echo /my_product is nice\nmount --bind /data/x /system/y\n"));
+    }
+
+    #[test]
+    fn my_var_but_no_mount_not_detected() {
+        assert!(!script_binds_my("DST=/my_product/x\ncat \"$DST\"\n"));
+    }
 }

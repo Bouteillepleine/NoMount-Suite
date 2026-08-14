@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1.2
+
+Hookless `/my_*` (opt-in) + self-manage detection across variables.
+
+### Added
+- **Hookless `/my_*` serving (opt-in, `NM_MY_HOOKLESS`).** `/my_*` targets can now be served by the same mountless hookless VFS injection as every other partition instead of a real bind — zero mounts. Enable with `NM_MY_HOOKLESS=1` (metamount env) or a `/data/adb/nomount/my_hookless` marker; the default stays bind. Cold-boot validated on OP15 (6.12): a `/my_product` framework feature-config served hookless survived the real init→zygote `forkSystemServer` FD-allowlist with no bootloop — refuting the long-held "my_* hookless bootloops" assumption for this case. Guarded by the existing `GUARD_MAX` self-disable. NOT yet validated for preloaded overlay APKs / framework jars / fonts under `/my_*`, so the safe default remains bind while multi-device data is gathered.
+
+### Fixed
+- **Self-manage detection matches across the script and resolves simple vars.** `self_binds_my` no longer requires `my_` and `mount`/`bind` on one line: it collects vars assigned a `my_*` value (`DST=/my_product/…`) and flags any `mount`/`bind` line that reaches a `my_*` path directly *or* through such a var (`mount "$DST"`). This catches the real-world pattern used by `op15_3d_lockscreen_wp`, `OxygenCustomizer` and `OnePlus_Dialer_Universal` that the one-line heuristic missed — which, under hookless `/my_*`, would otherwise double-handle the same target. Still precise: an unrelated `mount` plus an unrelated `my_` mention elsewhere does not trip it. 6 unit tests added.
+
 ## v1.1.1
 
 Follow-up audit cleanup of two v1.1.0 P2s.
