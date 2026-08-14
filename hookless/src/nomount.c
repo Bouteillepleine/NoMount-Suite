@@ -1121,12 +1121,21 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
     rcu_read_unlock();
     /* Parent is no longer hijacked (its rule/dir_node was removed by del or clear,
-     * and the dir was restored). A cached INJECTED child dentry is now stale --
-     * invalidate it so the path re-resolves to the real fs. This kills the
-     * "ghost dentry" that otherwise survived del/clear (even drop_caches) until a
-     * reboot or a re-hijack of the parent. */
-    if (!pdir)
-        return injected ? 0 : 1;
+     * and the dir was restored), so any child dentry WE cached is stale. An injected
+     * (positive, our-iop) one -> return 0 to invalidate. A stale NEGATIVE we cached
+     * (a whiteout that was just removed, or a blocked-uid fallback) must be d_drop'd
+     * too: d_invalidate() is a no-op on a negative, so returning 0 alone leaves the
+     * file ENOENT until eviction/reboot even though the rule is gone. A positive
+     * real-fs dentry we merely tagged still reflects reality -> keep it. */
+    if (!pdir) {
+        if (injected)
+            return 0;
+        if (d_is_negative(dentry)) {
+            d_drop(dentry);
+            return 0;
+        }
+        return 1;
+    }
 
     hash = full_name_hash(NULL, dentry->d_name.name, dentry->d_name.len);
     if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info, false)) {
