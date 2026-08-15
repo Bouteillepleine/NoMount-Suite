@@ -1998,7 +1998,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int dept
     struct kstat dkst;
     struct file *dir;
     const struct cred *old;
-    int i, ret = -ENOENT;
+    int i, pass, ret = -ENOENT;
 
     if (depth > 2)
         return -ENOENT;
@@ -2022,20 +2022,32 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int dept
     }
     revert_creds(old);
 
-    /* prefer a real file at this level (dev != the overlay-top dir dev) */
-    for (i = 0; i < sc->n_files; i++) {
-        char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->files[i]);
-        struct path fp;
-        struct kstat fk;
+    /* Two passes. Pass 0 prefers a file whose dev differs from the directory's:
+     * on an overlay-backed partition that is the lower-layer file, and using it
+     * avoids mirroring the overlay-TOP dev. Pass 1 accepts ANY real file.
+     *
+     * Pass 1 is what makes this work off overlay. On a plain erofs/ext4 mount a
+     * file and its parent share a dev, so the dev != test rejected every
+     * candidate, the scan walked to / and failed, and the caller fell back to a
+     * RAW NAME HASH for the inode -- an injected file on /vendor reported ino
+     * 2.7e9 next to stock siblings at 1.1e6. */
+    for (pass = 0; pass < 2; pass++) {
+        for (i = 0; i < sc->n_files; i++) {
+            char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->files[i]);
+            struct path fp;
+            struct kstat fk;
 
-        if (!cp) continue;
-        if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
-            int r = nm_path_stat(&fp, &fk);
+            if (!cp) continue;
+            if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
+                int r = nm_path_stat(&fp, &fk);
 
-            path_put(&fp);
-            if (r == 0 && fk.dev != sc->dir_dev) { *out = fk; kfree(cp); ret = 0; goto done; }
+                path_put(&fp);
+                if (r == 0 && (pass == 1 || fk.dev != sc->dir_dev)) {
+                    *out = fk; kfree(cp); ret = 0; goto done;
+                }
+            }
+            kfree(cp);
         }
-        kfree(cp);
     }
     /* else descend into a real subdir (bounded) */
     for (i = 0; i < sc->n_subdirs; i++) {
