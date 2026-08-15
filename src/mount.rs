@@ -281,6 +281,38 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
 
 /// Build the full plan for every enabled, non-blocklisted module.
 /// Returns the entries plus how many modules were skipped by the blocklist.
+/// A module whiteout is skipped unless it hides cleanly.
+///
+/// `.replace` and Magisk's char-device marker both ask us to make a stock entry
+/// disappear, and off overlayfs that leaves the parent directory describing an
+/// entry that is no longer listed (see [`crate::whiteout`]). Applying it anyway
+/// would put a measurable hole on the device with nothing about it in any output
+/// the user reads, so the default is to decline and say why.
+///
+/// The override is the durable list rather than a new switch: a path the user
+/// added with `nomount whiteout add <path> --force` is a decision already made,
+/// so honour it here too.
+fn whiteout_allowed(target: &Path, module: &str) -> bool {
+    if !crate::whiteout::measurable_hole(target) {
+        return true;
+    }
+    if crate::whiteout::read()
+        .unwrap_or_default()
+        .iter()
+        .any(|w| Path::new(w) == target)
+    {
+        return true;
+    }
+    eprintln!(
+        "nomount: skipping whiteout {} from {module}: not on overlayfs, so hiding the entry \
+         would leave its directory reporting a size and link count that still count it. \
+         Run `nomount whiteout add {} --force` to apply it anyway.",
+        target.display(),
+        target.display()
+    );
+    false
+}
+
 pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
     let blocklist = load_blocklist();
     let mut plan = Vec::new();
@@ -435,7 +467,12 @@ pub fn run_reload() -> Result<()> {
         }
         let r = match e.kind {
             PlanKind::Inject => nm.add(&e.target, &e.source),
-            PlanKind::Whiteout => nm.whiteout(&e.target),
+            PlanKind::Whiteout => {
+                if !whiteout_allowed(&e.target, &e.module) {
+                    continue;
+                }
+                nm.whiteout(&e.target)
+            }
             PlanKind::Bind => unreachable!(),
         };
         match r {
@@ -520,10 +557,15 @@ pub fn run_mount() -> Result<()> {
     for e in &plan {
         served.insert(e.module.as_str());
         match e.kind {
-            PlanKind::Whiteout => match nm.whiteout(&e.target) {
-                Ok(()) => st.whiteouts += 1,
-                Err(_) => st.failed += 1,
-            },
+            PlanKind::Whiteout => {
+                if !whiteout_allowed(&e.target, &e.module) {
+                    continue;
+                }
+                match nm.whiteout(&e.target) {
+                    Ok(()) => st.whiteouts += 1,
+                    Err(_) => st.failed += 1,
+                }
+            }
             PlanKind::Inject => match nm.add(&e.target, &e.source) {
                 Ok(()) => st.applied += 1,
                 Err(_) => st.failed += 1,

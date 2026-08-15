@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.6
+
+### Changed
+- **Module whiteouts are held to the same rule as manual ones.** v1.2.5 guarded `whiteout add`, but the mount pass called the engine directly, so a module's `.replace` marker or Magisk char-device marker could still hide an entry on a non-overlay path and leave the directory reporting a size and link count that count it. Those are now declined with the reason printed, `doctor` reports them at plan time rather than after a reboot, and the override is the durable list: `nomount whiteout add <path> --force` marks the decision and the mount pass then honours it. Whiteouts under an overlayfs mount are unaffected.
+
 ## v1.2.5
 
 ### Changed

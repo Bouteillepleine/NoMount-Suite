@@ -98,6 +98,24 @@ pub fn run_doctor() -> Result<()> {
             });
         }
 
+        // A module whiteout off overlayfs is declined by the mount pass; say so
+        // here, before a reboot, rather than leaving it to a stderr line.
+        if e.kind == PlanKind::Whiteout && crate::whiteout::measurable_hole(&e.target) {
+            f.push(Finding {
+                level: Level::Warn,
+                check: "module whiteout declined",
+                detail: format!(
+                    "{} wants to hide {} but it is not on overlayfs, where the parent \
+                     directory would still report a size and link count that count the \
+                     hidden entry. It will be skipped; `nomount whiteout add {} --force` \
+                     applies it anyway",
+                    e.module,
+                    e.target.display(),
+                    e.target.display()
+                ),
+            });
+        }
+
         if e.kind == PlanKind::Inject {
             // Backing gone (module updated/removed underneath us) -> rule serves nothing.
             if !e.source.exists() {
