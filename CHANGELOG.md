@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.5
+
+### Changed
+- **`whiteout add` now refuses a target that is not on overlayfs.** Hiding an entry is only unmeasurable where the directory's own metadata does not describe its contents. On the ROM's erofs partitions it does, exactly — `st_size == 12*entries + name bytes` and `st_nlink == 2 + subdirs`, which held with zero deviation across every stock directory checked on OP15. Removing an entry from the listing without changing either is something no real filesystem does, and one `stat` plus one `getdents64` finds it with no knowledge of the stock ROM. Overlayfs merged directories report neither relationship, so a whiteout there carries no evidence. `--force` overrides. `whiteout suggest` no longer proposes targets that would be refused, `whiteout apply` warns at boot for entries already on the list, and `doctor` reports them.
+
 ## v1.2.4
 
 ### Fixed

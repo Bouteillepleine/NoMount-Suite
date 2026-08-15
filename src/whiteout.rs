@@ -20,6 +20,42 @@ use crate::nm::Nm;
 
 pub const WHITEOUT_PATH: &str = "/data/adb/nomount/whiteouts.txt";
 
+const OVERLAYFS_SUPER_MAGIC: i64 = 0x794c_7630;
+
+/// True when the path sits on an overlayfs mount.
+///
+/// This decides whether a whiteout is safe, because hiding an entry is only
+/// unmeasurable where the directory's own metadata does not describe its
+/// contents. On the ROM's erofs partitions it does, exactly:
+///
+///   st_size  == 12 * entries + total name bytes
+///   st_nlink == 2 + subdirectories
+///
+/// Both held with zero deviation across every stock directory checked on OP15,
+/// and hiding one entry breaks them by precisely that entry's cost — a hole a
+/// caller can compute from one stat plus one getdents64, with no knowledge of
+/// the stock ROM. Overlayfs merged directories report neither relationship
+/// (nlink is 1 and the size comes from one layer), so there is nothing to
+/// contradict and the whiteout is genuinely invisible.
+fn is_overlay(p: &Path) -> Option<bool> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c = CString::new(p.as_os_str().as_bytes()).ok()?;
+    let mut sf: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut sf) } != 0 {
+        return None;
+    }
+    Some(sf.f_type as i64 == OVERLAYFS_SUPER_MAGIC)
+}
+
+/// The parent is what actually carries the evidence: hiding an entry changes
+/// what the DIRECTORY reports, not the target.
+pub(crate) fn measurable_hole(target: &Path) -> bool {
+    let dir = target.parent().unwrap_or(Path::new("/"));
+    matches!(is_overlay(dir), Some(false))
+}
+
 /// Patterns that are commonly probed and are safe to hide when present. Kept
 /// device-agnostic: `suggest` filters these against what really exists here.
 const SUGGESTIONS: &[(&str, &str)] = &[
@@ -91,10 +127,20 @@ pub(crate) fn validate(p: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn add(target: &str) -> Result<()> {
+pub fn add(target: &str, force: bool) -> Result<()> {
     let t = target.trim().to_string();
     validate(&t)?;
     let p = Path::new(&t);
+    if measurable_hole(p) && !force {
+        anyhow::bail!(
+            "refusing {t}: its directory is not on overlayfs, so hiding the entry leaves a \
+             measurable hole. There st_size == 12*entries + name bytes and st_nlink == 2 + \
+             subdirs, exactly; removing this entry from the listing without changing either \
+             is something no real filesystem does, and any caller can check it with one stat \
+             and one getdents64. Whiteouts under an overlayfs mount carry no such evidence. \
+             Use --force if you want it anyway."
+        );
+    }
     if !p.exists() {
         eprintln!("nomount: note - {t} does not exist right now; recorded anyway");
     } else if !is_real_file(p) && p.is_file() {
@@ -157,6 +203,12 @@ pub fn apply() -> Result<()> {
             failed += 1;
             continue;
         }
+        if measurable_hole(Path::new(&e)) {
+            eprintln!(
+                "nomount: warning - {e} is not on overlayfs; the whiteout is measurable \
+                 from its directory's size and link count"
+            );
+        }
         match nm.whiteout(Path::new(&e)) {
             Ok(()) => ok += 1,
             Err(_) => failed += 1,
@@ -171,7 +223,11 @@ pub fn suggest() -> Result<()> {
     let have = read()?;
     let mut found = 0;
     for (p, why) in SUGGESTIONS {
-        if is_real_file(Path::new(p)) && !have.iter().any(|x| x == p) {
+        let path = Path::new(p);
+        if is_real_file(path) && !have.iter().any(|x| x == p) {
+            if measurable_hole(path) {
+                continue; /* would be refused; proposing it would only mislead */
+            }
             println!("{p}\t{why}");
             found += 1;
         }

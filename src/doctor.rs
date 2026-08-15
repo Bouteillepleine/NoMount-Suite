@@ -251,6 +251,22 @@ pub fn run_doctor() -> Result<()> {
             ),
         });
     }
+    // A whiteout only hides cleanly on overlayfs; anywhere else the parent
+    // directory's size and link count still describe the entry that is gone.
+    for w in crate::whiteout::read().unwrap_or_default() {
+        if crate::whiteout::measurable_hole(std::path::Path::new(&w)) {
+            f.push(Finding {
+                level: Level::Warn,
+                check: "whiteout leaves a measurable hole",
+                detail: format!(
+                    "{w} is not under an overlayfs mount: its directory still reports the \
+                     size and link count of a directory that contains it, which one stat \
+                     and one getdents64 can compare. Remove it, or move the hide to a path \
+                     served through an overlay"
+                ),
+            });
+        }
+    }
     for (part, n) in &fd_note {
         f.push(Finding {
             level: Level::Info,

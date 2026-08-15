@@ -105,7 +105,13 @@ pub enum UidAction {
 #[derive(Subcommand)]
 pub enum WhiteoutAction {
     /// Hide a path now and on every boot
-    Add { path: String },
+    Add {
+        path: String,
+        /// Hide it anyway on a filesystem where the hole is measurable (see the
+        /// refusal message). Only for a target you have decided is worth it.
+        #[arg(long)]
+        force: bool,
+    },
     /// Stop hiding a path
     Remove { path: String },
     /// Show the list and whether each entry is currently applied
