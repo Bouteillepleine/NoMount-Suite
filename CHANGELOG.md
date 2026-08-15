@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.2
+
+### Fixed
+- **The absorb opt-out no longer depends on knowing a fork's module id.** The seeded skip list named specific ids (`zygisk_lsposed`, …), and matching is on `/modules/<id>/` — so a hook framework installed under any other id (`zygisk_lsposed_next`, a renamed fork, a new one) was not matched and its bind was absorbed. It now keys on the **path being hooked** (`/apex/com.android.art/bin/dex2oat`, `/system/bin/app_process`), which is identical across forks. Module ids still work for anything else.
+- **A missing skip file no longer fails open.** `skip_list()` returned an empty list when the file could not be read, so deleting or losing it silently absorbed *everything*, hook frameworks included. It now falls back to the built-in hook paths, so the protection survives losing the file.
+
 ## v1.2.1
 
 ### Changed

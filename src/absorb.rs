@@ -36,6 +36,17 @@ pub const SKIP_FILE: &str = "/data/adb/nomount/absorb-skip.txt";
 /// Pre-v1.2.1 name, still honoured so an existing install keeps its opt-outs.
 const SKIP_FILE_LEGACY: &str = "/data/adb/nomount/absorb-skip";
 
+/// Used when the skip file cannot be read at all. Keyed on the PATH BEING
+/// HOOKED, not on who installed it: a hook framework's module id varies between
+/// forks (`zygisk_lsposed`, `zygisk_lsposed_next`, `lsposed`, …) and an id list
+/// silently misses every one it does not name, while the path it hooks is the
+/// same for all of them. Losing the file must not quietly expose a framework, so
+/// this is what absorb falls back to rather than "skip nothing".
+const BUILTIN_SKIPS: &[&str] = &[
+    "/apex/com.android.art/bin/dex2oat", // dex2oat / dex2oat32 / dex2oat64
+    "/system/bin/app_process",           // app_process32 / app_process64
+];
+
 /// Entries to leave alone: one per line, either a module id (matched against the
 /// bind's source) or an absolute target prefix. Blank lines and `#` ignored.
 fn skip_list() -> Vec<String> {
@@ -48,7 +59,7 @@ fn skip_list() -> Vec<String> {
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|_| BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect())
 }
 
 /// True if this mount is explicitly excluded.
@@ -378,6 +389,31 @@ mod tests {
         assert!(!is_skipped(src, tgt, &["other_module".into()]));
         assert!(!is_skipped(src, tgt, &["/system/".into()]));
         assert!(!is_skipped(src, tgt, &[]));
+    }
+
+    #[test]
+    fn path_key_covers_any_fork_id() {
+        // The same hook, installed under three different fork ids.
+        let tgt = Path::new("/apex/com.android.art/bin/dex2oat64");
+        let key: Vec<String> = vec!["/apex/com.android.art/bin/dex2oat".into()];
+        for id in ["zygisk_lsposed", "zygisk_lsposed_next", "lsposed", "some_new_fork"] {
+            let src = PathBuf::from(format!("/data/adb/modules/{id}/bin/dex2oat"));
+            assert!(is_skipped(&src, tgt, &key), "path key must cover fork id {id}");
+        }
+        // An id key, by contrast, only ever covers the one id it names.
+        let idkey: Vec<String> = vec!["zygisk_lsposed".into()];
+        let other = PathBuf::from("/data/adb/modules/zygisk_lsposed_next/bin/dex2oat");
+        assert!(!is_skipped(&other, tgt, &idkey), "id key cannot cover a renamed fork");
+    }
+
+    #[test]
+    fn builtin_fallback_still_protects_hook_paths() {
+        let builtins: Vec<String> = BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect();
+        let src = PathBuf::from("/data/adb/modules/anything/bin/dex2oat");
+        assert!(is_skipped(&src, Path::new("/apex/com.android.art/bin/dex2oat64"), &builtins));
+        assert!(is_skipped(&src, Path::new("/system/bin/app_process64"), &builtins));
+        // and does not over-reach
+        assert!(!is_skipped(&src, Path::new("/product/etc/foo.xml"), &builtins));
     }
 
     #[test]
