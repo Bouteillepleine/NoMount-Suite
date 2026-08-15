@@ -4,7 +4,7 @@
 [ -n "$APATCH" ] && exit 0
 MODDIR="${0%/*}"
 NMDIR=/data/adb/nomount
-mkdir -p "$NMDIR"
+mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 ABI=$(getprop ro.product.cpu.abi)
 BIN="$MODDIR/bin/$ABI/nomount"
 

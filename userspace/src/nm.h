@@ -149,7 +149,9 @@ static noinline void *get_attr(const void *nh, int type) {
     char *attr = (char *)nh + 16;
     while ((attr - (char *)nh) + 4 <= max_len) {
         unsigned short alen = *(unsigned short *)attr;
-        if (alen < 4) break;
+        /* The payload must also FIT: without this a truncated attribute yields a
+         * pointer running past the message, which print_str() then walks to a NUL. */
+        if (alen < 4 || (attr - (char *)nh) + alen > max_len) break;
         if (*(unsigned short *)(attr + 2) == type) return attr + 4;
         attr += (alen + 3) & -4;
     }

@@ -30,7 +30,13 @@ void c_main(long *sp) {
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--uid") == 0 && i + 1 < argc) {
             const char *s = argv[++i];
-            while (*s) target_uid = (target_uid << 3) + (target_uid << 1) + (*s++ - '0');
+            /* Validate: the old loop turned any non-digit into arithmetic, so a
+             * typo silently targeted a garbage uid instead of failing. */
+            if (!*s) { exit_code = 3; goto do_exit; }
+            while (*s) {
+                if (*s < '0' || *s > '9') { exit_code = 3; goto do_exit; }
+                target_uid = (target_uid << 3) + (target_uid << 1) + (*s++ - '0');
+            }
         } else if (p_count < 64) {
             p_args[p_count++] = argv[i];
         }
@@ -88,7 +94,11 @@ void c_main(long *sp) {
     } else if (cmd == 'b' || cmd == 'u') {
         if (p_count < 1) goto do_exit;
         unsigned int uid = 0; const char *s = p_args[0];
-        while (*s) uid = (uid << 3) + (uid << 1) + (*s++ - '0');
+        if (!*s) { exit_code = 3; goto do_exit; }
+        while (*s) {
+            if (*s < '0' || *s > '9') { exit_code = 3; goto do_exit; }
+            uid = (uid << 3) + (uid << 1) + (*s++ - '0');
+        }
         exit_code = (do_nm_cmd(fd,6 - (cmd == 'b'), 4, &uid, 4, 5, &mem) < 0);
         goto do_exit;
 
@@ -123,11 +133,10 @@ void c_main(long *sp) {
         if (do_nm_cmd(fd,1, 0, (void *)0, 0, 1, &mem) > 0) {
             unsigned int *ver = get_attr(mem.rx_buf, 5);
             if (ver) {
-                unsigned int v = *ver; char v_str[4] = {0};
-                unsigned char tens = ((v << 7) + (v << 6) + (v << 3) + (v << 2) + v) >> 11;
-                v = v - ((tens << 3) + (tens << 1));
-                v_str[0] = tens + '0'; v_str[1] = v + '0'; v_str[2] = '\n';
-                print_str(v_str);
+                /* print_uint handles any width; the old two-digit routine printed
+                 * "02" for 2 and garbage for >= 100. */
+                print_uint(*ver);
+                print_str("\n");
                 exit_code = 0; goto do_exit;
             }
         }

@@ -5,10 +5,19 @@
 # Root/su is NOT managed here (sucompat handles it, mountlessly).
 MODDIR="${0%/*}"
 NMDIR=/data/adb/nomount
-mkdir -p "$NMDIR"
+# 0700: spoof.conf/blocklist/pathhide.conf are read as root at boot, so anything
+# able to write here gets root. The dir was being created under the boot umask (0777).
+mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 
-LOCK="/dev/nomount_metamount.lock"
-( set -o noclobber; : > "$LOCK" ) 2>/dev/null || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
+# Single-run guard. Was a noclobber file in /dev: world-writable (boot umask),
+# named after the project, and "held" by mere existence -- so anything able to
+# create that path pre-empted the whole mount pass. flock releases on exit and
+# lives in the 0700 state dir.
+LOCK="$NMDIR/.mount.lock"
+exec 9>"$LOCK" 2>/dev/null
+if command -v flock >/dev/null 2>&1; then
+    flock -n 9 || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
+fi
 
 ABI=$(getprop ro.product.cpu.abi)
 BIN="$MODDIR/bin/$ABI/nomount"
@@ -42,6 +51,9 @@ if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
     else
         rm -f "$SUSFS_BIN.nm_new" 2>/dev/null
     fi
+    # Restore ksud's immutable flag: it was cleared above only so the copy could
+    # be read, and leaving it off permanently removes protection we did not add.
+    chattr +i "$KSUD" 2>/dev/null
 fi
 
 # --- spoof add-on (dynamic vbmeta.digest) ---

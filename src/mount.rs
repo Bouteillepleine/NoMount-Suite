@@ -140,69 +140,6 @@ fn is_partition_root(target: &Path) -> bool {
     target.components().skip(1).count() == 1
 }
 
-/// Does this module bind its OWN my_* content (so we must not double-handle it)?
-/// A module counts as self-managing if a boot script actually mounts/binds a my_*
-/// path. The old heuristic required `my_` and `mount`/`bind` on ONE line, which
-/// missed the common real-world pattern of assigning the path to a variable and
-/// mounting the variable on a later line:
-///     DST=/my_product/etc/extension/com.oplus.app-features.xml
-///     mount --bind "$SRC" "$DST"
-/// (op15_3d_lockscreen_wp, OxygenCustomizer, OnePlus_Dialer_Universal all do this).
-/// So we now match ACROSS the script: first collect vars assigned a my_* value,
-/// then flag any mount/bind line that references a my_* path directly OR through
-/// one of those vars. Still precise — an unrelated `mount` plus an unrelated `my_`
-/// mention elsewhere won't trip it (the mount line itself must reach a my_* path).
-/// Deep indirection (mounting inside a function looped over a my_* var) can still
-/// slip; the cost there is only a redundant rule, and bind::apply() skips an
-/// already-mounted target as a second guard.
-fn self_binds_my(mdir: &Path) -> bool {
-    ["post-fs-data.sh", "service.sh", "post-mount.sh"]
-        .iter()
-        .filter_map(|s| fs::read_to_string(mdir.join(s)).ok())
-        .any(|body| script_binds_my(&body))
-}
-
-/// Pure text analysis (unit-tested): does this one boot script mount/bind a my_*
-/// path? Split out from [`self_binds_my`] so the cross-line + variable-resolution
-/// logic can be tested without a temp module tree on disk.
-fn script_binds_my(body: &str) -> bool {
-    // Comment-stripped code lines (drop full-line and inline trailing `#...`).
-    let code: Vec<String> = body
-        .lines()
-        .map(|l| l.split('#').next().unwrap_or("").to_string())
-        .collect();
-    // Vars assigned a value that references a my_* path: `NAME=…my_…`.
-    let mut my_vars: HashSet<String> = HashSet::new();
-    for line in &code {
-        if let Some((name, val)) = line.trim().split_once('=') {
-            let name = name.trim();
-            if !name.is_empty()
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && val.contains("my_")
-            {
-                my_vars.insert(name.to_string());
-            }
-        }
-    }
-    // A mount/bind line that reaches a my_* path — literally, or via a my_* var
-    // as `$VAR`, `${VAR}`, or `"$VAR"`.
-    for line in &code {
-        let low = line.to_lowercase();
-        if !(low.contains("mount") || low.contains("bind")) {
-            continue;
-        }
-        if low.contains("my_") {
-            return true;
-        }
-        for v in &my_vars {
-            if line.contains(&format!("${v}")) || line.contains(&format!("${{{v}}}")) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn module_enabled(dir: &Path) -> bool {
     !dir.join("disable").exists()
         && !dir.join("remove").exists()
@@ -258,7 +195,7 @@ pub(crate) struct PlanEntry {
 /// are hookless-injected into e.g. `/product/overlay`, and OverlayManagerService +
 /// idmap2 pick them up at the system_server scan (which runs after this
 /// post-fs-data pass). So RRO works with no overlayfs mount — zero mounts total.
-fn plan_tree(module: &str, module_root: &Path, dir: &Path, self_manages: bool, out: &mut Vec<PlanEntry>) {
+fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -280,7 +217,7 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, self_manages: bool, o
         let name = name.to_string_lossy();
 
         if ft.is_dir() {
-            plan_tree(module, module_root, &source, self_manages, out);
+            plan_tree(module, module_root, &source, out);
         } else if name == ".replace" {
             // Whiteout the parent dir (module wants to replace, not merge, it).
             // Never whiteout a bare partition root: masking a whole partition bootloops
@@ -317,17 +254,13 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, self_manages: bool, o
             // are unaffected: they take the is_dir() branch above and recurse as before.
             continue;
         } else if is_my_partition(&target) {
-            // A module that ships its own post-fs-data.sh/service.sh already binds its
-            // my_* content (often a processed copy); double-handling it would stack a
-            // duplicate mount or shadow the wrong version, so leave those to it —
-            // whichever mode we're in.
-            if self_manages {
-                continue;
-            }
-            // Default: real bind (my_* historically excluded from hookless). With
-            // NM_MY_HOOKLESS, route it through the same hookless inject as every other
-            // partition and let the boot guard adjudicate whether the bind was ever
-            // needed. Partition-root/overlay-fallback hazards are handled above.
+            // Always served. This used to be skipped when a text heuristic decided the
+            // module's boot scripts "looked like" they mounted my_* themselves, which
+            // silently dropped the module's ENTIRE my_* content on a grep over shell
+            // source -- unpredictable, and invisible when it misfired. With
+            // NM_MY_HOOKLESS nothing here bind-mounts, so the duplicate-mount hazard it
+            // guarded against is gone; if a module does bind its own path, that real
+            // mount simply takes precedence over the injection.
             let kind = if my_hookless_enabled() { PlanKind::Inject } else { PlanKind::Bind };
             out.push(PlanEntry {
                 module: module.to_string(),
@@ -368,10 +301,6 @@ pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
             continue;
         }
         let id = id.to_string();
-        // A module that binds its own my_* content manages it itself; we skip its
-        // my_* binds (see plan_tree) to avoid a duplicate mount. Its hookless
-        // content is still served normally.
-        let self_manages = self_binds_my(&mdir);
         // "system/" is the classic layout; auto_mount modules (e.g. OxygenCustomizer)
         // ship content directly under module-root partition dirs. Process every
         // top-level dir that maps to a real on-device partition — dynamically, so any
@@ -395,7 +324,7 @@ pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
                 if !is_partition_dir(name) {
                     continue;
                 }
-                plan_tree(&id, &mdir, &e.path(), self_manages, &mut plan);
+                plan_tree(&id, &mdir, &e.path(), &mut plan);
             }
         }
     }
@@ -429,19 +358,27 @@ enum LiveRule {
 /// any ` [UID: N]` suffix are ignored. Suffix/rsplit matching so a target path
 /// containing spaces/parens/arrows is not mis-split (source is after the LAST
 /// ` -> `; whiteout is a suffix).
-fn parse_live_rules(list: &str) -> HashMap<PathBuf, LiveRule> {
+fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
     let mut out = HashMap::new();
     for l in list.lines() {
+        // Keep the UID: it is part of a rule's identity. Collapsing it meant a
+        // per-UID rule and a global one for the same target shared a key, and
+        // `nm del <target>` (always uid 0) could never remove the per-UID one --
+        // so it re-counted as a failure on every reload, forever.
+        let uid: u32 = l
+            .split_once(" [UID:")
+            .and_then(|(_, r)| r.trim_start().trim_end_matches(']').trim().parse().ok())
+            .unwrap_or(0);
         let l = l.split(" [UID:").next().unwrap_or(l).trim();
         if l.is_empty() {
             continue;
         }
         if let Some(t) = l.strip_suffix(" (whiteout)") {
-            out.insert(PathBuf::from(t.trim()), LiveRule::Whiteout);
+            out.insert((PathBuf::from(t.trim()), uid), LiveRule::Whiteout);
         } else if l.ends_with(" (virtual dir)") {
             continue;
         } else if let Some((t, s)) = l.rsplit_once(" -> ") {
-            out.insert(PathBuf::from(t.trim()), LiveRule::Inject(PathBuf::from(s.trim())));
+            out.insert((PathBuf::from(t.trim()), uid), LiveRule::Inject(PathBuf::from(s.trim())));
         }
     }
     out
@@ -482,7 +419,7 @@ pub fn run_reload() -> Result<()> {
     // just presence): a target moving between modules or flipping inject<->whiteout
     // must update, or the stale rule would be frozen until a full mount.
     for (t, e) in &desired_hookless {
-        let up_to_date = match live.get(*t) {
+        let up_to_date = match live.get(&((*t).to_path_buf(), 0)) {
             Some(LiveRule::Inject(src)) => {
                 e.kind == PlanKind::Inject && src.as_path() == e.source.as_path()
             }
@@ -492,7 +429,7 @@ pub fn run_reload() -> Result<()> {
         if up_to_date {
             continue;
         }
-        let existed = live.contains_key(*t);
+        let existed = live.contains_key(&((*t).to_path_buf(), 0));
         if existed {
             let _ = nm.del(&e.target); // drop the stale rule before re-adding
         }
@@ -513,7 +450,7 @@ pub fn run_reload() -> Result<()> {
         }
     }
     // Remove live rules no longer desired (skip any that are now bind targets).
-    for t in live.keys() {
+    for (t, _uid) in live.keys() {
         if !desired_hookless.contains_key(t.as_path()) && !desired_bind_src.contains_key(t.as_path()) {
             if nm.del(t).is_ok() {
                 removed += 1;
@@ -610,44 +547,14 @@ pub fn run_mount() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::script_binds_my;
+    use super::*;
 
     #[test]
-    fn var_indirect_my_bind_detected() {
-        // The exact op15_3d_lockscreen_wp pattern the one-line heuristic missed.
-        let s = "SRC=$MODDIR/my_product/etc/extension/foo.xml\n\
-                 DST=/my_product/etc/extension/foo.xml\n\
-                 mount --bind \"$SRC\" \"$DST\"\n";
-        assert!(script_binds_my(s));
-    }
-
-    #[test]
-    fn literal_my_on_mount_line_detected() {
-        assert!(script_binds_my("mount --bind $MODDIR/my_product/x /my_product/x\n"));
-    }
-
-    #[test]
-    fn mount_folders_var_assignment_detected() {
-        // extreme_gt: `mount_folders='my_product my_heytap my_stock'` — the assignment
-        // line itself carries both tokens, so it's caught even before the loop body.
-        assert!(script_binds_my("mount_folders='my_product my_heytap my_stock'\n"));
-    }
-
-    #[test]
-    fn commented_out_not_detected() {
-        assert!(!script_binds_my("# mount --bind $SRC /my_product/x\nDST=/my_product/x\n"));
-    }
-
-    #[test]
-    fn unrelated_mount_and_my_not_tripped() {
-        // A my_ mention on a non-mount line + an unrelated mount of /system: no my_ var
-        // reaches the mount line, so it must NOT be flagged (a false positive would make
-        // NoMount wrongly skip serving that module's my_ content).
-        assert!(!script_binds_my("echo /my_product is nice\nmount --bind /data/x /system/y\n"));
-    }
-
-    #[test]
-    fn my_var_but_no_mount_not_detected() {
-        assert!(!script_binds_my("DST=/my_product/x\ncat \"$DST\"\n"));
+    fn live_rules_are_keyed_including_uid() {
+        let m = parse_live_rules("/a -> /b\n/a -> /c [UID: 1000]\n/d (whiteout)\n/e (virtual dir)\n");
+        assert_eq!(m.len(), 3);
+        assert!(m.contains_key(&(PathBuf::from("/a"), 0)));
+        assert!(m.contains_key(&(PathBuf::from("/a"), 1000)));
+        assert!(m.contains_key(&(PathBuf::from("/d"), 0)));
     }
 }

@@ -66,6 +66,8 @@ fn parse_live(list: &str) -> Vec<(PathBuf, PathBuf)> {
 }
 
 pub fn run_doctor() -> Result<()> {
+    // partition -> count of non-overlay entries not in zygote's FD allowlist
+    let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut f: Vec<Finding> = Vec::new();
     let (plan, skipped) = collect_plan();
 
@@ -160,19 +162,24 @@ pub fn run_doctor() -> Result<()> {
                     if !ZYGOTE_FD_ALLOWLISTED.contains(&part.as_str()) {
                         let is_overlay_apk = target.extension().and_then(|x| x.to_str()) == Some("apk")
                             && target.components().any(|c| c.as_os_str() == "overlay");
-                        f.push(Finding {
-                            level: if is_overlay_apk { Level::Error } else { Level::Warn },
-                            check: "not FD-allowlisted for zygote",
-                            detail: format!(
-                                "{} lives on /{part}{}",
-                                target.display(),
-                                if is_overlay_apk {
-                                    " — an overlay APK here aborts forkSystemServer"
-                                } else {
-                                    ""
-                                }
-                            ),
-                        });
+                        if is_overlay_apk {
+                            // The genuinely dangerous case: zygote preloads these and an
+                            // identity mismatch aborts forkSystemServer. Always per-file.
+                            f.push(Finding {
+                                level: Level::Error,
+                                check: "not FD-allowlisted for zygote",
+                                detail: format!(
+                                    "{} lives on /{part} — an overlay APK here aborts forkSystemServer",
+                                    target.display()
+                                ),
+                            });
+                        } else {
+                            // Everything else on such a partition is the same observation
+                            // repeated once per file. Emitting one warning per entry buried
+                            // real findings under ~85 identical lines on a device that boots
+                            // fine, so count them and report once per partition below.
+                            *fd_note.entry(part).or_insert(0usize) += 1;
+                        }
                     }
                 }
                 // Served content should be byte-identical in size to its backing; a mismatch
@@ -216,6 +223,16 @@ pub fn run_doctor() -> Result<()> {
     );
 
     f.sort_by(|a, b| a.level.cmp(&b.level).then(a.check.cmp(b.check)));
+    for (part, n) in &fd_note {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "not FD-allowlisted for zygote",
+            detail: format!(
+                "{n} injected file(s) on /{part} — zygote does not preload these, so this is \
+                 informational; an overlay APK here would be reported separately as an error"
+            ),
+        });
+    }
     let errors = f.iter().filter(|x| x.level == Level::Error).count();
     let warns = f.len() - errors;
 

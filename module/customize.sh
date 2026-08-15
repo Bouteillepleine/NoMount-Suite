@@ -62,6 +62,7 @@ done
 # make the add-on script executable. The work itself happens at boot in spoof.sh.
 NMDIR=/data/adb/nomount
 mkdir -p "$NMDIR"
+set_perm "$NMDIR" 0 0 0700
 CONF="$NMDIR/spoof.conf"
 [ -f "$CONF" ] || cat > "$CONF" <<'EOF'
 # NoMount Suite — spoof add-on config

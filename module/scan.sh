@@ -4,7 +4,7 @@
 # timeout keeps one slow/wedged APK from stalling the scan. --cached prints cache.
 # tr -d '\000' collapses the manifest's UTF-16 string pool so grep matches.
 CACHE=/data/adb/nomount/xposed_cache
-mkdir -p /data/adb/nomount
+mkdir -p /data/adb/nomount && chmod 0700 /data/adb/nomount
 
 if [ "$1" = "--cached" ]; then
     cat "$CACHE" 2>/dev/null

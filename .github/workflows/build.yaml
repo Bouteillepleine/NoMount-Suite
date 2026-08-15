@@ -6,6 +6,10 @@ on:
     branches: [suite]
     tags: ['v*']
 
+# Least privilege by default; the release job re-grants what it needs.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   NDK_VERSION: r27c

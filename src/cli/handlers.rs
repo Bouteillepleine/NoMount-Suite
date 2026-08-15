@@ -6,6 +6,12 @@ use super::{UidAction, VfsAction};
 use crate::blocklist::{self, Resolved};
 use crate::nm::Nm;
 
+/// Android packs (user_id, appid) into a uid. The kernel's blocked set stores and
+/// returns the APPID, so a raw-uid comparison misses for any work-profile or clone
+/// uid (>= 100000) -- reporting "not blocked" for one that is.
+const PER_USER_RANGE: u32 = 100_000;
+fn appid(uid: u32) -> u32 { uid % PER_USER_RANGE }
+
 pub fn handle_vfs(action: VfsAction) -> Result<()> {
     let nm = Nm::new();
     match action {
@@ -51,7 +57,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     // UID — a second block returns EEXIST (non-zero), which would
                     // surface as a spurious failure on the drift→Save path even
                     // though the persist (the point of Save) succeeded.
-                    let already = nm.uid_list_live().unwrap_or_default().contains(&uid);
+                    let already = nm.uid_list_live().unwrap_or_default().iter().any(|u| appid(*u) == appid(uid));
                     if already {
                         println!("ok: {target} (uid {uid}) already hidden — saved so it persists");
                     } else {
@@ -70,7 +76,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             blocklist::remove(&target)?;
             match blocklist::resolve(&target)? {
                 Resolved::Uid(uid) => {
-                    if nm.uid_list_live().unwrap_or_default().contains(&uid) {
+                    if nm.uid_list_live().unwrap_or_default().iter().any(|u| appid(*u) == appid(uid)) {
                         nm.uid_unblock(uid)?;
                     }
                     println!("ok: {target} (uid {uid}) unhidden");
@@ -103,7 +109,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 match resolved {
                     Resolved::Uid(uid) => {
                         covered.push(uid);
-                        let state = if live.contains(&uid) {
+                        let state = if live.iter().any(|u| appid(*u) == appid(uid)) {
                             "live"
                         } else {
                             "saved, not applied"
@@ -115,7 +121,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             }
             // Live-only: enforced by the kernel but absent from the file.
             for uid in &live {
-                if !covered.contains(uid) {
+                if !covered.iter().any(|c| appid(*c) == appid(*uid)) {
                     let name =
                         blocklist::package_for_uid(*uid).unwrap_or_else(|| format!("uid {uid}"));
                     println!("{name}\tuid {uid} · live, not saved");

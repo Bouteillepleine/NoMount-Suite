@@ -14,7 +14,7 @@ NMDIR=/data/adb/nomount
 CONF="$NMDIR/spoof.conf"
 LOG="$NMDIR/spoof.log"
 
-mkdir -p "$NMDIR" 2>/dev/null
+mkdir -p "$NMDIR" 2>/dev/null && chmod 0700 "$NMDIR" 2>/dev/null
 # Trim the log so it can't grow unbounded across boots.
 [ -f "$LOG" ] && tail -n 200 "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null
 
@@ -34,7 +34,29 @@ spoof_uname=0          # 1 = apply the uname override
 # (so Boot-state props covers procfs too); set 0 in spoof.conf to keep procfs untouched.
 uname_tail=""          # blank = keep; a bare tail or a whole pasted uname -r
 uname_date=""          # blank = keep; a bare date or a whole pasted uname -v
-[ -f "$CONF" ] && . "$CONF"
+# Parse, do NOT source. `. "$CONF"` executes the file as root at post-fs-data,
+# so a writable config was arbitrary root code execution. Only known keys are
+# accepted and the value is never evaluated.
+nm_load_conf() {
+    [ -f "$CONF" ] || return 0
+    while IFS= read -r _l; do
+        _l=${_l%%#*}
+        case "$_l" in *=*) ;; *) continue ;; esac
+        _k=${_l%%=*}; _v=${_l#*=}
+        _k=$(printf '%s' "$_k" | tr -d " \t")
+        _v=${_v#\'}; _v=${_v%\'}; _v=${_v#\"}; _v=${_v%\"}
+        case "$_k" in
+            vbmeta_digest) vbmeta_digest=$_v ;;
+            vbmeta_size)   vbmeta_size=$_v ;;
+            spoof_props)   spoof_props=$_v ;;
+            spoof_uname)   spoof_uname=$_v ;;
+            spoof_cmdline) spoof_cmdline=$_v ;;
+            uname_tail)    uname_tail=$_v ;;
+            uname_date)    uname_date=$_v ;;
+        esac
+    done < "$CONF"
+}
+nm_load_conf
 
 # ---- resetprop locator ----------------------------------------------------
 RESETPROP=""

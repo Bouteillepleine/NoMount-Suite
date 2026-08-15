@@ -3,7 +3,9 @@
 # healthy, so clear the boot counter (re-arms the guard for next time).
 NMDIR=/data/adb/nomount
 i=0
-while [ "$(getprop sys.boot_completed)" != "1" ] && [ "$i" -lt 120 ]; do
+booted=0
+while [ "$i" -lt 120 ]; do
+    if [ "$(getprop sys.boot_completed)" = "1" ]; then booted=1; break; fi
     sleep 2
     i=$((i + 1))
 done
@@ -13,8 +15,15 @@ done
 # mounts is handled by the manager's per-app-profile default-umount instead.
 
 sleep 10
-rm -f "$NMDIR/bootcount"
-echo "nomount: boot completed, guard counter reset" > /dev/kmsg 2>/dev/null
+# Only re-arm when the boot really finished. Clearing the counter after the wait
+# merely TIMED OUT disarms the bootloop guard on exactly the hanging boots it
+# exists to catch, so it could never reach GUARD_MAX.
+if [ "$booted" = "1" ]; then
+    rm -f "$NMDIR/bootcount"
+    echo "nomount: boot completed, guard counter reset" > /dev/kmsg 2>/dev/null
+else
+    echo "nomount: boot_completed never set - leaving guard counter armed" > /dev/kmsg 2>/dev/null
+fi
 
 # --- Cloak: re-apply the pathhide maps/fd rule list (managed by the WebUI) ---
 # Hides selected module APKs from every /proc/<pid>/maps and /proc/<pid>/fd via
@@ -58,6 +67,9 @@ if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
     else
         rm -f "$SUSFS_BIN.nm_new" 2>/dev/null
     fi
+    # Restore ksud's immutable flag: it was cleared above only so the copy could
+    # be read, and leaving it off permanently removes protection we did not add.
+    chattr +i "$KSUD" 2>/dev/null
 fi
 
 # --- refresh the manager card with the settled state ---

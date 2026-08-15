@@ -25,17 +25,20 @@ const SELINUX_XATTR: &[u8] = b"security.selinux\0";
 /// on a fresh fd from the same process would deadlock).
 struct Lock(fs::File);
 impl Lock {
-    fn acquire() -> Option<Lock> {
+    /// Fails loudly. This used to return `Option` and every call site bound it to
+    /// `_lock` and carried on, so a failed open or flock silently degraded to no
+    /// locking at all -- the exact concurrent mount/reload corruption of
+    /// binds.list the lock exists to prevent.
+    fn acquire() -> Result<Lock> {
         let f = fs::OpenOptions::new()
             .create(true)
             .write(true)
             .open(LOCK_FILE)
-            .ok()?;
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0 {
-            Some(Lock(f))
-        } else {
-            None
+            .with_context(|| format!("open {LOCK_FILE}"))?;
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            bail!("flock {LOCK_FILE}: {}", std::io::Error::last_os_error());
         }
+        Ok(Lock(f))
     }
 }
 impl Drop for Lock {
@@ -65,6 +68,27 @@ fn is_mounted(target: &Path) -> bool {
 /// partition's context (e.g. `system_file`) instead of `adb_data_file` -- without
 /// this an app reading the my_* file hits an avc denial. Fails hard: a mislabeled
 /// override is worse than none (broken read + a detection tell).
+/// Read a path's SELinux label, if it has one.
+fn read_selinux(p: &Path) -> Option<Vec<u8>> {
+    let c = cstr(p).ok()?;
+    let mut buf = [0u8; 256];
+    let n = unsafe {
+        libc::getxattr(c.as_ptr(), SELINUX_XATTR.as_ptr() as *const libc::c_char,
+                       buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+    };
+    if n <= 0 { None } else { Some(buf[..n as usize].to_vec()) }
+}
+
+/// Put a previously captured label back on `p`.
+fn restore_selinux(p: &Path, label: &[u8]) {
+    if let Ok(c) = cstr(p) {
+        unsafe {
+            libc::setxattr(c.as_ptr(), SELINUX_XATTR.as_ptr() as *const libc::c_char,
+                           label.as_ptr() as *const libc::c_void, label.len(), 0);
+        }
+    }
+}
+
 fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     let (sc, tc) = (cstr(source)?, cstr(target)?);
     let name = SELINUX_XATTR.as_ptr() as *const libc::c_char;
@@ -95,12 +119,17 @@ pub fn apply(source: &Path, target: &Path) -> Result<()> {
         bail!("bind target missing (new-file unsupported): {t}");
     }
 
-    let _lock = Lock::acquire();
+    let _lock = Lock::acquire()?;
     // Serialized: check-then-bind can't race another process into a double mount.
     if is_mounted(target) {
         // Another module already bound this target; leave it to them.
         return Ok(());
     }
+    // Capture the source's own label BEFORE overwriting it, so teardown (and the
+    // failure path below) can put it back. Without this every attempted bind left
+    // a module file permanently carrying a partition label, even when the mount
+    // then failed and no bind existed at all.
+    let orig_label = read_selinux(source);
     // Relabel first; abort the whole bind on failure (never expose a mislabeled file).
     mirror_selinux(source, target)
         .with_context(|| format!("relabel for bind of {t}"))?;
@@ -110,11 +139,15 @@ pub fn apply(source: &Path, target: &Path) -> Result<()> {
         libc::mount(sc.as_ptr(), tc.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null())
     };
     if r != 0 {
+        if let Some(l) = &orig_label { restore_selinux(source, l); }
         bail!("bind {} -> {t}: {}", source.display(), std::io::Error::last_os_error());
     }
     // Track it; if we can't, unbind rather than leak an untracked mount.
-    if let Err(e) = append_locked(&t, &s) {
+    let lbl = orig_label.as_deref().map(|l| String::from_utf8_lossy(l).trim_end_matches('\0').to_string())
+        .unwrap_or_default();
+    if let Err(e) = append_locked(&t, &s, &lbl) {
         unsafe { libc::umount2(tc.as_ptr(), libc::MNT_DETACH) };
+        if let Some(l) = &orig_label { restore_selinux(source, l); }
         bail!("bind of {t} recorded failed ({e}); unbound");
     }
     Ok(())
@@ -123,28 +156,38 @@ pub fn apply(source: &Path, target: &Path) -> Result<()> {
 /// Append a "target\tsource" record to binds.list. Caller must hold the Lock.
 /// Storing the source lets a reload detect a changed backing (re-bind), not just
 /// an added/removed target.
-fn append_locked(target: &str, source: &str) -> std::io::Result<()> {
+fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Result<()> {
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(BINDS_LIST)?;
-    writeln!(f, "{target}\t{source}")
+    writeln!(f, "{target}\t{source}\t{orig_label}")
 }
 
 /// Parse one binds.list line into (target, source). Tolerates the legacy
 /// target-only format (source comes back empty), so an upgrade-in-place reload
 /// simply re-binds every legacy row once to backfill its source.
-fn parse_line(l: &str) -> Option<(PathBuf, PathBuf)> {
+/// `target \t source \t original-label`. Tolerates both legacy shapes
+/// (target-only, and target+source without a label).
+fn parse_line(l: &str) -> Option<(PathBuf, PathBuf, String)> {
     let l = l.trim();
     if l.is_empty() {
         return None;
     }
-    let (t, s) = l.split_once('\t').unwrap_or((l, ""));
-    Some((PathBuf::from(t), PathBuf::from(s)))
+    let mut it = l.split('\t');
+    let t = it.next()?;
+    let s = it.next().unwrap_or("");
+    let lbl = it.next().unwrap_or("");
+    Some((PathBuf::from(t), PathBuf::from(s), lbl.to_string()))
 }
 
 /// (target, source) pairs we currently have bound (from binds.list). Read-only.
 pub fn tracked() -> Vec<(PathBuf, PathBuf)> {
+    tracked_full().into_iter().map(|(t, s, _)| (t, s)).collect()
+}
+
+/// As [`tracked`], plus each row's recorded original source label.
+fn tracked_full() -> Vec<(PathBuf, PathBuf, String)> {
     fs::read_to_string(BINDS_LIST)
         .map(|s| s.lines().filter_map(parse_line).collect())
         .unwrap_or_default()
@@ -152,14 +195,22 @@ pub fn tracked() -> Vec<(PathBuf, PathBuf)> {
 
 /// Umount a single tracked bind and drop it from the list (gap-free reload).
 pub fn umount_one(target: &Path) {
-    let _lock = Lock::acquire();
+    let Ok(_lock) = Lock::acquire() else { return };
     if let Ok(c) = CString::new(target.to_string_lossy().as_bytes()) {
         unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
     }
-    let remaining: String = tracked()
+    let rows = tracked_full();
+    // Put the source file's own label back now that nothing is bound over it.
+    for (t, s, lbl) in rows.iter().filter(|(t, _, _)| t == target) {
+        let _ = t;
+        if !lbl.is_empty() {
+            restore_selinux(s, format!("{lbl}\0").as_bytes());
+        }
+    }
+    let remaining: String = rows
         .into_iter()
-        .filter(|(t, _)| t != target)
-        .map(|(t, s)| format!("{}\t{}\n", t.display(), s.display()))
+        .filter(|(t, _, _)| t != target)
+        .map(|(t, s, l)| format!("{}\t{}\t{}\n", t.display(), s.display(), l))
         .collect();
     let _ = fs::write(BINDS_LIST, remaining);
 }
@@ -167,16 +218,19 @@ pub fn umount_one(target: &Path) {
 /// Umount every bind we recorded, then clear the list. Run at the start of each
 /// mount pass so stale binds (removed/updated modules) never accumulate.
 pub fn teardown_all() {
-    let _lock = Lock::acquire();
+    let Ok(_lock) = Lock::acquire() else { return };
     let Ok(list) = fs::read_to_string(BINDS_LIST) else {
         return;
     };
     for line in list.lines() {
-        let Some((t, _)) = parse_line(line) else {
+        let Some((t, s, lbl)) = parse_line(line) else {
             continue;
         };
         if let Ok(c) = CString::new(t.to_string_lossy().as_bytes()) {
             unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+        }
+        if !lbl.is_empty() {
+            restore_selinux(&s, format!("{lbl}\0").as_bytes());
         }
     }
     let _ = fs::remove_file(BINDS_LIST);
