@@ -245,15 +245,26 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
 
     let (mut rules, mut done, mut failed, mut skipped_dirs) = (0u32, 0u32, 0u32, 0u32);
     for c in &cands {
+        // Apply the same directory rule the real run uses, so a dry run can never
+        // promise an action the real run would decline.
+        let is_dir_bind = c.source.is_dir();
         if dry_run {
-            println!("would absorb {} <- {}", c.target.display(), c.source.display());
+            if is_dir_bind && !include_dirs {
+                println!(
+                    "would SKIP directory bind {} <- {} (needs --include-dirs)",
+                    c.target.display(), c.source.display()
+                );
+                skipped_dirs += 1;
+            } else {
+                println!("would absorb {} <- {}", c.target.display(), c.source.display());
+            }
             continue;
         }
         // A DIRECTORY bind becomes one rule per file -- a static snapshot of the
         // listing as it is right now. Anything the owning module adds to that
         // directory later would simply never appear, and unlike a file bind we
         // cannot tell whether it intends to. Opt-in only.
-        if c.source.is_dir() && !include_dirs {
+        if is_dir_bind && !include_dirs {
             println!(
                 "skipping directory bind {} <- {} (use --include-dirs; injection would \
                  snapshot the listing and miss files added later)",
@@ -295,12 +306,17 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     }
 
     if dry_run {
-        println!("nomount absorb: {} mount(s) would be absorbed (dry run)", cands.len());
-    } else {
         println!(
-            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {failed} failed             {}",
-            if skipped_dirs > 0 { format!(", {skipped_dirs} directory bind(s) skipped") } else { String::new() }
+            "nomount absorb: {} mount(s) would be absorbed, {skipped_dirs} directory bind(s)              would be skipped (dry run)",
+            cands.len() as u32 - skipped_dirs
         );
+    } else {
+        let dirs = if skipped_dirs > 0 {
+            format!(", {skipped_dirs} directory bind(s) skipped")
+        } else {
+            String::new()
+        };
+        println!("nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {failed} failed{dirs}");
     }
     Ok(())
 }
