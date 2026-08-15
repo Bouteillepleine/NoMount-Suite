@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.4
+
+### Fixed
+- **Absorb and `doctor` named a skip file that may not exist.** With no skip file present the built-in hook-path list is used, but both still reported "listed in /data/adb/nomount/absorb-skip.txt" and told you to remove an entry from it — sending you to edit a file that is not there. `skip_list()` now returns its source, absorb names it, and `doctor` says the built-in list is in use and how to override it.
+
 ## v1.2.3
 
 ### Fixed
