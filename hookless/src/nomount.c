@@ -324,8 +324,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         inode->i_blocks = 8;
         inode->i_uid = rule_info->v_uid;
         inode->i_gid = rule_info->v_gid;
-        /* Real directories report st_nlink >= 2 (self + '.'); a synthesized dir
-         * left at new_inode()'s default of 1 is a stat self-consistency outlier. */
+        /* Initial value only -- getattr recounts, since children arrive in batches. */
         /* Real dirs report 2 + one per subdirectory. A synthesized dir that
          * contains subdirectories but reports a flat 2 is impossible on any
          * normal fs, so count the injected children that are dirs. */
@@ -799,6 +798,24 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
     return d_backing_inode(info->r_path.dentry)->i_op->listxattr(info->r_path.dentry, buffer, size);
 }
 
+/* A directory reports 2 + one link per subdirectory. Counted live rather than at
+ * inode creation: the children of a synthesized dir are injected in batches, so
+ * an inode created part-way through would bake in a count that never updates. */
+static unsigned int nm_vdir_nlink(struct nomount_dir_node *d)
+{
+    struct nomount_child_node *ch;
+    unsigned int links = 2;
+    int cid = 0;
+
+    if (!d) return links;
+    rcu_read_lock();
+    idr_for_each_entry(&d->children_idr, ch, cid)
+        if (ch->d_type == DT_DIR && !(ch->flags & NM_FLAG_WHITEOUT))
+            links++;
+    rcu_read_unlock();
+    return links;
+}
+
 /* Reported (getattr-level) stat of a path — i.e. what a userspace detector
  * sees, not the raw backing inode->i_sb->s_dev. On an overlay mount this yields
  * the underlying layer's dev; on plain erofs it equals the sb dev. We mirror
@@ -846,6 +863,7 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
          * stock sibling produces. Narrow to the stock mask -- never widen. */
         if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #endif
+        stat->nlink = nm_vdir_nlink(info->dir_node);
         return 0;
     }
 
@@ -910,6 +928,7 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
          * stock sibling produces. Narrow to the stock mask -- never widen. */
         if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #endif
+        stat->nlink = nm_vdir_nlink(info->dir_node);
         return 0;
     }
 
@@ -1740,6 +1759,27 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     dir_node->owner_rule = ex;
                     dir_node->_tag_ptr = (unsigned long)ex | 1UL;
                     ex->this_dir = dir_node;
+                }
+                /* The walk ENDS here, so the kern_path() below never runs and
+                 * have_anc would stay false -- leaving every irule created in
+                 * this call with no ancestor metadata (raw-hash ino, blksize 1,
+                 * epoch-0 times, no context). Only the FIRST rule under a new
+                 * subtree reaches a real path; every later one stops here, which
+                 * is why only the top synthesized level was ever stamped. The
+                 * virtual parent already carries the right values -- inherit. */
+                if (!have_anc) {
+                    anc_uid = ex->v_uid; anc_gid = ex->v_gid;
+                    anc_mode = ex->v_mode ? ex->v_mode : 0755;
+                    anc_atime = ex->v_atime; anc_mtime = ex->v_mtime; anc_ctime = ex->v_ctime;
+                    anc_ino = ex->v_ino; anc_blksize = ex->v_blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+                    anc_result_mask = ex->v_result_mask;
+                    anc_attributes = ex->v_attributes;
+                    anc_attr_mask = ex->v_attr_mask;
+#endif
+                    anc_ctx_len = ex->v_ctx_len;
+                    if (ex->v_ctx_len) memcpy(anc_ctx, ex->v_ctx, ex->v_ctx_len + 1);
+                    have_anc = true;
                 }
                 __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
                 found_virtual = true;
