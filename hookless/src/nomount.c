@@ -132,6 +132,8 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
             if (rule && (rule->target_uid == 0 || rule->target_uid == current_uid().val)) {
                 rule_info->flags = rule->flags;
                 rule_info->v_ino = rule->v_ino;
+                rule_info->v_dino = rule->v_dino;
+                rule_info->v_pdino = rule->v_pdino;
                 rule_info->v_dev = rule->v_dev;
                 rule_info->v_atime = rule->v_atime;
                 rule_info->v_mtime = rule->v_mtime;
@@ -222,6 +224,30 @@ do_real_actor:
     return ret;
 }
 
+/* dir_emit_dots() serves i_ino for "." and the parent's i_ino for "..", i.e. the
+ * exact numbers stat returns. That is right on a normal fs and wrong under
+ * overlayfs, where a real dir's dirent carries the lower fs's ino and stat the
+ * one overlayfs allocated -- so a synthesized dir was the only one on the device
+ * where getdents64(".") agreed with stat("."). Serve the dirent inos here. */
+static bool nm_emit_dots(struct file *file, struct dir_context *ctx,
+                         const struct nm_inode_info *info)
+{
+    if (!(info->flags & NM_FLAG_OVL_INO))
+        return dir_emit_dots(file, ctx);
+
+    if (ctx->pos == 0) {
+        if (!dir_emit(ctx, ".", 1, info->v_dino ? info->v_dino : info->v_ino, DT_DIR))
+            return false;
+        ctx->pos = 1;
+    }
+    if (ctx->pos == 1) {
+        if (!dir_emit(ctx, "..", 2, info->v_pdino ? info->v_pdino : info->v_ino, DT_DIR))
+            return false;
+        ctx->pos = 2;
+    }
+    return true;
+}
+
 static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct nomount_dir_node *dir_node)
 {
     struct nomount_child_node *child;
@@ -304,6 +330,8 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     }
 
     info->v_ino = rule_info->v_ino;
+    info->v_dino = rule_info->v_dino;
+    info->v_pdino = rule_info->v_pdino;
     info->v_dev = rule_info->v_dev;
     info->v_atime = rule_info->v_atime;
     info->v_mtime = rule_info->v_mtime;
@@ -1041,7 +1069,7 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         nm_publish_real_eof(dir_node, ctx->pos);
         ctx->pos = nm_pack_pos(dir_node, 0);
     } else if (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) {
-        if (ctx->pos < 2 && !dir_emit_dots(file, ctx)) return 0;
+        if (ctx->pos < 2 && !nm_emit_dots(file, ctx, info)) return 0;
         if (!dir_node) return 0;
         nm_publish_real_eof(dir_node, 2);
         ctx->pos = nm_pack_pos(dir_node, 0);
@@ -1624,6 +1652,23 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
     return dir_node;
 }
 
+/* Re-point the parent's listing entry at the rule's final dirent ino. Called
+ * under the write mutex, after the walk has settled v_dino. */
+static void nm_restamp_child_ino(struct nomount_dir_node *dir_node, struct nomount_rule *rule)
+{
+    struct nomount_child_node *child;
+    int id = 0;
+
+    if (unlikely(!dir_node)) return;
+    while ((child = idr_get_next(&dir_node->children_idr, &id)) != NULL) {
+        if (child->rule == rule) {
+            WRITE_ONCE(child->fake_ino, rule->v_dino);
+            return;
+        }
+        id++;
+    }
+}
+
 static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule, const char *name, size_t name_len)
 {
     struct nomount_child_node *child;
@@ -1644,7 +1689,7 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
     child = kmalloc(sizeof(*child) + name_len + 1, GFP_KERNEL);
     if (unlikely(!child)) return;
 
-    child->fake_ino = rule->v_ino;
+    child->fake_ino = rule->v_dino ? rule->v_dino : rule->v_ino;
     child->name_hash = name_hash;
     child->d_type = (rule->flags & NM_FLAG_IS_DIR) ? DT_DIR : DT_REG;
     child->flags = rule->flags;
@@ -1735,6 +1780,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     char anc_ctx[NM_CTX_MAX];
     u16 anc_ctx_len = 0;
     bool have_anc = false;
+    bool anc_ovl = false;      /* ancestor is on overlayfs => dirent ino != st_ino */
+    u64 anc_dino = 0;          /* what the ancestor's own readdir reports for "." */
 
     while (p_len > 1) {
         for (i = p_len - 1; i >= 0; i--) {
@@ -1773,6 +1820,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     anc_mode = ex->v_mode ? ex->v_mode : 0755;
                     anc_atime = ex->v_atime; anc_mtime = ex->v_mtime; anc_ctime = ex->v_ctime;
                     anc_ino = ex->v_ino; anc_blksize = ex->v_blksize;
+                    anc_ovl = !!(ex->flags & NM_FLAG_OVL_INO);
+                    anc_dino = ex->v_dino;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
                     anc_result_mask = ex->v_result_mask;
                     anc_attributes = ex->v_attributes;
@@ -1827,6 +1876,15 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 }
                 if (nm_read_secctx(v_inode, anc_ctx, &anc_ctx_len) != 0)
                     anc_ctx_len = 0;
+#ifdef OVERLAYFS_SUPER_MAGIC
+                anc_ovl = p_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
+#endif
+                /* The ancestor's own dirent ino, needed for ".." one level down.
+                 * Its real value lives in a lowerdir we cannot cheaply read, so
+                 * derive a stable stand-in from the path hash: all that has to
+                 * hold is that it is not the ancestor's st_ino, which is the
+                 * comparison a probe actually makes. */
+                anc_dino = anc_ovl ? ((u64)h_parent | 1ULL) : (u64)anc_ino;
                 have_anc = true;
             }
             dir_node = nomount_get_dir_node(v_inode);
@@ -1888,6 +1946,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     }
 
     if (likely(err == 0)) {
+        u64 prev_dino = anc_dino;
+
         hlist_for_each_entry_safe(irule, tmp, &pending_list, vpath_node) {
             hlist_del_init(&irule->vpath_node);
             if (have_anc) {   /* stamp the nearest real ancestor's owner/mode/times/context */
@@ -1905,6 +1965,26 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                  * nearest real ancestor's magnitude band instead. */
                 if (anc_ino)
                     irule->v_ino = (anc_ino & ~0xFFFFUL) | (irule->v_hash & 0xFFFF) | 1UL;
+                /* Split stat's ino from readdir's when the tree is overlay-backed,
+                 * and keep them equal when it is not. The list runs top-down, so
+                 * prev_dino is this dir's parent. The parent's listing entry was
+                 * created earlier in the walk, before v_ino was narrowed above --
+                 * restamp it, or the entry and stat disagree on every synthesized
+                 * dir (which is what shipped, and is itself a probe). */
+                if (anc_ovl) {
+                    irule->flags |= NM_FLAG_OVL_INO;
+                    /* Band it like a lowerdir image ino (tens of millions on the
+                     * OP15 erofs partitions) rather than handing out the raw
+                     * 32-bit hash, which lands billions away from every real
+                     * dirent -- the same magnitude argument as v_ino above. */
+                    irule->v_dino = ((u64)irule->v_hash & 0x03FFFFFFULL) | 0x02000000ULL | 1ULL;
+                } else {
+                    irule->v_dino = (u64)irule->v_ino;
+                }
+                irule->v_pdino = prev_dino;
+                prev_dino = irule->v_dino;
+                if (irule->parent_dir)
+                    nm_restamp_child_ino(irule->parent_dir, irule);
                 /* Without this a synthesized dir reports st_blksize=1 (the
                  * generic_fillattr fallback) where every real dir reports the
                  * fs block size -- a one-stat divergence. */

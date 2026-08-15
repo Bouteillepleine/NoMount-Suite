@@ -27,6 +27,13 @@
  * value -- every file on an apex image and on any reproducible-build erofs
  * reports it -- so "tv_sec != 0" cannot mean "we have a mirrored value". */
 #define NM_FLAG_HAVE_TIMES  (1 << 3)
+/* This virtual dir hangs under an overlayfs mount, where a real dir's readdir
+ * ino and its st_ino diverge (the dirent carries the lower fs's number, stat
+ * the one overlayfs allocated). Emitting a single number for both is a
+ * zero-permission tell: on OP15, 143/143 real dirs under /product diverge and
+ * only a synthesized one matched. Set => serve v_dino to readdir, v_ino to
+ * stat; clear => they are the same number, which is what a normal fs does. */
+#define NM_FLAG_OVL_INO     (1 << 4)
 /* Bits a client may set; anything else is kernel-derived and must be stripped. */
 #define NM_FLAGS_USER_MASK  (NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR | NM_FLAG_WHITEOUT)
 #define NM_CTX_MAX          96   /* inline SELinux context; Android's are ~30B */
@@ -92,6 +99,7 @@ struct nm_inode_info {
     char v_ctx[NM_CTX_MAX];          /* mirrored context for synthesized dirs */
     u16 v_ctx_len;
     unsigned long v_ino;
+    u64 v_dino, v_pdino;
     dev_t v_dev;
     struct timespec64 v_atime, v_mtime, v_ctime;
     u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
@@ -151,6 +159,10 @@ struct nomount_rule {
     struct nomount_dir_node *this_dir;
     struct path r_path;
     unsigned long v_ino;
+    /* Dirent ino, i.e. what readdir reports -- for this dir's own "." and for
+     * its entry in the parent's listing. On overlayfs these differ from st_ino
+     * (see NM_FLAG_OVL_INO); everywhere else they are equal. */
+    u64 v_dino, v_pdino;
     dev_t v_dev;
     struct timespec64 v_atime, v_mtime, v_ctime;
     u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
@@ -196,6 +208,7 @@ static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *
 struct nm_rule_info {
     u32 flags;
     unsigned long v_ino;
+    u64 v_dino, v_pdino;
     dev_t v_dev;
     struct timespec64 v_atime, v_mtime, v_ctime;
     u64 v_attributes, v_attr_mask;
