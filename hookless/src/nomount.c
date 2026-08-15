@@ -324,7 +324,24 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         inode->i_gid = rule_info->v_gid;
         /* Real directories report st_nlink >= 2 (self + '.'); a synthesized dir
          * left at new_inode()'s default of 1 is a stat self-consistency outlier. */
-        set_nlink(inode, 2);
+        /* Real dirs report 2 + one per subdirectory. A synthesized dir that
+         * contains subdirectories but reports a flat 2 is impossible on any
+         * normal fs, so count the injected children that are dirs. */
+        {
+            unsigned int links = 2;
+
+            if (rule_info->this_dir) {
+                struct nomount_child_node *ch;
+                int cid = 0;
+
+                rcu_read_lock();
+                idr_for_each_entry(&rule_info->this_dir->children_idr, ch, cid)
+                    if (ch->d_type == DT_DIR && !(ch->flags & NM_FLAG_WHITEOUT))
+                        links++;
+                rcu_read_unlock();
+            }
+            set_nlink(inode, links);
+        }
         /* Label it like its nearest real ancestor. If that context was
          * unreadable we deliberately do NOT fall back to S_PRIVATE: that would
          * reinstate the very LSM bypass this inode is meant to lose. An
@@ -343,6 +360,9 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         inode->i_gid = real_inode->i_gid;
         nm_sync_inode_times(inode, real_inode);
        if (S_ISDIR(real_inode->i_mode)) {
+            /* new_inode() leaves i_nlink at 1; a directory reporting 1 link is
+             * impossible. Mirror the backing directory's count. */
+            set_nlink(inode, real_inode->i_nlink);
             inode->i_op = &nm_dir_iops;
             inode->i_fop = &nm_dir_fops;
         } else {
@@ -1654,6 +1674,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     umode_t anc_mode = 0755;
     struct timespec64 anc_atime = {0}, anc_mtime = {0}, anc_ctime = {0};
     unsigned long anc_ino = 0;
+    u32 anc_blksize = 0;
     char anc_ctx[NM_CTX_MAX];
     u16 anc_ctx_len = 0;
     bool have_anc = false;
@@ -1706,6 +1727,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 anc_mode = v_inode->i_mode & 0777;
                 if (nm_path_stat(&p_path, &akst) == 0) {
                     anc_ino   = (unsigned long)akst.ino;
+                    anc_blksize = akst.blksize;
                     anc_atime = akst.atime;
                     anc_mtime = akst.mtime;
                     anc_ctime = akst.ctime;
@@ -1789,6 +1811,10 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                  * nearest real ancestor's magnitude band instead. */
                 if (anc_ino)
                     irule->v_ino = (anc_ino & ~0xFFFFUL) | (irule->v_hash & 0xFFFF) | 1UL;
+                /* Without this a synthesized dir reports st_blksize=1 (the
+                 * generic_fillattr fallback) where every real dir reports the
+                 * fs block size -- a one-stat divergence. */
+                irule->v_blksize = anc_blksize;
             }
             hash_add_rcu(nomount_rules_ht, &irule->vpath_node, irule->v_hash);
         }

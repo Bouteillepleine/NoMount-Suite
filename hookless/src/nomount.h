@@ -223,9 +223,19 @@ void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
  */
 static inline bool nm_is_virtual_pos(const struct nomount_dir_node *d, loff_t pos)
 {
-    loff_t eof = d ? READ_ONCE(d->real_eof) : 0;
+    loff_t eof, mx;
 
-    return eof && pos > eof;
+    if (!d) return false;
+    eof = READ_ONCE(d->real_eof);
+    mx  = READ_ONCE(d->max_real_pos);
+    /* Also require pos to be above the running max, not just the published base.
+     * If the directory GREW since the last completed pass, mx climbs live while
+     * real_eof is still the older (lower) base, and a resume position in that
+     * gap is a real offset -- treating it as ours would drop the tail of the
+     * directory. Residual: a position above BOTH is still ambiguous until the
+     * grown dir has been walked to EOF once. Read-only ROM partitions (the
+     * injection targets) never grow, so this only bites writable mounts. */
+    return eof && pos > eof && pos > mx;
 }
 
 static inline loff_t nm_pack_pos(const struct nomount_dir_node *d, int id)
