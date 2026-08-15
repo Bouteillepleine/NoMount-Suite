@@ -1714,7 +1714,7 @@
     $("spUnameCur").textContent = "current uname: " + ur;
     $("spDateCur").textContent  = "current date: "  + curDate;
 
-    const uw = (await exec("for d in /sys/kernel/boot_meta /sys/kernel/nomount; do for a in release uname_release; do [ -w \"$d/$a\" ] && { echo 1; exit 0; }; done; done; echo 0")).stdout.trim();
+    const uw = (await exec(`[ -x "${(await bin()).replace(/nomount$/, "nm")}" ] && echo 1 || echo 0`)).stdout.trim();
     const uvl = $("spUnameVal");
     if (uw !== "1") { uvl.textContent = "needs kernel support"; }
     else if (!$("spUname").checked) { uvl.textContent = "off"; }

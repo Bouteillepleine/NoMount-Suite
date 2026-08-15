@@ -92,6 +92,29 @@ void c_main(long *sp) {
         exit_code = (do_nm_cmd(fd,6 - (cmd == 'b'), 4, &uid, 4, 5, &mem) < 0);
         goto do_exit;
 
+    } else if (cmd == 'k') {
+        /* k <r|v|c|b> <value> -- boot-identity knob, formerly a sysfs attribute.
+         * Payload: [u32 knob][value bytes]; an empty value clears the override. */
+        unsigned int knob;
+        const char *val;
+        int vlen = 0;
+
+        if (p_count < 1) goto do_exit;
+        switch (p_args[0][0]) {
+        case 'r': knob = 0; break;
+        case 'v': knob = 1; break;
+        case 'c': knob = 2; break;
+        case 'b': knob = 3; break;
+        default: exit_code = 3; goto do_exit;
+        }
+        val = (p_count > 1) ? p_args[1] : "";
+        while (val[vlen]) vlen++;
+        if (4 + vlen > MAX_PAYLOAD) { exit_code = 3; goto do_exit; }
+        *(unsigned int *)mem.payload = knob;
+        if (vlen) memcpy(mem.payload + 4, val, vlen);
+        exit_code = (do_nm_cmd(fd, 9, 6, mem.payload, 4 + vlen, 5, &mem) < 0);
+        goto do_exit;
+
     } else if (cmd == 'c') {
         exit_code = (do_nm_cmd(fd,4, 0, (void *)0, 0, 5, &mem) < 0);
         goto do_exit;
@@ -122,12 +145,22 @@ void c_main(long *sp) {
          * guard, not wrap to a huge unsigned length that walks rx_buf out of bounds. */
         int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
         int offset = 2;
+        /* A dump that aborts mid-stream (kernel returns -EAGAIN when the rule
+         * table mutated under the cursor) must NOT look like success: callers
+         * feed this list straight into the reload delta, so a silently truncated
+         * list is acted on as if it were the whole live set. */
+        if (len < 0) { exit_code = 4; goto do_exit; }
+        exit_code = 0;
         if (is_json) print_str("[\n");
 
         while (len > 0) {
             for (struct nlmsghdr *msg = (void *)mem.rx_buf; msg->nlmsg_len && msg->nlmsg_len <= len;
                     len -= msg->nlmsg_len, msg = (void *)((char *)msg + msg->nlmsg_len)) {
-                if (msg->nlmsg_type == 3 || msg->nlmsg_type == 2) goto list_done; 
+                if (msg->nlmsg_type == 3) goto list_done;          /* NLMSG_DONE */
+                if (msg->nlmsg_type == 2) {                        /* NLMSG_ERROR */
+                    if (*(int *)((char *)msg + 16)) exit_code = 4; /* err 0 == plain ACK */
+                    goto list_done;
+                }
 
                 if (is_uids) {
                     unsigned int *uid = get_attr(msg, 4); /* NOMOUNT_ATTR_UID */
@@ -169,7 +202,6 @@ void c_main(long *sp) {
         }
 list_done:
         if (is_json) print_str("\n]\n");
-        exit_code = 0;
     }
 
 do_exit:

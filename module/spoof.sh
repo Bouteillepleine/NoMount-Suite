@@ -298,7 +298,12 @@ do_props() {
     fi
 }
 
-# ---- kernel knob interface (renamed; probe both so kernel/module can differ) --
+# ---- kernel knob interface --------------------------------------------------
+# Current kernels carry the boot-identity knobs on the netlink control plane
+# (CAP_NET_ADMIN-gated, not enumerable). Older ones exposed a /sys/kernel
+# directory whose name AND attribute names any app could read. Prefer netlink,
+# fall back to either legacy sysfs layout so kernel and module can be flashed
+# out of step.
 nm_sysd() {
     local d
     for d in /sys/kernel/boot_meta /sys/kernel/nomount; do
@@ -306,15 +311,35 @@ nm_sysd() {
     done
     return 1
 }
-# attribute names differ with the directory: boot_meta/{release,version}
-nm_rel_attr() { [ -e "$1/release" ] && echo "$1/release" || echo "$1/uname_release"; }
-nm_ver_attr() { [ -e "$1/version" ] && echo "$1/version" || echo "$1/uname_version"; }
+nm_bin() {
+    local b
+    [ -n "$NM_BIN" ] && [ -x "$NM_BIN" ] && { echo "$NM_BIN"; return 0; }
+    for b in /data/adb/modules/meta-nomount/bin/*/nm; do
+        [ -x "$b" ] && { echo "$b"; return 0; }
+    done
+    return 1
+}
+# nm_knob <r|v|c|b> <value>
+nm_knob() {
+    local b d a
+    b=$(nm_bin) && "$b" k "$1" "$2" 2>/dev/null && return 0
+    d=$(nm_sysd) || return 1
+    case "$1" in
+        r) a=release;    [ -e "$d/$a" ] || a=uname_release ;;
+        v) a=version;    [ -e "$d/$a" ] || a=uname_version ;;
+        c) a=cmdline ;;
+        b) a=bootconfig ;;
+        *) return 1 ;;
+    esac
+    [ -w "$d/$a" ] || return 1
+    printf '%s' "$2" > "$d/$a" 2>/dev/null
+}
+nm_knob_ok() { nm_bin >/dev/null 2>&1 || nm_sysd >/dev/null 2>&1; }
 
 # ---- uname override via the kernel knob dir (blank = keep) ------------------
 do_uname() {
     [ "${spoof_uname:-0}" = "1" ] || return 0
-    local sysd; sysd=$(nm_sysd) || sysd=/sys/kernel/nomount
-    if [ ! -w "$(nm_rel_attr "$sysd")" ]; then
+    if ! nm_knob_ok; then
         log "uname: kernel interface absent (needs the nomount uname build)"
         return 0
     fi
@@ -324,7 +349,7 @@ do_uname() {
         tail=$(printf '%s' "$uname_tail" | sed -E 's/^[0-9][0-9.]*-android[0-9]+-//')
         prefix=$(uname -r | grep -oE '^[0-9][0-9.]*-android[0-9]+-')
         rel="${prefix}${tail}"
-        printf '%s' "$rel" > "$(nm_rel_attr "$sysd")" 2>/dev/null && log "uname release=$rel"
+        nm_knob r "$rel" && log "uname release=$rel"
     fi
 
     if [ -n "$uname_date" ]; then
@@ -333,7 +358,7 @@ do_uname() {
         [ -z "$d" ] && d=$uname_date
         head=$(uname -v | sed -E 's/^(#[0-9]+ SMP( [A-Z_]*PREEMPT[A-Z_]*)?).*/\1/')
         ver="$head $d"
-        printf '%s' "$ver" > "$(nm_ver_attr "$sysd")" 2>/dev/null && log "uname version=$ver"
+        nm_knob v "$ver" && log "uname version=$ver"
     fi
 }
 
@@ -361,12 +386,11 @@ do_cmdline() {
         log "cmdline: skipped (props not normalized to green; check resetprop)"
         return 0
     fi
-    local sysd dg
-    sysd=$(nm_sysd) || sysd=/sys/kernel/nomount
+    local dg
     dg=$(getprop ro.boot.vbmeta.digest 2>/dev/null)
 
     # /proc/cmdline: androidboot.key=value, space-separated
-    if [ -w "$sysd/cmdline" ] && [ -r /proc/cmdline ]; then
+    if nm_knob_ok && [ -r /proc/cmdline ]; then
         local c
         # Prefix-agnostic: OnePlus/OEM boot state rides oplusboot.* (and others use
         # their own prefix), not just androidboot.*, in /proc/cmdline. Capture the
@@ -378,11 +402,11 @@ do_cmdline() {
                     s/([a-z]*boot\.veritymode)=[^ ]*/\1=enforcing/g;
                     s/ [a-z]*boot\.verifiedbooterror=[^ ]*//g' /proc/cmdline)
         [ -n "$dg" ] && c=$(printf '%s' "$c" | sed -E "s/([a-z]*boot\.vbmeta\.digest)=[^ ]*/\1=$dg/g")
-        printf '%s' "$c" > "$sysd/cmdline" 2>/dev/null && log "cmdline sanitized (green/locked)"
+        nm_knob c "$c" && log "cmdline sanitized (green/locked)"
     fi
 
     # /proc/bootconfig: androidboot.key = "value" (GKI 5.10+); knob absent otherwise
-    if [ -w "$sysd/bootconfig" ] && [ -r /proc/bootconfig ]; then
+    if nm_knob_ok && [ -r /proc/bootconfig ]; then
         local b
         # Prefix-agnostic like the cmdline branch: bootconfig is androidboot.* on GKI,
         # but keep symmetry so an OEM that namespaces it differently is still covered.
@@ -393,7 +417,7 @@ do_cmdline() {
                     s/([a-z]*boot\.warranty_bit[[:space:]]*=[[:space:]]*")[^"]*/\10/g;
                     s/([a-z]*boot\.veritymode[[:space:]]*=[[:space:]]*")[^"]*/\1enforcing/g' /proc/bootconfig)
         [ -n "$dg" ] && b=$(printf '%s' "$b" | sed -E "s/([a-z]*boot\.vbmeta\.digest[[:space:]]*=[[:space:]]*\")[^\"]*/\1$dg/g")
-        printf '%s' "$b" > "$sysd/bootconfig" 2>/dev/null && log "bootconfig sanitized (green/locked)"
+        nm_knob b "$b" && log "bootconfig sanitized (green/locked)"
     fi
 }
 
@@ -479,10 +503,8 @@ case "${1:-}" in
         orig=$NMDIR/uname_orig
         [ -s "$orig" ] || { echo "no-baseline"; exit 0; }
         rel=$(sed -n 2p "$orig"); ver=$(sed -n 3p "$orig")
-        _sd=$(nm_sysd) && {
-            [ -n "$rel" ] && printf '%s' "$rel" > "$(nm_rel_attr "$_sd")" 2>/dev/null
-            [ -n "$ver" ] && printf '%s' "$ver" > "$(nm_ver_attr "$_sd")" 2>/dev/null
-        }
+        [ -n "$rel" ] && nm_knob r "$rel"
+        [ -n "$ver" ] && nm_knob v "$ver"
         if grep -v -E '^(uname_tail|uname_date)=' "$CONF" > "$CONF.t" 2>/dev/null; then
             printf "uname_tail=''\nuname_date=''\n" >> "$CONF.t"; mv "$CONF.t" "$CONF"
         fi
