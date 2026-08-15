@@ -27,3 +27,15 @@ index fabdf0fd7..f7c7f44a4 100644
  obj-$(CONFIG_BUFFER_HEAD)	+= buffer.o mpage.o
  obj-$(CONFIG_PROC_FS)		+= proc_namespace.o
  obj-$(CONFIG_LEGACY_DIRECT_IO)	+= direct-io.o
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@
+ 		dev = inode->i_sb->s_dev;
+ 		ino = inode->i_ino;
++#ifdef CONFIG_NOMOUNT
++		{ extern void nomount_spoof_mmap_metadata(const struct inode *,
++							  dev_t *, unsigned long *);
++		  nomount_spoof_mmap_metadata(inode, &dev, &ino); }
++#endif
+ 		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;

@@ -24,6 +24,7 @@
 #define NM_ISOLATED_START   90000
 #define NM_ISOLATED_END     99999
 
+static atomic_t nm_rule_gen = ATOMIC_INIT(0);
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
 static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mostly;
 static const struct cred *nm_root_cred;
@@ -35,6 +36,33 @@ static void nm_dir_node_put(struct nomount_dir_node *dir_node);
 static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
 /*** Helpers ***/
+
+/* Read/apply an inode's LSM context. A synthesized directory has no backing
+ * inode to inherit from, so without this it stays UNLABELED -- ls -Z prints '?'
+ * where every stock sibling prints a context, which is a one-syscall tell any
+ * app can make. */
+static int nm_read_secctx(struct inode *in, char *dst, u16 *dlen)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+    struct lsm_context lc;
+
+    if (security_inode_getsecctx(in, &lc)) return -ENODATA;
+    *dlen = min_t(u16, lc.len, NM_CTX_MAX - 1);
+    memcpy(dst, lc.context, *dlen);
+    security_release_secctx(&lc);
+#else
+    void *ctx = NULL;
+    u32 clen = 0;
+
+    if (security_inode_getsecctx(in, &ctx, &clen)) return -ENODATA;
+    *dlen = min_t(u16, clen, NM_CTX_MAX - 1);
+    memcpy(dst, ctx, *dlen);
+    security_release_secctx(ctx, clen);
+#endif
+    dst[*dlen] = '\0';
+    return 0;
+}
+
 
 static __always_inline bool nomount_is_uid_blocked(uid_t uid)
 {
@@ -115,6 +143,8 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_uid = rule->v_uid;
                 rule_info->v_gid = rule->v_gid;
                 rule_info->v_mode = rule->v_mode;
+                rule_info->v_ctx_len = rule->v_ctx_len;
+                if (rule->v_ctx_len) memcpy(rule_info->v_ctx, rule->v_ctx, rule->v_ctx_len + 1);
                 /* Acquire a ref while still under rcu_read_lock so the node
                  * survives create_new_inode's sleeping alloc; a node already being
                  * freed (refcount hit 0, call_rcu pending) fails not_zero -> treat
@@ -160,7 +190,6 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     NM_ACTOR_RET ret;
     u32 hash;
 
-    proxy->emitted++;
     if (!proxy->dir_node) goto do_real_actor;
     hash = full_name_hash(NULL, name, namelen);
     if (!(proxy->dir_node->bloom_mask & (1ULL << (hash & 63))))
@@ -187,6 +216,7 @@ do_real_actor:
     proxy->orig_ctx->pos = proxy->ctx.pos;
     ret = proxy->orig_ctx->actor(proxy->orig_ctx, name, namelen, offset, ino, d_type);
     proxy->ctx.pos = proxy->orig_ctx->pos;
+    if (ret == NM_ACTOR_CONTINUE) proxy->emitted++;
 
     return ret;
 }
@@ -197,8 +227,9 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
     int id;
 
     if (!dir_node) return;
-    if (!nm_is_virtual_pos(ctx->pos)) ctx->pos = nm_pack_pos(0);
-    id = nm_unpack_pos(ctx->pos);
+    if (!nm_is_virtual_pos(dir_node, ctx->pos)) ctx->pos = nm_pack_pos(dir_node, 0);
+    id = nm_unpack_pos(dir_node, ctx->pos);
+    if (id < 0) id = 0;
 
     /* Keep the node alive across the dir_emit sleeps below without holding RCU. */
     if (!atomic_inc_not_zero(&dir_node->refcount)) return;
@@ -206,7 +237,7 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
     for (;;) {
         char name[NAME_MAX + 1];
         int found = -1, nlen = 0;
-        u32 fino = 0;
+        u64 fino = 0;
         unsigned char dt = 0;
 
         /* Pick the next emittable child and SNAPSHOT it under RCU. dir_emit ->
@@ -231,11 +262,11 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
 
         if (found < 0)
             break;
-        ctx->pos = nm_pack_pos(found);
+        ctx->pos = nm_pack_pos(dir_node, found);
         if (!dir_emit(ctx, name, nlen, fino, dt))
             break;
         id = found + 1;
-        ctx->pos = nm_pack_pos(id);
+        ctx->pos = nm_pack_pos(dir_node, id);
     }
 
     nm_dir_node_put(dir_node);
@@ -256,6 +287,8 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     }
 
     info->flags = rule_info->flags;
+    info->v_ctx_len = rule_info->v_ctx_len;
+    if (rule_info->v_ctx_len) memcpy(info->v_ctx, rule_info->v_ctx, rule_info->v_ctx_len + 1);
     /* Own ref for the inode's cached copy: the caller still holds its get_rule_info
      * ref (so the node is live here), and releases it via nm_put_rule_info(). This
      * ref is dropped in nomount_hijacked_destroy_inode(). */
@@ -293,6 +326,15 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         /* Real directories report st_nlink >= 2 (self + '.'); a synthesized dir
          * left at new_inode()'s default of 1 is a stat self-consistency outlier. */
         set_nlink(inode, 2);
+        /* Label it like its nearest real ancestor, else it is the only
+         * unlabeled directory on the partition. If the ancestor's context was
+         * unreadable we have nothing to mirror: fail OPEN (S_PRIVATE) rather
+         * than enforce against an unlabeled dir and make the subtree
+         * untraversable -- an unlabeled dir is a tell, a broken one is worse. */
+        if (rule_info->v_ctx_len)
+            security_inode_notifysecctx(inode, rule_info->v_ctx, rule_info->v_ctx_len);
+        else
+            inode->i_flags |= S_PRIVATE;
         inode->i_op = &nm_dir_iops;
         inode->i_fop = &nm_dir_fops;
     } else {
@@ -316,25 +358,27 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
                 inode->i_fop = &nm_file_fops;
         }
         inode->i_mapping = real_inode->i_mapping;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
         /* Mirror the backing file's SELinux context onto the synthetic inode.
-         * getfilecon()/ls -Z read the label from SELinux's i_security (the SID
-         * assigned at new_inode time), NOT via our xattr proxy — on plain erofs
-         * that SID is unlabeled ('?'), a detection tell. Overlay copies it for
-         * free; erofs does not. (secctx API changed to lsmcontext post-6.12.) */
+         * ls -Z reads the SID assigned at new_inode time, not our xattr proxy;
+         * on plain erofs that SID is unlabeled ('?'). */
         {
-            void *ctx = NULL;
-            u32 ctxlen = 0;
+            char ctx[NM_CTX_MAX];
+            u16 ctxlen = 0;
 
-            if (security_inode_getsecctx(real_inode, &ctx, &ctxlen) == 0) {
+            if (nm_read_secctx(real_inode, ctx, &ctxlen) == 0) {
                 security_inode_notifysecctx(inode, ctx, ctxlen);
-                security_release_secctx(ctx, ctxlen);
+                memcpy(info->v_ctx, ctx, ctxlen + 1);
+                info->v_ctx_len = ctxlen;
             }
         }
-#endif
     }
 
-    inode->i_flags |= S_PRIVATE | S_NOATIME | S_NOCMTIME | S_NOSEC;
+    /* No S_PRIVATE: IS_PRIVATE() makes selinux_inode_permission() and
+     * inode_has_perm() return early, so the caller's domain was never checked
+     * against an injected path -- both a policy hole and a probe (a read that
+     * policy should deny but succeeds proves injection). Contexts are mirrored
+     * above, so normal enforcement now applies and matches the stock file. */
+    inode->i_flags |= S_NOATIME | S_NOCMTIME | S_NOSEC;
     inode->i_opflags |= IOP_XATTR;
     if (!S_ISLNK(inode->i_mode)) inode->i_opflags |= IOP_NOFOLLOW;
 
@@ -456,7 +500,7 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
     if (unlikely(nomount_is_uid_blocked(current_uid().val) || !orig_fop || !pdir))
         goto do_real_iterate;
 
-    if (unlikely(nm_is_virtual_pos(ctx->pos))) {
+    if (unlikely(nm_is_virtual_pos(pdir, ctx->pos))) {
         nomount_emit_virtual_children(ctx, pdir);
         goto out;
     }
@@ -470,7 +514,8 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
     ctx->pos = proxy_ctx.ctx.pos;
     if (res < 0 || proxy_ctx.emitted > 0) goto out;
 
-    ctx->pos = nm_pack_pos(0);
+    nm_set_real_eof(pdir, ctx->pos);
+    ctx->pos = nm_pack_pos(pdir, 0);
     nomount_emit_virtual_children(ctx, pdir);
     goto out;
 
@@ -548,9 +593,16 @@ static int nm_open(struct inode *inode, struct file *file)
     }
     if (unlikely(!info->r_path.dentry)) return -ENODEV;
 
-    old_cred = override_creds(nm_root_cred);
-    real_file = dentry_open(&info->r_path, file->f_flags, nm_root_cred);
-    revert_creds(old_cred);
+    /* Try the caller's own creds first so an injected path is authorised like a
+     * stock one. The privileged fallback keeps a legitimately-injected file
+     * readable when the BACKING store's label is not one the caller may open
+     * (module trees are relabelled system_file, but nothing guarantees it). */
+    real_file = dentry_open(&info->r_path, file->f_flags, current_cred());
+    if (IS_ERR(real_file)) {
+        old_cred = override_creds(nm_root_cred);
+        real_file = dentry_open(&info->r_path, file->f_flags, nm_root_cred);
+        revert_creds(old_cred);
+    }
     if (IS_ERR(real_file)) return PTR_ERR(real_file);
 
     file->private_data = real_file;
@@ -577,10 +629,14 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
          * lseek(fd,0,SEEK_SET)), a behavioural tell vs a real directory.
          * Handle the directory-cookie seek on our own f_pos instead. */
         switch (whence) {
-        case SEEK_SET: file->f_pos = offset; return file->f_pos;
-        case SEEK_CUR: file->f_pos += offset; return file->f_pos;
+        case SEEK_END: offset += i_size_read(file_inode(file)); break;
+        case SEEK_CUR: offset += file->f_pos; break;
+        case SEEK_SET: break;
         default:       return -EINVAL;
         }
+        if (offset < 0) return -EINVAL;
+        file->f_pos = offset;
+        return offset;
     }
 
     real_file->f_pos = file->f_pos;
@@ -627,10 +683,6 @@ static int nm_mmap(struct file *file, struct vm_area_struct *vma)
     vma->vm_file = real_file;
     ret = real_file->f_op->mmap(real_file, vma);
     if (ret == 0 && vma->vm_file == real_file) vma->vm_file = file;
-    /* Drop S_PRIVATE after a successful map so the injected inode is subject to
-     * LSM/SELinux like a stock file (IS_PRIVATE short-circuits security hooks =
-     * a permissive divergence a detector can probe). See create_new_inode. */
-    if (ret == 0) file_inode(file)->i_flags &= ~S_PRIVATE;
 
     return ret;
 }
@@ -649,7 +701,6 @@ static int nm_mmap_prepare(struct vm_area_desc *desc)
     *(struct file **)&desc->file = real_file;
     ret = real_file->f_op->mmap_prepare(desc);
     if (ret == 0 && desc->file == real_file) *(struct file **)&desc->file = file;
-    if (ret == 0) file_inode(file)->i_flags &= ~S_PRIVATE;   /* restore LSM checks post-mmap */
 
     return ret;
 }
@@ -707,8 +758,21 @@ static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 
 static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
 {
+    static const char nm_selinux_name[] = "security.selinux";
     struct nm_inode_info *info = d_backing_inode(dentry)->i_private;
-    if (unlikely(!info || (info->flags & NM_FLAG_VIRTUAL_DIR) || !d_backing_inode(info->r_path.dentry)->i_op->listxattr))
+
+    if (unlikely(!info)) return -EOPNOTSUPP;
+    /* A synthesized dir has no backing dentry to forward to. Returning
+     * -EOPNOTSUPP where every real dir lists security.selinux is a tell, so
+     * report the one attribute we actually serve. */
+    if (info->flags & NM_FLAG_VIRTUAL_DIR) {
+        if (!info->v_ctx_len) return -EOPNOTSUPP;
+        if (!size) return sizeof(nm_selinux_name);
+        if (size < sizeof(nm_selinux_name)) return -ERANGE;
+        memcpy(buffer, nm_selinux_name, sizeof(nm_selinux_name));
+        return sizeof(nm_selinux_name);
+    }
+    if (unlikely(!d_backing_inode(info->r_path.dentry)->i_op->listxattr))
         return -EOPNOTSUPP;
 
     return d_backing_inode(info->r_path.dentry)->i_op->listxattr(info->r_path.dentry, buffer, size);
@@ -891,7 +955,7 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
     struct file *real_file = file->private_data;
     int res = 0;
 
-    if (unlikely(nm_is_virtual_pos(ctx->pos))) {
+    if (unlikely(nm_is_virtual_pos(dir_node, ctx->pos))) {
         nomount_emit_virtual_children(ctx, dir_node);
         return 0;
     }
@@ -904,10 +968,14 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         res = nm_call_iterate(real_file, &proxy_ctx.ctx, real_file->f_op);
         ctx->pos = proxy_ctx.ctx.pos;
         if (res < 0 || proxy_ctx.emitted > 0) return res;
-        ctx->pos = nm_pack_pos(0);
+        if (!dir_node) return res;
+        nm_set_real_eof(dir_node, ctx->pos);
+        ctx->pos = nm_pack_pos(dir_node, 0);
     } else if (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) {
         if (ctx->pos < 2 && !dir_emit_dots(file, ctx)) return 0;
-        ctx->pos = nm_pack_pos(0);
+        if (!dir_node) return 0;
+        nm_set_real_eof(dir_node, 2);
+        ctx->pos = nm_pack_pos(dir_node, 0);
     } else {
         return -ENOTDIR;
     }
@@ -1022,8 +1090,18 @@ static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dent
         const char *full;
         int r;
 
-        if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
+        if (unlikely(!info)) return -ENODATA;
         full = nm_full_xattr_name(proxy, name, &alloc);
+        if (!info->r_path.dentry) {
+            r = -ENODATA;
+            if (info->v_ctx_len && strcmp(full, "security.selinux") == 0) {
+                if (!size)                  r = info->v_ctx_len + 1;
+                else if (size < info->v_ctx_len + 1u) r = -ERANGE;
+                else { memcpy(buffer, info->v_ctx, info->v_ctx_len + 1); r = info->v_ctx_len + 1; }
+            }
+            kfree(alloc);
+            return r;
+        }
         r = vfs_getxattr(IDMAP_PATH(info->r_path) info->r_path.dentry, full, buffer, size);
         kfree(alloc);
         return r;
@@ -1467,6 +1545,7 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
     }
     idr_init(&dir_node->children_idr);
     hash_init(dir_node->children_ht);
+    dir_node->real_eof = 0;
     dir_node->bloom_mask = 0;
     atomic_set(&dir_node->refcount, 1);   /* structural owner ref */
     return dir_node;
@@ -1492,7 +1571,7 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
     child = kmalloc(sizeof(*child) + name_len + 1, GFP_KERNEL);
     if (unlikely(!child)) return;
 
-    child->fake_ino = rule->v_hash;
+    child->fake_ino = rule->v_ino;
     child->name_hash = name_hash;
     child->d_type = (rule->flags & NM_FLAG_IS_DIR) ? DT_DIR : DT_REG;
     child->flags = rule->flags;
@@ -1570,9 +1649,12 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     int i, err = 0;
     u32 h_parent;
     HLIST_HEAD(pending_list);
-    kuid_t anc_uid = GLOBAL_ROOT_UID;   /* nearest real ancestor owner/mode, to */
-    kgid_t anc_gid = GLOBAL_ROOT_GID;   /* stamp onto synthesized virtual dirs   */
+    kuid_t anc_uid = GLOBAL_ROOT_UID;   /* nearest real ancestor owner/mode/times/context, */
+    kgid_t anc_gid = GLOBAL_ROOT_GID;   /* to stamp onto the synthesized virtual dirs       */
     umode_t anc_mode = 0755;
+    struct timespec64 anc_atime = {0}, anc_mtime = {0}, anc_ctime = {0};
+    char anc_ctx[NM_CTX_MAX];
+    u16 anc_ctx_len = 0;
     bool have_anc = false;
 
     while (p_len > 1) {
@@ -1589,7 +1671,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 
         found_virtual = false;
         hash_for_each_possible(nomount_rules_ht, ex, vpath_node, h_parent) {
-            if (ex->v_len == parent_len && memcmp(nm_get_vpath(ex), v_path, parent_len) == 0) {
+            if (ex->v_len == parent_len && memcmp(nm_get_vpath(ex), v_path, parent_len) == 0 &&
+                (ex->target_uid == 0 || ex->target_uid == target_rule->target_uid)) {
                 dir_node = ex->this_dir;
                 if (!dir_node) {
                     dir_node = __nomount_alloc_dir_node(NULL);
@@ -1615,9 +1698,18 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         if (kern_path(lookup_path, LOOKUP_FOLLOW, &p_path) == 0) {
             v_inode = d_backing_inode(p_path.dentry);
             if (S_ISDIR(v_inode->i_mode)) {   /* nearest real ancestor -> mirror onto virtual dirs below it */
+                struct kstat akst;
+
                 anc_uid = v_inode->i_uid;
                 anc_gid = v_inode->i_gid;
                 anc_mode = v_inode->i_mode & 0777;
+                if (nm_path_stat(&p_path, &akst) == 0) {
+                    anc_atime = akst.atime;
+                    anc_mtime = akst.mtime;
+                    anc_ctime = akst.ctime;
+                }
+                if (nm_read_secctx(v_inode, anc_ctx, &anc_ctx_len) != 0)
+                    anc_ctx_len = 0;
                 have_anc = true;
             }
             dir_node = nomount_get_dir_node(v_inode);
@@ -1681,10 +1773,15 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     if (likely(err == 0)) {
         hlist_for_each_entry_safe(irule, tmp, &pending_list, vpath_node) {
             hlist_del_init(&irule->vpath_node);
-            if (have_anc) {   /* stamp the nearest real ancestor's owner/mode */
+            if (have_anc) {   /* stamp the nearest real ancestor's owner/mode/times/context */
                 irule->v_uid = anc_uid;
                 irule->v_gid = anc_gid;
                 irule->v_mode = anc_mode;
+                irule->v_atime = anc_atime;
+                irule->v_mtime = anc_mtime;
+                irule->v_ctime = anc_ctime;
+                irule->v_ctx_len = anc_ctx_len;
+                if (anc_ctx_len) memcpy(irule->v_ctx, anc_ctx, anc_ctx_len + 1);
             }
             hash_add_rcu(nomount_rules_ht, &irule->vpath_node, irule->v_hash);
         }
@@ -1991,8 +2088,13 @@ static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *
     hash_del_rcu(&rule->vpath_node);
     if (rule->parent_dir) {
         struct nomount_dir_node *p_dir = rule->parent_dir;
+        /* __nomount_delete_child_locked can drop the last ref on a REAL parent
+         * (call_rcu free), so pin p_dir across it before prune walks it. */
+        bool pinned = atomic_inc_not_zero(&p_dir->refcount);
+
         __nomount_delete_child_locked(p_dir, rule);
-        if (prune) nomount_prune_empty_virtual_dirs(p_dir, victims); 
+        if (prune && pinned) nomount_prune_empty_virtual_dirs(p_dir, victims);
+        if (pinned) nm_dir_node_put(p_dir);
     }
     hlist_add_head(&rule->vpath_node, victims);
 }
@@ -2046,6 +2148,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     }
 
     hash_add_rcu(nomount_rules_ht, &rule->vpath_node, rule->v_hash);
+    atomic_inc(&nm_rule_gen);
     mutex_unlock(&nomount_write_mutex);
 
     if (unlikely(victim)) {
@@ -2061,7 +2164,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     return 0;
 }
 
-static void __nomount_del_rule(const char *v_path, size_t v_len, unsigned int target_uid, struct hlist_head *r_victims)
+static int __nomount_del_rule(const char *v_path, size_t v_len, unsigned int target_uid, struct hlist_head *r_victims)
 {
     struct nomount_rule *rule;
     u32 hash = full_name_hash(NULL, v_path, v_len);
@@ -2076,11 +2179,12 @@ static void __nomount_del_rule(const char *v_path, size_t v_len, unsigned int ta
              * in __nomount_add_rule(). (nm clear is unaffected: it detaches every
              * rule before any dir_node is freed.) */
             if (rule->this_dir && !idr_is_empty(&rule->this_dir->children_idr))
-                break;
+                return -EBUSY;
             nm_detach_rule_locked(rule, r_victims, true);
-            break;
+            return 0;
         }
     }
+    return -ENOENT;
 }
 
 static void __nomount_clear_all(bool is_exit)
@@ -2094,6 +2198,7 @@ static void __nomount_clear_all(bool is_exit)
     hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {
         nm_detach_rule_locked(rule, &r_victims, false);
     }
+    atomic_inc(&nm_rule_gen);
     synchronize_rcu();
     /* Destroy the uid idr only after the grace period: nomount_is_uid_blocked()
      * does a lockless idr_find() under rcu_read_lock(), and a reader that already
@@ -2152,6 +2257,7 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
 {
     struct nomount_rule *rule;
     struct hlist_node *tmp;
+    bool busy = false;
     HLIST_HEAD(r_victims);
 
     if (attrs[NOMOUNT_ATTR_PAYLOAD]) {
@@ -2165,9 +2271,11 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
             u32 target_uid = get_unaligned((const u32 *)(data + pos));
             u16 vp_len     = get_unaligned((const u16 *)(data + pos + 4));
             pos += 6; if (pos + vp_len > len) break;
-            __nomount_del_rule(data + pos, vp_len, target_uid, &r_victims);
+            if (__nomount_del_rule(data + pos, vp_len, target_uid, &r_victims) == -EBUSY)
+                busy = true;
             pos += vp_len;
         }
+        atomic_inc(&nm_rule_gen);
         mutex_unlock(&nomount_write_mutex);
     } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) {
         char *v_path = nla_data(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
@@ -2175,13 +2283,17 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
         u32 target_uid = attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID]) : 0;
 
         mutex_lock(&nomount_write_mutex);
-        __nomount_del_rule(v_path, v_len, target_uid, &r_victims);
+        if (__nomount_del_rule(v_path, v_len, target_uid, &r_victims) == -EBUSY)
+            busy = true;
+        atomic_inc(&nm_rule_gen);
         mutex_unlock(&nomount_write_mutex);
     } else {
         return -EINVAL;
     }
 
-    if (hlist_empty(&r_victims)) return -ENOENT;
+    /* -EBUSY is not -ENOENT: the rule exists but still owns a populated virtual
+     * subtree, so the caller must remove the children first. */
+    if (hlist_empty(&r_victims)) return busy ? -EBUSY : -ENOENT;
     synchronize_rcu();
 
     hlist_for_each_entry_safe(rule, tmp, &r_victims, vpath_node) {
@@ -2207,7 +2319,14 @@ static int nomount_nl_dump_rules(struct sk_buff *skb, struct netlink_callback *c
     int current_bkt = cb->args[0];
     int skip_nodes  = cb->args[1];
     int bkt, node_idx = 0;
+    long gen = (long)atomic_read(&nm_rule_gen) + 1;
     void *hdr;
+
+    /* Resume is by (bucket, ordinal), which a concurrent add/del would shift
+     * under us -- skipping or duplicating rules in a multi-part dump. Abort
+     * instead: a short list silently feeding a reload delta is worse. */
+    if (!cb->args[2]) cb->args[2] = gen;
+    else if (cb->args[2] != gen) return -EAGAIN;
 
     rcu_read_lock();
     for (bkt = current_bkt; bkt < (1 << NOMOUNT_HASH_BITS); bkt++) {
@@ -2483,6 +2602,30 @@ static char *nm_dup_trim(const char *buf, size_t count)
     return count ? kstrndup(buf, count, GFP_KERNEL) : NULL;
 }
 
+/* proc has no rename and refuses a duplicate name, so a takeover must
+ * remove-then-create. If the create then fails the entry is gone for good, and a
+ * MISSING /proc/cmdline is both a louder tell and more breaking than an
+ * unsanitised one -- so retry, and report instead of failing silently. */
+static struct proc_dir_entry *nm_mk_cmdline_pde(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
+    return proc_create_single("cmdline", 0444, NULL, nm_cmdline_show);
+#else
+    return proc_create("cmdline", 0444, NULL, &nm_cmdline_fops);
+#endif
+}
+
+#ifdef CONFIG_BOOT_CONFIG
+static struct proc_dir_entry *nm_mk_bootconfig_pde(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
+    return proc_create_single("bootconfig", 0444, NULL, nm_bootconfig_show);
+#else
+    return proc_create("bootconfig", 0444, NULL, &nm_bootconfig_fops);
+#endif
+}
+#endif
+
 static ssize_t cmdline_show(struct kobject *k, struct kobj_attribute *a, char *buf)
 {
     ssize_t r;
@@ -2499,11 +2642,15 @@ static ssize_t cmdline_store(struct kobject *k, struct kobj_attribute *a, const 
     nm_fake_cmdline = nb;
     if (!nm_cmdline_pde) {
         remove_proc_entry("cmdline", NULL);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-        nm_cmdline_pde = proc_create_single("cmdline", 0444, NULL, nm_cmdline_show);
-#else
-        nm_cmdline_pde = proc_create("cmdline", 0444, NULL, &nm_cmdline_fops);
-#endif
+        nm_cmdline_pde = nm_mk_cmdline_pde();
+        if (!nm_cmdline_pde) nm_cmdline_pde = nm_mk_cmdline_pde();
+        if (!nm_cmdline_pde) {
+            kfree(nm_fake_cmdline);
+            nm_fake_cmdline = NULL;
+            nm_err("procspoof: /proc/cmdline takeover failed, entry lost\n");
+            mutex_unlock(&nm_procspoof_mutex);
+            return -EIO;
+        }
     }
     mutex_unlock(&nm_procspoof_mutex);
     return c;
@@ -2534,11 +2681,15 @@ static ssize_t bootconfig_store(struct kobject *k, struct kobj_attribute *a, con
         kfree(nm_fake_bootconfig);
         nm_fake_bootconfig = nb;
         remove_proc_entry("bootconfig", NULL);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-        nm_bootconfig_pde = proc_create_single("bootconfig", 0444, NULL, nm_bootconfig_show);
-#else
-        nm_bootconfig_pde = proc_create("bootconfig", 0444, NULL, &nm_bootconfig_fops);
-#endif
+        nm_bootconfig_pde = nm_mk_bootconfig_pde();
+        if (!nm_bootconfig_pde) nm_bootconfig_pde = nm_mk_bootconfig_pde();
+        if (!nm_bootconfig_pde) {
+            kfree(nm_fake_bootconfig);
+            nm_fake_bootconfig = NULL;
+            nm_err("procspoof: /proc/bootconfig takeover failed, entry lost\n");
+            mutex_unlock(&nm_procspoof_mutex);
+            return -EIO;
+        }
     } else {
         kfree(nm_fake_bootconfig);
         nm_fake_bootconfig = nb;
@@ -2592,9 +2743,9 @@ static ssize_t uname_version_store(struct kobject *k, struct kobj_attribute *a, 
 { return nm_uts_store(init_uts_ns.name.version, sizeof(init_uts_ns.name.version), buf, c); }
 
 static struct kobj_attribute nm_uname_release_attr =
-    __ATTR(uname_release, 0600, uname_release_show, uname_release_store);
+    __ATTR(release, 0600, uname_release_show, uname_release_store);
 static struct kobj_attribute nm_uname_version_attr =
-    __ATTR(uname_version, 0600, uname_version_show, uname_version_store);
+    __ATTR(version, 0600, uname_version_show, uname_version_store);
 
 static struct attribute *nm_uname_attrs[] = {
     &nm_uname_release_attr.attr,
@@ -2610,7 +2761,7 @@ static const struct attribute_group nm_uname_group = { .attrs = nm_uname_attrs }
 static void nm_uname_sysfs_init(void)
 {
     int err;
-    nm_uname_kobj = kobject_create_and_add("nomount", kernel_kobj);
+    nm_uname_kobj = kobject_create_and_add("boot_meta", kernel_kobj);
     if (!nm_uname_kobj) { nm_err("uname: kobject create failed\n"); return; }
     err = sysfs_create_group(nm_uname_kobj, &nm_uname_group);
     if (err) {
@@ -2664,10 +2815,10 @@ static int __init nomount_init(void)
     nm_root_cred = cred;
 
     hash_init(nomount_rules_ht);
-    nm_dir_cachep = kmem_cache_create("vext_dnode", sizeof(struct nomount_dir_node), 0, SLAB_HWCACHE_ALIGN, NULL);
-    nm_inode_cachep = kmem_cache_create("vext_inode", sizeof(struct nm_inode_info), 0, SLAB_HWCACHE_ALIGN, NULL);
-    nm_iop_cachep = kmem_cache_create("vext_iop", sizeof(struct nm_iop), 0, SLAB_HWCACHE_ALIGN, NULL);
-    nm_fop_cachep = kmem_cache_create("vext_fop", sizeof(struct nm_fop), 0, SLAB_HWCACHE_ALIGN, NULL);
+    nm_dir_cachep = kmem_cache_create("vfs_dnode", sizeof(struct nomount_dir_node), 0, SLAB_HWCACHE_ALIGN, NULL);
+    nm_inode_cachep = kmem_cache_create("vfs_ninfo", sizeof(struct nm_inode_info), 0, SLAB_HWCACHE_ALIGN, NULL);
+    nm_iop_cachep = kmem_cache_create("vfs_iops", sizeof(struct nm_iop), 0, SLAB_HWCACHE_ALIGN, NULL);
+    nm_fop_cachep = kmem_cache_create("vfs_fops", sizeof(struct nm_fop), 0, SLAB_HWCACHE_ALIGN, NULL);
 
     if (!nm_dir_cachep || !nm_inode_cachep || !nm_iop_cachep || !nm_fop_cachep) {
         nm_err("Failed to allocate memory slab caches\n");

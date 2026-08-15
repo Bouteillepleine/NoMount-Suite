@@ -23,6 +23,7 @@
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
 #define NM_FLAG_WHITEOUT    (1 << 2)
+#define NM_CTX_MAX          96   /* inline SELinux context; Android's are ~30B */
 
 /* logs
  *
@@ -82,6 +83,8 @@ struct nm_sop {
 struct nm_inode_info {
     struct path r_path;
     struct nomount_dir_node *dir_node;
+    char v_ctx[NM_CTX_MAX];          /* mirrored context for synthesized dirs */
+    u16 v_ctx_len;
     unsigned long v_ino;
     dev_t v_dev;
     struct timespec64 v_atime, v_mtime, v_ctime;
@@ -107,7 +110,7 @@ struct nomount_child_node {
     struct rcu_head rcu;
     struct hlist_node hnode;   /* link in the owning dir_node's children_ht */
     u32 name_hash;
-    u32 fake_ino;
+    u64 fake_ino;
     int id;
     u8 d_type;
     u8 flags;
@@ -123,6 +126,7 @@ struct nomount_child_node {
 struct nomount_dir_node {
     struct idr children_idr;
     DECLARE_HASHTABLE(children_ht, NM_CHILD_HT_BITS);
+    loff_t real_eof;     /* backing dir's EOF cookie; 0 = not yet observed */
     u64 bloom_mask;
     atomic_t refcount;   /* owner ref (alloc) + one per synthetic inode caching this node */
     struct rcu_head rcu;
@@ -146,6 +150,8 @@ struct nomount_rule {
     kuid_t v_uid;                    /* virtual-dir owner (mirrored from nearest real ancestor) */
     kgid_t v_gid;
     umode_t v_mode;                  /* virtual-dir mode bits (0 => default 0755) */
+    char v_ctx[NM_CTX_MAX];          /* nearest real ancestor's context, for virtual dirs */
+    u16 v_ctx_len;
     u32 v_hash;
     u16 v_len;
     u8  flags;
@@ -188,6 +194,8 @@ struct nm_rule_info {
     kuid_t v_uid;
     kgid_t v_gid;
     umode_t v_mode;
+    char v_ctx[NM_CTX_MAX];          /* copied inline: the rule can be freed after the snapshot */
+    u16 v_ctx_len;
     struct path r_path;
     struct nomount_dir_node *this_dir;
 };
@@ -201,29 +209,39 @@ void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
 /* =====================================================================
  * NoMount VFS Offset Protocol
  * =====================================================================
- * 64-bit layout: [ 16-bit 'nm' ][ 16-bit 0 ][ 32-bit ID ] 
- * 32-bit layout: [ 16-bit 'nm' ][ 16-bit ID ]
+ * Virtual dirents CONTINUE the backing directory's own cookie space, starting
+ * one past the EOF position that directory reports. The previous scheme tagged
+ * every offset with a constant 16-bit signature, which getdents64() then handed
+ * to userspace verbatim as d_off -- a single-comparison fingerprint on any
+ * injected directory. There is no tag now: an injected entry's d_off is simply
+ * the next number after the real ones.
+ *
+ * real_eof == 0 means no virtual entry has ever been emitted for this dir, so no
+ * position can be ours yet. It is recorded at the real->virtual transition, i.e.
+ * always before any virtual offset is handed out.
  */
-#define NM_SIG_16 0x6E6DULL /* "nm" in hex */
-static inline bool nm_is_virtual_pos(loff_t pos) {
-#ifdef CONFIG_COMPAT
-    if (in_compat_syscall()) return (pos & 0xFFFF0000ULL) == (NM_SIG_16 << 16);
-#endif
-    return (pos & 0xFFFFFFFF00000000ULL) == (NM_SIG_16 << 48);
+static inline bool nm_is_virtual_pos(const struct nomount_dir_node *d, loff_t pos)
+{
+    loff_t eof = d ? READ_ONCE(d->real_eof) : 0;
+
+    return eof && pos > eof;
 }
 
-static inline loff_t nm_pack_pos(int id) {
-#ifdef CONFIG_COMPAT
-    if (in_compat_syscall()) return (NM_SIG_16 << 16) | (id & 0xFFFF);
-#endif
-    return (NM_SIG_16 << 48) | (id & 0xFFFFFFFF);
+static inline loff_t nm_pack_pos(const struct nomount_dir_node *d, int id)
+{
+    return READ_ONCE(d->real_eof) + 1 + id;
 }
 
-static inline int nm_unpack_pos(loff_t pos) {
-#ifdef CONFIG_COMPAT
-    if (in_compat_syscall()) return (int)(pos & 0xFFFF);
-#endif
-    return (int)(pos & 0xFFFFFFFF);
+static inline int nm_unpack_pos(const struct nomount_dir_node *d, loff_t pos)
+{
+    return (int)(pos - READ_ONCE(d->real_eof) - 1);
+}
+
+/* A dir with no backing readdir (purely synthesized) still emits . and .., so
+ * its cookie space starts at 2 just like a real empty directory. */
+static inline void nm_set_real_eof(struct nomount_dir_node *d, loff_t eof)
+{
+    if (d) WRITE_ONCE(d->real_eof, eof > 0 ? eof : 2);
 }
 
 /* ========================================================================= */
