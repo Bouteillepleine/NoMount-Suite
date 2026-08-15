@@ -197,19 +197,31 @@ pub fn run_absorb(dry_run: bool) -> Result<()> {
             println!("would absorb {} <- {}", c.target.display(), c.source.display());
             continue;
         }
-        // Inject BEFORE unmounting: the mount shadows the injection while it is
-        // still there, so the content is never absent for even an instant.
+        // Unmount FIRST, then inject. Inject-first looks safer (the mount shadows
+        // the injection, so content is never absent) but is actually fatal: adding
+        // a rule d_drops the cached dentry for that name, and a mount hangs off a
+        // specific (vfsmount, dentry) pair. Dropping it detaches the mount from
+        // path resolution, so umount2() then returns EINVAL -- the path is no
+        // longer a mountpoint -- and the entry is stranded in mountinfo until
+        // reboot while the content silently reverts to the file underneath.
+        // Verified on-device against LSPosed's dex2oat bind.
+        //
+        // Unmounting first costs a brief window where the stock file shows
+        // through. That is strictly better than an unremovable mount, and it also
+        // means nm_alloc_rule mirrors metadata from the REAL stock file rather
+        // than through the bind -- which is what makes absorption remove the
+        // bind's dev/ino/mtime tell instead of preserving it.
+        if !umount_detach(&c.target) {
+            eprintln!(
+                "nomount: cannot unmount {} - leaving it alone (injecting anyway would \
+                 strand it in mountinfo)",
+                c.target.display()
+            );
+            failed += 1;
+            continue;
+        }
         match inject(&nm, &c.source, &c.target, &mut rules) {
-            Ok(()) => {
-                if umount_detach(&c.target) {
-                    done += 1;
-                } else {
-                    // Injection is live and the mount still shadows it - content
-                    // is correct either way, only the mount remains visible.
-                    eprintln!("nomount: injected but could not unmount {}", c.target.display());
-                    failed += 1;
-                }
-            }
+            Ok(()) => done += 1,
             Err(e) => {
                 eprintln!("nomount: absorb of {} failed: {e:#}", c.target.display());
                 failed += 1;
