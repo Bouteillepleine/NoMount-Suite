@@ -1707,8 +1707,11 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     umode_t anc_mode = 0755;
     struct timespec64 anc_atime = {0}, anc_mtime = {0}, anc_ctime = {0};
     unsigned long anc_ino = 0;
-    u32 anc_blksize = 0, anc_result_mask = 0;
+    u32 anc_blksize = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+    u32 anc_result_mask = 0;                 /* statx-era only; unused pre-4.11 */
     u64 anc_attributes = 0, anc_attr_mask = 0;
+#endif
     char anc_ctx[NM_CTX_MAX];
     u16 anc_ctx_len = 0;
     bool have_anc = false;
