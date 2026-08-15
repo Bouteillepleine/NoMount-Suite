@@ -23,6 +23,12 @@
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
 #define NM_FLAG_WHITEOUT    (1 << 2)
+/* Times were captured from a stock source. Needed because mtime 0 is a REAL
+ * value -- every file on an apex image and on any reproducible-build erofs
+ * reports it -- so "tv_sec != 0" cannot mean "we have a mirrored value". */
+#define NM_FLAG_HAVE_TIMES  (1 << 3)
+/* Bits a client may set; anything else is kernel-derived and must be stripped. */
+#define NM_FLAGS_USER_MASK  (NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR | NM_FLAG_WHITEOUT)
 #define NM_CTX_MAX          96   /* inline SELinux context; Android's are ~30B */
 
 /* logs

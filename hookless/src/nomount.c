@@ -844,7 +844,7 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
         generic_fillattr(v_inode, stat);
         stat->ino = info->v_ino;
         stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->v_mtime.tv_sec) {   /* mirror the stock/sibling times (see nm_alloc_rule) */
+        if (info->flags & NM_FLAG_HAVE_TIMES) {   /* mtime 0 is real (apex/erofs), so gate on the flag */
             stat->atime = info->v_atime;
             stat->mtime = info->v_mtime;
             stat->ctime = info->v_ctime;
@@ -871,7 +871,7 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
     if (likely(res == 0)) {
         stat->ino = info->v_ino;
         stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->v_mtime.tv_sec) {   /* mirror the stock/sibling times (see nm_alloc_rule) */
+        if (info->flags & NM_FLAG_HAVE_TIMES) {   /* mtime 0 is real (apex/erofs), so gate on the flag */
             stat->atime = info->v_atime;
             stat->mtime = info->v_mtime;
             stat->ctime = info->v_ctime;
@@ -909,7 +909,7 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
 #endif
         stat->ino = info->v_ino;
         stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->v_mtime.tv_sec) {   /* mirror the stock/sibling times (see nm_alloc_rule) */
+        if (info->flags & NM_FLAG_HAVE_TIMES) {   /* mtime 0 is real (apex/erofs), so gate on the flag */
             stat->atime = info->v_atime;
             stat->mtime = info->v_mtime;
             stat->ctime = info->v_ctime;
@@ -936,7 +936,7 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     if (likely(res == 0)) {
         stat->ino = info->v_ino;
         stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->v_mtime.tv_sec) {   /* mirror the stock/sibling times (see nm_alloc_rule) */
+        if (info->flags & NM_FLAG_HAVE_TIMES) {   /* mtime 0 is real (apex/erofs), so gate on the flag */
             stat->atime = info->v_atime;
             stat->mtime = info->v_mtime;
             stat->ctime = info->v_ctime;
@@ -1893,6 +1893,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 irule->v_uid = anc_uid;
                 irule->v_gid = anc_gid;
                 irule->v_mode = anc_mode;
+                irule->flags |= NM_FLAG_HAVE_TIMES;
                 irule->v_atime = anc_atime;
                 irule->v_mtime = anc_mtime;
                 irule->v_ctime = anc_ctime;
@@ -2131,7 +2132,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
 
     INIT_HLIST_NODE(&rule->vpath_node);
     rule->v_hash = full_name_hash(NULL, v_path, v_len);
-    rule->flags = flags;
+    rule->flags = flags & NM_FLAGS_USER_MASK;
     rule->v_len = v_len;
     rule->target_uid = target_uid;
     memcpy(nm_get_vpath(rule), v_path, v_len);
@@ -2162,6 +2163,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         if (nm_path_stat(&v_path_struct, &kst) == 0) {
             rule->v_ino = kst.ino;
             rule->v_dev = kst.dev;
+            rule->flags |= NM_FLAG_HAVE_TIMES;
             rule->v_atime = kst.atime;   /* mirror the stock file's times too */
             rule->v_mtime = kst.mtime;
             rule->v_ctime = kst.ctime;
@@ -2187,6 +2189,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
 
         if (nm_find_sibling_meta(nm_get_vpath(rule), &sib) == 0) {
             rule->v_dev   = sib.dev;
+            rule->flags |= NM_FLAG_HAVE_TIMES;
             rule->v_atime = sib.atime;
             rule->v_mtime = sib.mtime;
             rule->v_ctime = sib.ctime;
@@ -2232,6 +2235,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
                             /* Mirror the parent dir's times too: leaving these 0
                              * makes getattr fall through to the backing file's
                              * (module-install) mtime -- a fresh-timestamp tell. */
+                            rule->flags |= NM_FLAG_HAVE_TIMES;
                             rule->v_atime = kst.atime;
                             rule->v_mtime = kst.mtime;
                             rule->v_ctime = kst.ctime;
