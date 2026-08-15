@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.7
+
+### Changed
+- **Absorb now leaves every hook framework alone, by what it ships rather than by its name.** A module is treated as a framework if it carries `zygisk/<abi>.so` (any Zygisk module — LSPosed and all its forks, PlayIntegrityFix, HMA, zygisk-detach) or `bin/zygisk*` (the providers — Zygisk Next, ReZygisk, NeoZygisk), and then *nothing* it mounts is absorbed. This replaces guesswork with a structural fact: an id list misses renamed forks and a path list only covers the paths someone enumerated, while both markers are part of how these modules are built. `zygisksu` is also seeded into the skip file, and absorb and `doctor` now say which module the framework rule matched.
+
 ## v1.2.6
 
 ### Changed

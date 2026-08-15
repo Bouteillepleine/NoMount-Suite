@@ -105,6 +105,12 @@ if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
     {
         echo "# One per line: an absolute TARGET PATH PREFIX, or a module id."
         echo "#"
+        echo "# You rarely need to add a hook framework here: absorb already leaves"
+        echo "# alone everything mounted by a module that ships zygisk/<abi>.so (any"
+        echo "# Zygisk module, LSPosed and its forks included) or bin/zygisk* (the"
+        echo "# providers - Zygisk Next, ReZygisk, NeoZygisk). This file is for"
+        echo "# anything that marker does not cover."
+        echo "#"
         echo "# Prefer a path: a hook framework's module id differs between forks"
         echo "# (zygisk_lsposed, zygisk_lsposed_next, lsposed, ...) so an id list"
         echo "# silently misses every fork it does not name, while the path being"
@@ -119,6 +125,7 @@ if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
         echo "/apex/com.android.runtime/bin/dex2oat"
         echo "/system/bin/dex2oat"
         echo "/system/bin/app_process"
+        echo "zygisksu"
     } > "$NMDIR/absorb-skip.txt"
 fi
 set_perm "$NMDIR/absorb-skip.txt" 0 0 0600

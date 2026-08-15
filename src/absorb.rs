@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -77,8 +78,49 @@ pub fn skip_source() -> &'static str {
     skip_list().1
 }
 
+/// A module that provides Zygisk or an Xposed framework, detected by what it
+/// ships rather than by its id.
+///
+/// Absorbing a hook framework's own bind is the one absorption that can break
+/// something badly and late — dexopt runs on app install, not at boot, so the
+/// damage surfaces hours later as "modules stopped applying". Id lists fail in
+/// both directions here (Vector renames itself; Irena keeps `zygisk_lsposed`),
+/// and a path list only covers the paths someone thought to enumerate. What
+/// every one of them has in common is structure:
+///
+/// * a Zygisk **module** ships `zygisk/<abi>.so` — LSPosed and every fork,
+///   PlayIntegrityFix, HMA, zygisk-detach
+/// * a Zygisk **provider** ships the loader itself, `bin/zygiskd*` or
+///   `bin/zygisk-ptrace*` — Zygisk Next (`zygisksu`), ReZygisk, NeoZygisk
+///
+/// Either marker means: leave everything this module mounts alone.
+pub(crate) fn is_hook_framework(module_dir: &Path) -> bool {
+    if module_dir.join("zygisk").is_dir() {
+        return true;
+    }
+    let Ok(bin) = fs::read_dir(module_dir.join("bin")) else {
+        return false;
+    };
+    bin.filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().starts_with("zygisk"))
+}
+
+/// `/data/adb/modules/<id>` for a path inside a module tree.
+pub(crate) fn module_dir_of(src: &Path) -> Option<PathBuf> {
+    let s = src.to_string_lossy();
+    let rest = s.split("/modules/").nth(1)?;
+    let id = rest.split('/').next()?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from("/data/adb/modules").join(id))
+}
+
 /// True if this mount is explicitly excluded.
 pub(crate) fn is_skipped(src: &Path, target: &Path, skips: &[String]) -> bool {
+    if module_dir_of(src).is_some_and(|d| is_hook_framework(&d)) {
+        return true;
+    }
     let (s, t) = (src.to_string_lossy(), target.to_string_lossy());
     skips.iter().any(|k| {
         if k.starts_with('/') {
@@ -222,7 +264,14 @@ pub fn candidates() -> Result<Vec<Candidate>> {
                 return None;
             }
             if is_skipped(&src, &r.target, &skips) {
-                println!("skipping {} (listed in {skip_src})", r.target.display());
+                match module_dir_of(&src).filter(|d| is_hook_framework(d)) {
+                    Some(d) => println!(
+                        "skipping {} ({} is a hook framework)",
+                        r.target.display(),
+                        d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                    ),
+                    None => println!("skipping {} (listed in {skip_src})", r.target.display()),
+                }
                 return None;
             }
             Some(Candidate { target: r.target.clone(), source: src })

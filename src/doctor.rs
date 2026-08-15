@@ -249,6 +249,8 @@ pub fn run_doctor() -> Result<()> {
     // has run the only ones left are those deliberately skipped. Report them, so
     // opting out of absorption is a visible trade rather than a silent one.
     let skip_src = crate::absorb::skip_source();
+    let how_fw = "it belongs to a hook framework (Zygisk/Xposed), which absorb never takes over \
+                  because a broken hook only surfaces later, during dexopt";
     let how = if skip_src.starts_with('/') {
         format!("remove its entry from {skip_src} to absorb it")
     } else {
@@ -262,11 +264,16 @@ pub fn run_doctor() -> Result<()> {
         f.push(Finding {
             level: Level::Warn,
             check: "module mount not absorbed",
-            detail: format!(
-                "{} <- {} is still a real mount and visible to any app; {how}",
-                c.target.display(),
-                c.source.display(),
-            ),
+            detail: {
+                let fw = crate::absorb::module_dir_of(&c.source)
+                    .is_some_and(|d| crate::absorb::is_hook_framework(&d));
+                format!(
+                    "{} <- {} is still a real mount and visible to any app; {}",
+                    c.target.display(),
+                    c.source.display(),
+                    if fw { how_fw } else { &how }
+                )
+            },
         });
     }
     // A whiteout only hides cleanly on overlayfs; anywhere else the parent
