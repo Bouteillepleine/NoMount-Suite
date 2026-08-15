@@ -135,6 +135,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_dino = rule->v_dino;
                 rule_info->v_pdino = rule->v_pdino;
                 rule_info->v_dev = rule->v_dev;
+                rule_info->v_mapdev = rule->v_mapdev;
                 rule_info->v_atime = rule->v_atime;
                 rule_info->v_mtime = rule->v_mtime;
                 rule_info->v_ctime = rule->v_ctime;
@@ -333,6 +334,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     info->v_dino = rule_info->v_dino;
     info->v_pdino = rule_info->v_pdino;
     info->v_dev = rule_info->v_dev;
+    info->v_mapdev = rule_info->v_mapdev;
     info->v_atime = rule_info->v_atime;
     info->v_mtime = rule_info->v_mtime;
     info->v_ctime = rule_info->v_ctime;
@@ -2076,7 +2078,7 @@ static NM_ACTOR_RET nm_sib_actor(struct dir_context *ctx, const char *name,
 }
 
 static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
-                                char *octx, u16 *octxlen, int depth)
+                                char *octx, u16 *octxlen, dev_t *omapdev, int depth)
 {
     struct nm_sib_scan *sc;
     struct path dp;
@@ -2137,11 +2139,16 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                 int r = nm_path_stat(&fp, &fk);
                 char fctx[NM_CTX_MAX];
                 u16 fctxlen = 0;
+                dev_t fmapdev = 0;
 
-                /* Read the label BEFORE dropping the reference; a pure
-                 * injection has no stock file of its own to copy one from. */
-                if (r == 0 && nm_read_secctx(d_backing_inode(fp.dentry), fctx, &fctxlen) != 0)
-                    fctxlen = 0;
+                /* Read the label and the lower dev BEFORE dropping the
+                 * reference; a pure injection has no stock file of its own to
+                 * copy either from. */
+                if (r == 0) {
+                    if (nm_read_secctx(d_backing_inode(fp.dentry), fctx, &fctxlen) != 0)
+                        fctxlen = 0;
+                    fmapdev = d_real_inode(fp.dentry)->i_sb->s_dev;
+                }
                 path_put(&fp);
                 if (r == 0 && (pass == 1 ||
                                (dir_is_overlay ? fk.dev != sc->dir_dev
@@ -2151,6 +2158,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                         *octxlen = fctxlen;
                         if (fctxlen) memcpy(octx, fctx, fctxlen + 1);
                     }
+                    if (omapdev) *omapdev = fmapdev;
                     kfree(cp); ret = 0; goto done;
                 }
             }
@@ -2162,7 +2170,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
         char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->subdirs[i]);
 
         if (!cp) continue;
-        if (nm_scan_dir_for_file(cp, out, octx, octxlen, depth + 1) == 0) { kfree(cp); ret = 0; goto done; }
+        if (nm_scan_dir_for_file(cp, out, octx, octxlen, omapdev, depth + 1) == 0) { kfree(cp); ret = 0; goto done; }
         kfree(cp);
     }
 done:
@@ -2179,10 +2187,11 @@ static char nm_sib_cache_dir[PATH_MAX];
 static struct kstat nm_sib_cache_kst;
 static char nm_sib_cache_ctx[NM_CTX_MAX];
 static u16 nm_sib_cache_ctxlen;
+static dev_t nm_sib_cache_mapdev;
 static bool nm_sib_cache_valid;
 
 static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
-                                char *octx, u16 *octxlen)
+                                char *octx, u16 *octxlen, dev_t *omapdev)
 {
     char *path = kstrdup(vpath, GFP_KERNEL);
     char *slash;
@@ -2200,12 +2209,13 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
             *octxlen = nm_sib_cache_ctxlen;
             if (nm_sib_cache_ctxlen) memcpy(octx, nm_sib_cache_ctx, nm_sib_cache_ctxlen + 1);
         }
+        if (omapdev) *omapdev = nm_sib_cache_mapdev;
         kfree(path);
         return 0;
     }
 
     for (;;) {
-        if (nm_scan_dir_for_file(path, out, octx, octxlen, 0) == 0) { ret = 0; break; }
+        if (nm_scan_dir_for_file(path, out, octx, octxlen, omapdev, 0) == 0) { ret = 0; break; }
         slash = strrchr(path, '/');
         if (!slash || slash == path)
             break;
@@ -2219,6 +2229,7 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
             nm_sib_cache_kst = *out;
             nm_sib_cache_ctxlen = (octx && octxlen) ? *octxlen : 0;
             if (nm_sib_cache_ctxlen) memcpy(nm_sib_cache_ctx, octx, nm_sib_cache_ctxlen + 1);
+            nm_sib_cache_mapdev = omapdev ? *omapdev : 0;
             nm_sib_cache_valid = true;
         }
     }
@@ -2287,6 +2298,13 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         if (nm_read_secctx(d_backing_inode(v_path_struct.dentry),
                            rule->v_ctx, &rule->v_ctx_len) != 0)
             rule->v_ctx_len = 0;
+        /* On overlayfs a mapping is of the LOWER file, so show_map_vma prints
+         * the lower sb's dev while stat reports the overlay's. Spoofing maps to
+         * the stat dev made the two agree -- which no stock file on an overlay
+         * mount does: 139/139 injected agreed where 15/15 stock differed, an
+         * mmap+statx pair apart. d_real_inode() resolves to the lower inode on
+         * overlayfs and to the inode itself everywhere else. */
+        rule->v_mapdev = d_real_inode(v_path_struct.dentry)->i_sb->s_dev;
         if (nm_path_stat(&v_path_struct, &kst) == 0) {
             rule->v_ino = kst.ino;
             rule->v_dev = kst.dev;
@@ -2315,7 +2333,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         struct kstat sib;
 
         if (nm_find_sibling_meta(nm_get_vpath(rule), &sib,
-                                 rule->v_ctx, &rule->v_ctx_len) == 0) {
+                                 rule->v_ctx, &rule->v_ctx_len, &rule->v_mapdev) == 0) {
             rule->v_dev   = sib.dev;
             rule->flags |= NM_FLAG_HAVE_TIMES;
             rule->v_atime = sib.atime;
@@ -3131,7 +3149,9 @@ void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
     info = inode->i_private;
     if (unlikely(!info))
         return;
-    if (info->v_dev)
+    if (info->v_mapdev)
+        *dev = info->v_mapdev;
+    else if (info->v_dev)
         *dev = info->v_dev;
     *ino = info->v_ino;
 }
