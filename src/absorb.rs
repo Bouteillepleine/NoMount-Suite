@@ -56,17 +56,25 @@ const BUILTIN_SKIPS: &[&str] = &[
 
 /// Entries to leave alone: one per line, either a module id (matched against the
 /// bind's source) or an absolute target prefix. Blank lines and `#` ignored.
-fn skip_list() -> Vec<String> {
-    std::fs::read_to_string(SKIP_FILE)
-        .or_else(|_| std::fs::read_to_string(SKIP_FILE_LEGACY))
-        .map(|s| {
-            s.lines()
+fn skip_list() -> (Vec<String>, &'static str) {
+    for f in [SKIP_FILE, SKIP_FILE_LEGACY] {
+        if let Ok(s) = std::fs::read_to_string(f) {
+            let entries = s
+                .lines()
                 .map(|l| l.trim())
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_else(|_| BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect())
+                .collect();
+            return (entries, f);
+        }
+    }
+    (BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect(), "the built-in list")
+}
+
+/// Where the active skip entries came from, for messages that tell the user
+/// where to go and change them.
+pub fn skip_source() -> &'static str {
+    skip_list().1
 }
 
 /// True if this mount is explicitly excluded.
@@ -205,7 +213,7 @@ pub fn candidates() -> Result<Vec<Candidate>> {
     let body = std::fs::read_to_string(MOUNTINFO).context("read mountinfo")?;
     let rows = parse_mountinfo(&body);
     let roots = fs_roots(&rows);
-    let skips = skip_list();
+    let (skips, skip_src) = skip_list();
     let mut out: Vec<Candidate> = rows
         .iter()
         .filter_map(|r| {
@@ -214,7 +222,7 @@ pub fn candidates() -> Result<Vec<Candidate>> {
                 return None;
             }
             if is_skipped(&src, &r.target, &skips) {
-                println!("skipping {} (listed in {SKIP_FILE})", r.target.display());
+                println!("skipping {} (listed in {skip_src})", r.target.display());
                 return None;
             }
             Some(Candidate { target: r.target.clone(), source: src })

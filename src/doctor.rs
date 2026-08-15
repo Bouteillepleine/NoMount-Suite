@@ -230,16 +230,24 @@ pub fn run_doctor() -> Result<()> {
     // it is the one thing the mountless posture exists to deny, and after absorb
     // has run the only ones left are those deliberately skipped. Report them, so
     // opting out of absorption is a visible trade rather than a silent one.
+    let skip_src = crate::absorb::skip_source();
+    let how = if skip_src.starts_with('/') {
+        format!("remove its entry from {skip_src} to absorb it")
+    } else {
+        format!(
+            "no skip file exists, so the built-in list is in use; create {} listing only \
+             what you want skipped",
+            crate::absorb::SKIP_FILE
+        )
+    };
     for c in crate::absorb::candidates_all().unwrap_or_default() {
         f.push(Finding {
             level: Level::Warn,
             check: "module mount not absorbed",
             detail: format!(
-                "{} <- {} is still a real mount and visible to any app; remove its entry \
-                 from {} to absorb it",
+                "{} <- {} is still a real mount and visible to any app; {how}",
                 c.target.display(),
                 c.source.display(),
-                crate::absorb::SKIP_FILE
             ),
         });
     }
