@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.1
+
+### Changed
+- **`absorb-skip` is now `absorb-skip.txt`.** It is a hand-edited list — `doctor` tells you to edit it by name — and an extensionless file makes an Android file manager ask which app to open it with. Now matches its peer `whiteouts.txt`. An existing `absorb-skip` is migrated on install, and the old name is still read as a fallback, so opt-outs already set are preserved either way.
+
 ## v1.2.0
 
 Audit fix pass (14 findings) plus two new capabilities: absorbing other modules' mounts, and durable whiteouts.

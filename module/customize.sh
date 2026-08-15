@@ -94,16 +94,19 @@ ui_print "  config: $CONF"
 # Skipped by default. The cost is one file keeping the bind's dev/ino/mtime
 # tell, which `nomount doctor` reports so it is not invisible. Delete a line to
 # absorb that module once you have verified your fork.
-if [ ! -f "$NMDIR/absorb-skip" ]; then
+# Migrate the pre-v1.2.1 extensionless name, preserving any opt-outs already set.
+[ -f "$NMDIR/absorb-skip" ] && [ ! -f "$NMDIR/absorb-skip.txt" ] && \
+    mv -f "$NMDIR/absorb-skip" "$NMDIR/absorb-skip.txt"
+if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
     {
         echo "# One per line: a module id, or an absolute target path prefix."
         echo "# Hook frameworks: silent, delayed failure mode - opt in only after testing."
         echo "zygisk_lsposed"
         echo "zygisk_ksposed"
         echo "lsposed"
-    } > "$NMDIR/absorb-skip"
+    } > "$NMDIR/absorb-skip.txt"
 fi
-set_perm "$NMDIR/absorb-skip" 0 0 0600
+set_perm "$NMDIR/absorb-skip.txt" 0 0 0600
 set_perm "$NMDIR/pathhide.conf" 0 0 0644
 if [ -e /proc/pathhide ]; then
     ui_print "- Cloak add-on: kernel pathhide FOUND — pick modules in WebUI › Tools › Cloak"

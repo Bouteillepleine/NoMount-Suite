@@ -1,7 +1,7 @@
 id=meta-nomount
 name=NoMount Suite
-version=v1.2.0
-versionCode=10200
+version=v1.2.1
+versionCode=10201
 author=XxxY
 description=NoMount Suite — fully mountless: hookless VFS injection + hookless RRO overlays (no overlayfs). Root/su independent (sucompat). 🫥
 metamodule=1

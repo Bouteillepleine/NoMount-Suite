@@ -28,13 +28,19 @@ use crate::nm::Nm;
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 /// Only sources under here are module content we may take over.
 const MODULE_ROOT: &str = "/data/adb";
-/// Opt-out list: module ids or target path prefixes to leave mounted.
-pub const SKIP_FILE: &str = "/data/adb/nomount/absorb-skip";
+/// Opt-out list: module ids or target path prefixes to leave mounted. `.txt`
+/// to match its peer `whiteouts.txt` and because this file is meant to be
+/// hand-edited -- an extensionless file makes an Android file manager ask which
+/// app to open it with.
+pub const SKIP_FILE: &str = "/data/adb/nomount/absorb-skip.txt";
+/// Pre-v1.2.1 name, still honoured so an existing install keeps its opt-outs.
+const SKIP_FILE_LEGACY: &str = "/data/adb/nomount/absorb-skip";
 
 /// Entries to leave alone: one per line, either a module id (matched against the
 /// bind's source) or an absolute target prefix. Blank lines and `#` ignored.
 fn skip_list() -> Vec<String> {
     std::fs::read_to_string(SKIP_FILE)
+        .or_else(|_| std::fs::read_to_string(SKIP_FILE_LEGACY))
         .map(|s| {
             s.lines()
                 .map(|l| l.trim())
