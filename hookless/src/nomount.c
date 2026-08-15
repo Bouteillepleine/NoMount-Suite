@@ -23,7 +23,6 @@
 #define NM_ISOLATED_END     99999
 
 static atomic_t nm_rule_gen = ATOMIC_INIT(0);
-static atomic_t nm_ino_seq  = ATOMIC_INIT(0);
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
 static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mostly;
 static const struct cred *nm_root_cred;
@@ -1296,6 +1295,9 @@ static const struct inode_operations nm_file_iops = {
     .getattr = nm_file_getattr,
     .setattr = nm_setattr,
     .listxattr = nm_listxattr,
+    /* Unreachable as written: nm_alloc_rule() resolves r_path with LOOKUP_FOLLOW,
+     * so an injected inode mirrors the symlink TARGET and S_ISLNK is never true.
+     * Kept for the day that resolution changes; see the symlink note there. */
     .get_link = nm_get_link,
     .fiemap = nm_fiemap,
 };
@@ -2027,6 +2029,11 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         nm_get_rpath(rule)[r_len] = '\0';
     }
 
+    /* LOOKUP_FOLLOW: a module symlink is injected as a copy of its target, not as
+     * a symlink -- readlink() fails and a dangling link instantiates nothing.
+     * Deliberate: switching to no-follow also changes how symlink-to-directory is
+     * classified (NM_FLAG_IS_DIR below), which is load-bearing for RRO overlay
+     * dirs. No installed module currently ships a content symlink. */
     if (!is_whiteout && kern_path(nm_get_rpath(rule), LOOKUP_FOLLOW, &rule->r_path) ==  0 &&
          S_ISDIR(d_backing_inode(rule->r_path.dentry)->i_mode)) rule->flags |= NM_FLAG_IS_DIR;
 
@@ -2070,17 +2077,16 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_attributes = sib.attributes;
             rule->v_attr_mask  = sib.attributes_mask;
 #endif
-            /* Sequential, not hashed. A 20-bit hash over ~1M values gives each
-             * injection ~0.1% odds of landing on a real inode on this partition
-             * (~12% across a 139-file module set) and ~1% of colliding with
-             * another injection -- and duplicate (dev,ino) is both structurally
-             * impossible on a real fs and breaks tar/du/rsync/find. A counter
-             * makes injection-vs-injection collisions impossible and keeps the
-             * band dense and contiguous, which is what sequential allocation
-             * looks like anyway. Magnitude is not the tell it appears to be:
-             * a clean /system on this device spans ino 334..24.5M. */
+            /* Derive from the BACKING file's inode: unique per file and, unlike
+             * a global counter, STABLE across boots. A counter depends on module
+             * scan order, so every injected file's ino would shift on reboot
+             * while stock inodes never move -- a divergence in its own right and
+             * breaks anything keying a cache on (dev,ino). A path hash is stable
+             * but collides. Magnitude is not the tell it looks like: a clean
+             * /system on this device spans ino 334..24.5M, so the band here sits
+             * well inside what real filesystems produce. */
             rule->v_ino   = (unsigned long)((sib.ino & ~0xFFFFFULL) + 0x100000ULL +
-                                            (u64)atomic_inc_return(&nm_ino_seq));
+                                            (u64)d_backing_inode(rule->r_path.dentry)->i_ino);
         } else {
             /* last resort: previous parent-dir dev fallback */
             char *vp = nm_get_vpath(rule);
