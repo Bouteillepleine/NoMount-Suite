@@ -126,7 +126,8 @@ struct nomount_child_node {
 struct nomount_dir_node {
     struct idr children_idr;
     DECLARE_HASHTABLE(children_ht, NM_CHILD_HT_BITS);
-    loff_t real_eof;     /* backing dir's EOF cookie; 0 = not yet observed */
+    loff_t real_eof;     /* published base; 0 = no full pass observed yet */
+    loff_t max_real_pos; /* running max real dirent offset (not authoritative) */
     u64 bloom_mask;
     atomic_t refcount;   /* owner ref (alloc) + one per synthetic inode caching this node */
     struct rcu_head rcu;
@@ -240,23 +241,31 @@ static inline int nm_unpack_pos(const struct nomount_dir_node *d, loff_t pos)
 /* Headroom for the virtual entries appended above the base. */
 #define NM_POS_HEADROOM 65536
 
-/* Raise the base to the highest REAL dirent offset seen. Deliberately NOT the
- * fs's ctx->pos at EOF: ext4 with dir_index reports EXT4_HTREE_EOF_64BIT
- * (S64_MAX) there, so basing on it overflows loff_t and makes pos > eof never
- * true -- the virtual phase would never resume and entries would repeat. Every
- * value passed here is an actual dirent position, so it is always in range. */
-static inline void nm_raise_real_eof(struct nomount_dir_node *d, loff_t pos)
+/* Track the highest REAL dirent offset seen. Deliberately NOT the fs's ctx->pos
+ * at EOF: ext4 with dir_index reports EXT4_HTREE_EOF_64BIT (S64_MAX) there, so
+ * basing on it overflows loff_t and makes pos > eof never true. */
+static inline void nm_note_real_pos(struct nomount_dir_node *d, loff_t pos)
 {
     if (!d || pos <= 0 || pos > (loff_t)(S64_MAX - NM_POS_HEADROOM)) return;
-    if (pos > READ_ONCE(d->real_eof)) WRITE_ONCE(d->real_eof, pos);
+    if (pos > READ_ONCE(d->max_real_pos)) WRITE_ONCE(d->max_real_pos, pos);
 }
 
-/* A dir with no backing readdir (purely synthesized) still emits . and .., so
- * its cookie space starts at 2 just like a real empty directory. */
-static inline void nm_set_real_eof(struct nomount_dir_node *d, loff_t eof)
+/* Publish the base ONLY once the backing dir has actually reached EOF. Until
+ * then the running max is not the maximum, and a mid-pass resume position (which
+ * legitimately sits above every offset seen so far) would be mistaken for one of
+ * ours -- short-circuiting straight to the virtual entries and dropping the rest
+ * of the real directory. Re-published on every completed pass so a dir that grew
+ * keeps the invariant that every real offset is <= real_eof. */
+static inline void nm_publish_real_eof(struct nomount_dir_node *d, loff_t eof_hint)
 {
-    if (!d || READ_ONCE(d->real_eof)) return;   /* real entries already set the base */
-    WRITE_ONCE(d->real_eof, (eof > 0 && eof <= (loff_t)(S64_MAX - NM_POS_HEADROOM)) ? eof : 2);
+    loff_t base;
+
+    if (!d) return;
+    base = READ_ONCE(d->max_real_pos);
+    if (!base && eof_hint > 0 && eof_hint <= (loff_t)(S64_MAX - NM_POS_HEADROOM))
+        base = eof_hint;
+    if (!base) base = 2;                        /* dots-only / purely synthesized */
+    WRITE_ONCE(d->real_eof, base);
 }
 
 /* ========================================================================= */

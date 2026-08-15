@@ -211,7 +211,7 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     rcu_read_unlock();
 
 do_real_actor:
-    nm_raise_real_eof(proxy->dir_node, offset);
+    nm_note_real_pos(proxy->dir_node, offset);
     proxy->orig_ctx->pos = proxy->ctx.pos;
     ret = proxy->orig_ctx->actor(proxy->orig_ctx, name, namelen, offset, ino, d_type);
     proxy->ctx.pos = proxy->orig_ctx->pos;
@@ -511,7 +511,7 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
     ctx->pos = proxy_ctx.ctx.pos;
     if (res < 0 || proxy_ctx.emitted > 0) goto out;
 
-    nm_set_real_eof(pdir, ctx->pos);
+    nm_publish_real_eof(pdir, ctx->pos);
     ctx->pos = nm_pack_pos(pdir, 0);
     nomount_emit_virtual_children(ctx, pdir);
     goto out;
@@ -676,9 +676,12 @@ static int nm_mmap(struct file *file, struct vm_area_struct *vma)
     int ret;
     if (!real_file || !real_file->f_op->mmap) return -ENODEV;
 
+    /* Restore on FAILURE too. mmap_region() took its ref on `file` and its error
+     * path does fput(vma->vm_file): leaving real_file there over-puts a reference
+     * we never took (backing struct file UAF) and leaks the one on `file`. */
     vma->vm_file = real_file;
     ret = real_file->f_op->mmap(real_file, vma);
-    if (ret == 0 && vma->vm_file == real_file) vma->vm_file = file;
+    if (vma->vm_file == real_file) vma->vm_file = file;
 
     return ret;
 }
@@ -696,7 +699,7 @@ static int nm_mmap_prepare(struct vm_area_desc *desc)
      * the pre-6.18 behaviour) and restore it afterwards. */
     *(struct file **)&desc->file = real_file;
     ret = real_file->f_op->mmap_prepare(desc);
-    if (ret == 0 && desc->file == real_file) *(struct file **)&desc->file = file;
+    if (desc->file == real_file) *(struct file **)&desc->file = file;   /* on failure too */
 
     return ret;
 }
@@ -965,12 +968,12 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         ctx->pos = proxy_ctx.ctx.pos;
         if (res < 0 || proxy_ctx.emitted > 0) return res;
         if (!dir_node) return res;
-        nm_set_real_eof(dir_node, ctx->pos);
+        nm_publish_real_eof(dir_node, ctx->pos);
         ctx->pos = nm_pack_pos(dir_node, 0);
     } else if (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) {
         if (ctx->pos < 2 && !dir_emit_dots(file, ctx)) return 0;
         if (!dir_node) return 0;
-        nm_set_real_eof(dir_node, 2);
+        nm_publish_real_eof(dir_node, 2);
         ctx->pos = nm_pack_pos(dir_node, 0);
     } else {
         return -ENOTDIR;
@@ -1542,6 +1545,7 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
     idr_init(&dir_node->children_idr);
     hash_init(dir_node->children_ht);
     dir_node->real_eof = 0;
+    dir_node->max_real_pos = 0;
     dir_node->bloom_mask = 0;
     atomic_set(&dir_node->refcount, 1);   /* structural owner ref */
     return dir_node;
@@ -1649,6 +1653,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     kgid_t anc_gid = GLOBAL_ROOT_GID;   /* to stamp onto the synthesized virtual dirs       */
     umode_t anc_mode = 0755;
     struct timespec64 anc_atime = {0}, anc_mtime = {0}, anc_ctime = {0};
+    unsigned long anc_ino = 0;
     char anc_ctx[NM_CTX_MAX];
     u16 anc_ctx_len = 0;
     bool have_anc = false;
@@ -1700,6 +1705,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 anc_gid = v_inode->i_gid;
                 anc_mode = v_inode->i_mode & 0777;
                 if (nm_path_stat(&p_path, &akst) == 0) {
+                    anc_ino   = (unsigned long)akst.ino;
                     anc_atime = akst.atime;
                     anc_mtime = akst.mtime;
                     anc_ctime = akst.ctime;
@@ -1778,6 +1784,11 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 irule->v_ctime = anc_ctime;
                 irule->v_ctx_len = anc_ctx_len;
                 if (anc_ctx_len) memcpy(irule->v_ctx, anc_ctx, anc_ctx_len + 1);
+                /* A raw name hash puts a synthesized dir billions away from its
+                 * stock siblings (erofs dir inos are small); derive one in the
+                 * nearest real ancestor's magnitude band instead. */
+                if (anc_ino)
+                    irule->v_ino = (anc_ino & ~0xFFFFUL) | (irule->v_hash & 0xFFFF) | 1UL;
             }
             hash_add_rcu(nomount_rules_ht, &irule->vpath_node, irule->v_hash);
         }
