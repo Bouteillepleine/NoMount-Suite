@@ -11,6 +11,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
+#include <linux/magic.h>
 #include "nomount.h"
 
 /* Android packs (user_id, appid) into a uid: uid = user_id*NM_PER_USER_RANGE + appid.
@@ -1999,6 +2000,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int dept
     struct kstat dkst;
     struct file *dir;
     const struct cred *old;
+    bool dir_is_overlay = false;
     int i, pass, ret = -ENOENT;
 
     if (depth > 2)
@@ -2008,6 +2010,15 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int dept
 
     sc = kzalloc(sizeof(*sc), GFP_KERNEL);
     if (!sc) { path_put(&dp); return -ENOMEM; }
+    /* "dev differs from the directory" identifies the LOWER-LAYER file on an
+     * overlay mount -- but a BIND MOUNT looks identical, and mirroring one
+     * imports its foreign dev/mtime. Seen live: a bound LSPosed dex2oat in
+     * /apex/com.android.art/bin was picked as the sibling for a new injection,
+     * giving it /data's dev and the module file's mtime. So only prefer a
+     * differing dev where the directory really is overlayfs. */
+#ifdef OVERLAYFS_SUPER_MAGIC
+    dir_is_overlay = dp.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
+#endif
     /* dir_context.actor is const; heap alloc can't use a designated initializer,
      * so assign through a cast (matches how the VFS treats it internally). */
     *((filldir_t *)&sc->ctx.actor) = nm_sib_actor;
@@ -2043,7 +2054,9 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int dept
                 int r = nm_path_stat(&fp, &fk);
 
                 path_put(&fp);
-                if (r == 0 && (pass == 1 || fk.dev != sc->dir_dev)) {
+                if (r == 0 && (pass == 1 ||
+                               (dir_is_overlay ? fk.dev != sc->dir_dev
+                                               : fk.dev == sc->dir_dev))) {
                     *out = fk; kfree(cp); ret = 0; goto done;
                 }
             }
