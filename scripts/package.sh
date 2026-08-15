@@ -80,11 +80,20 @@ declare -A ABI_TARGET=(
 )
 
 setup_toolchain() {
-    export NDK_BIN="/opt/android-ndk-r25b/toolchains/llvm/prebuilt/linux-x86_64/bin"
-    if [ ! -d "$NDK_BIN" ]; then
-        echo "FATAL: Android NDK not found at /opt/android-ndk-r25b" >&2
+    # Honour the environment first; the previous hardcoded /opt path made this
+    # script unusable on any machine that installs the NDK anywhere else.
+    local ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+    if [ -z "$ndk" ]; then
+        for c in /opt/android-ndk-r25b "$HOME"/Android/Sdk/ndk/* "$HOME"/android-ndk-*; do
+            [ -d "$c/toolchains/llvm/prebuilt/linux-x86_64/bin" ] && ndk="$c"
+        done
+    fi
+    export NDK_BIN="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    if [ -z "$ndk" ] || [ ! -d "$NDK_BIN" ]; then
+        echo "FATAL: Android NDK not found. Set ANDROID_NDK_HOME." >&2
         exit 1
     fi
+    echo "==> NDK: $ndk"
     if [ -f "/home/president/.cargo/bin/cargo" ]; then
         export RUSTUP_HOME=/home/president/.rustup
         export CARGO_HOME=/home/president/.cargo
