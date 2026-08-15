@@ -28,6 +28,35 @@ use crate::nm::Nm;
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 /// Only sources under here are module content we may take over.
 const MODULE_ROOT: &str = "/data/adb";
+/// Opt-out list: module ids or target path prefixes to leave mounted.
+pub const SKIP_FILE: &str = "/data/adb/nomount/absorb-skip";
+
+/// Entries to leave alone: one per line, either a module id (matched against the
+/// bind's source) or an absolute target prefix. Blank lines and `#` ignored.
+fn skip_list() -> Vec<String> {
+    std::fs::read_to_string(SKIP_FILE)
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True if this mount is explicitly excluded.
+pub(crate) fn is_skipped(src: &Path, target: &Path, skips: &[String]) -> bool {
+    let (s, t) = (src.to_string_lossy(), target.to_string_lossy());
+    skips.iter().any(|k| {
+        if k.starts_with('/') {
+            t.starts_with(k.as_str())
+        } else {
+            // module id: match the /data/adb/modules/<id>/ path component
+            s.contains(&format!("/modules/{k}/"))
+        }
+    })
+}
 
 /// One parsed `/proc/self/mountinfo` row (the fields we need).
 #[derive(Debug, Clone)]
@@ -134,14 +163,19 @@ pub fn candidates() -> Result<Vec<Candidate>> {
     let body = std::fs::read_to_string(MOUNTINFO).context("read mountinfo")?;
     let rows = parse_mountinfo(&body);
     let roots = fs_roots(&rows);
+    let skips = skip_list();
     let mut out: Vec<Candidate> = rows
         .iter()
         .filter_map(|r| {
             let src = source_of(r, &roots)?;
-            is_absorbable(&src, &r.target).then(|| Candidate {
-                target: r.target.clone(),
-                source: src,
-            })
+            if !is_absorbable(&src, &r.target) {
+                return None;
+            }
+            if is_skipped(&src, &r.target, &skips) {
+                println!("skipping {} (listed in {SKIP_FILE})", r.target.display());
+                return None;
+            }
+            Some(Candidate { target: r.target.clone(), source: src })
         })
         .collect();
     out.sort_by_key(|c| std::cmp::Reverse(c.target.components().count()));
@@ -180,7 +214,7 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut u32) -> Result<()> {
 }
 
 /// `nomount absorb [--dry-run]`.
-pub fn run_absorb(dry_run: bool) -> Result<()> {
+pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     let nm = Nm::new();
     nm.version()
         .context("hookless NoMount engine not responding")?;
@@ -191,10 +225,23 @@ pub fn run_absorb(dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let (mut rules, mut done, mut failed) = (0u32, 0u32, 0u32);
+    let (mut rules, mut done, mut failed, mut skipped_dirs) = (0u32, 0u32, 0u32, 0u32);
     for c in &cands {
         if dry_run {
             println!("would absorb {} <- {}", c.target.display(), c.source.display());
+            continue;
+        }
+        // A DIRECTORY bind becomes one rule per file -- a static snapshot of the
+        // listing as it is right now. Anything the owning module adds to that
+        // directory later would simply never appear, and unlike a file bind we
+        // cannot tell whether it intends to. Opt-in only.
+        if c.source.is_dir() && !include_dirs {
+            println!(
+                "skipping directory bind {} <- {} (use --include-dirs; injection would \
+                 snapshot the listing and miss files added later)",
+                c.target.display(), c.source.display()
+            );
+            skipped_dirs += 1;
             continue;
         }
         // Unmount FIRST, then inject. Inject-first looks safer (the mount shadows
@@ -232,7 +279,10 @@ pub fn run_absorb(dry_run: bool) -> Result<()> {
     if dry_run {
         println!("nomount absorb: {} mount(s) would be absorbed (dry run)", cands.len());
     } else {
-        println!("nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {failed} failed");
+        println!(
+            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {failed} failed             {}",
+            if skipped_dirs > 0 { format!(", {skipped_dirs} directory bind(s) skipped") } else { String::new() }
+        );
     }
     Ok(())
 }
@@ -277,6 +327,17 @@ mod tests {
         let roots = fs_roots(&rows);
         let prod = rows.iter().find(|r| r.target == Path::new("/product")).unwrap();
         assert!(source_of(prod, &roots).is_none());
+    }
+
+    #[test]
+    fn skip_list_matches_module_id_or_target_prefix() {
+        let src = Path::new("/data/adb/modules/zygisk_lsposed/bin/dex2oat");
+        let tgt = Path::new("/apex/com.android.art/bin/dex2oat64");
+        assert!(is_skipped(src, tgt, &["zygisk_lsposed".into()]), "module id");
+        assert!(is_skipped(src, tgt, &["/apex/".into()]), "target prefix");
+        assert!(!is_skipped(src, tgt, &["other_module".into()]));
+        assert!(!is_skipped(src, tgt, &["/system/".into()]));
+        assert!(!is_skipped(src, tgt, &[]));
     }
 
     #[test]

@@ -35,6 +35,10 @@ pub enum Commands {
         /// Report what would be absorbed without changing anything
         #[arg(long)]
         dry_run: bool,
+        /// Also absorb directory binds. Off by default: injection snapshots the
+        /// listing, so files the owning module adds later would never appear.
+        #[arg(long)]
+        include_dirs: bool,
     },
     /// Durable whiteouts: hide stock ROM files that are themselves a tell.
     /// The list survives reboots and is re-applied at boot.
