@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.3
+
+### Fixed
+- **The hook-path skip missed half of Vector's dex2oat paths.** ART lived in `/apex/com.android.runtime` before moving to `/apex/com.android.art`, and frameworks still hook whichever exists — JingMatrix's Vector targets eight paths spread across both. Keying only on `com.android.art` covered its four `art` variants by prefix and silently missed all four `com.android.runtime` ones, so those binds would have been absorbed. Both apex names are now covered, plus the pre-apex `/system/bin/dex2oat`. A test asserts the exact eight paths Vector hooks.
+
 ## v1.2.2
 
 ### Fixed

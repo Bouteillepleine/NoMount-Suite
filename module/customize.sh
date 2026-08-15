@@ -116,6 +116,8 @@ if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
         echo "# later as \"modules stopped applying to new apps\". Delete a line to"
         echo "# absorb it once you have tested your fork."
         echo "/apex/com.android.art/bin/dex2oat"
+        echo "/apex/com.android.runtime/bin/dex2oat"
+        echo "/system/bin/dex2oat"
         echo "/system/bin/app_process"
     } > "$NMDIR/absorb-skip.txt"
 fi

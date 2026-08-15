@@ -43,8 +43,15 @@ const SKIP_FILE_LEGACY: &str = "/data/adb/nomount/absorb-skip";
 /// same for all of them. Losing the file must not quietly expose a framework, so
 /// this is what absorb falls back to rather than "skip nothing".
 const BUILTIN_SKIPS: &[&str] = &[
-    "/apex/com.android.art/bin/dex2oat", // dex2oat / dex2oat32 / dex2oat64
-    "/system/bin/app_process",           // app_process32 / app_process64
+    // Prefixes: each covers the plain, `d` (debug), `32` and `64` variants.
+    // BOTH apex names matter — ART lived in com.android.runtime before moving to
+    // com.android.art, and frameworks still hook whichever exists. Vector
+    // (JingMatrix) targets eight paths spread across the two, so keying on the
+    // com.android.art name alone silently missed half of them.
+    "/apex/com.android.art/bin/dex2oat",
+    "/apex/com.android.runtime/bin/dex2oat",
+    "/system/bin/dex2oat", // pre-apex layout
+    "/system/bin/app_process",
 ];
 
 /// Entries to leave alone: one per line, either a module id (matched against the
@@ -404,6 +411,25 @@ mod tests {
         let idkey: Vec<String> = vec!["zygisk_lsposed".into()];
         let other = PathBuf::from("/data/adb/modules/zygisk_lsposed_next/bin/dex2oat");
         assert!(!is_skipped(&other, tgt, &idkey), "id key cannot cover a renamed fork");
+    }
+
+    #[test]
+    fn builtin_covers_every_dex2oat_path_vector_hooks() {
+        // The exact set from JingMatrix/Vector's Dex2OatServer.kt.
+        let builtins: Vec<String> = BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect();
+        let src = PathBuf::from("/data/adb/modules/zygisk_vector/bin/dex2oat64");
+        for p in [
+            "/apex/com.android.runtime/bin/dex2oat",
+            "/apex/com.android.runtime/bin/dex2oatd",
+            "/apex/com.android.runtime/bin/dex2oat64",
+            "/apex/com.android.runtime/bin/dex2oatd64",
+            "/apex/com.android.art/bin/dex2oat32",
+            "/apex/com.android.art/bin/dex2oatd32",
+            "/apex/com.android.art/bin/dex2oat64",
+            "/apex/com.android.art/bin/dex2oatd64",
+        ] {
+            assert!(is_skipped(&src, Path::new(p), &builtins), "must cover {p}");
+        }
     }
 
     #[test]
