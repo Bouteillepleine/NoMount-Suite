@@ -190,17 +190,20 @@ jobs:
           echo "== compile fs/nomount.o =="
           make $MAKEOPTS fs/nomount.o 2>&1 | tee /tmp/nm_build.log
           ls -l out/fs/nomount.o && echo "COMPILE_OK ${{ matrix.ver }}"
-          # Also compile the maps-cloak consumer when the integration patch carries
-          # the task_mmu.c hunk (device versions 5.10..6.12). show_map_vma() reads
-          # inode->i_sb->s_dev/i_ino raw, so nomount_spoof_mmap_metadata() runs there;
-          # this gates that hunk on every GKI version that ships it.
-          if grep -q 'nomount_spoof_mmap_metadata' fs/proc/task_mmu.c; then
-            echo "== compile fs/proc/task_mmu.o (maps hook present) =="
-            make $MAKEOPTS fs/proc/task_mmu.o 2>&1 | tee /tmp/tm_build.log
-            ls -l out/fs/proc/task_mmu.o && echo "TASK_MMU_OK ${{ matrix.ver }}"
-          else
-            echo "== task_mmu.c has no NoMount hook for ${{ matrix.ver }} — skipping =="
-          fi
+          # The maps-cloak consumer is MANDATORY on all ten versions: show_map_vma()
+          # reads inode->i_sb->s_dev/i_ino raw, so without the hunk an injected
+          # mapping reports the overlay-top dev. This used to be a soft "skipping"
+          # branch, which let a malformed hunk (bare @@ header) silently no-op on
+          # five versions while the job still went green -- assert instead.
+          echo "== assert task_mmu.c hook present =="
+          grep -q 'nomount_spoof_mmap_metadata' fs/proc/task_mmu.c || {
+            echo "FATAL: integration patch did not apply its task_mmu.c hunk for ${{ matrix.ver }}"; exit 1; }
+          awk '/^(static )?[a-zA-Z_].*\(/{last=$0} /nomount_spoof_mmap_metadata\(inode/{print last; found=1; exit}
+               END{ if(!found) exit 1 }' fs/proc/task_mmu.c | grep -q 'show_map_vma' || {
+            echo "FATAL: task_mmu.c hunk applied OUTSIDE show_map_vma for ${{ matrix.ver }} (fuzzy misplacement)"; exit 1; }
+          echo "== compile fs/proc/task_mmu.o =="
+          make $MAKEOPTS fs/proc/task_mmu.o 2>&1 | tee /tmp/tm_build.log
+          ls -l out/fs/proc/task_mmu.o && echo "TASK_MMU_OK ${{ matrix.ver }}"
           ccache -s 2>/dev/null | grep -iE 'hit|miss' || true
 
       - name: Advisory W=1 + sparse (non-blocking)

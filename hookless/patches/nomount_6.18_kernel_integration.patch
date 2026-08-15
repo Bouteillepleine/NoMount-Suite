@@ -30,7 +30,8 @@ index fabdf0fd7..f7c7f44a4 100644
 diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
 --- a/fs/proc/task_mmu.c
 +++ b/fs/proc/task_mmu.c
-@@
+@@ -475,6 +475,11 @@
+ 
  		dev = inode->i_sb->s_dev;
  		ino = inode->i_ino;
 +#ifdef CONFIG_NOMOUNT
@@ -39,3 +40,5 @@ diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
 +		  nomount_spoof_mmap_metadata(inode, &dev, &ino); }
 +#endif
  		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
+ 	}
+ 
