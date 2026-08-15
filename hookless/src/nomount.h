@@ -90,6 +90,7 @@ struct nm_inode_info {
     struct timespec64 v_atime, v_mtime, v_ctime;
     u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
     u32 v_blksize;                   /* mirrored st_blksize */
+    u32 v_result_mask;               /* statx result_mask a STOCK file reports */
     kuid_t v_uid;                    /* virtual-dir owner (mirrored from nearest real ancestor) */
     kgid_t v_gid;
     umode_t v_mode;                  /* virtual-dir mode bits (0 => default 0755) */
@@ -148,6 +149,7 @@ struct nomount_rule {
     struct timespec64 v_atime, v_mtime, v_ctime;
     u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
     u32 v_blksize;                   /* mirrored st_blksize */
+    u32 v_result_mask;               /* statx result_mask a STOCK file reports */
     kuid_t v_uid;                    /* virtual-dir owner (mirrored from nearest real ancestor) */
     kgid_t v_gid;
     umode_t v_mode;                  /* virtual-dir mode bits (0 => default 0755) */
@@ -192,6 +194,7 @@ struct nm_rule_info {
     struct timespec64 v_atime, v_mtime, v_ctime;
     u64 v_attributes, v_attr_mask;
     u32 v_blksize;
+    u32 v_result_mask;
     kuid_t v_uid;
     kgid_t v_gid;
     umode_t v_mode;

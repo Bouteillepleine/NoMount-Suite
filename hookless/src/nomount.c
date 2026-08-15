@@ -138,6 +138,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_attributes = rule->v_attributes;
                 rule_info->v_attr_mask = rule->v_attr_mask;
                 rule_info->v_blksize = rule->v_blksize;
+                rule_info->v_result_mask = rule->v_result_mask;
                 rule_info->v_uid = rule->v_uid;
                 rule_info->v_gid = rule->v_gid;
                 rule_info->v_mode = rule->v_mode;
@@ -309,6 +310,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     info->v_attributes = rule_info->v_attributes;
     info->v_attr_mask = rule_info->v_attr_mask;
     info->v_blksize = rule_info->v_blksize;
+    info->v_result_mask = rule_info->v_result_mask;
 
     inode->i_private = info;
     inode->i_ino = rule_info->v_ino;
@@ -837,6 +839,13 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
         }
 #endif
         if (info->v_blksize) stat->blksize = info->v_blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        /* A stock erofs file reports atime UNSUPPORTED in statx's result_mask;
+         * forwarding getattr to the backing file on /data (which does track
+         * atime) sets that bit, so injected files answered statx with a mask no
+         * stock sibling produces. Narrow to the stock mask -- never widen. */
+        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
+#endif
         return 0;
     }
 
@@ -856,6 +865,13 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
         }
 #endif
         if (info->v_blksize) stat->blksize = info->v_blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        /* A stock erofs file reports atime UNSUPPORTED in statx's result_mask;
+         * forwarding getattr to the backing file on /data (which does track
+         * atime) sets that bit, so injected files answered statx with a mask no
+         * stock sibling produces. Narrow to the stock mask -- never widen. */
+        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
+#endif
     }
     return res;
 }
@@ -887,6 +903,13 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
         }
 #endif
         if (info->v_blksize) stat->blksize = info->v_blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        /* A stock erofs file reports atime UNSUPPORTED in statx's result_mask;
+         * forwarding getattr to the backing file on /data (which does track
+         * atime) sets that bit, so injected files answered statx with a mask no
+         * stock sibling produces. Narrow to the stock mask -- never widen. */
+        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
+#endif
         return 0;
     }
 
@@ -906,6 +929,13 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
         }
 #endif
         if (info->v_blksize) stat->blksize = info->v_blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        /* A stock erofs file reports atime UNSUPPORTED in statx's result_mask;
+         * forwarding getattr to the backing file on /data (which does track
+         * atime) sets that bit, so injected files answered statx with a mask no
+         * stock sibling produces. Narrow to the stock mask -- never widen. */
+        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
+#endif
     }
     return res;
 }
@@ -2052,6 +2082,9 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_ctime = kst.ctime;
             rule->v_blksize = kst.blksize;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+            rule->v_result_mask = kst.result_mask;
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             rule->v_attributes = kst.attributes;   /* STATX_ATTR_* only exist >= 4.11 */
             rule->v_attr_mask = kst.attributes_mask;
 #endif
@@ -2074,6 +2107,9 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_ctime = sib.ctime;
             rule->v_blksize    = sib.blksize;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+            rule->v_result_mask = sib.result_mask;
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             rule->v_attributes = sib.attributes;
             rule->v_attr_mask  = sib.attributes_mask;
 #endif
@@ -2085,8 +2121,13 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
              * but collides. Magnitude is not the tell it looks like: a clean
              * /system on this device spans ino 334..24.5M, so the band here sits
              * well inside what real filesystems produce. */
+            /* r_path is unset for a whiteout, and for a backing path that did not
+             * resolve (e.g. a dangling module symlink) -- both reach here when the
+             * vpath does not exist either, so this MUST NOT deref it blindly. */
             rule->v_ino   = (unsigned long)((sib.ino & ~0xFFFFFULL) + 0x100000ULL +
-                                            (u64)d_backing_inode(rule->r_path.dentry)->i_ino);
+                                            (rule->r_path.dentry
+                                             ? (u64)d_backing_inode(rule->r_path.dentry)->i_ino
+                                             : ((u64)rule->v_hash & 0xFFFFF)));
         } else {
             /* last resort: previous parent-dir dev fallback */
             char *vp = nm_get_vpath(rule);
