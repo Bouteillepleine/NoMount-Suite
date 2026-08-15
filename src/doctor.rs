@@ -226,6 +226,23 @@ pub fn run_doctor() -> Result<()> {
     );
 
     f.sort_by(|a, b| a.level.cmp(&b.level).then(a.check.cmp(b.check)));
+    // Any module-backed mount still standing is an app-visible detection surface:
+    // it is the one thing the mountless posture exists to deny, and after absorb
+    // has run the only ones left are those deliberately skipped. Report them, so
+    // opting out of absorption is a visible trade rather than a silent one.
+    for c in crate::absorb::candidates_all().unwrap_or_default() {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "module mount not absorbed",
+            detail: format!(
+                "{} <- {} is still a real mount and visible to any app; remove its entry \
+                 from {} to absorb it",
+                c.target.display(),
+                c.source.display(),
+                crate::absorb::SKIP_FILE
+            ),
+        });
+    }
     for (part, n) in &fd_note {
         f.push(Finding {
             level: Level::Info,

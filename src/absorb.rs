@@ -159,6 +159,24 @@ pub struct Candidate {
 
 /// Everything currently absorbable, deepest target first so nested mounts come
 /// off in the right order.
+/// Absorbable mounts INCLUDING ones the skip list excludes. Used by `doctor` to
+/// report what is deliberately being left mounted.
+pub fn candidates_all() -> Result<Vec<Candidate>> {
+    let body = std::fs::read_to_string(MOUNTINFO).context("read mountinfo")?;
+    let rows = parse_mountinfo(&body);
+    let roots = fs_roots(&rows);
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            let src = source_of(r, &roots)?;
+            is_absorbable(&src, &r.target).then(|| Candidate {
+                target: r.target.clone(),
+                source: src,
+            })
+        })
+        .collect())
+}
+
 pub fn candidates() -> Result<Vec<Candidate>> {
     let body = std::fs::read_to_string(MOUNTINFO).context("read mountinfo")?;
     let rows = parse_mountinfo(&body);

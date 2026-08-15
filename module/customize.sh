@@ -83,6 +83,27 @@ ui_print "  config: $CONF"
 # --- Cloak (pathhide maps/fd) add-on ---
 [ -f "$MODPATH/scan.sh" ] && set_perm "$MODPATH/scan.sh" 0 0 0755
 [ -f "$NMDIR/pathhide.conf" ] || echo "# NoMount Cloak — pathhide rule list (managed by WebUI › Tools › Cloak)" > "$NMDIR/pathhide.conf"
+
+# --- absorb opt-out list -----------------------------------------------------
+# `nomount absorb` converts other modules' bind mounts into injections. Safe for
+# a plain file bind (exec through an injection is verified working), but a hook
+# framework installs its bind from NATIVE daemon code that differs between forks
+# and versions, and the failure mode is SILENT AND DELAYED: dex2oat runs during
+# dexopt on app install, not at boot, so a broken hook surfaces hours later as
+# "modules stopped applying to new apps" and is near-impossible to attribute.
+# Skipped by default. The cost is one file keeping the bind's dev/ino/mtime
+# tell, which `nomount doctor` reports so it is not invisible. Delete a line to
+# absorb that module once you have verified your fork.
+if [ ! -f "$NMDIR/absorb-skip" ]; then
+    {
+        echo "# One per line: a module id, or an absolute target path prefix."
+        echo "# Hook frameworks: silent, delayed failure mode - opt in only after testing."
+        echo "zygisk_lsposed"
+        echo "zygisk_ksposed"
+        echo "lsposed"
+    } > "$NMDIR/absorb-skip"
+fi
+set_perm "$NMDIR/absorb-skip" 0 0 0600
 set_perm "$NMDIR/pathhide.conf" 0 0 0644
 if [ -e /proc/pathhide ]; then
     ui_print "- Cloak add-on: kernel pathhide FOUND — pick modules in WebUI › Tools › Cloak"
