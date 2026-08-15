@@ -1707,7 +1707,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     umode_t anc_mode = 0755;
     struct timespec64 anc_atime = {0}, anc_mtime = {0}, anc_ctime = {0};
     unsigned long anc_ino = 0;
-    u32 anc_blksize = 0;
+    u32 anc_blksize = 0, anc_result_mask = 0;
+    u64 anc_attributes = 0, anc_attr_mask = 0;
     char anc_ctx[NM_CTX_MAX];
     u16 anc_ctx_len = 0;
     bool have_anc = false;
@@ -1761,6 +1762,20 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 if (nm_path_stat(&p_path, &akst) == 0) {
                     anc_ino   = (unsigned long)akst.ino;
                     anc_blksize = akst.blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+                    anc_result_mask = akst.result_mask;
+                    anc_attr_mask   = akst.attributes_mask;
+                    /* Mirror the ancestor's attributes, minus the bits that
+                     * describe a MOUNT rather than a file: the nearest real
+                     * ancestor is often a mount root (/product/priv-app reports
+                     * STATX_ATTR_MOUNT_ROOT) and a synthesized child claiming
+                     * that would be a tell in its own right. */
+                    anc_attributes  = akst.attributes & ~(u64)(
+#ifdef STATX_ATTR_MOUNT_ROOT
+                                          STATX_ATTR_MOUNT_ROOT |
+#endif
+                                          STATX_ATTR_AUTOMOUNT);
+#endif
                     anc_atime = akst.atime;
                     anc_mtime = akst.mtime;
                     anc_ctime = akst.ctime;
@@ -1848,6 +1863,14 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                  * generic_fillattr fallback) where every real dir reports the
                  * fs block size -- a one-stat divergence. */
                 irule->v_blksize = anc_blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+                /* Without these a synthesized dir answers statx with a mask and
+                 * attribute set no stock dir on the partition produces (atime
+                 * reported as valid, IMMUTABLE absent). */
+                irule->v_result_mask = anc_result_mask;
+                irule->v_attributes  = anc_attributes;
+                irule->v_attr_mask   = anc_attr_mask;
+#endif
             }
             hash_add_rcu(nomount_rules_ht, &irule->vpath_node, irule->v_hash);
         }
