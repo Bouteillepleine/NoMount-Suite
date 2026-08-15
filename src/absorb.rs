@@ -307,7 +307,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
 
     if dry_run {
         println!(
-            "nomount absorb: {} mount(s) would be absorbed, {skipped_dirs} directory bind(s)              would be skipped (dry run)",
+            "nomount absorb: {} mount(s) would be absorbed, {skipped_dirs} directory bind(s) skipped (dry run)",
             cands.len() as u32 - skipped_dirs
         );
     } else {
