@@ -3,7 +3,7 @@
 ## v1.2.1
 
 ### Changed
-- **`absorb-skip` is now `absorb-skip.txt`.** It is a hand-edited list — `doctor` tells you to edit it by name — and an extensionless file makes an Android file manager ask which app to open it with. Now matches its peer `whiteouts.txt`. An existing `absorb-skip` is migrated on install, and the old name is still read as a fallback, so opt-outs already set are preserved either way.
+- **`absorb-skip` is now `absorb-skip.txt`.** It is a hand-edited list — `doctor` tells you to edit it by name — and an extensionless file makes an Android file manager ask which app to open it with. Now matches its peer `whiteouts.txt`. An existing `absorb-skip` is *copied* to the new name on install — deliberately not moved, since the outgoing binary stays live until the next reboot and reads the old name, so a rename would silently drop its opt-outs in that window. The new binary prefers `.txt` and falls back to the old name, so both work.
 
 ## v1.2.0
 

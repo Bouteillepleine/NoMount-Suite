@@ -94,9 +94,13 @@ ui_print "  config: $CONF"
 # Skipped by default. The cost is one file keeping the bind's dev/ino/mtime
 # tell, which `nomount doctor` reports so it is not invisible. Delete a line to
 # absorb that module once you have verified your fork.
-# Migrate the pre-v1.2.1 extensionless name, preserving any opt-outs already set.
+# Migrate the pre-v1.2.1 extensionless name. COPY, never move: the outgoing
+# binary is still live until the next reboot and reads the OLD name, so renaming
+# here would silently drop its opt-outs for anything that runs absorb in that
+# window. The new binary prefers .txt and falls back to the old name, so both
+# work; the stale copy is simply ignored afterwards.
 [ -f "$NMDIR/absorb-skip" ] && [ ! -f "$NMDIR/absorb-skip.txt" ] && \
-    mv -f "$NMDIR/absorb-skip" "$NMDIR/absorb-skip.txt"
+    cp -f "$NMDIR/absorb-skip" "$NMDIR/absorb-skip.txt"
 if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
     {
         echo "# One per line: a module id, or an absolute target path prefix."
