@@ -298,11 +298,23 @@ do_props() {
     fi
 }
 
-# ---- uname override via /sys/kernel/nomount (blank = keep) ------------------
+# ---- kernel knob interface (renamed; probe both so kernel/module can differ) --
+nm_sysd() {
+    local d
+    for d in /sys/kernel/boot_meta /sys/kernel/nomount; do
+        [ -d "$d" ] && { echo "$d"; return 0; }
+    done
+    return 1
+}
+# attribute names differ with the directory: boot_meta/{release,version}
+nm_rel_attr() { [ -e "$1/release" ] && echo "$1/release" || echo "$1/uname_release"; }
+nm_ver_attr() { [ -e "$1/version" ] && echo "$1/version" || echo "$1/uname_version"; }
+
+# ---- uname override via the kernel knob dir (blank = keep) ------------------
 do_uname() {
     [ "${spoof_uname:-0}" = "1" ] || return 0
-    local sysd=/sys/kernel/nomount
-    if [ ! -w "$sysd/uname_release" ]; then
+    local sysd; sysd=$(nm_sysd) || sysd=/sys/kernel/nomount
+    if [ ! -w "$(nm_rel_attr "$sysd")" ]; then
         log "uname: kernel interface absent (needs the nomount uname build)"
         return 0
     fi
@@ -312,7 +324,7 @@ do_uname() {
         tail=$(printf '%s' "$uname_tail" | sed -E 's/^[0-9][0-9.]*-android[0-9]+-//')
         prefix=$(uname -r | grep -oE '^[0-9][0-9.]*-android[0-9]+-')
         rel="${prefix}${tail}"
-        printf '%s' "$rel" > "$sysd/uname_release" 2>/dev/null && log "uname release=$rel"
+        printf '%s' "$rel" > "$(nm_rel_attr "$sysd")" 2>/dev/null && log "uname release=$rel"
     fi
 
     if [ -n "$uname_date" ]; then
@@ -321,11 +333,11 @@ do_uname() {
         [ -z "$d" ] && d=$uname_date
         head=$(uname -v | sed -E 's/^(#[0-9]+ SMP( [A-Z_]*PREEMPT[A-Z_]*)?).*/\1/')
         ver="$head $d"
-        printf '%s' "$ver" > "$sysd/uname_version" 2>/dev/null && log "uname version=$ver"
+        printf '%s' "$ver" > "$(nm_ver_attr "$sysd")" 2>/dev/null && log "uname version=$ver"
     fi
 }
 
-# ---- /proc/cmdline + /proc/bootconfig spoof via /sys/kernel/nomount ----------
+# ---- /proc/cmdline + /proc/bootconfig spoof via the kernel knob dir ----------
 # resetprop only moves the derived ro.boot.* props; the raw androidboot.* in
 # /proc/cmdline (and /proc/bootconfig on GKI) still carry the real boot state, so
 # a detector reading them sees the opposite of the props. The kernel serves a
@@ -349,7 +361,8 @@ do_cmdline() {
         log "cmdline: skipped (props not normalized to green; check resetprop)"
         return 0
     fi
-    local sysd=/sys/kernel/nomount dg
+    local sysd dg
+    sysd=$(nm_sysd) || sysd=/sys/kernel/nomount
     dg=$(getprop ro.boot.vbmeta.digest 2>/dev/null)
 
     # /proc/cmdline: androidboot.key=value, space-separated
@@ -466,8 +479,10 @@ case "${1:-}" in
         orig=$NMDIR/uname_orig
         [ -s "$orig" ] || { echo "no-baseline"; exit 0; }
         rel=$(sed -n 2p "$orig"); ver=$(sed -n 3p "$orig")
-        [ -w /sys/kernel/nomount/uname_release ] && [ -n "$rel" ] && printf '%s' "$rel" > /sys/kernel/nomount/uname_release
-        [ -w /sys/kernel/nomount/uname_version ] && [ -n "$ver" ] && printf '%s' "$ver" > /sys/kernel/nomount/uname_version
+        _sd=$(nm_sysd) && {
+            [ -n "$rel" ] && printf '%s' "$rel" > "$(nm_rel_attr "$_sd")" 2>/dev/null
+            [ -n "$ver" ] && printf '%s' "$ver" > "$(nm_ver_attr "$_sd")" 2>/dev/null
+        }
         if grep -v -E '^(uname_tail|uname_date)=' "$CONF" > "$CONF.t" 2>/dev/null; then
             printf "uname_tail=''\nuname_date=''\n" >> "$CONF.t"; mv "$CONF.t" "$CONF"
         fi
