@@ -243,6 +243,9 @@ void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
  * position can be ours yet. It is recorded at the real->virtual transition, i.e.
  * always before any virtual offset is handed out.
  */
+/* Headroom for the virtual entries appended above the base. */
+#define NM_POS_HEADROOM 65536
+
 static inline bool nm_is_virtual_pos(const struct nomount_dir_node *d, loff_t pos)
 {
     loff_t eof, mx;
@@ -257,7 +260,11 @@ static inline bool nm_is_virtual_pos(const struct nomount_dir_node *d, loff_t po
      * directory. Residual: a position above BOTH is still ambiguous until the
      * grown dir has been walked to EOF once. Read-only ROM partitions (the
      * injection targets) never grow, so this only bites writable mounts. */
-    return eof && pos > eof && pos > mx;
+    /* Bound the window. Without an upper edge, ANY position above the base
+     * counts as ours -- including a wild fs cookie (ext4 dir_index hands back
+     * S64_MAX at EOF), which then unpacks to a nonsense child id and silently
+     * ends the listing. */
+    return eof && pos > eof && pos > mx && pos <= eof + NM_POS_HEADROOM;
 }
 
 static inline loff_t nm_pack_pos(const struct nomount_dir_node *d, int id)
@@ -267,11 +274,11 @@ static inline loff_t nm_pack_pos(const struct nomount_dir_node *d, int id)
 
 static inline int nm_unpack_pos(const struct nomount_dir_node *d, loff_t pos)
 {
-    return (int)(pos - READ_ONCE(d->real_eof) - 1);
-}
+    loff_t id = pos - READ_ONCE(d->real_eof) - 1;
 
-/* Headroom for the virtual entries appended above the base. */
-#define NM_POS_HEADROOM 65536
+    if (id < 0 || id > NM_POS_HEADROOM) return -1;
+    return (int)id;
+}
 
 /* Track the highest REAL dirent offset seen. Deliberately NOT the fs's ctx->pos
  * at EOF: ext4 with dir_index reports EXT4_HTREE_EOF_64BIT (S64_MAX) there, so
@@ -294,7 +301,15 @@ static inline void nm_publish_real_eof(struct nomount_dir_node *d, loff_t eof_hi
 
     if (!d) return;
     base = READ_ONCE(d->max_real_pos);
-    if (!base && eof_hint > 0 && eof_hint <= (loff_t)(S64_MAX - NM_POS_HEADROOM))
+    /* Take the HIGHER of the last real dirent offset and the position the
+     * backing dir left at EOF. They coincide on overlayfs (sequential cookies,
+     * EOF == last + 1) but not on a byte-offset fs like erofs, where EOF sits
+     * PAST the last entry -- basing the window on the dirent offset alone put
+     * that EOF position inside the virtual range, so every listing after the
+     * first resumed at a child id that does not exist and emitted nothing. The
+     * injected file stayed resolvable by name, so it was visible to stat and
+     * open but absent from readdir: 90 of 260 rules on OP15. */
+    if (eof_hint > 0 && eof_hint <= (loff_t)(S64_MAX - NM_POS_HEADROOM) && eof_hint > base)
         base = eof_hint;
     if (!base) base = 2;                        /* dots-only / purely synthesized */
     WRITE_ONCE(d->real_eof, base);
