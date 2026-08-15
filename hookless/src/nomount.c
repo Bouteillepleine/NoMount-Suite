@@ -2516,7 +2516,13 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             char *vp = nm_get_vpath(rule);
             char *slash = strrchr(vp, '/');
 
-            rule->v_ino = (unsigned long)rule->v_hash;
+            /* Masked, never the raw hash. full_name_hash() is a full-width u32,
+             * so an unmasked value lands in the billions while the inodes around
+             * it are 2-8 digits: an adreno driver injected into a synthesized
+             * /vendor/gpu/kbc reported ino 1.4e9-3.2e9 where nothing under
+             * /vendor exceeds 1.4e7 (3308 files sampled). One stat, no baseline.
+             * Refined below into the parent's band once its ino is known. */
+            rule->v_ino = (unsigned long)((u64)rule->v_hash & 0xFFFFFULL) | 1UL;
             rule->v_dev = 0;
             if (slash && slash != vp) {
                 char *parent = kstrndup(vp, slash - vp, GFP_KERNEL);
@@ -2527,6 +2533,13 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
 
                         if (nm_path_stat(&v_path_struct, &kst) == 0) {
                             rule->v_dev = kst.dev;
+                            /* Anchor into the parent directory's magnitude band,
+                             * the same shape the sibling path uses. A synthesized
+                             * parent is itself anchored to a real ancestor, so
+                             * this stays inside the partition's inode range even
+                             * when every directory above us is virtual. */
+                            rule->v_ino = (unsigned long)((kst.ino & ~0xFFFFFULL) + 0x100000ULL +
+                                                          ((u64)rule->v_hash & 0xFFFFFULL));
                             /* Mirror the parent dir's times too: leaving these 0
                              * makes getattr fall through to the backing file's
                              * (module-install) mtime -- a fresh-timestamp tell. */
