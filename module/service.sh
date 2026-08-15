@@ -92,6 +92,14 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     echo "nomount: $_ab" > /dev/kmsg 2>/dev/null
 fi
 
+# --- re-apply persistent whiteouts ---
+# Whiteouts live in kernel memory and are empty after every reboot; the list on
+# disk is the durable record.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/whiteouts.txt" ]; then
+    _wo=$("$BIN" whiteout apply 2>&1 | tail -1)
+    echo "nomount: $_wo" > /dev/kmsg 2>/dev/null
+fi
+
 # --- re-apply the persistent per-app block list ---
 # Per-UID hiding lives in kernel memory and is empty after every reboot; the
 # block list on disk (package names / UIDs) is the durable record. Now that boot

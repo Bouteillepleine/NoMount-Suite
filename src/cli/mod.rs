@@ -36,6 +36,12 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Durable whiteouts: hide stock ROM files that are themselves a tell.
+    /// The list survives reboots and is re-applied at boot.
+    Whiteout {
+        #[command(subcommand)]
+        action: WhiteoutAction,
+    },
     /// Lint the mount plan (and live rules) for known bootloop/no-op hazards
     Doctor,
     /// Print what the mount pass would do (resolved target, kind, source) without
@@ -90,4 +96,18 @@ pub enum UidAction {
     List,
     /// Re-apply the persistent block list to the kernel (run at boot)
     Apply,
+}
+
+#[derive(Subcommand)]
+pub enum WhiteoutAction {
+    /// Hide a path now and on every boot
+    Add { path: String },
+    /// Stop hiding a path
+    Remove { path: String },
+    /// Show the list and whether each entry is currently applied
+    List,
+    /// Re-apply the whole list (run at boot)
+    Apply,
+    /// Propose paths that exist on THIS device and are worth hiding
+    Suggest,
 }
