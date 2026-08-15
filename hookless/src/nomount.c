@@ -87,6 +87,7 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
  * before their definitions (identity is now by function pointer, not magic sig) */
 static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags);
 static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *ctx);
+static u64 nm_child_dotdot_of(const char *dirpath);
 
 /* Returns the raw (unpinned) dir_node behind a hijacked inode. Safe ONLY under
  * nomount_write_mutex, which excludes the del/clear paths that call_rcu-free a
@@ -1883,12 +1884,15 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 #ifdef OVERLAYFS_SUPER_MAGIC
                 anc_ovl = p_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
 #endif
-                /* The ancestor's own dirent ino, needed for ".." one level down.
-                 * Its real value lives in a lowerdir we cannot cheaply read, so
-                 * derive a stable stand-in from the path hash: all that has to
-                 * hold is that it is not the ancestor's st_ino, which is the
-                 * comparison a probe actually makes. */
-                anc_dino = anc_ovl ? ((u64)h_parent | 1ULL) : (u64)anc_ino;
+                /* What ".." looks like one level down. Copy it from a real
+                 * child of this directory: every stock sibling reports the same
+                 * lowerdir ino, so anything else is an outlier among them. */
+                anc_dino = anc_ino;
+                if (anc_ovl) {
+                    anc_dino = nm_child_dotdot_of(lookup_path);
+                    if (!anc_dino)
+                        anc_dino = ((u64)h_parent & 0x03FFFFFFULL) | 0x02000000ULL | 1ULL;
+                }
                 have_anc = true;
             }
             dir_node = nomount_get_dir_node(v_inode);
@@ -2075,6 +2079,77 @@ static NM_ACTOR_RET nm_sib_actor(struct dir_context *ctx, const char *name,
         s->n_subdirs++;
     }
     return NM_ACTOR_CONTINUE;
+}
+
+/* Read what a REAL sibling directory reports for "..", so a synthesized dir one
+ * level down can report the same thing. Its own ".." refers to the real parent,
+ * and on overlayfs that dirent carries a lowerdir ino every stock sibling
+ * shares: 67 of 68 dirs under /product/priv-app answered 179 or 455 while a
+ * synthesized one answered a raw path hash, 3.2e9 -- an outlier a probe spots by
+ * comparing siblings, no baseline needed. */
+struct nm_dotdot_scan {
+    struct dir_context ctx;
+    u64 ino;
+    char subdir[NAME_MAX + 1];
+    int sublen;
+};
+
+static NM_ACTOR_RET nm_dotdot_actor(struct dir_context *ctx, const char *name, int namelen,
+                                    loff_t off, u64 ino, unsigned int dt)
+{
+    struct nm_dotdot_scan *d = container_of(ctx, struct nm_dotdot_scan, ctx);
+
+    if (namelen == 2 && name[0] == '.' && name[1] == '.') {
+        d->ino = ino;
+    } else if (!d->sublen && dt == DT_DIR && namelen > 0 && namelen <= NAME_MAX &&
+               name[0] != '.') {
+        memcpy(d->subdir, name, namelen);
+        d->subdir[namelen] = '\0';
+        d->sublen = namelen;
+    }
+    return NM_ACTOR_CONTINUE;
+}
+
+static int nm_iter_dotdot(const char *dirpath, struct nm_dotdot_scan *sc)
+{
+    struct path dp;
+    struct file *dir;
+    const struct cred *old;
+
+    if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
+        return -ENOENT;
+    *((filldir_t *)&sc->ctx.actor) = nm_dotdot_actor;
+    old = override_creds(nm_root_cred);
+    dir = dentry_open(&dp, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+    path_put(&dp);
+    if (IS_ERR(dir)) { revert_creds(old); return -EACCES; }
+    iterate_dir(dir, &sc->ctx);
+    fput(dir);
+    revert_creds(old);
+    return 0;
+}
+
+/* The ".." a child of dirpath would report: scan dirpath for a real subdir,
+ * then read that subdir's own "..". */
+static u64 nm_child_dotdot_of(const char *dirpath)
+{
+    struct nm_dotdot_scan *a, *b;
+    char *cp;
+    u64 out = 0;
+
+    a = kzalloc(sizeof(*a), GFP_KERNEL);
+    if (!a) return 0;
+    if (nm_iter_dotdot(dirpath, a) != 0 || !a->sublen) { kfree(a); return 0; }
+    cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, a->subdir);
+    kfree(a);
+    if (!cp) return 0;
+    b = kzalloc(sizeof(*b), GFP_KERNEL);
+    if (b) {
+        if (nm_iter_dotdot(cp, b) == 0) out = b->ino;
+        kfree(b);
+    }
+    kfree(cp);
+    return out;
 }
 
 static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
