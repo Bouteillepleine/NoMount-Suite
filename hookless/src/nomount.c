@@ -23,6 +23,7 @@
 #define NM_ISOLATED_END     99999
 
 static atomic_t nm_rule_gen = ATOMIC_INIT(0);
+static atomic_t nm_ino_seq  = ATOMIC_INIT(0);
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
 static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mostly;
 static const struct cred *nm_root_cred;
@@ -2069,8 +2070,17 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_attributes = sib.attributes;
             rule->v_attr_mask  = sib.attributes_mask;
 #endif
-            rule->v_ino   = (unsigned long)((sib.ino & ~0xFFFFFULL) |
-                                            ((u64)rule->v_hash & 0xFFFFF));
+            /* Sequential, not hashed. A 20-bit hash over ~1M values gives each
+             * injection ~0.1% odds of landing on a real inode on this partition
+             * (~12% across a 139-file module set) and ~1% of colliding with
+             * another injection -- and duplicate (dev,ino) is both structurally
+             * impossible on a real fs and breaks tar/du/rsync/find. A counter
+             * makes injection-vs-injection collisions impossible and keeps the
+             * band dense and contiguous, which is what sequential allocation
+             * looks like anyway. Magnitude is not the tell it appears to be:
+             * a clean /system on this device spans ino 334..24.5M. */
+            rule->v_ino   = (unsigned long)((sib.ino & ~0xFFFFFULL) + 0x100000ULL +
+                                            (u64)atomic_inc_return(&nm_ino_seq));
         } else {
             /* last resort: previous parent-dir dev fallback */
             char *vp = nm_get_vpath(rule);
