@@ -137,7 +137,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     _rules=$("$NM_BIN" list 2>/dev/null | wc -l)
     _rro=$("$NM_BIN" list 2>/dev/null | grep -c '/overlay/[^ ]*\.apk')
     _mnt=$(grep -c '/data/adb/modules' /proc/self/mountinfo 2>/dev/null || echo 0)
-    _doc=$(timeout 30 "$BIN" doctor 2>/dev/null | sed -n 's/^summary: \([0-9]*\) errors, \([0-9]*\) warnings$/\1 \2/p')
+    _doc=$(timeout 30 "$BIN" doctor 2>/dev/null | sed -n 's/^summary: \([0-9]*\) errors, \([0-9]*\) warnings.*$/\1 \2/p')
     _err=$(echo "$_doc" | awk '{print $1+0}')
     _wrn=$(echo "$_doc" | awk '{print $2+0}')
     # runtime consistency canary trumps plan-time doctor for card health: a

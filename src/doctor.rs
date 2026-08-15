@@ -33,6 +33,9 @@ const ZYGOTE_FD_ALLOWLISTED: &[&str] = &[
 enum Level {
     Error,
     Warn,
+    /// Worth printing, not worth acting on. Kept out of the warning count so a
+    /// standing observation about a working configuration cannot bury a real one.
+    Info,
 }
 
 struct Finding {
@@ -225,7 +228,7 @@ pub fn run_doctor() -> Result<()> {
     f.sort_by(|a, b| a.level.cmp(&b.level).then(a.check.cmp(b.check)));
     for (part, n) in &fd_note {
         f.push(Finding {
-            level: Level::Warn,
+            level: Level::Info,
             check: "not FD-allowlisted for zygote",
             detail: format!(
                 "{n} injected file(s) on /{part} — zygote does not preload these, so this is \
@@ -234,7 +237,8 @@ pub fn run_doctor() -> Result<()> {
         });
     }
     let errors = f.iter().filter(|x| x.level == Level::Error).count();
-    let warns = f.len() - errors;
+    let warns = f.iter().filter(|x| x.level == Level::Warn).count();
+    let infos = f.iter().filter(|x| x.level == Level::Info).count();
 
     if f.is_empty() {
         println!("[ok] no problems found");
@@ -243,11 +247,16 @@ pub fn run_doctor() -> Result<()> {
             let tag = match x.level {
                 Level::Error => "error",
                 Level::Warn => "warn",
+                Level::Info => "info",
             };
             println!("[{tag}] {}: {}", x.check, x.detail);
         }
     }
-    println!("summary: {errors} errors, {warns} warnings");
+    if infos > 0 {
+        println!("summary: {errors} errors, {warns} warnings, {infos} informational");
+    } else {
+        println!("summary: {errors} errors, {warns} warnings");
+    }
     Ok(())
 }
 
