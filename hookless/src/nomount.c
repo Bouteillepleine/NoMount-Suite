@@ -412,7 +412,9 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
             char ctx[NM_CTX_MAX];
             u16 ctxlen = 0;
 
-            if (nm_read_secctx(real_inode, ctx, &ctxlen) == 0) {
+            if (rule_info->v_ctx_len) {                 /* stock file's label */
+                security_inode_notifysecctx(inode, rule_info->v_ctx, rule_info->v_ctx_len);
+            } else if (nm_read_secctx(real_inode, ctx, &ctxlen) == 0) {
                 security_inode_notifysecctx(inode, ctx, ctxlen);
                 memcpy(info->v_ctx, ctx, ctxlen + 1);
                 info->v_ctx_len = ctxlen;
@@ -2073,7 +2075,8 @@ static NM_ACTOR_RET nm_sib_actor(struct dir_context *ctx, const char *name,
     return NM_ACTOR_CONTINUE;
 }
 
-static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int depth)
+static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
+                                char *octx, u16 *octxlen, int depth)
 {
     struct nm_sib_scan *sc;
     struct path dp;
@@ -2132,12 +2135,23 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int dept
             if (!cp) continue;
             if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
                 int r = nm_path_stat(&fp, &fk);
+                char fctx[NM_CTX_MAX];
+                u16 fctxlen = 0;
 
+                /* Read the label BEFORE dropping the reference; a pure
+                 * injection has no stock file of its own to copy one from. */
+                if (r == 0 && nm_read_secctx(d_backing_inode(fp.dentry), fctx, &fctxlen) != 0)
+                    fctxlen = 0;
                 path_put(&fp);
                 if (r == 0 && (pass == 1 ||
                                (dir_is_overlay ? fk.dev != sc->dir_dev
                                                : fk.dev == sc->dir_dev))) {
-                    *out = fk; kfree(cp); ret = 0; goto done;
+                    *out = fk;
+                    if (octx && octxlen) {
+                        *octxlen = fctxlen;
+                        if (fctxlen) memcpy(octx, fctx, fctxlen + 1);
+                    }
+                    kfree(cp); ret = 0; goto done;
                 }
             }
             kfree(cp);
@@ -2148,7 +2162,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out, int dept
         char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->subdirs[i]);
 
         if (!cp) continue;
-        if (nm_scan_dir_for_file(cp, out, depth + 1) == 0) { kfree(cp); ret = 0; goto done; }
+        if (nm_scan_dir_for_file(cp, out, octx, octxlen, depth + 1) == 0) { kfree(cp); ret = 0; goto done; }
         kfree(cp);
     }
 done:
@@ -2163,9 +2177,12 @@ done:
  * dev on the same partition. */
 static char nm_sib_cache_dir[PATH_MAX];
 static struct kstat nm_sib_cache_kst;
+static char nm_sib_cache_ctx[NM_CTX_MAX];
+static u16 nm_sib_cache_ctxlen;
 static bool nm_sib_cache_valid;
 
-static int nm_find_sibling_meta(const char *vpath, struct kstat *out)
+static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
+                                char *octx, u16 *octxlen)
 {
     char *path = kstrdup(vpath, GFP_KERNEL);
     char *slash;
@@ -2179,12 +2196,16 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out)
 
     if (nm_sib_cache_valid && strcmp(nm_sib_cache_dir, path) == 0) {
         *out = nm_sib_cache_kst;
+        if (octx && octxlen) {
+            *octxlen = nm_sib_cache_ctxlen;
+            if (nm_sib_cache_ctxlen) memcpy(octx, nm_sib_cache_ctx, nm_sib_cache_ctxlen + 1);
+        }
         kfree(path);
         return 0;
     }
 
     for (;;) {
-        if (nm_scan_dir_for_file(path, out, 0) == 0) { ret = 0; break; }
+        if (nm_scan_dir_for_file(path, out, octx, octxlen, 0) == 0) { ret = 0; break; }
         slash = strrchr(path, '/');
         if (!slash || slash == path)
             break;
@@ -2196,6 +2217,8 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out)
         if (slash && slash != nm_sib_cache_dir) {
             *slash = '\0';
             nm_sib_cache_kst = *out;
+            nm_sib_cache_ctxlen = (octx && octxlen) ? *octxlen : 0;
+            if (nm_sib_cache_ctxlen) memcpy(nm_sib_cache_ctx, octx, nm_sib_cache_ctxlen + 1);
             nm_sib_cache_valid = true;
         }
     }
@@ -2253,6 +2276,17 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
          * On overlay-mounted partitions the raw i_sb->s_dev is the overlay-top
          * dev and the raw i_ino skips overlay xino remapping, so injected
          * inodes become dev/ino outliers vs their stock siblings. */
+        /* Capture the context of the file being SHADOWED. Everything else here
+         * mirrors the stock file; the context did not, and was taken from the
+         * backing file instead -- which ksud labels system_file. That matches
+         * stock on /system and /product by luck and is wrong everywhere else:
+         * a config injected into /vendor reported system_file among
+         * vendor_configs_file siblings (one getxattr to spot), and with
+         * S_PRIVATE gone SELinux now enforces that label, so a vendor domain
+         * allowed the stock file can be denied the injected one. */
+        if (nm_read_secctx(d_backing_inode(v_path_struct.dentry),
+                           rule->v_ctx, &rule->v_ctx_len) != 0)
+            rule->v_ctx_len = 0;
         if (nm_path_stat(&v_path_struct, &kst) == 0) {
             rule->v_ino = kst.ino;
             rule->v_dev = kst.dev;
@@ -2280,7 +2314,8 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
          * a real file instead (see nm_find_sibling_meta). */
         struct kstat sib;
 
-        if (nm_find_sibling_meta(nm_get_vpath(rule), &sib) == 0) {
+        if (nm_find_sibling_meta(nm_get_vpath(rule), &sib,
+                                 rule->v_ctx, &rule->v_ctx_len) == 0) {
             rule->v_dev   = sib.dev;
             rule->flags |= NM_FLAG_HAVE_TIMES;
             rule->v_atime = sib.atime;
