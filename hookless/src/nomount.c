@@ -850,6 +850,57 @@ static unsigned int nm_vdir_nlink(struct nomount_dir_node *d)
     return links;
 }
 
+#ifndef EROFS_SUPER_MAGIC_V1
+#define EROFS_SUPER_MAGIC_V1 0xE0F5E1E2
+#endif
+/* sizeof(struct erofs_dirent); fs/erofs/erofs_fs.h asserts it with a
+ * BUILD_BUG_ON, so it is part of the on-disk format, not a guess. */
+#define NM_EROFS_DIRENT_SZ 12
+
+/* erofs stores a directory as a run of blocks, each holding a packed array of
+ * 12-byte erofs_dirent followed by the entry names -- unpadded, not
+ * NUL-terminated. So a directory that fits in one block reports
+ * i_size == 12 * N + sum(namelen) over all N entries including "." and "..",
+ * and is block-quantised beyond that. It is never PAGE_SIZE.
+ *
+ * A synthesized dir left at i_size 4096 is therefore an outlier no real erofs
+ * directory produces, and one stat() on it is enough to prove injection. Every
+ * stock dir sampled on /product and /vendor matches the formula exactly.
+ *
+ * ext4/f2fs *do* quantise directories to a block, where 4096 is correct, so
+ * callers gate this on the superblock magic rather than applying it blindly.
+ */
+static loff_t nm_vdir_size(struct nomount_dir_node *d, unsigned int blocksize)
+{
+    struct nomount_child_node *ch;
+    loff_t full = 0;                 /* bytes already committed to whole blocks */
+    unsigned int used;               /* bytes used in the block being filled */
+    int cid = 0;
+
+    /* "." and ".." are always emitted */
+    used = 2 * NM_EROFS_DIRENT_SZ + 1 + 2;
+
+    if (d) {
+        rcu_read_lock();
+        idr_for_each_entry(&d->children_idr, ch, cid) {
+            unsigned int need;
+
+            if (ch->flags & NM_FLAG_WHITEOUT)
+                continue;
+            need = NM_EROFS_DIRENT_SZ + ch->name_len;
+            /* An entry never straddles a block; the tail of the previous one
+             * is padding, which is why multi-block dirs are not a flat sum. */
+            if (blocksize && used + need > blocksize) {
+                full += blocksize;
+                used = 0;
+            }
+            used += need;
+        }
+        rcu_read_unlock();
+    }
+    return full + used;
+}
+
 /* Reported (getattr-level) stat of a path — i.e. what a userspace detector
  * sees, not the raw backing inode->i_sb->s_dev. On an overlay mount this yields
  * the underlying layer's dev; on plain erofs it equals the sb dev. We mirror
@@ -898,6 +949,11 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
         if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #endif
         stat->nlink = nm_vdir_nlink(info->dir_node);
+        /* i_size stays at its 4096 placeholder otherwise; on erofs that is a
+         * value no stock directory reports. Recount like nlink. */
+        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1)
+            stat->size = nm_vdir_size(info->dir_node,
+                                      v_inode->i_sb->s_blocksize);
         return 0;
     }
 
@@ -963,6 +1019,11 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
         if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #endif
         stat->nlink = nm_vdir_nlink(info->dir_node);
+        /* i_size stays at its 4096 placeholder otherwise; on erofs that is a
+         * value no stock directory reports. Recount like nlink. */
+        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1)
+            stat->size = nm_vdir_size(info->dir_node,
+                                      v_inode->i_sb->s_blocksize);
         return 0;
     }
 
