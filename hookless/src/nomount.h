@@ -237,11 +237,26 @@ static inline int nm_unpack_pos(const struct nomount_dir_node *d, loff_t pos)
     return (int)(pos - READ_ONCE(d->real_eof) - 1);
 }
 
+/* Headroom for the virtual entries appended above the base. */
+#define NM_POS_HEADROOM 65536
+
+/* Raise the base to the highest REAL dirent offset seen. Deliberately NOT the
+ * fs's ctx->pos at EOF: ext4 with dir_index reports EXT4_HTREE_EOF_64BIT
+ * (S64_MAX) there, so basing on it overflows loff_t and makes pos > eof never
+ * true -- the virtual phase would never resume and entries would repeat. Every
+ * value passed here is an actual dirent position, so it is always in range. */
+static inline void nm_raise_real_eof(struct nomount_dir_node *d, loff_t pos)
+{
+    if (!d || pos <= 0 || pos > (loff_t)(S64_MAX - NM_POS_HEADROOM)) return;
+    if (pos > READ_ONCE(d->real_eof)) WRITE_ONCE(d->real_eof, pos);
+}
+
 /* A dir with no backing readdir (purely synthesized) still emits . and .., so
  * its cookie space starts at 2 just like a real empty directory. */
 static inline void nm_set_real_eof(struct nomount_dir_node *d, loff_t eof)
 {
-    if (d) WRITE_ONCE(d->real_eof, eof > 0 ? eof : 2);
+    if (!d || READ_ONCE(d->real_eof)) return;   /* real entries already set the base */
+    WRITE_ONCE(d->real_eof, (eof > 0 && eof <= (loff_t)(S64_MAX - NM_POS_HEADROOM)) ? eof : 2);
 }
 
 /* ========================================================================= */
@@ -279,7 +294,22 @@ enum {
     NM_CMD_DEL_UID,
     NM_CMD_GET_LIST,
     NM_CMD_GET_UIDS,
+    NM_CMD_SET_KNOB,
     __NM_CMD_MAX,
+};
+
+/* Boot-identity knobs, formerly sysfs attributes under /sys/kernel/<name>/.
+ * That kobject directory was world-traversable (0755), so both its name and its
+ * attribute names were readable by any process that could search /sys/kernel --
+ * a stock-baseline diff finds it regardless of what it is called. They ride the
+ * netlink control plane instead, which is CAP_NET_ADMIN-gated and not
+ * enumerable. Payload layout: [u32 knob][value bytes], empty value = clear. */
+enum {
+    NM_KNOB_UNAME_RELEASE = 0,
+    NM_KNOB_UNAME_VERSION,
+    NM_KNOB_CMDLINE,
+    NM_KNOB_BOOTCONFIG,
+    __NM_KNOB_MAX,
 };
 
 /* Attributes */

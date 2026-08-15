@@ -11,8 +11,6 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
-#include <linux/kobject.h>
-#include <linux/sysfs.h>
 #include "nomount.h"
 
 /* Android packs (user_id, appid) into a uid: uid = user_id*NM_PER_USER_RANGE + appid.
@@ -213,6 +211,7 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     rcu_read_unlock();
 
 do_real_actor:
+    nm_raise_real_eof(proxy->dir_node, offset);
     proxy->orig_ctx->pos = proxy->ctx.pos;
     ret = proxy->orig_ctx->actor(proxy->orig_ctx, name, namelen, offset, ino, d_type);
     proxy->ctx.pos = proxy->orig_ctx->pos;
@@ -326,15 +325,13 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         /* Real directories report st_nlink >= 2 (self + '.'); a synthesized dir
          * left at new_inode()'s default of 1 is a stat self-consistency outlier. */
         set_nlink(inode, 2);
-        /* Label it like its nearest real ancestor, else it is the only
-         * unlabeled directory on the partition. If the ancestor's context was
-         * unreadable we have nothing to mirror: fail OPEN (S_PRIVATE) rather
-         * than enforce against an unlabeled dir and make the subtree
-         * untraversable -- an unlabeled dir is a tell, a broken one is worse. */
+        /* Label it like its nearest real ancestor. If that context was
+         * unreadable we deliberately do NOT fall back to S_PRIVATE: that would
+         * reinstate the very LSM bypass this inode is meant to lose. An
+         * unlabelled inode then gets whatever SELinux assigns any unlabelled
+         * inode on this sb, and is enforced like one. */
         if (rule_info->v_ctx_len)
             security_inode_notifysecctx(inode, rule_info->v_ctx, rule_info->v_ctx_len);
-        else
-            inode->i_flags |= S_PRIVATE;
         inode->i_op = &nm_dir_iops;
         inode->i_fop = &nm_dir_fops;
     } else {
@@ -584,7 +581,6 @@ static int nm_open(struct inode *inode, struct file *file)
 {
     struct nm_inode_info *info = inode->i_private;
     struct file *real_file;
-    const struct cred *old_cred;
 
     if (unlikely(!info)) return -ENODEV;
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
@@ -593,17 +589,17 @@ static int nm_open(struct inode *inode, struct file *file)
     }
     if (unlikely(!info->r_path.dentry)) return -ENODEV;
 
-    /* Try the caller's own creds first so an injected path is authorised like a
-     * stock one. The privileged fallback keeps a legitimately-injected file
-     * readable when the BACKING store's label is not one the caller may open
-     * (module trees are relabelled system_file, but nothing guarantees it). */
+    /* The caller's own creds are authoritative: an injected path is authorised
+     * exactly like a stock one. There is no privileged retry -- that fallback
+     * let any caller reach a backing file its own domain could not open. A
+     * module tree whose files are not labelled for the reader is a packaging
+     * bug to fix with a relabel, not something to paper over in the kernel. */
     real_file = dentry_open(&info->r_path, file->f_flags, current_cred());
     if (IS_ERR(real_file)) {
-        old_cred = override_creds(nm_root_cred);
-        real_file = dentry_open(&info->r_path, file->f_flags, nm_root_cred);
-        revert_creds(old_cred);
+        nm_warn("open of backing file denied for uid %u (relabel the module tree)\n",
+                current_uid().val);
+        return PTR_ERR(real_file);
     }
-    if (IS_ERR(real_file)) return PTR_ERR(real_file);
 
     file->private_data = real_file;
     return 0;
@@ -2214,6 +2210,7 @@ static void __nomount_clear_all(bool is_exit)
 /*** Netlink control API (private raw netlink) ***/
 
 static struct sock *nm_nl_sk;
+static int nomount_nl_set_knob(struct nlattr **attrs);
 
 static int nomount_nl_add_rule(struct nlattr **attrs)
 {
@@ -2512,6 +2509,7 @@ static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
     case NM_CMD_ADD_UID:     return nomount_nl_add_uid(attrs);
     case NM_CMD_DEL_UID:     return nomount_nl_del_uid(attrs);
     case NM_CMD_GET_VERSION: return nomount_nl_get_version(skb, nlh);
+    case NM_CMD_SET_KNOB:    return nomount_nl_set_knob(attrs);
     default:                 return -EINVAL;
     }
 }
@@ -2526,7 +2524,6 @@ static void nm_nl_rcv(struct sk_buff *skb)
  * that field in the initial UTS namespace, so every uname()/`/proc/version`
  * reader reflects it (Android apps share init's UTS ns). Empty/"default" = leave.
  * Built-in only (CONFIG_NOMOUNT=y): uts_sem/init_uts_ns are not exported. */
-static struct kobject *nm_uname_kobj;
 
 /* ---- /proc/cmdline + /proc/bootconfig spoofing --------------------------------
  * androidboot.* boot state (verifiedbootstate, lock, warranty, vbmeta.digest) lives in
@@ -2626,15 +2623,7 @@ static struct proc_dir_entry *nm_mk_bootconfig_pde(void)
 }
 #endif
 
-static ssize_t cmdline_show(struct kobject *k, struct kobj_attribute *a, char *buf)
-{
-    ssize_t r;
-    mutex_lock(&nm_procspoof_mutex);
-    r = scnprintf(buf, PAGE_SIZE, "%s\n", nm_fake_cmdline ? nm_fake_cmdline : "");
-    mutex_unlock(&nm_procspoof_mutex);
-    return r;
-}
-static ssize_t cmdline_store(struct kobject *k, struct kobj_attribute *a, const char *buf, size_t c)
+static int nm_set_cmdline(const char *buf, size_t c)
 {
     char *nb = nm_dup_trim(buf, c);
     mutex_lock(&nm_procspoof_mutex);
@@ -2653,19 +2642,11 @@ static ssize_t cmdline_store(struct kobject *k, struct kobj_attribute *a, const 
         }
     }
     mutex_unlock(&nm_procspoof_mutex);
-    return c;
+    return 0;
 }
 
 #ifdef CONFIG_BOOT_CONFIG
-static ssize_t bootconfig_show(struct kobject *k, struct kobj_attribute *a, char *buf)
-{
-    ssize_t r;
-    mutex_lock(&nm_procspoof_mutex);
-    r = scnprintf(buf, PAGE_SIZE, "%s", nm_fake_bootconfig ? "set\n" : "off\n");
-    mutex_unlock(&nm_procspoof_mutex);
-    return r;
-}
-static ssize_t bootconfig_store(struct kobject *k, struct kobj_attribute *a, const char *buf, size_t c)
+static int nm_set_bootconfig(const char *buf, size_t c)
 {
     char *nb = nm_dup_trim(buf, c);
     mutex_lock(&nm_procspoof_mutex);
@@ -2676,7 +2657,7 @@ static ssize_t bootconfig_store(struct kobject *k, struct kobj_attribute *a, con
          * tell (stock is never empty). Leave the genuine entry in place. */
         if (!nb && !nm_orig_bootconfig) {
             mutex_unlock(&nm_procspoof_mutex);
-            return c;
+            return 0;
         }
         kfree(nm_fake_bootconfig);
         nm_fake_bootconfig = nb;
@@ -2695,18 +2676,11 @@ static ssize_t bootconfig_store(struct kobject *k, struct kobj_attribute *a, con
         nm_fake_bootconfig = nb;
     }
     mutex_unlock(&nm_procspoof_mutex);
-    return c;
+    return 0;
 }
 #endif /* CONFIG_BOOT_CONFIG */
 
-static struct kobj_attribute nm_cmdline_attr =
-    __ATTR(cmdline, 0600, cmdline_show, cmdline_store);
-#ifdef CONFIG_BOOT_CONFIG
-static struct kobj_attribute nm_bootconfig_attr =
-    __ATTR(bootconfig, 0600, bootconfig_show, bootconfig_store);
-#endif
-
-static ssize_t nm_uts_store(char *field, size_t fieldsz, const char *buf, size_t count)
+static int nm_uts_store(char *field, size_t fieldsz, const char *buf, size_t count)
 {
     char tmp[__NEW_UTS_LEN + 1];
     size_t n = count;
@@ -2715,63 +2689,49 @@ static ssize_t nm_uts_store(char *field, size_t fieldsz, const char *buf, size_t
     if (n > __NEW_UTS_LEN) return -EINVAL;
     memcpy(tmp, buf, n);
     tmp[n] = '\0';
-    if (n == 0 || strcmp(tmp, "default") == 0) return count;
+    if (n == 0 || strcmp(tmp, "default") == 0) return 0;
 
     down_write(&uts_sem);
     memset(field, 0, fieldsz);
     memcpy(field, tmp, n);
     up_write(&uts_sem);
-    return count;
+    return 0;
 }
 
-static ssize_t nm_uts_show(const char *field, char *buf)
+/* Netlink knob setter. Payload: [u32 knob][value bytes]; empty value clears. */
+static int nomount_nl_set_knob(struct nlattr **attrs)
 {
-    ssize_t r;
-    down_read(&uts_sem);
-    r = scnprintf(buf, PAGE_SIZE, "%s\n", field);
-    up_read(&uts_sem);
-    return r;
-}
+    const char *data, *val;
+    u32 knob;
+    int len, vlen;
 
-static ssize_t uname_release_show(struct kobject *k, struct kobj_attribute *a, char *buf)
-{ return nm_uts_show(init_uts_ns.name.release, buf); }
-static ssize_t uname_release_store(struct kobject *k, struct kobj_attribute *a, const char *buf, size_t c)
-{ return nm_uts_store(init_uts_ns.name.release, sizeof(init_uts_ns.name.release), buf, c); }
-static ssize_t uname_version_show(struct kobject *k, struct kobj_attribute *a, char *buf)
-{ return nm_uts_show(init_uts_ns.name.version, buf); }
-static ssize_t uname_version_store(struct kobject *k, struct kobj_attribute *a, const char *buf, size_t c)
-{ return nm_uts_store(init_uts_ns.name.version, sizeof(init_uts_ns.name.version), buf, c); }
+    if (!attrs[NOMOUNT_ATTR_PAYLOAD]) return -EINVAL;
+    data = nla_data(attrs[NOMOUNT_ATTR_PAYLOAD]);
+    len  = nla_len(attrs[NOMOUNT_ATTR_PAYLOAD]);
+    if (len < 4) return -EINVAL;
+    knob = get_unaligned((const u32 *)data);
+    val  = data + 4;
+    vlen = len - 4;
 
-static struct kobj_attribute nm_uname_release_attr =
-    __ATTR(release, 0600, uname_release_show, uname_release_store);
-static struct kobj_attribute nm_uname_version_attr =
-    __ATTR(version, 0600, uname_version_show, uname_version_store);
-
-static struct attribute *nm_uname_attrs[] = {
-    &nm_uname_release_attr.attr,
-    &nm_uname_version_attr.attr,
-    &nm_cmdline_attr.attr,
+    switch (knob) {
+    case NM_KNOB_UNAME_RELEASE:
+        return nm_uts_store(init_uts_ns.name.release,
+                            sizeof(init_uts_ns.name.release), val, vlen);
+    case NM_KNOB_UNAME_VERSION:
+        return nm_uts_store(init_uts_ns.name.version,
+                            sizeof(init_uts_ns.name.version), val, vlen);
+    case NM_KNOB_CMDLINE:
+        return nm_set_cmdline(val, vlen);
 #ifdef CONFIG_BOOT_CONFIG
-    &nm_bootconfig_attr.attr,
+    case NM_KNOB_BOOTCONFIG:
+        return nm_set_bootconfig(val, vlen);
 #endif
-    NULL,
-};
-static const struct attribute_group nm_uname_group = { .attrs = nm_uname_attrs };
-
-static void nm_uname_sysfs_init(void)
-{
-    int err;
-    nm_uname_kobj = kobject_create_and_add("boot_meta", kernel_kobj);
-    if (!nm_uname_kobj) { nm_err("uname: kobject create failed\n"); return; }
-    err = sysfs_create_group(nm_uname_kobj, &nm_uname_group);
-    if (err) {
-        nm_err("uname: sysfs group failed (%d)\n", err);
-        kobject_put(nm_uname_kobj);
-        nm_uname_kobj = NULL;
+    default:
+        return -EINVAL;
     }
 }
 
-static void nm_uname_sysfs_exit(void)
+static void nm_procspoof_exit(void)
 {
     struct proc_dir_entry *cpde;
 #ifdef CONFIG_BOOT_CONFIG
@@ -2797,11 +2757,6 @@ static void nm_uname_sysfs_exit(void)
     if (bpde) remove_proc_entry("bootconfig", NULL);
 #endif
 
-    if (nm_uname_kobj) {
-        sysfs_remove_group(nm_uname_kobj, &nm_uname_group);
-        kobject_put(nm_uname_kobj);
-        nm_uname_kobj = NULL;
-    }
 }
 
 static int __init nomount_init(void)
@@ -2844,8 +2799,6 @@ static int __init nomount_init(void)
         return -ENOMEM;
     }
 
-    nm_uname_sysfs_init();
-
     nm_info("Loaded successfully\n");
     return 0;
 }
@@ -2875,7 +2828,7 @@ void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
 
 static void __exit nomount_exit(void)
 {
-    nm_uname_sysfs_exit();
+    nm_procspoof_exit();
 
     netlink_kernel_release(nm_nl_sk);
 
