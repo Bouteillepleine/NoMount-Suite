@@ -41,8 +41,11 @@ if [ -z "$VERSION" ]; then
 
     sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$PROJECT_ROOT/Cargo.toml"
 
-    vcode="${NEW_VERSION%%-*}"
-    vcode="${vcode//./}"
+    # major*10000 + minor*100 + patch. Plain dot-stripping regressed the code
+    # (1.2.0 -> "120" < 10102 for v1.1.2), which a manager reads as a downgrade.
+    vbase="${NEW_VERSION%%-*}"
+    IFS=. read -r vmaj vmin vpat <<< "$vbase"
+    vcode=$(( ${vmaj:-0} * 10000 + ${vmin:-0} * 100 + ${vpat:-0} ))
     sed -i "s/^version=.*/version=v${NEW_VERSION}/" "$MODULE_DIR/module.prop"
     sed -i "s/^versionCode=.*/versionCode=${vcode}/" "$MODULE_DIR/module.prop"
 

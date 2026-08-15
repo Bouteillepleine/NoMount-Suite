@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.2.0
+
+Audit fix pass (14 findings) plus two new capabilities: absorbing other modules' mounts, and durable whiteouts.
+
+### Added
+- **`nomount absorb` — take over bind mounts other modules made.** A third-party module can still run its own `mount --bind` from a boot script, and every such mount is visible in `/proc/*/mountinfo` to any app, defeating the mountless posture no matter how mountless the Suite itself is. Absorb re-serves each module-backed mount as a hookless injection and drops the mount. Only possible *because* injection is mountless — no overlay- or bind-based metamodule can absorb a mount, since it would have to create one. Runs from `service.sh` after module scripts have settled. Verified on-device against LSPosed's `dex2oat` bind: the mount disappeared and `dex2oat64` picked up its stock apex `dev`/`ino` in place of `/data`'s.
+  - Unmounts **before** injecting. Injecting first `d_drop`s the cached dentry, and a mount hangs off a specific `(vfsmount, dentry)` pair — dropping it detaches the mount from path resolution, so `umount2()` then returns `EINVAL` and the entry is stranded in mountinfo until reboot while content silently reverts to the file underneath.
+  - Directory binds are **opt-in** (`--include-dirs`): injection snapshots the listing, so files the owning module adds later would never appear.
+  - Opt-out list at `/data/adb/nomount/absorb-skip` (module id or target prefix). **Hook frameworks are skipped by default** — their bind comes from native daemon code that differs between forks, and the failure mode is silent and delayed (dex2oat runs during dexopt on app install, not at boot). `doctor` reports whatever stays mounted, so the trade is visible rather than silent.
+- **`nomount whiteout` — durable whiteouts.** Whiteouts live in kernel memory and were lost on every reboot. A persisted list at `/data/adb/nomount/whiteouts.txt` is re-applied at boot. `add`/`remove`/`list`/`apply`/`suggest`; validation refuses partition roots (masking a whole partition is the same `forkSystemServer` abort an injection on a root causes), relative paths and `/data`. `suggest` inspects *this* device and only proposes genuinely openable files — a path that stats but cannot be opened is fabricated at the syscall layer (KSU sucompat's `su` does exactly this), and hiding it would be useless at best.
+
+### Changed
+- **`/my_*` content is always served.** The `self_binds_my` heuristic — which grepped a module's boot scripts and silently dropped its *entire* `/my_*` content if they "looked like" they mounted it — is gone. With hookless `/my_*` nothing bind-mounts, so the duplicate-mount hazard it guarded is gone; if a module does bind its own path, that real mount takes precedence over the injection anyway. Coverage no longer depends on a text match over shell source.
+- **`doctor` gained an informational level.** The zygote FD-allowlist note fired once per injected file — 85 identical warnings on a configuration that boots fine, burying anything real. Now one counted line per partition, at `[info]`, excluded from the warning count. Overlay APKs on such a partition still error per-file, which is the case that actually aborts `forkSystemServer`.
+
+### Fixed
+- **Boot-time root code execution via the state directory.** `/data/adb/nomount` was created under the boot umask (`0777`) at all five `mkdir` sites, and `spoof.sh` **sourced** `spoof.conf` out of it as root at post-fs-data. Anything able to write there got arbitrary root code execution. The directory is now `0700` everywhere, and the config is *parsed* (known keys only, values never evaluated) instead of sourced.
+- **World-writable `/dev` lock that could wedge the mount pass.** The single-run guard was a `noclobber` file in `/dev` — `0666`, named after the project, and "held" by mere existence, so anything able to create that path pre-empted the whole mount pass. Now a real `flock` in the `0700` state directory.
+- **Bind-list locking silently degraded to no locking.** `Lock::acquire()` returned `Option` and every call site bound it to `_lock` and continued, so a failed open or `flock` meant no serialization at all — the exact concurrent mount/reload corruption of `binds.list` the lock exists to prevent. It now returns `Result` and propagates.
+- **Module files were permanently relabelled.** A bind copied the target's SELinux label onto the module's source file and never restored it — not on teardown, not on umount, and not when the `mount` that followed failed. The original label is now recorded in `binds.list` and restored on all three paths.
+- **The bootloop guard disarmed itself on a hanging boot.** The counter was cleared even when the `sys.boot_completed` wait *timed out*, so a boot that never finished re-armed the guard instead of counting toward `GUARD_MAX` — precisely the boots it exists to catch.
+- **`chattr -i` on ksud is restored.** The susfs-action guard cleared the immutable flag to copy the binary and left it off permanently.
+- **Per-UID rules are removable.** `parse_live_rules` stripped the ` [UID: N]` suffix, so a per-UID rule and a global one for the same target shared a key and `nm del` (always uid 0) could never remove the per-UID one — it re-counted as a failure on every reload, forever. Live rules are now keyed on `(target, uid)`.
+- **Appid vs uid comparison.** The kernel stores and returns the appid (`uid % 100000`), so a raw-uid comparison missed for any work-profile or clone uid and reported "not blocked" for one that is.
+- **`nm` client hardening.** `get_attr()` now bounds the attribute payload before returning a pointer (a truncated attribute yielded one running past the message, which `print_str` then walked to a NUL); numeric arguments are validated instead of silently computing garbage from non-digits; the version printer handles any width rather than exactly two digits.
+- **Dump errors no longer read as success.** `nm list` conflated `NLMSG_ERROR` with `NLMSG_DONE` and exited 0, so a dump that aborted mid-stream handed `reload` a silently truncated list which it acted on as the whole live set.
+- **`versionCode` no longer regresses on an auto-bump.** `package.sh` derived it by stripping dots (`1.2.0` → `120`), below the `10102` already shipped for v1.1.2 — a manager reads that as a downgrade. Now `major*10000 + minor*100 + patch`.
+- **CI least privilege.** The build and package jobs inherited the repository default token scope; the workflow now pins `permissions: contents: read`.
+
+### Note
+This release pairs with the hookless kernel engine at `kbuild@hookless` ≥ `a12e0d0`, which moves the boot-identity knobs off `/sys/kernel/*` onto the netlink control plane. `spoof.sh` probes both layouts, so kernel and module can be flashed out of step.
+
 ## v1.1.2
 
 Hookless `/my_*` (opt-in) + self-manage detection across variables.
