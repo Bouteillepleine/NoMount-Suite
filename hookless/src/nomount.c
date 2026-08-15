@@ -2975,10 +2975,14 @@ static void __exit nomount_exit(void)
     nm_info("Unloaded successfully\n");
 }
 
+/* MODULE_VERSION() on BUILT-IN code emits a __modver entry, and kernel/params.c
+ * turns that into /sys/module/<KBUILD_MODNAME>/version -- mode 0444, verified
+ * readable by an ordinary app uid, printing the project name and version. That
+ * is the same class of tell as the /sys/kernel dir this driver already dropped,
+ * and strictly worse (that one was 0600). AUTHOR/DESCRIPTION only add
+ * identifying strings to .modinfo. CONFIG_NOMOUNT is bool, so none of this
+ * metadata is ever consumed: the driver cannot be built as a module. */
 MODULE_LICENSE("GPL");
-MODULE_VERSION(NM_MODULE_VERSION);
-MODULE_AUTHOR("XxxY");
-MODULE_DESCRIPTION("VFS path helper");
 
 fs_initcall(nomount_init);
 module_exit(nomount_exit);
