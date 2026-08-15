@@ -2352,8 +2352,21 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
      * Deliberate: switching to no-follow also changes how symlink-to-directory is
      * classified (NM_FLAG_IS_DIR below), which is load-bearing for RRO overlay
      * dirs. No installed module currently ships a content symlink. */
-    if (!is_whiteout && kern_path(nm_get_rpath(rule), LOOKUP_FOLLOW, &rule->r_path) ==  0 &&
-         S_ISDIR(d_backing_inode(rule->r_path.dentry)->i_mode)) rule->flags |= NM_FLAG_IS_DIR;
+    if (!is_whiteout) {
+        /* An unresolvable backing path used to leave r_path NULL and the rule
+         * live: readdir emitted the child, lookup could not build an inode, so
+         * the entry listed but ENOENTed on stat. No real read-only fs produces
+         * a dirent that cannot be stat'd, which makes it a one-syscall-pair
+         * probe -- and a module shipping a broken symlink (LOOKUP_FOLLOW is
+         * what makes a dangling one unresolvable) was enough to create it.
+         * Reject at add time instead. */
+        if (kern_path(nm_get_rpath(rule), LOOKUP_FOLLOW, &rule->r_path) != 0) {
+            kfree(rule);
+            return ERR_PTR(-ENOENT);
+        }
+        if (S_ISDIR(d_backing_inode(rule->r_path.dentry)->i_mode))
+            rule->flags |= NM_FLAG_IS_DIR;
+    }
 
     if (kern_path(nm_get_vpath(rule), LOOKUP_FOLLOW, &v_path_struct) == 0) {
         struct kstat kst;
