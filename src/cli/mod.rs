@@ -28,6 +28,14 @@ pub enum Commands {
         #[command(subcommand)]
         action: UidAction,
     },
+    /// Take over bind mounts other modules made: re-serve each as a hookless
+    /// injection, then unmount it. Restores the zero-mount posture even when a
+    /// module mounts its own content without knowing about NoMount.
+    Absorb {
+        /// Report what would be absorbed without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Lint the mount plan (and live rules) for known bootloop/no-op hazards
     Doctor,
     /// Print what the mount pass would do (resolved target, kind, source) without

@@ -82,6 +82,16 @@ ABI=$(getprop ro.product.cpu.abi)
 BIN="$MODDIR/bin/$ABI/nomount"
 export NM_BIN="$MODDIR/bin/$ABI/nm"
 
+# --- absorb any bind mounts other modules made ---
+# Module boot scripts have all run by now. Anything that bind-mounted its own
+# content is visible in every app's mountinfo, which defeats the zero-mount
+# posture no matter how mountless the Suite itself is. Re-serve each as an
+# injection and drop the mount. No-op when nothing mounted anything.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+    _ab=$("$BIN" absorb 2>&1 | tail -1)
+    echo "nomount: $_ab" > /dev/kmsg 2>/dev/null
+fi
+
 # --- re-apply the persistent per-app block list ---
 # Per-UID hiding lives in kernel memory and is empty after every reboot; the
 # block list on disk (package names / UIDs) is the durable record. Now that boot

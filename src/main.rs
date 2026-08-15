@@ -1,3 +1,4 @@
+mod absorb;
 mod bind;
 mod blocklist;
 mod cli;
@@ -20,6 +21,7 @@ fn main() -> Result<()> {
         Commands::Doctor => doctor::run_doctor(),
         Commands::Plan => mount::run_plan(),
         Commands::Reload => mount::run_reload(),
+        Commands::Absorb { dry_run } => absorb::run_absorb(dry_run),
         Commands::Selfcheck { write } => health::run_selfcheck(write),
         Commands::Snapshot => health::run_snapshot(),
         Commands::Verify => health::run_verify(),
