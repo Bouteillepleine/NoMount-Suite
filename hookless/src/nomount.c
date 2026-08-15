@@ -1720,6 +1720,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         for (i = p_len - 1; i >= 0; i--) {
             if (v_path[i] == '/') break;
         }
+        if (unlikely(i < 0)) break;          /* no separator: nothing to walk up to */
 
         parent_len = (i == 0) ? 1 : i;
         child_name = v_path + i + 1;
@@ -2062,7 +2063,13 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
     bool is_whiteout = (flags & NM_FLAG_WHITEOUT);
     struct path v_path_struct;
 
-    if (!v_path || (!r_path && !is_whiteout)) return ERR_PTR(-EINVAL);
+    /* Must be absolute. A vpath with no '/' makes the parent scan in
+     * nomount_generate_virtual_topology() run off the front of the buffer:
+     * i ends at -1, parent_len becomes -1, and full_name_hash() is handed it as
+     * a size_t -- a ~4GB read. The bundled client always sends absolute paths,
+     * so nothing validated it. */
+    if (!v_path || v_len == 0 || v_path[0] != '/') return ERR_PTR(-EINVAL);
+    if (!r_path && !is_whiteout) return ERR_PTR(-EINVAL);
     while (v_len > 1 && v_path[v_len - 1] == '/') { v_len--; }
     if (!is_whiteout) { while (r_len > 1 && r_path[r_len - 1] == '/') { r_len--; } }
 
@@ -2536,11 +2543,10 @@ static int nomount_nl_del_uid(struct nlattr **attrs)
 static int nomount_nl_dump_uids(struct sk_buff *skb, struct netlink_callback *cb)
 {
     int id = cb->args[0];
-    void *ptr;
 
     if (!static_branch_unlikely(&nomount_active_uids)) return 0;
     rcu_read_lock();
-    while ((ptr = idr_get_next(&nomount_uid_idr, &id)) != NULL) {
+    while (idr_get_next(&nomount_uid_idr, &id) != NULL) {
         void *hdr;
         hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
                         NM_CMD_TO_TYPE(NM_CMD_GET_UIDS), 0, NLM_F_MULTI);
