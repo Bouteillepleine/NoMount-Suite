@@ -6,7 +6,7 @@ name: NoMount hookless — compile-test matrix
 
 on:
   push:
-    branches: [hookless]
+    branches: [hookless, audit-fixes-2026-08]
     # Only rebuild when the patch/source or this workflow changes — NOT for docs
     # (e.g. hookless/AUDIT.md), so documentation edits don't re-run all ten.
     paths:
