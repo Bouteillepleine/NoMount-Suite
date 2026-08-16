@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.8
+
+### Added
+- **`/data/local/tmp` is restored to the owner, mode and SELinux context AOSP ships.** Every device has it `0771 shell:shell u:object_r:shell_data_file:s0`; `ksud` stages files there and commonly leaves it `0777` and/or `root:root`, so the drift is caused by having a root manager rather than by anything the Suite hides — which makes it a zero-false-positive probe for a detector that can stat the path without root, and one no amount of mount-hiding can answer. Each field is corrected only when it already differs, so a clean device is a no-op, and the pass runs at post-fs-data and again after boot completes because `ksud` and `adbd` keep staging files there for the whole of boot. Config key `fix_shell_tmp` (default on); `spoof.sh shell-tmp-status` reports the current state and the real inode.
+
 ## v1.2.7
 
 ### Changed
