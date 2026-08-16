@@ -34,6 +34,7 @@ spoof_uname=0          # 1 = apply the uname override
 # (so Boot-state props covers procfs too); set 0 in spoof.conf to keep procfs untouched.
 uname_tail=""          # blank = keep; a bare tail or a whole pasted uname -r
 uname_date=""          # blank = keep; a bare date or a whole pasted uname -v
+fix_shell_tmp=1        # 1 = restore AOSP owner/mode/context on /data/local/tmp
 # Parse, do NOT source. `. "$CONF"` executes the file as root at post-fs-data,
 # so a writable config was arbitrary root code execution. Only known keys are
 # accepted and the value is never evaluated.
@@ -53,6 +54,7 @@ nm_load_conf() {
             spoof_cmdline) spoof_cmdline=$_v ;;
             uname_tail)    uname_tail=$_v ;;
             uname_date)    uname_date=$_v ;;
+            fix_shell_tmp) fix_shell_tmp=$_v ;;
         esac
     done < "$CONF"
 }
@@ -320,6 +322,58 @@ do_props() {
     fi
 }
 
+# ---- /data/local/tmp — restore the AOSP owner/mode/context ------------------
+# ksud (and anything else that stages files there) commonly leaves it 0777 and/or
+# root/root; AOSP ships 0771 shell:shell u:object_r:shell_data_file:s0. The drift
+# is a first-class detector probe. Restorative only: each field is touched solely
+# when it already differs, so a clean device is a no-op.
+SHELL_TMP=/data/local/tmp
+
+do_shell_tmp() {
+    [ "${fix_shell_tmp:-1}" = "1" ] || return 0
+    local mode own ctx changed=""
+
+    if [ ! -d "$SHELL_TMP" ]; then
+        mkdir -p "$SHELL_TMP" 2>/dev/null \
+            || { log "shell-tmp: $SHELL_TMP absent and not creatable"; return 0; }
+        changed="created"
+    fi
+
+    mode=$(stat -c %a "$SHELL_TMP" 2>/dev/null)
+    own=$(stat -c %u:%g "$SHELL_TMP" 2>/dev/null)
+    ctx=$(stat -c %C "$SHELL_TMP" 2>/dev/null)
+
+    if [ "$mode" != "771" ]; then
+        chmod 0771 "$SHELL_TMP" 2>/dev/null && changed="$changed mode:${mode:-?}->771"
+    fi
+    if [ "$own" != "2000:2000" ]; then
+        chown 2000:2000 "$SHELL_TMP" 2>/dev/null && changed="$changed owner:${own:-?}->2000:2000"
+    fi
+    if [ "$ctx" != "u:object_r:shell_data_file:s0" ]; then
+        chcon u:object_r:shell_data_file:s0 "$SHELL_TMP" 2>/dev/null \
+            && changed="$changed ctx:${ctx:-?}->shell_data_file"
+    fi
+
+    [ -n "$changed" ] && log "shell-tmp: ${changed# }"
+    return 0
+}
+
+# Report-only, for the doctor/UI: "clean" or the fields that still differ. The
+# inode is informational — lowering a real inode is the separate hijacker module,
+# not something a chmod can fix.
+shell_tmp_status() {
+    local mode own ctx bad=""
+    [ -d "$SHELL_TMP" ] || { echo "absent"; return 0; }
+    mode=$(stat -c %a "$SHELL_TMP" 2>/dev/null)
+    own=$(stat -c %u:%g "$SHELL_TMP" 2>/dev/null)
+    ctx=$(stat -c %C "$SHELL_TMP" 2>/dev/null)
+    [ "$mode" = "771" ] || bad="$bad mode=$mode"
+    [ "$own" = "2000:2000" ] || bad="$bad owner=$own"
+    [ "$ctx" = "u:object_r:shell_data_file:s0" ] || bad="$bad ctx=$ctx"
+    [ -z "$bad" ] && echo "clean ino=$(stat -c %i "$SHELL_TMP" 2>/dev/null)" \
+                  || echo "dirty$bad ino=$(stat -c %i "$SHELL_TMP" 2>/dev/null)"
+}
+
 # ---- kernel knob interface --------------------------------------------------
 # Current kernels carry the boot-identity knobs on the netlink control plane
 # (CAP_NET_ADMIN-gated, not enumerable). Older ones exposed a /sys/kernel
@@ -496,6 +550,7 @@ main() {
     do_props
     do_uname
     do_cmdline
+    do_shell_tmp
 }
 
 # `verify` / `compute` inspect without changing anything, so the UI can show
@@ -520,6 +575,12 @@ case "${1:-}" in
         exit 0 ;;
     props)
         props_status
+        exit 0 ;;
+    shell-tmp)
+        do_shell_tmp
+        exit 0 ;;
+    shell-tmp-status)
+        shell_tmp_status
         exit 0 ;;
     reset-uname)
         orig=$NMDIR/uname_orig

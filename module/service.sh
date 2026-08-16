@@ -46,6 +46,12 @@ fi
 [ -f /data/adb/modules/meta-nomount/scan.sh ] && \
     (sh /data/adb/modules/meta-nomount/scan.sh >/dev/null 2>&1 &)
 
+# --- /data/local/tmp: re-assert after boot ---
+# spoof.sh already normalized it at post-fs-data, but ksud and adbd stage files
+# there for the whole of boot and can put the mode/owner back.
+[ -f /data/adb/modules/meta-nomount/spoof.sh ] && \
+    sh /data/adb/modules/meta-nomount/spoof.sh shell-tmp >/dev/null 2>&1
+
 # --- ksud de-link re-assertion (self-heal of the susfs-action guard) ---
 # metamount.sh de-links ksu_susfs from the ksud multicall at mount time; re-assert it
 # here post-boot as a belt-and-suspenders against any timing race (e.g. ksud finishing

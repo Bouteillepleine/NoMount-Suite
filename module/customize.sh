@@ -75,6 +75,7 @@ seed_conf spoof_props 0
 seed_conf spoof_uname 0
 seed_conf uname_tail ""
 seed_conf uname_date ""
+seed_conf fix_shell_tmp 1
 set_perm "$CONF" 0 0 0644
 [ -f "$MODPATH/spoof.sh" ] && set_perm "$MODPATH/spoof.sh" 0 0 0755
 ui_print "- Spoof add-on enabled: dynamic vbmeta.digest"
