@@ -354,10 +354,34 @@
 
   /* ---- rules-by-module breakdown bar (Rules tab) ------------------------- */
   .rmbar {
+    position: relative;
     display: flex; height: 13px; border-radius: 7px; overflow: hidden;
     margin: 12px 0 10px; background: var(--card2); border: 1px solid var(--brd2);
+    box-shadow: 0 1px 2px rgba(0,0,0,.30);
   }
   .rmbar span { display: block; height: 100%; }
+  /* Domed 3D, the same treatment as the .chip capsules so the bar reads as the
+     same material. It has to be an OVERLAY: the segments are children that fill
+     the bar, so an inset shadow on .rmbar itself would be painted underneath
+     them and never show. One gloss across the whole bar, not per segment, so it
+     domes as a single capsule rather than looking like separate beads. */
+  .rmbar::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    border-radius: inherit;
+    background-image: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,0) 62%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.26),
+      inset 0 -1px 2px rgba(0,0,0,.22);
+  }
+  html[data-theme="light"] .rmbar { box-shadow: 0 1px 2px rgba(20,32,64,.12); }
+  /* Lighter gloss than the capsule's .75: that value is tuned for a near-white
+     chip, and over saturated segment colours it goes chalky and eats the hue. */
+  html[data-theme="light"] .rmbar::after {
+    background-image: linear-gradient(180deg, rgba(255,255,255,.50), rgba(255,255,255,0) 65%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.85),
+      inset 0 -1px 2px rgba(16,26,48,.10);
+  }
   .rmlegend { display: flex; flex-wrap: wrap; gap: 7px 14px; margin-bottom: 2px; }
   .rmleg { font-size: 11.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
   .rmleg .rmname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }

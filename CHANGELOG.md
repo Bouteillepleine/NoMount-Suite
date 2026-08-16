@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.9
+
+### Changed
+- **The rules breakdown bar now reads as the same material as the capsules.** It was a flat strip sitting next to domed pills. It gets the capsule's gloss and inset highlight/shade, applied as an overlay because the colour segments are children that fill the bar — an inset shadow on the bar itself is painted underneath them and never shows. One gloss spans the whole bar so it domes as a single capsule rather than looking like separate beads, and the light-theme gloss is softened from the capsule's value, which is tuned for a near-white chip and goes chalky over saturated colours.
+
 ## v1.2.8
 
 ### Added
