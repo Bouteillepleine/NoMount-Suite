@@ -248,50 +248,47 @@ pub fn run_doctor() -> Result<()> {
     // it is the one thing the mountless posture exists to deny, and after absorb
     // has run the only ones left are those deliberately skipped. Report them, so
     // opting out of absorption is a visible trade rather than a silent one.
-    let skip_src = crate::absorb::skip_source();
-    let how_fw = "it belongs to a hook framework (Zygisk/Xposed), which absorb never takes over \
-                  because a broken hook only surfaces later, during dexopt";
-    let how = if skip_src.starts_with('/') {
-        format!("remove its entry from {skip_src} to absorb it")
-    } else {
-        format!(
-            "no skip file exists, so the built-in list is in use; create {} listing only \
-             what you want skipped",
-            crate::absorb::SKIP_FILE
-        )
-    };
+    // A mount left standing on purpose is an observation, not a warning: absorb is
+    // never going to take it, so there is nothing to act on. Only a mount that
+    // nothing declined is worth flagging — that one means absorb has not run or
+    // could not do its job.
     for c in crate::absorb::candidates_all().unwrap_or_default() {
-        f.push(Finding {
-            level: Level::Warn,
-            check: "module mount not absorbed",
-            detail: {
-                let fw = crate::absorb::module_dir_of(&c.source)
-                    .is_some_and(|d| crate::absorb::is_hook_framework(&d));
+        let (level, check, detail) = match crate::absorb::declined_reason(&c.source, &c.target) {
+            Some(crate::absorb::Declined::Framework(id)) => (
+                Level::Info,
+                "module mount left by design",
                 format!(
-                    "{} <- {} is still a real mount and visible to any app; {}",
+                    "{} <- {} stays mounted: {id} is a hook framework (Zygisk/Xposed), which \
+                     absorb never takes over because a broken hook only surfaces later, \
+                     during dexopt",
                     c.target.display(),
-                    c.source.display(),
-                    if fw { how_fw } else { &how }
-                )
-            },
-        });
-    }
-    // A whiteout only hides cleanly on overlayfs; anywhere else the parent
-    // directory's size and link count still describe the entry that is gone.
-    for w in crate::whiteout::read().unwrap_or_default() {
-        if crate::whiteout::measurable_hole(std::path::Path::new(&w)) {
-            f.push(Finding {
-                level: Level::Warn,
-                check: "whiteout leaves a measurable hole",
-                detail: format!(
-                    "{w} is not under an overlayfs mount: its directory still reports the \
-                     size and link count of a directory that contains it, which one stat \
-                     and one getdents64 can compare. Remove it, or move the hide to a path \
-                     served through an overlay"
+                    c.source.display()
                 ),
-            });
-        }
+            ),
+            Some(crate::absorb::Declined::Listed(from)) => (
+                Level::Info,
+                "module mount left by design",
+                format!(
+                    "{} <- {} stays mounted: listed in {from}. Remove its entry to absorb it",
+                    c.target.display(),
+                    c.source.display()
+                ),
+            ),
+            None => (
+                Level::Warn,
+                "module mount not absorbed",
+                format!(
+                    "{} <- {} is still a real mount and visible to any app, and nothing \
+                     declined it — run `nomount absorb` (it runs at boot, so this usually \
+                     means it failed)",
+                    c.target.display(),
+                    c.source.display()
+                ),
+            ),
+        };
+        f.push(Finding { level, check, detail });
     }
+
     for (part, n) in &fd_note {
         f.push(Finding {
             level: Level::Info,

@@ -3,6 +3,7 @@
 ## v1.2.9
 
 ### Changed
+- **A mount left standing on purpose is now info, not a warning.** LSPosed's `dex2oat` bind was reported as a warning on every health check, but absorb is never going to take it — the framework rule declines it by design — so there was nothing to act on and the card sat permanently at "1 warning". `doctor` now separates the two cases: a mount declined by the hook-framework rule or by the skip list is `[info] module mount left by design` and stays out of the warning count, while a mount that *nothing* declined is still a warning, because that one means absorb did not run or failed.
 - **The rules breakdown bar now reads as the same material as the capsules.** It was a flat strip sitting next to domed pills. It gets the capsule's gloss and inset highlight/shade, applied as an overlay because the colour segments are children that fill the bar — an inset shadow on the bar itself is painted underneath them and never shows. One gloss spans the whole bar so it domes as a single capsule rather than looking like separate beads, and the light-theme gloss is softened from the capsule's value, which is tuned for a near-white chip and goes chalky over saturated colours.
 
 ## v1.2.8

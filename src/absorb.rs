@@ -72,12 +72,6 @@ fn skip_list() -> (Vec<String>, &'static str) {
     (BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect(), "the built-in list")
 }
 
-/// Where the active skip entries came from, for messages that tell the user
-/// where to go and change them.
-pub fn skip_source() -> &'static str {
-    skip_list().1
-}
-
 /// A module that provides Zygisk or an Xposed framework, detected by what it
 /// ships rather than by its id.
 ///
@@ -114,6 +108,28 @@ pub(crate) fn module_dir_of(src: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from("/data/adb/modules").join(id))
+}
+
+/// Why a still-present module mount was left alone, when that was deliberate.
+pub(crate) enum Declined {
+    /// The module ships Zygisk/Xposed markers, so absorb never touches it.
+    Framework(String),
+    /// Named by the skip list (or the built-in fallback), which names its source.
+    Listed(&'static str),
+}
+
+/// `None` means nothing declined this mount — it is still mounted for some other
+/// reason (absorb has not run, or it failed), which is the only case worth a warning.
+pub(crate) fn declined_reason(src: &Path, target: &Path) -> Option<Declined> {
+    if let Some(d) = module_dir_of(src) {
+        if is_hook_framework(&d) {
+            return Some(Declined::Framework(
+                d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            ));
+        }
+    }
+    let (skips, from) = skip_list();
+    is_skipped(src, target, &skips).then_some(Declined::Listed(from))
 }
 
 /// True if this mount is explicitly excluded.
