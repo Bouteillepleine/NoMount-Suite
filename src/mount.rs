@@ -292,6 +292,31 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
 /// The override is the durable list rather than a new switch: a path the user
 /// added with `nomount whiteout add <path> --force` is a decision already made,
 /// so honour it here too.
+/// Drop any mount sitting on a target we are about to serve.
+///
+/// Injecting d_drops the cached dentry for that name, and a mount hangs off a
+/// specific (vfsmount, dentry) pair — so injecting over a live mount detaches
+/// it from path resolution, umount2 then fails with EINVAL even with
+/// MNT_DETACH, and the entry is stranded in mountinfo until reboot. Absorb runs
+/// after boot and cannot undo that, so a module whose own script mounts earlier
+/// than this pass would leave a permanent entry behind. Seen in the field: a
+/// bootanimation module binding at post-fs-data, injected over here, two
+/// unremovable mounts.
+fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: &Path) {
+    if !targets.contains(target) {
+        return;
+    }
+    if crate::absorb::umount_detach(target) {
+        eprintln!("nomount: unmounted {} before serving it", target.display());
+    } else {
+        eprintln!(
+            "nomount: {} is mounted and will not unmount; serving it anyway would strand \
+             that mount in mountinfo, so it is left alone",
+            target.display()
+        );
+    }
+}
+
 fn whiteout_allowed(target: &Path, module: &str) -> bool {
     if !crate::whiteout::measurable_hole(target) {
         return true;
@@ -450,6 +475,7 @@ pub fn run_reload() -> Result<()> {
     // Add new rules, and re-apply a live rule whose SOURCE or KIND changed (not
     // just presence): a target moving between modules or flipping inject<->whiteout
     // must update, or the stale rule would be frozen until a full mount.
+    let mounted = crate::absorb::mounted_targets();
     for (t, e) in &desired_hookless {
         let up_to_date = match live.get(&((*t).to_path_buf(), 0)) {
             Some(LiveRule::Inject(src)) => {
@@ -465,6 +491,7 @@ pub fn run_reload() -> Result<()> {
         if existed {
             let _ = nm.del(&e.target); // drop the stale rule before re-adding
         }
+        unmount_before_serving(&mounted, &e.target);
         let r = match e.kind {
             PlanKind::Inject => nm.add(&e.target, &e.source),
             PlanKind::Whiteout => {
@@ -554,8 +581,10 @@ pub fn run_mount() -> Result<()> {
         failed: 0,
         whiteouts: 0,
     };
+    let mounted = crate::absorb::mounted_targets();
     for e in &plan {
         served.insert(e.module.as_str());
+        unmount_before_serving(&mounted, &e.target);
         match e.kind {
             PlanKind::Whiteout => {
                 if !whiteout_allowed(&e.target, &e.module) {

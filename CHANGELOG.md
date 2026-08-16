@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.0
+
+### Fixed
+- **Injecting over a live mount stranded it in `mountinfo` permanently.** Adding a rule `d_drop`s the cached dentry for that name, and a mount hangs off a specific `(vfsmount, dentry)` pair — so serving a path that already had a mount detached that mount from path resolution, after which `umount2` fails with EINVAL even with `MNT_DETACH` and the entry is stuck until reboot. `absorb` runs after boot and cannot undo it, so any module whose own script mounted earlier than the mount pass left a permanent entry behind — exactly the surface the zero-mount posture exists to remove. Reported in the field: a bootanimation module binding at post-fs-data, injected over by the mount pass, two unremovable mounts that `absorb` then correctly refused to touch. The mount pass and `reload` now read `mountinfo` and unmount a target before serving it; if the unmount fails they leave it alone rather than stranding it.
+
 ## v1.2.9
 
 ### Changed

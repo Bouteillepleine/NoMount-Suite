@@ -297,7 +297,23 @@ pub fn candidates() -> Result<Vec<Candidate>> {
     Ok(out)
 }
 
-fn umount_detach(p: &Path) -> bool {
+/// Targets that currently have something mounted on them.
+///
+/// The mount pass needs this before it injects: adding a rule d_drops the
+/// cached dentry for that name, and a mount hangs off a specific
+/// (vfsmount, dentry) pair, so injecting over a live mount detaches it from
+/// path resolution. umount2 then returns EINVAL — even with MNT_DETACH — and
+/// the entry is stuck in mountinfo until reboot, which is the one thing the
+/// zero-mount posture exists to prevent. Absorb runs after boot and cannot undo
+/// it, so the unmount has to happen before the injection, not after.
+pub(crate) fn mounted_targets() -> std::collections::HashSet<PathBuf> {
+    let Ok(body) = std::fs::read_to_string(MOUNTINFO) else {
+        return Default::default();
+    };
+    parse_mountinfo(&body).into_iter().map(|r| r.target).collect()
+}
+
+pub(crate) fn umount_detach(p: &Path) -> bool {
     let Ok(c) = CString::new(p.to_string_lossy().as_bytes()) else {
         return false;
     };
