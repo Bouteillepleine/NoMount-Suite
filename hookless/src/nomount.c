@@ -2639,7 +2639,16 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
          * mount does: 139/139 injected agreed where 15/15 stock differed, an
          * mmap+statx pair apart. d_real_inode() resolves to the lower inode on
          * overlayfs and to the inode itself everywhere else. */
-        rule->v_mapdev = d_real_inode(v_path_struct.dentry)->i_sb->s_dev;
+        /* The dev a stock file at this path reports IN MAPS -- taken through the
+         * mount, not resolved past it. d_real_inode() steps through overlayfs to
+         * the lower layer, which is right for the dev/ino a stock file *stats*
+         * as, but wrong for the mapping: measured on /product/overlay, every
+         * stock file maps with 00:1b (the overlay mount's own dev, 0:27) while
+         * every injected one mapped with fe:19 (the erofs lower). One grep of
+         * /proc/self/maps separated the two populations completely. On a plain
+         * erofs path the two calls agree, which is why /system, /my_product,
+         * /my_stock and /product/etc already matched. */
+        rule->v_mapdev = d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
         if (nm_path_stat(&v_path_struct, &kst) == 0) {
             rule->v_ino = kst.ino;
             rule->v_dev = kst.dev;
