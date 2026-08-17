@@ -176,6 +176,18 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
     Serve::Inject
 }
 
+/// Can this entry actually produce a rule?
+///
+/// Injection serves a symlink's TARGET, so a link whose target does not exist
+/// yields nothing: the engine accepts the add and no rule appears. Counting that
+/// as applied is what made `reload` report `+3 rules` where only 2 existed, and
+/// `plan` list an entry that never materialises. `exists()` follows symlinks,
+/// which is exactly the question being asked. Whiteouts and binds are unaffected
+/// — a whiteout needs no backing, and a bind fails loudly on its own.
+fn source_resolves(e: &PlanEntry) -> bool {
+    e.kind != PlanKind::Inject || e.source.exists()
+}
+
 fn module_enabled(dir: &Path) -> bool {
     !dir.join("disable").exists()
         && !dir.join("remove").exists()
@@ -433,10 +445,13 @@ pub fn run_plan() -> Result<()> {
             PlanKind::Whiteout => "whiteout",
             PlanKind::Bind => "bind",
         };
-        println!("{k:8} {} <- {} [{}]", e.target.display(), e.source.display(), e.module);
+        let note = if source_resolves(e) { "" } else { "  << UNSERVABLE: source does not resolve, no rule will be created" };
+        println!("{k:8} {} <- {} [{}]{note}", e.target.display(), e.source.display(), e.module);
     }
     let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
-    println!("({} entries: {} binds, {skipped} blocklisted)", plan.len(), binds);
+    let dead = plan.iter().filter(|e| !source_resolves(e)).count();
+    let dead_note = if dead > 0 { format!(", {dead} unservable") } else { String::new() };
+    println!("({} entries: {} binds, {skipped} blocklisted{dead_note})", plan.len(), binds);
     Ok(())
 }
 
@@ -521,6 +536,12 @@ pub fn run_reload() -> Result<()> {
             None => false,
         };
         if up_to_date {
+            continue;
+        }
+        // No point issuing an add that cannot produce a rule; counting it as
+        // applied is the overcount this guards against.
+        if !source_resolves(e) {
+            failed += 1;
             continue;
         }
         let existed = live.contains_key(&((*t).to_path_buf(), 0));
@@ -631,6 +652,7 @@ pub fn run_mount() -> Result<()> {
                     Err(_) => st.failed += 1,
                 }
             }
+            PlanKind::Inject if !source_resolves(e) => st.failed += 1,
             PlanKind::Inject => match nm.add(&e.target, &e.source) {
                 Ok(()) => st.applied += 1,
                 Err(_) => st.failed += 1,
