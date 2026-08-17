@@ -87,6 +87,12 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
  * before their definitions (identity is now by function pointer, not magic sig) */
 static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags);
 static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *ctx);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+static int nomount_hijacked_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat);
+#else
+static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct kstat *stat,
+                                    u32 request_mask, unsigned int query_flags);
+#endif
 static u64 nm_child_dotdot_of(const char *dirpath);
 
 /* Returns the raw (unpinned) dir_node behind a hijacked inode. Safe ONLY under
@@ -955,6 +961,102 @@ static void nm_dir_size_fix(struct nm_inode_info *info, struct kstat *stat)
     stat->size = fixed;
 }
 
+
+/* How many links the hidden/added subdirectories are worth to the parent.
+ * A directory's nlink is 2 + subdirs, so hiding one must decrement and adding
+ * one must increment -- correcting size alone would just move the tell. */
+static int nm_dir_nlink_delta(struct nomount_dir_node *d)
+{
+    struct nomount_child_node *ch;
+    int delta = 0, cid = 0;
+
+    if (!d) return 0;
+    rcu_read_lock();
+    idr_for_each_entry(&d->children_idr, ch, cid) {
+        if (ch->d_type != DT_DIR) continue;
+        if (ch->flags & NM_FLAG_WHITEOUT)            delta--;
+        else if (!(ch->flags & NM_FLAG_SHADOWS_STOCK)) delta++;
+    }
+    rcu_read_unlock();
+    return delta;
+}
+
+/* getattr for a REAL directory we manage.
+ *
+ * nomount_hijack_dir_inode used to swap only ->lookup, so a stock directory kept
+ * its filesystem's own getattr and every metadata correction here was
+ * unreachable: a hidden entry left the parent reporting a size and link count
+ * that still counted it. This is that missing consumer -- the same RCU-pin
+ * discipline as nomount_hijacked_lookup, because a concurrent del/clear can
+ * restore i_op and call_rcu-free nm_iop underneath us.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+static int nomount_hijacked_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
+#else
+static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct kstat *stat,
+                                    u32 request_mask, unsigned int query_flags)
+#endif
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+    struct inode *inode = d_backing_inode(dentry);
+#else
+    struct inode *inode = d_backing_inode(path->dentry);
+#endif
+    const struct inode_operations *orig_iop;
+    struct nomount_dir_node *d;
+    struct nm_iop *nm_iop;
+    int res, nld;
+    s32 delta;
+
+    rcu_read_lock();
+    nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
+    orig_iop = nm_iop ? nm_iop->orig_iop : NULL;
+    d = nm_iop ? nm_iop->dir_node : NULL;
+    if (d && !atomic_inc_not_zero(&d->refcount)) d = NULL;
+    rcu_read_unlock();
+
+    /* Always answer with the real filesystem's values first. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+    if (orig_iop && orig_iop->getattr)
+        res = orig_iop->getattr(mnt, dentry, stat);
+    else { generic_fillattr(inode, stat); res = 0; }
+#else
+    if (orig_iop && orig_iop->getattr)
+        res = orig_iop->getattr(IDMAP_CALL path, stat, request_mask, query_flags);
+    else {
+# if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+        generic_fillattr(IDMAP_CALL request_mask, inode, stat);
+# else
+        generic_fillattr(IDMAP_CALL inode, stat);
+# endif
+        res = 0;
+    }
+#endif
+    if (res || !d)
+        goto out;
+
+    delta = READ_ONCE(d->size_delta);
+    nld = nm_dir_nlink_delta(d);
+    pr_info_ratelimited("nomount_probe: dirgetattr ino=%lu magic=0x%lx size=%lld delta=%d nlink=%u nld=%d\n",
+                        inode->i_ino, (unsigned long)inode->i_sb->s_magic,
+                        (long long)stat->size, delta, stat->nlink, nld);
+
+    if (nld) {
+        if ((int)stat->nlink + nld >= 2)
+            stat->nlink = (unsigned int)((int)stat->nlink + nld);
+    }
+    /* erofs only, single block only -- see nm_dir_size_fix's reasoning. */
+    if (delta && inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 &&
+        stat->size > 0 && stat->size < 4096) {
+        loff_t fixed = stat->size + delta;
+        if (fixed > 0 && fixed < 4096)
+            stat->size = fixed;
+    }
+out:
+    if (d) nm_dir_node_put(d);
+    return res;
+}
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
 /* Pre-4.11 inode_operations->getattr signature: (vfsmount, dentry, kstat).
  * vfs_getattr_nosec()/generic_fillattr() are the 2-arg forms here. */
@@ -1639,6 +1741,9 @@ static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, s
         nm_iop->dir_node = dir_node;
 
         if (nm_iop->orig_iop->lookup) nm_iop->fake_iop.lookup = nomount_hijacked_lookup;
+        /* THE missing half: without this the stock fs answers getattr directly and
+         * every correction below is dead code. */
+        nm_iop->fake_iop.getattr = nomount_hijacked_getattr;
         smp_store_release(&inode->i_op, &nm_iop->fake_iop);
         nm_debug("i_op successfully hijacked for parent dir (ino: %lu)\n", inode->i_ino);
     }
