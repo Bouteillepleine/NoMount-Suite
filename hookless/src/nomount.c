@@ -1037,9 +1037,6 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
 
     delta = READ_ONCE(d->size_delta);
     nld = nm_dir_nlink_delta(d);
-    pr_info_ratelimited("nomount_probe: dirgetattr ino=%lu magic=0x%lx size=%lld delta=%d nlink=%u nld=%d\n",
-                        inode->i_ino, (unsigned long)inode->i_sb->s_magic,
-                        (long long)stat->size, delta, stat->nlink, nld);
 
     if (nld) {
         if ((int)stat->nlink + nld >= 2)
