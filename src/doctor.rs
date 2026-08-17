@@ -252,37 +252,59 @@ pub fn run_doctor() -> Result<()> {
     // never going to take it, so there is nothing to act on. Only a mount that
     // nothing declined is worth flagging — that one means absorb has not run or
     // could not do its job.
-    for c in crate::absorb::candidates_all().unwrap_or_default() {
-        let (level, check, detail) = match crate::absorb::declined_reason(&c.source, &c.target) {
-            Some(crate::absorb::Declined::Framework(id)) => (
+    for s in crate::absorb::survey().unwrap_or_default() {
+        let (level, check, detail) = match &s.disposition {
+            crate::absorb::Disposition::Declined(crate::absorb::Declined::Framework(id)) => (
                 Level::Info,
                 "module mount left by design",
                 format!(
                     "{} <- {} stays mounted: {id} is a hook framework (Zygisk/Xposed), which \
                      absorb never takes over because a broken hook only surfaces later, \
                      during dexopt",
-                    c.target.display(),
-                    c.source.display()
+                    s.target.display(),
+                    s.source.display()
                 ),
             ),
-            Some(crate::absorb::Declined::Listed(from)) => (
+            crate::absorb::Disposition::Declined(crate::absorb::Declined::Listed(from)) => (
                 Level::Info,
                 "module mount left by design",
                 format!(
                     "{} <- {} stays mounted: listed in {from}. Remove its entry to absorb it",
-                    c.target.display(),
-                    c.source.display()
+                    s.target.display(),
+                    s.source.display()
                 ),
             ),
-            None => (
+            crate::absorb::Disposition::Declined(crate::absorb::Declined::MustBind) => (
+                Level::Info,
+                "module mount left by design",
+                format!(
+                    "{} <- {} stays mounted: a my_* target is served by a real bind, so \
+                     absorbing it into an injection would bootloop zygote",
+                    s.target.display(),
+                    s.source.display()
+                ),
+            ),
+            // Nothing declined it and absorb cannot take it, so it is simply
+            // there — the exact condition the mountless posture exists to deny.
+            crate::absorb::Disposition::Leaking(why) => (
+                Level::Warn,
+                "foreign mount absorb cannot take",
+                format!(
+                    "{} <- {} is a real mount visible to any app, and absorb cannot convert \
+                     it: {why}",
+                    s.target.display(),
+                    s.source.display()
+                ),
+            ),
+            crate::absorb::Disposition::Absorb => (
                 Level::Warn,
                 "module mount not absorbed",
                 format!(
                     "{} <- {} is still a real mount and visible to any app, and nothing \
                      declined it — run `nomount absorb` (it runs at boot, so this usually \
                      means it failed)",
-                    c.target.display(),
-                    c.source.display()
+                    s.target.display(),
+                    s.source.display()
                 ),
             ),
         };

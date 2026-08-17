@@ -140,6 +140,42 @@ fn is_partition_root(target: &Path) -> bool {
     target.components().skip(1).count() == 1
 }
 
+/// How a target may be served -- the single answer both the native module plan
+/// and `absorb` must obey.
+///
+/// These used to be two rules. `plan_tree` consulted `NON_PARTITION_ROOTS`,
+/// `is_partition_root` and `is_my_partition`; absorb had its own weaker test
+/// (source under /data/adb, target not under /data) and so would happily inject
+/// where this file refuses to -- `/my_*`, which bootloops zygote, and `/apex`,
+/// which is not ours at all. Absorbing someone else's bind must never do
+/// something we would not do for our own module content, so there is now one
+/// predicate and two callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Serve {
+    /// Hookless injection works here.
+    Inject,
+    /// Must be a real bind: injection on `my_*` trips zygote's FD allowlist.
+    Bind,
+    /// Not ours to serve, with the reason for a human.
+    Refuse(&'static str),
+}
+
+pub(crate) fn serve_mode(target: &Path) -> Serve {
+    let Some(root) = target.components().nth(1).and_then(|c| c.as_os_str().to_str()) else {
+        return Serve::Refuse("not a path under a partition");
+    };
+    if NON_PARTITION_ROOTS.contains(&root) {
+        return Serve::Refuse("not a ROM partition");
+    }
+    if is_partition_root(target) {
+        return Serve::Refuse("a bare partition root (injecting one bootloops zygote)");
+    }
+    if is_my_partition(target) && !my_hookless_enabled() {
+        return Serve::Bind;
+    }
+    Serve::Inject
+}
+
 fn module_enabled(dir: &Path) -> bool {
     !dir.join("disable").exists()
         && !dir.join("remove").exists()
@@ -619,6 +655,23 @@ pub fn run_mount() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of `serve_mode` is that absorb gets the SAME answer this
+    /// file acts on, so these are the cases where the two used to disagree.
+    #[test]
+    fn serve_mode_refuses_what_plan_tree_refuses() {
+        assert_eq!(serve_mode(Path::new("/system/bin/x")), Serve::Inject);
+        assert_eq!(serve_mode(Path::new("/product/etc/foo.xml")), Serve::Inject);
+        // my_* is bind-served unless the experimental flag is on.
+        if !my_hookless_enabled() {
+            assert_eq!(serve_mode(Path::new("/my_product/app/Foo/Foo.apk")), Serve::Bind);
+        }
+        // NON_PARTITION_ROOTS, a bare partition root, and the filesystem root.
+        assert!(matches!(serve_mode(Path::new("/apex/com.android.art/x")), Serve::Refuse(_)));
+        assert!(matches!(serve_mode(Path::new("/data/adb/x")), Serve::Refuse(_)));
+        assert!(matches!(serve_mode(Path::new("/system")), Serve::Refuse(_)));
+        assert!(matches!(serve_mode(Path::new("/")), Serve::Refuse(_)));
+    }
 
     #[test]
     fn live_rules_are_keyed_including_uid() {

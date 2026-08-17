@@ -29,6 +29,9 @@ use crate::nm::Nm;
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 /// Only sources under here are module content we may take over.
 const MODULE_ROOT: &str = "/data/adb";
+/// A mount backed by anything under here, landing outside it, is foreign content
+/// over the ROM — worth reporting even when `MODULE_ROOT` does not cover it.
+const FOREIGN_ROOT: &str = "/data";
 /// Opt-out list: module ids or target path prefixes to leave mounted. `.txt`
 /// to match its peer `whiteouts.txt` and because this file is meant to be
 /// hand-edited -- an extensionless file makes an Android file manager ask which
@@ -111,16 +114,48 @@ pub(crate) fn module_dir_of(src: &Path) -> Option<PathBuf> {
 }
 
 /// Why a still-present module mount was left alone, when that was deliberate.
-pub(crate) enum Declined {
+pub enum Declined {
     /// The module ships Zygisk/Xposed markers, so absorb never touches it.
     Framework(String),
     /// Named by the skip list (or the built-in fallback), which names its source.
     Listed(&'static str),
+    /// `my_*` is served by a real bind, so converting the module's bind to an
+    /// injection would trade a working mount for a zygote bootloop.
+    MustBind,
+}
+
+/// What absorb will do about one foreign mount.
+///
+/// Absorb used to model only its own action -- "mounts I can convert" -- and
+/// treated everything else as absent, which is how a bind sourced from
+/// /data/local/tmp got reported as "posture already clean". The posture is a
+/// claim about what is visible in mountinfo, not about how much absorb managed
+/// to convert, so every foreign mount now lands in exactly one of these and
+/// silence is unreachable while one exists.
+pub enum Disposition {
+    /// Convert it to injections.
+    Absorb,
+    /// Still mounted on purpose.
+    Declined(Declined),
+    /// Still mounted because absorb cannot take it, and still visible to apps.
+    Leaking(&'static str),
+}
+
+/// One foreign mount and its verdict.
+pub struct Surveyed {
+    pub target: PathBuf,
+    pub source: PathBuf,
+    pub disposition: Disposition,
 }
 
 /// `None` means nothing declined this mount — it is still mounted for some other
 /// reason (absorb has not run, or it failed), which is the only case worth a warning.
-pub(crate) fn declined_reason(src: &Path, target: &Path) -> Option<Declined> {
+pub(crate) fn declined_reason_with(
+    src: &Path,
+    target: &Path,
+    skips: &[String],
+    from: &'static str,
+) -> Option<Declined> {
     if let Some(d) = module_dir_of(src) {
         if is_hook_framework(&d) {
             return Some(Declined::Framework(
@@ -128,8 +163,7 @@ pub(crate) fn declined_reason(src: &Path, target: &Path) -> Option<Declined> {
             ));
         }
     }
-    let (skips, from) = skip_list();
-    is_skipped(src, target, &skips).then_some(Declined::Listed(from))
+    is_skipped(src, target, skips).then_some(Declined::Listed(from))
 }
 
 /// True if this mount is explicitly excluded.
@@ -233,12 +267,72 @@ pub(crate) fn source_of(row: &MountRow, roots: &HashMap<String, PathBuf>) -> Opt
     })
 }
 
-/// Is this a mount we should take over? Module-backed, and landing somewhere we
-/// actually serve — never a target under /data (the module's own scratch space).
+/// Is this mount module content laid over the ROM? OWNERSHIP only — whether the
+/// target can actually be served is `mount::serve_mode`'s question, and asking
+/// it here instead is what let absorb inject onto `/my_*` and `/apex`.
 pub(crate) fn is_absorbable(src: &Path, target: &Path) -> bool {
     src.starts_with(MODULE_ROOT)
-        && !target.starts_with("/data")
+        && !target.starts_with(FOREIGN_ROOT)
         && target.components().count() > 1
+}
+
+/// The verdict for one foreign mount. Split out of `survey` so it can be tested
+/// without a /proc to read.
+pub(crate) fn classify(
+    src: &Path,
+    target: &Path,
+    skips: &[String],
+    skip_src: &'static str,
+) -> Disposition {
+    if !is_absorbable(src, target) {
+        return Disposition::Leaking(
+            "source is outside /data/adb, so there is no module content to re-serve",
+        );
+    }
+    if let Some(d) = declined_reason_with(src, target, skips, skip_src) {
+        return Disposition::Declined(d);
+    }
+    // The target question belongs to mount.rs, not here — see `serve_mode`.
+    match crate::mount::serve_mode(target) {
+        crate::mount::Serve::Inject => Disposition::Absorb,
+        crate::mount::Serve::Bind => Disposition::Declined(Declined::MustBind),
+        crate::mount::Serve::Refuse(why) => Disposition::Leaking(why),
+    }
+}
+
+/// Every mount whose source is on /data and whose target is not — content some
+/// module laid over the ROM, whoever owns it — paired with what absorb will do.
+///
+/// Deliberately wider than `MODULE_ROOT`: a module is free to bind from
+/// /data/local/tmp (custom-certificate-authorities does, off a tmpfs), and that
+/// mount is just as visible to an app as one we can convert. Stock ROM overlays
+/// never appear here — their source is the partition itself, so `source_of`
+/// returns None for them or a path outside /data.
+pub fn survey() -> Result<Vec<Surveyed>> {
+    let body = std::fs::read_to_string(MOUNTINFO).context("read mountinfo")?;
+    let rows = parse_mountinfo(&body);
+    let roots = fs_roots(&rows);
+    let (skips, skip_src) = skip_list();
+
+    let mut out: Vec<Surveyed> = rows
+        .iter()
+        .filter_map(|r| {
+            let src = source_of(r, &roots)?;
+            // Foreign = backed by /data, landing off /data. A target under /data
+            // is the module's own scratch space (fbind and friends): not ours.
+            if !src.starts_with(FOREIGN_ROOT) || r.target.starts_with(FOREIGN_ROOT) {
+                return None;
+            }
+            if r.target.components().count() <= 1 {
+                return None;
+            }
+            let disposition = classify(&src, &r.target, &skips, skip_src);
+            Some(Surveyed { target: r.target.clone(), source: src, disposition })
+        })
+        .collect();
+    // Deepest target first, so nested mounts come off in the right order.
+    out.sort_by_key(|s| std::cmp::Reverse(s.target.components().count()));
+    Ok(out)
 }
 
 /// A mount we intend to convert.
@@ -247,55 +341,6 @@ pub struct Candidate {
     pub source: PathBuf,
 }
 
-/// Everything currently absorbable, deepest target first so nested mounts come
-/// off in the right order.
-/// Absorbable mounts INCLUDING ones the skip list excludes. Used by `doctor` to
-/// report what is deliberately being left mounted.
-pub fn candidates_all() -> Result<Vec<Candidate>> {
-    let body = std::fs::read_to_string(MOUNTINFO).context("read mountinfo")?;
-    let rows = parse_mountinfo(&body);
-    let roots = fs_roots(&rows);
-    Ok(rows
-        .iter()
-        .filter_map(|r| {
-            let src = source_of(r, &roots)?;
-            is_absorbable(&src, &r.target).then(|| Candidate {
-                target: r.target.clone(),
-                source: src,
-            })
-        })
-        .collect())
-}
-
-pub fn candidates() -> Result<Vec<Candidate>> {
-    let body = std::fs::read_to_string(MOUNTINFO).context("read mountinfo")?;
-    let rows = parse_mountinfo(&body);
-    let roots = fs_roots(&rows);
-    let (skips, skip_src) = skip_list();
-    let mut out: Vec<Candidate> = rows
-        .iter()
-        .filter_map(|r| {
-            let src = source_of(r, &roots)?;
-            if !is_absorbable(&src, &r.target) {
-                return None;
-            }
-            if is_skipped(&src, &r.target, &skips) {
-                match module_dir_of(&src).filter(|d| is_hook_framework(d)) {
-                    Some(d) => println!(
-                        "skipping {} ({} is a hook framework)",
-                        r.target.display(),
-                        d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-                    ),
-                    None => println!("skipping {} (listed in {skip_src})", r.target.display()),
-                }
-                return None;
-            }
-            Some(Candidate { target: r.target.clone(), source: src })
-        })
-        .collect();
-    out.sort_by_key(|c| std::cmp::Reverse(c.target.components().count()));
-    Ok(out)
-}
 
 /// Targets that currently have something mounted on them.
 ///
@@ -350,9 +395,49 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding")?;
 
-    let cands = candidates()?;
+    // Report the whole picture BEFORE acting, so a mount absorb cannot take is
+    // never implied to be absent. "Nothing to absorb" and "nothing is mounted"
+    // are different claims and only the second one is the posture.
+    let surveyed = survey()?;
+    let mut leaking = 0u32;
+    for s in &surveyed {
+        match &s.disposition {
+            Disposition::Absorb => {}
+            Disposition::Declined(Declined::Framework(id)) => println!(
+                "skipping {} ({id} is a hook framework)",
+                s.target.display()
+            ),
+            Disposition::Declined(Declined::Listed(from)) => {
+                println!("skipping {} (listed in {from})", s.target.display())
+            }
+            Disposition::Declined(Declined::MustBind) => println!(
+                "skipping {} (my_* is served by a real bind; injecting one bootloops zygote)",
+                s.target.display()
+            ),
+            Disposition::Leaking(why) => {
+                leaking += 1;
+                eprintln!(
+                    "nomount: LEAK {} <- {} stays mounted and is visible to any app: {why}",
+                    s.target.display(),
+                    s.source.display()
+                );
+            }
+        }
+    }
+
+    let cands: Vec<Candidate> = surveyed
+        .into_iter()
+        .filter(|s| matches!(s.disposition, Disposition::Absorb))
+        .map(|s| Candidate { target: s.target, source: s.source })
+        .collect();
     if cands.is_empty() {
-        println!("nomount absorb: no module-backed mounts to absorb (posture already clean)");
+        match leaking {
+            0 => println!("nomount absorb: nothing mounted over the ROM (posture clean)"),
+            n => println!(
+                "nomount absorb: nothing to absorb, but {n} foreign mount(s) remain — \
+                 the posture is NOT clean"
+            ),
+        }
         return Ok(());
     }
 
@@ -418,9 +503,16 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         }
     }
 
+    // A leak is worth restating in the summary line: the per-mount notice above
+    // scrolls away, and "12 absorbed" reads like success on its own.
+    let leaks = if leaking > 0 {
+        format!(", {leaking} NOT absorbed and still mounted")
+    } else {
+        String::new()
+    };
     if dry_run {
         println!(
-            "nomount absorb: {} mount(s) would be absorbed, {skipped_dirs} directory bind(s) skipped (dry run)",
+            "nomount absorb: {} mount(s) would be absorbed, {skipped_dirs} directory bind(s) skipped{leaks} (dry run)",
             cands.len() as u32 - skipped_dirs
         );
     } else {
@@ -429,7 +521,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         } else {
             String::new()
         };
-        println!("nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {failed} failed{dirs}");
+        println!(
+            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {failed} failed{dirs}{leaks}"
+        );
     }
     Ok(())
 }
@@ -529,6 +623,63 @@ mod tests {
         assert!(is_skipped(&src, Path::new("/system/bin/app_process64"), &builtins));
         // and does not over-reach
         assert!(!is_skipped(&src, Path::new("/product/etc/foo.xml"), &builtins));
+    }
+
+    /// Real modules, real failures. SystemlessDebloater binds its dummy.apk over
+    /// stock APKs — on a OnePlus those live on my_*, where an injection bootloops
+    /// zygote. custom-certificate-authorities binds a /data/local/tmp tmpfs over
+    /// the cacerts apex. Absorb used to accept all three.
+    #[test]
+    fn a_target_mount_rs_would_not_inject_is_never_absorbed() {
+        let none: Vec<String> = vec![];
+        let modsrc = PathBuf::from("/data/adb/modules/SystemlessDebloater/dummy.apk");
+
+        // my_* -> mount.rs serves these with a real bind, so absorb must decline.
+        assert!(matches!(
+            classify(&modsrc, Path::new("/my_product/app/Foo/Foo.apk"), &none, "test"),
+            Disposition::Declined(Declined::MustBind)
+        ));
+        // apex is in NON_PARTITION_ROOTS: not ours to serve at all.
+        assert!(matches!(
+            classify(&modsrc, Path::new("/apex/com.android.conscrypt/cacerts"), &none, "test"),
+            Disposition::Leaking(_)
+        ));
+        // A bare partition root would mask the whole partition.
+        assert!(matches!(
+            classify(&modsrc, Path::new("/product"), &none, "test"),
+            Disposition::Leaking(_)
+        ));
+        // …and an ordinary ROM path still absorbs.
+        assert!(matches!(
+            classify(&modsrc, Path::new("/system/app/Foo/Foo.apk"), &none, "test"),
+            Disposition::Absorb
+        ));
+    }
+
+    #[test]
+    fn a_bind_sourced_outside_data_adb_is_reported_not_ignored() {
+        // custom-certificate-authorities: `mount --bind /data/local/tmp/custom-ca-copy
+        // /system/etc/security/cacerts`. Absorb cannot re-serve a tmpfs it does not
+        // own, but staying quiet about it is what made the posture claim false.
+        let d = classify(
+            Path::new("/data/local/tmp/custom-ca-copy"),
+            Path::new("/system/etc/security/cacerts"),
+            &[],
+            "test",
+        );
+        assert!(matches!(d, Disposition::Leaking(_)), "must be reported as a leak");
+    }
+
+    #[test]
+    fn a_declined_framework_still_beats_the_target_rule() {
+        // Ordering matters: a framework mount onto an injectable target must be
+        // declined for being a framework, not silently absorbed.
+        let src = PathBuf::from("/data/adb/modules/anything/bin/dex2oat");
+        let builtins: Vec<String> = BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect();
+        assert!(matches!(
+            classify(&src, Path::new("/system/bin/app_process64"), &builtins, "built-in"),
+            Disposition::Declined(Declined::Listed(_))
+        ));
     }
 
     #[test]
