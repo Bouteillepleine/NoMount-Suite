@@ -92,7 +92,6 @@ pub fn rom_dirs_are_dirent_packed() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     /// The formula, pinned against directories measured on OP15 erofs. If this
     /// ever changes, every claim built on it is void.

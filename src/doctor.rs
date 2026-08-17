@@ -98,17 +98,18 @@ pub fn run_doctor() -> Result<()> {
             });
         }
 
-        // A module whiteout off overlayfs is declined by the mount pass; say so
-        // here, before a reboot, rather than leaving it to a stderr line.
+        // Only where a hole genuinely REMAINS: from engine v13 a single-block
+        // erofs parent is recomputed, so reporting those would cry wolf on the
+        // debloat case -- the very one the fix made clean.
         if e.kind == PlanKind::Whiteout && crate::mount::whiteout_leaves_hole(&e.target) {
             f.push(Finding {
                 level: Level::Info,
                 check: "whiteout leaves a measurable hole",
                 detail: format!(
-                    "{} hides {} off overlayfs: the parent still reports st_size == \
-                     12*(entries incl . and ..) + name bytes and st_nlink == 2 + subdirs \
-                     counting the hidden entry, so one stat plus one getdents64 can spot it. \
-                     Applied anyway — declining it would silently neuter the module",
+                    "{} hides {}, whose parent is multi-block erofs (or the engine predates \
+                     v13): the size and link count still count the hidden entry and the engine \
+                     cannot recompute them there, so a caller that replays erofs block packing \
+                     can spot it. Applied anyway — declining it would silently neuter the module",
                     e.module,
                     e.target.display()
                 ),
@@ -170,11 +171,11 @@ pub fn run_doctor() -> Result<()> {
     for (module, n) in rolled {
         f.push(Finding {
             level: Level::Info,
-            check: "module hides off overlayfs",
+            check: "module hides where the hole remains",
             detail: format!(
-                "{module} applies {n} hide(s) on a filesystem whose directories describe their \
-                 own contents. Each one is individually checkable; uninstall the module or move \
-                 its targets under an overlay-backed path if that matters more than the module"
+                "{module} applies {n} hide(s) the engine cannot make consistent (multi-block \
+                 erofs parents). Hides on single-block parents are corrected and not counted \
+                 here. Uninstall the module or move its targets if that matters more"
             ),
         });
     }

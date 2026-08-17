@@ -20,40 +20,48 @@ use crate::nm::Nm;
 
 pub const WHITEOUT_PATH: &str = "/data/adb/nomount/whiteouts.txt";
 
-const OVERLAYFS_SUPER_MAGIC: i64 = 0x794c_7630;
 
-/// True when the path sits on an overlayfs mount.
-///
-/// This decides whether a whiteout is safe, because hiding an entry is only
-/// unmeasurable where the directory's own metadata does not describe its
-/// contents. On the ROM's erofs partitions it does, exactly:
-///
-///   st_size  == 12 * entries + total name bytes
-///   st_nlink == 2 + subdirectories
-///
-/// Both held with zero deviation across every stock directory checked on OP15,
-/// and hiding one entry breaks them by precisely that entry's cost — a hole a
-/// caller can compute from one stat plus one getdents64, with no knowledge of
-/// the stock ROM. Overlayfs merged directories report neither relationship
-/// (nlink is 1 and the size comes from one layer), so there is nothing to
-/// contradict and the whiteout is genuinely invisible.
-fn is_overlay(p: &Path) -> Option<bool> {
+/// Statfs magic of the directory holding `target`.
+fn parent_fs_magic(target: &Path) -> Option<i64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-
-    let c = CString::new(p.as_os_str().as_bytes()).ok()?;
+    let dir = target.parent().unwrap_or(Path::new("/"));
+    let c = CString::new(dir.as_os_str().as_bytes()).ok()?;
     let mut sf: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statfs(c.as_ptr(), &mut sf) } != 0 {
         return None;
     }
-    Some(sf.f_type as i64 == OVERLAYFS_SUPER_MAGIC)
+    Some(sf.f_type as i64)
 }
 
-/// The parent is what actually carries the evidence: hiding an entry changes
-/// what the DIRECTORY reports, not the target.
+/// Does hiding `target` leave evidence in its PARENT's metadata?
+///
+/// Only erofs describes a directory's contents in the directory itself, and only
+/// while it fits in one block:
+///   * **erofs, size < 4096** — `st_size == 12*(entries incl . and ..) + name
+///     bytes` exactly, so a hidden entry is one stat plus one getdents64 away…
+///     UNLESS the engine corrects it, which it does from v13 (it recomputes both
+///     size and nlink from the served listing). Hence the version gate: a new
+///     Suite on an OLD kernel still leaves the hole and must still say so.
+///   * **erofs, size >= 4096** — erofs pads each block by an amount that depends
+///     on where the names fall (measured +18…+208 on stock dirs), so there is no
+///     closed form for the engine to correct, and the hole stays.
+///   * **overlayfs** — reports `nlink=1` and a size unrelated to the entry set.
+///   * **f2fs / ext4** — block-granular (`/data/adb` is 3452 for 22 entries).
+///     These were previously reported as holes by a plain "not overlayfs" test,
+///     which was wrong: there is no invariant to contradict.
 pub(crate) fn measurable_hole(target: &Path) -> bool {
+    const EROFS_MAGIC: i64 = 0xE0F5_E1E2;
+    if parent_fs_magic(target) != Some(EROFS_MAGIC) {
+        return false;
+    }
     let dir = target.parent().unwrap_or(Path::new("/"));
-    matches!(is_overlay(dir), Some(false))
+    let size = fs::metadata(dir).map(|m| m.len()).unwrap_or(0);
+    if size >= 4096 || size == 0 {
+        return true; // multi-block: no closed form, engine cannot correct it
+    }
+    // Single block: only a hole on an engine that does not recompute.
+    crate::nm::Nm::new().version().map(|v| v < 13).unwrap_or(true)
 }
 
 /// Patterns that are commonly probed and are safe to hide when present. Kept
@@ -138,10 +146,10 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     // just silences the note.
     if measurable_hole(p) && !force {
         eprintln!(
-            "nomount: note - {t} is not on overlayfs, so hiding it leaves a measurable hole: \
-             the parent still reports st_size == 12*(entries incl . and ..) + name bytes and \
-             st_nlink == 2 + subdirs counting this entry, checkable with one stat plus one \
-             getdents64. Applying anyway; `nomount doctor` lists every such path."
+            "nomount: note - hiding {t} leaves a measurable hole: its parent is a multi-block \
+             erofs directory (or the engine predates v13), so the size and link count still \
+             count this entry and the engine cannot recompute them. Applying anyway; \
+             `nomount doctor` lists every such path."
         );
     }
     if !p.exists() {
@@ -208,7 +216,7 @@ pub fn apply() -> Result<()> {
         }
         if measurable_hole(Path::new(&e)) {
             eprintln!(
-                "nomount: warning - {e} is not on overlayfs; the whiteout is measurable \
+                "nomount: warning - {e} leaves a measurable hole; the whiteout is detectable \
                  from its directory's size and link count"
             );
         }

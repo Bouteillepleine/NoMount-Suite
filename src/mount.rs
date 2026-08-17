@@ -409,7 +409,10 @@ fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: 
 /// Does applying this whiteout leave a measurable hole? It is APPLIED either
 /// way now — this only decides whether the trade gets reported.
 ///
-/// POLICY (2026-08-17): a module whiteout off overlayfs used to be declined,
+/// POLICY (2026-08-17): a module whiteout off overlayfs used to be declined, and
+/// as of engine v13 most of them leave no hole at all -- the kernel recomputes
+/// the parent's size and nlink from the listing it serves. What remains is the
+/// multi-block erofs case, where the padding has no closed form. Originally:
 /// because on erofs a directory's own metadata describes its contents exactly
 /// (`st_size == 12*(entries incl . and ..) + name bytes`) and hiding an entry
 /// without moving the size is something no real filesystem does. That protected
@@ -435,9 +438,10 @@ pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
 fn whiteout_allowed(target: &Path, module: &str) -> bool {
     if whiteout_leaves_hole(target) {
         eprintln!(
-            "nomount: applying whiteout {} from {module}: not on overlayfs, so its directory \
-             still reports a size and link count that count the hidden entry. Applied because \
-             declining it would make {module} a no-op; see `nomount doctor`.",
+            "nomount: applying whiteout {} from {module}: its parent is multi-block erofs (or \
+             the engine predates v13), so the size and link count still count the hidden entry \
+             and cannot be recomputed. Applied because declining it would make {module} a \
+             no-op; see `nomount doctor`.",
             target.display()
         );
     }
@@ -510,7 +514,7 @@ pub fn run_plan() -> Result<()> {
         let note = if !source_resolves(e) {
             "  << UNSERVABLE: source does not resolve, no rule will be created"
         } else if e.kind == PlanKind::Whiteout && whiteout_leaves_hole(&e.target) {
-            "  << applied, but off overlayfs: the parent's size/nlink still count the hidden entry"
+            "  << applied, but the parent's size/nlink still count it (multi-block erofs)"
         } else {
             ""
         };
