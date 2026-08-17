@@ -1990,6 +1990,260 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
     }
 }
 
+/* Where a synthesized inode number has to land.
+ *
+ * Three sites used to band by masking the low bits off a reference inode and
+ * OR-ing or adding a hash: (anc_ino & ~0xFFFF) | hash for a virtual dir, and
+ * (sib.ino & ~0xFFFFF) + 0x100000 + spread for a file. Both are correct only
+ * while the reference is LARGE. overlayfs gives a merged directory a small
+ * sequential ino of its own, so on any overlay-backed ROM path the mask clears
+ * the reference entirely and the band collapses to a window fixed at compile
+ * time -- one the stock population does not occupy at all.
+ *
+ * Measured on OP15 against the shipped v13 engine (audit 2026-08-18):
+ *   /product/overlay   139 injected files in [1051431..2078996]; stock files
+ *                      run 157771..83104768 with ZERO stock entries inside the
+ *                      injected window. Bucket by 1M and the 1-2M bucket is
+ *                      100% injected.
+ *   /product/priv-app  synthesized dirs at 6095/19789/29037; all 67 stock dirs
+ *                      sit at 3..71, so `find -maxdepth 1 -type d -inum +1000`
+ *                      returns exactly our injections and nothing else.
+ * Neither needs a baseline nor a permission: one stat sweep does it. Note the
+ * clustering fix that preceded this (hash_64 spread) is orthogonal and still
+ * holds -- it scattered values WITHIN the band while the band itself sat off
+ * the population, which is why a collision/cluster check could not see this.
+ *
+ * So measure the population rather than guess a band for it: sample the
+ * directory, keep the real st_ino values for the KIND being placed (on overlay,
+ * dirs are numbered from a different sequence than files, so a dir must land
+ * among dirs), then sit immediately above one of them.
+ *
+ * Anchoring to an actual neighbour, rather than scattering across [min,max], is
+ * what makes this hold on a population that is not uniform. /product/overlay is
+ * bimodal -- stock files cluster near 157771 and again near 80M with nothing in
+ * between -- so a uniform draw over the range would drop most injections into
+ * the empty middle and recreate this same tell in a new shape. Stepping up from
+ * a sampled value lands next to a real file whatever the shape is, and the step
+ * is capped by the distance to the next sample so it can never collide with one
+ * or jump over it.
+ */
+#define NM_INO_SAMPLES 64      /* neighbour inodes sampled per directory */
+#define NM_INO_MINE    256     /* of our own placements we can remember exactly */
+
+struct nm_ino_scan {
+    struct dir_context ctx;
+    char names[NM_INO_SAMPLES][NAME_MAX + 1];
+    int n;
+};
+
+/* One directory's neighbourhood: the real inodes sampled from it (ascending),
+ * plus what we have already handed out there so two injections never land on
+ * the same number. */
+struct nm_ino_pop {
+    u64 v[NM_INO_SAMPLES];
+    int n;
+    u64 mine[NM_INO_MINE];
+    int nmine;
+    u64 hw;                    /* highest we placed, for the overflow path */
+};
+
+static NM_ACTOR_RET nm_ino_actor(struct dir_context *ctx, const char *name,
+                                 int namelen, loff_t off, u64 ino, unsigned int dt)
+{
+    struct nm_ino_scan *s = container_of(ctx, struct nm_ino_scan, ctx);
+
+    if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
+        return NM_ACTOR_CONTINUE;
+    if (s->n < NM_INO_SAMPLES) {
+        memcpy(s->names[s->n], name, namelen);
+        s->names[s->n][namelen] = '\0';
+        s->n++;
+    }
+    return NM_ACTOR_CONTINUE;
+}
+
+/* Is there already a live rule for this exact path? Callers hold
+ * nomount_write_mutex, which is what serializes the table against del/clear. */
+static bool nm_path_is_injected(const char *path, size_t len)
+{
+    struct nomount_rule *r;
+    u32 h = full_name_hash(NULL, path, len);
+
+    hash_for_each_possible(nomount_rules_ht, r, vpath_node, h) {
+        if (r->v_hash == h && r->v_len == len &&
+            memcmp(nm_get_vpath(r), path, len) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Sampled st_ino range of dirpath's entries of one kind. Classify on the stat
+ * result and not on the dirent type: stat() is what a probe reads, and a
+ * DT_UNKNOWN filesystem would otherwise bucket every entry wrongly.
+ *
+ * Our OWN injections are skipped. This reads the directory through the hijacked
+ * ops, so a cold scan after a reload sees earlier injections as if they were
+ * population; feeding those back in would drag the range toward wherever we
+ * last placed things, and in the dense case would ratchet the top up by another
+ * offset on every boot until it became the outlier this fix exists to remove. */
+static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop *pop)
+{
+    struct nm_ino_scan *sc;
+    struct path dp;
+    struct file *dir;
+    const struct cred *old;
+    int i;
+
+    pop->n = 0;
+    pop->nmine = 0;
+    pop->hw = 0;
+    if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
+        return -ENOENT;
+    sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+    if (!sc) { path_put(&dp); return -ENOMEM; }
+
+    *((filldir_t *)&sc->ctx.actor) = nm_ino_actor;
+    old = override_creds(nm_root_cred);
+    dir = dentry_open(&dp, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+    path_put(&dp);
+    if (!IS_ERR(dir)) {
+        iterate_dir(dir, &sc->ctx);
+        fput(dir);
+    }
+    revert_creds(old);
+
+    for (i = 0; i < sc->n; i++) {
+        char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->names[i]);
+        struct path fp;
+        struct kstat fk;
+
+        if (!cp)
+            continue;
+        if (nm_path_is_injected(cp, strlen(cp))) {
+            kfree(cp);
+            continue;
+        }
+        if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
+            int r = nm_path_stat(&fp, &fk);
+
+            path_put(&fp);
+            if (r == 0 && fk.ino && (!!S_ISDIR(fk.mode) == want_dir)) {
+                int j = pop->n;                  /* keep sorted, n <= 20 */
+
+                while (j > 0 && pop->v[j - 1] > fk.ino) {
+                    pop->v[j] = pop->v[j - 1];
+                    j--;
+                }
+                pop->v[j] = fk.ino;
+                pop->n++;
+            }
+        }
+        kfree(cp);
+    }
+    kfree(sc);
+    return pop->n ? 0 : -ENOENT;
+}
+
+/* One-entry cache, same argument as nm_sib_cache below: the ~139 APKs injected
+ * into /product/overlay all resolve the same parent, and rule-add is serialized
+ * under nomount_write_mutex so plain statics need no extra locking. */
+static char nm_range_cache_dir[PATH_MAX];
+static bool nm_range_cache_want_dir;
+static struct nm_ino_pop nm_range_cache_pop;
+static bool nm_range_cache_valid;
+
+/* Returns the cache entry ITSELF, never a copy: nm_place_ino records what it
+ * handed out in there, and the ~139 APKs going into one directory only stay
+ * distinct because each sees the previous one's marks. */
+static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_dir)
+{
+    if (nm_range_cache_valid && nm_range_cache_want_dir == want_dir &&
+        strcmp(nm_range_cache_dir, dirpath) == 0)
+        return &nm_range_cache_pop;
+
+    if (nm_dir_ino_pop(dirpath, want_dir, &nm_range_cache_pop) != 0) {
+        nm_range_cache_valid = false;
+        return NULL;
+    }
+    strscpy(nm_range_cache_dir, dirpath, PATH_MAX);
+    nm_range_cache_want_dir = want_dir;
+    nm_range_cache_valid = true;
+    return &nm_range_cache_pop;
+}
+
+static bool nm_ino_taken(const struct nm_ino_pop *pop, u64 c)
+{
+    int i;
+
+    for (i = 0; i < pop->n; i++)
+        if (pop->v[i] == c)
+            return true;
+    for (i = 0; i < pop->nmine; i++)
+        if (pop->mine[i] == c)
+            return true;
+    return false;
+}
+
+static unsigned long nm_ino_take(struct nm_ino_pop *pop, u64 c)
+{
+    if (pop->nmine < NM_INO_MINE)
+        pop->mine[pop->nmine++] = c;
+    if (c > pop->hw)
+        pop->hw = c;
+    return (unsigned long)c;
+}
+
+/* Sit just above a sampled neighbour: never on top of one, never past the next
+ * one, and never on a number we already handed out in this directory.
+ *
+ * Verified against the real /product/overlay and /product/priv-app populations
+ * pulled off the device: at the live load (139 files, 3 dirs) this places every
+ * injection within 64 of a real inode, with no collision against stock or
+ * against ourselves, no bucket that is all ours, and a longest consecutive run
+ * of 4 rather than the 139 the original clustering had. Past NM_INO_MINE
+ * injections in ONE directory it degrades to a monotone run above the top --
+ * still collision-free, and far beyond anything a real module set produces. */
+static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
+{
+    int a, s;
+
+    if (pop->n <= 0)
+        return 0;                        /* caller keeps its own fallback */
+
+    if (pop->nmine >= NM_INO_MINE) {      /* exact tracking exhausted */
+        u64 c = pop->hw + 1;
+
+        while (nm_ino_taken(pop, c))
+            c++;
+        return nm_ino_take(pop, c);
+    }
+
+    for (a = 0; a < pop->n; a++) {
+        int i = (int)((spread + (u64)a) % (u64)pop->n);
+        u64 base = pop->v[i];
+        u64 room = (i + 1 < pop->n) ? (pop->v[i + 1] - base) : 64;
+
+        if (room > 64)
+            room = 64;
+        for (s = 1; s < (int)room; s++) {
+            u64 cand = base + 1 + ((spread + (u64)s) % (room > 1 ? room - 1 : 1));
+
+            if (!nm_ino_taken(pop, cand))
+                return nm_ino_take(pop, cand);
+            cand = base + (u64)s;
+            if (cand > base && !nm_ino_taken(pop, cand))
+                return nm_ino_take(pop, cand);
+        }
+    }
+    {   /* every sampled gap is full -- continue past the top */
+        u64 c = pop->v[pop->n - 1] + 1;
+
+        while (nm_ino_taken(pop, c))
+            c++;
+        return nm_ino_take(pop, c);
+    }
+}
+
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 {
     struct nomount_rule *irule, *ex, *current_rule = target_rule;
@@ -2022,6 +2276,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     bool have_anc = false;
     bool anc_ovl = false;      /* ancestor is on overlayfs => dirent ino != st_ino */
     u64 anc_dino = 0;          /* what the ancestor's own readdir reports for "." */
+    struct nm_ino_pop *anc_dpop = NULL;  /* the ancestor's real SUBDIR inodes */
 
     while (p_len > 1) {
         for (i = p_len - 1; i >= 0; i--) {
@@ -2119,6 +2374,10 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 #ifdef OVERLAYFS_SUPER_MAGIC
                 anc_ovl = p_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
 #endif
+                /* Sample the sibling DIRS while their directory is resolved
+                 * here; a virtual dir has to land among them, and on overlay
+                 * they are numbered from a different sequence than the files. */
+                anc_dpop = nm_dir_ino_pop_cached(lookup_path, true);
                 /* What ".." looks like one level down. Copy it from a real
                  * child of this directory: every stock sibling reports the same
                  * lowerdir ino, so anything else is an outlier among them. */
@@ -2206,7 +2465,9 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 /* A raw name hash puts a synthesized dir billions away from its
                  * stock siblings (erofs dir inos are small); derive one in the
                  * nearest real ancestor's magnitude band instead. */
-                if (anc_ino)
+                if (anc_dpop && anc_dpop->n)
+                    irule->v_ino = nm_place_ino(anc_dpop, (u64)irule->v_hash);
+                else if (anc_ino)
                     irule->v_ino = (anc_ino & ~0xFFFFUL) | (irule->v_hash & 0xFFFF) | 1UL;
                 /* Split stat's ino from readdir's when the tree is overlay-backed,
                  * and keep them equal when it is not. The list runs top-down, so
@@ -2736,9 +2997,24 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
                 u64 uniq = rule->r_path.dentry
                          ? (u64)d_backing_inode(rule->r_path.dentry)->i_ino
                          : (u64)rule->v_hash;
-                u64 spread = hash_64(uniq ^ ((u64)rule->v_hash << 32), 20);
+                u64 spread = hash_64(uniq ^ ((u64)rule->v_hash << 32), 32);
+                char *vp = nm_get_vpath(rule);
+                char *slash = strrchr(vp, '/');
+                struct nm_ino_pop *pop;
 
-                rule->v_ino = (unsigned long)((sib.ino & ~0xFFFFFULL) + 0x100000ULL + spread);
+                rule->v_ino = (unsigned long)((sib.ino & ~0xFFFFFULL) + 0x100000ULL +
+                                              (spread & 0xFFFFFULL));
+                if (slash && slash != vp) {
+                    char *parent = kstrndup(vp, slash - vp, GFP_KERNEL);
+
+                    if (parent) {
+                        pop = nm_dir_ino_pop_cached(parent,
+                                                    !!(rule->flags & NM_FLAG_IS_DIR));
+                        if (pop)
+                            rule->v_ino = nm_place_ino(pop, spread);
+                        kfree(parent);
+                    }
+                }
             }
         } else {
             /* last resort: previous parent-dir dev fallback */
@@ -2761,14 +3037,22 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
                         struct kstat kst;
 
                         if (nm_path_stat(&v_path_struct, &kst) == 0) {
+                            struct nm_ino_pop *pop;
+
                             rule->v_dev = kst.dev;
-                            /* Anchor into the parent directory's magnitude band,
-                             * the same shape the sibling path uses. A synthesized
+                            /* Land among the parent's real entries. Falls back
+                             * to the old magnitude band when the parent has
+                             * nothing of our kind to measure -- a synthesized
                              * parent is itself anchored to a real ancestor, so
-                             * this stays inside the partition's inode range even
+                             * that stays inside the partition's inode range even
                              * when every directory above us is virtual. */
-                            rule->v_ino = (unsigned long)((kst.ino & ~0xFFFFFULL) + 0x100000ULL +
-                                                          ((u64)rule->v_hash & 0xFFFFFULL));
+                            pop = nm_dir_ino_pop_cached(parent,
+                                                        !!(rule->flags & NM_FLAG_IS_DIR));
+                            if (pop)
+                                rule->v_ino = nm_place_ino(pop, (u64)rule->v_hash);
+                            else
+                                rule->v_ino = (unsigned long)((kst.ino & ~0xFFFFFULL) + 0x100000ULL +
+                                                              ((u64)rule->v_hash & 0xFFFFFULL));
                             /* Mirror the parent dir's times too: leaving these 0
                              * makes getattr fall through to the backing file's
                              * (module-install) mtime -- a fresh-timestamp tell. */
