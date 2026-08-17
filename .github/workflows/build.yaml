@@ -138,13 +138,11 @@ jobs:
           # The module shells out to bin/<abi>/nm; it is arch-shared C, built
           # once here. Same zig incantation as the nomount source repo, then
           # sstrip to ~3 KB. Placed next to nomount so package.sh bundles it.
-          curl -fsSL https://www.muppetlabs.com/~breadbox/pub/software/ELFkickers-3.2.tar.gz -o sstrip.tar.gz
-          tar xf sstrip.tar.gz
-          make -C ELFkickers-3.2 sstrip
+          make -C userspace/tools/sstrip
           zig cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
             -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
             userspace/src/nm.c -o nm-arm64
-          ELFkickers-3.2/sstrip/sstrip -z nm-arm64
+          userspace/tools/sstrip/sstrip -z nm-arm64
           file nm-arm64; wc -c nm-arm64
           for profile in debug release; do
             install -Dm755 nm-arm64 "target/aarch64-linux-android/${profile}/nm"
