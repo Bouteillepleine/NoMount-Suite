@@ -274,6 +274,16 @@ pub fn run_doctor() -> Result<()> {
                     s.source.display()
                 ),
             ),
+            crate::absorb::Disposition::Declined(crate::absorb::Declined::HooksElsewhere(id)) => (
+                Level::Info,
+                "module mount left by design",
+                format!(
+                    "{} <- {} stays mounted: {id} also mounts a known hook path, so absorb \
+                     leaves everything it owns alone",
+                    s.target.display(),
+                    s.source.display()
+                ),
+            ),
             crate::absorb::Disposition::Declined(crate::absorb::Declined::MustBind) => (
                 Level::Info,
                 "module mount left by design",

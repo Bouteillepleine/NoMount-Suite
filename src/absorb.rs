@@ -17,7 +17,7 @@
 //! This is only possible because injection is mountless: no overlay- or
 //! bind-based metamodule can absorb a mount, because it would have to create one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -60,19 +60,26 @@ const BUILTIN_SKIPS: &[&str] = &[
 
 /// Entries to leave alone: one per line, either a module id (matched against the
 /// bind's source) or an absolute target prefix. Blank lines and `#` ignored.
+/// The user's entries are ADDED to the built-ins, never substituted for them.
+/// They used to replace them, which meant writing a single line into the skip
+/// file silently dropped dex2oat and app_process protection — a footgun with a
+/// delayed, silent failure mode, since dexopt runs on app install rather than at
+/// boot. The built-ins are the floor; the file can only raise it.
 fn skip_list() -> (Vec<String>, &'static str) {
+    let mut entries: Vec<String> = BUILTIN_SKIPS.iter().map(|s| (*s).to_string()).collect();
     for f in [SKIP_FILE, SKIP_FILE_LEGACY] {
         if let Ok(s) = std::fs::read_to_string(f) {
-            let entries = s
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .map(str::to_string)
-                .collect();
+            entries.extend(
+                s.lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                    .map(str::to_string),
+            );
+            entries.dedup();
             return (entries, f);
         }
     }
-    (BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect(), "the built-in list")
+    (entries, "the built-in list")
 }
 
 /// A module that provides Zygisk or an Xposed framework, detected by what it
@@ -113,10 +120,44 @@ pub(crate) fn module_dir_of(src: &Path) -> Option<PathBuf> {
     Some(PathBuf::from("/data/adb/modules").join(id))
 }
 
+/// Module ids that own a mount landing on a known hook path.
+///
+/// FINDING-2: identifying a hook framework by the files it ships lost to the
+/// arms race. `is_hook_framework` looks for `zygisk/` or `bin/zygisk*`, and
+/// against current releases it is 0-for-3 — Vector v2.2 ships `framework/` and
+/// `daemon.apk`, ReZygisk ships `machikado.arm64`/`misaki.sig`, Zygisk Next
+/// ships `mazoku`. Those names are deliberately obfuscated to defeat detectors,
+/// and they defeat ours the same way. Chasing them is a treadmill.
+///
+/// What cannot be renamed is the TARGET: a hook framework has to land on
+/// dex2oat or app_process to do its job. So identify by target, then protect by
+/// module — once a module is known to hook, every mount it owns is declined,
+/// including ones no list enumerates. The shipped-files check stays on as a
+/// second, independent signal; neither is load-bearing alone.
+fn hooking_modules(rows: &[MountRow], roots: &HashMap<String, PathBuf>, skips: &[String]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for r in rows {
+        let Some(src) = source_of(r, roots) else { continue };
+        let Some(dir) = module_dir_of(&src) else { continue };
+        let hooks_a_path = skips.iter().any(|k| {
+            k.starts_with('/') && r.target.to_string_lossy().starts_with(k.as_str())
+        });
+        if hooks_a_path || is_hook_framework(&dir) {
+            if let Some(id) = dir.file_name() {
+                ids.insert(id.to_string_lossy().into_owned());
+            }
+        }
+    }
+    ids
+}
+
 /// Why a still-present module mount was left alone, when that was deliberate.
 pub enum Declined {
     /// The module ships Zygisk/Xposed markers, so absorb never touches it.
     Framework(String),
+    /// The module hooks a known path elsewhere, so all of its mounts are left
+    /// alone — including this one, which is not itself on a hook path.
+    HooksElsewhere(String),
     /// Named by the skip list (or the built-in fallback), which names its source.
     Listed(&'static str),
     /// `my_*` is served by a real bind, so converting the module's bind to an
@@ -155,12 +196,17 @@ pub(crate) fn declined_reason_with(
     target: &Path,
     skips: &[String],
     from: &'static str,
+    hookers: &HashSet<String>,
 ) -> Option<Declined> {
     if let Some(d) = module_dir_of(src) {
+        let id = d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if is_hook_framework(&d) {
-            return Some(Declined::Framework(
-                d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-            ));
+            return Some(Declined::Framework(id));
+        }
+        // Identified by a hook path it mounts SOMEWHERE ELSE, so this mount is
+        // spared too even though its own target is ordinary.
+        if hookers.contains(&id) {
+            return Some(Declined::HooksElsewhere(id));
         }
     }
     is_skipped(src, target, skips).then_some(Declined::Listed(from))
@@ -284,6 +330,7 @@ pub(crate) fn classify(
     target: &Path,
     skips: &[String],
     skip_src: &'static str,
+    hookers: &HashSet<String>,
 ) -> Option<Disposition> {
     // The target question belongs to mount.rs, not here — see `serve_mode`.
     let mode = crate::mount::serve_mode(target);
@@ -299,7 +346,7 @@ pub(crate) fn classify(
             ),
         );
     }
-    if let Some(d) = declined_reason_with(src, target, skips, skip_src) {
+    if let Some(d) = declined_reason_with(src, target, skips, skip_src, hookers) {
         return Some(Disposition::Declined(d));
     }
     Some(match mode {
@@ -322,6 +369,7 @@ pub fn survey() -> Result<Vec<Surveyed>> {
     let rows = parse_mountinfo(&body);
     let roots = fs_roots(&rows);
     let (skips, skip_src) = skip_list();
+    let hookers = hooking_modules(&rows, &roots, &skips);
 
     let mut out: Vec<Surveyed> = rows
         .iter()
@@ -335,7 +383,7 @@ pub fn survey() -> Result<Vec<Surveyed>> {
             if r.target.components().count() <= 1 {
                 return None;
             }
-            let disposition = classify(&src, &r.target, &skips, skip_src)?;
+            let disposition = classify(&src, &r.target, &skips, skip_src, &hookers)?;
             Some(Surveyed { target: r.target.clone(), source: src, disposition })
         })
         .collect();
@@ -422,6 +470,10 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             Disposition::Declined(Declined::Listed(from)) => {
                 println!("skipping {} (listed in {from})", s.target.display())
             }
+            Disposition::Declined(Declined::HooksElsewhere(id)) => println!(
+                "skipping {} ({id} hooks a known path elsewhere, so all of its mounts are left alone)",
+                s.target.display()
+            ),
             Disposition::Declined(Declined::MustBind) => println!(
                 "skipping {} (my_* is served by a real bind; injecting one bootloops zygote)",
                 s.target.display()
@@ -654,22 +706,22 @@ mod tests {
 
         // my_* -> mount.rs serves these with a real bind, so absorb must decline.
         assert!(matches!(
-            classify(&modsrc, Path::new("/my_product/app/Foo/Foo.apk"), &none, "test").unwrap(),
+            classify(&modsrc, Path::new("/my_product/app/Foo/Foo.apk"), &none, "test", &HashSet::new()).unwrap(),
             Disposition::Declined(Declined::MustBind)
         ));
         // apex is in NON_PARTITION_ROOTS: not ours to serve at all.
         assert!(matches!(
-            classify(&modsrc, Path::new("/apex/com.android.conscrypt/cacerts"), &none, "test").unwrap(),
+            classify(&modsrc, Path::new("/apex/com.android.conscrypt/cacerts"), &none, "test", &HashSet::new()).unwrap(),
             Disposition::Leaking(_)
         ));
         // A bare partition root would mask the whole partition.
         assert!(matches!(
-            classify(&modsrc, Path::new("/product"), &none, "test").unwrap(),
+            classify(&modsrc, Path::new("/product"), &none, "test", &HashSet::new()).unwrap(),
             Disposition::Leaking(_)
         ));
         // …and an ordinary ROM path still absorbs.
         assert!(matches!(
-            classify(&modsrc, Path::new("/system/app/Foo/Foo.apk"), &none, "test").unwrap(),
+            classify(&modsrc, Path::new("/system/app/Foo/Foo.apk"), &none, "test", &HashSet::new()).unwrap(),
             Disposition::Absorb
         ));
     }
@@ -684,6 +736,7 @@ mod tests {
             Path::new("/system/etc/security/cacerts"),
             &[],
             "test",
+            &HashSet::new(),
         );
         assert!(matches!(d, Some(Disposition::Leaking(_))), "must be reported as a leak");
 
@@ -696,7 +749,7 @@ mod tests {
             ("/data/misc/profiles/cur", "/data_mirror/cur_profiles"),
         ] {
             assert!(
-                classify(Path::new(s), Path::new(t), &[], "test").is_none(),
+                classify(Path::new(s), Path::new(t), &[], "test", &HashSet::new()).is_none(),
                 "stock plumbing {t} must not be reported"
             );
         }
@@ -709,9 +762,57 @@ mod tests {
         let src = PathBuf::from("/data/adb/modules/anything/bin/dex2oat");
         let builtins: Vec<String> = BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect();
         assert!(matches!(
-            classify(&src, Path::new("/system/bin/app_process64"), &builtins, "built-in").unwrap(),
+            classify(&src, Path::new("/system/bin/app_process64"), &builtins, "built-in", &HashSet::new()).unwrap(),
             Disposition::Declined(Declined::Listed(_))
         ));
+    }
+
+    /// FINDING-2, the case marker-detection cannot reach: a framework that ships
+    /// none of the known files (ReZygisk's `machikado.arm64`, Zygisk Next's
+    /// `mazoku`) but still binds dex2oat. Identifying it by that target must then
+    /// protect the ORDINARY mount it also owns.
+    #[test]
+    fn a_module_that_hooks_anywhere_has_all_its_mounts_declined() {
+        const ROWS: &str = "\
+205 1 254:78 / /data rw - f2fs /dev/block/dm-78 rw
+900 205 254:78 /adb/modules/obfuscated_fw/bin/x /apex/com.android.art/bin/dex2oat64 rw - f2fs /dev/block/dm-78 rw
+901 205 254:78 /adb/modules/obfuscated_fw/system/etc/f /system/etc/f rw - f2fs /dev/block/dm-78 rw
+902 205 254:78 /adb/modules/plain_mod/system/etc/g /system/etc/g rw - f2fs /dev/block/dm-78 rw";
+        let rows = parse_mountinfo(ROWS);
+        let roots = fs_roots(&rows);
+        let builtins: Vec<String> = BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect();
+        let hookers = hooking_modules(&rows, &roots, &builtins);
+        assert!(hookers.contains("obfuscated_fw"), "must be identified by the path it hooks");
+        assert!(!hookers.contains("plain_mod"), "an ordinary module must not be swept in");
+
+        // Its unrelated mount is spared...
+        let d = classify(
+            Path::new("/data/adb/modules/obfuscated_fw/system/etc/f"),
+            Path::new("/system/etc/f"),
+            &builtins,
+            "test",
+            &hookers,
+        );
+        assert!(matches!(d, Some(Disposition::Declined(Declined::HooksElsewhere(_)))));
+
+        // ...while an ordinary module's identical-shaped mount still absorbs.
+        let d = classify(
+            Path::new("/data/adb/modules/plain_mod/system/etc/g"),
+            Path::new("/system/etc/g"),
+            &builtins,
+            "test",
+            &hookers,
+        );
+        assert!(matches!(d, Some(Disposition::Absorb)));
+    }
+
+    /// The built-ins are a floor the skip file cannot lower.
+    #[test]
+    fn user_skip_entries_add_to_the_builtins() {
+        let (list, _) = skip_list();
+        for b in BUILTIN_SKIPS {
+            assert!(list.iter().any(|e| e == b), "built-in {b} must always be present");
+        }
     }
 
     #[test]
