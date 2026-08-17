@@ -131,14 +131,17 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     let t = target.trim().to_string();
     validate(&t)?;
     let p = Path::new(&t);
+    // Warn, do not refuse. Module whiteouts are applied off overlayfs (see
+    // mount::whiteout_leaves_hole), and a CLI that still refused the same
+    // operation would be the odd one out. `--force` is kept as a no-op so
+    // existing scripts and the message this used to print stay valid; passing it
+    // just silences the note.
     if measurable_hole(p) && !force {
-        anyhow::bail!(
-            "refusing {t}: its directory is not on overlayfs, so hiding the entry leaves a \
-             measurable hole. There st_size == 12*entries + name bytes and st_nlink == 2 + \
-             subdirs, exactly; removing this entry from the listing without changing either \
-             is something no real filesystem does, and any caller can check it with one stat \
-             and one getdents64. Whiteouts under an overlayfs mount carry no such evidence. \
-             Use --force if you want it anyway."
+        eprintln!(
+            "nomount: note - {t} is not on overlayfs, so hiding it leaves a measurable hole: \
+             the parent still reports st_size == 12*(entries incl . and ..) + name bytes and \
+             st_nlink == 2 + subdirs counting this entry, checkable with one stat plus one \
+             getdents64. Applying anyway; `nomount doctor` lists every such path."
         );
     }
     if !p.exists() {

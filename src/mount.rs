@@ -406,33 +406,42 @@ fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: 
     }
 }
 
-/// Will a planned whiteout actually be applied? Same test `whiteout_allowed`
-/// enforces, without the stderr line — so `plan` and `doctor` can say so BEFORE
-/// the mount pass silently drops it.
-pub(crate) fn whiteout_will_apply(target: &Path) -> bool {
-    !crate::whiteout::measurable_hole(target)
-        || crate::whiteout::read().unwrap_or_default().iter().any(|w| Path::new(w) == target)
+/// Does applying this whiteout leave a measurable hole? It is APPLIED either
+/// way now — this only decides whether the trade gets reported.
+///
+/// POLICY (2026-08-17): a module whiteout off overlayfs used to be declined,
+/// because on erofs a directory's own metadata describes its contents exactly
+/// (`st_size == 12*(entries incl . and ..) + name bytes`) and hiding an entry
+/// without moving the size is something no real filesystem does. That protected
+/// against a detector that stats a directory and counts its entries — at the
+/// price of silently neutering every module built on `.replace`. A survey of 197
+/// popular modules found ~14% of them are exactly that: debloaters, DRM
+/// disablers, OTA removers, which ship no files and consist ENTIRELY of hides.
+/// They installed, reported success, and did nothing.
+///
+/// The trade was judged the wrong way round. A real bind mount — what magic
+/// mount uses for the same job — leaves a mountinfo entry plus a foreign
+/// filesystem's size, block count and statfs type on a ROM path: strictly louder
+/// than a directory whose size is stale by one entry. So the hide now happens,
+/// and `doctor` names the paths that carry the hole instead of hiding the fact.
+///
+/// The proper fix is kernel-side (correct the parent's size and nlink in
+/// getattr); until then this is the honest default.
+pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
+    crate::whiteout::measurable_hole(target)
+        && !crate::whiteout::read().unwrap_or_default().iter().any(|w| Path::new(w) == target)
 }
 
 fn whiteout_allowed(target: &Path, module: &str) -> bool {
-    if !crate::whiteout::measurable_hole(target) {
-        return true;
+    if whiteout_leaves_hole(target) {
+        eprintln!(
+            "nomount: applying whiteout {} from {module}: not on overlayfs, so its directory \
+             still reports a size and link count that count the hidden entry. Applied because \
+             declining it would make {module} a no-op; see `nomount doctor`.",
+            target.display()
+        );
     }
-    if crate::whiteout::read()
-        .unwrap_or_default()
-        .iter()
-        .any(|w| Path::new(w) == target)
-    {
-        return true;
-    }
-    eprintln!(
-        "nomount: skipping whiteout {} from {module}: not on overlayfs, so hiding the entry \
-         would leave its directory reporting a size and link count that still count it. \
-         Run `nomount whiteout add {} --force` to apply it anyway.",
-        target.display(),
-        target.display()
-    );
-    false
+    true
 }
 
 pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
@@ -500,8 +509,8 @@ pub fn run_plan() -> Result<()> {
         // as "working" when it did nothing at all.
         let note = if !source_resolves(e) {
             "  << UNSERVABLE: source does not resolve, no rule will be created"
-        } else if e.kind == PlanKind::Whiteout && !whiteout_will_apply(&e.target) {
-            "  << DECLINED: not on overlayfs, this hide will NOT be applied"
+        } else if e.kind == PlanKind::Whiteout && whiteout_leaves_hole(&e.target) {
+            "  << applied, but off overlayfs: the parent's size/nlink still count the hidden entry"
         } else {
             ""
         };
@@ -510,11 +519,11 @@ pub fn run_plan() -> Result<()> {
     let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
     let dead = plan.iter().filter(|e| !source_resolves(e)).count();
     let declined = plan.iter()
-        .filter(|e| e.kind == PlanKind::Whiteout && !whiteout_will_apply(&e.target))
+        .filter(|e| e.kind == PlanKind::Whiteout && whiteout_leaves_hole(&e.target))
         .count();
     let mut extra = String::new();
     if dead > 0 { extra.push_str(&format!(", {dead} unservable")); }
-    if declined > 0 { extra.push_str(&format!(", {declined} declined whiteout(s)")); }
+    if declined > 0 { extra.push_str(&format!(", {declined} whiteout(s) leaving a measurable hole")); }
     println!("({} entries: {} binds, {skipped} blocklisted{extra})", plan.len(), binds);
     Ok(())
 }

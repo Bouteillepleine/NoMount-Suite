@@ -100,17 +100,16 @@ pub fn run_doctor() -> Result<()> {
 
         // A module whiteout off overlayfs is declined by the mount pass; say so
         // here, before a reboot, rather than leaving it to a stderr line.
-        if e.kind == PlanKind::Whiteout && crate::whiteout::measurable_hole(&e.target) {
+        if e.kind == PlanKind::Whiteout && crate::mount::whiteout_leaves_hole(&e.target) {
             f.push(Finding {
-                level: Level::Warn,
-                check: "module whiteout declined",
+                level: Level::Info,
+                check: "whiteout leaves a measurable hole",
                 detail: format!(
-                    "{} wants to hide {} but it is not on overlayfs, where the parent \
-                     directory would still report a size and link count that count the \
-                     hidden entry. It will be skipped; `nomount whiteout add {} --force` \
-                     applies it anyway",
+                    "{} hides {} off overlayfs: the parent still reports st_size == \
+                     12*(entries incl . and ..) + name bytes and st_nlink == 2 + subdirs \
+                     counting the hidden entry, so one stat plus one getdents64 can spot it. \
+                     Applied anyway — declining it would silently neuter the module",
                     e.module,
-                    e.target.display(),
                     e.target.display()
                 ),
             });
@@ -156,38 +155,28 @@ pub fn run_doctor() -> Result<()> {
         }
     }
 
-    // MODULE-LEVEL rollup. The per-entry warnings above say a whiteout was
-    // declined; they do not say what that MEANS for the module. A debloat module
-    // is nothing but whiteouts, so declining them all leaves it installed,
-    // enabled, and doing exactly nothing -- the failure a survey of 197 popular
-    // modules found in ~14% of them (.replace users: debloaters, DRM disablers,
-    // OTA removers). Say it at the level the user thinks in: the module.
-    let mut per_mod: HashMap<&str, (usize, usize, usize)> = HashMap::new(); // (declined_wo, applied_wo, injects)
+    // MODULE-LEVEL rollup, kept but inverted: with the policy flip nothing is
+    // declined, so the question is no longer "does this module work" but "how
+    // much detectable surface does it add". Reported per module because that is
+    // the unit a user installs and can uninstall.
+    let mut per_mod: HashMap<&str, usize> = HashMap::new();
     for e in &plan {
-        let ent = per_mod.entry(e.module.as_str()).or_default();
-        match e.kind {
-            PlanKind::Whiteout => {
-                if crate::mount::whiteout_will_apply(&e.target) { ent.1 += 1 } else { ent.0 += 1 }
-            }
-            PlanKind::Inject | PlanKind::Bind => ent.2 += 1,
+        if e.kind == PlanKind::Whiteout && crate::mount::whiteout_leaves_hole(&e.target) {
+            *per_mod.entry(e.module.as_str()).or_default() += 1;
         }
     }
-    let mut rolled: Vec<(&str, (usize, usize, usize))> =
-        per_mod.into_iter().filter(|(_, v)| v.0 > 0).collect();
+    let mut rolled: Vec<(&str, usize)> = per_mod.into_iter().collect();
     rolled.sort_by_key(|(m, _)| *m);
-    for (module, (declined, applied, injects)) in rolled {
-        let (level, detail) = if injects == 0 && applied == 0 {
-            (Level::Error, format!(
-                "{module} does nothing on this device: all {declined} of its entries are hides, \
-                 and none can be applied off overlayfs. It ships no files, so installing it has \
-                 no effect at all -- typical of a debloat / DRM-disable / OTA-remove module"))
-        } else {
-            (Level::Warn, format!(
-                "{module} is only PARTIALLY applied: {injects} file(s) served, but {declined} \
-                 hide(s) declined. Its own files appear; the stock entries it meant to remove \
-                 stay visible, so a replace behaves as a merge"))
-        };
-        f.push(Finding { level, check: "module effect reduced", detail });
+    for (module, n) in rolled {
+        f.push(Finding {
+            level: Level::Info,
+            check: "module hides off overlayfs",
+            detail: format!(
+                "{module} applies {n} hide(s) on a filesystem whose directories describe their \
+                 own contents. Each one is individually checkable; uninstall the module or move \
+                 its targets under an overlay-backed path if that matters more than the module"
+            ),
+        });
     }
 
     // Two modules writing the same path: last one wins, silently.
