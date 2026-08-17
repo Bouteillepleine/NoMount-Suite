@@ -156,6 +156,40 @@ pub fn run_doctor() -> Result<()> {
         }
     }
 
+    // MODULE-LEVEL rollup. The per-entry warnings above say a whiteout was
+    // declined; they do not say what that MEANS for the module. A debloat module
+    // is nothing but whiteouts, so declining them all leaves it installed,
+    // enabled, and doing exactly nothing -- the failure a survey of 197 popular
+    // modules found in ~14% of them (.replace users: debloaters, DRM disablers,
+    // OTA removers). Say it at the level the user thinks in: the module.
+    let mut per_mod: HashMap<&str, (usize, usize, usize)> = HashMap::new(); // (declined_wo, applied_wo, injects)
+    for e in &plan {
+        let ent = per_mod.entry(e.module.as_str()).or_default();
+        match e.kind {
+            PlanKind::Whiteout => {
+                if crate::mount::whiteout_will_apply(&e.target) { ent.1 += 1 } else { ent.0 += 1 }
+            }
+            PlanKind::Inject | PlanKind::Bind => ent.2 += 1,
+        }
+    }
+    let mut rolled: Vec<(&str, (usize, usize, usize))> =
+        per_mod.into_iter().filter(|(_, v)| v.0 > 0).collect();
+    rolled.sort_by_key(|(m, _)| *m);
+    for (module, (declined, applied, injects)) in rolled {
+        let (level, detail) = if injects == 0 && applied == 0 {
+            (Level::Error, format!(
+                "{module} does nothing on this device: all {declined} of its entries are hides, \
+                 and none can be applied off overlayfs. It ships no files, so installing it has \
+                 no effect at all -- typical of a debloat / DRM-disable / OTA-remove module"))
+        } else {
+            (Level::Warn, format!(
+                "{module} is only PARTIALLY applied: {injects} file(s) served, but {declined} \
+                 hide(s) declined. Its own files appear; the stock entries it meant to remove \
+                 stay visible, so a replace behaves as a merge"))
+        };
+        f.push(Finding { level, check: "module effect reduced", detail });
+    }
+
     // Two modules writing the same path: last one wins, silently.
     let mut collisions: Vec<(&Path, Vec<&str>)> = by_target
         .into_iter()

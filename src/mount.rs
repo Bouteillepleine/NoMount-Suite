@@ -406,6 +406,14 @@ fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: 
     }
 }
 
+/// Will a planned whiteout actually be applied? Same test `whiteout_allowed`
+/// enforces, without the stderr line — so `plan` and `doctor` can say so BEFORE
+/// the mount pass silently drops it.
+pub(crate) fn whiteout_will_apply(target: &Path) -> bool {
+    !crate::whiteout::measurable_hole(target)
+        || crate::whiteout::read().unwrap_or_default().iter().any(|w| Path::new(w) == target)
+}
+
 fn whiteout_allowed(target: &Path, module: &str) -> bool {
     if !crate::whiteout::measurable_hole(target) {
         return true;
@@ -486,13 +494,28 @@ pub fn run_plan() -> Result<()> {
             PlanKind::Whiteout => "whiteout",
             PlanKind::Bind => "bind",
         };
-        let note = if source_resolves(e) { "" } else { "  << UNSERVABLE: source does not resolve, no rule will be created" };
+        // Two different ways a planned entry never becomes a rule. Both were
+        // silent before: the module installs, the manager says enabled, nothing
+        // happens. A debloat module is ENTIRELY these entries, so "planned" read
+        // as "working" when it did nothing at all.
+        let note = if !source_resolves(e) {
+            "  << UNSERVABLE: source does not resolve, no rule will be created"
+        } else if e.kind == PlanKind::Whiteout && !whiteout_will_apply(&e.target) {
+            "  << DECLINED: not on overlayfs, this hide will NOT be applied"
+        } else {
+            ""
+        };
         println!("{k:8} {} <- {} [{}]{note}", e.target.display(), e.source.display(), e.module);
     }
     let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
     let dead = plan.iter().filter(|e| !source_resolves(e)).count();
-    let dead_note = if dead > 0 { format!(", {dead} unservable") } else { String::new() };
-    println!("({} entries: {} binds, {skipped} blocklisted{dead_note})", plan.len(), binds);
+    let declined = plan.iter()
+        .filter(|e| e.kind == PlanKind::Whiteout && !whiteout_will_apply(&e.target))
+        .count();
+    let mut extra = String::new();
+    if dead > 0 { extra.push_str(&format!(", {dead} unservable")); }
+    if declined > 0 { extra.push_str(&format!(", {declined} declined whiteout(s)")); }
+    println!("({} entries: {} binds, {skipped} blocklisted{extra})", plan.len(), binds);
     Ok(())
 }
 
