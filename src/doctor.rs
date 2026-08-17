@@ -68,6 +68,27 @@ fn parse_live(list: &str) -> Vec<(PathBuf, PathBuf)> {
         .collect()
 }
 
+
+/// The root manager's "umount modules" switch, as `ksud` reports it.
+///
+/// Parsed rather than read from `.feature_config`, whose layout is ksud's to
+/// change. `None` = could not ask (not KernelSU, or ksud missing).
+fn manager_umount_enabled() -> Option<bool> {
+    let out = std::process::Command::new("/data/adb/ksu/bin/ksud")
+        .args(["feature", "get", "kernel_umount"])
+        .output()
+        .ok()?;
+    let txt = String::from_utf8_lossy(&out.stdout);
+    parse_feature_value(&txt).map(|v| v != 0)
+}
+
+/// `ksud feature get` prints a block ending in `Value: N`.
+fn parse_feature_value(s: &str) -> Option<u32> {
+    s.lines()
+        .find_map(|l| l.trim().strip_prefix("Value:"))
+        .and_then(|v| v.trim().parse().ok())
+}
+
 pub fn run_doctor() -> Result<()> {
     // partition -> count of non-overlay entries not in zygote's FD allowlist
     let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -199,6 +220,27 @@ pub fn run_doctor() -> Result<()> {
             level: Level::Warn,
             check: "target claimed twice",
             detail: format!("{} <- {}", target.display(), m.join(", ")),
+        });
+    }
+
+    // The root manager's own "umount modules" switch. With the Suite this is
+    // inert -- injection is a VFS redirect, not a mount, so there is nothing for
+    // it to unmount and the kernel's umount list stays empty. Users reach for it
+    // expecting it to hide modules, which it cannot do here, and on this build
+    // enabling it once cost ~8 reboots: su used to arrive as a module overlay,
+    // so anything stripping module content stripped su with it. The Suite keeps
+    // su out entirely now (kernel sucompat), but there is still no upside.
+    if manager_umount_enabled() == Some(true) {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "manager umount is on",
+            detail: "the root manager's `kernel_umount` is ENABLED. It cannot hide anything \
+                     the Suite serves -- injections are VFS redirects, not mounts, so the \
+                     kernel umount list is empty and there is nothing to unmount. To hide from \
+                     a specific app use `nomount uid block <uid>` instead. Turn it off in the \
+                     manager: on this configuration it is at best a no-op, and it has broken \
+                     root here before"
+                .to_string(),
         });
     }
 
@@ -431,6 +473,16 @@ pub fn run_doctor() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verbatim from `ksud feature get kernel_umount` on OP15 / ReSukiSU.
+    #[test]
+    fn parses_ksud_feature_output() {
+        let off = "Feature: kernel_umount (1)\nDescription: Kernel Umount - controls whether \
+                   kernel automatically unmounts modules when not needed\nValue: 0\n";
+        assert_eq!(parse_feature_value(off), Some(0));
+        assert_eq!(parse_feature_value("Feature: x (1)\nValue: 1\n"), Some(1));
+        assert_eq!(parse_feature_value("no value here"), None);
+    }
 
     #[test]
     fn partition_of_extracts_top_level() {
