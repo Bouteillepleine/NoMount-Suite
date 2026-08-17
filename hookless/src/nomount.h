@@ -17,8 +17,14 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "12.1"
-#define NOMOUNT_VERSION    12
+#define NM_MODULE_VERSION "12.2"
+/* Bumped for the directory-size correction: userspace has no other way to tell
+ * whether the running engine keeps a managed erofs directory's i_size in step
+ * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
+ * because an older engine did not, so it must be able to gate that refusal on
+ * >= 13 rather than assume. Nothing compares this for equality -- the nm client
+ * only parses it for liveness -- so raising it is safe. */
+#define NOMOUNT_VERSION    13
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -34,6 +40,12 @@
  * only a synthesized one matched. Set => serve v_dino to readdir, v_ino to
  * stat; clear => they are the same number, which is what a normal fs does. */
 #define NM_FLAG_OVL_INO     (1 << 4)
+/* The vpath resolved at rule-creation time, i.e. this rule SHADOWS a stock entry
+ * rather than adding a new name. Decides whether the parent directory's entry
+ * count changes: a replacement leaves it alone, an addition grows it and a
+ * whiteout shrinks it. Set from the kern_path(vpath) that already runs in
+ * nm_alloc_rule, so it costs nothing extra. */
+#define NM_FLAG_SHADOWS_STOCK (1 << 5)
 /* Bits a client may set; anything else is kernel-derived and must be stripped. */
 #define NM_FLAGS_USER_MASK  (NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR | NM_FLAG_WHITEOUT)
 #define NM_CTX_MAX          96   /* inline SELinux context; Android's are ~30B */
@@ -142,6 +154,13 @@ struct nomount_dir_node {
     struct idr children_idr;
     DECLARE_HASHTABLE(children_ht, NM_CHILD_HT_BITS);
     loff_t real_eof;     /* published base; 0 = no full pass observed yet */
+    /* Bytes to add to the backing directory's i_size so it matches the listing
+     * we actually serve. On erofs a directory's size is exactly
+     * 12*(entries incl . and ..) + total name bytes, so adding a name without
+     * changing the size leaves a directory that lists N entries while reporting
+     * a size that encodes N-1 -- one stat() plus one readdir() apart. Only
+     * additions and whiteouts move it; replacements do not. See nm_dir_size_fix. */
+    s32 size_delta;
     loff_t max_real_pos; /* running max real dirent offset (not authoritative) */
     u64 bloom_mask;
     atomic_t refcount;   /* owner ref (alloc) + one per synthetic inode caching this node */

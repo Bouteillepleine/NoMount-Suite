@@ -915,6 +915,46 @@ static int nm_path_stat(const struct path *p, struct kstat *st)
 #endif
 }
 
+
+/* erofs packs a directory as 12 bytes per dirent plus the name, unpadded, and
+ * counts "." and "..". So its i_size encodes the entry set exactly, and serving
+ * a listing that differs from the backing one without moving the size leaves a
+ * directory whose stat() and readdir() disagree -- measured at -28 bytes for a
+ * single added name. Apply the bookkeeping the dir_node has been keeping.
+ *
+ * Deliberately narrow. Only erofs has this closed form: f2fs reports block
+ * multiples (3452, 20480) unrelated to the entries, and overlayfs reports a size
+ * unrelated to either -- "correcting" those would manufacture the divergence
+ * this removes. And only single-block directories, because past 4096 bytes erofs
+ * pads each block by an amount that depends on where the names fall; measured
+ * exact on every single-block dir and off by 18..208 bytes on multi-block ones,
+ * so beyond one block a computed size would be confidently wrong, which is a
+ * sharper oracle than a stale one.
+ *
+ * nm_vdir_size() solves the same problem for a dir NoMount synthesizes whole,
+ * where every entry is known and the block packing can be replayed exactly. Here
+ * the stock entries are NOT known -- this is a real erofs dir we are adding to
+ * or hiding from -- so only the delta is computable, and only within one block. */
+static void nm_dir_size_fix(struct nm_inode_info *info, struct kstat *stat)
+{
+    s32 delta;
+    loff_t fixed;
+
+    if (!info->dir_node || !info->r_path.dentry)
+        return;
+    delta = READ_ONCE(info->dir_node->size_delta);
+    if (!delta)
+        return;
+    if (d_backing_inode(info->r_path.dentry)->i_sb->s_magic != EROFS_SUPER_MAGIC_V1)
+        return;
+    if (stat->size <= 0 || stat->size >= 4096)
+        return;
+    fixed = stat->size + delta;
+    if (fixed <= 0 || fixed >= 4096)
+        return;
+    stat->size = fixed;
+}
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
 /* Pre-4.11 inode_operations->getattr signature: (vfsmount, dentry, kstat).
  * vfs_getattr_nosec()/generic_fillattr() are the 2-arg forms here. */
@@ -980,6 +1020,8 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
          * stock sibling produces. Narrow to the stock mask -- never widen. */
         if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #endif
+        if (S_ISDIR(stat->mode))
+            nm_dir_size_fix(info, stat);
     }
     return res;
 }
@@ -1050,6 +1092,8 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
          * stock sibling produces. Narrow to the stock mask -- never widen. */
         if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #endif
+        if (S_ISDIR(stat->mode))
+            nm_dir_size_fix(info, stat);
     }
     return res;
 }
@@ -1735,6 +1779,21 @@ static void nm_restamp_child_ino(struct nomount_dir_node *dir_node, struct nomou
     }
 }
 
+/* How this child moves the parent's on-disk directory size. One erofs dirent is
+ * an NM_EROFS_DIRENT_SZ header plus the name, unpadded. A whiteout removes a stock entry, an
+ * addition introduces one, and a replacement reuses the name that is already
+ * counted. */
+static s32 nm_child_size_contrib(const struct nomount_child_node *child)
+{
+    s32 bytes = (s32)(NM_EROFS_DIRENT_SZ + child->name_len);
+
+    if (child->flags & NM_FLAG_WHITEOUT)
+        return -bytes;
+    if (child->flags & NM_FLAG_SHADOWS_STOCK)
+        return 0;
+    return bytes;
+}
+
 static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule, const char *name, size_t name_len)
 {
     struct nomount_child_node *child;
@@ -1780,6 +1839,7 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
      * an empty table walk.) */
     dir_node->bloom_mask |= (1ULL << (name_hash & 63));
     hash_add_rcu(dir_node->children_ht, &child->hnode, name_hash);
+    dir_node->size_delta += nm_child_size_contrib(child);
 }
 
 static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule)
@@ -1790,6 +1850,7 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
     if (unlikely(!dir_node)) return;
     idr_for_each_entry(&dir_node->children_idr, child, id) {
         if (child->rule == rule) {
+            dir_node->size_delta -= nm_child_size_contrib(child);
             hash_del_rcu(&child->hnode);
             idr_remove(&dir_node->children_idr, id);
             kfree_rcu(child, rcu);
@@ -2431,6 +2492,9 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
 
     if (kern_path(nm_get_vpath(rule), LOOKUP_FOLLOW, &v_path_struct) == 0) {
         struct kstat kst;
+        /* The name is already there, so serving it does not change the parent's
+         * entry count -- see NM_FLAG_SHADOWS_STOCK. */
+        rule->flags |= NM_FLAG_SHADOWS_STOCK;
         /* Mirror both the dev AND ino a *stock* file at this path reports (what
          * a detector's stat()/maps sees) rather than the raw backing values.
          * On overlay-mounted partitions the raw i_sb->s_dev is the overlay-top
