@@ -118,12 +118,29 @@ pub fn run_doctor() -> Result<()> {
 
         if e.kind == PlanKind::Inject {
             // Backing gone (module updated/removed underneath us) -> rule serves nothing.
+            // `exists()` follows symlinks, so a DANGLING symlink lands here too — and
+            // reporting that as "source missing" sends the reader to a path that is
+            // plainly there in `ls`. Injection resolves a symlink to its target, so a
+            // link with no target yields no rule at all: `plan` lists the entry and
+            // `reload` counts it, then the path simply never appears. Name which of
+            // the two it is, because the fixes differ.
             if !e.source.exists() {
-                f.push(Finding {
-                    level: Level::Error,
-                    check: "missing backing",
-                    detail: format!("{} -> {} (source missing)", e.target.display(), e.source.display()),
-                });
+                let detail = match fs::symlink_metadata(&e.source) {
+                    Ok(m) if m.file_type().is_symlink() => {
+                        let dest = fs::read_link(&e.source).unwrap_or_default();
+                        format!(
+                            "{} -> {} is a symlink to {}, which does not exist. Injection \
+                             serves a link's TARGET, so this produces no rule and the path \
+                             never appears — an installer that symlinks before its target \
+                             lands hits this",
+                            e.target.display(),
+                            e.source.display(),
+                            dest.display()
+                        )
+                    }
+                    _ => format!("{} -> {} (source missing)", e.target.display(), e.source.display()),
+                };
+                f.push(Finding { level: Level::Error, check: "missing backing", detail });
             }
         }
 
