@@ -24,6 +24,30 @@ fn is_char_dev(ft: &fs::FileType) -> bool { ft.is_char_device() }
 #[cfg(not(unix))]
 fn is_char_dev(_ft: &fs::FileType) -> bool { false }
 
+/// Does this directory carry overlayfs's `trusted.overlay.opaque=y`?
+///
+/// The third whiteout dialect a module can speak, alongside `.replace` and the
+/// 0:0 char device. `trusted.*` is root-only, which is why it needs a raw
+/// getxattr rather than anything in std.
+#[cfg(unix)]
+fn is_opaque_dir(p: &Path) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let (Ok(path), Ok(name)) = (
+        CString::new(p.as_os_str().as_bytes()),
+        CString::new("trusted.overlay.opaque"),
+    ) else {
+        return false;
+    };
+    let mut buf = [0u8; 4];
+    let n = unsafe {
+        libc::getxattr(path.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len())
+    };
+    n > 0 && buf[0] == b'y'
+}
+#[cfg(not(unix))]
+fn is_opaque_dir(_p: &Path) -> bool { false }
+
 use anyhow::{Context, Result};
 
 use crate::nm::Nm;
@@ -265,6 +289,23 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
         let name = name.to_string_lossy();
 
         if ft.is_dir() {
+            // A directory carrying `trusted.overlay.opaque=y` means the same thing
+            // as a `.replace` file inside it: serve MY contents, hide the stock
+            // directory underneath. It is not an exotic case — it is the branch
+            // PlayIntegrityFork (and anything sharing its installer) takes on
+            // KernelSU and APatch, where `.replace` and the 0:0 char device are
+            // only used for Magisk. We read the other two markers and were blind
+            // to this one, so the module installed cleanly and hid nothing: an
+            // empty opaque dir has no files, so plan_tree recursed into it and
+            // emitted nothing at all.
+            if is_opaque_dir(&source) && !is_partition_root(&target) && !is_my_partition(&target) {
+                out.push(PlanEntry {
+                    module: module.to_string(),
+                    target: target.clone(),
+                    source: source.clone(),
+                    kind: PlanKind::Whiteout,
+                });
+            }
             plan_tree(module, module_root, &source, out);
         } else if name == ".replace" {
             // Whiteout the parent dir (module wants to replace, not merge, it).
