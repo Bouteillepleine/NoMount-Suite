@@ -2463,7 +2463,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                      * /product/overlay), while d_real_inode() answers with the
                      * erofs lower (fe:19). Fixing only the other assignment left
                      * every PURE injection -- which is what reaches this sibling
-                     * scan -- still announcing the lower dev in /proc/*/maps. */
+                     * scan -- still announcing the lower dev in /proc/<pid>/maps. */
                     fmapdev = d_backing_inode(fp.dentry)->i_sb->s_dev;
                 }
                 path_put(&fp);
