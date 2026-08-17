@@ -12,6 +12,7 @@
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
 #include <linux/magic.h>
+#include <linux/hash.h>
 #include "nomount.h"
 
 /* Android packs (user_id, appid) into a uid: uid = user_id*NM_PER_USER_RANGE + appid.
@@ -2685,17 +2686,44 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
              * a global counter, STABLE across boots. A counter depends on module
              * scan order, so every injected file's ino would shift on reboot
              * while stock inodes never move -- a divergence in its own right and
-             * breaks anything keying a cache on (dev,ino). A path hash is stable
-             * but collides. Magnitude is not the tell it looks like: a clean
-             * /system on this device spans ino 334..24.5M, so the band here sits
-             * well inside what real filesystems produce. */
+             * breaks anything keying a cache on (dev,ino). A path hash alone is
+             * stable but collides. Magnitude is not the tell it looks like: a
+             * clean /system on this device spans ino 334..24.5M, so the band here
+             * sits well inside what real filesystems produce.
+             *
+             * ...but magnitude was never the whole tell. Adding the backing ino
+             * LINEARLY also inherited its ORDER: a module's files are written to
+             * /data together, so their inodes are consecutive, and the derived
+             * ones came out consecutive too. Measured on /product/overlay: 139
+             * injected files occupied 139 consecutive values (span 138 -- every
+             * integer used), while the 78 stock entries in the same directory
+             * formed 25 ragged clusters spread over 3..83M, because an overlay
+             * dir merges several erofs layers. One readdir plus one stat finds a
+             * perfectly dense run whose length is exactly the module's file
+             * count, and it needs no baseline at all.
+             *
+             * So mix instead of add. hash_64 destroys the input's ordering while
+             * staying a pure function of it, which keeps every property the
+             * paragraph above depends on: same file -> same ino across boots, no
+             * dependence on scan order. The vpath hash is folded in so two module
+             * files that happen to share a backing inode (a hardlinked payload)
+             * still separate.
+             *
+             * Collisions: 20 bits = ~1M slots per band, and a band is per stock
+             * sibling, so the population that can collide is one directory's
+             * injections. At 139 files that is ~1% for a single pair -- against a
+             * clustering tell that was 100% reliable. */
             /* r_path is unset for a whiteout, and for a backing path that did not
              * resolve (e.g. a dangling module symlink) -- both reach here when the
              * vpath does not exist either, so this MUST NOT deref it blindly. */
-            rule->v_ino   = (unsigned long)((sib.ino & ~0xFFFFFULL) + 0x100000ULL +
-                                            (rule->r_path.dentry
-                                             ? (u64)d_backing_inode(rule->r_path.dentry)->i_ino
-                                             : ((u64)rule->v_hash & 0xFFFFF)));
+            {
+                u64 uniq = rule->r_path.dentry
+                         ? (u64)d_backing_inode(rule->r_path.dentry)->i_ino
+                         : (u64)rule->v_hash;
+                u64 spread = hash_64(uniq ^ ((u64)rule->v_hash << 32), 20);
+
+                rule->v_ino = (unsigned long)((sib.ino & ~0xFFFFFULL) + 0x100000ULL + spread);
+            }
         } else {
             /* last resort: previous parent-dir dev fallback */
             char *vp = nm_get_vpath(rule);
