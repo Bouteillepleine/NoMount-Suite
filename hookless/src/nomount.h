@@ -387,6 +387,19 @@ enum {
     NM_KNOB_UNAME_VERSION,
     NM_KNOB_CMDLINE,
     NM_KNOB_BOOTCONFIG,
+    /* "1" => this device's ROM directories are dirent-packed (erofs-shaped), so
+     * a synthesized directory must report 12*(entries incl . and ..) + name
+     * bytes rather than the 4096 placeholder.
+     *
+     * Why a knob rather than reading the superblock: a virtual dir inherits its
+     * PARENT's sb, and on an overlay-mounted ROM path that is overlayfs, whose
+     * magic says nothing about the layer whose shape the stock siblings show.
+     * d_real() cannot answer either -- it resolves regular files, and a merged
+     * directory has no single real dentry, which is why two attempts to infer
+     * this in-kernel both produced no-ops. Userspace CAN answer it: enumerate a
+     * real sibling and check whether its size equals the formula. Measure where
+     * it is cheap, decide where it is needed. Unset => previous behaviour. */
+    NM_KNOB_VDIR_EROFS_SIZE,
     __NM_KNOB_MAX,
 };
 

@@ -87,6 +87,10 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
  * before their definitions (identity is now by function pointer, not magic sig) */
 static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags);
 static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *ctx);
+/* Userspace-measured: this device's ROM directories are dirent-packed, so a
+ * synthesized dir must report the erofs-shaped size instead of 4096. See
+ * NM_KNOB_VDIR_EROFS_SIZE for why this cannot be inferred in-kernel. */
+static bool nm_vdir_erofs_size __read_mostly;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
 static int nomount_hijacked_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat);
 #else
@@ -1090,7 +1094,10 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
         stat->nlink = nm_vdir_nlink(info->dir_node);
         /* i_size stays at its 4096 placeholder otherwise; on erofs that is a
          * value no stock directory reports. Recount like nlink. */
-        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1)
+        /* The sb here is the PARENT's -- overlayfs on an overlay-backed ROM path,
+         * which is why this guard alone left those dirs at 4096. The knob is
+         * userspace's measured answer for this device. */
+        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size))
             stat->size = nm_vdir_size(info->dir_node,
                                       v_inode->i_sb->s_blocksize);
         return 0;
@@ -1162,7 +1169,10 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
         stat->nlink = nm_vdir_nlink(info->dir_node);
         /* i_size stays at its 4096 placeholder otherwise; on erofs that is a
          * value no stock directory reports. Recount like nlink. */
-        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1)
+        /* The sb here is the PARENT's -- overlayfs on an overlay-backed ROM path,
+         * which is why this guard alone left those dirs at 4096. The knob is
+         * userspace's measured answer for this device. */
+        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size))
             stat->size = nm_vdir_size(info->dir_node,
                                       v_inode->i_sb->s_blocksize);
         return 0;
@@ -3391,6 +3401,9 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
     case NM_KNOB_BOOTCONFIG:
         return nm_set_bootconfig(val, vlen);
 #endif
+    case NM_KNOB_VDIR_EROFS_SIZE:
+        WRITE_ONCE(nm_vdir_erofs_size, vlen > 0 && val[0] == '1');
+        return 0;
     default:
         return -EINVAL;
     }
