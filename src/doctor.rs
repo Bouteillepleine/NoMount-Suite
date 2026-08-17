@@ -336,6 +336,23 @@ pub fn run_doctor() -> Result<()> {
         f.push(Finding { level, check, detail });
     }
 
+    // Mounts absorb can neither see nor remove, because they live in a namespace
+    // it is not in. Reported separately from the survey above: the verdict there
+    // is about our own mountinfo, and an app's view can be strictly worse.
+    for e in crate::absorb::survey_elsewhere() {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "foreign mount in another namespace",
+            detail: format!(
+                "{} <- {} is mounted in {} but not here, so `nomount absorb` can neither \
+                 see nor unmount it — it was replicated with nsenter and is visible to apps",
+                e.mount.target.display(),
+                e.mount.source.display(),
+                e.seen_in
+            ),
+        });
+    }
+
     for (part, n) in &fd_note {
         f.push(Finding {
             level: Level::Info,

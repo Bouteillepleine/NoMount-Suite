@@ -322,6 +322,77 @@ pub(crate) fn is_absorbable(src: &Path, target: &Path) -> bool {
         && target.components().count() > 1
 }
 
+/// A foreign mount that exists in another mount namespace but not in ours.
+pub struct Elsewhere {
+    /// Which process's namespace it was seen in, for the report.
+    pub seen_in: String,
+    pub mount: Surveyed,
+}
+
+/// `mnt:[4026531841]`-style id, so two pids sharing a namespace are only read once.
+fn mnt_ns_of(pid: &str) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/ns/mnt")).ok().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The pids whose namespace an app actually inherits or is judged against: init,
+/// and zygote (both bitnesses). Anything a module `nsenter`s into to make its
+/// bind stick for apps has to be one of these.
+fn namespace_probes() -> Vec<(String, String)> {
+    let mut out = vec![("init".to_string(), "1".to_string())];
+    let Ok(rd) = fs::read_dir("/proc") else { return out };
+    for e in rd.filter_map(Result::ok) {
+        let pid = e.file_name().to_string_lossy().into_owned();
+        if !pid.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        // Match on CMDLINE, not comm. The ART runtime renames the zygote thread,
+        // so `/proc/<pid>/comm` reads `main` — keying on comm matched nothing and
+        // the whole cross-namespace check silently did nothing. cmdline still
+        // says `zygote64`/`zygote`, and it is NUL-padded, hence the trim.
+        let Ok(raw) = fs::read_to_string(format!("/proc/{pid}/cmdline")) else { continue };
+        let name = raw.split('\0').next().unwrap_or("").trim();
+        if name == "zygote64" || name == "zygote" {
+            out.push((name.to_string(), pid));
+        }
+    }
+    out
+}
+
+/// Foreign mounts visible in another namespace but not in ours.
+///
+/// absorb reads `/proc/self/mountinfo` and `umount2`s in its own namespace. A
+/// module that replicates its bind with `nsenter --mount=/proc/<pid>/ns/mnt`
+/// — custom-certificate-authorities does exactly this, into init AND zygote —
+/// is therefore invisible to the survey and out of reach of the unmount, so a
+/// "posture clean" verdict was only ever a claim about OUR namespace while the
+/// mount was still plainly there for apps. We cannot remove these from here
+/// (that needs setns, which is a different and much sharper tool), but staying
+/// silent about them is the failure this whole reporting model exists to avoid.
+pub fn survey_elsewhere() -> Vec<Elsewhere> {
+    let Some(mine) = mnt_ns_of("self") else { return Vec::new() };
+    let ours: HashSet<(PathBuf, PathBuf)> = survey()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.target, s.source))
+        .collect();
+
+    let mut seen_ns: HashSet<String> = HashSet::from([mine]);
+    let mut out = Vec::new();
+    for (name, pid) in namespace_probes() {
+        // Same namespace as us (the common case) has nothing new to say.
+        let Some(ns) = mnt_ns_of(&pid) else { continue };
+        if !seen_ns.insert(ns) {
+            continue;
+        }
+        for m in survey_of(&format!("/proc/{pid}/mountinfo")).unwrap_or_default() {
+            if !ours.contains(&(m.target.clone(), m.source.clone())) {
+                out.push(Elsewhere { seen_in: format!("{name} (pid {pid})"), mount: m });
+            }
+        }
+    }
+    out
+}
+
 /// The verdict for one foreign mount. Split out of `survey` so it can be tested
 /// without a /proc to read.
 /// `None` means the mount is none of our business — not a report, not an action.
@@ -365,7 +436,13 @@ pub(crate) fn classify(
 /// never appear here — their source is the partition itself, so `source_of`
 /// returns None for them or a path outside /data.
 pub fn survey() -> Result<Vec<Surveyed>> {
-    let body = std::fs::read_to_string(MOUNTINFO).context("read mountinfo")?;
+    survey_of(MOUNTINFO)
+}
+
+/// The same survey against any process's mountinfo, so another mount namespace
+/// can be inspected the same way our own is.
+pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
+    let body = std::fs::read_to_string(mountinfo).context("read mountinfo")?;
     let rows = parse_mountinfo(&body);
     let roots = fs_roots(&rows);
     let (skips, skip_src) = skip_list();
@@ -487,6 +564,19 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
                 );
             }
         }
+    }
+
+    // Same reasoning as the leak bucket: something we cannot act on still has to
+    // be said, or the summary line below overstates what absorb achieved.
+    for e in survey_elsewhere() {
+        leaking += 1;
+        eprintln!(
+            "nomount: LEAK {} <- {} is mounted in {} but not in our namespace: absorb \
+             cannot see or unmount it (replicated with nsenter)",
+            e.mount.target.display(),
+            e.mount.source.display(),
+            e.seen_in
+        );
     }
 
     let cands: Vec<Candidate> = surveyed
