@@ -306,6 +306,21 @@ pub fn run_doctor() -> Result<()> {
                     s.source.display()
                 ),
             ),
+            // A DIRECTORY bind is absorbable in principle but a plain run always
+            // skips it, so telling the reader to "run nomount absorb" would send
+            // them to a command that declines it again and explains nothing.
+            crate::absorb::Disposition::Absorb if s.source.is_dir() => (
+                Level::Warn,
+                "module mount not absorbed",
+                format!(
+                    "{} <- {} is a directory bind, still a real mount and visible to any \
+                     app. A plain `nomount absorb` skips it, because injecting a directory \
+                     snapshots its listing and would miss files the module adds later — \
+                     `nomount absorb --include-dirs` takes it anyway",
+                    s.target.display(),
+                    s.source.display()
+                ),
+            ),
             crate::absorb::Disposition::Absorb => (
                 Level::Warn,
                 "module mount not absorbed",
