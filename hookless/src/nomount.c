@@ -2457,7 +2457,14 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                 if (r == 0) {
                     if (nm_read_secctx(d_backing_inode(fp.dentry), fctx, &fctxlen) != 0)
                         fctxlen = 0;
-                    fmapdev = d_real_inode(fp.dentry)->i_sb->s_dev;
+                    /* Through the mount, not past it -- same reasoning as the
+                     * shadowing path below: a stock file on an overlay-backed
+                     * dir MAPS with the overlay's own dev (00:1b measured on
+                     * /product/overlay), while d_real_inode() answers with the
+                     * erofs lower (fe:19). Fixing only the other assignment left
+                     * every PURE injection -- which is what reaches this sibling
+                     * scan -- still announcing the lower dev in /proc/*/maps. */
+                    fmapdev = d_backing_inode(fp.dentry)->i_sb->s_dev;
                 }
                 path_put(&fp);
                 if (r == 0 && (pass == 1 ||
