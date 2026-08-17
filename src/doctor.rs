@@ -239,7 +239,9 @@ pub fn run_doctor() -> Result<()> {
                      kernel umount list is empty and there is nothing to unmount. To hide from \
                      a specific app use `nomount uid block <uid>` instead. Turn it off in the \
                      manager: on this configuration it is at best a no-op, and it has broken \
-                     root here before"
+                     root here before. While you are there, the SEPARATE \"umount modules by \
+                     default\" switch should also be off for the same reason -- that one is \
+                     kernel profile state with no ksud read path, so this check cannot see it"
                 .to_string(),
         });
     }
