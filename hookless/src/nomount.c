@@ -2600,6 +2600,15 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         /* The name is already there, so serving it does not change the parent's
          * entry count -- see NM_FLAG_SHADOWS_STOCK. */
         rule->flags |= NM_FLAG_SHADOWS_STOCK;
+        /* Classify a WHITEOUT from the path it hides. IS_DIR is normally taken
+         * from the backing path above, but a whiteout has none -- so a hidden
+         * directory was typed DT_REG and nm_dir_nlink_delta skipped it: the
+         * parent's size shrank correctly while its link count kept counting the
+         * subdirectory. Measured 9 links against 2+8 subdirs. The vpath is
+         * already resolved here, so this costs nothing. */
+        if ((rule->flags & NM_FLAG_WHITEOUT) &&
+            S_ISDIR(d_backing_inode(v_path_struct.dentry)->i_mode))
+            rule->flags |= NM_FLAG_IS_DIR;
         /* Mirror both the dev AND ino a *stock* file at this path reports (what
          * a detector's stat()/maps sees) rather than the raw backing values.
          * On overlay-mounted partitions the raw i_sb->s_dev is the overlay-top
