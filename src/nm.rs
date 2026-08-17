@@ -112,6 +112,14 @@ impl Nm {
 
     /// `nm clear` — drop all rules. (No enable/refresh: hookless activates a
     /// rule the moment it's added, via per-inode ops hijack.)
+    /// Tell the engine whether this device's ROM directories are dirent-packed,
+    /// so a synthesized directory reports the erofs-shaped size instead of the
+    /// 4096 placeholder. The engine cannot determine this itself on an
+    /// overlay-backed path -- see `crate::dirshape`.
+    pub fn set_dir_shape(&self, packed: bool) -> Result<()> {
+        self.run(&["k", "d", if packed { "1" } else { "0" }]).map(|_| ())
+    }
+
     pub fn clear(&self) -> Result<()> {
         self.run(&["clear"]).map(drop)
     }

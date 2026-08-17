@@ -698,6 +698,16 @@ pub fn run_mount() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding -- is the CONFIG_NOMOUNT kernel loaded?")?;
 
+    // Measure the ROM's directory shape and tell the engine, BEFORE any rule
+    // exists: a synthesized dir inherits its parent's superblock, which on an
+    // overlay-backed path is overlayfs and says nothing about the layer whose
+    // shape its stock siblings show. Userspace can just read a directory and
+    // check, so it does; a failure to prove it leaves the engine as it was.
+    let packed = crate::dirshape::rom_dirs_are_dirent_packed();
+    if let Err(e) = nm.set_dir_shape(packed) {
+        eprintln!("nomount: could not set the directory-shape knob: {e:#}");
+    }
+
     // Start clean so uninstalled/updated modules don't leave stale rules, and tear
     // down any my_* binds from the previous pass so removed modules don't leak one.
     let _ = nm.clear();

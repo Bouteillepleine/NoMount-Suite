@@ -115,6 +115,10 @@ void c_main(long *sp) {
         case 'v': knob = 1; break;
         case 'c': knob = 2; break;
         case 'b': knob = 3; break;
+        /* d <0|1> -- this device's ROM dirs are dirent-packed (erofs-shaped), so
+         * a synthesized dir must report the formula rather than 4096. Measured
+         * by the Suite; see NM_KNOB_VDIR_EROFS_SIZE. */
+        case 'd': knob = 4; break;
         default: exit_code = 3; goto do_exit;
         }
         val = (p_count > 1) ? p_args[1] : "";

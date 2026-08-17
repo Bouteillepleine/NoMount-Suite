@@ -2,6 +2,7 @@ mod absorb;
 mod bind;
 mod blocklist;
 mod cli;
+mod dirshape;
 mod doctor;
 mod health;
 mod mount;
