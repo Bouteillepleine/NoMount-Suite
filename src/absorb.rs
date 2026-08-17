@@ -278,26 +278,35 @@ pub(crate) fn is_absorbable(src: &Path, target: &Path) -> bool {
 
 /// The verdict for one foreign mount. Split out of `survey` so it can be tested
 /// without a /proc to read.
+/// `None` means the mount is none of our business — not a report, not an action.
 pub(crate) fn classify(
     src: &Path,
     target: &Path,
     skips: &[String],
     skip_src: &'static str,
-) -> Disposition {
+) -> Option<Disposition> {
+    // The target question belongs to mount.rs, not here — see `serve_mode`.
+    let mode = crate::mount::serve_mode(target);
     if !is_absorbable(src, target) {
-        return Disposition::Leaking(
-            "source is outside /data/adb, so there is no module content to re-serve",
+        // Backed by /data but not by a module. Only interesting if it landed
+        // somewhere we would otherwise serve: Android's own storage plumbing
+        // binds /data/user -> /data_mirror/... and /data/media ->
+        // /mnt/pass_through/..., which is stock, not a module leak, and reporting
+        // those as leaks is worse than useless — nine of them drown the real one.
+        return matches!(mode, crate::mount::Serve::Inject | crate::mount::Serve::Bind).then_some(
+            Disposition::Leaking(
+                "source is outside /data/adb, so there is no module content to re-serve",
+            ),
         );
     }
     if let Some(d) = declined_reason_with(src, target, skips, skip_src) {
-        return Disposition::Declined(d);
+        return Some(Disposition::Declined(d));
     }
-    // The target question belongs to mount.rs, not here — see `serve_mode`.
-    match crate::mount::serve_mode(target) {
+    Some(match mode {
         crate::mount::Serve::Inject => Disposition::Absorb,
         crate::mount::Serve::Bind => Disposition::Declined(Declined::MustBind),
         crate::mount::Serve::Refuse(why) => Disposition::Leaking(why),
-    }
+    })
 }
 
 /// Every mount whose source is on /data and whose target is not — content some
@@ -326,7 +335,7 @@ pub fn survey() -> Result<Vec<Surveyed>> {
             if r.target.components().count() <= 1 {
                 return None;
             }
-            let disposition = classify(&src, &r.target, &skips, skip_src);
+            let disposition = classify(&src, &r.target, &skips, skip_src)?;
             Some(Surveyed { target: r.target.clone(), source: src, disposition })
         })
         .collect();
@@ -399,8 +408,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     // never implied to be absent. "Nothing to absorb" and "nothing is mounted"
     // are different claims and only the second one is the posture.
     let surveyed = survey()?;
-    let mut leaking = 0u32;
+    let (mut leaking, mut declined) = (0u32, 0u32);
     for s in &surveyed {
+        if matches!(s.disposition, Disposition::Declined(_)) {
+            declined += 1;
+        }
         match &s.disposition {
             Disposition::Absorb => {}
             Disposition::Declined(Declined::Framework(id)) => println!(
@@ -431,11 +443,17 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         .map(|s| Candidate { target: s.target, source: s.source })
         .collect();
     if cands.is_empty() {
-        match leaking {
-            0 => println!("nomount absorb: nothing mounted over the ROM (posture clean)"),
-            n => println!(
-                "nomount absorb: nothing to absorb, but {n} foreign mount(s) remain — \
-                 the posture is NOT clean"
+        // "Nothing to absorb" is not "nothing is mounted". A declined mount is
+        // still a mount and still visible to an app, so only claim a clean
+        // posture when mountinfo genuinely holds no foreign mount at all.
+        match (leaking, declined) {
+            (0, 0) => println!("nomount absorb: nothing mounted over the ROM (posture clean)"),
+            (0, d) => println!(
+                "nomount absorb: nothing to absorb; {d} mount(s) left by design and still visible"
+            ),
+            (n, d) => println!(
+                "nomount absorb: nothing to absorb, but {n} foreign mount(s) remain \
+                 ({d} left by design) — the posture is NOT clean"
             ),
         }
         return Ok(());
@@ -636,22 +654,22 @@ mod tests {
 
         // my_* -> mount.rs serves these with a real bind, so absorb must decline.
         assert!(matches!(
-            classify(&modsrc, Path::new("/my_product/app/Foo/Foo.apk"), &none, "test"),
+            classify(&modsrc, Path::new("/my_product/app/Foo/Foo.apk"), &none, "test").unwrap(),
             Disposition::Declined(Declined::MustBind)
         ));
         // apex is in NON_PARTITION_ROOTS: not ours to serve at all.
         assert!(matches!(
-            classify(&modsrc, Path::new("/apex/com.android.conscrypt/cacerts"), &none, "test"),
+            classify(&modsrc, Path::new("/apex/com.android.conscrypt/cacerts"), &none, "test").unwrap(),
             Disposition::Leaking(_)
         ));
         // A bare partition root would mask the whole partition.
         assert!(matches!(
-            classify(&modsrc, Path::new("/product"), &none, "test"),
+            classify(&modsrc, Path::new("/product"), &none, "test").unwrap(),
             Disposition::Leaking(_)
         ));
         // …and an ordinary ROM path still absorbs.
         assert!(matches!(
-            classify(&modsrc, Path::new("/system/app/Foo/Foo.apk"), &none, "test"),
+            classify(&modsrc, Path::new("/system/app/Foo/Foo.apk"), &none, "test").unwrap(),
             Disposition::Absorb
         ));
     }
@@ -667,7 +685,21 @@ mod tests {
             &[],
             "test",
         );
-        assert!(matches!(d, Disposition::Leaking(_)), "must be reported as a leak");
+        assert!(matches!(d, Some(Disposition::Leaking(_))), "must be reported as a leak");
+
+        // But Android's OWN storage plumbing is not a module leak: it binds
+        // /data/user -> /data_mirror/... and /data/media -> /mnt/pass_through/...
+        // Nine of these on a stock OP15 buried the one that mattered.
+        for (s, t) in [
+            ("/data/user", "/data_mirror/data_ce/null"),
+            ("/data/media", "/mnt/pass_through/0/emulated"),
+            ("/data/misc/profiles/cur", "/data_mirror/cur_profiles"),
+        ] {
+            assert!(
+                classify(Path::new(s), Path::new(t), &[], "test").is_none(),
+                "stock plumbing {t} must not be reported"
+            );
+        }
     }
 
     #[test]
@@ -677,7 +709,7 @@ mod tests {
         let src = PathBuf::from("/data/adb/modules/anything/bin/dex2oat");
         let builtins: Vec<String> = BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect();
         assert!(matches!(
-            classify(&src, Path::new("/system/bin/app_process64"), &builtins, "built-in"),
+            classify(&src, Path::new("/system/bin/app_process64"), &builtins, "built-in").unwrap(),
             Disposition::Declined(Declined::Listed(_))
         ));
     }
