@@ -142,10 +142,13 @@ fi
 if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     _rules=$("$NM_BIN" list 2>/dev/null | wc -l)
     _rro=$("$NM_BIN" list 2>/dev/null | grep -c '/overlay/[^ ]*\.apk')
-    # No `|| echo 0`: grep -c already prints 0, and exits 1 when it does, so the
-    # fallback appended a SECOND line -- "0\n0" -- which made every `[ "$_mnt" -gt 0 ]`
-    # below fail with "bad number" on stderr on every single boot.
-    _mnt=$(grep -c '/data/adb/modules' /proc/self/mountinfo 2>/dev/null); _mnt=${_mnt:-0}
+    # Match on mountinfo FIELD 4, the mount's root within its own filesystem. A bind
+    # out of a module reads "/adb/modules/<id>/..." there, because /data is its own
+    # filesystem -- so the old `grep -c '/data/adb/modules'` matched nothing on any
+    # device and the card reported "0 mounts" however many there really were.
+    # (It also used `|| echo 0` after a grep that already prints 0 and exits 1 when
+    # it does, appending a second line and making every later -gt test a bad number.)
+    _mnt=$(awk '$4 ~ "/adb/modules/" {n++} END{print n+0}' /proc/self/mountinfo 2>/dev/null); _mnt=${_mnt:-0}
     _doc=$(timeout 30 "$BIN" doctor 2>/dev/null | sed -n 's/^summary: \([0-9]*\) errors, \([0-9]*\) warnings.*$/\1 \2/p')
     _err=$(echo "$_doc" | awk '{print $1+0}')
     _wrn=$(echo "$_doc" | awk '{print $2+0}')

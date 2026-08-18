@@ -1027,6 +1027,12 @@
       'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
       'echo "root_ov=$(grep -c \'^nomount_ov \' /proc/self/mounts 2>/dev/null)"; ' +
       'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
+      // Mounts some OTHER module laid over the ROM. The card counted only
+      // nomount_* devices, which the mountless engine never creates, so the
+      // verdict was always "zero mounts" no matter how many module binds an
+      // app could actually read out of /proc/*/mountinfo. Field 4 is the mount
+      // root within its filesystem, hence /adb/modules and not /data/adb/modules.
+      'echo "fmnt=$(awk \'$4 ~ "/adb/modules/" {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null)"; ' +
       'vb=$(grep -hoE \'verifiedbootstate[ ="]*(green|orange|yellow|red)\' /proc/cmdline /proc/bootconfig 2>/dev/null | grep -oE \'green|orange|yellow|red\'); ' +
       'vbad=$(printf \'%s\\n\' "$vb" | grep -E \'orange|yellow|red\' | head -1); ' +
       'echo "vbs=${vbad:-$(printf \'%s\\n\' "$vb" | grep green | head -1)}"; ' +
@@ -1038,6 +1044,7 @@
     const sucompat = kv.sucompat === "1";
     const rootOv = parseInt(kv.root_ov || "0", 10);
     const rootNm = parseInt(kv.root_nm || "0", 10);
+    const fmnt = parseInt(kv.fmnt || "0", 10);
 
     // app view: drop to a non-root uid and count nomount_* mounts. If the kernel
     // mount-hide hook is active, non-root readers get them filtered out (-> 0).
@@ -1068,6 +1075,8 @@
       if (appNm === 0) rows.push({ k: "Real mounts", v: `root ${rootNm} · apps 0 — hidden`, t: "vfs" });
       else if (appNm > 0) rows.push({ k: "Real mounts", v: `apps see ${appNm} — VISIBLE`, t: "warn" });
       else rows.push({ k: "Real mounts", v: `root ${rootNm} · app-view n/a`, t: "off" });
+    } else if (fmnt > 0) {
+      rows.push({ k: "Real mounts", v: `${fmnt} from other module${fmnt > 1 ? "s" : ""} — visible`, t: "warn" });
     } else {
       rows.push({ k: "Real mounts", v: "none — pure hookless", t: "vfs" });
     }
@@ -1086,7 +1095,19 @@
       $("stealthNote").innerHTML = "A live non-root check sees <code>nomount_*</code> mounts. v2.3.7+ is <b>fully mountless</b> (hookless RRO) — if you see this, an older overlay build is still active; re-run the mount pass or reboot.";
     } else if (appNm === 0) {
       shield.className = "shield clean";
-      if (rootNm === 0) {
+      if (rootNm === 0 && fmnt > 0) {
+        // The Suite is mountless, but the mount TABLE is not: another module's bind is
+        // just as readable to an app as one of ours would be, and claiming "zero mounts"
+        // over the top of it was the one false reassurance this card exists to prevent.
+        shield.className = "shield warn";
+        $("stealthT").textContent = "Another module is mounting";
+        $("stealthD").textContent = `${fmnt} module mount${fmnt > 1 ? "s" : ""} visible to any app`;
+        $("stealthNote").innerHTML = "The Suite itself adds <b>zero mounts</b>, but " + fmnt +
+          " mount(s) backed by <code>/data/adb/modules</code> are in the mount table and readable by any app. " +
+          "<code>nomount absorb</code> converts what it safely can into hookless injections and runs at every boot; " +
+          "anything left is either a hook framework (Zygisk/Xposed, deliberately skipped) or a target injection cannot serve. " +
+          "Run <b>Health check</b> below — it names each one and why it is still there.";
+      } else if (rootNm === 0) {
         $("stealthT").textContent = "Fully mountless";
         $("stealthD").textContent = "zero mounts — nothing to hide";
         $("stealthNote").innerHTML = "The Suite adds <b>zero mounts</b>: file injections are hookless, su is sucompat (kernel&nbsp;· mountless), and RRO overlays are hookless too — OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> mount table, so there is no mount-gap for a scanner to flag.";
@@ -1110,7 +1131,7 @@
     if (seTell) extraTells.push("SELinux " + se);
     if (extraTells.length) {
       shield.className = "shield warn";
-      if (appNm > 0) {
+      if (appNm > 0 || fmnt > 0) {
         // A visible mount is the more actionable problem — keep its title/desc and
         // just append the residual tells rather than clobbering the mount warning.
         $("stealthNote").innerHTML +=
@@ -1340,7 +1361,11 @@
       '[ -n "$(find $roots -type f ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
       'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
       'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
-      'mnt=$(grep -cE "/data/adb/modules/$id(/|$)" /proc/self/mountinfo 2>/dev/null); ' +
+      // mountinfo field 4 is the mount root WITHIN ITS FILESYSTEM: a module bind reads
+      // "/adb/modules/<id>/...", not "/data/adb/modules/...", because /data is its own
+      // filesystem. The old grep matched nothing, so every module row showed the green
+      // "mountless" tag even while it owned a real, app-visible mount.
+      'mnt=$(awk -v m="$id" \'$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); ' +
       'echo "$id|$st|$mech|$cnt|$mnt"; done'
     )).stdout.trim();
     if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }

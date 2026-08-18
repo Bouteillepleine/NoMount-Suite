@@ -431,8 +431,16 @@ fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: 
 /// The proper fix is kernel-side (correct the parent's size and nlink in
 /// getattr); until then this is the honest default.
 pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
-    crate::whiteout::measurable_hole(target)
-        && !crate::whiteout::read().unwrap_or_default().iter().any(|w| Path::new(w) == target)
+    if !crate::whiteout::measurable_hole(target) {
+        return false;
+    }
+    // Cached: this is called once per planned whiteout (and again in the doctor
+    // rollup), and each call re-read and re-parsed whiteouts.txt from disk.
+    static FORCED: std::sync::OnceLock<HashSet<PathBuf>> = std::sync::OnceLock::new();
+    let forced = FORCED.get_or_init(|| {
+        crate::whiteout::read().unwrap_or_default().into_iter().map(PathBuf::from).collect()
+    });
+    !forced.contains(target)
 }
 
 fn whiteout_allowed(target: &Path, module: &str) -> bool {

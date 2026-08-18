@@ -148,7 +148,11 @@ if command -v ksud >/dev/null 2>&1; then
         # can be enabled and still contribute nothing. A non-zero mount count is the only
         # thing that breaks the zero-mount posture, so it is called out per module.
         _n=$("$NM_BIN" list 2>/dev/null | grep -c "/data/adb/modules/$mid/")
-        _m=$(grep -cE "/data/adb/modules/$mid(/|$)" /proc/self/mountinfo 2>/dev/null); _m=${_m:-0}
+        # Field 4 = the mount's root within its filesystem, so a module bind reads
+        # "/adb/modules/<id>/...", never "/data/adb/modules/...". The old pattern
+        # matched nothing, so every module was badged "mountless" regardless.
+        _m=$(awk -v m="$mid" '$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}' \
+             /proc/self/mountinfo 2>/dev/null); _m=${_m:-0}
         _badge="$_t · $_n served"
         [ "${_m:-0}" -gt 0 ] && _badge="$_badge · ⚠ $_m mount(s)"
         _orig=$(sed -n 's/^description=//p' "$d/module.prop" | head -1)

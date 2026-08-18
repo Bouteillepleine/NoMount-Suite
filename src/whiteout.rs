@@ -61,7 +61,15 @@ pub(crate) fn measurable_hole(target: &Path) -> bool {
         return true; // multi-block: no closed form, engine cannot correct it
     }
     // Single block: only a hole on an engine that does not recompute.
-    crate::nm::Nm::new().version().map(|v| v < 13).unwrap_or(true)
+    engine_predates_v13()
+}
+
+/// Cached: `measurable_hole` runs once per whiteout, and every call used to fork
+/// `nm v`. A debloat module is ENTIRELY whiteouts, so `doctor` on one spawned a
+/// process per hide for an answer that cannot change within a run.
+fn engine_predates_v13() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| crate::nm::Nm::new().version().map(|v| v < 13).unwrap_or(true))
 }
 
 /// Patterns that are commonly probed and are safe to hide when present. Kept
@@ -191,14 +199,36 @@ pub fn remove(target: &str) -> Result<()> {
     Ok(())
 }
 
+/// Targets the engine is currently whiting out, from `nm list`.
+fn live_whiteouts() -> std::collections::HashSet<String> {
+    Nm::new()
+        .list()
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split(" [UID:").next().unwrap_or(l).trim().strip_suffix(" (whiteout)"))
+        .map(|t| t.trim().to_string())
+        .collect()
+}
+
 pub fn list() -> Result<()> {
     let entries = read()?;
     if entries.is_empty() {
         println!("no whiteouts configured");
         return Ok(());
     }
+    // Path-absence alone cannot tell "hidden" from "was never there": an entry for a
+    // path this ROM does not ship reported `hidden`, which reads as working. Ask the
+    // engine which targets it is actually serving, and use absence only to confirm.
+    let live = live_whiteouts();
     for e in &entries {
-        let state = if Path::new(e).exists() { "visible - not applied" } else { "hidden" };
+        let applied = live.contains(e);
+        let present = Path::new(e).exists();
+        let state = match (applied, present) {
+            (true, false) => "hidden",
+            (true, true) => "applied, but still visible - the engine is not serving it",
+            (false, false) => "not applied (and no such path on this ROM)",
+            (false, true) => "not applied - run `nomount whiteout apply`",
+        };
         println!("{e}\t{state}");
     }
     Ok(())

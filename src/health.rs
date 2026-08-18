@@ -73,10 +73,23 @@ fn app_size(uid: u32, path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// How many mounts are backed by module content.
+///
+/// This used to grep mountinfo for the literal `/data/adb/modules`, which NEVER
+/// matches: field 4 is the mount's root WITHIN ITS FILESYSTEM, so a bind out of a
+/// module reads `/adb/modules/<id>/…` against the device `/data` lives on. The
+/// count was therefore a constant zero, and `mounts=0` in the fingerprint (and on
+/// the manager card, and in the WebUI) claimed a clean posture on a device that
+/// had real module mounts. Resolve sources properly instead -- absorb already
+/// knows how.
 fn count_module_mounts() -> usize {
-    fs::read_to_string("/proc/self/mountinfo")
-        .map(|s| s.lines().filter(|l| l.contains("/data/adb/modules")).count())
-        .unwrap_or(0)
+    let Ok(body) = fs::read_to_string("/proc/self/mountinfo") else { return 0 };
+    let rows = crate::absorb::parse_mountinfo(&body);
+    let roots = crate::absorb::fs_roots(&rows);
+    rows.iter()
+        .filter_map(|r| crate::absorb::source_of(r, &roots))
+        .filter(|src| src.starts_with("/data/adb/modules"))
+        .count()
 }
 
 /// The Narcissus canary: sample a few injected files and confirm a normal app
