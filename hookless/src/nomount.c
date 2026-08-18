@@ -13,7 +13,6 @@
 #include <linux/sizes.h>
 #include <linux/magic.h>
 #include <linux/hash.h>
-#include <linux/ktime.h>
 #include "nomount.h"
 
 /* Android packs (user_id, appid) into a uid: uid = user_id*NM_PER_USER_RANGE + appid.
@@ -2137,10 +2136,6 @@ static NM_ACTOR_RET nm_ino_actor(struct dir_context *ctx, const char *name,
     return NM_ACTOR_CONTINUE;
 }
 
-/* TEMPORARY (validation only -- strip before shipping, it names the mechanism
- * in dmesg): what the injection pass actually costs. */
-static u32 nm_ino_scan_count, nm_ino_stat_count;
-static u64 nm_ino_scan_ns;
 
 /* Sampled st_ino population of dirpath's entries of one kind.
  *
@@ -2155,8 +2150,6 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     struct path dp;
     struct file *dir;
     const struct cred *old;
-    u64 t0 = ktime_get_ns();
-    bool was_overlay = false;
     int i, nstat = 0;
 
     pop->n = 0;
@@ -2212,18 +2205,10 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
         kfree(cp);
     }
 
-    was_overlay = sc->overlay;
     if (sc->names)
         kfree(sc->names);
     kfree(sc);
 
-    nm_ino_scan_count++;
-    nm_ino_stat_count += nstat;
-    nm_ino_scan_ns += ktime_get_ns() - t0;
-    pr_info_ratelimited("nomount: ino-scan %s (%s,%s) got=%d stats=%d | cum scans=%u stats=%u ms=%llu\n",
-                        dirpath, was_overlay ? "ovl" : "cheap", want_dir ? "dir" : "file",
-                        pop->n, nstat, nm_ino_scan_count, nm_ino_stat_count,
-                        nm_ino_scan_ns / 1000000);
     return pop->n ? 0 : -ENOENT;
 }
 
