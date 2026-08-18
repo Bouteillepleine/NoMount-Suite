@@ -39,6 +39,14 @@ const FOREIGN_ROOT: &str = "/data";
 pub const SKIP_FILE: &str = "/data/adb/nomount/absorb-skip.txt";
 /// Pre-v1.2.1 name, still honoured so an existing install keeps its opt-outs.
 const SKIP_FILE_LEGACY: &str = "/data/adb/nomount/absorb-skip";
+/// Rules absorb created, so `reload` knows they are wanted.
+///
+/// An absorbed rule belongs to no module *plan* -- it came from a bind whose
+/// source can sit anywhere inside the owning module, including paths the plan
+/// walk never visits. `reload` prunes every live rule the plan does not name, so
+/// without this record a single Reload silently undid every absorption and the
+/// mounts did not come back either: the content simply reverted to stock.
+pub const ABSORBED_LIST: &str = "/data/adb/nomount/absorbed.list";
 
 /// Used when the skip file cannot be read at all. Keyed on the PATH BEING
 /// HOOKED, not on who installed it: a hook framework's module id varies between
@@ -492,6 +500,36 @@ pub(crate) fn mounted_targets() -> std::collections::HashSet<PathBuf> {
     parse_mountinfo(&body).into_iter().map(|r| r.target).collect()
 }
 
+/// Targets absorb is currently serving. Read by `reload` so they survive a
+/// reconcile, and by `run_mount` so a fresh pass starts from an empty record.
+pub fn absorbed_targets() -> HashSet<PathBuf> {
+    fs::read_to_string(ABSORBED_LIST)
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Replace the record. `run_mount` calls this with an empty set: it issues
+/// `nm clear`, so nothing absorb recorded is live any more and keeping the file
+/// would make `reload` protect targets that no longer have a rule.
+pub fn set_absorbed(targets: &[PathBuf]) {
+    if let Some(d) = Path::new(ABSORBED_LIST).parent() {
+        let _ = fs::create_dir_all(d);
+    }
+    let mut body =
+        String::from("# Targets absorb re-serves as injections; reload keeps these.\n");
+    for t in targets {
+        body.push_str(&t.to_string_lossy());
+        body.push('\n');
+    }
+    let _ = fs::write(ABSORBED_LIST, body);
+}
+
 pub(crate) fn umount_detach(p: &Path) -> bool {
     let Ok(c) = CString::new(p.to_string_lossy().as_bytes()) else {
         return false;
@@ -503,7 +541,7 @@ pub(crate) fn umount_detach(p: &Path) -> bool {
 /// file rather than a single directory rule: a directory rule REPLACES the stock
 /// directory, hiding every entry the module did not ship, which is the same
 /// whole-partition masking that bootloops zygote.
-fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut u32) -> Result<()> {
+fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     if source.is_dir() {
         for e in std::fs::read_dir(source)?.flatten() {
             let ft = e.file_type()?;
@@ -513,12 +551,12 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut u32) -> Result<()> {
                 inject(nm, &child_src, &child_tgt, out)?;
             } else {
                 nm.add(&child_tgt, &child_src)?;
-                *out += 1;
+                out.push(child_tgt);
             }
         }
     } else {
         nm.add(target, source)?;
-        *out += 1;
+        out.push(target.to_path_buf());
     }
     Ok(())
 }
@@ -601,7 +639,10 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         return Ok(());
     }
 
-    let (mut rules, mut done, mut failed, mut skipped_dirs) = (0u32, 0u32, 0u32, 0u32);
+    let (mut done, mut failed, mut skipped_dirs) = (0u32, 0u32, 0u32);
+    // Recorded so `reload` does not prune them: an absorbed rule is not in any
+    // module plan, and the reconcile drops whatever the plan does not name.
+    let mut fresh: Vec<PathBuf> = Vec::new();
     for c in &cands {
         // Apply the same directory rule the real run uses, so a dry run can never
         // promise an action the real run would decline.
@@ -654,7 +695,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             failed += 1;
             continue;
         }
-        match inject(&nm, &c.source, &c.target, &mut rules) {
+        match inject(&nm, &c.source, &c.target, &mut fresh) {
             Ok(()) => done += 1,
             Err(e) => {
                 eprintln!("nomount: absorb of {} failed: {e:#}", c.target.display());
@@ -662,6 +703,13 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             }
         }
     }
+    // Written even when nothing was absorbed this run: a partially-failed inject
+    // still created rules, and those are exactly the ones reload must not drop.
+    let rules = fresh.len() as u32;
+    let mut recorded: Vec<PathBuf> = absorbed_targets().into_iter().chain(fresh).collect();
+    recorded.sort();
+    recorded.dedup();
+    set_absorbed(&recorded);
 
     // A leak is worth restating in the summary line: the per-mount notice above
     // scrolls away, and "12 absorbed" reads like success on its own.

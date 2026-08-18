@@ -569,6 +569,21 @@ fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
     out
 }
 
+/// May the reconcile drop this live rule?
+///
+/// Only when the module plan does not want it AND neither durable list claims it.
+/// `wanted` is the plan's answer; the two sets are the rules the plan structurally
+/// cannot describe -- a stock path hidden by `nomount whiteout add`, and a rule
+/// `absorb` created from another module's bind.
+fn prunable(
+    target: &Path,
+    wanted: bool,
+    durable_whiteouts: &HashSet<PathBuf>,
+    absorbed: &HashSet<PathBuf>,
+) -> bool {
+    !wanted && !durable_whiteouts.contains(target) && !absorbed.contains(target)
+}
+
 /// `nomount reload`: gap-free hot load/unload. Diffs the desired plan against the
 /// live rule set and applies ONLY the delta -- no `clear`, so injections never
 /// drop. Install a module then reload => just its files go live; remove a module
@@ -598,6 +613,20 @@ pub fn run_reload() -> Result<()> {
     // rather than silently mass-re-add and stop pruning.
     let live_txt = nm.list().context("nm list failed during reload")?;
     let live = parse_live_rules(&live_txt);
+
+    // Rules the Suite wants that no MODULE plan can account for. The prune pass
+    // below drops every live rule the plan does not name, and these two are named
+    // nowhere in it:
+    //   * a durable whiteout (`nomount whiteout add`) hides a STOCK path, so it has
+    //     no module and no backing file;
+    //   * an absorbed rule came from another module's bind, whose source may sit at
+    //     any path inside that module -- including ones the plan walk never visits.
+    // Both were therefore deleted by a single Reload while their on-disk list still
+    // said "applied", and neither came back until a reboot: the whiteout stopped
+    // hiding, and the absorbed content silently reverted to the stock file.
+    let durable_whiteouts: HashSet<PathBuf> =
+        crate::whiteout::read().unwrap_or_default().into_iter().map(PathBuf::from).collect();
+    let absorbed = crate::absorb::absorbed_targets();
 
     let (mut added, mut changed, mut removed, mut failed) = (0u32, 0u32, 0u32, 0u32);
     // Add new rules, and re-apply a live rule whose SOURCE or KIND changed (not
@@ -647,14 +676,30 @@ pub fn run_reload() -> Result<()> {
             Err(_) => failed += 1,
         }
     }
-    // Remove live rules no longer desired (skip any that are now bind targets).
+    // Re-apply any durable whiteout the engine is not currently serving, so a
+    // reload CONVERGES on the saved list instead of merely not destroying it.
+    for w in &durable_whiteouts {
+        if live.contains_key(&(w.clone(), 0)) {
+            continue;
+        }
+        match nm.whiteout(w) {
+            Ok(()) => added += 1,
+            Err(_) => failed += 1,
+        }
+    }
+
+    // Remove live rules no longer desired (skip any that are now bind targets,
+    // and anything durable/absorbed that the module plan cannot describe).
     for (t, _uid) in live.keys() {
-        if !desired_hookless.contains_key(t.as_path()) && !desired_bind_src.contains_key(t.as_path()) {
-            if nm.del(t).is_ok() {
-                removed += 1;
-            } else {
-                failed += 1;
-            }
+        let wanted = desired_hookless.contains_key(t.as_path())
+            || desired_bind_src.contains_key(t.as_path());
+        if !prunable(t, wanted, &durable_whiteouts, &absorbed) {
+            continue;
+        }
+        if nm.del(t).is_ok() {
+            removed += 1;
+        } else {
+            failed += 1;
         }
     }
 
@@ -716,6 +761,10 @@ pub fn run_mount() -> Result<()> {
     // down any my_* binds from the previous pass so removed modules don't leak one.
     let _ = nm.clear();
     crate::bind::teardown_all();
+    // `clear` dropped every absorbed rule too, so the record of them is now a lie.
+    // Left behind, `reload` would protect targets that no longer carry a rule.
+    // service.sh re-runs absorb after boot and repopulates it.
+    crate::absorb::set_absorbed(&[]);
 
     let (plan, skipped) = collect_plan();
     let mut served: HashSet<&str> = HashSet::new();
@@ -780,6 +829,24 @@ mod tests {
         assert!(matches!(serve_mode(Path::new("/data/adb/x")), Serve::Refuse(_)));
         assert!(matches!(serve_mode(Path::new("/system")), Serve::Refuse(_)));
         assert!(matches!(serve_mode(Path::new("/")), Serve::Refuse(_)));
+    }
+
+    /// A Reload used to delete every durable whiteout and every absorbed rule,
+    /// because neither appears in any module plan. The on-disk lists still said
+    /// "applied", so the hide simply stopped and the absorbed content reverted.
+    #[test]
+    fn reload_never_prunes_durable_or_absorbed_rules() {
+        let durable: HashSet<PathBuf> = ["/system/etc/tell.conf"].iter().map(PathBuf::from).collect();
+        let absorbed: HashSet<PathBuf> = ["/system/etc/absorbed.xml"].iter().map(PathBuf::from).collect();
+        let none = HashSet::new();
+
+        // Claimed by a durable list -> never pruned, even though no plan wants it.
+        assert!(!prunable(Path::new("/system/etc/tell.conf"), false, &durable, &absorbed));
+        assert!(!prunable(Path::new("/system/etc/absorbed.xml"), false, &durable, &absorbed));
+        // Wanted by the plan -> never pruned either.
+        assert!(!prunable(Path::new("/system/app/Foo.apk"), true, &none, &none));
+        // Claimed by nobody -> this is the stale rule prune exists for.
+        assert!(prunable(Path::new("/system/app/Gone.apk"), false, &durable, &absorbed));
     }
 
     #[test]
