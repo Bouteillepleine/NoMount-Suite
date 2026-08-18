@@ -2342,6 +2342,41 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
 }
 
 
+/* The nearest REAL directory at or above vpath, and its subdir population.
+ *
+ * nomount_generate_virtual_topology resolves its ancestor two ways: through
+ * kern_path (which scans, above) or by finding an already-existing VIRTUAL
+ * rule, which does not. A virtual dir nested under one already synthesized --
+ * Mms/lib under Mms -- takes the second path, so it kept the old masked band:
+ * measured 29037 and 19789 live, where every real nested dir under
+ * /product/priv-app sits at 104-105. One `find -type d -inum +1000` still
+ * picked those two out.
+ *
+ * Ascend to the real directory and reuse the population its virtual parent was
+ * placed from. The cache still holds what was handed out there, so the nested
+ * dirs come out distinct from the parent and inside the same range the real
+ * nested dirs occupy. */
+static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
+{
+    char *p = kstrdup(vpath, GFP_KERNEL);
+    struct nm_ino_pop *pop = NULL;
+    struct path dp;
+    char *slash;
+
+    if (!p)
+        return NULL;
+    while ((slash = strrchr(p, '/')) && slash != p) {
+        *slash = '\0';
+        if (kern_path(p, LOOKUP_FOLLOW, &dp) == 0) {
+            path_put(&dp);
+            pop = nm_dir_ino_pop_cached(p, true);
+            break;
+        }
+    }
+    kfree(p);
+    return pop;
+}
+
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 {
     struct nomount_rule *irule, *ex, *current_rule = target_rule;
@@ -2563,6 +2598,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 /* A raw name hash puts a synthesized dir billions away from its
                  * stock siblings (erofs dir inos are small); derive one in the
                  * nearest real ancestor's magnitude band instead. */
+                if (!anc_dpop)          /* ancestor was an existing virtual rule */
+                    anc_dpop = nm_real_ancestor_pop(nm_get_vpath(irule));
                 if (anc_dpop && anc_dpop->n)
                     irule->v_ino = nm_place_ino(anc_dpop, (u64)irule->v_hash);
                 else if (anc_ino)
