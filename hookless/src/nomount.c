@@ -2342,6 +2342,47 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
 }
 
 
+/* The nearest REAL directory at or above vpath, and its subdir population.
+ *
+ * nomount_generate_virtual_topology resolves its ancestor two ways: through
+ * kern_path (which scans) or by finding an already-existing VIRTUAL rule, which
+ * does not. So a virtual dir nested under one already synthesized never got a
+ * population, fell back to the masked band, and -- because that band is taken
+ * from the ancestor's own v_ino -- inherited whatever the ancestor had.
+ *
+ * The ascent MUST step over directories a rule already owns, for two reasons.
+ * kern_path SUCCEEDS on them (they are live in the VFS, that is the point), so
+ * a naive walk stops at the virtual parent and scans a directory holding
+ * nothing real. Worse, resolving one INSTANTIATES it, and the ancestor lookup
+ * above then reads a synthesized dir's own ino as if it were a stock one --
+ * which cascades: measured live, Mms/lib and Mms/lib/arm64 came out at
+ * 1102213485 and 1102213508, the raw-hash band of an ancestor, where every real
+ * nested dir under /product/priv-app sits at 34..105. Creating the same chain
+ * in one pass gave 66/71, which is how the cascade was told apart from a broken
+ * placement. */
+static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
+{
+    char *p = kstrdup(vpath, GFP_KERNEL);
+    struct nm_ino_pop *pop = NULL;
+    struct path dp;
+    char *slash;
+
+    if (!p)
+        return NULL;
+    while ((slash = strrchr(p, '/')) && slash != p) {
+        *slash = '\0';
+        if (nm_path_is_injected(p, strlen(p)))
+            continue;                 /* ours: never resolve it, keep climbing */
+        if (kern_path(p, LOOKUP_FOLLOW, &dp) == 0) {
+            path_put(&dp);
+            pop = nm_dir_ino_pop_cached(p, true);
+            break;
+        }
+    }
+    kfree(p);
+    return pop;
+}
+
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 {
     struct nomount_rule *irule, *ex, *current_rule = target_rule;
@@ -2563,6 +2604,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 /* A raw name hash puts a synthesized dir billions away from its
                  * stock siblings (erofs dir inos are small); derive one in the
                  * nearest real ancestor's magnitude band instead. */
+                if (!anc_dpop)      /* ancestor was an existing virtual rule */
+                    anc_dpop = nm_real_ancestor_pop(nm_get_vpath(irule));
                 if (anc_dpop && anc_dpop->n)
                     irule->v_ino = nm_place_ino(anc_dpop, (u64)irule->v_hash);
                 else if (anc_ino)
