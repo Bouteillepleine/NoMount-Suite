@@ -199,6 +199,11 @@ compute_vbmeta_digest() {
     [ "$alg" = "sha512" ] && dg=$(sha512_of "$ACC")
     [ -z "$dg" ] && dg=$(sha256_of "$ACC")
     VB_SIZE=$(wc -c < "$ACC" 2>/dev/null | tr -d ' \n')
+    # Written here, not returned: every caller runs this in a $(...) subshell, so a
+    # variable set now is gone the moment it returns. That is why ro.boot.vbmeta.size
+    # was NEVER set -- do_vbmeta read an always-empty VB_SIZE, so it also never wrote
+    # the size cache it then fell back to. A file crosses the subshell boundary.
+    [ -n "$VB_SIZE" ] && echo "$VB_SIZE" > "$NMDIR/vbmeta_size.cache" 2>/dev/null
     rm -f "$ACC" 2>/dev/null
     [ -n "$dg" ] && printf '%s' "$dg" | tr 'A-F' 'a-f'
 }
@@ -214,7 +219,8 @@ do_vbmeta() {
         [ -s "$cache" ] && [ "$mode" != "force" ] && dg=$(cat "$cache" 2>/dev/null)
         if [ -z "$dg" ]; then
             dg=$(compute_vbmeta_digest)
-            [ -n "$dg" ] && { echo "$dg" > "$cache" 2>/dev/null; [ -n "$VB_SIZE" ] && echo "$VB_SIZE" > "$szcache" 2>/dev/null; }
+            # compute_vbmeta_digest wrote $szcache itself (it runs in a subshell).
+            [ -n "$dg" ] && echo "$dg" > "$cache" 2>/dev/null
         fi
         if [ -z "$dg" ]; then
             log "vbmeta.digest: could not compute (left unset)"
@@ -230,8 +236,11 @@ do_vbmeta() {
     # Set only when missing (unless forced). VALIDATE once against the real prop.
     [ "${vbmeta_size:-auto}" = "off" ] && return 0
     [ -n "$RESETPROP" ] || return 0
-    sz=$VB_SIZE
-    [ -z "$sz" ] && [ -s "$szcache" ] && sz=$(cat "$szcache" 2>/dev/null)
+    [ -s "$szcache" ] && sz=$(cat "$szcache" 2>/dev/null)
+    # No cache yet (digest already present, so nothing recomputed) -- measure the
+    # chain now rather than leaving the size permanently unset.
+    [ -n "$sz" ] || { compute_vbmeta_digest >/dev/null 2>&1
+                      [ -s "$szcache" ] && sz=$(cat "$szcache" 2>/dev/null); }
     [ -n "$sz" ] || return 0
     cur=$(getprop ro.boot.vbmeta.size 2>/dev/null)
     if [ -z "$cur" ] || [ "$mode" = "force" ]; then
@@ -329,6 +338,21 @@ do_props() {
 # when it already differs, so a clean device is a no-op.
 SHELL_TMP=/data/local/tmp
 
+# `stat -c %C` answers correctly from an interactive root shell but comes back as
+# the bare letter "C" in the post-fs-data / ksud service context this actually runs
+# in, so the label always compared unequal: every boot re-ran chcon and logged a
+# change that had not happened, and the WebUI read /data/local/tmp as permanently
+# "dirty ctx=C". Take the reading only when it looks like a context, and fall back
+# to `ls -Zd`; an empty answer means "could not read", which is not "wrong".
+selinux_ctx() {
+    local c
+    c=$(stat -c %C "$1" 2>/dev/null)
+    case "$c" in *:*:*) echo "$c"; return 0 ;; esac
+    c=$(ls -Zd "$1" 2>/dev/null | awk '{print $1}')
+    case "$c" in *:*:*) echo "$c"; return 0 ;; esac
+    echo ""
+}
+
 do_shell_tmp() {
     [ "${fix_shell_tmp:-1}" = "1" ] || return 0
     local mode own ctx changed=""
@@ -341,7 +365,7 @@ do_shell_tmp() {
 
     mode=$(stat -c %a "$SHELL_TMP" 2>/dev/null)
     own=$(stat -c %u:%g "$SHELL_TMP" 2>/dev/null)
-    ctx=$(stat -c %C "$SHELL_TMP" 2>/dev/null)
+    ctx=$(selinux_ctx "$SHELL_TMP")
 
     if [ "$mode" != "771" ]; then
         chmod 0771 "$SHELL_TMP" 2>/dev/null && changed="$changed mode:${mode:-?}->771"
@@ -349,9 +373,9 @@ do_shell_tmp() {
     if [ "$own" != "2000:2000" ]; then
         chown 2000:2000 "$SHELL_TMP" 2>/dev/null && changed="$changed owner:${own:-?}->2000:2000"
     fi
-    if [ "$ctx" != "u:object_r:shell_data_file:s0" ]; then
+    if [ -n "$ctx" ] && [ "$ctx" != "u:object_r:shell_data_file:s0" ]; then
         chcon u:object_r:shell_data_file:s0 "$SHELL_TMP" 2>/dev/null \
-            && changed="$changed ctx:${ctx:-?}->shell_data_file"
+            && changed="$changed ctx:$ctx->shell_data_file"
     fi
 
     [ -n "$changed" ] && log "shell-tmp: ${changed# }"
@@ -366,10 +390,10 @@ shell_tmp_status() {
     [ -d "$SHELL_TMP" ] || { echo "absent"; return 0; }
     mode=$(stat -c %a "$SHELL_TMP" 2>/dev/null)
     own=$(stat -c %u:%g "$SHELL_TMP" 2>/dev/null)
-    ctx=$(stat -c %C "$SHELL_TMP" 2>/dev/null)
+    ctx=$(selinux_ctx "$SHELL_TMP")
     [ "$mode" = "771" ] || bad="$bad mode=$mode"
     [ "$own" = "2000:2000" ] || bad="$bad owner=$own"
-    [ "$ctx" = "u:object_r:shell_data_file:s0" ] || bad="$bad ctx=$ctx"
+    [ -n "$ctx" ] && [ "$ctx" != "u:object_r:shell_data_file:s0" ] && bad="$bad ctx=$ctx"
     [ -z "$bad" ] && echo "clean ino=$(stat -c %i "$SHELL_TMP" 2>/dev/null)" \
                   || echo "dirty$bad ino=$(stat -c %i "$SHELL_TMP" 2>/dev/null)"
 }
