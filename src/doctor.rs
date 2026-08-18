@@ -58,7 +58,12 @@ fn is_partition_root(p: &Path) -> bool {
 fn parse_live(list: &str) -> Vec<(PathBuf, PathBuf)> {
     list.lines()
         .filter_map(|l| {
-            let (t, s) = l.split_once(" -> ")?;
+            // Match mount.rs: strip the ` [UID: N]` suffix (else it lands in the
+            // source path and every metadata check on a per-UID rule silently
+            // no-ops), and split on the LAST arrow so a target containing one is
+            // not mis-split.
+            let l = l.split(" [UID:").next().unwrap_or(l);
+            let (t, s) = l.rsplit_once(" -> ")?;
             let (t, s) = (t.trim(), s.trim());
             if t.is_empty() || s.is_empty() {
                 return None;
@@ -513,6 +518,13 @@ mod tests {
         assert_eq!(v[0].0, PathBuf::from("/product/x.apk"));
         assert_eq!(v[0].1, PathBuf::from("/data/adb/modules/M/product/x.apk"));
         assert_eq!(v[1].0, PathBuf::from("/product/z"));
+    }
+
+    #[test]
+    fn parse_live_strips_the_uid_suffix() {
+        let v = parse_live("/product/x.apk -> /data/adb/modules/M/x.apk [UID: 10123]\n");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].1, PathBuf::from("/data/adb/modules/M/x.apk"));
     }
 
     #[test]

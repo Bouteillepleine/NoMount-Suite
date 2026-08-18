@@ -101,6 +101,13 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
     } > "$NMDIR/incident.log" 2>/dev/null
 elif [ -x "$BIN" ]; then
     timeout 60 "$BIN" mount 2>/dev/null
+    # Durable whiteouts, HERE rather than only in service.sh. A whiteout hides a
+    # stock path that is itself the tell, and service.sh does not run it until
+    # after sys.boot_completed plus a 10s settle -- so every such path was plainly
+    # visible for the whole of boot, to anything that looked early. Nothing here
+    # needs packages.list, so it belongs in the same pass as the injections.
+    # service.sh still re-applies, which is idempotent and catches a late failure.
+    [ -s "$NMDIR/whiteouts.txt" ] && timeout 30 "$BIN" whiteout apply 2>/dev/null
 fi
 
 # --- hiding ---
