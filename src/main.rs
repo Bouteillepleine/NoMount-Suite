@@ -7,6 +7,7 @@ mod doctor;
 mod health;
 mod mount;
 mod nm;
+mod preflight;
 mod whiteout;
 
 use anyhow::Result;

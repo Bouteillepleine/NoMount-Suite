@@ -443,6 +443,58 @@ pub fn run_doctor() -> Result<()> {
         });
     }
 
+    // Static pre-flight: what each module's OWN scripts will do to the mount
+    // table. The checks above describe mounts that already exist; this one runs
+    // off the scripts on disk, so it lands BEFORE boot -- which is the only
+    // point at which the nsenter family can still be avoided rather than
+    // discovered. See preflight.rs for the survey this is sized from.
+    for h in crate::preflight::scan_all("/data/adb/modules", "meta-nomount") {
+        let (level, check, detail) = match h.habit {
+            crate::preflight::MountHabit::Namespace => (
+                Level::Warn,
+                "module will replicate mounts into other namespaces",
+                format!(
+                    "{} calls {} in its scripts: it mounts inside other processes' \
+                     namespaces, where absorb has no standing — those mounts stay visible \
+                     to apps and no amount of absorbing removes them. This is the one habit \
+                     the zero-mount posture cannot cover",
+                    h.module, h.evidence
+                ),
+            ),
+            crate::preflight::MountHabit::ForeignFs => (
+                Level::Warn,
+                "module will mount a filesystem of its own",
+                format!(
+                    "{} sets up {} in its scripts: absorb cannot re-serve that as an \
+                     injection because there is no backing file to point at, so it stays a \
+                     real mount",
+                    h.module, h.evidence
+                ),
+            ),
+            crate::preflight::MountHabit::Pseudo => (
+                Level::Info,
+                "module mounts a kernel pseudo-filesystem",
+                format!(
+                    "{} mounts {} in its scripts. That carries no module content, so absorb \
+                     leaves it alone and it is not a leak of anything we serve — listed only \
+                     so the extra mount is accounted for",
+                    h.module, h.evidence
+                ),
+            ),
+            crate::preflight::MountHabit::Absorbable => (
+                Level::Info,
+                "module mounts for itself, absorb takes it over",
+                format!(
+                    "{} uses {} in its scripts; absorb re-serves it as an injection and \
+                     unmounts it at boot, so the zero-mount posture holds — listed so a \
+                     mount appearing mid-boot is expected rather than alarming",
+                    h.module, h.evidence
+                ),
+            ),
+        };
+        f.push(Finding { level, check, detail });
+    }
+
     for (part, n) in &fd_note {
         f.push(Finding {
             level: Level::Info,
