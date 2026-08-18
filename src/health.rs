@@ -259,11 +259,30 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     write("dmesg-nomount.txt", &read_cmd("sh", &["-c", "dmesg | grep -i nomount 2>/dev/null || true"]));
     write("mountinfo.txt", &fs::read_to_string("/proc/self/mountinfo").unwrap_or_default());
     write("uname.txt", &read_cmd("uname", &["-a"]));
+
+    // Shared storage is readable by any app holding a storage permission, and the
+    // point of an export is to hand it to someone. `blocklist` names the apps you
+    // are hiding FROM -- publishing it there tells a detector exactly that -- and
+    // `spoof.conf` describes what is being spoofed. They go only to a destination
+    // that is not shared storage; the diagnostics that matter for a bug report do
+    // not include either.
+    const PRIVATE: &[&str] = &["blocklist", "spoof.conf"];
+    let shared = ["/sdcard", "/storage", "/mnt/sdcard"].iter().any(|p| out.starts_with(p));
     for f in ["blocklist", "spoof.conf", "spoof.log", "incident.log", "health.txt", "snapshot.txt"] {
+        if shared && PRIVATE.contains(&f) {
+            continue;
+        }
         if let Ok(c) = fs::read_to_string(format!("{NM_DIR}/{f}")) {
             write(f, &c);
         }
     }
     println!("exported to {out}");
+    if shared {
+        println!(
+            "note: blocklist and spoof.conf were left out — {out} is shared storage, readable \
+             by any app with a storage permission, and the block list names the apps you are \
+             hiding from. Pass a private path to include them: nomount export /data/adb/nomount"
+        );
+    }
     Ok(())
 }

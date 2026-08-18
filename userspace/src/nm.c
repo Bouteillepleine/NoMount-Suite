@@ -39,12 +39,20 @@ void c_main(long *sp) {
             }
         } else if (p_count < 64) {
             p_args[p_count++] = argv[i];
+        } else {
+            /* Silently dropping the tail meant a batch `nm add` past 64 arguments
+             * applied part of its work and still exited 0, so the caller recorded
+             * every pair as applied. Refuse the whole command instead. */
+            print_str("nm: too many arguments (max 64)\n");
+            exit_code = 3; goto do_exit;
         }
     }
 
     if (cmd == 'a' || cmd == 'd' || cmd == 'w') {
         int step = 1 + (cmd == 'a');
-        if (p_count < step) { exit_code = 0; goto do_exit; }
+        /* Was exit 0: `nm add` with no operands reported success and did nothing,
+         * so a caller that built an empty argument list saw its work "applied". */
+        if (p_count < step) { print_str("nm: missing operand\n"); exit_code = 3; goto do_exit; }
 
         const char *cwd = (sys3(SYS_GETCWD, (long)mem.cwd_buf, PATH_MAX, 0) > 0) ? mem.cwd_buf : "/";
         char *cursor = mem.payload;

@@ -1,9 +1,15 @@
 //! Client for the **hookless** NoMount kernel engine.
 //!
-//! The hookless driver has no `/dev/nomount` char device — it's a Generic
-//! Netlink family (`nomount`) driven by the freestanding `nm` binary. Rather
-//! than reimplement the genl wire protocol here, the Suite shells out to `nm`
-//! (which already owns it). This replaces the old ioctl `/dev/nomount` path.
+//! The hookless driver has no `/dev/nomount` char device — it speaks a PRIVATE
+//! RAW netlink protocol (`NOMOUNT_NL_PROTO`), driven by the freestanding `nm`
+//! binary. The generic-netlink family it used to register was resolvable by any
+//! caller through `CTRL_CMD_GETFAMILY`, which is an enumeration oracle, so the
+//! control plane moved off genl entirely. Rather than reimplement the wire
+//! protocol here, the Suite shells out to `nm` (which already owns it).
+//!
+//! Kernel and client must therefore be flashed as a SET: a genl-era `nm` gets no
+//! answer from a raw-netlink kernel, and nothing about the version number warns
+//! you — it reads as "engine not responding".
 //!
 //! CLI verbs (first-char dispatch in `nm`): `add <virtual> <real>`, `w <path>`
 //! (whiteout), `block`/`unblock <uid>`, `clear`, `list`, `v` (version).

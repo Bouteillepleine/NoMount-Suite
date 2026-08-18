@@ -1,5 +1,6 @@
 #!/system/bin/sh
-# NoMount metamodule installer. Requires the NoMount kernel patch (/dev/nomount).
+# NoMount metamodule installer. Requires a CONFIG_NOMOUNT kernel (the hookless
+# engine, reached over private raw netlink -- there is no /dev/nomount node).
 ui_print "- Installing NoMount metamodule"
 ui_print "- version $(grep_prop version "$MODPATH/module.prop")"
 

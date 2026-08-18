@@ -30,11 +30,18 @@ impl Lock {
     /// locking at all -- the exact concurrent mount/reload corruption of
     /// binds.list the lock exists to prevent.
     fn acquire() -> Result<Lock> {
-        let f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(LOCK_FILE)
-            .with_context(|| format!("open {LOCK_FILE}"))?;
+        // 0600: created under the boot umask this landed 0666. It is inside a 0700
+        // directory so nothing could reach it, but a world-writable lock is not a
+        // property to depend on the parent for.
+        let f = {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .mode(0o600)
+                .open(LOCK_FILE)
+                .with_context(|| format!("open {LOCK_FILE}"))?
+        };
         if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
             bail!("flock {LOCK_FILE}: {}", std::io::Error::last_os_error());
         }

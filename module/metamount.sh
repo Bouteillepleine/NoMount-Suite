@@ -15,6 +15,9 @@ mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 # lives in the 0700 state dir.
 LOCK="$NMDIR/.mount.lock"
 exec 9>"$LOCK" 2>/dev/null
+# Created under the boot umask, so it landed 0666. Harmless inside a 0700 dir,
+# but do not rely on the parent for it.
+chmod 0600 "$LOCK" 2>/dev/null
 if command -v flock >/dev/null 2>&1; then
     flock -n 9 || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
 fi
