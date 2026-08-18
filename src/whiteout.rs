@@ -72,12 +72,54 @@ fn engine_predates_v13() -> bool {
     *V.get_or_init(|| crate::nm::Nm::new().version().map(|v| v < 13).unwrap_or(true))
 }
 
-/// Patterns that are commonly probed and are safe to hide when present. Kept
-/// device-agnostic: `suggest` filters these against what really exists here.
-const SUGGESTIONS: &[(&str, &str)] = &[
-    ("/system/bin/install-recovery.sh", "recovery-restore script; a classic root-check target"),
-    ("/system/vendor/bin/install-recovery.sh", "same, vendor copy"),
-    ("/system/etc/init/adbd.rc", "adb init policy; probed by USB-debug checks"),
+/// How a filename is matched. Anchored on purpose: a plain substring test for
+/// "ksu" matches `/system/bin/cksum`, and a scanner that proposes hiding a stock
+/// coreutil is worse than no scanner. Measured on OP15, where `cksum` and
+/// `debuggerd` were the ONLY hits a substring sweep produced.
+enum Match {
+    Exact(&'static str),
+    Prefix(&'static str),
+    Suffix(&'static str),
+}
+
+impl Match {
+    fn hits(&self, name: &str) -> bool {
+        match self {
+            Match::Exact(x) => name == *x,
+            Match::Prefix(x) => name.starts_with(x),
+            Match::Suffix(x) => name.ends_with(x),
+        }
+    }
+}
+
+/// What the scan looks for, and why each one is a tell. Every entry is a file a
+/// ROOT SETUP leaves on a read-only ROM partition — none of it ships on a stock
+/// device, so a hit is meaningful rather than a heuristic.
+const PATTERNS: &[(Match, &str)] = &[
+    (Match::Prefix("install-recovery"), "recovery-restore script; a classic root-check target"),
+    (Match::Exact("daemonsu"), "SuperSU daemon binary"),
+    (Match::Exact("supolicy"), "SuperSU sepolicy tool"),
+    (Match::Exact(".installed_su_daemon"), "SuperSU install marker"),
+    (Match::Prefix("magisk"), "Magisk binary or applet left on the ROM"),
+    (Match::Exact("Superuser.apk"), "SuperSU manager APK on the ROM"),
+    (Match::Prefix("SuperSU"), "SuperSU payload on the ROM"),
+    (Match::Exact("XposedBridge.jar"), "Xposed framework jar; probed directly by RASP"),
+    (Match::Prefix("app_process_xposed"), "Xposed's replacement zygote entry point"),
+    (Match::Prefix("libriru"), "Riru injection library"),
+    (Match::Prefix("libzygisk"), "Zygisk injection library"),
+    (Match::Prefix("libxposed"), "Xposed injection library"),
+    (Match::Suffix("SuperSUDaemon"), "SuperSU init.d hook"),
+];
+
+/// Directories the scan reads. One level each -- bounded on purpose, and these
+/// are where a root setup actually writes. `/system/xbin`, `/system/sbin` and
+/// `/system/etc/init.d` do not exist on a modern device; that is the point, and
+/// a hit there is worth more than one anywhere else.
+const SCAN_DIRS: &[&str] = &[
+    "/system/bin", "/system/xbin", "/system/sbin", "/system/etc", "/system/etc/init",
+    "/system/etc/init.d", "/system/addon.d", "/system/framework", "/system/lib",
+    "/system/lib64", "/system/app", "/vendor/bin", "/vendor/etc/init",
+    "/product/etc/init", "/system_ext/bin", "/system_ext/etc/init",
 ];
 
 /// A path that stats but cannot be OPENED is not a real file — it is fabricated
@@ -259,24 +301,119 @@ pub fn apply() -> Result<()> {
     Ok(())
 }
 
-/// Propose only paths that exist on THIS device and are not already listed.
-pub fn suggest() -> Result<()> {
-    let have = read()?;
-    let mut found = 0;
-    for (p, why) in SUGGESTIONS {
-        let path = Path::new(p);
-        if is_real_file(path) && !have.iter().any(|x| x == p) {
-            if measurable_hole(path) {
-                continue; /* would be refused; proposing it would only mislead */
+/// Targets NoMount is currently serving.
+///
+/// A scanner that walks `/system/bin` will happily meet a file a MODULE put
+/// there, and proposing a whiteout for it would hide that module's own content.
+/// The old three-entry list never needed this check; a directory walk does.
+fn injected_targets() -> std::collections::HashSet<String> {
+    Nm::new()
+        .list()
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let l = l.split(" [UID:").next().unwrap_or(l).trim();
+            Some(l.rsplit_once(" -> ")?.0.trim().to_string())
+        })
+        .collect()
+}
+
+/// Can an ordinary, non-root-granted app see this path at all?
+///
+/// The decisive question, and the one a path list cannot answer. `/system/bin/su`
+/// is the case that proves it: on a sucompat kernel it is present for a granted
+/// uid and ENOENT for every app, so it is not a tell and hiding it would only
+/// interfere with how root is invoked. uid 9999 (`nobody`) is never on the allow
+/// list, and was verified on OP15 to see stock AND injected files while getting
+/// ENOENT for `su`.
+fn app_can_see(path: &str) -> bool {
+    std::process::Command::new("su")
+        .args(["9999", "-c", &format!("ls -d {path}")])
+        .output()
+        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(true) // cannot ask -> do not silently drop the candidate
+}
+
+/// One thing the scan found worth hiding.
+pub struct Candidate {
+    pub path: String,
+    pub why: &'static str,
+    /// Hiding it still leaves the parent's size and link count counting it.
+    /// Reported, NOT filtered -- see `scan`.
+    pub hole: bool,
+}
+
+/// Walk the ROM for files that only a root setup leaves behind.
+///
+/// Returns (candidates, skipped_invisible, skipped_injected) so the caller can
+/// say what was filtered rather than just showing a short list.
+pub fn scan() -> (Vec<Candidate>, usize, usize) {
+    let have = read().unwrap_or_default();
+    let injected = injected_targets();
+    let (mut out, mut invisible, mut ours) = (Vec::new(), 0usize, 0usize);
+
+    for dir in SCAN_DIRS {
+        let Ok(rd) = fs::read_dir(dir) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let Some((_, why)) = PATTERNS.iter().find(|(m, _)| m.hits(&name)) else { continue };
+            let path = e.path();
+            let ps = path.to_string_lossy().into_owned();
+
+            // Fabricated-at-the-syscall-layer paths stat but never open; a
+            // whiteout cannot hide one and may break whatever provides it.
+            if !is_real_file(&path) {
+                continue;
             }
-            println!("{p}\t{why}");
-            found += 1;
+            if have.iter().any(|x| *x == ps) || validate(&ps).is_err() {
+                continue;
+            }
+            if injected.contains(&ps) {
+                ours += 1;
+                continue;
+            }
+            if !app_can_see(&ps) {
+                invisible += 1;
+                continue;
+            }
+            // NOT a filter. `/system/bin` is a multi-block erofs directory (8541
+            // bytes on OP15), so every candidate in the one place these files
+            // actually live leaves a measurable hole -- dropping them here made the
+            // scan silently report "nothing found" on exactly the device that has
+            // something to find. `whiteout add` applies such a hide anyway and says
+            // so, so the scan proposes it and carries the same warning.
+            out.push(Candidate { path: ps, why, hole: measurable_hole(&path) });
         }
     }
-    if found == 0 {
-        println!("nothing to suggest: none of the known candidates exist here, or all are listed");
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    (out, invisible, ours)
+}
+
+/// `nomount whiteout suggest` — scan THIS device and propose what it finds.
+pub fn suggest() -> Result<()> {
+    let (found, invisible, ours) = scan();
+    for c in &found {
+        let note = if c.hole { " (hiding it leaves a measurable hole in the parent)" } else { "" };
+        println!("{}\t{}{note}", c.path, c.why);
+    }
+    if found.is_empty() {
+        println!(
+            "nothing to suggest: no root-setup leftovers on any ROM partition here. On a \
+             mountless setup that is the expected result -- nothing is written to /system, so \
+             there is nothing on it to hide."
+        );
     } else {
-        println!("\n{found} candidate(s); add with: nomount whiteout add <path>");
+        println!("\n{} candidate(s); add with: nomount whiteout add <path>", found.len());
+    }
+    if invisible > 0 {
+        println!(
+            "({invisible} match(es) skipped: no ordinary app can see them, so hiding them \
+             would be a no-op)"
+        );
+    }
+    if ours > 0 {
+        println!("({ours} match(es) skipped: NoMount is serving them -- they are module content)");
     }
     Ok(())
 }
@@ -289,6 +426,25 @@ mod tests {
     fn parse_strips_comments_blanks_and_dedups() {
         let raw = "# hdr\n\n/system/bin/x\n  /system/bin/y  \n/system/bin/x\n";
         assert_eq!(parse(raw), vec!["/system/bin/x".to_string(), "/system/bin/y".to_string()]);
+    }
+
+    /// The false positive that made a substring sweep useless: "ksu" is inside
+    /// `cksum`, and `debuggerd` contains "adbd". Both are stock binaries, and
+    /// proposing a hide for either is worse than proposing nothing.
+    #[test]
+    fn patterns_are_anchored_and_miss_stock_binaries() {
+        for stock in ["cksum", "debuggerd", "sh", "linker64", "app_process64", "toybox"] {
+            assert!(
+                !PATTERNS.iter().any(|(m, _)| m.hits(stock)),
+                "{stock} is a stock binary and must never be proposed"
+            );
+        }
+        for tell in [
+            "install-recovery.sh", "install-recovery_oplus.sh", "daemonsu", "magiskinit",
+            "XposedBridge.jar", "libriru.so", "99SuperSUDaemon",
+        ] {
+            assert!(PATTERNS.iter().any(|(m, _)| m.hits(tell)), "{tell} must be found");
+        }
     }
 
     #[test]
