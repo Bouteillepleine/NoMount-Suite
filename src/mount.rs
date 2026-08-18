@@ -690,6 +690,14 @@ pub fn run_reload() -> Result<()> {
         if live.contains_key(&(w.clone(), 0)) {
             continue;
         }
+        // Same gate `whiteout::apply` uses. Without it a hand-edited entry that
+        // apply() refuses (a partition root, a /data path) would still be pushed
+        // to the engine from here -- the two paths must agree on what is legal.
+        if crate::whiteout::validate(&w.to_string_lossy()).is_err() {
+            eprintln!("nomount: skipping invalid whiteout entry {}", w.display());
+            failed += 1;
+            continue;
+        }
         match nm.whiteout(w) {
             Ok(()) => added += 1,
             Err(_) => failed += 1,

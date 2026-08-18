@@ -236,13 +236,18 @@ do_vbmeta() {
     # Set only when missing (unless forced). VALIDATE once against the real prop.
     [ "${vbmeta_size:-auto}" = "off" ] && return 0
     [ -n "$RESETPROP" ] || return 0
+    # Decide whether there is anything to DO before doing any work. Walking the AVB
+    # chain costs ~1.9s (dd bs=1 over every chained partition) and this runs at
+    # post-fs-data, ahead of the mount pass -- so it must not happen on a device
+    # whose ro.boot.vbmeta.size is already correct, which is the normal case.
+    cur=$(getprop ro.boot.vbmeta.size 2>/dev/null)
+    [ -n "$cur" ] && [ "$mode" != "force" ] && return 0
     [ -s "$szcache" ] && sz=$(cat "$szcache" 2>/dev/null)
     # No cache yet (digest already present, so nothing recomputed) -- measure the
     # chain now rather than leaving the size permanently unset.
     [ -n "$sz" ] || { compute_vbmeta_digest >/dev/null 2>&1
                       [ -s "$szcache" ] && sz=$(cat "$szcache" 2>/dev/null); }
     [ -n "$sz" ] || return 0
-    cur=$(getprop ro.boot.vbmeta.size 2>/dev/null)
     if [ -z "$cur" ] || [ "$mode" = "force" ]; then
         $RESETPROP -n ro.boot.vbmeta.size "$sz" 2>/dev/null && log "vbmeta.size set = $sz ($mode)"
     fi

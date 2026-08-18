@@ -16,6 +16,7 @@
     --brd2:    rgba(255,255,255,0.055);
     --txt:     #eaeef7;
     --muted:   #8a93a9;
+    --dim:     #7d8699;
     --faint:   #616a80;
     --acc:     #7c9cff;
     --acc2:    #57e6c3;
@@ -315,6 +316,8 @@
   .blk.live    .dot { background: var(--acc2, #57e6c3); }
   .blk.live    .bs  { color: var(--acc2, #57e6c3); }
   .blk.pending .dot, .blk.drift .dot { background: var(--warn, #d9a441); }
+  .blk.live .dot { background: var(--ok); }
+  .blk.gone .dot { background: var(--faint); }
   .blk.pending .bs,  .blk.drift .bs  { color: var(--warn, #d9a441); }
   .blk .bx, .row .bx {
     flex: 0 0 auto; width: 24px; height: 24px; line-height: 22px; text-align: center;
@@ -556,6 +559,7 @@
     --brd2:    rgba(16,26,48,0.070);
     --txt:     #101725;
     --muted:   #576179;
+    --dim:     #6b7488;
     --faint:   #7a8497;
     --acc:     #3f63e0;
     --acc2:    #0f9e84;
@@ -981,7 +985,11 @@
   let execId = 0;
   const KSU = window.ksu;
   const $ = (id) => document.getElementById(id);
-  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  // Quotes included: every use of this sits inside an HTML attribute
+  // (title="...", data-...="..."), where a bare " ends the attribute early and
+  // silently turns the rest of the tag into garbage.
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   document.getElementById("banner").style.display = (KSU && KSU.exec) ? "none" : "block";
 
   function exec(cmd, opts = {}) {
@@ -1018,7 +1026,7 @@
   // control now shows the same spinning ring, so "is it doing anything?" is never
   // a guess. Returns the restore function, so callers cannot forget which label
   // to put back.
-  const _SPIN = '<svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  const _SPIN = '<svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
     'stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="9" opacity=".25"/>' +
     '<path d="M21 12a9 9 0 0 0-9-9"/></svg>';
   function busy(btn, label) {
@@ -1927,7 +1935,7 @@
       const cls = /^hidden/.test(st) ? "vfs" : /^not applied \(and no such path/.test(st) ? "off" : "warn";
       return `<div class="row"><span class="name mono" title="${esc(path)}">${esc(path)}</span>` +
              `<span class="tag ${cls}" title="${esc(st)}">${esc(st.split(" - ")[0])}</span>` +
-             `<button class="bx" title="Stop hiding" onclick="woRemove(${JSON.stringify(path)},this)">✕</button></div>`;
+             `<button class="bx" title="Stop hiding" data-p="${encodeURIComponent(path)}" onclick="woRemove(this)">✕</button></div>`;
     }).join("");
   }
   async function woAdd(btn) {
@@ -1942,7 +1950,8 @@
     if (r.errno === 0) $("woPath").value = "";
     done(); refreshWhiteouts(); refreshStatus();
   }
-  async function woRemove(path, btn) {
+  async function woRemove(btn) {
+    const path = decodeURIComponent(btn.dataset.p || "");
     const done = busy(btn);
     const r = await nm(`whiteout remove ${path}`);
     toast(r.errno === 0 ? "No longer hidden" : "Failed", r.errno === 0 ? "ok" : "bad");
@@ -1972,14 +1981,19 @@
           const p = l.split("\t")[0], why = l.split("\t")[1] || "";
           return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(p)}</span>` +
                  `<span class="tag warn" title="${esc(why)}">${esc(why.split(";")[0])}</span>` +
-                 `<button class="bx" title="Hide this path" onclick="woAddPath(${JSON.stringify(p)},this)">+</button></div>`;
+                 `<button class="bx" title="Hide this path" data-p="${encodeURIComponent(p)}" onclick="woAddPath(this)">+</button></div>`;
         }).join("") +
         (notes ? `<div class="empty">${esc(notes)}</div>` : "");
       toast(cands.length + " candidate(s) found", "ok");
     }
     done();
   }
-  async function woAddPath(path, btn) {
+  // Path arrives via a data attribute, like the Cloak rows: inlining it into the
+  // onclick as a JSON string put a bare " inside a double-quoted attribute, which
+  // ended the attribute at the first character of the path and left the button
+  // completely inert.
+  async function woAddPath(btn) {
+    const path = decodeURIComponent(btn.dataset.p || "");
     const done = busy(btn);
     const r = await nm(`whiteout add ${path}`);
     toast(r.errno === 0 ? "Hidden" : "Failed", r.errno === 0 ? "ok" : "bad");

@@ -12,7 +12,7 @@
 //! device instead and only ever proposes paths that actually exist.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -327,8 +327,13 @@ fn injected_targets() -> std::collections::HashSet<String> {
 /// list, and was verified on OP15 to see stock AND injected files while getting
 /// ENOENT for `su`.
 fn app_can_see(path: &str) -> bool {
+    // Single-quoted: `path` is a FILENAME READ OFF THE FILESYSTEM, and this string
+    // is handed to a shell. A ROM (or a module writing into one) carrying a name
+    // like `x; id` would otherwise run it. uid 9999 is unprivileged, but a shell
+    // built by concatenation is not something to leave standing.
+    let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     std::process::Command::new("su")
-        .args(["9999", "-c", &format!("ls -d {path}")])
+        .args(["9999", "-c", &format!("ls -d {quoted}")])
         .output()
         .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(true) // cannot ask -> do not silently drop the candidate
@@ -352,13 +357,27 @@ pub fn scan() -> (Vec<Candidate>, usize, usize) {
     let injected = injected_targets();
     let (mut out, mut invisible, mut ours) = (Vec::new(), 0usize, 0usize);
 
-    for dir in SCAN_DIRS {
-        let Ok(rd) = fs::read_dir(dir) else { continue };
+    // Depth 2, not 1. `/system/app` and `/system/priv-app` hold one DIRECTORY per
+    // app, so a stale `Superuser.apk` lives at `/system/app/Superuser/Superuser.apk`
+    // and a depth-1 walk could never match it -- the pattern was unreachable.
+    let mut queue: Vec<(PathBuf, u8)> =
+        SCAN_DIRS.iter().map(|d| (PathBuf::from(d), 0u8)).collect();
+    let mut seen = 0usize;
+    while let Some((dir, depth)) = queue.pop() {
+        // Bounded: a symlinked ROM root could otherwise turn this into a full walk.
+        seen += 1;
+        if seen > 4096 {
+            break;
+        }
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
         for e in rd.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            let Some((_, why)) = PATTERNS.iter().find(|(m, _)| m.hits(&name)) else { continue };
             let path = e.path();
+            if depth < 1 && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                queue.push((path.clone(), depth + 1));
+            }
+            let Some((_, why)) = PATTERNS.iter().find(|(m, _)| m.hits(&name)) else { continue };
             let ps = path.to_string_lossy().into_owned();
 
             // Fabricated-at-the-syscall-layer paths stat but never open; a
