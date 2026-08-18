@@ -13,6 +13,7 @@
 #include <linux/sizes.h>
 #include <linux/magic.h>
 #include <linux/hash.h>
+#include <linux/ktime.h>
 #include "nomount.h"
 
 /* Android packs (user_id, appid) into a uid: uid = user_id*NM_PER_USER_RANGE + appid.
@@ -2029,12 +2030,7 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
  */
 #define NM_INO_SAMPLES 64      /* neighbour inodes sampled per directory */
 #define NM_INO_MINE    256     /* of our own placements we can remember exactly */
-
-struct nm_ino_scan {
-    struct dir_context ctx;
-    char names[NM_INO_SAMPLES][NAME_MAX + 1];
-    int n;
-};
+#define NM_RANGE_SLOTS 8       /* directories whose sample we keep around */
 
 /* One directory's neighbourhood: the real inodes sampled from it (ascending),
  * plus what we have already handed out there so two injections never land on
@@ -2046,21 +2042,6 @@ struct nm_ino_pop {
     int nmine;
     u64 hw;                    /* highest we placed, for the overflow path */
 };
-
-static NM_ACTOR_RET nm_ino_actor(struct dir_context *ctx, const char *name,
-                                 int namelen, loff_t off, u64 ino, unsigned int dt)
-{
-    struct nm_ino_scan *s = container_of(ctx, struct nm_ino_scan, ctx);
-
-    if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
-        return NM_ACTOR_CONTINUE;
-    if (s->n < NM_INO_SAMPLES) {
-        memcpy(s->names[s->n], name, namelen);
-        s->names[s->n][namelen] = '\0';
-        s->n++;
-    }
-    return NM_ACTOR_CONTINUE;
-}
 
 /* Is there already a live rule for this exact path? Callers hold
  * nomount_write_mutex, which is what serializes the table against del/clear. */
@@ -2077,13 +2058,95 @@ static bool nm_path_is_injected(const char *path, size_t len)
     return false;
 }
 
-/* Sampled st_ino range of dirpath's entries of one kind. Classify on the stat
- * result and not on the dirent type: stat() is what a probe reads, and a
- * DT_UNKNOWN filesystem would otherwise bucket every entry wrongly.
+struct nm_ino_scan {
+    struct dir_context ctx;
+    bool overlay;              /* dirent ino lies here -- must stat each child */
+    bool want_dir;
+    const char *dirpath;
+    int dirlen;
+    struct nm_ino_pop *pop;    /* filled directly on the cheap path */
+    char (*names)[NAME_MAX + 1];   /* allocated for the overlay path only */
+    int n_names;
+    char pathbuf[PATH_MAX];    /* reused; the actor must not allocate */
+};
+
+static void nm_pop_insert(struct nm_ino_pop *pop, u64 ino)
+{
+    int j = pop->n;
+
+    if (!ino || pop->n >= NM_INO_SAMPLES)
+        return;
+    while (j > 0 && pop->v[j - 1] > ino) {
+        pop->v[j] = pop->v[j - 1];
+        j--;
+    }
+    pop->v[j] = ino;
+    pop->n++;
+}
+
+/* Build dirpath/name into the scan's own buffer. No allocation: this runs
+ * inside iterate_dir, under the directory's lock. */
+static int nm_scan_path(struct nm_ino_scan *s, const char *name, int namelen)
+{
+    if (s->dirlen + 1 + namelen >= PATH_MAX)
+        return -ENAMETOOLONG;
+    memcpy(s->pathbuf, s->dirpath, s->dirlen);
+    s->pathbuf[s->dirlen] = '/';
+    memcpy(s->pathbuf + s->dirlen + 1, name, namelen);
+    s->pathbuf[s->dirlen + 1 + namelen] = '\0';
+    return s->dirlen + 1 + namelen;
+}
+
+static NM_ACTOR_RET nm_ino_actor(struct dir_context *ctx, const char *name,
+                                 int namelen, loff_t off, u64 ino, unsigned int dt)
+{
+    struct nm_ino_scan *s = container_of(ctx, struct nm_ino_scan, ctx);
+    int len;
+
+    if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
+        return NM_ACTOR_CONTINUE;
+
+    len = nm_scan_path(s, name, namelen);
+    if (len < 0)
+        return NM_ACTOR_CONTINUE;
+    if (nm_path_is_injected(s->pathbuf, len))   /* never sample ourselves */
+        return NM_ACTOR_CONTINUE;
+
+    if (!s->overlay) {
+        /* d_ino IS st_ino off overlayfs, so the dirent stream already carries
+         * the number a probe would stat for. Measured on this device: 0 of 15
+         * entries differed in /system/app (erofs) while 38 of 38 differed in
+         * /product/app (overlay). Taking it here costs nothing, where the
+         * kern_path()+stat() per child that this replaces pushed the injection
+         * pass from ~30s to ~205s of boot and tripped the 250s OPlus watchdog.
+         *
+         * DT_UNKNOWN carries no kind, and guessing one would put entries in the
+         * wrong population; skip those rather than pollute the sample. */
+        if (dt == DT_UNKNOWN)
+            return NM_ACTOR_CONTINUE;
+        if ((dt == DT_DIR) == s->want_dir)
+            nm_pop_insert(s->pop, ino);
+        return NM_ACTOR_CONTINUE;
+    }
+
+    if (s->names && s->n_names < NM_INO_SAMPLES) {
+        memcpy(s->names[s->n_names], name, namelen);
+        s->names[s->n_names][namelen] = '\0';
+        s->n_names++;
+    }
+    return NM_ACTOR_CONTINUE;
+}
+
+/* TEMPORARY (validation only -- strip before shipping, it names the mechanism
+ * in dmesg): what the injection pass actually costs. */
+static u32 nm_ino_scan_count, nm_ino_stat_count;
+static u64 nm_ino_scan_ns;
+
+/* Sampled st_ino population of dirpath's entries of one kind.
  *
  * Our OWN injections are skipped. This reads the directory through the hijacked
  * ops, so a cold scan after a reload sees earlier injections as if they were
- * population; feeding those back in would drag the range toward wherever we
+ * population; feeding those back in would drag the sample toward wherever we
  * last placed things, and in the dense case would ratchet the top up by another
  * offset on every boot until it became the outlier this fix exists to remove. */
 static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop *pop)
@@ -2092,7 +2155,9 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     struct path dp;
     struct file *dir;
     const struct cred *old;
-    int i;
+    u64 t0 = ktime_get_ns();
+    bool was_overlay = false;
+    int i, nstat = 0;
 
     pop->n = 0;
     pop->nmine = 0;
@@ -2101,6 +2166,21 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
         return -ENOENT;
     sc = kzalloc(sizeof(*sc), GFP_KERNEL);
     if (!sc) { path_put(&dp); return -ENOMEM; }
+
+    sc->want_dir = want_dir;
+    sc->dirpath  = dirpath;
+    sc->dirlen   = (int)strlen(dirpath);
+    if (sc->dirlen == 1 && dirpath[0] == '/')
+        sc->dirlen = 0;                  /* "//x" would not match any rule */
+    sc->pop = pop;
+#ifdef OVERLAYFS_SUPER_MAGIC
+    sc->overlay = dp.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
+#endif
+    /* Only the overlay path needs names kept for a second, stat-ing pass. */
+    if (sc->overlay) {
+        sc->names = kzalloc(NM_INO_SAMPLES * (NAME_MAX + 1), GFP_KERNEL);
+        if (!sc->names) { kfree(sc); path_put(&dp); return -ENOMEM; }
+    }
 
     *((filldir_t *)&sc->ctx.actor) = nm_ino_actor;
     old = override_creds(nm_root_cred);
@@ -2112,63 +2192,80 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     }
     revert_creds(old);
 
-    for (i = 0; i < sc->n; i++) {
+    /* Overlay only: resolve what we collected. Classify on the stat result,
+     * not the dirent type -- stat() is what a probe reads. */
+    for (i = 0; sc->overlay && i < sc->n_names; i++) {
         char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->names[i]);
         struct path fp;
         struct kstat fk;
 
         if (!cp)
             continue;
-        if (nm_path_is_injected(cp, strlen(cp))) {
-            kfree(cp);
-            continue;
-        }
         if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
             int r = nm_path_stat(&fp, &fk);
 
             path_put(&fp);
-            if (r == 0 && fk.ino && (!!S_ISDIR(fk.mode) == want_dir)) {
-                int j = pop->n;                  /* keep sorted, n <= 20 */
-
-                while (j > 0 && pop->v[j - 1] > fk.ino) {
-                    pop->v[j] = pop->v[j - 1];
-                    j--;
-                }
-                pop->v[j] = fk.ino;
-                pop->n++;
-            }
+            nstat++;
+            if (r == 0 && (!!S_ISDIR(fk.mode) == want_dir))
+                nm_pop_insert(pop, fk.ino);
         }
         kfree(cp);
     }
+
+    was_overlay = sc->overlay;
+    if (sc->names)
+        kfree(sc->names);
     kfree(sc);
+
+    nm_ino_scan_count++;
+    nm_ino_stat_count += nstat;
+    nm_ino_scan_ns += ktime_get_ns() - t0;
+    pr_info_ratelimited("nomount: ino-scan %s (%s,%s) got=%d stats=%d | cum scans=%u stats=%u ms=%llu\n",
+                        dirpath, was_overlay ? "ovl" : "cheap", want_dir ? "dir" : "file",
+                        pop->n, nstat, nm_ino_scan_count, nm_ino_stat_count,
+                        nm_ino_scan_ns / 1000000);
     return pop->n ? 0 : -ENOENT;
 }
 
-/* One-entry cache, same argument as nm_sib_cache below: the ~139 APKs injected
- * into /product/overlay all resolve the same parent, and rule-add is serialized
- * under nomount_write_mutex so plain statics need no extra locking. */
-static char nm_range_cache_dir[PATH_MAX];
-static bool nm_range_cache_want_dir;
-static struct nm_ino_pop nm_range_cache_pop;
-static bool nm_range_cache_valid;
-
-/* Returns the cache entry ITSELF, never a copy: nm_place_ino records what it
+/* Small keyed cache. A one-slot version re-scanned every time rule-add
+ * alternated between directories, which is most of what a real module set
+ * does. Keyed on the path hash rather than the string so the table stays a
+ * few KB. Returns the entry ITSELF, never a copy: nm_place_ino records what it
  * handed out in there, and the ~139 APKs going into one directory only stay
  * distinct because each sees the previous one's marks. */
+struct nm_range_slot {
+    u32 hash;
+    u16 len;
+    bool want_dir;
+    bool valid;
+    struct nm_ino_pop pop;
+};
+static struct nm_range_slot nm_range_cache[NM_RANGE_SLOTS];
+static int nm_range_cache_next;
+
 static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_dir)
 {
-    if (nm_range_cache_valid && nm_range_cache_want_dir == want_dir &&
-        strcmp(nm_range_cache_dir, dirpath) == 0)
-        return &nm_range_cache_pop;
+    size_t len = strlen(dirpath);
+    u32 h = full_name_hash(NULL, dirpath, len);
+    struct nm_range_slot *sl;
+    int i;
 
-    if (nm_dir_ino_pop(dirpath, want_dir, &nm_range_cache_pop) != 0) {
-        nm_range_cache_valid = false;
-        return NULL;
+    for (i = 0; i < NM_RANGE_SLOTS; i++) {
+        sl = &nm_range_cache[i];
+        if (sl->valid && sl->hash == h && sl->len == (u16)len &&
+            sl->want_dir == want_dir)
+            return &sl->pop;
     }
-    strscpy(nm_range_cache_dir, dirpath, PATH_MAX);
-    nm_range_cache_want_dir = want_dir;
-    nm_range_cache_valid = true;
-    return &nm_range_cache_pop;
+    sl = &nm_range_cache[nm_range_cache_next];
+    nm_range_cache_next = (nm_range_cache_next + 1) % NM_RANGE_SLOTS;
+    sl->valid = false;
+    if (nm_dir_ino_pop(dirpath, want_dir, &sl->pop) != 0)
+        return NULL;
+    sl->hash = h;
+    sl->len = (u16)len;
+    sl->want_dir = want_dir;
+    sl->valid = true;
+    return &sl->pop;
 }
 
 static bool nm_ino_taken(const struct nm_ino_pop *pop, u64 c)
@@ -2243,6 +2340,7 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
         return nm_ino_take(pop, c);
     }
 }
+
 
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 {
