@@ -56,6 +56,39 @@ else
     VERSION="v${VERSION}"
 fi
 
+# --- nm: build it, or say plainly that a prebuilt is being shipped ------------
+# nm is freestanding C with no libc, so it needs a cross compiler rather than
+# cargo. Only CI ever built it, and packaging silently fell back to the gitignored
+# prebuilt under module/bin/ -- so a local build shipped a STALE nm whenever
+# userspace/src/nm.c had changed, with nothing in the output saying so. Build it
+# here when zig is around, and refuse to ship a prebuilt older than its source.
+build_nm() {
+    local zig
+    zig="$(command -v zig || true)"
+    if [ -z "$zig" ]; then
+        return 1
+    fi
+    make -s -C "$PROJECT_ROOT/userspace/tools/sstrip" >/dev/null 2>&1 || true
+    "$zig" cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
+        -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
+        "$PROJECT_ROOT/userspace/src/nm.c" -o "$PROJECT_ROOT/nm-arm64" || return 1
+    "$PROJECT_ROOT/userspace/tools/sstrip/sstrip" -z "$PROJECT_ROOT/nm-arm64" >/dev/null 2>&1 || true
+    local profile
+    for profile in debug release; do
+        install -Dm755 "$PROJECT_ROOT/nm-arm64" \
+            "$PROJECT_ROOT/target/aarch64-linux-android/${profile}/nm"
+    done
+    rm -f "$PROJECT_ROOT/nm-arm64"
+    echo "==> nm built from source ($(wc -c < "$PROJECT_ROOT/target/aarch64-linux-android/release/nm") bytes)"
+    return 0
+}
+
+if $BUILD; then
+    if ! build_nm; then
+        echo "==> nm: no zig on PATH, will fall back to a prebuilt"
+    fi
+fi
+
 mkdir -p "$RELEASE_DIR/debug" "$RELEASE_DIR/release"
 
 if [ "$CLEAN" = true ]; then
@@ -181,12 +214,21 @@ package_zip() {
             cp "$MODULE_DIR/bin/$abi/nomount" "$staging/bin/$abi/nomount"; found_nomount=$((found_nomount + 1))
         fi
 
-        # nm is arch-shared C, built once (by CI) into the target dir next to
-        # nomount; fall back to a committed prebuilt for local packaging.
+        # nm is arch-shared C, built by build_nm() above (or by CI) into the target
+        # dir next to nomount; a committed prebuilt is the last resort.
         local nm_src="$PROJECT_ROOT/target/$target/$target_subdir/nm"
         if [ -f "$nm_src" ]; then
             cp "$nm_src" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
         elif [ -f "$MODULE_DIR/bin/$abi/nm" ]; then
+            # A prebuilt older than nm.c is a stale binary the zip would present as
+            # current -- the failure this whole check exists to make impossible.
+            if [ "$PROJECT_ROOT/userspace/src/nm.c" -nt "$MODULE_DIR/bin/$abi/nm" ] \
+               || [ "$PROJECT_ROOT/userspace/src/nm.h" -nt "$MODULE_DIR/bin/$abi/nm" ]; then
+                echo "FATAL: $MODULE_DIR/bin/$abi/nm predates userspace/src/nm.[ch]." >&2
+                echo "       Install zig (0.14.x) and re-run, or let CI build it." >&2
+                rm -rf "$staging"
+                exit 1
+            fi
             cp "$MODULE_DIR/bin/$abi/nm" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
         fi
     done
