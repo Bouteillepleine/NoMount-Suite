@@ -31,6 +31,167 @@ const SCRIPTS: &[&str] = &[
     "common.sh",
 ];
 
+/// A module rewriting the ROOT MANAGER's global settings from its own scripts.
+///
+/// A different class from touching the mount table, and in one respect worse:
+/// it re-applies at every boot, so a user who fixes the setting by hand finds it
+/// back on next reboot with nothing to explain why.
+///
+/// BRENE (rrr333nnn333/BRENE, 325*) is the case this was written from. It makes
+/// no direct `mount` call at all -- it drives a susfs binary -- so the mount scan
+/// below sees nothing, while its boot-completed.sh runs
+/// `ksud feature set kernel_umount 1` with `config_kernel_umount=1` by DEFAULT.
+/// That is the switch that broke root on this hardware, and it also silently
+/// turns on "Umount modules by default".
+pub struct ManagerWrite {
+    pub module: String,
+    /// The setting being written, e.g. "kernel_umount".
+    pub key: String,
+    /// The value written, when the script writes a literal.
+    pub value: Option<String>,
+    /// Why this particular write is harmful, or None when it is merely notable.
+    pub harm: Option<&'static str>,
+}
+
+/// The VALUE decides the harm, not the key. `feature set su_compat 1` is what a
+/// healthy system already has; `feature set su_compat 0` removes root entirely.
+/// Grading on the key alone would warn about the first and miss the second.
+///
+/// Read off the live feature set (ksud 4.2.0-rc1): su_compat, kernel_umount,
+/// sulog, adb_root, selinux_hide.
+fn harm_of(key: &str, value: Option<&str>) -> Option<&'static str> {
+    match (key, value) {
+        ("su_compat", Some("0")) => Some(
+            "su on this configuration comes from sucompat, so disabling it removes root \
+             outright -- a harder failure than any mount switch",
+        ),
+        ("kernel_umount", Some("1")) => Some(
+            "it can hide nothing the Suite serves (injections are not mounts), it turns on \
+             \"Umount modules by default\" with it, and it has broken root on this hardware",
+        ),
+        ("selinux_hide", Some("0")) => Some(
+            "it sanitizes /sys/fs/selinux for app UIDs; turning it off re-opens the SELinux \
+             oracles detectors already use",
+        ),
+        ("sulog", Some("1")) => Some(
+            "it persists su events to disk, which is both a forensic trail and a file a \
+             detector can look for",
+        ),
+        // A write with no literal value still deserves naming: the module is
+        // taking the setting over, whatever it decides at runtime.
+        (k, None) if matches!(k, "su_compat" | "kernel_umount" | "selinux_hide" | "sulog") => {
+            Some("the value is computed at runtime, so what it ends up as is the module's call")
+        }
+        _ => None,
+    }
+}
+
+/// `ksud feature set <key> <value>`, however the binary is spelled -- a literal
+/// path, `$KSU_BIN`, `ksud`. Matches on the verb, not the binary.
+fn manager_writes(code: &str) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    for line in code.lines() {
+        // Drop quoted text first, exactly as the mount scan does: `echo "we
+        // never feature set anything"` is prose, not a setting being written.
+        let bare = unquote(line);
+        let w: Vec<&str> = bare.split_whitespace().collect();
+        for i in 0..w.len() {
+            if w[i] == "feature" && w.get(i + 1) == Some(&"set") {
+                if let Some(k) = w.get(i + 2) {
+                    let k = k.trim_matches(|c| c == '"' || c == '\'');
+                    // A literal 0/1 is the value; a variable or substitution is
+                    // unknown rather than assumed.
+                    let v = w
+                        .get(i + 3)
+                        .map(|v| v.trim_matches(|c| c == '"' || c == '\''))
+                        .filter(|v| *v == "0" || *v == "1")
+                        .map(|v| v.to_string());
+                    if !k.is_empty() && !out.iter().any(|(e, _)| e == k) {
+                        out.push((k.to_string(), v));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Does this module's own scripts drive SUSFS?
+///
+/// Matters because a SUSFS module on a kernel without SUSFS is all cost and no
+/// benefit: every hiding call it makes is a no-op, while its side effects --
+/// flipping manager settings, writing props, mounting -- still happen. BRENE and
+/// susfs4ksu-module are both in this shape on a hookless build.
+fn uses_susfs(code: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "ksu_susfs",
+        "susfs_bin",
+        "add_sus_path",
+        "add_sus_mount",
+        "add_sus_kstat",
+        "add_try_umount",
+        "add_open_redirect",
+        "hide_sus_mnts_for_non_su_procs",
+        "sus_su",
+    ];
+    MARKERS.iter().any(|m| code.contains(m))
+}
+
+/// Enabled modules whose function depends on SUSFS.
+pub fn scan_susfs_users(modules_dir: &str, self_id: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(dirs) = fs::read_dir(modules_dir) else { return out };
+    for e in dirs.flatten() {
+        let dir = e.path();
+        if !dir.is_dir() || dir.join("disable").exists() || dir.join("remove").exists() {
+            continue;
+        }
+        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else { continue };
+        if id == self_id {
+            continue;
+        }
+        let hit = SCRIPTS.iter().any(|n| {
+            fs::read_to_string(dir.join(n)).map(|r| uses_susfs(&code_only(&r))).unwrap_or(false)
+        });
+        if hit {
+            out.push(id.to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Every enabled module whose scripts rewrite root-manager settings.
+pub fn scan_manager_writes(modules_dir: &str, self_id: &str) -> Vec<ManagerWrite> {
+    let mut out = Vec::new();
+    let Ok(dirs) = fs::read_dir(modules_dir) else { return out };
+    for e in dirs.flatten() {
+        let dir = e.path();
+        if !dir.is_dir() || dir.join("disable").exists() || dir.join("remove").exists() {
+            continue;
+        }
+        let Some(id) = dir.file_name().and_then(|n| n.to_str()) else { continue };
+        if id == self_id {
+            continue;
+        }
+        let mut keys: Vec<(String, Option<String>)> = Vec::new();
+        for name in SCRIPTS {
+            let Ok(raw) = fs::read_to_string(dir.join(name)) else { continue };
+            for kv in manager_writes(&code_only(&raw)) {
+                if !keys.iter().any(|(k, _)| *k == kv.0) {
+                    keys.push(kv);
+                }
+            }
+        }
+        for (key, value) in keys {
+            let harm = harm_of(&key, value.as_deref());
+            out.push(ManagerWrite { module: id.to_string(), key, value, harm });
+        }
+    }
+    out.sort_by(|a, b| b.harm.is_some().cmp(&a.harm.is_some()).then(a.module.cmp(&b.module)));
+    out
+}
+
 /// What a module will do to the mount table, worst case first.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 pub enum MountHabit {
@@ -267,6 +428,45 @@ mod tests {
             classify(&code_only("mount -t tmpfs tmpfs /dev/x")).unwrap().0,
             MountHabit::Absorbable
         );
+    }
+
+    /// Verbatim from BRENE's boot-completed.sh, which the mount scan cannot see.
+    #[test]
+    fn catches_a_module_flipping_manager_settings() {
+        let code = code_only(
+            "if [[ \"${config_kernel_umount}\" == \"1\" ]]; then\n\
+             \t${KSU_BIN} feature set kernel_umount 1\nfi\n\
+             ${KSU_BIN} feature set selinux_hide 1\n",
+        );
+        let keys = manager_writes(&code);
+        assert!(keys.iter().any(|(k, _)| k == "kernel_umount"), "must catch the dangerous key");
+        assert!(keys.iter().any(|(k, _)| k == "selinux_hide"));
+        // and it must not fire on prose or on reading a feature
+        assert!(manager_writes(&code_only("ksud feature get kernel_umount")).is_empty());
+        assert!(manager_writes(&code_only("echo 'we never feature set anything'")).is_empty());
+    }
+
+    #[test]
+    fn susfs_users_are_recognised() {
+        assert!(uses_susfs(&code_only("${SUSFS_BIN} add_sus_path /system/addon.d")));
+        assert!(uses_susfs(&code_only("ksu_susfs add_try_umount /data/adb/modules 1")));
+        assert!(!uses_susfs(&code_only("echo hello; mount -o bind /a /b")));
+    }
+
+    /// The VALUE decides harm. Turning su_compat OFF is worse than anything a
+    /// mount switch can do; turning it ON is what a healthy system already has.
+    #[test]
+    fn harm_is_judged_on_the_value_not_the_key() {
+        assert!(harm_of("su_compat", Some("0")).is_some(), "disabling su must warn");
+        assert!(harm_of("su_compat", Some("1")).is_none(), "enabling su is not harm");
+        assert!(harm_of("kernel_umount", Some("1")).is_some());
+        assert!(harm_of("kernel_umount", Some("0")).is_none(), "turning it OFF is a fix");
+        assert!(harm_of("selinux_hide", Some("0")).is_some());
+        assert!(harm_of("sulog", Some("1")).is_some());
+        assert!(harm_of("adb_root", Some("1")).is_none());
+        // an unresolved value on a sensitive key is still worth naming
+        assert!(harm_of("kernel_umount", None).is_some());
+        assert!(harm_of("adb_root", None).is_none());
     }
 
     /// The worst habit wins even when a milder one appears first.

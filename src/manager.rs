@@ -193,6 +193,33 @@ fn global_from(buf: &[u8]) -> Option<bool> {
     None
 }
 
+/// Does this kernel actually have SUSFS?
+///
+/// Probed through ksud rather than guessed: on a kernel without it,
+/// `ksud susfs show version` answers `Error: Unsupported SuSFS command`, because
+/// the prctl the tool issues is not implemented. Falls back to the build config
+/// when ksud cannot be run at all. Measured here: `# CONFIG_KSU_SUSFS is not
+/// set`, no /sys/fs/susfs, and the error above.
+pub fn susfs_present() -> bool {
+    if let Ok(out) = std::process::Command::new("/data/adb/ksu/bin/ksud")
+        .args(["susfs", "show", "version"])
+        .output()
+    {
+        let txt = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if txt.contains("Unsupported SuSFS command") {
+            return false;
+        }
+        if txt.chars().any(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    std::path::Path::new("/sys/fs/susfs").exists()
+}
+
 /// `ksud feature get kernel_umount` -> Some(true) when enabled.
 pub fn kernel_umount_enabled() -> Option<bool> {
     let out = std::process::Command::new("/data/adb/ksu/bin/ksud")

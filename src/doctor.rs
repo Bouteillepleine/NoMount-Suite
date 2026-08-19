@@ -519,6 +519,57 @@ pub fn run_doctor() -> Result<()> {
         f.push(Finding { level, check, detail });
     }
 
+    // A module rewriting the root manager's global settings from its own
+    // scripts. Separate from the mount scan because the module that motivated it
+    // makes no mount call at all: it drives a susfs binary, so the mount scan is
+    // blind to it while it flips kernel_umount on every boot.
+    // A SUSFS module on a kernel without SUSFS. This is the case where the
+    // advice really is "remove it", not "adjust it": every hiding call it makes
+    // is a no-op here, while its side effects -- manager settings, props,
+    // mounts -- still apply in full. Checked against the kernel, not assumed, so
+    // it stays silent on a SUSFS build where these modules do their job.
+    if !crate::manager::susfs_present() {
+        for id in crate::preflight::scan_susfs_users("/data/adb/modules", "meta-nomount") {
+            f.push(Finding {
+                level: Level::Warn,
+                check: "SUSFS module on a kernel without SUSFS",
+                detail: format!(
+                    "{id} drives SUSFS, but this kernel reports no SUSFS support, so every \
+                     hiding call it makes does nothing — while its side effects still happen \
+                     in full. It cannot help the Suite either: injections are VFS redirects, \
+                     so there is no mount for it to hide. REMOVE IT rather than tuning it; \
+                     anything it was meant to hide is already handled here, and on this build \
+                     it is pure risk"
+                ),
+            });
+        }
+    }
+
+    for w in crate::preflight::scan_manager_writes("/data/adb/modules", "meta-nomount") {
+        let shown = w.value.clone().unwrap_or_else(|| "<computed>".into());
+        let (level, detail) = match w.harm {
+            Some(why) => (
+                Level::Warn,
+                format!(
+                    "{} runs `feature set {} {}` in its scripts, so it re-applies that root \
+                     manager setting on EVERY boot — changing it by hand will not stick. {}. \
+                     Remove the module, or set its own config so it stops writing that key",
+                    w.module, w.key, shown, why
+                ),
+            ),
+            None => (
+                Level::Info,
+                format!(
+                    "{} runs `feature set {} {}` in its scripts, so it owns that root manager \
+                     setting at every boot — listed so the value you see in the manager is not \
+                     a mystery",
+                    w.module, w.key, shown
+                ),
+            ),
+        };
+        f.push(Finding { level, check: "module rewrites root-manager settings", detail });
+    }
+
     for (part, n) in &fd_note {
         f.push(Finding {
             level: Level::Info,
