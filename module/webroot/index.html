@@ -645,7 +645,7 @@
     </div>
     <div class="brand">
       <h1>NoMount Suite</h1>
-      <p>hookless VFS · RRO overlays · sucompat root</p>
+      <p>Prism VFS · RRO overlays · sucompat root</p>
     </div>
     <div class="hbtns">
       <span class="ver" id="ver">v…</span>
@@ -891,7 +891,7 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v5H3z"/><path d="M6 12v5M18 12v5"/><path d="M3 17h18v4H3z"/></svg>
       <h2>Foreign mounts</h2><span class="chip" id="abchip">—</span><span class="chev">›</span>
     </div>
-    <p class="note">Mounts that <b>another module</b> laid over the ROM. Every one is readable by any app in <code>/proc/&lt;pid&gt;/mountinfo</code>, which is the whole thing the mountless posture denies. <b>Absorb</b> re-serves each as a hookless injection and drops the mount; it also runs at every boot. A hook framework (Zygisk/Xposed) is deliberately left alone — breaking one only surfaces later, during dexopt.</p>
+    <p class="note">Mounts that <b>another module</b> laid over the ROM. Every one is readable by any app in <code>/proc/&lt;pid&gt;/mountinfo</code>, which is the whole thing the mountless posture denies. <b>Absorb</b> re-serves each as a Prism injection and drops the mount; it also runs at every boot. A hook framework (Zygisk/Xposed) is deliberately left alone — breaking one only surfaces later, during dexopt.</p>
     <div class="btns">
       <button class="act" onclick="absorbScan(this)">Scan</button>
       <button class="act primary" onclick="absorbRun(this)">Absorb now</button>
@@ -973,7 +973,7 @@
   </div>
   </section>
 
-  <div class="foot">NoMount Suite · hookless engine via netlink <code>nm</code><br/><span id="footver"></span></div>
+  <div class="foot">NoMount Suite · Prism engine via netlink <code>nm</code><br/><span id="footver"></span></div>
 </div>
 
 
@@ -1174,7 +1174,7 @@
     } else if (fmnt > 0) {
       rows.push({ k: "Real mounts", v: `${fmnt} from other module${fmnt > 1 ? "s" : ""} — visible`, t: "warn" });
     } else {
-      rows.push({ k: "Real mounts", v: "none — pure hookless", t: "vfs" });
+      rows.push({ k: "Real mounts", v: "none — pure Prism", t: "vfs" });
     }
     rows.push({ k: "Verified boot", v: vbs ? (vbTell ? vbs + " · tell" : vbs) : "n/a", t: vbTell ? "warn" : (vbs ? "vfs" : "off") });
     rows.push({ k: "Build keys", v: keyTell ? "test-keys · tell" : "release-keys", t: keyTell ? "warn" : "vfs" });
@@ -1188,7 +1188,7 @@
       shield.className = "shield warn";
       $("stealthT").textContent = "Mount visible to apps";
       $("stealthD").textContent = `uid 2000 sees ${appNm} nomount_* mount${appNm > 1 ? "s" : ""}`;
-      $("stealthNote").innerHTML = "A live non-root check sees <code>nomount_*</code> mounts. v2.3.7+ is <b>fully mountless</b> (hookless RRO) — if you see this, an older overlay build is still active; re-run the mount pass or reboot.";
+      $("stealthNote").innerHTML = "A live non-root check sees <code>nomount_*</code> mounts. v2.3.7+ is <b>fully mountless</b> (Prism RRO) — if you see this, an older overlay build is still active; re-run the mount pass or reboot.";
     } else if (appNm === 0) {
       shield.className = "shield clean";
       if (rootNm === 0 && fmnt > 0) {
@@ -1200,13 +1200,13 @@
         $("stealthD").textContent = `${fmnt} module mount${fmnt > 1 ? "s" : ""} visible to any app`;
         $("stealthNote").innerHTML = "The Suite itself adds <b>zero mounts</b>, but " + fmnt +
           " mount(s) backed by <code>/data/adb/modules</code> are in the mount table and readable by any app. " +
-          "<code>nomount absorb</code> converts what it safely can into hookless injections and runs at every boot; " +
+          "<code>nomount absorb</code> converts what it safely can into Prism injections and runs at every boot; " +
           "anything left is either a hook framework (Zygisk/Xposed, deliberately skipped) or a target injection cannot serve. " +
           "Run <b>Health check</b> below — it names each one and why it is still there.";
       } else if (rootNm === 0) {
         $("stealthT").textContent = "Fully mountless";
         $("stealthD").textContent = "zero mounts — nothing to hide";
-        $("stealthNote").innerHTML = "The Suite adds <b>zero mounts</b>: file injections are hookless, su is sucompat (kernel&nbsp;· mountless), and RRO overlays are hookless too — OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> mount table, so there is no mount-gap for a scanner to flag.";
+        $("stealthNote").innerHTML = "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat (kernel&nbsp;· mountless), and RRO overlays are hookless too — OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> mount table, so there is no mount-gap for a scanner to flag.";
       } else {
         $("stealthT").textContent = "Clean — nothing visible to apps";
         $("stealthD").textContent = `${rootNm} mount${rootNm > 1 ? "s" : ""} hidden from non-root`;
@@ -1216,7 +1216,7 @@
       shield.className = "shield clean";
       $("stealthT").textContent = "Detection posture";
       $("stealthD").textContent = "app-view check unavailable";
-      $("stealthNote").innerHTML = `File injections and RRO are hookless; su is sucompat. Couldn't drop to a non-root uid to verify here; root sees ${rootNm} <code>nomount_*</code> mount(s).`;
+      $("stealthNote").innerHTML = `File injections and RRO are Prism; su is sucompat. Couldn't drop to a non-root uid to verify here; root sees ${rootNm} <code>nomount_*</code> mount(s).`;
     }
 
     // Residual tells override the mount-only verdict: even with a clean mount surface,
@@ -1556,7 +1556,7 @@
     const vfs = lines.length - rro;
     $("rulechip").textContent = lines.length;
     $("rulebreak").textContent = lines.length
-      ? `${vfs} file redirect${vfs === 1 ? "" : "s"} · ${rro} RRO overlay APK${rro === 1 ? "" : "s"} — all hookless, no mounts`
+      ? `${vfs} file redirect${vfs === 1 ? "" : "s"} · ${rro} RRO overlay APK${rro === 1 ? "" : "s"} — all Prism, no mounts`
       : "No rules active.";
     _paintRuleModuleBar(lines);
   }
@@ -1616,7 +1616,7 @@
     else box.innerHTML = keys.map((d) =>
       `<div class="row"><span class="name mono">${esc(d)}</span>` +
       `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} file${dirs[d] > 1 ? "s" : ""}</span>` +
-      `<span class="tag vfs">hookless</span></div>`
+      `<span class="tag vfs">Prism</span></div>`
     ).join("");
     if ($("vfsfull").style.display !== "none") renderVfsFull();
   }
@@ -1627,7 +1627,7 @@
     return f.map(p => {
       const base = p.replace(/^.*\//, "");
       return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(base)}</span>` +
-             `<span class="tag vfs">hookless</span></div>`;
+             `<span class="tag vfs">Prism</span></div>`;
     }).join("");
   }
   function renderVfsFull() {
@@ -1668,7 +1668,7 @@
     else box.innerHTML = keys.map((d) =>
       `<div class="row"><span class="name mono">${esc(d)}</span>` +
       `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} apk${dirs[d] > 1 ? "s" : ""}</span>` +
-      `<span class="tag ov">hookless</span></div>`
+      `<span class="tag ov">Prism</span></div>`
     ).join("");
     if ($("overlaysfull").style.display !== "none") renderOvFull();
   }

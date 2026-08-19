@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "nomount",
     version = env!("CARGO_PKG_VERSION"),
-    about = "NoMount Suite metamodule + CLI for the hookless VFS engine (nm netlink)"
+    about = "NoMount Suite metamodule + CLI for the Prism VFS engine (nm netlink)"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -16,9 +16,9 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Metamodule mount pass: classify enabled modules and route them
-    /// (hookless inject / RRO overlay). su is external (sucompat).
+    /// (Prism inject / RRO overlay). su is external (sucompat).
     Mount,
-    /// Direct VFS-engine operations via the hookless `nm` client
+    /// Direct VFS-engine operations via the Prism `nm` client
     Vfs {
         #[command(subcommand)]
         action: VfsAction,
@@ -28,7 +28,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: UidAction,
     },
-    /// Take over bind mounts other modules made: re-serve each as a hookless
+    /// Take over bind mounts other modules made: re-serve each as a Prism
     /// injection, then unmount it. Restores the zero-mount posture even when a
     /// module mounts its own content without knowing about NoMount.
     Absorb {

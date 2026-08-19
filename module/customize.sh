@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# NoMount metamodule installer. Requires a CONFIG_NOMOUNT kernel (the hookless
+# NoMount metamodule installer. Requires a CONFIG_NOMOUNT kernel (the Prism
 # engine, reached over private raw netlink -- there is no /dev/nomount node).
 ui_print "- Installing NoMount metamodule"
 ui_print "- version $(grep_prop version "$MODPATH/module.prop")"
@@ -74,7 +74,7 @@ _nm="$MODPATH/bin/${_abi}/nm"
 if [ -x "$_nm" ]; then
     _ev=$("$_nm" v 2>/dev/null | tr -dc '0-9')
     if [ -n "$_ev" ]; then
-        ui_print "- Hookless engine: v${_ev} (responding)"
+        ui_print "- Prism engine: v${_ev} (responding)"
     else
         ui_print "*********************************************************"
         ui_print "! The kernel's NoMount engine did not answer."

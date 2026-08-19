@@ -173,13 +173,13 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     _fgn=${_fgn:-$_mnt}
     if [ "${_fgn:-0}" -gt 0 ]; then
         _mstate="⚠ $_fgn module mount(s)"
-        _tail="hookless VFS + RRO injection is mountless; $_fgn foreign mount(s) present"
+        _tail="Prism VFS + RRO injection is mountless; $_fgn foreign mount(s) present"
     elif [ "${_mnt:-0}" -gt 0 ]; then
         _mstate="$_mnt by design"
-        _tail="fully mountless: hookless VFS + RRO, su via sucompat ($_mnt hook-framework mount left alone)"
+        _tail="fully mountless: Prism VFS + RRO, su via sucompat ($_mnt hook-framework mount left alone)"
     else
         _mstate="0 mounts"
-        _tail="fully mountless: hookless VFS + RRO, su via sucompat"
+        _tail="fully mountless: Prism VFS + RRO, su via sucompat"
     fi
     # The manager's kernel_umount rides along on the card. It can hide nothing
     # the Suite serves -- injections are VFS redirects, so the kernel umount list
