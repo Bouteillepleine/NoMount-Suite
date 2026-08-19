@@ -59,7 +59,24 @@ pub struct ManagerWrite {
 ///
 /// Read off the live feature set (ksud 4.2.0-rc1): su_compat, kernel_umount,
 /// sulog, adb_root, selinux_hide.
+/// ksud accepts the numeric feature ID as well as the name, and modules use it:
+/// susfs4ksu-module ships `ksud feature set 1 1` -- feature 1 is kernel_umount,
+/// and its own echo says "[ksud umount enabled]". A name-only check waves that
+/// straight through, which is the difference between catching the dangerous
+/// switch and missing it. IDs are from `ksud feature list` (ksud 4.2.0-rc1).
+fn canonical_key(key: &str) -> &str {
+    match key {
+        "0" => "su_compat",
+        "1" => "kernel_umount",
+        "2" => "sulog",
+        "3" => "adb_root",
+        "4" => "selinux_hide",
+        other => other,
+    }
+}
+
 fn harm_of(key: &str, value: Option<&str>) -> Option<&'static str> {
+    let key = canonical_key(key);
     match (key, value) {
         ("su_compat", Some("0")) => Some(
             "su on this configuration comes from sucompat, so disabling it removes root \
@@ -211,6 +228,9 @@ pub fn scan_manager_writes(modules_dir: &str, self_id: &str) -> Vec<ManagerWrite
         }
         for (key, value) in keys {
             let harm = harm_of(&key, value.as_deref());
+            // Report the NAME even when the script used the numeric id, so the
+            // finding names a switch the user can find in their manager.
+            let key = canonical_key(&key).to_string();
             out.push(ManagerWrite { module: id.to_string(), key, value, harm });
         }
     }
@@ -479,6 +499,18 @@ mod tests {
         assert!(!uses_susfs(&code_only("echo hello; mount -o bind /a /b")));
     }
 
+    /// ksud takes the numeric feature id too, and a real module uses it.
+    #[test]
+    fn numeric_feature_ids_are_resolved() {
+        // verbatim from susfs4ksu-module: `feature set 1 1` == kernel_umount on
+        let kv = manager_writes(&code_only("${KSU_BIN} feature set 1 1 && echo ok"));
+        assert_eq!(kv.len(), 1);
+        assert_eq!(canonical_key(&kv[0].0), "kernel_umount");
+        assert!(harm_of(&kv[0].0, kv[0].1.as_deref()).is_some(), "id form must warn like the name");
+        assert!(harm_of("0", Some("0")).is_some(), "feature set 0 0 disables su_compat");
+        assert!(harm_of("3", Some("1")).is_none(), "adb_root by id is still benign");
+    }
+
     /// The VALUE decides harm. Turning su_compat OFF is worse than anything a
     /// mount switch can do; turning it ON is what a healthy system already has.
     #[test]
@@ -500,5 +532,80 @@ mod tests {
     fn worst_habit_wins() {
         let code = code_only("mount -o bind /a /b\nnsenter -t 1 -m -- mount -o bind /c /d");
         assert_eq!(classify(&code).unwrap().0, MountHabit::Namespace);
+    }
+}
+
+#[cfg(test)]
+mod survey {
+    //! Corpus survey: run the SHIPPING classifiers over a directory laid out
+    //! like /data/adb/modules, so the census reflects what the Suite would
+    //! actually report -- not a reimplementation of it that could drift.
+    //! Driven by NM_SURVEY_DIR; a no-op when that is unset.
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn corpus_census() {
+        let Ok(dir) = std::env::var("NM_SURVEY_DIR") else { return };
+        let habits = scan_all(&dir, "meta-nomount");
+        let writes = scan_manager_writes(&dir, "meta-nomount");
+        let susfs = scan_susfs_users(&dir, "meta-nomount");
+        let total = fs::read_dir(&dir).map(|d| d.flatten().filter(|e| e.path().is_dir()).count()).unwrap_or(0);
+
+        let mut hb: BTreeMap<String, usize> = BTreeMap::new();
+        for h in &habits {
+            *hb.entry(format!("{:?}", h.habit)).or_default() += 1;
+        }
+        println!("\n===== CORPUS: {total} modules =====");
+        println!("\n-- mount habit (preflight) --");
+        for (k, v) in &hb {
+            println!("   {k:<12} {v:>4}  ({:.1}%)", *v as f64 * 100.0 / total as f64);
+        }
+        println!("   {:<12} {:>4}  ({:.1}%)", "none", total - habits.len(),
+                 (total - habits.len()) as f64 * 100.0 / total as f64);
+
+        println!("\n-- rewrites root-manager settings --");
+        let mut kb: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+        for w in &writes {
+            let e = kb.entry(w.key.clone()).or_default();
+            e.0 += 1;
+            if w.harm.is_some() { e.1 += 1; }
+        }
+        if kb.is_empty() { println!("   none"); }
+        for (k, (n, harm)) in &kb {
+            println!("   feature set {k:<16} {n:>3} module(s), {harm} harmful");
+        }
+        let movers: std::collections::BTreeSet<&str> =
+            writes.iter().map(|w| w.module.as_str()).collect();
+        println!("   distinct modules touching manager settings: {}", movers.len());
+
+        println!("\n-- drives SUSFS --");
+        let purpose = susfs.iter().filter(|u| u.susfs_is_its_purpose).count();
+        println!("   {:>4} total, of which SUSFS IS the purpose: {purpose} (advise removal)",
+                 susfs.len());
+        println!("   {:>4} ship content too (assist only, keep)", susfs.len() - purpose);
+
+        println!("\n-- worst-case verdict per module --");
+        let mut worst: BTreeMap<&str, usize> = BTreeMap::new();
+        for _ in 0..0 { }
+        let mut counted = std::collections::BTreeSet::new();
+        for u in susfs.iter().filter(|u| u.susfs_is_its_purpose) {
+            *worst.entry("WARN susfs-only module").or_default() += 1;
+            counted.insert(u.module.clone());
+        }
+        for w in writes.iter().filter(|w| w.harm.is_some()) {
+            if counted.insert(w.module.clone()) { *worst.entry("WARN flips manager setting").or_default() += 1; }
+        }
+        for h in habits.iter().filter(|h| matches!(h.habit, MountHabit::Namespace | MountHabit::ForeignFs)) {
+            if counted.insert(h.module.clone()) { *worst.entry("WARN unabsorbable mount").or_default() += 1; }
+        }
+        for h in habits.iter().filter(|h| matches!(h.habit, MountHabit::Absorbable)) {
+            if counted.insert(h.module.clone()) { *worst.entry("info absorbed at boot").or_default() += 1; }
+        }
+        for h in habits.iter().filter(|h| matches!(h.habit, MountHabit::Pseudo)) {
+            if counted.insert(h.module.clone()) { *worst.entry("info pseudo-fs mount").or_default() += 1; }
+        }
+        for (k, v) in &worst { println!("   {k:<26} {v:>4}"); }
+        println!("   {:<26} {:>4}  (nothing to report)", "clean", total - counted.len());
     }
 }
