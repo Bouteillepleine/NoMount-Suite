@@ -1,4 +1,5 @@
 mod absorb;
+mod audit;
 mod bind;
 mod blocklist;
 mod cli;
@@ -23,6 +24,7 @@ fn main() -> Result<()> {
         Commands::Vfs { action } => cli::handlers::handle_vfs(action),
         Commands::Uid { action } => cli::handlers::handle_uid(action),
         Commands::Doctor => doctor::run_doctor(),
+        Commands::Audit => audit::run_audit(),
         Commands::Plan => mount::run_plan(),
         Commands::Reload => mount::run_reload(),
         Commands::Absorb { dry_run, include_dirs } => absorb::run_absorb(dry_run, include_dirs),

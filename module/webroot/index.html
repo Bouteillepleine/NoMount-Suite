@@ -654,6 +654,11 @@
     </div>
   </header>
 
+  <!-- Global warning: the root manager's umount switches. Deliberately OUTSIDE
+       every <section> so it shows on any tab -- a switch that can break root
+       should not require navigating to the right tab to discover. -->
+  <div class="banner warn" id="mgrwarn" hidden></div>
+
   <section class="tab on" id="tab-status">
   <div class="banner" id="banner">Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
 
@@ -837,42 +842,10 @@
 
   <div class="group-label">Diagnostics</div>
   <!-- HEALTH CHECK -->
-  <div class="card collapsed" id="cardHealth">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
-      <h2>Health check</h2><span class="chip" id="dchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Lints the mount plan the way it will actually be applied, plus the live rules — partition-root redirects, overlay APKs on partitions zygote will not accept, missing backings, and targets two modules both claim. Run it before rebooting after a module change.</p>
-    <div class="btns"><button class="act primary" onclick="runDoctor(this)">Run health check</button></div>
-    <pre class="rules" id="doctorout" style="display:none">…</pre>
-  </div>
 
   <!-- RUNTIME HEALTH -->
-  <div class="card collapsed" id="cardRuntime">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>
-      <h2>Runtime health</h2><span class="chip" id="hchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">The live counterpart to the plan-time check above. <b>Self-check</b> runs the per-UID consistency canary — does a normal app see the same injected files as root? — and reports engine, mounts and guard. <b>Snapshot</b> freezes today's healthy state; <b>Verify</b> diffs the live system against it and names any drift. <b>Export</b> dumps diagnostics to <code>/sdcard/Download</code>.</p>
-    <div class="btns" style="flex-wrap:wrap">
-      <button class="act primary" onclick="runSelfcheck(this)">Self-check</button>
-      <button class="act" onclick="runSnapshot(this)">Snapshot</button>
-      <button class="act" onclick="runVerify(this)">Verify</button>
-      <button class="act" onclick="runExport(this)">Export</button>
-    </div>
-    <pre class="rules" id="healthout" style="display:none">…</pre>
-  </div>
 
   <!-- LAST INCIDENT -->
-  <div class="card collapsed" id="incidentcard" style="display:none">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
-      <h2>Last incident</h2><span class="chip bad">guard tripped</span><span class="chev">›</span>
-    </div>
-    <p class="note">Recorded when the bootloop guard self-disabled the Suite — including the newest native crash and its abort message, which usually names the offending path outright. This is a saved record, not live state — it survives reboots until a new trip overwrites it or you clear it. Whether the Suite is disabled <em>right now</em> is the guard chip on Status.</p>
-    <pre class="rules" id="incidentout">…</pre>
-    <div class="btns"><button class="act danger" onclick="clearIncident(this)">Clear incident</button></div>
-  </div>
 
   <div class="group-label">Hiding</div>
   <!-- CLOAK (pathhide maps/fd) -->
@@ -943,6 +916,54 @@
 
   </section>
 
+  <section class="tab" id="tab-diag">
+
+  <!-- AUDIT: replay every detection oracle against this device -->
+  <div class="card">
+    <div class="cardhead" onclick="tog(this)">
+      <h2>Detection audit</h2><span class="chip" id="auchip">—</span><span class="chev">›</span>
+    </div>
+    <p class="note">Replays every detection oracle this project has found and closed — readdir cookies, inode banding, directory shape, mount visibility, kernel surfaces — against <b>your</b> device and ROM, and prints what it actually measured. A <b>skipped</b> check was not verified: it is not a pass.</p>
+    <div class="btns"><button class="act primary" onclick="runAudit(this)">Run detection audit</button></div>
+    <pre class="rules" id="auditout" style="display:none">…</pre>
+  </div>
+
+  <div class="card collapsed" id="cardHealth">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
+      <h2>Health check</h2><span class="chip" id="dchip">—</span><span class="chev">›</span>
+    </div>
+    <p class="note">Lints the mount plan the way it will actually be applied, plus the live rules — partition-root redirects, overlay APKs on partitions zygote will not accept, missing backings, and targets two modules both claim. Run it before rebooting after a module change.</p>
+    <div class="btns"><button class="act primary" onclick="runDoctor(this)">Run health check</button></div>
+    <pre class="rules" id="doctorout" style="display:none">…</pre>
+  </div>
+
+  <div class="card collapsed" id="cardRuntime">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>
+      <h2>Runtime health</h2><span class="chip" id="hchip">—</span><span class="chev">›</span>
+    </div>
+    <p class="note">The live counterpart to the plan-time check above. <b>Self-check</b> runs the per-UID consistency canary — does a normal app see the same injected files as root? — and reports engine, mounts and guard. <b>Snapshot</b> freezes today's healthy state; <b>Verify</b> diffs the live system against it and names any drift. <b>Export</b> dumps diagnostics to <code>/sdcard/Download</code>.</p>
+    <div class="btns" style="flex-wrap:wrap">
+      <button class="act primary" onclick="runSelfcheck(this)">Self-check</button>
+      <button class="act" onclick="runSnapshot(this)">Snapshot</button>
+      <button class="act" onclick="runVerify(this)">Verify</button>
+      <button class="act" onclick="runExport(this)">Export</button>
+    </div>
+    <pre class="rules" id="healthout" style="display:none">…</pre>
+  </div>
+
+  <div class="card collapsed" id="incidentcard" style="display:none">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+      <h2>Last incident</h2><span class="chip bad">guard tripped</span><span class="chev">›</span>
+    </div>
+    <p class="note">Recorded when the bootloop guard self-disabled the Suite — including the newest native crash and its abort message, which usually names the offending path outright. This is a saved record, not live state — it survives reboots until a new trip overwrites it or you clear it. Whether the Suite is disabled <em>right now</em> is the guard chip on Status.</p>
+    <pre class="rules" id="incidentout">…</pre>
+    <div class="btns"><button class="act danger" onclick="clearIncident(this)">Clear incident</button></div>
+  </div>
+  </section>
+
   <div class="foot">NoMount Suite · hookless engine via netlink <code>nm</code><br/><span id="footver"></span></div>
 </div>
 
@@ -974,6 +995,10 @@
     <button class="navb" id="nb-tools" role="tab" aria-selected="false" onclick="showTab('tools',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5-1.4-1.4 2.5-2.5z"/></svg>
       <span>Tools</span><span class="nbdot"></span>
+    </button>
+    <button class="navb" id="nb-diag" role="tab" aria-selected="false" onclick="showTab('diag',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h3l2 5 4-12 2 7h5"/></svg>
+      <span>Diagnostics</span><span class="nbdot"></span>
     </button>
   </div>
 </nav>
@@ -1323,7 +1348,7 @@
     out.textContent = txt;
     const m = txt.match(/summary:\s*(\d+)\s*errors?,\s*(\d+)\s*warnings?/i);
     const chip = $("dchip");
-    const nb = $("nb-tools");
+    const nb = $("nb-diag"); // card moved to Diagnostics
     if (m) {
       const errs = parseInt(m[1], 10), warns = parseInt(m[2], 10);
       chip.textContent = errs ? errs + " error" + (errs > 1 ? "s" : "")
@@ -1335,6 +1360,54 @@
       chip.textContent = "—"; chip.className = "chip";
     }
     done();
+  }
+
+  // ---- detection audit ----
+  async function runAudit(btn) {
+    const done = busy(btn, "Auditing\u2026");
+    const out = $("auditout");
+    out.style.display = "";
+    out.textContent = "Replaying detection oracles\u2026";
+    const r = await nm("audit");
+    const txt = ((r.stdout || "") + (r.stderr || "")).trim() || "(no output)";
+    out.textContent = txt;
+    const m = txt.match(/summary:\s*(\d+)\s*passed,\s*(\d+)\s*failed,\s*(\d+)\s*skipped/i);
+    const chip = $("auchip");
+    if (m) {
+      const failed = parseInt(m[2], 10), skipped = parseInt(m[3], 10);
+      // A skipped check was NOT verified, so it must not render as a pass.
+      chip.textContent = failed ? failed + " detectable"
+                       : skipped ? skipped + " unverified"
+                       : "undetected";
+      chip.className = "chip " + (failed ? "bad" : skipped ? "warn" : "ok");
+      const nb = $("nb-diag");
+      if (nb) nb.classList.toggle("alert", failed > 0);
+    } else {
+      chip.textContent = "\u2014"; chip.className = "chip";
+    }
+    done();
+  }
+
+  // ---- root-manager umount switches (global banner) ----
+  // Both switches are readable now: kernel_umount through ksud, and the global
+  // "Umount modules by default" from the allowlist sentinel, which doctor
+  // decodes. Neither can hide anything the Suite serves, and both have broken
+  // root on real hardware -- so this is a banner, not a buried card.
+  async function checkManagerSwitches() {
+    const el = $("mgrwarn");
+    if (!el) return;
+    const r = await nm("doctor");
+    const txt = (r.stdout || "") + (r.stderr || "");
+    const bad = [];
+    if (/"Umount modules by default" is ON/.test(txt)) bad.push("Umount modules by default");
+    if (/manager: kernel umount is ON/i.test(txt)) bad.push("Kernel umount");
+    if (!bad.length) { el.hidden = true; return; }
+    el.hidden = false;
+    el.innerHTML =
+      "\u26a0\ufe0f Turn <b>" + bad.join("</b> and <b>") + "</b> OFF in your root manager. " +
+      "Nothing here is a mount, so " + (bad.length > 1 ? "they hide" : "it hides") +
+      " nothing the Suite serves \u2014 and it has broken root on real devices. " +
+      "To hide from one app, use <code>nomount uid block &lt;uid&gt;</code> instead.";
   }
 
   // ---- runtime health (selfcheck / snapshot / verify / export) ----
@@ -1382,7 +1455,7 @@
     const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
-    const nb = $("nb-tools");
+    const nb = $("nb-diag"); // card moved to Diagnostics
     if (!txt) { card.style.display = "none"; if (nb) nb.classList.remove("alert"); return; }
     card.style.display = "";
     $("incidentout").textContent = txt;
@@ -1908,7 +1981,7 @@
     const v = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
     $("ver").textContent = v || "v?";
     $("footver").textContent = v ? ("Suite " + v) : "";
-    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshWhiteouts()]);
+    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshWhiteouts(), checkManagerSwitches()]);
     if (rulesShown) loadRules();
     loadPkgList();
     if (ic) ic.classList.remove("spin");

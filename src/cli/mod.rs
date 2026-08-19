@@ -46,6 +46,10 @@ pub enum Commands {
         #[command(subcommand)]
         action: WhiteoutAction,
     },
+    /// Prove the hiding holds on THIS device: replay every detection oracle we
+    /// have closed and report what was actually measured. A skipped check is not
+    /// a pass.
+    Audit,
     /// Lint the mount plan (and live rules) for known bootloop/no-op hazards
     Doctor,
     /// Print what the mount pass would do (resolved target, kind, source) without

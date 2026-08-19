@@ -1,0 +1,505 @@
+//! `nomount audit` — prove the hiding actually holds, on THIS device.
+//!
+//! Every check here reproduces a detection oracle that was found, and closed, by
+//! measuring a real device: an app that can run these can also run them against
+//! us. Bundling them means a user can answer "is my setup detectable?" without
+//! hand-written probes, and a regression announces itself instead of waiting for
+//! someone to go looking.
+//!
+//! Two rules this file exists to enforce on itself:
+//!   * MEASURE, never infer. Each check reports what it read, not what the
+//!     configuration implies it should have read. Three kernel patches in this
+//!     project compiled clean and did nothing; only measurement caught them.
+//!   * A check that cannot run says so. "Skipped" is a distinct result from
+//!     "passed" -- reporting an unrun check as clean is how a hole survives.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+
+use crate::nm::Nm;
+
+#[derive(PartialEq)]
+pub enum Verdict {
+    Pass,
+    Fail,
+    /// Could not be measured here (nothing to sample, wrong fs, no engine).
+    Skip,
+}
+
+pub struct Check {
+    pub name: &'static str,
+    pub verdict: Verdict,
+    /// What was actually read. Always populated, including on a pass -- a bare
+    /// "OK" is not evidence.
+    pub evidence: String,
+    /// What an attacker would do with a failure. Only on Fail.
+    pub oracle: Option<&'static str>,
+}
+
+fn pass(name: &'static str, evidence: String) -> Check {
+    Check { name, verdict: Verdict::Pass, evidence, oracle: None }
+}
+fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
+    Check { name, verdict: Verdict::Fail, evidence, oracle: Some(oracle) }
+}
+fn skip(name: &'static str, evidence: String) -> Check {
+    Check { name, verdict: Verdict::Skip, evidence, oracle: None }
+}
+
+// ---------------------------------------------------------------- raw readdir
+
+#[repr(C)]
+struct Dirent64Hdr {
+    d_ino: u64,
+    d_off: i64,
+    d_reclen: u16,
+    d_type: u8,
+}
+
+pub struct Entry {
+    pub name: String,
+    pub d_ino: u64,
+    pub d_off: i64,
+}
+
+/// getdents64 directly: `read_dir` exposes neither `d_off` nor `d_ino`, and both
+/// are oracles in their own right.
+pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
+    let c = std::ffi::CString::new(dir.as_os_str().to_string_lossy().as_bytes()).ok()?;
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+    if fd < 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = unsafe {
+            libc::syscall(libc::SYS_getdents64, fd, buf.as_mut_ptr(), buf.len()) as isize
+        };
+        if n <= 0 {
+            break;
+        }
+        let mut off = 0usize;
+        while off + std::mem::size_of::<Dirent64Hdr>() <= n as usize {
+            // SAFETY: the kernel guarantees a header plus a NUL-terminated name
+            // within d_reclen; we never read past `n`.
+            let h = unsafe { &*(buf.as_ptr().add(off) as *const Dirent64Hdr) };
+            let reclen = h.d_reclen as usize;
+            if reclen == 0 || off + reclen > n as usize {
+                break;
+            }
+            let nstart = off + 19; // offsetof(name)
+            let nend = buf[nstart..off + reclen].iter().position(|&c| c == 0).unwrap_or(0) + nstart;
+            if let Ok(name) = std::str::from_utf8(&buf[nstart..nend]) {
+                if name != "." && name != ".." {
+                    out.push(Entry { name: name.to_string(), d_ino: h.d_ino, d_off: h.d_off });
+                }
+            }
+            off += reclen;
+        }
+    }
+    unsafe { libc::close(fd) };
+    Some(out)
+}
+
+// ------------------------------------------------------------------- helpers
+
+fn live_targets() -> Vec<PathBuf> {
+    Nm::new()
+        .list()
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split(" [UID:").next().unwrap_or(l).split_whitespace().next())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> =
+        targets.iter().filter_map(|t| t.parent().map(|p| p.to_path_buf())).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+fn fs_type(p: &Path) -> String {
+    // statfs f_type, rendered as the names the checks care about.
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().to_string_lossy().as_bytes()) else {
+        return "?".into();
+    };
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
+        return "?".into();
+    }
+    match s.f_type as i64 {
+        0xE0F5E1E2 => "erofs".into(),
+        0x794C7630 => "overlay".into(),
+        0xF2F52010 => "f2fs".into(),
+        other => format!("0x{other:x}"),
+    }
+}
+
+fn ino_of(p: &Path) -> Option<u64> {
+    fs::symlink_metadata(p).ok().map(|m| {
+        use std::os::unix::fs::MetadataExt;
+        m.ino()
+    })
+}
+
+// -------------------------------------------------------------------- checks
+
+/// Injections must not be mounts. Counts on mountinfo field 4 (the mount's root
+/// within its filesystem) -- matching on a path never matched anything, which is
+/// how the old counter reported zero regardless of reality.
+fn check_zero_mount() -> Check {
+    let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
+        return skip("zero-mount posture", "cannot read /proc/self/mountinfo".into());
+    };
+    let hits: Vec<&str> = mi
+        .lines()
+        .filter(|l| l.split_whitespace().nth(3).is_some_and(|r| r.contains("/adb/modules/")))
+        .collect();
+    // A hook framework's bind is one absorb deliberately never takes over --
+    // breaking a Zygisk/Xposed hook surfaces hours later during dexopt, not at
+    // boot. Counting it as a failure would leave every LSPosed user staring at a
+    // permanent FAIL they cannot act on, so it is reported as expected. It is
+    // still SHOWN, because it is genuinely visible to apps.
+    let (by_design, leaked): (Vec<&&str>, Vec<&&str>) = hits.iter().partition(|l| {
+        l.split_whitespace()
+            .nth(3)
+            .and_then(|root| root.split("/adb/modules/").nth(1))
+            .and_then(|rest| rest.split('/').next())
+            .is_some_and(|id| {
+                crate::absorb::is_hook_framework(Path::new("/data/adb/modules").join(id).as_path())
+            })
+    });
+    let show = |v: &[&&str]| -> String {
+        v.iter()
+            .filter_map(|l| l.split_whitespace().nth(4).map(|s| s.to_string()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if leaked.is_empty() {
+        let note = if by_design.is_empty() {
+            "0 module mounts in this namespace".to_string()
+        } else {
+            format!(
+                "0 unexpected module mounts; {} left by design (hook framework): {}",
+                by_design.len(),
+                show(&by_design)
+            )
+        };
+        pass("zero-mount posture", note)
+    } else {
+        fail(
+            "zero-mount posture",
+            format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked)),
+            "any app can read /proc/self/mountinfo and see a module mounted over the ROM",
+        )
+    }
+}
+
+/// The engine must expose no /sys, /proc or module surface of its own.
+fn check_surfaces() -> Check {
+    let mut found = Vec::new();
+    for dir in ["/sys/kernel", "/sys/module", "/proc"] {
+        if let Ok(rd) = fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_lowercase();
+                if n.contains("nomount") {
+                    found.push(format!("{dir}/{n}"));
+                }
+            }
+        }
+    }
+    if let Ok(f) = fs::read_to_string("/proc/filesystems") {
+        if f.to_lowercase().contains("nomount") {
+            found.push("/proc/filesystems".into());
+        }
+    }
+    if found.is_empty() {
+        pass("kernel surfaces", "no nomount entry in /sys/kernel, /sys/module, /proc".into())
+    } else {
+        fail(
+            "kernel surfaces",
+            found.join(", "),
+            "a named surface identifies the engine outright, with no analysis needed",
+        )
+    }
+}
+
+/// readdir cookies must not carry the engine's magic.
+fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
+    const NM_MAGIC: i64 = 0x6e6d; // "nm"
+    let (mut scanned, mut hits) = (0usize, 0usize);
+    for p in parents {
+        let Some(entries) = getdents(p) else { continue };
+        for e in entries {
+            scanned += 1;
+            if (e.d_off >> 48) == NM_MAGIC {
+                hits += 1;
+            }
+        }
+    }
+    if scanned == 0 {
+        return skip("readdir cookie magic", "no injected directory could be read".into());
+    }
+    if hits == 0 {
+        pass("readdir cookie magic", format!("0 of {scanned} dirents carry the magic"))
+    } else {
+        fail(
+            "readdir cookie magic",
+            format!("{hits} of {scanned} dirents have 0x6e6d in the top 16 bits of d_off"),
+            "one getdents64 on an injected directory identifies the engine, no root needed",
+        )
+    }
+}
+
+/// An injected file's readdir d_ino must equal its stat st_ino.
+fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
+    let mut checked = 0usize;
+    let mut bad = Vec::new();
+    let mut by_parent: HashMap<PathBuf, Vec<&PathBuf>> = HashMap::new();
+    for t in targets {
+        if let Some(p) = t.parent() {
+            by_parent.entry(p.to_path_buf()).or_default().push(t);
+        }
+    }
+    for (parent, kids) in &by_parent {
+        // Only meaningful off overlayfs: there, STOCK entries disagree too
+        // (readdir reports the lower's ino), so a mismatch proves nothing.
+        if fs_type(parent) == "overlay" {
+            continue;
+        }
+        let Some(entries) = getdents(parent) else { continue };
+        for k in kids {
+            let Some(name) = k.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(e) = entries.iter().find(|e| e.name == name) else { continue };
+            let Some(st) = ino_of(k) else { continue };
+            checked += 1;
+            if e.d_ino != st {
+                bad.push(format!("{} d_ino={} st_ino={}", k.display(), e.d_ino, st));
+            }
+        }
+    }
+    if checked == 0 {
+        return skip(
+            "readdir ino vs stat ino",
+            "no injected file on a non-overlay filesystem to compare".into(),
+        );
+    }
+    if bad.is_empty() {
+        pass("readdir ino vs stat ino", format!("{checked} injected file(s) agree"))
+    } else {
+        fail(
+            "readdir ino vs stat ino",
+            format!("{} of {checked} disagree: {}", bad.len(), bad.join("; ")),
+            "listing a directory and stat-ing its entries separates injected files from stock",
+        )
+    }
+}
+
+/// Injected inodes must not occupy a band the stock population never uses.
+fn check_inode_band(targets: &[PathBuf]) -> Check {
+    const BUCKET: u64 = 1_000_000;
+    let mut worst: Option<(String, u64, usize)> = None;
+    let mut examined = 0usize;
+    for parent in parents_of(targets) {
+        let Ok(rd) = fs::read_dir(&parent) else { continue };
+        let injected: Vec<&PathBuf> =
+            targets.iter().filter(|t| t.parent() == Some(parent.as_path())).collect();
+        if injected.len() < 4 {
+            continue; // too few to form a visible band
+        }
+        let mut stock_buckets: HashMap<u64, usize> = HashMap::new();
+        let mut ours_buckets: HashMap<u64, usize> = HashMap::new();
+        for e in rd.flatten() {
+            let p = e.path();
+            let Some(i) = ino_of(&p) else { continue };
+            let b = i / BUCKET;
+            if injected.iter().any(|t| **t == p) {
+                *ours_buckets.entry(b).or_default() += 1;
+            } else {
+                *stock_buckets.entry(b).or_default() += 1;
+            }
+        }
+        // A directory that is entirely ours (a synthesized tree such as
+        // <app>/lib/arm64) has NO stock population, so "a bucket with no stock
+        // in it" is true by construction and says nothing. Measured live:
+        // /product/priv-app/Mms/lib/arm64 is 25 of 25 injected. Judging it
+        // produced a FAIL that no attacker could ever act on.
+        if stock_buckets.is_empty() {
+            continue;
+        }
+        examined += 1;
+        for (b, n) in &ours_buckets {
+            if !stock_buckets.contains_key(b) && worst.as_ref().is_none_or(|w| *n > w.2) {
+                worst = Some((parent.to_string_lossy().into_owned(), *b, *n));
+            }
+        }
+    }
+    if examined == 0 {
+        return skip(
+            "injected inode band",
+            "no directory with both enough injections and a stock population to compare".into(),
+        );
+    }
+    match worst {
+        None => pass(
+            "injected inode band",
+            format!("{examined} directory(ies): every injected inode shares a bucket with stock"),
+        ),
+        Some((dir, b, n)) => fail(
+            "injected inode band",
+            format!("{dir}: {n} injected inode(s) alone in the {}M bucket, no stock there", b),
+            "bucket every inode in a directory and the all-ours band names the injections",
+        ),
+    }
+}
+
+/// A synthesized directory on an overlay mount must not carry an inode from
+/// outside the range overlayfs hands its own entries.
+fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
+    let mut outliers = Vec::new();
+    let mut examined = 0usize;
+    for parent in parents_of(targets) {
+        if fs_type(&parent) != "overlay" {
+            continue;
+        }
+        let Ok(rd) = fs::read_dir(&parent) else { continue };
+        let mut stock_max = 0u64;
+        let mut dirs = Vec::new();
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let Some(i) = ino_of(&p) else { continue };
+            let ours = targets.iter().any(|t| t.starts_with(&p) || *t == p);
+            if ours {
+                dirs.push((p, i));
+            } else if i > stock_max {
+                stock_max = i;
+            }
+        }
+        if stock_max == 0 {
+            continue;
+        }
+        examined += 1;
+        for (p, i) in dirs {
+            // Generous: only flag an order-of-magnitude departure, so ordinary
+            // "next allocation" values never cry wolf.
+            if i > stock_max.saturating_mul(8) {
+                outliers.push(format!("{} ino={i} (stock max here {stock_max})", p.display()));
+            }
+        }
+    }
+    if examined == 0 {
+        return skip("overlay dir inode range", "no injected directory on an overlay mount".into());
+    }
+    if outliers.is_empty() {
+        pass(
+            "overlay dir inode range",
+            format!("{examined} overlay dir(s): synthesized inodes sit inside the stock range"),
+        )
+    } else {
+        fail(
+            "overlay dir inode range",
+            outliers.join("; "),
+            "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
+        )
+    }
+}
+
+/// On erofs a single-block directory's size is a closed form over its entries,
+/// so an injected or hidden name must be reflected in the parent's size.
+fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
+    let (mut ok, mut bad) = (0usize, Vec::new());
+    for parent in parents_of(targets) {
+        if fs_type(&parent) != "erofs" {
+            continue;
+        }
+        let Ok(md) = fs::metadata(&parent) else { continue };
+        let size = md.len();
+        if size == 0 || size >= 4096 {
+            continue; // multi-block padding has no closed form
+        }
+        let Ok(rd) = fs::read_dir(&parent) else { continue };
+        let (mut n, mut bytes) = (0u64, 0u64);
+        for e in rd.flatten() {
+            n += 1;
+            bytes += e.file_name().as_encoded_bytes().len() as u64;
+        }
+        let model = 12 * (n + 2) + bytes + 3;
+        if model == size {
+            ok += 1;
+        } else {
+            bad.push(format!("{} size={size} model={model}", parent.display()));
+        }
+    }
+    if ok == 0 && bad.is_empty() {
+        return skip(
+            "erofs directory shape",
+            "no single-block erofs parent among the injected paths".into(),
+        );
+    }
+    if bad.is_empty() {
+        pass("erofs directory shape", format!("{ok} erofs parent(s) match the dirent model"))
+    } else {
+        fail(
+            "erofs directory shape",
+            bad.join("; "),
+            "st_size stops matching the listing, so a stat plus a getdents64 shows a name was \
+             added or hidden",
+        )
+    }
+}
+
+pub fn run_audit() -> Result<()> {
+    let targets = live_targets();
+    let parents = parents_of(&targets);
+
+    let checks = vec![
+        check_zero_mount(),
+        check_surfaces(),
+        check_dirent_cookie(&parents),
+        check_dino_matches_stat(&targets),
+        check_inode_band(&targets),
+        check_overlay_dir_ino(&targets),
+        check_erofs_dir_shape(&targets),
+    ];
+
+    println!("nomount audit: {} live rule(s) across {} directory(ies)\n", targets.len(), parents.len());
+    let (mut p, mut fl, mut sk) = (0, 0, 0);
+    for c in &checks {
+        let tag = match c.verdict {
+            Verdict::Pass => {
+                p += 1;
+                "PASS"
+            }
+            Verdict::Fail => {
+                fl += 1;
+                "FAIL"
+            }
+            Verdict::Skip => {
+                sk += 1;
+                "SKIP"
+            }
+        };
+        println!("[{tag}] {}\n       {}", c.name, c.evidence);
+        if let Some(o) = c.oracle {
+            println!("       oracle: {o}");
+        }
+    }
+    println!("\nsummary: {p} passed, {fl} failed, {sk} skipped");
+    if sk > 0 {
+        println!("note: a skipped check was NOT verified — it is not a pass.");
+    }
+    if fl > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
