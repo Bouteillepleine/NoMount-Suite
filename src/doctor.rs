@@ -529,19 +529,35 @@ pub fn run_doctor() -> Result<()> {
     // mounts -- still apply in full. Checked against the kernel, not assumed, so
     // it stays silent on a SUSFS build where these modules do their job.
     if !crate::manager::susfs_present() {
-        for id in crate::preflight::scan_susfs_users("/data/adb/modules", "meta-nomount") {
-            f.push(Finding {
-                level: Level::Warn,
-                check: "SUSFS module on a kernel without SUSFS",
-                detail: format!(
-                    "{id} drives SUSFS, but this kernel reports no SUSFS support, so every \
-                     hiding call it makes does nothing — while its side effects still happen \
-                     in full. It cannot help the Suite either: injections are VFS redirects, \
-                     so there is no mount for it to hide. REMOVE IT rather than tuning it; \
-                     anything it was meant to hide is already handled here, and on this build \
-                     it is pure risk"
-                ),
-            });
+        for u in crate::preflight::scan_susfs_users("/data/adb/modules", "meta-nomount") {
+            // "Remove it" is only right for a module whose PURPOSE is SUSFS
+            // hiding. A content module making a best-effort SUSFS call in a
+            // fallback branch loses nothing here -- saying remove would cost the
+            // user the content they installed it for.
+            let (level, detail) = if u.susfs_is_its_purpose {
+                (
+                    Level::Warn,
+                    format!(
+                        "{} drives SUSFS and ships no content of its own, but this kernel \
+                         reports no SUSFS support — so every hiding call it makes does nothing, \
+                         while its side effects still happen in full. It cannot help the Suite \
+                         either: injections are VFS redirects, so there is no mount for it to \
+                         hide. REMOVE IT rather than tuning it",
+                        u.module
+                    ),
+                )
+            } else {
+                (
+                    Level::Info,
+                    format!(
+                        "{} makes SUSFS calls, which do nothing on this kernel (no SUSFS) — but \
+                         it ships its own content, so that is an unused assist rather than a \
+                         reason to remove it. The Suite serves its files mountlessly regardless",
+                        u.module
+                    ),
+                )
+            };
+            f.push(Finding { level, check: "SUSFS calls on a kernel without SUSFS", detail });
         }
     }
 

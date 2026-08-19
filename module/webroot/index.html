@@ -253,7 +253,12 @@
   pre.rules {
     margin: 4px 0 0; max-height: 260px; overflow: auto; font-size: 11.5px; line-height: 1.65;
     font-family: var(--mono); color: #c8d2ea; background: rgba(0,0,0,0.28);
-    border: 1px solid var(--brd2); border-radius: 13px; padding: 13px; white-space: pre; word-break: break-all;
+    border: 1px solid var(--brd2); border-radius: 13px; padding: 13px;
+    /* pre-wrap, not pre: doctor and audit emit full sentences, and `pre` ran
+       them off the right edge where a phone simply cannot read them. Paths wrap
+       at any point so a long target still fits; blank lines and indentation are
+       preserved, which is what the reports rely on for structure. */
+    white-space: pre-wrap; overflow-wrap: anywhere;
   }
 
   /* stealth readout */

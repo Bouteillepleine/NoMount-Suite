@@ -137,8 +137,31 @@ fn uses_susfs(code: &str) -> bool {
     MARKERS.iter().any(|m| code.contains(m))
 }
 
-/// Enabled modules whose function depends on SUSFS.
-pub fn scan_susfs_users(modules_dir: &str, self_id: &str) -> Vec<String> {
+/// Does this module ship files to inject? A module with a partition tree is a
+/// CONTENT module; SUSFS calls in it are an assist, not its purpose.
+///
+/// This is the line between "remove it" and "ignore it". OnePlus_Dialer_Universal
+/// makes two best-effort `ksu_susfs` calls (`|| true`) inside the fallback branch
+/// that only runs when NoMount is absent -- its actual job is shipping dialer
+/// content. Advising its removal would delete something the user wants, on the
+/// strength of two lines that never execute here.
+fn ships_content(dir: &Path) -> bool {
+    const PARTS: &[&str] = &[
+        "system", "product", "vendor", "system_ext", "odm", "my_product", "my_stock",
+        "my_region", "my_heytap", "my_preload", "my_company", "my_engineering", "my_carrier",
+    ];
+    PARTS.iter().any(|p| dir.join(p).is_dir())
+}
+
+pub struct SusfsUser {
+    pub module: String,
+    /// True when SUSFS is the module's whole purpose -- it ships no content of
+    /// its own, so with SUSFS absent it does nothing at all.
+    pub susfs_is_its_purpose: bool,
+}
+
+/// Enabled modules whose scripts drive SUSFS.
+pub fn scan_susfs_users(modules_dir: &str, self_id: &str) -> Vec<SusfsUser> {
     let mut out = Vec::new();
     let Ok(dirs) = fs::read_dir(modules_dir) else { return out };
     for e in dirs.flatten() {
@@ -154,10 +177,13 @@ pub fn scan_susfs_users(modules_dir: &str, self_id: &str) -> Vec<String> {
             fs::read_to_string(dir.join(n)).map(|r| uses_susfs(&code_only(&r))).unwrap_or(false)
         });
         if hit {
-            out.push(id.to_string());
+            out.push(SusfsUser {
+                module: id.to_string(),
+                susfs_is_its_purpose: !ships_content(&dir),
+            });
         }
     }
-    out.sort();
+    out.sort_by(|a, b| b.susfs_is_its_purpose.cmp(&a.susfs_is_its_purpose).then(a.module.cmp(&b.module)));
     out
 }
 
