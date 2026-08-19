@@ -30,6 +30,10 @@ use std::fs;
 
 
 const ALLOWLIST: &str = "/data/adb/ksu/.allowlist";
+/// The real file is ~25 KB (32 records). Cap the read so a corrupt or hostile
+/// file cannot pull an arbitrary amount into memory: this parses bytes another
+/// component owns, on a path we do not control.
+const MAX_ALLOWLIST: u64 = 4 * 1024 * 1024;
 /// "USK\x7f"
 const MAGIC: &[u8] = &[0x55, 0x53, 0x4b, 0x7f];
 const HEADER: usize = 8;
@@ -89,8 +93,25 @@ fn u32_le(b: &[u8]) -> u32 {
 /// "umount modules" profile decoded as set. Any layout change shows up as
 /// garbage uids rather than silently wrong flags, which `looks_sane` rejects.
 pub fn app_umount_flags() -> Vec<AppFlag> {
+    match read_allowlist() {
+        Some(buf) => parse_apps(&buf),
+        None => Vec::new(),
+    }
+}
+
+/// Read the allowlist, bounded. `None` when absent, unreadable, or implausibly
+/// large.
+fn read_allowlist() -> Option<Vec<u8>> {
+    let meta = fs::metadata(ALLOWLIST).ok()?;
+    if meta.len() > MAX_ALLOWLIST {
+        return None;
+    }
+    fs::read(ALLOWLIST).ok()
+}
+
+/// Split out from the file read so it can be tested against hostile input.
+fn parse_apps(buf: &[u8]) -> Vec<AppFlag> {
     let mut out = Vec::new();
-    let Ok(buf) = fs::read(ALLOWLIST) else { return out };
     if buf.len() < HEADER + RECORD || !buf.starts_with(MAGIC) {
         return out;
     }
@@ -148,13 +169,21 @@ fn looks_sane(v: &[AppFlag]) -> bool {
 /// from every app WITHOUT a profile, and the one that broke root on this device
 /// in July, so a wrong answer here is worse than no answer.
 pub fn global_umount_default() -> Option<bool> {
-    let buf = fs::read(ALLOWLIST).ok()?;
+    global_from(&read_allowlist()?)
+}
+
+fn global_from(buf: &[u8]) -> Option<bool> {
     if buf.len() < HEADER + RECORD || !buf.starts_with(MAGIC) {
         return None;
     }
     for i in 0..(buf.len() - HEADER) / RECORD {
         let r = &buf[HEADER + i * RECORD..HEADER + (i + 1) * RECORD];
-        let end = r[OFF_NAME..OFF_NAME + NAME_MAX].iter().position(|&c| c == 0)?;
+        // One unterminated name must not abandon the search: `?` here made a
+        // single malformed record read as "no sentinel", i.e. the dangerous
+        // switch silently reported unknown.
+        let Some(end) = r[OFF_NAME..OFF_NAME + NAME_MAX].iter().position(|&c| c == 0) else {
+            continue;
+        };
         if &r[OFF_NAME..OFF_NAME + end] == SENTINEL_NAME.as_bytes()
             && u32_le(&r[OFF_UID..]) == SENTINEL_UID
         {
@@ -260,6 +289,36 @@ mod tests {
         let r1 = &b[HEADER + RECORD..];
         assert_eq!(r1[OFF_UMOUNT], 1);
         assert_eq!(r1[OFF_OTHER_FLAG], 0, "the adjacent byte is not umount_modules");
+    }
+
+    /// Nothing in here may panic on bytes another component owns.
+    #[test]
+    fn hostile_input_never_panics() {
+        assert!(parse_apps(&[]).is_empty());
+        assert!(parse_apps(b"USK\x7f").is_empty());
+        assert!(parse_apps(&vec![0u8; HEADER + RECORD]).is_empty()); // bad magic
+        assert!(global_from(&[]).is_none());
+        assert!(global_from(&vec![0xffu8; HEADER + RECORD]).is_none());
+        // truncated final record: loop must not slice past the end
+        let mut t = file(&[rec("a.b", 10001, false, true)]);
+        t.truncate(t.len() - 13);
+        let _ = parse_apps(&t);
+        let _ = global_from(&t);
+        // a record whose name field has no NUL at all
+        let mut nz = file(&[rec("a.b", 10001, false, true)]);
+        for b in nz[HEADER + OFF_NAME..HEADER + OFF_NAME + NAME_MAX].iter_mut() {
+            *b = b'x';
+        }
+        let _ = parse_apps(&nz);
+        assert!(global_from(&nz).is_none()); // no sentinel, but must not abort early
+        // ...and one bad record must not hide a sentinel that follows it
+        let mut sent = rec("$", SENTINEL_UID, false, false);
+        sent[OFF_UMOUNT] = 1;
+        let mut bad = rec("a.b", 10001, false, false);
+        for b in bad[OFF_NAME..OFF_NAME + NAME_MAX].iter_mut() {
+            *b = b'x';
+        }
+        assert_eq!(global_from(&file(&[bad, sent])), Some(true), "bad record must not mask the sentinel");
     }
 
     #[test]
