@@ -5,6 +5,7 @@ mod cli;
 mod dirshape;
 mod doctor;
 mod health;
+mod manager;
 mod mount;
 mod nm;
 mod preflight;

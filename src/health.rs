@@ -35,6 +35,16 @@ struct Fingerprint {
     blocked: usize,
     consistency: String, // "ok" | "mismatch:<path>(root=A app=B)" | "unchecked"
     guard: String,       // "armed" | "tripped"
+    /// The root manager's `kernel_umount`: "on" | "off" | "unknown".
+    ///
+    /// Carried in the fingerprint so the manager's state travels with every
+    /// diagnostic anyone pastes into a bug report -- it cannot hide anything the
+    /// Suite serves (injections are not mounts) and it has broken root on this
+    /// hardware before, so "is that switch on?" was a question every report used
+    /// to need asking. "unknown" means ksud could not be asked, not that it is
+    /// off. The SEPARATE global "umount modules by default" has no read path at
+    /// all and is deliberately not guessed at here; see manager.rs.
+    manager_umount: String,
 }
 
 impl Fingerprint {
@@ -49,6 +59,7 @@ impl Fingerprint {
         let _ = writeln!(s, "blocked={}", self.blocked);
         let _ = writeln!(s, "consistency={}", self.consistency);
         let _ = writeln!(s, "guard={}", self.guard);
+        let _ = writeln!(s, "manager_umount={}", self.manager_umount);
         s
     }
 }
@@ -146,6 +157,11 @@ fn gather() -> Fingerprint {
         blocked,
         consistency: consistency_probe(&rules),
         guard: guard.to_string(),
+        manager_umount: match crate::manager::kernel_umount_enabled() {
+            Some(true) => "on".to_string(),
+            Some(false) => "off".to_string(),
+            None => "unknown".to_string(),
+        },
     }
 }
 

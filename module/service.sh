@@ -169,9 +169,23 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     else
         _mstate="0 mounts"
     fi
+    # The manager's kernel_umount rides along on the card. It can hide nothing
+    # the Suite serves -- injections are VFS redirects, so the kernel umount list
+    # is empty -- and enabling it on this hardware once cost ~8 reboots. Put it
+    # where the user already looks (the module description in their root
+    # manager), not only in dmesg. "unknown" means ksud could not be asked, so
+    # say nothing rather than accuse a switch of being on.
+    _mu=$(grep -m1 '^manager_umount=' "$NMDIR/health.txt" 2>/dev/null | cut -d= -f2)
+    if [ "$_mu" = "on" ]; then
+        _muc=" · ⚠️ turn OFF “kernel umount” in your root manager (it hides nothing here)"
+        _mul=", ⚠ manager kernel_umount is ON — turn it off"
+    else
+        _muc=""
+        _mul=""
+    fi
     KSU_MODULE=meta-nomount ksud module config set --temp override.description \
-        "[NoMount ✅ $_rules rules · $_rro RRO · $_mstate] $_health — fully mountless: hookless VFS + RRO, su via sucompat" \
+        "[NoMount ✅ $_rules rules · $_rro RRO · $_mstate] $_health$_muc — fully mountless: hookless VFS + RRO, su via sucompat" \
         >/dev/null 2>&1
-    echo "nomount: card refreshed ($_rules rules, $_mstate, $_health)" > /dev/kmsg 2>/dev/null
+    echo "nomount: card refreshed ($_rules rules, $_mstate, $_health$_mul)" > /dev/kmsg 2>/dev/null
 fi
 exit 0

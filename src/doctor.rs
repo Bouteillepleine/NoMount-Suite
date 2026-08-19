@@ -74,25 +74,7 @@ fn parse_live(list: &str) -> Vec<(PathBuf, PathBuf)> {
 }
 
 
-/// The root manager's "umount modules" switch, as `ksud` reports it.
-///
-/// Parsed rather than read from `.feature_config`, whose layout is ksud's to
-/// change. `None` = could not ask (not KernelSU, or ksud missing).
-fn manager_umount_enabled() -> Option<bool> {
-    let out = std::process::Command::new("/data/adb/ksu/bin/ksud")
-        .args(["feature", "get", "kernel_umount"])
-        .output()
-        .ok()?;
-    let txt = String::from_utf8_lossy(&out.stdout);
-    parse_feature_value(&txt).map(|v| v != 0)
-}
 
-/// `ksud feature get` prints a block ending in `Value: N`.
-fn parse_feature_value(s: &str) -> Option<u32> {
-    s.lines()
-        .find_map(|l| l.trim().strip_prefix("Value:"))
-        .and_then(|v| v.trim().parse().ok())
-}
 
 pub fn run_doctor() -> Result<()> {
     // partition -> count of non-overlay entries not in zygote's FD allowlist
@@ -235,18 +217,60 @@ pub fn run_doctor() -> Result<()> {
     // enabling it once cost ~8 reboots: su used to arrive as a module overlay,
     // so anything stripping module content stripped su with it. The Suite keeps
     // su out entirely now (kernel sucompat), but there is still no upside.
-    if manager_umount_enabled() == Some(true) {
+    let kernel_umount = crate::manager::kernel_umount_enabled();
+    if kernel_umount == Some(true) {
         f.push(Finding {
             level: Level::Warn,
-            check: "manager umount is on",
-            detail: "the root manager's `kernel_umount` is ENABLED. It cannot hide anything \
-                     the Suite serves -- injections are VFS redirects, not mounts, so the \
-                     kernel umount list is empty and there is nothing to unmount. To hide from \
-                     a specific app use `nomount uid block <uid>` instead. Turn it off in the \
-                     manager: on this configuration it is at best a no-op, and it has broken \
-                     root here before. While you are there, the SEPARATE \"umount modules by \
-                     default\" switch should also be off for the same reason -- that one is \
-                     kernel profile state with no ksud read path, so this check cannot see it"
+            check: "manager: kernel umount is ON",
+            detail: "the root manager's `kernel_umount` is ENABLED (manager: \"Kernel umount\" / \
+                     FR \"Démontage du noyau\"). It cannot hide anything the Suite serves -- \
+                     injections are VFS redirects, not mounts, so the kernel umount list is \
+                     empty and there is nothing for it to unmount. Switch it OFF in your root \
+                     manager. To hide from one app use `nomount uid block <uid>` instead"
+                .to_string(),
+        });
+    }
+
+    // Per-app "umount modules" profiles. Read from the allowlist rather than
+    // guessed: the layout is verified against known uids before it is trusted,
+    // and a decode that stops making sense yields nothing instead of invented
+    // flags. Info, not warn -- these are harmless here, just pointless.
+    let flags = crate::manager::app_umount_flags();
+    let umounters: Vec<&str> =
+        flags.iter().filter(|a| a.umount_modules).map(|a| a.package.as_str()).collect();
+    if !umounters.is_empty() {
+        let shown: Vec<&str> = umounters.iter().take(4).copied().collect();
+        f.push(Finding {
+            level: Level::Info,
+            check: "manager: per-app \"umount modules\" set",
+            detail: format!(
+                "{} app(s) carry an \"umount modules\" profile in the root manager ({}{}). \
+                 That switch removes MOUNTS from those apps, and the Suite serves its content \
+                 without mounting, so it hides nothing we inject -- it is a leftover from a \
+                 mount-based setup and can be set back to default. Harmless either way",
+                umounters.len(),
+                shown.join(", "),
+                if umounters.len() > shown.len() { ", …" } else { "" }
+            ),
+        });
+    }
+
+    // The GLOBAL "umount modules by default" switch has no read path at all --
+    // see manager.rs. Surface it only when there is a REASON to look: either the
+    // readable switch is on, or per-app umount profiles exist, which means the
+    // user has been in that part of the manager. Printed unconditionally it
+    // became the line people skim past, taking the real kernel_umount warning
+    // next to it along with them.
+    if kernel_umount == Some(true) || !umounters.is_empty() {
+        f.push(Finding {
+            level: Level::Info,
+            check: "manager: global \"umount modules by default\" cannot be read",
+            detail: "no interface exposes the manager's GLOBAL \"umount modules by default\" \
+                     switch (FR \"Démonter les modules par défaut\"): it is not a ksud feature, \
+                     not in `ksud umount-config`, and not in the allowlist, which only records \
+                     apps that have an explicit profile. Check it by hand in the root manager \
+                     and turn it OFF -- on a mountless setup it can hide nothing, and it is the \
+                     switch that has broken root on this device before"
                 .to_string(),
         });
     }
@@ -534,13 +558,15 @@ mod tests {
     use super::*;
 
     /// Verbatim from `ksud feature get kernel_umount` on OP15 / ReSukiSU.
+    /// The parser itself now lives in manager.rs; this keeps the real-device
+    /// sample exercising it from here too.
     #[test]
     fn parses_ksud_feature_output() {
         let off = "Feature: kernel_umount (1)\nDescription: Kernel Umount - controls whether \
                    kernel automatically unmounts modules when not needed\nValue: 0\n";
-        assert_eq!(parse_feature_value(off), Some(0));
-        assert_eq!(parse_feature_value("Feature: x (1)\nValue: 1\n"), Some(1));
-        assert_eq!(parse_feature_value("no value here"), None);
+        assert_eq!(crate::manager::parse_feature_value(off), Some(0));
+        assert_eq!(crate::manager::parse_feature_value("Feature: x (1)\nValue: 1\n"), Some(1));
+        assert_eq!(crate::manager::parse_feature_value("no value here"), None);
     }
 
     #[test]
