@@ -12,7 +12,7 @@
 //!   kernel_umount           `ksud feature get kernel_umount` -> exact.
 //!   per-app "umount modules" .allowlist, decoded below -> exact.
 //!   "Umount modules by default" (the global, exact manager label; note the
-//!       manager spells it "Umount") -- NO read path exists. It is not
+//!       manager spells it "Umount") -- the allowlist SENTINEL record, below. It is not
 //!       a ksud feature, not in `ksud umount-config`, and not in the allowlist,
 //!       which only holds apps that have an explicit profile. Do not guess it: a
 //!       behavioural probe was tried and is confounded, because on a zero-mount
@@ -38,7 +38,30 @@ const OFF_NAME: usize = 4;
 const NAME_MAX: usize = 256;
 const OFF_UID: usize = OFF_NAME + NAME_MAX; // 260
 const OFF_ALLOW_SU: usize = OFF_UID + 4; // 264
-const OFF_UMOUNT: usize = OFF_ALLOW_SU + 8; // 272
+// +272 and +273 are adjacent single BYTES, not one u32, and the one that means
+// "umount modules" is +273 -- established by differential against apps whose
+// setting is known: La Banque Postale and FNB both carry the per-app profile and
+// both read +272=00, +273=01, while another app reads +272=01 with no umount
+// profile at all. An earlier read of +272 badged the wrong apps.
+//
+// The SENTINEL uses the SAME offset: its +273 is the default value of that field
+// for apps with no profile, which is precisely what the manager calls "Umount
+// modules by default".
+const OFF_OTHER_FLAG: usize = OFF_ALLOW_SU + 8; // 272, not umount; unidentified
+const OFF_UMOUNT: usize = OFF_OTHER_FLAG + 1; // 273
+
+/// The allowlist carries a sentinel record that is not an app: name "$",
+/// uid 9999 (nobody). Its byte at +273 is the manager's GLOBAL "Umount modules
+/// by default".
+///
+/// Found by differential, not by reading source: with the switch OFF a full
+/// snapshot was taken, the user flipped it in the manager, and exactly one bit
+/// moved in the whole system -- `.allowlist` byte 4202, which is record #5
+/// offset +273. Every ksud read surface (`feature list`, `kernel umount list`,
+/// `umount-config list`, `profile list-templates`) was byte-identical before and
+/// after, which is why no CLI path for it exists.
+const SENTINEL_NAME: &str = "$";
+const SENTINEL_UID: u32 = 9999;
 
 // `umount_modules` lives in the NON-ROOT arm of the profile union. For a record
 // with allow_su set, those same bytes are root-profile data (uid/gid/caps), so
@@ -82,6 +105,10 @@ pub fn app_umount_flags() -> Vec<AppFlag> {
             continue;
         }
         let Ok(package) = std::str::from_utf8(&r[OFF_NAME..OFF_NAME + name_end]) else { continue };
+        // The sentinel is not an app; it carries the global default.
+        if package == SENTINEL_NAME && u32_le(&r[OFF_UID..]) == SENTINEL_UID {
+            continue;
+        }
         if !package.contains('.') {
             continue; // sepolicy blobs and padding, not a package
         }
@@ -90,8 +117,8 @@ pub fn app_umount_flags() -> Vec<AppFlag> {
             package: package.to_string(),
             uid: u32_le(&r[OFF_UID..]),
             allow_su,
-            // only meaningful for the non-root arm of the union
-            umount_modules: !allow_su && u32_le(&r[OFF_UMOUNT..]) != 0,
+            // single byte, and only meaningful for the non-root arm of the union
+            umount_modules: !allow_su && r[OFF_UMOUNT] != 0,
         });
     }
     if !looks_sane(&out) {
@@ -112,6 +139,29 @@ fn looks_sane(v: &[AppFlag]) -> bool {
         .filter(|a| a.uid == 2000 || (10000..100_000).contains(&a.uid))
         .count();
     plausible * 2 > v.len()
+}
+
+/// The manager's GLOBAL "Umount modules by default".
+///
+/// `None` when the sentinel is absent or the file does not look like an
+/// allowlist -- never guessed. This is the switch that removes module content
+/// from every app WITHOUT a profile, and the one that broke root on this device
+/// in July, so a wrong answer here is worse than no answer.
+pub fn global_umount_default() -> Option<bool> {
+    let buf = fs::read(ALLOWLIST).ok()?;
+    if buf.len() < HEADER + RECORD || !buf.starts_with(MAGIC) {
+        return None;
+    }
+    for i in 0..(buf.len() - HEADER) / RECORD {
+        let r = &buf[HEADER + i * RECORD..HEADER + (i + 1) * RECORD];
+        let end = r[OFF_NAME..OFF_NAME + NAME_MAX].iter().position(|&c| c == 0)?;
+        if &r[OFF_NAME..OFF_NAME + end] == SENTINEL_NAME.as_bytes()
+            && u32_le(&r[OFF_UID..]) == SENTINEL_UID
+        {
+            return Some(r[OFF_UMOUNT] != 0);
+        }
+    }
+    None
 }
 
 /// `ksud feature get kernel_umount` -> Some(true) when enabled.
@@ -139,7 +189,7 @@ mod tests {
         r[OFF_NAME..OFF_NAME + pkg.len()].copy_from_slice(pkg.as_bytes());
         r[OFF_UID..OFF_UID + 4].copy_from_slice(&uid.to_le_bytes());
         r[OFF_ALLOW_SU..OFF_ALLOW_SU + 4].copy_from_slice(&(su as u32).to_le_bytes());
-        r[OFF_UMOUNT..OFF_UMOUNT + 4].copy_from_slice(&(umount as u32).to_le_bytes());
+        r[OFF_UMOUNT] = umount as u8;
         r
     }
 
@@ -193,6 +243,23 @@ mod tests {
             AppFlag { package: "c.d".into(), uid: 2000, allow_su: true, umount_modules: false },
         ];
         assert!(looks_sane(&good));
+    }
+
+    /// The sentinel is not reported as an app, and its +273 byte is the global.
+    #[test]
+    fn sentinel_carries_the_global_not_an_app() {
+        let mut sent = rec("$", SENTINEL_UID, false, false);
+        sent[OFF_UMOUNT] = 1;
+        let b = file(&[sent, rec("com.example.app", 10001, false, true)]);
+        let r0 = &b[HEADER..HEADER + RECORD];
+        let end = r0[OFF_NAME..].iter().position(|&c| c == 0).unwrap();
+        assert_eq!(&r0[OFF_NAME..OFF_NAME + end], b"$");
+        assert_eq!(u32_le(&r0[OFF_UID..]), SENTINEL_UID);
+        assert_eq!(r0[OFF_UMOUNT], 1, "global lives at +273, same field as per-app");
+        // the per-app flag is the same single byte, and +272 is a different flag
+        let r1 = &b[HEADER + RECORD..];
+        assert_eq!(r1[OFF_UMOUNT], 1);
+        assert_eq!(r1[OFF_OTHER_FLAG], 0, "the adjacent byte is not umount_modules");
     }
 
     #[test]

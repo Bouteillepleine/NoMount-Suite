@@ -226,11 +226,27 @@ pub fn run_doctor() -> Result<()> {
                      toggle). It cannot hide anything the Suite serves -- \
                      injections are VFS redirects, not mounts, so the kernel umount list is \
                      empty and there is nothing for it to unmount. Switch it OFF in your root \
-                     manager. To hide from one app use `nomount uid block <uid>` instead. While you \
-                     are in there, check \"Umount modules by default\" too and turn that OFF: \
-                     enabling this switch silently turned that one on here once, it removes \
-                     module content from every app without a profile, and nothing can read its \
-                     state to warn you about it"
+                     manager. To hide from one app use `nomount uid block <uid>` instead."
+                .to_string(),
+        });
+    }
+
+    // The GLOBAL "Umount modules by default". This is the dangerous one: it
+    // strips module content from every app WITHOUT a profile, which in July
+    // included any app the moment it asked for root, and that is what broke root
+    // on this device. Warned above kernel_umount's own finding because enabling
+    // kernel_umount is what silently turned THIS on.
+    if crate::manager::global_umount_default() == Some(true) {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "manager: \"Umount modules by default\" is ON",
+            detail: "the root manager's GLOBAL \"Umount modules by default\" is ENABLED \
+                     (Settings -> Umount modules by default). It removes module content from \
+                     every app that has no profile set, it can hide nothing this Suite serves \
+                     -- injections are VFS redirects, so there is no mount to remove -- and it \
+                     is the switch that broke root on this hardware. Turn it OFF in your root \
+                     manager. For a specific app, set a per-app profile or use \
+                     `nomount uid block <uid>`"
                 .to_string(),
         });
     }
