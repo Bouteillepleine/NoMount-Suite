@@ -221,12 +221,9 @@ pub fn run_doctor() -> Result<()> {
     if kernel_umount == Some(true) {
         f.push(Finding {
             level: Level::Warn,
-            check: "manager: kernel umount is ON",
-            detail: "the root manager's `kernel_umount` is ENABLED (the manager's \"Kernel umount\" \
-                     toggle). It cannot hide anything the Suite serves -- \
-                     injections are VFS redirects, not mounts, so the kernel umount list is \
-                     empty and there is nothing for it to unmount. Switch it OFF in your root \
-                     manager. To hide from one app use `nomount uid block <uid>` instead."
+            check: "manager kernel umount ON",
+            detail: "manager \"Kernel umount\" is ON — it hides nothing here (injections are \
+                     not mounts). Turn it OFF; use `nomount uid block <uid>` per app."
                 .to_string(),
         });
     }
@@ -239,14 +236,9 @@ pub fn run_doctor() -> Result<()> {
     if crate::manager::global_umount_default() == Some(true) {
         f.push(Finding {
             level: Level::Warn,
-            check: "manager: \"Umount modules by default\" is ON",
-            detail: "the root manager's GLOBAL \"Umount modules by default\" is ENABLED \
-                     (Settings -> Umount modules by default). It removes module content from \
-                     every app that has no profile set, it can hide nothing this Suite serves \
-                     -- injections are VFS redirects, so there is no mount to remove -- and it \
-                     is the switch that broke root on this hardware. Turn it OFF in your root \
-                     manager. For a specific app, set a per-app profile or use \
-                     `nomount uid block <uid>`"
+            check: "manager global umount ON",
+            detail: "manager \"Umount modules by default\" is ON — strips module content from \
+                     every profile-less app and hides nothing here. Turn it OFF"
                 .to_string(),
         });
     }
@@ -259,15 +251,13 @@ pub fn run_doctor() -> Result<()> {
     let umounters: Vec<&str> =
         flags.iter().filter(|a| a.umount_modules).map(|a| a.package.as_str()).collect();
     if !umounters.is_empty() {
-        let shown: Vec<&str> = umounters.iter().take(4).copied().collect();
+        let shown: Vec<&str> = umounters.iter().take(2).copied().collect();
         f.push(Finding {
             level: Level::Info,
-            check: "manager: per-app \"umount modules\" set",
+            check: "per-app umount profiles",
             detail: format!(
-                "{} app(s) carry an \"umount modules\" profile in the root manager ({}{}). \
-                 That switch removes MOUNTS from those apps, and the Suite serves its content \
-                 without mounting, so it hides nothing we inject -- it is a leftover from a \
-                 mount-based setup and can be set back to default. Harmless either way",
+                "{} app(s) have an \"umount modules\" profile ({}{}) — harmless here, hides \
+                 nothing we inject",
                 umounters.len(),
                 shown.join(", "),
                 if umounters.len() > shown.len() { ", …" } else { "" }
@@ -302,7 +292,7 @@ pub fn run_doctor() -> Result<()> {
                             // identity mismatch aborts forkSystemServer. Always per-file.
                             f.push(Finding {
                                 level: Level::Error,
-                                check: "not FD-allowlisted for zygote",
+                                check: "not FD-allowlisted",
                                 detail: format!(
                                     "{} lives on /{part} — an overlay APK here aborts forkSystemServer",
                                     target.display()
@@ -372,9 +362,7 @@ pub fn run_doctor() -> Result<()> {
                 Level::Info,
                 "module mount left by design",
                 format!(
-                    "{} <- {} stays mounted: {id} is a hook framework (Zygisk/Xposed), which \
-                     absorb never takes over because a broken hook only surfaces later, \
-                     during dexopt",
+                    "{} <- {} — {id} is a hook framework; absorb leaves it alone",
                     s.target.display(),
                     s.source.display()
                 ),
@@ -476,43 +464,33 @@ pub fn run_doctor() -> Result<()> {
         let (level, check, detail) = match h.habit {
             crate::preflight::MountHabit::Namespace => (
                 Level::Warn,
-                "module will replicate mounts into other namespaces",
+                "mounts into other namespaces",
                 format!(
-                    "{} calls {} in its scripts: it mounts inside other processes' \
-                     namespaces, where absorb has no standing — those mounts stay visible \
-                     to apps and no amount of absorbing removes them. This is the one habit \
-                     the zero-mount posture cannot cover",
+                    "{} uses {} — mounts in other processes' namespaces; absorb cannot \
+                     remove those",
                     h.module, h.evidence
                 ),
             ),
             crate::preflight::MountHabit::ForeignFs => (
                 Level::Warn,
-                "module will mount a filesystem of its own",
+                "mounts its own filesystem",
                 format!(
-                    "{} sets up {} in its scripts: absorb cannot re-serve that as an \
-                     injection because there is no backing file to point at, so it stays a \
-                     real mount",
+                    "{} sets up {} — absorb cannot re-serve it, so it stays a real mount",
                     h.module, h.evidence
                 ),
             ),
             crate::preflight::MountHabit::Pseudo => (
                 Level::Info,
-                "module mounts a kernel pseudo-filesystem",
+                "mounts a pseudo-fs",
                 format!(
-                    "{} mounts {} in its scripts. That carries no module content, so absorb \
-                     leaves it alone and it is not a leak of anything we serve — listed only \
-                     so the extra mount is accounted for",
-                    h.module, h.evidence
+                    "{} mounts {} — kernel pseudo-fs, no module content", h.module, h.evidence
                 ),
             ),
             crate::preflight::MountHabit::Absorbable => (
                 Level::Info,
-                "module mounts for itself, absorb takes it over",
+                "self-mounts, absorbed",
                 format!(
-                    "{} uses {} in its scripts; absorb re-serves it as an injection and \
-                     unmounts it at boot, so the zero-mount posture holds — listed so a \
-                     mount appearing mid-boot is expected rather than alarming",
-                    h.module, h.evidence
+                    "{} uses {} — absorb takes it over at boot", h.module, h.evidence
                 ),
             ),
         };
@@ -538,11 +516,8 @@ pub fn run_doctor() -> Result<()> {
                 (
                     Level::Warn,
                     format!(
-                        "{} drives SUSFS and ships no content of its own, but this kernel \
-                         reports no SUSFS support — so every hiding call it makes does nothing, \
-                         while its side effects still happen in full. It cannot help the Suite \
-                         either: injections are VFS redirects, so there is no mount for it to \
-                         hide. REMOVE IT rather than tuning it",
+                        "{} is a SUSFS module and this kernel has no SUSFS — it hides \
+                         nothing here while its side effects still apply. Remove it",
                         u.module
                     ),
                 )
@@ -550,14 +525,12 @@ pub fn run_doctor() -> Result<()> {
                 (
                     Level::Info,
                     format!(
-                        "{} makes SUSFS calls, which do nothing on this kernel (no SUSFS) — but \
-                         it ships its own content, so that is an unused assist rather than a \
-                         reason to remove it. The Suite serves its files mountlessly regardless",
-                        u.module
+                        "{} makes SUSFS calls (no SUSFS here, so they no-op) but ships its \
+                         own content — keep it", u.module
                     ),
                 )
             };
-            f.push(Finding { level, check: "SUSFS calls on a kernel without SUSFS", detail });
+            f.push(Finding { level, check: "SUSFS calls, no SUSFS", detail });
         }
     }
 
@@ -567,23 +540,18 @@ pub fn run_doctor() -> Result<()> {
             Some(why) => (
                 Level::Warn,
                 format!(
-                    "{} runs `feature set {} {}` in its scripts, so it re-applies that root \
-                     manager setting on EVERY boot — changing it by hand will not stick. {}. \
-                     Remove the module, or set its own config so it stops writing that key",
+                    "{} sets {}={} every boot — your manual change will not stick. {}",
                     w.module, w.key, shown, why
                 ),
             ),
             None => (
                 Level::Info,
                 format!(
-                    "{} runs `feature set {} {}` in its scripts, so it owns that root manager \
-                     setting at every boot — listed so the value you see in the manager is not \
-                     a mystery",
-                    w.module, w.key, shown
+                    "{} sets {}={} every boot", w.module, w.key, shown
                 ),
             ),
         };
-        f.push(Finding { level, check: "module rewrites root-manager settings", detail });
+        f.push(Finding { level, check: "rewrites manager setting", detail });
     }
 
     for (part, n) in &fd_note {
@@ -591,8 +559,7 @@ pub fn run_doctor() -> Result<()> {
             level: Level::Info,
             check: "not FD-allowlisted for zygote",
             detail: format!(
-                "{n} injected file(s) on /{part} — zygote does not preload these, so this is \
-                 informational; an overlay APK here would be reported separately as an error"
+                "{n} injected file(s) on /{part} — zygote does not preload these; fine"
             ),
         });
     }

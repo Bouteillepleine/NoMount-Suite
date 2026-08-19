@@ -260,6 +260,13 @@
        preserved, which is what the reports rely on for structure. */
     white-space: pre-wrap; overflow-wrap: anywhere;
   }
+  /* .rules had DARK-ONLY colours and no light override, unlike every other
+     component here -- in light mode it rendered pale blue-grey text on a grey
+     box, which is unreadable on a phone. Same palette the other light-theme
+     surfaces use. */
+  html[data-theme="light"] .rules {
+    color: #16203a; background: rgba(16,26,48,0.05); border-color: rgba(16,26,48,0.12);
+  }
 
   /* stealth readout */
   .stealth-head { display: flex; align-items: center; gap: 11px; }
