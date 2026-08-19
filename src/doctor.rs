@@ -222,11 +222,15 @@ pub fn run_doctor() -> Result<()> {
         f.push(Finding {
             level: Level::Warn,
             check: "manager: kernel umount is ON",
-            detail: "the root manager's `kernel_umount` is ENABLED (manager: \"Kernel umount\" / \
-                     FR \"Démontage du noyau\"). It cannot hide anything the Suite serves -- \
+            detail: "the root manager's `kernel_umount` is ENABLED (the manager's \"Kernel umount\" \
+                     toggle). It cannot hide anything the Suite serves -- \
                      injections are VFS redirects, not mounts, so the kernel umount list is \
                      empty and there is nothing for it to unmount. Switch it OFF in your root \
-                     manager. To hide from one app use `nomount uid block <uid>` instead"
+                     manager. To hide from one app use `nomount uid block <uid>` instead. While you \
+                     are in there, check \"Umount modules by default\" too and turn that OFF: \
+                     enabling this switch silently turned that one on here once, it removes \
+                     module content from every app without a profile, and nothing can read its \
+                     state to warn you about it"
                 .to_string(),
         });
     }
@@ -252,26 +256,6 @@ pub fn run_doctor() -> Result<()> {
                 shown.join(", "),
                 if umounters.len() > shown.len() { ", …" } else { "" }
             ),
-        });
-    }
-
-    // The GLOBAL "umount modules by default" switch has no read path at all --
-    // see manager.rs. Surface it only when there is a REASON to look: either the
-    // readable switch is on, or per-app umount profiles exist, which means the
-    // user has been in that part of the manager. Printed unconditionally it
-    // became the line people skim past, taking the real kernel_umount warning
-    // next to it along with them.
-    if kernel_umount == Some(true) || !umounters.is_empty() {
-        f.push(Finding {
-            level: Level::Info,
-            check: "manager: global \"umount modules by default\" cannot be read",
-            detail: "no interface exposes the manager's GLOBAL \"umount modules by default\" \
-                     switch (FR \"Démonter les modules par défaut\"): it is not a ksud feature, \
-                     not in `ksud umount-config`, and not in the allowlist, which only records \
-                     apps that have an explicit profile. Check it by hand in the root manager \
-                     and turn it OFF -- on a mountless setup it can hide nothing, and it is the \
-                     switch that has broken root on this device before"
-                .to_string(),
         });
     }
 

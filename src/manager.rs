@@ -11,7 +11,8 @@
 //!
 //!   kernel_umount           `ksud feature get kernel_umount` -> exact.
 //!   per-app "umount modules" .allowlist, decoded below -> exact.
-//!   "umount modules by default" (the global) -- NO read path exists. It is not
+//!   "Umount modules by default" (the global, exact manager label; note the
+//!       manager spells it "Umount") -- NO read path exists. It is not
 //!       a ksud feature, not in `ksud umount-config`, and not in the allowlist,
 //!       which only holds apps that have an explicit profile. Do not guess it: a
 //!       behavioural probe was tried and is confounded, because on a zero-mount
