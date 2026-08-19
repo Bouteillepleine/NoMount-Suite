@@ -164,10 +164,22 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     else
         _health="healthy"
     fi
-    if [ "${_mnt:-0}" -gt 0 ]; then
-        _mstate="⚠ $_mnt module mount(s)"
+    # Distinguish a LEAK from a mount absorb leaves on purpose (a Zygisk/Xposed
+    # hook bind). Counting them the same made the card read
+    # "⚠ 1 module mount(s) … fully mountless" in one breath, which is both
+    # alarming and self-contradictory, and gave the reader no way to tell an
+    # expected mount from a real one.
+    _fgn=$(sed -n 's/^mounts_foreign=//p' "$NMDIR/health.txt" 2>/dev/null)
+    _fgn=${_fgn:-$_mnt}
+    if [ "${_fgn:-0}" -gt 0 ]; then
+        _mstate="⚠ $_fgn module mount(s)"
+        _tail="hookless VFS + RRO injection is mountless; $_fgn foreign mount(s) present"
+    elif [ "${_mnt:-0}" -gt 0 ]; then
+        _mstate="$_mnt by design"
+        _tail="fully mountless: hookless VFS + RRO, su via sucompat ($_mnt hook-framework mount left alone)"
     else
         _mstate="0 mounts"
+        _tail="fully mountless: hookless VFS + RRO, su via sucompat"
     fi
     # The manager's kernel_umount rides along on the card. It can hide nothing
     # the Suite serves -- injections are VFS redirects, so the kernel umount list
@@ -184,7 +196,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
         _mul=""
     fi
     KSU_MODULE=meta-nomount ksud module config set --temp override.description \
-        "[NoMount ✅ $_rules rules · $_rro RRO · $_mstate] $_health$_muc — fully mountless: hookless VFS + RRO, su via sucompat" \
+        "[NoMount ✅ $_rules rules · $_rro RRO · $_mstate] $_health$_muc — $_tail" \
         >/dev/null 2>&1
     echo "nomount: card refreshed ($_rules rules, $_mstate, $_health$_mul)" > /dev/kmsg 2>/dev/null
 fi

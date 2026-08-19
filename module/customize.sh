@@ -61,6 +61,31 @@ done
 # --- spoof add-on: dynamic vbmeta.digest ---
 # Seed the persistent config (append-only so user edits survive an update), and
 # make the add-on script executable. The work itself happens at boot in spoof.sh.
+# --- does this kernel actually have the engine? ---------------------------
+# The header above says this needs a CONFIG_NOMOUNT kernel, but nothing checked
+# it: installing on a kernel without the hookless engine "succeeded" and then
+# injected nothing, silently. `nm v` asks the engine its version over netlink and
+# answers nothing if it is not there.
+#
+# A WARNING, never an abort: flashing from recovery is legitimate and the
+# recovery kernel has no engine, so aborting would block a valid install.
+_abi=$(getprop ro.product.cpu.abi 2>/dev/null)
+_nm="$MODPATH/bin/${_abi}/nm"
+if [ -x "$_nm" ]; then
+    _ev=$("$_nm" v 2>/dev/null | tr -dc '0-9')
+    if [ -n "$_ev" ]; then
+        ui_print "- Hookless engine: v${_ev} (responding)"
+    else
+        ui_print "*********************************************************"
+        ui_print "! The kernel's NoMount engine did not answer."
+        ui_print "! From recovery this is normal — it will work after boot."
+        ui_print "! On a running system it means this kernel has no NoMount"
+        ui_print "! support: the module installs but injects NOTHING."
+        ui_print "! Flash a NoMount-enabled kernel, then reboot."
+        ui_print "*********************************************************"
+    fi
+fi
+
 NMDIR=/data/adb/nomount
 mkdir -p "$NMDIR"
 set_perm "$NMDIR" 0 0 0700

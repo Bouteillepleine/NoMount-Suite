@@ -35,6 +35,10 @@ struct Fingerprint {
     blocked: usize,
     consistency: String, // "ok" | "mismatch:<path>(root=A app=B)" | "unchecked"
     guard: String,       // "armed" | "tripped"
+    /// Module mounts that are NOT left by design, i.e. actual leaks. Carried
+    /// separately so the card can stop calling an expected hook-framework bind a
+    /// warning.
+    mounts_foreign: usize,
     /// The root manager's `kernel_umount`: "on" | "off" | "unknown".
     ///
     /// Carried in the fingerprint so the manager's state travels with every
@@ -56,6 +60,7 @@ impl Fingerprint {
         let _ = writeln!(s, "rules={}", self.rules);
         let _ = writeln!(s, "whiteouts={}", self.whiteouts);
         let _ = writeln!(s, "mounts={}", self.mounts);
+        let _ = writeln!(s, "mounts_foreign={}", self.mounts_foreign);
         let _ = writeln!(s, "blocked={}", self.blocked);
         let _ = writeln!(s, "consistency={}", self.consistency);
         let _ = writeln!(s, "guard={}", self.guard);
@@ -93,14 +98,30 @@ fn app_size(uid: u32, path: &str) -> String {
 /// the manager card, and in the WebUI) claimed a clean posture on a device that
 /// had real module mounts. Resolve sources properly instead -- absorb already
 /// knows how.
-fn count_module_mounts() -> usize {
-    let Ok(body) = fs::read_to_string("/proc/self/mountinfo") else { return 0 };
+/// (total, by_design) module mounts.
+///
+/// A hook framework's bind is one absorb deliberately never takes over, so
+/// counting it the same as a leak made the card contradict itself: it read
+/// "⚠ 1 module mount(s)" and "fully mountless" in the same sentence, with no way
+/// for a reader to tell the expected one from a real leak.
+fn count_mounts_split() -> (usize, usize) {
+    let Ok(body) = fs::read_to_string("/proc/self/mountinfo") else { return (0, 0) };
     let rows = crate::absorb::parse_mountinfo(&body);
     let roots = crate::absorb::fs_roots(&rows);
-    rows.iter()
-        .filter_map(|r| crate::absorb::source_of(r, &roots))
-        .filter(|src| src.starts_with("/data/adb/modules"))
-        .count()
+    let (mut total, mut by_design) = (0usize, 0usize);
+    for r in &rows {
+        let Some(src) = crate::absorb::source_of(r, &roots) else { continue };
+        if !src.starts_with("/data/adb/modules") {
+            continue;
+        }
+        total += 1;
+        if crate::absorb::module_dir_of(&src)
+            .is_some_and(|d| crate::absorb::is_hook_framework(&d))
+        {
+            by_design += 1;
+        }
+    }
+    (total, by_design)
 }
 
 /// The Narcissus canary: sample a few injected files and confirm a normal app
@@ -147,13 +168,15 @@ fn gather() -> Fingerprint {
     } else {
         "armed"
     };
+    let (mounts_total, mounts_by_design) = count_mounts_split();
     Fingerprint {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uname: read_cmd("uname", &["-r"]),
         engine,
         rules: rules.len(),
         whiteouts,
-        mounts: count_module_mounts(),
+        mounts: mounts_total,
+        mounts_foreign: mounts_total - mounts_by_design,
         blocked,
         consistency: consistency_probe(&rules),
         guard: guard.to_string(),
