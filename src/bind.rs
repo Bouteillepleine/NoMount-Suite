@@ -219,7 +219,14 @@ pub fn umount_one(target: &Path) {
         .filter(|(t, _, _)| t != target)
         .map(|(t, s, l)| format!("{}\t{}\t{}\n", t.display(), s.display(), l))
         .collect();
-    let _ = fs::write(BINDS_LIST, remaining);
+    // This list is the ONLY record of binds we made; if it cannot be rewritten
+    // the dropped entry is leaked -- a real mount nothing will umount later.
+    if let Err(e) = fs::write(BINDS_LIST, &remaining) {
+        eprintln!(
+            "nomount: could not update {BINDS_LIST}: {e} — a bind may be left \
+             recorded (or unrecorded) and will not be cleaned up on the next pass"
+        );
+    }
 }
 
 /// Umount every bind we recorded, then clear the list. Run at the start of each
@@ -240,5 +247,12 @@ pub fn teardown_all() {
             restore_selinux(&s, format!("{lbl}\0").as_bytes());
         }
     }
-    let _ = fs::remove_file(BINDS_LIST);
+    // A stale list makes the next pass try to umount paths already gone. Not
+    // fatal, but it is the difference between a clean pass and confusing noise.
+    if let Err(e) = fs::remove_file(BINDS_LIST) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("nomount: could not clear {BINDS_LIST}: {e} — the next pass will \
+                       retry umounts that are already done");
+        }
+    }
 }

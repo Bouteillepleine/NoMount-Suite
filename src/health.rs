@@ -258,8 +258,15 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     fs::create_dir_all(&out).with_context(|| format!("create {out}"))?;
 
     let nm = Nm::new();
+    // An export that silently omits a file is worse than one that fails loudly:
+    // the whole point is handing someone a complete picture, and a missing
+    // section reads as "the tool had nothing to say" rather than "the write
+    // failed". Shared storage is exactly where writes DO fail (permissions,
+    // full volume, a scanner deleting flagged files).
     let write = |name: &str, content: &str| {
-        let _ = fs::write(format!("{out}/{name}"), content);
+        if let Err(e) = fs::write(format!("{out}/{name}"), content) {
+            eprintln!("nomount: export: could not write {name}: {e} — this diagnostic is INCOMPLETE");
+        }
     };
 
     write("selfcheck.txt", &{

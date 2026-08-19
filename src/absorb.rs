@@ -527,7 +527,15 @@ pub fn set_absorbed(targets: &[PathBuf]) {
         body.push_str(&t.to_string_lossy());
         body.push('\n');
     }
-    let _ = fs::write(ABSORBED_LIST, body);
+    // Not discarded: `reload` reads this list to keep absorbed rules across a
+    // delta apply, so losing it silently means those targets come back as real
+    // mounts on the next reload with nothing explaining why.
+    if let Err(e) = fs::write(ABSORBED_LIST, &body) {
+        eprintln!(
+            "nomount: could not record absorbed targets in {ABSORBED_LIST}: {e} — \
+             `nomount reload` will not know to keep them, and they may return as mounts"
+        );
+    }
 }
 
 pub(crate) fn umount_detach(p: &Path) -> bool {

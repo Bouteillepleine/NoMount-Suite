@@ -20,6 +20,13 @@ exec 9>"$LOCK" 2>/dev/null
 chmod 0600 "$LOCK" 2>/dev/null
 if command -v flock >/dev/null 2>&1; then
     flock -n 9 || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
+else
+    # No flock: the single-run guard is GONE, and two concurrent mount passes
+    # would race on the same rule set. Say so rather than proceeding quietly --
+    # a missing guard that announces itself is debuggable; a silent one is not.
+    # (flock is /system/bin/flock on a stock ROM, so reaching this means the
+    # ROM is unusual, which is exactly when you want the warning.)
+    echo "nomount: flock unavailable — mount pass running WITHOUT a single-run guard" > /dev/kmsg 2>/dev/null
 fi
 
 ABI=$(getprop ro.product.cpu.abi)
