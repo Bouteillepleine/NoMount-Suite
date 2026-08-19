@@ -840,7 +840,6 @@
     <p class="note" id="spNote">Verified boot recomputes <code>ro.boot.vbmeta.digest</code> and <code>.size</code> from the real AVB chain on-device. Boot-state normalizes the lock-state/warranty/debuggable props and, where the kernel exposes it, the raw <code>/proc/cmdline</code> + <code>/proc/bootconfig</code> boot-state to match — only ever changing a prop that already exists, and skipping procfs if the kernel has no nomount knobs. Kernel uname keeps the running kernel's base and swaps the tail + build date so <code>uname</code> matches the ROM; blank keeps the current values, or paste them from a stock device. <b>Apply now</b> runs it immediately.</p>
   </div>
 
-  <div class="group-label">Diagnostics</div>
   <!-- HEALTH CHECK -->
 
   <!-- RUNTIME HEALTH -->
@@ -918,15 +917,20 @@
 
   <section class="tab" id="tab-diag">
 
+  <div class="group-label">Detection</div>
+
   <!-- AUDIT: replay every detection oracle against this device -->
-  <div class="card">
-    <div class="cardhead" onclick="tog(this)">
+  <div class="card collapsed" id="cardAudit">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
       <h2>Detection audit</h2><span class="chip" id="auchip">—</span><span class="chev">›</span>
     </div>
     <p class="note">Replays every detection oracle this project has found and closed — readdir cookies, inode banding, directory shape, mount visibility, kernel surfaces — against <b>your</b> device and ROM, and prints what it actually measured. A <b>skipped</b> check was not verified: it is not a pass.</p>
     <div class="btns"><button class="act primary" onclick="runAudit(this)">Run detection audit</button></div>
     <pre class="rules" id="auditout" style="display:none">…</pre>
   </div>
+
+  <div class="group-label">Health</div>
 
   <div class="card collapsed" id="cardHealth">
     <div class="card-h clp" onclick="toggleCard(this)">

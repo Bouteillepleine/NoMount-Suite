@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Auto-bump patch version unless explicitly provided
+# Decide the version: auto-bump the patch level, or take the one given.
 if [ -z "$VERSION" ]; then
     IFS='.-' read -r major minor patch pre <<< "$CURRENT_VERSION"
     patch=$((patch + 1))
@@ -38,23 +38,29 @@ if [ -z "$VERSION" ]; then
     else
         NEW_VERSION="${major}.${minor}.${patch}"
     fi
-
-    sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$PROJECT_ROOT/Cargo.toml"
-
-    # major*10000 + minor*100 + patch. Plain dot-stripping regressed the code
-    # (1.2.0 -> "120" < 10102 for v1.1.2), which a manager reads as a downgrade.
-    vbase="${NEW_VERSION%%-*}"
-    IFS=. read -r vmaj vmin vpat <<< "$vbase"
-    vcode=$(( ${vmaj:-0} * 10000 + ${vmin:-0} * 100 + ${vpat:-0} ))
-    sed -i "s/^version=.*/version=v${NEW_VERSION}/" "$MODULE_DIR/module.prop"
-    sed -i "s/^versionCode=.*/versionCode=${vcode}/" "$MODULE_DIR/module.prop"
-
-    VERSION="v${NEW_VERSION}"
-    echo "==> Version bumped: v${CURRENT_VERSION} → ${VERSION}"
+    echo "==> Version bumped: v${CURRENT_VERSION} → v${NEW_VERSION}"
 else
-    VERSION="${VERSION#v}"
-    VERSION="v${VERSION}"
+    NEW_VERSION="${VERSION#v}"
+    [ "$NEW_VERSION" != "$CURRENT_VERSION" ] && \
+        echo "==> Version set: v${CURRENT_VERSION} → v${NEW_VERSION}"
 fi
+
+# Stamp it EVERYWHERE, for an explicit --version just as much as an auto-bump.
+# These writes used to live inside the auto-bump branch, so `--version 1.3.9`
+# renamed the zip while Cargo.toml and module.prop stayed behind: the artifact
+# was called 1.3.9 and the binary inside it answered `nomount 1.3.8`. A version
+# that lies about itself is the one thing a release must never do.
+sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$PROJECT_ROOT/Cargo.toml"
+
+# major*10000 + minor*100 + patch. Plain dot-stripping regressed the code
+# (1.2.0 -> "120" < 10102 for v1.1.2), which a manager reads as a downgrade.
+vbase="${NEW_VERSION%%-*}"
+IFS=. read -r vmaj vmin vpat <<< "$vbase"
+vcode=$(( ${vmaj:-0} * 10000 + ${vmin:-0} * 100 + ${vpat:-0} ))
+sed -i "s/^version=.*/version=v${NEW_VERSION}/" "$MODULE_DIR/module.prop"
+sed -i "s/^versionCode=.*/versionCode=${vcode}/" "$MODULE_DIR/module.prop"
+
+VERSION="v${NEW_VERSION}"
 
 # --- nm: build it, or say plainly that a prebuilt is being shipped ------------
 # nm is freestanding C with no libc, so it needs a cross compiler rather than
