@@ -1206,7 +1206,7 @@
       } else if (rootNm === 0) {
         $("stealthT").textContent = "Fully mountless";
         $("stealthD").textContent = "zero mounts — nothing to hide";
-        $("stealthNote").innerHTML = "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat (kernel&nbsp;· mountless), and RRO overlays are hookless too — OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> mount table, so there is no mount-gap for a scanner to flag.";
+        $("stealthNote").innerHTML = "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat (kernel&nbsp;· mountless), and RRO overlays are Prism too — OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> mount table, so there is no mount-gap for a scanner to flag.";
       } else {
         $("stealthT").textContent = "Clean — nothing visible to apps";
         $("stealthD").textContent = `${rootNm} mount${rootNm > 1 ? "s" : ""} hidden from non-root`;
