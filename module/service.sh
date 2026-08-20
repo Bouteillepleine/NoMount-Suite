@@ -123,16 +123,25 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
         # apps the user believes are hidden are not.
         echo "nomount: ⚠ hide list apply FAILED ($_bl)" > /dev/kmsg 2>/dev/null
     fi
+fi
 
-    # Close the install-time gap: an entry saved for an app that wasn't installed
-    # yet used to sit inert until the next reboot — install the detector you meant
-    # to hide from and it saw everything until you rebooted. PackageManager
-    # rewrites packages.list on every install/uninstall/update, so watch its
-    # directory and re-apply. One idle toybox process; skipped without inotifyd.
-    if command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
-        inotifyd "$MODDIR/uidwatch.sh" /data/system:cwm >/dev/null 2>&1 &
-        echo "nomount: hide-list package watcher started" > /dev/kmsg 2>/dev/null
-    fi
+# --- watch the package map, so the hide list follows installs ---
+# An entry saved for an app that wasn't installed yet used to sit inert until the
+# next reboot — install the detector you meant to hide from and it saw everything
+# until you rebooted. PackageManager rewrites packages.list on every install,
+# uninstall and update, so watch its directory and re-apply.
+#
+# Deliberately NOT gated on the list being non-empty: hide your first app from the
+# WebUI after boot and a list-gated watcher would not be running, leaving the gap
+# open for the rest of the boot — the exact hole this closes. uidwatch.sh exits
+# immediately when there is nothing to apply, so the idle cost is one blocked
+# process. No event mask either: the mask letters differ between the busybox and
+# toybox inotifyd, and an unknown letter makes inotifyd exit at startup, which
+# would disable the watcher silently.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] \
+   && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
+    inotifyd "$MODDIR/uidwatch.sh" /data/system >/dev/null 2>&1 &
+    echo "nomount: hide-list package watcher started" > /dev/kmsg 2>/dev/null
 fi
 
 # --- runtime health canary (writes health.txt; complements plan-time doctor) ---

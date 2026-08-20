@@ -319,8 +319,15 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         let fp = gather();
         fp.to_text()
     });
+    let shared = ["/sdcard", "/storage", "/mnt/sdcard"].iter().any(|p| out.starts_with(p));
     write("rules.txt", &nm.list().unwrap_or_else(|e| format!("(nm list failed: {e})")));
-    write("uid_live.txt", &format!("{:?}", nm.uid_list_live().unwrap_or_default()));
+    // The live hidden set is the same secret as the hide list itself -- it names
+    // the appids you are hiding from -- so it obeys the same rule. It used to be
+    // written unconditionally, which handed exactly that to shared storage on
+    // every WebUI export (the default destination is /sdcard/Download).
+    if !shared {
+        write("uid_live.txt", &format!("{:?}", nm.uid_list_live().unwrap_or_default()));
+    }
     let self_exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "nomount".to_string());
@@ -330,14 +337,20 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     write("uname.txt", &read_cmd("uname", &["-a"]));
 
     // Shared storage is readable by any app holding a storage permission, and the
-    // point of an export is to hand it to someone. `blocklist` names the apps you
-    // are hiding FROM -- publishing it there tells a detector exactly that -- and
-    // `spoof.conf` describes what is being spoofed. They go only to a destination
-    // that is not shared storage; the diagnostics that matter for a bug report do
-    // not include either.
-    const PRIVATE: &[&str] = &["blocklist", "spoof.conf"];
-    let shared = ["/sdcard", "/storage", "/mnt/sdcard"].iter().any(|p| out.starts_with(p));
-    for f in ["blocklist", "spoof.conf", "spoof.log", "incident.log", "health.txt", "snapshot.txt"] {
+    // point of an export is to hand it to someone. `uidhide` names the apps you are
+    // hiding FROM -- publishing it there tells a detector exactly that -- its
+    // `.cache` spells out the resolved appid for each, and `spoof.conf` describes
+    // what is being spoofed. They go only to a destination that is not shared
+    // storage; the diagnostics that matter for a bug report do not include any.
+    //
+    // NB: `blocklist` is no longer one of them. It used to hold the hide list and
+    // is now only module ids to skip injecting, so it is ordinary diagnostic data
+    // -- but the secret moved with the content, and the guard has to move with it.
+    const PRIVATE: &[&str] = &["uidhide", "uidhide.cache", "uidhide.conf", "spoof.conf"];
+    for f in [
+        "uidhide", "uidhide.cache", "uidhide.conf", "blocklist", "spoof.conf", "spoof.log",
+        "incident.log", "health.txt", "snapshot.txt",
+    ] {
         if shared && PRIVATE.contains(&f) {
             continue;
         }

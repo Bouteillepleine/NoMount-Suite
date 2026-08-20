@@ -146,10 +146,22 @@ fn parse_uid_for_package(list: &str, pkg: &str) -> Option<u32> {
     None
 }
 
-/// One-time split of the shared `blocklist` file. Runs only while the new file is
+/// One-time split of the shared `blocklist` file, run while the new file is
 /// absent. An entry that names a directory under `/data/adb/modules` is a module
-/// id and stays put; everything else is a hide-list entry and moves. Both writes
-/// are best-effort: a failure here must never cost the caller its list.
+/// id for the mount pass to skip; everything else is a hide-list entry and is
+/// COPIED here.
+///
+/// Copied, not moved: this runs unattended at post-fs-data, and the two mistakes
+/// are not the same size. A leftover package name in `blocklist` is inert — that
+/// file is only ever consulted as "is this the id of a module I am about to
+/// inject?", so a name no module has changes nothing. Removing an entry that IS a
+/// module id, on the other hand, means the next mount pass injects a module that
+/// was deliberately excluded, which is how a self-mounting module or a shipped su
+/// binary breaks the boot. So if `is_dir()` were ever wrong (an unreadable modules
+/// dir, say), the failure lands on the harmless side.
+///
+/// The dangerous half of the old shared file is fixed regardless: the hidden-apps
+/// list, and its delete button, now read and write `uidhide` only.
 fn migrate_legacy() {
     if Path::new(BLOCKLIST_PATH).exists() {
         return;
@@ -159,22 +171,13 @@ fn migrate_legacy() {
     if entries.is_empty() {
         return;
     }
-    let (modules, apps): (Vec<String>, Vec<String>) = entries
+    let apps: Vec<String> = entries
         .into_iter()
-        .partition(|e| Path::new(MODULES_DIR).join(e).is_dir());
-
-    if write_lines(BLOCKLIST_PATH, &apps).is_ok() {
-        // Only shrink the legacy file once the new one is safely on disk.
-        let mut body = String::from(
-            "# NoMount: module ids to skip injecting (self-mounting modules).\n\
-             # Per-app hiding moved to /data/adb/nomount/uidhide.\n",
-        );
-        for m in &modules {
-            body.push_str(m);
-            body.push('\n');
-        }
-        let _ = fs::write(LEGACY_PATH, body);
-    }
+        .filter(|e| !Path::new(MODULES_DIR).join(e).is_dir())
+        .collect();
+    // Written even when empty: the file's existence is what marks the migration
+    // done, so an all-module-ids legacy file is not re-scanned on every read.
+    let _ = write_lines(BLOCKLIST_PATH, &apps);
 }
 
 /// Read the persistent hide list: trimmed, comment- and blank-stripped, order

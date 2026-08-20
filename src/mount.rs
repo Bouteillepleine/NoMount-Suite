@@ -781,6 +781,18 @@ pub fn run_mount() -> Result<()> {
     // Start clean so uninstalled/updated modules don't leave stale rules, and tear
     // down any my_* binds from the previous pass so removed modules don't leak one.
     let _ = nm.clear();
+    // `clear` dropped the kernel's hidden-UID set along with the rules — per-UID
+    // hiding is runtime state and CLEAR_ALL is its reset. Without this, every mount
+    // pass after boot (the WebUI's Re-apply button is one) silently unhid every app
+    // on the list for the rest of the session.
+    //
+    // Re-hide BEFORE the rules go back in, not after: hiding is per-UID state that
+    // does not depend on any rule existing, so asserting it first means a hidden app
+    // is never able to observe the window in which the pass is adding injections.
+    // Resolved from the cached appid mirror, so this also works at post-fs-data,
+    // before `packages.list` is meaningful — apps are hidden from the moment the
+    // injections exist rather than from boot_completed onwards.
+    let hidden = crate::cli::handlers::reapply_blocklist(&nm, true);
     crate::bind::teardown_all();
     // `clear` dropped every absorbed rule too, so the record of them is now a lie.
     // Left behind, `reload` would protect targets that no longer carry a rule.
@@ -822,14 +834,6 @@ pub fn run_mount() -> Result<()> {
     }
     let modules = served.len();
     let surface = if binds > 0 { "hookless + my_* bind" } else { "mountless (RRO via hookless)" };
-
-    // The `clear` above dropped the kernel's hidden-UID set along with the rules —
-    // per-UID hiding is runtime state and CLEAR_ALL is its reset. Without this,
-    // every mount pass after boot (the WebUI's Re-apply button is one) silently
-    // unhid every app on the list for the rest of the session. Resolving from the
-    // cached mirror so this works at post-fs-data too: apps are hidden from the
-    // moment the injections exist, rather than from boot_completed onwards.
-    let hidden = crate::cli::handlers::reapply_blocklist(&nm, true);
 
     println!(
         "nomount(suite): {modules} modules | {} rules, {} whiteouts, {binds} my_* binds, {} failed, \

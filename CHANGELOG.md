@@ -59,6 +59,12 @@ findings, fixed. The kernel half lives in `kbuild@hookless`.
 - **A `--uid`-scoped rule missed the app's clones,** comparing a raw UID where the
   hide list compares appids.
 
+- **`export` published the live hidden set.** The hide list is deliberately kept
+  off shared storage — it names the apps you are hiding from — but `uid_live.txt`,
+  the kernel's live hidden set, was written unconditionally, and the WebUI exports
+  to `/sdcard/Download` by default. It obeys the same rule now, along with
+  `uidhide` and its resolved-appid cache.
+
 ### Added
 - **`nomount uid isolated <both|appzygote|platform|off>`** (WebUI: Per-UID hiding ›
   Isolated processes). An isolated process gets a pool UID that says nothing about

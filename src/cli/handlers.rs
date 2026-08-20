@@ -129,6 +129,15 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
                 } else if nm.uid_block(uid).is_ok() {
                     live.push(uid);
                     rep.hidden += 1;
+                } else if nm
+                    .uid_list_live()
+                    .map(|v| v.iter().any(|u| appid(*u) == uid))
+                    .unwrap_or(false)
+                {
+                    // The kernel answers EEXIST for a UID it already hides, which is
+                    // the end state we wanted -- only ask when the call failed, so a
+                    // stale snapshot of the live set cannot be reported as a failure.
+                    rep.hidden += 1;
                 } else {
                     rep.failed += 1;
                 }
@@ -308,10 +317,13 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 let Some(v) = parse_isolated_mode(&m) else {
                     bail!("unknown mode '{m}' — use both | appzygote | platform | off");
                 };
-                blocklist::set_hide_isolated(v)?;
+                // Knob first, persist second. Persisting a policy the engine has
+                // just refused leaves the file claiming a setting that is not in
+                // force, and every later apply re-tries and re-reports the failure.
                 nm.set_hide_isolated(v).map_err(|e| {
                     e.context("engine did not accept the isolated-pool knob (kernel too old?)")
                 })?;
+                blocklist::set_hide_isolated(v)?;
                 println!("ok: {}", isolated_mode_name(v));
             }
         },
