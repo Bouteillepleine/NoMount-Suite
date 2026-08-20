@@ -30,7 +30,7 @@ it, ordered by severity.
 
 ---
 
-## Status — all findings fixed in v1.3.12
+## Status — all findings fixed in v1.3.13
 
 Audited against `origin/suite` (`0f1c5da`) and `kbuild@hookless` (`40de86b`). Three
 findings turned out to be **already fixed upstream** and were dropped from the port:

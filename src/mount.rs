@@ -59,7 +59,7 @@ const MODULES_DIR: &str = "/data/adb/modules";
 // for a su binary would break root. Extend at runtime via the blocklist file.
 const BUILTIN_BLOCKLIST: &[&str] = &["kernelnosu", "scene_swap_controller", "AAaTempSpoof"];
 // NOTE: module ids, one per line — NOT the per-app hide list. The two shared this
-// path until v1.3.12: hiding an app also told this pass to skip a module of that
+// path until v1.3.13: hiding an app also told this pass to skip a module of that
 // name, and every module-skip entry showed up in the WebUI's hidden-apps list with
 // a delete button, one click away from injecting a self-mounting module. Per-app
 // hiding lives in `uidhide` now (see blocklist.rs, which migrates an existing file).

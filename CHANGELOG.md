@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.3.12
+## v1.3.13
 
 Audit pass over per-UID hiding, kernel to WebUI. Everything below is that audit's
 findings, fixed. The kernel half lives in `kbuild@hookless`.
