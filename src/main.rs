@@ -10,6 +10,7 @@ mod manager;
 mod mount;
 mod nm;
 mod preflight;
+mod presets;
 mod whiteout;
 
 use anyhow::Result;

@@ -94,8 +94,10 @@ pub enum VfsAction {
 
 #[derive(Subcommand)]
 pub enum UidAction {
-    /// Hide injections from an app — accepts a package name (durable) or a bare
-    /// UID. Persists across reboots.
+    /// Hide injections from an app — accepts a package name (durable), a bare
+    /// UID, or a glob over package names (`*.duckdetector`, `me.garfieldhan.*`,
+    /// `*chunqiu*`). Persists across reboots; a glob re-matches every apply, so
+    /// it also covers apps installed later.
     Block {
         target: String,
         /// Allow a platform appid (< 10000: root, system_server, shell …).
@@ -115,6 +117,15 @@ pub enum UidAction {
         /// works at post-fs-data before `packages.list` is meaningful.
         #[arg(long)]
         early: bool,
+    },
+    /// Add a curated preset to the hide list — `detectors` covers the known
+    /// root/environment detectors. No argument lists the available presets.
+    Preset {
+        /// Preset name, e.g. `detectors`
+        name: Option<String>,
+        /// Print what would be added without touching the list
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Which isolated-process pools hiding covers. Hiding from them stops a
     /// hidden app probing through an isolated helper; leaving them visible stops

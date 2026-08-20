@@ -212,7 +212,7 @@ pub fn add(target: &str, force: bool) -> Result<()> {
         );
     }
     let mut list = read()?;
-    if list.iter().any(|x| *x == t) {
+    if list.contains(&t) {
         println!("already listed: {t}");
         return Ok(());
     }
@@ -385,7 +385,7 @@ pub fn scan() -> (Vec<Candidate>, usize, usize) {
             if !is_real_file(&path) {
                 continue;
             }
-            if have.iter().any(|x| *x == ps) || validate(&ps).is_err() {
+            if have.contains(&ps) || validate(&ps).is_err() {
                 continue;
             }
             if injected.contains(&ps) {

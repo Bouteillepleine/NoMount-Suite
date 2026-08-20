@@ -37,6 +37,9 @@ impl Lock {
             use std::os::unix::fs::OpenOptionsExt;
             fs::OpenOptions::new()
                 .create(true)
+                // Nothing is ever written to it -- the file exists only to carry the
+                // flock -- so truncation is explicitly not wanted.
+                .truncate(false)
                 .write(true)
                 .mode(0o600)
                 .open(LOCK_FILE)

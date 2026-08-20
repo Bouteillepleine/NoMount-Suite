@@ -1,5 +1,53 @@
 # Changelog
 
+## v1.3.14
+
+Hide-list globs, a curated detector preset, and the per-UID card rebuilt so it is
+readable on a phone.
+
+### Added
+- **Globs in the hide list.** `*.duckdetector`, `me.garfieldhan.*` and `*chunqiu*`
+  are now valid entries, re-matched on every apply — so a detector that reinstalls
+  under a new package name stays hidden, and one installed later is covered without
+  being added by hand. Anchors are allowed at the ends only and a glob must carry at
+  least four literal characters, so a typo cannot hide injections from the whole
+  device. `uid list` prints each matched package with the glob that caught it, and
+  removing the glob un-hides them.
+- **`nomount uid preset detectors`** — 43 known detectors plus the five globs above,
+  in one command, with `--dry-run` to see it first. Also a one-tap button in the
+  WebUI. The inventory is adapted from Hide My Applist (HMA-OSS, AGPL-3.0); none of
+  its code is used, only the package list.
+
+### Fixed
+- **The isolated-process control could lie about the kernel's state.** It only
+  adopted the engine's answer when a regex matched, so if the engine did not answer
+  at all — old kernel, no netlink — the control went on displaying "Hide from all
+  (default)" whatever the kernel was actually doing. It now shows the state as
+  unknown instead, and the failure path waits for the re-read before re-enabling.
+- **A bad `packages.list` read could have un-hidden every hidden app.** The map
+  answers "not installed" identically whether an app is gone or the file could not
+  be read, and the new reconcile pass treats "not wanted" as "stop hiding". One
+  unreadable pass would therefore have un-hidden everything and wiped the resolved
+  mirror. Un-hiding is now gated on having actually read the map, and an empty parse
+  counts as unread.
+- **A glob can no longer reach a platform UID.** Unlike an exact entry it is
+  evaluated on every pass, so it could start matching a package sharing
+  `android.uid.system` (appid 1000) long after being added, with no chance for the
+  `--force` prompt. Those matches are skipped and named on stderr.
+- `metamount.sh` claimed in its header that it hides RRO mounts via SUSFS. It does
+  not — the Suite makes no SUSFS call at all; RRO goes through the hookless engine
+  and leaves no mount to hide. The only `ksu_susfs` reference is the guard against
+  another module's action button clobbering ksud.
+
+### Changed
+- **Per-UID hiding card rebuilt.** The isolated-process `<select>` is now a
+  segmented control: the native picker was drawn by the OS, ignored the theme
+  entirely and covered the card behind it. One tap instead of two. The two long
+  explanations fold away, which is most of the card's height back.
+- The apply pass reads `packages.list` once instead of once per entry, and writes
+  the hide list and the resolved mirror once instead of once per entry — a
+  ~50-entry preset was doing ~50 rewrites of each in the boot path.
+
 ## v1.3.13
 
 Audit pass over per-UID hiding, kernel to WebUI. Everything below is that audit's

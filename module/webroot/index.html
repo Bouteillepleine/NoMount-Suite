@@ -311,9 +311,44 @@
     letter-spacing: .04em; text-transform: uppercase; color: var(--dim);
     background: var(--bg2); border-bottom: 1px solid var(--brd2);
   }
-  /* isolated-pool policy row: label + select on one line, wrapping when narrow */
-  .iso-l { flex: 0 0 auto; align-self: center; font-size: 12.5px; color: var(--dim); }
-  .iso-s { flex: 1 1 180px; margin-top: 0; font-family: inherit; font-size: 13px; }
+  /* Isolated-pool policy: a segmented control, not a <select>. The native select
+     popup is drawn by the OS -- it ignores the theme tokens entirely and covers the
+     card behind it, which is jarring against everything else here. Four short
+     mutually-exclusive options fit inline, and this way it is one tap, not two. */
+  .seg { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; border-radius: 13px;
+         background: rgba(0,0,0,0.26); border: 1px solid var(--brd2); }
+  html[data-theme="light"] .seg { background: rgba(16,26,48,0.05); }
+  .seg-b { flex: 1 1 76px; appearance: none; background: transparent; border: 1px solid transparent;
+           border-radius: 10px; padding: 9px 7px; font: inherit; font-size: 12.5px; line-height: 1.15;
+           color: var(--dim); cursor: pointer; transition: background .13s, color .13s, border-color .13s; }
+  .seg-b:hover { color: var(--txt); }
+  .seg-b.on { background: rgba(124,156,255,0.16); border-color: var(--acc); color: var(--txt); font-weight: 600; }
+  html[data-theme="light"] .seg-b.on { background: rgba(124,156,255,0.20); }
+  .seg-b:disabled { opacity: .5; cursor: default; }
+  /* Engine did not answer: show nothing selected rather than lying with the default. */
+  .seg.unknown { border-style: dashed; }
+  .seg.unknown .seg-b { opacity: .5; }
+  .segstate { margin-top: 7px; font-size: 11.5px; color: var(--dim); }
+  .segstate.bad { color: var(--bad); }
+
+  /* One-tap curated list, beside the free-text field. */
+  .presetrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+  .presethint { flex: 1 1 210px; font-size: 11.5px; line-height: 1.45; color: var(--dim); }
+
+  /* Long explanations fold away: they were most of this card's height. */
+  .ndet { margin-top: 12px; }
+  .ndet > summary { cursor: pointer; list-style: none; font-size: 12px; font-weight: 600;
+                    color: var(--dim); padding: 7px 0; }
+  .ndet > summary::-webkit-details-marker { display: none; }
+  .ndet > summary::before { content: "\203A"; display: inline-block; margin-right: 7px;
+                            transition: transform .16s; }
+  .ndet[open] > summary::before { transform: rotate(90deg); }
+  .ndet > summary:hover { color: var(--txt); }
+  .ndet .note { margin-top: 4px; }
+
+  .subsec { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--brd2); }
+  .subsec-h { margin-bottom: 9px; font-size: 10.5px; font-weight: 640; letter-spacing: .04em;
+              text-transform: uppercase; color: var(--dim); }
   .blocklist { display: flex; flex-direction: column; gap: 6px; margin-top: 11px; }
   .blocklist:empty { display: none; }
   .blk-none { font-size: 12.5px; color: var(--dim); padding: 9px 11px; border: 1px dashed var(--brd2);
@@ -917,26 +952,45 @@
     <div class="uidbar">
       <div class="pkgwrap">
         <input id="uid" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
-               placeholder="Package name or UID — start typing to pick an app"
+               placeholder="Package name, UID, or glob (*.duckdetector)"
                oninput="pkgFilter()" onfocus="pkgFilter()" onblur="pkgBlur()" onkeydown="pkgKey(event)" />
         <div id="pkgdd" class="pkgdd"></div>
       </div>
       <button class="act" onclick="uidOp('block',this)">Hide</button>
       <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
     </div>
-    <div id="blocked" class="blocklist"></div>
-    <p class="note">Shows the listed app the <b>stock filesystem</b> — no injected files, no whiteouts, stock directory metadata. One entry covers the app in every user, work profile and clone (matching is on the appid), and its SDK-sandbox process too. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root is unaffected, and so is <code>su</code> — that's sucompat, not the engine. Doesn't cover SELinux-policy detection, or anything a system service reads on the app's behalf (PackageManager still parses the injected APK).</p>
 
-    <div class="uidbar" style="margin-top:13px">
-      <label class="iso-l" for="isoMode">Isolated processes</label>
-      <select id="isoMode" class="txin iso-s" onchange="setIsolated(this)">
-        <option value="both">Hide from all (default)</option>
-        <option value="appzygote">App-zygote pool only</option>
-        <option value="platform">Platform pool only</option>
-        <option value="off">Don't hide from any</option>
-      </select>
+    <div class="presetrow">
+      <button class="act" onclick="addPreset(this)">Hide known detectors</button>
+      <span class="presethint">Curated list of root/environment detectors, including globs that keep
+        matching when a detector is repackaged under a new name.</span>
     </div>
-    <p class="note">An isolated process gets a pool UID that says nothing about which app spawned it, so hiding from a listed app can only mean hiding from <i>every</i> isolated process. That closes the hole where a hidden app farms its probing out to an isolated helper — but while it's on, an app that <b>isn't</b> hidden can spot the injection by diffing its own view against its own isolated child's. Both pools are hidden by default; narrow it here if you'd rather not arm that comparison. No effect unless at least one app is hidden.</p>
+
+    <div id="blocked" class="blocklist"></div>
+
+    <details class="ndet">
+      <summary>What hiding covers</summary>
+      <p class="note">Shows the listed app the <b>stock filesystem</b> — no injected files, no whiteouts, stock directory metadata. One entry covers the app in every user, work profile and clone (matching is on the appid), and its SDK-sandbox process too. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root is unaffected, and so is <code>su</code> — that's sucompat, not the engine. Doesn't cover SELinux-policy detection, or anything a system service reads on the app's behalf (PackageManager still parses the injected APK).</p>
+      <p class="note">A <b>glob</b> covers a moving target: <code>*.duckdetector</code>,
+        <code>me.garfieldhan.*</code> or <code>*chunqiu*</code> re-match on every apply, so a detector
+        that reinstalls under a new package name stays hidden. Anchors go at the ends only, and a glob
+        needs at least four literal characters.</p>
+    </details>
+
+    <div class="subsec">
+      <div class="subsec-h">Isolated processes</div>
+      <div class="seg" id="isoSeg" role="radiogroup" aria-label="Which isolated-process pools hiding covers">
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="both" onclick="setIsolated('both')">All</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="appzygote" onclick="setIsolated('appzygote')">App-zygote</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="platform" onclick="setIsolated('platform')">Platform</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="off" onclick="setIsolated('off')">None</button>
+      </div>
+      <div class="segstate" id="isoState">Reading…</div>
+      <details class="ndet">
+        <summary>Why this trades one tell for another</summary>
+        <p class="note">An isolated process gets a pool UID that says nothing about which app spawned it, so hiding from a listed app can only mean hiding from <i>every</i> isolated process. That closes the hole where a hidden app farms its probing out to an isolated helper — but while it's on, an app that <b>isn't</b> hidden can spot the injection by diffing its own view against its own isolated child's. Both pools are hidden by default; narrow it here if you'd rather not arm that comparison. No effect unless at least one app is hidden.</p>
+      </details>
+    </div>
   </div>
 
   </section>
@@ -1791,12 +1845,17 @@
       const [name, stateRaw] = l.split("\t");
       const s = (stateRaw || "").trim();
       let cls = "live";
-      if (/not installed/.test(s) || /unreachable/.test(s)) cls = "gone";
+      if (/not installed/.test(s) || /unreachable/.test(s) || /no match/.test(s)) cls = "gone";
       else if (/not applied/.test(s)) cls = "pending";
       else if (/not saved/.test(s)) cls = "drift";
-      // Target for actions: package name when known, else the bare UID.
+      // Target for actions: for a glob-matched row the row names a package but the
+      // hide-list entry is the glob, so removing must act on the glob — otherwise the
+      // ✕ would delete nothing and the next apply would just re-hide the app.
       const uidM = s.match(/uid (\d+)/);
-      const target = /^uid \d+$/.test(name) ? (uidM ? uidM[1] : name) : name;
+      const viaM = s.match(/^via (\S+)/);
+      const target = viaM ? viaM[1]
+        : (/^uid \d+$/.test(name) ? (uidM ? uidM[1] : name) : name);
+      const xTitle = viaM ? `Remove ${viaM[1]} — un-hides every app it matches` : "Unhide";
       const save = cls === "drift"
         ? `<button class="bx save" title="Save so it survives reboot" data-act="save" data-nmt="${esc(target)}">💾</button>` : "";
       return `<div class="blk ${cls}">
@@ -1804,7 +1863,7 @@
         <span class="bn">${esc(name)}</span>
         <span class="bs">${esc(s)}</span>
         ${save}
-        <button class="bx" title="Unhide" data-act="unblock" data-nmt="${esc(target)}">✕</button>
+        <button class="bx" title="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>
       </div>`;
     }).join("");
     const n = lines.length;
@@ -1871,17 +1930,67 @@
     }
   }
   // Isolated-pool policy (a kernel knob, re-asserted from disk on every apply).
+  const ISO_MODES = {
+    both:      "Hiding covers every isolated process.",
+    appzygote: "Hiding covers the app-zygote pool only.",
+    platform:  "Hiding covers the platform pool (99000-99999) only.",
+    off:       "Isolated processes are not hidden from.",
+  };
+  function isoPaint(mode, note, bad) {
+    const seg = $("isoSeg"), st = $("isoState");
+    const known = Object.prototype.hasOwnProperty.call(ISO_MODES, mode);
+    seg.classList.toggle("unknown", !known);
+    seg.querySelectorAll(".seg-b").forEach(function (b) {
+      const on = known && b.dataset.v === mode;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-checked", on ? "true" : "false");
+    });
+    st.textContent = note || (known ? ISO_MODES[mode] : "");
+    st.classList.toggle("bad", !!bad);
+  }
   async function refreshIsolated() {
     const r = await nm("uid isolated");
     const m = (r.stdout || "").trim().match(/^(both|appzygote|platform|off)/);
-    if (m) $("isoMode").value = m[1];
+    // Never fall back to showing the default: if the engine did not answer, the
+    // control would claim "covers every isolated process" whatever the kernel is
+    // actually doing. Show it as unknown instead.
+    if (r.errno === 0 && m) isoPaint(m[1]);
+    else isoPaint(null, "State unknown — the engine did not answer.", true);
   }
-  async function setIsolated(sel) {
-    sel.disabled = true;
-    const r = await nm(`uid isolated ${sel.value}`);
-    if (r.errno === 0) toast((r.stdout || "").replace(/^ok:/, "").trim() || "Updated", "ok");
-    else { toast("Failed: " + (r.stderr || "error"), "bad"); refreshIsolated(); }
-    sel.disabled = false;
+  async function setIsolated(mode) {
+    const seg = $("isoSeg");
+    const btns = Array.prototype.slice.call(seg.querySelectorAll(".seg-b"));
+    btns.forEach(function (b) { b.disabled = true; });
+    try {
+      const r = await nm(`uid isolated ${mode}`);
+      if (r.errno === 0) {
+        toast((r.stdout || "").replace(/^ok:/, "").trim() || "Updated", "ok");
+        isoPaint(mode);
+      } else {
+        toast("Failed: " + (r.stderr || "error"), "bad");
+        // Await it: re-enabling before the read lands let the control be clicked
+        // again while it still showed the stale value.
+        await refreshIsolated();
+      }
+    } finally {
+      btns.forEach(function (b) { b.disabled = false; });
+    }
+  }
+
+  // Curated hide-list preset. Adds entries (globs included) and applies in one go.
+  async function addPreset(btn) {
+    btn.disabled = true;
+    const was = btn.textContent;
+    btn.textContent = "Adding…";
+    try {
+      const r = await nm("uid preset detectors");
+      if (r.errno === 0) toast((r.stdout || "").replace(/^preset /, "").trim() || "Added", "ok");
+      else toast("Failed: " + (r.stderr || "error"), "bad");
+      refreshBlocked();
+    } finally {
+      btn.textContent = was;
+      btn.disabled = false;
+    }
   }
 
   async function unblockOne(target, btn) {

@@ -81,6 +81,140 @@ pub enum Resolved {
 ///
 /// A purely numeric target is taken verbatim (already a UID) and normalised.
 /// Anything else is a package name, looked up in `packages.list`.
+/// A hide-list entry that is not a single package or UID but a glob over package
+/// names. Detectors are the reason this exists: Duck ships as `*.duckdetector`,
+/// Holmes under `me.garfieldhan.*`, Chunqiu with the string buried mid-name — all
+/// under package names that change between builds, so an exact list cannot hold
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pattern {
+    /// `com.foo.*`
+    Prefix(String),
+    /// `*.duckdetector`
+    Suffix(String),
+    /// `*chunqiu*`
+    Contains(String),
+}
+
+/// Shortest literal a glob may carry. `*a*` would match most of the device and a
+/// bare `*` all of it; hiding injections from every installed app is never what
+/// someone meant to type, so it is rejected rather than silently applied.
+pub const MIN_PATTERN_LITERAL: usize = 4;
+
+impl Pattern {
+    /// Parse a glob. `None` = not a glob (no `*`), so the caller treats it as an
+    /// exact package name. `Some(Err)` = a glob that is too broad to honour.
+    pub fn parse(entry: &str) -> Option<Result<Pattern>> {
+        let e = entry.trim();
+        if !e.contains('*') {
+            return None;
+        }
+        let stripped = e.trim_start_matches('*').trim_end_matches('*');
+        if stripped.contains('*') {
+            return Some(Err(anyhow::anyhow!(
+                "{e:?}: `*` is only allowed at the start and/or end"
+            )));
+        }
+        if stripped.len() < MIN_PATTERN_LITERAL {
+            return Some(Err(anyhow::anyhow!(
+                "{e:?}: needs at least {MIN_PATTERN_LITERAL} literal characters \
+                 (a broader glob would hide injections from most of the device)"
+            )));
+        }
+        let lit = stripped.to_string();
+        Some(Ok(match (e.starts_with('*'), e.ends_with('*')) {
+            (true, true) => Pattern::Contains(lit),
+            (true, false) => Pattern::Suffix(lit),
+            (false, true) => Pattern::Prefix(lit),
+            // No leading or trailing `*`, yet `contains('*')` held: impossible.
+            (false, false) => unreachable!("glob with no anchor"),
+        }))
+    }
+
+    pub fn matches(&self, pkg: &str) -> bool {
+        match self {
+            Pattern::Prefix(p) => pkg.starts_with(p.as_str()),
+            Pattern::Suffix(p) => pkg.ends_with(p.as_str()),
+            Pattern::Contains(p) => pkg.contains(p.as_str()),
+        }
+    }
+}
+
+/// Every installed package and its appid, from `packages.list`. One read serves a
+/// whole apply pass; globs are matched against this rather than forking `pm`.
+///
+/// `None` means the map could not be read (not root, or too early in boot) — which
+/// is NOT the same as "nothing is installed". The caller must not treat it as
+/// evidence that an app went away: `uid_for_package` answers `Ok(None)` for both
+/// cases, so acting on that alone would un-hide every hidden app the first time a
+/// read failed. An empty parse counts as unreadable for the same reason; a real
+/// device always has packages.
+pub fn installed_packages() -> Option<Vec<(String, u32)>> {
+    installed_from(&fs::read_to_string(PACKAGES_LIST).ok()?)
+}
+
+/// Pure half of [`installed_packages`]: `None` when the body yields no packages,
+/// which on a real device means the read was bad rather than the device empty.
+fn installed_from(list: &str) -> Option<Vec<(String, u32)>> {
+    let parsed = parse_installed(list);
+    if parsed.is_empty() { None } else { Some(parsed) }
+}
+
+/// Pure: `packages.list` body -> (package, appid).
+fn parse_installed(list: &str) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    for line in list.lines() {
+        let mut cols = line.split(' ');
+        let (Some(pkg), Some(uid)) = (cols.next(), cols.next()) else { continue };
+        if pkg.is_empty() {
+            continue;
+        }
+        if let Ok(u) = uid.parse::<u32>() {
+            out.push((pkg.to_string(), appid(u)));
+        }
+    }
+    out
+}
+
+/// Resolve an exact entry against an already-loaded package map. Same answer as
+/// [`resolve`], without re-reading `packages.list` — which the apply pass did once
+/// per entry, so a ~50-entry preset re-read the whole file ~50 times at boot.
+pub fn resolve_in(target: &str, installed: &[(String, u32)]) -> Result<Resolved> {
+    let t = target.trim();
+    if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
+        let uid: u32 = t.parse().context("UID out of range")?;
+        return Ok(Resolved::Uid(appid(uid)));
+    }
+    match installed.iter().find(|(pkg, _)| pkg == t) {
+        Some((_, uid)) => Ok(Resolved::Uid(*uid)),
+        None => Ok(Resolved::NotInstalled),
+    }
+}
+
+/// Expand one hide-list entry into the concrete `(package, appid)` pairs it covers.
+/// An exact entry yields at most one; a glob yields every installed match. `installed`
+/// is passed in so a whole pass shares a single `packages.list` read.
+pub fn expand(entry: &str, installed: &[(String, u32)]) -> Result<Vec<(String, u32)>> {
+    let e = entry.trim();
+    if let Some(pat) = Pattern::parse(e) {
+        let pat = pat?;
+        return Ok(installed
+            .iter()
+            .filter(|(pkg, _)| pat.matches(pkg))
+            .cloned()
+            .collect());
+    }
+    match resolve(e)? {
+        Resolved::Uid(uid) => Ok(vec![(e.to_string(), uid)]),
+        Resolved::NotInstalled => Ok(Vec::new()),
+    }
+}
+
+/// True if the entry is a glob (well-formed or not) rather than a package/UID.
+pub fn is_pattern(entry: &str) -> bool {
+    entry.contains('*')
+}
+
 pub fn resolve(target: &str) -> Result<Resolved> {
     let t = target.trim();
     if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
@@ -222,6 +356,30 @@ fn write_lines(path: &str, entries: &[String]) -> Result<()> {
 /// Persist the list (LF-terminated, one entry per line).
 fn write(entries: &[String]) -> Result<()> {
     write_lines(BLOCKLIST_PATH, entries)
+}
+
+/// Add many entries in one read-modify-write. Returns how many were new. A preset
+/// is ~50 entries, and `add` per entry rewrote the whole file each time.
+pub fn add_many(entries: &[String]) -> Result<usize> {
+    let mut list = read()?;
+    let mut added = 0;
+    for e in entries {
+        let e = e.trim();
+        if e.is_empty() || list.iter().any(|x| x == e) {
+            continue;
+        }
+        list.push(e.to_string());
+        added += 1;
+    }
+    if added > 0 {
+        write(&list)?;
+    }
+    Ok(added)
+}
+
+/// Replace the whole resolved-appid mirror in one write.
+pub fn cache_replace(map: &BTreeMap<String, u32>) {
+    cache_write(map);
 }
 
 /// Add an entry (no-op if already present). Returns true if it was newly added.
@@ -395,5 +553,99 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
     fn empty_or_comment_only_blocklist_is_empty() {
         assert!(parse_blocklist("").is_empty());
         assert!(parse_blocklist("# only\n\n   \n").is_empty());
+    }
+
+    // ---- globs ------------------------------------------------------------
+
+    fn pat(s: &str) -> Pattern {
+        Pattern::parse(s).expect("is a glob").expect("is well formed")
+    }
+
+    #[test]
+    fn plain_names_and_uids_are_not_globs() {
+        assert!(Pattern::parse("com.example.app").is_none());
+        assert!(Pattern::parse("10487").is_none());
+        assert!(!is_pattern("com.example.app"));
+        assert!(is_pattern("*.duckdetector"));
+    }
+
+    #[test]
+    fn each_anchor_form_matches_only_where_it_should() {
+        assert!(matches!(pat("me.garfieldhan.*"), Pattern::Prefix(_)));
+        assert!(matches!(pat("*.duckdetector"), Pattern::Suffix(_)));
+        assert!(matches!(pat("*chunqiu*"), Pattern::Contains(_)));
+
+        assert!(pat("me.garfieldhan.*").matches("me.garfieldhan.holmes"));
+        assert!(!pat("me.garfieldhan.*").matches("com.me.garfieldhan.x"));
+
+        assert!(pat("*.duckdetector").matches("com.whatever.duckdetector"));
+        assert!(!pat("*.duckdetector").matches("com.duckdetector.app"));
+
+        assert!(pat("*chunqiu*").matches("io.chunqiu.detector"));
+        assert!(!pat("*chunqiu*").matches("com.google.android.gms"));
+    }
+
+    /// The guard that stops a typo hiding injections from the whole device.
+    #[test]
+    fn globs_that_are_too_broad_are_refused() {
+        for bad in ["*", "**", "*a*", "*ab*", "*abc*", "a*"] {
+            let parsed = Pattern::parse(bad).expect("is a glob");
+            assert!(parsed.is_err(), "{bad} should have been refused");
+        }
+        assert!(Pattern::parse("*abcd*").expect("is a glob").is_ok());
+    }
+
+    #[test]
+    fn a_star_in_the_middle_is_refused_rather_than_half_honoured() {
+        let parsed = Pattern::parse("com.*.detector").expect("is a glob");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn expand_returns_every_installed_match_for_a_glob() {
+        let installed = vec![
+            ("me.garfieldhan.holmes".to_string(), 10001u32),
+            ("com.acme.duckdetector".to_string(), 10002),
+            ("com.google.android.gms".to_string(), 10003),
+        ];
+        let hits = expand("*.duckdetector", &installed).unwrap();
+        assert_eq!(hits, vec![("com.acme.duckdetector".to_string(), 10002)]);
+
+        let hits = expand("me.garfieldhan.*", &installed).unwrap();
+        assert_eq!(hits.len(), 1);
+
+        // A glob matching nothing installed is empty, not an error.
+        assert!(expand("*.nosuchthing", &installed).unwrap().is_empty());
+        // A malformed glob is an error, so a pass reports it instead of hiding all.
+        assert!(expand("*", &installed).is_err());
+    }
+
+    /// The gate that stops a bad read being read as "every app was uninstalled".
+    /// Acting on that would un-hide everything and wipe the mirror in one pass.
+    #[test]
+    fn resolve_in_agrees_with_resolve_without_touching_the_disk() {
+        let installed = vec![("com.a".to_string(), 10123u32), ("com.b".to_string(), 10456)];
+        assert!(matches!(resolve_in("com.a", &installed).unwrap(), Resolved::Uid(10123)));
+        // A bare UID never needs the map, and is normalised to its appid.
+        assert!(matches!(resolve_in("1010456", &installed).unwrap(), Resolved::Uid(10456)));
+        assert!(matches!(resolve_in("com.gone", &installed).unwrap(), Resolved::NotInstalled));
+        assert!(resolve_in("99999999999", &installed).is_err());
+    }
+
+    #[test]
+    fn an_unusable_package_map_is_none_not_an_empty_device() {
+        assert!(installed_from("").is_none());
+        assert!(installed_from("\n\n").is_none());
+        assert!(installed_from("garbage-with-no-columns").is_none());
+        assert!(installed_from("com.a 10123 0 /data/user/0/com.a default none 0\n").is_some());
+    }
+
+    #[test]
+    fn parse_installed_reads_packages_list_columns_and_normalises_appid() {
+        let body = "com.a 10123 0 /data/user/0/com.a default:targetSdk=34 none 0\n\
+                    com.b 1010456 1 /data/user/0/com.b default 3003 0\n\
+                    garbage\n";
+        let got = parse_installed(body);
+        assert_eq!(got, vec![("com.a".to_string(), 10123), ("com.b".to_string(), 10456)]);
     }
 }

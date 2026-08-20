@@ -96,7 +96,7 @@ fn harm_of(key: &str, value: Option<&str>) -> Option<&'static str> {
         ),
         // A write with no literal value still deserves naming: the module is
         // taking the setting over, whatever it decides at runtime.
-        (k, None) if matches!(k, "su_compat" | "kernel_umount" | "selinux_hide" | "sulog") => {
+        ("su_compat" | "kernel_umount" | "selinux_hide" | "sulog", None) => {
             Some("the value is computed at runtime, so what it ends up as is the module's call")
         }
         _ => None,
@@ -307,7 +307,7 @@ fn calls_mount(code: &str) -> bool {
     // gets ignored and this check only earns its place by being quiet.
     const PREFIXES: &[&str] = &["busybox", "toybox", "sudo", "su", "exec", "then", "do", "else"];
     for line in code.lines() {
-        for seg in unquote(line).split(|c| c == ';' || c == '|' || c == '&') {
+        for seg in unquote(line).split([';', '|', '&']) {
             let mut words = seg.split_whitespace().skip_while(|w| {
                 PREFIXES.contains(w) || w.starts_with('$') || w.contains('=')
             });
@@ -587,7 +587,6 @@ mod survey {
 
         println!("\n-- worst-case verdict per module --");
         let mut worst: BTreeMap<&str, usize> = BTreeMap::new();
-        for _ in 0..0 { }
         let mut counted = std::collections::BTreeSet::new();
         for u in susfs.iter().filter(|u| u.susfs_is_its_purpose) {
             *worst.entry("WARN susfs-only module").or_default() += 1;

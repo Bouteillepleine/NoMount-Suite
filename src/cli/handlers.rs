@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{bail, Result};
@@ -101,66 +102,143 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
     // kernel once per entry meant a fork+exec+netlink round trip per app.
     let mut live = nm.uid_list_live().unwrap_or_default();
 
-    for e in entries {
+    // Build the set this pass wants hidden, keyed by the *package* (or bare UID)
+    // rather than by the list entry, because one glob covers many packages. The
+    // cache is keyed the same way, so a glob's matches survive a reboot and are
+    // re-blocked by the early pass, before `packages.list` is meaningful.
+    // `None` = the package map could not be read. Un-hiding is destructive and
+    // "not installed" is indistinguishable from "could not tell", so every retire
+    // below is gated on having actually read it. Without this gate one unreadable
+    // pass would un-hide every hidden app and wipe the mirror.
+    let installed = if early { None } else { blocklist::installed_packages() };
+    let can_retire = !early && installed.is_some();
+    let installed = installed.unwrap_or_default();
+    if !early && !can_retire {
+        // Nothing can be resolved this pass; say so rather than reporting success.
+        rep.failed += 1;
+    }
+    let mut desired: BTreeMap<String, u32> = BTreeMap::new();
+
+    for e in &entries {
+        if blocklist::is_pattern(e) {
+            if early {
+                // `packages.list` is not trustworthy yet. Every package this glob
+                // matched last time is in the cache under its own name, and the
+                // sweep below picks those up.
+                continue;
+            }
+            match blocklist::expand(e, &installed) {
+                Ok(hits) => {
+                    if hits.is_empty() {
+                        rep.skipped += 1;
+                    }
+                    for (pkg, uid) in hits {
+                        // A glob is evaluated on every pass, so unlike an exact entry
+                        // it can start matching a package that shares a platform UID
+                        // (android.uid.system -> 1000) long after it was added, with
+                        // no chance for the --force prompt `uid block` gives. Hiding
+                        // from those hides injections from Android itself, so a glob
+                        // never reaches below the app range.
+                        if uid < blocklist::FIRST_APP_APPID {
+                            eprintln!(
+                                "nomount: {e} matches {pkg} (appid {uid}, below the app range) — \
+                                 not hiding from it; add it explicitly with `uid block --force`"
+                            );
+                            rep.skipped += 1;
+                            continue;
+                        }
+                        desired.insert(pkg, uid);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("nomount: skipping hide-list glob {e:?}: {err:#}");
+                    rep.skipped += 1;
+                }
+            }
+            continue;
+        }
+
         // Skip-and-continue on a malformed entry: one bad line (a hand-edited
         // out-of-range UID) must NOT abort the boot-time apply and leave every
         // later app un-hidden -- the exact failure this module exists to prevent.
         let resolved = if early {
-            blocklist::resolve_early(&e, &cache)
+            blocklist::resolve_early(e, &cache)
         } else {
-            blocklist::resolve(&e)
+            // Against the map already read for this pass, not a fresh read per entry.
+            blocklist::resolve_in(e, &installed)
         };
         match resolved {
             Ok(Resolved::Uid(uid)) => {
-                if !early {
-                    if let Some(old) = cache.get(&e) {
-                        if *old != uid {
-                            let _ = nm.uid_unblock(*old);
-                            live.retain(|u| appid(*u) != *old);
-                            rep.retired += 1;
-                        }
-                    }
-                    blocklist::cache_put(&e, uid);
-                }
-                // A UID the kernel already hides answers EEXIST -- the desired end
-                // state, not a failure. Anything else is real.
-                if live.iter().any(|u| appid(*u) == uid) {
-                    rep.hidden += 1;
-                } else if nm.uid_block(uid).is_ok() {
-                    live.push(uid);
-                    rep.hidden += 1;
-                } else if nm
-                    .uid_list_live()
-                    .map(|v| v.iter().any(|u| appid(*u) == uid))
-                    .unwrap_or(false)
-                {
-                    // The kernel answers EEXIST for a UID it already hides, which is
-                    // the end state we wanted -- only ask when the call failed, so a
-                    // stale snapshot of the live set cannot be reported as a failure.
-                    rep.hidden += 1;
-                } else {
-                    rep.failed += 1;
-                }
+                desired.insert(e.clone(), uid);
             }
-            Ok(Resolved::NotInstalled) => {
-                if !early {
-                    // Gone (or not here yet): retire the mirror entry and stop
-                    // hiding from whatever now owns that appid.
-                    if let Some(old) = cache.get(&e) {
-                        let _ = nm.uid_unblock(*old);
-                        live.retain(|u| appid(*u) != *old);
-                        blocklist::cache_forget(&e);
-                        rep.retired += 1;
-                    }
-                }
-                rep.skipped += 1;
-            }
+            Ok(Resolved::NotInstalled) => rep.skipped += 1,
             Err(err) => {
                 eprintln!("nomount: skipping hide-list entry {e:?}: {err:#}");
                 rep.skipped += 1;
             }
         }
     }
+
+    // Early pass: re-block whatever the last authoritative pass resolved, globs
+    // included. Without this a glob would not take effect until boot completed.
+    if early {
+        for (pkg, uid) in &cache {
+            desired.entry(pkg.clone()).or_insert(*uid);
+        }
+    }
+
+    for (key, uid) in &desired {
+        let uid = *uid;
+        if can_retire {
+            // Appids are reused after an uninstall, so an entry that now resolves
+            // elsewhere has its stale appid unblocked rather than left hiding
+            // injections from whatever inherited it.
+            if let Some(old) = cache.get(key) {
+                if *old != uid {
+                    let _ = nm.uid_unblock(*old);
+                    live.retain(|u| appid(*u) != *old);
+                    rep.retired += 1;
+                }
+            }
+        }
+        if live.iter().any(|u| appid(*u) == uid) {
+            rep.hidden += 1;
+        } else if nm.uid_block(uid).is_ok() {
+            live.push(uid);
+            rep.hidden += 1;
+        } else if nm
+            .uid_list_live()
+            .map(|v| v.iter().any(|u| appid(*u) == uid))
+            .unwrap_or(false)
+        {
+            // The kernel answers EEXIST for a UID it already hides, which is
+            // the end state we wanted -- only ask when the call failed, so a
+            // stale snapshot of the live set cannot be reported as a failure.
+            rep.hidden += 1;
+        } else {
+            rep.failed += 1;
+        }
+    }
+
+    // Reconcile: anything the mirror still holds but this pass no longer wants is
+    // stale -- package uninstalled, entry removed, or a glob stopped matching it.
+    // Stop hiding from it, so deleting a glob actually un-hides its matches. Only
+    // when the package map was readable: see `can_retire`.
+    if can_retire {
+        for (key, old) in &cache {
+            if desired.contains_key(key) {
+                continue;
+            }
+            let _ = nm.uid_unblock(*old);
+            live.retain(|u| appid(*u) != *old);
+            rep.retired += 1;
+        }
+        // One write for the whole pass. Per-entry `cache_put`/`cache_forget` each
+        // re-read and rewrote the file, which a ~50-entry preset turned into ~50
+        // rewrites in the boot path.
+        blocklist::cache_replace(&desired);
+    }
+
     rep
 }
 
@@ -191,6 +269,35 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
         // A package that isn't installed yet is still recorded so `apply` picks it
         // up when it appears — the block "sticks" the moment the app exists.
         UidAction::Block { target, force } => {
+            // A glob covers however many packages match now *and later*, so it is
+            // validated, persisted, then applied through the normal pass.
+            if blocklist::is_pattern(&target) {
+                if let Some(parsed) = blocklist::Pattern::parse(&target) {
+                    parsed?;
+                }
+                let installed = blocklist::installed_packages().unwrap_or_default();
+                let hits = blocklist::expand(&target, &installed)?;
+                // Refuse up front if it already matches a platform UID. The apply
+                // pass skips those regardless (see the note there), so this is about
+                // telling the user now rather than silently doing less than asked.
+                if let Some((pkg, uid)) = hits.iter().find(|(_, u)| *u < blocklist::FIRST_APP_APPID)
+                {
+                    bail!(
+                        "{target} matches {pkg} (appid {uid}), below the app range — hiding from \
+                         it would hide injections from Android itself. Narrow the glob, or hide \
+                         that package explicitly with `uid block {pkg} --force`"
+                    );
+                }
+                blocklist::add(&target)?;
+                let rep = reapply_blocklist(&nm, false);
+                println!(
+                    "ok: {target} saved — matches {} installed package(s), now hiding {}{}",
+                    hits.len(),
+                    rep.hidden,
+                    rep.fail_note()
+                );
+                return Ok(());
+            }
             // Resolve BEFORE persisting, so a refused target doesn't linger in the
             // file waiting for the next `apply` to enforce it anyway.
             let resolved = blocklist::resolve(&target)?;
@@ -225,6 +332,23 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
         // Unblock: drop from the persistent list AND unblock live if it's actually
         // blocked (unblocking a UID the kernel isn't hiding also returns non-zero).
         UidAction::Unblock { target } => {
+            // Removing a glob leaves its matches hidden until something retires
+            // them; the reconcile in `apply` is what does that, so run it.
+            if blocklist::is_pattern(&target) {
+                let existed = blocklist::remove(&target)?;
+                let rep = reapply_blocklist(&nm, false);
+                if existed {
+                    println!(
+                        "ok: {target} removed — {} package(s) un-hidden, {} still hidden{}",
+                        rep.retired,
+                        rep.hidden,
+                        rep.fail_note()
+                    );
+                } else {
+                    println!("ok: {target} was not in the hide list");
+                }
+                return Ok(());
+            }
             let cached = blocklist::cache_read().get(target.trim()).copied();
             blocklist::remove(&target)?;
             match blocklist::resolve(&target)? {
@@ -264,7 +388,38 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             let live = nm.uid_list_live().unwrap_or_default();
             let mut covered: Vec<u32> = Vec::new();
 
+            // Unreadable package map: globs cannot be expanded, and saying "no
+            // match" would read as "nothing is hidden by this rule".
+            let installed_opt = blocklist::installed_packages();
+            let installed = installed_opt.clone().unwrap_or_default();
             for e in &persisted {
+                // A glob stands for however many installed packages it matches;
+                // print each one so the list shows what is actually hidden, not
+                // just the rule that put it there.
+                if blocklist::is_pattern(e) {
+                    if installed_opt.is_none() {
+                        println!("{e}\tglob · package map unreadable");
+                        continue;
+                    }
+                    match blocklist::expand(e, &installed) {
+                        Ok(hits) if hits.is_empty() => println!("{e}\tglob · no match"),
+                        Ok(hits) => {
+                            // Package first so a reader sees what is hidden; the glob
+                            // follows as provenance, and is what removing it acts on.
+                            for (pkg, uid) in hits {
+                                covered.push(uid);
+                                let state = if live.iter().any(|u| appid(*u) == appid(uid)) {
+                                    "live"
+                                } else {
+                                    "saved, not applied"
+                                };
+                                println!("{pkg}\tvia {e} · uid {uid} · {state}");
+                            }
+                        }
+                        Err(err) => println!("{e}\tinvalid glob: {err:#}"),
+                    }
+                    continue;
+                }
                 let resolved = match blocklist::resolve(e) {
                     Ok(r) => r,
                     Err(err) => {
@@ -310,6 +465,37 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             if rep.failed > 0 {
                 bail!("{} entr(ies) could not be applied", rep.failed);
             }
+        }
+        // Presets are ordinary hide-list entries — nothing about them is special
+        // once added, so they can be removed one by one like anything else.
+        UidAction::Preset { name, dry_run } => {
+            let Some(name) = name else {
+                println!("available presets:");
+                for (n, desc) in crate::presets::ALL {
+                    let count = crate::presets::entries(n).map(|e| e.len()).unwrap_or(0);
+                    println!("  {n}\t{desc} ({count} entries)");
+                }
+                println!("\nadd with: nomount uid preset <name>");
+                return Ok(());
+            };
+            let Some(entries) = crate::presets::entries(&name) else {
+                bail!("unknown preset {name:?} — try `nomount uid preset` for the list");
+            };
+            if dry_run {
+                for e in &entries {
+                    println!("{e}");
+                }
+                println!("\n{} entr(ies) — not added (--dry-run)", entries.len());
+                return Ok(());
+            }
+            let added = blocklist::add_many(&entries)?;
+            let rep = reapply_blocklist(&nm, false);
+            println!(
+                "preset {name}: {added} new, {} already present · now hiding {}{}",
+                entries.len() - added,
+                rep.hidden,
+                rep.fail_note()
+            );
         }
         UidAction::Isolated { mode } => match mode {
             None => println!("{}", isolated_mode_name(blocklist::hide_isolated())),

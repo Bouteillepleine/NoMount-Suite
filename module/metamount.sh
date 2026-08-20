@@ -1,7 +1,10 @@
 #!/system/bin/sh
 # NoMount Suite metamodule hook (KSU/APatch, post-fs-data / metamodule stage).
 # Runs the Suite mount pass (hookless mountless inject + RRO overlays), guarded by
-# a bootloop counter, hides the RRO mounts via SUSFS if present, then signals ready.
+# a bootloop counter, then signals ready. The Suite does NOT use SUSFS: RRO goes
+# through the hookless engine and makes no mount to hide (see the note at the
+# mount pass below). The only ksu_susfs reference here is a guard against another
+# module's action button clobbering ksud.
 # Root/su is NOT managed here (sucompat handles it, mountlessly).
 MODDIR="${0%/*}"
 NMDIR=/data/adb/nomount
