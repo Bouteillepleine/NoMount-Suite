@@ -200,24 +200,72 @@ fn global_from(buf: &[u8]) -> Option<bool> {
 /// the prctl the tool issues is not implemented. Falls back to the build config
 /// when ksud cannot be run at all. Measured here: `# CONFIG_KSU_SUSFS is not
 /// set`, no /sys/fs/susfs, and the error above.
-pub fn susfs_present() -> bool {
-    if let Ok(out) = std::process::Command::new("/data/adb/ksu/bin/ksud")
+/// What we can honestly say about SUSFS on this kernel.
+///
+/// The Suite does not use SUSFS and deliberately knows nothing about its
+/// internals — no prctl magic, no command constants, nothing to keep in step with
+/// its releases. That leaves exactly one honest source: whether the *manager's own*
+/// CLI answers the question. Some managers answer clearly; KernelSU Next has no
+/// `susfs` subcommand at all and simply errors, which says nothing about the
+/// kernel. So the third state is real and must not be collapsed into "absent".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Susfs {
+    /// The manager reported a SUSFS version.
+    Present,
+    /// The manager explicitly reported the kernel has no SUSFS.
+    Absent,
+    /// No manager answered — missing ksud, no such subcommand, exec failed. This
+    /// is NOT evidence of absence.
+    Unknown,
+}
+
+/// Ask the manager, and report exactly what it said — including "it didn't say".
+///
+/// ⚠️ Was `susfs_present() -> bool`, which folded Unknown into "no SUSFS" and made
+/// `doctor` tell a KernelSU Next user (whose ksud has no `susfs` command, and whose
+/// kernel *did* have SUSFS) to delete a working module —
+/// Bouteillepleine/OnePlus-KsuNext_NMS#13.
+pub fn susfs_state() -> Susfs {
+    if std::path::Path::new("/sys/fs/susfs").exists() {
+        return Susfs::Present;
+    }
+    let Ok(out) = std::process::Command::new("/data/adb/ksu/bin/ksud")
         .args(["susfs", "show", "version"])
         .output()
-    {
-        let txt = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        if txt.contains("Unsupported SuSFS command") {
-            return false;
-        }
-        if txt.chars().any(|c| c.is_ascii_digit()) {
-            return true;
-        }
+    else {
+        return Susfs::Unknown;
+    };
+    let txt = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    classify_susfs_output(&txt)
+}
+
+/// Pure half of [`susfs_state`], so the three cases are testable without a device.
+fn classify_susfs_output(txt: &str) -> Susfs {
+    let t = txt.trim();
+    // The manager knows the command and says the kernel lacks SUSFS.
+    if t.contains("Unsupported SuSFS command") {
+        return Susfs::Absent;
     }
-    std::path::Path::new("/sys/fs/susfs").exists()
+    // The manager does not know the command at all: that is a fact about the
+    // manager, not the kernel. clap phrases it a few ways across forks.
+    let lower = t.to_ascii_lowercase();
+    if lower.contains("unrecognized subcommand")
+        || lower.contains("unexpected argument")
+        || lower.contains("invalid subcommand")
+        || lower.contains("usage:")
+        || t.is_empty()
+    {
+        return Susfs::Unknown;
+    }
+    // A version number is the one positive answer.
+    if t.chars().any(|c| c.is_ascii_digit()) {
+        return Susfs::Present;
+    }
+    Susfs::Unknown
 }
 
 /// `ksud feature get kernel_umount` -> Some(true) when enabled.
@@ -237,6 +285,37 @@ pub fn parse_feature_value(s: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use super::{classify_susfs_output, Susfs};
+
+    /// The three states must stay distinct: folding Unknown into Absent is what
+    /// told a KernelSU Next user to delete a module that was working (issue #13).
+    #[test]
+    fn a_manager_that_cannot_answer_is_unknown_not_absent() {
+        // KernelSU Next: no `susfs` subcommand at all.
+        assert_eq!(
+            classify_susfs_output("error: unrecognized subcommand 'susfs'\n\nUsage: ksud <COMMAND>"),
+            Susfs::Unknown
+        );
+        assert_eq!(classify_susfs_output(""), Susfs::Unknown);
+        assert_eq!(classify_susfs_output("Usage: ksud susfs <COMMAND>"), Susfs::Unknown);
+    }
+
+    #[test]
+    fn only_an_explicit_answer_counts_either_way() {
+        assert_eq!(classify_susfs_output("Unsupported SuSFS command"), Susfs::Absent);
+        assert_eq!(classify_susfs_output("v1.5.9"), Susfs::Present);
+        assert_eq!(classify_susfs_output("1.5.5"), Susfs::Present);
+    }
+
+    /// A usage banner that happens to carry a digit must not read as a version.
+    #[test]
+    fn a_usage_banner_with_a_digit_is_still_unknown() {
+        assert_eq!(
+            classify_susfs_output("error: unrecognized subcommand 'susfs'\nUsage: ksud <CMD> [v2]"),
+            Susfs::Unknown
+        );
+    }
+
     use super::*;
 
     fn rec(pkg: &str, uid: u32, su: bool, umount: bool) -> Vec<u8> {

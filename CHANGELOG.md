@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.3.17
+
+### Fixed
+- **`doctor` told KernelSU Next users to delete a working module**
+  ([KsuNext_NMS#13](https://github.com/Bouteillepleine/OnePlus-KsuNext_NMS/issues/13)).
+  SUSFS presence was a boolean, and "the manager could not answer" collapsed into
+  "the kernel has no SUSFS". KernelSU Next's ksud has no `susfs` subcommand at all,
+  so on a kernel that *did* have SUSFS the check reported it missing and advised
+  removing the module. It is three states now — Present, Absent, Unknown — and the
+  removal advice needs a real answer. When nobody can tell us, the finding states
+  the condition instead of asserting it.
+
+  The Suite does not use SUSFS and deliberately knows nothing about its internals —
+  no prctl magic, no command constants to keep in step with its releases. The one
+  honest source is whether the manager's own CLI answers, so that is all we ask.
+
 ## v1.3.16
 
 ### Fixed

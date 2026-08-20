@@ -506,31 +506,57 @@ pub fn run_doctor() -> Result<()> {
     // is a no-op here, while its side effects -- manager settings, props,
     // mounts -- still apply in full. Checked against the kernel, not assumed, so
     // it stays silent on a SUSFS build where these modules do their job.
-    if !crate::manager::susfs_present() {
+    // Only claim something about SUSFS when the manager actually answered. On a
+    // manager whose ksud has no `susfs` command (KernelSU Next) the probe says
+    // nothing about the kernel, and treating that as "no SUSFS" told a user with a
+    // SUSFS kernel to delete a working module (KsuNext_NMS#13). The Suite does not
+    // use SUSFS and knows nothing of its internals, so silence is the honest answer
+    // when nobody could tell us.
+    let susfs = crate::manager::susfs_state();
+    if susfs != crate::manager::Susfs::Present {
         for u in crate::preflight::scan_susfs_users("/data/adb/modules", "meta-nomount") {
             // "Remove it" is only right for a module whose PURPOSE is SUSFS
             // hiding. A content module making a best-effort SUSFS call in a
             // fallback branch loses nothing here -- saying remove would cost the
             // user the content they installed it for.
-            let (level, detail) = if u.susfs_is_its_purpose {
-                (
+            let known_absent = susfs == crate::manager::Susfs::Absent;
+            let (level, detail) = match (u.susfs_is_its_purpose, known_absent) {
+                (true, true) => (
                     Level::Warn,
                     format!(
                         "{} is a SUSFS module and this kernel has no SUSFS — it hides \
                          nothing here while its side effects still apply. Remove it",
                         u.module
                     ),
-                )
-            } else {
-                (
+                ),
+                // Same module, but we could not confirm the kernel. State the
+                // condition, do not assert it, and do not tell anyone to delete
+                // something that may well be working.
+                (true, false) => (
+                    Level::Info,
+                    format!(
+                        "{} is a SUSFS module. This manager cannot report whether the kernel \
+                         has SUSFS — if it does not, the module hides nothing here while its \
+                         side effects still apply",
+                        u.module
+                    ),
+                ),
+                (false, true) => (
                     Level::Info,
                     format!(
                         "{} makes SUSFS calls (no SUSFS here, so they no-op) but ships its \
                          own content — keep it", u.module
                     ),
-                )
+                ),
+                (false, false) => (
+                    Level::Info,
+                    format!(
+                        "{} makes SUSFS calls but ships its own content — keep it", u.module
+                    ),
+                ),
             };
-            f.push(Finding { level, check: "SUSFS calls, no SUSFS", detail });
+            let check = if known_absent { "SUSFS calls, no SUSFS" } else { "SUSFS calls" };
+            f.push(Finding { level, check, detail });
         }
     }
 
