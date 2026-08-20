@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.3.15
+
+Candidate scan replaces the blunt preset. Adding a whole inventory put dozens of
+entries for apps that are not installed in front of the handful that are — on the
+test device, 41 of 48 entries were dead. The scan proposes only what is here, and
+says why, in the same shape as the Cloak picker.
+
+### Added
+- **`uidscan.sh` + a Scan button.** Finds installed third-party apps worth hiding
+  from and labels each: `detector` (matches the known-detector inventory, globs
+  included), `queries-root` (the manifest names a root manager in `<queries>` — it is
+  looking for us), `su-perm` (requests `ACCESS_SUPERUSER`). Nothing is hidden until
+  picked. Detectors and root-lookers are pre-picked; `su-perm` is not, because those
+  are usually your own root tools and hiding shows them the stock tree instead of
+  your module content. `QUERY_ALL_PACKAGES` is an annotation only, never a reason on
+  its own — ~50 of 64 apps request it, so a list led by it is noise, not a shortlist.
+  The inventory comes from `nomount uid preset --dry-run`, so the package list still
+  has exactly one home and the globs work verbatim as shell `case` patterns.
+- **`nomount uid preset --globs`** and an "Add detector globs" button: the five glob
+  rules on their own. They are the part a scan cannot give you — they keep matching
+  a detector installed tomorrow, or repackaged under a new name.
+
+### Fixed
+- **The scanner could silently check nothing.** `$INV` must word-split, so it cannot
+  be quoted — but its entries are globs, and without `set -f` the shell pathname-
+  expands them against the caller's cwd first. A file named `x.duckdetector` in that
+  directory replaced the rule `*.duckdetector` with that filename and the rule
+  stopped matching, in a scan that otherwise looked like it ran fine. Verified on
+  device by seeding a cwd with trap files.
+- **Globs could not be typed or removed in the WebUI.** `UID_TARGET_RE` rejected
+  `*`, so the Hide field refused a glob and the ✕ on a glob row reported "characters
+  nomount won't take". Widened — and every target is now single-quoted where it is
+  interpolated into a shell command, because an unquoted `*` would have been expanded
+  by the shell before nomount ever saw it.
+- **Whiteout paths reached the shell unquoted.** `whiteout add` rejected `;|&$` but
+  not `*` or `?`, and `whiteout remove`/the suggestion buttons validated nothing at
+  all before interpolating. All three now share one validator and are quoted.
+- A scan that found nothing, or a list emptied by applying, rendered an empty box.
+- Candidates already in the hide list were offered again, pre-picked.
+
 ## v1.3.14
 
 Hide-list globs, a curated detector preset, and the per-UID card rebuilt so it is

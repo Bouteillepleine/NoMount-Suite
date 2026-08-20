@@ -468,7 +468,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
         }
         // Presets are ordinary hide-list entries — nothing about them is special
         // once added, so they can be removed one by one like anything else.
-        UidAction::Preset { name, dry_run } => {
+        UidAction::Preset { name, dry_run, globs } => {
             let Some(name) = name else {
                 println!("available presets:");
                 for (n, desc) in crate::presets::ALL {
@@ -478,9 +478,12 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 println!("\nadd with: nomount uid preset <name>");
                 return Ok(());
             };
-            let Some(entries) = crate::presets::entries(&name) else {
+            let Some(mut entries) = crate::presets::entries(&name) else {
                 bail!("unknown preset {name:?} — try `nomount uid preset` for the list");
             };
+            if globs {
+                entries.retain(|e| blocklist::is_pattern(e));
+            }
             if dry_run {
                 for e in &entries {
                     println!("{e}");

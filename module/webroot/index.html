@@ -335,6 +335,27 @@
   .presetrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
   .presethint { flex: 1 1 210px; font-size: 11.5px; line-height: 1.45; color: var(--dim); }
 
+  /* Candidate picker: rows are tappable anywhere, not just on a small checkbox. */
+  .uslist { display: flex; flex-direction: column; gap: 5px; margin-top: 11px; }
+  .usrow { display: flex; align-items: center; gap: 9px; padding: 9px 11px; border-radius: 11px;
+           background: var(--card2); border: 1px solid var(--brd2); cursor: pointer;
+           transition: background .12s, border-color .12s; }
+  .usrow:hover { border-color: var(--brd); }
+  .usrow.on { background: rgba(124,156,255,0.12); border-color: var(--acc); }
+  .uscb { flex: 0 0 18px; width: 18px; height: 18px; border-radius: 6px; border: 1px solid var(--brd);
+          display: flex; align-items: center; justify-content: center; font-size: 12px;
+          color: var(--acc); background: rgba(0,0,0,0.2); }
+  .usrow.on .uscb { border-color: var(--acc); }
+  .usn { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+         font-size: 12.5px; font-family: var(--mono); }
+  .usr { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+  .rch { font-size: 10px; padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+         border: 1px solid var(--brd2); color: var(--dim); }
+  .rch.r-det { color: var(--bad);  border-color: rgba(248,113,122,0.42); }
+  .rch.r-qr  { color: var(--warn); border-color: rgba(251,191,36,0.42); }
+  .rch.r-su  { color: var(--acc2); border-color: rgba(87,230,195,0.36); }
+  .usfoot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 11px; }
+
   /* Long explanations fold away: they were most of this card's height. */
   .ndet { margin-top: 12px; }
   .ndet > summary { cursor: pointer; list-style: none; font-size: 12px; font-weight: 600;
@@ -961,10 +982,14 @@
     </div>
 
     <div class="presetrow">
-      <button class="act" onclick="addPreset(this)">Hide known detectors</button>
-      <span class="presethint">Curated list of root/environment detectors, including globs that keep
-        matching when a detector is repackaged under a new name.</span>
+      <button class="act" onclick="uidScan(this)">Scan for candidates</button>
+      <button class="act" id="usShow" style="display:none" onclick="usToggle(this)">Show list</button>
+      <button class="act" onclick="addGlobs(this)">Add detector globs</button>
+      <span class="presethint">Scan finds apps <b>installed here</b> worth hiding from and says why —
+        nothing is hidden until you pick it. The globs are the part a scan cannot give you: they keep
+        matching detectors installed later, or repackaged under a new name.</span>
     </div>
+    <div id="usList" class="uslist" style="display:none"></div>
 
     <div id="blocked" class="blocklist"></div>
 
@@ -1812,13 +1837,18 @@
   // An allow-list is exact here. The old deny-list let glob characters (* ? [ ])
   // and a backslash through to an unquoted shell word, so Hide could land on
   // something other than what was typed.
-  const UID_TARGET_RE = /^[A-Za-z0-9._]+$/;
+  // Globs are valid hide-list entries, so `*` has to pass -- but every target is
+  // interpolated into a shell command, and an unquoted `*` would be expanded by the
+  // shell against the cwd before nomount ever saw it. Two halves of one fix: this
+  // set excludes quotes/spaces/metacharacters, and every call site below wraps the
+  // target in single quotes.
+  const UID_TARGET_RE = /^[A-Za-z0-9._*]+$/;
   async function uidOp(op, btn) {
     const v = $("uid").value.trim();
     if (!v) { toast("Enter a package name or UID", "bad"); return; }
-    if (!UID_TARGET_RE.test(v)) { toast("Package names are letters, digits, dots and underscores", "bad"); return; }
+    if (!UID_TARGET_RE.test(v)) { toast("Letters, digits, dots, underscores, and * for a glob", "bad"); return; }
     const done = busy(btn, op === "block" ? "Hiding…" : "Unhiding…");
-    const r = await nm(`uid ${op} ${v}`);
+    const r = await nm(`uid ${op} '${v}'`);
     if (r.errno === 0) {
       toast((r.stdout || "").replace(/^ok:\s*/, "").trim() || `${v} ${op === "block" ? "hidden" : "unhidden"}`, "ok");
       if (op === "block") $("uid").value = "";
@@ -1879,6 +1909,15 @@
     const t = b.getAttribute("data-nmt") || "";
     if (!UID_TARGET_RE.test(t)) { toast("That entry has characters nomount won't take", "bad"); return; }
     if (b.getAttribute("data-act") === "save") saveOne(t, b); else unblockOne(t, b);
+  });
+  // Candidate rows are divs, and the package names come from `pm list packages`,
+  // but they are validated like every other target before reaching a command.
+  document.getElementById("usList").addEventListener("click", ev => {
+    const row = ev.target.closest("[data-act='uspick']");
+    if (!row) return;
+    const t = row.getAttribute("data-nmt") || "";
+    if (!UID_TARGET_RE.test(t)) { toast("That entry has characters nomount won't take", "bad"); return; }
+    usPick(t);
   });
   // Load installed third-party packages with their UIDs (once), for the custom
   // app-picker dropdown below. Best-effort — the field still accepts free text.
@@ -1977,32 +2016,124 @@
     }
   }
 
-  // Curated hide-list preset. Adds entries (globs included) and applies in one go.
-  async function addPreset(btn) {
-    btn.disabled = true;
-    const was = btn.textContent;
-    btn.textContent = "Adding…";
-    try {
-      const r = await nm("uid preset detectors");
-      if (r.errno === 0) toast((r.stdout || "").replace(/^preset /, "").trim() || "Added", "ok");
-      else toast("Failed: " + (r.stderr || "error"), "bad");
-      refreshBlocked();
-    } finally {
-      btn.textContent = was;
-      btn.disabled = false;
+  // Candidate scan. Proposing only what is installed keeps the hide list to the
+  // handful of apps that matter on THIS device, instead of dozens of entries for
+  // apps that are not here. Same shape as the Cloak picker: scan, pick, apply.
+  const US = new Map();
+  let usShown = false;
+  const US_REASONS = {
+    detector:       { label: "known detector",   cls: "r-det",  pick: true },
+    "queries-root": { label: "looks for root",   cls: "r-qr",   pick: true },
+    "su-perm":      { label: "wants superuser",  cls: "r-su",   pick: false },
+    "queries-all":  { label: "enumerates apps",  cls: "r-qa",   pick: false },
+  };
+  function usParse(out) {
+    (out || "").split("\n").forEach(function (l) {
+      const [pkg, raw] = l.replace(/\r/g, "").split("\t");
+      if (!pkg || !raw) return;
+      const reasons = raw.trim().split(",").filter(Boolean);
+      const prev = US.get(pkg);
+      // Anything with a strong reason starts picked; su-perm alone does not, because
+      // those are usually the user's OWN root tools (file managers, app managers) and
+      // hiding from them shows them the stock tree instead of the module content.
+      const pick = reasons.some(function (r) { return US_REASONS[r] && US_REASONS[r].pick; });
+      US.set(pkg, { reasons: reasons, pick: prev ? prev.pick : pick });
+    });
+  }
+  async function uidScan(btn) {
+    const done = busy(btn, "Scanning…");
+    const r = await exec("sh /data/adb/modules/meta-nomount/uidscan.sh 2>/dev/null");
+    usParse(r.stdout);
+    // Drop what is already hidden — re-offering it, pre-picked, would invite a
+    // pointless second `uid block` and make the count meaningless.
+    const cur = await nm("uid list");
+    (cur.stdout || "").split("\n").forEach(function (l) {
+      const name = l.split("\t")[0].trim();
+      if (name && US.has(name)) US.delete(name);
+    });
+    done();
+    if (!usShown) usToggle($("usShow"));
+    usRender();
+    toast(US.size ? `${US.size} candidate(s)` : "Nothing worth hiding found", US.size ? "ok" : "");
+  }
+  function usToggle(btn) {
+    usShown = !usShown;
+    $("usList").style.display = usShown ? "" : "none";
+    btn.style.display = "";
+    btn.textContent = usShown ? "Hide list" : "Show list";
+  }
+  function usPick(pkg) {
+    const e = US.get(pkg); if (!e) return;
+    e.pick = !e.pick; usRender();
+  }
+  function usRender() {
+    const box = $("usList");
+    $("usShow").style.display = US.size ? "" : "none";
+    if (!US.size) {
+      box.innerHTML = '<div class="blk-none">Nothing left to pick — scan again after installing apps.</div>';
+      return;
     }
+    const order = ["detector", "queries-root", "su-perm", "queries-all"];
+    const rank = (e) => Math.min.apply(null, e.reasons.map(function (r) {
+      const i = order.indexOf(r); return i < 0 ? 9 : i;
+    }));
+    const rows = [...US.entries()].sort(function (a, b) {
+      return rank(a[1]) - rank(b[1]) || a[0].localeCompare(b[0]);
+    }).map(function ([pkg, e]) {
+      const chips = e.reasons.map(function (r) {
+        const d = US_REASONS[r] || { label: r, cls: "" };
+        return `<span class="rch ${d.cls}">${esc(d.label)}</span>`;
+      }).join("");
+      return `<div class="usrow${e.pick ? " on" : ""}" data-act="uspick" data-nmt="${esc(pkg)}">
+        <span class="uscb">${e.pick ? "✓" : ""}</span>
+        <span class="usn">${esc(pkg)}</span>
+        <span class="usr">${chips}</span>
+      </div>`;
+    }).join("");
+    const n = [...US.values()].filter(function (e) { return e.pick; }).length;
+    box.innerHTML = `<div class="blk-head">Candidates · ${US.size}</div>${rows}
+      <div class="usfoot">
+        <button class="act primary" onclick="usApply(this)"${n ? "" : " disabled"}>Hide ${n} selected</button>
+        <span class="presethint">Picked by default: known detectors and apps that look for a root
+          manager. Apps that merely request superuser are left unpicked — those are usually your own
+          root tools, and hiding shows them the stock tree instead of your module content.</span>
+      </div>`;
+  }
+  async function usApply(btn) {
+    const picks = [...US.entries()].filter(function ([, e]) { return e.pick; }).map(function ([p]) { return p; });
+    if (!picks.length) return;
+    const done = busy(btn, "Hiding…");
+    let ok = 0, bad = 0;
+    for (const p of picks) {
+      const r = await nm(`uid block '${p}'`);
+      if (r.errno === 0) { ok++; US.delete(p); } else bad++;
+    }
+    done();
+    usRender();
+    refreshBlocked();
+    toast(bad ? `${ok} hidden, ${bad} failed` : `${ok} app(s) hidden`, bad ? "bad" : "ok");
+  }
+  // The globs are separate from the scan on purpose: they are what covers a detector
+  // installed tomorrow, which a scan of what is installed today cannot.
+  async function addGlobs(btn) {
+    const done = busy(btn, "Adding…");
+    const r = await nm("uid preset detectors --globs");
+    if (r.errno === 0) toast((r.stdout || "").replace(/^preset /, "").trim() || "Added", "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    done();
+    refreshBlocked();
   }
 
   async function unblockOne(target, btn) {
     btn.disabled = true;
-    const r = await nm(`uid unblock ${target}`);
+    const r = await nm(`uid unblock '${target}'`);
     if (r.errno === 0) toast(`${target} unhidden`, "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
     refreshBlocked();
   }
   async function saveOne(target, btn) {
     btn.disabled = true;
-    const r = await nm(`uid block ${target}`);
+    const r = await nm(`uid block '${target}'`);
     if (r.errno === 0) toast(`${target} saved`, "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
     refreshBlocked();
@@ -2180,13 +2311,23 @@
              `<button class="bx" title="Stop hiding" data-p="${encodeURIComponent(path)}" onclick="woRemove(this)">✕</button></div>`;
     }).join("");
   }
+  // Whiteout paths reach a shell command, so they get the same treatment as UID
+  // targets: reject anything a shell would act on, then single-quote. `*` and `?`
+  // matter as much as `;` here -- unquoted they are pathname-expanded, so a rule
+  // typed as /system/app/* would silently become whatever happened to match.
+  const WO_PATH_RE = /^\/[^\s'"`;|&$<>()*?\[\]{}\\]*$/;
+  function woSafe(p) {
+    if (WO_PATH_RE.test(p)) return true;
+    toast("That path has characters nomount won't take", "bad");
+    return false;
+  }
   async function woAdd(btn) {
     const v = ($("woPath").value || "").trim();
     if (!v) { toast("Enter an absolute path", "bad"); return; }
     if (v[0] !== "/") { toast("Must be an absolute path", "bad"); return; }
-    if (/[\s'"`;|&$<>()]/.test(v)) { toast("Invalid characters in path", "bad"); return; }
+    if (!woSafe(v)) return;
     const done = busy(btn, "Hiding…");
-    const r = await nm(`whiteout add ${v}`);
+    const r = await nm(`whiteout add '${v}'`);
     const txt = ((r.stdout || "") + (r.stderr || "")).trim();
     toast(r.errno === 0 ? (txt.split("\n").pop() || "Hidden") : "Failed: " + txt, r.errno === 0 ? "ok" : "bad");
     if (r.errno === 0) $("woPath").value = "";
@@ -2194,8 +2335,9 @@
   }
   async function woRemove(btn) {
     const path = decodeURIComponent(btn.dataset.p || "");
+    if (!woSafe(path)) return;
     const done = busy(btn);
-    const r = await nm(`whiteout remove ${path}`);
+    const r = await nm(`whiteout remove '${path}'`);
     toast(r.errno === 0 ? "No longer hidden" : "Failed", r.errno === 0 ? "ok" : "bad");
     done(); refreshWhiteouts(); refreshStatus();
   }
@@ -2236,8 +2378,9 @@
   // completely inert.
   async function woAddPath(btn) {
     const path = decodeURIComponent(btn.dataset.p || "");
+    if (!woSafe(path)) return;
     const done = busy(btn);
-    const r = await nm(`whiteout add ${path}`);
+    const r = await nm(`whiteout add '${path}'`);
     toast(r.errno === 0 ? "Hidden" : "Failed", r.errno === 0 ? "ok" : "bad");
     done(); refreshWhiteouts();
     if (r.errno === 0) btn.closest(".row").remove();

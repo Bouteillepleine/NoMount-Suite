@@ -126,6 +126,11 @@ pub enum UidAction {
         /// Print what would be added without touching the list
         #[arg(long)]
         dry_run: bool,
+        /// Only the glob rules, not the exact package names. These are the part a
+        /// scan of installed apps cannot give you: they keep matching detectors
+        /// installed later, or repackaged under a new name.
+        #[arg(long)]
+        globs: bool,
     },
     /// Which isolated-process pools hiding covers. Hiding from them stops a
     /// hidden app probing through an isolated helper; leaving them visible stops

@@ -109,6 +109,7 @@ SCRIPTS=(
     service.sh
     spoof.sh
     scan.sh
+    uidscan.sh
     uidwatch.sh
 )
 
