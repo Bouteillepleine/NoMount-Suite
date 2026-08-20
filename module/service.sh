@@ -106,14 +106,33 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/whiteouts.txt" ];
     echo "nomount: $_wo" > /dev/kmsg 2>/dev/null
 fi
 
-# --- re-apply the persistent per-app block list ---
-# Per-UID hiding lives in kernel memory and is empty after every reboot; the
-# block list on disk (package names / UIDs) is the durable record. Now that boot
-# is complete, packages.list is populated and app UIDs are stable, so resolve the
-# list and re-block each app. Runs only when the guard hasn't tripped.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/blocklist" ]; then
-    _bl=$("$BIN" uid apply 2>/dev/null)
-    echo "nomount: block list re-applied ($_bl)" > /dev/kmsg 2>/dev/null
+# --- re-apply the persistent per-app hide list (authoritative pass) ---
+# Per-UID hiding lives in kernel memory and is empty after every reboot; the hide
+# list on disk (package names / UIDs) is the durable record. The mount pass has
+# already applied it from the cached appid mirror at post-fs-data, so apps are
+# hidden from the moment the injections exist rather than from here — this later
+# pass is the authoritative one: packages.list is now populated and app UIDs are
+# stable, so it re-resolves, refreshes the mirror, and retires any appid an entry
+# no longer maps to (appids get reused after an uninstall). Guard-gated.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
+    _bl=$("$BIN" uid apply 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "nomount: hide list re-applied ($_bl)" > /dev/kmsg 2>/dev/null
+    else
+        # A failed apply is the one thing here that must not pass quietly: it means
+        # apps the user believes are hidden are not.
+        echo "nomount: ⚠ hide list apply FAILED ($_bl)" > /dev/kmsg 2>/dev/null
+    fi
+
+    # Close the install-time gap: an entry saved for an app that wasn't installed
+    # yet used to sit inert until the next reboot — install the detector you meant
+    # to hide from and it saw everything until you rebooted. PackageManager
+    # rewrites packages.list on every install/uninstall/update, so watch its
+    # directory and re-apply. One idle toybox process; skipped without inotifyd.
+    if command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
+        inotifyd "$MODDIR/uidwatch.sh" /data/system:cwm >/dev/null 2>&1 &
+        echo "nomount: hide-list package watcher started" > /dev/kmsg 2>/dev/null
+    fi
 fi
 
 # --- runtime health canary (writes health.txt; complements plan-time doctor) ---
@@ -129,9 +148,11 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     while [ "$_try" -lt 6 ]; do
         "$BIN" selfcheck --write >/dev/null 2>&1
         _cons=$(sed -n 's/^consistency=//p' "$NMDIR/health.txt" 2>/dev/null)
-        if [ "$_cons" = "ok" ] || [ "$_cons" = "unchecked" ] || [ -z "$_cons" ]; then
-            break
-        fi
+        # "unchecked" and its qualified forms (unchecked:probe-uid-hidden, when
+        # shell itself is on the hide list) are not-a-verdict, not a failure.
+        case "$_cons" in
+            ok|unchecked*|"") break ;;
+        esac
         _try=$((_try + 1))
         sleep 15
     done
@@ -155,7 +176,11 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # runtime consistency canary trumps plan-time doctor for card health: a
     # per-UID inconsistency is a live regression, not a plan hazard.
     _cons=$(sed -n 's/^consistency=//p' "$NMDIR/health.txt" 2>/dev/null)
-    if [ -n "$_cons" ] && [ "$_cons" != "ok" ] && [ "$_cons" != "unchecked" ]; then
+    case "$_cons" in
+        ok|unchecked*|"") _consbad=0 ;;
+        *) _consbad=1 ;;
+    esac
+    if [ "$_consbad" = 1 ]; then
         _health="⚠️ per-UID inconsistency — see WebUI › Tools"
     elif [ "${_err:-0}" -gt 0 ]; then
         _health="⚠️ $_err error(s) — see WebUI › Tools"

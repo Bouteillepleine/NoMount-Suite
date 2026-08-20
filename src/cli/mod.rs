@@ -96,14 +96,34 @@ pub enum VfsAction {
 pub enum UidAction {
     /// Hide injections from an app — accepts a package name (durable) or a bare
     /// UID. Persists across reboots.
-    Block { target: String },
+    Block {
+        target: String,
+        /// Allow a platform appid (< 10000: root, system_server, shell …).
+        /// Hiding from those hides injections from Android itself.
+        #[arg(long)]
+        force: bool,
+    },
     /// Re-show injections to an app — package name or bare UID. Also removes it
     /// from the persistent list.
     Unblock { target: String },
-    /// Show the persistent block list with each entry's resolved UID and state
+    /// Show the persistent hide list with each entry's resolved UID and state
     List,
-    /// Re-apply the persistent block list to the kernel (run at boot)
-    Apply,
+    /// Re-apply the persistent hide list to the kernel. Run from the mount pass
+    /// (which clears the kernel's set) and again once boot completes.
+    Apply {
+        /// Early-boot pass: resolve from the cached appid mirror first, so it
+        /// works at post-fs-data before `packages.list` is meaningful.
+        #[arg(long)]
+        early: bool,
+    },
+    /// Which isolated-process pools hiding covers. Hiding from them stops a
+    /// hidden app probing through an isolated helper; leaving them visible stops
+    /// an *unhidden* app spotting the injection by diffing its own view against
+    /// its own isolated child's. No argument = show the current setting.
+    Isolated {
+        /// both (default) | appzygote | platform | off
+        mode: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

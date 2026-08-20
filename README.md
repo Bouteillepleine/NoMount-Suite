@@ -32,28 +32,33 @@ NoMount is a metamodule: at boot it scans `/data/adb/modules/`, classifies every
 * **Transparent path redirection** — intercepts a target VFS path (e.g. `/system/app/YouTube/YouTube.apk`) and redirects it to a modified file in another partition (e.g. `/data`). The userspace process is unaware.
 * **VFS directory injection** — injects new file/directory entries into read-only system paths; via `iterate_dir` hooks they appear natively in `readdir`, `ls`, and Java `File.list()`.
 * **Security-context correct** — `inode_permission` / `generic_permission` handling keeps injected files traversable and readable with correct system-partition attributes, SELinux intact.
-* **UID-based rule isolation** — a per-UID hash table filters active rules; specific apps can be shown the 100% stock filesystem with no injections.
+* **Per-UID hiding** — named apps are shown the 100% stock filesystem: no injected files, no whiteouts, stock directory metadata. Matching is on the *appid*, so one entry covers the app in every user, work profile and clone, and follows it into its SDK-runtime sandbox. The list (`/data/adb/nomount/uidhide`) is applied by the mount pass at post-fs-data and re-resolved once boot completes. Isolated processes carry a pool UID that names no owner, so they are hidden as a group — `nomount uid isolated` sets which pools, and the note there explains the trade.
 * **Real overlayfs for RRO** — hidden overlay mounts so `idmap2`/theming works.
-* **Detection hiding (own footprint)** — overlay mounts are registered with KernelSU's umount so they're `MNT_DETACH`ed in DenyList apps' namespaces; `/dev/nomount` is hidden from non-root scanners via SUSFS `sus_path`.
-* **Self-mounting blocklist** — modules that mount themselves are skipped (built-in list + `/data/adb/nomount/blocklist`).
+* **Detection hiding (own footprint)** — the Prism engine has no `/dev/nomount` and no mounts of its own to hide: the control plane is a private netlink protocol behind `CAP_NET_ADMIN`, and injected inodes carry the stock `st_dev`, SELinux context and directory metadata.
+* **Self-mounting module skip list** — modules that mount themselves are skipped (built-in list + `/data/adb/nomount/blocklist`, one module id per line). Distinct from the per-app hide list above, which lives in `uidhide`.
 * **Bootloop guard** — a boot counter self-disables NoMount after repeated failed boots and re-arms once the system boots healthy.
 * **Manager tags** — each module's description in the root manager is tagged with how it's served (`vfs` / `overlay` / `vfs + overlay`).
 * **Install integrity** — a bundled `sha256` manifest is verified at install; a corrupt or tampered zip aborts.
 
 ## Kernel Integration
 
-The VFS engine needs the `/dev/nomount` driver compiled into your kernel. Patches for **android12-5.10, android13-5.15, android14-6.1, android15-6.6, android16-6.12** live in [`kernel_patches/`](kernel_patches/):
+The Suite drives the **Prism** engine — a per-inode ops hijack with a private
+netlink control plane, built from
+[`Bouteillepleine/kbuild@hookless`](https://github.com/Bouteillepleine/kbuild/tree/hookless).
+That is what the kernel builders apply and what the bundled `nm` client speaks to.
+Enable with `CONFIG_NOMOUNT=y`.
 
-| Variant | Path | Use when |
-| :--- | :--- | :--- |
-| Raw GKI (standalone) | `kernel_patches/nomount-android*.patch` | NoMount only |
-| SUSFS-compatible | `kernel_patches/susfs/nomount-android*.patch` | NoMount **+** SUSFS (apply SUSFS first) |
-
-Enable with `CONFIG_NOMOUNT=y`. The recursion guard uses `current->journal_info` — **never** `android_oem_data1`, which OEMs like OnePlus use for their own per-task pointer (writing to it soft-locks the device at boot). See [`kernel_patches/README.md`](kernel_patches/README.md).
+> **`kernel_patches/` is the superseded engine.** Those patches implement the
+> original `/dev/nomount` char device with `fs/namei.c` hooks and an ioctl control
+> plane (`NOMOUNT_IOC_*`). Nothing in this repo can drive them any more: `nm` and
+> `src/nm.rs` speak netlink only, so a kernel built from them answers no CLI
+> command — per-UID hiding included. Kept for reference; see
+> [`kernel_patches/README.md`](kernel_patches/README.md).
 
 ## Usage (Userspace)
 
-The subsystem is controlled via the `nomount` binary, communicating through a custom IOCTL interface.
+The subsystem is controlled via the `nomount` binary, which drives the engine
+through the bundled freestanding `nm` netlink client.
 
 | Command | Syntax | Description |
 | :--- | :--- | :--- |
@@ -64,7 +69,10 @@ The subsystem is controlled via the `nomount` binary, communicating through a cu
 | **Clear All** | `nomount vfs clear` | Flush all rules immediately. |
 | **Engine** | `nomount vfs enable\|disable\|refresh` | Toggle the engine / refresh the dcache. |
 | **Status** | `nomount vfs query-status` | Driver version, engine state, rule count. |
-| **Block UID** | `nomount uid block <uid>` | Isolate a UID from seeing any injections. |
+| **Hide from app** | `nomount uid block <pkg\|uid>` | Show that app the stock filesystem. Persists; `--force` for platform uids. |
+| **Hide list** | `nomount uid list` | Saved entries cross-referenced against the kernel's live set. |
+| **Re-apply** | `nomount uid apply [--early]` | Re-assert the list (the mount pass clears the kernel's set). |
+| **Isolated pools** | `nomount uid isolated <mode>` | `both` (default) \| `appzygote` \| `platform` \| `off`. |
 | **Unblock UID** | `nomount uid unblock <uid>` | Restore injection visibility for a UID. |
 | **Version** | `nomount version` | Show the subsystem version. |
 
@@ -82,10 +90,10 @@ nomount vfs add /vendor/lib64/soundfx/libfoo.so /data/local/tmp/my_lib.so
 nomount vfs add /vendor/etc/audio_effects.conf /data/adb/modules/my_mod/audio_effects.conf
 ```
 
-**Hide root from a banking app** (UID 10256 sees the stock system, no injections):
+**Hide the injections from a banking app** (it sees the stock system; a package name is used so the entry survives a reinstall, and it covers the app in a clone or work profile too):
 
 ```bash
-nomount uid block 10256
+nomount uid block com.bank.app
 ```
 
 ## WebUI

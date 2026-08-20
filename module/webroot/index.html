@@ -311,6 +311,9 @@
     letter-spacing: .04em; text-transform: uppercase; color: var(--dim);
     background: var(--bg2); border-bottom: 1px solid var(--brd2);
   }
+  /* isolated-pool policy row: label + select on one line, wrapping when narrow */
+  .iso-l { flex: 0 0 auto; align-self: center; font-size: 12.5px; color: var(--dim); }
+  .iso-s { flex: 1 1 180px; margin-top: 0; font-family: inherit; font-size: 13px; }
   .blocklist { display: flex; flex-direction: column; gap: 6px; margin-top: 11px; }
   .blocklist:empty { display: none; }
   .blk-none { font-size: 12.5px; color: var(--dim); padding: 9px 11px; border: 1px dashed var(--brd2);
@@ -922,7 +925,18 @@
       <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
     </div>
     <div id="blocked" class="blocklist"></div>
-    <p class="note">Hides injected files and su from <b>one</b> app only. Use a <b>package name</b> to persist across reboots (raw UIDs reset on reinstall). Doesn't cover SELinux-policy detection or isolated-process probes.</p>
+    <p class="note">Shows the listed app the <b>stock filesystem</b> — no injected files, no whiteouts, stock directory metadata. One entry covers the app in every user, work profile and clone (matching is on the appid), and its SDK-sandbox process too. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root is unaffected, and so is <code>su</code> — that's sucompat, not the engine. Doesn't cover SELinux-policy detection, or anything a system service reads on the app's behalf (PackageManager still parses the injected APK).</p>
+
+    <div class="uidbar" style="margin-top:13px">
+      <label class="iso-l" for="isoMode">Isolated processes</label>
+      <select id="isoMode" class="txin iso-s" onchange="setIsolated(this)">
+        <option value="both">Hide from all (default)</option>
+        <option value="appzygote">App-zygote pool only</option>
+        <option value="platform">Platform pool only</option>
+        <option value="off">Don't hide from any</option>
+      </select>
+    </div>
+    <p class="note">An isolated process gets a pool UID that says nothing about which app spawned it, so hiding from a listed app can only mean hiding from <i>every</i> isolated process. That closes the hole where a hidden app farms its probing out to an isolated helper — but while it's on, an app that <b>isn't</b> hidden can spot the injection by diffing its own view against its own isolated child's. Both pools are hidden by default; narrow it here if you'd rather not arm that comparison. No effect unless at least one app is hidden.</p>
   </div>
 
   </section>
@@ -1725,9 +1739,12 @@
   }
   async function clearRules(btn) {
     const done = busy(btn, "Clearing…");
+    // A clear drops the kernel's hidden-app set along with the rules, so nomount
+    // re-hides the saved list straight after; the toast reports what it re-hid.
     const r = await nm("vfs clear");
-    if (r.errno === 0) toast("Rules cleared", "ok"); else toast("Failed: " + (r.stderr || "error"), "bad");
-    done(); refreshStatus(); if (rulesShown) loadRules();
+    if (r.errno === 0) toast((r.stdout || "").trim().replace(/^ok\b\s*/, "Rules cleared ") || "Rules cleared", "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    done(); refreshStatus(); refreshBlocked(); if (rulesShown) loadRules();
   }
   async function rearm(btn) {
     btn.disabled = true;
@@ -1737,12 +1754,15 @@
     toast("Guard re-armed — reboot to re-enable", "ok");
     btn.disabled = false; refreshGuard(); refreshIncident();
   }
+  // A package name is letters, digits, dots and underscores; an app id is digits.
+  // An allow-list is exact here. The old deny-list let glob characters (* ? [ ])
+  // and a backslash through to an unquoted shell word, so Hide could land on
+  // something other than what was typed.
+  const UID_TARGET_RE = /^[A-Za-z0-9._]+$/;
   async function uidOp(op, btn) {
     const v = $("uid").value.trim();
     if (!v) { toast("Enter a package name or UID", "bad"); return; }
-    // Package names can contain dots/underscores/digits; only reject whitespace
-    // and shell metacharacters so we never build a broken command.
-    if (/[\s'"`;|&$<>()]/.test(v)) { toast("Invalid characters in name", "bad"); return; }
+    if (!UID_TARGET_RE.test(v)) { toast("Package names are letters, digits, dots and underscores", "bad"); return; }
     const done = busy(btn, op === "block" ? "Hiding…" : "Unhiding…");
     const r = await nm(`uid ${op} ${v}`);
     if (r.errno === 0) {
@@ -1771,26 +1791,36 @@
       const [name, stateRaw] = l.split("\t");
       const s = (stateRaw || "").trim();
       let cls = "live";
-      if (/not installed/.test(s)) cls = "gone";
+      if (/not installed/.test(s) || /unreachable/.test(s)) cls = "gone";
       else if (/not applied/.test(s)) cls = "pending";
       else if (/not saved/.test(s)) cls = "drift";
       // Target for actions: package name when known, else the bare UID.
       const uidM = s.match(/uid (\d+)/);
       const target = /^uid \d+$/.test(name) ? (uidM ? uidM[1] : name) : name;
-      const t = target.replace(/'/g, "");
       const save = cls === "drift"
-        ? `<button class="bx save" title="Save so it survives reboot" onclick="saveOne('${t}',this)">💾</button>` : "";
+        ? `<button class="bx save" title="Save so it survives reboot" data-act="save" data-nmt="${esc(target)}">💾</button>` : "";
       return `<div class="blk ${cls}">
         <span class="dot"></span>
-        <span class="bn">${name}</span>
-        <span class="bs">${s}</span>
+        <span class="bn">${esc(name)}</span>
+        <span class="bs">${esc(s)}</span>
         ${save}
-        <button class="bx" title="Unhide" onclick="unblockOne('${t}',this)">✕</button>
+        <button class="bx" title="Unhide" data-act="unblock" data-nmt="${esc(target)}">✕</button>
       </div>`;
     }).join("");
     const n = lines.length;
     box.innerHTML = `<div class="blk-head">Hidden apps · ${n}</div>` + rows;
   }
+
+  // The list is built from a file a human can edit, so nothing from it is
+  // interpolated raw: esc() for the text nodes and for the data attribute the
+  // handler reads, and the buttons carry no generated inline code at all.
+  document.getElementById("blocked").addEventListener("click", ev => {
+    const b = ev.target.closest("button[data-act]");
+    if (!b) return;
+    const t = b.getAttribute("data-nmt") || "";
+    if (!UID_TARGET_RE.test(t)) { toast("That entry has characters nomount won't take", "bad"); return; }
+    if (b.getAttribute("data-act") === "save") saveOne(t, b); else unblockOne(t, b);
+  });
   // Load installed third-party packages with their UIDs (once), for the custom
   // app-picker dropdown below. Best-effort — the field still accepts free text.
   var _pkgsLoaded = false, _pkgs = [], _pkgSel = -1;
@@ -1840,6 +1870,20 @@
       e.preventDefault(); pkgPick(opts[_pkgSel]);
     }
   }
+  // Isolated-pool policy (a kernel knob, re-asserted from disk on every apply).
+  async function refreshIsolated() {
+    const r = await nm("uid isolated");
+    const m = (r.stdout || "").trim().match(/^(both|appzygote|platform|off)/);
+    if (m) $("isoMode").value = m[1];
+  }
+  async function setIsolated(sel) {
+    sel.disabled = true;
+    const r = await nm(`uid isolated ${sel.value}`);
+    if (r.errno === 0) toast((r.stdout || "").replace(/^ok:/, "").trim() || "Updated", "ok");
+    else { toast("Failed: " + (r.stderr || "error"), "bad"); refreshIsolated(); }
+    sel.disabled = false;
+  }
+
   async function unblockOne(target, btn) {
     btn.disabled = true;
     const r = await nm(`uid unblock ${target}`);
@@ -1997,7 +2041,7 @@
     const v = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
     $("ver").textContent = v || "v?";
     $("footver").textContent = v ? ("Suite " + v) : "";
-    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshWhiteouts(), checkManagerSwitches()]);
+    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshIsolated(), refreshWhiteouts(), checkManagerSwitches()]);
     if (rulesShown) loadRules();
     loadPkgList();
     if (ic) ic.classList.remove("spin");

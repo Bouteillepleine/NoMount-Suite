@@ -32,7 +32,7 @@ struct Fingerprint {
     rules: usize,
     whiteouts: usize,
     mounts: usize,
-    blocked: usize,
+    blocked: String, // count, or "unknown" when the engine could not be asked
     consistency: String, // "ok" | "mismatch:<path>(root=A app=B)" | "unchecked"
     guard: String,       // "armed" | "tripped"
     /// Module mounts that are NOT left by design, i.e. actual leaks. Carried
@@ -124,10 +124,20 @@ fn count_mounts_split() -> (usize, usize) {
     (total, by_design)
 }
 
+/// The unprivileged uid the consistency canary probes as (`shell`).
+const PROBE_UID: u32 = 2000;
+
 /// The Narcissus canary: sample a few injected files and confirm a normal app
 /// (uid 2000, `shell`) sees the same size as root. A divergence for an unblocked
 /// app is the d_drop-class regression this whole module exists to catch early.
-fn consistency_probe(rules: &[(String, String)]) -> String {
+///
+/// If shell itself is on the hide list the probe is meaningless: the divergence it
+/// would report is the feature doing exactly what was asked. Say so, rather than
+/// stamping a permanent "per-UID inconsistency" on the manager card.
+fn consistency_probe(rules: &[(String, String)], probe_uid_hidden: bool) -> String {
+    if probe_uid_hidden {
+        return "unchecked:probe-uid-hidden".to_string();
+    }
     // Injected regular files only (skip virtual dirs / whiteouts which have no size).
     let mut checked = 0;
     for (target, _src) in rules.iter() {
@@ -137,7 +147,7 @@ fn consistency_probe(rules: &[(String, String)]) -> String {
         let root = fs::metadata(target).ok().map(|m| m.len().to_string());
         let Some(root_sz) = root else { continue };
         checked += 1;
-        let app_sz = app_size(2000, target);
+        let app_sz = app_size(PROBE_UID, target);
         if app_sz != root_sz {
             return format!("mismatch:{target}(root={root_sz} app={})",
                 if app_sz.is_empty() { "ENOENT" } else { &app_sz });
@@ -162,7 +172,18 @@ fn gather() -> Fingerprint {
     let list = nm.list().unwrap_or_default();
     let rules = parse_rules(&list);
     let whiteouts = list.lines().filter(|l| l.contains("(whiteout)")).count();
-    let blocked = nm.uid_list_live().map(|v| v.len()).unwrap_or(0);
+    // Distinguish "nothing hidden" from "couldn't ask": `nm l u` fails loudly on
+    // EPERM / engine-down, and reporting that as 0 hidden reads as a working
+    // feature with an empty list.
+    let live = nm.uid_list_live();
+    let blocked = match &live {
+        Ok(v) => v.len().to_string(),
+        Err(_) => "unknown".to_string(),
+    };
+    let probe_hidden = live
+        .as_ref()
+        .map(|v| v.iter().any(|u| crate::blocklist::appid(*u) == PROBE_UID))
+        .unwrap_or(false);
     let guard = if Path::new("/data/adb/nomount/disabled").exists() {
         "tripped"
     } else {
@@ -178,7 +199,7 @@ fn gather() -> Fingerprint {
         mounts: mounts_total,
         mounts_foreign: mounts_total - mounts_by_design,
         blocked,
-        consistency: consistency_probe(&rules),
+        consistency: consistency_probe(&rules, probe_hidden),
         guard: guard.to_string(),
         manager_umount: match crate::manager::kernel_umount_enabled() {
             Some(true) => "on".to_string(),
@@ -193,7 +214,9 @@ fn gather() -> Fingerprint {
 /// Exit is non-zero when the consistency canary or guard indicates trouble.
 pub fn run_selfcheck(write: bool) -> Result<()> {
     let fp = gather();
-    let ok_consistency = fp.consistency == "ok" || fp.consistency == "unchecked";
+    // "unchecked" and its qualified forms (unchecked:probe-uid-hidden) are
+    // not-a-verdict, not a failure.
+    let ok_consistency = fp.consistency == "ok" || fp.consistency.starts_with("unchecked");
     let ok_guard = fp.guard == "armed";
     let ok_engine = fp.engine != "down";
 

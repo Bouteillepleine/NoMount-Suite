@@ -58,6 +58,11 @@ const MODULES_DIR: &str = "/data/adb/modules";
 // kernelnosu module) — injecting their files double-handles the same targets, and
 // for a su binary would break root. Extend at runtime via the blocklist file.
 const BUILTIN_BLOCKLIST: &[&str] = &["kernelnosu", "scene_swap_controller", "AAaTempSpoof"];
+// NOTE: module ids, one per line — NOT the per-app hide list. The two shared this
+// path until v1.3.12: hiding an app also told this pass to skip a module of that
+// name, and every module-skip entry showed up in the WebUI's hidden-apps list with
+// a delete button, one click away from injecting a self-mounting module. Per-app
+// hiding lives in `uidhide` now (see blocklist.rs, which migrates an existing file).
 const BLOCKLIST_FILE: &str = "/data/adb/nomount/blocklist";
 
 // Top-level module roots that exist on-device but must NEVER be injected into
@@ -818,10 +823,22 @@ pub fn run_mount() -> Result<()> {
     let modules = served.len();
     let surface = if binds > 0 { "hookless + my_* bind" } else { "mountless (RRO via hookless)" };
 
+    // The `clear` above dropped the kernel's hidden-UID set along with the rules —
+    // per-UID hiding is runtime state and CLEAR_ALL is its reset. Without this,
+    // every mount pass after boot (the WebUI's Re-apply button is one) silently
+    // unhid every app on the list for the rest of the session. Resolving from the
+    // cached mirror so this works at post-fs-data too: apps are hidden from the
+    // moment the injections exist, rather than from boot_completed onwards.
+    let hidden = crate::cli::handlers::reapply_blocklist(&nm, true);
+
     println!(
         "nomount(suite): {modules} modules | {} rules, {} whiteouts, {binds} my_* binds, {} failed, \
-         {skipped} skipped | {surface}",
-        st.applied, st.whiteouts, st.failed
+         {skipped} skipped | {} hidden{} | {surface}",
+        st.applied,
+        st.whiteouts,
+        st.failed,
+        hidden.hidden,
+        if hidden.failed > 0 { format!(", {} hide failed", hidden.failed) } else { String::new() }
     );
     Ok(())
 }

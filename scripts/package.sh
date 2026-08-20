@@ -109,6 +109,7 @@ SCRIPTS=(
     service.sh
     spoof.sh
     scan.sh
+    uidwatch.sh
 )
 
 # OnePlus (and any device that can run this kernel) is arm64-v8a only — the

@@ -107,6 +107,13 @@ set_perm "$CONF" 0 0 0644
 ui_print "- Spoof add-on enabled: dynamic vbmeta.digest"
 ui_print "  config: $CONF"
 
+# --- per-UID hiding ---
+# The hide list used to share /data/adb/nomount/blocklist with the module-skip
+# list, so hiding an app also told the mount pass to skip a module of that name,
+# and the WebUI's unhide button could delete a module-skip entry. It has its own
+# file (uidhide) now; an existing shared file is split on first read.
+[ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
+
 # --- Cloak (pathhide maps/fd) add-on ---
 [ -f "$MODPATH/scan.sh" ] && set_perm "$MODPATH/scan.sh" 0 0 0755
 [ -f "$NMDIR/pathhide.conf" ] || echo "# NoMount Cloak — pathhide rule list (managed by WebUI › Tools › Cloak)" > "$NMDIR/pathhide.conf"

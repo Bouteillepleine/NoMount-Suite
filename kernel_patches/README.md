@@ -1,5 +1,21 @@
 # NoMount — kernel VFS path-redirection patches
 
+> ## ⚠️ Superseded — reference only
+>
+> These patches are the **original hooked engine**: a `/dev/nomount` char device,
+> `fs/namei.c` / `fs/readdir.c` hooks, and an ioctl control plane
+> (`NOMOUNT_IOC_ADD_UID` and friends, with per-UID hiding backed by a hashtable).
+>
+> The Suite no longer speaks to any of it. `nm` and `src/nm.rs` drive the **Prism**
+> engine — per-inode ops hijack, private netlink protocol — built from
+> [`Bouteillepleine/kbuild@hookless`](https://github.com/Bouteillepleine/kbuild/tree/hookless),
+> which is also what the kernel builders apply. A kernel built from the patches
+> below will boot, but every `nomount` command (per-UID hiding included) will fail
+> to reach the driver, because the transports do not match.
+>
+> Build the hookless integration patches instead. Kept here for reference and for
+> anyone maintaining a fork of the older design.
+
 Mountless, systemless module loading via VFS-layer path redirection and virtual
 dirent injection — no entries in `/proc/mounts`. These patches add the
 `/dev/nomount` driver and are **rebased onto pristine GKI**, so each applies to a

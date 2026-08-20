@@ -1,5 +1,88 @@
 # Changelog
 
+## v1.3.12
+
+Audit pass over per-UID hiding, kernel to WebUI. Everything below is that audit's
+findings, fixed. The kernel half lives in `kbuild@hookless`.
+
+### Fixed
+- **A hidden app could still see the shape of what was hidden.** `getattr` on an
+  injected directory was the one major kernel entry point with no per-UID gate, so
+  a hidden app got the *corrected* link count and erofs directory size while its
+  own `readdir` and `lookup` returned the stock set. `stat()` and `readdir()`
+  disagreed by exactly the number of hidden entries — for the one caller most
+  likely to be measuring. The correction is skipped for a hidden reader now, and
+  the link-count delta only counts children that reader can actually see.
+- **A hidden app could read through its own SDK-runtime sandbox process.** Matching
+  is on the appid, and a sandbox process runs at `appid + 10000` — outside the list.
+  Unlike an isolated pool uid, that one names its owner exactly, so it is followed
+  back to the app instead of being left uncovered.
+- **"Re-apply" silently unhid every app.** `nm clear` drops the kernel's hidden-UID
+  set along with the rules, and the mount pass clears before it rebuilds — so the
+  WebUI's Re-apply button (and `vfs clear`) left every app on the list visible for
+  the rest of the session, with nothing to put it back. Both paths re-assert the
+  list now.
+- **The hide list and the module-skip list were the same file.**
+  `/data/adb/nomount/blocklist` was read as *module ids to skip injecting* and
+  written as *apps to hide*. Hiding an app inserted it into the module-skip set, and
+  every module-skip entry appeared in the WebUI as a hidden app with a ✕ that
+  deleted it — one click from injecting a self-mounting module. Hiding moved to
+  `/data/adb/nomount/uidhide`; an existing file is split on first read, with entries
+  that name an installed module left where they were.
+- **Apps were unhidden for the first ~10–20 s of every boot.** The list was applied
+  only after `sys.boot_completed` plus a sleep, long after injections went live — a
+  detector with a `BOOT_COMPLETED` receiver had a clean window. Each resolve is now
+  mirrored to `uidhide.cache`, and the mount pass re-hides from it at post-fs-data,
+  before any app starts. The later pass stays authoritative: it re-resolves against
+  `packages.list`, refreshes the mirror, and retires an appid an entry no longer
+  maps to (appids are reused after an uninstall).
+- **An entry for a not-yet-installed app stayed inert until the next reboot.**
+  `uidwatch.sh` re-applies the list on install/uninstall/update, via `inotifyd` on
+  the package map.
+- **`uid apply` could not fail.** Kernel errors were discarded and the pass reported
+  "applied N" regardless, so an engine that hid nothing looked identical to a clean
+  run — on the one path whose job is to be trustworthy. It counts and reports
+  failures now, exits non-zero, and `service.sh` logs the failure loudly.
+- **Blocking a platform uid was one keystroke away.** `1000` hides injections from
+  system_server (RRO and framework patches revert to stock), `2000` breaks the
+  health canary permanently (it probes as shell), `0` hides them from root. Appids
+  below 10000 are refused without `--force`, and the canary reports
+  `unchecked:probe-uid-hidden` instead of a standing inconsistency warning.
+- **`blocked=0` when the engine could not be asked.** `nm l u` fails loudly on
+  EPERM / engine-down, but the health fingerprint still reported zero hidden apps —
+  a working feature with an empty list. It says `unknown` now, and `uid list` says
+  "engine unreachable".
+- **WebUI input and output handling.** The hide field's deny-list let glob
+  characters through to an unquoted shell word; it is an allow-list now. List rows
+  are escaped and their buttons carry data attributes instead of generated inline
+  handlers.
+- **A `--uid`-scoped rule missed the app's clones,** comparing a raw UID where the
+  hide list compares appids.
+
+### Added
+- **`nomount uid isolated <both|appzygote|platform|off>`** (WebUI: Per-UID hiding ›
+  Isolated processes). An isolated process gets a pool UID that says nothing about
+  which app spawned it, so hiding from a listed app can only mean hiding from every
+  isolated process. That closes the hole where a hidden app farms its probing out to
+  an isolated helper — but while it is on, an app that *is not* hidden can spot the
+  injection by diffing its own view against its own isolated child's. The default is
+  unchanged (both pools); the trade is now a deliberate, documented setting rather
+  than a hardcoded range.
+- **`nomount uid apply --early`** — resolve from the cached mirror, for the
+  post-fs-data pass.
+- **`nm k i <0..3>`** — the isolated-pool knob on the existing knob transport.
+
+### Changed
+- README's feature list, command table and kernel section still described the
+  superseded hooked engine (`/dev/nomount`, SUSFS `sus_path`, a per-UID hash table);
+  the WebUI note claimed hiding covered `su` (it is sucompat — untouched) and *not*
+  isolated processes (the opposite of what the kernel does). Both corrected.
+- `kernel_patches/` is marked superseded: those patches are the ioctl engine, which
+  no current client can drive.
+- Shipped scripts and assets are pinned to LF via `.gitattributes` — a Windows clone
+  would otherwise check `module/*.sh` out with CRLF, and a local `package.sh` run
+  would zip them that way.
+
 ## v1.3.6
 
 ### Fixed

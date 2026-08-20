@@ -127,6 +127,10 @@ void c_main(long *sp) {
          * a synthesized dir must report the formula rather than 4096. Measured
          * by the Suite; see NM_KNOB_VDIR_EROFS_SIZE. */
         case 'd': knob = 4; break;
+        /* i <0..3> -- which isolated-process pools per-UID hiding covers:
+         * 1 = app-zygote, 2 = platform, 3 = both (default), 0 = neither.
+         * See NM_KNOB_HIDE_ISOLATED for the trade this expresses. */
+        case 'i': knob = 5; break;
         default: exit_code = 3; goto do_exit;
         }
         val = (p_count > 1) ? p_args[1] : "";

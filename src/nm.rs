@@ -93,13 +93,24 @@ impl Nm {
     }
 
     /// `nm block <uid>` — hide injections from this UID (sus_path substitute).
+    /// Normalised to the appid, which is what the kernel stores and matches, so
+    /// one entry covers the app in every user, work profile and clone.
     pub fn uid_block(&self, uid: u32) -> Result<()> {
-        self.run(&["block", &uid.to_string()]).map(drop)
+        self.run(&["block", &crate::blocklist::appid(uid).to_string()])
+            .map(drop)
     }
 
-    /// `nm unblock <uid>`.
+    /// `nm unblock <uid>`. Same normalisation as `uid_block`.
     pub fn uid_unblock(&self, uid: u32) -> Result<()> {
-        self.run(&["unblock", &uid.to_string()]).map(drop)
+        self.run(&["unblock", &crate::blocklist::appid(uid).to_string()])
+            .map(drop)
+    }
+
+    /// `nm k i <0..3>` — which isolated-process pools per-UID hiding covers.
+    /// Runtime state like the blocked set itself (a reboot or `nm clear` resets
+    /// it), so every apply pass re-asserts it from the persisted setting.
+    pub fn set_hide_isolated(&self, mode: u32) -> Result<()> {
+        self.run(&["k", "i", &mode.to_string()]).map(drop)
     }
 
     /// `nm l u` — the kernel's **live** blocked-UID set (authoritative, straight

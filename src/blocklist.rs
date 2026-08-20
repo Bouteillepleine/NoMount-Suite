@@ -1,35 +1,75 @@
 //! Persistent, package-name-aware UID block list.
 //!
 //! The kernel's per-UID hiding (`nm block <uid>`) is **runtime-only**: the idr
-//! that backs it lives in kernel memory and is empty after every reboot. It also
-//! speaks raw UIDs, which nobody remembers — `10487` tells you nothing, whereas
-//! `me.garfieldhan.holmes` does.
+//! that backs it lives in kernel memory and is empty after every reboot (and is
+//! destroyed again by `nm clear`). It also speaks raw UIDs, which nobody
+//! remembers — `10487` tells you nothing, whereas `me.garfieldhan.holmes` does.
 //!
 //! This module closes both gaps without touching the kernel:
-//!   * a plain-text file (`/data/adb/nomount/blocklist`) is the source of truth,
+//!   * a plain-text file (`/data/adb/nomount/uidhide`) is the source of truth,
 //!     one entry per line — a package name (preferred, durable) or a bare UID;
-//!   * package names are resolved to their live UID via the canonical
+//!   * package names are resolved to their live appid via the canonical
 //!     `/data/system/packages.list` (root-readable, no `pm` fork);
-//!   * `apply` re-blocks every resolved UID and is invoked from `service.sh` once
-//!     `packages.list` is populated, so a hidden detector stays hidden across boots.
+//!   * every successful resolve is mirrored into `uidhide.cache`, so the mount
+//!     pass can re-block at post-fs-data — before a single app has started —
+//!     instead of waiting for `packages.list` to be meaningful at boot_completed;
+//!   * `apply` re-blocks every resolved appid and is invoked from the mount pass
+//!     and again from `service.sh`, so a hidden detector stays hidden across
+//!     reboots *and* across a mid-session `nomount mount`.
+//!
+//! Matching is on the **appid** (`uid % 100000`), exactly like the kernel: one
+//! entry covers the app in every user, work profile and clone.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-/// Source of truth for the persistent block list. Lives beside the guard state
-/// under `/data/adb/nomount`, which the module creates in `customize.sh`.
-pub const BLOCKLIST_PATH: &str = "/data/adb/nomount/blocklist";
+/// Source of truth for the persistent hide list.
+pub const BLOCKLIST_PATH: &str = "/data/adb/nomount/uidhide";
+
+/// Where this list used to live — the same file `mount.rs` reads as the list of
+/// *module ids to skip injecting*. One file, two schemas: hiding an app also
+/// inserted it into the module-skip set, every module-skip entry showed up in the
+/// WebUI as a "hidden app", and its ✕ button deleted a line whose real job was to
+/// keep a self-mounting module from being injected. Split, with a one-time
+/// migration that only moves entries which are not the id of an installed module.
+const LEGACY_PATH: &str = "/data/adb/nomount/blocklist";
+
+/// Resolved appids, mirrored from the last successful resolve. Lets the mount
+/// pass re-block at post-fs-data without depending on `packages.list`.
+const CACHE_PATH: &str = "/data/adb/nomount/uidhide.cache";
+
+/// Feature settings that must be re-asserted after every reboot / `nm clear`.
+const CONF_PATH: &str = "/data/adb/nomount/uidhide.conf";
 
 /// Android's canonical package→UID map. Column 0 is the package name, column 1
 /// the app UID. Root-readable; avoids forking `pm` (slow, and unavailable early
-/// in boot when `service.sh` runs).
+/// in boot when the mount pass runs).
 const PACKAGES_LIST: &str = "/data/system/packages.list";
+
+const MODULES_DIR: &str = "/data/adb/modules";
+
+/// Android packs (user, appid) into a uid. The kernel stores and matches the
+/// appid, so the CLI must normalise the same way or the two disagree about a
+/// clone/work-profile UID — which made `uid unblock 1010471` report success while
+/// the kernel went on hiding appid 10471.
+pub const PER_USER_RANGE: u32 = 100_000;
+
+/// Below this is the platform (root, system_server, shell, radio…). Blocking one
+/// of these hides injections from Android itself; `2000` additionally breaks the
+/// health canary, which probes as shell.
+pub const FIRST_APP_APPID: u32 = 10_000;
+
+/// Normalise a raw UID to the appid the kernel matches on.
+pub fn appid(uid: u32) -> u32 {
+    uid % PER_USER_RANGE
+}
 
 /// What an entry resolved to, for display in `uid list`.
 pub enum Resolved {
-    /// Package (or bare UID) resolved to this live app UID.
+    /// Package (or bare UID) resolved to this live appid.
     Uid(u32),
     /// A package name that isn't in `packages.list` right now (not installed, or
     /// disabled for the current user). Kept in the list so it re-arms if the app
@@ -37,23 +77,34 @@ pub enum Resolved {
     NotInstalled,
 }
 
-/// Resolve a block-list target to a UID.
+/// Resolve a hide-list target to an appid.
 ///
-/// A purely numeric target is taken verbatim (already a UID). Anything else is a
-/// package name, looked up in `packages.list`.
+/// A purely numeric target is taken verbatim (already a UID) and normalised.
+/// Anything else is a package name, looked up in `packages.list`.
 pub fn resolve(target: &str) -> Result<Resolved> {
     let t = target.trim();
     if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
-        return Ok(Resolved::Uid(t.parse().context("UID out of range")?));
+        let uid: u32 = t.parse().context("UID out of range")?;
+        return Ok(Resolved::Uid(appid(uid)));
     }
     match uid_for_package(t)? {
-        Some(uid) => Ok(Resolved::Uid(uid)),
+        Some(uid) => Ok(Resolved::Uid(appid(uid))),
         None => Ok(Resolved::NotInstalled),
     }
 }
 
+/// Resolve preferring the cache, for the early-boot pass. `packages.list` is
+/// readable at post-fs-data, but the cache is both cheaper and correct even if it
+/// is not yet in its final state; `apply` reconciles against the live map later.
+pub fn resolve_early(target: &str, cache: &BTreeMap<String, u32>) -> Result<Resolved> {
+    if let Some(uid) = cache.get(target.trim()) {
+        return Ok(Resolved::Uid(*uid));
+    }
+    resolve(target)
+}
+
 /// Reverse of `uid_for_package`: the first package owning `uid`, for labelling a
-/// UID the kernel is hiding that isn't in the block-list file. `None` = no match
+/// UID the kernel is hiding that isn't in the hide-list file. `None` = no match
 /// (system/shared UID, or `packages.list` unreadable).
 pub fn package_for_uid(uid: u32) -> Option<String> {
     parse_package_for_uid(&fs::read_to_string(PACKAGES_LIST).ok()?, uid)
@@ -64,7 +115,7 @@ fn parse_package_for_uid(list: &str, uid: u32) -> Option<String> {
     for line in list.lines() {
         let mut cols = line.split(' ');
         let pkg = cols.next()?;
-        if cols.next().and_then(|c| c.parse::<u32>().ok()) == Some(uid) {
+        if cols.next().and_then(|c| c.parse::<u32>().ok()).map(appid) == Some(appid(uid)) {
             return Some(pkg.to_string());
         }
     }
@@ -95,13 +146,45 @@ fn parse_uid_for_package(list: &str, pkg: &str) -> Option<u32> {
     None
 }
 
-/// Read the persistent block list: trimmed, comment- and blank-stripped, order
+/// One-time split of the shared `blocklist` file. Runs only while the new file is
+/// absent. An entry that names a directory under `/data/adb/modules` is a module
+/// id and stays put; everything else is a hide-list entry and moves. Both writes
+/// are best-effort: a failure here must never cost the caller its list.
+fn migrate_legacy() {
+    if Path::new(BLOCKLIST_PATH).exists() {
+        return;
+    }
+    let Ok(raw) = fs::read_to_string(LEGACY_PATH) else { return };
+    let entries = parse_blocklist(&raw);
+    if entries.is_empty() {
+        return;
+    }
+    let (modules, apps): (Vec<String>, Vec<String>) = entries
+        .into_iter()
+        .partition(|e| Path::new(MODULES_DIR).join(e).is_dir());
+
+    if write_lines(BLOCKLIST_PATH, &apps).is_ok() {
+        // Only shrink the legacy file once the new one is safely on disk.
+        let mut body = String::from(
+            "# NoMount: module ids to skip injecting (self-mounting modules).\n\
+             # Per-app hiding moved to /data/adb/nomount/uidhide.\n",
+        );
+        for m in &modules {
+            body.push_str(m);
+            body.push('\n');
+        }
+        let _ = fs::write(LEGACY_PATH, body);
+    }
+}
+
+/// Read the persistent hide list: trimmed, comment- and blank-stripped, order
 /// preserved, deduplicated. Absent file = empty list (not an error).
 pub fn read() -> Result<Vec<String>> {
+    migrate_legacy();
     let raw = match fs::read_to_string(BLOCKLIST_PATH) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).context("read blocklist"),
+        Err(e) => return Err(e).context("read hide list"),
     };
     Ok(parse_blocklist(&raw))
 }
@@ -121,9 +204,8 @@ fn parse_blocklist(raw: &str) -> Vec<String> {
     out
 }
 
-/// Persist the list (LF-terminated, one entry per line).
-fn write(entries: &[String]) -> Result<()> {
-    if let Some(dir) = Path::new(BLOCKLIST_PATH).parent() {
+fn write_lines(path: &str, entries: &[String]) -> Result<()> {
+    if let Some(dir) = Path::new(path).parent() {
         fs::create_dir_all(dir).ok();
     }
     let mut body = String::new();
@@ -131,14 +213,19 @@ fn write(entries: &[String]) -> Result<()> {
         body.push_str(e);
         body.push('\n');
     }
-    fs::write(BLOCKLIST_PATH, body).context("write blocklist")
+    fs::write(path, body).with_context(|| format!("write {path}"))
+}
+
+/// Persist the list (LF-terminated, one entry per line).
+fn write(entries: &[String]) -> Result<()> {
+    write_lines(BLOCKLIST_PATH, entries)
 }
 
 /// Add an entry (no-op if already present). Returns true if it was newly added.
 pub fn add(entry: &str) -> Result<bool> {
     let e = entry.trim().to_string();
     let mut list = read()?;
-    if list.iter().any(|x| *x == e) {
+    if list.contains(&e) {
         return Ok(false);
     }
     list.push(e);
@@ -156,7 +243,89 @@ pub fn remove(entry: &str) -> Result<bool> {
         return Ok(false);
     }
     write(&list)?;
+    cache_forget(e);
     Ok(true)
+}
+
+// ---- resolved-appid cache -------------------------------------------------
+
+/// Read the `entry<TAB>appid` mirror. Absent/garbled = empty (never an error:
+/// the cache is an optimisation, `packages.list` is the truth).
+pub fn cache_read() -> BTreeMap<String, u32> {
+    let mut map = BTreeMap::new();
+    let Ok(raw) = fs::read_to_string(CACHE_PATH) else { return map };
+    for line in raw.lines() {
+        if let Some((k, v)) = line.split_once('\t') {
+            if let Ok(uid) = v.trim().parse::<u32>() {
+                map.insert(k.trim().to_string(), appid(uid));
+            }
+        }
+    }
+    map
+}
+
+fn cache_write(map: &BTreeMap<String, u32>) {
+    if let Some(dir) = Path::new(CACHE_PATH).parent() {
+        fs::create_dir_all(dir).ok();
+    }
+    let mut body = String::new();
+    for (k, v) in map {
+        body.push_str(k);
+        body.push('\t');
+        body.push_str(&v.to_string());
+        body.push('\n');
+    }
+    let _ = fs::write(CACHE_PATH, body);
+}
+
+/// Record `entry -> appid` for the next early-boot pass.
+pub fn cache_put(entry: &str, uid: u32) {
+    let mut map = cache_read();
+    if map.insert(entry.trim().to_string(), appid(uid)) != Some(appid(uid)) {
+        cache_write(&map);
+    }
+}
+
+/// Drop an entry from the mirror (unhidden, or its package went away).
+pub fn cache_forget(entry: &str) {
+    let mut map = cache_read();
+    if map.remove(entry.trim()).is_some() {
+        cache_write(&map);
+    }
+}
+
+// ---- feature settings -----------------------------------------------------
+
+/// Which isolated-process pools the kernel hides from: 1 = app-zygote pool,
+/// 2 = platform isolated pool, 3 = both (the default), 0 = neither.
+pub const DEFAULT_HIDE_ISOLATED: u32 = 3;
+
+/// Read the persisted isolated-pool policy (default when unset/garbled).
+pub fn hide_isolated() -> u32 {
+    let Ok(raw) = fs::read_to_string(CONF_PATH) else { return DEFAULT_HIDE_ISOLATED };
+    for line in raw.lines() {
+        if let Some(v) = line.trim().strip_prefix("hide_isolated=") {
+            if let Ok(n) = v.trim().parse::<u32>() {
+                if n <= 3 {
+                    return n;
+                }
+            }
+        }
+    }
+    DEFAULT_HIDE_ISOLATED
+}
+
+/// Persist the isolated-pool policy so `apply` can re-assert it after a reboot
+/// or a `nm clear` (the kernel knob is runtime state like the block set itself).
+pub fn set_hide_isolated(mode: u32) -> Result<()> {
+    if let Some(dir) = Path::new(CONF_PATH).parent() {
+        fs::create_dir_all(dir).ok();
+    }
+    fs::write(
+        CONF_PATH,
+        format!("# NoMount per-UID hiding settings\nhide_isolated={mode}\n"),
+    )
+    .context("write uidhide.conf")
 }
 
 #[cfg(test)]
@@ -182,11 +351,35 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
     }
 
     #[test]
+    fn package_for_uid_matches_a_clone_of_the_same_app() {
+        // uid 1010471 is holmes in user 10 — same appid, same entry.
+        assert_eq!(parse_package_for_uid(LIST, 1_010_471).as_deref(), Some("me.garfieldhan.holmes"));
+    }
+
+    #[test]
     fn resolve_numeric_target_is_uid_without_io() {
         match resolve(" 10123 ").unwrap() {
             Resolved::Uid(u) => assert_eq!(u, 10123),
             _ => panic!("numeric target should resolve to a UID"),
         }
+    }
+
+    #[test]
+    fn resolve_normalises_a_clone_uid_to_its_appid() {
+        // What the kernel stores for uid 1010471 is appid 10471; the CLI must agree
+        // or `uid unblock 1010471` reports success while the app stays hidden.
+        match resolve("1010471").unwrap() {
+            Resolved::Uid(u) => assert_eq!(u, 10471),
+            _ => panic!("numeric target should resolve to a UID"),
+        }
+    }
+
+    #[test]
+    fn appid_normalisation() {
+        assert_eq!(appid(10471), 10471);
+        assert_eq!(appid(1_010_471), 10471);
+        assert_eq!(appid(99_020), 99_020);
+        assert_eq!(appid(2000), 2000);
     }
 
     #[test]
