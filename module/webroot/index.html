@@ -315,10 +315,11 @@
      popup is drawn by the OS -- it ignores the theme tokens entirely and covers the
      card behind it, which is jarring against everything else here. Four short
      mutually-exclusive options fit inline, and this way it is one tap, not two. */
-  .seg { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; border-radius: 13px;
+  .seg { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 4px;
+         padding: 4px; border-radius: 13px;
          background: rgba(0,0,0,0.26); border: 1px solid var(--brd2); }
   html[data-theme="light"] .seg { background: rgba(16,26,48,0.05); }
-  .seg-b { flex: 1 1 76px; appearance: none; background: transparent; border: 1px solid transparent;
+  .seg-b { appearance: none; background: transparent; border: 1px solid transparent;
            border-radius: 10px; padding: 9px 7px; font: inherit; font-size: 12.5px; line-height: 1.15;
            color: var(--dim); cursor: pointer; transition: background .13s, color .13s, border-color .13s; }
   .seg-b:hover { color: var(--txt); }
@@ -372,6 +373,7 @@
               text-transform: uppercase; color: var(--dim); }
   .blocklist { display: flex; flex-direction: column; gap: 6px; margin-top: 11px; }
   .blocklist:empty { display: none; }
+  .blk-sub { font-size: 11px; line-height: 1.45; color: var(--dim); padding: 0 2px 4px; }
   .blk-none { font-size: 12.5px; color: var(--dim); padding: 9px 11px; border: 1px dashed var(--brd2);
               border-radius: 11px; text-align: center; }
   .blk-head { font-size: 11px; font-weight: 640; letter-spacing: .04em; text-transform: uppercase;
@@ -1866,7 +1868,11 @@
     const r = await nm("uid list");
     const lines = (r.stdout || "").split("\n").map(s => s.trim()).filter(Boolean);
     const none = !lines.length || lines[0] === "no blocked apps";
-    const uc = $("uidchip"); if (uc) uc.textContent = none ? "0" : String(lines.length);
+    // Counted once the rows are classified: an entry nothing installed matches --
+    // a glob with no match, a package that is not here -- is a rule waiting, not an
+    // app being hidden, and counting it as one overstates what is actually in force.
+    const uc = $("uidchip");
+    if (none && uc) uc.textContent = "0";
     if (none) {
       box.innerHTML = `<div class="blk-none">No per-UID hiding active — no apps hidden.</div>`;
       return;
@@ -1888,16 +1894,23 @@
       const xTitle = viaM ? `Remove ${viaM[1]} — un-hides every app it matches` : "Unhide";
       const save = cls === "drift"
         ? `<button class="bx save" title="Save so it survives reboot" data-act="save" data-nmt="${esc(target)}">💾</button>` : "";
-      return `<div class="blk ${cls}">
+      return { active: cls !== "gone", html: `<div class="blk ${cls}">
         <span class="dot"></span>
         <span class="bn">${esc(name)}</span>
         <span class="bs">${esc(s)}</span>
         ${save}
         <button class="bx" title="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>
-      </div>`;
-    }).join("");
-    const n = lines.length;
-    box.innerHTML = `<div class="blk-head">Hidden apps · ${n}</div>` + rows;
+      </div>` };
+    });
+    const active = rows.filter(function (x) { return x.active; });
+    const waiting = rows.filter(function (x) { return !x.active; });
+    const htmlOf = function (a) { return a.map(function (x) { return x.html; }).join(""); };
+    if (uc) uc.textContent = String(active.length);
+    box.innerHTML =
+      (active.length ? `<div class="blk-head">Hidden apps · ${active.length}</div>` + htmlOf(active) : "") +
+      (waiting.length ? `<div class="blk-head">Waiting · ${waiting.length}</div>` +
+        `<div class="blk-sub">Nothing installed matches these yet. A glob keeps watching, so a
+          detector installed later is hidden the moment it appears.</div>` + htmlOf(waiting) : "");
   }
 
   // The list is built from a file a human can edit, so nothing from it is

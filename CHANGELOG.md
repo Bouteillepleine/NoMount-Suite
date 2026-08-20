@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.3.16
+
+### Fixed
+- **Rules that hide nothing were counted as hidden apps.** A glob with no installed
+  match, and a package that is not installed, both sat in the "Hidden apps" list and
+  in the card's count — so the count claimed more was in force than actually was.
+  They now appear under **Waiting**, with a line explaining that a glob keeps
+  watching, and only entries actually in force are counted.
+- The isolated-process control wrapped 3 + 1 on a phone. It is a grid now: four
+  across when they fit, an even 2x2 when they do not.
+
 ## v1.3.15
 
 Candidate scan replaces the blunt preset. Adding a whole inventory put dozens of
