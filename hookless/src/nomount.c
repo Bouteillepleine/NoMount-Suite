@@ -18,11 +18,29 @@
 /* Android packs (user_id, appid) into a uid: uid = user_id*NM_PER_USER_RANGE + appid.
  * Matching a blocklist entry on the appid (uid % NM_PER_USER_RANGE) therefore covers
  * the same app across every user, work profile and clone with a single entry. Isolated
- * processes carry a pool-allocated appid in [NM_ISOLATED_START, NM_ISOLATED_END] that is
- * not tied to the parent app, so they are hidden whenever any app is blocked. */
+ * processes carry a pool-allocated appid that is not tied to the parent app:
+ * [NM_APPZYGOTE_START, NM_APPZYGOTE_END] for an app's own zygote children and
+ * [NM_ISOLATED_START, NM_ISOLATED_END] for the platform pool.
+ *
+ * Hiding from those pools protects a blocked app that farms its probing out to an
+ * isolated helper, and it is not free: while it is on, an UNBLOCKED app can compare
+ * its own view against its own isolated child's view and find the injection that way.
+ * (The blocked app itself sees no such divergence -- both of its views are stock.)
+ * Which side of that trade to take is a policy call, so it is nm_hide_isolated rather
+ * than a hardcoded range. Default = both pools, i.e. the historical behaviour. */
 #define NM_PER_USER_RANGE   100000
-#define NM_ISOLATED_START   90000
+#define NM_APPZYGOTE_START  90000
+#define NM_APPZYGOTE_END    98999
+#define NM_ISOLATED_START   99000
 #define NM_ISOLATED_END     99999
+
+/* An app's SDK-runtime sandbox process, by contrast, runs at a uid that DOES name
+ * its owner: Process.toSdkSandboxUid() is appid + 10000. So a blocked app could
+ * simply read through its own sandbox process. That one maps back exactly, with no
+ * collateral, so it is followed rather than pooled. */
+#define NM_SDKSANDBOX_START 20000
+#define NM_SDKSANDBOX_END   29999
+#define NM_SDKSANDBOX_OFF   10000
 
 static atomic_t nm_rule_gen = ATOMIC_INIT(0);
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
@@ -64,19 +82,48 @@ static int nm_read_secctx(struct inode *in, char *dst, u16 *dlen)
 }
 
 
+/* Which isolated pools to hide from once anything is blocked. Bit 0 = the app
+ * zygote pool, bit 1 = the platform isolated pool; NM_KNOB_HIDE_ISOLATED sets it.
+ * See the range comment above for the trade this expresses. */
+#define NM_HIDE_APPZYGOTE   0x1
+#define NM_HIDE_ISOLATED    0x2
+static unsigned int nm_hide_isolated __read_mostly = NM_HIDE_APPZYGOTE | NM_HIDE_ISOLATED;
+
 static __always_inline bool nomount_is_uid_blocked(uid_t uid)
 {
-    unsigned int appid;
+    unsigned int appid, pools;
     bool is_blocked;
     if (!static_branch_unlikely(&nomount_active_uids)) return false;
     /* Reaching here means the static branch is on, i.e. at least one appid is blocked. */
     appid = uid % NM_PER_USER_RANGE;
-    if (appid >= NM_ISOLATED_START && appid <= NM_ISOLATED_END)
-        return true; /* pool-allocated isolated process: hide from all of them */
+    pools = READ_ONCE(nm_hide_isolated);
+    if ((pools & NM_HIDE_APPZYGOTE) &&
+        appid >= NM_APPZYGOTE_START && appid <= NM_APPZYGOTE_END)
+        return true; /* app-zygote isolated child: not attributable, hide from all */
+    if ((pools & NM_HIDE_ISOLATED) &&
+        appid >= NM_ISOLATED_START && appid <= NM_ISOLATED_END)
+        return true; /* platform isolated pool: same */
+    if (appid >= NM_SDKSANDBOX_START && appid <= NM_SDKSANDBOX_END)
+        appid -= NM_SDKSANDBOX_OFF;  /* follow the sandbox back to the app that owns it */
     rcu_read_lock();
     is_blocked = (idr_find(&nomount_uid_idr, appid) != NULL);
     rcu_read_unlock();
     return is_blocked;
+}
+
+/* Is a rule visible to the CALLER? A rule scoped with --uid follows the app across
+ * users, work profiles and clones, because it compares the appid -- the same
+ * normalisation the block list uses. Comparing raw uids here (as this did) made a
+ * uid-scoped rule silently miss the cloned instance of the very app it named.
+ * target_uid 0 = every caller. */
+static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
+{
+    unsigned int target;
+
+    if (!rule) return false;
+    target = rule->target_uid;
+    return target == 0 ||
+           (target % NM_PER_USER_RANGE) == (current_uid().val % NM_PER_USER_RANGE);
 }
 
 #define __get_nm(ptr, type, member, field, hook_func) ({ \
@@ -141,7 +188,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
     hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
             struct nomount_rule *rule = child->rule;
-            if (rule && (rule->target_uid == 0 || rule->target_uid == current_uid().val)) {
+            if (nm_rule_visible(rule)) {
                 rule_info->flags = rule->flags;
                 rule_info->v_ino = rule->v_ino;
                 rule_info->v_dino = rule->v_dino;
@@ -217,7 +264,7 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     rcu_read_lock();
     hash_for_each_possible_rcu(proxy->dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == namelen && memcmp(child->name, name, namelen) == 0) {
-            if (child->rule && (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val)) {
+            if (nm_rule_visible(child->rule)) {
                 rcu_read_unlock();
                 proxy->ctx.pos = offset;
                 return NM_ACTOR_CONTINUE;
@@ -286,8 +333,7 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
          * so the emit below runs with RCU dropped and only the stack snapshot. */
         rcu_read_lock();
         while ((child = idr_get_next(&dir_node->children_idr, &id)) != NULL) {
-            if (child->rule &&
-                (child->rule->target_uid == 0 || child->rule->target_uid == current_uid().val) &&
+            if (nm_rule_visible(child->rule) &&
                 !(child->flags & NM_FLAG_WHITEOUT)) {
                 found = id;
                 nlen = min_t(int, (int)child->name_len, NAME_MAX);
@@ -979,6 +1025,9 @@ static int nm_dir_nlink_delta(struct nomount_dir_node *d)
     rcu_read_lock();
     idr_for_each_entry(&d->children_idr, ch, cid) {
         if (ch->d_type != DT_DIR) continue;
+        /* Only children this caller can actually see: a uid-scoped rule must not
+         * move the link count for everyone else. */
+        if (!nm_rule_visible(ch->rule)) continue;
         if (ch->flags & NM_FLAG_WHITEOUT)            delta--;
         else if (!(ch->flags & NM_FLAG_SHADOWS_STOCK)) delta++;
     }
@@ -1037,7 +1086,13 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
         res = 0;
     }
 #endif
-    if (res || !d)
+    /* A blocked reader is being served the stock filesystem, so it must get the
+     * stock METADATA too. Correcting nlink/size for it would leave stat() counting
+     * children its own readdir() and lookup() refuse to show -- the exact
+     * stat-vs-readdir divergence nm_dir_size_fix() exists to remove, handed to the
+     * one caller most likely to be measuring for it, with the delta spelling out
+     * how many entries are being hidden. */
+    if (res || !d || nomount_is_uid_blocked(current_uid().val))
         goto out;
 
     delta = READ_ONCE(d->size_delta);
@@ -1457,6 +1512,11 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
  * pre-per-UID (plain re-resolve, negative stays cached). The blocked reader's
  * poisoned negative is in any case already evicted at lookup by DCACHE_DONTCACHE on
  * >=5.13; this d_drop is the pre-DONTCACHE fallback and stays gated to that path. */
+/* Known cost of the DONTCACHE/d_drop pair: for a BLOCKED reader an injected name
+ * is never left in the dcache, while its non-injected siblings are, so repeated
+ * lookups of the two differ in cost in a way they do not on a stock device. That
+ * is a narrower tell than the poisoned-negative bug it replaces (which was visible
+ * to every UID at once), and it only exists for a reader we are already lying to. */
 static inline int nm_reval_stale(struct dentry *dentry)
 {
     if (nomount_is_uid_blocked(current_uid().val) && d_is_negative(dentry))
@@ -3313,6 +3373,10 @@ static int __nomount_del_rule(const char *v_path, size_t v_len, unsigned int tar
     return -ENOENT;
 }
 
+/* NB: this drops the blocked-UID set as well as the rules -- per-UID hiding is
+ * runtime-only state and CLEAR_ALL is its reset. Any caller that clears in order to
+ * rebuild (the Suite's mount pass does exactly that) must re-apply its persistent
+ * block list afterwards, or every hidden app is silently unhidden. */
 static void __nomount_clear_all(bool is_exit)
 {
     struct nomount_rule *rule;
@@ -3858,6 +3922,20 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
     case NM_KNOB_VDIR_EROFS_SIZE:
         WRITE_ONCE(nm_vdir_erofs_size, vlen > 0 && val[0] == '1');
         return 0;
+    case NM_KNOB_HIDE_ISOLATED: {
+        unsigned int pools;
+
+        /* Single decimal digit 0..3; empty value restores the default. */
+        if (vlen <= 0) {
+            WRITE_ONCE(nm_hide_isolated, NM_HIDE_APPZYGOTE | NM_HIDE_ISOLATED);
+            return 0;
+        }
+        if (val[0] < '0' || val[0] > '3') return -EINVAL;
+        pools = val[0] - '0';
+        WRITE_ONCE(nm_hide_isolated, pools);
+        nm_info("Isolated-pool hiding set to %u\n", pools);
+        return 0;
+    }
     default:
         return -EINVAL;
     }
@@ -3917,6 +3995,12 @@ static int __init nomount_init(void)
         return -ENOMEM;
     }
 
+    /* Registering the protocol makes socket(AF_NETLINK, SOCK_RAW, NOMOUNT_NL_PROTO)
+     * succeed here where a stock kernel answers EPROTONOSUPPORT -- an existence tell
+     * for anything that can create the socket at all. Every command behind it is
+     * netlink_capable(CAP_NET_ADMIN)-gated, and for app domains SELinux denies
+     * netlink_socket:create first (EACCES on stock and here alike), so the tell is
+     * not reachable from an app; a domain that does hold netlink_socket would see it. */
     {
         struct netlink_kernel_cfg cfg = { .input = nm_nl_rcv, };
         nm_nl_sk = netlink_kernel_create(&init_net, NOMOUNT_NL_PROTO, &cfg);

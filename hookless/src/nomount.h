@@ -400,6 +400,13 @@ enum {
      * real sibling and check whether its size equals the formula. Measure where
      * it is cheap, decide where it is needed. Unset => previous behaviour. */
     NM_KNOB_VDIR_EROFS_SIZE,
+    /* Which isolated-process pools per-UID hiding covers, as a decimal bitmask:
+     * 1 = app-zygote pool (90000..98999), 2 = platform isolated pool
+     * (99000..99999), 3 = both (default). Hiding from them stops a blocked app
+     * probing through an isolated helper; leaving them visible stops an UNBLOCKED
+     * app spotting the injection by diffing its own view against its own isolated
+     * child's. Only meaningful while at least one appid is blocked. */
+    NM_KNOB_HIDE_ISOLATED,
     __NM_KNOB_MAX,
 };
 
