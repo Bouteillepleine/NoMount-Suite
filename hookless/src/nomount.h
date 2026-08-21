@@ -17,7 +17,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "12.2"
+#define NM_MODULE_VERSION "14.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
