@@ -41,11 +41,23 @@ fix_shell_tmp=1        # 1 = restore AOSP owner/mode/context on /data/local/tmp
 nm_load_conf() {
     [ -f "$CONF" ] || return 0
     while IFS= read -r _l; do
-        _l=${_l%%#*}
-        case "$_l" in *=*) ;; *) continue ;; esac
-        _k=${_l%%=*}; _v=${_l#*=}
+        # Never cut at the first "#": every pasted `uname -v` STARTS with
+        # "#1 SMP ...", so a blanket ${_l%%#*} silently emptied uname_date and the
+        # version override was skipped -- a spoofed release with a stock version,
+        # exactly the half-spoof this add-on exists to avoid. A "#" opens a comment
+        # only at the start of a line, or after a blank in an unquoted value.
+        _t=$_l
+        while :; do case "$_t" in " "*|"	"*) _t=${_t#?} ;; *) break ;; esac; done
+        case "$_t" in ""|"#"*) continue ;; esac
+        case "$_t" in *=*) ;; *) continue ;; esac
+        _k=${_t%%=*}; _v=${_t#*=}
         _k=$(printf '%s' "$_k" | tr -d " \t")
-        _v=${_v#\'}; _v=${_v%\'}; _v=${_v#\"}; _v=${_v%\"}
+        case "$_v" in
+            \'*) _v=${_v#\'}; _v=${_v%%\'*} ;;
+            \"*)  _v=${_v#\"};  _v=${_v%%\"*} ;;
+            *)    _v=${_v%%[ 	]#*}
+                  while :; do case "$_v" in *" "|*"	") _v=${_v%?} ;; *) break ;; esac; done ;;
+        esac
         case "$_k" in
             vbmeta_digest) vbmeta_digest=$_v ;;
             vbmeta_size)   vbmeta_size=$_v ;;
@@ -531,7 +543,7 @@ do_cmdline() {
 # changed by do_props)? Writes nothing. "clean" = nothing to fix. Same present-
 # and-differs rule do_props uses, so absent OEM-specific props never count.
 props_status() {
-    local n=0 c
+    local n=0 c _u _p _c
     _d() { c=$(getprop "$1" 2>/dev/null); [ -n "$c" ] && [ "$c" != "$2" ] && n=$((n + 1)); }
     _d ro.boot.vbmeta.device_state    locked
     _d ro.boot.verifiedbootstate      green
@@ -558,6 +570,32 @@ props_status() {
     [ -n "$(getprop ro.kernel.qemu 2>/dev/null)" ] && n=$((n + 1))
     [ "$(getprop ro.build.version.sdk 2>/dev/null)" -ge 36 ] 2>/dev/null \
         && [ -n "$(getprop sys.oem_unlock_allowed 2>/dev/null)" ] && n=$((n + 1))
+    # The harmonization pass do_props also runs -- date.utc across partitions, the
+    # :type/keys tail on every fingerprint, description and flavor. Without these the
+    # UI reported "clean" while Apply still rewrote up to 21 more props.
+    _u=$(getprop ro.build.date.utc 2>/dev/null)
+    if [ -n "$_u" ]; then
+        for _p in ro.bootimage.build.date.utc ro.odm.build.date.utc ro.odm_dlkm.build.date.utc \
+                  ro.product.build.date.utc ro.system.build.date.utc ro.system_dlkm.build.date.utc \
+                  ro.system_ext.build.date.utc ro.vendor.build.date.utc ro.vendor_dlkm.build.date.utc; do
+            _d "$_p" "$_u"
+        done
+    fi
+    for _p in ro.build.fingerprint ro.system.build.fingerprint ro.vendor.build.fingerprint \
+              ro.product.build.fingerprint ro.odm.build.fingerprint ro.system_ext.build.fingerprint \
+              ro.bootimage.build.fingerprint ro.vendor_dlkm.build.fingerprint \
+              ro.odm_dlkm.build.fingerprint ro.system_dlkm.build.fingerprint; do
+        _c=$(getprop "$_p" 2>/dev/null)
+        [ -n "$_c" ] || continue
+        [ "$(echo "$_c" | sed -E 's#:(user|userdebug|eng)/(release-keys|test-keys|dev-keys)\$#:user/release-keys')" != "$_c" ] \
+            && n=$((n + 1))
+    done
+    _c=$(getprop ro.build.description 2>/dev/null)
+    [ -n "$_c" ] && [ "$(echo "$_c" | sed -E 's#-userdebug #-user #; s#-eng #-user #; s# (test-keys|dev-keys)\$# release-keys')" != "$_c" ] \
+        && n=$((n + 1))
+    _c=$(getprop ro.build.flavor 2>/dev/null)
+    [ -n "$_c" ] && [ "$(echo "$_c" | sed -E 's#-(userdebug|eng)\$#-user')" != "$_c" ] \
+        && n=$((n + 1))
     [ "$n" = 0 ] && echo clean || echo "dirty $n"
 }
 
@@ -617,9 +655,13 @@ case "${1:-}" in
         rel=$(sed -n 2p "$orig"); ver=$(sed -n 3p "$orig")
         [ -n "$rel" ] && nm_knob r "$rel"
         [ -n "$ver" ] && nm_knob v "$ver"
-        if grep -v -E '^(uname_tail|uname_date)=' "$CONF" > "$CONF.t" 2>/dev/null; then
-            printf "uname_tail=''\nuname_date=''\n" >> "$CONF.t"; mv "$CONF.t" "$CONF"
+        # grep exits 1 when it selects NO lines -- a conf holding only these two
+        # keys. That is a successful filter, not a failure; the old `if` skipped the
+        # reset and left a stray spoof.conf.t behind.
+        if grep -v -E '^(uname_tail|uname_date)=' "$CONF" > "$CONF.t" 2>/dev/null || [ -f "$CONF.t" ]; then
+            printf "uname_tail=''\nuname_date=''\n" >> "$CONF.t" && mv -f "$CONF.t" "$CONF"
         fi
+        rm -f "$CONF.t" 2>/dev/null
         echo "reset"
         exit 0 ;;
 esac
