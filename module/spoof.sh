@@ -587,14 +587,14 @@ props_status() {
               ro.odm_dlkm.build.fingerprint ro.system_dlkm.build.fingerprint; do
         _c=$(getprop "$_p" 2>/dev/null)
         [ -n "$_c" ] || continue
-        [ "$(echo "$_c" | sed -E 's#:(user|userdebug|eng)/(release-keys|test-keys|dev-keys)\$#:user/release-keys')" != "$_c" ] \
+        [ "$(echo "$_c" | sed -E 's#:(user|userdebug|eng)/(release-keys|test-keys|dev-keys)$#:user/release-keys#')" != "$_c" ] \
             && n=$((n + 1))
     done
     _c=$(getprop ro.build.description 2>/dev/null)
-    [ -n "$_c" ] && [ "$(echo "$_c" | sed -E 's#-userdebug #-user #; s#-eng #-user #; s# (test-keys|dev-keys)\$# release-keys')" != "$_c" ] \
+    [ -n "$_c" ] && [ "$(echo "$_c" | sed -E 's#-userdebug #-user #; s#-eng #-user #; s# (test-keys|dev-keys)$# release-keys#')" != "$_c" ] \
         && n=$((n + 1))
     _c=$(getprop ro.build.flavor 2>/dev/null)
-    [ -n "$_c" ] && [ "$(echo "$_c" | sed -E 's#-(userdebug|eng)\$#-user')" != "$_c" ] \
+    [ -n "$_c" ] && [ "$(echo "$_c" | sed -E 's#-(userdebug|eng)$#-user#')" != "$_c" ] \
         && n=$((n + 1))
     [ "$n" = 0 ] && echo clean || echo "dirty $n"
 }
