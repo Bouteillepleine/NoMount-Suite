@@ -1,9 +1,23 @@
 # NoMount **hookless** — full audit & review (kernels 4.9 → 6.18)
 
-Source: `maxsteeel/nomount@experimental/hookless` (head `eb9587b`, 2026‑07‑25).
-Module artifact reviewed: `NoMount-v1.1.0-196-77432e9.zip`.
-Reviewer: static analysis only — **no kernel was compiled** (needs the kbuild CI).
-Compile-viability verdicts below are predictions to be confirmed by the CI matrix.
+> ## ⚠️ Historical — superseded by the 2026-08-21 pre-release audit
+>
+> This document audits `eb9587b` (2026-07-25): a **1768-line** engine on a
+> **Generic Netlink** family that set `S_PRIVATE` on hijacked inodes. None of
+> those three things is still true. The engine is now ~4090 lines on a **private
+> raw-netlink** protocol, `S_PRIVATE` is gone (contexts are mirrored instead —
+> the F2 finding below is fixed), and `vfs_getattr_nosec` is version-guarded
+> (F1 fixed). Read it for the design rationale and for what the technique had to
+> get right, **not** as a current statement of defects.
+>
+> Its own caveat — "static analysis only, no kernel was compiled" — is also no
+> longer the state of things: `fs/nomount.o` has since been built against a real
+> GKI 6.12 tree with gcc `W=1`/`W=2` and clang plain/`W=1`, all clean.
+>
+> **Current audit:** `NOMOUNT-PRERELEASE-AUDIT-2026-08-21.md` (24 findings, three
+> confirmed on hardware). Fixed since: the half-updated child node on rule
+> replacement, RCU list-node reuse in the teardown path, batch-add swallowing
+> rejections, and a dead `nstat` that failed `W=1` clang.
 
 ---
 
