@@ -1,6 +1,11 @@
 #ifndef _LINUX_NOMOUNT_H
 #define _LINUX_NOMOUNT_H
 
+/* FIRST, before any declaration below: the optional symbol cloak is a set of
+ * #defines over this driver's own identifiers, so it has to be in scope before
+ * anything names them. No-op unless built with -DNOMOUNT_STEALTH_SYMS. */
+#include "nomount_syms.h"
+
 #include <linux/types.h>
 #include <linux/idr.h>
 #include <linux/list.h>
@@ -72,18 +77,33 @@
  * the kernel ring buffer. Build with -DNOMOUNT_DEBUG to get them back.
  * no_printk() keeps the format string and arguments type-checked (so the calls
  * cannot rot) while generating no code. */
+/* The log tag is part of the symbol cloak, not decoration. nm_warn/nm_err are
+ * real printks, so their format literals sit in .rodata and survive into the
+ * image: a stealth build with 0 nomount_* symbols still answered
+ * `strings vmlinux | grep NoMount` with 7 hits, which makes the cloak worse than
+ * useless -- the survivors become the only thing worth grepping for. Tag and
+ * symbols move together.
+ * Known cost when cloaked: `nomount export` dumps `dmesg | grep -i nomount`
+ * (health.rs), which then only catches the module's own lowercase "nomount:"
+ * lines from the shell, not the kernel's. Diagnostics only, nothing decides on it. */
+#ifdef NOMOUNT_STEALTH_SYMS
+#define NM_LOG_TAG "vfs: "
+#else
+#define NM_LOG_TAG "NoMount: "
+#endif
+
 #ifdef NOMOUNT_DEBUG
-#define nm_debug(fmt, ...) printk(KERN_DEBUG "NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
-#define nm_info(fmt, ...)  printk(KERN_INFO "NoMount: " fmt, ##__VA_ARGS__)
+#define nm_debug(fmt, ...) printk(KERN_DEBUG NM_LOG_TAG "[DEBUG] " fmt, ##__VA_ARGS__)
+#define nm_info(fmt, ...)  printk(KERN_INFO NM_LOG_TAG fmt, ##__VA_ARGS__)
 #else
 /* Production: compile out the message strings entirely (no_printk still
  * type-checks the format but the literal is dead-code-eliminated), so they do
  * not sit in nomount.o naming functions/logic to anyone disassembling the image. */
-#define nm_debug(fmt, ...) no_printk("NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
-#define nm_info(fmt, ...)  no_printk("NoMount: " fmt, ##__VA_ARGS__)
+#define nm_debug(fmt, ...) no_printk(NM_LOG_TAG "[DEBUG] " fmt, ##__VA_ARGS__)
+#define nm_info(fmt, ...)  no_printk(NM_LOG_TAG fmt, ##__VA_ARGS__)
 #endif
-#define nm_warn(fmt, ...) printk(KERN_WARNING "NoMount: [WARN] " fmt, ##__VA_ARGS__)
-#define nm_err(fmt, ...)  printk(KERN_ERR "NoMount: [ERROR] " fmt, ##__VA_ARGS__)
+#define nm_warn(fmt, ...) printk(KERN_WARNING NM_LOG_TAG "[WARN] " fmt, ##__VA_ARGS__)
+#define nm_err(fmt, ...)  printk(KERN_ERR NM_LOG_TAG "[ERROR] " fmt, ##__VA_ARGS__)
 
 static DEFINE_HASHTABLE(nomount_rules_ht, NOMOUNT_HASH_BITS);
 static LIST_HEAD(nomount_sb_list);
@@ -269,7 +289,7 @@ struct nm_rule_info {
 static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nm_rule_info *rule_info);
 /* Maps (/proc/<pid>/maps) dev/ino spoof for mapped injected inodes; called from
  * fs/proc/task_mmu.c show_map_vma() via a guarded extern there. */
-void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
+void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
 				 unsigned long *ino);
 
 /* =====================================================================

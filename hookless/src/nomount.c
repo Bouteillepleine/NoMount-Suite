@@ -4154,7 +4154,7 @@ static int __init nomount_init(void)
  * (major 0), an outlier vs stock file-backed mappings. Only our own created
  * inodes (nm_file_iops/nm_dir_iops + nm_inode_info in i_private) are touched;
  * hijacked real inodes and everything else are left alone. */
-void nomount_spoof_mmap_metadata(const struct inode *inode, dev_t *dev,
+void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
                                  unsigned long *ino)
 {
     const struct nm_inode_info *info;

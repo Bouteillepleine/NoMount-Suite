@@ -35,9 +35,9 @@ diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
  		dev = inode->i_sb->s_dev;
  		ino = inode->i_ino;
 +#ifdef CONFIG_NOMOUNT
-+		{ extern void nomount_spoof_mmap_metadata(const struct inode *,
++		{ extern void vfs_map_meta_override(const struct inode *,
 +							  dev_t *, unsigned long *);
-+		  nomount_spoof_mmap_metadata(inode, &dev, &ino); }
++		  vfs_map_meta_override(inode, &dev, &ino); }
 +#endif
  		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
  	}

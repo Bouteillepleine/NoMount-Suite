@@ -248,9 +248,9 @@ jobs:
           # branch, which let a malformed hunk (bare @@ header) silently no-op on
           # five versions while the job still went green -- assert instead.
           echo "== assert task_mmu.c hook present =="
-          grep -q 'nomount_spoof_mmap_metadata' fs/proc/task_mmu.c || {
+          grep -q 'vfs_map_meta_override' fs/proc/task_mmu.c || {
             echo "FATAL: integration patch did not apply its task_mmu.c hunk for ${{ matrix.ver }}"; exit 1; }
-          awk '/^(static )?[a-zA-Z_].*\(/{last=$0} /nomount_spoof_mmap_metadata\(inode/{print last; found=1; exit}
+          awk '/^(static )?[a-zA-Z_].*\(/{last=$0} /vfs_map_meta_override\(inode/{print last; found=1; exit}
                END{ if(!found) exit 1 }' fs/proc/task_mmu.c | grep -q 'show_map_vma' || {
             echo "FATAL: task_mmu.c hunk applied OUTSIDE show_map_vma for ${{ matrix.ver }} (fuzzy misplacement)"; exit 1; }
           echo "== compile fs/proc/task_mmu.o =="
@@ -287,6 +287,39 @@ jobs:
             echo "FATAL: ${{ matrix.ver }} has ${w} W=1 warning(s) in nomount.[ch], baseline ${W1_BASELINE}"
             exit 1
           fi
+
+      # A HALF-applied symbol cloak is worse than none: whatever still says
+      # "nomount" becomes the only thing worth grepping for. nomount_syms.h is a
+      # hand-maintainable list of ~100 #defines, so a function added later would
+      # silently escape it. Build the cloaked variant and assert the object is
+      # clean -- of symbols AND of the log tag, which is a .rodata literal that
+      # survives into the image and defeats the whole thing on its own.
+      - name: Symbol cloak (-DNOMOUNT_STEALTH_SYMS) leaves nothing named
+        if: steps.sel.outputs.run == '1' && steps.build.outcome == 'success'
+        run: |
+          set -o pipefail
+          cd ksrc
+          NM_BIN=aarch64-linux-gnu-nm
+          rm -f out/fs/nomount.o
+          make $MAKEOPTS KCFLAGS="-Wno-error -DNOMOUNT_STEALTH_SYMS" fs/nomount.o 2>&1 | tail -5
+          leak=$("$NM_BIN" --defined-only out/fs/nomount.o | awk '{print $3}' \
+                 | grep -cE '^(nomount|nm_|__nomount)' || true)
+          cloaked=$("$NM_BIN" --defined-only out/fs/nomount.o | awk '{print $3}' | grep -c '^__vfsx_' || true)
+          strleak=$(strings -a out/fs/nomount.o | grep -c 'NoMount' || true)
+          echo "cloaked=${cloaked}  leaking_symbols=${leak}  leaking_strings=${strleak}"
+          if [ "${leak:-0}" -ne 0 ] || [ "${strleak:-0}" -ne 0 ]; then
+            echo "== symbols still naming the project =="
+            "$NM_BIN" --defined-only out/fs/nomount.o | awk '{print $3}' | grep -E '^(nomount|nm_|__nomount)' || true
+            strings -a out/fs/nomount.o | grep 'NoMount' || true
+            echo "FATAL: ${{ matrix.ver }} cloak is incomplete -- add the new name(s) to hookless/src/nomount_syms.h"
+            exit 1
+          fi
+          # The maps-cloak global is deliberately NOT in the header (task_mmu.c
+          # names it from the patch, so a header cannot rename it); it carries a
+          # neutral name outright. Assert it is still that, not the old one.
+          "$NM_BIN" --defined-only out/fs/nomount.o | grep -q 'vfs_map_meta_override' || {
+            echo "FATAL: the maps-cloak global is missing or renamed"; exit 1; }
+          rm -f out/fs/nomount.o
 
       - name: Save ccache
         if: ${{ always() && steps.sel.outputs.run == '1' }}
