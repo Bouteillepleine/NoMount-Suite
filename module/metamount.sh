@@ -8,18 +8,32 @@
 # Root/su is NOT managed here (sucompat handles it, mountlessly).
 MODDIR="${0%/*}"
 NMDIR=/data/adb/nomount
+# The boot umask is 0, so every state file created from here (and by the binaries
+# this script execs, which inherit it) landed 0666 -- observed on absorbed.list,
+# binds.lock, uidhide and uidhide.cache. The 0700 directory below is what actually
+# protects them, but uidhide IS the hiding policy and should not rely on its
+# parent alone. Set the umask once, at the top, so it covers the whole pass.
+umask 077
 # 0700: spoof.conf/blocklist/pathhide.conf are read as root at boot, so anything
 # able to write here gets root. The dir was being created under the boot umask (0777).
 mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
+# Tighten anything an earlier build already created wide. Cheap and idempotent.
+chmod 0600 "$NMDIR"/* 2>/dev/null
 
 # Single-run guard. Was a noclobber file in /dev: world-writable (boot umask),
 # named after the project, and "held" by mere existence -- so anything able to
 # create that path pre-empted the whole mount pass. flock releases on exit and
 # lives in the 0700 state dir.
 LOCK="$NMDIR/.mount.lock"
+# Silence stderr for the redirection ONLY. Writing `exec 9>"$LOCK" 2>/dev/null`
+# applies BOTH redirections to the shell permanently, so every diagnostic any
+# later command wrote to stderr -- for the whole rest of the boot pass -- went to
+# /dev/null. Save it on fd 8, silence, redirect, restore.
+exec 8>&2
 exec 9>"$LOCK" 2>/dev/null
-# Created under the boot umask, so it landed 0666. Harmless inside a 0700 dir,
-# but do not rely on the parent for it.
+exec 2>&8 8>&-
+# umask 077 above already gives 0600; keep the chmod for a lock file an older
+# build left behind wide.
 chmod 0600 "$LOCK" 2>/dev/null
 if command -v flock >/dev/null 2>&1; then
     flock -n 9 || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
@@ -55,6 +69,15 @@ SUSFS_BIN=/data/adb/ksu/bin/ksu_susfs
 if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
    && [ "$(stat -c %i "$KSUD" 2>/dev/null)" = "$(stat -c %i "$SUSFS_BIN" 2>/dev/null)" ] \
    && [ "$(stat -c %s "$KSUD" 2>/dev/null)" -gt 1000000 ]; then
+    # RECORD the flag before clearing it, and put back only what was there.
+    # `chattr +i` unconditionally was not a restore: on a device where ksud was
+    # never immutable it ADDED immutability every boot, and the next legitimate
+    # ksud update then failed with EPERM. (The clear is genuinely needed, but not
+    # for the reason the old comment gave -- reading an immutable file is fine;
+    # what needs it is the `mv` below, which UNLINKS $SUSFS_BIN, and unlinking a
+    # hardlink to an immutable inode is refused.)
+    _ksud_imm=0
+    lsattr -d "$KSUD" 2>/dev/null | cut -d' ' -f1 | grep -q 'i' && _ksud_imm=1
     chattr -i "$KSUD" 2>/dev/null
     if cp "$KSUD" "$SUSFS_BIN.nm_new" 2>/dev/null; then
         chmod 0755 "$SUSFS_BIN.nm_new" 2>/dev/null
@@ -64,25 +87,23 @@ if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
     else
         rm -f "$SUSFS_BIN.nm_new" 2>/dev/null
     fi
-    # Restore ksud's immutable flag: it was cleared above only so the copy could
-    # be read, and leaving it off permanently removes protection we did not add.
-    chattr +i "$KSUD" 2>/dev/null
+    [ "$_ksud_imm" = 1 ] && chattr +i "$KSUD" 2>/dev/null
 fi
 
-# --- spoof add-on (dynamic vbmeta.digest) ---
-# Runs in this post-fs-data stage so the property is in place before
-# zygote/system_server come up. Best-effort: it never aborts the boot, and
-# it is kept separate from the mount pass so a spoof failure can't affect mounting.
-[ -f "$MODDIR/spoof.sh" ] && sh "$MODDIR/spoof.sh" 2>/dev/null
-
 # --- bootloop guard ---
+# NB: the spoof add-on runs INSIDE this guard (below), not before it. It used to
+# run above, which meant `disabled` never suppressed it and the counter could not
+# protect against it: spoof.sh drives resetprop, uname, /proc/cmdline and
+# /proc/bootconfig -- a larger bootloop surface than the injection pass -- and it
+# kept running every boot after the guard had already tripped, leaving a user
+# bootlooping on a spoof setting with no self-recovery path.
 GUARD_MAX=3
 COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
 COUNT=$((COUNT + 1))
 echo "$COUNT" > "$NMDIR/bootcount"
 
 if [ -f "$NMDIR/disabled" ]; then
-    echo "nomount: disabled, skipping mount" > /dev/kmsg 2>/dev/null
+    echo "nomount: disabled, skipping spoof + mount" > /dev/kmsg 2>/dev/null
 elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
     echo "nomount: bootloop guard tripped (count=$COUNT) -> self-disabling" > /dev/kmsg 2>/dev/null
     : > "$NMDIR/disabled"
@@ -109,15 +130,24 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
             echo "  $(grep -m1 'Abort message' "$_t" 2>/dev/null)"
         fi
     } > "$NMDIR/incident.log" 2>/dev/null
-elif [ -x "$BIN" ]; then
-    timeout 60 "$BIN" mount 2>/dev/null
-    # Durable whiteouts, HERE rather than only in service.sh. A whiteout hides a
-    # stock path that is itself the tell, and service.sh does not run it until
-    # after sys.boot_completed plus a 10s settle -- so every such path was plainly
-    # visible for the whole of boot, to anything that looked early. Nothing here
-    # needs packages.list, so it belongs in the same pass as the injections.
-    # service.sh still re-applies, which is idempotent and catches a late failure.
-    [ -s "$NMDIR/whiteouts.txt" ] && timeout 30 "$BIN" whiteout apply 2>/dev/null
+else
+    # --- spoof add-on (dynamic vbmeta.digest) ---
+    # Still this post-fs-data stage, so the property is in place before
+    # zygote/system_server come up, and still kept separate from the mount pass
+    # so a spoof failure can't affect mounting -- but now guard-gated, so a
+    # tripped counter (or a manual `disabled`) stops it like everything else.
+    [ -f "$MODDIR/spoof.sh" ] && sh "$MODDIR/spoof.sh" 2>/dev/null
+
+    if [ -x "$BIN" ]; then
+        timeout 60 "$BIN" mount 2>/dev/null
+        # Durable whiteouts, HERE rather than only in service.sh. A whiteout hides a
+        # stock path that is itself the tell, and service.sh does not run it until
+        # after sys.boot_completed plus a 10s settle -- so every such path was plainly
+        # visible for the whole of boot, to anything that looked early. Nothing here
+        # needs packages.list, so it belongs in the same pass as the injections.
+        # service.sh still re-applies, which is idempotent and catches a late failure.
+        [ -s "$NMDIR/whiteouts.txt" ] && timeout 30 "$BIN" whiteout apply 2>/dev/null
+    fi
 fi
 
 # --- hiding ---
@@ -129,6 +159,15 @@ fi
 
 # --- tag managed modules in the manager with how the Suite serves them ---
 if command -v ksud >/dev/null 2>&1; then
+    # ONE dump of the rule table, reused for every module below and for the
+    # Suite's own card. This used to run `nm list` inside the per-module loop
+    # plus twice more afterwards -- 16 full netlink dumps of ~260 rules during
+    # post-fs-data on a 14-module device, all returning the same answer. The
+    # engine's own directory scan was optimised precisely because this stage sits
+    # under the OPlus boot watchdog; spending it again here made no sense.
+    _NMLIST=$("$NM_BIN" list 2>/dev/null)
+    # grep -c on an empty stream prints 0 and exits 1, so guard the empty case.
+    _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
     _vf=""; _ov=""
     for d in /data/adb/modules/*/; do
         [ -d "$d" ] || continue
@@ -167,7 +206,7 @@ if command -v ksud >/dev/null 2>&1; then
         # rule count is the honest measure of "is this module being served" — a module
         # can be enabled and still contribute nothing. A non-zero mount count is the only
         # thing that breaks the zero-mount posture, so it is called out per module.
-        _n=$("$NM_BIN" list 2>/dev/null | grep -c "/data/adb/modules/$mid/")
+        _n=$(_nmcount -F "/data/adb/modules/$mid/")
         # Field 4 = the mount's root within its filesystem, so a module bind reads
         # "/adb/modules/<id>/...", never "/data/adb/modules/...". The old pattern
         # matched nothing, so every module was badged "mountless" regardless.
@@ -182,8 +221,8 @@ if command -v ksud >/dev/null 2>&1; then
 
     # The Suite's own card doubles as the at-a-glance status readout, so put the live
     # numbers there rather than restating the tagline the module.prop already carries.
-    _rules=$("$NM_BIN" list 2>/dev/null | wc -l)
-    _rro=$("$NM_BIN" list 2>/dev/null | grep -c '/overlay/[^ ]*\.apk')
+    _rules=$(_nmcount .)
+    _rro=$(_nmcount '/overlay/[^ ]*\.apk')
     _mods=0
     for _x in $_vf $_ov; do _mods=$((_mods + 1)); done
     _list=""

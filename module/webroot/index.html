@@ -1152,7 +1152,7 @@
   async function nm(args) {
     const b = await bin();
     const nmClient = b.replace(/nomount$/, "nm");
-    return exec(`NM_BIN='${nmClient}' ${b} ${args}`);
+    return exec(`NM_BIN=${shq(nmClient)} ${shq(b)} ${args}`);
   }
 
   // Shared busy state. Anything that shells out can take a noticeable moment --
@@ -1850,7 +1850,7 @@
     if (!v) { toast("Enter a package name or UID", "bad"); return; }
     if (!UID_TARGET_RE.test(v)) { toast("Letters, digits, dots, underscores, and * for a glob", "bad"); return; }
     const done = busy(btn, op === "block" ? "Hiding…" : "Unhiding…");
-    const r = await nm(`uid ${op} '${v}'`);
+    const r = await nm(`uid ${op} ${shq(v)}`);
     if (r.errno === 0) {
       toast((r.stdout || "").replace(/^ok:\s*/, "").trim() || `${v} ${op === "block" ? "hidden" : "unhidden"}`, "ok");
       if (op === "block") $("uid").value = "";
@@ -2118,7 +2118,7 @@
     const done = busy(btn, "Hiding…");
     let ok = 0, bad = 0;
     for (const p of picks) {
-      const r = await nm(`uid block '${p}'`);
+      const r = await nm(`uid block ${shq(p)}`);
       if (r.errno === 0) { ok++; US.delete(p); } else bad++;
     }
     done();
@@ -2139,14 +2139,14 @@
 
   async function unblockOne(target, btn) {
     btn.disabled = true;
-    const r = await nm(`uid unblock '${target}'`);
+    const r = await nm(`uid unblock ${shq(target)}`);
     if (r.errno === 0) toast(`${target} unhidden`, "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
     refreshBlocked();
   }
   async function saveOne(target, btn) {
     btn.disabled = true;
-    const r = await nm(`uid block '${target}'`);
+    const r = await nm(`uid block ${shq(target)}`);
     if (r.errno === 0) toast(`${target} saved`, "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
     refreshBlocked();
@@ -2340,7 +2340,7 @@
     if (v[0] !== "/") { toast("Must be an absolute path", "bad"); return; }
     if (!woSafe(v)) return;
     const done = busy(btn, "Hiding…");
-    const r = await nm(`whiteout add '${v}'`);
+    const r = await nm(`whiteout add ${shq(v)}`);
     const txt = ((r.stdout || "") + (r.stderr || "")).trim();
     toast(r.errno === 0 ? (txt.split("\n").pop() || "Hidden") : "Failed: " + txt, r.errno === 0 ? "ok" : "bad");
     if (r.errno === 0) $("woPath").value = "";
@@ -2350,7 +2350,7 @@
     const path = decodeURIComponent(btn.dataset.p || "");
     if (!woSafe(path)) return;
     const done = busy(btn);
-    const r = await nm(`whiteout remove '${path}'`);
+    const r = await nm(`whiteout remove ${shq(path)}`);
     toast(r.errno === 0 ? "No longer hidden" : "Failed", r.errno === 0 ? "ok" : "bad");
     done(); refreshWhiteouts(); refreshStatus();
   }
@@ -2393,7 +2393,7 @@
     const path = decodeURIComponent(btn.dataset.p || "");
     if (!woSafe(path)) return;
     const done = busy(btn);
-    const r = await nm(`whiteout add '${path}'`);
+    const r = await nm(`whiteout add ${shq(path)}`);
     toast(r.errno === 0 ? "Hidden" : "Failed", r.errno === 0 ? "ok" : "bad");
     done(); refreshWhiteouts();
     if (r.errno === 0) btn.closest(".row").remove();
@@ -2499,14 +2499,46 @@
     const rules = [...PH.entries()].filter(function (x) { return x[1].hidden; })
       .map(function (x) { return phClean(x[0]); }).filter(Boolean);
     const done = busy(btn, "Applying…");
+    // /proc/pathhide is a SHARED kernel list: `echo -` wipes every rule on it,
+    // including ones another module put there (PathHideManager drives the same
+    // interface exactly this way). Clearing is still needed so an un-ticked rule
+    // goes away live, so preserve what is not ours: read the current list, keep
+    // the entries our conf does not claim, then re-add those alongside ours. If
+    // the list cannot be read we skip the wipe entirely and only add — leaving a
+    // stale rule until reboot is strictly better than silently unhiding another
+    // module's paths.
+    // Every value is shq()'d: a rule string reaches a ROOT shell here.
     let cmd = "mkdir -p /data/adb/nomount; { echo '# NoMount Cloak — pathhide rule list (managed by WebUI)'; ";
-    rules.forEach(function (r) { cmd += "echo '" + r + "'; "; });
-    cmd += "} > " + PH_CONF + "; if [ -e /proc/pathhide ]; then echo - > /proc/pathhide; ";
-    rules.forEach(function (r) { cmd += "echo '+" + r + "' > /proc/pathhide; "; });
+    rules.forEach(function (r) { cmd += "echo " + shq(r) + "; "; });
+    cmd += "} > " + shq(PH_CONF) + "; ";
+    cmd += "if [ -e /proc/pathhide ]; then ";
+    cmd +=   "_ours=" + shq(rules.join("\n")) + "; ";
+    // cat's EXIT STATUS separates "readable and empty" from "not readable at
+    // all" -- an empty capture alone cannot, and guessing wrong either wipes a
+    // foreign rule or refuses to remove one of ours.
+    cmd +=   "if _cur=$(cat /proc/pathhide 2>/dev/null); then ";
+    cmd +=     "_foreign=$(printf '%s\\n' \"$_cur\" | grep -vxF \"$_ours\" 2>/dev/null); ";
+    cmd +=     "echo - > /proc/pathhide; ";
+    cmd +=     "[ -n \"$_foreign\" ] && printf '%s\\n' \"$_foreign\" | while IFS= read -r _f; do ";
+    cmd +=       "[ -n \"$_f\" ] && echo \"+$_f\" > /proc/pathhide; done; ";
+    cmd +=   "else ";
+    // Write-only interface: foreign rules cannot be enumerated, so they cannot
+    // be preserved. Clear anyway -- removing a rule the user just un-ticked is
+    // what this button is for -- and say so rather than failing silently.
+    cmd +=     "echo - > /proc/pathhide; echo WRONLY; ";
+    cmd +=   "fi; ";
+    rules.forEach(function (r) { cmd += "echo " + shq("+" + r) + " > /proc/pathhide; "; });
     cmd += "fi; echo OK";
     const r = await exec(cmd); done();
     const ok = r.stdout.indexOf("OK") >= 0;
-    toast(ok ? (rules.length ? "Cloaking " + rules.length + " — live & saved" : "Cleared all rules") : "Failed", ok ? "ok" : "bad");
+    const wronly = r.stdout.indexOf("WRONLY") >= 0;
+    toast(
+      !ok ? "Failed"
+        : wronly ? "Applied — note: /proc/pathhide is write-only here, so any rule another module set was cleared too"
+        : rules.length ? "Cloaking " + rules.length + " — live & saved"
+        : "Cleared all rules",
+      ok ? "ok" : "bad"
+    );
   }
 
   // ---- init (top level: must not live inside an action handler) ----

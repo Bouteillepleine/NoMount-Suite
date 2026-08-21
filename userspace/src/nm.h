@@ -65,7 +65,16 @@
 /* Private raw-netlink protocol — MUST match kernel nomount.h NOMOUNT_NL_PROTO.
  * Replaces the old genl family "nomount" (enumerable via CTRL_CMD_GETFAMILY).
  * The command now travels in nlmsg_type as NM_TYPE_BASE + cmd (no genlmsghdr). */
+/* #ifndef, so -DNOMOUNT_NL_PROTO=<n> on the build line actually works. The
+ * kernel header guards its own definition the same way and documents
+ * randomising the number per build; with an unguarded #define here that was a
+ * redefinition, so the documented mitigation could not be used without editing
+ * this file -- and a kernel built with a different number would simply never
+ * answer, with no diagnostic beyond `nm v` printing nothing. Kernel and client
+ * MUST be built with the same value. */
+#ifndef NOMOUNT_NL_PROTO
 #define NOMOUNT_NL_PROTO 29
+#endif
 #define NM_TYPE_BASE 0x10
 
 struct nlmsghdr {

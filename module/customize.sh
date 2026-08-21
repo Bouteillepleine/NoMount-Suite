@@ -5,7 +5,11 @@ ui_print "- Installing NoMount metamodule"
 ui_print "- version $(grep_prop version "$MODPATH/module.prop")"
 
 # --- integrity check: verify bundled files against their sha256 manifest ---
-# Catches a corrupted download or a tampered zip before we run a root binary.
+# Catches a CORRUPTED DOWNLOAD (a truncated or bit-rotted zip) before we run a
+# root binary. It is deliberately not an authenticity check and cannot be one:
+# the manifest ships inside the same zip, so anyone who alters a file alters the
+# manifest with it. Verifying provenance needs a signature over the zip against a
+# key that is not in the zip.
 SUMS="$MODPATH/nomount.sha256sums"
 if [ -f "$SUMS" ]; then
     if command -v sha256sum >/dev/null 2>&1; then

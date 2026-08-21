@@ -4,14 +4,16 @@
 [ -n "$APATCH" ] && exit 0
 MODDIR="${0%/*}"
 NMDIR=/data/adb/nomount
+umask 077                     # see metamount.sh
 mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 ABI=$(getprop ro.product.cpu.abi)
 BIN="$MODDIR/bin/$ABI/nomount"
 
-# --- spoof add-on (dynamic vbmeta.digest) ---
-# Same stage as the KSU/APatch metamount hook, but for the Magisk path.
-[ -f "$MODDIR/spoof.sh" ] && sh "$MODDIR/spoof.sh" 2>/dev/null
-
+# --- bootloop guard ---
+# The spoof add-on runs INSIDE the guard (below), not before it -- same reasoning
+# as metamount.sh: `disabled` has to suppress spoof.sh too, or the counter cannot
+# protect against the one script most able to wedge a boot (resetprop, uname,
+# /proc/cmdline, /proc/bootconfig).
 GUARD_MAX=3
 COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
 COUNT=$((COUNT + 1))
@@ -22,7 +24,10 @@ if [ -f "$NMDIR/disabled" ]; then
 elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
     echo "nomount: bootloop guard tripped -> self-disabling" > /dev/kmsg 2>/dev/null
     : > "$NMDIR/disabled"
-elif [ -x "$BIN" ]; then
-    "$BIN" mount 2>/dev/null
+else
+    # --- spoof add-on (dynamic vbmeta.digest) ---
+    # Same stage as the KSU/APatch metamount hook, but for the Magisk path.
+    [ -f "$MODDIR/spoof.sh" ] && sh "$MODDIR/spoof.sh" 2>/dev/null
+    [ -x "$BIN" ] && "$BIN" mount 2>/dev/null
 fi
 exit 0

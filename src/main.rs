@@ -19,6 +19,16 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 fn main() -> Result<()> {
+    // Every state file this binary writes lives in /data/adb/nomount, and the
+    // umask inherited from init at post-fs-data is 0, so File::create landed them
+    // 0666 -- observed on absorbed.list, binds.lock, uidhide and uidhide.cache.
+    // The 0700 directory is what actually gates access, but uidhide IS the
+    // per-app hiding policy and should not depend on its parent alone. One call
+    // here covers every writer in the crate; nothing this binary creates is meant
+    // to be group- or world-readable. Also inherited by anything it execs.
+    // SAFETY: umask() is always successful and only touches this process.
+    unsafe { libc::umask(0o077) };
+
     let cli = Cli::parse();
     match cli.command {
         Commands::Mount => mount::run_mount(),

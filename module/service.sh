@@ -2,6 +2,7 @@
 # Bootloop-guard reset: once the system finishes booting, the last boot was
 # healthy, so clear the boot counter (re-arms the guard for next time).
 NMDIR=/data/adb/nomount
+umask 077                     # state files are 0600, not the boot umask 0666 (see metamount.sh)
 i=0
 booted=0
 while [ "$i" -lt 120 ]; do
@@ -29,7 +30,13 @@ fi
 # Hides selected module APKs from every /proc/<pid>/maps and /proc/<pid>/fd via
 # the kernel pathhide interface. Inert on a kernel without /proc/pathhide.
 if [ -e /proc/pathhide ]; then
-    echo - > /proc/pathhide 2>/dev/null
+    # No `echo - > /proc/pathhide` here. The kernel's list starts EMPTY at boot,
+    # so clearing achieves nothing on the only path this runs -- except when
+    # another module (PathHideManager drives the same shared interface) has
+    # already added its rules, in which case it silently unhides everything that
+    # module was asked to hide. Removing one of OUR rules still works: it is
+    # dropped from pathhide.conf and simply not re-added on the next boot, and
+    # the WebUI's Apply handles the live case.
     if [ -f "$NMDIR/pathhide.conf" ]; then
         while IFS= read -r _phr; do
             _phr=$(echo "$_phr" | tr -d '\r')
@@ -64,6 +71,12 @@ SUSFS_BIN=/data/adb/ksu/bin/ksu_susfs
 if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
    && [ "$(stat -c %s "$KSUD" 2>/dev/null)" -gt 1000000 ] \
    && [ "$(stat -c %i "$KSUD" 2>/dev/null)" = "$(stat -c %i "$SUSFS_BIN" 2>/dev/null)" ]; then
+    # Record-then-restore, same as metamount.sh: `chattr +i` unconditionally
+    # ADDED immutability on a device that never had it, breaking the next ksud
+    # update with EPERM. The clear is needed for the `mv` (which unlinks a
+    # hardlink to the inode), not to read it.
+    _ksud_imm=0
+    lsattr -d "$KSUD" 2>/dev/null | cut -d' ' -f1 | grep -q 'i' && _ksud_imm=1
     chattr -i "$KSUD" 2>/dev/null
     if cp "$KSUD" "$SUSFS_BIN.nm_new" 2>/dev/null; then
         chmod 0755 "$SUSFS_BIN.nm_new" 2>/dev/null
@@ -73,9 +86,7 @@ if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
     else
         rm -f "$SUSFS_BIN.nm_new" 2>/dev/null
     fi
-    # Restore ksud's immutable flag: it was cleared above only so the copy could
-    # be read, and leaving it off permanently removes protection we did not add.
-    chattr +i "$KSUD" 2>/dev/null
+    [ "$_ksud_imm" = 1 ] && chattr +i "$KSUD" 2>/dev/null
 fi
 
 # --- refresh the manager card with the settled state ---
@@ -170,8 +181,12 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
 fi
 
 if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
-    _rules=$("$NM_BIN" list 2>/dev/null | wc -l)
-    _rro=$("$NM_BIN" list 2>/dev/null | grep -c '/overlay/[^ ]*\.apk')
+    # One dump, both counts (see metamount.sh): two `nm list` runs returning the
+    # same answer is two full netlink dumps of the whole rule table.
+    _NMLIST=$("$NM_BIN" list 2>/dev/null)
+    _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
+    _rules=$(_nmcount .)
+    _rro=$(_nmcount '/overlay/[^ ]*\.apk')
     # Match on mountinfo FIELD 4, the mount's root within its own filesystem. A bind
     # out of a module reads "/adb/modules/<id>/..." there, because /data is its own
     # filesystem -- so the old `grep -c '/data/adb/modules'` matched nothing on any
@@ -179,9 +194,20 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # (It also used `|| echo 0` after a grep that already prints 0 and exits 1 when
     # it does, appending a second line and making every later -gt test a bad number.)
     _mnt=$(awk '$4 ~ "/adb/modules/" {n++} END{print n+0}' /proc/self/mountinfo 2>/dev/null); _mnt=${_mnt:-0}
+    # Distinguish "doctor found nothing" from "doctor never answered". Parsing an
+    # EMPTY capture through awk yields 0 errors / 0 warnings, so a timeout or a
+    # crash used to render the card as "healthy" -- the one word it must not say
+    # when it does not know. _docok=0 means unknown, and the card says so.
     _doc=$(timeout 30 "$BIN" doctor 2>/dev/null | sed -n 's/^summary: \([0-9]*\) errors, \([0-9]*\) warnings.*$/\1 \2/p')
-    _err=$(echo "$_doc" | awk '{print $1+0}')
-    _wrn=$(echo "$_doc" | awk '{print $2+0}')
+    if [ -n "$_doc" ]; then
+        _docok=1
+        _err=$(echo "$_doc" | awk '{print $1+0}')
+        _wrn=$(echo "$_doc" | awk '{print $2+0}')
+    else
+        _docok=0
+        _err=0
+        _wrn=0
+    fi
     # runtime consistency canary trumps plan-time doctor for card health: a
     # per-UID inconsistency is a live regression, not a plan hazard.
     _cons=$(sed -n 's/^consistency=//p' "$NMDIR/health.txt" 2>/dev/null)
@@ -195,8 +221,10 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
         _health="⚠️ $_err error(s) — see WebUI › Tools"
     elif [ "${_wrn:-0}" -gt 0 ]; then
         _health="$_wrn warning(s)"
-    else
+    elif [ "${_docok:-0}" = 1 ]; then
         _health="healthy"
+    else
+        _health="health unknown — doctor did not finish"
     fi
     # Distinguish a LEAK from a mount absorb leaves on purpose (a Zygisk/Xposed
     # hook bind). Counting them the same made the card read
