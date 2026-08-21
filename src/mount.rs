@@ -273,11 +273,18 @@ pub(crate) struct PlanEntry {
 /// idmap2 pick them up at the system_server scan (which runs after this
 /// post-fs-data pass). So RRO works with no overlayfs mount — zero mounts total.
 fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
+    // Sorted, not raw readdir order. Two modules may claim the same target (doctor
+    // reports it as "target claimed twice"), and the LAST plan entry wins -- in
+    // run_mount because its nm.add overwrites, in run_reload because desired_hookless
+    // is keyed on target. readdir order is the filesystem's, so the winner could
+    // differ between two boots of an unchanged device. Sorting makes the precedence
+    // stable and explainable (last name alphabetically wins) instead of incidental.
+    let mut entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(e) => e.flatten().collect(),
         Err(_) => return,
     };
-    for entry in entries.flatten() {
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
         let ft = match entry.file_type() {
             Ok(t) => t,
             Err(_) => continue,
@@ -465,10 +472,14 @@ pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
     let blocklist = load_blocklist();
     let mut plan = Vec::new();
     let mut skipped = 0u32;
+    // Sorted for the same reason plan_tree sorts: a contested target must resolve
+    // to the same module on every boot.
     let Ok(dirs) = fs::read_dir(MODULES_DIR) else {
         return (plan, skipped);
     };
-    for entry in dirs.flatten() {
+    let mut dirs: Vec<_> = dirs.flatten().collect();
+    dirs.sort_by_key(|e| e.file_name());
+    for entry in dirs {
         let mdir = entry.path();
         if !mdir.is_dir() || !module_enabled(&mdir) {
             continue;
@@ -487,7 +498,9 @@ pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
         // OEM's partitions are handled. resolve_target_path maps "<root>/…" -> "/<root>/…"
         // (and applies the SAR aliases for "system/vendor" etc.).
         if let Ok(entries) = fs::read_dir(&mdir) {
-            for e in entries.flatten() {
+            let mut entries: Vec<_> = entries.flatten().collect();
+            entries.sort_by_key(|e| e.file_name());
+            for e in entries {
                 if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     continue;
                 }
