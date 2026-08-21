@@ -268,7 +268,14 @@ fn unescape(s: &str) -> String {
         return s.to_string();
     }
     let b = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
+    // Collect BYTES, not chars. `out.push(b[i] as char)` is Latin-1: every byte
+    // >= 0x80 became U+0080..U+00FF and was then re-encoded as two UTF-8 bytes,
+    // so any non-ASCII path that also contained an escape came out corrupted --
+    // and the corrupted string is what umount2() and the injector are handed. It
+    // needed both to bite (the no-backslash fast path above returns early), which
+    // is why it survived: a module directory with an accent AND a space in its
+    // name. Assembling bytes and decoding once keeps such a path exact.
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'\\' && i + 3 < b.len() {
@@ -276,15 +283,15 @@ fn unescape(s: &str) -> String {
                 .ok()
                 .and_then(|o| u8::from_str_radix(o, 8).ok())
             {
-                out.push(v as char);
+                out.push(v);
                 i += 4;
                 continue;
             }
         }
-        out.push(b[i] as char);
+        out.push(b[i]);
         i += 1;
     }
-    out
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// Map each filesystem (maj:min) to where its ROOT is mounted, so a bind's
@@ -966,5 +973,29 @@ mod tests {
         let rows = parse_mountinfo("1 1 0:1 /a\\040b /c\\040d rw - t s rw");
         assert_eq!(rows[0].root, "/a b");
         assert_eq!(rows[0].target, PathBuf::from("/c d"));
+    }
+
+    /// A non-ASCII path that ALSO contains an escape must survive intact.
+    ///
+    /// Both are needed to reproduce: without a backslash `unescape` returns the
+    /// string untouched. With one, the old byte-at-a-time `as char` was Latin-1,
+    /// so each byte of a multi-byte character became its own U+00xx and was
+    /// re-encoded -- handing umount2() and the injector a path that no longer
+    /// names the mount.
+    #[test]
+    fn unescape_preserves_non_ascii() {
+        let rows = parse_mountinfo("1 1 0:1 /caf\u{e9}\\040mod /data/caf\u{e9}\\040mod rw - t s rw");
+        assert_eq!(rows[0].root, "/café mod");
+        assert_eq!(rows[0].target, PathBuf::from("/data/café mod"));
+
+        // Emoji: 4-byte UTF-8, the worst case for the old code.
+        let rows = parse_mountinfo("1 1 0:1 /a\u{1F600}b\\040c /x\u{1F600}y\\040z rw - t s rw");
+        assert_eq!(rows[0].root, "/a\u{1F600}b c");
+        assert_eq!(rows[0].target, PathBuf::from("/x\u{1F600}y z"));
+
+        // The escapes mountinfo actually emits still decode.
+        let rows = parse_mountinfo("1 1 0:1 /a\\011b /c\\012d rw - t s rw");
+        assert_eq!(rows[0].root, "/a\tb");
+        assert_eq!(rows[0].target, PathBuf::from("/c\nd"));
     }
 }

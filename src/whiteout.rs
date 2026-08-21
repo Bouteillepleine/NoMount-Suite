@@ -176,6 +176,19 @@ pub(crate) fn validate(p: &str) -> Result<()> {
     if !path.is_absolute() {
         anyhow::bail!("not an absolute path: {p}");
     }
+    // Refuse `..` outright, BEFORE counting depth. Path::components() does not
+    // resolve it -- ParentDir comes back as its own component -- so
+    // "/system/../product" counted four, cleared the depth test below, and then
+    // resolved to "/product" in the engine, which resolves the vpath with
+    // kern_path(LOOKUP_FOLLOW). That is a partition-root whiteout reached
+    // through the check that exists to prevent one, and a partition-root rule is
+    // what bootlooped zygote by masking every stock entry underneath.
+    // Normalising instead of refusing would be worse: the path a caller typed
+    // and the path we act on should be the same string, and a whiteout list is
+    // read back by humans.
+    if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        anyhow::bail!("refusing {p}: '..' is not allowed in a whiteout path (pass the resolved path)");
+    }
     if path.components().count() <= 2 {
         anyhow::bail!("refusing a partition root: {p} would mask every stock entry under it");
     }
@@ -472,6 +485,32 @@ mod tests {
         assert!(validate("/").is_err());
         assert!(validate("system/bin/x").is_err(), "relative must be refused");
         assert!(validate("/data/adb/x").is_err(), "/data is not a ROM path");
+        assert!(validate("/system/bin/install-recovery.sh").is_ok());
+    }
+
+    /// `..` must not be a way around the partition-root refusal.
+    ///
+    /// The depth test counts Path::components(), which does NOT resolve `..` --
+    /// it yields ParentDir as its own component. So "/system/../product" counted
+    /// four and passed while resolving to "/product", and the engine resolves the
+    /// vpath with kern_path(LOOKUP_FOLLOW), which does resolve it. That is the
+    /// exact rule shape recorded as bootlooping zygote by masking a partition
+    /// root, arrived at through the check meant to prevent it.
+    #[test]
+    fn rejects_dotdot_escapes_to_a_partition_root() {
+        for p in [
+            "/system/../product",
+            "/product/app/../..",
+            "/system/bin/../../vendor",
+            "/product/./..",
+        ] {
+            assert!(validate(p).is_err(), "{p} resolves to a partition root and must be refused");
+        }
+        // A `..` that stays deep is still refused: normalising is not this
+        // function's job, and a caller that wants a real path can pass one.
+        assert!(validate("/system/bin/../lib/x.so").is_err(), "any .. must be refused");
+        // ...while the ordinary paths keep working.
+        assert!(validate("/product/overlay/Foo.apk").is_ok());
         assert!(validate("/system/bin/install-recovery.sh").is_ok());
     }
 }
