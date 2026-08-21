@@ -299,13 +299,26 @@ do_props() {
     rp_reset_if_present ro.boot.realmebootstate        green
     rp_reset_if_present ro.boot.realme.lockstate       1
 
-    # harmonize build.date.utc across partitions to ro.build.date.utc — a custom
-    # build often bumps only some, and a mismatch across partitions is a tell.
+    # Harmonize build.date.utc only where a partition claims to be NEWER than the
+    # ROM. That is the real signature of a rebuilt partition: a custom build stamps
+    # "now", which lands after ro.build.date.utc. A partition dated EARLIER is
+    # ordinary OEM cadence - vendor, odm and bootimage are built on their own
+    # schedule and ship older than system on stock devices too. Rewriting those
+    # replaces a genuine OEM timestamp with a synthetic one, moving the device
+    # further from stock rather than closer.
+    #
+    # Measured on OP15 2026-08-21: vendor/odm/bootimage 2026-06-29 vs system
+    # 2026-07-01, a normal two-day gap that the old blanket rule reported as
+    # "4 props differ - Apply to fix" on a locked-bootloader device that was
+    # already green and digest-matching.
     base_utc=$(getprop ro.build.date.utc 2>/dev/null)
     if [ -n "$base_utc" ]; then
         for p in ro.bootimage.build.date.utc ro.odm.build.date.utc ro.odm_dlkm.build.date.utc \
                  ro.product.build.date.utc ro.system.build.date.utc ro.system_dlkm.build.date.utc \
                  ro.system_ext.build.date.utc ro.vendor.build.date.utc ro.vendor_dlkm.build.date.utc; do
+            _v=$(getprop "$p" 2>/dev/null)
+            [ -n "$_v" ] || continue
+            [ "$_v" -gt "$base_utc" ] 2>/dev/null || continue
             rp_reset_if_present "$p" "$base_utc"
         done
     fi
@@ -578,7 +591,12 @@ props_status() {
         for _p in ro.bootimage.build.date.utc ro.odm.build.date.utc ro.odm_dlkm.build.date.utc \
                   ro.product.build.date.utc ro.system.build.date.utc ro.system_dlkm.build.date.utc \
                   ro.system_ext.build.date.utc ro.vendor.build.date.utc ro.vendor_dlkm.build.date.utc; do
-            _d "$_p" "$_u"
+            # Same newer-than-base rule do_props uses; the dry run must never
+            # report a difference the apply would not make.
+            _pv=$(getprop "$_p" 2>/dev/null)
+            [ -n "$_pv" ] || continue
+            [ "$_pv" -gt "$_u" ] 2>/dev/null || continue
+            n=$((n + 1))
         done
     fi
     for _p in ro.build.fingerprint ro.system.build.fingerprint ro.vendor.build.fingerprint \
