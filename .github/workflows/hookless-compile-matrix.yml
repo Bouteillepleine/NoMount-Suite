@@ -210,15 +210,19 @@ jobs:
             echo "FATAL: fs/Kconfig hunk did not apply for ${{ matrix.ver }}"; exit 1; }
 
           echo "== defconfig =="
-          # gki_defconfig where the tree has one: the generic arm64 defconfig
-          # omits CONFIG_BOOT_CONFIG, which silently excluded every
-          # #ifdef CONFIG_BOOT_CONFIG block (nm_snapshot_bootconfig,
-          # nm_bootconfig_show, nm_set_bootconfig, nm_mk_bootconfig_pde and the
-          # NM_KNOB_BOOTCONFIG dispatch) from ALL ten versions -- the bootconfig
-          # half of the boot-identity cloak had zero compile coverage.
-          if [ -f arch/arm64/configs/gki_defconfig ]; then DEF=gki_defconfig; else DEF=defconfig; fi
-          echo "using $DEF"
-          make $MAKEOPTS "$DEF" 2>&1 | tail -5
+          # The generic arm64 defconfig leaves CONFIG_BOOT_CONFIG unset, which
+          # silently excluded every #ifdef CONFIG_BOOT_CONFIG block
+          # (nm_snapshot_bootconfig, nm_bootconfig_show, nm_set_bootconfig,
+          # nm_mk_bootconfig_pde and the NM_KNOB_BOOTCONFIG dispatch) from ALL ten
+          # versions -- the bootconfig half of the boot-identity cloak had zero
+          # compile coverage. Turn the symbol on explicitly rather than switching
+          # to gki_defconfig: that pulls in GKI's KMI machinery, and on
+          # android16-6.12 it enables gendwarfksyms, which needs <dwarf.h> from
+          # libdw-dev and failed the job for a reason unrelated to this driver.
+          # `defconfig -e BOOT_CONFIG` gives CONFIG_BOOT_CONFIG=y on its own
+          # (BLK_DEV_INITRD, its only dependency, is already set) and leaves the
+          # rest of the matrix's config baseline alone.
+          make $MAKEOPTS defconfig 2>&1 | tail -5
           ./scripts/config --file out/.config -e NOMOUNT
           # bootconfig only exists from 5.6; on older trees the #ifdef is
           # correctly compiling out real absence, so only assert where it exists.
