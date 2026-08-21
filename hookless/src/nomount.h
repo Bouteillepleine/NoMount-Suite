@@ -3,6 +3,12 @@
 
 /* Optional symbol-name cloak. OFF unless built with -DNOMOUNT_STEALTH_SYMS.
  *
+ * DECISION (2026-08-21): this stays OFF for the shipped builds. It is kept
+ * working, and CI proves it still cloaks cleanly on all ten kernels, so it can
+ * be turned on later without archaeology -- but no release should enable it
+ * without revisiting the reasoning below. Do not read "off by default" as
+ * "not adopted yet".
+ *
  * Every identifier in this driver is named nomount_* or nm_*, and /proc/kallsyms
  * lists local text symbols as well as global ones -- so a stock kernel and this
  * one differ by ~100 greppable names. kptr_restrict zeroes the addresses, not the

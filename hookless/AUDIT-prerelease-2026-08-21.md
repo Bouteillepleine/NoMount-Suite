@@ -45,7 +45,7 @@ vanish while absorb reported success.
 | **A5** | `nm_get_link()` returns `-EIO` on the ref-walk call (`dentry != NULL`) and `-ECHILD` only on the RCU-walk call, where it is a retry request rather than an error. |
 | **A6** | `nm_setattr()` forwards a **copy** of the `iattr` with `ATTR_FILE`/`ia_file` stripped, so the backing fs never receives our `struct file`. Also keeps `notify_change`'s `ia_valid` mutations off the caller's struct. |
 | **A8** | `bloom_mask` reads use `READ_ONCE`; the add-side update uses `WRITE_ONCE`, matching the delete side. |
-| **A9** | Superblock-hijack persistence documented as a deliberate **invariant** (restoring `s_op` while a synthetic inode is still pinned would hand it to a teardown that knows nothing about `i_private`). kallsyms residual recorded in-source as an accepted risk — **not** code-fixed; see below. |
+| **A9** | Superblock-hijack persistence documented as a deliberate **invariant** (restoring `s_op` while a synthetic inode is still pinned would hand it to a teardown that knows nothing about `i_private`). kallsyms residual: an opt-in `-DNOMOUNT_STEALTH_SYMS` cloak was built and is CI-gated on all ten kernels — **and deliberately left OFF for shipped builds** (decision 2026-08-21). |
 | **A10** | `ki_filp` is no longer restored when the backing op returns `-EIOCBQUEUED`; the in-flight completion keeps the backing file, which is what it dereferences. Synchronous callers are unaffected. |
 | **B4** | `NOMOUNT_NL_PROTO` in the client is `#ifndef`-guarded, so `-DNOMOUNT_NL_PROTO=n` works and the documented per-build randomisation is actually reachable. |
 | **C2** | ksud's immutable flag is **recorded with `lsattr` and restored only if it was set**. The clear is kept (the `mv` unlinks a hardlink to that inode, which `+i` refuses) but no longer *adds* immutability that would break the next ksud update with `EPERM`. Both sites. |
@@ -58,15 +58,28 @@ vanish while absorb reported success.
 | **C9** | The install integrity-check comment now says what it is: corruption detection, not authenticity (the manifest ships in the same zip). |
 | **C10** | `scan.sh` uses `tr '\n' '\0' \| xargs -0`, disabling `xargs` quote processing so a quoted APK path cannot mangle or abort the scan. |
 
-**Deliberately not code-fixed — A9's kallsyms half.** All 67 function symbols in the object are
-named `nomount_*`/`nm_*`, and kallsyms lists local text symbols. Closing it needs either renaming
-every identifier or a build-time mangling layer. Both cost real debuggability (a stack trace from
-such a build names nothing), both must be kept in step as functions are added, and neither makes the
-object anonymous — 67 symbols under one invented prefix is still a distinctive cluster, just one
-that does not name the project. The exposure is also unmeasured for app domains: the file is `0444`
-but SELinux-typed `proc_kallsyms`, and an `untrusted_app`-context read could not be executed here.
-Recorded in-source as an accepted risk rather than churned. Say the word and it becomes an opt-in
-`NOMOUNT_STEALTH_SYMS` header with a CI gate that fails if any symbol leaks.
+**A9's kallsyms half — built, then deliberately left off.** Every identifier is named
+`nomount_*`/`nm_*`, and kallsyms lists local text symbols. `-DNOMOUNT_STEALTH_SYMS` renames all of
+them to `__vfsx_NNN`; the list is derived from the source (172 entries) rather than from a built
+object, because which identifiers survive as symbols varies by kernel version and by inlining — a
+single-object list left 4.9 leaking its pre-4.17 `nm_cmdline_*` and 6.12 leaking a dozen more. The
+log tag moves with the symbols (`nm_warn`/`nm_err` literals live in `.rodata` and a symbol-clean
+build still answered `strings | grep NoMount` with 7 hits), and the one global `task_mmu.c` names
+from the patch was renamed outright to `vfs_map_meta_override`. CI builds the cloaked variant on all
+ten kernels and fails if any symbol or string survives:
+
+```
+4.9  cloaked=98   leaking_symbols=0  leaking_strings=0
+6.12 cloaked=104  leaking_symbols=0  leaking_strings=0
+6.18 cloaked=106  leaking_symbols=0  leaking_strings=0
+```
+
+**Decision (2026-08-21): it stays OFF for shipped builds.** It costs real debuggability — a stack
+trace or KASAN splat from a cloaked build names nothing recognisable — and it does not buy
+anonymity: ~100 symbols under one invented prefix is still a distinctive cluster, it merely stops
+naming the project. Its value depends on a threat model where "something is here" is acceptable but
+"it is NoMount" is not, and app-domain reachability of `proc_kallsyms` was never measured. Keeping
+it working and gated means it can be switched on later without archaeology.
 
 > The pre-existing `hookless/AUDIT.md` was **stale** — it describes a 1768-line, Generic-Netlink,
 > `S_PRIVATE`-setting engine at `eb9587b`. Now marked historical (B5).
