@@ -603,11 +603,17 @@ fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
 /// `absorb` created from another module's bind.
 fn prunable(
     target: &Path,
+    uid: u32,
     wanted: bool,
     durable_whiteouts: &HashSet<PathBuf>,
     absorbed: &HashSet<PathBuf>,
 ) -> bool {
-    !wanted && !durable_whiteouts.contains(target) && !absorbed.contains(target)
+    // Only the GLOBAL (uid 0) rules are the module plan's to prune. A per-UID rule
+    // comes from the hide path, no module plan describes it, and `nm del` -- which
+    // always addresses uid 0 -- cannot remove it anyway. Without this gate the
+    // prune pass reached every per-UID rule, failed to delete it, and re-counted
+    // it as a failure on every single reload, forever.
+    uid == 0 && !wanted && !durable_whiteouts.contains(target) && !absorbed.contains(target)
 }
 
 /// `nomount reload`: gap-free hot load/unload. Diffs the desired plan against the
@@ -724,10 +730,10 @@ pub fn run_reload() -> Result<()> {
 
     // Remove live rules no longer desired (skip any that are now bind targets,
     // and anything durable/absorbed that the module plan cannot describe).
-    for (t, _uid) in live.keys() {
+    for (t, uid) in live.keys() {
         let wanted = desired_hookless.contains_key(t.as_path())
             || desired_bind_src.contains_key(t.as_path());
-        if !prunable(t, wanted, &durable_whiteouts, &absorbed) {
+        if !prunable(t, *uid, wanted, &durable_whiteouts, &absorbed) {
             continue;
         }
         if nm.del(t).is_ok() {
@@ -891,12 +897,25 @@ mod tests {
         let none = HashSet::new();
 
         // Claimed by a durable list -> never pruned, even though no plan wants it.
-        assert!(!prunable(Path::new("/system/etc/tell.conf"), false, &durable, &absorbed));
-        assert!(!prunable(Path::new("/system/etc/absorbed.xml"), false, &durable, &absorbed));
+        assert!(!prunable(Path::new("/system/etc/tell.conf"), 0, false, &durable, &absorbed));
+        assert!(!prunable(Path::new("/system/etc/absorbed.xml"), 0, false, &durable, &absorbed));
         // Wanted by the plan -> never pruned either.
-        assert!(!prunable(Path::new("/system/app/Foo.apk"), true, &none, &none));
+        assert!(!prunable(Path::new("/system/app/Foo.apk"), 0, true, &none, &none));
         // Claimed by nobody -> this is the stale rule prune exists for.
-        assert!(prunable(Path::new("/system/app/Gone.apk"), false, &durable, &absorbed));
+        assert!(prunable(Path::new("/system/app/Gone.apk"), 0, false, &durable, &absorbed));
+    }
+
+    /// A per-UID rule is not the module plan's to prune, and `nm del` (always uid 0)
+    /// could not remove it anyway -- the attempt just re-counted as a failure on
+    /// every reload, forever.
+    #[test]
+    fn reload_never_prunes_per_uid_rules() {
+        let none = HashSet::new();
+        let t = Path::new("/system/app/Gone.apk");
+        // Same target, same "nobody wants it": global gets pruned, per-UID does not.
+        assert!(prunable(t, 0, false, &none, &none));
+        assert!(!prunable(t, 10471, false, &none, &none));
+        assert!(!prunable(t, 1000, false, &none, &none));
     }
 
     #[test]

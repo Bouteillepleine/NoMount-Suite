@@ -210,6 +210,38 @@ pub fn run_doctor() -> Result<()> {
         });
     }
 
+    // Stale entries in the legacy `blocklist` file. blocklist.rs migrates app
+    // names out of it into `uidhide` but deliberately COPIES rather than moves --
+    // deleting an entry that really is a module id would let a self-mounting
+    // module inject and break boot, which is the worse mistake. The cost is that
+    // the leftovers are invisible: mount.rs reads that file as a module-id skip
+    // list, so a module whose id happens to match a hidden package would be
+    // silently skipped, and nothing would say so. Report them instead of
+    // deleting them. Measured on OP15 2026-08-21: four package names still there.
+    if let Ok(raw) = std::fs::read_to_string("/data/adb/nomount/blocklist") {
+        let hidden: std::collections::HashSet<String> =
+            crate::blocklist::read().unwrap_or_default().into_iter().collect();
+        let stale: Vec<String> = raw
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter(|l| !Path::new("/data/adb/modules").join(l).is_dir())
+            .filter(|l| hidden.contains(*l))
+            .map(str::to_string)
+            .collect();
+        if !stale.is_empty() {
+            f.push(Finding {
+                level: Level::Info,
+                check: "stale legacy blocklist entries",
+                detail: format!(
+                    "{} entry/entries in /data/adb/nomount/blocklist are hidden APPS, already                      migrated to uidhide, and inert there ({}). That file is read as a                      module-id skip list; remove them if you want it to mean only what it says",
+                    stale.len(),
+                    stale.join(", ")
+                ),
+            });
+        }
+    }
+
     // The root manager's own "umount modules" switch. With the Suite this is
     // inert -- injection is a VFS redirect, not a mount, so there is nothing for
     // it to unmount and the kernel's umount list stays empty. Users reach for it
