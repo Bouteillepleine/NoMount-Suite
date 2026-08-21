@@ -1,7 +1,6 @@
 #ifndef _LINUX_NOMOUNT_H
 #define _LINUX_NOMOUNT_H
 
-
 /* Optional symbol-name cloak. OFF unless built with -DNOMOUNT_STEALTH_SYMS.
  *
  * Every identifier in this driver is named nomount_* or nm_*, and /proc/kallsyms
@@ -15,7 +14,7 @@
  * What this buys, and what it does not:
  *   - It removes the PROJECT NAME from the symbol table. Nothing greps for
  *     "nomount" and finds anything.
- *   - It does NOT make the object anonymous. 100 symbols sharing one invented
+ *   - It does NOT make the object anonymous. ~100 symbols sharing one invented
  *     prefix is still a distinctive cluster; it just no longer says what it is.
  *     If that distinction does not buy you anything, leave this off.
  *   - It costs real debuggability: a stack trace, a KASAN splat or a
@@ -23,6 +22,14 @@
  *     The names are therefore assigned in sorted order and NUMBERED, so mapping
  *     one back is a lookup in this file rather than guesswork:
  *         __vfsx_042  ->  grep -n __vfsx_042 nomount.h
+ *
+ * The list is derived from every nomount_ or nm_ prefixed identifier in the SOURCE, not
+ * from one built object. Which of them survive as symbols varies by kernel
+ * version and by what the compiler inlined -- generating it from a single 6.12
+ * build left 4.9 leaking its pre-4.17 nm_cmdline_fops/nm_cmdline_open and 6.12
+ * itself leaking a dozen more under the matrix flags. A source-derived superset
+ * is version-independent by construction; the extra defines for struct tags and
+ * inlined helpers cost nothing.
  *
  * Kept INLINE here rather than in its own header on purpose: every consumer of
  * kbuild@hookless copies exactly nomount.c and nomount.h (the compile matrix and
@@ -35,116 +42,190 @@
  * cannot be renamed by a header. It was given a neutral name outright
  * (vfs_map_meta_override) so it does not name the project either way.
  *
- * Keeping it honest: the compile matrix builds one version with this defined and
- * fails if ANY nomount_* or nm_* symbol survives, so a function added later cannot
- * silently escape the cloak and leave it half-applied -- which would be worse
- * than not having it, since the survivors would be the only thing to grep for.
+ * Keeping it honest: the compile matrix builds EVERY version with this defined
+ * and fails if any nomount_* or nm_* symbol -- or any "NoMount" string --
+ * survives. A half-applied cloak is worse than none: the survivors would be the
+ * only thing worth grepping for.
  */
 
 #ifdef NOMOUNT_STEALTH_SYMS
 
-#define __nomount_add_rule                     __vfsx_001
-#define __nomount_alloc_dir_node               __vfsx_002
-#define __nomount_clear_all                    __vfsx_003
-#define __nomount_del_rule                     __vfsx_004
-#define __nomount_delete_child_locked          __vfsx_005
-#define __nomount_inject_child_locked          __vfsx_006
-#define nm_alloc_rule                          __vfsx_007
-#define nm_bootconfig_pde                      __vfsx_008
-#define nm_bootconfig_show                     __vfsx_009
-#define nm_cmdline_pde                         __vfsx_010
-#define nm_cmdline_show                        __vfsx_011
-#define nm_compat_ioctl                        __vfsx_012
-#define nm_d_revalidate                        __vfsx_013
-#define nm_detach_rule_locked                  __vfsx_014
-#define nm_dir_cachep                          __vfsx_015
-#define nm_dir_deltas                          __vfsx_016
-#define nm_dir_fops                            __vfsx_017
-#define nm_dir_ino_pop                         __vfsx_018
-#define nm_dir_ino_pop_cached                  __vfsx_019
-#define nm_dir_iops                            __vfsx_020
-#define nm_dir_iterate_dir                     __vfsx_021
-#define nm_dir_lookup                          __vfsx_022
-#define nm_dir_node_put                        __vfsx_023
-#define nm_dir_node_rcu_free                   __vfsx_024
-#define nm_dops                                __vfsx_025
-#define nm_dotdot_actor                        __vfsx_026
-#define nm_fake_bootconfig                     __vfsx_027
-#define nm_fake_cmdline                        __vfsx_028
-#define nm_fallocate                           __vfsx_029
-#define nm_fiemap                              __vfsx_030
-#define nm_file_fops                           __vfsx_031
-#define nm_file_getattr                        __vfsx_032
-#define nm_file_iops                           __vfsx_033
-#define nm_fop_cachep                          __vfsx_034
-#define nm_fop_rcu_free                        __vfsx_035
-#define nm_fsync                               __vfsx_036
-#define nm_full_xattr_name                     __vfsx_037
-#define nm_get_link                            __vfsx_038
-#define nm_hide_isolated                       __vfsx_039
-#define nm_ino_actor                           __vfsx_040
-#define nm_inode_cachep                        __vfsx_041
-#define nm_iop_cachep                          __vfsx_042
-#define nm_iop_rcu_free                        __vfsx_043
-#define nm_iter_dotdot                         __vfsx_044
-#define nm_listxattr                           __vfsx_045
-#define nm_llseek                              __vfsx_046
-#define nm_mmap                                __vfsx_047
-#define nm_nl_rcv                              __vfsx_048
-#define nm_nl_rcv_msg                          __vfsx_049
-#define nm_nl_sk                               __vfsx_050
-#define nm_open                                __vfsx_051
-#define nm_orig_bootconfig                     __vfsx_052
-#define nm_path_is_injected                    __vfsx_053
-#define nm_place_ino                           __vfsx_054
-#define nm_procspoof_mutex                     __vfsx_055
-#define nm_range_cache                         __vfsx_056
-#define nm_range_cache_next                    __vfsx_057
-#define nm_read_iter                           __vfsx_058
-#define nm_read_secctx                         __vfsx_059
-#define nm_release                             __vfsx_060
-#define nm_root_cred                           __vfsx_061
-#define nm_rule_gen                            __vfsx_062
-#define nm_scan_dir_for_file                   __vfsx_063
-#define nm_setattr                             __vfsx_064
-#define nm_sib_actor                           __vfsx_065
-#define nm_sib_cache_ctx                       __vfsx_066
-#define nm_sib_cache_ctxlen                    __vfsx_067
-#define nm_sib_cache_dir                       __vfsx_068
-#define nm_sib_cache_kst                       __vfsx_069
-#define nm_sib_cache_mapdev                    __vfsx_070
-#define nm_sib_cache_valid                     __vfsx_071
-#define nm_splice_read                         __vfsx_072
-#define nm_splice_write                        __vfsx_073
-#define nm_unlocked_ioctl                      __vfsx_074
-#define nm_uts_store                           __vfsx_075
-#define nm_vdir_erofs_size                     __vfsx_076
-#define nm_write_iter                          __vfsx_077
-#define nm_xattr_get                           __vfsx_078
-#define nm_xattr_set                           __vfsx_079
-#define nomount_active_uids                    __vfsx_080
-#define nomount_actor_proxy                    __vfsx_081
-#define nomount_create_new_inode               __vfsx_082
-#define nomount_emit_virtual_children          __vfsx_083
-#define nomount_exit                           __vfsx_084
-#define nomount_generate_virtual_topology      __vfsx_085
-#define nomount_genl_policy                    __vfsx_086
-#define nomount_hijacked_destroy_inode         __vfsx_087
-#define nomount_hijacked_drop_inode            __vfsx_088
-#define nomount_hijacked_evict_inode           __vfsx_089
-#define nomount_hijacked_getattr               __vfsx_090
-#define nomount_hijacked_iterate_dir           __vfsx_091
-#define nomount_hijacked_lookup                __vfsx_092
-#define nomount_hijacked_put_super             __vfsx_093
-#define nomount_init                           __vfsx_094
-#define nomount_nl_dump_rules                  __vfsx_095
-#define nomount_nl_dump_uids                   __vfsx_096
-#define nomount_rules_ht                       __vfsx_097
-#define nomount_sb_list                        __vfsx_098
-#define nomount_uid_idr                        __vfsx_099
-#define nomount_write_mutex                    __vfsx_100
+#define __nomount_add_rule                       __vfsx_001
+#define __nomount_alloc_dir_node                 __vfsx_002
+#define __nomount_clear_all                      __vfsx_003
+#define __nomount_del_rule                       __vfsx_004
+#define __nomount_delete_child_locked            __vfsx_005
+#define __nomount_inject_child_locked            __vfsx_006
+#define nm_alloc_rule                            __vfsx_007
+#define nm_bootconfig_fops                       __vfsx_008
+#define nm_bootconfig_open                       __vfsx_009
+#define nm_bootconfig_pde                        __vfsx_010
+#define nm_bootconfig_show                       __vfsx_011
+#define nm_call_iterate                          __vfsx_012
+#define nm_child_dotdot_of                       __vfsx_013
+#define nm_child_size_contrib                    __vfsx_014
+#define nm_cmdline_fops                          __vfsx_015
+#define nm_cmdline_open                          __vfsx_016
+#define nm_cmdline_pde                           __vfsx_017
+#define nm_cmdline_show                          __vfsx_018
+#define nm_compat_ioctl                          __vfsx_019
+#define nm_d_revalidate                          __vfsx_020
+#define nm_detach_rule_locked                    __vfsx_021
+#define nm_dir_cachep                            __vfsx_022
+#define nm_dir_deltas                            __vfsx_023
+#define nm_dir_fops                              __vfsx_024
+#define nm_dir_ino_pop                           __vfsx_025
+#define nm_dir_ino_pop_cached                    __vfsx_026
+#define nm_dir_iops                              __vfsx_027
+#define nm_dir_iterate_dir                       __vfsx_028
+#define nm_dir_lookup                            __vfsx_029
+#define nm_dir_nlink_delta                       __vfsx_030
+#define nm_dir_node_put                          __vfsx_031
+#define nm_dir_node_rcu_free                     __vfsx_032
+#define nm_dir_size_fix                          __vfsx_033
+#define nm_dops                                  __vfsx_034
+#define nm_dotdot_actor                          __vfsx_035
+#define nm_dotdot_scan                           __vfsx_036
+#define nm_dup_trim                              __vfsx_037
+#define nm_emit_dots                             __vfsx_038
+#define nm_fake_bootconfig                       __vfsx_039
+#define nm_fake_cmdline                          __vfsx_040
+#define nm_fallocate                             __vfsx_041
+#define nm_fiemap                                __vfsx_042
+#define nm_file_fops                             __vfsx_043
+#define nm_file_fops_mmap_prepare                __vfsx_044
+#define nm_file_getattr                          __vfsx_045
+#define nm_file_iops                             __vfsx_046
+#define nm_find_sibling_meta                     __vfsx_047
+#define nm_fop                                   __vfsx_048
+#define nm_fop_cachep                            __vfsx_049
+#define nm_fop_rcu_free                          __vfsx_050
+#define nm_free_rule                             __vfsx_051
+#define nm_fsync                                 __vfsx_052
+#define nm_full_xattr_name                       __vfsx_053
+#define nm_get_link                              __vfsx_054
+#define nm_hide_isolated                         __vfsx_055
+#define nm_ino_actor                             __vfsx_056
+#define nm_ino_pop                               __vfsx_057
+#define nm_ino_scan                              __vfsx_058
+#define nm_ino_take                              __vfsx_059
+#define nm_ino_taken                             __vfsx_060
+#define nm_inode_cachep                          __vfsx_061
+#define nm_inode_info                            __vfsx_062
+#define nm_install_dentry_ops                    __vfsx_063
+#define nm_iop                                   __vfsx_064
+#define nm_iop_cachep                            __vfsx_065
+#define nm_iop_rcu_free                          __vfsx_066
+#define nm_is_virtual_pos                        __vfsx_067
+#define nm_iter_dotdot                           __vfsx_068
+#define nm_listxattr                             __vfsx_069
+#define nm_llseek                                __vfsx_070
+#define nm_mk_bootconfig_pde                     __vfsx_071
+#define nm_mk_cmdline_pde                        __vfsx_072
+#define nm_mmap                                  __vfsx_073
+#define nm_mmap_prepare                          __vfsx_074
+#define nm_nl_rcv                                __vfsx_075
+#define nm_nl_rcv_msg                            __vfsx_076
+#define nm_nl_sk                                 __vfsx_077
+#define nm_note_real_pos                         __vfsx_078
+#define nm_open                                  __vfsx_079
+#define nm_orig_bootconfig                       __vfsx_080
+#define nm_pack_pos                              __vfsx_081
+#define nm_path_is_injected                      __vfsx_082
+#define nm_path_stat                             __vfsx_083
+#define nm_place_ino                             __vfsx_084
+#define nm_pop_insert                            __vfsx_085
+#define nm_procspoof_exit                        __vfsx_086
+#define nm_procspoof_mutex                       __vfsx_087
+#define nm_publish_real_eof                      __vfsx_088
+#define nm_put_rule_info                         __vfsx_089
+#define nm_range_cache                           __vfsx_090
+#define nm_range_cache_next                      __vfsx_091
+#define nm_range_slot                            __vfsx_092
+#define nm_read_iter                             __vfsx_093
+#define nm_read_secctx                           __vfsx_094
+#define nm_real_ancestor_pop                     __vfsx_095
+#define nm_release                               __vfsx_096
+#define nm_restamp_child_ino                     __vfsx_097
+#define nm_reval_stale                           __vfsx_098
+#define nm_root_cred                             __vfsx_099
+#define nm_rule_gen                              __vfsx_100
+#define nm_rule_info                             __vfsx_101
+#define nm_rule_visible                          __vfsx_102
+#define nm_scan_dir_for_file                     __vfsx_103
+#define nm_scan_path                             __vfsx_104
+#define nm_selinux_name                          __vfsx_105
+#define nm_set_bootconfig                        __vfsx_106
+#define nm_set_cmdline                           __vfsx_107
+#define nm_setattr                               __vfsx_108
+#define nm_sib_actor                             __vfsx_109
+#define nm_sib_cache_ctx                         __vfsx_110
+#define nm_sib_cache_ctxlen                      __vfsx_111
+#define nm_sib_cache_dir                         __vfsx_112
+#define nm_sib_cache_kst                         __vfsx_113
+#define nm_sib_cache_mapdev                      __vfsx_114
+#define nm_sib_cache_valid                       __vfsx_115
+#define nm_sib_scan                              __vfsx_116
+#define nm_snapshot_bootconfig                   __vfsx_117
+#define nm_sop                                   __vfsx_118
+#define nm_splice_read                           __vfsx_119
+#define nm_splice_write                          __vfsx_120
+#define nm_sync_inode_times                      __vfsx_121
+#define nm_unlocked_ioctl                        __vfsx_122
+#define nm_unpack_pos                            __vfsx_123
+#define nm_uts_store                             __vfsx_124
+#define nm_vdir_erofs_size                       __vfsx_125
+#define nm_vdir_nlink                            __vfsx_126
+#define nm_vdir_size                             __vfsx_127
+#define nm_write_iter                            __vfsx_128
+#define nm_xattr_get                             __vfsx_129
+#define nm_xattr_proxy                           __vfsx_130
+#define nm_xattr_set                             __vfsx_131
+#define nomount_active_uids                      __vfsx_132
+#define nomount_actor_proxy                      __vfsx_133
+#define nomount_child_node                       __vfsx_134
+#define nomount_create_new_inode                 __vfsx_135
+#define nomount_dir_node                         __vfsx_136
+#define nomount_emit_virtual_children            __vfsx_137
+#define nomount_exit                             __vfsx_138
+#define nomount_generate_virtual_topology        __vfsx_139
+#define nomount_genl_policy                      __vfsx_140
+#define nomount_get_dir_node                     __vfsx_141
+#define nomount_get_rule_info                    __vfsx_142
+#define nomount_hijack_dir_inode                 __vfsx_143
+#define nomount_hijack_superblock                __vfsx_144
+#define nomount_hijack_virtual_parent            __vfsx_145
+#define nomount_hijacked_destroy_inode           __vfsx_146
+#define nomount_hijacked_drop_inode              __vfsx_147
+#define nomount_hijacked_evict_inode             __vfsx_148
+#define nomount_hijacked_getattr                 __vfsx_149
+#define nomount_hijacked_iterate_dir             __vfsx_150
+#define nomount_hijacked_lookup                  __vfsx_151
+#define nomount_hijacked_put_super               __vfsx_152
+#define nomount_init                             __vfsx_153
+#define nomount_is_uid_blocked                   __vfsx_154
+#define nomount_nl_add_rule                      __vfsx_155
+#define nomount_nl_add_uid                       __vfsx_156
+#define nomount_nl_clear_rules                   __vfsx_157
+#define nomount_nl_del_rule                      __vfsx_158
+#define nomount_nl_del_uid                       __vfsx_159
+#define nomount_nl_dump_rules                    __vfsx_160
+#define nomount_nl_dump_uids                     __vfsx_161
+#define nomount_nl_get_version                   __vfsx_162
+#define nomount_nl_set_knob                      __vfsx_163
+#define nomount_proxy_ctx                        __vfsx_164
+#define nomount_prune_empty_virtual_dirs         __vfsx_165
+#define nomount_restore_dir_node                 __vfsx_166
+#define nomount_restore_superblocks              __vfsx_167
+#define nomount_rule                             __vfsx_168
+#define nomount_rules_ht                         __vfsx_169
+#define nomount_sb_list                          __vfsx_170
+#define nomount_uid_idr                          __vfsx_171
+#define nomount_write_mutex                      __vfsx_172
 
 #endif /* NOMOUNT_STEALTH_SYMS */
+
+
 
 #include <linux/types.h>
 #include <linux/idr.h>
