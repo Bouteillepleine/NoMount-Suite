@@ -19,6 +19,22 @@
 # inotifyd calls us as: <handler> <event> <dir> <filename>
 [ "$3" = "packages.list" ] || exit 0
 
+# Ignore read-only events. `uid apply` below READS packages.list, and with the
+# no-mask registration above inotifyd reports that read straight back as an
+# ACCESS/OPEN on the same file -- so the handler re-triggered itself and one real
+# package change armed a permanent loop at the `sleep 3` cadence below. Measured
+# on OP15: 121 passes in the first 413s of uptime, still climbing, 24 UIDs
+# re-applied every 3.07s until reboot.
+#
+# Filtering here rather than in the registration mask keeps the property the mask
+# comment describes: an unknown letter can still never stop inotifyd from
+# starting. Deny-list, not allow-list, for the same reason -- a letter that
+# differs between busybox and toybox should over-trigger, not go silent. These
+# five mean the same thing in both: a=ACCESS r=OPEN 0=CLOSE_NOWRITE x=IGNORED
+# o=OVERFLOW. A rename (how PackageManager actually publishes the file) arrives
+# as y=MOVED_TO and is kept.
+[ -n "$(printf %s "$1" | tr -d "ar0xo")" ] || exit 0
+
 MODDIR=/data/adb/modules/meta-nomount
 NMDIR=/data/adb/nomount
 [ -f "$NMDIR/disabled" ] && exit 0
@@ -34,6 +50,15 @@ export NM_BIN="$MODDIR/bin/$ABI/nm"
 # killed handler leaves the lock behind and every later change is ignored for the
 # rest of the boot — the watcher would look alive and do nothing.
 LOCK=/dev/nomount_uidwatch.lock
+# The trap covers INT/TERM but not SIGKILL, which is exactly what Android's
+# low-memory killer sends to a background shell. Treat an abandoned lock as stale
+# instead of going deaf for the rest of the boot -- the failure the trap comment
+# below describes, reached by the one signal a trap cannot catch.
+if [ -f "$LOCK" ]; then
+    _now=$(date +%s)
+    _age=$(( _now - $(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now") ))
+    [ "$_age" -ge 60 ] && rm -f "$LOCK"
+fi
 ( set -o noclobber; : > "$LOCK" ) 2>/dev/null || exit 0
 trap 'rm -f "$LOCK"' EXIT INT TERM
 
