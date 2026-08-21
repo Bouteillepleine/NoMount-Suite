@@ -180,7 +180,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
      * injected child here, so skip the lookup entirely. On a hit we resolve via
      * the per-dir hash table (O(bucket)) rather than a full O(children) scan, so
      * large-fanout dirs stay fast even once the 64-bit bloom filter saturates. */
-    if (!(dir_node->bloom_mask & (1ULL << (hash & 63)))) return false;
+    if (!(READ_ONCE(dir_node->bloom_mask) & (1ULL << (hash & 63)))) return false;
     rule_info->r_path.dentry = NULL;
     rule_info->r_path.mnt = NULL;
 
@@ -254,7 +254,7 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
 
     if (!proxy->dir_node) goto do_real_actor;
     hash = full_name_hash(NULL, name, namelen);
-    if (!(proxy->dir_node->bloom_mask & (1ULL << (hash & 63))))
+    if (!(READ_ONCE(proxy->dir_node->bloom_mask) & (1ULL << (hash & 63))))
         goto do_real_actor;
 
     /* By-name lookup: use the per-dir hash table, not an O(children) idr scan.
@@ -763,7 +763,17 @@ static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
     iocb->ki_filp = real_file;
     ret = real_file->f_op->read_iter(iocb, to);
-    iocb->ki_filp = file;
+    /* Do NOT restore on -EIOCBQUEUED. The op is still in flight and the backing
+     * filesystem's completion path reads iocb->ki_filp (kiocb_end_write and the
+     * iomap/dio completions all do); putting our synthetic file back there hands
+     * the completion a file belonging to a different inode with a vtable it never
+     * called into. Leaving the backing file is also safe for lifetime: the
+     * submitter holds a reference to OUR file for the duration, and real_file is
+     * pinned by its ->private_data, so it outlives the completion either way.
+     * Synchronous callers (is_sync_kiocb) never see -EIOCBQUEUED and are restored
+     * exactly as before. */
+    if (ret != -EIOCBQUEUED)
+        iocb->ki_filp = file;
 
     return ret;
 }
@@ -777,7 +787,10 @@ static ssize_t nm_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
     iocb->ki_filp = real_file;
     ret = real_file->f_op->write_iter(iocb, from);
-    iocb->ki_filp = file;
+    /* Same as nm_read_iter: an in-flight (-EIOCBQUEUED) op keeps the backing file
+     * on the iocb, because that is what its completion will dereference. */
+    if (ret != -EIOCBQUEUED)
+        iocb->ki_filp = file;
 
     return ret;
 }
@@ -992,47 +1005,87 @@ static int nm_path_stat(const struct path *p, struct kstat *st)
  * where every entry is known and the block packing can be replayed exactly. Here
  * the stock entries are NOT known -- this is a real erofs dir we are adding to
  * or hiding from -- so only the delta is computable, and only within one block. */
+/* Both corrections a managed directory needs, from ONE walk of its children.
+ *
+ * nlink: a directory reports 2 + one link per subdirectory, so hiding one must
+ * decrement and adding one must increment.
+ * size: one erofs dirent is NM_EROFS_DIRENT_SZ + the name, unpadded, so an
+ * addition grows the parent, a whiteout shrinks it, and a replacement (the name
+ * is already counted) moves nothing.
+ *
+ * Both are filtered by nm_rule_visible(). The size half used to come from a
+ * dir_node->size_delta counter maintained at add/delete time, which could not be
+ * -- a single cached number cannot answer "how much does THIS caller see". So a
+ * --uid-scoped rule shifted the reported SIZE for every caller while moving the
+ * link count only for the targeted one: stat() on an untargeted process showed a
+ * directory whose size had been corrected for entries it cannot see, which is the
+ * same stat-vs-readdir divergence the correction exists to remove, just relocated.
+ * Computing it here costs nothing extra -- the nlink walk was already O(children)
+ * on this exact path -- and it is always in step with the current flags, so the
+ * counter's staleness on rule replacement stops being expressible too. */
+/* How this child moves the parent's on-disk directory size. One erofs dirent is
+ * an NM_EROFS_DIRENT_SZ header plus the name, unpadded. A whiteout removes a
+ * stock entry, an addition introduces one, and a replacement reuses the name
+ * that is already counted. */
+static s32 nm_child_size_contrib(const struct nomount_child_node *child)
+{
+    s32 bytes = (s32)(NM_EROFS_DIRENT_SZ + child->name_len);
+
+    if (child->flags & NM_FLAG_WHITEOUT)
+        return -bytes;
+    if (child->flags & NM_FLAG_SHADOWS_STOCK)
+        return 0;
+    return bytes;
+}
+
+static void nm_dir_deltas(struct nomount_dir_node *d, int *nlink_d, s32 *size_d)
+{
+    struct nomount_child_node *ch;
+    int nld = 0, cid = 0;
+    s32 szd = 0;
+
+    *nlink_d = 0;
+    *size_d = 0;
+    if (!d) return;
+    rcu_read_lock();
+    idr_for_each_entry(&d->children_idr, ch, cid) {
+        /* Only children this caller can actually see: a uid-scoped rule must not
+         * move the parent's metadata for everyone else. */
+        if (!nm_rule_visible(ch->rule)) continue;
+        szd += nm_child_size_contrib(ch);
+        if (ch->d_type != DT_DIR) continue;
+        if (ch->flags & NM_FLAG_WHITEOUT)            nld--;
+        else if (!(ch->flags & NM_FLAG_SHADOWS_STOCK)) nld++;
+    }
+    rcu_read_unlock();
+    *nlink_d = nld;
+    *size_d = szd;
+}
+
 static void nm_dir_size_fix(struct nm_inode_info *info, struct kstat *stat)
 {
+    int nld;
     s32 delta;
     loff_t fixed;
 
     if (!info->dir_node || !info->r_path.dentry)
         return;
-    delta = READ_ONCE(info->dir_node->size_delta);
-    if (!delta)
-        return;
+    /* O(1) rejects BEFORE the O(children) walk: the delta is only ever applied to
+     * a single-block erofs directory, so on every other filesystem -- and on any
+     * dir already past one block -- computing it would be wasted work on a stat
+     * path. (The counter this replaced was a free read, so the old order did not
+     * matter; now it does.) */
     if (d_backing_inode(info->r_path.dentry)->i_sb->s_magic != EROFS_SUPER_MAGIC_V1)
         return;
     if (stat->size <= 0 || stat->size >= 4096)
+        return;
+    nm_dir_deltas(info->dir_node, &nld, &delta);
+    if (!delta)
         return;
     fixed = stat->size + delta;
     if (fixed <= 0 || fixed >= 4096)
         return;
     stat->size = fixed;
-}
-
-
-/* How many links the hidden/added subdirectories are worth to the parent.
- * A directory's nlink is 2 + subdirs, so hiding one must decrement and adding
- * one must increment -- correcting size alone would just move the tell. */
-static int nm_dir_nlink_delta(struct nomount_dir_node *d)
-{
-    struct nomount_child_node *ch;
-    int delta = 0, cid = 0;
-
-    if (!d) return 0;
-    rcu_read_lock();
-    idr_for_each_entry(&d->children_idr, ch, cid) {
-        if (ch->d_type != DT_DIR) continue;
-        /* Only children this caller can actually see: a uid-scoped rule must not
-         * move the link count for everyone else. */
-        if (!nm_rule_visible(ch->rule)) continue;
-        if (ch->flags & NM_FLAG_WHITEOUT)            delta--;
-        else if (!(ch->flags & NM_FLAG_SHADOWS_STOCK)) delta++;
-    }
-    rcu_read_unlock();
-    return delta;
 }
 
 /* getattr for a REAL directory we manage.
@@ -1095,8 +1148,7 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
     if (res || !d || nomount_is_uid_blocked(current_uid().val))
         goto out;
 
-    delta = READ_ONCE(d->size_delta);
-    nld = nm_dir_nlink_delta(d);
+    nm_dir_deltas(d, &nld, &delta);
 
     if (nld) {
         if ((int)stat->nlink + nld >= 2)
@@ -1273,9 +1325,28 @@ static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
     if (unlikely(!info)) return -EIO;
     if (info->flags & NM_FLAG_VIRTUAL_DIR) return 0;
 
-    inode_lock(d_backing_inode(info->r_path.dentry));
-    err = notify_change(IDMAP_CALL info->r_path.dentry, attr, NULL);
-    inode_unlock(d_backing_inode(info->r_path.dentry));
+    /* Forward a COPY with ATTR_FILE stripped, never the caller's iattr verbatim.
+     * do_truncate() sets ATTR_FILE with ia_file pointing at the file the caller
+     * opened -- which is OURS, an nm_file_fops file whose payload lives in
+     * ->private_data. Handing that to the backing filesystem gives it a struct
+     * file belonging to a different inode and a vtable it knows nothing about;
+     * a filesystem that consults attr->ia_file (fuse and friends do) then acts on
+     * the wrong object. Dropping the bit makes the backing fs take its inode
+     * path, which is the correct one for a stacked caller. Same reason overlayfs
+     * does not pass its own file down. The copy also keeps notify_change's
+     * ia_valid mutations off the caller's struct.
+     * ATTR_MODE/UID/GID/SIZE and the times all survive -- only the file handle
+     * is removed, so no permission or size semantics change. */
+    {
+        struct iattr battr = *attr;
+
+        battr.ia_valid &= ~ATTR_FILE;
+        battr.ia_file = NULL;
+
+        inode_lock(d_backing_inode(info->r_path.dentry));
+        err = notify_change(IDMAP_CALL info->r_path.dentry, &battr, NULL);
+        inode_unlock(d_backing_inode(info->r_path.dentry));
+    }
 
     if (likely(!err)) {
         if (attr->ia_valid & ATTR_MODE) v_inode->i_mode = d_backing_inode(info->r_path.dentry)->i_mode;
@@ -1291,7 +1362,17 @@ static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struc
     struct nm_inode_info *info = inode->i_private;
     struct inode *real_inode;
     struct dentry *target_dentry;
-    if (unlikely(!info || !info->r_path.dentry)) return ERR_PTR(-ECHILD);
+    /* -ECHILD is a REQUEST to the VFS ("retry me in ref-walk"), not an error, and
+     * it is only meaningful on the RCU-walk call -- which is the one the VFS makes
+     * with dentry == NULL. Returning it on the ref-walk call instead propagates
+     * all the way out, so a caller resolving a broken injected symlink got
+     * ECHILD ("No child processes") from a path operation: an errno no filesystem
+     * produces there, and therefore a tell. Answer -EIO on that side.
+     * (Unreachable as written -- nm_alloc_rule resolves r_path with LOOKUP_FOLLOW
+     * so S_ISLNK never holds -- but the whole point of keeping nm_get_link is
+     * that resolution may change; see the note on nm_file_iops.get_link.) */
+    if (unlikely(!info || !info->r_path.dentry))
+        return ERR_PTR(dentry ? -EIO : -ECHILD);
 
     real_inode = d_backing_inode(info->r_path.dentry);
     target_dentry = dentry ? info->r_path.dentry : NULL;
@@ -1952,20 +2033,6 @@ static void nm_restamp_child_ino(struct nomount_dir_node *dir_node, struct nomou
     }
 }
 
-/* How this child moves the parent's on-disk directory size. One erofs dirent is
- * an NM_EROFS_DIRENT_SZ header plus the name, unpadded. A whiteout removes a stock entry, an
- * addition introduces one, and a replacement reuses the name that is already
- * counted. */
-static s32 nm_child_size_contrib(const struct nomount_child_node *child)
-{
-    s32 bytes = (s32)(NM_EROFS_DIRENT_SZ + child->name_len);
-
-    if (child->flags & NM_FLAG_WHITEOUT)
-        return -bytes;
-    if (child->flags & NM_FLAG_SHADOWS_STOCK)
-        return 0;
-    return bytes;
-}
 
 static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule, const char *name, size_t name_len)
 {
@@ -1978,8 +2045,35 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
     hash_for_each_possible(dir_node->children_ht, child, hnode, name_hash) {
         if (child->name_hash == name_hash && child->name_len == name_len &&
             memcmp(child->name, name, name_len) == 0) {
+            /* REPLACEMENT (the shadow path in __nomount_add_rule, i.e. what a
+             * `nomount reload` does on a module update). The incoming rule can
+             * differ from the outgoing one in kind (file vs dir), in the dirent
+             * ino it publishes, and in how it moves the parent's on-disk size --
+             * so refreshing only flags/rule left the child describing the OLD
+             * rule on all three counts:
+             *   d_type stale  -> nm_dir_nlink_delta() counts the wrong kind, so
+             *                    a directory that now contains a subdirectory
+             *                    still reported nlink 2. Measured: a file rule
+             *                    shadowed by a dir rule left the parent at 2
+             *                    where both a fresh dir rule and a real on-disk
+             *                    dir report 3 -- a state no filesystem produces,
+             *                    i.e. a one-stat tell.
+             *   fake_ino stale-> readdir publishes the previous rule's number
+             *                    while stat answers the new one. Usually masked
+             *                    (the replacement resolves its vpath through the
+             *                    still-live injection and inherits v_ino), but
+             *                    NOT when the outgoing rule is a whiteout: the
+             *                    vpath no longer resolves, so the new rule picks
+             *                    a fresh sibling-derived ino and the two diverge.
+             * The parent's reported SIZE had the same problem via a cached
+             * size_delta counter; that counter is gone -- nm_dir_deltas() now
+             * derives the size correction from the live child flags on the same
+             * walk as nlink, so it cannot go stale here and cannot ignore the
+             * caller's uid either. */
             child->flags = rule->flags;
             child->rule = rule;
+            child->d_type = (rule->flags & NM_FLAG_IS_DIR) ? DT_DIR : DT_REG;
+            WRITE_ONCE(child->fake_ino, rule->v_dino ? rule->v_dino : rule->v_ino);
             return;
         }
     }
@@ -2010,9 +2104,8 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
      * else the fast-reject would drop a present child. (The reverse window -- bit
      * set, child not yet visible -- is harmless: the reader just falls through to
      * an empty table walk.) */
-    dir_node->bloom_mask |= (1ULL << (name_hash & 63));
+    WRITE_ONCE(dir_node->bloom_mask, dir_node->bloom_mask | (1ULL << (name_hash & 63)));
     hash_add_rcu(dir_node->children_ht, &child->hnode, name_hash);
-    dir_node->size_delta += nm_child_size_contrib(child);
 }
 
 static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule)
@@ -2023,7 +2116,6 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
     if (unlikely(!dir_node)) return;
     idr_for_each_entry(&dir_node->children_idr, child, id) {
         if (child->rule == rule) {
-            dir_node->size_delta -= nm_child_size_contrib(child);
             hash_del_rcu(&child->hnode);
             idr_remove(&dir_node->children_idr, id);
             kfree_rcu(child, rcu);
@@ -2210,7 +2302,7 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     struct path dp;
     struct file *dir;
     const struct cred *old;
-    int i, nstat = 0;
+    int i;
 
     pop->n = 0;
     pop->nmine = 0;
@@ -2258,7 +2350,6 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
             int r = nm_path_stat(&fp, &fk);
 
             path_put(&fp);
-            nstat++;
             if (r == 0 && (!!S_ISDIR(fk.mode) == want_dir))
                 nm_pop_insert(pop, fk.ino);
         }
@@ -2722,7 +2813,7 @@ static void nomount_prune_empty_virtual_dirs(struct nomount_dir_node *dir_node, 
         if (parent) __nomount_delete_child_locked(parent, owner);
         nm_debug("Pruned empty virtual directory: %s\n", nm_get_vpath(owner));
         dir_node = parent_virtual ? parent : NULL;
-        hlist_add_head(&owner->vpath_node, victims);
+        hlist_add_head(&owner->victim_node, victims);
     }
 }
 
@@ -3064,7 +3155,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         rule->flags |= NM_FLAG_SHADOWS_STOCK;
         /* Classify a WHITEOUT from the path it hides. IS_DIR is normally taken
          * from the backing path above, but a whiteout has none -- so a hidden
-         * directory was typed DT_REG and nm_dir_nlink_delta skipped it: the
+         * directory was typed DT_REG and nm_dir_deltas skipped it: the
          * parent's size shrank correctly while its link count kept counting the
          * subdirectory. Measured 9 links against 2+8 subdirs. The vpath is
          * already resolved here, so this costs nothing. */
@@ -3282,7 +3373,7 @@ static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *
         if (prune && pinned) nomount_prune_empty_virtual_dirs(p_dir, victims);
         if (pinned) nm_dir_node_put(p_dir);
     }
-    hlist_add_head(&rule->vpath_node, victims);
+    hlist_add_head(&rule->victim_node, victims);
 }
 
 static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid)
@@ -3394,7 +3485,7 @@ static void __nomount_clear_all(bool is_exit)
      * does a lockless idr_find() under rcu_read_lock(), and a reader that already
      * passed the static-branch check may still be walking the radix nodes. */
     idr_destroy(&nomount_uid_idr);
-    hlist_for_each_entry_safe(rule, tmp, &r_victims, vpath_node) {
+    hlist_for_each_entry_safe(rule, tmp, &r_victims, victim_node) {
         nm_free_rule(rule);
     }
 
@@ -3412,7 +3503,7 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
         struct nlattr *attr = attrs[NOMOUNT_ATTR_PAYLOAD];
         const char *data = nla_data(attr), *v_ptr, *r_ptr;
         int len = nla_len(attr);
-        int pos = 0, err = 0;
+        int pos = 0, err = 0, first_err = 0, nfail = 0;
 
         while (pos + 12 <= len) {
             u32 flags      = get_unaligned((const u32 *)(data + pos));
@@ -3421,15 +3512,33 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
             u16 rp_len     = get_unaligned((const u16 *)(data + pos + 10));
             pos += 12;
 
-            if (pos + vp_len + rp_len > len) break;
-            if (unlikely(vp_len >= PATH_MAX || rp_len >= PATH_MAX)) break;
+            if (pos + vp_len + rp_len > len) { if (!first_err) first_err = -EINVAL; break; }
+            if (unlikely(vp_len >= PATH_MAX || rp_len >= PATH_MAX)) { if (!first_err) first_err = -ENAMETOOLONG; break; }
 
             v_ptr = data + pos; pos += vp_len;
             r_ptr = data + pos;  pos += rp_len;
             err = __nomount_add_rule(v_ptr, r_ptr, vp_len, rp_len, flags, target_uid);
-            if (err) nm_err("Failed to inject rule batch entry (err: %d)\n", err);
+            if (err) {
+                nm_err("Failed to inject rule batch entry (err: %d)\n", err);
+                nfail++;
+                if (!first_err) first_err = err;
+            }
         }
-        return 0;
+        /* Report the first rejection instead of an unconditional 0.
+         *
+         * Returning success for a batch in which nothing applied made a module
+         * whose files were REFUSED (an unresolvable backing path, -ENOENT from
+         * nm_alloc_rule) indistinguishable from one that injected cleanly: the
+         * `nm` client exits 0, the Suite counts the rule as applied, and the
+         * reload delta then believes it is already live. The per-entry Err arm
+         * in mount.rs (st.failed) exists for exactly this and could never fire.
+         *
+         * Every entry is still ATTEMPTED -- the loop does not stop at the first
+         * failure -- so this reports a partial batch rather than aborting one. */
+        if (first_err)
+            nm_warn("rule batch: %d entr%s rejected (first err %d)\n",
+                    nfail, nfail == 1 ? "y" : "ies", first_err);
+        return first_err;
 
     } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH] && attrs[NOMOUNT_ATTR_REAL_PATH]) {
         char *v_str = nla_data(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
@@ -3487,7 +3596,7 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
     if (hlist_empty(&r_victims)) return busy ? -EBUSY : -ENOENT;
     synchronize_rcu();
 
-    hlist_for_each_entry_safe(rule, tmp, &r_victims, vpath_node) {
+    hlist_for_each_entry_safe(rule, tmp, &r_victims, victim_node) {
         nm_debug("Deleted rule for: %s\n", nm_get_vpath(rule));
         nm_free_rule(rule);
     }
@@ -4066,6 +4175,44 @@ static void __exit nomount_exit(void)
 
     nm_info("Unloaded successfully\n");
 }
+
+/* --- Known residual identity surface (measured 2026-08-21, OP15/6.12) --------
+ *
+ * The tells this driver DOES close: no /sys/kernel/<name> kobject (the knobs
+ * ride netlink), no Generic Netlink family name to resolve, no MODULE_VERSION so
+ * no /sys/module/<name>/version (verified absent on-device), disguised slab
+ * cache names, and no debug strings in a production build.
+ *
+ * What remains, deliberately:
+ *
+ * 1. /proc/kallsyms. All 67 function symbols in this object are named
+ *    nomount_* and nm_*, and kallsyms lists local text symbols too. kptr_restrict
+ *    zeroes the addresses but not the names. The file is mode 0444 with SELinux
+ *    type proc_kallsyms, so on a stock Android policy app domains cannot read it
+ *    and `shell` can; that gate was NOT verified from an untrusted_app context
+ *    here, so treat app reachability as unmeasured rather than as safe.
+ *
+ *    Closing it means renaming every identifier, or a build-time mangling layer.
+ *    Both cost real debuggability (a stack trace or KASAN report from a stealth
+ *    build no longer names anything), both have to be kept in step as functions
+ *    are added, and neither actually makes the object anonymous -- 67 symbols
+ *    sharing one invented prefix is still a distinctive cluster, just one that
+ *    does not name the project. That trade is a deployment decision, not one to
+ *    bake in here. It is recorded so it is an accepted risk, not an oversight.
+ *
+ * 2. /proc/slabinfo lists vfs_dnode / vfs_ninfo / vfs_iops / vfs_fops. The names
+ *    are deliberately generic and the file is 0440 root:log.
+ *
+ * 3. A hijacked superblock is never un-hijacked at runtime -- see
+ *    nomount_restore_superblocks(), which only the (dead, __exit) unload path
+ *    calls. This is CORRECT, not a leak: `nm clear` frees the rules and cures the
+ *    hijacked directory inodes, but synthetic inodes can still be pinned by an
+ *    open fd, and those need our ->destroy_inode to free their nm_inode_info and
+ *    our ->evict_inode to leave i_data alone. Restoring s_op while any such inode
+ *    lives would hand it to the backing fs's teardown, which knows nothing about
+ *    i_private -- a leak at best. The fall-through cost when no rules exist is a
+ *    predictable-branch call per inode teardown on that sb.
+ */
 
 /* MODULE_VERSION() on BUILT-IN code emits a __modver entry, and kernel/params.c
  * turns that into /sys/module/<KBUILD_MODNAME>/version -- mode 0444, verified

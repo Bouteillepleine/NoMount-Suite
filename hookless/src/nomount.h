@@ -23,8 +23,22 @@
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
  * because an older engine did not, so it must be able to gate that refusal on
  * >= 13 rather than assume. Nothing compares this for equality -- the nm client
- * only parses it for liveness -- so raising it is safe. */
-#define NOMOUNT_VERSION    13
+ * only parses it for liveness -- so raising it is safe.
+ *
+ * 14: three behaviour changes userspace can otherwise not detect.
+ *  - A replaced rule now refreshes the parent's child node completely (d_type
+ *    and fake_ino). On 13 and earlier a reload that shadowed a rule left a
+ *    directory whose link count contradicted its contents -- measured as nlink 2
+ *    on a dir that had gained a subdirectory.
+ *  - The parent's size correction is now derived per-caller from the live child
+ *    flags (nm_dir_deltas) instead of a cached counter, so a --uid-scoped rule no
+ *    longer shifts the reported directory SIZE for callers it does not target
+ *    while moving the link count only for the one it does.
+ *  - NM_CMD_ADD_RULE's batch form returns the first rejection instead of an
+ *    unconditional 0, so a refused rule is no longer indistinguishable from an
+ *    applied one. The Suite's per-entry failure counters become meaningful only
+ *    against >= 14. */
+#define NOMOUNT_VERSION    14
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -154,13 +168,11 @@ struct nomount_dir_node {
     struct idr children_idr;
     DECLARE_HASHTABLE(children_ht, NM_CHILD_HT_BITS);
     loff_t real_eof;     /* published base; 0 = no full pass observed yet */
-    /* Bytes to add to the backing directory's i_size so it matches the listing
-     * we actually serve. On erofs a directory's size is exactly
-     * 12*(entries incl . and ..) + total name bytes, so adding a name without
-     * changing the size leaves a directory that lists N entries while reporting
-     * a size that encodes N-1 -- one stat() plus one readdir() apart. Only
-     * additions and whiteouts move it; replacements do not. See nm_dir_size_fix. */
-    s32 size_delta;
+    /* NB: there is deliberately no size_delta counter here any more. See
+     * nm_dir_deltas(): the parent's size correction is derived from the live
+     * child flags on the same walk that computes the link-count correction, so
+     * it stays in step with a replaced rule AND is filtered by the caller's uid.
+     * A single cached number could do neither. */
     loff_t max_real_pos; /* running max real dirent offset (not authoritative) */
     u64 bloom_mask;
     atomic_t refcount;   /* owner ref (alloc) + one per synthetic inode caching this node */
@@ -174,6 +186,15 @@ struct nomount_dir_node {
 
 struct nomount_rule {
     struct hlist_node vpath_node;
+    /* Teardown list link, kept SEPARATE from vpath_node on purpose.
+     * hlist_del_rcu() deliberately leaves ->next intact so an RCU reader already
+     * standing on the node can still walk off it; the victims list used to reuse
+     * vpath_node, whose hlist_add_head() overwrote exactly that pointer. Since
+     * nomount_nl_dump_rules() walks the rule table under rcu_read_lock() ALONE
+     * (it does not take nomount_write_mutex), a `nm list` concurrent with a
+     * del/clear could follow ->next out of its hash bucket and into the victims
+     * list -- emitting deleted or duplicated rules into the reload delta. */
+    struct hlist_node victim_node;
     struct nomount_dir_node *parent_dir;
     struct nomount_dir_node *this_dir;
     struct path r_path;
