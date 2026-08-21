@@ -3406,6 +3406,26 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
                 nm_free_rule(rule);
                 return -EBUSY;
             }
+            /* Inherit "a STOCK entry underlies this name" from the rule being
+             * replaced; do NOT keep what nm_alloc_rule just measured.
+             *
+             * NM_FLAG_SHADOWS_STOCK is set there from kern_path(vpath), and by
+             * the time a REPLACEMENT is added that path already resolves --
+             * through the outgoing rule's own injection. So every replacement
+             * concluded it was shadowing stock, and nm_dir_deltas() then declined
+             * to count it: measured on OP15, adding a dir rule took the parent
+             * from nlink 2 to 3, and re-adding the same vpath dropped it back to
+             * 2 while the entry was still a descendable directory. Since d_type
+             * is identical across a dir->dir replacement, that is provably this
+             * flag and not the child-node refresh below it.
+             *
+             * The outgoing rule resolved the vpath BEFORE any of ours served it,
+             * so its answer is the one about the real filesystem. Carry it over:
+             * replacing a pure injection stays an addition (+1 link, +dirent
+             * bytes), and replacing a rule that really did shadow a stock file
+             * stays neutral -- which is what stops the count double-moving. */
+            rule->flags = (rule->flags & ~NM_FLAG_SHADOWS_STOCK) |
+                          (existing->flags & NM_FLAG_SHADOWS_STOCK);
             hash_del_rcu(&existing->vpath_node);
             victim = existing;
             nm_debug("Shadowing existing rule for: %s\n", nm_get_vpath(rule));

@@ -16,7 +16,7 @@
 
 | ID | Fix | Verification |
 |---|---|---|
-| **A1** | `__nomount_inject_child_locked()` replacement branch now subtracts the old `nm_child_size_contrib()`, refreshes `d_type` and `fake_ino`, and re-adds on the new flags | builds clean; needs a kernel flash to re-run the nlink test |
+| **A1** | **Two independent causes — see the correction below.** (a) the replacement branch now refreshes `d_type` and `fake_ino`; (b) `NM_FLAG_SHADOWS_STOCK` is inherited from the rule being replaced rather than re-measured | (a) shipped in the first v14 build and was **not sufficient**; (b) added after on-device testing |
 | **A2** | `nomount_rule` gained a dedicated `victim_node`; the teardown list no longer reuses `vpath_node` | builds clean |
 | **A3** | Batch `NM_CMD_ADD_RULE` returns the first rejection instead of `0`; every entry is still attempted | builds clean; consumers audited (see below) |
 | **A7** | dead `nstat` deleted | **clang `W=1` now 0 diagnostics** (was `-Werror` fail) |
