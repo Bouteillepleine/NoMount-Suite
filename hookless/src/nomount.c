@@ -1286,10 +1286,15 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
     {
         struct path *stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
+            /* _nosec, like every other getattr in this file: the caller has
+             * already passed the security check for the path it named, and
+             * re-running the LSM hook against the pinned stock path returned
+             * -EPERM on OP15 (no AVC -- a non-SELinux hook), so a hidden reader
+             * could read the file but not stat it. */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-            return vfs_getattr(stock, stat, request_mask, query_flags);
+            return vfs_getattr_nosec(stock, stat, request_mask, query_flags);
 #else
-            return vfs_getattr(stock, stat);
+            return vfs_getattr_nosec(stock, stat);
 #endif
         }
     }
@@ -1370,10 +1375,15 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     {
         struct path *stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
+            /* _nosec, like every other getattr in this file: the caller has
+             * already passed the security check for the path it named, and
+             * re-running the LSM hook against the pinned stock path returned
+             * -EPERM on OP15 (no AVC -- a non-SELinux hook), so a hidden reader
+             * could read the file but not stat it. */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-            return vfs_getattr(stock, stat, request_mask, query_flags);
+            return vfs_getattr_nosec(stock, stat, request_mask, query_flags);
 #else
-            return vfs_getattr(stock, stat);
+            return vfs_getattr_nosec(stock, stat);
 #endif
         }
     }
