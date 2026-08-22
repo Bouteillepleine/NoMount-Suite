@@ -368,6 +368,11 @@ struct nm_sop {
 
 struct nm_inode_info {
     struct path r_path;
+    /* The STOCK file this injection shadows, pinned at rule creation. A hidden
+     * reader is entitled to see it, and serving it from here means we never have
+     * to invalidate the shared dentry to arrange that. Empty for an ADDED name
+     * (nothing underneath) and for a whiteout. */
+    struct path s_path;
     struct nomount_dir_node *dir_node;
     char v_ctx[NM_CTX_MAX];          /* mirrored context for synthesized dirs */
     u16 v_ctx_len;
@@ -445,6 +450,7 @@ struct nomount_rule {
     struct nomount_dir_node *parent_dir;
     struct nomount_dir_node *this_dir;
     struct path r_path;
+    struct path s_path;              /* stock file this rule shadows; see nm_inode_info */
     unsigned long v_ino;
     /* Dirent ino, i.e. what readdir reports -- for this dir's own "." and for
      * its entry in the parent's listing. On overlayfs these differ from st_ino
@@ -497,6 +503,7 @@ static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *
  * -- a use-after-free if a concurrent nm del/clear/COW freed the rule. */
 struct nm_rule_info {
     u32 flags;
+    struct path s_path;              /* stock file behind a shadowing rule (may be empty) */
     unsigned long v_ino;
     u64 v_dino, v_pdino;
     dev_t v_dev, v_mapdev;

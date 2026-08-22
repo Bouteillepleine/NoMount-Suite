@@ -214,6 +214,8 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
     if (!(READ_ONCE(dir_node->bloom_mask) & (1ULL << (hash & 63)))) return false;
     rule_info->r_path.dentry = NULL;
     rule_info->r_path.mnt = NULL;
+    rule_info->s_path.dentry = NULL;
+    rule_info->s_path.mnt = NULL;
 
     rcu_read_lock();
     hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
@@ -249,6 +251,10 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                     rule_info->r_path = rule->r_path;
                     path_get(&rule_info->r_path);
                 }
+                if (get_path && rule->s_path.dentry) {
+                    rule_info->s_path = rule->s_path;
+                    path_get(&rule_info->s_path);
+                }
                 found = true;
             }
             break;
@@ -266,6 +272,7 @@ static inline void nm_put_rule_info(struct nm_rule_info *ri)
 {
     if (ri->this_dir) { nm_dir_node_put(ri->this_dir); ri->this_dir = NULL; }
     if (ri->r_path.dentry) { path_put(&ri->r_path); ri->r_path.dentry = NULL; ri->r_path.mnt = NULL; }
+    if (ri->s_path.dentry) { path_put(&ri->s_path); ri->s_path.dentry = NULL; ri->s_path.mnt = NULL; }
 }
 
 struct nomount_proxy_ctx {
@@ -417,6 +424,14 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     } else {
         info->r_path = rule_info->r_path;
         path_get(&info->r_path);
+    }
+    /* Own ref on the shadowed stock file, same discipline as r_path: it is what a
+     * hidden reader gets served from the ops, so it must outlive the rule_info. */
+    info->s_path.dentry = NULL;
+    info->s_path.mnt = NULL;
+    if (rule_info->s_path.dentry) {
+        info->s_path = rule_info->s_path;
+        path_get(&info->s_path);
     }
 
     info->v_ino = rule_info->v_ino;
@@ -682,9 +697,8 @@ static void nomount_hijacked_destroy_inode(struct inode *inode)
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         if (inode->i_private) {
             struct nm_inode_info *info = inode->i_private;
-            if (info->r_path.dentry) {
-                path_put(&info->r_path);
-            }
+            if (info->r_path.dentry) path_put(&info->r_path);
+            if (info->s_path.dentry) path_put(&info->s_path);
             if (info->dir_node) nm_dir_node_put(info->dir_node);
             kmem_cache_free(nm_inode_cachep, info);
             inode->i_private = NULL;
@@ -750,6 +764,19 @@ static __always_inline bool nm_hidden_from_caller(const struct nm_inode_info *in
            nomount_is_uid_blocked(current_uid().val);
 }
 
+/* The stock file to serve THIS caller, or NULL to serve the injection.
+ * A hidden reader of a SHADOWING rule is entitled to the file underneath, and
+ * handing it back from here is what removes the last reason to invalidate the
+ * shared dentry (see nm_hidden_from_caller). NULL when the rule adds a new name
+ * (nothing underneath -- that path returns -ENOENT instead) or when the stock
+ * file could not be pinned at rule creation. */
+static __always_inline const struct path *nm_stock_for_caller(const struct nm_inode_info *info)
+{
+    if (!info || !info->s_path.dentry) return NULL;
+    if (!(info->flags & NM_FLAG_SHADOWS_STOCK)) return NULL;
+    return nomount_is_uid_blocked(current_uid().val) ? &info->s_path : NULL;
+}
+
 static int nm_open(struct inode *inode, struct file *file)
 {
     struct nm_inode_info *info = inode->i_private;
@@ -762,6 +789,19 @@ static int nm_open(struct inode *inode, struct file *file)
         return 0;
     }
     if (unlikely(!info->r_path.dentry)) return -ENODEV;
+
+    /* A hidden reader gets the file this rule shadows, opened from the pinned
+     * stock path -- same view it used to get by having the dentry invalidated
+     * underneath it, minus the collateral on everyone else's mappings. */
+    {
+        const struct path *stock = nm_stock_for_caller(info);
+        if (unlikely(stock)) {
+            real_file = dentry_open(stock, file->f_flags, current_cred());
+            if (IS_ERR(real_file)) return PTR_ERR(real_file);
+            file->private_data = real_file;
+            return 0;
+        }
+    }
 
     /* The caller's own creds are authoritative: an injected path is authorised
      * exactly like a stock one. There is no privileged retry -- that fallback
@@ -1238,6 +1278,18 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
     int res;
     if (unlikely(!info)) return -EIO;
     if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
+    /* Hidden reader of a shadowing rule: report the stock file it is entitled to,
+     * so stat() agrees with the open() and no dcache invalidation is needed. */
+    {
+        const struct path *stock = nm_stock_for_caller(info);
+        if (unlikely(stock)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+            return vfs_getattr(stock, stat, request_mask, query_flags);
+#else
+            return vfs_getattr(stock, stat);
+#endif
+        }
+    }
 
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
         generic_fillattr(v_inode, stat);
@@ -1310,6 +1362,18 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     int res;
     if (unlikely(!info)) return -EIO;
     if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
+    /* Hidden reader of a shadowing rule: report the stock file it is entitled to,
+     * so stat() agrees with the open() and no dcache invalidation is needed. */
+    {
+        const struct path *stock = nm_stock_for_caller(info);
+        if (unlikely(stock)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+            return vfs_getattr(stock, stat, request_mask, query_flags);
+#else
+            return vfs_getattr(stock, stat);
+#endif
+        }
+    }
 
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
@@ -1752,9 +1816,20 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
             /* An ADDED name stays hashed and is refused in the ops instead --
              * see nm_hidden_from_caller(). Invalidating here is what marked every
              * other process's existing mapping of this file "(deleted)". */
-            if (injected && !(rule_info.flags & NM_FLAG_SHADOWS_STOCK))
-                return 1;
-            return injected ? 0 : 1;
+            /* Both classes are now served from the ops: an ADDED name is refused
+             * (-ENOENT), a SHADOWING one hands back the stock file it pinned at
+             * rule creation. Neither needs the dentry unhashed, which is what
+             * used to mark every other process's mapping "(deleted)". Fall back
+             * to invalidation only for a shadowing rule with no pinned stock
+             * path -- there the real fs is the only way to reach it. */
+            if (injected) {
+                struct nm_inode_info *ii = dentry->d_inode->i_private;
+                if (!(rule_info.flags & NM_FLAG_SHADOWS_STOCK) ||
+                    (ii && ii->s_path.dentry))
+                    return 1;
+                return 0;
+            }
+            return 1;
         }
         return injected ? 1 : nm_reval_stale(dentry);
     }
@@ -3283,7 +3358,21 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_ino = d_backing_inode(v_path_struct.dentry)->i_ino;
             rule->v_dev = d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
         }
-        path_put(&v_path_struct);
+        /* Keep it. A hidden reader is entitled to the file this rule shadows, and
+         * pinning it here is what lets nm_open()/getattr serve that reader from
+         * the ops instead of invalidating the shared dentry -- which is what used
+         * to mark every other process's mapping of this path "(deleted)".
+         * Guarded against pinning one of OUR OWN inodes: re-adding a rule over a
+         * live injection resolves the vpath to the virtual inode, and treating
+         * that as "stock" would serve the injection to the very reader it must be
+         * hidden from. */
+        {
+            struct inode *si = d_backing_inode(v_path_struct.dentry);
+            if (si && si->i_op != &nm_file_iops && si->i_op != &nm_dir_iops)
+                rule->s_path = v_path_struct;          /* takes the ref */
+            else
+                path_put(&v_path_struct);
+        }
     } else {
         /* Pure injection (no stock file): mirror a real sibling FILE's dev +
          * times, and derive an ino in the sibling's magnitude band. Mirroring
@@ -3422,6 +3511,7 @@ static void nm_free_rule(struct nomount_rule *rule)
 {
     if (unlikely(!rule)) return;
     if (rule->r_path.dentry) path_put(&rule->r_path);
+    if (rule->s_path.dentry) path_put(&rule->s_path);
     /* Defer the dir_node (and its remaining children) to an RCU grace period:
      * lockless readers can still be walking children_idr. The plain kfree of the
      * children here previously raced kfree_rcu'd siblings; the callback frees them
