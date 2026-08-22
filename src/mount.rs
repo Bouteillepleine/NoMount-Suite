@@ -819,7 +819,17 @@ pub fn run_mount() -> Result<()> {
     // Read the record BEFORE clearing it -- set_absorbed(&[]) truncates the file,
     // so re-serving afterwards read an empty list and silently did nothing.
     let recorded = crate::absorb::absorbed_pairs();
-    crate::absorb::set_absorbed(&[]);
+    // Keep the record across the clear. Wiping it here was right when nothing
+    // could rebuild those rules, but the post-boot absorb pass now re-serves them
+    // (see absorb::reapply_absorbed) -- and it cannot, if run_mount has already
+    // truncated the file. The cost is a short window where `reload` would protect
+    // a target whose rule is not live yet; the absorb pass closes it seconds
+    // later. Entries whose source has gone are dropped when they are re-served.
+    if recorded.is_empty() {
+        crate::absorb::set_absorbed(&[]);
+    } else {
+        crate::absorb::set_absorbed_pairs(&recorded);
+    }
     // NOT re-served here. Serving an app's base.apk from post-fs-data -- before
     // zygote starts and PackageManager scans -- corrupts the package: measured on
     // OP15, YouTube came up with a null Resources
