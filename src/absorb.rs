@@ -829,6 +829,22 @@ pub(crate) fn umount_detach(p: &Path) -> bool {
 /// file rather than a single directory rule: a directory rule REPLACES the stock
 /// directory, hiding every entry the module did not ship, which is the same
 /// whole-partition masking that bootloops zygote.
+/// Is `target` already serving `source`? Compared by size and mtime, which is
+/// what an effective injection makes identical -- the rule mirrors the backing
+/// file's metadata.
+///
+/// Re-adding a live rule is not free: `nm add` d_drops the cached dentry, and any
+/// process that already MAPPED the file keeps the now-unhashed one, which the
+/// kernel renders as "…/file (deleted)" in /proc/<pid>/maps ever after. Measured
+/// on OP15 with a probe holding an mmap: idle 12s clean, `uid apply` clean,
+/// re-adding the same rule flipped it to (deleted). So a re-assert has to be able
+/// to tell "listed but not serving" (worth the drop) from "already serving"
+/// (pure cost).
+fn already_serving(target: &Path, source: &Path) -> bool {
+    let (Ok(t), Ok(s)) = (fs::metadata(target), fs::metadata(source)) else { return false };
+    t.len() == s.len() && t.modified().ok() == s.modified().ok()
+}
+
 fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     if source.is_dir() {
         for e in std::fs::read_dir(source)?.flatten() {
@@ -1004,6 +1020,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             // Idempotent, so re-adding a rule that IS live costs nothing.
             let at = servable(&c.target, &aliases);
             if !reasserted.insert(at.clone()) {
+                continue;
+            }
+            // Already serving: re-adding would only d_drop a dentry other
+            // processes may be mapping, for no gain (see `already_serving`).
+            if already_serving(&at, &c.source) {
                 continue;
             }
             let mut refreshed = Vec::new();
