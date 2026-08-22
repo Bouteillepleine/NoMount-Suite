@@ -1056,10 +1056,12 @@ fn absorb_rom_tmpfs(dry_run: bool) -> (u32, u32) {
     let (mut done, mut failed) = (0u32, 0u32);
     for target in body.lines().filter_map(rom_tmpfs_target) {
         // The opt-out list applies here too. Converting a tmpfs to a whiteout
-        // hides the ROM directory outright, and for a system app that a
-        // /data/app package UPDATES that is not always equivalent -- the update
-        // rides on the system base. Leaving one alone must be one line in
-        // absorb-skip.txt, not a rebuild.
+        // swaps "directory empty" for "directory absent"; measured on OP15 across
+        // several boots those behave the same even for a system app that a
+        // /data/app package UPDATES -- YouTube installed, launched and ran with
+        // /product/app/YouTube whiteouted. Keep the opt-out anyway: one ROM, one
+        // app, and leaving a takeover alone should be a line in absorb-skip.txt
+        // rather than a rebuild.
         if is_skipped(Path::new("/"), &target, &skips) {
             println!("skipping the tmpfs over {} (opt-out list)", target.display());
             continue;
