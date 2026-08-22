@@ -784,16 +784,16 @@ pub fn reapply_absorbed(nm: &Nm) -> u32 {
 pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
     let live = nm.list().unwrap_or_default();
     let mut n = 0;
-    for (target, source) in pairs.iter().cloned() {
-        if !is_app_apk(&target) || !source.exists() || !target.exists() {
+    for (target, source) in pairs {
+        if !is_app_apk(target) || !source.exists() || !target.exists() {
             continue;
         }
         if live.lines().any(|l| l.split(" -> ").next().is_some_and(|t| t.trim() == target.to_string_lossy())) {
             continue;
         }
-        label_apk_readable(&source);
-        let _ = fs::symlink_metadata(&target);
-        if nm.add(&target, &source).is_ok() {
+        label_apk_readable(source);
+        let _ = fs::symlink_metadata(target);
+        if nm.add(target, source).is_ok() {
             n += 1;
         }
     }

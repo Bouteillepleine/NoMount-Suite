@@ -813,38 +813,32 @@ pub fn run_mount() -> Result<()> {
     // injections exist rather than from boot_completed onwards.
     let hidden = crate::cli::handlers::reapply_blocklist(&nm, true);
     crate::bind::teardown_all();
-    // `clear` dropped every absorbed rule too, so the record of them is now a lie.
-    // Left behind, `reload` would protect targets that no longer carry a rule.
-    // service.sh re-runs absorb after boot and repopulates it.
-    // Read the record BEFORE clearing it -- set_absorbed(&[]) truncates the file,
-    // so re-serving afterwards read an empty list and silently did nothing.
+    // `clear` dropped every absorbed rule, but NOT the record of them: the pass
+    // below rebuilds those rules from it, so truncating the file here would throw
+    // away the only thing that can. Read it first either way -- an earlier version
+    // cleared the file and then read an empty list, and silently did nothing.
     let recorded = crate::absorb::absorbed_pairs();
-    // Keep the record across the clear. Wiping it here was right when nothing
-    // could rebuild those rules, but the post-boot absorb pass now re-serves them
-    // (see absorb::reapply_absorbed) -- and it cannot, if run_mount has already
-    // truncated the file. The cost is a short window where `reload` would protect
-    // a target whose rule is not live yet; the absorb pass closes it seconds
-    // later. Entries whose source has gone are dropped when they are re-served.
     if recorded.is_empty() {
         crate::absorb::set_absorbed(&[]);
     } else {
         crate::absorb::set_absorbed_pairs(&recorded);
     }
-    // NOT re-served here. Serving an app's base.apk from post-fs-data -- before
-    // zygote starts and PackageManager scans -- corrupts the package: measured on
-    // OP15, YouTube came up with a null Resources
-    // (GraphicsEnvironment.queryAngleChoice -> handleBindApplication NPE), and the
-    // second launch attempt took the system down with it. The SAME rule created
-    // after boot, by absorb, works fine and has all session. So an APK rule must
-    // not exist before the scan that reads it; the record is kept for reload's
-    // prune guard and for absorb's own refresh, and absorb re-serves it later.
+    // Re-serve them here, before zygote starts and PackageManager scans, so a
+    // patched-APK module never has to mount at all: no bind, so no process maps
+    // one, so nothing carries the "(deleted)" marking a later takeover leaves
+    // behind. Verified end to end on OP15 -- all audit checks pass with the app
+    // patched, running, and zero mounts.
     //
-    // Opt in with NM_REAPPLY_ABSORBED=1 to experiment; the default must stay off.
-    if !recorded.is_empty() && std::env::var("NM_REAPPLY_ABSORBED").as_deref() == Ok("1") {
+    // This looked like a timing bug at first: YouTube came up with a null
+    // Resources (GraphicsEnvironment.queryAngleChoice -> handleBindApplication
+    // NPE) and a retry took the system down. The cause was the SELinux label on
+    // the copy being served -- everything under /data/adb is adb_data_file, which
+    // an app cannot read. absorb::label_apk_readable fixes that; the timing was
+    // never the problem.
+    if !recorded.is_empty() {
         let n = crate::absorb::reapply_absorbed_pairs(&nm, &recorded);
         if n > 0 {
             println!("nomount: re-served {n} absorbed APK rule(s) from the record");
-            crate::absorb::set_absorbed_pairs(&recorded);
         }
     }
 
