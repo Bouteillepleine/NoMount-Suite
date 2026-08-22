@@ -510,6 +510,42 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     }
 }
 
+/// A tmpfs mounted inside a ROM partition is never stock.
+///
+/// Emptying a ROM directory by mounting an empty tmpfs over it is a common module
+/// trick -- the ReVanced installer does exactly that to `/product/app/<App>` so its
+/// /data/app copy wins. Every check we had keys on the mount's SOURCE being under
+/// /data/adb, and a tmpfs has no such source, so this was invisible to absorb,
+/// doctor, health and this audit alike. Measured on OP15: the only tmpfs anywhere
+/// inside a ROM partition was the module's; stock keeps them at /dev, /mnt, /apex,
+/// /linkerconfig and /tmp. Visible to any app in its own mountinfo.
+fn check_no_rom_tmpfs() -> Check {
+    let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
+        return skip("tmpfs over the ROM", "cannot read /proc/self/mountinfo".into());
+    };
+    let roots = ["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
+    let mut hits: Vec<String> = Vec::new();
+    for line in mi.lines() {
+        let Some((pre, post)) = line.split_once(" - ") else { continue };
+        if post.split_whitespace().next() != Some("tmpfs") {
+            continue;
+        }
+        let Some(target) = pre.split_whitespace().nth(4) else { continue };
+        if roots.iter().any(|r| target.starts_with(r)) {
+            hits.push(target.to_string());
+        }
+    }
+    if hits.is_empty() {
+        pass("tmpfs over the ROM", "no tmpfs mounted inside a ROM partition".into())
+    } else {
+        fail(
+            "tmpfs over the ROM",
+            format!("{} ROM path(s) emptied by a tmpfs: {}", hits.len(), hits.join(", ")),
+            "stock never mounts tmpfs inside /system, /product or /vendor -- any app can read it from its own mountinfo",
+        )
+    }
+}
+
 pub fn run_audit() -> Result<()> {
     let targets = live_targets();
     let parents = parents_of(&targets);
@@ -523,6 +559,7 @@ pub fn run_audit() -> Result<()> {
         check_overlay_dir_ino(&targets),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&targets),
+        check_no_rom_tmpfs(),
     ];
 
     println!("nomount audit: {} live rule(s) across {} directory(ies)\n", targets.len(), parents.len());
