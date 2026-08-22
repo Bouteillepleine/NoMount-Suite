@@ -440,6 +440,19 @@ pub fn run_doctor() -> Result<()> {
                     s.source.display()
                 ),
             ),
+            // Already served by an injection, so absorb only has to unmount it —
+            // no `--include-dirs`, nothing to re-serve. Still a warning while it
+            // stands: a redundant mount is every bit as visible to an app as a
+            // load-bearing one.
+            crate::absorb::Disposition::Redundant => (
+                Level::Warn,
+                "module mount not absorbed",
+                format!(
+                    "{} <- {} is still a real mount and visible to any app, but its                      content is ALREADY served by live injections, so the mount is                      redundant — `nomount absorb` just unmounts it. The owning module                      is bind-mounting content NoMount already injects; dropping that                      bind from its post-fs-data.sh stops it coming back at boot",
+                    s.target.display(),
+                    s.source.display()
+                ),
+            ),
             // A DIRECTORY bind is absorbable in principle but a plain run always
             // skips it, so telling the reader to "run nomount absorb" would send
             // them to a command that declines it again and explains nothing.

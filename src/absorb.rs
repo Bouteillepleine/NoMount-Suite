@@ -184,6 +184,19 @@ pub enum Declined {
 pub enum Disposition {
     /// Convert it to injections.
     Absorb,
+    /// Every file this bind serves is ALREADY a live injection from the same
+    /// source file, so the mount adds nothing: drop it, add no rule.
+    ///
+    /// Worth its own verdict because both of the other answers are wrong for it.
+    /// `Absorb` would re-serve rules that already exist, and for a directory bind
+    /// would demand `--include-dirs` and snapshot a listing the module plan
+    /// already maintains properly. `Leaking` is what `serve_mode` returns for the
+    /// propagated twin of such a bind (`/mnt/vendor/my_product/...`, whose root is
+    /// in NON_PARTITION_ROOTS) even though dropping it removes nothing: it is the
+    /// same subtree as the servable path, already injected. Both were reported on
+    /// an OP11 whose Bootanimation module still ran a legacy `mount --bind` over
+    /// content NoMount was injecting anyway.
+    Redundant,
     /// Still mounted on purpose.
     Declined(Declined),
     /// Still mounted because absorb cannot take it, and still visible to apps.
@@ -408,6 +421,134 @@ pub fn survey_elsewhere() -> Vec<Elsewhere> {
     out
 }
 
+/// Live injections plus the mountpoint aliases needed to match a bind against
+/// them, so absorb can recognise a mount whose content it is already serving.
+///
+/// Both halves come from state absorb already reads: `nm list` for the rules,
+/// mountinfo for the aliases. Nothing here consults the module plan, so a rule
+/// counts only if the engine is really serving it right now.
+#[derive(Default)]
+pub(crate) struct Redundancy {
+    /// target -> source, uid-0 injects only. A per-UID rule does not make a
+    /// global mount redundant: dropping the mount would expose the stock file to
+    /// every other UID.
+    live: HashMap<PathBuf, PathBuf>,
+    /// Mountpoint pairs that are the same subtree, both directions. OnePlus
+    /// mounts one filesystem at both `/my_product` and `/mnt/vendor/my_product`,
+    /// so a module bind propagates to both and only one of the two paths is
+    /// servable — the other is under `/mnt`, which `serve_mode` refuses.
+    aliases: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Stop walking a source this large rather than answer slowly: a bind big enough
+/// to blow this budget is not the legacy two-file case this exists for, and
+/// "not redundant" is the safe answer (absorb just handles it the old way).
+const REDUNDANCY_FILE_BUDGET: usize = 5000;
+
+/// Parse `nm list` into uid-0 injections. Mirrors mount.rs `parse_live_rules`,
+/// minus the whiteout/virtual-dir kinds, which can never make a bind redundant.
+pub(crate) fn live_injections(list: &str) -> HashMap<PathBuf, PathBuf> {
+    let mut out = HashMap::new();
+    for l in list.lines() {
+        // A ` [UID: N]` suffix means the rule is scoped to one UID. Skip it
+        // rather than key on it: see the `live` field.
+        if l.contains(" [UID:") {
+            continue;
+        }
+        let l = l.trim();
+        if l.is_empty() || l.ends_with(" (whiteout)") || l.ends_with(" (virtual dir)") {
+            continue;
+        }
+        // Source is after the LAST ` -> `, so a target containing one survives.
+        if let Some((t, src)) = l.rsplit_once(" -> ") {
+            out.insert(PathBuf::from(t.trim()), PathBuf::from(src.trim()));
+        }
+    }
+    out
+}
+
+/// Mountpoints that are the same subtree, derived from mountinfo alone: identical
+/// (device, filesystem-root) is exactly what "same content" means.
+pub(crate) fn mount_aliases(rows: &[MountRow]) -> Vec<(PathBuf, PathBuf)> {
+    let mut by_subtree: HashMap<(&str, &str), Vec<&PathBuf>> = HashMap::new();
+    for r in rows {
+        by_subtree.entry((r.dev.as_str(), r.root.as_str())).or_default().push(&r.target);
+    }
+    let mut out = Vec::new();
+    for targets in by_subtree.values() {
+        for a in targets {
+            for b in targets {
+                if a != b {
+                    out.push(((*a).clone(), (*b).clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Relative paths of every regular file under `src`. A file source yields one
+/// empty path, meaning "src itself". `None` if the walk is too big or unreadable
+/// — an unknown listing must not be reported as fully covered.
+fn files_under(src: &Path) -> Option<Vec<PathBuf>> {
+    fn walk(dir: &Path, prefix: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
+        for e in std::fs::read_dir(dir).ok()?.flatten() {
+            if out.len() >= REDUNDANCY_FILE_BUDGET {
+                return None;
+            }
+            // Not `is_dir()`: that follows symlinks, and a symlinked directory
+            // would be walked as content the bind does not actually carry.
+            let ft = e.file_type().ok()?;
+            let rel = prefix.join(e.file_name());
+            if ft.is_dir() {
+                walk(&e.path(), &rel, out)?;
+            } else {
+                out.push(rel);
+            }
+        }
+        Some(())
+    }
+    if !src.is_dir() {
+        return src.exists().then(|| vec![PathBuf::new()]);
+    }
+    let mut out = Vec::new();
+    walk(src, Path::new(""), &mut out)?;
+    // An empty directory proves nothing is covered, so it is not redundant.
+    (!out.is_empty()).then_some(out)
+}
+
+impl Redundancy {
+    pub(crate) fn new(list: &str, rows: &[MountRow]) -> Self {
+        Self { live: live_injections(list), aliases: mount_aliases(rows) }
+    }
+
+    /// Every path this target is reachable by: itself, plus the same tail under
+    /// any mountpoint that is the same subtree.
+    fn reachable(&self, target: &Path) -> Vec<PathBuf> {
+        let mut out = vec![target.to_path_buf()];
+        for (a, b) in &self.aliases {
+            if let Ok(tail) = target.strip_prefix(a) {
+                out.push(b.join(tail));
+            }
+        }
+        out
+    }
+
+    /// True if a live injection already serves every file this bind carries, from
+    /// the very same source file. Source identity is the point: a rule pointing at
+    /// a DIFFERENT file at the same target means the mount is shadowing content
+    /// the engine would otherwise serve, which is not redundant at all.
+    pub(crate) fn covers(&self, src: &Path, target: &Path) -> bool {
+        let Some(files) = files_under(src) else { return false };
+        files.iter().all(|rel| {
+            let want = if rel.as_os_str().is_empty() { src.to_path_buf() } else { src.join(rel) };
+            self.reachable(target)
+                .iter()
+                .any(|t| self.live.get(&t.join(rel)).is_some_and(|s| *s == want))
+        })
+    }
+}
+
 /// The verdict for one foreign mount. Split out of `survey` so it can be tested
 /// without a /proc to read.
 /// `None` means the mount is none of our business — not a report, not an action.
@@ -417,6 +558,7 @@ pub(crate) fn classify(
     skips: &[String],
     skip_src: &'static str,
     hookers: &HashSet<String>,
+    red: &Redundancy,
 ) -> Option<Disposition> {
     // The target question belongs to mount.rs, not here — see `serve_mode`.
     let mode = crate::mount::serve_mode(target);
@@ -434,6 +576,13 @@ pub(crate) fn classify(
     }
     if let Some(d) = declined_reason_with(src, target, skips, skip_src, hookers) {
         return Some(Disposition::Declined(d));
+    }
+    // Asked BEFORE serve_mode, because serve_mode answers "can I serve this
+    // target?" and the whole point of a redundant bind is that nothing needs
+    // serving — the rules are already live. Asked AFTER the declines, so a hook
+    // framework stays skipped whatever its content looks like.
+    if red.covers(src, target) {
+        return Some(Disposition::Redundant);
     }
     Some(match mode {
         crate::mount::Serve::Inject => Disposition::Absorb,
@@ -462,6 +611,10 @@ pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
     let roots = fs_roots(&rows);
     let (skips, skip_src) = skip_list();
     let hookers = hooking_modules(&rows, &roots, &skips);
+    // One `nm list` per survey, not per row. An engine that will not answer
+    // leaves this empty, which only costs the redundancy shortcut: every mount
+    // then classifies exactly as it did before this existed.
+    let red = Redundancy::new(&Nm::new().list().unwrap_or_default(), &rows);
 
     let mut out: Vec<Surveyed> = rows
         .iter()
@@ -475,7 +628,7 @@ pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
             if r.target.components().count() <= 1 {
                 return None;
             }
-            let disposition = classify(&src, &r.target, &skips, skip_src, &hookers)?;
+            let disposition = classify(&src, &r.target, &skips, skip_src, &hookers, &red)?;
             Some(Surveyed { target: r.target.clone(), source: src, disposition })
         })
         .collect();
@@ -484,10 +637,13 @@ pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
     Ok(out)
 }
 
-/// A mount we intend to convert.
+/// A mount we intend to act on: convert it, or — when its content is already
+/// injected — simply drop it.
 pub struct Candidate {
     pub target: PathBuf,
     pub source: PathBuf,
+    /// Unmount only. Injecting would duplicate rules that already exist.
+    pub redundant: bool,
 }
 
 
@@ -545,6 +701,34 @@ pub fn set_absorbed(targets: &[PathBuf]) {
     }
 }
 
+/// Is anything still mounted here? The authority on whether an unmount worked:
+/// umount2 reports EINVAL both for "never a mountpoint" and for "a peer already
+/// took it away", and only the second is fine.
+pub(crate) fn still_mounted(p: &Path) -> bool {
+    std::fs::read_to_string(MOUNTINFO)
+        .map(|b| parse_mountinfo(&b).iter().any(|r| r.target == p))
+        .unwrap_or(false)
+}
+
+/// The path to re-assert rules at. `target` itself when it is servable; otherwise
+/// the alias that is -- `/mnt/vendor/my_product/...` cannot carry an injection
+/// (`/mnt` is not a ROM partition) but its twin `/my_product/...` can, and they
+/// are the same subtree, so serving one serves both.
+pub(crate) fn servable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -> PathBuf {
+    if matches!(crate::mount::serve_mode(target), crate::mount::Serve::Inject) {
+        return target.to_path_buf();
+    }
+    for (a, b) in aliases {
+        if let Ok(tail) = target.strip_prefix(a) {
+            let alt = b.join(tail);
+            if matches!(crate::mount::serve_mode(&alt), crate::mount::Serve::Inject) {
+                return alt;
+            }
+        }
+    }
+    target.to_path_buf()
+}
+
 pub(crate) fn umount_detach(p: &Path) -> bool {
     let Ok(c) = CString::new(p.to_string_lossy().as_bytes()) else {
         return false;
@@ -593,6 +777,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         }
         match &s.disposition {
             Disposition::Absorb => {}
+            Disposition::Redundant => println!(
+                "redundant {} <- {} (already served by an injection; unmounting only)",
+                s.target.display(),
+                s.source.display()
+            ),
             Disposition::Declined(Declined::Framework(id)) => println!(
                 "skipping {} ({id} is a hook framework)",
                 s.target.display()
@@ -634,8 +823,12 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
 
     let cands: Vec<Candidate> = surveyed
         .into_iter()
-        .filter(|s| matches!(s.disposition, Disposition::Absorb))
-        .map(|s| Candidate { target: s.target, source: s.source })
+        .filter(|s| matches!(s.disposition, Disposition::Absorb | Disposition::Redundant))
+        .map(|s| Candidate {
+            redundant: matches!(s.disposition, Disposition::Redundant),
+            target: s.target,
+            source: s.source,
+        })
         .collect();
     if cands.is_empty() {
         // "Nothing to absorb" is not "nothing is mounted". A declined mount is
@@ -655,6 +848,12 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     }
 
     let (mut done, mut failed, mut skipped_dirs) = (0u32, 0u32, 0u32);
+    let mut dropped = 0u32;
+    // Same mountinfo the survey classified from, so a redundant target resolves
+    // to the same servable twin here as it did there.
+    let aliases = std::fs::read_to_string(MOUNTINFO)
+        .map(|b| mount_aliases(&parse_mountinfo(&b)))
+        .unwrap_or_default();
     // Recorded so `reload` does not prune them: an absorbed rule is not in any
     // module plan, and the reconcile drops whatever the plan does not name.
     let mut fresh: Vec<PathBuf> = Vec::new();
@@ -662,6 +861,51 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         // Apply the same directory rule the real run uses, so a dry run can never
         // promise an action the real run would decline.
         let is_dir_bind = c.source.is_dir();
+        // A redundant bind skips the directory guard: that guard exists because
+        // absorb would have to snapshot a listing, and here it creates nothing.
+        // The rules covering this content are the module plan's, so `reload`
+        // keeps them current instead of freezing today's listing.
+        if c.redundant {
+            if dry_run {
+                println!(
+                    "would DROP redundant mount {} <- {}",
+                    c.target.display(),
+                    c.source.display()
+                );
+                dropped += 1;
+                continue;
+            }
+            // A peer of an already-dropped mount is gone too: one `mount --bind`
+            // under shared propagation appears once per mountpoint, so unmounting
+            // either takes both. umount2 then fails on the second with EINVAL,
+            // which is success, not failure -- ask mountinfo, not errno.
+            if !umount_detach(&c.target) && still_mounted(&c.target) {
+                eprintln!(
+                    "nomount: cannot unmount redundant {} - leaving it alone",
+                    c.target.display()
+                );
+                failed += 1;
+                continue;
+            }
+            dropped += 1;
+            // Re-issue the rules even though `nm list` already has them. A rule
+            // added while a bind shadowed the same name never took effect: the
+            // engine hangs its injection off a dentry the mount had already
+            // claimed, so the path kept resolving to the stock file and only
+            // started serving module content when the rule was added again.
+            // Measured on an OP11: after the unmount, the target still read the
+            // ROM's bootanimation.zip until `nm add` was repeated verbatim.
+            // Idempotent, so re-adding a rule that IS live costs nothing.
+            let mut refreshed = Vec::new();
+            if let Err(e) = inject(&nm, &c.source, &servable(&c.target, &aliases), &mut refreshed) {
+                eprintln!(
+                    "nomount: {} unmounted but re-asserting its rules failed: {e:#} - content may have reverted to the stock file",
+                    c.target.display()
+                );
+                failed += 1;
+            }
+            continue;
+        }
         if dry_run {
             if is_dir_bind && !include_dirs {
                 println!(
@@ -733,10 +977,15 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     } else {
         String::new()
     };
+    let drops = if dropped > 0 {
+        format!(", {dropped} redundant mount(s) dropped")
+    } else {
+        String::new()
+    };
     if dry_run {
         println!(
-            "nomount absorb: {} mount(s) would be absorbed, {skipped_dirs} directory bind(s) skipped{leaks} (dry run)",
-            cands.len() as u32 - skipped_dirs
+            "nomount absorb: {} mount(s) would be absorbed, {skipped_dirs} directory bind(s) skipped{drops}{leaks} (dry run)",
+            cands.len() as u32 - skipped_dirs - dropped
         );
     } else {
         let dirs = if skipped_dirs > 0 {
@@ -745,7 +994,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             String::new()
         };
         println!(
-            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {failed} failed{dirs}{leaks}"
+            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {failed} failed{dirs}{drops}{leaks}"
         );
     }
     Ok(())
@@ -859,22 +1108,22 @@ mod tests {
 
         // my_* -> mount.rs serves these with a real bind, so absorb must decline.
         assert!(matches!(
-            classify(&modsrc, Path::new("/my_product/app/Foo/Foo.apk"), &none, "test", &HashSet::new()).unwrap(),
+            classify(&modsrc, Path::new("/my_product/app/Foo/Foo.apk"), &none, "test", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Declined(Declined::MustBind)
         ));
         // apex is in NON_PARTITION_ROOTS: not ours to serve at all.
         assert!(matches!(
-            classify(&modsrc, Path::new("/apex/com.android.conscrypt/cacerts"), &none, "test", &HashSet::new()).unwrap(),
+            classify(&modsrc, Path::new("/apex/com.android.conscrypt/cacerts"), &none, "test", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Leaking(_)
         ));
         // A bare partition root would mask the whole partition.
         assert!(matches!(
-            classify(&modsrc, Path::new("/product"), &none, "test", &HashSet::new()).unwrap(),
+            classify(&modsrc, Path::new("/product"), &none, "test", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Leaking(_)
         ));
         // …and an ordinary ROM path still absorbs.
         assert!(matches!(
-            classify(&modsrc, Path::new("/system/app/Foo/Foo.apk"), &none, "test", &HashSet::new()).unwrap(),
+            classify(&modsrc, Path::new("/system/app/Foo/Foo.apk"), &none, "test", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Absorb
         ));
     }
@@ -890,6 +1139,7 @@ mod tests {
             &[],
             "test",
             &HashSet::new(),
+            &Redundancy::default(),
         );
         assert!(matches!(d, Some(Disposition::Leaking(_))), "must be reported as a leak");
 
@@ -902,7 +1152,7 @@ mod tests {
             ("/data/misc/profiles/cur", "/data_mirror/cur_profiles"),
         ] {
             assert!(
-                classify(Path::new(s), Path::new(t), &[], "test", &HashSet::new()).is_none(),
+                classify(Path::new(s), Path::new(t), &[], "test", &HashSet::new(), &Redundancy::default()).is_none(),
                 "stock plumbing {t} must not be reported"
             );
         }
@@ -915,7 +1165,7 @@ mod tests {
         let src = PathBuf::from("/data/adb/modules/anything/bin/dex2oat");
         let builtins: Vec<String> = BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect();
         assert!(matches!(
-            classify(&src, Path::new("/system/bin/app_process64"), &builtins, "built-in", &HashSet::new()).unwrap(),
+            classify(&src, Path::new("/system/bin/app_process64"), &builtins, "built-in", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Declined(Declined::Listed(_))
         ));
     }
@@ -945,6 +1195,7 @@ mod tests {
             &builtins,
             "test",
             &hookers,
+            &Redundancy::default(),
         );
         assert!(matches!(d, Some(Disposition::Declined(Declined::HooksElsewhere(_)))));
 
@@ -955,8 +1206,110 @@ mod tests {
             &builtins,
             "test",
             &hookers,
+            &Redundancy::default(),
         );
         assert!(matches!(d, Some(Disposition::Absorb)));
+    }
+
+    /// Two mountpoints of one filesystem subtree are the same content. OnePlus
+    /// mounts `254:34 /` at both `/my_product` and `/mnt/vendor/my_product`, which
+    /// is why a single `mount --bind` there shows up twice in mountinfo.
+    #[test]
+    fn mount_aliases_pair_mountpoints_sharing_dev_and_root() {
+        let rows = parse_mountinfo(&[
+            "1 0 254:34 / /mnt/vendor/my_product ro,noatime - f2fs /dev/block/dm-34 ro",
+            "2 0 254:34 / /my_product ro,noatime - f2fs /dev/block/dm-34 ro",
+            "3 0 254:78 / /data rw,noatime - f2fs /dev/block/dm-78 rw",
+        ]
+        .join("
+"));
+        let a = mount_aliases(&rows);
+        assert!(a.contains(&(
+            PathBuf::from("/mnt/vendor/my_product"),
+            PathBuf::from("/my_product")
+        )));
+        // Both directions, so either path can be the one absorb was handed.
+        assert!(a.contains(&(
+            PathBuf::from("/my_product"),
+            PathBuf::from("/mnt/vendor/my_product")
+        )));
+        // A lone mountpoint is nobody's alias.
+        assert!(!a.iter().any(|(x, _)| x == Path::new("/data")));
+    }
+
+    /// A per-UID rule serves one UID. Dropping a global mount because of one
+    /// would expose the stock file to every other UID.
+    #[test]
+    fn live_injections_ignores_per_uid_and_non_inject_rules() {
+        let live = live_injections(
+            "/system/etc/a -> /data/adb/modules/m/system/etc/a
+             /system/etc/b -> /data/adb/modules/m/system/etc/b [UID: 10123]
+             /system/etc/c (whiteout)
+             /system/etc (virtual dir)",
+        );
+        assert_eq!(live.len(), 1);
+        assert!(live.contains_key(Path::new("/system/etc/a")));
+    }
+
+    /// The case this exists for: a module still bind-mounts a directory whose
+    /// files NoMount is already injecting, and the bind propagated to a second
+    /// mountpoint that `serve_mode` refuses (`/mnt/...`). Both are redundant.
+    #[test]
+    fn a_bind_over_already_injected_content_is_redundant_through_either_path() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("bootanimation");
+        std::fs::create_dir_all(&src).unwrap();
+        for f in ["bootanimation.zip", "rbootanimation.zip"] {
+            std::fs::write(src.join(f), b"x").unwrap();
+        }
+        let list = format!(
+            "/my_product/media/bootanimation/bootanimation.zip -> {0}/bootanimation.zip
+             /my_product/media/bootanimation/rbootanimation.zip -> {0}/rbootanimation.zip",
+            src.display()
+        );
+        let rows = parse_mountinfo(&[
+            "1 0 254:34 / /mnt/vendor/my_product ro,noatime - f2fs /dev/block/dm-34 ro",
+            "2 0 254:34 / /my_product ro,noatime - f2fs /dev/block/dm-34 ro",
+        ]
+        .join("
+"));
+        let red = Redundancy::new(&list, &rows);
+
+        assert!(red.covers(&src, Path::new("/my_product/media/bootanimation")));
+        // The twin absorb calls "not a ROM partition": same subtree, so the rules
+        // that cover the servable path cover this one too.
+        assert!(red.covers(&src, Path::new("/mnt/vendor/my_product/media/bootanimation")));
+
+        // One file not covered is enough to disqualify the whole bind: dropping it
+        // would expose the stock file underneath that one name.
+        std::fs::write(src.join("extra.zip"), b"x").unwrap();
+        assert!(!red.covers(&src, Path::new("/my_product/media/bootanimation")));
+    }
+
+    /// A rule at the right target but pointing at a DIFFERENT file means the mount
+    /// is shadowing content the engine would otherwise serve — the opposite of
+    /// redundant, and unmounting it would change what apps read.
+    #[test]
+    fn a_rule_from_another_source_does_not_make_a_bind_redundant() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("f");
+        std::fs::write(&src, b"x").unwrap();
+        let red = Redundancy::new("/system/etc/f -> /data/adb/modules/other/system/etc/f", &[]);
+        assert!(!red.covers(&src, Path::new("/system/etc/f")));
+        // ...and with the rule naming this very file, it is.
+        let red = Redundancy::new(&format!("/system/etc/f -> {}", src.display()), &[]);
+        assert!(red.covers(&src, Path::new("/system/etc/f")));
+    }
+
+    /// An empty directory proves nothing, and a missing source proves nothing.
+    #[test]
+    fn nothing_to_prove_is_not_redundant() {
+        let d = tempfile::tempdir().unwrap();
+        let empty = d.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let red = Redundancy::new("/system/etc/x -> /whatever", &[]);
+        assert!(!red.covers(&empty, Path::new("/system/etc/x")));
+        assert!(!red.covers(&d.path().join("missing"), Path::new("/system/etc/x")));
     }
 
     /// The built-ins are a floor the skip file cannot lower.
