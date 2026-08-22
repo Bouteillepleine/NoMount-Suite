@@ -13,7 +13,7 @@
 //!   * A check that cannot run says so. "Skipped" is a distinct result from
 //!     "passed" -- reporting an unrun check as clean is how a hole survives.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -463,6 +463,53 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     }
 }
 
+/// An injected file must not be mapped as deleted.
+///
+/// Adding a rule d_drops the cached dentry for that name, which is how the next
+/// lookup gets routed through the injection. A process that already had the file
+/// mapped keeps that now-unhashed dentry, and the kernel renders every such
+/// mapping with a " (deleted)" suffix -- so `/proc/<pid>/maps` names exactly which
+/// files are injected. Measured on OP15: of 72 overlay APKs mapped by
+/// system_server, the only two flagged deleted were the two we inject, and an app
+/// serving an injected APK sees the same thing in its OWN maps, which needs no
+/// privilege at all.
+fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
+    if targets.is_empty() {
+        return skip("injected files in maps", "no live rules".into());
+    }
+    let want: HashSet<&Path> = targets.iter().map(PathBuf::as_path).collect();
+    let Ok(rd) = fs::read_dir("/proc") else {
+        return skip("injected files in maps", "cannot read /proc".into());
+    };
+    let mut hits: Vec<String> = Vec::new();
+    let mut scanned = 0u32;
+    for e in rd.filter_map(Result::ok) {
+        let pid = e.file_name().to_string_lossy().into_owned();
+        if !pid.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(maps) = fs::read_to_string(format!("/proc/{pid}/maps")) else { continue };
+        scanned += 1;
+        for line in maps.lines() {
+            let Some(rest) = line.strip_suffix(" (deleted)") else { continue };
+            let Some(path) = rest.split_whitespace().nth(5) else { continue };
+            if want.contains(Path::new(path)) && !hits.iter().any(|h| h.starts_with(path)) {
+                hits.push(format!("{path} (pid {pid})"));
+            }
+        }
+    }
+    if hits.is_empty() {
+        pass("injected files in maps", format!("{scanned} process(es): no injected file mapped as deleted"))
+    } else {
+        let shown = hits.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        fail(
+            "injected files in maps",
+            format!("{} injected file(s) mapped as deleted: {shown}", hits.len()),
+            "any app can read its own /proc/self/maps and see which of its files are injected",
+        )
+    }
+}
+
 pub fn run_audit() -> Result<()> {
     let targets = live_targets();
     let parents = parents_of(&targets);
@@ -475,6 +522,7 @@ pub fn run_audit() -> Result<()> {
         check_inode_band(&targets),
         check_overlay_dir_ino(&targets),
         check_erofs_dir_shape(&targets),
+        check_maps_not_deleted(&targets),
     ];
 
     println!("nomount audit: {} live rule(s) across {} directory(ies)\n", targets.len(), parents.len());
