@@ -166,6 +166,35 @@ static __always_inline struct nomount_dir_node *nomount_get_dir_node(struct inod
     return NULL;
 }
 
+/* Does `name` carry a rule here that this reader is NOT the audience for?
+ * nomount_get_rule_info() applies nm_rule_visible() internally, so a UID-scoped
+ * rule that does not match reports "no rule" and the caller falls through to the
+ * real fs. That is correct for this reader, but the dentry the real lookup caches
+ * is shared: whichever UID resolves the path first wins, and the UID the rule IS
+ * for then gets the stock view until drop_caches. Measured on OP15 against a rule
+ * scoped to uid 2000: 2000 read the injection, root's lookup cached the real
+ * dentry, and every later read by 2000 returned the real file. Same shape as the
+ * blocked-reader case below, one lookup away. */
+static __always_inline bool nm_name_has_hidden_uid_rule(struct nomount_dir_node *dir_node,
+                                                        const char *name, size_t len, u32 hash)
+{
+    struct nomount_child_node *child;
+    bool found = false;
+
+    if (unlikely(!dir_node)) return false;
+    if (!(dir_node->bloom_mask & (1ULL << (hash & 63)))) return false;
+
+    rcu_read_lock();
+    hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
+        if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
+            found = child->rule && !nm_rule_visible(child->rule);
+            break;
+        }
+    }
+    rcu_read_unlock();
+    return found;
+}
+
 /* Lockless read path: snapshot the needed fields under RCU and path_get() the
  * backing path, so callers never dereference the rule after rcu_read_unlock().
  * Returns true if a rule visible to the current UID was found; on true the caller
@@ -577,6 +606,16 @@ fallback:
         dentry->d_flags |= DCACHE_DONTCACHE;
 #endif
         nm_put_rule_info(&rule_info);
+    } else if (pdir && nm_name_has_hidden_uid_rule(pdir, name, len,
+                                                   full_name_hash(NULL, name, len))) {
+        /* Mirror of the above for a UID-scoped rule this reader is not the
+         * audience for: it legitimately sees the stock file, but that view must
+         * not outlive the call or it becomes the cached answer for the UID the
+         * rule names. */
+        nm_install_dentry_ops(dentry);
+#ifdef DCACHE_DONTCACHE
+        dentry->d_flags |= DCACHE_DONTCACHE;
+#endif
     }
 
     if (orig_iop && orig_iop->lookup)
