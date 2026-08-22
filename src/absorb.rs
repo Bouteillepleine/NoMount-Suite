@@ -341,12 +341,40 @@ pub(crate) fn source_of(row: &MountRow, roots: &HashMap<String, PathBuf>) -> Opt
     })
 }
 
+/// An installed app's APK: `/data/app/~~<hash>==/<pkg>-<hash>==/base.apk`, or the
+/// pre-Android-9 `/data/app/<pkg>-1/base.apk`, plus the `split_*.apk` siblings.
+///
+/// The one shape under `FOREIGN_ROOT` worth taking over. A patched-APK module
+/// (ReVanced and friends) binds its APK here from its own script, which leaves an
+/// `/adb/` token in every process's mount table -- issue #14. The engine serves
+/// `/data` targets perfectly well (measured on OP15: rule served, zero mounts,
+/// clean revert), so the old blanket "not on /data" refusal was a limit of the
+/// absorb gate, not of the engine.
+///
+/// Deliberately narrow: anything looser and absorb would start eating unrelated
+/// `/data` mounts, where a wrong take-over costs an app its data rather than a
+/// ROM file that can be re-served.
+pub(crate) fn is_app_apk(target: &Path) -> bool {
+    if !target.starts_with("/data/app/") {
+        return false;
+    }
+    let n = target.components().count();
+    // /data/app/<container>/<pkg-dir>/<file> = 6, /data/app/<pkg-dir>/<file> = 5.
+    if n != 5 && n != 6 {
+        return false;
+    }
+    target
+        .file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| f == "base.apk" || (f.starts_with("split_") && f.ends_with(".apk")))
+}
+
 /// Is this mount module content laid over the ROM? OWNERSHIP only — whether the
 /// target can actually be served is `mount::serve_mode`'s question, and asking
 /// it here instead is what let absorb inject onto `/my_*` and `/apex`.
 pub(crate) fn is_absorbable(src: &Path, target: &Path) -> bool {
     src.starts_with(MODULE_ROOT)
-        && !target.starts_with(FOREIGN_ROOT)
+        && (!target.starts_with(FOREIGN_ROOT) || is_app_apk(target))
         && target.components().count() > 1
 }
 
@@ -561,7 +589,14 @@ pub(crate) fn classify(
     red: &Redundancy,
 ) -> Option<Disposition> {
     // The target question belongs to mount.rs, not here — see `serve_mode`.
-    let mode = crate::mount::serve_mode(target);
+    // An app APK is the exception: serve_mode refuses everything under /data
+    // because no ROM partition lives there, but this one path IS servable and is
+    // the only /data shape absorb accepts (see `is_app_apk`).
+    let mode = if is_app_apk(target) {
+        crate::mount::Serve::Inject
+    } else {
+        crate::mount::serve_mode(target)
+    };
     if !is_absorbable(src, target) {
         if !src.starts_with(MODULE_ROOT) {
             // Backed by /data but not by a module. Only interesting if it landed
@@ -574,12 +609,13 @@ pub(crate) fn classify(
                     "source is outside /data/adb, so there is no module content to re-serve",
                 ));
         }
-        // Root-managed content laid over a /data path. Hookless injection does not
-        // serve /data, so this cannot be absorbed — but it is a real mount carrying
-        // an /adb/ token in every process's mount table, which is exactly what the
-        // mountless posture exists to deny. Say so rather than returning no verdict.
+        // Root-managed content laid over a /data path that is not an app APK. The
+        // engine could serve it, but absorb will not guess at arbitrary /data
+        // targets; it is still a real mount carrying an /adb/ token in every
+        // process's mount table, which is what the mountless posture exists to
+        // deny. Say so rather than returning no verdict.
         return Some(Disposition::Leaking(
-            "target is on /data, which hookless injection does not serve",
+            "target is on /data and is not an app APK, which absorb does not take over",
         ));
     }
     if let Some(d) = declined_reason_with(src, target, skips, skip_src, hookers) {
@@ -1085,6 +1121,41 @@ mod tests {
 900 205 254:78 /adb/modules/foo/system/bin/x /system/bin/x rw,noatime shared:9 - f2fs /dev/block/dm-78 rw
 35 1 0:35 / /product ro,noatime - erofs /dev/block/dm-25 ro";
 
+    /// Issue #14: a ReVanced module binds its patched APK over the installed app
+    /// from its own service.sh. That target is on /data, which absorb used to
+    /// refuse outright, so the Suite reported a clean posture while the bind sat
+    /// in every process's mount table.
+    #[test]
+    fn an_app_apk_bind_is_absorbable() {
+        let src = Path::new("/data/adb/rvhc/youtube-morphe-jhc-arm64.apk");
+        let target = Path::new("/data/app/~~j9-uUJRSd2LZbuW==/com.google.android.youtube-ZvGL==/base.apk");
+        assert!(is_app_apk(target));
+        assert!(is_absorbable(src, target));
+    }
+
+    #[test]
+    fn split_apks_and_the_legacy_layout_count_too() {
+        assert!(is_app_apk(Path::new("/data/app/~~a==/com.foo-b==/split_config.arm64_v8a.apk")));
+        assert!(is_app_apk(Path::new("/data/app/com.foo-1/base.apk")));
+    }
+
+    /// The gate stays shut for everything else under /data: a wrong take-over
+    /// there costs an app its data, not a ROM file that can be re-served.
+    #[test]
+    fn other_data_targets_stay_refused() {
+        let src = Path::new("/data/adb/modules/x/foo");
+        for t in [
+            "/data/app/~~a==/com.foo-b==/lib/arm64/libx.so",
+            "/data/app/~~a==/com.foo-b==/oat/arm64/base.odex",
+            "/data/data/com.foo/files/x.apk",
+            "/data/local/tmp/base.apk",
+            "/data/app/base.apk",
+        ] {
+            assert!(!is_app_apk(Path::new(t)), "{t}");
+            assert!(!is_absorbable(src, Path::new(t)), "{t}");
+        }
+    }
+
     #[test]
     fn resolves_a_bind_source_via_its_filesystem_root() {
         let rows = parse_mountinfo(SAMPLE);
@@ -1207,10 +1278,14 @@ mod tests {
     /// Every /data target used to be discarded as "module scratch space", so nobody
     /// surveyed it: absorb ignored it, doctor never named it, and the Modules pane
     /// badged the module mountless while a detector read /adb/ out of the process
-    /// mount table. It cannot be absorbed -- hookless does not serve /data -- but it
-    /// must be REPORTED.
+    /// mount table.
+    ///
+    /// It was reported as an unfixable leak on the premise that hookless cannot
+    /// serve /data. That premise was wrong -- measured on OP15, a rule over a /data
+    /// file serves correctly and creates no mount -- so this is now ABSORBED: the
+    /// APK is re-served as an injection and the bind goes away.
     #[test]
-    fn module_bind_over_an_installed_apk_is_reported_as_a_leak() {
+    fn module_bind_over_an_installed_apk_is_absorbed() {
         let none: Vec<String> = Vec::new();
         let src = PathBuf::from("/data/adb/rvhc/youtube-morphe-jhc-arm64.apk");
         let tgt = PathBuf::from(
@@ -1218,8 +1293,8 @@ mod tests {
         );
         let d = classify(&src, &tgt, &none, "test", &HashSet::new(), &Redundancy::default());
         assert!(
-            matches!(d, Some(Disposition::Leaking(_))),
-            "a module bind over an installed APK must be reported as a leak"
+            matches!(d, Some(Disposition::Absorb)),
+            "a module bind over an installed APK must be absorbed"
         );
 
         // The neighbouring cases must not change: a module's own scratch space on
