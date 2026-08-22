@@ -3376,10 +3376,56 @@ static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *
     hlist_add_head(&rule->victim_node, victims);
 }
 
+/*
+ * A target with fewer than two path components is a partition root (/system,
+ * /vendor, /product) or the filesystem root itself. Serving one redirects an
+ * ENTIRE partition at a single backing file: every exec under it then fails
+ * ENOTDIR. That is not a boot-time hazard, it is immediate -- and it takes adb
+ * with it, because adbd spawns /system/bin/sh, so the only recovery is a
+ * physical reboot.
+ *
+ * mount.rs::is_partition_root() already refuses these when the Suite builds a
+ * plan, but `nm` ships inside the module and speaks to this interface directly:
+ * a module script, a WebUI action or a root shell reaches the engine without
+ * passing through that check. The guard has to live on this side too.
+ *
+ * Measured 2026-08-22 on an OP11 (5.15): `nm add /system <file>` made the
+ * running system unusable in one command, and `adb reboot` could not recover it
+ * because that also needs a shell. The same class bootlooped an OP15 earlier
+ * through `nm add /product`, which masked the stock overlays and took zygote
+ * down at forkSystemServer.
+ *
+ * Counts components rather than slashes so "//system", "/system/" and
+ * "/system//" all answer the same.
+ */
+static bool nm_target_too_shallow(const char *p, u16 len)
+{
+    int comps = 0;
+    u16 i = 0;
+
+    while (i < len) {
+        while (i < len && p[i] == '/')
+            i++;
+        if (i >= len)
+            break;
+        if (++comps >= 2)
+            return false;
+        while (i < len && p[i] != '/')
+            i++;
+    }
+    return true;
+}
+
 static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid)
 {
     struct nomount_rule *rule, *existing, *victim = NULL;
     int err = 0;
+
+    if (unlikely(nm_target_too_shallow(v_path, v_len))) {
+        nm_warn("refusing rule on '%.*s': fewer than two path components would mask a whole partition\n",
+                (int)v_len, v_path);
+        return -EINVAL;
+    }
 
     mutex_lock(&nomount_write_mutex);
 
