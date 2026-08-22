@@ -1083,6 +1083,16 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     // the stock APK until a reboot. Cheap when there are none (no absorbed APK
     // rules means no work).
     if !dry_run {
+        // Re-serve what a previous run recorded. This runs from service.sh AFTER
+        // boot_completed, which is the timing that works: the same rule applied at
+        // post-fs-data, before PackageManager scans, corrupts the package (null
+        // Resources, then a system crash -- see mount.rs). Post-boot it is exactly
+        // what absorb itself does when it takes a bind over, so a module that no
+        // longer mounts (or is uninstalled) still gets its content served.
+        let reserved = reapply_absorbed(&nm);
+        if reserved > 0 {
+            println!("re-served {reserved} recorded APK rule(s)");
+        }
         let (repointed, stale) = refresh_app_apks(&nm);
         if repointed > 0 || stale > 0 {
             println!("refreshed {repointed} app APK rule(s), dropped {stale} for an uninstalled app");
