@@ -107,6 +107,19 @@ export NM_BIN="$MODDIR/bin/$ABI/nm"
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     _ab=$("$BIN" absorb 2>&1 | tail -1)
     echo "nomount: $_ab" > /dev/kmsg 2>/dev/null
+    # Second pass, later. Not every module binds by the time this runs: a
+    # patched-APK module (ReVanced and friends, issue #14) waits for
+    # sys.boot_completed, then for /sdcard, then polls `pm path` until
+    # PackageManager answers, then sleeps before mounting its APK over the
+    # installed one. That lands after the pass above on a slow boot, and a bind
+    # that arrives after the only absorb pass stays mounted for the whole
+    # session. Backgrounded so it cannot delay anything else here, and a plain
+    # no-op when nothing new turned up.
+    (
+        sleep 45
+        _ab2=$("$BIN" absorb 2>&1 | tail -1)
+        echo "nomount: late absorb pass: $_ab2" > /dev/kmsg 2>/dev/null
+    ) &
 fi
 
 # --- re-apply persistent whiteouts ---
