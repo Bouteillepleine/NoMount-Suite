@@ -37,7 +37,24 @@ J=$(( $(nproc 2>/dev/null || echo 4) * 2 ))
 [ "$J" -lt 4 ] && J=4
 
 export INV
-pm list packages -3 -f 2>/dev/null | sed 's/^package://' | xargs -P "$J" -n1 sh -c '
+# Publish a scan only when `pm` actually listed something. The redirect used to
+# truncate $CACHE as the pipeline STARTED, so a `pm list` that came back empty --
+# package service not up yet, or an interrupted scan -- replaced a good cache
+# with an empty one. An empty list then reads as "nothing found" rather than
+# "the scan failed", which is the wrong answer stated confidently. A genuinely
+# empty RESULT still publishes: only an empty INPUT is treated as failure.
+PKGS=$(pm list packages -3 -f 2>/dev/null | sed 's/^package://')
+if [ -z "$PKGS" ]; then
+    echo "nomount scan: pm listed no packages; keeping the previous cache" >&2
+    cat "$CACHE" 2>/dev/null
+    exit 0
+fi
+
+# NUL-delimited: plain `xargs` also applies QUOTE processing, so an APK path
+# containing a quote is either mangled or aborts the whole scan with "unmatched
+# quote" -- and a silently short scan here means the list is missing entries it
+# should have offered. -0 disables both splitting and quoting.
+printf '%s\n' "$PKGS" | tr '\n' '\0' | xargs -0 -P "$J" -n1 sh -c '
     apk="${1%=*}"; pkg="${1##*=}"
     [ -n "$pkg" ] || exit 0
     reasons=""
@@ -82,6 +99,6 @@ pm list packages -3 -f 2>/dev/null | sed 's/^package://' | xargs -P "$J" -n1 sh 
     fi
 
     [ -n "$reasons" ] && printf "%s\t%s\n" "$pkg" "$reasons"
-' _ | sort -u > "$CACHE"
+' _ | sort -u > "$CACHE.tmp" && mv -f "$CACHE.tmp" "$CACHE"
 
 cat "$CACHE"
