@@ -866,6 +866,66 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<PathBuf>) -> Resu
 }
 
 /// `nomount absorb [--dry-run]`.
+/// The package an installed-APK path belongs to: `/data/app/~~a==/com.foo-b==/base.apk`
+/// yields `com.foo`. The trailing `-<hash>` (or `-1` on the old layout) is the
+/// install generation, and it is exactly what changes when the app updates.
+pub(crate) fn pkg_of_apk_target(target: &Path) -> Option<String> {
+    if !is_app_apk(target) {
+        return None;
+    }
+    let dir = target.parent()?.file_name()?.to_str()?;
+    let (pkg, _gen) = dir.rsplit_once('-')?;
+    // A package name is dotted and never empty; anything else means the layout
+    // changed under us and guessing would re-point a rule at the wrong app.
+    (!pkg.is_empty() && pkg.contains('.')).then(|| pkg.to_string())
+}
+
+/// Where PackageManager says the package lives right now.
+fn current_apk_of(pkg: &str) -> Option<PathBuf> {
+    let out = std::process::Command::new("pm").args(["path", pkg]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("package:"))
+        .map(|p| PathBuf::from(p.trim()))
+}
+
+/// Re-point absorbed APK rules at the app's current path.
+///
+/// An absorbed rule names `/data/app/~~<hash>==/<pkg>-<hash>==/base.apk`, and both
+/// hashes are regenerated when the app updates: the rule then points at a path
+/// that no longer exists, so the app silently reverts to the stock APK until the
+/// next boot re-absorbs. PackageManager knows the new path, so ask it.
+///
+/// Returns (repointed, stale) — stale being rules whose package is simply gone
+/// (uninstalled), which are dropped rather than re-pointed.
+pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
+    let (mut repointed, mut stale) = (0u32, 0u32);
+    let Ok(list) = nm.list() else { return (0, 0) };
+    for line in list.lines() {
+        let Some((target, source)) = line.split_once(" -> ") else { continue };
+        let target = Path::new(target.trim());
+        // A UID-scoped rule prints a trailing "[UID: n]"; the source ends there.
+        let source = PathBuf::from(source.split(" [").next().unwrap_or(source).trim());
+        if !is_app_apk(target) || target.exists() {
+            continue;
+        }
+        let Some(pkg) = pkg_of_apk_target(target) else { continue };
+        match current_apk_of(&pkg) {
+            Some(now) if now != target && source.exists() => {
+                let _ = nm.del(target);
+                if nm.add(&now, &source).is_ok() {
+                    repointed += 1;
+                }
+            }
+            _ => {
+                let _ = nm.del(target);
+                stale += 1;
+            }
+        }
+    }
+    (repointed, stale)
+}
+
 pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     let nm = Nm::new();
     nm.version()
@@ -874,6 +934,16 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     // Report the whole picture BEFORE acting, so a mount absorb cannot take is
     // never implied to be absent. "Nothing to absorb" and "nothing is mounted"
     // are different claims and only the second one is the posture.
+    // Before surveying: a rule pointing at an APK path the app has moved away from
+    // is not a mount, so the survey would never see it, and the app would sit on
+    // the stock APK until a reboot. Cheap when there are none (no absorbed APK
+    // rules means no work).
+    if !dry_run {
+        let (repointed, stale) = refresh_app_apks(&nm);
+        if repointed > 0 || stale > 0 {
+            println!("refreshed {repointed} app APK rule(s), dropped {stale} for an uninstalled app");
+        }
+    }
     let surveyed = survey()?;
     // Same mountinfo the survey classified from, so a redundant target resolves
     // to the same servable twin here as it did there.
@@ -1146,6 +1216,38 @@ mod tests {
     /// from its own service.sh. That target is on /data, which absorb used to
     /// refuse outright, so the Suite reported a clean posture while the bind sat
     /// in every process's mount table.
+    /// An app update regenerates both hashes in
+    /// /data/app/~~<hash>==/<pkg>-<hash>==/base.apk, so an absorbed rule has to be
+    /// re-pointed by package name rather than by remembering the old path.
+    #[test]
+    fn a_package_name_is_recoverable_from_its_apk_path() {
+        assert_eq!(
+            pkg_of_apk_target(Path::new(
+                "/data/app/~~j9-uUJRSd2LZbuW==/com.google.android.youtube-ZvGL==/base.apk"
+            ))
+            .as_deref(),
+            Some("com.google.android.youtube")
+        );
+        assert_eq!(
+            pkg_of_apk_target(Path::new("/data/app/com.foo.bar-1/base.apk")).as_deref(),
+            Some("com.foo.bar")
+        );
+    }
+
+    /// Guessing a package from a path that is not an app APK, or from a directory
+    /// with no generation suffix, would re-point a live rule at the wrong file.
+    #[test]
+    fn a_package_name_is_not_guessed_from_anything_else() {
+        for p in [
+            "/data/app/~~a==/nodots-b==/base.apk",
+            "/data/app/~~a==/com.foo/base.apk",
+            "/product/overlay/x.apk",
+            "/data/app/~~a==/com.foo-b==/lib/arm64/libx.so",
+        ] {
+            assert!(pkg_of_apk_target(Path::new(p)).is_none(), "{p}");
+        }
+    }
+
     #[test]
     fn an_app_apk_bind_is_absorbable() {
         let src = Path::new("/data/adb/rvhc/youtube-morphe-jhc-arm64.apk");

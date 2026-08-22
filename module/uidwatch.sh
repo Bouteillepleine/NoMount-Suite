@@ -38,7 +38,13 @@
 MODDIR=/data/adb/modules/meta-nomount
 NMDIR=/data/adb/nomount
 [ -f "$NMDIR/disabled" ] && exit 0
-[ -s "$NMDIR/uidhide" ] || exit 0
+# Two jobs ride this one watch, because PackageManager rewriting packages.list is
+# the trigger for both and a second inotifyd would cost another blocked process:
+#   * re-apply the per-app hide list (an appid only exists once installed);
+#   * re-point absorbed app-APK rules (an update regenerates the /data/app path,
+#     leaving the rule aimed at a file that no longer exists — issue #14).
+# Proceed when EITHER has something to do.
+[ -s "$NMDIR/uidhide" ] || [ -s "$NMDIR/absorbed.list" ] || exit 0
 
 ABI=$(getprop ro.product.cpu.abi)
 BIN="$MODDIR/bin/$ABI/nomount"
@@ -65,6 +71,16 @@ trap 'rm -f "$LOCK"' EXIT INT TERM
 # PackageManager writes the file in a couple of steps (temp file, then rename);
 # let it settle so we resolve the finished map rather than a half-written one.
 sleep 3
-_out=$("$BIN" uid apply 2>&1)
-echo "nomount: hide list re-applied after package change ($_out)" > /dev/kmsg 2>/dev/null
+if [ -s "$NMDIR/uidhide" ]; then
+    _out=$("$BIN" uid apply 2>&1)
+    echo "nomount: hide list re-applied after package change ($_out)" > /dev/kmsg 2>/dev/null
+fi
+
+# An absorbed APK rule survives the app it serves being updated only if it is
+# re-pointed at the new path; absorb refreshes those before it surveys, and is a
+# no-op when nothing moved.
+if [ -s "$NMDIR/absorbed.list" ]; then
+    _abs=$("$BIN" absorb 2>&1 | tail -1)
+    echo "nomount: absorb after package change ($_abs)" > /dev/kmsg 2>/dev/null
+fi
 exit 0
