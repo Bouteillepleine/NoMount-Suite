@@ -158,27 +158,32 @@ fn check_zero_mount() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
         return skip("zero-mount posture", "cannot read /proc/self/mountinfo".into());
     };
-    let hits: Vec<&str> = mi
-        .lines()
-        .filter(|l| l.split_whitespace().nth(3).is_some_and(|r| r.contains("/adb/modules/")))
+    // /adb/, not /adb/modules/: a module is free to bind from anywhere under
+    // /data/adb and several do. Issue #14 is the case in point -- a YouTube
+    // ReVanced module binds /data/adb/rvhc/<apk> over the installed APK, which
+    // this check called clean while Duck reported it as a critical root mount.
+    // Resolve the source properly (mountinfo field 4 is fs-relative) rather than
+    // matching the raw field, so the same row also yields the owning module.
+    let rows = crate::absorb::parse_mountinfo(&mi);
+    let roots = crate::absorb::fs_roots(&rows);
+    let hits: Vec<(&crate::absorb::MountRow, std::path::PathBuf)> = rows
+        .iter()
+        .filter_map(|r| crate::absorb::source_of(r, &roots).map(|src| (r, src)))
+        .filter(|(_, src)| src.starts_with("/data/adb"))
         .collect();
     // A hook framework's bind is one absorb deliberately never takes over --
     // breaking a Zygisk/Xposed hook surfaces hours later during dexopt, not at
     // boot. Counting it as a failure would leave every LSPosed user staring at a
     // permanent FAIL they cannot act on, so it is reported as expected. It is
     // still SHOWN, because it is genuinely visible to apps.
-    let (by_design, leaked): (Vec<&&str>, Vec<&&str>) = hits.iter().partition(|l| {
-        l.split_whitespace()
-            .nth(3)
-            .and_then(|root| root.split("/adb/modules/").nth(1))
-            .and_then(|rest| rest.split('/').next())
-            .is_some_and(|id| {
-                crate::absorb::is_hook_framework(Path::new("/data/adb/modules").join(id).as_path())
-            })
+    // A source outside /data/adb/modules has no module dir, so it can never be a
+    // hook framework: it is reported as a leak, which is what it is.
+    let (by_design, leaked): (Vec<_>, Vec<_>) = hits.iter().partition(|(_, src)| {
+        crate::absorb::module_dir_of(src).is_some_and(|d| crate::absorb::is_hook_framework(&d))
     });
-    let show = |v: &[&&str]| -> String {
+    let show = |v: &[&(&crate::absorb::MountRow, std::path::PathBuf)]| -> String {
         v.iter()
-            .filter_map(|l| l.split_whitespace().nth(4).map(|s| s.to_string()))
+            .map(|(r, _)| r.target.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -502,4 +507,52 @@ pub fn run_audit() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #14: a ReVanced module binds its APK from /data/adb/rvhc, not from
+    /// /data/adb/modules, over the installed app. The old filter keyed on
+    /// "/adb/modules/" so this row was invisible and the check reported clean
+    /// while Duck flagged the very same line as a critical root mount.
+    #[test]
+    fn a_bind_from_outside_modules_is_still_a_module_mount() {
+        let mi = "\
+25 2 254:81 / /data rw,nosuid,nodev,noatime - f2fs /dev/block/dm-81 rw
+30311 2105 254:81 /adb/rvhc/youtube-morphe-jhc-arm64.apk /data/app/~~j9==/com.google.android.youtube-Zv==/base.apk rw,nosuid,nodev,noatime - f2fs /dev/block/dm-81 rw
+";
+        let rows = crate::absorb::parse_mountinfo(mi);
+        let roots = crate::absorb::fs_roots(&rows);
+        let srcs: Vec<_> = rows
+            .iter()
+            .filter_map(|r| crate::absorb::source_of(r, &roots))
+            .filter(|s| s.starts_with("/data/adb"))
+            .collect();
+        assert_eq!(srcs.len(), 1, "the rvhc bind must resolve under /data/adb");
+        assert_eq!(srcs[0], Path::new("/data/adb/rvhc/youtube-morphe-jhc-arm64.apk"));
+        // No module dir, so it can never be excused as a hook framework.
+        assert!(crate::absorb::module_dir_of(&srcs[0]).is_none());
+    }
+
+    /// The by-design exemption still has to work for a real module source.
+    #[test]
+    fn a_bind_from_a_module_dir_still_names_its_module() {
+        let mi = "\
+25 2 254:81 / /data rw - f2fs /dev/block/dm-81 rw
+900 25 254:81 /adb/modules/zygisk_lsposed/bin/dex2oat /apex/com.android.art/bin/dex2oat64 rw - f2fs /dev/block/dm-81 rw
+";
+        let rows = crate::absorb::parse_mountinfo(mi);
+        let roots = crate::absorb::fs_roots(&rows);
+        let src = rows
+            .iter()
+            .filter_map(|r| crate::absorb::source_of(r, &roots))
+            .find(|s| s.starts_with("/data/adb"))
+            .expect("resolves");
+        assert_eq!(
+            crate::absorb::module_dir_of(&src).as_deref(),
+            Some(Path::new("/data/adb/modules/zygisk_lsposed"))
+        );
+    }
 }
