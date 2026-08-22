@@ -1888,7 +1888,29 @@ static const struct file_operations nm_file_fops = {
     .fsync = nm_fsync,
 };
 
+/* access() must agree with stat() and open().
+ *
+ * Refusing a hidden reader in getattr/open while the dentry stays hashed left
+ * inode_permission() answering "yes": measured on OP15, access(F_OK) and
+ * access(R_OK) both returned 0 for a file whose stat() and open() returned
+ * -ENOENT. No real filesystem does that, and a detector reads it as a permission
+ * loophole -- which is precisely the shape one of them (Holmes) reports. So the
+ * permission hook has to tell the same story as the rest of the ops. */
+static int nm_inode_permission(IDMAP_ARG struct inode *inode, int mask)
+{
+    if (unlikely(nm_hidden_from_caller(inode->i_private)))
+        return -ENOENT;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+    return generic_permission(idmap, inode, mask);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+    return generic_permission(mnt_userns, inode, mask);
+#else
+    return generic_permission(inode, mask);
+#endif
+}
+
 static const struct inode_operations nm_file_iops = {
+    .permission = nm_inode_permission,
     .getattr = nm_file_getattr,
     .setattr = nm_setattr,
     .listxattr = nm_listxattr,
@@ -1912,6 +1934,7 @@ static const struct file_operations nm_dir_fops = {
 };
 
 static const struct inode_operations nm_dir_iops = {
+    .permission = nm_inode_permission,
     .lookup = nm_dir_lookup,
     .getattr = nm_file_getattr,
     .setattr = nm_setattr,
