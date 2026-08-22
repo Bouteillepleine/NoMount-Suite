@@ -753,9 +753,15 @@ pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
 /// Skips a target already served and a source that has gone (module uninstalled),
 /// so a stale record cannot resurrect a rule pointing at nothing.
 pub fn reapply_absorbed(nm: &Nm) -> u32 {
+    reapply_absorbed_pairs(nm, &absorbed_pairs())
+}
+
+/// Same, against a record read earlier -- `run_mount` has to snapshot it before it
+/// clears the file.
+pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
     let live = nm.list().unwrap_or_default();
     let mut n = 0;
-    for (target, source) in absorbed_pairs() {
+    for (target, source) in pairs.iter().cloned() {
         if !is_app_apk(&target) || !source.exists() || !target.exists() {
             continue;
         }

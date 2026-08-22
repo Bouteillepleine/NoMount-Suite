@@ -816,15 +816,19 @@ pub fn run_mount() -> Result<()> {
     // `clear` dropped every absorbed rule too, so the record of them is now a lie.
     // Left behind, `reload` would protect targets that no longer carry a rule.
     // service.sh re-runs absorb after boot and repopulates it.
+    // Read the record BEFORE clearing it -- set_absorbed(&[]) truncates the file,
+    // so re-serving afterwards read an empty list and silently did nothing.
+    let recorded = crate::absorb::absorbed_pairs();
     crate::absorb::set_absorbed(&[]);
-    // Re-serve what absorb recorded, BEFORE the module plan runs: an absorbed APK
-    // rule is the reason a patched-APK module never has to mount at boot, and the
-    // mount is what marks other processes' mappings "(deleted)". Skips a target
-    // already served and a source that has gone.
-    {
-        let n = crate::absorb::reapply_absorbed(&nm);
+    // Re-serve what absorb recorded. This is what lets a patched-APK module stay
+    // unmounted across a reboot: the rule is back before anything maps the path,
+    // so nothing ever gets the "(deleted)" marking a late takeover leaves behind.
+    // Skips a target already served and a source that has gone.
+    if !recorded.is_empty() {
+        let n = crate::absorb::reapply_absorbed_pairs(&nm, &recorded);
         if n > 0 {
             println!("nomount: re-served {n} absorbed APK rule(s) from the record");
+            crate::absorb::set_absorbed_pairs(&recorded);
         }
     }
 
