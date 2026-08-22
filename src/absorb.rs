@@ -729,6 +729,34 @@ pub(crate) fn servable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -> PathBuf
     target.to_path_buf()
 }
 
+/// May a redundant bind be dropped while Android is running?
+///
+/// Only when re-asserting its rules afterwards is safe, and on `my_*` it is not.
+/// Dropping the mount alone is not an option either: a rule registered behind a
+/// bind is inert until re-added, so an unmount without the re-assert silently
+/// reverts the path to the stock file. So `my_*` is reported and left alone --
+/// the fix there is to delete the owning module's bind, after which the next
+/// boot registers the rule with nothing shadowing it and no runtime re-add is
+/// ever needed.
+///
+/// Measured, not theorised: absorbing the two `/my_product/media/bootanimation`
+/// binds on an OP11 (Suite v1.3.22, engine v14) unmounted them, re-added four
+/// `my_*` rules in a burst, and the device rebooted mid-command -- clean
+/// `sys.boot.reason=reboot`, no tombstone, no crash record. That is the FD
+/// allowlist hazard `mount.rs::my_hookless_enabled` says it is trialling.
+pub(crate) fn runtime_droppable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -> bool {
+    // ANY component, not just the root: the twin of `/my_product/...` is
+    // `/mnt/vendor/my_product/...`, whose root is `mnt`. And checked on the
+    // target as well as on the servable path, because `serve_mode` only calls a
+    // my_* target injectable while the `my_hookless` marker is present — the
+    // hazard does not come and go with that marker.
+    fn touches_my_partition(p: &Path) -> bool {
+        p.components()
+            .any(|c| c.as_os_str().to_str().is_some_and(|s| s.starts_with("my_")))
+    }
+    !touches_my_partition(target) && !touches_my_partition(&servable(target, aliases))
+}
+
 pub(crate) fn umount_detach(p: &Path) -> bool {
     let Ok(c) = CString::new(p.to_string_lossy().as_bytes()) else {
         return false;
@@ -770,6 +798,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     // never implied to be absent. "Nothing to absorb" and "nothing is mounted"
     // are different claims and only the second one is the posture.
     let surveyed = survey()?;
+    // Same mountinfo the survey classified from, so a redundant target resolves
+    // to the same servable twin here as it did there.
+    let aliases = std::fs::read_to_string(MOUNTINFO)
+        .map(|b| mount_aliases(&parse_mountinfo(&b)))
+        .unwrap_or_default();
     let (mut leaking, mut declined) = (0u32, 0u32);
     for s in &surveyed {
         if matches!(s.disposition, Disposition::Declined(_)) {
@@ -777,11 +810,20 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         }
         match &s.disposition {
             Disposition::Absorb => {}
-            Disposition::Redundant => println!(
+            Disposition::Redundant if runtime_droppable(&s.target, &aliases) => println!(
                 "redundant {} <- {} (already served by an injection; unmounting only)",
                 s.target.display(),
                 s.source.display()
             ),
+            // Still a foreign mount at the end of the run, so it counts as one.
+            Disposition::Redundant => {
+                leaking += 1;
+                eprintln!(
+                    "nomount: LEAK {} <- {} is redundant (its content is already injected) but stays mounted: re-asserting a my_* rule at runtime has rebooted a device, and unmounting without that re-assert reverts the path to the stock file. Delete the bind from the owning module's post-fs-data.sh instead -- the next boot then serves it by injection with nothing to absorb",
+                    s.target.display(),
+                    s.source.display()
+                );
+            }
             Disposition::Declined(Declined::Framework(id)) => println!(
                 "skipping {} ({id} is a hook framework)",
                 s.target.display()
@@ -823,7 +865,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
 
     let cands: Vec<Candidate> = surveyed
         .into_iter()
-        .filter(|s| matches!(s.disposition, Disposition::Absorb | Disposition::Redundant))
+        .filter(|s| match s.disposition {
+            Disposition::Absorb => true,
+            Disposition::Redundant => runtime_droppable(&s.target, &aliases),
+            _ => false,
+        })
         .map(|s| Candidate {
             redundant: matches!(s.disposition, Disposition::Redundant),
             target: s.target,
@@ -840,8 +886,8 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
                 "nomount absorb: nothing to absorb; {d} mount(s) left by design and still visible"
             ),
             (n, d) => println!(
-                "nomount absorb: nothing to absorb, but {n} foreign mount(s) remain \
-                 ({d} left by design) — the posture is NOT clean"
+                "nomount absorb: nothing to absorb, but {n} foreign mount(s) remain, \
+                 plus {d} more left by design — the posture is NOT clean"
             ),
         }
         return Ok(());
@@ -849,11 +895,10 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
 
     let (mut done, mut failed, mut skipped_dirs) = (0u32, 0u32, 0u32);
     let mut dropped = 0u32;
-    // Same mountinfo the survey classified from, so a redundant target resolves
-    // to the same servable twin here as it did there.
-    let aliases = std::fs::read_to_string(MOUNTINFO)
-        .map(|b| mount_aliases(&parse_mountinfo(&b)))
-        .unwrap_or_default();
+    // One re-assert per servable target: the same rules are reachable from both
+    // mountpoints of a propagated bind, and re-adding them twice in a burst is
+    // exactly what preceded the reboot this path now avoids on my_*.
+    let mut reasserted: HashSet<PathBuf> = HashSet::new();
     // Recorded so `reload` does not prune them: an absorbed rule is not in any
     // module plan, and the reconcile drops whatever the plan does not name.
     let mut fresh: Vec<PathBuf> = Vec::new();
@@ -896,8 +941,12 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             // Measured on an OP11: after the unmount, the target still read the
             // ROM's bootanimation.zip until `nm add` was repeated verbatim.
             // Idempotent, so re-adding a rule that IS live costs nothing.
+            let at = servable(&c.target, &aliases);
+            if !reasserted.insert(at.clone()) {
+                continue;
+            }
             let mut refreshed = Vec::new();
-            if let Err(e) = inject(&nm, &c.source, &servable(&c.target, &aliases), &mut refreshed) {
+            if let Err(e) = inject(&nm, &c.source, &at, &mut refreshed) {
                 eprintln!(
                     "nomount: {} unmounted but re-asserting its rules failed: {e:#} - content may have reverted to the stock file",
                     c.target.display()
@@ -1310,6 +1359,53 @@ mod tests {
         let red = Redundancy::new("/system/etc/x -> /whatever", &[]);
         assert!(!red.covers(&empty, Path::new("/system/etc/x")));
         assert!(!red.covers(&d.path().join("missing"), Path::new("/system/etc/x")));
+    }
+
+    /// A redundant bind is only actionable while Android runs if re-asserting its
+    /// rules afterwards is safe. On `my_*` it is not, so it is reported instead.
+    #[test]
+    fn my_partitions_are_never_dropped_at_runtime() {
+        let aliases = vec![(
+            PathBuf::from("/mnt/vendor/my_product"),
+            PathBuf::from("/my_product"),
+        )];
+        // Both the servable path and its /mnt twin resolve to a my_* rule.
+        assert!(!runtime_droppable(Path::new("/my_product/media/bootanimation"), &aliases));
+        assert!(!runtime_droppable(
+            Path::new("/mnt/vendor/my_product/media/bootanimation"),
+            &aliases
+        ));
+        // An ordinary partition stays actionable.
+        assert!(runtime_droppable(Path::new("/system/etc/f"), &aliases));
+        assert!(runtime_droppable(Path::new("/product/media/x.zip"), &[]));
+    }
+
+    /// `/mnt/...` cannot carry an injection, but its same-subtree twin can, and
+    /// that is where the rules have to be re-asserted.
+    #[test]
+    fn the_servable_twin_is_where_rules_land() {
+        // Deliberately not a my_* pair: `serve_mode` only treats my_* as injectable
+        // while the `my_hookless` marker exists, which is a property of the device
+        // under test, not of this function.
+        let aliases = vec![
+            (PathBuf::from("/mnt/vendor/product"), PathBuf::from("/product")),
+            (PathBuf::from("/product"), PathBuf::from("/mnt/vendor/product")),
+        ];
+        assert_eq!(
+            servable(Path::new("/mnt/vendor/product/media/b"), &aliases),
+            PathBuf::from("/product/media/b")
+        );
+        // Already servable: unchanged.
+        assert_eq!(
+            servable(Path::new("/system/etc/f"), &aliases),
+            PathBuf::from("/system/etc/f")
+        );
+        // No alias to fall back on: returned as-is, and the caller's
+        // runtime_droppable/serve_mode checks still refuse it.
+        assert_eq!(
+            servable(Path::new("/mnt/vendor/other/f"), &aliases),
+            PathBuf::from("/mnt/vendor/other/f")
+        );
     }
 
     /// The built-ins are a floor the skip file cannot lower.
