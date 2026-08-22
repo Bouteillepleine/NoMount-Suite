@@ -6,9 +6,18 @@ name: NoMount hookless — compile-test matrix
 
 on:
   push:
-    branches: [hookless]
+    # Work branches too, not just hookless: a change that only compiles on one
+    # version is exactly what this matrix exists to catch, and catching it after
+    # the merge means hookless is broken while someone bisects ten jobs.
+    branches: [hookless, 'fix/**', 'feature/**', 'update/**', 'audit/**']
     # Only rebuild when the patch/source or this workflow changes — NOT for docs
     # (e.g. hookless/AUDIT.md), so documentation edits don't re-run all ten.
+    paths:
+      - 'hookless/src/**'
+      - 'hookless/patches/**'
+      - '.github/workflows/hookless-compile-matrix.yml'
+  pull_request:
+    branches: [hookless]
     paths:
       - 'hookless/src/**'
       - 'hookless/patches/**'
