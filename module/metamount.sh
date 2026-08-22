@@ -35,15 +35,30 @@ exec 2>&8 8>&-
 # umask 077 above already gives 0600; keep the chmod for a lock file an older
 # build left behind wide.
 chmod 0600 "$LOCK" 2>/dev/null
-if command -v flock >/dev/null 2>&1; then
-    flock -n 9 || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
-else
-    # No flock: the single-run guard is GONE, and two concurrent mount passes
-    # would race on the same rule set. Say so rather than proceeding quietly --
-    # a missing guard that announces itself is debuggable; a silent one is not.
-    # (flock is /system/bin/flock on a stock ROM, so reaching this means the
-    # ROM is unusual, which is exactly when you want the warning.)
+# Three outcomes, not two. `flock -n 9 || exit 0` conflated the last with the
+# first: it reads ANY failure as "another pass already holds the lock" and
+# returns silently having injected nothing.
+#
+# mksh (/system/bin/sh) marks a shell-opened fd >= 3 close-on-exec, so an
+# external flock never receives fd 9 and fails EBADF no matter what. KSU runs
+# module scripts under its bundled busybox ash, where the fd IS inherited and
+# the guard works -- but anything invoking this script with /system/bin/sh gets
+# a flock that CANNOT succeed, and the silent exit made that indistinguishable
+# from a healthy second instance backing off.
+#
+# The probe asks an EXTERNAL process to look at its own fd table, which is the
+# property flock depends on and needs no knowledge of which shell is running --
+# `cmd >&9` would not do, because the parent performs that redirection and always
+# succeeds. Verified on an OP11 to predict flock's outcome in both shells. An fd
+# an external binary cannot see takes the same
+# warn-and-continue path as a missing flock: no single-run guard, but said out
+# loud, which is the documented behaviour for that case.
+if ! command -v flock >/dev/null 2>&1; then
     echo "nomount: flock unavailable — mount pass running WITHOUT a single-run guard" > /dev/kmsg 2>/dev/null
+elif ! ls /proc/self/fd/9 >/dev/null 2>&1; then
+    echo "nomount: fd 9 is close-on-exec in this shell, so flock cannot use it — mount pass running WITHOUT a single-run guard" > /dev/kmsg 2>/dev/null
+else
+    flock -n 9 || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
 fi
 
 ABI=$(getprop ro.product.cpu.abi)
