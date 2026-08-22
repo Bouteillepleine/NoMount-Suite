@@ -926,6 +926,61 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     (repointed, stale)
 }
 
+/// ROM partitions a module might try to empty. A tmpfs anywhere under one of
+/// these is never stock: measured on OP15, 21 mounts land inside a ROM partition
+/// (vfat firmware, ext4 dsp, the OEM's own overlayfs) and not one of them is a
+/// tmpfs -- stock keeps those at /dev, /mnt, /apex, /linkerconfig and /tmp.
+const ROM_ROOTS: &[&str] =
+    &["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
+
+/// Is this mountinfo line a tmpfs laid over a ROM path?
+///
+/// A module that wants a stock directory to look empty mounts an empty tmpfs over
+/// it -- the ReVanced installer does exactly this to `/product/app/<App>` from a
+/// post-fs-data.d script, so its /data/app copy wins the PackageManager scan. It
+/// has no source under /data/adb, so every source-keyed check we have is blind to
+/// it while it sits in every process's mountinfo.
+pub(crate) fn rom_tmpfs_target(line: &str) -> Option<PathBuf> {
+    let (pre, post) = line.split_once(" - ")?;
+    if post.split_whitespace().next()? != "tmpfs" {
+        return None;
+    }
+    let target = pre.split_whitespace().nth(4)?;
+    ROM_ROOTS.iter().any(|r| target.starts_with(r)).then(|| PathBuf::from(unescape(target)))
+}
+
+/// Take over the "make this ROM directory look empty" trick: drop the tmpfs and
+/// record a durable whiteout for the path instead.
+///
+/// The whiteout is the mountless equivalent -- the directory reads as absent
+/// rather than empty, which is the same answer to a PackageManager scan -- and it
+/// is re-applied at boot from whiteouts.txt, so the module can re-mount its tmpfs
+/// every boot and we simply take it over again.
+fn absorb_rom_tmpfs(dry_run: bool) -> (u32, u32) {
+    let Ok(body) = fs::read_to_string(MOUNTINFO) else { return (0, 0) };
+    let (mut done, mut failed) = (0u32, 0u32);
+    for target in body.lines().filter_map(rom_tmpfs_target) {
+        if dry_run {
+            println!("would empty {} mountlessly (tmpfs -> durable whiteout)", target.display());
+            done += 1;
+            continue;
+        }
+        if !umount_detach(&target) && still_mounted(&target) {
+            eprintln!("nomount: cannot unmount the tmpfs over {}", target.display());
+            failed += 1;
+            continue;
+        }
+        match crate::whiteout::add(&target.to_string_lossy(), true) {
+            Ok(()) => done += 1,
+            Err(e) => {
+                eprintln!("nomount: {} unmounted but the whiteout failed: {e:#}", target.display());
+                failed += 1;
+            }
+        }
+    }
+    (done, failed)
+}
+
 pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     let nm = Nm::new();
     nm.version()
@@ -944,6 +999,10 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             println!("refreshed {repointed} app APK rule(s), dropped {stale} for an uninstalled app");
         }
     }
+    // A tmpfs over the ROM is not module content laid over a path, so the survey
+    // (which keys on the source) never sees it. Handle it first: it is the loudest
+    // mount of the lot and the one no source-keyed check ever reported.
+    let (tmpfs_done, tmpfs_failed) = absorb_rom_tmpfs(dry_run);
     let surveyed = survey()?;
     // Same mountinfo the survey classified from, so a redundant target resolves
     // to the same servable twin here as it did there.
@@ -1024,6 +1083,14 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         })
         .collect();
     if cands.is_empty() {
+        // A ROM tmpfs is taken over above, not through the candidate list, so say
+        // so here -- otherwise a run that emptied one still reported "nothing to
+        // absorb", which reads as "we did nothing".
+        if tmpfs_done > 0 || tmpfs_failed > 0 {
+            println!(
+                "nomount absorb: {tmpfs_done} ROM tmpfs emptied mountlessly                  ({tmpfs_failed} failed)"
+            );
+        }
         // "Nothing to absorb" is not "nothing is mounted". A declined mount is
         // still a mount and still visible to an app, so only claim a clean
         // posture when mountinfo genuinely holds no foreign mount at all.
@@ -1185,7 +1252,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     };
     if dry_run {
         println!(
-            "nomount absorb: {} mount(s) would be absorbed, {skipped_dirs} directory bind(s) skipped{drops}{leaks} (dry run)",
+            "nomount absorb: {} mount(s) would be absorbed, {tmpfs_done} ROM tmpfs, {skipped_dirs} directory bind(s) skipped{drops}{leaks} (dry run)",
             cands.len() as u32 - skipped_dirs - dropped
         );
     } else {
@@ -1195,7 +1262,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             String::new()
         };
         println!(
-            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {failed} failed{dirs}{drops}{leaks}"
+            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {tmpfs_done} ROM tmpfs emptied mountlessly, {} failed{dirs}{drops}{leaks}", failed + tmpfs_failed
         );
     }
     Ok(())
@@ -1219,6 +1286,30 @@ mod tests {
     /// An app update regenerates both hashes in
     /// /data/app/~~<hash>==/<pkg>-<hash>==/base.apk, so an absorbed rule has to be
     /// re-pointed by package name rather than by remembering the old path.
+    /// The ReVanced installer empties the stock system-app dir with a tmpfs from a
+    /// post-fs-data.d script. It has no source under /data/adb, so every
+    /// source-keyed check missed it while it sat in every process's mountinfo.
+    #[test]
+    fn a_tmpfs_over_the_rom_is_recognised() {
+        let line = "359 149 0:129 / /product/app/YouTube rw,relatime shared:77 - tmpfs none rw,seclabel";
+        assert_eq!(rom_tmpfs_target(line).as_deref(), Some(Path::new("/product/app/YouTube")));
+    }
+
+    /// Stock tmpfs mounts live outside the ROM partitions, and real filesystems
+    /// inside them (firmware vfat, dsp ext4, the OEM's overlayfs) are not ours.
+    #[test]
+    fn stock_mounts_are_left_alone() {
+        for line in [
+            "20 1 0:20 / /dev rw - tmpfs tmpfs rw",
+            "25 1 0:21 / /apex rw - tmpfs tmpfs rw",
+            "30 1 0:22 / /mnt rw - tmpfs tmpfs rw",
+            "40 1 8:6 / /vendor/firmware_mnt ro - vfat /dev/block/sde6 ro",
+            "41 1 0:99 / /product/lib ro - overlay overlay-overlay ro",
+        ] {
+            assert!(rom_tmpfs_target(line).is_none(), "{line}");
+        }
+    }
+
     #[test]
     fn a_package_name_is_recoverable_from_its_apk_path() {
         assert_eq!(
