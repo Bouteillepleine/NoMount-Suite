@@ -1028,8 +1028,18 @@ pub(crate) fn rom_tmpfs_target(line: &str) -> Option<PathBuf> {
 /// every boot and we simply take it over again.
 fn absorb_rom_tmpfs(dry_run: bool) -> (u32, u32) {
     let Ok(body) = fs::read_to_string(MOUNTINFO) else { return (0, 0) };
+    let (skips, _) = skip_list();
     let (mut done, mut failed) = (0u32, 0u32);
     for target in body.lines().filter_map(rom_tmpfs_target) {
+        // The opt-out list applies here too. Converting a tmpfs to a whiteout
+        // hides the ROM directory outright, and for a system app that a
+        // /data/app package UPDATES that is not always equivalent -- the update
+        // rides on the system base. Leaving one alone must be one line in
+        // absorb-skip.txt, not a rebuild.
+        if is_skipped(Path::new("/"), &target, &skips) {
+            println!("skipping the tmpfs over {} (opt-out list)", target.display());
+            continue;
+        }
         if dry_run {
             println!("would empty {} mountlessly (tmpfs -> durable whiteout)", target.display());
             done += 1;
