@@ -182,11 +182,13 @@ static __always_inline bool nm_name_has_hidden_uid_rule(struct nomount_dir_node 
     bool found = false;
 
     if (unlikely(!dir_node)) return false;
-    if (!(dir_node->bloom_mask & (1ULL << (hash & 63)))) return false;
+    if (!(READ_ONCE(dir_node->bloom_mask) & (1ULL << (hash & 63)))) return false;
 
     rcu_read_lock();
     hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
+            /* One child node per name (get_rule_info breaks on the first name
+             * match too), so this decides the name outright. */
             found = child->rule && !nm_rule_visible(child->rule);
             break;
         }
