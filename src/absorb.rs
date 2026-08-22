@@ -726,13 +726,57 @@ pub(crate) fn mounted_targets() -> std::collections::HashSet<PathBuf> {
 
 /// Targets absorb is currently serving. Read by `reload` so they survive a
 /// reconcile, and by `run_mount` so a fresh pass starts from an empty record.
+/// (target, source) for every absorbed rule that recorded one.
+///
+/// The file used to hold bare targets, which was enough for reload's prune guard
+/// but not to REBUILD a rule: `run_mount` clears the engine at boot, so an
+/// absorbed injection only came back if absorb saw the same bind again. For a
+/// patched-APK module that means the module has to mount first every boot -- and
+/// the mount is what marks other processes' mappings "(deleted)". Recording the
+/// source lets the boot pass re-serve it directly, so the module never needs to
+/// mount at all. Lines without a tab are the old format and yield no source.
+pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
+    fs::read_to_string(ABSORBED_LIST)
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .filter_map(|l| l.split_once('\t'))
+                .map(|(t, src)| (PathBuf::from(t), PathBuf::from(src)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Re-serve the absorbed APK rules recorded by a previous run.
+///
+/// Skips a target already served and a source that has gone (module uninstalled),
+/// so a stale record cannot resurrect a rule pointing at nothing.
+pub fn reapply_absorbed(nm: &Nm) -> u32 {
+    let live = nm.list().unwrap_or_default();
+    let mut n = 0;
+    for (target, source) in absorbed_pairs() {
+        if !is_app_apk(&target) || !source.exists() || !target.exists() {
+            continue;
+        }
+        if live.lines().any(|l| l.split(" -> ").next().is_some_and(|t| t.trim() == target.to_string_lossy())) {
+            continue;
+        }
+        let _ = fs::symlink_metadata(&target);
+        if nm.add(&target, &source).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 pub fn absorbed_targets() -> HashSet<PathBuf> {
     fs::read_to_string(ABSORBED_LIST)
         .map(|s| {
             s.lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .map(PathBuf::from)
+                .map(|l| PathBuf::from(l.split('\t').next().unwrap_or(l)))
                 .collect()
         })
         .unwrap_or_default()
@@ -741,6 +785,26 @@ pub fn absorbed_targets() -> HashSet<PathBuf> {
 /// Replace the record. `run_mount` calls this with an empty set: it issues
 /// `nm clear`, so nothing absorb recorded is live any more and keeping the file
 /// would make `reload` protect targets that no longer have a rule.
+pub fn set_absorbed_pairs(pairs: &[(PathBuf, PathBuf)]) {
+    if let Some(d) = Path::new(ABSORBED_LIST).parent() {
+        let _ = fs::create_dir_all(d);
+    }
+    let mut body = String::from(
+        "# Targets absorb re-serves as injections; reload keeps these.\n\
+         # <target>\\t<source> -- the source lets the boot pass re-serve it without\n\
+         # waiting for the owning module to mount again.\n",
+    );
+    for (t, src) in pairs {
+        body.push_str(&t.to_string_lossy());
+        body.push('\t');
+        body.push_str(&src.to_string_lossy());
+        body.push('\n');
+    }
+    if let Err(e) = fs::write(ABSORBED_LIST, &body) {
+        eprintln!("nomount: could not record absorbed targets: {e:#}");
+    }
+}
+
 pub fn set_absorbed(targets: &[PathBuf]) {
     if let Some(d) = Path::new(ABSORBED_LIST).parent() {
         let _ = fs::create_dir_all(d);
@@ -965,6 +1029,15 @@ fn absorb_rom_tmpfs(dry_run: bool) -> (u32, u32) {
             done += 1;
             continue;
         }
+        // Drop any live rule on the path FIRST. A whiteout there (ours, from a
+        // previous pass, re-applied at boot from whiteouts.txt) d_drops the
+        // dentry, which detaches the mount from path resolution -- umount2 then
+        // cannot find the mountpoint and the tmpfs is stranded until reboot.
+        // Same trap the inject-over-a-mountpoint comment below describes, reached
+        // from the other direction. Measured on OP15: with the whiteout already
+        // applied, every absorb reported "1 failed" and the tmpfs never went away.
+        let nm = Nm::new();
+        let _ = nm.del(&target);
         if !umount_detach(&target) && still_mounted(&target) {
             eprintln!("nomount: cannot unmount the tmpfs over {}", target.display());
             failed += 1;
@@ -1233,6 +1306,24 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     // Written even when nothing was absorbed this run: a partially-failed inject
     // still created rules, and those are exactly the ones reload must not drop.
     let rules = fresh.len() as u32;
+    // Pair each fresh target with the source we just served it from, so a later
+    // boot can re-serve it without the owning module mounting first.
+    let fresh_pairs: Vec<(PathBuf, PathBuf)> = fresh
+        .iter()
+        .filter_map(|t| {
+            cands.iter().find(|c| &c.target == t).map(|c| (t.clone(), c.source.clone()))
+        })
+        .collect();
+    if !fresh_pairs.is_empty() {
+        let mut all = absorbed_pairs();
+        for p in fresh_pairs {
+            if !all.iter().any(|(t, _)| *t == p.0) {
+                all.push(p);
+            }
+        }
+        all.sort();
+        set_absorbed_pairs(&all);
+    }
     let mut recorded: Vec<PathBuf> = absorbed_targets().into_iter().chain(fresh).collect();
     recorded.sort();
     recorded.dedup();
