@@ -50,10 +50,13 @@ if [ -z "$PKGS" ]; then
     exit 0
 fi
 
-# NUL-delimited: plain `xargs` also applies QUOTE processing, so an APK path
-# containing a quote is either mangled or aborts the whole scan with "unmatched
-# quote" -- and a silently short scan here means the list is missing entries it
-# should have offered. -0 disables both splitting and quoting.
+# NUL-delimited. Verified against toybox 0.8.12 on Android: unlike GNU xargs it
+# does NOT do quote processing -- a single or double quote in a path passes
+# through intact -- but it DOES split on whitespace, so a path containing a
+# space becomes two arguments and the scan reads a truncated path plus a bogus
+# one. -0 disables splitting entirely. Latent rather than live: 0 of 306
+# third-party APK paths on an OP11 contain a space, quote or backslash, because
+# the installer builds them from the package name plus base64 hashes.
 printf '%s\n' "$PKGS" | tr '\n' '\0' | xargs -0 -P "$J" -n1 sh -c '
     apk="${1%=*}"; pkg="${1##*=}"
     [ -n "$pkg" ] || exit 0
