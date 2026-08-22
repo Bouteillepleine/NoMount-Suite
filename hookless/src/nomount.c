@@ -730,12 +730,33 @@ static void nomount_hijacked_evict_inode(struct inode *inode)
 
 /*** file / inode / superblock operations ***/
 
+/* A blocked (hidden) reader must not see an injected name that stock does not
+ * have. The historic way to arrange that was to fail d_revalidate, which makes
+ * the VFS d_invalidate() the dentry -- but the dcache holds ONE dentry per
+ * (parent, name), so unhashing it for this reader unhashes it for everyone, and
+ * every process that already MAPPED the file then reads
+ * "…/file (deleted)" out of /proc/<pid>/maps for the life of that mapping.
+ * Measured on OP15: six app-uid processes, every injected mapping in each of
+ * them flagged, readable by any app from its OWN maps with no permission at all.
+ *
+ * So for an ADDED name, keep the dentry hashed for everyone and refuse it in the
+ * ops instead: stat and open return -ENOENT, and readdir already filters per UID,
+ * which is what "not there" means to a caller. A SHADOWING rule still takes the
+ * old path: a stock file exists underneath and the reader is entitled to see it,
+ * so re-resolving to the real fs is both correct and the only way to serve it. */
+static __always_inline bool nm_hidden_from_caller(const struct nm_inode_info *info)
+{
+    return info && !(info->flags & NM_FLAG_SHADOWS_STOCK) &&
+           nomount_is_uid_blocked(current_uid().val);
+}
+
 static int nm_open(struct inode *inode, struct file *file)
 {
     struct nm_inode_info *info = inode->i_private;
     struct file *real_file;
 
     if (unlikely(!info)) return -ENODEV;
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
         file->private_data = NULL;
         return 0;
@@ -1216,6 +1237,7 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
     struct nm_inode_info *info = v_inode->i_private;
     int res;
     if (unlikely(!info)) return -EIO;
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
 
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
         generic_fillattr(v_inode, stat);
@@ -1287,6 +1309,7 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     struct nm_inode_info *info = v_inode->i_private;
     int res;
     if (unlikely(!info)) return -EIO;
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
 
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
@@ -1725,8 +1748,14 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
          * injection, so a stock/negative dentry (e.g. one a blocked reader's fallback
          * cached in the shared dcache) is invalid for it. Re-resolving fixes both --
          * and nm_reval_stale() unhashes the negative so the re-resolve actually runs. */
-        if (nomount_is_uid_blocked(current_uid().val))
+        if (nomount_is_uid_blocked(current_uid().val)) {
+            /* An ADDED name stays hashed and is refused in the ops instead --
+             * see nm_hidden_from_caller(). Invalidating here is what marked every
+             * other process's existing mapping of this file "(deleted)". */
+            if (injected && !(rule_info.flags & NM_FLAG_SHADOWS_STOCK))
+                return 1;
             return injected ? 0 : 1;
+        }
         return injected ? 1 : nm_reval_stale(dentry);
     }
     nm_dir_node_put(pdir);                                /* pin no longer needed past the lookup */
