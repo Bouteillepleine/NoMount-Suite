@@ -770,7 +770,10 @@ static __always_inline bool nm_hidden_from_caller(const struct nm_inode_info *in
  * shared dentry (see nm_hidden_from_caller). NULL when the rule adds a new name
  * (nothing underneath -- that path returns -ENOENT instead) or when the stock
  * file could not be pinned at rule creation. */
-static __always_inline const struct path *nm_stock_for_caller(const struct nm_inode_info *info)
+/* Non-const on purpose: vfs_getattr() takes a writable `struct path *` on 4.9
+ * (it gained the const in a later series), and a const return here fails that
+ * build with -Wdiscarded-qualifiers. */
+static __always_inline struct path *nm_stock_for_caller(struct nm_inode_info *info)
 {
     if (!info || !info->s_path.dentry) return NULL;
     if (!(info->flags & NM_FLAG_SHADOWS_STOCK)) return NULL;
@@ -794,7 +797,7 @@ static int nm_open(struct inode *inode, struct file *file)
      * stock path -- same view it used to get by having the dentry invalidated
      * underneath it, minus the collateral on everyone else's mappings. */
     {
-        const struct path *stock = nm_stock_for_caller(info);
+        struct path *stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
             real_file = dentry_open(stock, file->f_flags, current_cred());
             if (IS_ERR(real_file)) return PTR_ERR(real_file);
@@ -1281,7 +1284,7 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
     /* Hidden reader of a shadowing rule: report the stock file it is entitled to,
      * so stat() agrees with the open() and no dcache invalidation is needed. */
     {
-        const struct path *stock = nm_stock_for_caller(info);
+        struct path *stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             return vfs_getattr(stock, stat, request_mask, query_flags);
@@ -1365,7 +1368,7 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     /* Hidden reader of a shadowing rule: report the stock file it is entitled to,
      * so stat() agrees with the open() and no dcache invalidation is needed. */
     {
-        const struct path *stock = nm_stock_for_caller(info);
+        struct path *stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             return vfs_getattr(stock, stat, request_mask, query_flags);
