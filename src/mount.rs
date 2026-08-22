@@ -820,11 +820,17 @@ pub fn run_mount() -> Result<()> {
     // so re-serving afterwards read an empty list and silently did nothing.
     let recorded = crate::absorb::absorbed_pairs();
     crate::absorb::set_absorbed(&[]);
-    // Re-serve what absorb recorded. This is what lets a patched-APK module stay
-    // unmounted across a reboot: the rule is back before anything maps the path,
-    // so nothing ever gets the "(deleted)" marking a late takeover leaves behind.
-    // Skips a target already served and a source that has gone.
-    if !recorded.is_empty() {
+    // NOT re-served here. Serving an app's base.apk from post-fs-data -- before
+    // zygote starts and PackageManager scans -- corrupts the package: measured on
+    // OP15, YouTube came up with a null Resources
+    // (GraphicsEnvironment.queryAngleChoice -> handleBindApplication NPE), and the
+    // second launch attempt took the system down with it. The SAME rule created
+    // after boot, by absorb, works fine and has all session. So an APK rule must
+    // not exist before the scan that reads it; the record is kept for reload's
+    // prune guard and for absorb's own refresh, and absorb re-serves it later.
+    //
+    // Opt in with NM_REAPPLY_ABSORBED=1 to experiment; the default must stay off.
+    if !recorded.is_empty() && std::env::var("NM_REAPPLY_ABSORBED").as_deref() == Ok("1") {
         let n = crate::absorb::reapply_absorbed_pairs(&nm, &recorded);
         if n > 0 {
             println!("nomount: re-served {n} absorbed APK rule(s) from the record");
