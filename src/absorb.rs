@@ -752,6 +752,29 @@ pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
 ///
 /// Skips a target already served and a source that has gone (module uninstalled),
 /// so a stale record cannot resurrect a rule pointing at nothing.
+/// Label an APK the Suite serves so the app can actually read it.
+///
+/// An app runs as untrusted_app and can read `apk_data_file`, not
+/// `adb_data_file` -- and everything under /data/adb carries adb_data_file,
+/// including a copy we keep there. Serving such a file gives the app a null
+/// Resources and it dies in handleBindApplication (measured on OP15:
+/// GraphicsEnvironment.queryAngleChoice NPE, twice, once taking the system with
+/// it). The label is an xattr and the boot pass relabels /data/adb/nomount, so a
+/// hand-applied chcon does not survive: re-assert it every time we serve.
+fn label_apk_readable(p: &Path) {
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return };
+    let ctx = c"u:object_r:apk_data_file:s0";
+    unsafe {
+        libc::setxattr(
+            c.as_ptr(),
+            c"security.selinux".as_ptr(),
+            ctx.as_ptr().cast(),
+            ctx.to_bytes_with_nul().len(),
+            0,
+        );
+    }
+}
+
 pub fn reapply_absorbed(nm: &Nm) -> u32 {
     reapply_absorbed_pairs(nm, &absorbed_pairs())
 }
@@ -768,6 +791,7 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
         if live.lines().any(|l| l.split(" -> ").next().is_some_and(|t| t.trim() == target.to_string_lossy())) {
             continue;
         }
+        label_apk_readable(&source);
         let _ = fs::symlink_metadata(&target);
         if nm.add(&target, &source).is_ok() {
             n += 1;
