@@ -228,6 +228,7 @@
 #define nomount_sb_list                          __vfsx_170
 #define nomount_uid_idr                          __vfsx_171
 #define nomount_write_mutex                      __vfsx_172
+#define nm_inode_permission                      __vfsx_173
 
 #endif /* NOMOUNT_STEALTH_SYMS */
 
