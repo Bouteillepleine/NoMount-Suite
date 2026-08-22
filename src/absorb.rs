@@ -563,16 +563,24 @@ pub(crate) fn classify(
     // The target question belongs to mount.rs, not here — see `serve_mode`.
     let mode = crate::mount::serve_mode(target);
     if !is_absorbable(src, target) {
-        // Backed by /data but not by a module. Only interesting if it landed
-        // somewhere we would otherwise serve: Android's own storage plumbing
-        // binds /data/user -> /data_mirror/... and /data/media ->
-        // /mnt/pass_through/..., which is stock, not a module leak, and reporting
-        // those as leaks is worse than useless — nine of them drown the real one.
-        return matches!(mode, crate::mount::Serve::Inject | crate::mount::Serve::Bind).then_some(
-            Disposition::Leaking(
-                "source is outside /data/adb, so there is no module content to re-serve",
-            ),
-        );
+        if !src.starts_with(MODULE_ROOT) {
+            // Backed by /data but not by a module. Only interesting if it landed
+            // somewhere we would otherwise serve: Android's own storage plumbing
+            // binds /data/user -> /data_mirror/... and /data/media ->
+            // /mnt/pass_through/..., which is stock, not a module leak, and reporting
+            // those as leaks is worse than useless — nine of them drown the real one.
+            return matches!(mode, crate::mount::Serve::Inject | crate::mount::Serve::Bind)
+                .then_some(Disposition::Leaking(
+                    "source is outside /data/adb, so there is no module content to re-serve",
+                ));
+        }
+        // Root-managed content laid over a /data path. Hookless injection does not
+        // serve /data, so this cannot be absorbed — but it is a real mount carrying
+        // an /adb/ token in every process's mount table, which is exactly what the
+        // mountless posture exists to deny. Say so rather than returning no verdict.
+        return Some(Disposition::Leaking(
+            "target is on /data, which hookless injection does not serve",
+        ));
     }
     if let Some(d) = declined_reason_with(src, target, skips, skip_src, hookers) {
         return Some(Disposition::Declined(d));
@@ -620,9 +628,26 @@ pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
         .iter()
         .filter_map(|r| {
             let src = source_of(r, &roots)?;
-            // Foreign = backed by /data, landing off /data. A target under /data
-            // is the module's own scratch space (fbind and friends): not ours.
-            if !src.starts_with(FOREIGN_ROOT) || r.target.starts_with(FOREIGN_ROOT) {
+            // Foreign = backed by /data. A target under /data/adb is a module's own
+            // scratch space (fbind and friends): not ours. A target elsewhere on
+            // /data is only ours when the SOURCE is root-managed content under
+            // /data/adb — that is module content laid over a real app path, and it
+            // is visible in that app's mount table.
+            //
+            // Discarding every /data target missed exactly that case. Issue #14 on
+            // OP15: a YouTube module binds
+            // /data/adb/rvhc/youtube-morphe-<abi>.apk over
+            // /data/app/~~<hash>/com.google.android.youtube-<hash>/base.apk. absorb
+            // never classified it, doctor never named it, and the Modules pane badged
+            // the module "mountless" while it held a live root-managed mount — a
+            // detector read /adb/ straight out of the process mount table.
+            if !src.starts_with(FOREIGN_ROOT) {
+                return None;
+            }
+            if r.target.starts_with(MODULE_ROOT) {
+                return None;
+            }
+            if r.target.starts_with(FOREIGN_ROOT) && !src.starts_with(MODULE_ROOT) {
                 return None;
             }
             if r.target.components().count() <= 1 {
@@ -1175,6 +1200,48 @@ mod tests {
             classify(&modsrc, Path::new("/system/app/Foo/Foo.apk"), &none, "test", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Absorb
         ));
+    }
+
+    /// Issue #14: a YouTube module binds its patched APK straight over the installed
+    /// one -- source root-managed under /data/adb, target a real app path on /data.
+    /// Every /data target used to be discarded as "module scratch space", so nobody
+    /// surveyed it: absorb ignored it, doctor never named it, and the Modules pane
+    /// badged the module mountless while a detector read /adb/ out of the process
+    /// mount table. It cannot be absorbed -- hookless does not serve /data -- but it
+    /// must be REPORTED.
+    #[test]
+    fn module_bind_over_an_installed_apk_is_reported_as_a_leak() {
+        let none: Vec<String> = Vec::new();
+        let src = PathBuf::from("/data/adb/rvhc/youtube-morphe-jhc-arm64.apk");
+        let tgt = PathBuf::from(
+            "/data/app/~~j9-uUJRSd2LZbuWhGChmMg==/com.google.android.youtube-ZvGLpaBP8lRYo5dmzQ92LA==/base.apk",
+        );
+        let d = classify(&src, &tgt, &none, "test", &HashSet::new(), &Redundancy::default());
+        assert!(
+            matches!(d, Some(Disposition::Leaking(_))),
+            "a module bind over an installed APK must be reported as a leak"
+        );
+
+        // The neighbouring cases must not change: a module's own scratch space on
+        // /data/adb stays unreported, and so does a non-module /data source.
+        let scratch = PathBuf::from("/data/adb/modules/foo/tmp");
+        assert!(
+            classify(&src, &scratch, &none, "test", &HashSet::new(), &Redundancy::default())
+                .is_none()
+                || !matches!(
+                    classify(&src, &scratch, &none, "test", &HashSet::new(), &Redundancy::default()),
+                    Some(Disposition::Absorb)
+                ),
+            "module scratch space must never be absorbed"
+        );
+        let stock = PathBuf::from("/data/local/tmp/x");
+        assert!(
+            !matches!(
+                classify(&stock, &tgt, &none, "test", &HashSet::new(), &Redundancy::default()),
+                Some(Disposition::Absorb)
+            ),
+            "a non-module /data source must never be absorbed"
+        );
     }
 
     #[test]

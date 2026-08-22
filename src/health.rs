@@ -111,7 +111,12 @@ fn count_mounts_split() -> (usize, usize) {
     let (mut total, mut by_design) = (0usize, 0usize);
     for r in &rows {
         let Some(src) = crate::absorb::source_of(r, &roots) else { continue };
-        if !src.starts_with("/data/adb/modules") {
+        // /data/adb, not /data/adb/modules: a module may bind from anywhere under
+        // /data/adb, and the narrower test made the count a constant zero for one
+        // that does. Issue #14: a YouTube module binds /data/adb/rvhc/<apk> over the
+        // installed APK, so the card and the Modules pane both said "mountless" on a
+        // device holding a live root-managed mount.
+        if !src.starts_with("/data/adb") {
             continue;
         }
         total += 1;
