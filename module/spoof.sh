@@ -299,29 +299,9 @@ do_props() {
     rp_reset_if_present ro.boot.realmebootstate        green
     rp_reset_if_present ro.boot.realme.lockstate       1
 
-    # Harmonize build.date.utc only where a partition claims to be NEWER than the
-    # ROM. That is the real signature of a rebuilt partition: a custom build stamps
-    # "now", which lands after ro.build.date.utc. A partition dated EARLIER is
-    # ordinary OEM cadence - vendor, odm and bootimage are built on their own
-    # schedule and ship older than system on stock devices too. Rewriting those
-    # replaces a genuine OEM timestamp with a synthetic one, moving the device
-    # further from stock rather than closer.
-    #
-    # Measured on OP15 2026-08-21: vendor/odm/bootimage 2026-06-29 vs system
-    # 2026-07-01, a normal two-day gap that the old blanket rule reported as
-    # "4 props differ - Apply to fix" on a locked-bootloader device that was
-    # already green and digest-matching.
-    base_utc=$(getprop ro.build.date.utc 2>/dev/null)
-    if [ -n "$base_utc" ]; then
-        for p in ro.bootimage.build.date.utc ro.odm.build.date.utc ro.odm_dlkm.build.date.utc \
-                 ro.product.build.date.utc ro.system.build.date.utc ro.system_dlkm.build.date.utc \
-                 ro.system_ext.build.date.utc ro.vendor.build.date.utc ro.vendor_dlkm.build.date.utc; do
-            _v=$(getprop "$p" 2>/dev/null)
-            [ -n "$_v" ] || continue
-            [ "$_v" -gt "$base_utc" ] 2>/dev/null || continue
-            rp_reset_if_present "$p" "$base_utc"
-        done
-    fi
+    # No build.date.utc harmonization. On a QSSI split build the vendor-side
+    # partitions are stamped in their own pass, so a vendor/odm/bootimage dated
+    # after system is stock cadence; flattening them is what looks synthetic.
 
     # harmonize the build-type/tags tail on every fingerprint so it agrees with the
     # ro.build.type=user / ro.build.tags=release-keys set above. A custom ROM often
@@ -556,7 +536,7 @@ do_cmdline() {
 # changed by do_props)? Writes nothing. "clean" = nothing to fix. Same present-
 # and-differs rule do_props uses, so absent OEM-specific props never count.
 props_status() {
-    local n=0 c _u _p _c
+    local n=0 c _p _c
     _d() { c=$(getprop "$1" 2>/dev/null); [ -n "$c" ] && [ "$c" != "$2" ] && n=$((n + 1)); }
     _d ro.boot.vbmeta.device_state    locked
     _d ro.boot.verifiedbootstate      green
@@ -583,22 +563,9 @@ props_status() {
     [ -n "$(getprop ro.kernel.qemu 2>/dev/null)" ] && n=$((n + 1))
     [ "$(getprop ro.build.version.sdk 2>/dev/null)" -ge 36 ] 2>/dev/null \
         && [ -n "$(getprop sys.oem_unlock_allowed 2>/dev/null)" ] && n=$((n + 1))
-    # The harmonization pass do_props also runs -- date.utc across partitions, the
-    # :type/keys tail on every fingerprint, description and flavor. Without these the
-    # UI reported "clean" while Apply still rewrote up to 21 more props.
-    _u=$(getprop ro.build.date.utc 2>/dev/null)
-    if [ -n "$_u" ]; then
-        for _p in ro.bootimage.build.date.utc ro.odm.build.date.utc ro.odm_dlkm.build.date.utc \
-                  ro.product.build.date.utc ro.system.build.date.utc ro.system_dlkm.build.date.utc \
-                  ro.system_ext.build.date.utc ro.vendor.build.date.utc ro.vendor_dlkm.build.date.utc; do
-            # Same newer-than-base rule do_props uses; the dry run must never
-            # report a difference the apply would not make.
-            _pv=$(getprop "$_p" 2>/dev/null)
-            [ -n "$_pv" ] || continue
-            [ "$_pv" -gt "$_u" ] 2>/dev/null || continue
-            n=$((n + 1))
-        done
-    fi
+    # The harmonization pass do_props also runs -- the :type/keys tail on every
+    # fingerprint, description and flavor. Without these the UI reported "clean"
+    # while Apply still rewrote more props.
     for _p in ro.build.fingerprint ro.system.build.fingerprint ro.vendor.build.fingerprint \
               ro.product.build.fingerprint ro.odm.build.fingerprint ro.system_ext.build.fingerprint \
               ro.bootimage.build.fingerprint ro.vendor_dlkm.build.fingerprint \
