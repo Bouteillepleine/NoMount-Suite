@@ -234,7 +234,7 @@ pub fn run_doctor() -> Result<()> {
                 level: Level::Info,
                 check: "stale legacy blocklist entries",
                 detail: format!(
-                    "{} entry/entries in /data/adb/nomount/blocklist are hidden APPS, already                      migrated to uidhide, and inert there ({}). That file is read as a                      module-id skip list; remove them if you want it to mean only what it says",
+                    "{} entry/entries in /data/adb/nomount/blocklist are hidden APPS, already migrated to uidhide, and inert there ({}). That file is read as a module-id skip list; remove them if you want it to mean only what it says",
                     stale.len(),
                     stale.join(", ")
                 ),
@@ -448,7 +448,7 @@ pub fn run_doctor() -> Result<()> {
                 Level::Warn,
                 "module mount not absorbed",
                 format!(
-                    "{} <- {} is still a real mount and visible to any app, but its                      content is ALREADY served by live injections, so the mount is                      redundant — `nomount absorb` just unmounts it. The owning module                      is bind-mounting content NoMount already injects; dropping that                      bind from its post-fs-data.sh stops it coming back at boot",
+                    "{} <- {} is still a real mount and visible to any app, but its content is ALREADY served by live injections, so the mount is redundant — `nomount absorb` just unmounts it. The owning module is bind-mounting content NoMount already injects; dropping that bind from its post-fs-data.sh stops it coming back at boot",
                     s.target.display(),
                     s.source.display()
                 ),

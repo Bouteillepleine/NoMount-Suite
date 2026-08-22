@@ -304,7 +304,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             if let Resolved::Uid(uid) = resolved {
                 if uid < blocklist::FIRST_APP_APPID && !force {
                     bail!(
-                        "{target} is appid {uid}, below the app range — hiding from it hides                          injections from Android itself (1000 = system_server: RRO and framework                          patches revert to stock; 2000 = shell: the health canary then reports a                          permanent inconsistency; 0 = root). Pass --force if that is really what                          you want."
+                        "{target} is appid {uid}, below the app range — hiding from it hides injections from Android itself (1000 = system_server: RRO and framework patches revert to stock; 2000 = shell: the health canary then reports a permanent inconsistency; 0 = root). Pass --force if that is really what you want."
                     );
                 }
             }
