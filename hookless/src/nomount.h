@@ -233,6 +233,8 @@
 #define nm_child_visible                         __vfsx_175
 #define nm_mark_public_up                        __vfsx_176
 #define nomount_nl_dump_pathhide                 __vfsx_177
+#define nm_stock_map_dev                         __vfsx_178
+#define nm_target_too_shallow                    __vfsx_179
 
 #endif /* NOMOUNT_STEALTH_SYMS */
 
