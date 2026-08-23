@@ -320,7 +320,7 @@ jobs:
             echo "== symbols still naming the project =="
             "$NM_BIN" --defined-only out/fs/nomount.o | awk '{print $3}' | grep -E '^(nomount|nm_|__nomount)' || true
             strings -a out/fs/nomount.o | grep 'NoMount' || true
-            echo "FATAL: ${{ matrix.ver }} cloak is incomplete -- add the new name(s) to hookless/src/nomount_syms.h"
+            echo "FATAL: ${{ matrix.ver }} cloak is incomplete -- add the new name(s) to the NOMOUNT_STEALTH_SYMS table in hookless/src/nomount.h"
             exit 1
           fi
           # The maps-cloak global is deliberately NOT in the header (task_mmu.c
