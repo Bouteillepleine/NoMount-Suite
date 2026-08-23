@@ -16,6 +16,37 @@ env:
   NDK_HOME: /opt/ndk
 
 jobs:
+  # The unit tests are host tests (no NDK, no device), so they cost a minute and
+  # gate the thing that actually ships: `package` needs them green. `build` is
+  # deliberately NOT gated — the cross-compile is the slowest leg and there is no
+  # reason to hold it behind a fast check that cannot break it. A red test simply
+  # means no ZIP comes out the far end.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-host-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-host-test-
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
   build:
     runs-on: ubuntu-latest
     strategy:
@@ -100,7 +131,7 @@ jobs:
           retention-days: 7
 
   package:
-    needs: build
+    needs: [build, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
