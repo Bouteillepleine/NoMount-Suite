@@ -826,9 +826,6 @@ pub fn run_reload() -> Result<()> {
     // Re-apply any durable whiteout the engine is not currently serving, so a
     // reload CONVERGES on the saved list instead of merely not destroying it.
     for w in &durable_whiteouts {
-        if live.contains_key(&(w.clone(), 0)) {
-            continue;
-        }
         // Same gate `whiteout::apply` uses. Without it a hand-edited entry that
         // apply() refuses (a partition root, a /data path) would still be pushed
         // to the engine from here -- the two paths must agree on what is legal.
@@ -837,8 +834,32 @@ pub fn run_reload() -> Result<()> {
             failed += 1;
             continue;
         }
+        // Converge on the same two observables `whiteout list` reports: whether
+        // the engine holds the rule, and whether the target still stats. A rule
+        // that is live while its path remains readable is applied and NOT
+        // serving -- what that command prints as "applied, but still visible".
+        // The presence-only check this loop used to open with skipped precisely
+        // that state, so a whiteout that had stopped hiding stayed stopped until
+        // the next boot or a manual `whiteout apply`. Re-issuing is idempotent,
+        // so the missing and the inert case take the same path.
+        //
+        // Honest scope: a durable whiteout was twice seen inert on an OP15 with
+        // reloads and a reboot in flight, but three attempts to reproduce it from
+        // `reload` alone did not, so the trigger is NOT established. This is
+        // convergence on the saved list, not a fix for a known cause. Cost is one
+        // stat per durable entry.
+        let live_rule = live.contains_key(&(w.clone(), 0));
+        if live_rule && !w.exists() {
+            continue;
+        }
         match nm.whiteout(w) {
-            Ok(()) => added += 1,
+            // Only a genuinely absent whiteout is a new rule; re-arming an inert
+            // one must not inflate the `+N` the caller reads as "rules added".
+            Ok(()) => {
+                if !live_rule {
+                    added += 1;
+                }
+            }
             Err(_) => failed += 1,
         }
     }
