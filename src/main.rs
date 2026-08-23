@@ -9,6 +9,7 @@ mod health;
 mod manager;
 mod mount;
 mod nm;
+mod pmcache;
 mod preflight;
 mod presets;
 mod whiteout;

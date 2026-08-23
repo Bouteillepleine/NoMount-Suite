@@ -770,10 +770,29 @@ pub fn run_reload() -> Result<()> {
         }
     }
 
+    // PM has already parsed every ROM APK by the time a reload runs, so dropping
+    // its cache entry here only takes effect at the next scan.
+    let pm = crate::pmcache::sync(&served_apks(&plan, &crate::absorb::absorbed_pairs()));
+    crate::pmcache::add_pending(&pm);
+
     println!(
         "nomount reload: +{added} ~{changed} -{removed} rules, +{bind_added} -{bind_removed} binds, \
          {failed} failed, {skipped} blocklisted (gap-free)"
     );
+    if !pm.is_empty() {
+        let shown: Vec<String> =
+            pm.iter().take(3).map(|p| p.display().to_string()).collect();
+        println!(
+            "nomount: {} system APK(s) changed -- REBOOT REQUIRED: {}{}",
+            pm.len(),
+            shown.join(", "),
+            if pm.len() > 3 { ", ..." } else { "" }
+        );
+        println!(
+            "         PackageManager parsed the old bytes; its cache is dropped but only \
+             re-read at the next scan. Apps over these APKs can force-close until then."
+        );
+    }
     Ok(())
 }
 
@@ -875,6 +894,11 @@ pub fn run_mount() -> Result<()> {
             },
         }
     }
+    // PM scans after this pass, so an entry dropped here is rebuilt with the
+    // bytes we serve and nothing is left pending.
+    let pm = crate::pmcache::sync(&served_apks(&plan, &recorded));
+    crate::pmcache::clear_pending();
+
     let modules = served.len();
     let surface = if binds > 0 { "hookless + my_* bind" } else { "mountless (RRO via hookless)" };
 
@@ -887,7 +911,22 @@ pub fn run_mount() -> Result<()> {
         hidden.hidden,
         if hidden.failed > 0 { format!(", {} hide failed", hidden.failed) } else { String::new() }
     );
+    if !pm.is_empty() {
+        println!("nomount: re-parsed {} changed system APK(s) (package cache)", pm.len());
+    }
     Ok(())
+}
+
+/// Every ROM APK a rule serves, as (target, source), from the module plan plus
+/// the absorbed record. Whiteouts and binds are excluded: neither replaces an
+/// APK's bytes with a file of our own.
+fn served_apks(plan: &[PlanEntry], absorbed: &[(PathBuf, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
+    plan.iter()
+        .filter(|e| e.kind == PlanKind::Inject)
+        .map(|e| (e.target.clone(), e.source.clone()))
+        .chain(absorbed.iter().cloned())
+        .filter(|(t, _)| crate::pmcache::is_rom_apk(t))
+        .collect()
 }
 
 #[cfg(test)]

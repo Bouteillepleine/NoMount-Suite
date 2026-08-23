@@ -25,6 +25,8 @@ use crate::nm::Nm;
 pub enum Verdict {
     Pass,
     Fail,
+    /// Real, but already cured -- a reboot applies the fix that is pending.
+    Reboot,
     /// Could not be measured here (nothing to sample, wrong fs, no engine).
     Skip,
 }
@@ -47,6 +49,9 @@ fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
 }
 fn skip(name: &'static str, evidence: String) -> Check {
     Check { name, verdict: Verdict::Skip, evidence, oracle: None }
+}
+fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
+    Check { name, verdict: Verdict::Reboot, evidence, oracle: Some(oracle) }
 }
 
 // ---------------------------------------------------------------- raw readdir
@@ -499,9 +504,24 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
         }
     }
     if hits.is_empty() {
-        pass("injected files in maps", format!("{scanned} process(es): no injected file mapped as deleted"))
-    } else {
-        let shown = hits.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        return pass(
+            "injected files in maps",
+            format!("{scanned} process(es): no injected file mapped as deleted"),
+        );
+    }
+    let shown = hits.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    // A rule change over an APK PM had already parsed unhashes the dentry every
+    // process mapped it through. The rule is right and the cache is dropped; the
+    // mappings are what a reboot replaces.
+    let pending = crate::pmcache::pending();
+    if !pending.is_empty() && hits.iter().all(|h| pending.iter().any(|p| h.starts_with(&*p.to_string_lossy()))) {
+        return reboot(
+            "injected files in maps",
+            format!("{} injected file(s) mapped as deleted: {shown} -- pending reboot after a rule change", hits.len()),
+            "still readable until the reboot: any app can see which of its files are injected",
+        );
+    }
+    {
         fail(
             "injected files in maps",
             format!("{} injected file(s) mapped as deleted: {shown}", hits.len()),
@@ -563,7 +583,7 @@ pub fn run_audit() -> Result<()> {
     ];
 
     println!("nomount audit: {} live rule(s) across {} directory(ies)\n", targets.len(), parents.len());
-    let (mut p, mut fl, mut sk) = (0, 0, 0);
+    let (mut p, mut fl, mut sk, mut rb) = (0, 0, 0, 0);
     for c in &checks {
         let tag = match c.verdict {
             Verdict::Pass => {
@@ -573,6 +593,10 @@ pub fn run_audit() -> Result<()> {
             Verdict::Fail => {
                 fl += 1;
                 "FAIL"
+            }
+            Verdict::Reboot => {
+                rb += 1;
+                "REBOOT"
             }
             Verdict::Skip => {
                 sk += 1;
@@ -584,11 +608,14 @@ pub fn run_audit() -> Result<()> {
             println!("       oracle: {o}");
         }
     }
-    println!("\nsummary: {p} passed, {fl} failed, {sk} skipped");
+    println!("\nsummary: {p} passed, {fl} failed, {sk} skipped, {rb} pending reboot");
+    if rb > 0 {
+        println!("note: a pending-reboot check is still detectable until you reboot.");
+    }
     if sk > 0 {
         println!("note: a skipped check was NOT verified — it is not a pass.");
     }
-    if fl > 0 {
+    if fl > 0 || rb > 0 {
         std::process::exit(1);
     }
     Ok(())
