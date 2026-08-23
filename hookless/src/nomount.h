@@ -232,6 +232,7 @@
 #define nm_uid_hidden                            __vfsx_174
 #define nm_child_visible                         __vfsx_175
 #define nm_mark_public_up                        __vfsx_176
+#define nomount_nl_dump_pathhide                 __vfsx_177
 
 #endif /* NOMOUNT_STEALTH_SYMS */
 
@@ -279,8 +280,18 @@
  *    with every other unknown one, so a Suite that sets it gets the old
  *    behaviour silently -- an added ROM APK stays hidden from a blocked reader
  *    and the PackageManager keeps advertising a path that app cannot open.
- *    Userspace can only warn about that if it can tell the two apart. */
-#define NOMOUNT_VERSION    15
+ *    Userspace can only warn about that if it can tell the two apart.
+ *
+ * 16: NM_KNOB_PATHHIDE and NM_CMD_GET_PATHHIDE exist, i.e. this engine can
+ *    carry the _pathhide cloak's configuration. That patch set used to own a
+ *    /proc node, which every app could find with one readdir -- a self-naming
+ *    tell louder than the paths it concealed. It has no control plane of its
+ *    own any more, so a Suite talking to an engine below 16 cannot configure it
+ *    at all: the knob is refused as unknown and the rule list stays empty. That
+ *    is silent unless userspace can tell 15 from 16, which is what this is for.
+ *    (Whether pathhide is COMPILED IN is a separate question -- the weak symbol
+ *    answers -EINVAL either way, so a live probe still needs `nm l p`.) */
+#define NOMOUNT_VERSION    16
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -686,6 +697,9 @@ enum {
     NM_CMD_GET_LIST,
     NM_CMD_GET_UIDS,
     NM_CMD_SET_KNOB,
+    /* Dump the _pathhide rule list. Answers empty (not an error) on a kernel
+     * built without that patch set, so a caller need not special-case it. */
+    NM_CMD_GET_PATHHIDE,
     __NM_CMD_MAX,
 };
 
@@ -720,6 +734,16 @@ enum {
      * app spotting the injection by diffing its own view against its own isolated
      * child's. Only meaningful while at least one appid is blocked. */
     NM_KNOB_HIDE_ISOLATED,
+    /* One _pathhide control command, forwarded verbatim to its parser:
+     * "+needle" adds, "~needle" removes, "-" clears. Lives here rather than on
+     * a /proc node of its own because this channel is CAP_NET_ADMIN-gated and
+     * creates no dirent for an app to find.
+     *
+     * NB: an EMPTY value is a presence probe here (returns 0 iff pathhide is
+     * compiled in), not "clear" as it is for the knobs above -- clearing is the
+     * explicit "-" command. Userspace needs it because NM_CMD_GET_PATHHIDE
+     * answers empty both for "not built" and for "built, no rules". */
+    NM_KNOB_PATHHIDE,
     __NM_KNOB_MAX,
 };
 

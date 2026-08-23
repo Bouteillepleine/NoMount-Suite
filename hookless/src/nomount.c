@@ -42,6 +42,21 @@
 #define NM_SDKSANDBOX_END   29999
 #define NM_SDKSANDBOX_OFF   10000
 
+/* _pathhide control plane, reached through WEAK symbols on purpose.
+ *
+ * The two patch sets have to stay independently applicable, so nomount.c does
+ * NOT include pathhide.h -- that header only exists once the other set has been
+ * applied. A kernel with nomount but without pathhide therefore still links,
+ * and answers -EINVAL on the knob exactly as it would for any unknown one.
+ *
+ * NM_PATHHIDE_RULE_MAX must be >= pathhide.c's PH_RULE_LEN. If it ever drifts
+ * below, pathhide_get_rule() rejects the undersized buffer with -EINVAL and the
+ * dump ends empty -- a visibly short list -- rather than silently truncating a
+ * rule into something that no longer matches what the kernel is enforcing. */
+#define NM_PATHHIDE_RULE_MAX 128
+extern int pathhide_ctl(const char *buf, size_t count) __attribute__((weak));
+extern int pathhide_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
+
 static atomic_t nm_rule_gen = ATOMIC_INIT(0);
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
 static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mostly;
@@ -4165,6 +4180,42 @@ static int nomount_nl_dump_uids(struct sk_buff *skb, struct netlink_callback *cb
     return skb->len;
 }
 
+/* Stream the _pathhide rule list.
+ *
+ * Reuses NOMOUNT_ATTR_VIRTUAL_PATH for the needle rather than adding an
+ * attribute: it is already an NLA_NUL_STRING in the policy and already parsed
+ * by the client, and a rule here occupies the same slot in the message that a
+ * rule's target does in NM_CMD_GET_LIST.
+ *
+ * pathhide_get_rule() takes its own lock per call, so nothing is held across
+ * nlmsg_put() -- which is the whole reason it hands back one rule at a time.
+ * A kernel without the _pathhide patch set has the weak symbol NULL and returns
+ * an empty dump, so `nm l p` prints nothing instead of an error the caller
+ * would have to tell apart from "no rules configured". */
+static int nomount_nl_dump_pathhide(struct sk_buff *skb, struct netlink_callback *cb)
+{
+    char rule[NM_PATHHIDE_RULE_MAX];
+    int idx = cb->args[0];
+    void *hdr;
+
+    if (!pathhide_get_rule)
+        return 0;
+
+    while (pathhide_get_rule(idx, rule, sizeof(rule)) > 0) {
+        hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
+                        NM_CMD_TO_TYPE(NM_CMD_GET_PATHHIDE), 0, NLM_F_MULTI);
+        if (!hdr) break;
+        if (nla_put_string(skb, NOMOUNT_ATTR_VIRTUAL_PATH, rule)) {
+            nlmsg_cancel(skb, hdr);
+            break;
+        }
+        nlmsg_end(skb, hdr);
+        idx++;
+    }
+    cb->args[0] = idx;
+    return skb->len;
+}
+
 static int nomount_nl_get_version(struct sk_buff *req, struct nlmsghdr *req_nlh)
 {
     u32 portid = NETLINK_CB(req).portid;
@@ -4218,10 +4269,12 @@ static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
     if (!netlink_capable(skb, CAP_NET_ADMIN))
         return -EPERM;
 
-    if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS) {
+    if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS ||
+        cmd == NM_CMD_GET_PATHHIDE) {
         struct netlink_dump_control c = {
-            .dump = (cmd == NM_CMD_GET_LIST) ? nomount_nl_dump_rules
-                                             : nomount_nl_dump_uids,
+            .dump = cmd == NM_CMD_GET_LIST ? nomount_nl_dump_rules
+                  : cmd == NM_CMD_GET_UIDS ? nomount_nl_dump_uids
+                                           : nomount_nl_dump_pathhide,
         };
         return netlink_dump_start(nm_nl_sk, skb, nlh, &c);
     }
@@ -4471,6 +4524,20 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
         nm_info("Isolated-pool hiding set to %u\n", pools);
         return 0;
     }
+    case NM_KNOB_PATHHIDE:
+        if (!pathhide_ctl)
+            return -EINVAL;
+        /* Empty value = presence probe, NOT "clear" (that is the "-" command).
+         * Deliberately different from the other knobs, because userspace has no
+         * other way to tell "pathhide is not compiled into this kernel" from
+         * "pathhide is here and has no rules": the dump answers empty for both.
+         * A probe must not have a side effect, which rules out using an add or a
+         * clear for it. */
+        if (vlen == 0)
+            return 0;
+        /* Forwarded verbatim otherwise -- _pathhide owns the parser, and
+         * duplicating it here is how the two would drift. */
+        return pathhide_ctl(val, vlen);
     default:
         return -EINVAL;
     }
