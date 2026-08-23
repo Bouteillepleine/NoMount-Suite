@@ -530,6 +530,98 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     }
 }
 
+/// A hidden app must still be able to open the APKs the PackageManager gave it.
+///
+/// Per-UID hiding serves a blocked reader the stock filesystem, which for an ADDED
+/// name means ENOENT. That is right for a module file nothing else mentions -- and
+/// wrong for a ROM APK, because the PackageManager scanned the directory as
+/// system_server (never blocked), registered the package, and now hands its path to
+/// every app that asks. The hidden app is then holding a path the system says
+/// exists and open() denies, which no device produces on its own.
+///
+/// Measured consequence, OP15 2026-08-23: IBM Trusteer (La Banque Postale) walks
+/// the package list at startup, calls getResourcesForApplication() on each entry,
+/// and SIGSEGVs on the IOException from 139 unopenable /product/overlay APKs.
+///
+/// The probe forks, drops to a blocked appid and opens each ROM APK rule target.
+/// It changes UID only -- the SELinux domain stays ours -- which is exactly what
+/// the engine keys on (nomount_is_uid_blocked reads current_uid()), so it measures
+/// the hiding decision and NOT the app's own domain permissions.
+fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
+    const NAME: &str = "PM-registered APKs open for a hidden app";
+    let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_rom_apk(t)).collect();
+    if apks.is_empty() {
+        return skip(NAME, "no ROM APK rules live".into());
+    }
+    let blocked = Nm::new().uid_list_live().unwrap_or_default();
+    let Some(&appid) = blocked.first() else {
+        return skip(NAME, format!("{} ROM APK rule(s), but no app is hidden", apks.len()));
+    };
+    // Only paths root can open are worth asking about: one the module itself
+    // cannot serve is a different bug, and this check must not claim it.
+    let readable: Vec<&&PathBuf> = apks.iter().filter(|p| fs::File::open(p).is_ok()).collect();
+    if readable.is_empty() {
+        return skip(NAME, format!("{} ROM APK rule(s), none readable as root", apks.len()));
+    }
+
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return skip(NAME, "pipe() failed".into());
+    }
+    let (rd, wr) = (fds[0], fds[1]);
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        unsafe { libc::close(rd); libc::close(wr) };
+        return skip(NAME, "fork() failed".into());
+    }
+    if pid == 0 {
+        unsafe { libc::close(rd) };
+        let mut denied = 0u32;
+        // setgid before setuid: the reverse leaves the group id unchanged with no
+        // privilege left to change it.
+        let dropped = unsafe { libc::setgid(appid) == 0 && libc::setuid(appid) == 0 };
+        if dropped {
+            for p in &readable {
+                if fs::File::open(p.as_path()).is_err() {
+                    denied += 1;
+                }
+            }
+        } else {
+            denied = u32::MAX;
+        }
+        let buf = denied.to_ne_bytes();
+        unsafe { libc::write(wr, buf.as_ptr() as *const libc::c_void, 4) };
+        unsafe { libc::_exit(0) };
+    }
+    unsafe { libc::close(wr) };
+    let mut buf = [0u8; 4];
+    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 4) };
+    unsafe { libc::close(rd) };
+    let mut status = 0i32;
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    if got != 4 {
+        return skip(NAME, "probe child said nothing".into());
+    }
+    let denied = u32::from_ne_bytes(buf);
+    if denied == u32::MAX {
+        return skip(NAME, format!("could not drop to uid {appid}"));
+    }
+    if denied == 0 {
+        return pass(
+            NAME,
+            format!("uid {appid} (hidden) opened all {} ROM APK rule target(s)", readable.len()),
+        );
+    }
+    fail(
+        NAME,
+        format!(
+            "uid {appid} (hidden) could not open {denied} of {} ROM APK rule target(s)",
+            readable.len()
+        ),
+        "the PackageManager names those paths to the app while open() answers ENOENT --          an inconsistency no stock device has, and one that crashes RASP code that walks          the package list (engine < 15 cannot express the opt-out; see NM_FLAG_PUBLIC)",
+    )
+}
+
 /// A tmpfs mounted inside a ROM partition is never stock.
 ///
 /// Emptying a ROM directory by mounting an empty tmpfs over it is a common module
@@ -579,6 +671,7 @@ pub fn run_audit() -> Result<()> {
         check_overlay_dir_ino(&targets),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&targets),
+        check_pm_apks_open_when_hidden(&targets),
         check_no_rom_tmpfs(),
     ];
 

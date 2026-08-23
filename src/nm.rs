@@ -77,8 +77,34 @@ impl Nm {
     /// `nm add <virtual> <real>` — inject a VFS redirect.
     /// `virtual_path` is the on-device target (e.g. `/system/app/Foo/Foo.apk`);
     /// `real` is the backing module file. Mountless.
+    ///
+    /// A ROM APK is added with `--public`, i.e. it stays visible to an app on the
+    /// hide list. This is the one class of injection the system advertises to
+    /// that app by other means: the PackageManager scans the ROM APK directories
+    /// as system_server (never hidden), registers what it finds, and then hands
+    /// the path to any app that asks about the package. Hiding the file leaves
+    /// such an app holding a path the PM says exists and `open()` answers ENOENT
+    /// for -- a far louder inconsistency than the injection, and one that is not
+    /// merely theoretical: IBM Trusteer (La Banque Postale) walks the package
+    /// list at startup, calls getResourcesForApplication() on every entry, and
+    /// SIGSEGVs on the IOException from 139 unopenable /product/overlay APKs.
+    ///
+    /// Deciding it HERE rather than per call site is deliberate: every caller
+    /// wants the same answer, and a new one that forgets would reintroduce the
+    /// crash for whichever module it serves. The flag is safe to set broadly --
+    /// the kernel strips it from any rule that turns out to shadow a stock file,
+    /// so only an ADDED APK is ever exempted, and an engine older than 15 drops
+    /// it with every other unknown bit (`nomount doctor` reports that case).
     pub fn add(&self, virtual_path: &Path, real: &Path) -> Result<()> {
-        self.run(&["add", path_str(virtual_path)?, path_str(real)?])
+        let public = crate::pmcache::is_rom_apk(virtual_path);
+        self.add_flagged(virtual_path, real, public)
+    }
+
+    /// `nm add [--public] <virtual> <real>` — as `add`, with the hiding opt-out
+    /// stated explicitly. Only for a caller that knows better than the ROM-APK
+    /// rule above; everything else should use `add`.
+    pub fn add_flagged(&self, virtual_path: &Path, real: &Path, public: bool) -> Result<()> {
+        self.run(&add_argv(public, path_str(virtual_path)?, path_str(real)?))
             .map(drop)
     }
 
@@ -153,7 +179,55 @@ impl Default for Nm {
     }
 }
 
+/// The argv `add` hands to `nm`. Split out so the option spelling is pinned by a
+/// test: the client takes any non-option word as a path, so a misspelt flag would
+/// silently become the virtual path of the rule it was meant to mark. (The client
+/// now refuses an unknown `--` word for the same reason; this catches it here.)
+fn add_argv<'a>(public: bool, virtual_path: &'a str, real: &'a str) -> Vec<&'a str> {
+    let mut args = Vec::with_capacity(4);
+    args.push("add");
+    if public {
+        args.push("--public");
+    }
+    args.push(virtual_path);
+    args.push(real);
+    args
+}
+
 fn path_str(p: &Path) -> Result<&str> {
     p.to_str()
         .with_context(|| format!("non-UTF8 path: {}", p.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The flag is what keeps a PackageManager-registered APK readable by an app
+    /// on the hide list, so its spelling and position are load-bearing: `nm` reads
+    /// argv positionally and a word it does not recognise as an option used to
+    /// become a path.
+    #[test]
+    fn public_adds_the_flag_before_the_paths() {
+        assert_eq!(
+            add_argv(true, "/product/overlay/Foo.apk", "/data/adb/modules/m/product/overlay/Foo.apk"),
+            vec!["add", "--public", "/product/overlay/Foo.apk", "/data/adb/modules/m/product/overlay/Foo.apk"]
+        );
+        assert_eq!(
+            add_argv(false, "/system/lib64/libfoo.so", "/data/adb/modules/m/system/lib64/libfoo.so"),
+            vec!["add", "/system/lib64/libfoo.so", "/data/adb/modules/m/system/lib64/libfoo.so"]
+        );
+    }
+
+    /// The policy `add` applies, stated where it is easy to check: the ROM APKs PM
+    /// scans opt out of hiding, everything else a module ships does not.
+    #[test]
+    fn only_rom_apks_opt_out_of_hiding() {
+        for p in ["/product/overlay/OxygenCustomizerComponentNB8.apk", "/system/priv-app/Foo/Foo.apk"] {
+            assert!(crate::pmcache::is_rom_apk(Path::new(p)), "{p} should be public");
+        }
+        for p in ["/system/lib64/libfoo.so", "/product/etc/permissions/x.xml", "/data/app/x/base.apk"] {
+            assert!(!crate::pmcache::is_rom_apk(Path::new(p)), "{p} must stay hidden");
+        }
+    }
 }

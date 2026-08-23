@@ -299,12 +299,21 @@ pub fn run_doctor() -> Result<()> {
 
     // ---- live checks (engine up) ------------------------------------------
     let nm = Nm::new();
-    let live_ok = nm.version().is_ok();
+    let engine = nm.version().ok();
+    let live_ok = engine.is_some();
     let mut live_count = 0usize;
+    // Apps hidden from the injections, and the live rules the PackageManager
+    // advertises regardless -- the pair the opt-out check below is about.
+    let hidden_apps = crate::blocklist::read().unwrap_or_default();
+    let mut rom_apk_rules = 0usize;
     if live_ok {
         if let Ok(list) = nm.list() {
             let live = parse_live(&list);
             live_count = live.len();
+            rom_apk_rules = live
+                .iter()
+                .filter(|(t, _)| crate::pmcache::is_rom_apk(t))
+                .count();
             for (target, source) in &live {
                 if is_partition_root(target) {
                     f.push(Finding {
@@ -357,6 +366,29 @@ pub fn run_doctor() -> Result<()> {
                 }
             }
         }
+    }
+
+    // A ROM APK is the one injection the system advertises to an app that is
+    // hidden from us: the PackageManager scans those directories as system_server
+    // (never blocked), registers what it finds, and names the path to every app
+    // that asks. `Nm::add` therefore serves them with the hiding opt-out — but
+    // that flag only exists from engine v15, and an older one strips it with
+    // every other unknown bit. The result is silent: the rule applies, the app
+    // still gets ENOENT on a path the PM says exists, and the only symptom is
+    // whatever that app does about it (Trusteer SIGSEGVs). Say so instead.
+    if live_ok && !hidden_apps.is_empty() && rom_apk_rules > 0 && engine.unwrap_or(0) < 15 {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "engine predates the hiding opt-out",
+            detail: format!(
+                "engine v{} < 15: {rom_apk_rules} ROM APK rule(s) cannot opt out of per-UID \
+                 hiding, so the {} hidden app(s) see a PackageManager-registered path that \
+                 open() refuses. Rebuild the kernel from kbuild@hookless >= 15, or unhide \
+                 any app that walks the package list",
+                engine.unwrap_or(0),
+                hidden_apps.len()
+            ),
+        });
     }
 
     // ---- report ------------------------------------------------------------

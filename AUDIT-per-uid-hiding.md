@@ -30,6 +30,50 @@ it, ordered by severity.
 
 ---
 
+## K7 — hiding a PackageManager-registered APK is worse than not hiding it  (High, fixed in engine v15 / Suite v1.3.42)
+
+Found on OP15, 2026-08-23, from a user-visible crash rather than a probe: **La Banque Postale**
+(`com.fullsix.android.labanquepostale.accountaccess`) died ~2 s after launch, every launch, with
+`SIGSEGV` in a thread owned by its RASP, **IBM Trusteer** (`com.trusteer.mobile.*`, logcat tag
+`TAZ`). The app was on the hide list.
+
+The chain, all of it in `logcat -v threadtime`:
+
+1. Trusteer walks the installed-package list at startup and calls
+   `ApplicationPackageManager.getResourcesForApplication()` on every entry.
+2. The PackageManager had already scanned `/product/overlay` **as `system_server`**, which is
+   never on the hide list, so it parsed and registered the 139 `OxygenCustomizer*.apk` overlays
+   NoMount injects there — and hands those paths to any app that asks.
+3. For the hidden app every one of them is an ADDED name, so the engine serves the stock
+   filesystem: `ENOENT`. 139 × `java.io.IOException: Failed to load asset path …`.
+4. Trusteer's native side logs `Internal signal occured: 7`, ART reports
+   `attempting to detach while still running code`, and the process dies.
+
+The general shape matters more than the one app: per-UID hiding was **all-or-nothing per UID**,
+so it also hid the one class of injection the system advertises to that UID by other means. An
+app holding a path the PackageManager says exists and `open()` refuses is a *louder*
+inconsistency than the injection it was hiding — and here it was fatal. Every other hidden app
+on the device (GMS, Play, Wallet, FNB) was being served the same ghost paths; they only logged
+the IOExceptions instead of crashing.
+
+**Fix.** `NM_FLAG_PUBLIC` (engine v15): a rule may opt out of hiding. `Nm::add` sets it for
+every ROM APK (`pmcache::is_rom_apk`), and the kernel strips it again from any rule that turns
+out to shadow a stock file — where the hidden reader is already served the stock bytes, and
+honouring the flag would leak the module's copy instead. The per-caller verdict moved from
+`nomount_is_uid_blocked()` to `nm_uid_hidden(flags)` / `nm_child_visible(child)`, so lookup,
+readdir, the real-dirent proxy and the parent's `nlink`/size deltas all agree about what a
+hidden caller can see. The coarse per-directory bail-out survives, gated on a new
+`dir_node->has_public`, so a device with no public rule behaves exactly as it did before.
+Synthesized ancestor directories inherit the flag (`nm_mark_public_up`), or the rule they lead
+to would be unreachable.
+
+**Verification.** `nomount audit` gained *"PM-registered APKs open for a hidden app"*: it forks,
+drops to a blocked appid and opens every ROM APK rule target. `nomount doctor` warns when the
+running engine is older than v15, because there the flag is stripped with every other unknown
+bit and the failure is otherwise silent.
+
+---
+
 ## Status — all findings fixed in v1.3.13
 
 Audited against `origin/suite` (`0f1c5da`) and `kbuild@hookless` (`40de86b`). Three

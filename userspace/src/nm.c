@@ -24,6 +24,12 @@ void c_main(long *sp) {
 
     char cmd = argv[1][0];
     unsigned int target_uid = 0;
+    /* NM_FLAG_PUBLIC: this rule stays visible to a UID on the hide list. Only
+     * meaningful on `add`, and only correct for a path the system already
+     * advertises to that UID anyway -- a ROM APK the PackageManager has scanned
+     * and now names to every app that asks. The kernel refuses it on a rule that
+     * shadows a stock file, so a wrong `--public` cannot leak module bytes. */
+    unsigned int add_flags = 0;
     const char *p_args[64];
     int p_count = 0;
 
@@ -37,6 +43,16 @@ void c_main(long *sp) {
                 if (*s < '0' || *s > '9') { exit_code = 3; goto do_exit; }
                 target_uid = (target_uid << 3) + (target_uid << 1) + (*s++ - '0');
             }
+        } else if (strcmp(argv[i], "--public") == 0) {
+            add_flags |= 64;
+        } else if (argv[i][0] == '-' && argv[i][1] == '-') {
+            /* Anything else spelled like an option is a mistake, and taking it for
+             * a PATH is the worst way to handle one: a typo ("--publik") would be
+             * accepted as the virtual path of the very rule it was meant to flag,
+             * and `--uid` with no value (which fails the branch above) as a path
+             * of its own. Both applied a wrong rule and exited 0. */
+            print_str("nm: unknown option\n");
+            exit_code = 3; goto do_exit;
         } else if (p_count < 64) {
             p_args[p_count++] = argv[i];
         } else {
@@ -79,7 +95,7 @@ void c_main(long *sp) {
             }
 
             if (target_cmd == 2) { /* ADD / WHITEOUT */
-                *(unsigned int*)cursor = (cmd == 'w') ? 4 : 0; 
+                *(unsigned int*)cursor = (cmd == 'w') ? 4 : add_flags;
                 *(unsigned int*)(cursor + 4) = target_uid;
                 *(unsigned short*)(cursor + 8) = v_len;
                 *(unsigned short*)(cursor + 10) = r_len;
@@ -203,6 +219,11 @@ void c_main(long *sp) {
                     if (v && r) {
                         int is_whiteout    = (flags && (*flags & 4));
                         int is_virtual_dir = (flags && (*flags & 2)); 
+                        /* Reported so `nomount doctor` can tell an added ROM APK
+                         * that opted out of hiding from one that did not -- the
+                         * kernel may have stripped the bit (a shadowing rule), so
+                         * what was asked for is not always what is live. */
+                        int is_public      = (flags && (*flags & 64));
 
                         if (is_json) {
                             print_str((const char *)",\n  {\n    \"virtual\": \"" + offset); offset = 0;
@@ -210,6 +231,7 @@ void c_main(long *sp) {
                             if (is_whiteout) print_str("\",\n    \"whiteout\": true");
                             else if (is_virtual_dir) print_str("\",\n    \"virtual_dir\": true");
                             else { print_str("\",\n    \"real\": \""); print_str(r); print_str("\""); }
+                            if (is_public) print_str(",\n    \"public\": true");
                             if (uid && *uid != 0) { print_str(",\n    \"uid\": "); print_uint(*uid); }
                             print_str("\n  }");
                         } else {
@@ -217,6 +239,7 @@ void c_main(long *sp) {
                             if (is_whiteout) print_str(" (whiteout)");
                             else if (is_virtual_dir) print_str(" (virtual dir)");
                             else { print_str(" -> "); print_str(r); }
+                            if (is_public) print_str(" (public)");
                             if (uid && *uid != 0) { print_str(" [UID: "); print_uint(*uid); print_str("]"); }
                             print_str("\n");
                         }
