@@ -201,3 +201,41 @@ jobs:
           name: nomount-debug-zip
           path: release/debug/00_NoMount-Module-*.zip
           retention-days: 30
+
+  # Publish on a v* tag.
+  #
+  # The tag already triggered a build, but the ZIP only ever became a 30-day
+  # ARTIFACT -- which needs a GitHub login to download, is not linkable, and is
+  # gone a month later. So "tagging a release" produced no release. This turns the
+  # tag into the thing people can actually install from.
+  #
+  # Release-only: `needs: package` means the tests gated it (package needs test),
+  # so nothing ships without them green.
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # Elevated for THIS job only -- the workflow default stays contents: read.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nomount-release-zip
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          zip=$(ls dist/00_NoMount-Module-*.zip | head -1)
+          test -s "$zip"
+          echo "publishing $TAG <- $zip ($(stat -c %s "$zip") bytes)"
+          # The tag is authoritative for the name; the notes point at the commit
+          # log rather than restating it, so this never goes stale.
+          gh release create "$TAG" "$zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "NoMount Suite $TAG" \
+            --generate-notes

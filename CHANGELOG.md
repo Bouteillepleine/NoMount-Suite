@@ -1,5 +1,59 @@
 # Changelog
 
+## v1.3.46
+
+Requires a kernel with **Prism engine v16**. On an older engine the maps/fd cloak
+goes inert (the presence probe fails and no rules are applied) — the injection
+engine itself is unaffected. Flash the kernel and the module as a set.
+
+### Fixed
+- **Per-UID hiding leaked through the xattr path.** An app on the hide list got
+  `ENOENT` from `stat()`, `open()`, `access()` and `readdir()` for an injected
+  file — and a valid answer from `listxattr()`/`getxattr()`, handing back the
+  injected file's SELinux label at a path `stat()` said did not exist. Measured
+  on OP15 as 10/10 reproducible once any unblocked process had warmed the shared
+  dentry; now 0/10, with an unblocked reader unaffected.
+
+  `fs/xattr.c::xattr_permission()` returns early for `security.*` without calling
+  `inode_permission()`, so the engine's existing `-ENOENT` guard was never
+  consulted on that path. The guard is now in the xattr ops themselves, and a
+  hidden reader of a *shadowing* rule is served the stock file — the same answer
+  `open()` already gave it. Reach was an added rule whose parent is a real
+  directory; rules under a synthesized parent were never exposed.
+
+- **The maps/fd cloak announced itself.** `pathhide` created `/proc/pathhide`
+  unconditionally, and `proc:dir read` is granted to `untrusted_app`,
+  `app_zygote` and `priv_app` — so any app could find the node with one readdir
+  of `/proc`. A stock kernel has no such entry, which made it a louder tell than
+  the package names it was concealing. The node is gone; configuration rides
+  nomount's netlink channel (`nm k p`, `nm l p`), which is CAP_NET_ADMIN-gated
+  and creates no dirent. Reading the live list back also works reliably now, so
+  applying rules no longer risks clearing another module's.
+
+- **`nm` dispatched on the first character of the command.** `nm check`,
+  `nm count` and `nm config` all executed `clear`, which drops every rule *and*
+  the blocked-UID set, exiting 0. Commands are matched as whole words.
+
+- `nm l j` emitted paths into JSON unescaped, so a filename containing `"` or
+  `\` produced a document the Suite's own reload reader could not parse.
+- `--public` (exemption from per-UID hiding) was granted to any `.apk` under a
+  ROM partition. It is justified only by the PackageManager already advertising
+  the path, so it is now limited to the directories PM actually scans — an APK in
+  e.g. `/product/etc` stays hidden.
+- `nm v` walked netlink attributes using the reply's own length field without
+  bounding it by the bytes actually read.
+- `spoof.log` and `pathhide.conf` were `0644` inside a `0700` directory whose
+  every other file is `0600`.
+- Blocking an appid in the isolated-process pools reported `-EEXIST` against an
+  empty table and silently did not add it.
+
+### Changed
+- `pathhide` no longer disables interrupts around its rule scan — nothing takes
+  that lock from interrupt context, and the scan runs once per VMA on
+  `/proc/<pid>/maps`.
+- Removing a pathhide rule that does not exist now reports `-ENOENT` instead of
+  success.
+
 ## v1.3.17
 
 ### Fixed
