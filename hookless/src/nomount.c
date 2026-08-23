@@ -3175,6 +3175,40 @@ static void nomount_prune_empty_virtual_dirs(struct nomount_dir_node *dir_node, 
  * real sibling FILE (walk up to the nearest real ancestor, scan it, descend one
  * level when a level holds only dirs) and mirror its dev + times, deriving an
  * in-range ino. Read-only, privileged (nm_root_cred), bounded depth/fanout. */
+/* The dev a STOCK file at this path reports in /proc/<pid>/maps.
+ *
+ * show_map_vma() prints file_inode(vma->vm_file)->i_sb->s_dev, so the answer is
+ * "whichever file object the mmap left on the vma". overlayfs replaces it:
+ * ovl_mmap() installs the REAL (lower) file and does not put it back, so a stock
+ * file on an overlay-mounted ROM directory maps with the lower filesystem's dev.
+ * d_real_inode() resolves to exactly that object on overlayfs, and to the inode
+ * itself everywhere else -- which makes it right in both cases by construction,
+ * rather than by matching one device.
+ *
+ * Measured on OP11 (5.15) /product/priv-app, an overlay whose lowerdir stack
+ * spans six partitions: stock files map with fe:22 or fe:28 -- the erofs dev of
+ * whichever layer holds each one, so there is not even a single "stock dev" for
+ * the directory -- while injected ones showed 00:22, the anonymous overlay sb our
+ * synthetic inode lives on. 10 of ~4848 /product mappings were 00:22 and all of
+ * them were ours, so one grep of /proc/self/maps separated the populations, with
+ * no permission needed: a process may always read its own maps.
+ *
+ * NB this REVERSES an earlier choice. The previous line took
+ * d_backing_inode(vpath)->i_sb->s_dev -- always the overlay inode -- after
+ * measuring OP15 /product/overlay, where the stock files appeared to report the
+ * overlay dev instead. Both cannot be right, and d_real_inode() is the one that
+ * follows from what ovl_mmap actually does. Re-measure /product/overlay on OP15
+ * before trusting this everywhere.
+ */
+static dev_t nm_stock_map_dev(struct dentry *dentry)
+{
+    struct inode *real = d_real_inode(dentry);
+
+    if (real)
+        return real->i_sb->s_dev;
+    return d_backing_inode(dentry)->i_sb->s_dev;
+}
+
 struct nm_sib_scan {
     struct dir_context ctx;
     dev_t dir_dev;                       /* this dir's overlay-top dev, to skip */
@@ -3350,7 +3384,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                      * erofs lower (fe:19). Fixing only the other assignment left
                      * every PURE injection -- which is what reaches this sibling
                      * scan -- still announcing the lower dev in /proc/<pid>/maps. */
-                    fmapdev = d_backing_inode(fp.dentry)->i_sb->s_dev;
+                    fmapdev = nm_stock_map_dev(fp.dentry);
                 }
                 path_put(&fp);
                 if (r == 0 && (pass == 1 ||
@@ -3541,7 +3575,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
          * /proc/self/maps separated the two populations completely. On a plain
          * erofs path the two calls agree, which is why /system, /my_product,
          * /my_stock and /product/etc already matched. */
-        rule->v_mapdev = d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
+        rule->v_mapdev = nm_stock_map_dev(v_path_struct.dentry);
         if (nm_path_stat(&v_path_struct, &kst) == 0) {
             rule->v_ino = kst.ino;
             rule->v_dev = kst.dev;
