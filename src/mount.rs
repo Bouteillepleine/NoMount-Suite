@@ -205,6 +205,35 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
     Serve::Inject
 }
 
+/// May a whiteout be applied to `target`?
+///
+/// Deliberately NOT `serve_mode`. A whiteout serves nothing: no bind, no
+/// injection, no source file behind it -- the engine just d_drops the dentry.
+/// That is the same operation `nomount whiteout add` performs, and it works on
+/// every ROM partition including `my_*`. So the Bind/Inject split does not apply
+/// here; the only refusals that carry over are the ones about WHICH path may be
+/// touched at all, never HOW it would have been served.
+///
+/// This guard used to be `is_partition_root(t) || is_my_partition(t)`, on the
+/// reasoning that "bind can't whiteout". True, but irrelevant -- a whiteout never
+/// reaches bind.rs. The effect was that a module shipping a 0:0 char device under
+/// `/my_product` or `/my_stock`, which is where OnePlus/Oppo keep a third of the
+/// preinstalled apps, installed cleanly and hid nothing, silently. Verified on an
+/// OP15 (CPH2747): the CLI hides `/my_stock/app/OplusOperationManual` live, while
+/// the identical char device in a module tree was dropped from the plan.
+pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
+    let Some(root) = target.components().nth(1).and_then(|c| c.as_os_str().to_str()) else {
+        return Err("not a path under a partition");
+    };
+    if NON_PARTITION_ROOTS.contains(&root) {
+        return Err("not a ROM partition");
+    }
+    if is_partition_root(target) {
+        return Err("a bare partition root (masking one bootloops zygote)");
+    }
+    Ok(())
+}
+
 /// Can this entry actually produce a rule?
 ///
 /// Injection serves a symlink's TARGET, so a link whose target does not exist
@@ -310,6 +339,8 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             // to this one, so the module installed cleanly and hid nothing: an
             // empty opaque dir has no files, so plan_tree recursed into it and
             // emitted nothing at all.
+            // my_* is refused here for the same reason as `.replace`, not the char
+            // device's: an opaque dir carries replacement content with it.
             if is_opaque_dir(&source) && !is_partition_root(&target) && !is_my_partition(&target) {
                 out.push(PlanEntry {
                     module: module.to_string(),
@@ -324,7 +355,12 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             // Never whiteout a bare partition root: masking a whole partition bootloops
             // (forkSystemServer SIGABRT), exactly as an inject on a root does below.
             if let Some(parent) = target.parent() {
-                // Skip a partition root (bootloop) and my_* (bind can't whiteout).
+                // Skip a partition root (bootloop). my_* stays refused here too, but
+                // for a narrower reason than the char device below: `.replace` means
+                // the module ALSO ships content for this directory, and on my_* that
+                // content is bind-served unless NM_MY_HOOKLESS is on. A whiteout and
+                // a bind on one path is an untested combination, so leave it refused
+                // until it is tested -- the pure-deletion case is not affected.
                 if is_partition_root(parent) || is_my_partition(parent) {
                     continue;
                 }
@@ -336,9 +372,11 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                 });
             }
         } else if is_char_dev(&ft) {
-            // A 0:0 char device is Magisk's whiteout marker. Refuse it on a partition
-            // root for the same bootloop reason, and on my_* (bind can't whiteout).
-            if is_partition_root(&target) || is_my_partition(&target) {
+            // A 0:0 char device is Magisk's whiteout marker: a pure deletion, with
+            // no module content behind it. `can_whiteout` is the whole guard, and
+            // it permits my_* -- the engine d_drops a my_* dentry as readily as any
+            // other, which is what `nomount whiteout add` has always done there.
+            if can_whiteout(&target).is_err() {
                 continue;
             }
             out.push(PlanEntry {
@@ -950,6 +988,32 @@ mod tests {
         assert!(matches!(serve_mode(Path::new("/data/adb/x")), Serve::Refuse(_)));
         assert!(matches!(serve_mode(Path::new("/system")), Serve::Refuse(_)));
         assert!(matches!(serve_mode(Path::new("/")), Serve::Refuse(_)));
+    }
+
+    /// A whiteout is a d_drop, not a serve, so it is allowed wherever the path
+    /// itself is ours to touch -- `my_*` included. Proven on an OP15: the CLI
+    /// hides `/my_stock/app/OplusOperationManual` live (43 app dirs -> 42, restored
+    /// on remove), while a module shipping the identical 0:0 char device was
+    /// dropped from the plan without a word.
+    #[test]
+    fn whiteout_allowed_on_my_partitions() {
+        assert!(can_whiteout(Path::new("/my_stock/app/OplusOperationManual")).is_ok());
+        assert!(can_whiteout(Path::new("/my_product/app/Foo")).is_ok());
+        assert!(can_whiteout(Path::new("/product/app/AIMemory")).is_ok());
+        assert!(can_whiteout(Path::new("/system/priv-app/Foo")).is_ok());
+    }
+
+    /// The refusals that DO carry over from `serve_mode`: a bare partition root
+    /// masks every stock entry under it (zygote SIGABRT at forkSystemServer), and
+    /// a non-ROM root was never ours to touch.
+    #[test]
+    fn whiteout_refuses_partition_roots_and_non_rom() {
+        assert!(can_whiteout(Path::new("/my_stock")).is_err());
+        assert!(can_whiteout(Path::new("/product")).is_err());
+        assert!(can_whiteout(Path::new("/system")).is_err());
+        assert!(can_whiteout(Path::new("/data/adb/modules/x")).is_err());
+        assert!(can_whiteout(Path::new("/apex/com.android.art/x")).is_err());
+        assert!(can_whiteout(Path::new("/")).is_err());
     }
 
     /// A Reload used to delete every durable whiteout and every absorbed rule,
