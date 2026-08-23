@@ -1029,8 +1029,38 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
 {
     static const char nm_selinux_name[] = "security.selinux";
     struct nm_inode_info *info = d_backing_inode(dentry)->i_private;
+    struct path *stock;
 
     if (unlikely(!info)) return -EOPNOTSUPP;
+    /* Tell the same story as the rest of the ops.
+     *
+     * xattr_permission() returns 0 for security.* and system.* WITHOUT calling
+     * inode_permission(), so nm_inode_permission()'s -ENOENT never runs on the
+     * xattr path: an ADDED name that stat(), open() and access() all refuse was
+     * still listing security.selinux to the very reader it is hidden from.
+     * Measured on OP15 as blocked uid 10438 against
+     * /product/etc/permissions/privapp-permissions-oplus-product.xml -- 10/10
+     * once any unblocked UID had warmed the shared dentry. That is a louder
+     * loophole than the access() one this mirrors, because it hands back the
+     * injected file's LABEL at a path stat() says is not there.
+     *
+     * Reach is an ADDED rule whose parent is a REAL directory; a rule under a
+     * synthesized parent is unreachable anyway (the blocked reader cannot
+     * resolve the parent), which is why 25 of 26 hidden paths on that device
+     * never showed it. */
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
+    /* A hidden reader of a SHADOWING rule is entitled to the stock file, exactly
+     * as in nm_open()/nm_file_getattr(). Forward to the backing inode's op
+     * rather than vfs_listxattr(), which would re-run the LSM hook the caller
+     * has already passed for the path it named -- the same reason every getattr
+     * here uses the _nosec form. */
+    stock = nm_stock_for_caller(info);
+    if (unlikely(stock)) {
+        struct inode *si = d_backing_inode(stock->dentry);
+
+        if (!si || !si->i_op || !si->i_op->listxattr) return -EOPNOTSUPP;
+        return si->i_op->listxattr(stock->dentry, buffer, size);
+    }
     /* A synthesized dir has no backing dentry to forward to. Returning
      * -EOPNOTSUPP where every real dir lists security.selinux is a tell, so
      * report the one attribute we actually serve. */
@@ -1509,6 +1539,10 @@ static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
     int err;
 
     if (unlikely(!info)) return -EIO;
+    /* Hidden reader: same -ENOENT the other ops give. notify_change() would
+     * otherwise act on the backing file for a name this caller is told does not
+     * exist. */
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     if (info->flags & NM_FLAG_VIRTUAL_DIR) return 0;
 
     /* Forward a COPY with ATTR_FILE stripped, never the caller's iattr verbatim.
@@ -1579,7 +1613,12 @@ static int nm_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
     struct nm_inode_info *info = inode->i_private;
     struct inode *real_inode;
 
-    if (unlikely(!info || (info->flags & NM_FLAG_VIRTUAL_DIR) || !info->r_path.dentry))
+    if (unlikely(!info)) return -EOPNOTSUPP;
+    /* Normally unreachable for a hidden reader -- ioctl(FS_IOC_FIEMAP) needs an
+     * fd and nm_open() answers first -- but ->fiemap is dispatched off the
+     * inode, so keep the per-UID answer here rather than relying on that. */
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
+    if (unlikely((info->flags & NM_FLAG_VIRTUAL_DIR) || !info->r_path.dentry))
         return -EOPNOTSUPP;
     real_inode = d_backing_inode(info->r_path.dentry);
     if (!real_inode || !real_inode->i_op || !real_inode->i_op->fiemap)
@@ -1724,11 +1763,23 @@ static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dent
     struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         struct nm_inode_info *info = inode->i_private;
+        struct path *stock;
         char *alloc;
         const char *full;
         int r;
 
         if (unlikely(!info)) return -ENODATA;
+        /* The other half of the pair nm_listxattr() documents: xattr_permission()
+         * short-circuits security.*, so this op answered for a reader that
+         * stat() and open() refuse. */
+        if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
+        stock = nm_stock_for_caller(info);
+        if (unlikely(stock)) {
+            full = nm_full_xattr_name(proxy, name, &alloc);
+            r = vfs_getxattr(IDMAP_PATH(info->s_path) info->s_path.dentry, full, buffer, size);
+            kfree(alloc);
+            return r;
+        }
         full = nm_full_xattr_name(proxy, name, &alloc);
         if (!info->r_path.dentry) {
             r = -ENODATA;
@@ -1757,6 +1808,11 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
         int r;
 
         if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
+        /* A hidden reader must not be able to WRITE an attribute onto a name it
+         * is told does not exist. Harder to reach than the get side (it needs
+         * write permission, and the injection targets are read-only ROM paths),
+         * but the answer has to be the same one. */
+        if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
         full = nm_full_xattr_name(proxy, name, &alloc);
         r = vfs_setxattr(IDMAP_CALL info->r_path.dentry, full, buffer, size, flags);
         kfree(alloc);
