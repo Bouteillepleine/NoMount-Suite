@@ -22,7 +22,33 @@ void c_main(long *sp) {
     /* No family resolution: the private raw-netlink protocol is addressed
      * directly (kernel is portid 0); the command rides in nlmsg_type. */
 
-    char cmd = argv[1][0];
+    /* Exact command WORDS, not a first-character match.
+     *
+     * This used to be `argv[1][0]`, so any word beginning with the right letter
+     * ran the command. `nm check`, `nm count` and `nm config` all executed CLEAR
+     * -- which drops every rule AND the blocked-UID set (see __nomount_clear_all:
+     * per-UID hiding is runtime-only state and CLEAR_ALL is its reset). A typo at
+     * a root shell was a silent, total wipe with a success exit code.
+     *
+     * The table carries every spelling the Suite actually uses -- nm.rs, the
+     * module scripts and the WebUI between them issue add/del/w/block/unblock/
+     * clear/list/l/v/k -- plus the obvious long forms. Anything else is refused
+     * rather than guessed at. */
+    static const struct { const char *name; char op; } nm_cmds[] = {
+        { "add", 'a' },      { "del", 'd' },     { "w", 'w' },
+        { "whiteout", 'w' }, { "block", 'b' },   { "unblock", 'u' },
+        { "clear", 'c' },    { "list", 'l' },    { "l", 'l' },
+        { "v", 'v' },        { "version", 'v' }, { "k", 'k' },
+        { "knob", 'k' },
+    };
+    char cmd = 0;
+    for (unsigned int ci = 0; ci < sizeof(nm_cmds) / sizeof(nm_cmds[0]); ci++) {
+        if (strcmp(argv[1], nm_cmds[ci].name) == 0) { cmd = nm_cmds[ci].op; break; }
+    }
+    if (!cmd) {
+        print_str("nm: unknown command\n");
+        exit_code = 3; goto do_exit;
+    }
     unsigned int target_uid = 0;
     /* NM_FLAG_PUBLIC: this rule stays visible to a UID on the hide list. Only
      * meaningful on `add`, and only correct for a path the system already
@@ -167,7 +193,13 @@ void c_main(long *sp) {
         goto do_exit;
 
     } else if (cmd == 'v') {
-        if (do_nm_cmd(fd,1, 0, (void *)0, 0, 1, &mem) > 0) {
+        int vlen_rx = do_nm_cmd(fd, 1, 0, (void *)0, 0, 1, &mem);
+        struct nlmsghdr *vh = (struct nlmsghdr *)mem.rx_buf;
+        /* Bound the header's own length claim by what was actually READ before
+         * walking attributes off it. The list path below already does this per
+         * message; this one trusted nlmsg_len outright, so a short or malformed
+         * reply sent get_attr walking past rx_buf. */
+        if (vlen_rx >= 16 && vh->nlmsg_len <= (unsigned int)vlen_rx) {
             unsigned int *ver = get_attr(mem.rx_buf, 5);
             if (ver) {
                 /* print_uint handles any width; the old two-digit routine printed
@@ -204,7 +236,7 @@ void c_main(long *sp) {
         if (is_json) print_str("[\n");
 
         while (len > 0) {
-            for (struct nlmsghdr *msg = (void *)mem.rx_buf; msg->nlmsg_len && msg->nlmsg_len <= len;
+            for (struct nlmsghdr *msg = (void *)mem.rx_buf; msg->nlmsg_len && msg->nlmsg_len <= (unsigned int)len;
                     len -= msg->nlmsg_len, msg = (void *)((char *)msg + msg->nlmsg_len)) {
                 if (msg->nlmsg_type == 3) goto list_done;          /* NLMSG_DONE */
                 if (msg->nlmsg_type == 2) {                        /* NLMSG_ERROR */
@@ -219,7 +251,7 @@ void c_main(long *sp) {
                     if (rule) {
                         if (is_json) {
                             print_str((const char *)",\n  \"" + offset); offset = 0;
-                            print_str(rule);
+                            print_json(rule);
                             print_str("\"");
                         } else {
                             print_str(rule); print_str("\n");
@@ -249,10 +281,10 @@ void c_main(long *sp) {
 
                         if (is_json) {
                             print_str((const char *)",\n  {\n    \"virtual\": \"" + offset); offset = 0;
-                            print_str(v);
+                            print_json(v);
                             if (is_whiteout) print_str("\",\n    \"whiteout\": true");
                             else if (is_virtual_dir) print_str("\",\n    \"virtual_dir\": true");
-                            else { print_str("\",\n    \"real\": \""); print_str(r); print_str("\""); }
+                            else { print_str("\",\n    \"real\": \""); print_json(r); print_str("\""); }
                             if (is_public) print_str(",\n    \"public\": true");
                             if (uid && *uid != 0) { print_str(",\n    \"uid\": "); print_uint(*uid); }
                             print_str("\n  }");

@@ -165,8 +165,17 @@ fn my_hookless_enabled() -> bool {
 /// allowlist -> `FileDescriptorInfo::CreateFromFd` JNI FatalError at the first
 /// `forkSystemServer` -> SIGABRT -> bootloop. Skipping partition-root targets fixes it; the
 /// real content is still injected via the module's own top-level partition dirs.
+/// A partition root (`/system`, `/product`) -- or `/` itself.
+///
+/// The `== 1` test alone answered FALSE for `/`, which has zero components after
+/// the root: the one path where serving a rule is most catastrophic was the one
+/// path this said was fine. Nothing reached it that way in practice (`serve_mode`
+/// refuses `/` for want of a partition component, and the kernel's
+/// `nm_target_too_shallow` refuses it again), but a predicate named
+/// `is_partition_root` returning false for the filesystem root is a trap for the
+/// next caller. `<= 1` says what the name claims.
 fn is_partition_root(target: &Path) -> bool {
-    target.components().skip(1).count() == 1
+    target.components().skip(1).count() <= 1
 }
 
 /// How a target may be served -- the single answer both the native module plan

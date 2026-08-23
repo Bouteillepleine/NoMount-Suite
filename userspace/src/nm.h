@@ -126,6 +126,37 @@ static noinline void print_str(const char *s) {
     sys3(SYS_WRITE, 1, (long)s, len);
 }
 
+/* Emit a string as JSON string CONTENT (caller writes the surrounding quotes).
+ *
+ * `nm l j` used to print paths raw, so a filename containing a double quote or a
+ * backslash produced a document the Suite's own reader could not parse -- and it
+ * feeds the reload delta, which then acts on a truncated view of the live rule
+ * set. Both characters are legal in a Linux filename, so this is a correctness
+ * bug, not a hardening nicety. Control bytes are escaped too, since a raw one is
+ * also invalid inside a JSON string. */
+static noinline void print_json(const char *s) {
+    static const char hexd[] = "0123456789abcdef";
+    char esc[6];
+    long i = 0, run = 0;
+
+    while (s[i]) {
+        unsigned char c = (unsigned char)s[i];
+        if (c != '"' && c != '\\' && c >= 0x20) { i++; run++; continue; }
+        if (run) sys3(SYS_WRITE, 1, (long)(s + i - run), run);
+        run = 0;
+        if (c == '"' || c == '\\') {
+            esc[0] = '\\'; esc[1] = (char)c;
+            sys3(SYS_WRITE, 1, (long)esc, 2);
+        } else {
+            esc[0] = '\\'; esc[1] = 'u'; esc[2] = '0'; esc[3] = '0';
+            esc[4] = hexd[(c >> 4) & 0xF]; esc[5] = hexd[c & 0xF];
+            sys3(SYS_WRITE, 1, (long)esc, 6);
+        }
+        i++;
+    }
+    if (run) sys3(SYS_WRITE, 1, (long)(s + i - run), run);
+}
+
 static noinline void print_uint(unsigned int n) {
     char buf[12];
     int i = 11;

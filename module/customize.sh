@@ -167,7 +167,11 @@ if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
     } > "$NMDIR/absorb-skip.txt"
 fi
 set_perm "$NMDIR/absorb-skip.txt" 0 0 0600
-set_perm "$NMDIR/pathhide.conf" 0 0 0644
+# 0600, not 0644: this is the cloak rule list -- it names exactly which packages
+# are being hidden from maps/fd -- and every other file in the 0700 $NMDIR is
+# 0600. Only root reads it (service.sh at boot, the WebUI through an exec), so
+# nothing needs the group/other bits.
+set_perm "$NMDIR/pathhide.conf" 0 0 0600
 # Probe over the netlink knob, not a /proc node: pathhide no longer creates one
 # (any app could find it with a single readdir of /proc). `nm k p` with no value
 # is side-effect-free and exits 0 only when the patch set is compiled in.

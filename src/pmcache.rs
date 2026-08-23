@@ -29,9 +29,38 @@ const ROM_ROOTS: &[&str] = &[
     "/my_stock/", "/my_company/", "/my_carrier/", "/my_engineering/", "/my_heytap/", "/my_preload/",
 ];
 
+/// The directory names PM actually scans for packages. An APK anywhere else on a
+/// ROM partition is just a file: PM never parses it, so it has no cache entry to
+/// invalidate and -- far more importantly -- it is not advertised to any app.
+///
+/// This gate is load-bearing beyond the cache. `Nm::add` passes `is_rom_apk` as
+/// the `--public` flag, i.e. "exempt this rule from per-UID hiding", and the only
+/// justification for that exemption is that the PackageManager already hands the
+/// path to every app that asks (see the NM_FLAG_PUBLIC note in nomount.h). A
+/// path-prefix test alone made every `.apk` under a ROM root public, so a module
+/// shipping `/product/etc/foo.apk` or `/product/media/x.apk` -- which PM never
+/// scans, never registers and never advertises -- was handed to the detector apps
+/// on the hide list for no benefit at all. Narrow it to what PM really reads.
+const PM_SCAN_DIRS: &[&str] = &["app", "priv-app", "overlay", "app-ext", "priv-app-ext"];
+
 pub fn is_rom_apk(target: &Path) -> bool {
     let s = target.to_string_lossy();
-    target.extension().is_some_and(|e| e == "apk") && ROM_ROOTS.iter().any(|r| s.starts_with(r))
+    if !target.extension().is_some_and(|e| e == "apk") {
+        return false;
+    }
+    if !ROM_ROOTS.iter().any(|r| s.starts_with(r)) {
+        return false;
+    }
+    // PM's layout is <partition>/<scan-dir>/… -- either the APK directly
+    // (/product/overlay/Foo.apk) or one directory of its own below it
+    // (/product/priv-app/Contacts/Contacts.apk). Match the component after the
+    // partition rather than searching the whole path, so a stray directory called
+    // "app" deeper down does not qualify.
+    target
+        .components()
+        .nth(2)
+        .and_then(|c| c.as_os_str().to_str())
+        .is_some_and(|d| PM_SCAN_DIRS.contains(&d))
 }
 
 /// The cache-entry prefixes PM may use for this APK. PM names the entry after
@@ -185,6 +214,32 @@ mod tests {
         assert!(!is_rom_apk(Path::new("/data/app/~~x==/com.foo-1/base.apk")));
         assert!(!is_rom_apk(Path::new("/product/etc/config.xml")));
         assert!(!is_rom_apk(Path::new("/data/adb/nomount/apks/youtube-patched.apk")));
+    }
+
+    /// An APK on a ROM partition that PM does NOT scan must not be treated as one
+    /// it does: `is_rom_apk` is what grants `--public`, i.e. exemption from
+    /// per-UID hiding, and the only thing that justifies the exemption is PM
+    /// already advertising the path. A prefix-only test made all of these public.
+    #[test]
+    fn apks_outside_a_pm_scan_dir_stay_hidden() {
+        for p in [
+            "/product/etc/foo.apk",
+            "/product/media/x.apk",
+            "/system/framework/bar.apk",
+            "/vendor/lib/baz.apk",
+            "/my_product/etc/extension/q.apk",
+        ] {
+            assert!(!is_rom_apk(Path::new(p)), "{p} must NOT be public");
+        }
+        // ...while the directories PM really reads still qualify, in both layouts.
+        for p in [
+            "/product/overlay/OxygenCustomizerComponentNB8.apk",
+            "/product/priv-app/Mms/Mms.apk",
+            "/system_ext/app/Foo/Foo.apk",
+            "/my_stock/priv-app/Bar/Bar.apk",
+        ] {
+            assert!(is_rom_apk(Path::new(p)), "{p} should be public");
+        }
     }
 
     /// Both layouts PM uses, measured on OP15: `Contacts-16-...` for a dir it

@@ -10,6 +10,14 @@
 # property is in place before zygote/system_server start.
 
 PATH=/data/adb/ksu/bin:/data/adb/magisk:/system/bin:/system/xbin:$PATH
+# The only script under module/ that did not set this, and it showed: every other
+# file in $NMDIR is 0600 while spoof.log was 0644 on-device. The log rotation
+# below is what does it -- `tail > $LOG.tmp` creates the temp under whatever umask
+# is in force and `mv` carries that mode onto the log. The 0700 parent means this
+# was never reachable by anything unprivileged, but the log records the spoof
+# decisions (vbmeta digest, uname) and the invariant is "nothing here is group- or
+# world-readable", so state it here rather than depend on the caller's umask.
+umask 077
 NMDIR=/data/adb/nomount
 CONF="$NMDIR/spoof.conf"
 LOG="$NMDIR/spoof.log"
@@ -17,6 +25,9 @@ LOG="$NMDIR/spoof.log"
 mkdir -p "$NMDIR" 2>/dev/null && chmod 0700 "$NMDIR" 2>/dev/null
 # Trim the log so it can't grow unbounded across boots.
 [ -f "$LOG" ] && tail -n 200 "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null
+# Correct a log left 0644 by an older build; the rotation above only fixes the
+# mode once it next rotates, and a fresh install never rotates at all.
+[ -f "$LOG" ] && chmod 0600 "$LOG" 2>/dev/null
 
 log() {
     echo "nomount-spoof: $*" > /dev/kmsg 2>/dev/null
