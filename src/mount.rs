@@ -918,11 +918,13 @@ pub fn run_mount() -> Result<()> {
 }
 
 /// Every ROM APK a rule serves, as (target, source), from the module plan plus
-/// the absorbed record. Whiteouts and binds are excluded: neither replaces an
-/// APK's bytes with a file of our own.
+/// the absorbed record. Binds count: a my_* APK is bind-served (hookless there
+/// bootloops zygote) and a bind swaps the bytes PM parsed just as an inject
+/// does. Only whiteouts are excluded -- removing a file leaves PM nothing to
+/// have cached under that path.
 fn served_apks(plan: &[PlanEntry], absorbed: &[(PathBuf, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
     plan.iter()
-        .filter(|e| e.kind == PlanKind::Inject)
+        .filter(|e| matches!(e.kind, PlanKind::Inject | PlanKind::Bind))
         .map(|e| (e.target.clone(), e.source.clone()))
         .chain(absorbed.iter().cloned())
         .filter(|(t, _)| crate::pmcache::is_rom_apk(t))

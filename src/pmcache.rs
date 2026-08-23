@@ -169,6 +169,14 @@ pub fn clear_pending() {
 mod tests {
     use super::*;
 
+    /// A my_* APK is bind-served, and a bind swaps the parsed bytes too -- it
+    /// must be tracked like any other ROM APK.
+    #[test]
+    fn my_partition_apks_are_tracked() {
+        assert!(is_rom_apk(Path::new("/my_product/app/Foo/Foo.apk")));
+        assert!(is_rom_apk(Path::new("/my_stock/priv-app/Bar/Bar.apk")));
+    }
+
     #[test]
     fn only_rom_apks_are_pm_parsed() {
         assert!(is_rom_apk(Path::new("/product/priv-app/Contacts/Contacts.apk")));
