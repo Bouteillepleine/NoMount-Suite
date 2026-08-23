@@ -254,7 +254,12 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "15.0"
+/* Kept in step with NOMOUNT_VERSION below. Nothing in the driver reads this --
+ * the BUILDERS scrape it out of this header to label the kernel they publish, so
+ * leaving it behind means a release announces a version its engine does not
+ * speak. That happened: the engine went to 16 while this still said 15.0, and
+ * the build summary reported "NoMount version: 15.0". Bump both together. */
+#define NM_MODULE_VERSION "16.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
