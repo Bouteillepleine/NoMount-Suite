@@ -4108,11 +4108,31 @@ static int nomount_nl_add_uid(struct nlattr **attrs)
 
     uid = nla_get_u32(attrs[NOMOUNT_ATTR_UID]) % NM_PER_USER_RANGE; /* store/match appid */
 
-    if (nomount_is_uid_blocked(uid)) 
-        return -EEXIST;
-
     mutex_lock(&nomount_write_mutex);
+    /* Ask the TABLE whether this appid is already listed, not
+     * nomount_is_uid_blocked(). That helper answers a different question --
+     * "is a caller running as this uid hidden from" -- and returns true for the
+     * whole app-zygote (90000..98999) and platform-isolated (99000..99999)
+     * pools whether or not anything was ever added for them. So `nm block 99000`
+     * reported -EEXIST against an empty table and the appid never got listed:
+     * the pools are covered by the range test at READ time, but the entry the
+     * operator asked for was silently absent, so `nm l u` did not show it and
+     * removing it later answered -ENOENT.
+     *
+     * It also short-circuits on the static branch, so before the FIRST uid is
+     * added it returned false unconditionally -- the duplicate check it was
+     * doing could not fire on an empty table at all.
+     *
+     * idr_find() under the write mutex is the direct question and has neither
+     * quirk. Moved inside the lock while we are here: the old test raced a
+     * concurrent add, which idr_alloc then rejected as -ENOSPC and this
+     * function reported as -ENOMEM. */
     idr_preload(GFP_KERNEL);
+    if (idr_find(&nomount_uid_idr, uid)) {
+        idr_preload_end();
+        mutex_unlock(&nomount_write_mutex);
+        return -EEXIST;
+    }
     ret = idr_alloc(&nomount_uid_idr, (void *)8, uid, uid + 1, GFP_NOWAIT);
     idr_preload_end();
 
@@ -4121,7 +4141,9 @@ static int nomount_nl_add_uid(struct nlattr **attrs)
         nm_info("Successfully added blocked UID: %u\n", uid);
         ret = 0;
     } else {
-        ret = -ENOMEM;
+        /* -ENOSPC means the slot filled between the check and the alloc; report
+         * it as the duplicate it is, not as an allocation failure. */
+        ret = (ret == -ENOSPC) ? -EEXIST : -ENOMEM;
     }
     mutex_unlock(&nomount_write_mutex);
 
