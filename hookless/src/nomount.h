@@ -229,6 +229,9 @@
 #define nomount_uid_idr                          __vfsx_171
 #define nomount_write_mutex                      __vfsx_172
 #define nm_inode_permission                      __vfsx_173
+#define nm_uid_hidden                            __vfsx_174
+#define nm_child_visible                         __vfsx_175
+#define nm_mark_public_up                        __vfsx_176
 
 #endif /* NOMOUNT_STEALTH_SYMS */
 
@@ -250,7 +253,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "14.0"
+#define NM_MODULE_VERSION "15.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -270,8 +273,14 @@
  *  - NM_CMD_ADD_RULE's batch form returns the first rejection instead of an
  *    unconditional 0, so a refused rule is no longer indistinguishable from an
  *    applied one. The Suite's per-entry failure counters become meaningful only
- *    against >= 14. */
-#define NOMOUNT_VERSION    14
+ *    against >= 14.
+ *
+ * 15: NM_FLAG_PUBLIC exists (see below). An engine below this strips the bit
+ *    with every other unknown one, so a Suite that sets it gets the old
+ *    behaviour silently -- an added ROM APK stays hidden from a blocked reader
+ *    and the PackageManager keeps advertising a path that app cannot open.
+ *    Userspace can only warn about that if it can tell the two apart. */
+#define NOMOUNT_VERSION    15
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -293,8 +302,28 @@
  * whiteout shrinks it. Set from the kern_path(vpath) that already runs in
  * nm_alloc_rule, so it costs nothing extra. */
 #define NM_FLAG_SHADOWS_STOCK (1 << 5)
-/* Bits a client may set; anything else is kernel-derived and must be stripped. */
-#define NM_FLAGS_USER_MASK  (NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR | NM_FLAG_WHITEOUT)
+/* This rule stays visible to a reader on the block list.
+ *
+ * Per-UID hiding is otherwise all-or-nothing: a blocked reader gets the stock
+ * filesystem, and for an ADDED name that means -ENOENT. That is right for a
+ * module file nothing else advertises, and wrong for one the system has already
+ * told the reader about. The PackageManager scans /product/overlay (and every
+ * other ROM APK directory) as system_server, which is not blocked, so it parses
+ * and REGISTERS an injected APK -- then hands its path to every app that asks
+ * about the package. A blocked app therefore holds a path the PM says exists and
+ * open() answers ENOENT for, which is a far louder inconsistency than the
+ * injection it was hiding: measured on OP15, IBM Trusteer (La Banque Postale)
+ * walks the package list at startup, calls getResourcesForApplication() on each
+ * entry, and SIGSEGVs on the IOException from 139 unopenable overlay APKs.
+ *
+ * So a rule the PM already advertises opts out of hiding. Set by userspace for
+ * an added ROM APK; STRIPPED by the kernel whenever the rule turns out to shadow
+ * a stock file, because there the blocked reader is served the stock bytes and
+ * revealing the module's copy instead would be a real leak. */
+#define NM_FLAG_PUBLIC      (1 << 6)
+/* Bits a client may set; anything else is kernel-derived and must be stripped.
+ * NB: nomount_child_node.flags is a u8, so a client-settable bit must be < 8. */
+#define NM_FLAGS_USER_MASK  (NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR | NM_FLAG_WHITEOUT |                              NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96   /* inline SELinux context; Android's are ~30B */
 
 /* logs
@@ -428,6 +457,14 @@ struct nomount_dir_node {
      * A single cached number could do neither. */
     loff_t max_real_pos; /* running max real dirent offset (not authoritative) */
     u64 bloom_mask;
+    /* Does any child here carry NM_FLAG_PUBLIC? Conservative summary in the same
+     * spirit as bloom_mask: set when such a child is injected and never cleared,
+     * because a stale true only costs a blocked reader the slow path through a
+     * directory where it then sees nothing, while a stale false would hide a
+     * child that must stay visible. Read on the hot gate in
+     * nomount_hijacked_lookup/iterate so that a device with no public rule keeps
+     * the exact bail-out it has today. */
+    bool has_public;
     atomic_t refcount;   /* owner ref (alloc) + one per synthetic inode caching this node */
     struct rcu_head rcu;
     union {

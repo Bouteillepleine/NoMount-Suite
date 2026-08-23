@@ -126,6 +126,30 @@ static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
            (target % NM_PER_USER_RANGE) == (current_uid().val % NM_PER_USER_RANGE);
 }
 
+/* Does the block list hide a rule carrying these flags from THIS caller?
+ *
+ * The block list is otherwise all-or-nothing per UID, which is wrong for a rule
+ * the system already advertises to that UID by other means -- see NM_FLAG_PUBLIC
+ * for the PackageManager case that motivates it. Everything that used to test
+ * nomount_is_uid_blocked() to decide whether to serve an injection asks this
+ * instead; the raw test survives only where the question really is about the UID
+ * and not about a rule (the coarse gates, which are additionally guarded by
+ * dir_node->has_public, and nm_reval_stale). */
+static __always_inline bool nm_uid_hidden(u32 flags)
+{
+    return !(flags & NM_FLAG_PUBLIC) &&
+           nomount_is_uid_blocked(current_uid().val);
+}
+
+/* Is this listing entry visible to the caller: right audience for a --uid-scoped
+ * rule, and not hidden by the block list. Every by-child walk (readdir emit, the
+ * real-dirent proxy, the parent's nlink/size deltas) filters on this, so all
+ * three agree about what the caller can see. */
+static __always_inline bool nm_child_visible(const struct nomount_child_node *child)
+{
+    return child && nm_rule_visible(child->rule) && !nm_uid_hidden(child->flags);
+}
+
 #define __get_nm(ptr, type, member, field, hook_func) ({ \
     typeof(ptr) __p = (ptr); \
     (likely(__p) && __p->field == (hook_func)) ? container_of(__p, type, member) : NULL; \
@@ -189,7 +213,7 @@ static __always_inline bool nm_name_has_hidden_uid_rule(struct nomount_dir_node 
         if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
             /* One child node per name (get_rule_info breaks on the first name
              * match too), so this decides the name outright. */
-            found = child->rule && !nm_rule_visible(child->rule);
+            found = child->rule && !nm_child_visible(child);
             break;
         }
     }
@@ -302,7 +326,7 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     rcu_read_lock();
     hash_for_each_possible_rcu(proxy->dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == namelen && memcmp(child->name, name, namelen) == 0) {
-            if (nm_rule_visible(child->rule)) {
+            if (nm_child_visible(child)) {
                 rcu_read_unlock();
                 proxy->ctx.pos = offset;
                 return NM_ACTOR_CONTINUE;
@@ -371,7 +395,7 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
          * so the emit below runs with RCU dropped and only the stack snapshot. */
         rcu_read_lock();
         while ((child = idr_get_next(&dir_node->children_idr, &id)) != NULL) {
-            if (nm_rule_visible(child->rule) &&
+            if (nm_child_visible(child) &&
                 !(child->flags & NM_FLAG_WHITEOUT)) {
                 found = id;
                 nlen = min_t(int, (int)child->name_len, NAME_MAX);
@@ -567,11 +591,21 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
     if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
     rcu_read_unlock();
 
-    if (unlikely(nomount_is_uid_blocked(current_uid().val) || !pdir))
+    /* A blocked reader used to bail out here for the whole directory. It still
+     * does when nothing in this one is public -- the common case, and the shape
+     * the audit matrix measures -- but a directory that holds a public rule has
+     * to be walked, because that rule stays visible to it. nm_uid_hidden() below
+     * makes the call per rule, so only the public name is served. */
+    if (unlikely(!pdir || (nomount_is_uid_blocked(current_uid().val) &&
+                           !READ_ONCE(pdir->has_public))))
         goto fallback;
 
     v_hash = full_name_hash(NULL, name, len);
     if (nomount_get_rule_info(pdir, name, len, v_hash, &rule_info, true)) {
+        if (unlikely(nm_uid_hidden(rule_info.flags))) {
+            nm_put_rule_info(&rule_info);
+            goto fallback;
+        }
         if (rule_info.flags & NM_FLAG_WHITEOUT) {
             nm_install_dentry_ops(dentry);
             d_add(dentry, NULL);
@@ -662,7 +696,13 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
     if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
     rcu_read_unlock();
 
-    if (unlikely(nomount_is_uid_blocked(current_uid().val) || !orig_fop || !pdir))
+    /* Same gate as nomount_hijacked_lookup: a blocked reader skips the whole
+     * directory unless something in it is public, in which case it runs the
+     * normal path and the per-child filter (nm_child_visible) decides what the
+     * proxy suppresses and what the virtual pass emits. */
+    if (unlikely(!orig_fop || !pdir ||
+                 (nomount_is_uid_blocked(current_uid().val) &&
+                  !READ_ONCE(pdir->has_public))))
         goto do_real_iterate;
 
     if (unlikely(nm_is_virtual_pos(pdir, ctx->pos))) {
@@ -761,7 +801,7 @@ static void nomount_hijacked_evict_inode(struct inode *inode)
 static __always_inline bool nm_hidden_from_caller(const struct nm_inode_info *info)
 {
     return info && !(info->flags & NM_FLAG_SHADOWS_STOCK) &&
-           nomount_is_uid_blocked(current_uid().val);
+           nm_uid_hidden(info->flags);
 }
 
 /* The stock file to serve THIS caller, or NULL to serve the injection.
@@ -1156,7 +1196,7 @@ static void nm_dir_deltas(struct nomount_dir_node *d, int *nlink_d, s32 *size_d)
     idr_for_each_entry(&d->children_idr, ch, cid) {
         /* Only children this caller can actually see: a uid-scoped rule must not
          * move the parent's metadata for everyone else. */
-        if (!nm_rule_visible(ch->rule)) continue;
+        if (!nm_child_visible(ch)) continue;
         szd += nm_child_size_contrib(ch);
         if (ch->d_type != DT_DIR) continue;
         if (ch->flags & NM_FLAG_WHITEOUT)            nld--;
@@ -1249,8 +1289,13 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
      * children its own readdir() and lookup() refuse to show -- the exact
      * stat-vs-readdir divergence nm_dir_size_fix() exists to remove, handed to the
      * one caller most likely to be measuring for it, with the delta spelling out
-     * how many entries are being hidden. */
-    if (res || !d || nomount_is_uid_blocked(current_uid().val))
+     * how many entries are being hidden. Unless this directory holds a public
+     * rule: that one IS in its listing, so its metadata has to count it, and
+     * nm_dir_deltas() -- which filters per child on the same predicate readdir
+     * uses -- returns exactly the public entries' contribution and nothing else. */
+    if (res || !d)
+        goto out;
+    if (nomount_is_uid_blocked(current_uid().val) && !READ_ONCE(d->has_public))
         goto out;
 
     nm_dir_deltas(d, &nld, &delta);
@@ -1584,8 +1629,7 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
     struct nm_inode_info *info = dir->i_private;
     const char *name = dentry->d_name.name;
     size_t len = dentry->d_name.len;
-    bool blocked = nomount_is_uid_blocked(current_uid().val);
-    bool have_rule = false;
+    bool hidden_rule = false;
 
     if (info && info->dir_node) {
         u32 v_hash = full_name_hash(NULL, name, len);
@@ -1597,8 +1641,8 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
          * belt to that braces -- it keeps the per-UID rule true of this path on
          * its own terms rather than by relying on the parent lookup failing. */
         if (nomount_get_rule_info(info->dir_node, name, len, v_hash, &rule_info, true)) {
-            have_rule = true;
-            if (!blocked) {
+            hidden_rule = nm_uid_hidden(rule_info.flags);
+            if (!hidden_rule) {
                 /* Install our dentry ops on every dentry we manage. Without this the
                  * child inherits sb->s_d_op: harmless on a normal fs (NULL), but on an
                  * overlayfs sb it is ovl_dentry_operations, whose d_revalidate/d_real
@@ -1632,7 +1676,7 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
      * injection from other UIDs (same reasoning as the top-level fallback). Gate on
      * a rule existing, else ordinary files under this dir would be needlessly
      * uncached. */
-    if (blocked && have_rule) {
+    if (hidden_rule) {
         nm_install_dentry_ops(dentry);
 #ifdef DCACHE_DONTCACHE
         dentry->d_flags |= DCACHE_DONTCACHE;
@@ -1825,7 +1869,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
          * injection, so a stock/negative dentry (e.g. one a blocked reader's fallback
          * cached in the shared dcache) is invalid for it. Re-resolving fixes both --
          * and nm_reval_stale() unhashes the negative so the re-resolve actually runs. */
-        if (nomount_is_uid_blocked(current_uid().val)) {
+        if (nm_uid_hidden(rule_info.flags)) {
             /* An ADDED name stays hashed and is refused in the ops instead --
              * see nm_hidden_from_caller(). Invalidating here is what marked every
              * other process's existing mapping of this file "(deleted)". */
@@ -2193,6 +2237,7 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
     dir_node->real_eof = 0;
     dir_node->max_real_pos = 0;
     dir_node->bloom_mask = 0;
+    dir_node->has_public = false;         /* kmem_cache_alloc does not zero */
     atomic_set(&dir_node->refcount, 1);   /* structural owner ref */
     return dir_node;
 }
@@ -2214,6 +2259,45 @@ static void nm_restamp_child_ino(struct nomount_dir_node *dir_node, struct nomou
     }
 }
 
+
+/* Make a synthesized ancestor of a public rule public too, and keep walking up.
+ *
+ * A public rule is unreachable if the virtual directories on the way to it stay
+ * hidden -- the blocked reader gets ENOENT on the parent and never asks about the
+ * child. Fresh ancestors inherit the bit at creation (see the irule below); this
+ * covers the other order, where the directory already exists because a NON-public
+ * file under it was injected first. Both the rule and the listing entry its parent
+ * caches have to be updated, since the by-child walks read the entry's copy.
+ *
+ * Called under nomount_write_mutex (the only caller is the topology walk), which
+ * is what makes the idr walk and the flag stores safe here. Stops at the first
+ * ancestor already public (everything above it was promoted with it) and at the
+ * first real directory, which needs no permission to be seen. */
+static void nm_mark_public_up(struct nomount_rule *rule)
+{
+    int guard = 64;   /* the topology walk bounds depth; this is the belt to it */
+
+    while (rule && guard-- > 0) {
+        struct nomount_child_node *child;
+        struct nomount_dir_node *pd;
+        int id = 0;
+
+        if (!(rule->flags & NM_FLAG_VIRTUAL_DIR)) break;
+        if (rule->flags & NM_FLAG_PUBLIC) break;
+        rule->flags |= NM_FLAG_PUBLIC;
+
+        pd = rule->parent_dir;
+        if (!pd) break;
+        while ((child = idr_get_next(&pd->children_idr, &id)) != NULL) {
+            if (child->rule == rule) { child->flags |= NM_FLAG_PUBLIC; break; }
+            id++;
+        }
+        WRITE_ONCE(pd->has_public, true);
+
+        if (!(pd->_tag_ptr & 1UL)) break;   /* a real directory owns this node */
+        rule = (struct nomount_rule *)(pd->_tag_ptr & ~1UL);
+    }
+}
 
 static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule, const char *name, size_t name_len)
 {
@@ -2255,6 +2339,8 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
             child->rule = rule;
             child->d_type = (rule->flags & NM_FLAG_IS_DIR) ? DT_DIR : DT_REG;
             WRITE_ONCE(child->fake_ino, rule->v_dino ? rule->v_dino : rule->v_ino);
+            if (rule->flags & NM_FLAG_PUBLIC)
+                WRITE_ONCE(dir_node->has_public, true);
             return;
         }
     }
@@ -2286,6 +2372,11 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
      * set, child not yet visible -- is harmless: the reader just falls through to
      * an empty table walk.) */
     WRITE_ONCE(dir_node->bloom_mask, dir_node->bloom_mask | (1ULL << (name_hash & 63)));
+    /* Set before publishing the child, same ordering argument as the bloom bit:
+     * a reader that can already see the child must also see the gate that lets it
+     * look. Never cleared -- see nomount_dir_node.has_public. */
+    if (rule->flags & NM_FLAG_PUBLIC)
+        WRITE_ONCE(dir_node->has_public, true);
     hash_add_rcu(dir_node->children_ht, &child->hnode, name_hash);
 }
 
@@ -2782,6 +2873,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     if (ex->v_ctx_len) memcpy(anc_ctx, ex->v_ctx, ex->v_ctx_len + 1);
                     have_anc = true;
                 }
+                if (target_rule->flags & NM_FLAG_PUBLIC)
+                    nm_mark_public_up(ex);
                 __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
                 found_virtual = true;
                 break;
@@ -2881,7 +2974,10 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 
         irule->v_len = parent_len;
         irule->v_hash = h_parent;
-        irule->flags = NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR;
+        /* A directory synthesized on the way to a public rule is public too, or
+         * the rule it leads to cannot be reached -- see nm_mark_public_up(). */
+        irule->flags = NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR |
+                       (target_rule->flags & NM_FLAG_PUBLIC);
         irule->v_ino = (unsigned long)h_parent;
         irule->target_uid = 0;
         irule->v_uid = GLOBAL_ROOT_UID;   /* defaults; overwritten below if a real ancestor was found */
@@ -3674,6 +3770,18 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
             break;
         }
     }
+
+    /* PUBLIC only ever excuses an ADDED name from hiding. On a rule that shadows
+     * a stock file the blocked reader is already served the stock bytes from the
+     * ops (nm_stock_for_caller), which is consistent on its own; honouring the
+     * bit there would hand it the module's copy instead -- a real leak, and one a
+     * client could ask for by mislabelling. Decide it HERE rather than in
+     * nm_alloc_rule: a replacement re-derives SHADOWS_STOCK from the rule it
+     * replaces just above, and measuring it earlier would strip the bit off every
+     * re-added rule (a reload resolves the vpath through the live injection, so
+     * nm_alloc_rule always concludes "shadowing"). */
+    if (rule->flags & NM_FLAG_SHADOWS_STOCK)
+        rule->flags &= ~NM_FLAG_PUBLIC;
 
     err = nomount_generate_virtual_topology(rule);
     if (err != 0) {
