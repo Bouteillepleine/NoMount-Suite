@@ -3177,36 +3177,42 @@ static void nomount_prune_empty_virtual_dirs(struct nomount_dir_node *dir_node, 
  * in-range ino. Read-only, privileged (nm_root_cred), bounded depth/fanout. */
 /* The dev a STOCK file at this path reports in /proc/<pid>/maps.
  *
- * show_map_vma() prints file_inode(vma->vm_file)->i_sb->s_dev, so the answer is
- * "whichever file object the mmap left on the vma". overlayfs replaces it:
- * ovl_mmap() installs the REAL (lower) file and does not put it back, so a stock
- * file on an overlay-mounted ROM directory maps with the lower filesystem's dev.
- * d_real_inode() resolves to exactly that object on overlayfs, and to the inode
- * itself everywhere else -- which makes it right in both cases by construction,
- * rather than by matching one device.
+ * show_map_vma() prints <accessor>(vma->vm_file)'s i_sb->s_dev, and WHICH
+ * accessor it uses changed upstream at 6.8:
  *
- * Measured on OP11 (5.15) /product/priv-app, an overlay whose lowerdir stack
- * spans six partitions: stock files map with fe:22 or fe:28 -- the erofs dev of
- * whichever layer holds each one, so there is not even a single "stock dev" for
- * the directory -- while injected ones showed 00:22, the anonymous overlay sb our
- * synthetic inode lives on. 10 of ~4848 /product mappings were 00:22 and all of
- * them were ours, so one grep of /proc/self/maps separated the populations, with
- * no permission needed: a process may always read its own maps.
+ *   < 6.8   file_inode(vma->vm_file)
+ *           ovl_mmap() installs the REAL (lower) file on the vma and does not put
+ *           it back, so a stock file on an overlay maps with the LOWER fs dev.
+ *   >= 6.8  file_user_inode(vma->vm_file)
+ *           which resolves a backing file back to the USER-visible inode, so a
+ *           stock file maps with the OVERLAY dev instead.
  *
- * NB this REVERSES an earlier choice. The previous line took
- * d_backing_inode(vpath)->i_sb->s_dev -- always the overlay inode -- after
- * measuring OP15 /product/overlay, where the stock files appeared to report the
- * overlay dev instead. Both cannot be right, and d_real_inode() is the one that
- * follows from what ovl_mmap actually does. Re-measure /product/overlay on OP15
- * before trusting this everywhere.
+ * Both halves are measured, on two devices whose results looked contradictory
+ * until the accessor explained them:
+ *
+ *   OP11 / 5.15 / /product/priv-app (overlay, 6-deep lowerdir)
+ *       stock fe:22 and fe:28 -- the erofs dev of whichever layer holds each
+ *       file, so not even one value for the directory -- while injected showed
+ *       00:22, the anonymous overlay sb our synthetic inode lives on. 10 of ~4848
+ *       /product mappings were 00:22 and every one was ours.
+ *   OP15 / 6.12 / /product/overlay (overlay, 8-deep lowerdir)
+ *       all 7748 mappings 00:1b, stock and injected alike. Nothing to fix, and
+ *       taking the lower here would have CREATED the split it removes on 5.15.
+ *
+ * So there is no single right answer, and picking either one unconditionally is
+ * wrong on half the fleet. Follow the accessor.
  */
 static dev_t nm_stock_map_dev(struct dentry *dentry)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+    return d_backing_inode(dentry)->i_sb->s_dev;
+#else
     struct inode *real = d_real_inode(dentry);
 
     if (real)
         return real->i_sb->s_dev;
     return d_backing_inode(dentry)->i_sb->s_dev;
+#endif
 }
 
 struct nm_sib_scan {
