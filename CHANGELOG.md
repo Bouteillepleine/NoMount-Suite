@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.3.47
+
+Pairs with a kernel built from `kbuild@hookless` at 27f8d95 or later. Nothing here
+requires a new engine version — v16 is still the floor, same as v1.3.46.
+
+### Fixed
+- **The audit probe kept root's supplementary groups.** `nomount audit` forks a
+  child, drops to a hidden app's uid and asks whether it can still open the ROM
+  APKs a `--public` rule serves. It called `setgid`/`setuid` but never
+  `setgroups`, so the child carried root's group memberships into the test: on a
+  target whose group bits grant more than its other bits, the probe reported the
+  file readable where the real app is denied — a PASS on a check that should have
+  failed. Groups are cleared first, while still privileged.
+- The WebUI built two shell commands with a value interpolated outside `shq()`:
+  the `nm` client path (derived from `ro.product.cpu.abi`) and the config key in
+  `setConf`. Neither is reachable today — every caller passes a literal — but both
+  were the only interpolations on those lines that could break out of their
+  quoting.
+
 ## v1.3.46
 
 Requires a kernel with **Prism engine v16**. On an older engine the maps/fd cloak
