@@ -618,7 +618,9 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             "uid {appid} (hidden) could not open {denied} of {} ROM APK rule target(s)",
             readable.len()
         ),
-        "the PackageManager names those paths to the app while open() answers ENOENT --          an inconsistency no stock device has, and one that crashes RASP code that walks          the package list (engine < 15 cannot express the opt-out; see NM_FLAG_PUBLIC)",
+        "the PackageManager names those paths to the app while open() answers ENOENT -- \
+         an inconsistency no stock device has, and one that crashes RASP code that walks \
+         the package list (engine < 15 cannot express the opt-out; see NM_FLAG_PUBLIC)",
     )
 }
 
