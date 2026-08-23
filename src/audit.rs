@@ -577,9 +577,20 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     if pid == 0 {
         unsafe { libc::close(rd) };
         let mut denied = 0u32;
-        // setgid before setuid: the reverse leaves the group id unchanged with no
-        // privilege left to change it.
-        let dropped = unsafe { libc::setgid(appid) == 0 && libc::setuid(appid) == 0 };
+        // setgroups FIRST, then setgid, then setuid.
+        //
+        // Dropping the uid and gid alone leaves root's SUPPLEMENTARY groups on the
+        // child -- so the probe asks "can uid N open this" while still carrying
+        // group memberships the real app does not have. On a target whose group
+        // bits grant more than its other bits, that answers "opened" where the app
+        // is denied, i.e. this check reports PASS on a path an app cannot actually
+        // read. Clearing them is only possible while still privileged, hence
+        // first; setgid before setuid for the same reason.
+        let dropped = unsafe {
+            libc::setgroups(0, std::ptr::null()) == 0
+                && libc::setgid(appid) == 0
+                && libc::setuid(appid) == 0
+        };
         if dropped {
             for p in &readable {
                 if fs::File::open(p.as_path()).is_err() {

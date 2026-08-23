@@ -2215,7 +2215,10 @@
     $("spUnameCur").textContent = "current uname: " + ur;
     $("spDateCur").textContent  = "current date: "  + curDate;
 
-    const uw = (await exec(`[ -x "${(await bin()).replace(/nomount$/, "nm")}" ] && echo 1 || echo 0`)).stdout.trim();
+    // shq like every other call site: the path is built from
+    // getprop ro.product.cpu.abi, and a bare "${...}" inside double quotes still
+    // expands $, ` and \.
+    const uw = (await exec(`[ -x ${shq(await nmc())} ] && echo 1 || echo 0`)).stdout.trim();
     const uvl = $("spUnameVal");
     if (uw !== "1") { uvl.textContent = "needs kernel support"; }
     else if (!$("spUname").checked) { uvl.textContent = "off"; }
@@ -2231,10 +2234,14 @@
   async function setConf(key, val) {
     // rewrite the key line without sed, so arbitrary values (spaces, / # &, the
     // '#1 SMP PREEMPT …' build string) are written verbatim and safely.
+    // `key` goes through shq() for the grep pattern too. Every caller passes a
+    // literal today, so this is not reachable -- but it was the one interpolation
+    // here that could break out of its quoting, and a key is exactly the kind of
+    // thing that later becomes a variable.
     await exec(
-      "f=/data/adb/nomount/spoof.conf; [ -f \"$f\" ] || : > \"$f\"; " +
-      "grep -v '^" + key + "=' \"$f\" > \"$f.tmp\" 2>/dev/null; mv \"$f.tmp\" \"$f\"; " +
-      "printf '%s=%s\\n' " + shq(key) + " " + shq("'" + String(val).replace(/'/g, "'\\''") + "'") + " >> \"$f\""
+      "f=/data/adb/nomount/spoof.conf; k=" + shq(key) + "; [ -f \"$f\" ] || : > \"$f\"; " +
+      "grep -v \"^$k=\" \"$f\" > \"$f.tmp\" 2>/dev/null; mv \"$f.tmp\" \"$f\"; " +
+      "printf '%s=%s\\n' \"$k\" " + shq("'" + String(val).replace(/'/g, "'\\''") + "'") + " >> \"$f\""
     );
   }
   async function toggleSpoof(key, el) {
