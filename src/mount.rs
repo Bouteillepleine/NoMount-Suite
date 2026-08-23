@@ -416,13 +416,19 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
         if ft.is_dir() {
             // A directory carrying `trusted.overlay.opaque=y` means the same thing
             // as a `.replace` file inside it: serve MY contents, hide the stock
-            // directory underneath. It is not an exotic case — it is the branch
-            // PlayIntegrityFork (and anything sharing its installer) takes on
-            // KernelSU and APatch, where `.replace` and the 0:0 char device are
-            // only used for Magisk. We read the other two markers and were blind
-            // to this one, so the module installed cleanly and hid nothing: an
-            // empty opaque dir has no files, so plan_tree recursed into it and
-            // emitted nothing at all.
+            // directory underneath. We read the other two markers and were blind to
+            // this one, so such a module installed cleanly and hid nothing: an empty
+            // opaque dir has no files, so plan_tree recursed into it and emitted
+            // nothing at all.
+            //
+            // This used to name PlayIntegrityFork as the module taking this branch
+            // on KernelSU/APatch. Not on the device this is developed against: the
+            // installed PIF ships no system tree at all (classes.dex, pif.prop and
+            // boot scripts only) and the plan plans zero entries for it. Across all
+            // 16 modules on that OP15 there are no `.replace` markers and no opaque
+            // dirs — the plan reports 0 whiteouts, which is the engine confirming
+            // it. So treat this branch as supported-but-unexercised here rather than
+            // as the common path, and do not assume any particular module needs it.
             // Expanded into per-entry whiteouts rather than one on this directory:
             // see expand_replacement. my_* rides along safely now -- what it
             // emits are leaf deletions, which the engine serves on my_* like

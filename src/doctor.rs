@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::mount::{collect_plan, PlanKind};
+use crate::mount::{collect_plan, PlanEntry, PlanKind};
 use crate::nm::Nm;
 
 /// Partitions whose file descriptors zygote will accept across `forkSystemServer`.
@@ -29,7 +29,7 @@ const ZYGOTE_FD_ALLOWLISTED: &[&str] = &[
     "system", "product", "vendor", "system_ext", "odm", "apex", "oem",
 ];
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Level {
     Error,
     Warn,
@@ -76,6 +76,44 @@ fn parse_live(list: &str) -> Vec<(PathBuf, PathBuf)> {
 
 
 
+/// One `.replace` marker or opaque dir expands into a whiteout per stock entry the
+/// module does not ship (see `mount::expand_replacement`), so a single marker can
+/// be responsible for a great many rules. Group them by the marker that produced
+/// them: every whiteout from one expansion carries that marker as its `source`,
+/// while a 0:0 char device is its own source and so always counts 1.
+fn expansions_by_marker(plan: &[PlanEntry]) -> Vec<(&Path, &str, usize)> {
+    let mut by: HashMap<&Path, (&str, usize)> = HashMap::new();
+    for e in plan.iter().filter(|e| e.kind == PlanKind::Whiteout) {
+        let slot = by.entry(e.source.as_path()).or_insert((e.module.as_str(), 0));
+        slot.1 += 1;
+    }
+    let mut v: Vec<(&Path, &str, usize)> =
+        by.into_iter().map(|(m, (module, n))| (m, module, n)).collect();
+    // Widest first, and by path for a stable order when counts tie.
+    v.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0)));
+    v
+}
+
+/// Report threshold for one marker's expansion.
+///
+/// Deliberately a REPORT and not a cap. Refusing to expand past some N would leave
+/// the module looking applied while the stock entries past the cutoff still showed
+/// through -- silent truncation, which is the failure this project refuses to ship
+/// elsewhere. So the count is surfaced and the expansion happens in full.
+///
+/// The numbers are calibrated against a stock OP15, which runs ~258 rules total:
+/// `.replace` on `/system/app` is 15 entries, on `/product/app` 75, but a FLAT
+/// directory is the pathological case -- `/system/fonts` is 224 and
+/// `/product/overlay` 217, either of which would roughly double the rule count
+/// from a single marker.
+fn expansion_level(count: usize) -> Option<Level> {
+    match count {
+        0..=49 => None,
+        50..=199 => Some(Level::Info),
+        _ => Some(Level::Warn),
+    }
+}
+
 pub fn run_doctor() -> Result<()> {
     // partition -> count of non-overlay entries not in zygote's FD allowlist
     let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -84,6 +122,7 @@ pub fn run_doctor() -> Result<()> {
 
     // ---- plan-level checks -------------------------------------------------
     let mut by_target: HashMap<&Path, Vec<&str>> = HashMap::new();
+    let mut holes: HashMap<&str, Vec<&Path>> = HashMap::new();
     for e in &plan {
         by_target
             .entry(e.target.as_path())
@@ -109,19 +148,11 @@ pub fn run_doctor() -> Result<()> {
         // Only where a hole genuinely REMAINS: from engine v13 a single-block
         // erofs parent is recomputed, so reporting those would cry wolf on the
         // debloat case -- the very one the fix made clean.
+        // Collected, not emitted here: one `.replace` can expand into hundreds of
+        // whiteouts, and a line each buried every other finding under its own output
+        // (236 informational lines on a single probe). Grouped per module below.
         if e.kind == PlanKind::Whiteout && crate::mount::whiteout_leaves_hole(&e.target) {
-            f.push(Finding {
-                level: Level::Info,
-                check: "whiteout leaves a measurable hole",
-                detail: format!(
-                    "{} hides {}, whose parent is multi-block erofs (or the engine predates \
-                     v13): the size and link count still count the hidden entry and the engine \
-                     cannot recompute them there, so a caller that replays erofs block packing \
-                     can spot it. Applied anyway — declining it would silently neuter the module",
-                    e.module,
-                    e.target.display()
-                ),
-            });
+            holes.entry(e.module.as_str()).or_default().push(e.target.as_path());
         }
 
         if e.kind == PlanKind::Inject {
@@ -666,6 +697,40 @@ pub fn run_doctor() -> Result<()> {
             ),
         });
     }
+    let mut holes: Vec<(&str, Vec<&Path>)> = holes.into_iter().collect();
+    holes.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(b.0)));
+    for (module, targets) in &holes {
+        let shown: Vec<String> = targets.iter().take(3).map(|t| t.display().to_string()).collect();
+        let more = targets.len().saturating_sub(shown.len());
+        f.push(Finding {
+            level: Level::Info,
+            check: "whiteout leaves a measurable hole",
+            detail: format!(
+                "{module}: {} path(s) whose parent is multi-block erofs (or the engine \
+                 predates v13) — the size and link count still count the hidden entry and \
+                 cannot be recomputed there, so a caller replaying erofs block packing can \
+                 spot it. Applied anyway; declining would silently neuter the module. {}{}",
+                targets.len(),
+                shown.join(", "),
+                if more > 0 { format!(", and {more} more") } else { String::new() }
+            ),
+        });
+    }
+
+    for (marker, module, count) in expansions_by_marker(&plan) {
+        let Some(level) = expansion_level(count) else { continue };
+        f.push(Finding {
+            level,
+            check: "wide replacement expansion",
+            detail: format!(
+                "{module}: {} expands to {count} whiteouts, one per stock entry it does \
+                 not ship. Correct and applied in full, but that is a lot of rules from \
+                 one marker — narrow the replacement if it was meant to cover less",
+                marker.display()
+            ),
+        });
+    }
+
     let errors = f.iter().filter(|x| x.level == Level::Error).count();
     let warns = f.iter().filter(|x| x.level == Level::Warn).count();
     let infos = f.iter().filter(|x| x.level == Level::Info).count();
@@ -693,6 +758,55 @@ pub fn run_doctor() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wo(module: &str, marker: &str, target: &str) -> PlanEntry {
+        PlanEntry {
+            module: module.to_string(),
+            target: PathBuf::from(target),
+            source: PathBuf::from(marker),
+            kind: PlanKind::Whiteout,
+        }
+    }
+
+    /// Whiteouts are grouped by the marker that produced them, so one `.replace`
+    /// reads as one wide expansion rather than N unrelated rules -- and an inject
+    /// sharing the plan is not counted at all.
+    #[test]
+    fn expansions_are_grouped_by_their_marker() {
+        let mut plan = vec![
+            wo("m", "/data/adb/modules/m/system/etc/x/.replace", "/system/etc/x/a"),
+            wo("m", "/data/adb/modules/m/system/etc/x/.replace", "/system/etc/x/b"),
+            wo("m", "/data/adb/modules/m/system/etc/x/.replace", "/system/etc/x/c"),
+            // a 0:0 char device is its own source: always a group of one
+            wo("m", "/data/adb/modules/m/system/app/Foo", "/system/app/Foo"),
+        ];
+        plan.push(PlanEntry {
+            module: "m".into(),
+            target: PathBuf::from("/system/etc/x/mine.xml"),
+            source: PathBuf::from("/data/adb/modules/m/system/etc/x/mine.xml"),
+            kind: PlanKind::Inject,
+        });
+
+        let got = expansions_by_marker(&plan);
+        assert_eq!(got.len(), 2, "one .replace group + one char device");
+        // widest first
+        assert_eq!(got[0].2, 3);
+        assert!(got[0].0.ends_with(".replace"));
+        assert_eq!(got[1].2, 1);
+    }
+
+    /// A report, never a cap: the levels escalate but nothing is ever withheld.
+    /// Calibrated on a stock OP15 (~258 live rules): /system/app is 15 entries,
+    /// /product/app 75, /system/fonts 224.
+    #[test]
+    fn expansion_levels_escalate_but_never_refuse() {
+        assert_eq!(expansion_level(1), None);
+        assert_eq!(expansion_level(15), None); // .replace on /system/app
+        assert_eq!(expansion_level(49), None);
+        assert_eq!(expansion_level(75), Some(Level::Info)); // /product/app
+        assert_eq!(expansion_level(199), Some(Level::Info));
+        assert_eq!(expansion_level(224), Some(Level::Warn)); // /system/fonts
+    }
 
     /// Verbatim from `ksud feature get kernel_umount` on OP15 / ReSukiSU.
     /// The parser itself now lives in manager.rs; this keeps the real-device
