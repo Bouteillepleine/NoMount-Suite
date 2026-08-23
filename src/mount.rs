@@ -301,6 +301,90 @@ pub(crate) struct PlanEntry {
 /// are hookless-injected into e.g. `/product/overlay`, and OverlayManagerService +
 /// idmap2 pick them up at the system_server scan (which runs after this
 /// post-fs-data pass). So RRO works with no overlayfs mount — zero mounts total.
+/// Expand a "replace this directory" marker into rules the engine actually has.
+///
+/// `.replace` and `trusted.overlay.opaque=y` both mean the same thing: the
+/// module's copy of a directory IS the directory, stock contents included. That
+/// is overlayfs vocabulary, inherited from when this project magic-mounted, and
+/// the hookless engine has no primitive for it. What it was translated into --
+/// one whiteout on the PARENT, plus injects for the module's files inside it --
+/// cannot work: the whiteout d_drops the directory, so every path beneath it
+/// stops resolving and the injects underneath serve nothing. Measured on an OP15:
+/// a `.replace` on `/system_ext/etc/perfetto-configs` shipping a byte-identical
+/// copy of the stock file left `ls` reporting "No such file or directory", with
+/// both the whiteout and the inject sitting in `nm list` looking healthy.
+///
+/// The engine does have the two primitives needed to express it exactly: a
+/// whiteout hides ONE path, and an inject serves ONE path. So instead of hiding
+/// the parent, hide each stock entry the module does not ship, and let the normal
+/// walk inject the ones it does. Where the module ships a directory of its own,
+/// recurse, so a partially-shipped subtree keeps the stock entries it does not
+/// replace hidden rather than merged -- `.replace` means replace, not merge.
+///
+/// Whiteouts land on leaves and on whole unshipped subdirectories, never on the
+/// parent being replaced, so nothing d_drops a path this module still serves.
+fn expand_replacement(
+    module: &str,
+    stock_dir: &Path,
+    module_dir: &Path,
+    marker: &Path,
+    depth: u32,
+    out: &mut Vec<PlanEntry>,
+) {
+    // A stock tree deep enough to hit this is not a module layout; stop rather
+    // than walk something pathological (or a symlink loop we failed to spot).
+    if depth > 16 {
+        eprintln!(
+            "nomount: {module}: giving up expanding {} past depth 16",
+            stock_dir.display()
+        );
+        return;
+    }
+    let stock_entries = match fs::read_dir(stock_dir) {
+        Ok(e) => e,
+        // No stock directory to replace: the module's content is simply served,
+        // and the engine materialises the parent as a virtual dir on its own.
+        Err(_) => return,
+    };
+    let mut entries: Vec<_> = stock_entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let stock_child = stock_dir.join(&name);
+        let module_child = module_dir.join(&name);
+
+        // lstat, not stat: a stock symlink the module does not ship must be
+        // hidden as the link it is, never followed to whatever it points at.
+        let shipped = fs::symlink_metadata(&module_child).ok();
+        let stock_is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+        match shipped {
+            // Shipped as a directory over a stock directory: recurse, so the
+            // stock entries the module does not replace inside it still go.
+            Some(m) if m.is_dir() && stock_is_dir => {
+                expand_replacement(module, &stock_child, &module_child, marker, depth + 1, out);
+            }
+            // Shipped at all, otherwise: the module's own file wins here and the
+            // ordinary walk emits its inject. Nothing to hide.
+            Some(_) => {}
+            // Not shipped: this is what "replace" is for.
+            None => {
+                if can_whiteout(&stock_child).is_err() {
+                    continue;
+                }
+                out.push(PlanEntry {
+                    module: module.to_string(),
+                    target: stock_child,
+                    // Provenance for `plan`/`doctor`: the marker that asked for this,
+                    // which is the `.replace` file or the opaque directory itself.
+                    source: marker.to_path_buf(),
+                    kind: PlanKind::Whiteout,
+                });
+            }
+        }
+    }
+}
+
 fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
     // Sorted, not raw readdir order. Two modules may claim the same target (doctor
     // reports it as "target claimed twice"), and the LAST plan entry wins -- in
@@ -339,15 +423,12 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             // to this one, so the module installed cleanly and hid nothing: an
             // empty opaque dir has no files, so plan_tree recursed into it and
             // emitted nothing at all.
-            // my_* is refused here for the same reason as `.replace`, not the char
-            // device's: an opaque dir carries replacement content with it.
-            if is_opaque_dir(&source) && !is_partition_root(&target) && !is_my_partition(&target) {
-                out.push(PlanEntry {
-                    module: module.to_string(),
-                    target: target.clone(),
-                    source: source.clone(),
-                    kind: PlanKind::Whiteout,
-                });
+            // Expanded into per-entry whiteouts rather than one on this directory:
+            // see expand_replacement. my_* rides along safely now -- what it
+            // emits are leaf deletions, which the engine serves on my_* like
+            // anywhere else, not the parent whiteout that made this unsafe.
+            if is_opaque_dir(&source) && !is_partition_root(&target) {
+                expand_replacement(module, &target, &source, &source, 0, out);
             }
             plan_tree(module, module_root, &source, out);
         } else if name == ".replace" {
@@ -355,21 +436,17 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             // Never whiteout a bare partition root: masking a whole partition bootloops
             // (forkSystemServer SIGABRT), exactly as an inject on a root does below.
             if let Some(parent) = target.parent() {
-                // Skip a partition root (bootloop). my_* stays refused here too, but
-                // for a narrower reason than the char device below: `.replace` means
-                // the module ALSO ships content for this directory, and on my_* that
-                // content is bind-served unless NM_MY_HOOKLESS is on. A whiteout and
-                // a bind on one path is an untested combination, so leave it refused
-                // until it is tested -- the pure-deletion case is not affected.
-                if is_partition_root(parent) || is_my_partition(parent) {
+                // Never touch a bare partition root: replacing a whole partition
+                // is not something a module can mean, and masking one bootloops.
+                if is_partition_root(parent) {
                     continue;
                 }
-                out.push(PlanEntry {
-                    module: module.to_string(),
-                    target: parent.to_path_buf(),
-                    source: source.clone(),
-                    kind: PlanKind::Whiteout,
-                });
+                // Expand instead of whiteouting `parent` itself -- a whiteout there
+                // d_drops the directory and the module's own injects underneath it
+                // stop resolving. See expand_replacement.
+                if let Some(module_dir) = source.parent() {
+                    expand_replacement(module, parent, module_dir, &source, 0, out);
+                }
             }
         } else if is_char_dev(&ft) {
             // A 0:0 char device is Magisk's whiteout marker: a pure deletion, with
@@ -988,6 +1065,123 @@ mod tests {
         assert!(matches!(serve_mode(Path::new("/data/adb/x")), Serve::Refuse(_)));
         assert!(matches!(serve_mode(Path::new("/system")), Serve::Refuse(_)));
         assert!(matches!(serve_mode(Path::new("/")), Serve::Refuse(_)));
+    }
+
+    /// `.replace` must hide the stock entries the module does NOT ship, and leave
+    /// the ones it does to the ordinary inject walk. The old translation put a
+    /// single whiteout on the parent, which d_dropped the directory and took the
+    /// module's own content down with it.
+    ///
+    /// Built on a real tree because that is what the function reads. The base has
+    /// to be somewhere `can_whiteout` accepts, so /tmp is out -- "tmp" is in
+    /// NON_PARTITION_ROOTS -- and $HOME is used instead.
+    #[test]
+    fn replace_expands_to_the_unshipped_entries_only() {
+        let Some(base) = test_base("replace-expand") else { return };
+        let stock = base.join("stock");
+        let module = base.join("module");
+
+        // stock: a.xml, b.xml, sub/{c.xml,d.xml}, extra/
+        fs::create_dir_all(stock.join("sub")).unwrap();
+        fs::create_dir_all(stock.join("extra")).unwrap();
+        fs::write(stock.join("a.xml"), b"stock").unwrap();
+        fs::write(stock.join("b.xml"), b"stock").unwrap();
+        fs::write(stock.join("sub/c.xml"), b"stock").unwrap();
+        fs::write(stock.join("sub/d.xml"), b"stock").unwrap();
+
+        // module ships: a.xml, and sub/ containing only d.xml
+        fs::create_dir_all(module.join("sub")).unwrap();
+        fs::write(module.join("a.xml"), b"mine").unwrap();
+        fs::write(module.join("sub/d.xml"), b"mine").unwrap();
+
+        let mut out = Vec::new();
+        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &mut out);
+        let mut got: Vec<String> =
+            out.iter().map(|e| e.target.strip_prefix(&stock).unwrap().display().to_string()).collect();
+        got.sort();
+
+        // b.xml unshipped -> hidden. extra/ unshipped -> hidden whole, not descended.
+        // sub/ is shipped as a dir -> recursed: c.xml hidden, d.xml left alone.
+        assert_eq!(got, vec!["b.xml".to_string(), "extra".to_string(), "sub/c.xml".to_string()]);
+        assert!(out.iter().all(|e| e.kind == PlanKind::Whiteout));
+        // The parent itself is never whiteouted -- that was the whole bug.
+        assert!(out.iter().all(|e| e.target != stock));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A stock directory the module replaces with a FILE of the same name is not
+    /// recursed into: the module's file is served there and the ordinary walk
+    /// emits its inject, so there is nothing left to hide.
+    #[test]
+    fn replace_does_not_descend_where_the_module_ships_a_file() {
+        let Some(base) = test_base("replace-file-over-dir") else { return };
+        let stock = base.join("stock");
+        let module = base.join("module");
+        fs::create_dir_all(stock.join("thing")).unwrap();
+        fs::write(stock.join("thing/inner.xml"), b"stock").unwrap();
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("thing"), b"mine").unwrap();
+
+        let mut out = Vec::new();
+        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &mut out);
+        assert!(out.is_empty(), "expected no whiteouts, got {} entries", out.len());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// No stock directory to replace: the module's content is served on its own
+    /// and the engine materialises the parent. Nothing to hide, and no panic.
+    #[test]
+    fn replace_on_a_directory_the_rom_does_not_have_is_a_no_op() {
+        let Some(base) = test_base("replace-absent") else { return };
+        let module = base.join("module");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("mine.xml"), b"mine").unwrap();
+
+        let mut out = Vec::new();
+        expand_replacement("m", &base.join("no-such-stock"), &module, &module.join(".replace"), 0, &mut out);
+        assert!(out.is_empty());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A tree deeper than the guard stops instead of walking forever.
+    #[test]
+    fn replace_expansion_stops_at_the_depth_guard() {
+        let Some(base) = test_base("replace-depth") else { return };
+        let stock = base.join("stock");
+        let mut d = stock.clone();
+        let module = base.join("module");
+        let mut m = module.clone();
+        for _ in 0..20 {
+            d = d.join("x");
+            m = m.join("x");
+        }
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("deep.xml"), b"stock").unwrap();
+        fs::create_dir_all(&m).unwrap();
+
+        let mut out = Vec::new();
+        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &mut out);
+        // It stopped rather than reaching the leaf 20 levels down.
+        assert!(out.iter().all(|e| !e.target.ends_with("deep.xml")));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Somewhere `can_whiteout` accepts (not /tmp, whose root is non-partition).
+    /// Returns None -- test skips -- if this machine has no usable home.
+    fn test_base(tag: &str) -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        let base = PathBuf::from(home).join(format!(".nomount-test-{tag}"));
+        if can_whiteout(&base.join("probe")).is_err() {
+            eprintln!("skipping: {} is not a whiteoutable base", base.display());
+            return None;
+        }
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).ok()?;
+        Some(base)
     }
 
     /// A whiteout is a d_drop, not a serve, so it is allowed wherever the path
