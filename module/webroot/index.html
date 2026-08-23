@@ -1148,6 +1148,10 @@
     NMBIN = `/data/adb/modules/meta-nomount/bin/${abi}/nomount`;
     return NMBIN;
   }
+  // Path to the raw `nm` netlink client beside the Suite binary. The pathhide
+  // control plane is a kernel knob, so it is addressed directly rather than
+  // through a Suite subcommand.
+  async function nmc() { return (await bin()).replace(/nomount$/, "nm"); }
   // The Suite binary shells to the `nm` netlink client beside it.
   async function nm(args) {
     const b = await bin();
@@ -2435,7 +2439,12 @@
   let PH = new Map(); let phShown = false;
   function phClean(s) { return (s || "").replace(/[^A-Za-z0-9._:\/\-]/g, "").trim(); }
   async function loadCloak() {
-    const ok = (await exec("[ -e /proc/pathhide ] && echo y")).stdout.indexOf("y") >= 0;
+    // Presence probe over the netlink knob. `nm k p` with no value exits 0 only
+    // when the pathhide patch set is compiled into the running kernel; the old
+    // `[ -e /proc/pathhide ]` test no longer works because that node is gone
+    // (any app could find it with one readdir of /proc).
+    const NMB = shq(await nmc());
+    const ok = (await exec(NMB + " k p >/dev/null 2>&1 && echo y")).stdout.indexOf("y") >= 0;
     document.getElementById("phApply").disabled = !ok;
     document.getElementById("phScan").disabled = !ok;
     if (!ok) document.getElementById("phchip").textContent = "no kernel";
@@ -2499,42 +2508,32 @@
     const rules = [...PH.entries()].filter(function (x) { return x[1].hidden; })
       .map(function (x) { return phClean(x[0]); }).filter(Boolean);
     const done = busy(btn, "Applying…");
-    // /proc/pathhide is a SHARED kernel list: `echo -` wipes every rule on it,
-    // including ones another module put there (PathHideManager drives the same
-    // interface exactly this way). Clearing is still needed so an un-ticked rule
+    // The kernel list is SHARED: "-" wipes every rule on it, including ones
+    // another module put there. Clearing is still needed so an un-ticked rule
     // goes away live, so preserve what is not ours: read the current list, keep
-    // the entries our conf does not claim, then re-add those alongside ours. If
-    // the list cannot be read we skip the wipe entirely and only add — leaving a
-    // stale rule until reboot is strictly better than silently unhiding another
-    // module's paths.
+    // the entries our conf does not claim, then re-add those alongside ours.
+    //
+    // `nm l p` makes that read RELIABLE. The old /proc node could be write-only
+    // to this caller, which forced a branch that wiped foreign rules and merely
+    // warned about it; the netlink dump always answers, so that branch is gone.
     // Every value is shq()'d: a rule string reaches a ROOT shell here.
+    const NMB = shq(await nmc());
     let cmd = "mkdir -p /data/adb/nomount; { echo '# NoMount Cloak — pathhide rule list (managed by WebUI)'; ";
     rules.forEach(function (r) { cmd += "echo " + shq(r) + "; "; });
     cmd += "} > " + shq(PH_CONF) + "; ";
-    cmd += "if [ -e /proc/pathhide ]; then ";
+    cmd += "if " + NMB + " k p >/dev/null 2>&1; then ";
     cmd +=   "_ours=" + shq(rules.join("\n")) + "; ";
-    // cat's EXIT STATUS separates "readable and empty" from "not readable at
-    // all" -- an empty capture alone cannot, and guessing wrong either wipes a
-    // foreign rule or refuses to remove one of ours.
-    cmd +=   "if _cur=$(cat /proc/pathhide 2>/dev/null); then ";
-    cmd +=     "_foreign=$(printf '%s\\n' \"$_cur\" | grep -vxF \"$_ours\" 2>/dev/null); ";
-    cmd +=     "echo - > /proc/pathhide; ";
-    cmd +=     "[ -n \"$_foreign\" ] && printf '%s\\n' \"$_foreign\" | while IFS= read -r _f; do ";
-    cmd +=       "[ -n \"$_f\" ] && echo \"+$_f\" > /proc/pathhide; done; ";
-    cmd +=   "else ";
-    // Write-only interface: foreign rules cannot be enumerated, so they cannot
-    // be preserved. Clear anyway -- removing a rule the user just un-ticked is
-    // what this button is for -- and say so rather than failing silently.
-    cmd +=     "echo - > /proc/pathhide; echo WRONLY; ";
-    cmd +=   "fi; ";
-    rules.forEach(function (r) { cmd += "echo " + shq("+" + r) + " > /proc/pathhide; "; });
+    cmd +=   "_cur=$(" + NMB + " l p 2>/dev/null); ";
+    cmd +=   "_foreign=$(printf '%s\\n' \"$_cur\" | grep -vxF \"$_ours\" 2>/dev/null); ";
+    cmd +=   NMB + " k p - >/dev/null 2>&1; ";
+    cmd +=   "[ -n \"$_foreign\" ] && printf '%s\\n' \"$_foreign\" | while IFS= read -r _f; do ";
+    cmd +=     "[ -n \"$_f\" ] && " + NMB + " k p \"+$_f\" >/dev/null 2>&1; done; ";
+    rules.forEach(function (r) { cmd += NMB + " k p " + shq("+" + r) + " >/dev/null 2>&1; "; });
     cmd += "fi; echo OK";
     const r = await exec(cmd); done();
     const ok = r.stdout.indexOf("OK") >= 0;
-    const wronly = r.stdout.indexOf("WRONLY") >= 0;
     toast(
       !ok ? "Failed"
-        : wronly ? "Applied — note: /proc/pathhide is write-only here, so any rule another module set was cleared too"
         : rules.length ? "Cloaking " + rules.length + " — live & saved"
         : "Cleared all rules",
       ok ? "ok" : "bad"

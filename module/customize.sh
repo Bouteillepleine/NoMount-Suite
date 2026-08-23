@@ -168,10 +168,13 @@ if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
 fi
 set_perm "$NMDIR/absorb-skip.txt" 0 0 0600
 set_perm "$NMDIR/pathhide.conf" 0 0 0644
-if [ -e /proc/pathhide ]; then
+# Probe over the netlink knob, not a /proc node: pathhide no longer creates one
+# (any app could find it with a single readdir of /proc). `nm k p` with no value
+# is side-effect-free and exits 0 only when the patch set is compiled in.
+if [ -x "$_nm" ] && "$_nm" k p >/dev/null 2>&1; then
     ui_print "- Cloak add-on: kernel pathhide FOUND — pick modules in WebUI › Tools › Cloak"
 else
-    ui_print "- Cloak add-on: /proc/pathhide not present (needs a pathhide-enabled kernel)"
+    ui_print "- Cloak add-on: kernel pathhide not present (needs a pathhide-enabled kernel)"
 fi
 
 ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."

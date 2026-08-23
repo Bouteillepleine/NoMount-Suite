@@ -147,6 +147,11 @@ void c_main(long *sp) {
          * 1 = app-zygote, 2 = platform, 3 = both (default), 0 = neither.
          * See NM_KNOB_HIDE_ISOLATED for the trade this expresses. */
         case 'i': knob = 5; break;
+        /* p <cmd> -- one _pathhide control command: "+needle" adds, "~needle"
+         * removes, "-" clears. `nm k p` with NO value is a presence probe that
+         * exits 0 only when the pathhide patch set is compiled in; it is not a
+         * clear. See NM_KNOB_PATHHIDE. */
+        case 'p': knob = 6; break;
         default: exit_code = 3; goto do_exit;
         }
         val = (p_count > 1) ? p_args[1] : "";
@@ -174,14 +179,18 @@ void c_main(long *sp) {
         }
 
     } else if (cmd == 'l') {
-        int is_json = 0, is_uids = 0;
+        int is_json = 0, is_uids = 0, is_ph = 0;
         for (int i = 0; i < p_count; i++) {
             if (p_args[i][0] == 'j') is_json = 1;
             if (p_args[i][0] == 'u') is_uids = 1;
+            /* `nm l p` -- the _pathhide rule list. Plain one-per-line by
+             * default so it drops straight into the shell loops that used to
+             * `cat /proc/pathhide`. */
+            if (p_args[i][0] == 'p') is_ph = 1;
         }
         if (is_uids) is_json = 1;
 
-        int target_cmd = is_uids ? 8 : 7;
+        int target_cmd = is_ph ? 10 : is_uids ? 8 : 7;
         /* signed: a negative errno from do_nm_cmd()/read() must fail the while(len>0)
          * guard, not wrap to a huge unsigned length that walks rx_buf out of bounds. */
         int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
@@ -203,7 +212,20 @@ void c_main(long *sp) {
                     goto list_done;
                 }
 
-                if (is_uids) {
+                if (is_ph) {
+                    /* The needle rides in NOMOUNT_ATTR_VIRTUAL_PATH -- see the
+                     * kernel dump for why that attribute is reused. */
+                    char *rule = get_attr(msg, 1);
+                    if (rule) {
+                        if (is_json) {
+                            print_str((const char *)",\n  \"" + offset); offset = 0;
+                            print_str(rule);
+                            print_str("\"");
+                        } else {
+                            print_str(rule); print_str("\n");
+                        }
+                    }
+                } else if (is_uids) {
                     unsigned int *uid = get_attr(msg, 4); /* NOMOUNT_ATTR_UID */
                     if (uid) {
                         if (offset == 0) print_str(",\n");

@@ -3,6 +3,14 @@
 # healthy, so clear the boot counter (re-arms the guard for next time).
 NMDIR=/data/adb/nomount
 umask 077                     # state files are 0600, not the boot umask 0666 (see metamount.sh)
+
+# Binary paths, hoisted to the top because the cloak block below now needs `nm`
+# too -- it used to write to /proc/pathhide, which needed nothing. $0 does not
+# change, so these are the same values the later section used to recompute.
+MODDIR="${0%/*}"
+ABI=$(getprop ro.product.cpu.abi)
+BIN="$MODDIR/bin/$ABI/nomount"
+export NM_BIN="$MODDIR/bin/$ABI/nm"
 i=0
 booted=0
 while [ "$i" -lt 120 ]; do
@@ -27,12 +35,17 @@ else
 fi
 
 # --- Cloak: re-apply the pathhide maps/fd rule list (managed by the WebUI) ---
-# Hides selected module APKs from every /proc/<pid>/maps and /proc/<pid>/fd via
-# the kernel pathhide interface. Inert on a kernel without /proc/pathhide.
-if [ -e /proc/pathhide ]; then
-    # No `echo - > /proc/pathhide` here. The kernel's list starts EMPTY at boot,
-    # so clearing achieves nothing on the only path this runs -- except when
-    # another module (PathHideManager drives the same shared interface) has
+# Hides selected module APKs from every /proc/<pid>/maps and /proc/<pid>/fd.
+#
+# Driven over nomount's netlink knob (`nm k p`), not the old /proc/pathhide node.
+# That node was created unconditionally and any app could find it with a single
+# readdir of /proc -- a self-naming tell louder than the packages it concealed --
+# so it is gone unless a kernel was deliberately built with -DPH_ENABLE_PROC.
+# `nm k p` with no value is the presence probe: it exits 0 only when the pathhide
+# patch set is compiled in, so this stays inert on a kernel without it.
+if [ -x "$NM_BIN" ] && "$NM_BIN" k p >/dev/null 2>&1; then
+    # No clear here. The kernel's list starts EMPTY at boot, so clearing achieves
+    # nothing on the only path this runs -- except when another module has
     # already added its rules, in which case it silently unhides everything that
     # module was asked to hide. Removing one of OUR rules still works: it is
     # dropped from pathhide.conf and simply not re-added on the next boot, and
@@ -42,7 +55,7 @@ if [ -e /proc/pathhide ]; then
             _phr=$(echo "$_phr" | tr -d '\r')
             [ -z "$_phr" ] && continue
             case "$_phr" in \#*) continue ;; esac
-            echo "+$_phr" > /proc/pathhide 2>/dev/null
+            "$NM_BIN" k p "+$_phr" >/dev/null 2>&1
         done < "$NMDIR/pathhide.conf"
         echo "nomount: pathhide cloak rules re-applied" > /dev/kmsg 2>/dev/null
     fi
@@ -94,10 +107,7 @@ fi
 # health cannot be judged yet. Now that boot is complete both are knowable, so restate
 # the card with the real mount count and the health-check verdict — that turns the
 # module list into a status readout you can trust without opening the WebUI.
-MODDIR="${0%/*}"
-ABI=$(getprop ro.product.cpu.abi)
-BIN="$MODDIR/bin/$ABI/nomount"
-export NM_BIN="$MODDIR/bin/$ABI/nm"
+# (MODDIR/ABI/BIN/NM_BIN are set at the top of this script.)
 
 # --- absorb any bind mounts other modules made ---
 # Module boot scripts have all run by now. Anything that bind-mounted its own
