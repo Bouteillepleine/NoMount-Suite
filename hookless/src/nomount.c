@@ -178,6 +178,11 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
  * synthesized dir must report the erofs-shaped size instead of 4096. See
  * NM_KNOB_VDIR_EROFS_SIZE for why this cannot be inferred in-kernel. */
 static bool nm_vdir_erofs_size __read_mostly;
+/* linux/magic.h only grew this in 5.4; nm_llseek below needs it, so the
+ * fallback has to sit above the FIRST use, not next to nm_vdir_size. */
+#ifndef EROFS_SUPER_MAGIC_V1
+#define EROFS_SUPER_MAGIC_V1 0xE0F5E1E2
+#endif
 /* Defined below; nm_llseek needs it so SEEK_END on a synthesized directory
  * reports the same size getattr does. */
 static loff_t nm_vdir_size(struct nomount_dir_node *d, unsigned int blocksize);
@@ -1350,9 +1355,6 @@ static unsigned int nm_vdir_nlink(struct nomount_dir_node *d)
     return links;
 }
 
-#ifndef EROFS_SUPER_MAGIC_V1
-#define EROFS_SUPER_MAGIC_V1 0xE0F5E1E2
-#endif
 /* sizeof(struct erofs_dirent); fs/erofs/erofs_fs.h asserts it with a
  * BUILD_BUG_ON, so it is part of the on-disk format, not a guess. */
 #define NM_EROFS_DIRENT_SZ 12
