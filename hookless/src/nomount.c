@@ -178,6 +178,9 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
  * synthesized dir must report the erofs-shaped size instead of 4096. See
  * NM_KNOB_VDIR_EROFS_SIZE for why this cannot be inferred in-kernel. */
 static bool nm_vdir_erofs_size __read_mostly;
+/* Defined below; nm_llseek needs it so SEEK_END on a synthesized directory
+ * reports the same size getattr does. */
+static loff_t nm_vdir_size(struct nomount_dir_node *d, unsigned int blocksize);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
 static int nomount_hijacked_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat);
 #else
@@ -197,10 +200,25 @@ static __always_inline struct nomount_dir_node *nomount_get_dir_node(struct inod
     struct nm_fop *nm_fop;
 
     nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
-    if (nm_iop && nm_iop->dir_node) return nm_iop->dir_node;
+    /* ACQUIRE, not a plain load. The re-arm in nomount_hijack_* stores a
+     * dir_node allocated microseconds earlier into a vtable that was ALREADY
+     * published, so the reader's smp_load_acquire(&inode->i_op) pairs with the
+     * FIRST publish and orders nothing about the new node. __nomount_alloc_dir_node
+     * uses kmem_cache_alloc (not zalloc) and its idr_init/hash_init/atomic_set are
+     * plain stores in another function, so on arm64 a reader could see the pointer
+     * before the init and then atomic_inc_not_zero a recycled slab word. */
+    {
+        struct nomount_dir_node *d = nm_iop ? smp_load_acquire(&nm_iop->dir_node) : NULL;
+
+        if (d) return d;
+    }
 
     nm_fop = nm_get_fop(smp_load_acquire(&inode->i_fop));
-    if (nm_fop && nm_fop->dir_node) return nm_fop->dir_node;
+    {
+        struct nomount_dir_node *d = nm_fop ? smp_load_acquire(&nm_fop->dir_node) : NULL;
+
+        if (d) return d;
+    }
     
     return NULL;
 }
@@ -652,7 +670,7 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
     rcu_read_lock();
     nm_iop = __get_nm(smp_load_acquire(&dir->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
     orig_iop = nm_iop ? nm_iop->orig_iop : NULL;
-    pdir = nm_iop ? nm_iop->dir_node : NULL;
+    pdir = nm_iop ? smp_load_acquire(&nm_iop->dir_node) : NULL;
     if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
     rcu_read_unlock();
 
@@ -757,7 +775,7 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
     rcu_read_lock();
     nm_fop = nm_get_fop(smp_load_acquire(&file->f_op));
     orig_fop = nm_fop ? nm_fop->orig_fop : NULL;
-    pdir = nm_fop ? nm_fop->dir_node : NULL;
+    pdir = nm_fop ? smp_load_acquire(&nm_fop->dir_node) : NULL;
     if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
     rcu_read_unlock();
 
@@ -948,28 +966,22 @@ static int nm_open(struct inode *inode, struct file *file)
     }
 
     file->private_data = real_file;
-    /* Mirror the stock answer for O_DIRECT.
+    /* Mirror the stock answer for O_DIRECT, by SETTING f_mode -- never by
+     * touching the caller's f_flags.
      *
-     * do_dentry_open() sets FMODE_CAN_ODIRECT from f_mapping->a_ops->direct_IO
-     * AFTER ->open returns, then rejects O_DIRECT when the bit is clear -- so the
-     * filesystem under the backing file decides it. Uncompressed erofs supplies
-     * noop_direct_IO, f2fs does not: an injected file therefore answered -EINVAL
-     * where 20 of its 24 stock siblings answered 0. Measured on OP15 in
-     * /system/etc/permissions.
+     * do_dentry_open() ORs FMODE_CAN_ODIRECT in after ->open returns and then
+     * rejects the open when the caller asked for O_DIRECT and the bit is clear
+     * (fs/open.c:974 and :981). It only ever ORs, so a bit set here survives --
+     * an earlier version of this comment claimed otherwise and stripped O_DIRECT
+     * from f_flags instead, which made the open succeed while F_GETFL reported a
+     * flag the caller had asked for and been told it had.
      *
-     * We cannot set f_mode from here (it is overwritten below us), but we can
-     * drop the flag the check keys on. Dropping it makes the open SUCCEED, which
-     * is what stock does, and costs nothing semantically: erofs's direct_IO is
-     * noop_direct_IO, i.e. stock falls back to buffered I/O anyway.
-     *
-     * Only when the stock file really would accept it, and only when our backing
-     * mapping would not -- otherwise leave the caller's flags alone. */
-    if (unlikely((file->f_flags & O_DIRECT) && info->v_cap & NM_CAP_ODIRECT)) {
-        struct address_space *m = real_file->f_mapping;
-
-        if (!m || !m->a_ops || !m->a_ops->direct_IO)
-            file->f_flags &= ~O_DIRECT;
-    }
+     * v_cap carries the answer a REAL open of the stock path gave at rule build,
+     * so both directions come out right without guessing: stock accepts and we
+     * set the bit, or stock refuses and we leave it clear so the VFS refuses us
+     * exactly as it refuses stock. */
+    if (unlikely(info->v_cap & NM_CAP_ODIRECT))
+        file->f_mode |= FMODE_CAN_ODIRECT;
     return 0;
 }
 
@@ -993,7 +1005,24 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
          * lseek(fd,0,SEEK_SET)), a behavioural tell vs a real directory.
          * Handle the directory-cookie seek on our own f_pos instead. */
         switch (whence) {
-        case SEEK_END: offset += i_size_read(file_inode(file)); break;
+        case SEEK_END: {
+            /* The size getattr REPORTS, not the raw i_size. A synthesized dir's
+             * inode keeps the 4096 placeholder from nomount_create_new_inode
+             * while nm_file_getattr recomputes the erofs-shaped size, so
+             * stat().st_size and lseek(fd,0,SEEK_END) disagreed on the same fd --
+             * something no filesystem does, and one syscall pair to spot.
+             * Measured on OP15: /product/priv-app/Mms st_size=61 vs SEEK_END
+             * 4096, 3 of 3 synthesized dirs diverging, 0 of 89 real ones. */
+            struct nm_inode_info *vi = file_inode(file)->i_private;
+            struct super_block *sb = file_inode(file)->i_sb;
+            loff_t sz = i_size_read(file_inode(file));
+
+            if (vi && vi->dir_node &&
+                (sb->s_magic == EROFS_SUPER_MAGIC_V1 || nm_vdir_erofs_size))
+                sz = nm_vdir_size(vi->dir_node, sb->s_blocksize);
+            offset += sz;
+            break;
+        }
         case SEEK_CUR: offset += file->f_pos; break;
         case SEEK_SET: break;
         default:       return -EINVAL;
@@ -1183,9 +1212,33 @@ static u8 nm_stock_caps(struct inode *ino)
 
     if (!ino) return 0;
     if (ino->i_fop && ino->i_fop->fsync) cap |= NM_CAP_FSYNC;
-    if (ino->i_mapping && ino->i_mapping->a_ops && ino->i_mapping->a_ops->direct_IO)
-        cap |= NM_CAP_ODIRECT;
     return cap;
+}
+
+/* Does a stock file at this path accept O_DIRECT? ASK IT -- do not infer.
+ *
+ * The obvious predicate, a_ops->direct_IO, is wrong on both sides here:
+ *   - d_backing_inode() of an overlayfs dentry is the OVL inode, and ovl_aops
+ *     sets .direct_IO = noop_direct_IO -- so every stock file on /product looks
+ *     like it accepts, while the real open is forwarded by ovl_open_realfile()
+ *     to a lower layer that on this device is COMPRESSED erofs and rejects it.
+ *   - f2fs (our donor) has no .direct_IO in its aops at all, yet f2fs_file_open()
+ *     sets FMODE_CAN_ODIRECT directly -- so the donor looks like it rejects when
+ *     it accepts.
+ * Both errors point the same way, and a guard built on them preserved exactly the
+ * divergence it was meant to erase (measured: 139/139 injected accepted on
+ * /product/overlay, 53/53 stock siblings refused).
+ *
+ * One real open at rule build settles it for any filesystem stacking. */
+static bool nm_stock_takes_odirect(struct path *p)
+{
+    struct file *f;
+
+    if (!p || !p->dentry) return false;
+    f = dentry_open(p, O_RDONLY | O_DIRECT | O_LARGEFILE, current_cred());
+    if (IS_ERR(f)) return false;
+    fput(f);
+    return true;
 }
 
 static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
@@ -1490,7 +1543,7 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
     rcu_read_lock();
     nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
     orig_iop = nm_iop ? nm_iop->orig_iop : NULL;
-    d = nm_iop ? nm_iop->dir_node : NULL;
+    d = nm_iop ? smp_load_acquire(&nm_iop->dir_node) : NULL;
     if (d && !atomic_inc_not_zero(&d->refcount)) d = NULL;
     rcu_read_unlock();
 
@@ -2109,7 +2162,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     rcu_read_lock();
     nm_iop = __get_nm(smp_load_acquire(&parent_dir->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
     if (nm_iop) {
-        pdir = nm_iop->dir_node;
+        pdir = smp_load_acquire(&nm_iop->dir_node);
     } else if (parent_dir->i_op == &nm_dir_iops) {
         struct nm_inode_info *pinfo = parent_dir->i_private;
         if (pinfo) pdir = pinfo->dir_node;
@@ -2376,7 +2429,7 @@ static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_no
     /* Already ours? RE-ARM -- see the matching note in nomount_hijack_dir_inode. */
     nm_fop = nm_get_fop(smp_load_acquire(&inode->i_fop));
     if (nm_fop) {
-        WRITE_ONCE(nm_fop->dir_node, dir_node);
+        smp_store_release(&nm_fop->dir_node, dir_node);
         return;
     }
     /* A vtable with no readdir op to hook would carry no marker, so nm_get_fop()
@@ -2425,7 +2478,7 @@ static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, s
      * the real fs and the rule would silently never be served. */
     nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
     if (nm_iop) {
-        WRITE_ONCE(nm_iop->dir_node, dir_node);
+        smp_store_release(&nm_iop->dir_node, dir_node);
         return;
     }
 
@@ -3886,7 +3939,25 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_attributes = kst.attributes;   /* STATX_ATTR_* only exist >= 4.11 */
             rule->v_attr_mask = kst.attributes_mask;
 #endif
-            rule->v_cap = nm_stock_caps(d_backing_inode(v_path_struct.dentry));
+            /* ONLY when this dentry is really the stock file. On a REPLACEMENT
+             * (the reload delta re-adds a live vpath without a clear) the
+             * kern_path above resolves THROUGH our own injection, so the inode
+             * here is ours -- and nm_file_fops always has .fsync, so v_cap would
+             * come back with NM_CAP_FSYNC set and nm_fsync would go back to
+             * forwarding to the f2fs backing file: 0 where all 24 erofs siblings
+             * answer -EINVAL. The oracle would reopen on the second reload and
+             * stay open until reboot. Same trap s_path guards against three
+             * blocks below, and the same reason __nomount_add_rule inherits
+             * SHADOWS_STOCK from the victim rather than re-deriving it. */
+            {
+                struct inode *ci = d_backing_inode(v_path_struct.dentry);
+
+                if (ci && ci->i_op != &nm_file_iops && ci->i_op != &nm_dir_iops) {
+                    rule->v_cap = nm_stock_caps(ci);
+                    if (nm_stock_takes_odirect(&v_path_struct))
+                        rule->v_cap |= NM_CAP_ODIRECT;
+                }
+            }
         } else {
             rule->v_ino = d_backing_inode(v_path_struct.dentry)->i_ino;
             rule->v_dev = d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
@@ -4253,6 +4324,13 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
              * stays neutral -- which is what stops the count double-moving. */
             rule->flags = (rule->flags & ~NM_FLAG_SHADOWS_STOCK) |
                           (existing->flags & NM_FLAG_SHADOWS_STOCK);
+            /* Same reason, same source: the outgoing rule sampled v_cap when the
+             * vpath still resolved to the REAL stock file. A replacement cannot
+             * re-derive it (kern_path now lands on our own inode), so nm_alloc_rule
+             * deliberately leaves it 0 in that case -- carry the measured one over
+             * rather than losing the fsync/O_DIRECT mirror on every reload. */
+            if (!rule->v_cap)
+                rule->v_cap = existing->v_cap;
             hash_del_rcu(&existing->vpath_node);
             victim = existing;
             nm_debug("Shadowing existing rule for: %s\n", nm_get_vpath(rule));

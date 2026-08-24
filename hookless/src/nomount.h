@@ -109,6 +109,7 @@
 #define nm_fsync                                 __vfsx_052
 #define nm_stock_caps                            __vfsx_184
 #define nm_ioctl_as_stock                        __vfsx_186
+#define nm_stock_takes_odirect                   __vfsx_187
 #define nm_full_xattr_name                       __vfsx_053
 #define nm_get_link                              __vfsx_054
 #define nm_hide_isolated                         __vfsx_055
@@ -477,9 +478,15 @@ static DEFINE_MUTEX(nomount_write_mutex);
  * installed. Every hijacked handler already treats a NULL dir_node as
  * "unhijacked" and falls through to orig_*, so behaviour matches a restored
  * inode; a cached file->f_op stays valid forever; and a later hijack of the same
- * inode RE-ARMS this object instead of allocating another. Cost is therefore
- * bounded at one pair per hijacked directory for the life of the boot, instead of
- * one pair per hijacked directory per reload. */
+ * inode RE-ARMS this object instead of allocating another.
+ *
+ * ⚠ The re-arm does NOT bound the total. Teardown also iputs the inode, dropping
+ * the igrab that pinned it, so between a clear and the next add the directory
+ * inode can be reclaimed -- taking the only pointer to its pair with it -- and
+ * the next add on that path allocates a fresh one. The real bound is "one pair
+ * per hijacked directory per reload IN WHICH THE INODE WAS RECLAIMED", not one
+ * for the life of the boot. Reuse is an optimisation here; the reason this design
+ * is correct is the cached f_op, not the accounting. */
 struct nm_iop {
     struct inode_operations fake_iop; /* MUST be exactly at offset 0 */
     const struct inode_operations *orig_iop;
