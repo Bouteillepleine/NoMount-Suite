@@ -320,7 +320,11 @@ fn calls_mount(code: &str) -> bool {
 }
 
 fn classify(code: &str) -> Option<(MountHabit, &'static str)> {
-    // Order matters: report the worst habit a module has.
+    // Order matters: report the worst habit a module has. This returns the FIRST
+    // hit, so the blocks must run in `MountHabit` order (Namespace < ForeignFs <
+    // Absorbable < Pseudo) -- Pseudo used to be tested before Absorbable, so a
+    // script doing both `mount -t debugfs` and `mount -o bind` was reported as the
+    // benign pseudo-fs verdict and its absorbable bind never named.
     if code.contains("nsenter") {
         return Some((MountHabit::Namespace, "nsenter"));
     }
@@ -335,6 +339,18 @@ fn classify(code: &str) -> Option<(MountHabit, &'static str)> {
         }
     }
     for (tok, ev) in [
+        ("-o bind", "bind mount"),
+        ("--bind", "bind mount"),
+        ("-o rbind", "bind mount"),
+        ("--rbind", "bind mount"),
+        ("-t tmpfs", "tmpfs"),
+        ("mknod", "device node"),
+    ] {
+        if code.contains(tok) {
+            return Some((MountHabit::Absorbable, ev));
+        }
+    }
+    for (tok, ev) in [
         ("-t debugfs", "debugfs"),
         ("-t tracefs", "tracefs"),
         ("-t configfs", "configfs"),
@@ -345,18 +361,6 @@ fn classify(code: &str) -> Option<(MountHabit, &'static str)> {
     ] {
         if code.contains(tok) {
             return Some((MountHabit::Pseudo, ev));
-        }
-    }
-    for (tok, ev) in [
-        ("-o bind", "bind mount"),
-        ("--bind", "bind mount"),
-        ("-o rbind", "bind mount"),
-        ("--rbind", "bind mount"),
-        ("-t tmpfs", "tmpfs"),
-        ("mknod", "device node"),
-    ] {
-        if code.contains(tok) {
-            return Some((MountHabit::Absorbable, ev));
         }
     }
     // A bare `mount` with no recognisable flag still moves the mount table.
@@ -474,6 +478,24 @@ mod tests {
             classify(&code_only("mount -t tmpfs tmpfs /dev/x")).unwrap().0,
             MountHabit::Absorbable
         );
+    }
+
+    /// classify() returns the first hit, so its blocks must run in MountHabit
+    /// order. They did not: a module doing both was reported as the benign
+    /// pseudo-fs verdict and its absorbable bind was never named.
+    #[test]
+    fn the_worst_habit_wins_not_the_first_one_tested() {
+        let code = code_only(
+            "mount -t debugfs debugfs /sys/kernel/debug\n\
+             mount -o bind $MODDIR/system/etc /system/etc\n",
+        );
+        assert_eq!(classify(&code).unwrap().0, MountHabit::Absorbable);
+        // ...and the same both ways round, since neither order may decide it.
+        let code = code_only(
+            "mount -o bind $MODDIR/system/etc /system/etc\n\
+             mount -t debugfs debugfs /sys/kernel/debug\n",
+        );
+        assert_eq!(classify(&code).unwrap().0, MountHabit::Absorbable);
     }
 
     /// Verbatim from BRENE's boot-completed.sh, which the mount scan cannot see.

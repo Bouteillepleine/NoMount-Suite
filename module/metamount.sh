@@ -18,7 +18,31 @@ umask 077
 # able to write here gets root. The dir was being created under the boot umask (0777).
 mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 # Tighten anything an earlier build already created wide. Cheap and idempotent.
-chmod 0600 "$NMDIR"/* 2>/dev/null
+# -type f, because the glob also handed DIRECTORIES to chmod: `rollback-bin` was
+# observed on-device as drw------- , i.e. readable but not traversable, so
+# nothing inside it could be reached by anything -- including us.
+find "$NMDIR" -maxdepth 1 -type f -exec chmod 0600 {} + 2>/dev/null
+
+# --- durable boot log ---------------------------------------------------------
+# Every boot diagnostic below used to go ONLY to /dev/kmsg. On this hardware the
+# ring is flooded by WMI roam-stats spam within minutes of boot, so by the time
+# anyone looks `dmesg | grep -i nomount` comes back empty -- which made the
+# loudest signals the Suite has (running WITHOUT a single-run guard, hide list
+# apply FAILED, absorb TIMED OUT) unrecoverable in practice. Tee the same lines
+# to a file; kmsg stays, because it is the only channel alive early enough to
+# survive a boot that never reaches /data.
+BOOTLOG="$NMDIR/boot.log"
+# Rotate here rather than in service.sh/uidwatch.sh: this is the boot entry point
+# for KSU/APatch, so it runs exactly once per boot. Same shape as spoof.sh's log
+# rotation, including the chmod for a file an older build left wide.
+[ -f "$BOOTLOG" ] && tail -n 400 "$BOOTLOG" > "$BOOTLOG.tmp" 2>/dev/null \
+    && mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
+: >> "$BOOTLOG" 2>/dev/null
+chmod 0600 "$BOOTLOG" 2>/dev/null
+nmlog() {
+    echo "nomount: $*" > /dev/kmsg 2>/dev/null
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [metamount] $*" >> "$BOOTLOG" 2>/dev/null
+}
 
 # Single-run guard. Was a noclobber file in /dev: world-writable (boot umask),
 # named after the project, and "held" by mere existence -- so anything able to
@@ -54,17 +78,31 @@ chmod 0600 "$LOCK" 2>/dev/null
 # warn-and-continue path as a missing flock: no single-run guard, but said out
 # loud, which is the documented behaviour for that case.
 if ! command -v flock >/dev/null 2>&1; then
-    echo "nomount: flock unavailable — mount pass running WITHOUT a single-run guard" > /dev/kmsg 2>/dev/null
+    nmlog "flock unavailable — mount pass running WITHOUT a single-run guard"
 elif ! ls /proc/self/fd/9 >/dev/null 2>&1; then
-    echo "nomount: fd 9 is close-on-exec in this shell, so flock cannot use it — mount pass running WITHOUT a single-run guard" > /dev/kmsg 2>/dev/null
+    nmlog "fd 9 is close-on-exec in this shell, so flock cannot use it — mount pass running WITHOUT a single-run guard"
 else
     flock -n 9 || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
 fi
 
 ABI=$(getprop ro.product.cpu.abi)
+# An unchecked ABI is a silent no-op: empty gives "$MODDIR/bin//nomount", which
+# can never be executable, and the mount pass below is gated on [ -x "$BIN" ]
+# with nothing on the other side -- so the whole boot injected nothing and said
+# nothing about it. getprop CAN come back empty this early. Fall back to the
+# first entry of the abilist, then to the only ABI this module actually ships,
+# rather than building a path that cannot resolve.
+[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
+[ -n "$ABI" ] || ABI=arm64-v8a
 BIN="$MODDIR/bin/$ABI/nomount"
 # The Suite binary shells out to the hookless `nm` netlink client bundled beside it.
 export NM_BIN="$MODDIR/bin/$ABI/nm"
+# Did the engine actually run this boot? The status card at the bottom is written
+# UNCONDITIONALLY, so a missing/non-executable binary used to leave it reading
+# "[NoMount ✅ 0 rules · 0 RRO · 0 modules] fully mountless" -- a green tick on a
+# boot that injected nothing. Worse: boot then completes, service.sh clears
+# bootcount, and the bootloop guard is re-armed by a pass that never happened.
+_engine_ran=0
 
 # Self-heal executable bits: some installers (and non-recovery ksud extraction)
 # don't preserve +x. Without it on nm the whole pass aborts before it can inject.
@@ -98,7 +136,7 @@ if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
         chmod 0755 "$SUSFS_BIN.nm_new" 2>/dev/null
         chcon u:object_r:adb_data_file:s0 "$SUSFS_BIN.nm_new" 2>/dev/null
         mv -f "$SUSFS_BIN.nm_new" "$SUSFS_BIN" 2>/dev/null \
-            && echo "nomount: de-linked ksu_susfs from ksud multicall (susfs-action guard)" > /dev/kmsg 2>/dev/null
+            && nmlog "de-linked ksu_susfs from ksud multicall (susfs-action guard)"
     else
         rm -f "$SUSFS_BIN.nm_new" 2>/dev/null
     fi
@@ -118,9 +156,9 @@ COUNT=$((COUNT + 1))
 echo "$COUNT" > "$NMDIR/bootcount"
 
 if [ -f "$NMDIR/disabled" ]; then
-    echo "nomount: disabled, skipping spoof + mount" > /dev/kmsg 2>/dev/null
+    nmlog "disabled, skipping spoof + mount"
 elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
-    echo "nomount: bootloop guard tripped (count=$COUNT) -> self-disabling" > /dev/kmsg 2>/dev/null
+    nmlog "bootloop guard tripped (count=$COUNT) -> self-disabling"
     : > "$NMDIR/disabled"
     # Record WHY, while the evidence is still fresh. Without this a trip leaves only an
     # empty `disabled` file and the user has to dig through tombstones by hand to find out
@@ -162,6 +200,24 @@ else
         # needs packages.list, so it belongs in the same pass as the injections.
         # service.sh still re-applies, which is idempotent and catches a late failure.
         [ -s "$NMDIR/whiteouts.txt" ] && timeout 30 "$BIN" whiteout apply 2>/dev/null
+        _engine_ran=1
+    else
+        # The missing `else`. Without it a binary that is absent, not executable,
+        # or sitting under an ABI directory this device does not have produced a
+        # completely silent boot: nothing on kmsg, nothing on disk, and a green
+        # card. Record it the same way a guard trip is recorded, because from the
+        # user's side the symptom is identical -- their modules stopped working --
+        # and incident.log is where the WebUI already looks for the reason.
+        nmlog "⛔ engine binary is missing or not executable ($BIN) — NOTHING was injected this boot"
+        {
+            echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
+            echo "reason=engine did not run: no executable at $BIN"
+            echo "abi=$ABI (ro.product.cpu.abi=$(getprop ro.product.cpu.abi 2>/dev/null))"
+            echo "shipped_abis=$(ls "$MODDIR/bin" 2>/dev/null | tr '\n' ' ')"
+            echo "kernel=$(uname -r)"
+            echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
+            echo "note=reinstall the module zip; a partial/permission-stripped extraction is the usual cause"
+        } > "$NMDIR/incident.log" 2>/dev/null
     fi
 fi
 
@@ -245,6 +301,17 @@ if command -v ksud >/dev/null 2>&1; then
     [ -n "$_ov" ] && _list="$_list${_list:+ | }overlay:$_ov"
     if [ -f "$NMDIR/disabled" ]; then
         _desc="[NoMount ⛔ disabled] bootloop guard tripped — open WebUI › Tools › Last incident"
+    elif [ "$_engine_ran" = 0 ]; then
+        # This block is NOT gated on [ -x "$BIN" ], so it used to render the green
+        # card even on the boot where the engine never ran. It is the only surface
+        # most users ever read; it must not claim a posture nothing established.
+        _desc="[NoMount ⛔ engine did not run] the mount pass never executed this boot — open WebUI › Tools › Last incident"
+    elif [ "${_rules:-0}" = 0 ]; then
+        # ✅ next to "0 rules" is a contradiction the reader has to catch for
+        # themselves. The engine ran, so this is not ⛔ — but it served nothing,
+        # and a green tick on a boot that injected nothing is the same false
+        # green, one branch further down.
+        _desc="[NoMount ⚠️ 0 rules] engine ran but injected nothing — open WebUI › Tools › Health"
     else
         _desc="[NoMount ✅ $_rules rules · $_rro RRO · $_mods modules] fully mountless — hookless VFS + RRO, no overlayfs, su via sucompat${_list:+. $_list}"
     fi

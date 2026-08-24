@@ -296,7 +296,8 @@ pub fn run_doctor() -> Result<()> {
     // included any app the moment it asked for root, and that is what broke root
     // on this device. Warned above kernel_umount's own finding because enabling
     // kernel_umount is what silently turned THIS on.
-    if crate::manager::global_umount_default() == Some(true) {
+    let global_umount = crate::manager::global_umount_default();
+    if global_umount == Some(true) {
         f.push(Finding {
             level: Level::Warn,
             check: "manager global umount ON",
@@ -311,20 +312,41 @@ pub fn run_doctor() -> Result<()> {
     // and a decode that stops making sense yields nothing instead of invented
     // flags. Info, not warn -- these are harmless here, just pointless.
     let flags = crate::manager::app_umount_flags();
-    let umounters: Vec<&str> =
-        flags.iter().filter(|a| a.umount_modules).map(|a| a.package.as_str()).collect();
-    if !umounters.is_empty() {
-        let shown: Vec<&str> = umounters.iter().take(2).copied().collect();
+    if let Some(flags) = &flags {
+        let umounters: Vec<&str> =
+            flags.iter().filter(|a| a.umount_modules).map(|a| a.package.as_str()).collect();
+        if !umounters.is_empty() {
+            let shown: Vec<&str> = umounters.iter().take(2).copied().collect();
+            f.push(Finding {
+                level: Level::Info,
+                check: "per-app umount profiles",
+                detail: format!(
+                    "{} app(s) have an \"umount modules\" profile ({}{}) — harmless here, hides \
+                     nothing we inject",
+                    umounters.len(),
+                    shown.join(", "),
+                    if umounters.len() > shown.len() { ", …" } else { "" }
+                ),
+            });
+        }
+    }
+
+    // ...and say so when we could NOT read it. The two checks above are silent
+    // both when the switches are off and when the allowlist is missing, truncated,
+    // or its record layout has moved, and those render identically to a reader who
+    // then concludes the dangerous global is off. It is the one this module's
+    // header says must never be guessed, and the one that broke root here in July.
+    // Only when a KernelSU-family manager is actually installed: a manager that
+    // keeps no allowlist has nothing to fail at reading.
+    if crate::manager::ksu_manager_present() && (global_umount.is_none() || flags.is_none()) {
         f.push(Finding {
-            level: Level::Info,
-            check: "per-app umount profiles",
-            detail: format!(
-                "{} app(s) have an \"umount modules\" profile ({}{}) — harmless here, hides \
-                 nothing we inject",
-                umounters.len(),
-                shown.join(", "),
-                if umounters.len() > shown.len() { ", …" } else { "" }
-            ),
+            level: Level::Warn,
+            check: "manager umount config unreadable",
+            detail: "could not read the manager's umount configuration \
+                     (/data/adb/ksu/.allowlist missing, truncated, or in a layout this build \
+                     does not decode) — \"Umount modules by default\" and the per-app umount \
+                     profiles are UNKNOWN here, not off. Check them in the manager by hand"
+                .to_string(),
         });
     }
 

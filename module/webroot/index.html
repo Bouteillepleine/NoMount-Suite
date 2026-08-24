@@ -1261,7 +1261,14 @@
     const fp = kv.fp || "";
     const se = (kv.se || "").trim();
     const vbTell = vbs !== "" && vbs !== "green";
-    const keyTell = /test-keys|userdebug|:eng\//.test(fp);
+    // `dev-keys` is a real signing tag — spoof.sh normalises it right alongside
+    // test-keys in both its fingerprint and its description rewrites — and its
+    // absence here rendered a dev-keys build as a green "release-keys". An EMPTY
+    // fingerprint is not a pass either: getprop returning nothing means we could
+    // not read it, and the row below now says n/a rather than asserting a clean
+    // one, the same way the Verified boot and SELinux rows already do.
+    const keyMatch = fp === "" ? null : fp.match(/test-keys|dev-keys|userdebug|:eng\//);
+    const keyTell = !!keyMatch;
     const seTell = se !== "" && se !== "Enforcing";
 
     $("mSu").innerHTML = sucompat ? 'sucompat <small>kernel · mountless</small>' : 'external <small>unmanaged</small>';
@@ -1283,7 +1290,13 @@
       rows.push({ k: "Real mounts", v: "none — pure Prism", t: "vfs" });
     }
     rows.push({ k: "Verified boot", v: vbs ? (vbTell ? vbs + " · tell" : vbs) : "n/a", t: vbTell ? "warn" : (vbs ? "vfs" : "off") });
-    rows.push({ k: "Build keys", v: keyTell ? "test-keys · tell" : "release-keys", t: keyTell ? "warn" : "vfs" });
+    // Name the tag that actually matched, so a dev-keys build is not reported as
+    // "test-keys" — the row is the only place the user sees which one it is.
+    rows.push({
+      k: "Build keys",
+      v: fp === "" ? "n/a" : keyTell ? keyMatch[0].replace(/^:|\/$/g, "") + " · tell" : "release-keys",
+      t: fp === "" ? "off" : keyTell ? "warn" : "vfs",
+    });
     rows.push({ k: "SELinux", v: se || "n/a", t: seTell ? "warn" : (se ? "vfs" : "off") });
     $("posture").innerHTML = rows.map((x) =>
       `<div class="row"><span class="name">${x.k}</span><span class="tag ${x.t}">${esc(x.v)}</span></div>`
@@ -1579,8 +1592,16 @@
     const r = await nm("verify");
     const txt = (r.stdout || "") + (r.stderr || "");
     _healthShow(txt);
-    const drift = /DRIFT/.test(txt);
-    toast(drift ? "Drift from snapshot — see output" : "Matches snapshot", drift ? "bad" : "ok");
+    // "No DRIFT in the output" is not "matches the snapshot": empty output, a
+    // verify that never ran, and "no snapshot yet — run `nomount snapshot`" all
+    // contain no DRIFT and all used to toast a green "Matches snapshot". Only
+    // verify's own no-drift line is a pass; everything else gets its own state.
+    // (src/health.rs run_verify prints exactly one of these three.)
+    if (r.errno !== 0 || !txt.trim()) toast("Verify did not run", "bad");
+    else if (/DRIFT/.test(txt)) toast("Drift from snapshot — see output", "bad");
+    else if (/no snapshot yet/.test(txt)) toast("No baseline yet — take a snapshot first", "");
+    else if (/no drift/.test(txt)) toast("Matches snapshot", "ok");
+    else toast("Verify gave no verdict — see output", "");
     done();
   }
   async function runExport(btn) {
@@ -1654,7 +1675,12 @@
       const p = l.split("|");
       const id = p[0];
       const cnt = parseInt(p[3] || "0", 10);
-      const mnt = parseInt(p[4] || "0", 10);
+      // Defaulting a MISSING field to 0 made "could not read /proc/self/mountinfo"
+      // indistinguishable from "owns no mount", and the green `mountless` badge
+      // then went on every row — the single most reassuring thing this list says,
+      // handed out on no evidence. -1 is "unknown" and gets a neutral badge.
+      const mntRaw = (p[4] || "").trim();
+      const mnt = /^\d+$/.test(mntRaw) ? parseInt(mntRaw, 10) : -1;
       let label, cls, showCnt = false, tip = "";
       if (p[1] === "suite") { label = "suite"; cls = "suite"; tip = "The NoMount Suite metamodule itself."; }
       else if (p[1] === "su") { label = "su backend"; cls = "su"; served++; tip = "Provides su; not injected by the Suite."; }
@@ -1671,7 +1697,9 @@
       // Visibility: a module is only "hidden" if nothing it owns appears in the mount
       // table. NoMount-served modules are mountless by construction; a module that
       // mounts on its own is visible to any scanner reading /proc/*/mountinfo.
-      const vis = mnt > 0
+      const vis = mnt < 0
+        ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown — it is not a claim that it owns no mount">mounts ?</span>`
+        : mnt > 0
         ? `<span class="tag warn" title="This module has ${mnt} mount(s) of its own in the mount table — visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
         : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
       return `<div class="mrow"><div class="mname">${esc(id)}</div>` +
@@ -2278,8 +2306,22 @@
   }
   async function applySpoof(btn) {
     const done = busy(btn, "Applying…");
-    await exec("sh /data/adb/modules/meta-nomount/spoof.sh 2>&1");
-    toast("Applied", "ok");
+    const r = await exec("sh /data/adb/modules/meta-nomount/spoof.sh 2>&1");
+    // spoof.sh is best-effort and ALWAYS exits 0 — a spoof failure must never
+    // abort boot — so errno cannot be the verdict. It reports its real failures
+    // in its own log lines instead ("resetprop not found", "vbmeta.digest: could
+    // not compute", "cmdline: skipped", "uname: kernel interface absent"), which
+    // this used to await and throw away before toasting green regardless. Those
+    // lines reach us on stderr (see log() in spoof.sh), folded in by the 2>&1.
+    const txt = ((r.stdout || "") + (r.stderr || "")).trim();
+    const fail = txt.split("\n").filter(function (l) {
+      return /nomount-spoof:/.test(l) &&
+        /(not found|unavailable|not creatable|could not|cannot|failed|skipped|absent)/i.test(l);
+    });
+    if (r.errno !== 0) toast("Apply did not run", "bad");
+    else if (fail.length) toast(fail[0].replace(/^.*nomount-spoof:\s*/, "") +
+                                (fail.length > 1 ? " (+" + (fail.length - 1) + " more)" : ""), "bad");
+    else toast("Applied", "ok");
     done();
     refreshSpoof();
   }
@@ -2346,6 +2388,15 @@
   async function refreshWhiteouts() {
     const r = await nm("whiteout list");
     const box = $("woList");
+    // errno was ignored, so an engine that did not answer rendered as the green
+    // "Nothing hidden." — telling the user their hidden paths are gone when in
+    // fact we simply do not know. refreshIsolated() is the model: never fall back
+    // to the reassuring state, show it as unknown instead.
+    if (r.errno !== 0) {
+      $("wochip").textContent = "?";
+      box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
+      return;
+    }
     const lines = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
     if (!lines.length || /^no whiteouts/.test(lines[0])) {
       $("wochip").textContent = "0";
@@ -2444,13 +2495,28 @@
     // The summary line is the honest one: "nothing to absorb" is not "nothing is
     // mounted", and the CLI already words that distinction carefully.
     const chip = $("abchip");
-    if (/posture clean/.test(txt)) { chip.textContent = "clean"; chip.className = "chip ok"; }
-    else if (/NOT clean|LEAK/.test(txt)) { chip.textContent = "leaking"; chip.className = "chip bad"; }
-    else {
-      const m = txt.match(/(\d+) mount\(s\) (?:would be absorbed|absorbed)/);
-      const left = (txt.match(/left by design/) || []).length;
-      chip.textContent = m && +m[1] > 0 ? m[1] + " to absorb" : left ? "by design" : "—";
-      chip.className = "chip " + (m && +m[1] > 0 ? "warn" : "");
+    // A real run reports its own failures. src/absorb.rs prints
+    //   "{done} mount(s) absorbed as {rules} rule(s), {n} ROM tmpfs emptied
+    //    mountlessly, {m} failed…"
+    // and the old matcher only ever looked at {done}, so
+    // "3 mount(s) absorbed …, 5 failed" painted green. A failure means those
+    // mounts are STILL mounted and still readable by any app — the one thing
+    // this chip exists to surface. Check it first, before anything else.
+    const failed = +((txt.match(/(\d+) failed/) || [0, 0])[1]);
+    if (failed > 0) { chip.textContent = failed + " failed"; chip.className = "chip bad"; return; }
+    if (/posture clean/.test(txt)) { chip.textContent = "clean"; chip.className = "chip ok"; return; }
+    if (/NOT clean|LEAK/.test(txt)) { chip.textContent = "leaking"; chip.className = "chip bad"; return; }
+    // Dry run and real run are not the same news: "would be absorbed" means they
+    // are still there (amber, there is work to do), "absorbed" means they are
+    // gone (green). One chip label for both read as a warning either way.
+    const dry = /\(dry run\)/.test(txt);
+    const m = txt.match(/(\d+) mount\(s\) (?:would be absorbed|absorbed)/);
+    if (m && +m[1] > 0) {
+      chip.textContent = dry ? m[1] + " to absorb" : m[1] + " absorbed";
+      chip.className = "chip " + (dry ? "warn" : "ok");
+    } else {
+      chip.textContent = /left by design/.test(txt) ? "by design" : "—";
+      chip.className = "chip";
     }
   }
   async function absorbScan(btn) {
@@ -2464,7 +2530,19 @@
     const r = await nm("absorb");
     const txt = (r.stdout || "") + (r.stderr || "");
     _abPaint(txt);
-    toast(/absorbed/.test(txt) ? "Absorb finished" : "Nothing absorbed", "ok");
+    // The toast was hardcoded to "ok" and keyed on the word "absorbed" appearing
+    // anywhere, which says nothing about whether the run worked: the summary line
+    // carries its own failure count, and every failure is a mount still visible
+    // to every app on the device.
+    const failed = +((txt.match(/(\d+) failed/) || [0, 0])[1]);
+    const absorbed = +((txt.match(/(\d+) mount\(s\) absorbed/) || [0, 0])[1]);
+    toast(
+      r.errno !== 0 ? "Absorb did not run"
+        : failed > 0 ? failed + " mount(s) could not be absorbed — still visible"
+        : absorbed > 0 ? absorbed + " mount(s) absorbed"
+        : "Nothing absorbed",
+      (r.errno !== 0 || failed > 0) ? "bad" : "ok"
+    );
     done();
     refreshStealth(); refreshModules(); refreshStatus();
   }
@@ -2553,26 +2631,44 @@
     // warned about it; the netlink dump always answers, so that branch is gone.
     // Every value is shq()'d: a rule string reaches a ROOT shell here.
     const NMB = shq(await nmc());
+    // The old command ended `…; fi; echo OK` with every inner `nm k p` sent to
+    // /dev/null and its status discarded, so `stdout.indexOf("OK") >= 0` was true
+    // whenever ANY shell ran at all. A kernel without pathhide, a moved `nm`, a
+    // rule the kernel rejected, or a failed re-add of the preserved foreign rules
+    // all produced the green "Cloaking N — live & saved" while nothing whatsoever
+    // was hidden. Count the failures in the shell and report the count.
+    // -1 is reserved for "this kernel has no pathhide" — saved, but not live.
+    const FT = "/data/adb/nomount/.cloak.foreign";
     let cmd = "mkdir -p /data/adb/nomount; { echo '# NoMount Cloak — pathhide rule list (managed by WebUI)'; ";
     rules.forEach(function (r) { cmd += "echo " + shq(r) + "; "; });
     cmd += "} > " + shq(PH_CONF) + "; ";
+    // This file names exactly which packages are being hidden, which is the same
+    // secret the hide list is. The 0700 parent was doing all the work; state the
+    // mode here like every other writer of $NMDIR does.
+    cmd += "chmod 0600 " + shq(PH_CONF) + " 2>/dev/null; ";
+    cmd += "_nf=0; ";
     cmd += "if " + NMB + " k p >/dev/null 2>&1; then ";
     cmd +=   "_ours=" + shq(rules.join("\n")) + "; ";
     cmd +=   "_cur=$(" + NMB + " l p 2>/dev/null); ";
     cmd +=   "_foreign=$(printf '%s\\n' \"$_cur\" | grep -vxF \"$_ours\" 2>/dev/null); ";
-    cmd +=   NMB + " k p - >/dev/null 2>&1; ";
-    cmd +=   "[ -n \"$_foreign\" ] && printf '%s\\n' \"$_foreign\" | while IFS= read -r _f; do ";
-    cmd +=     "[ -n \"$_f\" ] && " + NMB + " k p \"+$_f\" >/dev/null 2>&1; done; ";
-    rules.forEach(function (r) { cmd += NMB + " k p " + shq("+" + r) + " >/dev/null 2>&1; "; });
-    cmd += "fi; echo OK";
+    cmd +=   NMB + " k p - >/dev/null 2>&1 || _nf=$((_nf+1)); ";
+    // Redirected `while … done < file`, NOT `printf | while`: a pipeline puts the
+    // loop in a SUBSHELL, so every _nf increment inside it would be discarded on
+    // exit and foreign-rule failures would go uncounted. The temp lives in the
+    // 0700 state dir, so it leaks nothing while it exists.
+    cmd +=   "if [ -n \"$_foreign\" ]; then printf '%s\\n' \"$_foreign\" > " + shq(FT) + "; ";
+    cmd +=     "while IFS= read -r _fr; do [ -n \"$_fr\" ] || continue; ";
+    cmd +=       NMB + " k p \"+$_fr\" >/dev/null 2>&1 || _nf=$((_nf+1)); ";
+    cmd +=     "done < " + shq(FT) + "; rm -f " + shq(FT) + "; fi; ";
+    rules.forEach(function (r) { cmd += NMB + " k p " + shq("+" + r) + " >/dev/null 2>&1 || _nf=$((_nf+1)); "; });
+    cmd += "else _nf=-1; fi; echo \"OK $_nf\"";
     const r = await exec(cmd); done();
-    const ok = r.stdout.indexOf("OK") >= 0;
-    toast(
-      !ok ? "Failed"
-        : rules.length ? "Cloaking " + rules.length + " — live & saved"
-        : "Cleared all rules",
-      ok ? "ok" : "bad"
-    );
+    const m = (r.stdout || "").match(/OK (-?\d+)/);
+    if (r.errno !== 0 || !m) { toast("Failed — the rules were not applied", "bad"); return; }
+    const nf = parseInt(m[1], 10);
+    if (nf < 0) toast("Saved, but this kernel has no pathhide support — nothing is hidden", "bad");
+    else if (nf > 0) toast(nf + " rule(s) rejected by the kernel — saved, NOT fully live", "bad");
+    else toast(rules.length ? "Cloaking " + rules.length + " — live & saved" : "Cleared all rules", "ok");
   }
 
   // ---- init (top level: must not live inside an action handler) ----

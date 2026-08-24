@@ -11,6 +11,45 @@ MODDIR="${0%/*}"
 ABI=$(getprop ro.product.cpu.abi)
 BIN="$MODDIR/bin/$ABI/nomount"
 export NM_BIN="$MODDIR/bin/$ABI/nm"
+
+# Tee every diagnostic to a durable log as well as /dev/kmsg. On this hardware
+# the kernel ring is flooded by WMI roam-stats spam within minutes of boot, so
+# `dmesg | grep -i nomount` comes back empty long before anyone looks -- and the
+# loudest lines this script has (absorb TIMED OUT, ⚠ hide list apply FAILED) were
+# therefore unrecoverable in practice. No rotation here: the boot entry point
+# (metamount.sh / post-fs-data.sh) already rotated once this boot.
+BOOTLOG="$NMDIR/boot.log"
+nmlog() {
+    echo "nomount: $*" > /dev/kmsg 2>/dev/null
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [service] $*" >> "$BOOTLOG" 2>/dev/null
+}
+
+# --- health.txt freshness -----------------------------------------------------
+# health.txt carries a `ts=` field (written by src/health.rs) that NOTHING read.
+# So a selfcheck that failed to write -- or an engine that hung and never
+# returned -- silently left LAST BOOT's file in place, and every consumer below
+# sed'd yesterday's verdict out of it as if it were current. Worse, the empty
+# case mapped to _consbad=0 and the card printed "healthy" off a file that did
+# not exist at all.
+#
+# Boot epoch = now minus uptime. A record stamped before that is not this boot's.
+_now=$(date +%s 2>/dev/null || echo 0)
+_up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+case "$_now$_up" in *[!0-9]*|"") _now=0; _up=0 ;; esac
+_bootepoch=$((_now - _up))
+# 0 unless health.txt exists AND was stamped at or after this boot began.
+_health_fresh() {
+    _hts=$(sed -n 's/^ts=//p' "$NMDIR/health.txt" 2>/dev/null)
+    case "$_hts" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_hts" -ge "$_bootepoch" ]
+}
+# Read a key only from a fresh record; prints nothing at all otherwise, so a
+# stale file behaves exactly like a missing one instead of like a verdict.
+_health_get() {
+    _health_fresh || return 0
+    sed -n "s/^$1=//p" "$NMDIR/health.txt" 2>/dev/null
+}
+
 i=0
 booted=0
 while [ "$i" -lt 120 ]; do
@@ -29,9 +68,9 @@ sleep 10
 # exists to catch, so it could never reach GUARD_MAX.
 if [ "$booted" = "1" ]; then
     rm -f "$NMDIR/bootcount"
-    echo "nomount: boot completed, guard counter reset" > /dev/kmsg 2>/dev/null
+    nmlog "boot completed, guard counter reset"
 else
-    echo "nomount: boot_completed never set - leaving guard counter armed" > /dev/kmsg 2>/dev/null
+    nmlog "boot_completed never set - leaving guard counter armed"
 fi
 
 # --- Cloak: re-apply the pathhide maps/fd rule list (managed by the WebUI) ---
@@ -57,7 +96,7 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k p >/dev/null 2>&1; then
             case "$_phr" in \#*) continue ;; esac
             "$NM_BIN" k p "+$_phr" >/dev/null 2>&1
         done < "$NMDIR/pathhide.conf"
-        echo "nomount: pathhide cloak rules re-applied" > /dev/kmsg 2>/dev/null
+        nmlog "pathhide cloak rules re-applied"
     fi
 fi
 
@@ -95,7 +134,7 @@ if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
         chmod 0755 "$SUSFS_BIN.nm_new" 2>/dev/null
         chcon u:object_r:adb_data_file:s0 "$SUSFS_BIN.nm_new" 2>/dev/null
         mv -f "$SUSFS_BIN.nm_new" "$SUSFS_BIN" 2>/dev/null \
-            && echo "nomount: re-asserted ksud de-link (service)" > /dev/kmsg 2>/dev/null
+            && nmlog "re-asserted ksud de-link (service)"
     else
         rm -f "$SUSFS_BIN.nm_new" 2>/dev/null
     fi
@@ -130,10 +169,10 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     _ab_all=$(timeout 90 "$BIN" absorb 2>&1)
     _ab_rc=$?
     if [ "$_ab_rc" -eq 124 ]; then
-        echo "nomount: absorb TIMED OUT after 90s - continuing boot" > /dev/kmsg 2>/dev/null
+        nmlog "absorb TIMED OUT after 90s - continuing boot"
     else
         _ab=$(printf '%s\n' "$_ab_all" | tail -1)
-        echo "nomount: $_ab" > /dev/kmsg 2>/dev/null
+        nmlog "$_ab"
     fi
     # Second pass, later. Not every module binds by the time this runs: a
     # patched-APK module (ReVanced and friends, issue #14) waits for
@@ -146,7 +185,7 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     (
         sleep 45
         _ab2=$("$BIN" absorb 2>&1 | tail -1)
-        echo "nomount: late absorb pass: $_ab2" > /dev/kmsg 2>/dev/null
+        nmlog "late absorb pass: $_ab2"
     ) &
 fi
 
@@ -155,7 +194,7 @@ fi
 # disk is the durable record.
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/whiteouts.txt" ]; then
     _wo=$("$BIN" whiteout apply 2>&1 | tail -1)
-    echo "nomount: $_wo" > /dev/kmsg 2>/dev/null
+    nmlog "$_wo"
 fi
 
 # --- re-apply the persistent per-app hide list (authoritative pass) ---
@@ -169,11 +208,11 @@ fi
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
     _bl=$("$BIN" uid apply 2>&1)
     if [ $? -eq 0 ]; then
-        echo "nomount: hide list re-applied ($_bl)" > /dev/kmsg 2>/dev/null
+        nmlog "hide list re-applied ($_bl)"
     else
         # A failed apply is the one thing here that must not pass quietly: it means
         # apps the user believes are hidden are not.
-        echo "nomount: ⚠ hide list apply FAILED ($_bl)" > /dev/kmsg 2>/dev/null
+        nmlog "⚠ hide list apply FAILED ($_bl)"
     fi
 fi
 
@@ -193,7 +232,7 @@ fi
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
     inotifyd "$MODDIR/uidwatch.sh" /data/system >/dev/null 2>&1 &
-    echo "nomount: hide-list package watcher started" > /dev/kmsg 2>/dev/null
+    nmlog "hide-list package watcher started"
 fi
 
 # --- runtime health canary (writes health.txt; complements plan-time doctor) ---
@@ -207,8 +246,22 @@ fi
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     _try=0
     while [ "$_try" -lt 6 ]; do
-        "$BIN" selfcheck --write >/dev/null 2>&1
-        _cons=$(sed -n 's/^consistency=//p' "$NMDIR/health.txt" 2>/dev/null)
+        # Bounded, like every other engine call on this path. selfcheck runs the
+        # per-UID probe, which takes the engine-wide pass lock and can wait behind
+        # a concurrent WebUI reload; unbounded, a hung engine held the whole rest
+        # of the boot pass (card refresh included) hostage AND left the stale
+        # health.txt below to be read as if it were this boot's.
+        timeout 20 "$BIN" selfcheck --write >/dev/null 2>&1
+        _cons=$(_health_get consistency)
+        if ! _health_fresh; then
+            # No record from THIS boot: the write failed, or the probe never
+            # finished. The settle window exists to smooth a transient *verdict*,
+            # not to re-ask a question that produced no answer — so stop rather
+            # than spend 6 x 15s of boot on it, and let the "unknown" state below
+            # carry the result. (It is the state `doctor` already models
+            # correctly; the canary just never used it.)
+            break
+        fi
         # "unchecked" and its qualified forms (unchecked:probe-uid-hidden, when
         # shell itself is on the hide list) are not-a-verdict, not a failure.
         case "$_cons" in
@@ -217,8 +270,12 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
         _try=$((_try + 1))
         sleep 15
     done
-    _hv=$(sed -n 's/^verdict=//p' "$NMDIR/health.txt" 2>/dev/null)
-    echo "nomount: selfcheck verdict=${_hv:-unknown} consistency=${_cons:-unknown} (settle tries=$_try)" > /dev/kmsg 2>/dev/null
+    if _health_fresh; then
+        _hv=$(_health_get verdict)
+        nmlog "selfcheck verdict=${_hv:-unknown} consistency=${_cons:-unknown} (settle tries=$_try)"
+    else
+        nmlog "⚠ selfcheck wrote no health record this boot — health is UNKNOWN, not healthy"
+    fi
 fi
 
 if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
@@ -251,7 +308,13 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     fi
     # runtime consistency canary trumps plan-time doctor for card health: a
     # per-UID inconsistency is a live regression, not a plan hazard.
-    _cons=$(sed -n 's/^consistency=//p' "$NMDIR/health.txt" 2>/dev/null)
+    # Same not-a-verdict rule as the canary loop, but read through _health_get so
+    # a record left over from LAST boot cannot supply the answer. _hfresh keeps
+    # "the canary said nothing bad" apart from "the canary never spoke" -- without
+    # it, "" mapped to _consbad=0 and the ladder below fell through to "healthy"
+    # off a file that was stale or absent.
+    _health_fresh && _hfresh=1 || _hfresh=0
+    _cons=$(_health_get consistency)
     case "$_cons" in
         ok|unchecked*|"") _consbad=0 ;;
         *) _consbad=1 ;;
@@ -262,8 +325,10 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
         _health="⚠️ $_err error(s) — see WebUI › Tools"
     elif [ "${_wrn:-0}" -gt 0 ]; then
         _health="$_wrn warning(s)"
-    elif [ "${_docok:-0}" = 1 ]; then
+    elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
         _health="healthy"
+    elif [ "${_docok:-0}" = 1 ]; then
+        _health="health unknown — no selfcheck record this boot"
     else
         _health="health unknown — doctor did not finish"
     fi
@@ -272,7 +337,9 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # "⚠ 1 module mount(s) … fully mountless" in one breath, which is both
     # alarming and self-contradictory, and gave the reader no way to tell an
     # expected mount from a real one.
-    _fgn=$(sed -n 's/^mounts_foreign=//p' "$NMDIR/health.txt" 2>/dev/null)
+    # Through _health_get too: a stale record's foreign count describes last
+    # boot's mount table, and here it would override the live one we just read.
+    _fgn=$(_health_get mounts_foreign)
     _fgn=${_fgn:-$_mnt}
     if [ "${_fgn:-0}" -gt 0 ]; then
         _mstate="⚠ $_fgn module mount(s)"
@@ -290,7 +357,9 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # where the user already looks (the module description in their root
     # manager), not only in dmesg. "unknown" means ksud could not be asked, so
     # say nothing rather than accuse a switch of being on.
-    _mu=$(grep -m1 '^manager_umount=' "$NMDIR/health.txt" 2>/dev/null | cut -d= -f2)
+    # Freshness-gated as well: accusing a switch of being ON off LAST boot's
+    # record is exactly the "say nothing rather than accuse" case above.
+    _mu=$(_health_get manager_umount | head -1)
     if [ "$_mu" = "on" ]; then
         _muc=" · ⚠️ turn OFF “kernel umount” in your root manager (it hides nothing here)"
         _mul=", ⚠ manager kernel_umount is ON — turn it off"
@@ -298,9 +367,14 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
         _muc=""
         _mul=""
     fi
+    # ✅ next to "0 rules" is a contradiction, and this card is the last word on
+    # the boot -- it overwrites whatever metamount.sh wrote. Mirror the same
+    # guard, so a boot that served nothing cannot end on a green tick here after
+    # metamount.sh refused to give it one.
+    if [ "${_rules:-0}" = 0 ]; then _mark="⚠️"; else _mark="✅"; fi
     KSU_MODULE=meta-nomount ksud module config set --temp override.description \
-        "[NoMount ✅ $_rules rules · $_rro RRO · $_mstate] $_health$_muc — $_tail" \
+        "[NoMount $_mark $_rules rules · $_rro RRO · $_mstate] $_health$_muc — $_tail" \
         >/dev/null 2>&1
-    echo "nomount: card refreshed ($_rules rules, $_mstate, $_health$_mul)" > /dev/kmsg 2>/dev/null
+    nmlog "card refreshed ($_rules rules, $_mstate, $_health$_mul)"
 fi
 exit 0

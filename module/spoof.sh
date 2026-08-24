@@ -32,6 +32,15 @@ mkdir -p "$NMDIR" 2>/dev/null && chmod 0700 "$NMDIR" 2>/dev/null
 log() {
     echo "nomount-spoof: $*" > /dev/kmsg 2>/dev/null
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG" 2>/dev/null
+    # ...and to stderr, so a CALLER can see what happened. This script is
+    # best-effort by design and ALWAYS exits 0 -- a spoof failure must never abort
+    # boot -- which left the WebUI's Apply button with nothing to judge: it awaited
+    # the exec, discarded everything, and toasted green even when the run logged
+    # "resetprop not found" and changed nothing. stderr, not stdout, because the
+    # subcommands below (props / verify / compute / shell-tmp-status / reset-uname)
+    # have machine-read stdout that must stay pristine. Every boot-time caller
+    # already redirects fd 2 to /dev/null, so nothing changes there.
+    echo "nomount-spoof: $*" >&2
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -600,8 +609,15 @@ props_status() {
     [ -n "$(getprop ro.boot.verifiedbooterror 2>/dev/null)" ] && n=$((n + 1))
     case "$(getprop ro.bootmode 2>/dev/null)" in *recovery*) n=$((n + 1)) ;; esac
     [ -n "$(getprop ro.kernel.qemu 2>/dev/null)" ] && n=$((n + 1))
-    [ "$(getprop ro.build.version.sdk 2>/dev/null)" -ge 36 ] 2>/dev/null \
-        && [ -n "$(getprop sys.oem_unlock_allowed 2>/dev/null)" ] && n=$((n + 1))
+    # Both arms, because do_props has both: it DELETES this prop on SDK >= 36 and
+    # REWRITES it to 0 below that. Counting only the delete case meant Android 15
+    # and older were told "✓ all props already clean — nothing to fix" while Apply
+    # still changed a prop — the UI disagreeing with the button next to it.
+    if [ "$(getprop ro.build.version.sdk 2>/dev/null)" -ge 36 ] 2>/dev/null; then
+        [ -n "$(getprop sys.oem_unlock_allowed 2>/dev/null)" ] && n=$((n + 1))
+    else
+        _d sys.oem_unlock_allowed 0
+    fi
     # The harmonization pass do_props also runs -- the :type/keys tail on every
     # fingerprint, description and flavor. Without these the UI reported "clean"
     # while Apply still rewrote more props.

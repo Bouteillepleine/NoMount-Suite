@@ -51,6 +51,16 @@ BIN="$MODDIR/bin/$ABI/nomount"
 [ -x "$BIN" ] || exit 0
 export NM_BIN="$MODDIR/bin/$ABI/nm"
 
+# Tee to the durable boot log as well as kmsg (see metamount.sh): this handler
+# fires on package changes, long after boot, by which point the kernel ring on
+# this device has already been flushed by roam-stats spam. No rotation here --
+# the boot entry point does that once per boot, and this can run many times.
+BOOTLOG="$NMDIR/boot.log"
+nmlog() {
+    echo "nomount: $*" > /dev/kmsg 2>/dev/null
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [uidwatch] $*" >> "$BOOTLOG" 2>/dev/null
+}
+
 # Serialised so a burst of events (an install touches the file several times)
 # collapses into one pass instead of a pile-up. The trap matters: without it a
 # killed handler leaves the lock behind and every later change is ignored for the
@@ -79,16 +89,35 @@ trap 'rm -f "$LOCK"' EXIT INT TERM
 # PackageManager writes the file in a couple of steps (temp file, then rename);
 # let it settle so we resolve the finished map rather than a half-written one.
 sleep 3
+# Both jobs below are BOUNDED, so the 180s stale-lock threshold above is provably
+# unreachable rather than merely generous. They were unbounded, and each can
+# additionally wait up to 25s on the engine-wide pass lock -- which meant a
+# waiting handler was still indistinguishable from a dead one, just further out,
+# and the reaper's whole premise (age implies death) was still unsound.
+# 60s: comfortably past (25s pass-lock wait + the apply itself), comfortably
+# under 180.
 if [ -s "$NMDIR/uidhide" ]; then
-    _out=$("$BIN" uid apply 2>&1)
-    echo "nomount: hide list re-applied after package change ($_out)" > /dev/kmsg 2>/dev/null
+    _out=$(timeout 60 "$BIN" uid apply 2>&1)
+    if [ $? -eq 124 ]; then
+        nmlog "⚠ hide list apply after package change TIMED OUT after 60s — apps you expect to be hidden are NOT"
+    else
+        nmlog "hide list re-applied after package change ($_out)"
+    fi
 fi
 
 # An absorbed APK rule survives the app it serves being updated only if it is
 # re-pointed at the new path; absorb refreshes those before it surveys, and is a
 # no-op when nothing moved.
 if [ -s "$NMDIR/absorbed.list" ]; then
-    _abs=$("$BIN" absorb 2>&1 | tail -1)
-    echo "nomount: absorb after package change ($_abs)" > /dev/kmsg 2>/dev/null
+    # Capture the status BEFORE the pipe: `$?` after a command substitution that
+    # contains a pipeline is `tail`'s, which always succeeds, so a timeout branch
+    # written the obvious way is dead code (the same trap service.sh documents).
+    _abs_all=$(timeout 60 "$BIN" absorb 2>&1)
+    _abs_rc=$?
+    if [ "$_abs_rc" -eq 124 ]; then
+        nmlog "absorb after package change TIMED OUT after 60s"
+    else
+        nmlog "absorb after package change ($(printf '%s\n' "$_abs_all" | tail -1))"
+    fi
 fi
 exit 0

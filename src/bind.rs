@@ -45,10 +45,26 @@ impl Lock {
                 .open(LOCK_FILE)
                 .with_context(|| format!("open {LOCK_FILE}"))?
         };
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            bail!("flock {LOCK_FILE}: {}", std::io::Error::last_os_error());
+        // BOUNDED, like `mount::pass_lock` and for the same reasons: this runs on
+        // the boot path (`teardown_all` opens every mount pass), `service.sh` runs
+        // that pass in the foreground and un-timed, and `uidwatch.sh` reaps a
+        // handler lock it has seen for 60s -- a process merely WAITING on a
+        // blocking LOCK_EX is indistinguishable from a dead one, so it gets reaped
+        // and mutual exclusion is lost for the rest of the session. Same wait as
+        // the pass lock so the two engine-wide locks behave alike.
+        //
+        // Unlike the pass lock we then FAIL rather than proceed unserialised:
+        // every mutation here is a read-modify-write of binds.list, and an
+        // unserialised one corrupts the only record of the binds we made.
+        let wait = crate::mount::PASS_LOCK_WAIT;
+        for _ in 0..(wait * 10) {
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Lock(f));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        Ok(Lock(f))
+        bail!("another process still holds {LOCK_FILE} after {wait}s: {}",
+              std::io::Error::last_os_error());
     }
 }
 impl Drop for Lock {
@@ -233,11 +249,54 @@ fn tracked_full() -> Vec<(PathBuf, PathBuf, String)> {
         .unwrap_or_default()
 }
 
+/// Take the bind down, or say why not.
+///
+/// `Ok` means the target is NOT a mount any more -- either umount2 succeeded, or
+/// it was never mounted. The second case is a legitimate row: `apply` records
+/// BEFORE it mounts (L5), so a bind that failed after being recorded leaves one,
+/// and it must be retired (and its label restored) rather than kept forever.
+/// Anything else -- EPERM under a restrictive context is the one that bites --
+/// means the mount is still live, and the caller must keep both the row and the
+/// ROM label: restoring `adb_data_file` under a live bind serving a `my_*` path
+/// is an avc denial on every read and a detection tell.
+fn umount_target(target: &Path) -> Result<(), String> {
+    let c = CString::new(target.to_string_lossy().as_bytes())
+        .map_err(|_| "nul byte in path".to_string())?;
+    if unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) } == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    // Ask the mount table rather than trusting errno: EINVAL means "not a mount
+    // point", which is success here, and mountinfo answers that question for
+    // every errno at once.
+    if !is_mounted(target) {
+        return Ok(());
+    }
+    Err(e.to_string())
+}
+
 /// Umount a single tracked bind and drop it from the list (gap-free reload).
-pub fn umount_one(target: &Path) {
-    let Ok(_lock) = Lock::acquire() else { return };
-    if let Ok(c) = CString::new(target.to_string_lossy().as_bytes()) {
-        unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+///
+/// Returns whether the bind is down. False means it is still mounted and still
+/// recorded, so the caller must not count it as removed.
+pub fn umount_one(target: &Path) -> bool {
+    let _lock = match Lock::acquire() {
+        Ok(l) => l,
+        Err(e) => {
+            // Was `else { return }`: a failed lock silently did nothing, which is
+            // the same silent degrade `Lock::acquire` documents itself as
+            // refusing. The caller counted the bind as removed either way.
+            eprintln!("nomount: not umounting the bind over {}: {e:#}", target.display());
+            return false;
+        }
+    };
+    if let Err(e) = umount_target(target) {
+        eprintln!(
+            "nomount: could not umount the bind over {} ({e}); keeping its {BINDS_LIST} row \
+             and its ROM label so the next pass can retry it",
+            target.display()
+        );
+        return false;
     }
     let rows = tracked_full();
     // Put the source file's own label back now that nothing is bound over it.
@@ -260,25 +319,64 @@ pub fn umount_one(target: &Path) {
              recorded (or unrecorded) and will not be cleaned up on the next pass"
         );
     }
+    true
 }
 
 /// Umount every bind we recorded, then clear the list. Run at the start of each
 /// mount pass so stale binds (removed/updated modules) never accumulate.
-pub fn teardown_all() {
-    let Ok(_lock) = Lock::acquire() else { return };
-    let Ok(list) = fs::read_to_string(BINDS_LIST) else {
-        return;
+///
+/// Returns whether every recorded bind actually came down. A row whose umount
+/// FAILED is kept: this list is the only record of the binds we made, so dropping
+/// it (as deleting the file wholesale used to) leaves a live mount that no later
+/// pass can see, let alone unmount, over a `my_*` path whose backing file we had
+/// just relabelled back to `adb_data_file`.
+pub fn teardown_all() -> bool {
+    let _lock = match Lock::acquire() {
+        Ok(l) => l,
+        Err(e) => {
+            // Was `else { return }`. Silently skipping the teardown left the
+            // previous pass's binds live while the pass below rebuilt over them.
+            eprintln!("nomount: not tearing down recorded binds: {e:#}");
+            return false;
+        }
     };
+    let list = match fs::read_to_string(BINDS_LIST) {
+        Ok(s) => s,
+        // No list at all is the ordinary first-pass case, not a failure.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(e) => {
+            eprintln!("nomount: could not read {BINDS_LIST}: {e} — binds from the previous \
+                       pass cannot be torn down");
+            return false;
+        }
+    };
+    // Rows that are still mounted, kept verbatim so a later pass can retry them.
+    let mut kept = String::new();
     for line in list.lines() {
         let Some((t, s, lbl)) = parse_line(line) else {
             continue;
         };
-        if let Ok(c) = CString::new(t.to_string_lossy().as_bytes()) {
-            unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+        if let Err(e) = umount_target(&t) {
+            eprintln!(
+                "nomount: could not umount the bind over {} ({e}); keeping its record and \
+                 its ROM label — a live bind serving a file labelled adb_data_file is an \
+                 avc denial and a tell",
+                t.display()
+            );
+            kept.push_str(&format!("{}\t{}\t{}\n", t.display(), s.display(), lbl));
+            continue;
         }
+        // Only now is nothing bound over the source, so the label can go back.
         if !lbl.is_empty() {
             restore_selinux(&s, format!("{lbl}\0").as_bytes());
         }
+    }
+    if !kept.is_empty() {
+        if let Err(e) = fs::write(BINDS_LIST, &kept) {
+            eprintln!("nomount: could not rewrite {BINDS_LIST}: {e} — a bind that is still \
+                       mounted has lost its only record");
+        }
+        return false;
     }
     // A stale list makes the next pass try to umount paths already gone. Not
     // fatal, but it is the difference between a clean pass and confusing noise.
@@ -288,4 +386,5 @@ pub fn teardown_all() {
                        retry umounts that are already done");
         }
     }
+    true
 }

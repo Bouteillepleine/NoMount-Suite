@@ -36,6 +36,14 @@ const ALLOWLIST: &str = "/data/adb/ksu/.allowlist";
 const MAX_ALLOWLIST: u64 = 4 * 1024 * 1024;
 /// "USK\x7f"
 const MAGIC: &[u8] = &[0x55, 0x53, 0x4b, 0x7f];
+/// Is there a KernelSU-family manager here at all?
+///
+/// Gates the "could not read the umount configuration" finding: a manager that
+/// keeps no allowlist has none to fail at reading, and warning about a missing
+/// file that was never meant to exist is noise, not a finding.
+pub fn ksu_manager_present() -> bool {
+    std::path::Path::new("/data/adb/ksu").is_dir()
+}
 const HEADER: usize = 8;
 const RECORD: usize = 784;
 const OFF_NAME: usize = 4;
@@ -92,11 +100,14 @@ fn u32_le(b: &[u8]) -> u32 {
 /// La Banque Postale to uid 10497, both correct, and the two apps carrying an
 /// "umount modules" profile decoded as set. Any layout change shows up as
 /// garbage uids rather than silently wrong flags, which `looks_sane` rejects.
-pub fn app_umount_flags() -> Vec<AppFlag> {
-    match read_allowlist() {
-        Some(buf) => parse_apps(&buf),
-        None => Vec::new(),
-    }
+///
+/// `None` means the allowlist could not be decoded (absent, truncated, bad magic,
+/// or a layout that no longer looks like uids) -- NOT that no app carries the
+/// profile. Folding those together is what made "the switch is off", "the record
+/// layout moved" and "the file is unreadable" render identically silent in
+/// `doctor`; [`Susfs`] below models the same three states for the same reason.
+pub fn app_umount_flags() -> Option<Vec<AppFlag>> {
+    parse_apps(&read_allowlist()?)
 }
 
 /// Read the allowlist, bounded. `None` when absent, unreadable, or implausibly
@@ -110,10 +121,14 @@ fn read_allowlist() -> Option<Vec<u8>> {
 }
 
 /// Split out from the file read so it can be tested against hostile input.
-fn parse_apps(buf: &[u8]) -> Vec<AppFlag> {
+///
+/// `None` for "this is not an allowlist we can read", `Some(vec![])` for "it is,
+/// and no app carries the profile". The two are different answers and the caller
+/// has to be able to tell them apart.
+fn parse_apps(buf: &[u8]) -> Option<Vec<AppFlag>> {
     let mut out = Vec::new();
     if buf.len() < HEADER + RECORD || !buf.starts_with(MAGIC) {
-        return out;
+        return None;
     }
     let n = (buf.len() - HEADER) / RECORD;
     for i in 0..n {
@@ -142,10 +157,12 @@ fn parse_apps(buf: &[u8]) -> Vec<AppFlag> {
             umount_modules: !allow_su && r[OFF_UMOUNT] != 0,
         });
     }
+    // A decode that cannot be right is "we do not know", not "no app has it":
+    // clearing the vector reported a moved record layout as a clean bill of health.
     if !looks_sane(&out) {
-        out.clear();
+        return None;
     }
-    out
+    Some(out)
 }
 
 /// Refuse a decode that cannot be right, rather than report invented flags: an
@@ -400,9 +417,11 @@ mod tests {
     /// Nothing in here may panic on bytes another component owns.
     #[test]
     fn hostile_input_never_panics() {
-        assert!(parse_apps(&[]).is_empty());
-        assert!(parse_apps(b"USK\x7f").is_empty());
-        assert!(parse_apps(&vec![0u8; HEADER + RECORD]).is_empty()); // bad magic
+        // None, not an empty list: "cannot be read" is a different answer from
+        // "read fine, nothing set", and doctor has to be able to say so.
+        assert!(parse_apps(&[]).is_none());
+        assert!(parse_apps(b"USK\x7f").is_none());
+        assert!(parse_apps(&vec![0u8; HEADER + RECORD]).is_none()); // bad magic
         assert!(global_from(&[]).is_none());
         assert!(global_from(&vec![0xffu8; HEADER + RECORD]).is_none());
         // truncated final record: loop must not slice past the end

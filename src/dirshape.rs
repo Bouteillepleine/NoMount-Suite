@@ -29,7 +29,12 @@ fn erofs_model(dir: &Path) -> Option<u64> {
     let mut n: u64 = 0;
     let mut names: u64 = 0;
     for e in fs::read_dir(dir).ok()? {
-        let e = e.ok()?;
+        // Skip a dirent we cannot read, do not abandon the directory: `?` here
+        // threw away the whole measurement over one bad entry, which reads as
+        // "shape not proven" and is exactly the silent no-op this module exists
+        // to avoid. A skipped entry can only make the model UNDERCOUNT, so the
+        // comparison still fails closed -- it never claims a shape it did not see.
+        let Ok(e) = e else { continue };
         n += 1;
         names += e.file_name().as_encoded_bytes().len() as u64;
     }

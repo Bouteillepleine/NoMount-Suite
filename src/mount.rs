@@ -64,7 +64,9 @@ pub(crate) struct PassLock(std::fs::File);
 
 /// How long a pass will wait for another pass before giving up and running
 /// unserialised. Bounded on purpose -- see `pass_lock`.
-const PASS_LOCK_WAIT: u64 = 25;
+/// Shared with `bind::Lock`, which is the other engine-wide lock and must not
+/// out-wait this one (see its `acquire`).
+pub(crate) const PASS_LOCK_WAIT: u64 = 25;
 
 /// Take the process-wide pass lock. Best-effort: a failure to create or lock the
 /// file must never block boot, so this returns `None` and the caller proceeds
@@ -1060,8 +1062,14 @@ pub fn run_reload() -> Result<()> {
     // a changed backing is dropped here so apply() below re-binds the new source.
     for (t, s) in &live_binds {
         if desired_bind_src.get(t.as_path()).copied() != Some(s.as_path()) {
-            crate::bind::umount_one(t);
-            bind_removed += 1;
+            // Only count what actually came down: a bind that refused to umount is
+            // still live AND still recorded, and reporting it as removed is how a
+            // surviving mount became invisible to every later pass.
+            if crate::bind::umount_one(t) {
+                bind_removed += 1;
+            } else {
+                failed += 1;
+            }
         }
     }
     // Still-correct binds (right target AND source) are already mounted; skip them.
@@ -1128,9 +1136,17 @@ pub fn run_mount() -> Result<()> {
     // overlay-backed path is overlayfs and says nothing about the layer whose
     // shape its stock siblings show. Userspace can just read a directory and
     // check, so it does; a failure to prove it leaves the engine as it was.
-    let packed = crate::dirshape::rom_dirs_are_dirent_packed();
-    if let Err(e) = nm.set_dir_shape(packed) {
-        eprintln!("nomount: could not set the directory-shape knob: {e:#}");
+    //
+    // Which means: only CALL the knob when the shape is proven. Passing `false`
+    // for "unproven" is not the same statement -- it asserts not-packed, and
+    // `fits_erofs_shape` answers false for any sampled directory >= 4096 bytes or
+    // reached through an overlay mount, so a genuine erofs ROM whose sampled roots
+    // all happen to be large would have turned the knob OFF and disabled the
+    // size/nlink recompute `whiteout::measurable_hole` depends on.
+    if crate::dirshape::rom_dirs_are_dirent_packed() {
+        if let Err(e) = nm.set_dir_shape(true) {
+            eprintln!("nomount: could not set the directory-shape knob: {e:#}");
+        }
     }
 
     // Start clean so uninstalled/updated modules don't leave stale rules, and tear
@@ -1148,7 +1164,15 @@ pub fn run_mount() -> Result<()> {
     // before `packages.list` is meaningful — apps are hidden from the moment the
     // injections exist rather than from boot_completed onwards.
     let hidden = crate::cli::handlers::reapply_blocklist(&nm, true);
-    crate::bind::teardown_all();
+    if !crate::bind::teardown_all() {
+        // Not fatal -- the pass below still rebuilds the rules -- but a surviving
+        // bind is a mount this Suite can no longer account for, so it must be said
+        // rather than swallowed.
+        eprintln!(
+            "nomount: at least one my_* bind from the previous pass is still mounted; it \
+             stays recorded in binds.list and the next pass will retry it"
+        );
+    }
     // `clear` dropped every absorbed rule, but NOT the record of them: the pass
     // below rebuilds those rules from it, so truncating the file here would throw
     // away the only thing that can. Read it first either way -- an earlier version

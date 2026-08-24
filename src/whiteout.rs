@@ -249,8 +249,17 @@ pub fn remove(target: &str) -> Result<()> {
         return Ok(());
     }
     write(&list)?;
-    let _ = Nm::new().del(Path::new(t));
-    println!("ok: {t} no longer hidden");
+    // Two outcomes, like `add`. Dropping the row is only half of it: if the engine
+    // refuses the `del` the path stays whited out for the rest of the session, and
+    // "no longer hidden" -- printed by the CLI and echoed by the WebUI -- asserts
+    // the opposite of what the user will see.
+    match Nm::new().del(Path::new(t)) {
+        Ok(()) => println!("ok: {t} no longer hidden"),
+        Err(e) => println!(
+            "removed {t} from the list, but un-hiding it now failed: {e:#} — it stays \
+             hidden until the next reboot"
+        ),
+    }
     Ok(())
 }
 
@@ -311,6 +320,15 @@ pub fn apply() -> Result<()> {
         }
     }
     println!("nomount whiteout: applied {ok}, failed {failed}");
+    if failed > 0 {
+        // Exit non-zero. This runs unattended from metamount.sh and service.sh,
+        // which only see the process's status: returning Ok made a boot where
+        // every whiteout failed indistinguishable from one where all applied, and
+        // a whiteout that did not apply means a path the user believes is hidden
+        // is plainly visible. The message carries both counts so the single line
+        // service.sh puts in kmsg is self-contained.
+        anyhow::bail!("{failed} of {} whiteout(s) could not be applied (applied {ok})", ok + failed);
+    }
     Ok(())
 }
 
