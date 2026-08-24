@@ -113,6 +113,7 @@
 #define nm_dir_fsync                             __vfsx_188
 #define nm_inode_info_rcu_free                   __vfsx_193
 #define nm_reval_fresh                           __vfsx_194
+#define nm_lookup_backing_child                  __vfsx_195
 #define nm_tag_passthrough_dentry                __vfsx_189
 #define nm_child_ino                             __vfsx_190
 #define nm_dirent_ino                            __vfsx_191

@@ -2112,6 +2112,28 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
  * domain.te grants every domain r_dir_perms on. A module tree that does not
  * traverse for its readers now fails at lookup instead of at open; that is a
  * packaging bug to relabel, exactly as nm_open() says. */
+/* 6.16 split this API in two and re-typed it. Before: lookup_one_len_unlocked()
+ * -- which despite the name DOES check MAY_EXEC on the base (v4.9
+ * fs/namei.c:2514; 6.12's lookup_one_common() ends in inode_permission(..,
+ * MAY_EXEC)). From 6.16 the checking variant is lookup_one_unlocked() taking a
+ * struct qstr, and the name lookup_noperm_unlocked() is the one that skips the
+ * check. Bind to the CHECKING variant on both sides, or the semantics quietly
+ * flip at 6.16 depending on which name looks more familiar. The callee fills in
+ * qstr.hash itself (lookup_noperm_common), so QSTR_INIT is complete. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+static inline struct dentry *nm_lookup_backing_child(const char *name, struct dentry *base, int len)
+{
+    struct qstr q = QSTR_INIT(name, len);
+
+    return lookup_one_unlocked(&nop_mnt_idmap, &q, base);
+}
+#else
+static inline struct dentry *nm_lookup_backing_child(const char *name, struct dentry *base, int len)
+{
+    return lookup_one_len_unlocked(name, base, len);
+}
+#endif
+
 static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_info *info,
                                           struct dentry *dentry)
 {
@@ -2119,7 +2141,7 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     struct dentry *child, *res;
     struct inode *new_inode, *r_child;
 
-    child = lookup_one_len_unlocked(dentry->d_name.name, info->r_path.dentry,
+    child = nm_lookup_backing_child(dentry->d_name.name, info->r_path.dentry,
                                     dentry->d_name.len);
     if (IS_ERR(child))
         return ERR_CAST(child);
