@@ -979,9 +979,18 @@ static int nm_open(struct inode *inode, struct file *file)
      * v_cap carries the answer a REAL open of the stock path gave at rule build,
      * so both directions come out right without guessing: stock accepts and we
      * set the bit, or stock refuses and we leave it clear so the VFS refuses us
-     * exactly as it refuses stock. */
+     * exactly as it refuses stock.
+     *
+     * 6.0+ only: FMODE_CAN_ODIRECT was introduced there. Before it, the VFS
+     * tested f_mapping->a_ops->direct_IO directly in do_dentry_open, which a
+     * ->open hook cannot influence without swapping the inode's mapping -- so on
+     * 4.9..5.15 the mirror is simply not applied and behaviour is unchanged.
+     * Those kernels are not an injection target for this oracle today; closing it
+     * there needs a different lever and its own measurement. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
     if (unlikely(info->v_cap & NM_CAP_ODIRECT))
         file->f_mode |= FMODE_CAN_ODIRECT;
+#endif
     return 0;
 }
 
