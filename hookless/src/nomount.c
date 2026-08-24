@@ -3895,26 +3895,46 @@ static bool nm_target_too_shallow(const char *p, u16 len)
  * blocked reader of the stock .apk bytes is. Case-sensitive, like PM's scan. */
 static bool nm_vpath_in_pm_scandir(const struct nomount_rule *rule)
 {
+    /* Both lists mirror pmcache.rs (ROM_ROOTS / PM_SCAN_DIRS). Userspace is the
+     * source of truth for which rules get --public; the kernel repeats the test
+     * only so a mislabelling client cannot keep the bit on a shadowing rule PM
+     * never advertised, so it must be at least as strict as userspace. */
+    static const char *const roots[] = {
+        "system", "system_ext", "product", "vendor", "odm", "my_product",
+        "my_region", "my_stock", "my_company", "my_carrier", "my_engineering",
+        "my_heytap", "my_preload",
+    };
     static const char *const dirs[] = {
         "app", "priv-app", "overlay", "app-ext", "priv-app-ext",
     };
     const char *v = nm_get_vpath(rule);
-    u16 len = rule->v_len, i = 0, start = 0, seg = 0;
+    u16 len = rule->v_len, i, start = 0, seg = 0;
     unsigned int d;
 
     for (i = 0; i <= len; i++) {
         if (i != len && v[i] != '/')
             continue;
-        if (i > start) {            /* a non-empty path segment ended here */
-            if (++seg == 2) {       /* the <scan-dir> slot */
-                u16 seglen = i - start;
+        if (i > start) {                    /* a non-empty path segment ended */
+            u16 seglen = i - start;
+            const char *const *tab;
+            unsigned int n;
 
-                for (d = 0; d < ARRAY_SIZE(dirs); d++)
-                    if (strlen(dirs[d]) == seglen &&
-                        memcmp(v + start, dirs[d], seglen) == 0)
-                        return true;
-                return false;
+            seg++;
+            if (seg == 1) {                 /* <partition> */
+                tab = roots; n = ARRAY_SIZE(roots);
+            } else if (seg == 2) {          /* <scan-dir> */
+                tab = dirs;  n = ARRAY_SIZE(dirs);
+            } else {
+                return false;               /* unreachable; both slots matched */
             }
+            for (d = 0; d < n; d++)
+                if (strlen(tab[d]) == seglen &&
+                    memcmp(v + start, tab[d], seglen) == 0)
+                    break;
+            if (d == n)
+                return false;               /* this slot did not match */
+            if (seg == 2)
+                return true;                /* partition AND scan dir matched */
         }
         start = i + 1;
     }
