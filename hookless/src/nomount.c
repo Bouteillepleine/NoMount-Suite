@@ -2392,12 +2392,21 @@ static void nm_mark_public_up(struct nomount_rule *rule)
     }
 }
 
-static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule, const char *name, size_t name_len)
+/* Link `rule` into `dir_node` under `name`. Returns 0, or -ENOMEM when the child
+ * could not be created.
+ *
+ * The result is NOT advisory. __nomount_add_rule's shadow path frees the rule it
+ * replaces once this has run, on the assumption that the parent's child node was
+ * re-pointed at the incoming rule; if that never happened the node still holds
+ * the freed pointer and every later lookup or readdir of that directory
+ * dereferences it. Failing silently here (the old void return) is what made that
+ * reachable, so the allocation failures propagate and the caller aborts the add. */
+static int __nomount_inject_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule, const char *name, size_t name_len)
 {
     struct nomount_child_node *child;
     u32 name_hash;
 
-    if (unlikely(!dir_node)) return;
+    if (unlikely(!dir_node)) return -ENOMEM;
     name_hash = full_name_hash(NULL, name, name_len);
     rule->parent_dir = dir_node;
     hash_for_each_possible(dir_node->children_ht, child, hnode, name_hash) {
@@ -2434,12 +2443,12 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
             WRITE_ONCE(child->fake_ino, rule->v_dino ? rule->v_dino : rule->v_ino);
             if (rule->flags & NM_FLAG_PUBLIC)
                 WRITE_ONCE(dir_node->has_public, true);
-            return;
+            return 0;
         }
     }
 
     child = kmalloc(sizeof(*child) + name_len + 1, GFP_KERNEL);
-    if (unlikely(!child)) return;
+    if (unlikely(!child)) return -ENOMEM;
 
     child->fake_ino = rule->v_dino ? rule->v_dino : rule->v_ino;
     child->name_hash = name_hash;
@@ -2456,7 +2465,7 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
 
     if (child->id < 0) {
         kfree(child);
-        return;
+        return -ENOMEM;
     }
 
     /* Set the bloom bit BEFORE publishing the child via hash_add_rcu: a lockless
@@ -2471,6 +2480,7 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
     if (rule->flags & NM_FLAG_PUBLIC)
         WRITE_ONCE(dir_node->has_public, true);
     hash_add_rcu(dir_node->children_ht, &child->hnode, name_hash);
+    return 0;
 }
 
 static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule)
@@ -2978,7 +2988,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 }
                 if (target_rule->flags & NM_FLAG_PUBLIC)
                     nm_mark_public_up(ex);
-                __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
+                err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
+                if (unlikely(err)) break;
                 found_virtual = true;
                 break;
             }
@@ -3043,7 +3054,12 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
             }
             dir_node = nomount_get_dir_node(v_inode);
             if (!dir_node) dir_node = __nomount_alloc_dir_node(v_inode);
-            if (likely(dir_node)) {
+            /* No dir_node means the child below can never be linked, and the
+             * caller would free the rule this one replaces while the parent still
+             * points at it -- so this is a hard failure, not a skip. */
+            if (unlikely(!dir_node)) {
+                err = -ENOMEM;
+            } else {
                 nomount_hijack_virtual_parent(dir_node, v_inode);
                 nomount_hijack_dir_inode(dir_node, v_inode);
                 nomount_hijack_superblock(p_path.dentry->d_sb);
@@ -3056,10 +3072,10 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 
                 dentry = d_lookup(p_path.dentry, &qname);
                 if (dentry) {
-                    d_drop(dentry); 
+                    d_drop(dentry);
                     dput(dentry);
                 }
-                __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
+                err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
             }
             path_put(&p_path);
             
@@ -3095,7 +3111,14 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         if (unlikely(!dir_node)) { kfree(irule); err = -ENOMEM; if (i > 0) v_path[i] = orig_v_path; break; }
         dir_node->_tag_ptr = (unsigned long)irule | 1UL;
         irule->this_dir = dir_node;
-        __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
+        err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
+        if (unlikely(err)) {
+            /* irule is not on pending_list yet, so nothing else will free it. */
+            nm_dir_node_put(dir_node);
+            kfree(irule);
+            if (i > 0) v_path[i] = orig_v_path;
+            break;
+        }
         hlist_add_head(&irule->vpath_node, &pending_list);
         current_rule = irule;
         if (i > 0) v_path[i] = orig_v_path;
@@ -3993,8 +4016,16 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     err = nomount_generate_virtual_topology(rule);
     if (err != 0) {
+        /* The victim is already out of the rule hash, but its PARENT may still
+         * hold a child node pointing at it: the re-injection that would have
+         * re-pointed that node at `rule` is exactly what just failed. Freeing it
+         * now would leave that node dereferencing freed memory on every later
+         * lookup or readdir of the directory. Detach explicitly instead of
+         * relying on the overwrite. (No-op when the re-point did happen.) */
+        if (victim)
+            __nomount_delete_child_locked(victim->parent_dir, victim);
         mutex_unlock(&nomount_write_mutex);
-        nm_free_rule(rule); 
+        nm_free_rule(rule);
         if (victim) {
             synchronize_rcu();
             nm_free_rule(victim);
@@ -4004,6 +4035,13 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     hash_add_rcu(nomount_rules_ht, &rule->vpath_node, rule->v_hash);
     atomic_inc(&nm_rule_gen);
+    /* Same argument on the success path: the topology walk normally re-points the
+     * parent's child node at `rule`, but it can return 0 having taken a branch
+     * that did not (a replacement whose name resolves through a different
+     * ancestor). Detaching here is a no-op when it did, and removes a stale
+     * pointer to the about-to-be-freed victim when it did not. */
+    if (unlikely(victim))
+        __nomount_delete_child_locked(victim->parent_dir, victim);
     mutex_unlock(&nomount_write_mutex);
 
     if (unlikely(victim)) {
