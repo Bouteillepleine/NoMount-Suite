@@ -108,6 +108,7 @@
 #define nm_free_rule                             __vfsx_051
 #define nm_fsync                                 __vfsx_052
 #define nm_stock_caps                            __vfsx_184
+#define nm_ioctl_as_stock                        __vfsx_186
 #define nm_full_xattr_name                       __vfsx_053
 #define nm_get_link                              __vfsx_054
 #define nm_hide_isolated                         __vfsx_055

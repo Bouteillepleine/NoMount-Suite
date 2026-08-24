@@ -1086,19 +1086,62 @@ static int nm_mmap_prepare(struct vm_area_desc *desc)
 }
 #endif
 
+/* Answer ioctls like the STOCK filesystem, never like the donor.
+ *
+ * Forwarding to the backing file exposed the DONOR fs's ioctl surface: the module
+ * tree lives on /data (f2fs), whose ->unlocked_ioctl serves the ext4-family
+ * commands, while erofs_file_fops has NO ->unlocked_ioctl and no ->compat_ioctl
+ * at all -- every stock ROM file answers -ENOTTY. So one unprivileged
+ * `ioctl(fd, FS_IOC_GETVERSION)` separated injected from stock perfectly.
+ * Measured on OP15 over 2616 files in eight ROM directories: 117 returned 0 and
+ * all 117 were rule paths; the other 2499 returned -ENOTTY and none were. Two
+ * independent commands (GETVERSION, GETFSLABEL) agreed file-for-file.
+ *
+ * Route to the shadowed stock file when there is one, so the answer is literally
+ * the stock answer on any filesystem; a pure addition has nothing underneath, and
+ * its siblings are on that same ROM fs, so -ENOTTY is what they would say.
+ *
+ * Generic-VFS ioctls (FS_IOC_GETFSUUID, FS_IOC_GETFSSYSFSPATH) never reach here
+ * -- do_vfs_ioctl answers them from the superblock -- and they were measured
+ * identical on both, which is why only the f_op-dispatched ones leaked. FIEMAP
+ * likewise goes through i_op->fiemap (see nm_fiemap). */
+static long nm_ioctl_as_stock(struct file *file, unsigned int cmd, unsigned long arg, bool compat)
+{
+    struct nm_inode_info *info = file_inode(file)->i_private;
+    struct file *sf;
+    long ret;
+
+    if (unlikely(!info) || !info->s_path.dentry)
+        return -ENOTTY;
+
+    sf = dentry_open(&info->s_path, O_RDONLY | O_LARGEFILE, current_cred());
+    if (IS_ERR(sf))
+        return -ENOTTY;
+
+    ret = -ENOTTY;
+#ifdef CONFIG_COMPAT
+    if (compat) {
+        if (sf->f_op->compat_ioctl)
+            ret = sf->f_op->compat_ioctl(sf, cmd, arg);
+    } else
+#endif
+    {
+        if (sf->f_op->unlocked_ioctl)
+            ret = sf->f_op->unlocked_ioctl(sf, cmd, arg);
+    }
+    fput(sf);
+    return ret;
+}
+
 static long nm_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-    struct file *real_file = file->private_data;
-    if (!real_file || !real_file->f_op->unlocked_ioctl) return -ENOTTY;
-    return real_file->f_op->unlocked_ioctl(real_file, cmd, arg);
+    return nm_ioctl_as_stock(file, cmd, arg, false);
 }
 
 #ifdef CONFIG_COMPAT
 static long nm_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-    struct file *real_file = file->private_data;
-    if (!real_file || !real_file->f_op->compat_ioctl) return -ENOTTY;
-    return real_file->f_op->compat_ioctl(real_file, cmd, arg);
+    return nm_ioctl_as_stock(file, cmd, arg, true);
 }
 #endif
 
