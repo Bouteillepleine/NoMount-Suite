@@ -305,9 +305,20 @@ pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
 /// The mounted-set is read once and cached: `plan_tree` is recursive and each
 /// `nomount` run is a fresh short-lived process, so a snapshot is correct for it.
 fn inject_would_mask_dir(target: &Path) -> bool {
-    static MOUNTED: std::sync::OnceLock<HashSet<PathBuf>> = std::sync::OnceLock::new();
-    let mounted = MOUNTED.get_or_init(crate::absorb::mounted_targets);
-    target.is_dir() || mounted.contains(target)
+    // Only the DIRECTORY test belongs here. `is_dir()` follows symlinks, which is
+    // the case this exists for: a module file or link resolving onto a stock
+    // directory would be served as one directory rule and hide every stock entry
+    // under it -- the masking that bootlooped zygote.
+    //
+    // A live MOUNT on the target is deliberately NOT refused here any more. It is
+    // not a masking hazard (a bind over a file masks nothing), and refusing it at
+    // plan time had two silent costs: `unmount_before_serving` -- whose whole job
+    // is "unmount, then serve", and which since today returns false and skips
+    // loudly when it cannot -- became unreachable for injects; and because
+    // `collect_plan()` now runs BEFORE `bind::teardown_all()`, a mid-session
+    // re-apply saw the previous pass's own binds still live and dropped every one
+    // of those targets from the plan, leaving neither a bind nor an injection.
+    target.is_dir()
 }
 
 /// Can this entry actually produce a rule?

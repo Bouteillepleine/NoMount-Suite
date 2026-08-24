@@ -112,13 +112,20 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
 
 // ------------------------------------------------------------------- helpers
 
+/// Live INJECTION targets.
+///
+/// Deliberately not every rule: a whiteout's whole job is to make its target
+/// absent from the parent's listing, so feeding one to a check that asserts
+/// "this name appears in getdents" turns a working whiteout into a failure. The
+/// hand-rolled token split this replaced could not tell the kinds apart, so any
+/// device with a debloat module (or a hand-written `nomount whiteout add`) would
+/// have reported a fabricated "readdir ino vs stat ino" FAIL on the audit users
+/// are told to trust. Route through the shared typed parser instead.
 fn live_targets() -> Vec<PathBuf> {
-    Nm::new()
-        .list()
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| l.split(" [UID:").next().unwrap_or(l).split_whitespace().next())
-        .map(PathBuf::from)
+    crate::nm::parse_list(&Nm::new().list().unwrap_or_default())
+        .into_iter()
+        .filter(|r| r.kind == crate::nm::LiveKind::Inject)
+        .map(|r| r.target)
         .collect()
 }
 

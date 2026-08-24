@@ -473,9 +473,16 @@ pub fn run_doctor() -> Result<()> {
     // consistent. It is not: the PackageManager parsed the MODULE's copy as
     // system_server and publishes that version and signature for the path, so a
     // blocked reader handed the stock bytes disagrees with what the PM advertises.
-    // Engine v17 keeps the bit. Only the kernel knows which rules shadow, so gate
-    // on the version rather than trying to count them here.
-    if live_ok && !hidden_apps.is_empty() && pm_rules > 0 && (15..17).contains(&engine_v) {
+    // Only the kernel knows which rules shadow, so gate on the version rather than
+    // trying to count them here.
+    //
+    // 15..18, not 15..17: v17 SET the bit and printed it, but nothing acted on it
+    // -- nm_stock_for_caller() still decided with the raw blocked-uid test, so a
+    // v17 engine is observationally identical to v16. Excluding 17 here while the
+    // `>= 17` check above sees a fully-flagged rule list meant a v17 device passed
+    // BOTH checks clean while a blocked reader was still served stock bytes for a
+    // shadowed PM-published file -- the exact inconsistency both exist to catch.
+    if live_ok && !hidden_apps.is_empty() && pm_rules > 0 && (15..18).contains(&engine_v) {
         f.push(Finding {
             level: Level::Warn,
             check: "engine strips the opt-out from a replaced PM-published file",
