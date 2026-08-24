@@ -3819,6 +3819,21 @@ static bool nm_target_too_shallow(const char *p, u16 len)
     return true;
 }
 
+/* Does this rule's target name an APK?
+ *
+ * Only used to decide whether a SHADOWS_STOCK rule may keep NM_FLAG_PUBLIC (see
+ * the note at the strip below). Matches on the target's own name rather than a
+ * directory prefix: userspace has already restricted the bit to the directories
+ * the PackageManager scans, and re-deriving that policy here would put it in two
+ * places that could drift. Case-sensitive because the PM's own scan is -- an
+ * ".APK" is not parsed and so was never advertised. */
+static bool nm_vpath_is_apk(const struct nomount_rule *rule)
+{
+    const char *v = nm_get_vpath(rule);
+
+    return rule->v_len >= 4 && memcmp(v + rule->v_len - 4, ".apk", 4) == 0;
+}
+
 static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid)
 {
     struct nomount_rule *rule, *existing, *victim = NULL;
@@ -3882,16 +3897,32 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
         }
     }
 
-    /* PUBLIC only ever excuses an ADDED name from hiding. On a rule that shadows
-     * a stock file the blocked reader is already served the stock bytes from the
-     * ops (nm_stock_for_caller), which is consistent on its own; honouring the
-     * bit there would hand it the module's copy instead -- a real leak, and one a
+    /* PUBLIC excuses a name from hiding. On a rule that shadows a stock file the
+     * blocked reader is served the stock bytes from the ops (nm_stock_for_caller),
+     * and for an ordinary file that is consistent on its own; honouring the bit
+     * there would hand it the module's copy instead -- a real leak, and one a
      * client could ask for by mislabelling. Decide it HERE rather than in
      * nm_alloc_rule: a replacement re-derives SHADOWS_STOCK from the rule it
      * replaces just above, and measuring it earlier would strip the bit off every
      * re-added rule (a reload resolves the vpath through the live injection, so
-     * nm_alloc_rule always concludes "shadowing"). */
-    if (rule->flags & NM_FLAG_SHADOWS_STOCK)
+     * nm_alloc_rule always concludes "shadowing").
+     *
+     * An APK is the exception, because "served the stock bytes" is NOT consistent
+     * there. The PackageManager runs as system_server, which is never blocked, so
+     * it parses the MODULE's APK and publishes THAT identity -- version, signature,
+     * codePath -- to every app that asks. A blocked reader handed the stock bytes
+     * for the same path computes a different signature and version than the PM just
+     * advertised, which is exactly the measurable disagreement PUBLIC exists to
+     * remove; hiding the module's copy buys nothing once the PM has already
+     * described it. Measured on OP15: PM reported com.android.contacts 16.80.0
+     * parsed from a 74641847-byte /product/priv-app/Contacts/Contacts.apk while a
+     * blocked uid read the 64249089-byte stock one at that path.
+     *
+     * Restricted to *.apk so the anti-mislabelling guard still covers every other
+     * shadowing rule -- a client cannot leak an arbitrary replaced file by asking.
+     * Userspace only ever sets the bit for an APK in a directory the PM scans
+     * (pmcache::is_rom_apk), so this widens nothing it does not already request. */
+    if ((rule->flags & NM_FLAG_SHADOWS_STOCK) && !nm_vpath_is_apk(rule))
         rule->flags &= ~NM_FLAG_PUBLIC;
 
     err = nomount_generate_virtual_topology(rule);

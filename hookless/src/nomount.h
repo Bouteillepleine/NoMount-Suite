@@ -235,6 +235,7 @@
 #define nomount_nl_dump_pathhide                 __vfsx_177
 #define nm_stock_map_dev                         __vfsx_178
 #define nm_target_too_shallow                    __vfsx_179
+#define nm_vpath_is_apk                          __vfsx_180
 
 #endif /* NOMOUNT_STEALTH_SYMS */
 
@@ -261,7 +262,7 @@
  * leaving it behind means a release announces a version its engine does not
  * speak. That happened: the engine went to 16 while this still said 15.0, and
  * the build summary reported "NoMount version: 15.0". Bump both together. */
-#define NM_MODULE_VERSION "16.0"
+#define NM_MODULE_VERSION "17.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -297,8 +298,18 @@
  *    at all: the knob is refused as unknown and the rule list stays empty. That
  *    is silent unless userspace can tell 15 from 16, which is what this is for.
  *    (Whether pathhide is COMPILED IN is a separate question -- the weak symbol
- *    answers -EINVAL either way, so a live probe still needs `nm l p`.) */
-#define NOMOUNT_VERSION    16
+ *    answers -EINVAL either way, so a live probe still needs `nm l p`.)
+ *
+ * 17: NM_FLAG_PUBLIC now SURVIVES on a rule that shadows a stock APK, where 16
+ *    and earlier stripped it unconditionally. Below 17 a blocked reader opening
+ *    a replaced ROM APK gets the STOCK bytes while the PackageManager -- which
+ *    parsed the module's copy as system_server -- advertises the module's version
+ *    and signature for that same path, a disagreement any app can measure.
+ *    Measured on OP15 against a 16 engine: PM reported com.android.contacts
+ *    16.80.0 from a 74641847-byte /product/priv-app/Contacts/Contacts.apk while a
+ *    blocked uid read the 64249089-byte stock APK there. Userspace sets the bit
+ *    identically either way, so this is invisible without a version to gate on. */
+#define NOMOUNT_VERSION    17
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -335,9 +346,16 @@
  * entry, and SIGSEGVs on the IOException from 139 unopenable overlay APKs.
  *
  * So a rule the PM already advertises opts out of hiding. Set by userspace for
- * an added ROM APK; STRIPPED by the kernel whenever the rule turns out to shadow
- * a stock file, because there the blocked reader is served the stock bytes and
- * revealing the module's copy instead would be a real leak. */
+ * an added ROM APK; STRIPPED by the kernel when the rule shadows a stock file
+ * that is NOT an APK, because there the blocked reader is served the stock bytes
+ * and revealing the module's copy instead would be a real leak.
+ *
+ * A shadowed APK keeps the bit (engine >= 17). "Served the stock bytes" is only
+ * consistent while nothing else has described the file; for an APK the PM has,
+ * having parsed the module's copy as system_server, so a blocked reader handed
+ * the stock bytes disagrees with the version and signature the PM publishes for
+ * that path. Hiding the module's copy there conceals nothing the PM has not
+ * already announced and adds a mismatch that was not there before. */
 #define NM_FLAG_PUBLIC      (1 << 6)
 /* Bits a client may set; anything else is kernel-derived and must be stripped.
  * NB: nomount_child_node.flags is a u8, so a client-settable bit must be < 8. */
