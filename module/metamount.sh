@@ -22,6 +22,12 @@ mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 # observed on-device as drw------- , i.e. readable but not traversable, so
 # nothing inside it could be reached by anything -- including us.
 find "$NMDIR" -maxdepth 1 -type f -exec chmod 0600 {} + 2>/dev/null
+# ...and REPAIR the directories an earlier build already damaged. Restricting the
+# line above to -type f stops new breakage but cannot undo old: a device that ran
+# a build with the bug keeps its drw------- directory forever. Measured on OP15,
+# where rollback-bin sat unreadable for two days across several updates. 0700 to
+# match $NMDIR itself -- these hold root-read state, so no wider.
+find "$NMDIR" -maxdepth 1 -mindepth 1 -type d -exec chmod 0700 {} + 2>/dev/null
 
 # --- durable boot log ---------------------------------------------------------
 # Every boot diagnostic below used to go ONLY to /dev/kmsg. On this hardware the
