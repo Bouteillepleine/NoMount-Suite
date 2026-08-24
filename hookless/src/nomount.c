@@ -342,11 +342,47 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     hash_for_each_possible_rcu(proxy->dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == namelen && memcmp(child->name, name, namelen) == 0) {
             if (nm_child_visible(child)) {
+                /* A REPLACEMENT is emitted HERE, at the stock entry's own offset,
+                 * instead of being suppressed and re-appended after real EOF.
+                 *
+                 * erofs stores dirents sorted by name and its cookies are byte
+                 * offsets, so an appended entry was the only name out of order in
+                 * the whole directory AND pushed the final d_off past
+                 * stat().st_size -- both readable with one getdents64 plus one
+                 * stat, no baseline needed. Measured on OP15 before this:
+                 * /system/etc/permissions listed 25 entries, st_size 986, last
+                 * d_off 988, one name out of order; every rule-free erofs dir on
+                 * the same device ended exactly ON st_size and was fully sorted.
+                 *
+                 * Safe precisely for SHADOWS_STOCK: the flag means kern_path()
+                 * resolved the vpath when the rule was made, so a real dirent for
+                 * this name provably exists -- which is what gives us a correctly
+                 * ordered slot to emit into. It also keeps the size books
+                 * balanced, because nm_dir_deltas() already treats a shadowing
+                 * child as size-neutral. nomount_emit_virtual_children() skips
+                 * the same class so it is emitted exactly once.
+                 *
+                 * A WHITEOUT still falls through to suppression below: hiding the
+                 * stock name is the entire point of that rule. */
+                if ((child->flags & NM_FLAG_SHADOWS_STOCK) &&
+                    !(child->flags & NM_FLAG_WHITEOUT)) {
+                    u64 fino = child->fake_ino;
+                    unsigned char dt = child->d_type;
+
+                    rcu_read_unlock();
+                    nm_note_real_pos(proxy->dir_node, offset);
+                    proxy->orig_ctx->pos = proxy->ctx.pos;
+                    ret = proxy->orig_ctx->actor(proxy->orig_ctx, name, namelen,
+                                                 offset, fino, dt);
+                    proxy->ctx.pos = proxy->orig_ctx->pos;
+                    if (ret == NM_ACTOR_CONTINUE) proxy->emitted++;
+                    return ret;
+                }
                 rcu_read_unlock();
                 proxy->ctx.pos = offset;
                 return NM_ACTOR_CONTINUE;
             }
-            break; 
+            break;
         }
     }
     rcu_read_unlock();
@@ -385,7 +421,14 @@ static bool nm_emit_dots(struct file *file, struct dir_context *ctx,
     return true;
 }
 
-static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct nomount_dir_node *dir_node)
+/* @real_pass_done: this directory has a real backing listing that already ran, so
+ * SHADOWS_STOCK children were emitted in place there and must NOT be emitted
+ * again here. False for a directory NoMount synthesized whole -- it has no real
+ * pass, so anything skipped here would simply never appear. (A synthesized dir's
+ * children cannot normally shadow stock, since its own path does not exist in
+ * stock; the flag is passed explicitly rather than assumed.) */
+static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct nomount_dir_node *dir_node,
+                                                 bool real_pass_done)
 {
     struct nomount_child_node *child;
     int id;
@@ -410,8 +453,13 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
          * so the emit below runs with RCU dropped and only the stack snapshot. */
         rcu_read_lock();
         while ((child = idr_get_next(&dir_node->children_idr, &id)) != NULL) {
+            /* SHADOWS_STOCK children were already emitted in the real pass, at
+             * the stock entry's own (correctly ordered) offset -- see the
+             * in-place branch in nomount_actor_proxy. Emitting them again here
+             * would duplicate the name and re-introduce the ordering tell. */
             if (nm_child_visible(child) &&
-                !(child->flags & NM_FLAG_WHITEOUT)) {
+                !(child->flags & NM_FLAG_WHITEOUT) &&
+                !(real_pass_done && (child->flags & NM_FLAG_SHADOWS_STOCK))) {
                 found = id;
                 nlen = min_t(int, (int)child->name_len, NAME_MAX);
                 memcpy(name, child->name, nlen);
@@ -721,7 +769,7 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
         goto do_real_iterate;
 
     if (unlikely(nm_is_virtual_pos(pdir, ctx->pos))) {
-        nomount_emit_virtual_children(ctx, pdir);
+        nomount_emit_virtual_children(ctx, pdir, true);
         goto out;
     }
 
@@ -736,7 +784,7 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
 
     nm_publish_real_eof(pdir, ctx->pos);
     ctx->pos = nm_pack_pos(pdir, 0);
-    nomount_emit_virtual_children(ctx, pdir);
+    nomount_emit_virtual_children(ctx, pdir, true);
     goto out;
 
 do_real_iterate:
@@ -863,6 +911,20 @@ static int nm_open(struct inode *inode, struct file *file)
             real_file = dentry_open(stock, file->f_flags, current_cred());
             if (IS_ERR(real_file)) return PTR_ERR(real_file);
             file->private_data = real_file;
+            /* The MAPPING has to follow the file we just chose to serve.
+             *
+             * do_dentry_open() set f->f_mapping from inode->i_mapping, and this
+             * inode borrows the MODULE file's address_space (see
+             * nomount_create_new_inode). filemap_fault() resolves pages through
+             * vmf->vma->vm_file->f_mapping, and nm_mmap deliberately restores
+             * vma->vm_file to OUR file -- so without this a blocked reader got
+             * stock bytes from read()/stat() and MODULE bytes from every mapped
+             * page. On Android that is the dominant path (the linker mmaps .so,
+             * AssetManager mmaps APKs), so per-UID hiding was defeated for
+             * exactly the readers it targets, and read-vs-mmap disagreement is
+             * its own oracle. Overriding f_mapping in ->open is the normal way
+             * to express this (blkdev_open does the same). */
+            file->f_mapping = real_file->f_mapping;
             return 0;
         }
     }
@@ -1670,7 +1732,8 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
     int res = 0;
 
     if (unlikely(nm_is_virtual_pos(dir_node, ctx->pos))) {
-        nomount_emit_virtual_children(ctx, dir_node);
+        nomount_emit_virtual_children(ctx, dir_node,
+                                      !(info && (info->flags & NM_FLAG_VIRTUAL_DIR)));
         return 0;
     }
 
@@ -1704,7 +1767,8 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         return -ENOTDIR;
     }
 
-    nomount_emit_virtual_children(ctx, dir_node);
+    nomount_emit_virtual_children(ctx, dir_node,
+                                  !(info && (info->flags & NM_FLAG_VIRTUAL_DIR)));
     return res;
 }
 
