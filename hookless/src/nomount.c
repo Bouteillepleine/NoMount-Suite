@@ -1278,6 +1278,34 @@ static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
     return real_file->f_op->fsync(real_file, start, end, datasync);
 }
 
+/* The directory half of the same oracle nm_fsync() closes.
+ *
+ * nm_dir_fops carried no .fsync at all, so vfs_fsync_range() answered -EINVAL
+ * for every directory we serve. Whether a real directory answers that depends
+ * entirely on what it sits on: erofs has no ->fsync (-EINVAL), overlayfs has
+ * ovl_dir_fsync (0). On OP15 /product/priv-app is an overlay, so the synthesized
+ * dirs stood out against their neighbours with one syscall and no baseline --
+ * measured 3/3 EINVAL (Mms, Mms/lib, Mms/lib/arm64) against 6/6 zero for the
+ * stock package dirs beside them, at every depth.
+ *
+ * v_cap is sampled from the nearest real ancestor DIRECTORY for a synthesized
+ * dir (nomount_generate_virtual_topology) and from the shadowed dir or a sampled
+ * sibling otherwise; 0 means we learned nothing, and then we keep the old
+ * behaviour rather than invent an answer. Nothing here is dirty -- the caller
+ * cannot have written to a read-only ROM view -- so the capable answer is a
+ * plain 0, which is exactly what ovl_dir_fsync returns for a clean dir. */
+static int nm_dir_fsync(struct file *file, loff_t start, loff_t end, int datasync)
+{
+    struct nm_inode_info *info = file_inode(file)->i_private;
+    struct file *real_file = file->private_data;
+
+    if (info && info->v_cap)
+        return (info->v_cap & NM_CAP_FSYNC) ? 0 : -EINVAL;
+    if (real_file && real_file->f_op->fsync)
+        return real_file->f_op->fsync(real_file, start, end, datasync);
+    return -EINVAL;
+}
+
 static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
 {
     static const char nm_selinux_name[] = "security.selinux";
@@ -2041,6 +2069,18 @@ static const char *nm_full_xattr_name(const struct nm_xattr_proxy *proxy,
     return name;
 }
 
+/* On the LSM asymmetry with nm_listxattr(), which forwards to i_op->listxattr
+ * directly while this forwards through vfs_getxattr(): audited, then MEASURED
+ * rather than assumed. Across 14 paths on OP15 -- synthesized dirs, injected
+ * files, and stock neighbours at three depths -- listxattr and
+ * getxattr("security.selinux") agreed on every one, same context, no EACCES.
+ * They agree because xattr_permission() short-circuits security.* before any
+ * DAC check and SELinux answers the LSM half from the inode's own isec.
+ *
+ * Deliberately NOT "fixed" to __vfs_getxattr() for symmetry's sake: that skips
+ * security_inode_getsecurity(), which is the only thing that reports a context
+ * on a partition labelled by genfscon instead of an on-disk xattr -- trading a
+ * divergence that does not reproduce for one that would. */
 static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dentry, struct inode *inode, const char *name, void *buffer, size_t size FLAGS_ARG)
 {
     struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
@@ -2322,6 +2362,7 @@ static const struct file_operations nm_dir_fops = {
     .release = nm_release,
     .llseek = nm_llseek,
     .read = generic_read_dir,
+    .fsync = nm_dir_fsync,
     .iterate_shared = nm_dir_iterate_dir,
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
     .iterate = nm_dir_iterate_dir,
@@ -3192,6 +3233,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     struct path p_path;
     struct qstr qname;
     bool found_virtual;
+    bool fresh_node = false;   /* this call allocated dir_node -> ours to unwind */
     size_t child_len, irule_size;
     int i, err = 0;
     u32 h_parent;
@@ -3209,6 +3251,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     char anc_ctx[NM_CTX_MAX];
     u16 anc_ctx_len = 0;
     bool have_anc = false;
+    u8 anc_cap = 0;            /* nearest real ancestor DIR's file-op answers (NM_CAP_*) */
     bool anc_ovl = false;      /* ancestor is on overlayfs => dirent ino != st_ino */
     u64 anc_dino = 0;          /* what the ancestor's own readdir reports for "." */
     struct nm_ino_pop *anc_dpop = NULL;  /* the ancestor's real SUBDIR inodes */
@@ -3269,6 +3312,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 #endif
                     anc_ctx_len = ex->v_ctx_len;
                     if (ex->v_ctx_len) memcpy(anc_ctx, ex->v_ctx, ex->v_ctx_len + 1);
+                    anc_cap = ex->v_cap;
                     have_anc = true;
                 }
                 if (target_rule->flags & NM_FLAG_PUBLIC)
@@ -3319,6 +3363,15 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 }
                 if (nm_read_secctx(v_inode, anc_ctx, &anc_ctx_len) != 0)
                     anc_ctx_len = 0;
+                /* Which file-op answers a real directory HERE gives, for
+                 * nm_dir_fsync to replay on the synthesized dirs below. Skipped
+                 * when the resolved ancestor is one of our own inodes (a re-add
+                 * over a live injection resolves through it): nm_dir_fops now
+                 * always has .fsync, so sampling ourselves would bake in
+                 * NM_CAP_FSYNC and reopen the very oracle it closes -- the same
+                 * trap the shadowing path guards against in nm_alloc_rule. */
+                if (v_inode->i_op != &nm_file_iops && v_inode->i_op != &nm_dir_iops)
+                    anc_cap = nm_stock_caps(v_inode);
 #ifdef OVERLAYFS_SUPER_MAGIC
                 anc_ovl = p_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
 #endif
@@ -3338,6 +3391,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 have_anc = true;
             }
             dir_node = nomount_get_dir_node(v_inode);
+            fresh_node = !dir_node;
             if (!dir_node) dir_node = __nomount_alloc_dir_node(v_inode);
             /* No dir_node means the child below can never be linked, and the
              * caller would free the rule this one replaces while the parent still
@@ -3361,6 +3415,19 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     dput(dentry);
                 }
                 err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
+                /* Injection failing AFTER the hijack leaves a node this call
+                 * created armed on a REAL inode with no children and a permanent
+                 * igrab. The caller only unwinds pending_list, so nothing ever
+                 * reaches this node again: the inode stays pinned for the life of
+                 * the module and the vtable stays pointing at a dir_node no rule
+                 * owns. Undo exactly what we armed -- but only when the node was
+                 * ours AND is still empty, since an inherited node holds other
+                 * rules' children. Same neuter-in-place the delete path uses. */
+                if (unlikely(err) && fresh_node &&
+                    idr_is_empty(&dir_node->children_idr)) {
+                    nomount_restore_dir_node(dir_node);
+                    nm_dir_node_put(dir_node);
+                }
             }
             path_put(&p_path);
             
@@ -3425,6 +3492,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 irule->v_ctime = anc_ctime;
                 irule->v_ctx_len = anc_ctx_len;
                 if (anc_ctx_len) memcpy(irule->v_ctx, anc_ctx, anc_ctx_len + 1);
+                irule->v_cap = anc_cap;
                 /* A raw name hash puts a synthesized dir billions away from its
                  * stock siblings (erofs dir inos are small); derive one in the
                  * nearest real ancestor's magnitude band instead. */
@@ -3817,10 +3885,21 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
         *slash = '\0';                   /* ascend */
     }
     if (ret == 0) {                      /* cache keyed on vpath's immediate parent */
-        strscpy(nm_sib_cache_dir, vpath, PATH_MAX);
-        slash = strrchr(nm_sib_cache_dir, '/');
-        if (slash && slash != nm_sib_cache_dir) {
-            *slash = '\0';
+        const char *vslash = strrchr(vpath, '/');
+
+        /* Derive the key BEFORE touching the cache. The old order wrote the full
+         * vpath into nm_sib_cache_dir first and only then checked whether it
+         * could be truncated to a parent -- so for a vpath one level below root
+         * ("/foo") there was nothing to truncate, the key was left as the whole
+         * path, and nm_sib_cache_valid still described the PREVIOUS directory's
+         * payload. Any later lookup whose parent happened to spell that same
+         * string then got another directory's ino/dev/ctx/cap: mirrored metadata
+         * from the wrong partition, which is worse than no mirroring at all. */
+        if (vslash && vslash != vpath && (size_t)(vslash - vpath) < PATH_MAX) {
+            size_t plen = vslash - vpath;
+
+            memcpy(nm_sib_cache_dir, vpath, plen);
+            nm_sib_cache_dir[plen] = '\0';
             nm_sib_cache_kst = *out;
             nm_sib_cache_ctxlen = (octx && octxlen) ? *octxlen : 0;
             if (nm_sib_cache_ctxlen) memcpy(nm_sib_cache_ctx, octx, nm_sib_cache_ctxlen + 1);

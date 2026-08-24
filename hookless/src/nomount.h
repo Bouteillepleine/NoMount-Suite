@@ -110,6 +110,7 @@
 #define nm_stock_caps                            __vfsx_184
 #define nm_ioctl_as_stock                        __vfsx_186
 #define nm_stock_takes_odirect                   __vfsx_187
+#define nm_dir_fsync                             __vfsx_188
 #define nm_full_xattr_name                       __vfsx_053
 #define nm_get_link                              __vfsx_054
 #define nm_hide_isolated                         __vfsx_055
@@ -277,7 +278,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.18.0"
+#define NM_MODULE_VERSION "1.19.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -334,8 +335,19 @@
  *    well as its APK: measured on OP15, a blocked uid got ENOENT for all 25
  *    shared libraries under /product/priv-app/Mms/lib/arm64 while PM advertised
  *    that directory to every app. Below 18 a Suite cannot tell whether the bit it
- *    set is honoured, so `doctor` cannot report the difference. */
-#define NOMOUNT_VERSION    18
+ *    set is honoured, so `doctor` cannot report the difference.
+ *
+ * 19: directories answer fsync() the way a real directory at that path does.
+ *    nm_dir_fops carried no .fsync, so every directory we serve returned -EINVAL
+ *    regardless of what it sat on -- and on an overlay-backed ROM dir that is a
+ *    one-syscall, baseline-free oracle. Measured on OP15 /product/priv-app: the
+ *    three synthesized dirs (Mms, Mms/lib, Mms/lib/arm64) returned EINVAL while
+ *    all six stock package dirs beside them, at every depth, returned 0. A
+ *    synthesized dir now replays the nearest real ANCESTOR DIRECTORY's answer,
+ *    the same v_cap mechanism 18 introduced for files. Userspace cannot set or
+ *    observe this, so the bump exists purely so `doctor` can tell a flashed
+ *    engine from the one it replaced. */
+#define NOMOUNT_VERSION    19
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
