@@ -115,8 +115,19 @@ fi
 # posture no matter how mountless the Suite itself is. Re-serve each as an
 # injection and drop the mount. No-op when nothing mounted anything.
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
-    _ab=$("$BIN" absorb 2>&1 | tail -1)
-    echo "nomount: $_ab" > /dev/kmsg 2>/dev/null
+    # Bounded. This is FOREGROUND and everything below it -- the whiteout
+    # re-apply, the authoritative `uid apply`, the package watcher, the
+    # selfcheck canary -- only runs once it returns. absorb now takes the
+    # process-wide pass lock, so a concurrent WebUI reload can make it wait;
+    # without a timeout here that wait would silently cost per-UID hiding for
+    # the rest of the boot. 90s is well past a worst-case absorb (measured in
+    # seconds) and still far short of stalling boot.
+    _ab=$(timeout 90 "$BIN" absorb 2>&1 | tail -1)
+    if [ $? -eq 124 ]; then
+        echo "nomount: absorb TIMED OUT after 90s - continuing boot" > /dev/kmsg 2>/dev/null
+    else
+        echo "nomount: $_ab" > /dev/kmsg 2>/dev/null
+    fi
     # Second pass, later. Not every module binds by the time this runs: a
     # patched-APK module (ReVanced and friends, issue #14) waits for
     # sys.boot_completed, then for /sdcard, then polls `pm path` until

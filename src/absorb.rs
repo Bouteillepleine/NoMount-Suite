@@ -1246,8 +1246,24 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
         // exactly that. A tmpfs with files in it means the opposite -- the module
         // is SERVING that content -- and converting it would delete the module's
         // own files from view. Say so and leave it mounted.
+        let t_str = target.to_string_lossy().into_owned();
+        let was_durable = durable.contains(&t_str);
+        // Is this takeover already ours, from a previous pass?
+        let ours = was_durable || record.iter().any(|(t, _)| *t == target);
         match dir_is_empty(&target) {
             Some(true) => {}
+            // Unreadable AND already on one of our records: OUR OWN whiteout is
+            // what makes it unreadable. A whiteout d_drops the dentry so the path
+            // resolves to ENOENT -- that is the feature -- and `run_mount`
+            // re-applies every recorded takeover at post-fs-data. So from the
+            // SECOND boot after a takeover this test could never see the directory
+            // again, and the leak branch below fired every pass: either the tmpfs
+            // was stranded in mountinfo forever (never unmounted, "LEAK" printed
+            // on every pass, zero-mount posture broken) or, if it could not mount
+            // over the d_dropped path at all, the entry expired and the ROM
+            // directory was un-hidden -- giving a 2-boot oscillation where the
+            // module's hide is off every other boot. Both silent.
+            None if ours => {}
             other => {
                 eprintln!(
                     "nomount: LEAK the tmpfs over {} stays mounted: it {} so it is not the \
@@ -1266,8 +1282,6 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
             continue;
         }
         seen.insert(target.clone());
-        let t_str = target.to_string_lossy().into_owned();
-        let was_durable = durable.contains(&t_str);
         // Drop OUR OWN live rule on the path FIRST. A whiteout there (ours, from a
         // previous pass, re-applied at boot) d_drops the dentry, which detaches the
         // mount from path resolution -- umount2 then cannot find the mountpoint and
@@ -1281,7 +1295,7 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
         // module legitimately owns at that path. Ours are the ones on one of the two
         // records -- absorb's own list, or the durable list an older Suite wrote
         // this very takeover into.
-        if was_durable || record.iter().any(|(t, _)| *t == target) {
+        if ours {
             let _ = nm.del(&target);
         }
         if !umount_detach(&target) && still_mounted(&target) {

@@ -60,10 +60,18 @@ LOCK=/dev/nomount_uidwatch.lock
 # low-memory killer sends to a background shell. Treat an abandoned lock as stale
 # instead of going deaf for the rest of the boot -- the failure the trap comment
 # below describes, reached by the one signal a trap cannot catch.
+#
+# 180, not 60: a handler runs `uid apply`, which now takes the engine-wide pass
+# lock and can legitimately WAIT there (bounded at 25s) behind a mount/reload/
+# absorb pass. At 60s a merely-waiting handler was indistinguishable from a dead
+# one, so B would reap A's lock, A's EXIT trap would then delete B's, and mutual
+# exclusion was gone for the rest of the session -- handlers piling up, each
+# waiting on the same pass lock. The threshold has to exceed the worst case of
+# (pass-lock wait + the apply itself), not the apply alone.
 if [ -f "$LOCK" ]; then
     _now=$(date +%s)
     _age=$(( _now - $(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now") ))
-    [ "$_age" -ge 60 ] && rm -f "$LOCK"
+    [ "$_age" -ge 180 ] && rm -f "$LOCK"
 fi
 ( set -o noclobber; : > "$LOCK" ) 2>/dev/null || exit 0
 trap 'rm -f "$LOCK"' EXIT INT TERM

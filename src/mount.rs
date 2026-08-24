@@ -62,10 +62,30 @@ const PASS_LOCK: &str = "/data/adb/nomount/pass.lock";
 /// RAII holder for the pass lock; the flock releases when it drops.
 pub(crate) struct PassLock(std::fs::File);
 
+/// How long a pass will wait for another pass before giving up and running
+/// unserialised. Bounded on purpose -- see `pass_lock`.
+const PASS_LOCK_WAIT: u64 = 25;
+
 /// Take the process-wide pass lock. Best-effort: a failure to create or lock the
 /// file must never block boot, so this returns `None` and the caller proceeds
 /// unserialised rather than aborting. Held for the whole pass via the returned
 /// guard.
+///
+/// The wait is BOUNDED (`LOCK_NB` in a retry loop, not a blocking `LOCK_EX`).
+/// An unbounded wait here reaches much further than this function:
+/// * `service.sh` runs `absorb` in the FOREGROUND and un-timed, and everything
+///   after it -- whiteout apply, the authoritative `uid apply`, the package
+///   watcher, the selfcheck canary -- is gated on it returning. A WebUI-driven
+///   `reload` at the wrong moment would stall per-UID hiding for the rest of the
+///   boot, with nothing in the log saying why.
+/// * `uidwatch.sh` reaps its own handler lock once its mtime is >= 60s old, on
+///   the reasoning that only a SIGKILLed handler leaves one behind. A handler
+///   merely WAITING here is indistinguishable from a dead one, so it would be
+///   reaped, and mutual exclusion is lost for the rest of the session.
+///
+/// Timing out and proceeding unserialised is the lesser evil: the passes are
+/// idempotent, and a missed serialisation is recoverable where a stalled boot is
+/// not. Say so on stderr so it is not silent.
 pub(crate) fn pass_lock() -> Option<PassLock> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
@@ -76,10 +96,17 @@ pub(crate) fn pass_lock() -> Option<PassLock> {
         .mode(0o600)
         .open(PASS_LOCK)
         .ok()?;
-    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return None;
+    for _ in 0..(PASS_LOCK_WAIT * 10) {
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Some(PassLock(f));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    Some(PassLock(f))
+    eprintln!(
+        "nomount: another pass still holds {PASS_LOCK} after {PASS_LOCK_WAIT}s; \
+         continuing unserialised rather than stalling the boot"
+    );
+    None
 }
 
 impl Drop for PassLock {
