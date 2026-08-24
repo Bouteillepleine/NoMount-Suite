@@ -1267,7 +1267,7 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
         }
         seen.insert(target.clone());
         let t_str = target.to_string_lossy().into_owned();
-        let was_durable = durable.iter().any(|d| *d == t_str);
+        let was_durable = durable.contains(&t_str);
         // Drop OUR OWN live rule on the path FIRST. A whiteout there (ours, from a
         // previous pass, re-applied at boot) d_drops the dentry, which detaches the
         // mount from path resolution -- umount2 then cannot find the mountpoint and
