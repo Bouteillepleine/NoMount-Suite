@@ -260,12 +260,22 @@
 #endif
 #include <linux/jump_label.h>
 
-/* Kept in step with NOMOUNT_VERSION below. Nothing in the driver reads this --
- * the BUILDERS scrape it out of this header to label the kernel they publish, so
- * leaving it behind means a release announces a version its engine does not
- * speak. That happened: the engine went to 16 while this still said 15.0, and
- * the build summary reported "NoMount version: 15.0". Bump both together. */
-#define NM_MODULE_VERSION "18.0"
+/* The PUBLISHED label, and nothing else. Nothing in the driver reads it; the
+ * BUILDERS scrape it out of this header to name the kernel they release.
+ *
+ * Shaped 1.<NOMOUNT_VERSION>.0 on purpose. The product line is 1.x -- an engine
+ * label of "18.0" read like a major version eighteen releases along, next to a
+ * Suite at 1.3.x. But the middle field is still NOMOUNT_VERSION, the capability
+ * counter userspace actually gates on, so the label cannot drift away from what
+ * the engine really speaks: the last time these were maintained as two
+ * independent numbers the engine went to 16 while this still said "15.0" and the
+ * build summary announced a version the kernel did not implement.
+ *
+ * Do NOT collapse this to a bare "1.0", and do NOT renumber NOMOUNT_VERSION to
+ * match it. That counter is monotonic capability, not marketing: the Suite gates
+ * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
+ * number than a newer one inverts every one of those silently. */
+#define NM_MODULE_VERSION "1.18.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
