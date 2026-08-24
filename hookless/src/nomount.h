@@ -431,31 +431,39 @@ static DEFINE_MUTEX(nomount_write_mutex);
 #define nm_get_rpath(rule) ((rule)->paths + (rule)->v_len + 1)
 
 
-/* `retired` instead of `rcu`: a hijack vtable is NEVER freed while the module is
- * loaded, because the VFS caches the pointer outside any RCU read-side section.
- * do_dentry_open() copies i_fop into file->f_op once, and iterate_dir() then
- * dispatches through that copy for the fd's whole lifetime -- so an RCU grace
- * period says nothing about whether a reader still holds it. `nm clear` (which
- * the Suite runs on every mount/reload pass) used to call_rcu-free these, and any
- * process holding an open DIR* across that -- system_server or installd scanning
- * /product/overlay -- would call a function pointer out of recycled slab on its
- * next getdents64(). i_op has a narrower version of the same hole: the VFS loads
- * inode->i_op and makes the indirect call outside RCU. So restore the pointers
- * and park the object on a graveyard list; free it in nomount_exit() after
- * rcu_barrier(), which is the same lifetime rule this file already applies to
- * hijacked superblocks. Cost is ~100 bytes per hijacked directory. */
+/* A hijack vtable is installed ONCE per inode and never freed or uninstalled.
+ *
+ * It cannot be freed: the VFS caches the pointer outside any RCU read-side
+ * section. do_dentry_open() copies i_fop into file->f_op once, and iterate_dir()
+ * then dispatches through that copy for the fd's whole lifetime, so an RCU grace
+ * period says nothing about whether a reader still holds it. call_rcu-freeing
+ * these meant any process holding an open DIR* across a `nm clear` -- which the
+ * Suite runs on every mount/reload pass -- called a function pointer out of
+ * recycled slab on its next getdents64(). i_op has a narrower version of the same
+ * hole (the VFS loads inode->i_op and makes the indirect call outside RCU).
+ *
+ * Nor is it worth deferring the free to module exit: this driver is obj-y on
+ * every target, so __exit code is discarded at link time and a graveyard list has
+ * no reachable consumer -- measured on OP15 as 125 live nm_iop/nm_fop against 105
+ * dir_nodes, i.e. 20 of each already orphaned, growing with every reload.
+ *
+ * So teardown NEUTERS instead: `dir_node` is set to NULL and the vtable stays
+ * installed. Every hijacked handler already treats a NULL dir_node as
+ * "unhijacked" and falls through to orig_*, so behaviour matches a restored
+ * inode; a cached file->f_op stays valid forever; and a later hijack of the same
+ * inode RE-ARMS this object instead of allocating another. Cost is therefore
+ * bounded at one pair per hijacked directory for the life of the boot, instead of
+ * one pair per hijacked directory per reload. */
 struct nm_iop {
     struct inode_operations fake_iop; /* MUST be exactly at offset 0 */
     const struct inode_operations *orig_iop;
     struct nomount_dir_node *dir_node;
-    struct list_head retired;
 };
 
 struct nm_fop {
     struct file_operations fake_fop;  /* MUST be exactly at offset 0 */
     const struct file_operations *orig_fop;
     struct nomount_dir_node *dir_node;
-    struct list_head retired;
 };
 
 struct nm_sop {

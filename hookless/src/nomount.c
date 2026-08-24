@@ -1718,7 +1718,17 @@ static int nm_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
     if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     if (unlikely((info->flags & NM_FLAG_VIRTUAL_DIR) || !info->r_path.dentry))
         return -EOPNOTSUPP;
-    real_inode = d_backing_inode(info->r_path.dentry);
+    /* Describe the file this caller is actually SERVED, not always the module's.
+     * read()/stat() already follow nm_stock_for_caller(); leaving fiemap on the
+     * backing file meant a blocked reader got a 1484-byte stock file from read()
+     * and the module file's physical extents from FS_IOC_FIEMAP -- one ioctl plus
+     * one stat, measured on OP15 as an identical extent across three UIDs that
+     * were being served two different files. */
+    {
+        struct path *stock = nm_stock_for_caller(info);
+
+        real_inode = d_backing_inode(stock ? stock->dentry : info->r_path.dentry);
+    }
     if (!real_inode || !real_inode->i_op || !real_inode->i_op->fiemap)
         return -EOPNOTSUPP;
     return real_inode->i_op->fiemap(real_inode, fieinfo, start, len);
@@ -2262,7 +2272,23 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
 static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_node, struct inode *inode)
 {
     struct nm_fop *nm_fop;
-    if (unlikely(!inode->i_fop || nm_get_fop(smp_load_acquire(&inode->i_fop)))) return;
+
+    if (unlikely(!inode->i_fop)) return;
+    /* Already ours? RE-ARM -- see the matching note in nomount_hijack_dir_inode. */
+    nm_fop = nm_get_fop(smp_load_acquire(&inode->i_fop));
+    if (nm_fop) {
+        WRITE_ONCE(nm_fop->dir_node, dir_node);
+        return;
+    }
+    /* A vtable with no readdir op to hook would carry no marker, so nm_get_fop()
+     * could never recover it: the inode would be left pointing at a heap
+     * file_operations that nothing can ever find, re-arm or neuter. Refuse to
+     * hijack what we cannot identify. */
+    if (unlikely(!inode->i_fop->iterate_shared
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+                 && !inode->i_fop->iterate
+#endif
+        )) return;
 
     nm_fop = kmem_cache_zalloc(nm_fop_cachep, GFP_KERNEL);
     if (likely(nm_fop)) {
@@ -2292,7 +2318,17 @@ static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_no
 static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, struct inode *inode)
 {
     struct nm_iop *nm_iop;
-    if (unlikely(!inode->i_op || __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup))) return;
+
+    if (unlikely(!inode->i_op)) return;
+    /* Already ours? RE-ARM it. Teardown neuters (dir_node = NULL) and leaves the
+     * vtable installed, so a plain "already hijacked, skip" would hand this
+     * directory back with a NULL dir_node -- every handler would fall through to
+     * the real fs and the rule would silently never be served. */
+    nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
+    if (nm_iop) {
+        WRITE_ONCE(nm_iop->dir_node, dir_node);
+        return;
+    }
 
     nm_iop = kmem_cache_zalloc(nm_iop_cachep, GFP_KERNEL);
     if (likely(nm_iop)) {
@@ -2309,12 +2345,7 @@ static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, s
     }
 }
 
-/* Retired hijack vtables, freed only at module exit -- see the note on struct
- * nm_iop for why a grace period is not enough. Guarded by nm_retired_lock; the
- * lists are write-only until nomount_exit(), so readers never walk them. */
-static DEFINE_SPINLOCK(nm_retired_lock);
-static LIST_HEAD(nm_retired_iops);
-static LIST_HEAD(nm_retired_fops);
+/* (Hijack vtables are neutered rather than freed -- see struct nm_iop.) */
 
 /* dir_node owns an idr of child nodes, so it can't use the plain struct-only
  * macro. Freed via call_rcu: lockless readers walk children_idr under RCU
@@ -2353,21 +2384,18 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
 
     spin_lock(&t_inode->i_lock);
     nm_iop = __get_nm(smp_load_acquire(&t_inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
+    /* Neuter, do not restore: the handlers fall through to orig_* on a NULL
+     * dir_node, and leaving the vtable installed is what keeps an already-cached
+     * file->f_op valid. See struct nm_iop. */
     if (nm_iop && nm_iop->dir_node == dir_node) {
-        smp_store_release(&t_inode->i_op, nm_iop->orig_iop);
+        WRITE_ONCE(nm_iop->dir_node, NULL);
         nm_debug("Successfully cured i_op for dir %lu\n", t_inode->i_ino);
-        spin_lock(&nm_retired_lock);
-        list_add(&nm_iop->retired, &nm_retired_iops);
-        spin_unlock(&nm_retired_lock);
     }
 
     nm_fop = nm_get_fop(smp_load_acquire(&t_inode->i_fop));
     if (nm_fop && nm_fop->dir_node == dir_node) {
-        smp_store_release(&t_inode->i_fop, nm_fop->orig_fop);
+        WRITE_ONCE(nm_fop->dir_node, NULL);
         nm_debug("Successfully cured i_fop for dir %lu\n", t_inode->i_ino);
-        spin_lock(&nm_retired_lock);
-        list_add(&nm_fop->retired, &nm_retired_fops);
-        spin_unlock(&nm_retired_lock);
     }
     spin_unlock(&t_inode->i_lock);
     iput(t_inode);
@@ -5047,20 +5075,12 @@ static void __exit nomount_exit(void)
      * else kmem_cache_destroy races the deferred kmem_cache_free. */
     rcu_barrier();
 
-    /* Only now are the retired hijack vtables safe to free: every inode has had
-     * its i_op/i_fop restored by __nomount_clear_all above, and any struct file
-     * that cached one of these pointers is gone with the module's last reference.
-     * See the note on struct nm_iop. */
-    {
-        struct nm_iop *iop, *itmp;
-        struct nm_fop *fop, *ftmp;
-
-        list_for_each_entry_safe(iop, itmp, &nm_retired_iops, retired)
-            kmem_cache_free(nm_iop_cachep, iop);
-        list_for_each_entry_safe(fop, ftmp, &nm_retired_fops, retired)
-            kmem_cache_free(nm_fop_cachep, fop);
-    }
-
+    /* NB: hijack vtables are deliberately NOT freed here, and the caches below are
+     * destroyed with those objects still live. That is only reachable in a
+     * modular build, which no target uses (obj-y everywhere), and it is the safe
+     * direction: an inode still points at fake_iop/fake_fop, and a struct file
+     * may still cache f_op, so freeing them at unload would be the UAF this
+     * design exists to avoid. See the note on struct nm_iop. */
     kmem_cache_destroy(nm_dir_cachep);
     kmem_cache_destroy(nm_inode_cachep);
     kmem_cache_destroy(nm_iop_cachep);
