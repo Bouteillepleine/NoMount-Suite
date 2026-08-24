@@ -111,6 +111,12 @@
 #define nm_ioctl_as_stock                        __vfsx_186
 #define nm_stock_takes_odirect                   __vfsx_187
 #define nm_dir_fsync                             __vfsx_188
+#define nm_inode_info_rcu_free                   __vfsx_193
+#define nm_reval_fresh                           __vfsx_194
+#define nm_tag_passthrough_dentry                __vfsx_189
+#define nm_child_ino                             __vfsx_190
+#define nm_dirent_ino                            __vfsx_191
+#define nm_dir_child_lookup                      __vfsx_192
 #define nm_full_xattr_name                       __vfsx_053
 #define nm_get_link                              __vfsx_054
 #define nm_hide_isolated                         __vfsx_055
@@ -543,6 +549,18 @@ struct nm_inode_info {
     kgid_t v_gid;
     umode_t v_mode;                  /* virtual-dir mode bits (0 => default 0755) */
     u8 flags;
+    /* Rule-topology generation this inode was last fully validated against. Read
+     * LOCKLESS by nm_d_revalidate()'s RCU fast path: a mismatch means an add/del/
+     * clear has happened since, so that path bails to the ref-walk which re-runs
+     * the full verdict and re-stamps. See nomount_generation. */
+    u32 gen;
+    /* Freed via call_rcu, NOT immediately. destroy_inode() runs synchronously
+     * (fs/inode.c), so a plain kmem_cache_free here would pull this struct out
+     * from under the RCU fast path, which reads i_private with no reference. The
+     * INODE itself is already RCU-safe on both backing filesystems we hijack
+     * (erofs and overlayfs each provide ->free_inode), so this payload was the
+     * only piece left unprotected. */
+    struct rcu_head rcu;
 };
 
 #define nm_get_real_inode(v_inode) \
@@ -989,6 +1007,49 @@ static inline void nm_install_dentry_ops(struct dentry *dentry)
                          DCACHE_OP_DELETE | DCACHE_OP_PRUNE | DCACHE_OP_REAL);
     dentry->d_op = &nm_dops;
     dentry->d_flags |= DCACHE_OP_REVALIDATE;
+}
+
+/* Tag a dentry we are about to hand BACK to the real filesystem's ->lookup.
+ *
+ * nm_install_dentry_ops() REPLACES d_op wholesale. That is right for a dentry we
+ * instantiate ourselves -- its d_fsdata is still NULL and the fs's hooks must not
+ * run against our synthetic inode -- and wrong for one the fs is about to
+ * populate, because the fs's own ops go with it.
+ *
+ * overlayfs is the case that bites, and /product/overlay and /product/priv-app
+ * are overlay mounts on the devices this engine targets. ovl_lookup() stores its
+ * per-dentry ovl_entry in d_fsdata on every kernel from 4.9 to 6.4 -- including
+ * for a NEGATIVE result, where oe is allocated and assigned all the same
+ * (v5.10 fs/overlayfs/namei.c:1055-1057) -- and only .d_release =
+ * ovl_dentry_release frees it, dput()ing every lower-layer dentry in the stack on
+ * the way (v5.10 fs/overlayfs/super.c:69-77). Clobbering d_op before ovl_lookup
+ * runs therefore leaked one ovl_entry per fallback lookup and pinned the whole
+ * lowerdir stack (8 deep on OP15 /product/overlay) until reboot. It also dropped
+ * .d_real, which on 4.9/4.14 is how the VFS reaches the real file at all
+ * (vfs_open() -> d_real()), since overlayfs had no file_operations of its own
+ * before 4.19.
+ *
+ * 6.5 moved the ovl_entry into the inode (OVL_E() is OVL_I(inode)->oe) and
+ * dropped .d_release entirely -- v6.5 fs/overlayfs/super.c:135-139 vs
+ * v6.4:170-177 -- which is why a 6.12 device never showed any of it.
+ *
+ * Nor did the install buy anything on overlayfs: from 5.10 ovl_lookup ends with
+ * ovl_dentry_update_reval(), which CLEARS DCACHE_OP_REVALIDATE unless a layer
+ * asked for it, so nm_d_revalidate would not have run on that dentry anyway.
+ *
+ * So: DCACHE_DONTCACHE (5.13+) does the eviction and needs no d_op at all, and
+ * our ops go on only when the filesystem has none to lose -- s_d_op NULL, i.e.
+ * erofs/ext4/f2fs without casefolding, which is exactly where the pre-DONTCACHE
+ * nm_reval_stale() fallback matters and where nothing is given up by taking it.
+ * The dentry is freshly allocated by d_alloc_parallel() at this point, so d_op is
+ * still whatever __d_alloc() copied out of sb->s_d_op. */
+static inline void nm_tag_passthrough_dentry(struct dentry *dentry)
+{
+#ifdef DCACHE_DONTCACHE
+    dentry->d_flags |= DCACHE_DONTCACHE;
+#endif
+    if (!dentry->d_op)
+        nm_install_dentry_ops(dentry);
 }
 
 #endif /* _LINUX_NOMOUNT_H */

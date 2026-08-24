@@ -342,8 +342,58 @@ struct nomount_proxy_ctx {
     struct dir_context ctx;
     struct dir_context *orig_ctx;
     struct nomount_dir_node *dir_node;
+    /* Set ONLY when the directory being listed is one whose rule TARGETS a real
+     * directory, i.e. its entries come off the backing filesystem (/data, f2fs)
+     * rather than off a stock ROM directory. NULL for a hijacked stock dir, where
+     * the real dirents are the stock ones and must pass through untouched. See
+     * nm_dirent_ino(). */
+    const struct nm_inode_info *dir_info;
     int emitted;
 };
+
+/* A stable, mirrored st_ino for a child that has no rule of its own -- the
+ * contents of a directory a rule TARGETS (NM_FLAG_IS_DIR with a real backing
+ * dir). Those children are served straight off the backing fs, so without this
+ * they report /data's f2fs inode numbers among ROM siblings.
+ *
+ * Same band shape nm_alloc_rule uses when it has no sampled sibling population to
+ * place into (see the "last resort" branch there): keep the parent's magnitude,
+ * step one 20-bit band up, and spread inside it. It must be a PURE function of
+ * (parent ino, name) because readdir and stat compute it independently and have
+ * to agree -- there is no child_node to cache it in, which is exactly the
+ * difference between these children and a rule's.
+ *
+ * @dirent salts a SECOND number for the readdir side. On an overlay-backed parent
+ * a real child's dirent ino and its st_ino differ (NM_FLAG_OVL_INO); emitting one
+ * number for both is the tell that flag exists to avoid.
+ *
+ * Collisions are bounded the same way nm_alloc_rule's are: 20 bits per band
+ * against one directory's population. */
+static inline unsigned long nm_child_ino(unsigned long base, const char *name, int len, bool dirent)
+{
+    u64 h = (u64)full_name_hash(NULL, name, len) | (dirent ? (1ULL << 32) : 0);
+
+    return (unsigned long)(((u64)base & ~0xFFFFFULL) + 0x100000ULL +
+                           hash_64(h ^ ((u64)base << 32), 20));
+}
+
+/* The d_ino a dirent of a dir-target rule's backing directory should carry.
+ * "." and ".." follow nm_emit_dots() exactly, so a synthesized dir and a
+ * real-backed one answer the same way; everything else goes through
+ * nm_child_ino() with the readdir salt when the parent is overlay-backed.
+ *
+ * Known gap: ".." falls back to the directory's OWN ino when v_pdino is unset,
+ * which is what nm_emit_dots does and is only right for a dir whose parent was
+ * itself synthesized. It is still strictly closer than the f2fs number this
+ * replaces. */
+static inline u64 nm_dirent_ino(const struct nm_inode_info *d, const char *name, int len)
+{
+    if (len == 1 && name[0] == '.')
+        return d->v_dino ? d->v_dino : d->v_ino;
+    if (len == 2 && name[0] == '.' && name[1] == '.')
+        return d->v_pdino ? d->v_pdino : d->v_ino;
+    return nm_child_ino(d->v_ino, name, len, !!(d->flags & NM_FLAG_OVL_INO));
+}
 
 static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *name, int namelen,
                                         loff_t offset, u64 ino, unsigned int d_type)
@@ -412,6 +462,12 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     rcu_read_unlock();
 
 do_real_actor:
+    /* A dirent of a dir-target rule's BACKING directory carries an ino from
+     * /data, not from the ROM path the caller thinks it is reading. Mirror it,
+     * with the same number nm_dir_child_lookup() will hand stat() for that name --
+     * getdents64 d_ino and st_ino have to tell one story. */
+    if (proxy->dir_info)
+        ino = nm_dirent_ino(proxy->dir_info, name, namelen);
     nm_note_real_pos(proxy->dir_node, offset);
     proxy->orig_ctx->pos = proxy->ctx.pos;
     ret = proxy->orig_ctx->actor(proxy->orig_ctx, name, namelen, offset, ino, d_type);
@@ -522,6 +578,9 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     }
 
     info->flags = rule_info->flags;
+    /* Stamped BEFORE the inode goes live, and re-stamped by nm_d_revalidate()
+     * whenever the slow path confirms it. Read lockless -- see nm_inode_info.gen. */
+    info->gen = (u32)atomic_read(&nm_rule_gen);
     info->v_ctx_len = rule_info->v_ctx_len;
     if (rule_info->v_ctx_len) memcpy(info->v_ctx, rule_info->v_ctx, rule_info->v_ctx_len + 1);
     /* Own ref for the inode's cached copy: the caller still holds its get_rule_info
@@ -736,14 +795,15 @@ fallback:
      * so d_revalidate keeps the per-UID verdict for the window it is alive.
      * DCACHE_DONTCACHE exists from 5.13; on older trees nm_reval_stale() in
      * d_revalidate is the fallback. Gate on a rule existing, else a normal real
-     * file (no rule) would be needlessly uncached. */
+     * file (no rule) would be needlessly uncached.
+     *
+     * nm_tag_passthrough_dentry(), not nm_install_dentry_ops(): the real fs is
+     * about to populate this dentry and keeps its own d_op. See the note there --
+     * replacing d_op here leaked an ovl_entry per lookup on 4.9..6.4. */
     if (pdir && nomount_is_uid_blocked(current_uid().val) &&
         nomount_get_rule_info(pdir, name, len,
                               full_name_hash(NULL, name, len), &rule_info, false)) {
-        nm_install_dentry_ops(dentry);
-#ifdef DCACHE_DONTCACHE
-        dentry->d_flags |= DCACHE_DONTCACHE;
-#endif
+        nm_tag_passthrough_dentry(dentry);
         nm_put_rule_info(&rule_info);
     } else if (pdir && nm_name_has_hidden_uid_rule(pdir, name, len,
                                                    full_name_hash(NULL, name, len))) {
@@ -751,10 +811,7 @@ fallback:
          * audience for: it legitimately sees the stock file, but that view must
          * not outlive the call or it becomes the cached answer for the UID the
          * rule names. */
-        nm_install_dentry_ops(dentry);
-#ifdef DCACHE_DONTCACHE
-        dentry->d_flags |= DCACHE_DONTCACHE;
-#endif
+        nm_tag_passthrough_dentry(dentry);
     }
 
     if (orig_iop && orig_iop->lookup)
@@ -819,6 +876,11 @@ out:
     return res;
 }
 
+static void nm_inode_info_rcu_free(struct rcu_head *head)
+{
+    kmem_cache_free(nm_inode_cachep, container_of(head, struct nm_inode_info, rcu));
+}
+
 static void nomount_hijacked_destroy_inode(struct inode *inode)
 {
     struct nm_sop *nm_sop;
@@ -828,7 +890,21 @@ static void nomount_hijacked_destroy_inode(struct inode *inode)
             if (info->r_path.dentry) path_put(&info->r_path);
             if (info->s_path.dentry) path_put(&info->s_path);
             if (info->dir_node) nm_dir_node_put(info->dir_node);
-            kmem_cache_free(nm_inode_cachep, info);
+            /* The puts stay SYNCHRONOUS -- dput() can sleep and an RCU callback
+             * runs in softirq -- but the struct itself must outlive any in-flight
+             * lockless reader, so only the free is deferred. Null the two path
+             * dentries first: nm_d_revalidate()'s RCU fast path tests
+             * s_path.dentry for NULL, and after the put above that pointer is
+             * dangling. It is never dereferenced there, but leaving a freed
+             * pointer behind to be compared is not worth the argument.
+             *
+             * Ordering note: i_private is cleared AFTER call_rcu is armed, so a
+             * reader either sees the (still-allocated) info or NULL -- never a
+             * freed one. Both are handled. */
+            info->r_path.dentry = NULL;
+            info->s_path.dentry = NULL;
+            info->dir_node = NULL;
+            call_rcu(&info->rcu, nm_inode_info_rcu_free);
             inode->i_private = NULL;
         }
     }
@@ -1941,7 +2017,20 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
     if (real_file) {
         struct nomount_proxy_ctx proxy_ctx = {
             .ctx.actor = nomount_actor_proxy, .ctx.pos = ctx->pos,
-            .orig_ctx = ctx, .dir_node = dir_node, .emitted = 0
+            .orig_ctx = ctx, .dir_node = dir_node,
+            /* These real dirents are the BACKING directory's, not a stock ROM
+             * directory's -- so unlike the hijacked-dir proxy, their inos have to
+             * be mirrored. See nm_dirent_ino().
+             *
+             * Gated on real_file actually being the backing dir: nm_open() hands a
+             * reader that this rule hides the pinned STOCK directory instead, and
+             * that one's dirents are genuine ROM entries whose inos must pass
+             * through untouched. Compare the dentry rather than re-asking
+             * nm_stock_for_caller(), so the answer is the one this fd was opened
+             * with even if the fd is later read by a different uid. */
+            .dir_info = (info && real_file->f_path.dentry == info->r_path.dentry)
+                        ? info : NULL,
+            .emitted = 0
         };
         /* iterate_dir(), not a hand dispatch of ->iterate_shared: the VFS took
          * i_rwsem on OUR synthetic inode, which is a different inode on a
@@ -1970,6 +2059,121 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
 
     nomount_emit_virtual_children(ctx, dir_node,
                                   !(info && (info->flags & NM_FLAG_VIRTUAL_DIR)));
+    return res;
+}
+
+/* Resolve a child of a directory a rule TARGETS -- a name with no rule of its
+ * own, living in the backing directory on /data.
+ *
+ * This used to be `r_dir->i_op->lookup(r_dir, dentry, flags)`: a raw dispatch of
+ * the BACKING filesystem's lookup, which spliced an f2fs inode onto a dentry
+ * hanging off the ROM superblock. Everything the engine mirrors for a rule --
+ * st_dev, st_ino, the timestamps, st_blksize, the SELinux label, the /proc/maps
+ * dev -- was simply absent for those children: they answered with /data's f2fs
+ * values while every stock sibling on the same ROM path answered with the
+ * erofs/overlay ones. One stat() on any child of an injected directory, compared
+ * against its parent, showed the two on different filesystems.
+ *
+ * So build the same synthetic inode a rule gets, from the same
+ * nomount_create_new_inode(), with the parent's mirror inherited: the child of an
+ * injected directory belongs to the same partition as the directory, so the
+ * partition-level facts (dev, mapdev, blksize, times, label, the NM_CAP_* answers
+ * sampled from a real ancestor dir) are exactly the ones to carry down. Only the
+ * ino has to be minted per child -- nm_child_ino() -- and it is minted the same
+ * way on the readdir side so d_ino and st_ino agree.
+ *
+ * NM_FLAG_PUBLIC and NM_FLAG_SHADOWS_STOCK are inherited so a child is hidden
+ * from precisely the readers its parent is, and no wider. On the inode side those
+ * two bits are read in exactly two places -- nm_hidden_from_caller() and
+ * nm_stock_for_caller() -- and a reader that got this far has already been let
+ * through both of them on the PARENT directory (a blocked reader cannot traverse
+ * a non-PUBLIC, non-shadowing injected dir: nm_inode_permission answers -ENOENT).
+ * Without the inheritance a child would answer -ENOENT for a name its own parent
+ * had just listed, which is the listed-but-unstattable shape the engine refuses
+ * to produce anywhere else. s_path stays empty, so nm_stock_for_caller() still
+ * returns NULL here and nothing new is substituted.
+ *
+ * lookup_one_len_unlocked(), not a hand dispatch: it takes the backing
+ * directory's i_rwsem, which ->lookup is entitled to assume and which the raw
+ * dispatch never took -- the same unserialised-backing-fs bug the iterate path
+ * fixed by going through iterate_dir(). It also stops the raw dispatch's other
+ * habit of splicing an inode from the BACKING superblock onto a dentry hanging
+ * off the ROM one, which left ovl_dentry_operations (inherited from the ROM sb's
+ * s_d_op) pointed at an f2fs inode -- ovl_d_real() would then read OVL_I() out of
+ * it. The signature is unchanged from 4.9 (include/linux/namei.h:83) to 6.12
+ * (:73). d_name.name is NUL-terminated, which is what it wants.
+ *
+ * One deliberate semantic change comes with it: lookup_one_len_unlocked() runs
+ * inode_permission(base, MAY_EXEC) on the backing directory (v4.9 fs/namei.c:2514,
+ * and from 5.10 inside lookup_one_len_common()), which the raw dispatch skipped.
+ * That is the same "the caller's own creds are authorised exactly as for a stock
+ * path" rule nm_open() already states, and it holds on the deployment shape --
+ * ksud creates module dirs 0755 and labels them system_file, which AOSP's
+ * domain.te grants every domain r_dir_perms on. A module tree that does not
+ * traverse for its readers now fails at lookup instead of at open; that is a
+ * packaging bug to relabel, exactly as nm_open() says. */
+static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_info *info,
+                                          struct dentry *dentry)
+{
+    struct nm_rule_info ri;
+    struct dentry *child, *res;
+    struct inode *new_inode, *r_child;
+
+    child = lookup_one_len_unlocked(dentry->d_name.name, info->r_path.dentry,
+                                    dentry->d_name.len);
+    if (IS_ERR(child))
+        return ERR_CAST(child);
+    if (d_is_negative(child)) {
+        dput(child);
+        nm_install_dentry_ops(dentry);
+        d_add(dentry, NULL);
+        return NULL;
+    }
+
+    memset(&ri, 0, sizeof(ri));
+    /* Same ref discipline as nomount_get_rule_info(): ri owns a path ref of its
+     * own, released by nm_put_rule_info() once nomount_create_new_inode() has
+     * taken its. The lookup's own ref on @child is dropped separately below. */
+    ri.r_path.mnt = info->r_path.mnt;
+    ri.r_path.dentry = child;
+    path_get(&ri.r_path);
+
+    r_child = d_backing_inode(child);
+    ri.flags = info->flags & (NM_FLAG_HAVE_TIMES | NM_FLAG_OVL_INO |
+                              NM_FLAG_PUBLIC | NM_FLAG_SHADOWS_STOCK);
+    if (r_child && S_ISDIR(r_child->i_mode))
+        ri.flags |= NM_FLAG_IS_DIR;
+
+    ri.v_ino   = nm_child_ino(info->v_ino, dentry->d_name.name, dentry->d_name.len, false);
+    ri.v_dino  = (info->flags & NM_FLAG_OVL_INO)
+                 ? nm_child_ino(info->v_ino, dentry->d_name.name, dentry->d_name.len, true) : 0;
+    ri.v_pdino = info->v_dino ? info->v_dino : info->v_ino;
+    ri.v_dev   = info->v_dev;
+    ri.v_mapdev = info->v_mapdev;
+    ri.v_atime = info->v_atime;
+    ri.v_mtime = info->v_mtime;
+    ri.v_ctime = info->v_ctime;
+    ri.v_attributes = info->v_attributes;
+    ri.v_attr_mask  = info->v_attr_mask;
+    ri.v_blksize    = info->v_blksize;
+    ri.v_result_mask = info->v_result_mask;
+    ri.v_cap   = info->v_cap;
+    ri.v_uid   = info->v_uid;
+    ri.v_gid   = info->v_gid;
+    ri.v_mode  = info->v_mode;
+    ri.v_ctx_len = info->v_ctx_len;
+    if (info->v_ctx_len)
+        memcpy(ri.v_ctx, info->v_ctx, info->v_ctx_len + 1);
+
+    new_inode = nomount_create_new_inode(dir->i_sb, &ri);
+    nm_put_rule_info(&ri);
+    dput(child);
+    if (unlikely(!new_inode))
+        return ERR_PTR(-ENOMEM);
+
+    nm_install_dentry_ops(dentry);
+    res = d_splice_alias(new_inode, dentry);
+    if (!IS_ERR(res) && res) nm_install_dentry_ops(res);
     return res;
 }
 
@@ -2033,8 +2237,8 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
 #endif
     }
 
-    if (r_dir && r_dir->i_op && r_dir->i_op->lookup)
-        return r_dir->i_op->lookup(r_dir, dentry, flags);
+    if (r_dir && r_dir->i_op && r_dir->i_op->lookup && info && info->r_path.dentry)
+        return nm_dir_child_lookup(dir, info, dentry);
 
     if (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) {
         nm_install_dentry_ops(dentry);
@@ -2169,6 +2373,22 @@ static inline int nm_reval_stale(struct dentry *dentry)
     return 0;
 }
 
+/* The ref-walk confirmed an injected dentry, so re-stamp it with the generation
+ * it was validated against and let the RCU fast path answer for it next time.
+ * Only ever called where the verdict is already 1, and only for a positive
+ * dentry carrying one of our inodes -- so this narrows nothing and can only
+ * turn a future -ECHILD into the same 1 the slow path just produced. */
+static inline int nm_reval_fresh(struct dentry *dentry)
+{
+    struct inode *ino = d_inode(dentry);
+
+    if (ino && ino->i_private &&
+        (ino->i_op == &nm_file_iops || ino->i_op == &nm_dir_iops))
+        WRITE_ONCE(((struct nm_inode_info *)ino->i_private)->gen,
+                   (u32)atomic_read(&nm_rule_gen));
+    return 1;
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 static int nm_d_revalidate(struct inode *dir, const struct qstr *name, struct dentry *dentry, unsigned int flags)
 #else
@@ -2182,8 +2402,51 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     u32 hash;
     bool injected;
 
-    if (flags & LOOKUP_RCU)
-        return -ECHILD;
+    /* RCU-walk fast path.
+     *
+     * This used to be an unconditional -ECHILD, and that single line was a
+     * 100%-precision, UID-independent injection oracle. Every dentry we manage
+     * carries DCACHE_OP_REVALIDATE, so refusing the lazy walk forced
+     * try_to_unlazy_next() -- which legitimize_links() refuses outright when
+     * LOOKUP_CACHED is set -- and path_openat() then answered -EAGAIN. So
+     * openat2(RESOLVE_CACHED) separated injected from stock with one syscall, no
+     * baseline device and no root: measured on OP15 as unprivileged uid 2000,
+     * 260/260 rule paths EAGAIN against 216/216 stock siblings OK in the same
+     * eight directories, cold and warm alike, and transitive through synthesized
+     * parents so it enumerated directories too.
+     *
+     * Deliberately narrow. It answers ONLY for a positive dentry whose inode is
+     * ours -- exactly that 260-path population. Negatives (whiteouts, the
+     * blocked-reader fallback, virtual-dir children) have no inode to read a
+     * verdict from and still take the ref-walk, keeping today's behaviour bit for
+     * bit. So does anything needing d_drop(), which must not run in a lazy walk.
+     *
+     * Safety rests on three things, each checked rather than assumed:
+     *   - the inode is RCU-freed (erofs and overlayfs both provide ->free_inode),
+     *   - i_private is now RCU-freed too (nomount_hijacked_destroy_inode),
+     *   - staleness is caught by nm_rule_gen, so no d_name is read here at all --
+     *     which is what lets us skip the rename/seqcount argument entirely. Any
+     *     add/del/clear bumps the counter and pushes every cached injected dentry
+     *     through the ref-walk once, where the full verdict runs and re-stamps.
+     * nm_uid_hidden() is re-evaluated per call (static branch + idr_find under
+     * rcu_read_lock, no sleeping), so uid block/unblock needs no bump. */
+    if (flags & LOOKUP_RCU) {
+        struct inode *ino = d_inode_rcu(dentry);
+        struct nm_inode_info *rinfo;
+
+        if (!ino || (ino->i_op != &nm_file_iops && ino->i_op != &nm_dir_iops))
+            return -ECHILD;
+        rinfo = READ_ONCE(ino->i_private);
+        if (!rinfo || READ_ONCE(rinfo->gen) != (u32)atomic_read(&nm_rule_gen))
+            return -ECHILD;
+        /* The one verdict the ref-walk below answers with 0 rather than 1: a
+         * blocked reader on a SHADOWING rule with no pinned stock path, where the
+         * real filesystem is the only route to the file it is entitled to. */
+        if (nm_uid_hidden(rinfo->flags) &&
+            (rinfo->flags & NM_FLAG_SHADOWS_STOCK) && !rinfo->s_path.dentry)
+            return -ECHILD;
+        return 1;
+    }
 
     /* Is this a dentry WE instantiated (an injected file/dir inode)? Used below to
      * drop stale ghosts and to keep the per-UID view consistent. */
@@ -2274,12 +2537,12 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
                 struct nm_inode_info *ii = dentry->d_inode->i_private;
                 if (!(rule_info.flags & NM_FLAG_SHADOWS_STOCK) ||
                     (ii && ii->s_path.dentry))
-                    return 1;
+                    return nm_reval_fresh(dentry);
                 return 0;
             }
             return 1;
         }
-        return injected ? 1 : nm_reval_stale(dentry);
+        return injected ? nm_reval_fresh(dentry) : nm_reval_stale(dentry);
     }
     nm_dir_node_put(pdir);                                /* pin no longer needed past the lookup */
     return nm_reval_stale(dentry);                        /* rule gone -> re-resolve */
