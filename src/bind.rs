@@ -62,15 +62,14 @@ fn cstr(p: &Path) -> Result<CString> {
 }
 
 /// True if `target` is already a mount point (some other module bound it).
+///
+/// Parses through absorb's shared mountinfo parser so the mountpoint is octal-
+/// UNESCAPED before comparison (`\040` etc.): the old raw field-4 compare never
+/// matched a target with a space/tab in its path, so `apply` would try to bind
+/// over a path it wrongly believed free.
 fn is_mounted(target: &Path) -> bool {
-    let Some(t) = target.to_str() else {
-        return false;
-    };
     fs::read_to_string("/proc/self/mountinfo")
-        .map(|s| {
-            s.lines()
-                .any(|l| l.split(' ').nth(4).map(|m| m == t).unwrap_or(false))
-        })
+        .map(|s| crate::absorb::parse_mountinfo(&s).iter().any(|r| r.target == target))
         .unwrap_or(false)
 }
 
@@ -118,8 +117,17 @@ fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The result of an [`apply`] that succeeded.
+pub enum BindOutcome {
+    /// A new bind was made.
+    Bound,
+    /// The target was already a mount (another module bound it); nothing was
+    /// added, so the caller must NOT count it as a new bind.
+    AlreadyMounted,
+}
+
 /// File-over-file bind of `source` onto an existing `target`.
-pub fn apply(source: &Path, target: &Path) -> Result<()> {
+pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     // Reject non-UTF8 up front so the recorded/umounted path round-trips exactly.
     let s = source.to_str().context("non-utf8 bind source")?.to_string();
     let t = target.to_str().context("non-utf8 bind target")?.to_string();
@@ -132,35 +140,57 @@ pub fn apply(source: &Path, target: &Path) -> Result<()> {
     let _lock = Lock::acquire()?;
     // Serialized: check-then-bind can't race another process into a double mount.
     if is_mounted(target) {
-        // Another module already bound this target; leave it to them.
-        return Ok(());
+        // Another module already bound this target; leave it to them. Distinct
+        // outcome so the caller does not count a bind it never made.
+        return Ok(BindOutcome::AlreadyMounted);
     }
     // Capture the source's own label BEFORE overwriting it, so teardown (and the
-    // failure path below) can put it back. Without this every attempted bind left
+    // failure paths below) can put it back. Without this every attempted bind left
     // a module file permanently carrying a partition label, even when the mount
     // then failed and no bind existed at all.
     let orig_label = read_selinux(source);
-    // Relabel first; abort the whole bind on failure (never expose a mislabeled file).
-    mirror_selinux(source, target)
-        .with_context(|| format!("relabel for bind of {t}"))?;
+    let lbl = orig_label.as_deref().map(|l| String::from_utf8_lossy(l).trim_end_matches('\0').to_string())
+        .unwrap_or_default();
+    // Record the restore row BEFORE relabelling (L5): a SIGKILL between the relabel
+    // and the record would otherwise strand `source` carrying the ROM label under
+    // /data/adb with no row to restore it from. A record with no live mount is
+    // harmless (teardown umounts a non-mount as a no-op and restores the label),
+    // and the two failure paths below remove it so a failed bind never lingers as
+    // a phantom row reload would treat as already-bound.
+    if let Err(e) = append_locked(&t, &s, &lbl) {
+        if let Some(l) = &orig_label { restore_selinux(source, l); }
+        bail!("bind of {t} could not be recorded ({e}); not bound");
+    }
+    // Relabel; abort the whole bind on failure (never expose a mislabeled file).
+    if let Err(e) = mirror_selinux(source, target).with_context(|| format!("relabel for bind of {t}")) {
+        remove_record_locked(&t, &s);
+        if let Some(l) = &orig_label { restore_selinux(source, l); }
+        return Err(e);
+    }
 
     let (sc, tc) = (cstr(source)?, cstr(target)?);
     let r = unsafe {
         libc::mount(sc.as_ptr(), tc.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null())
     };
     if r != 0 {
+        remove_record_locked(&t, &s);
         if let Some(l) = &orig_label { restore_selinux(source, l); }
         bail!("bind {} -> {t}: {}", source.display(), std::io::Error::last_os_error());
     }
-    // Track it; if we can't, unbind rather than leak an untracked mount.
-    let lbl = orig_label.as_deref().map(|l| String::from_utf8_lossy(l).trim_end_matches('\0').to_string())
-        .unwrap_or_default();
-    if let Err(e) = append_locked(&t, &s, &lbl) {
-        unsafe { libc::umount2(tc.as_ptr(), libc::MNT_DETACH) };
-        if let Some(l) = &orig_label { restore_selinux(source, l); }
-        bail!("bind of {t} recorded failed ({e}); unbound");
+    Ok(BindOutcome::Bound)
+}
+
+/// Drop one (target, source) row from binds.list. Caller must hold the Lock. Used
+/// to undo a record written before a relabel/mount that then failed (L5).
+fn remove_record_locked(target: &str, source: &str) {
+    let remaining: String = tracked_full()
+        .into_iter()
+        .filter(|(t, s, _)| !(t.to_string_lossy() == target && s.to_string_lossy() == source))
+        .map(|(t, s, l)| format!("{}\t{}\t{}\n", t.display(), s.display(), l))
+        .collect();
+    if let Err(e) = fs::write(BINDS_LIST, &remaining) {
+        eprintln!("nomount: could not roll back a failed bind record in {BINDS_LIST}: {e}");
     }
-    Ok(())
 }
 
 /// Append a "target\tsource" record to binds.list. Caller must hold the Lock.

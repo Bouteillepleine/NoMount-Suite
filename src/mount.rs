@@ -53,6 +53,41 @@ use anyhow::{Context, Result};
 use crate::nm::Nm;
 
 const MODULES_DIR: &str = "/data/adb/modules";
+/// Serialises the whole-engine passes (`mount`, `reload`, `absorb`) against each
+/// other. `run_mount` opens with `nm.clear()`, so a concurrent reload/absorb could
+/// see the engine momentarily empty (or two passes could interleave adds and
+/// prunes). One process-wide advisory flock closes that window.
+const PASS_LOCK: &str = "/data/adb/nomount/pass.lock";
+
+/// RAII holder for the pass lock; the flock releases when it drops.
+pub(crate) struct PassLock(std::fs::File);
+
+/// Take the process-wide pass lock. Best-effort: a failure to create or lock the
+/// file must never block boot, so this returns `None` and the caller proceeds
+/// unserialised rather than aborting. Held for the whole pass via the returned
+/// guard.
+pub(crate) fn pass_lock() -> Option<PassLock> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false) // the file only carries the flock; never clobber it
+        .mode(0o600)
+        .open(PASS_LOCK)
+        .ok()?;
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return None;
+    }
+    Some(PassLock(f))
+}
+
+impl Drop for PassLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
 
 // Modules that do their own mounting/redirection (or ship their own su, like a
 // kernelnosu module) — injecting their files double-handles the same targets, and
@@ -241,6 +276,24 @@ pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
         return Err("a bare partition root (masking one bootloops zygote)");
     }
     Ok(())
+}
+
+/// A leaf inject must land on a FILE (or on nothing — a synthesized virtual
+/// entry). If the resolved target is a live directory on-device, or a live
+/// mountpoint, the module shipped a file or symlink named like a stock ROM
+/// directory (`product/overlay`, `product/app`, `system/priv-app`), and a rule
+/// there masks the WHOLE directory — the same stock-hiding, zygote-bootlooping
+/// mistake `is_partition_root` guards one level up. `is_partition_root` only sees
+/// depth-1 roots, so a deeper stock dir slips past it. Refuse those; a module's
+/// real content still comes from its own directory entries, which recurse and
+/// inject their leaves individually.
+///
+/// The mounted-set is read once and cached: `plan_tree` is recursive and each
+/// `nomount` run is a fresh short-lived process, so a snapshot is correct for it.
+fn inject_would_mask_dir(target: &Path) -> bool {
+    static MOUNTED: std::sync::OnceLock<HashSet<PathBuf>> = std::sync::OnceLock::new();
+    let mounted = MOUNTED.get_or_init(crate::absorb::mounted_targets);
+    target.is_dir() || mounted.contains(target)
 }
 
 /// Can this entry actually produce a rule?
@@ -499,6 +552,18 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                 source,
                 kind,
             });
+        } else if inject_would_mask_dir(&target) {
+            // Resolves to a live stock directory (or a mountpoint) one or more
+            // levels below a partition root — injecting a file here masks the whole
+            // directory. See `inject_would_mask_dir`; this is the depth-2+ case
+            // is_partition_root cannot see (e.g. a module file named `overlay`).
+            eprintln!(
+                "nomount: {module}: skipping {} — it resolves to a live directory/mountpoint; \
+                 injecting a file there would mask the whole directory (a module may only \
+                 inject over a file)",
+                target.display()
+            );
+            continue;
         } else {
             out.push(PlanEntry {
                 module: module.to_string(),
@@ -533,19 +598,29 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
 /// than this pass would leave a permanent entry behind. Seen in the field: a
 /// bootanimation module binding at post-fs-data, injected over here, two
 /// unremovable mounts.
-fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: &Path) {
+/// Returns whether it is now safe to serve `target` — i.e. nothing is mounted on
+/// it any more. The caller must NOT serve when this is false: injecting over a
+/// live mount strands it in mountinfo forever (the old fn returned `()` and the
+/// caller served regardless, which is exactly that leak).
+fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: &Path) -> bool {
     if !targets.contains(target) {
-        return;
+        return true; // nothing was mounted here; serving is safe
     }
     if crate::absorb::umount_detach(target) {
         eprintln!("nomount: unmounted {} before serving it", target.display());
-    } else {
+    }
+    // Authoritative: umount2 reports EINVAL both for a stranded peer under shared
+    // propagation (fine) and a still-live mount (not fine). `still_mounted` asks
+    // mountinfo, which distinguishes them.
+    let gone = !crate::absorb::still_mounted(target);
+    if !gone {
         eprintln!(
-            "nomount: {} is mounted and will not unmount; serving it anyway would strand \
-             that mount in mountinfo, so it is left alone",
+            "nomount: {} is still mounted and will not unmount; serving it anyway would strand \
+             that mount in mountinfo, so it is left unserved",
             target.display()
         );
     }
+    gone
 }
 
 /// Does applying this whiteout leave a measurable hole? It is APPLIED either
@@ -585,7 +660,11 @@ pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
     !forced.contains(target)
 }
 
-fn whiteout_allowed(target: &Path, module: &str) -> bool {
+/// Warn (only) when a whiteout will leave a measurable hole. It is always APPLIED
+/// -- declining would silently neuter a debloat module -- so this returns nothing.
+/// It used to return `bool` (always `true`), and every caller wrote
+/// `if !whiteout_allowed(...) { continue; }`, a dead branch that read as a real gate.
+fn warn_whiteout_hole(target: &Path, module: &str) {
     if whiteout_leaves_hole(target) {
         eprintln!(
             "nomount: applying whiteout {} from {module}: its parent is multi-block erofs (or \
@@ -595,7 +674,6 @@ fn whiteout_allowed(target: &Path, module: &str) -> bool {
             target.display()
         );
     }
-    true
 }
 
 pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
@@ -751,6 +829,7 @@ fn prunable(
 /// drop. Install a module then reload => just its files go live; remove a module
 /// then reload => just its files go away. Also reconciles my_* binds.
 pub fn run_reload() -> Result<()> {
+    let _pass = pass_lock(); // serialise against a concurrent mount/absorb (M-S9)
     let nm = Nm::new();
     nm.version()
         .context("hookless NoMount engine not responding -- is the CONFIG_NOMOUNT kernel loaded?")?;
@@ -812,17 +891,21 @@ pub fn run_reload() -> Result<()> {
             failed += 1;
             continue;
         }
+        // Unmount BEFORE dropping the stale rule: if the target will not unmount we
+        // must skip it entirely (serving would strand the mount), and skipping
+        // after a del would have left it with no rule at all.
+        if !unmount_before_serving(&mounted, &e.target) {
+            failed += 1;
+            continue;
+        }
         let existed = live.contains_key(&((*t).to_path_buf(), 0));
         if existed {
             let _ = nm.del(&e.target); // drop the stale rule before re-adding
         }
-        unmount_before_serving(&mounted, &e.target);
         let r = match e.kind {
             PlanKind::Inject => nm.add(&e.target, &e.source),
             PlanKind::Whiteout => {
-                if !whiteout_allowed(&e.target, &e.module) {
-                    continue;
-                }
+                warn_whiteout_hole(&e.target, &e.module);
                 nm.whiteout(&e.target)
             }
             PlanKind::Bind => unreachable!(),
@@ -915,7 +998,9 @@ pub fn run_reload() -> Result<()> {
     for e in plan.iter().filter(|e| e.kind == PlanKind::Bind) {
         if !live_ok.contains(e.target.as_path()) {
             match crate::bind::apply(&e.source, &e.target) {
-                Ok(_) => bind_added += 1,
+                // AlreadyMounted made no new bind, so it must not inflate the count.
+                Ok(crate::bind::BindOutcome::Bound) => bind_added += 1,
+                Ok(crate::bind::BindOutcome::AlreadyMounted) => {}
                 Err(_) => failed += 1,
             }
         }
@@ -953,9 +1038,15 @@ pub fn run_reload() -> Result<()> {
 /// mountlessly. Keeping su out of the Suite means a Suite bug can never break
 /// root, and there is no su mount for a scanner to flag.
 pub fn run_mount() -> Result<()> {
+    let _pass = pass_lock(); // serialise against a concurrent reload/absorb (M-S9)
     let nm = Nm::new();
     nm.version()
         .context("hookless NoMount engine not responding -- is the CONFIG_NOMOUNT kernel loaded?")?;
+
+    // Build the plan BEFORE clearing the engine (M-S9): collect_plan only reads the
+    // module tree, and enumerating it after `clear()` would, on any failure between
+    // the two, leave the engine empty with nothing to re-serve.
+    let (plan, skipped) = collect_plan();
 
     // Measure the ROM's directory shape and tell the engine, BEFORE any rule
     // exists: a synthesized dir inherits its parent's superblock, which on an
@@ -988,11 +1079,9 @@ pub fn run_mount() -> Result<()> {
     // away the only thing that can. Read it first either way -- an earlier version
     // cleared the file and then read an empty list, and silently did nothing.
     let recorded = crate::absorb::absorbed_pairs();
-    if recorded.is_empty() {
-        crate::absorb::set_absorbed(&[]);
-    } else {
-        crate::absorb::set_absorbed_pairs(&recorded);
-    }
+    // Always the tab-separated pairs format (empty is fine — it just rewrites the
+    // header). The legacy bare-target writer is gone; see H18.
+    crate::absorb::set_absorbed_pairs(&recorded);
     // Re-serve them here, before zygote starts and PackageManager scans, so a
     // patched-APK module never has to mount at all: no bind, so no process maps
     // one, so nothing carries the "(deleted)" marking a later takeover leaves
@@ -1012,7 +1101,7 @@ pub fn run_mount() -> Result<()> {
         }
     }
 
-    let (plan, skipped) = collect_plan();
+    // plan/skipped were collected before `clear()` above.
     let mut served: HashSet<&str> = HashSet::new();
     let mut binds = 0u32;
     let mut st = Stats {
@@ -1023,12 +1112,13 @@ pub fn run_mount() -> Result<()> {
     let mounted = crate::absorb::mounted_targets();
     for e in &plan {
         served.insert(e.module.as_str());
-        unmount_before_serving(&mounted, &e.target);
+        if !unmount_before_serving(&mounted, &e.target) {
+            st.failed += 1;
+            continue;
+        }
         match e.kind {
             PlanKind::Whiteout => {
-                if !whiteout_allowed(&e.target, &e.module) {
-                    continue;
-                }
+                warn_whiteout_hole(&e.target, &e.module);
                 match nm.whiteout(&e.target) {
                     Ok(()) => st.whiteouts += 1,
                     Err(_) => st.failed += 1,
@@ -1040,7 +1130,8 @@ pub fn run_mount() -> Result<()> {
                 Err(_) => st.failed += 1,
             },
             PlanKind::Bind => match crate::bind::apply(&e.source, &e.target) {
-                Ok(()) => binds += 1,
+                Ok(crate::bind::BindOutcome::Bound) => binds += 1,
+                Ok(crate::bind::BindOutcome::AlreadyMounted) => {}
                 Err(_) => st.failed += 1,
             },
         }

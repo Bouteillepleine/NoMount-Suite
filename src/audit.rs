@@ -270,6 +270,13 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
 
 /// An injected file's readdir d_ino must equal its stat st_ino.
 fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
+    // `eligible` is every injected file on a readable non-overlay parent, counted
+    // up front. The old code `continue`d past a name absent from getdents or one
+    // that no longer stats, then reported PASS over the remainder with no
+    // denominator -- so a file the engine had d_dropped out of the listing (the
+    // exact regression this checks for) simply vanished from the audit. Both of
+    // those are now FAIL rows, and the evidence carries checked/eligible.
+    let mut eligible = 0usize;
     let mut checked = 0usize;
     let mut bad = Vec::new();
     let mut by_parent: HashMap<PathBuf, Vec<&PathBuf>> = HashMap::new();
@@ -287,26 +294,33 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
         let Some(entries) = getdents(parent) else { continue };
         for k in kids {
             let Some(name) = k.file_name().and_then(|n| n.to_str()) else { continue };
-            let Some(e) = entries.iter().find(|e| e.name == name) else { continue };
-            let Some(st) = ino_of(k) else { continue };
+            eligible += 1;
+            let Some(e) = entries.iter().find(|e| e.name == name) else {
+                bad.push(format!("{} absent from getdents", k.display()));
+                continue;
+            };
+            let Some(st) = ino_of(k) else {
+                bad.push(format!("{} no longer stats", k.display()));
+                continue;
+            };
             checked += 1;
             if e.d_ino != st {
                 bad.push(format!("{} d_ino={} st_ino={}", k.display(), e.d_ino, st));
             }
         }
     }
-    if checked == 0 {
+    if eligible == 0 {
         return skip(
             "readdir ino vs stat ino",
             "no injected file on a non-overlay filesystem to compare".into(),
         );
     }
     if bad.is_empty() {
-        pass("readdir ino vs stat ino", format!("{checked} injected file(s) agree"))
+        pass("readdir ino vs stat ino", format!("{checked}/{eligible} injected file(s) agree"))
     } else {
         fail(
             "readdir ino vs stat ino",
-            format!("{} of {checked} disagree: {}", bad.len(), bad.join("; ")),
+            format!("{} of {eligible} eligible failed ({checked} compared): {}", bad.len(), bad.join("; ")),
             "listing a directory and stat-ing its entries separates injected files from stock",
         )
     }
@@ -530,12 +544,13 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// A hidden app must still be able to open the APKs the PackageManager gave it.
+/// A hidden app must still be able to open every file the PackageManager gave it.
 ///
 /// Per-UID hiding serves a blocked reader the stock filesystem, which for an ADDED
 /// name means ENOENT. That is right for a module file nothing else mentions -- and
-/// wrong for a ROM APK, because the PackageManager scanned the directory as
-/// system_server (never blocked), registered the package, and now hands its path to
+/// wrong for anything in a PM-registered codePath, because the PackageManager
+/// scanned the directory as system_server (never blocked), registered the package,
+/// and now hands its whole codePath (the APK AND its nativeLibraryDir .so files) to
 /// every app that asks. The hidden app is then holding a path the system says
 /// exists and open() denies, which no device produces on its own.
 ///
@@ -543,25 +558,25 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
 /// the package list at startup, calls getResourcesForApplication() on each entry,
 /// and SIGSEGVs on the IOException from 139 unopenable /product/overlay APKs.
 ///
-/// The probe forks, drops to a blocked appid and opens each ROM APK rule target.
-/// It changes UID only -- the SELinux domain stays ours -- which is exactly what
-/// the engine keys on (nomount_is_uid_blocked reads current_uid()), so it measures
-/// the hiding decision and NOT the app's own domain permissions.
+/// The probe forks, drops to a blocked appid and opens each PM-published rule
+/// target. It changes UID only -- the SELinux domain stays ours -- which is exactly
+/// what the engine keys on (nomount_is_uid_blocked reads current_uid()), so it
+/// measures the hiding decision and NOT the app's own domain permissions.
 fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
-    const NAME: &str = "PM-registered APKs open for a hidden app";
-    let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_rom_apk(t)).collect();
+    const NAME: &str = "PM-published files open for a hidden app";
+    let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
     if apks.is_empty() {
-        return skip(NAME, "no ROM APK rules live".into());
+        return skip(NAME, "no PM-published rules live".into());
     }
     let blocked = Nm::new().uid_list_live().unwrap_or_default();
     let Some(&appid) = blocked.first() else {
-        return skip(NAME, format!("{} ROM APK rule(s), but no app is hidden", apks.len()));
+        return skip(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()));
     };
     // Only paths root can open are worth asking about: one the module itself
     // cannot serve is a different bug, and this check must not claim it.
     let readable: Vec<&&PathBuf> = apks.iter().filter(|p| fs::File::open(p).is_ok()).collect();
     if readable.is_empty() {
-        return skip(NAME, format!("{} ROM APK rule(s), none readable as root", apks.len()));
+        return skip(NAME, format!("{} PM-published file rule(s), none readable as root", apks.len()));
     }
     // The size WE are served, to compare the hidden child against. Opening is only
     // half the question: a rule that shadows a stock APK answers a blocked reader
@@ -636,7 +651,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         return pass(
             NAME,
             format!(
-                "uid {appid} (hidden) opened all {} ROM APK rule target(s), same bytes we serve",
+                "uid {appid} (hidden) opened all {} PM-published rule target(s), same bytes we serve",
                 readable.len()
             ),
         );
@@ -645,20 +660,20 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         return fail(
             NAME,
             format!(
-                "uid {appid} (hidden) opened all {} ROM APK rule target(s) but {mismatched} \
+                "uid {appid} (hidden) opened all {} PM-published rule target(s) but {mismatched} \
                  differed in size from the copy we serve",
                 readable.len()
             ),
-            "those rules shadow a stock APK, so the blocked reader is answered from the stock \
+            "those rules shadow a stock file, so the blocked reader is answered from the stock \
              file -- while the PackageManager parsed OUR copy and publishes its version and \
              signature for that path, a disagreement the app can measure. Engine >= 17 keeps \
-             NM_FLAG_PUBLIC on a shadowed APK; below that the kernel strips it",
+             NM_FLAG_PUBLIC on a shadowed file; below that the kernel strips it",
         );
     }
     fail(
         NAME,
         format!(
-            "uid {appid} (hidden) could not open {denied} of {} ROM APK rule target(s)\
+            "uid {appid} (hidden) could not open {denied} of {} PM-published rule target(s)\
              {}",
             readable.len(),
             if mismatched > 0 { format!(", and {mismatched} more differed in size") } else { String::new() }
@@ -705,6 +720,49 @@ fn check_no_rom_tmpfs() -> Check {
     }
 }
 
+/// A bind or image mounted over the ROM from somewhere other than /data/adb.
+///
+/// `check_zero_mount` flags a source under /data/adb; `check_no_rom_tmpfs` flags a
+/// tmpfs. Neither sees a bind over the ROM sourced from /data/local/tmp, /cache or
+/// a loop image -- yet those are every bit as visible in an app's mountinfo. Flag
+/// any row whose MOUNTPOINT is inside a ROM partition and whose mount root (field
+/// 4) is not "/" (a bind of a subtree, never how a whole partition is mounted) OR
+/// whose backing device is the /data device (content served off userdata over the
+/// read-only ROM). Stock OEM mounts inside a ROM partition (vfat firmware, ext4
+/// dsp, the OEM's overlayfs) have root "/" on their own block device, so they do
+/// not match -- and a plain tmpfs (root "/", its own dev) is left to the check above.
+fn check_no_foreign_rom_mount() -> Check {
+    let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
+        return skip("foreign mount over the ROM", "cannot read /proc/self/mountinfo".into());
+    };
+    let roots = ["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
+    let rows = crate::absorb::parse_mountinfo(&mi);
+    // maj:min of /data, so a mount served off userdata is recognised by device
+    // rather than by the source path (which mountinfo does not carry usefully here).
+    let data_dev = rows.iter().find(|r| r.target == Path::new("/data")).map(|r| r.dev.clone());
+    let mut hits: Vec<String> = Vec::new();
+    for r in &rows {
+        let t = r.target.to_string_lossy();
+        if !roots.iter().any(|root| t.starts_with(root)) {
+            continue;
+        }
+        let subtree_bind = r.root != "/";
+        let off_userdata = data_dev.as_deref() == Some(r.dev.as_str());
+        if subtree_bind || off_userdata {
+            hits.push(format!("{} (root={}, dev={})", t, r.root, r.dev));
+        }
+    }
+    if hits.is_empty() {
+        pass("foreign mount over the ROM", "no non-/data/adb bind or image mounted over a ROM partition".into())
+    } else {
+        fail(
+            "foreign mount over the ROM",
+            format!("{} foreign mount(s) over the ROM: {}", hits.len(), hits.join(", ")),
+            "a bind from /data/local/tmp or /cache, or an image over the ROM, is visible in any app's mountinfo just like a module mount",
+        )
+    }
+}
+
 pub fn run_audit() -> Result<()> {
     let targets = live_targets();
     let parents = parents_of(&targets);
@@ -720,6 +778,7 @@ pub fn run_audit() -> Result<()> {
         check_maps_not_deleted(&targets),
         check_pm_apks_open_when_hidden(&targets),
         check_no_rom_tmpfs(),
+        check_no_foreign_rom_mount(),
     ];
 
     println!("nomount audit: {} live rule(s) across {} directory(ies)\n", targets.len(), parents.len());

@@ -204,7 +204,10 @@ pub fn expand(entry: &str, installed: &[(String, u32)]) -> Result<Vec<(String, u
             .cloned()
             .collect());
     }
-    match resolve(e)? {
+    // Resolve against the map already loaded for this pass, not a fresh
+    // packages.list read: `installed` is passed in for exactly this reason, and
+    // ignoring it re-read the whole file once per exact entry.
+    match resolve_in(e, installed)? {
         Resolved::Uid(uid) => Ok(vec![(e.to_string(), uid)]),
         Resolved::NotInstalled => Ok(Vec::new()),
     }

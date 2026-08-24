@@ -1486,17 +1486,19 @@
     const r = await nm("audit");
     const txt = ((r.stdout || "") + (r.stderr || "")).trim() || "(no output)";
     out.textContent = txt;
-    const m = txt.match(/summary:\s*(\d+)\s*passed,\s*(\d+)\s*failed,\s*(\d+)\s*skipped/i);
+    const m = txt.match(/summary:\s*(\d+)\s*passed,\s*(\d+)\s*failed,\s*(\d+)\s*skipped(?:,\s*(\d+)\s*pending reboot)?/i);
     const chip = $("auchip");
     if (m) {
-      const failed = parseInt(m[2], 10), skipped = parseInt(m[3], 10);
-      // A skipped check was NOT verified, so it must not render as a pass.
+      const failed = parseInt(m[2], 10), skipped = parseInt(m[3], 10), rb = parseInt(m[4] || "0", 10);
+      // A pending-reboot check is a real tell that is still detectable until the
+      // reboot, so it must not render green. A skipped check was NOT verified.
       chip.textContent = failed ? failed + " detectable"
+                       : rb ? rb + " reboot pending"
                        : skipped ? skipped + " unverified"
                        : "undetected";
-      chip.className = "chip " + (failed ? "bad" : skipped ? "warn" : "ok");
+      chip.className = "chip " + (failed ? "bad" : (rb || skipped) ? "warn" : "ok");
       const nb = $("nb-diag");
-      if (nb) nb.classList.toggle("alert", failed > 0);
+      if (nb) nb.classList.toggle("alert", failed > 0 || rb > 0);
     } else {
       chip.textContent = "\u2014"; chip.className = "chip";
     }
@@ -1535,8 +1537,11 @@
     const v = (txt.match(/verdict=(.+)/) || [])[1] || "";
     const chip = $("hchip");
     const bad = /INCONSISTENCY|DOWN|TRIPPED/.test(v);
-    chip.textContent = bad ? "attention" : "healthy";
-    chip.className = "chip " + (bad ? "bad" : "ok");
+    // "unverified" means the consistency canary sampled no injected file: not a
+    // pass, not a failure — an honest amber third state.
+    const unver = /^unverified/i.test(v);
+    chip.textContent = bad ? "attention" : unver ? "unverified" : "healthy";
+    chip.className = "chip " + (bad ? "bad" : unver ? "warn" : "ok");
     done();
   }
   async function runSnapshot(btn) {

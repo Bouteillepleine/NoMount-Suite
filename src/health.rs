@@ -81,8 +81,12 @@ fn read_cmd(prog: &str, args: &[&str]) -> String {
 /// Size a normal (non-root) app sees for `path`, via `su <uid> -c stat`. Empty
 /// string on any failure (which, for an injected path, is itself a divergence).
 fn app_size(uid: u32, path: &str) -> String {
+    // Single-quoted: `path` is a rule TARGET read off the engine, handed to a
+    // shell. A ROM (or a module writing into one) carrying a name like `x; id`
+    // would otherwise run it. Same quoting whiteout.rs::app_can_see uses.
+    let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     let out = Command::new("su")
-        .args([&uid.to_string(), "-c", &format!("stat -c %s {path} 2>/dev/null")])
+        .args([&uid.to_string(), "-c", &format!("stat -c %s {quoted} 2>/dev/null")])
         .output();
     out.ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -143,12 +147,45 @@ fn consistency_probe(rules: &[(String, String)], probe_uid_hidden: bool) -> Stri
     if probe_uid_hidden {
         return "unchecked:probe-uid-hidden".to_string();
     }
-    // Injected regular files only (skip virtual dirs / whiteouts which have no size).
-    let mut checked = 0;
-    for (target, _src) in rules.iter() {
-        if checked >= 6 {
+    // Sampling first-6-in-hash-order could sit entirely on one partition served by
+    // one module, and a d_drop-class regression can be confined to a single
+    // partition. Stratify by (partition, owning module) and take round-robin across
+    // buckets, so the sample spans the rule set. Budget bounds the `su` calls.
+    const BUDGET: usize = 18;
+    let mut buckets: std::collections::BTreeMap<(String, String), Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for (target, src) in rules.iter() {
+        let partition = target
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let module = crate::absorb::module_dir_of(Path::new(src))
+            .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        buckets.entry((partition, module)).or_default().push(target.as_str());
+    }
+    let mut sample: Vec<&str> = Vec::new();
+    'outer: for i in 0.. {
+        let mut progressed = false;
+        for targets in buckets.values() {
+            if let Some(t) = targets.get(i) {
+                sample.push(t);
+                progressed = true;
+                if sample.len() >= BUDGET {
+                    break 'outer;
+                }
+            }
+        }
+        if !progressed {
             break;
         }
+    }
+
+    // Injected regular files only (skip virtual dirs / whiteouts which have no size).
+    let mut checked = 0;
+    for target in sample {
         let root = fs::metadata(target).ok().map(|m| m.len().to_string());
         let Some(root_sz) = root else { continue };
         checked += 1;
@@ -219,21 +256,26 @@ fn gather() -> Fingerprint {
 /// Exit is non-zero when the consistency canary or guard indicates trouble.
 pub fn run_selfcheck(write: bool) -> Result<()> {
     let fp = gather();
-    // "unchecked" and its qualified forms (unchecked:probe-uid-hidden) are
-    // not-a-verdict, not a failure.
-    let ok_consistency = fp.consistency == "ok" || fp.consistency.starts_with("unchecked");
     let ok_guard = fp.guard == "armed";
     let ok_engine = fp.engine != "down";
+    let mismatch = fp.consistency.starts_with("mismatch");
+    // A bare "unchecked" means the canary could sample no injected file at all
+    // (every target failed to stat, or there were none): it is NOT a pass and NOT
+    // a hard failure -- a third, honest state. "unchecked:probe-uid-hidden" is a
+    // legitimate can't-check by design and stays healthy.
+    let unverified = fp.consistency == "unchecked";
 
     print!("{}", fp.to_text());
-    let verdict = if ok_consistency && ok_guard && ok_engine {
-        "healthy"
-    } else if !ok_consistency {
+    let verdict = if mismatch {
         "PER-UID INCONSISTENCY (injection visible to a normal app differently than root)"
     } else if !ok_engine {
         "ENGINE DOWN"
-    } else {
+    } else if !ok_guard {
         "GUARD TRIPPED"
+    } else if unverified {
+        "unverified (consistency canary sampled no injected file)"
+    } else {
+        "healthy"
     };
     println!("verdict={verdict}");
 
@@ -245,11 +287,12 @@ pub fn run_selfcheck(write: bool) -> Result<()> {
         fs::write(HEALTH, body).context("write health.txt")?;
     }
 
-    if ok_consistency && ok_guard && ok_engine {
-        Ok(())
-    } else {
+    // "unverified" is not a pass but not an abort-boot failure either: only a real
+    // inconsistency, a down engine, or a tripped guard exits non-zero.
+    if mismatch || !ok_engine || !ok_guard {
         std::process::exit(1);
     }
+    Ok(())
 }
 
 /// `nomount snapshot` — freeze the current fingerprint as the known-good baseline.
@@ -325,7 +368,19 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         fp.to_text()
     });
     let shared = ["/sdcard", "/storage", "/mnt/sdcard"].iter().any(|p| out.starts_with(p));
-    write("rules.txt", &nm.list().unwrap_or_else(|e| format!("(nm list failed: {e})")));
+    // On shared storage the ` [UID: n]` suffix on a per-UID rule names an appid we
+    // are hiding from -- the same secret as the hide list -- so strip it there.
+    let rules = nm.list().unwrap_or_else(|e| format!("(nm list failed: {e})"));
+    let rules = if shared {
+        rules
+            .lines()
+            .map(|l| l.split(" [UID:").next().unwrap_or(l).trim_end())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        rules
+    };
+    write("rules.txt", &rules);
     // The live hidden set is the same secret as the hide list itself -- it names
     // the appids you are hiding from -- so it obeys the same rule. It used to be
     // written unconditionally, which handed exactly that to shared storage on
@@ -336,7 +391,11 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     let self_exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "nomount".to_string());
-    write("doctor.txt", &read_cmd("sh", &["-c", &format!("'{self_exe}' doctor 2>&1 || true")]));
+    // doctor's "stale legacy blocklist entries" finding prints hidden package
+    // names verbatim; NM_REDACT_HIDE_LIST tells it to withhold them for a shared
+    // destination (see M-S2 in doctor.rs).
+    let redact = if shared { "NM_REDACT_HIDE_LIST=1 " } else { "" };
+    write("doctor.txt", &read_cmd("sh", &["-c", &format!("{redact}'{self_exe}' doctor 2>&1 || true")]));
     write("dmesg-nomount.txt", &read_cmd("sh", &["-c", "dmesg | grep -i nomount 2>/dev/null || true"]));
     write("mountinfo.txt", &fs::read_to_string("/proc/self/mountinfo").unwrap_or_default());
     write("uname.txt", &read_cmd("uname", &["-a"]));
@@ -365,10 +424,15 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     }
     println!("exported to {out}");
     if shared {
+        // Name what was ACTUALLY withheld: the PRIVATE set (uidhide*, spoof.conf) --
+        // NOT blocklist, which is now only module ids to skip and is included. The
+        // rules.txt UID suffixes and doctor's hide-list names were redacted in place.
         println!(
-            "note: blocklist and spoof.conf were left out — {out} is shared storage, readable \
-             by any app with a storage permission, and the block list names the apps you are \
-             hiding from. Pass a private path to include them: nomount export /data/adb/nomount"
+            "note: {} were left out — {out} is shared storage, readable by any app with a \
+             storage permission, and they name the apps you are hiding from (rules.txt UID \
+             suffixes and doctor's hide-list names were redacted). Pass a private path to \
+             include them in full: nomount export /data/adb/nomount",
+            PRIVATE.join(", ")
         );
     }
     Ok(())

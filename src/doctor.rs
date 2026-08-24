@@ -54,21 +54,79 @@ fn is_partition_root(p: &Path) -> bool {
     p.components().skip(1).count() == 1
 }
 
-/// Parse `nm list` output ("<target> -> <source>" per line) into pairs.
-fn parse_live(list: &str) -> Vec<(PathBuf, PathBuf)> {
+#[derive(Debug, PartialEq, Eq)]
+enum LiveKind {
+    /// `<target> -> <source>`; source carried in [`LiveRule::source`].
+    Inject,
+    /// `<target> (whiteout)`.
+    Whiteout,
+    /// `<target> (virtual dir)`.
+    VirtualDir,
+}
+
+/// One parsed `nm list` line.
+struct LiveRule {
+    target: PathBuf,
+    /// Present only for an `Inject`.
+    source: Option<PathBuf>,
+    kind: LiveKind,
+    /// The engine printed the per-rule `(public)` flag for this rule (engine >= 17
+    /// reports flags). A PM-published rule live WITHOUT it is the hazard M-S1 names.
+    public: bool,
+}
+
+/// Parse `nm list` output into typed rules.
+///
+/// `nm list` appends flag suffixes: ` (public)` on a hiding opt-out, plus the kind
+/// markers ` (whiteout)` / ` (virtual dir)`. The old parser dropped every
+/// non-arrow line (so whiteout/virtual-dir rules escaped the partition-root check)
+/// and never stripped ` (public)`, so `source` became `".../Foo.apk (public)"` and
+/// every `fs::metadata(source)` in the size-mismatch lint failed silently. Peel the
+/// flag suffixes first, classify by the kind markers, and keep the ` [UID: N]`
+/// strip.
+fn parse_live(list: &str) -> Vec<LiveRule> {
     list.lines()
-        .filter_map(|l| {
-            // Match mount.rs: strip the ` [UID: N]` suffix (else it lands in the
-            // source path and every metadata check on a per-UID rule silently
-            // no-ops), and split on the LAST arrow so a target containing one is
-            // not mis-split.
-            let l = l.split(" [UID:").next().unwrap_or(l);
+        .filter_map(|line| {
+            // Strip the ` [UID: N]` identity suffix (else it lands in the source
+            // path and every metadata check on a per-UID rule silently no-ops).
+            let mut l = line.split(" [UID:").next().unwrap_or(line).trim();
+            if l.is_empty() {
+                return None;
+            }
+            // Peel every trailing flag suffix, in any order, before anything else:
+            // so a whiteout/virtual-dir line is still recognised when it also
+            // carried ` (public)`, and so an inject's `source` never captures a flag.
+            let mut public = false;
+            let mut kind: Option<LiveKind> = None;
+            loop {
+                if let Some(rest) = l.strip_suffix(" (public)") {
+                    public = true;
+                    l = rest.trim_end();
+                } else if let Some(rest) = l.strip_suffix(" (whiteout)") {
+                    kind = Some(LiveKind::Whiteout);
+                    l = rest.trim_end();
+                } else if let Some(rest) = l.strip_suffix(" (virtual dir)") {
+                    kind = Some(LiveKind::VirtualDir);
+                    l = rest.trim_end();
+                } else {
+                    break;
+                }
+            }
+            if let Some(kind) = kind {
+                return Some(LiveRule { target: PathBuf::from(l.trim()), source: None, kind, public });
+            }
+            // Split on the LAST arrow so a target containing one is not mis-split.
             let (t, s) = l.rsplit_once(" -> ")?;
             let (t, s) = (t.trim(), s.trim());
             if t.is_empty() || s.is_empty() {
                 return None;
             }
-            Some((PathBuf::from(t), PathBuf::from(s)))
+            Some(LiveRule {
+                target: PathBuf::from(t),
+                source: Some(PathBuf::from(s)),
+                kind: LiveKind::Inject,
+                public,
+            })
         })
         .collect()
 }
@@ -261,13 +319,23 @@ pub fn run_doctor() -> Result<()> {
             .map(str::to_string)
             .collect();
         if !stale.is_empty() {
+            // The names are hidden-app package names -- the same secret as the hide
+            // list. When `nomount export` runs doctor for shared storage it sets
+            // NM_REDACT_HIDE_LIST=1, so print the count only there (health.rs owns
+            // the destination decision; see M-S2).
+            let redact = std::env::var_os("NM_REDACT_HIDE_LIST").is_some();
+            let names = if redact {
+                "names redacted".to_string()
+            } else {
+                stale.join(", ")
+            };
             f.push(Finding {
                 level: Level::Info,
                 check: "stale legacy blocklist entries",
                 detail: format!(
                     "{} entry/entries in /data/adb/nomount/blocklist are hidden APPS, already migrated to uidhide, and inert there ({}). That file is read as a module-id skip list; remove them if you want it to mean only what it says",
                     stale.len(),
-                    stale.join(", ")
+                    names
                 ),
             });
         }
@@ -336,21 +404,35 @@ pub fn run_doctor() -> Result<()> {
     // Apps hidden from the injections, and the live rules the PackageManager
     // advertises regardless -- the pair the opt-out check below is about.
     let hidden_apps = crate::blocklist::read().unwrap_or_default();
-    let mut rom_apk_rules = 0usize;
+    let mut pm_rules = 0usize;
+    // PM-published rules live WITHOUT the `(public)` flag, i.e. still subject to
+    // per-UID hiding despite the PackageManager advertising them. Only meaningful
+    // on an engine that reports flags (>= 17); see the finding below.
+    let mut pm_rules_no_public: Vec<PathBuf> = Vec::new();
     if live_ok {
         if let Ok(list) = nm.list() {
             let live = parse_live(&list);
             live_count = live.len();
-            rom_apk_rules = live
-                .iter()
-                .filter(|(t, _)| crate::pmcache::is_rom_apk(t))
-                .count();
-            for (target, source) in &live {
+            for r in &live {
+                let target = &r.target;
+                // Broadened from is_rom_apk: the opt-out now covers a package's whole
+                // codePath (the nativeLibraryDir .so too), so count that.
+                if crate::pmcache::is_pm_published(target) {
+                    pm_rules += 1;
+                    if !r.public {
+                        pm_rules_no_public.push(target.clone());
+                    }
+                }
+                // Partition-root check applies to every kind (a whiteout on a root
+                // masks the whole partition just as an inject does).
                 if is_partition_root(target) {
                     f.push(Finding {
                         level: Level::Error,
                         check: "partition-root rule live",
-                        detail: format!("{} is redirected wholesale -> {}", target.display(), source.display()),
+                        detail: match &r.source {
+                            Some(s) => format!("{} is redirected wholesale -> {}", target.display(), s.display()),
+                            None => format!("{} ({:?}) masks the whole partition", target.display(), r.kind),
+                        },
                     });
                 }
                 // The zygote FD-allowlist trap. Overlay APKs are the dangerous case because
@@ -380,67 +462,96 @@ pub fn run_doctor() -> Result<()> {
                     }
                 }
                 // Served content should be byte-identical in size to its backing; a mismatch
-                // means the redirect is not actually being served.
-                if let (Ok(a), Ok(b)) = (fs::metadata(target), fs::metadata(source)) {
-                    if a.is_file() && b.is_file() && a.len() != b.len() {
-                        f.push(Finding {
-                            level: Level::Warn,
-                            check: "size mismatch",
-                            detail: format!(
-                                "{} is {} bytes, backing is {}",
-                                target.display(),
-                                a.len(),
-                                b.len()
-                            ),
-                        });
+                // means the redirect is not actually being served. Injects only (a
+                // whiteout/virtual-dir has no backing file to compare against).
+                if let Some(source) = &r.source {
+                    if let (Ok(a), Ok(b)) = (fs::metadata(target), fs::metadata(source)) {
+                        if a.is_file() && b.is_file() && a.len() != b.len() {
+                            f.push(Finding {
+                                level: Level::Warn,
+                                check: "size mismatch",
+                                detail: format!(
+                                    "{} is {} bytes, backing is {}",
+                                    target.display(),
+                                    a.len(),
+                                    b.len()
+                                ),
+                            });
+                        }
                     }
                 }
             }
         }
     }
 
-    // A ROM APK is the one injection the system advertises to an app that is
-    // hidden from us: the PackageManager scans those directories as system_server
-    // (never blocked), registers what it finds, and names the path to every app
-    // that asks. `Nm::add` therefore serves them with the hiding opt-out — but
-    // that flag only exists from engine v15, and an older one strips it with
-    // every other unknown bit. The result is silent: the rule applies, the app
-    // still gets ENOENT on a path the PM says exists, and the only symptom is
-    // whatever that app does about it (Trusteer SIGSEGVs). Say so instead.
-    if live_ok && !hidden_apps.is_empty() && rom_apk_rules > 0 && engine.unwrap_or(0) < 15 {
+    // A PM-published file is the one injection the system advertises to an app
+    // that is hidden from us: the PackageManager scans those directories as
+    // system_server (never blocked), registers what it finds, and names the whole
+    // codePath to every app that asks. `Nm::add` therefore serves them with the
+    // hiding opt-out.
+    //
+    // From engine v17 the client PRINTS the per-rule `(public)` flag, so we can
+    // name the exact rules missing it rather than inferring from the version. A
+    // PM-published rule live without the flag on a v17+ engine means the opt-out
+    // did not take, and the hidden app gets ENOENT on a path the PM says exists
+    // (Trusteer SIGSEGVs). The engine is bumped 17 -> 18 this cycle and v18 keeps
+    // the flag behaviour, so this is `>= 17`, not `== 17`.
+    let engine_v = engine.unwrap_or(0);
+    if live_ok && !hidden_apps.is_empty() && engine_v >= 17 && !pm_rules_no_public.is_empty() {
+        let shown: Vec<String> =
+            pm_rules_no_public.iter().take(3).map(|t| t.display().to_string()).collect();
+        let more = pm_rules_no_public.len().saturating_sub(shown.len());
+        f.push(Finding {
+            level: Level::Warn,
+            check: "PM-published rule not opted out of hiding",
+            detail: format!(
+                "engine v{engine_v}: {} PM-published rule(s) are live WITHOUT the (public) flag \
+                 while {} app(s) are hidden, so those apps get ENOENT on a path the \
+                 PackageManager advertises: {}{}",
+                pm_rules_no_public.len(),
+                hidden_apps.len(),
+                shown.join(", "),
+                if more > 0 { format!(", and {more} more") } else { String::new() }
+            ),
+        });
+    }
+
+    // Fallback for engines that do NOT report the flag (< 17): infer from the
+    // version. `Nm::add` opts these rules out, but that flag only exists from
+    // engine v15, and an older one strips it with every other unknown bit. The
+    // result is silent: the rule applies, the app still gets ENOENT on a path the
+    // PM says exists. Say so instead.
+    if live_ok && !hidden_apps.is_empty() && pm_rules > 0 && engine_v < 15 {
         f.push(Finding {
             level: Level::Warn,
             check: "engine predates the hiding opt-out",
             detail: format!(
-                "engine v{} < 15: {rom_apk_rules} ROM APK rule(s) cannot opt out of per-UID \
-                 hiding, so the {} hidden app(s) see a PackageManager-registered path that \
-                 open() refuses. Rebuild the kernel from kbuild@hookless >= 15, or unhide \
+                "engine v{engine_v} < 15: {pm_rules} PM-published rule(s) cannot opt out of \
+                 per-UID hiding, so the {} hidden app(s) see a PackageManager-registered path \
+                 that open() refuses. Rebuild the kernel from kbuild@hookless >= 15, or unhide \
                  any app that walks the package list",
-                engine.unwrap_or(0),
                 hidden_apps.len()
             ),
         });
     }
 
-    // v15 gave an ADDED ROM APK the opt-out but the kernel stripped it again from
-    // any rule that turned out to SHADOW a stock APK, on the reasoning that the
-    // blocked reader is served the stock bytes and is therefore consistent. It is
-    // not: the PackageManager parsed the MODULE's copy as system_server and
-    // publishes that version and signature for the path, so a blocked reader
-    // handed the stock bytes disagrees with what the PM advertises. Engine v17
-    // keeps the bit for APKs. Only the kernel knows which rules shadow, so gate on
-    // the version rather than trying to count them here.
-    if live_ok && !hidden_apps.is_empty() && rom_apk_rules > 0 && (15..17).contains(&engine.unwrap_or(0))
-    {
+    // v15 gave an ADDED PM-published file the opt-out but the kernel stripped it
+    // again from any rule that turned out to SHADOW a stock file, on the reasoning
+    // that the blocked reader is served the stock bytes and is therefore
+    // consistent. It is not: the PackageManager parsed the MODULE's copy as
+    // system_server and publishes that version and signature for the path, so a
+    // blocked reader handed the stock bytes disagrees with what the PM advertises.
+    // Engine v17 keeps the bit. Only the kernel knows which rules shadow, so gate
+    // on the version rather than trying to count them here.
+    if live_ok && !hidden_apps.is_empty() && pm_rules > 0 && (15..17).contains(&engine_v) {
         f.push(Finding {
             level: Level::Warn,
-            check: "engine strips the opt-out from a replaced ROM APK",
+            check: "engine strips the opt-out from a replaced PM-published file",
             detail: format!(
-                "engine v{} < 17: of {rom_apk_rules} ROM APK rule(s), any that REPLACE a stock \
-                 APK still serve the stock bytes to the {} hidden app(s), while the \
+                "engine v{engine_v} < 17: of {pm_rules} PM-published rule(s), any that REPLACE a \
+                 stock file still serve the stock bytes to the {} hidden app(s), while the \
                  PackageManager advertises the module's version and signature for that same \
                  path. Rebuild the kernel from kbuild@hookless >= 17",
-                engine.unwrap_or(0),
                 hidden_apps.len()
             ),
         });
@@ -861,23 +972,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_live_keeps_only_arrow_pairs() {
+    fn parse_live_classifies_every_kind() {
         let s = "/product/x.apk -> /data/adb/modules/M/product/x.apk\n\
                  /system/y (whiteout)\n\
+                 /system/vdir (virtual dir)\n\
                  not a rule line\n\
                  /product/z -> /data/adb/modules/M/product/z\n";
         let v = parse_live(s);
-        assert_eq!(v.len(), 2);
-        assert_eq!(v[0].0, PathBuf::from("/product/x.apk"));
-        assert_eq!(v[0].1, PathBuf::from("/data/adb/modules/M/product/x.apk"));
-        assert_eq!(v[1].0, PathBuf::from("/product/z"));
+        // The whiteout and virtual-dir lines are no longer dropped -- the
+        // partition-root check must see them.
+        assert_eq!(v.len(), 4);
+        assert_eq!(v[0].target, PathBuf::from("/product/x.apk"));
+        assert_eq!(v[0].source.as_deref(), Some(Path::new("/data/adb/modules/M/product/x.apk")));
+        assert_eq!(v[0].kind, LiveKind::Inject);
+        assert_eq!(v[1].kind, LiveKind::Whiteout);
+        assert_eq!(v[1].source, None);
+        assert_eq!(v[2].kind, LiveKind::VirtualDir);
+        assert_eq!(v[3].target, PathBuf::from("/product/z"));
     }
 
     #[test]
-    fn parse_live_strips_the_uid_suffix() {
-        let v = parse_live("/product/x.apk -> /data/adb/modules/M/x.apk [UID: 10123]\n");
+    fn parse_live_strips_uid_and_public_suffixes() {
+        // The ` (public)` flag must be peeled or it lands in the source path and
+        // every fs::metadata(source) check silently no-ops.
+        let v = parse_live("/product/x.apk -> /data/adb/modules/M/x.apk (public) [UID: 10123]\n");
         assert_eq!(v.len(), 1);
-        assert_eq!(v[0].1, PathBuf::from("/data/adb/modules/M/x.apk"));
+        assert_eq!(v[0].source.as_deref(), Some(Path::new("/data/adb/modules/M/x.apk")));
+        assert!(v[0].public);
+        // A whiteout that also carried a flag is still classified as a whiteout.
+        let w = parse_live("/system/y (public) (whiteout)\n");
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].kind, LiveKind::Whiteout);
+        assert!(w[0].public);
+        // A plain inject has no flag.
+        let p = parse_live("/product/z -> /data/adb/modules/M/z\n");
+        assert!(!p[0].public);
     }
 
     #[test]

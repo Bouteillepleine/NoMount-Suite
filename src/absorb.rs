@@ -75,19 +75,27 @@ const BUILTIN_SKIPS: &[&str] = &[
 /// boot. The built-ins are the floor; the file can only raise it.
 fn skip_list() -> (Vec<String>, &'static str) {
     let mut entries: Vec<String> = BUILTIN_SKIPS.iter().map(|s| (*s).to_string()).collect();
+    // Read BOTH files and union them: returning after the first readable one
+    // silently ignored the legacy file whenever the new one existed. Report the
+    // primary (new) file if present, else the legacy, else the built-ins.
+    let mut from = "the built-in list";
     for f in [SKIP_FILE, SKIP_FILE_LEGACY] {
         if let Ok(s) = std::fs::read_to_string(f) {
+            if from == "the built-in list" {
+                from = f;
+            }
             entries.extend(
                 s.lines()
                     .map(|l| l.trim())
                     .filter(|l| !l.is_empty() && !l.starts_with('#'))
                     .map(str::to_string),
             );
-            entries.dedup();
-            return (entries, f);
         }
     }
-    (entries, "the built-in list")
+    // dedup only removes ADJACENT duplicates, so it is a no-op on an unsorted vec.
+    entries.sort();
+    entries.dedup();
+    (entries, from)
 }
 
 /// A module that provides Zygisk or an Xposed framework, detected by what it
@@ -788,7 +796,10 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
         if !is_app_apk(target) || !source.exists() || !target.exists() {
             continue;
         }
-        if live.lines().any(|l| l.split(" -> ").next().is_some_and(|t| t.trim() == target.to_string_lossy())) {
+        // Match the target on the LEFT of the LAST arrow, like the other parsers
+        // (rsplit_once), so a source path containing " -> " cannot mis-match.
+        let tgt = target.to_string_lossy();
+        if live.lines().any(|l| l.rsplit_once(" -> ").is_some_and(|(t, _)| t.trim() == tgt)) {
             continue;
         }
         label_apk_readable(source);
@@ -800,16 +811,11 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
     n
 }
 
+/// The absorbed TARGET set, derived from the pairs record (the file is always the
+/// tab-separated pairs format now — see H18). `reload`'s prune guard is the only
+/// consumer and it needs just the targets.
 pub fn absorbed_targets() -> HashSet<PathBuf> {
-    fs::read_to_string(ABSORBED_LIST)
-        .map(|s| {
-            s.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .map(|l| PathBuf::from(l.split('\t').next().unwrap_or(l)))
-                .collect()
-        })
-        .unwrap_or_default()
+    absorbed_pairs().into_iter().map(|(t, _)| t).collect()
 }
 
 /// Replace the record. `run_mount` calls this with an empty set: it issues
@@ -832,27 +838,6 @@ pub fn set_absorbed_pairs(pairs: &[(PathBuf, PathBuf)]) {
     }
     if let Err(e) = fs::write(ABSORBED_LIST, &body) {
         eprintln!("nomount: could not record absorbed targets: {e:#}");
-    }
-}
-
-pub fn set_absorbed(targets: &[PathBuf]) {
-    if let Some(d) = Path::new(ABSORBED_LIST).parent() {
-        let _ = fs::create_dir_all(d);
-    }
-    let mut body =
-        String::from("# Targets absorb re-serves as injections; reload keeps these.\n");
-    for t in targets {
-        body.push_str(&t.to_string_lossy());
-        body.push('\n');
-    }
-    // Not discarded: `reload` reads this list to keep absorbed rules across a
-    // delta apply, so losing it silently means those targets come back as real
-    // mounts on the next reload with nothing explaining why.
-    if let Err(e) = fs::write(ABSORBED_LIST, &body) {
-        eprintln!(
-            "nomount: could not record absorbed targets in {ABSORBED_LIST}: {e} — \
-             `nomount reload` will not know to keep them, and they may return as mounts"
-        );
     }
 }
 
@@ -939,24 +924,47 @@ fn already_serving(target: &Path, source: &Path) -> bool {
     t.len() == s.len() && t.modified().ok() == s.modified().ok()
 }
 
-fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+/// Serve `source` at `target`, recording each (target, source) pair actually
+/// served into `out`, and returning how many adds FAILED.
+///
+/// Errors are accumulated, not propagated with `?`: the bind is already unmounted
+/// by the time this runs, so bailing on the first failed `nm.add` would leave the
+/// rest of a directory's files reverted to stock. Serve as much as possible and
+/// let the caller report the count. `out` carries the (target, source) PAIRS so
+/// the caller can record a directory bind's children -- the old code returned bare
+/// child targets and the caller then matched them against the parent candidate,
+/// recording nothing for a directory bind (M-S12).
+fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> u32 {
+    let mut failed = 0u32;
     if source.is_dir() {
-        for e in std::fs::read_dir(source)?.flatten() {
-            let ft = e.file_type()?;
+        let entries = match std::fs::read_dir(source) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("nomount: cannot read {} to absorb it: {e}", source.display());
+                return 1;
+            }
+        };
+        for e in entries.flatten() {
+            let Ok(ft) = e.file_type() else {
+                failed += 1;
+                continue;
+            };
             let child_src = e.path();
             let child_tgt = target.join(e.file_name());
             if ft.is_dir() {
-                inject(nm, &child_src, &child_tgt, out)?;
+                failed += inject(nm, &child_src, &child_tgt, out);
+            } else if nm.add(&child_tgt, &child_src).is_ok() {
+                out.push((child_tgt, child_src));
             } else {
-                nm.add(&child_tgt, &child_src)?;
-                out.push(child_tgt);
+                failed += 1;
             }
         }
+    } else if nm.add(target, source).is_ok() {
+        out.push((target.to_path_buf(), source.to_path_buf()));
     } else {
-        nm.add(target, source)?;
-        out.push(target.to_path_buf());
+        failed += 1;
     }
-    Ok(())
+    failed
 }
 
 /// `nomount absorb [--dry-run]`.
@@ -975,12 +983,24 @@ pub(crate) fn pkg_of_apk_target(target: &Path) -> Option<String> {
 }
 
 /// Where PackageManager says the package lives right now.
-fn current_apk_of(pkg: &str) -> Option<PathBuf> {
-    let out = std::process::Command::new("pm").args(["path", pkg]).output().ok()?;
-    String::from_utf8_lossy(&out.stdout)
+///
+/// Three outcomes, kept distinct so a caller never mistakes a transient failure
+/// for an uninstall: `Err` = pm itself failed (ENOENT on PATH, non-zero exit,
+/// binder not up at boot); `Ok(None)` = pm ran and reports the package absent;
+/// `Ok(Some)` = the current path. Invoked by absolute path so a stripped PATH in
+/// the boot environment does not read as "uninstalled".
+fn current_apk_of(pkg: &str) -> Result<Option<PathBuf>> {
+    let out = std::process::Command::new("/system/bin/pm")
+        .args(["path", pkg])
+        .output()
+        .context("exec /system/bin/pm path")?;
+    if !out.status.success() {
+        anyhow::bail!("pm path {pkg} exited {:?}", out.status.code());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
         .find_map(|l| l.strip_prefix("package:"))
-        .map(|p| PathBuf::from(p.trim()))
+        .map(|p| PathBuf::from(p.trim())))
 }
 
 /// Re-point absorbed APK rules at the app's current path.
@@ -995,6 +1015,7 @@ fn current_apk_of(pkg: &str) -> Option<PathBuf> {
 pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     let (mut repointed, mut stale) = (0u32, 0u32);
     let Ok(list) = nm.list() else { return (0, 0) };
+    let mut pm_failed = false;
     for line in list.lines() {
         let Some((target, source)) = line.split_once(" -> ") else { continue };
         let target = Path::new(target.trim());
@@ -1005,13 +1026,28 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
         }
         let Some(pkg) = pkg_of_apk_target(target) else { continue };
         match current_apk_of(&pkg) {
-            Some(now) if now != target && source.exists() => {
+            // pm failed (binder not up at boot, non-zero exit): leave the rule
+            // alone. Treating this as "uninstalled" and deleting dropped every
+            // absorbed APK at once on a transient failure. Log once, not per rule.
+            Err(_) => {
+                if !pm_failed {
+                    pm_failed = true;
+                    eprintln!(
+                        "nomount: pm is not answering; leaving absorbed APK rules untouched \
+                         this pass rather than dropping them as uninstalled"
+                    );
+                }
+            }
+            Ok(Some(now)) if now != *target && source.exists() => {
                 let _ = nm.del(target);
                 if nm.add(&now, &source).is_ok() {
                     repointed += 1;
                 }
             }
-            _ => {
+            // pm answered: the package is gone, or the path is unchanged with no
+            // servable source — the rule points at a path that no longer exists, so
+            // drop it.
+            Ok(_) => {
                 let _ = nm.del(target);
                 stale += 1;
             }
@@ -1097,6 +1133,10 @@ fn absorb_rom_tmpfs(dry_run: bool) -> (u32, u32) {
 }
 
 pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
+    // Serialise against a concurrent mount/reload (M-S9): those clear and rebuild
+    // the engine, and absorb unmounts and re-adds rules -- interleaving the two
+    // corrupts both. A dry run changes nothing, so it needs no lock.
+    let _pass = if dry_run { None } else { crate::mount::pass_lock() };
     let nm = Nm::new();
     nm.version()
         .context("hookless NoMount engine not responding")?;
@@ -1239,8 +1279,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     // exactly what preceded the reboot this path now avoids on my_*.
     let mut reasserted: HashSet<PathBuf> = HashSet::new();
     // Recorded so `reload` does not prune them: an absorbed rule is not in any
-    // module plan, and the reconcile drops whatever the plan does not name.
-    let mut fresh: Vec<PathBuf> = Vec::new();
+    // module plan, and the reconcile drops whatever the plan does not name. Held
+    // as (target, source) pairs so a directory bind's children are recorded too.
+    let mut fresh: Vec<(PathBuf, PathBuf)> = Vec::new();
     for c in &cands {
         // Apply the same directory rule the real run uses, so a dry run can never
         // promise an action the real run would decline.
@@ -1290,9 +1331,10 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
                 continue;
             }
             let mut refreshed = Vec::new();
-            if let Err(e) = inject(&nm, &c.source, &at, &mut refreshed) {
+            let fails = inject(&nm, &c.source, &at, &mut refreshed);
+            if fails > 0 {
                 eprintln!(
-                    "nomount: {} unmounted but re-asserting its rules failed: {e:#} - content may have reverted to the stock file",
+                    "nomount: {} unmounted but re-asserting {fails} of its rule(s) failed - that content may have reverted to the stock file",
                     c.target.display()
                 );
                 failed += 1;
@@ -1347,26 +1389,30 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             failed += 1;
             continue;
         }
-        match inject(&nm, &c.source, &c.target, &mut fresh) {
-            Ok(()) => done += 1,
-            Err(e) => {
-                eprintln!("nomount: absorb of {} failed: {e:#}", c.target.display());
-                failed += 1;
-            }
+        let before = fresh.len();
+        let fails = inject(&nm, &c.source, &c.target, &mut fresh);
+        let served = fresh.len() - before;
+        if fails == 0 {
+            done += 1;
+        } else {
+            eprintln!(
+                "nomount: absorb of {} served {served} rule(s), {fails} failed",
+                c.target.display()
+            );
+            failed += 1;
         }
     }
     // Written even when nothing was absorbed this run: a partially-failed inject
     // still created rules, and those are exactly the ones reload must not drop.
+    // `fresh` already carries the (target, source) pairs -- including a directory
+    // bind's children, which the old parent-matching filter dropped (M-S12).
     let rules = fresh.len() as u32;
-    // Pair each fresh target with the source we just served it from, so a later
-    // boot can re-serve it without the owning module mounting first.
-    let fresh_pairs: Vec<(PathBuf, PathBuf)> = fresh
-        .iter()
-        .filter_map(|t| {
-            cands.iter().find(|c| &c.target == t).map(|c| (t.clone(), c.source.clone()))
-        })
-        .collect();
-    if !fresh_pairs.is_empty() {
+    let fresh_pairs: Vec<(PathBuf, PathBuf)> = fresh;
+    // Written unconditionally, and ONLY in the tab-separated pairs format:
+    // `set_absorbed` used to run right after this and rewrite absorbed.list in the
+    // legacy bare-target form, so `absorbed_pairs()` (which requires a tab) came
+    // back empty forever and the APK re-serve feature was dead (H18).
+    {
         let mut all = absorbed_pairs();
         for p in fresh_pairs {
             if !all.iter().any(|(t, _)| *t == p.0) {
@@ -1376,10 +1422,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         all.sort();
         set_absorbed_pairs(&all);
     }
-    let mut recorded: Vec<PathBuf> = absorbed_targets().into_iter().chain(fresh).collect();
-    recorded.sort();
-    recorded.dedup();
-    set_absorbed(&recorded);
 
     // A leak is worth restating in the summary line: the per-mount notice above
     // scrolls away, and "12 absorbed" reads like success on its own.

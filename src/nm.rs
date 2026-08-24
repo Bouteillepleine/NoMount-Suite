@@ -78,14 +78,15 @@ impl Nm {
     /// `virtual_path` is the on-device target (e.g. `/system/app/Foo/Foo.apk`);
     /// `real` is the backing module file. Mountless.
     ///
-    /// A ROM APK is added with `--public`, i.e. it stays visible to an app on the
-    /// hide list. This is the one class of injection the system advertises to
-    /// that app by other means: the PackageManager scans the ROM APK directories
-    /// as system_server (never hidden), registers what it finds, and then hands
-    /// the path to any app that asks about the package. Hiding the file leaves
-    /// such an app holding a path the PM says exists and `open()` answers ENOENT
-    /// for -- a far louder inconsistency than the injection, and one that is not
-    /// merely theoretical: IBM Trusteer (La Banque Postale) walks the package
+    /// A PM-published file is added with `--public`, i.e. it stays visible to an
+    /// app on the hide list. This is the one class of injection the system
+    /// advertises to that app by other means: the PackageManager scans the ROM
+    /// package directories as system_server (never hidden), registers what it
+    /// finds, and then hands the whole codePath to any app that asks about the
+    /// package -- the APK AND its nativeLibraryDir `.so` files. Hiding any of them
+    /// leaves such an app holding a path the PM says exists and `open()` answers
+    /// ENOENT for -- a far louder inconsistency than the injection, and one that is
+    /// not merely theoretical: IBM Trusteer (La Banque Postale) walks the package
     /// list at startup, calls getResourcesForApplication() on every entry, and
     /// SIGSEGVs on the IOException from 139 unopenable /product/overlay APKs.
     ///
@@ -96,7 +97,7 @@ impl Nm {
     /// so only an ADDED APK is ever exempted, and an engine older than 15 drops
     /// it with every other unknown bit (`nomount doctor` reports that case).
     pub fn add(&self, virtual_path: &Path, real: &Path) -> Result<()> {
-        let public = crate::pmcache::is_rom_apk(virtual_path);
+        let public = crate::pmcache::is_pm_published(virtual_path);
         self.add_flagged(virtual_path, real, public)
     }
 
@@ -219,15 +220,20 @@ mod tests {
         );
     }
 
-    /// The policy `add` applies, stated where it is easy to check: the ROM APKs PM
-    /// scans opt out of hiding, everything else a module ships does not.
+    /// The policy `add` applies, stated where it is easy to check: everything PM
+    /// scans and publishes -- the APK and the nativeLibraryDir .so under a package
+    /// dir -- opts out of hiding, everything else a module ships does not.
     #[test]
-    fn only_rom_apks_opt_out_of_hiding() {
-        for p in ["/product/overlay/OxygenCustomizerComponentNB8.apk", "/system/priv-app/Foo/Foo.apk"] {
-            assert!(crate::pmcache::is_rom_apk(Path::new(p)), "{p} should be public");
+    fn only_pm_published_files_opt_out_of_hiding() {
+        for p in [
+            "/product/overlay/OxygenCustomizerComponentNB8.apk",
+            "/system/priv-app/Foo/Foo.apk",
+            "/system/priv-app/Foo/lib/arm64/libfoo.so",
+        ] {
+            assert!(crate::pmcache::is_pm_published(Path::new(p)), "{p} should be public");
         }
         for p in ["/system/lib64/libfoo.so", "/product/etc/permissions/x.xml", "/data/app/x/base.apk"] {
-            assert!(!crate::pmcache::is_rom_apk(Path::new(p)), "{p} must stay hidden");
+            assert!(!crate::pmcache::is_pm_published(Path::new(p)), "{p} must stay hidden");
         }
     }
 }

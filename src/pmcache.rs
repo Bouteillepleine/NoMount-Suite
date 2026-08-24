@@ -29,38 +29,57 @@ const ROM_ROOTS: &[&str] = &[
     "/my_stock/", "/my_company/", "/my_carrier/", "/my_engineering/", "/my_heytap/", "/my_preload/",
 ];
 
-/// The directory names PM actually scans for packages. An APK anywhere else on a
+/// The directory names PM actually scans for packages. A file anywhere else on a
 /// ROM partition is just a file: PM never parses it, so it has no cache entry to
 /// invalidate and -- far more importantly -- it is not advertised to any app.
 ///
-/// This gate is load-bearing beyond the cache. `Nm::add` passes `is_rom_apk` as
-/// the `--public` flag, i.e. "exempt this rule from per-UID hiding", and the only
-/// justification for that exemption is that the PackageManager already hands the
-/// path to every app that asks (see the NM_FLAG_PUBLIC note in nomount.h). A
-/// path-prefix test alone made every `.apk` under a ROM root public, so a module
+/// This gate is load-bearing beyond the cache. `Nm::add` passes [`is_pm_published`]
+/// as the `--public` flag, i.e. "exempt this rule from per-UID hiding", and the
+/// only justification for that exemption is that the PackageManager already hands
+/// the path to every app that asks (see the NM_FLAG_PUBLIC note in nomount.h). A
+/// path-prefix test alone made every file under a ROM root public, so a module
 /// shipping `/product/etc/foo.apk` or `/product/media/x.apk` -- which PM never
 /// scans, never registers and never advertises -- was handed to the detector apps
 /// on the hide list for no benefit at all. Narrow it to what PM really reads.
+///
+/// The kernel's PUBLIC-strip exemption is changed in lockstep to use this SAME
+/// scan-dir predicate, so this list must stay identical to the kernel's; pmcache.rs
+/// is the single source of truth for it.
 const PM_SCAN_DIRS: &[&str] = &["app", "priv-app", "overlay", "app-ext", "priv-app-ext"];
 
-pub fn is_rom_apk(target: &Path) -> bool {
+/// Any file inside a directory PM scans, i.e. one PM registers a codePath for and
+/// advertises to every app that asks. This is what grants `--public`.
+///
+/// Deliberately NOT limited to the `.apk`: PM publishes a package's whole
+/// codePath, `nativeLibraryDir` included -- `com.android.mms` at
+/// `/product/priv-app/Mms` advertises `legacyNativeLibraryDir=.../Mms/lib`, so the
+/// `.so` files under `Mms/lib/arm64` are named to any app just as `Mms.apk` is.
+/// Hiding them from a blocked uid while PM says they exist is the same
+/// Trusteer-class inconsistency the APK case is (PM names the path, `open()`
+/// answers ENOENT). So every file under `<partition>/<scan-dir>/<PkgDir>/…`,
+/// including the synthesized `lib`/`lib/<abi>` subtree, is exempted.
+pub fn is_pm_published(target: &Path) -> bool {
     let s = target.to_string_lossy();
-    if !target.extension().is_some_and(|e| e == "apk") {
-        return false;
-    }
     if !ROM_ROOTS.iter().any(|r| s.starts_with(r)) {
         return false;
     }
-    // PM's layout is <partition>/<scan-dir>/… -- either the APK directly
+    // PM's layout is <partition>/<scan-dir>/… -- either a file directly
     // (/product/overlay/Foo.apk) or one directory of its own below it
-    // (/product/priv-app/Contacts/Contacts.apk). Match the component after the
-    // partition rather than searching the whole path, so a stray directory called
-    // "app" deeper down does not qualify.
+    // (/product/priv-app/Contacts/Contacts.apk, .../Contacts/lib/arm64/*.so).
+    // Match the component after the partition rather than searching the whole
+    // path, so a stray directory called "app" deeper down does not qualify.
     target
         .components()
         .nth(2)
         .and_then(|c| c.as_os_str().to_str())
         .is_some_and(|d| PM_SCAN_DIRS.contains(&d))
+}
+
+/// A ROM APK PM parses at scan time. The cache-invalidation half of this module
+/// keys on this: only an APK has a cached parse to drop. For the `--public`
+/// decision use [`is_pm_published`], which covers the rest of the codePath too.
+pub fn is_rom_apk(target: &Path) -> bool {
+    target.extension().is_some_and(|e| e == "apk") && is_pm_published(target)
 }
 
 /// The cache-entry prefixes PM may use for this APK. PM names the entry after
@@ -216,12 +235,12 @@ mod tests {
         assert!(!is_rom_apk(Path::new("/data/adb/nomount/apks/youtube-patched.apk")));
     }
 
-    /// An APK on a ROM partition that PM does NOT scan must not be treated as one
-    /// it does: `is_rom_apk` is what grants `--public`, i.e. exemption from
+    /// A file on a ROM partition that PM does NOT scan must not be treated as one
+    /// it does: `is_pm_published` is what grants `--public`, i.e. exemption from
     /// per-UID hiding, and the only thing that justifies the exemption is PM
     /// already advertising the path. A prefix-only test made all of these public.
     #[test]
-    fn apks_outside_a_pm_scan_dir_stay_hidden() {
+    fn files_outside_a_pm_scan_dir_stay_hidden() {
         for p in [
             "/product/etc/foo.apk",
             "/product/media/x.apk",
@@ -229,17 +248,25 @@ mod tests {
             "/vendor/lib/baz.apk",
             "/my_product/etc/extension/q.apk",
         ] {
-            assert!(!is_rom_apk(Path::new(p)), "{p} must NOT be public");
+            assert!(!is_pm_published(Path::new(p)), "{p} must NOT be public");
         }
-        // ...while the directories PM really reads still qualify, in both layouts.
+        // ...while the directories PM really reads still qualify, in both layouts,
+        // and for the WHOLE codePath -- the nativeLibraryDir .so files too, not
+        // just the .apk (the H3 hole: PM advertises Mms/lib/arm64 as well).
         for p in [
             "/product/overlay/OxygenCustomizerComponentNB8.apk",
             "/product/priv-app/Mms/Mms.apk",
+            "/product/priv-app/Mms/lib/arm64/libjni.so",
             "/system_ext/app/Foo/Foo.apk",
+            "/system_ext/app/Foo/lib/arm64/libfoo.so",
             "/my_stock/priv-app/Bar/Bar.apk",
         ] {
-            assert!(is_rom_apk(Path::new(p)), "{p} should be public");
+            assert!(is_pm_published(Path::new(p)), "{p} should be public");
         }
+        // is_rom_apk stays APK-only -- it drives cache invalidation, and only an
+        // APK has a cached parse to drop.
+        assert!(is_rom_apk(Path::new("/product/priv-app/Mms/Mms.apk")));
+        assert!(!is_rom_apk(Path::new("/product/priv-app/Mms/lib/arm64/libjni.so")));
     }
 
     /// Both layouts PM uses, measured on OP15: `Contacts-16-...` for a dir it

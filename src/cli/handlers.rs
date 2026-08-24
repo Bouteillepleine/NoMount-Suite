@@ -192,9 +192,13 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
         if can_retire {
             // Appids are reused after an uninstall, so an entry that now resolves
             // elsewhere has its stale appid unblocked rather than left hiding
-            // injections from whatever inherited it.
+            // injections from whatever inherited it. But a DIFFERENT still-desired
+            // key (shared UID, a glob and an exact entry, a bare UID and a package)
+            // may resolve to that same appid -- unblocking it then un-hides an app
+            // this pass still wants hidden. Leave it blocked when anything desired
+            // still maps to it.
             if let Some(old) = cache.get(key) {
-                if *old != uid {
+                if *old != uid && !desired.values().any(|v| *v == *old) {
                     let _ = nm.uid_unblock(*old);
                     live.retain(|u| appid(*u) != *old);
                     rep.retired += 1;
@@ -227,6 +231,13 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
     if can_retire {
         for (key, old) in &cache {
             if desired.contains_key(key) {
+                continue;
+            }
+            // A different still-desired key may resolve to the same appid (shared
+            // UID, glob + exact, bare UID + package). Retiring by key alone would
+            // then unblock an app another entry still wants hidden -- print
+            // "hidden N" while un-hiding one. Skip when anything desired maps here.
+            if desired.values().any(|v| *v == *old) {
                 continue;
             }
             let _ = nm.uid_unblock(*old);
