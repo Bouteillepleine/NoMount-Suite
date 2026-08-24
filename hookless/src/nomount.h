@@ -897,6 +897,28 @@ static inline int nm_call_iterate(struct file *file, struct dir_context *ctx, co
     return -ENOTDIR;
 }
 
+/* Recover our nm_fop from a (possibly hijacked) file_operations.
+ *
+ * The hijack mirrors whichever readdir op the filesystem itself implements, so
+ * the identity probe has to check both: before 6.6 the VFS picks the SHARED or
+ * EXCLUSIVE inode lock by whether ->iterate_shared is set, and installing it on a
+ * filesystem that only implements ->iterate silently downgrades the exclusion
+ * that split exists to express. From 6.6 ->iterate is gone and only the first
+ * probe can match. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+#define nm_get_fop(p) ({                                                        \
+    const struct file_operations *__nf = (p);                                   \
+    struct nm_fop *__nr = __get_nm(__nf, struct nm_fop, fake_fop,               \
+                                   iterate_shared, nomount_hijacked_iterate_dir);\
+    if (!__nr)                                                                  \
+        __nr = __get_nm(__nf, struct nm_fop, fake_fop,                          \
+                        iterate, nomount_hijacked_iterate_dir);                 \
+    __nr; })
+#else
+#define nm_get_fop(p) \
+    __get_nm((p), struct nm_fop, fake_fop, iterate_shared, nomount_hijacked_iterate_dir)
+#endif
+
 /* Install our dentry ops on a dentry we manage. Setting d_op alone is NOT enough:
  * a dentry allocated on a hijacked sb (e.g. overlayfs, whose s_d_op is
  * ovl_dentry_operations) already has the sb's DCACHE_OP_* flags set, so the VFS

@@ -199,7 +199,7 @@ static __always_inline struct nomount_dir_node *nomount_get_dir_node(struct inod
     nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
     if (nm_iop && nm_iop->dir_node) return nm_iop->dir_node;
 
-    nm_fop = __get_nm(smp_load_acquire(&inode->i_fop), struct nm_fop, fake_fop, iterate_shared, nomount_hijacked_iterate_dir);
+    nm_fop = nm_get_fop(smp_load_acquire(&inode->i_fop));
     if (nm_fop && nm_fop->dir_node) return nm_fop->dir_node;
     
     return NULL;
@@ -705,7 +705,7 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
      * RCU, copy orig_fop (real fs const ops), never deref nm_fop after -- a
      * concurrent del/clear can call_rcu-free it across nm_call_iterate's sleep. */
     rcu_read_lock();
-    nm_fop = __get_nm(smp_load_acquire(&file->f_op), struct nm_fop, fake_fop, iterate_shared, nomount_hijacked_iterate_dir);
+    nm_fop = nm_get_fop(smp_load_acquire(&file->f_op));
     orig_fop = nm_fop ? nm_fop->orig_fop : NULL;
     pdir = nm_fop ? nm_fop->dir_node : NULL;
     if (pdir && !atomic_inc_not_zero(&pdir->refcount)) pdir = NULL;
@@ -1679,7 +1679,17 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
             .ctx.actor = nomount_actor_proxy, .ctx.pos = ctx->pos,
             .orig_ctx = ctx, .dir_node = dir_node, .emitted = 0
         };
-        res = nm_call_iterate(real_file, &proxy_ctx.ctx, real_file->f_op);
+        /* iterate_dir(), not a hand dispatch of ->iterate_shared: the VFS took
+         * i_rwsem on OUR synthetic inode, which is a different inode on a
+         * different superblock from the backing directory. Calling the backing
+         * fs's readdir directly left it unserialised -- and the backing dir lives
+         * on /data (f2fs/ext4), a writable fs where concurrent modification
+         * during ->iterate_shared is exactly what that rwsem excludes. It also
+         * skipped security_file_permission(), fsnotify and the IS_DEADDIR check,
+         * and never synced real_file->f_pos. The scan helpers in this file
+         * (nm_dir_ino_pop, nm_iter_dotdot, nm_scan_dir_for_file) already go
+         * through iterate_dir for the same reason. */
+        res = iterate_dir(real_file, &proxy_ctx.ctx);
         ctx->pos = proxy_ctx.ctx.pos;
         if (res < 0 || proxy_ctx.emitted > 0) return res;
         if (!dir_node) return res;
@@ -1954,7 +1964,19 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     if (nomount_get_rule_info(pdir, dentry->d_name.name, dentry->d_name.len, hash, &rule_info, false)) {
         nm_put_rule_info(&rule_info);
         nm_dir_node_put(pdir);                            /* pin no longer needed past the lookup */
-        if (rule_info.flags & NM_FLAG_WHITEOUT) return d_is_negative(dentry) ? 1 : 0;
+        /* A whiteout hides a stock name -- but NOT from a reader the block list
+         * says must see the stock filesystem. Evaluating this before the
+         * nm_uid_hidden() test below meant the answer depended on which uid
+         * touched the path first: once any ordinary reader resolved the whiteout,
+         * d_add(dentry, NULL) left a hashed negative in the SHARED dcache, this
+         * branch validated it for everyone, and a blocked reader got -ENOENT for
+         * a file it is entitled to see -- without ever reaching ->lookup again.
+         * Same first-toucher-wins class the uid-scoped path already guards. */
+        if (rule_info.flags & NM_FLAG_WHITEOUT) {
+            if (nm_uid_hidden(rule_info.flags))
+                return 0;                 /* re-resolve; the blocked reader gets stock */
+            return d_is_negative(dentry) ? 1 : 0;
+        }
 
         /* Per-UID consistency: a BLOCKED reader must see the stock fs (non-injected),
          * so an injected dentry is invalid for it; a NORMAL reader must see the
@@ -2176,7 +2198,7 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
 static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_node, struct inode *inode)
 {
     struct nm_fop *nm_fop;
-    if (unlikely(!inode->i_fop || __get_nm(smp_load_acquire(&inode->i_fop), struct nm_fop, fake_fop, iterate_shared, nomount_hijacked_iterate_dir))) return;
+    if (unlikely(!inode->i_fop || nm_get_fop(smp_load_acquire(&inode->i_fop)))) return;
 
     nm_fop = kmem_cache_zalloc(nm_fop_cachep, GFP_KERNEL);
     if (likely(nm_fop)) {
@@ -2184,9 +2206,17 @@ static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_no
         nm_fop->orig_fop = inode->i_fop;
         nm_fop->dir_node = dir_node;
 
-        nm_fop->fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
+        /* Mirror the ops the filesystem actually implements. Installing
+         * ->iterate_shared unconditionally made the pre-6.6 VFS take the SHARED
+         * inode lock for a filesystem that only implements ->iterate, i.e. one
+         * that declared it needs exclusion -- concurrent readdirs would then race
+         * whatever per-directory state it keeps. From 6.6 ->iterate is gone and
+         * every directory implements ->iterate_shared, so this is a no-op there.
+         * nm_get_fop() probes both, so the hijack is still recognisable. */
+        if (nm_fop->orig_fop->iterate_shared)
+            nm_fop->fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
-        if (nm_fop->fake_fop.iterate)
+        if (nm_fop->orig_fop->iterate)
             nm_fop->fake_fop.iterate = nomount_hijacked_iterate_dir;
 #endif
 
@@ -2267,7 +2297,7 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
         spin_unlock(&nm_retired_lock);
     }
 
-    nm_fop = __get_nm(smp_load_acquire(&t_inode->i_fop), struct nm_fop, fake_fop, iterate_shared, nomount_hijacked_iterate_dir);
+    nm_fop = nm_get_fop(smp_load_acquire(&t_inode->i_fop));
     if (nm_fop && nm_fop->dir_node == dir_node) {
         smp_store_release(&t_inode->i_fop, nm_fop->orig_fop);
         nm_debug("Successfully cured i_fop for dir %lu\n", t_inode->i_ino);
@@ -3941,7 +3971,15 @@ static bool nm_vpath_in_pm_scandir(const struct nomount_rule *rule)
     return false;
 }
 
-static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid)
+/* `victims`, when non-NULL, collects rules this add REPLACED instead of freeing
+ * them inline. A replacement must outlive one RCU grace period before it can be
+ * freed, and paying that per rule cost the batch form N grace periods: a reload
+ * re-adds over every live rule (260 on the measured device), inside the boot
+ * injection pass whose watchdog budget is already tight. The DEL batch has always
+ * collected and paid once; this lets ADD do the same. A NULL list keeps the old
+ * inline behaviour for the single-rule callers. */
+static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid,
+                              struct hlist_head *victims)
 {
     struct nomount_rule *rule, *existing, *victim = NULL;
     int err = 0;
@@ -3960,6 +3998,25 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     if (IS_ERR(rule)) {
         mutex_unlock(&nomount_write_mutex);
         return PTR_ERR(rule);
+    }
+
+    /* Rules are keyed on (vpath, target_uid), but a parent's child nodes are keyed
+     * on NAME ALONE -- one node per name, whose ->rule the inject path overwrites.
+     * So a second rule on the same vpath with a DIFFERENT target_uid does not dedup
+     * here, then silently steals the child node from the first: the earlier rule
+     * stays in the table and is still listed, but nothing can ever reach it, and
+     * deleting it finds no child to remove and reports success. Refuse the
+     * collision rather than build a topology that cannot represent it. */
+    hash_for_each_possible(nomount_rules_ht, existing, vpath_node, rule->v_hash) {
+        if (existing->v_hash == rule->v_hash && existing->v_len == v_len &&
+            existing->target_uid != target_uid &&
+            memcmp(nm_get_vpath(existing), nm_get_vpath(rule), v_len) == 0) {
+            nm_warn("refusing rule on '%.*s' for uid %u: uid %u already owns this path\n",
+                    (int)v_len, v_path, target_uid, existing->target_uid);
+            mutex_unlock(&nomount_write_mutex);
+            nm_free_rule(rule);
+            return -EEXIST;
+        }
     }
 
     hash_for_each_possible(nomount_rules_ht, existing, vpath_node, rule->v_hash) {
@@ -4044,9 +4101,11 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
          * relying on the overwrite. (No-op when the re-point did happen.) */
         if (victim)
             __nomount_delete_child_locked(victim->parent_dir, victim);
+        if (victim && victims)
+            hlist_add_head(&victim->victim_node, victims);
         mutex_unlock(&nomount_write_mutex);
         nm_free_rule(rule);
-        if (victim) {
+        if (victim && !victims) {
             synchronize_rcu();
             nm_free_rule(victim);
         }
@@ -4062,9 +4121,11 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
      * pointer to the about-to-be-freed victim when it did not. */
     if (unlikely(victim))
         __nomount_delete_child_locked(victim->parent_dir, victim);
+    if (unlikely(victim) && victims)
+        hlist_add_head(&victim->victim_node, victims);
     mutex_unlock(&nomount_write_mutex);
 
-    if (unlikely(victim)) {
+    if (unlikely(victim) && !victims) {
         synchronize_rcu();
         nm_free_rule(victim);
     }
@@ -4140,6 +4201,9 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
         const char *data = nla_data(attr), *v_ptr, *r_ptr;
         int len = nla_len(attr);
         int pos = 0, err = 0, first_err = 0, nfail = 0;
+        struct nomount_rule *v_rule;
+        struct hlist_node *v_tmp;
+        HLIST_HEAD(a_victims);
 
         while (pos + 12 <= len) {
             u32 flags      = get_unaligned((const u32 *)(data + pos));
@@ -4153,12 +4217,18 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
 
             v_ptr = data + pos; pos += vp_len;
             r_ptr = data + pos;  pos += rp_len;
-            err = __nomount_add_rule(v_ptr, r_ptr, vp_len, rp_len, flags, target_uid);
+            err = __nomount_add_rule(v_ptr, r_ptr, vp_len, rp_len, flags, target_uid, &a_victims);
             if (err) {
                 nm_err("Failed to inject rule batch entry (err: %d)\n", err);
                 nfail++;
                 if (!first_err) first_err = err;
             }
+        }
+        /* One grace period for the whole batch, not one per replaced rule. */
+        if (!hlist_empty(&a_victims)) {
+            synchronize_rcu();
+            hlist_for_each_entry_safe(v_rule, v_tmp, &a_victims, victim_node)
+                nm_free_rule(v_rule);
         }
         /* Report the first rejection instead of an unconditional 0.
          *
@@ -4191,7 +4261,8 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
         u32 target_uid = attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID]) : 0;
 
         if (v_len == 0) return -EINVAL;
-        return __nomount_add_rule(v_str, r_str, v_len, r_len, flags, target_uid);
+        /* Single rule: no batch to amortise over, so free the victim inline. */
+        return __nomount_add_rule(v_str, r_str, v_len, r_len, flags, target_uid, NULL);
     }
     return -EINVAL;
 }
@@ -4262,7 +4333,7 @@ static int nomount_nl_dump_rules(struct sk_buff *skb, struct netlink_callback *c
     struct nomount_rule *rule;
     int current_bkt = cb->args[0];
     int skip_nodes  = cb->args[1];
-    int bkt, node_idx = 0;
+    int bkt, node_idx = 0, emitted = 0;
     long gen = (long)atomic_read(&nm_rule_gen) + 1;
     void *hdr;
 
@@ -4290,6 +4361,7 @@ static int nomount_nl_dump_rules(struct sk_buff *skb, struct netlink_callback *c
             }
             nlmsg_end(skb, hdr);
             node_idx++;
+            emitted++;
         }
         skip_nodes = 0;
     }
@@ -4297,7 +4369,18 @@ static int nomount_nl_dump_rules(struct sk_buff *skb, struct netlink_callback *c
 out:
     rcu_read_unlock();
     cb->args[0] = bkt;
-    cb->args[1] = node_idx; 
+    cb->args[1] = node_idx;
+    /* A rule too big for an empty skb can never be emitted: the put fails, we
+     * cancel, and returning 0 here reads to netlink_dump() as end-of-dump --
+     * NLMSG_DONE, no error, and the caller silently gets a SHORT LIST. Resume is
+     * by (bucket, ordinal) and args[1] is not advanced past it, so a retry hits
+     * the same rule and truncates identically. This is the same class the
+     * generation guard above exists to prevent, reached by a different door, so
+     * fail loudly instead. NLMSG_GOODSIZE (~3968B on 4K pages) against a policy
+     * that permits PATH_MAX on both strings is what makes it reachable; the
+     * dump control now also asks for a bigger buffer up front. */
+    if (!emitted && bkt < (1 << NOMOUNT_HASH_BITS))
+        return -EMSGSIZE;
     return skb->len;
 }
 
@@ -4500,6 +4583,11 @@ static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
             .dump = cmd == NM_CMD_GET_LIST ? nomount_nl_dump_rules
                   : cmd == NM_CMD_GET_UIDS ? nomount_nl_dump_uids
                                            : nomount_nl_dump_pathhide,
+            /* Without this netlink allocates NLMSG_GOODSIZE (~3968B on 4K
+             * pages), which cannot hold one rule whose two PATH_MAX strings the
+             * attribute policy allows -- and an un-emittable first rule ends the
+             * dump early with no error. Ask for a buffer that always fits one. */
+            .min_dump_alloc = 2 * PATH_MAX + 512,
         };
         return netlink_dump_start(nm_nl_sk, skb, nlh, &c);
     }
