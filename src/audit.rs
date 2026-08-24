@@ -563,6 +563,15 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     if readable.is_empty() {
         return skip(NAME, format!("{} ROM APK rule(s), none readable as root", apks.len()));
     }
+    // The size WE are served, to compare the hidden child against. Opening is only
+    // half the question: a rule that shadows a stock APK answers a blocked reader
+    // from the stock file, so open() succeeds and the check used to pass -- while
+    // the bytes differ from the ones the PackageManager parsed and published a
+    // version and signature for. Measured on OP15 against engine v16:
+    // /product/priv-app/Contacts/Contacts.apk served 74641847 bytes to us and
+    // 64249089 to a hidden uid, with PM advertising the former as 16.80.0.
+    let ours: Vec<u64> =
+        readable.iter().map(|p| fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(0)).collect();
 
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
@@ -591,43 +600,68 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
                 && libc::setgid(appid) == 0
                 && libc::setuid(appid) == 0
         };
+        let mut mismatched = 0u32;
         if dropped {
-            for p in &readable {
+            for (p, &our_len) in readable.iter().zip(ours.iter()) {
                 if fs::File::open(p.as_path()).is_err() {
                     denied += 1;
+                } else if fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(our_len) != our_len {
+                    mismatched += 1;
                 }
             }
         } else {
             denied = u32::MAX;
         }
-        let buf = denied.to_ne_bytes();
-        unsafe { libc::write(wr, buf.as_ptr() as *const libc::c_void, 4) };
+        let mut buf = [0u8; 8];
+        buf[..4].copy_from_slice(&denied.to_ne_bytes());
+        buf[4..].copy_from_slice(&mismatched.to_ne_bytes());
+        unsafe { libc::write(wr, buf.as_ptr() as *const libc::c_void, 8) };
         unsafe { libc::_exit(0) };
     }
     unsafe { libc::close(wr) };
-    let mut buf = [0u8; 4];
-    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 4) };
+    let mut buf = [0u8; 8];
+    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
     unsafe { libc::close(rd) };
     let mut status = 0i32;
     unsafe { libc::waitpid(pid, &mut status, 0) };
-    if got != 4 {
+    if got != 8 {
         return skip(NAME, "probe child said nothing".into());
     }
-    let denied = u32::from_ne_bytes(buf);
+    let denied = u32::from_ne_bytes(buf[..4].try_into().unwrap_or_default());
+    let mismatched = u32::from_ne_bytes(buf[4..].try_into().unwrap_or_default());
     if denied == u32::MAX {
         return skip(NAME, format!("could not drop to uid {appid}"));
     }
-    if denied == 0 {
+    if denied == 0 && mismatched == 0 {
         return pass(
             NAME,
-            format!("uid {appid} (hidden) opened all {} ROM APK rule target(s)", readable.len()),
+            format!(
+                "uid {appid} (hidden) opened all {} ROM APK rule target(s), same bytes we serve",
+                readable.len()
+            ),
+        );
+    }
+    if denied == 0 {
+        return fail(
+            NAME,
+            format!(
+                "uid {appid} (hidden) opened all {} ROM APK rule target(s) but {mismatched} \
+                 differed in size from the copy we serve",
+                readable.len()
+            ),
+            "those rules shadow a stock APK, so the blocked reader is answered from the stock \
+             file -- while the PackageManager parsed OUR copy and publishes its version and \
+             signature for that path, a disagreement the app can measure. Engine >= 17 keeps \
+             NM_FLAG_PUBLIC on a shadowed APK; below that the kernel strips it",
         );
     }
     fail(
         NAME,
         format!(
-            "uid {appid} (hidden) could not open {denied} of {} ROM APK rule target(s)",
-            readable.len()
+            "uid {appid} (hidden) could not open {denied} of {} ROM APK rule target(s)\
+             {}",
+            readable.len(),
+            if mismatched > 0 { format!(", and {mismatched} more differed in size") } else { String::new() }
         ),
         "the PackageManager names those paths to the app while open() answers ENOENT -- \
          an inconsistency no stock device has, and one that crashes RASP code that walks \

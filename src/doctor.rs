@@ -422,6 +422,30 @@ pub fn run_doctor() -> Result<()> {
         });
     }
 
+    // v15 gave an ADDED ROM APK the opt-out but the kernel stripped it again from
+    // any rule that turned out to SHADOW a stock APK, on the reasoning that the
+    // blocked reader is served the stock bytes and is therefore consistent. It is
+    // not: the PackageManager parsed the MODULE's copy as system_server and
+    // publishes that version and signature for the path, so a blocked reader
+    // handed the stock bytes disagrees with what the PM advertises. Engine v17
+    // keeps the bit for APKs. Only the kernel knows which rules shadow, so gate on
+    // the version rather than trying to count them here.
+    if live_ok && !hidden_apps.is_empty() && rom_apk_rules > 0 && (15..17).contains(&engine.unwrap_or(0))
+    {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "engine strips the opt-out from a replaced ROM APK",
+            detail: format!(
+                "engine v{} < 17: of {rom_apk_rules} ROM APK rule(s), any that REPLACE a stock \
+                 APK still serve the stock bytes to the {} hidden app(s), while the \
+                 PackageManager advertises the module's version and signature for that same \
+                 path. Rebuild the kernel from kbuild@hookless >= 17",
+                engine.unwrap_or(0),
+                hidden_apps.len()
+            ),
+        });
+    }
+
     // ---- report ------------------------------------------------------------
     let injects = plan.iter().filter(|e| e.kind == PlanKind::Inject).count();
     let whiteouts = plan.iter().filter(|e| e.kind == PlanKind::Whiteout).count();
