@@ -274,6 +274,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_attr_mask = rule->v_attr_mask;
                 rule_info->v_blksize = rule->v_blksize;
                 rule_info->v_result_mask = rule->v_result_mask;
+                rule_info->v_cap = rule->v_cap;
                 rule_info->v_uid = rule->v_uid;
                 rule_info->v_gid = rule->v_gid;
                 rule_info->v_mode = rule->v_mode;
@@ -533,6 +534,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     info->v_attr_mask = rule_info->v_attr_mask;
     info->v_blksize = rule_info->v_blksize;
     info->v_result_mask = rule_info->v_result_mask;
+    info->v_cap = rule_info->v_cap;
 
     inode->i_private = info;
     inode->i_ino = rule_info->v_ino;
@@ -946,6 +948,28 @@ static int nm_open(struct inode *inode, struct file *file)
     }
 
     file->private_data = real_file;
+    /* Mirror the stock answer for O_DIRECT.
+     *
+     * do_dentry_open() sets FMODE_CAN_ODIRECT from f_mapping->a_ops->direct_IO
+     * AFTER ->open returns, then rejects O_DIRECT when the bit is clear -- so the
+     * filesystem under the backing file decides it. Uncompressed erofs supplies
+     * noop_direct_IO, f2fs does not: an injected file therefore answered -EINVAL
+     * where 20 of its 24 stock siblings answered 0. Measured on OP15 in
+     * /system/etc/permissions.
+     *
+     * We cannot set f_mode from here (it is overwritten below us), but we can
+     * drop the flag the check keys on. Dropping it makes the open SUCCEED, which
+     * is what stock does, and costs nothing semantically: erofs's direct_IO is
+     * noop_direct_IO, i.e. stock falls back to buffered I/O anyway.
+     *
+     * Only when the stock file really would accept it, and only when our backing
+     * mapping would not -- otherwise leave the caller's flags alone. */
+    if (unlikely((file->f_flags & O_DIRECT) && info->v_cap & NM_CAP_ODIRECT)) {
+        struct address_space *m = real_file->f_mapping;
+
+        if (!m || !m->a_ops || !m->a_ops->direct_IO)
+            file->f_flags &= ~O_DIRECT;
+    }
     return 0;
 }
 
@@ -1105,9 +1129,41 @@ static long nm_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
     return real_file->f_op->fallocate(real_file, mode, offset, len);
 }
 
+/* Which filesystem-dependent file-op answers does THIS inode give?
+ *
+ * Sampled from a stock file (the one a rule shadows, or a sibling on the same
+ * partition) so the ops can replay them for the injected file, whose backing
+ * lives on a different filesystem. See NM_CAP_*. */
+static u8 nm_stock_caps(struct inode *ino)
+{
+    u8 cap = 0;
+
+    if (!ino) return 0;
+    if (ino->i_fop && ino->i_fop->fsync) cap |= NM_CAP_FSYNC;
+    if (ino->i_mapping && ino->i_mapping->a_ops && ino->i_mapping->a_ops->direct_IO)
+        cap |= NM_CAP_ODIRECT;
+    return cap;
+}
+
 static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
     struct file *real_file = file->private_data;
+    struct nm_inode_info *info = file_inode(file)->i_private;
+
+    /* Answer what a STOCK file here would answer.
+     *
+     * The backing file is on /data (f2fs, which has ->fsync); its neighbours are
+     * on erofs, which has none, so vfs_fsync_range() gives them -EINVAL. Simply
+     * forwarding therefore made the injected file the ONLY one in its directory
+     * that returned 0 -- one syscall per file, no reference device, no timing.
+     * Measured on OP15: all 24 stock files in /system/etc/permissions returned
+     * EINVAL and the single injected one returned 0.
+     *
+     * v_cap is captured from the shadowed file (or the sampled sibling) at rule
+     * build. When it is 0 we learned nothing and keep the old behaviour rather
+     * than inventing an answer. */
+    if (info && info->v_cap && !(info->v_cap & NM_CAP_FSYNC))
+        return -EINVAL;
     if (!real_file || !real_file->f_op->fsync) return -EINVAL;
     return real_file->f_op->fsync(real_file, start, end, datasync);
 }
@@ -3498,7 +3554,7 @@ static u64 nm_child_dotdot_of(const char *dirpath)
 }
 
 static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
-                                char *octx, u16 *octxlen, dev_t *omapdev, int depth)
+                                char *octx, u16 *octxlen, dev_t *omapdev, u8 *ocap, int depth)
 {
     struct nm_sib_scan *sc;
     struct path dp;
@@ -3560,6 +3616,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                 char fctx[NM_CTX_MAX];
                 u16 fctxlen = 0;
                 dev_t fmapdev = 0;
+                u8 fcap = 0;
 
                 /* Read the label and the lower dev BEFORE dropping the
                  * reference; a pure injection has no stock file of its own to
@@ -3575,6 +3632,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                      * every PURE injection -- which is what reaches this sibling
                      * scan -- still announcing the lower dev in /proc/<pid>/maps. */
                     fmapdev = nm_stock_map_dev(fp.dentry);
+                    fcap = nm_stock_caps(d_backing_inode(fp.dentry));
                 }
                 path_put(&fp);
                 if (r == 0 && (pass == 1 ||
@@ -3586,6 +3644,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                         if (fctxlen) memcpy(octx, fctx, fctxlen + 1);
                     }
                     if (omapdev) *omapdev = fmapdev;
+                    if (ocap) *ocap = fcap;
                     kfree(cp); ret = 0; goto done;
                 }
             }
@@ -3597,7 +3656,7 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
         char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->subdirs[i]);
 
         if (!cp) continue;
-        if (nm_scan_dir_for_file(cp, out, octx, octxlen, omapdev, depth + 1) == 0) { kfree(cp); ret = 0; goto done; }
+        if (nm_scan_dir_for_file(cp, out, octx, octxlen, omapdev, ocap, depth + 1) == 0) { kfree(cp); ret = 0; goto done; }
         kfree(cp);
     }
 done:
@@ -3615,10 +3674,11 @@ static struct kstat nm_sib_cache_kst;
 static char nm_sib_cache_ctx[NM_CTX_MAX];
 static u16 nm_sib_cache_ctxlen;
 static dev_t nm_sib_cache_mapdev;
+static u8 nm_sib_cache_cap;
 static bool nm_sib_cache_valid;
 
 static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
-                                char *octx, u16 *octxlen, dev_t *omapdev)
+                                char *octx, u16 *octxlen, dev_t *omapdev, u8 *ocap)
 {
     char *path = kstrdup(vpath, GFP_KERNEL);
     char *slash;
@@ -3637,12 +3697,13 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
             if (nm_sib_cache_ctxlen) memcpy(octx, nm_sib_cache_ctx, nm_sib_cache_ctxlen + 1);
         }
         if (omapdev) *omapdev = nm_sib_cache_mapdev;
+        if (ocap) *ocap = nm_sib_cache_cap;
         kfree(path);
         return 0;
     }
 
     for (;;) {
-        if (nm_scan_dir_for_file(path, out, octx, octxlen, omapdev, 0) == 0) { ret = 0; break; }
+        if (nm_scan_dir_for_file(path, out, octx, octxlen, omapdev, ocap, 0) == 0) { ret = 0; break; }
         slash = strrchr(path, '/');
         if (!slash || slash == path)
             break;
@@ -3657,6 +3718,7 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
             nm_sib_cache_ctxlen = (octx && octxlen) ? *octxlen : 0;
             if (nm_sib_cache_ctxlen) memcpy(nm_sib_cache_ctx, octx, nm_sib_cache_ctxlen + 1);
             nm_sib_cache_mapdev = omapdev ? *omapdev : 0;
+            nm_sib_cache_cap = ocap ? *ocap : 0;
             nm_sib_cache_valid = true;
         }
     }
@@ -3781,6 +3843,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_attributes = kst.attributes;   /* STATX_ATTR_* only exist >= 4.11 */
             rule->v_attr_mask = kst.attributes_mask;
 #endif
+            rule->v_cap = nm_stock_caps(d_backing_inode(v_path_struct.dentry));
         } else {
             rule->v_ino = d_backing_inode(v_path_struct.dentry)->i_ino;
             rule->v_dev = d_backing_inode(v_path_struct.dentry)->i_sb->s_dev;
@@ -3808,7 +3871,8 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         struct kstat sib;
 
         if (nm_find_sibling_meta(nm_get_vpath(rule), &sib,
-                                 rule->v_ctx, &rule->v_ctx_len, &rule->v_mapdev) == 0) {
+                                 rule->v_ctx, &rule->v_ctx_len, &rule->v_mapdev,
+                                 &rule->v_cap) == 0) {
             rule->v_dev   = sib.dev;
             rule->flags |= NM_FLAG_HAVE_TIMES;
             rule->v_atime = sib.atime;

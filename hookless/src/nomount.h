@@ -107,6 +107,7 @@
 #define nm_fop_cachep                            __vfsx_049
 #define nm_free_rule                             __vfsx_051
 #define nm_fsync                                 __vfsx_052
+#define nm_stock_caps                            __vfsx_184
 #define nm_full_xattr_name                       __vfsx_053
 #define nm_get_link                              __vfsx_054
 #define nm_hide_isolated                         __vfsx_055
@@ -168,6 +169,7 @@
 #define nm_sib_cache_dir                         __vfsx_112
 #define nm_sib_cache_kst                         __vfsx_113
 #define nm_sib_cache_mapdev                      __vfsx_114
+#define nm_sib_cache_cap                         __vfsx_185
 #define nm_sib_cache_valid                       __vfsx_115
 #define nm_sib_scan                              __vfsx_116
 #define nm_snapshot_bootconfig                   __vfsx_117
@@ -382,6 +384,19 @@
 #define NM_FLAGS_USER_MASK  (NM_FLAG_VIRTUAL_DIR | NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96   /* inline SELinux context; Android's are ~30B */
 
+/* Answers a STOCK file at this path gives to file ops whose result depends on
+ * which FILESYSTEM backs it rather than on the file's contents.
+ *
+ * The injected file is backed by /data (f2fs) while its neighbours are erofs, so
+ * these diverge by default and each one is a baseline-free, one-syscall oracle:
+ * measured on OP15, fsync() returned 0 on the single injected file in
+ * /system/etc/permissions and -EINVAL on all 24 stock siblings, because erofs has
+ * no ->fsync and f2fs does. Captured from the shadowed file (or, for a pure
+ * addition, from the sibling already sampled for st_blksize and STATX_ATTR_*) and
+ * replayed by the ops, the same "mirror the stock answer" rule as v_dev/v_ino. */
+#define NM_CAP_FSYNC        (1 << 0)   /* stock fops has ->fsync */
+#define NM_CAP_ODIRECT      (1 << 1)   /* stock mapping's a_ops has ->direct_IO */
+
 /* logs
  *
  * nm_debug is compiled OUT by default. The hijacked lookup path logs once per
@@ -493,6 +508,7 @@ struct nm_inode_info {
     u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
     u32 v_blksize;                   /* mirrored st_blksize */
     u32 v_result_mask;               /* statx result_mask a STOCK file reports */
+    u8  v_cap;                       /* NM_CAP_*: file-op answers a STOCK file gives */
     kuid_t v_uid;                    /* virtual-dir owner (mirrored from nearest real ancestor) */
     kgid_t v_gid;
     umode_t v_mode;                  /* virtual-dir mode bits (0 => default 0755) */
@@ -582,6 +598,7 @@ struct nomount_rule {
     u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
     u32 v_blksize;                   /* mirrored st_blksize */
     u32 v_result_mask;               /* statx result_mask a STOCK file reports */
+    u8  v_cap;                       /* NM_CAP_*: file-op answers a STOCK file gives */
     kuid_t v_uid;                    /* virtual-dir owner (mirrored from nearest real ancestor) */
     kgid_t v_gid;
     umode_t v_mode;                  /* virtual-dir mode bits (0 => default 0755) */
@@ -629,6 +646,7 @@ struct nm_rule_info {
     u64 v_attributes, v_attr_mask;
     u32 v_blksize;
     u32 v_result_mask;
+    u8  v_cap;
     kuid_t v_uid;
     kgid_t v_gid;
     umode_t v_mode;
