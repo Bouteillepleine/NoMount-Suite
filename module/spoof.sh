@@ -235,7 +235,17 @@ compute_vbmeta_digest() {
 
 do_vbmeta() {
     local mode=$1 cur cache="$NMDIR/vbmeta_digest.cache" szcache="$NMDIR/vbmeta_size.cache" dg="" sz=""
-    [ "$mode" = "off" ] && { log "vbmeta.digest: off"; return 0; }
+    # digest=off must NOT skip the size half. These are two independent settings
+    # (vbmeta_digest / vbmeta_size) and the early `return 0` here swallowed the
+    # size block 30 lines below, so `vbmeta_digest=off` + `vbmeta_size=auto` --
+    # the configuration on the author's own device -- silently never applied the
+    # size on a bootloader that does not export ro.boot.vbmeta.size. Skip only
+    # the digest work and fall through to the size block.
+    if [ "$mode" = "off" ]; then
+        log "vbmeta.digest: off"
+        do_vbmeta_size "$mode"
+        return 0
+    fi
 
     cur=$(getprop ro.boot.vbmeta.digest 2>/dev/null)
     if [ -n "$cur" ] && [ "$mode" != "force" ]; then
@@ -265,7 +275,15 @@ do_vbmeta() {
         fi
     fi
 
-    # ro.boot.vbmeta.size — the same chain bytes the digest is computed over.
+    do_vbmeta_size "$mode"
+}
+
+# ro.boot.vbmeta.size — the same chain bytes the digest is computed over.
+# Split out of do_vbmeta() so it is reachable when vbmeta_digest=off; the two
+# knobs are independent and the caller decides.
+do_vbmeta_size() {
+    local mode=$1 cur="" sz="" szcache="$NMDIR/vbmeta_size.cache"
+
     # Set only when missing (unless forced). VALIDATE once against the real prop.
     [ "${vbmeta_size:-auto}" = "off" ] && return 0
     [ -n "$RESETPROP" ] || return 0

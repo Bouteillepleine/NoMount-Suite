@@ -1319,7 +1319,13 @@
         $("stealthNote").innerHTML = "Injections are mountless and su is sucompat. Any remaining <code>nomount_*</code> mount is kernel-hidden from non-root readers of <code>/proc/*/mountinfo</code>; root still sees everything.";
       }
     } else {
-      shield.className = "shield clean";
+      // UNVERIFIED, not clean. This whole card is a claim about what a non-root
+      // process can see; if the probe could not drop to a non-root uid, nothing
+      // measured that claim. Green here asserted a posture the code explicitly
+      // says it could not check -- and `su 2000` is exactly the call that stops
+      // answering once uid 2000 lands on the hide list. The text was already
+      // honest; only the colour lied.
+      shield.className = "shield warn";
       $("stealthT").textContent = "Detection posture";
       $("stealthD").textContent = "app-view check unavailable";
       $("stealthNote").innerHTML = `File injections and RRO are Prism; su is sucompat. Couldn't drop to a non-root uid to verify here; root sees ${rootNm} <code>nomount_*</code> mount(s).`;
@@ -1516,8 +1522,14 @@
     const r = await nm("doctor");
     const txt = (r.stdout || "") + (r.stderr || "");
     const bad = [];
-    if (/"Umount modules by default" is ON/.test(txt)) bad.push("Umount modules by default");
-    if (/manager: kernel umount is ON/i.test(txt)) bad.push("Kernel umount");
+    // Match doctor's CHECK NAMES, not its prose. The detail text carries quotes
+    // and wording that drift; the check name is the stable half. The kernel-umount
+    // test used to read /manager: kernel umount is ON/ and could NEVER fire --
+    // doctor prints "manager kernel umount ON" (no colon, no "is") -- so half of
+    // the banner that exists because these switches have broken root on real
+    // hardware was dead. Its sibling matched, which is how it survived.
+    if (/manager global umount ON/i.test(txt)) bad.push("Umount modules by default");
+    if (/manager kernel umount ON/i.test(txt)) bad.push("Kernel umount");
     if (!bad.length) { el.hidden = true; return; }
     el.hidden = false;
     el.innerHTML =
@@ -1536,6 +1548,17 @@
     _healthShow(txt);
     const v = (txt.match(/verdict=(.+)/) || [])[1] || "";
     const chip = $("hchip");
+    // No verdict at all is NOT a pass. An engine that is down, a binary that
+    // will not exec, or a selfcheck that aborted all leave `v` empty, and the
+    // ladder below used to fall through to green "healthy" -- the same
+    // absent-means-fine bug the amber `unverified` state was added to fix, one
+    // branch further up. Check the exit status too, not just the text.
+    if (r.errno !== 0 || !v) {
+      chip.textContent = "unknown";
+      chip.className = "chip warn";
+      done();
+      return;
+    }
     const bad = /INCONSISTENCY|DOWN|TRIPPED/.test(v);
     // "unverified" means the consistency canary sampled no injected file: not a
     // pass, not a failure — an honest amber third state.

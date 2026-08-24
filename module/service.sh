@@ -122,10 +122,17 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     # without a timeout here that wait would silently cost per-UID hiding for
     # the rest of the boot. 90s is well past a worst-case absorb (measured in
     # seconds) and still far short of stalling boot.
-    _ab=$(timeout 90 "$BIN" absorb 2>&1 | tail -1)
-    if [ $? -eq 124 ]; then
+    # Capture the status BEFORE any pipe. `$?` after a command substitution that
+    # contains a pipeline is the status of the LAST element -- `tail`, which
+    # always succeeds -- so `_ab=$(timeout 90 ... | tail -1); [ $? -eq 124 ]`
+    # could never be true and the timeout branch was dead code. Verified:
+    # `x=$(sh -c "exit 124" | tail -1)` leaves $? at 0; without the pipe, 124.
+    _ab_all=$(timeout 90 "$BIN" absorb 2>&1)
+    _ab_rc=$?
+    if [ "$_ab_rc" -eq 124 ]; then
         echo "nomount: absorb TIMED OUT after 90s - continuing boot" > /dev/kmsg 2>/dev/null
     else
+        _ab=$(printf '%s\n' "$_ab_all" | tail -1)
         echo "nomount: $_ab" > /dev/kmsg 2>/dev/null
     fi
     # Second pass, later. Not every module binds by the time this runs: a
