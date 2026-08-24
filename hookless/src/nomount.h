@@ -285,7 +285,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.19.0"
+#define NM_MODULE_VERSION "1.20.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -353,8 +353,21 @@
  *    synthesized dir now replays the nearest real ANCESTOR DIRECTORY's answer,
  *    the same v_cap mechanism 18 introduced for files. Userspace cannot set or
  *    observe this, so the bump exists purely so `doctor` can tell a flashed
- *    engine from the one it replaced. */
-#define NOMOUNT_VERSION    19
+ *    engine from the one it replaced.
+ *
+ * 20: two fixes found by exercising a DIR-TARGET rule on-device for the first
+ *    time (no rule of that shape had ever run). NM_CAP_KNOWN splits "we sampled
+ *    stock and it has no ->fsync" from "we never sampled": the two used to share
+ *    the encoding v_cap == 0, and the ops read that as never-sampled and
+ *    forwarded to the f2fs backing file -- so on an erofs path fsync() answered
+ *    0 where every stock sibling answers -EINVAL, reopening the oracle 19
+ *    closed, for any rule whose caps came from a sibling scan. And nm_child_ino
+ *    now scales its band to the parent instead of stepping a fixed 1 MB, which
+ *    only preserved magnitude when the parent ino already exceeded 1 MB;
+ *    measured at /product/etc (dir ino 15018, siblings 7166..20309) minting
+ *    children at 1226252..2181515. Neither is userspace-settable; the bump
+ *    exists so `doctor` can tell this engine from v19. */
+#define NOMOUNT_VERSION    20
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -427,6 +440,16 @@
  * replayed by the ops, the same "mirror the stock answer" rule as v_dev/v_ino. */
 #define NM_CAP_FSYNC        (1 << 0)   /* stock fops has ->fsync */
 #define NM_CAP_ODIRECT      (1 << 1)   /* stock mapping's a_ops has ->direct_IO */
+/* "We actually sampled a stock file for this rule." Without it, v_cap == 0 is
+ * ambiguous -- it means BOTH "never sampled" and "sampled, and stock supports
+ * nothing" -- and the ops treat the ambiguous zero as never-sampled and fall
+ * through to the /data backing file. On an erofs path that is exactly wrong:
+ * erofs has no ->fsync, so the correct sampled answer IS zero, and falling
+ * through to f2fs made fsync() return 0 where every stock sibling returns
+ * -EINVAL. Measured on OP15 via a dir-target rule at /product/etc/mk10test --
+ * the directory, its nested child and its files all answered 0 against stock
+ * /product/etc answering EINVAL. Set by nm_stock_caps() on every real sample. */
+#define NM_CAP_KNOWN        (1 << 7)
 
 /* logs
  *

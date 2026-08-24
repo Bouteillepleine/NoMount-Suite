@@ -372,9 +372,28 @@ struct nomount_proxy_ctx {
 static inline unsigned long nm_child_ino(unsigned long base, const char *name, int len, bool dirent)
 {
     u64 h = (u64)full_name_hash(NULL, name, len) | (dirent ? (1ULL << 32) : 0);
+    unsigned int bits, w;
 
-    return (unsigned long)(((u64)base & ~0xFFFFFULL) + 0x100000ULL +
-                           hash_64(h ^ ((u64)base << 32), 20));
+    /* The fixed 1 MB step only preserves magnitude when the parent's ino is
+     * ALREADY above 1 MB. Below that, `base & ~0xFFFFF` is 0 and every child
+     * lands at 1..2M regardless of the parent -- two orders of magnitude above
+     * its siblings on a small-ino filesystem. Measured on OP15: a dir-target at
+     * /product/etc (erofs, dir ino 15018, stock siblings 7166..20309) minted
+     * children at 1226252..2181515. One stat separates them from the whole
+     * directory. So scale the band to the parent instead of assuming it. */
+    if ((u64)base >= 0x100000ULL)
+        return (unsigned long)(((u64)base & ~0xFFFFFULL) + 0x100000ULL +
+                               hash_64(h ^ ((u64)base << 32), 20));
+
+    /* Next power of two above the parent, spread over a quarter of that width:
+     * for base 15018 -> band 32768, children in 32768..36863. Same digit count
+     * as the siblings and clear of the sampled population, which is what the
+     * 1 MB step was buying on large-ino filesystems. The 12-bit floor keeps a
+     * tiny parent ino from collapsing the spread to nothing. */
+    bits = fls64((u64)base | 0xFFFULL);
+    w = bits - 2;
+    return (unsigned long)((1ULL << (bits + 1)) +
+                           hash_64(h ^ ((u64)base << 32), w));
 }
 
 /* The d_ino a dirent of a dir-target rule's backing directory should carry.
@@ -1298,7 +1317,7 @@ static long nm_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
  * lives on a different filesystem. See NM_CAP_*. */
 static u8 nm_stock_caps(struct inode *ino)
 {
-    u8 cap = 0;
+    u8 cap = NM_CAP_KNOWN;   /* reaching here IS the sample; see NM_CAP_KNOWN */
 
     if (!ino) return 0;
     if (ino->i_fop && ino->i_fop->fsync) cap |= NM_CAP_FSYNC;
@@ -1346,9 +1365,13 @@ static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
      * EINVAL and the single injected one returned 0.
      *
      * v_cap is captured from the shadowed file (or the sampled sibling) at rule
-     * build. When it is 0 we learned nothing and keep the old behaviour rather
-     * than inventing an answer. */
-    if (info && info->v_cap && !(info->v_cap & NM_CAP_FSYNC))
+     * build. Gate on NM_CAP_KNOWN, not on v_cap being non-zero: "sampled, and
+     * stock has no ->fsync" is the COMMON case on erofs and its correct answer
+     * is -EINVAL, but it also encodes as v_cap == 0 and so used to be read as
+     * "never sampled" and fall through to the f2fs backing file, which answers
+     * 0. That silently reopened this very oracle for every erofs-backed rule
+     * whose caps came from a sibling scan. */
+    if (info && (info->v_cap & NM_CAP_KNOWN) && !(info->v_cap & NM_CAP_FSYNC))
         return -EINVAL;
     if (!real_file || !real_file->f_op->fsync) return -EINVAL;
     return real_file->f_op->fsync(real_file, start, end, datasync);
@@ -1366,16 +1389,19 @@ static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
  *
  * v_cap is sampled from the nearest real ancestor DIRECTORY for a synthesized
  * dir (nomount_generate_virtual_topology) and from the shadowed dir or a sampled
- * sibling otherwise; 0 means we learned nothing, and then we keep the old
- * behaviour rather than invent an answer. Nothing here is dirty -- the caller
- * cannot have written to a read-only ROM view -- so the capable answer is a
- * plain 0, which is exactly what ovl_dir_fsync returns for a clean dir. */
+ * sibling otherwise. NM_CAP_KNOWN, not a non-zero v_cap, is what says we have an
+ * answer -- on erofs the right answer is "no ->fsync", which encodes as zero.
+ * Only a rule whose sampling found nothing at all falls through. Nothing here is
+ * dirty -- the caller cannot have written to a read-only ROM view -- so the
+ * capable answer is a plain 0, exactly what ovl_dir_fsync returns for a clean
+ * dir. This also covers the children of a dir-target rule, which inherit the
+ * parent's v_cap through nm_dir_child_lookup. */
 static int nm_dir_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
     struct nm_inode_info *info = file_inode(file)->i_private;
     struct file *real_file = file->private_data;
 
-    if (info && info->v_cap)
+    if (info && (info->v_cap & NM_CAP_KNOWN))
         return (info->v_cap & NM_CAP_FSYNC) ? 0 : -EINVAL;
     if (real_file && real_file->f_op->fsync)
         return real_file->f_op->fsync(real_file, start, end, datasync);
