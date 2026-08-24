@@ -14,7 +14,7 @@
 //! CLI verbs (first-char dispatch in `nm`): `add <virtual> <real>`, `w <path>`
 //! (whiteout), `block`/`unblock <uid>`, `clear`, `list`, `v` (version).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -200,6 +200,102 @@ fn path_str(p: &Path) -> Result<&str> {
         .with_context(|| format!("non-UTF8 path: {}", p.display()))
 }
 
+/// What a `nm list` line describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveKind {
+    /// `<target> -> <source>`; source carried in [`LiveRule::source`].
+    Inject,
+    /// `<target> (whiteout)`.
+    Whiteout,
+    /// `<target> (virtual dir)`, materialised by the engine, not by a rule.
+    VirtualDir,
+}
+
+/// One parsed `nm list` line.
+pub(crate) struct LiveRule {
+    pub target: PathBuf,
+    /// Present only for an [`LiveKind::Inject`].
+    pub source: Option<PathBuf>,
+    /// The ` [UID: N]` suffix, or 0 for a global rule. Part of a rule's identity:
+    /// a per-UID rule and a global one can name the SAME target, and `nm del`
+    /// only ever addresses uid 0.
+    pub uid: u32,
+    pub kind: LiveKind,
+    /// The engine printed the per-rule `(public)` flag (engine >= 17 reports
+    /// flags). A PM-published rule live WITHOUT it is the hazard M-S1 names.
+    pub public: bool,
+}
+
+/// Parse `nm list` output into typed rules -- the ONE parser of this text.
+///
+/// There were three: `doctor::parse_live`, `mount::parse_live_rules` and
+/// `absorb::live_injections`, each reading the same lines with its own rules.
+/// They had already drifted (one split on the FIRST ` -> `, the others on the
+/// last; only one peeled ` (public)`, so the other two silently folded the flag
+/// into the source path and every metadata comparison against it failed), and
+/// nothing made them drift back. Each caller now derives its own shape from these
+/// rows instead, so a change to the client's output format is one edit.
+///
+/// `nm list` appends flag suffixes: ` (public)` on a hiding opt-out, plus the
+/// kind markers ` (whiteout)` / ` (virtual dir)`, plus the ` [UID: N]` identity.
+/// Peel them all first, in any order, then split on the LAST ` -> ` so a target
+/// path containing one is not mis-split.
+pub(crate) fn parse_list(list: &str) -> Vec<LiveRule> {
+    list.lines()
+        .filter_map(|line| {
+            let uid: u32 = line
+                .split_once(" [UID:")
+                .and_then(|(_, r)| r.trim_start().trim_end_matches(']').trim().parse().ok())
+                .unwrap_or(0);
+            let mut l = line.split(" [UID:").next().unwrap_or(line).trim();
+            if l.is_empty() {
+                return None;
+            }
+            let mut public = false;
+            let mut kind: Option<LiveKind> = None;
+            loop {
+                if let Some(rest) = l.strip_suffix(" (public)") {
+                    public = true;
+                    l = rest.trim_end();
+                } else if let Some(rest) = l.strip_suffix(" (whiteout)") {
+                    kind = Some(LiveKind::Whiteout);
+                    l = rest.trim_end();
+                } else if let Some(rest) = l.strip_suffix(" (virtual dir)") {
+                    kind = Some(LiveKind::VirtualDir);
+                    l = rest.trim_end();
+                } else {
+                    break;
+                }
+            }
+            if let Some(kind) = kind {
+                let target = l.trim();
+                if target.is_empty() {
+                    return None;
+                }
+                return Some(LiveRule {
+                    target: PathBuf::from(target),
+                    source: None,
+                    uid,
+                    kind,
+                    public,
+                });
+            }
+            let (t, s) = l.rsplit_once(" -> ")?;
+            let (t, s) = (t.trim(), s.trim());
+            if t.is_empty() || s.is_empty() {
+                return None;
+            }
+            Some(LiveRule {
+                target: PathBuf::from(t),
+                source: Some(PathBuf::from(s)),
+                uid,
+                kind: LiveKind::Inject,
+                public,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +331,63 @@ mod tests {
         for p in ["/system/lib64/libfoo.so", "/product/etc/permissions/x.xml", "/data/app/x/base.apk"] {
             assert!(!crate::pmcache::is_pm_published(Path::new(p)), "{p} must stay hidden");
         }
+    }
+
+    #[test]
+    fn parse_list_classifies_every_kind() {
+        let s = "/product/x.apk -> /data/adb/modules/M/product/x.apk\n\
+                 /system/y (whiteout)\n\
+                 /system/vdir (virtual dir)\n\
+                 not a rule line\n\
+                 /product/z -> /data/adb/modules/M/product/z\n";
+        let v = parse_list(s);
+        // The whiteout and virtual-dir lines are kept -- doctor's partition-root
+        // check must see them.
+        assert_eq!(v.len(), 4);
+        assert_eq!(v[0].target, PathBuf::from("/product/x.apk"));
+        assert_eq!(v[0].source.as_deref(), Some(Path::new("/data/adb/modules/M/product/x.apk")));
+        assert_eq!(v[0].kind, LiveKind::Inject);
+        assert_eq!(v[1].kind, LiveKind::Whiteout);
+        assert_eq!(v[1].source, None);
+        assert_eq!(v[2].kind, LiveKind::VirtualDir);
+        assert_eq!(v[3].target, PathBuf::from("/product/z"));
+    }
+
+    #[test]
+    fn parse_list_strips_uid_and_public_suffixes() {
+        // The ` (public)` flag must be peeled or it lands in the source path and
+        // every fs::metadata(source) check silently no-ops.
+        let v = parse_list("/product/x.apk -> /data/adb/modules/M/x.apk (public) [UID: 10123]\n");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].source.as_deref(), Some(Path::new("/data/adb/modules/M/x.apk")));
+        assert!(v[0].public);
+        // ...and the UID it was scoped to is kept, not dropped: it is part of the
+        // rule's identity, and `nm del` only ever addresses uid 0.
+        assert_eq!(v[0].uid, 10123);
+        // A whiteout that also carried a flag is still classified as a whiteout.
+        let w = parse_list("/system/y (public) (whiteout)\n");
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].kind, LiveKind::Whiteout);
+        assert!(w[0].public);
+        // A plain inject has no flag and is global.
+        let p = parse_list("/product/z -> /data/adb/modules/M/z\n");
+        assert!(!p[0].public);
+        assert_eq!(p[0].uid, 0);
+    }
+
+    #[test]
+    fn parse_list_drops_empty_sides() {
+        assert!(parse_list(" -> /data/x").is_empty());
+        assert!(parse_list("/product/x -> ").is_empty());
+        assert!(parse_list(" (whiteout)").is_empty());
+    }
+
+    /// A source path containing ` -> ` must not move the split: the source is
+    /// whatever follows the LAST arrow.
+    #[test]
+    fn parse_list_splits_on_the_last_arrow() {
+        let v = parse_list("/system/etc/a -> b -> /data/adb/modules/M/x\n");
+        assert_eq!(v[0].target, PathBuf::from("/system/etc/a -> b"));
+        assert_eq!(v[0].source.as_deref(), Some(Path::new("/data/adb/modules/M/x")));
     }
 }

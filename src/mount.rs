@@ -106,10 +106,17 @@ const BLOCKLIST_FILE: &str = "/data/adb/nomount/blocklist";
 // discovery is dynamic (product/, my_*/, vendor/, whatever THIS device ships) with
 // no hardcoded per-OEM list. Module-metadata dirs (META-INF/, webroot/, common/…)
 // are excluded for free: their "/<name>" doesn't exist on the device.
+// `d` is the debugfs shortcut (`/d -> /sys/kernel/debug`), and it is listed
+// because discovery FOLLOWS symlinks: `/d`.is_dir() answers true, so a module
+// shipping a top-level `d/` tree was walked and its files injected into debugfs
+// (measured on an OP15). Nothing belonging to a ROM partition lives there.
+// `/etc -> /system/etc` is deliberately NOT listed: that symlink points at real
+// ROM content, so an inject through it lands on the same dentry as the
+// `system/etc` path a module would normally ship.
 const NON_PARTITION_ROOTS: &[&str] = &[
     "data", "data_mirror", "mnt", "dev", "proc", "sys", "cache", "metadata", "config",
     "storage", "sdcard", "apex", "tmp", "debug_ramdisk", "linkerconfig",
-    "postinstall", "second_stage_resources", "bin", "sbin",
+    "postinstall", "second_stage_resources", "bin", "sbin", "d",
 ];
 
 /// DISCOVERY: should we walk a top-level module dir `<name>`? Yes if `/<name>`
@@ -223,6 +230,13 @@ fn is_partition_root(target: &Path) -> bool {
 /// which is not ours at all. Absorbing someone else's bind must never do
 /// something we would not do for our own module content, so there is now one
 /// predicate and two callers.
+///
+/// The claim was only half true until M-S10: `plan_tree` never actually CALLED
+/// this, it re-implemented a subset, and the subset was weaker again --
+/// `NON_PARTITION_ROOTS` was enforced only where module roots are discovered, so
+/// a module shipping a top-level `d/` tree was walked and injected into debugfs.
+/// Every plan entry that is served now routes through here, and a `Refuse` is a
+/// skip with the reason printed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Serve {
     /// Hookless injection works here.
@@ -495,7 +509,12 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             // see expand_replacement. my_* rides along safely now -- what it
             // emits are leaf deletions, which the engine serves on my_* like
             // anywhere else, not the parent whiteout that made this unsafe.
-            if is_opaque_dir(&source) && !is_partition_root(&target) {
+            //
+            // Gated on `can_whiteout`, the shared predicate, rather than on a local
+            // partition-root test: what an expansion emits are whiteouts, so the
+            // question is whether this directory is one we may hide entries under at
+            // all -- which also rules out a non-ROM root the old test let through.
+            if is_opaque_dir(&source) && can_whiteout(&target).is_ok() {
                 expand_replacement(module, &target, &source, &source, 0, out);
             }
             plan_tree(module, module_root, &source, out);
@@ -506,7 +525,9 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             if let Some(parent) = target.parent() {
                 // Never touch a bare partition root: replacing a whole partition
                 // is not something a module can mean, and masking one bootloops.
-                if is_partition_root(parent) {
+                // `can_whiteout` is that test plus the non-ROM roots, and it is the
+                // same predicate the expansion applies to each entry it emits.
+                if can_whiteout(parent).is_err() {
                     continue;
                 }
                 // Expand instead of whiteouting `parent` itself -- a whiteout there
@@ -518,9 +539,10 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             }
         } else if is_char_dev(&ft) {
             // A 0:0 char device is Magisk's whiteout marker: a pure deletion, with
-            // no module content behind it. `can_whiteout` is the whole guard, and
-            // it permits my_* -- the engine d_drops a my_* dentry as readily as any
-            // other, which is what `nomount whiteout add` has always done there.
+            // no module content behind it. `can_whiteout` is the whole guard -- and
+            // deliberately NOT `serve_mode`, see its doc: it permits my_*, where the
+            // engine d_drops a dentry as readily as anywhere else, which is what
+            // `nomount whiteout add` has always done there.
             if can_whiteout(&target).is_err() {
                 continue;
             }
@@ -530,47 +552,62 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                 source,
                 kind: PlanKind::Whiteout,
             });
-        } else if is_partition_root(&target) {
-            // A non-directory entry resolving to a bare partition root — a module's
-            // layout-convergence symlink (e.g. `system/product -> ../product`). Injecting it
-            // would redirect the entire partition; skip it. The real content still comes from
-            // the module's own top-level partition dir. Real `system/<partition>` DIRECTORIES
-            // are unaffected: they take the is_dir() branch above and recurse as before.
-            continue;
-        } else if is_my_partition(&target) {
-            // Always served. This used to be skipped when a text heuristic decided the
-            // module's boot scripts "looked like" they mounted my_* themselves, which
-            // silently dropped the module's ENTIRE my_* content on a grep over shell
-            // source -- unpredictable, and invisible when it misfired. With
-            // NM_MY_HOOKLESS nothing here bind-mounts, so the duplicate-mount hazard it
-            // guarded against is gone; if a module does bind its own path, that real
-            // mount simply takes precedence over the injection.
-            let kind = if my_hookless_enabled() { PlanKind::Inject } else { PlanKind::Bind };
-            out.push(PlanEntry {
-                module: module.to_string(),
-                target,
-                source,
-                kind,
-            });
-        } else if inject_would_mask_dir(&target) {
-            // Resolves to a live stock directory (or a mountpoint) one or more
-            // levels below a partition root — injecting a file here masks the whole
-            // directory. See `inject_would_mask_dir`; this is the depth-2+ case
-            // is_partition_root cannot see (e.g. a module file named `overlay`).
-            eprintln!(
-                "nomount: {module}: skipping {} — it resolves to a live directory/mountpoint; \
-                 injecting a file there would mask the whole directory (a module may only \
-                 inject over a file)",
-                target.display()
-            );
-            continue;
         } else {
-            out.push(PlanEntry {
-                module: module.to_string(),
-                target,
-                source,
-                kind: PlanKind::Inject,
-            });
+            // Every servable entry goes through the ONE predicate (M-S10). The plan
+            // used to re-derive a weaker subset of it here -- `is_partition_root` +
+            // `is_my_partition`, with `NON_PARTITION_ROOTS` enforced only at module-root
+            // discovery -- which is how the plan and absorb drifted apart once already:
+            // absorb refused targets this file happily injected. A refusal is now
+            // skipped WITH its reason, because a module whose content silently vanishes
+            // is the failure mode this project keeps re-fixing.
+            match serve_mode(&target) {
+                Serve::Refuse(why) => {
+                    // The common one is a module's layout-convergence symlink
+                    // (`system/product -> ../product`), which resolves to a bare
+                    // partition root: injecting it would redirect the whole partition.
+                    // The real content still comes from the module's own top-level
+                    // partition dir, and real `system/<partition>` DIRECTORIES are
+                    // unaffected -- they take the is_dir() branch above and recurse.
+                    eprintln!("nomount: {module}: skipping {} — {why}", target.display());
+                }
+                Serve::Bind => {
+                    // my_* is served by a real bind: hookless there trips zygote's FD
+                    // allowlist. Whether the experimental NM_MY_HOOKLESS override is on
+                    // is `serve_mode`'s business now, not this walk's.
+                    //
+                    // Always served. This used to be skipped when a text heuristic decided
+                    // the module's boot scripts "looked like" they mounted my_* themselves,
+                    // which silently dropped the module's ENTIRE my_* content on a grep over
+                    // shell source -- unpredictable, and invisible when it misfired. If a
+                    // module does bind its own path, that real mount simply takes precedence.
+                    out.push(PlanEntry {
+                        module: module.to_string(),
+                        target,
+                        source,
+                        kind: PlanKind::Bind,
+                    });
+                }
+                // H16, kept in the inject arm where it belongs (a bind d_drops
+                // nothing): resolves to a live stock directory, or a mountpoint, one
+                // or more levels below a partition root -- injecting a file there masks
+                // the whole directory. See `inject_would_mask_dir`; this is the depth-2+
+                // case a partition-root test cannot see (e.g. a module file named
+                // `overlay`).
+                Serve::Inject if inject_would_mask_dir(&target) => {
+                    eprintln!(
+                        "nomount: {module}: skipping {} — it resolves to a live directory/mountpoint; \
+                         injecting a file there would mask the whole directory (a module may only \
+                         inject over a file)",
+                        target.display()
+                    );
+                }
+                Serve::Inject => out.push(PlanEntry {
+                    module: module.to_string(),
+                    target,
+                    source,
+                    kind: PlanKind::Inject,
+                }),
+            }
         }
     }
 }
@@ -772,35 +809,31 @@ enum LiveRule {
     Whiteout,
 }
 
-/// Parse `nm list` into live leaf rules keyed by target: injects (`T -> S`) and
-/// whiteouts (`T (whiteout)`). Engine-managed virtual dirs (`T (virtual dir)`) and
-/// any ` [UID: N]` suffix are ignored. Suffix/rsplit matching so a target path
-/// containing spaces/parens/arrows is not mis-split (source is after the LAST
-/// ` -> `; whiteout is a suffix).
+/// The live leaf rules the reconcile diffs against, keyed by (target, UID):
+/// injects and whiteouts. Engine-managed virtual dirs are dropped -- no rule
+/// created them, so the prune pass has nothing to say about one.
+///
+/// The line reading is [`crate::nm::parse_list`], shared with `doctor` and
+/// `absorb`; this only reshapes its rows. The three used to parse the same text
+/// independently and had already disagreed on where to split a line, which is how
+/// a source containing ` -> ` matched here and not there.
+///
+/// Keeping the UID in the key is load-bearing: collapsing it meant a per-UID rule
+/// and a global one for the same target shared a key, and `nm del <target>`
+/// (always uid 0) could never remove the per-UID one -- so it re-counted as a
+/// failure on every reload, forever.
 fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
-    let mut out = HashMap::new();
-    for l in list.lines() {
-        // Keep the UID: it is part of a rule's identity. Collapsing it meant a
-        // per-UID rule and a global one for the same target shared a key, and
-        // `nm del <target>` (always uid 0) could never remove the per-UID one --
-        // so it re-counted as a failure on every reload, forever.
-        let uid: u32 = l
-            .split_once(" [UID:")
-            .and_then(|(_, r)| r.trim_start().trim_end_matches(']').trim().parse().ok())
-            .unwrap_or(0);
-        let l = l.split(" [UID:").next().unwrap_or(l).trim();
-        if l.is_empty() {
-            continue;
-        }
-        if let Some(t) = l.strip_suffix(" (whiteout)") {
-            out.insert((PathBuf::from(t.trim()), uid), LiveRule::Whiteout);
-        } else if l.ends_with(" (virtual dir)") {
-            continue;
-        } else if let Some((t, s)) = l.rsplit_once(" -> ") {
-            out.insert((PathBuf::from(t.trim()), uid), LiveRule::Inject(PathBuf::from(s.trim())));
-        }
-    }
-    out
+    crate::nm::parse_list(list)
+        .into_iter()
+        .filter_map(|r| {
+            let kind = match r.kind {
+                crate::nm::LiveKind::Inject => LiveRule::Inject(r.source?),
+                crate::nm::LiveKind::Whiteout => LiveRule::Whiteout,
+                crate::nm::LiveKind::VirtualDir => return None,
+            };
+            Some(((r.target, r.uid), kind))
+        })
+        .collect()
 }
 
 /// May the reconcile drop this live rule?
@@ -867,7 +900,11 @@ pub fn run_reload() -> Result<()> {
     // hiding, and the absorbed content silently reverted to the stock file.
     let durable_whiteouts: HashSet<PathBuf> =
         crate::whiteout::read().unwrap_or_default().into_iter().map(PathBuf::from).collect();
-    let absorbed = crate::absorb::absorbed_targets();
+    let mut absorbed = crate::absorb::absorbed_targets();
+    // The ROM-tmpfs takeovers are absorb's rules too (M-S8): whiteouts on paths no
+    // module plan names, so the prune below would drop them and the emptied
+    // directory would fill back in on the first reload after a takeover.
+    absorbed.extend(crate::absorb::absorbed_tmpfs_targets());
 
     let (mut added, mut changed, mut removed, mut failed) = (0u32, 0u32, 0u32, 0u32);
     // Add new rules, and re-apply a live rule whose SOURCE or KIND changed (not
@@ -1136,6 +1173,15 @@ pub fn run_mount() -> Result<()> {
             },
         }
     }
+    // Re-apply the ROM-tmpfs takeovers, AFTER the module plan for the same reason
+    // metamount.sh runs `whiteout apply` after this pass: a whiteout d_drops the
+    // dentry it names, so it has to land once the injections underneath are in.
+    // `clear` above dropped these along with everything else, and the module that
+    // mounted the tmpfs does not re-mount it until the next boot -- so without
+    // this, a mid-session Re-apply put the stock directory back. absorb confirms
+    // or expires each entry when it next runs (M-S8).
+    let tmpfs_hidden = crate::absorb::reapply_tmpfs_whiteouts(&nm);
+
     // PM scans after this pass, so an entry dropped here is rebuilt with the
     // bytes we serve and nothing is left pending.
     let pm = crate::pmcache::sync(&served_apks(&plan, &recorded));
@@ -1153,6 +1199,11 @@ pub fn run_mount() -> Result<()> {
         hidden.hidden,
         if hidden.failed > 0 { format!(", {} hide failed", hidden.failed) } else { String::new() }
     );
+    if tmpfs_hidden > 0 {
+        println!(
+            "nomount: re-applied {tmpfs_hidden} ROM directory hide(s) taken over from a module tmpfs"
+        );
+    }
     if !pm.is_empty() {
         println!("nomount: re-parsed {} changed system APK(s) (package cache)", pm.len());
     }
@@ -1192,6 +1243,10 @@ mod tests {
         assert!(matches!(serve_mode(Path::new("/data/adb/x")), Serve::Refuse(_)));
         assert!(matches!(serve_mode(Path::new("/system")), Serve::Refuse(_)));
         assert!(matches!(serve_mode(Path::new("/")), Serve::Refuse(_)));
+        // `/d` is debugfs. It only ever reached the plan because discovery follows
+        // symlinks and nothing downstream re-checked the root (M-S10).
+        assert!(matches!(serve_mode(Path::new("/d/tracing/x")), Serve::Refuse(_)));
+        assert!(can_whiteout(Path::new("/d/tracing/x")).is_err());
     }
 
     /// `.replace` must hide the stock entries the module does NOT ship, and leave

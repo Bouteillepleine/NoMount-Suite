@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::mount::{collect_plan, PlanEntry, PlanKind};
-use crate::nm::Nm;
+use crate::nm::{LiveRule, Nm};
 
 /// Partitions whose file descriptors zygote will accept across `forkSystemServer`.
 ///
@@ -54,84 +54,16 @@ fn is_partition_root(p: &Path) -> bool {
     p.components().skip(1).count() == 1
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum LiveKind {
-    /// `<target> -> <source>`; source carried in [`LiveRule::source`].
-    Inject,
-    /// `<target> (whiteout)`.
-    Whiteout,
-    /// `<target> (virtual dir)`.
-    VirtualDir,
-}
-
-/// One parsed `nm list` line.
-struct LiveRule {
-    target: PathBuf,
-    /// Present only for an `Inject`.
-    source: Option<PathBuf>,
-    kind: LiveKind,
-    /// The engine printed the per-rule `(public)` flag for this rule (engine >= 17
-    /// reports flags). A PM-published rule live WITHOUT it is the hazard M-S1 names.
-    public: bool,
-}
-
 /// Parse `nm list` output into typed rules.
 ///
-/// `nm list` appends flag suffixes: ` (public)` on a hiding opt-out, plus the kind
-/// markers ` (whiteout)` / ` (virtual dir)`. The old parser dropped every
-/// non-arrow line (so whiteout/virtual-dir rules escaped the partition-root check)
-/// and never stripped ` (public)`, so `source` became `".../Foo.apk (public)"` and
-/// every `fs::metadata(source)` in the size-mismatch lint failed silently. Peel the
-/// flag suffixes first, classify by the kind markers, and keep the ` [UID: N]`
-/// strip.
+/// The parsing itself is [`crate::nm::parse_list`], which every reader of that
+/// text now shares -- this file's copy, `mount`'s and `absorb`'s had already
+/// drifted apart on how a line is split and which suffixes are peeled. Doctor
+/// keeps every row, whatever its kind: the partition-root check below has to see
+/// whiteouts and virtual dirs too, which the pre-typed parser dropped.
 fn parse_live(list: &str) -> Vec<LiveRule> {
-    list.lines()
-        .filter_map(|line| {
-            // Strip the ` [UID: N]` identity suffix (else it lands in the source
-            // path and every metadata check on a per-UID rule silently no-ops).
-            let mut l = line.split(" [UID:").next().unwrap_or(line).trim();
-            if l.is_empty() {
-                return None;
-            }
-            // Peel every trailing flag suffix, in any order, before anything else:
-            // so a whiteout/virtual-dir line is still recognised when it also
-            // carried ` (public)`, and so an inject's `source` never captures a flag.
-            let mut public = false;
-            let mut kind: Option<LiveKind> = None;
-            loop {
-                if let Some(rest) = l.strip_suffix(" (public)") {
-                    public = true;
-                    l = rest.trim_end();
-                } else if let Some(rest) = l.strip_suffix(" (whiteout)") {
-                    kind = Some(LiveKind::Whiteout);
-                    l = rest.trim_end();
-                } else if let Some(rest) = l.strip_suffix(" (virtual dir)") {
-                    kind = Some(LiveKind::VirtualDir);
-                    l = rest.trim_end();
-                } else {
-                    break;
-                }
-            }
-            if let Some(kind) = kind {
-                return Some(LiveRule { target: PathBuf::from(l.trim()), source: None, kind, public });
-            }
-            // Split on the LAST arrow so a target containing one is not mis-split.
-            let (t, s) = l.rsplit_once(" -> ")?;
-            let (t, s) = (t.trim(), s.trim());
-            if t.is_empty() || s.is_empty() {
-                return None;
-            }
-            Some(LiveRule {
-                target: PathBuf::from(t),
-                source: Some(PathBuf::from(s)),
-                kind: LiveKind::Inject,
-                public,
-            })
-        })
-        .collect()
+    crate::nm::parse_list(list)
 }
-
-
 
 
 /// One `.replace` marker or opaque dir expands into a whiteout per stock entry the
@@ -893,6 +825,7 @@ pub fn run_doctor() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nm::LiveKind;
 
     fn wo(module: &str, marker: &str, target: &str) -> PlanEntry {
         PlanEntry {
@@ -971,47 +904,21 @@ mod tests {
         assert!(!is_partition_root(Path::new("/product/overlay/x.apk")));
     }
 
+    /// The parser itself, and its suffix-peeling, now live with the client that
+    /// produces the text (`nm::parse_list`) -- see its tests. What this file still
+    /// owns is the reading of those rows, exercised by the checks above.
     #[test]
-    fn parse_live_classifies_every_kind() {
-        let s = "/product/x.apk -> /data/adb/modules/M/product/x.apk\n\
-                 /system/y (whiteout)\n\
-                 /system/vdir (virtual dir)\n\
-                 not a rule line\n\
-                 /product/z -> /data/adb/modules/M/product/z\n";
-        let v = parse_live(s);
-        // The whiteout and virtual-dir lines are no longer dropped -- the
-        // partition-root check must see them.
-        assert_eq!(v.len(), 4);
+    fn parse_live_still_yields_the_rows_the_checks_read() {
+        let v = parse_live(
+            "/product/x.apk -> /data/adb/modules/M/product/x.apk (public)\n\
+             /system/y (whiteout)\n",
+        );
+        assert_eq!(v.len(), 2);
         assert_eq!(v[0].target, PathBuf::from("/product/x.apk"));
         assert_eq!(v[0].source.as_deref(), Some(Path::new("/data/adb/modules/M/product/x.apk")));
         assert_eq!(v[0].kind, LiveKind::Inject);
+        assert!(v[0].public);
         assert_eq!(v[1].kind, LiveKind::Whiteout);
         assert_eq!(v[1].source, None);
-        assert_eq!(v[2].kind, LiveKind::VirtualDir);
-        assert_eq!(v[3].target, PathBuf::from("/product/z"));
-    }
-
-    #[test]
-    fn parse_live_strips_uid_and_public_suffixes() {
-        // The ` (public)` flag must be peeled or it lands in the source path and
-        // every fs::metadata(source) check silently no-ops.
-        let v = parse_live("/product/x.apk -> /data/adb/modules/M/x.apk (public) [UID: 10123]\n");
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0].source.as_deref(), Some(Path::new("/data/adb/modules/M/x.apk")));
-        assert!(v[0].public);
-        // A whiteout that also carried a flag is still classified as a whiteout.
-        let w = parse_live("/system/y (public) (whiteout)\n");
-        assert_eq!(w.len(), 1);
-        assert_eq!(w[0].kind, LiveKind::Whiteout);
-        assert!(w[0].public);
-        // A plain inject has no flag.
-        let p = parse_live("/product/z -> /data/adb/modules/M/z\n");
-        assert!(!p[0].public);
-    }
-
-    #[test]
-    fn parse_live_drops_empty_sides() {
-        assert!(parse_live(" -> /data/x").is_empty());
-        assert!(parse_live("/product/x -> ").is_empty());
     }
 }

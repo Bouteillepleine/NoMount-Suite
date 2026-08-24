@@ -47,6 +47,15 @@ const SKIP_FILE_LEGACY: &str = "/data/adb/nomount/absorb-skip";
 /// without this record a single Reload silently undid every absorption and the
 /// mounts did not come back either: the content simply reverted to stock.
 pub const ABSORBED_LIST: &str = "/data/adb/nomount/absorbed.list";
+/// ROM directories absorb empties in place of another module's tmpfs.
+///
+/// Absorb-owned, deliberately NOT the user's durable `whiteouts.txt`: that list
+/// is re-applied at every boot and nothing prunes it, so a tmpfs takeover written
+/// there hid the ROM directory forever -- long after the module that mounted the
+/// tmpfs was uninstalled (M-S8). This one is re-derived from the live mount table
+/// on every absorb pass: an entry lives while its tmpfs keeps coming back and is
+/// dropped when it stops.
+pub const ABSORBED_TMPFS_LIST: &str = "/data/adb/nomount/absorbed-tmpfs.list";
 
 /// Used when the skip file cannot be read at all. Keyed on the PATH BEING
 /// HOOKED, not on who installed it: a hook framework's module id varies between
@@ -481,26 +490,22 @@ pub(crate) struct Redundancy {
 /// "not redundant" is the safe answer (absorb just handles it the old way).
 const REDUNDANCY_FILE_BUDGET: usize = 5000;
 
-/// Parse `nm list` into uid-0 injections. Mirrors mount.rs `parse_live_rules`,
-/// minus the whiteout/virtual-dir kinds, which can never make a bind redundant.
+/// The uid-0 injections, target -> source.
+///
+/// Reshaped from [`crate::nm::parse_list`], the one parser of `nm list` text
+/// (`mount` and `doctor` derive their own shapes from the same rows). This used
+/// to be its own reader and had already drifted from mount.rs's -- they split a
+/// line differently -- with nothing to make them converge again.
+///
+/// Whiteouts and virtual dirs are dropped: neither can make a bind redundant.
+/// So is every per-UID rule -- it serves one UID, and dropping a global mount
+/// because of one would expose the stock file to every other UID.
 pub(crate) fn live_injections(list: &str) -> HashMap<PathBuf, PathBuf> {
-    let mut out = HashMap::new();
-    for l in list.lines() {
-        // A ` [UID: N]` suffix means the rule is scoped to one UID. Skip it
-        // rather than key on it: see the `live` field.
-        if l.contains(" [UID:") {
-            continue;
-        }
-        let l = l.trim();
-        if l.is_empty() || l.ends_with(" (whiteout)") || l.ends_with(" (virtual dir)") {
-            continue;
-        }
-        // Source is after the LAST ` -> `, so a target containing one survives.
-        if let Some((t, src)) = l.rsplit_once(" -> ") {
-            out.insert(PathBuf::from(t.trim()), PathBuf::from(src.trim()));
-        }
-    }
-    out
+    crate::nm::parse_list(list)
+        .into_iter()
+        .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
+        .filter_map(|r| Some((r.target, r.source?)))
+        .collect()
 }
 
 /// Mountpoints that are the same subtree, derived from mountinfo alone: identical
@@ -1079,17 +1084,145 @@ pub(crate) fn rom_tmpfs_target(line: &str) -> Option<PathBuf> {
     ROM_ROOTS.iter().any(|r| target.starts_with(r)).then(|| PathBuf::from(unescape(target)))
 }
 
+/// This boot, as the kernel names it. `None` when it cannot be read, which
+/// disables expiry rather than guessing: an entry with no stamp is kept.
+fn boot_id() -> Option<String> {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Is this directory empty right now? `None` when it cannot be read at all.
+fn dir_is_empty(p: &Path) -> Option<bool> {
+    fs::read_dir(p).ok().map(|mut e| e.next().is_none())
+}
+
+/// The ROM-tmpfs takeovers on record: target -> the boot in which its tmpfs was
+/// last SEEN mounted (empty string when the boot id was unreadable then).
+pub(crate) fn absorbed_tmpfs() -> Vec<(PathBuf, String)> {
+    fs::read_to_string(ABSORBED_TMPFS_LIST).map(|s| parse_tmpfs_record(&s)).unwrap_or_default()
+}
+
+/// Pure: one `<target>\t<boot id>` per line. A line without a tab is read as a
+/// target with no stamp, which is never expired -- so a hand-written entry, or
+/// one from a build that did not stamp yet, hides until it is removed by hand.
+fn parse_tmpfs_record(body: &str) -> Vec<(PathBuf, String)> {
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| match l.split_once('\t') {
+            Some((t, boot)) => (PathBuf::from(t.trim()), boot.trim().to_string()),
+            None => (PathBuf::from(l), String::new()),
+        })
+        .collect()
+}
+
+/// Just the targets. `reload`'s prune guard needs no more than that.
+pub fn absorbed_tmpfs_targets() -> HashSet<PathBuf> {
+    absorbed_tmpfs().into_iter().map(|(t, _)| t).collect()
+}
+
+/// Does a recorded takeover survive this pass?
+///
+/// Pure, because the answer is the whole of M-S8's reverse path and getting it
+/// wrong in either direction is a visible regression: too eager and the ROM
+/// directory fills back in under a module that still empties it every boot, too
+/// lazy and the hide is the permanent one this finding is about.
+fn tmpfs_entry_lives(seen_now: bool, seen_boot: &str, boot: &str, mounted: bool) -> bool {
+    // Seen this pass, still mounted (an opt-out, or an unmount that failed), or
+    // last seen in THIS boot -- absorb unmounts the tmpfs itself, so every later
+    // pass in the same boot finds it gone and must not read that as an uninstall.
+    // An unstamped entry is never expired: a fresh sighting cannot be told from
+    // an old one.
+    seen_now || mounted || seen_boot.is_empty() || seen_boot == boot
+}
+
+fn set_absorbed_tmpfs(entries: &[(PathBuf, String)]) {
+    if let Some(d) = Path::new(ABSORBED_TMPFS_LIST).parent() {
+        let _ = fs::create_dir_all(d);
+    }
+    let mut body = String::from(
+        "# ROM directories absorb empties in place of a module's tmpfs.\n\
+         # <target>\\t<boot id when its tmpfs was last seen> -- absorb re-derives this\n\
+         # from the live mount table every boot and drops an entry whose tmpfs is gone,\n\
+         # so uninstalling the owning module restores the directory. Not hand-edited:\n\
+         # a hide you want to keep belongs in whiteouts.txt.\n",
+    );
+    for (t, boot) in entries {
+        body.push_str(&t.to_string_lossy());
+        body.push('\t');
+        body.push_str(boot);
+        body.push('\n');
+    }
+    if let Err(e) = fs::write(ABSORBED_TMPFS_LIST, &body) {
+        eprintln!("nomount: could not record the ROM tmpfs takeovers: {e:#}");
+    }
+}
+
+/// Re-apply the recorded ROM-tmpfs whiteouts. Called by the boot pass after
+/// `nm clear`, which drops them along with every other rule.
+///
+/// Deliberately re-applies rather than re-derives: `run_mount` runs at
+/// post-fs-data, where a module's own script may not have re-mounted its tmpfs
+/// yet, and a mid-session `Re-apply` runs long after absorb already unmounted it.
+/// Deciding "the tmpfs is gone for good" from either point would put the stock
+/// directory back under a module that still wants it empty. Absorb, which runs
+/// after boot_completed, is the only place that can tell -- see
+/// `absorb_rom_tmpfs`, which confirms or expires each entry.
+pub fn reapply_tmpfs_whiteouts(nm: &Nm) -> u32 {
+    let mut n = 0u32;
+    for (t, _) in absorbed_tmpfs() {
+        // Same gate `whiteout::apply` uses: a hand-edited entry that names a
+        // partition root or a /data path must not reach the engine from here.
+        if crate::whiteout::validate(&t.to_string_lossy()).is_err() {
+            eprintln!("nomount: skipping invalid ROM-tmpfs entry {}", t.display());
+            continue;
+        }
+        if nm.whiteout(&t).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// What one ROM-tmpfs pass did, in the same buckets `run_absorb` reports the
+/// bind survey in -- a tmpfs left mounted is just as visible to an app as a bind
+/// is, so it must reach the same summary rather than be quietly dropped.
+#[derive(Default)]
+struct TmpfsPass {
+    /// Emptied mountlessly (or, on a dry run, would be).
+    done: u32,
+    failed: u32,
+    /// Still mounted, still visible, and not by design.
+    leaked: u32,
+    /// Still mounted on purpose (the opt-out list).
+    declined: u32,
+}
+
 /// Take over the "make this ROM directory look empty" trick: drop the tmpfs and
-/// record a durable whiteout for the path instead.
+/// hide the path with a whiteout instead.
 ///
 /// The whiteout is the mountless equivalent -- the directory reads as absent
-/// rather than empty, which is the same answer to a PackageManager scan -- and it
-/// is re-applied at boot from whiteouts.txt, so the module can re-mount its tmpfs
-/// every boot and we simply take it over again.
-fn absorb_rom_tmpfs(dry_run: bool) -> (u32, u32) {
-    let Ok(body) = fs::read_to_string(MOUNTINFO) else { return (0, 0) };
+/// rather than empty, which is the same answer to a PackageManager scan.
+///
+/// It is recorded in absorb's OWN list, not appended to the user's durable
+/// `whiteouts.txt` (M-S8). That list is re-applied at every boot with nothing
+/// that ever prunes it, so a tmpfs takeover was permanent: uninstall the module
+/// that mounted it and the ROM directory stayed hidden forever, until the user
+/// happened to run `whiteout remove` on a path they never added. Here the record
+/// is re-derived from the live mount table each boot instead -- an entry is
+/// confirmed while its tmpfs keeps coming back, and expired when it stops -- and
+/// `run_mount` re-applies it in between so nothing regresses to stock mid-session.
+fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
+    let mut st = TmpfsPass::default();
+    let Ok(body) = fs::read_to_string(MOUNTINFO) else { return st };
     let (skips, _) = skip_list();
-    let (mut done, mut failed) = (0u32, 0u32);
+    let nm = Nm::new();
+    let boot = boot_id().unwrap_or_default();
+    let mut record = absorbed_tmpfs();
+    let durable = crate::whiteout::read().unwrap_or_default();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     for target in body.lines().filter_map(rom_tmpfs_target) {
         // The opt-out list applies here too. Converting a tmpfs to a whiteout
         // swaps "directory empty" for "directory absent"; measured on OP15 across
@@ -1100,36 +1233,130 @@ fn absorb_rom_tmpfs(dry_run: bool) -> (u32, u32) {
         // rather than a rebuild.
         if is_skipped(Path::new("/"), &target, &skips) {
             println!("skipping the tmpfs over {} (opt-out list)", target.display());
+            st.declined += 1;
             continue;
+        }
+        // OWNERSHIP (M-S8). Every other path in absorb requires the source to be
+        // under /data/adb before taking a mount over; this one cannot, because a
+        // fresh tmpfs HAS no source -- mountinfo gives it root `/` and device
+        // `none`, so `source_of` returns nothing and a source test would either
+        // reject every tmpfs (killing the feature) or nothing at all. What can be
+        // asserted is the shape of the trick itself: an EMPTY tmpfs over a ROM
+        // path means "pretend this directory has no entries", and a whiteout says
+        // exactly that. A tmpfs with files in it means the opposite -- the module
+        // is SERVING that content -- and converting it would delete the module's
+        // own files from view. Say so and leave it mounted.
+        match dir_is_empty(&target) {
+            Some(true) => {}
+            other => {
+                eprintln!(
+                    "nomount: LEAK the tmpfs over {} stays mounted: it {} so it is not the \
+                     \"make this directory look empty\" trick a whiteout can replace -- \
+                     converting it would hide content the owning module is serving",
+                    target.display(),
+                    if other.is_some() { "has files in it" } else { "cannot be read" }
+                );
+                st.leaked += 1;
+                continue;
+            }
         }
         if dry_run {
-            println!("would empty {} mountlessly (tmpfs -> durable whiteout)", target.display());
-            done += 1;
+            println!("would empty {} mountlessly (tmpfs -> whiteout)", target.display());
+            st.done += 1;
             continue;
         }
-        // Drop any live rule on the path FIRST. A whiteout there (ours, from a
-        // previous pass, re-applied at boot from whiteouts.txt) d_drops the
-        // dentry, which detaches the mount from path resolution -- umount2 then
-        // cannot find the mountpoint and the tmpfs is stranded until reboot.
-        // Same trap the inject-over-a-mountpoint comment below describes, reached
-        // from the other direction. Measured on OP15: with the whiteout already
-        // applied, every absorb reported "1 failed" and the tmpfs never went away.
-        let nm = Nm::new();
-        let _ = nm.del(&target);
+        seen.insert(target.clone());
+        let t_str = target.to_string_lossy().into_owned();
+        let was_durable = durable.iter().any(|d| *d == t_str);
+        // Drop OUR OWN live rule on the path FIRST. A whiteout there (ours, from a
+        // previous pass, re-applied at boot) d_drops the dentry, which detaches the
+        // mount from path resolution -- umount2 then cannot find the mountpoint and
+        // the tmpfs is stranded until reboot. Same trap the inject-over-a-mountpoint
+        // comment below describes, reached from the other direction. Measured on
+        // OP15: with the whiteout already applied, every absorb reported "1 failed"
+        // and the tmpfs never went away.
+        //
+        // Scoped to rules absorb itself created (M-S8): this used to be an
+        // unconditional `nm del`, which would just as happily drop a rule another
+        // module legitimately owns at that path. Ours are the ones on one of the two
+        // records -- absorb's own list, or the durable list an older Suite wrote
+        // this very takeover into.
+        if was_durable || record.iter().any(|(t, _)| *t == target) {
+            let _ = nm.del(&target);
+        }
         if !umount_detach(&target) && still_mounted(&target) {
             eprintln!("nomount: cannot unmount the tmpfs over {}", target.display());
-            failed += 1;
+            st.failed += 1;
             continue;
         }
-        match crate::whiteout::add(&target.to_string_lossy(), true) {
-            Ok(()) => done += 1,
+        // Hand over a takeover an older Suite wrote into the user's durable list:
+        // that list is re-applied at every boot with nothing that ever prunes it,
+        // which is the permanent hide this finding is about. Done AFTER the unmount
+        // succeeded, so a takeover that fails half-way leaves the old record intact.
+        // The hide itself is re-applied a few lines down and recorded in absorb's
+        // list instead, so from now on it expires with the tmpfs.
+        if was_durable {
+            println!(
+                "moving {t_str} out of whiteouts.txt into absorb's own list: it came from a \
+                 tmpfs, so it should stop hiding when that tmpfs does"
+            );
+            let _ = crate::whiteout::remove(&t_str);
+        }
+        // `whiteout::add` is no longer the right door -- it writes the durable
+        // list. Its validation is, though: it is what refuses a partition root
+        // (`/my_product` matches ROM_ROOTS on its own) and any `..`.
+        if let Err(e) = crate::whiteout::validate(&t_str) {
+            eprintln!("nomount: {t_str} unmounted but will not be hidden: {e:#}");
+            st.failed += 1;
+            continue;
+        }
+        match nm.whiteout(&target) {
+            Ok(()) => {
+                match record.iter_mut().find(|(t, _)| *t == target) {
+                    Some(e) => e.1 = boot.clone(),
+                    None => record.push((target.clone(), boot.clone())),
+                }
+                st.done += 1;
+            }
             Err(e) => {
                 eprintln!("nomount: {} unmounted but the whiteout failed: {e:#}", target.display());
-                failed += 1;
+                st.failed += 1;
             }
         }
     }
-    (done, failed)
+    if dry_run {
+        return st;
+    }
+    // EXPIRY -- the reverse path the durable list never had. Absorb runs from
+    // service.sh after boot_completed, so every module's post-fs-data script has
+    // had its chance: a recorded target with no tmpfs over it, last seen in an
+    // EARLIER boot, belongs to a module that no longer asks for it (uninstalled,
+    // or the trick dropped). Drop the whiteout and the record, and the ROM
+    // directory comes back on its own.
+    //
+    // Keyed on the boot id rather than on "is it mounted right now", because
+    // absorb unmounts the tmpfs itself: every later pass in the SAME boot (the
+    // late pass, uidwatch) sees it gone, and expiring there would unhide a
+    // directory the owning module is still emptying every boot. An entry with no
+    // stamp at all is never expired -- we cannot tell a fresh sighting from an
+    // old one.
+    let mut expired = 0u32;
+    record.retain(|(t, seen_boot)| {
+        if tmpfs_entry_lives(seen.contains(t), seen_boot, &boot, still_mounted(t)) {
+            return true;
+        }
+        let _ = nm.del(t);
+        println!(
+            "restored {}: nothing mounts a tmpfs there any more, so it is no longer hidden",
+            t.display()
+        );
+        expired += 1;
+        false
+    });
+    if expired > 0 || !seen.is_empty() || !record.is_empty() {
+        set_absorbed_tmpfs(&record);
+    }
+    st
 }
 
 pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
@@ -1167,14 +1394,17 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     // A tmpfs over the ROM is not module content laid over a path, so the survey
     // (which keys on the source) never sees it. Handle it first: it is the loudest
     // mount of the lot and the one no source-keyed check ever reported.
-    let (tmpfs_done, tmpfs_failed) = absorb_rom_tmpfs(dry_run);
+    let tmpfs = absorb_rom_tmpfs(dry_run);
     let surveyed = survey()?;
     // Same mountinfo the survey classified from, so a redundant target resolves
     // to the same servable twin here as it did there.
     let aliases = std::fs::read_to_string(MOUNTINFO)
         .map(|b| mount_aliases(&parse_mountinfo(&b)))
         .unwrap_or_default();
-    let (mut leaking, mut declined) = (0u32, 0u32);
+    // Seeded from the tmpfs pass: a tmpfs absorb would not convert is still a
+    // mount over the ROM, and the "posture clean" line below must not be reachable
+    // while one is up.
+    let (mut leaking, mut declined) = (tmpfs.leaked, tmpfs.declined);
     for s in &surveyed {
         if matches!(s.disposition, Disposition::Declined(_)) {
             declined += 1;
@@ -1251,9 +1481,10 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         // A ROM tmpfs is taken over above, not through the candidate list, so say
         // so here -- otherwise a run that emptied one still reported "nothing to
         // absorb", which reads as "we did nothing".
-        if tmpfs_done > 0 || tmpfs_failed > 0 {
+        if tmpfs.done > 0 || tmpfs.failed > 0 {
             println!(
-                "nomount absorb: {tmpfs_done} ROM tmpfs emptied mountlessly                  ({tmpfs_failed} failed)"
+                "nomount absorb: {} ROM tmpfs emptied mountlessly ({} failed)",
+                tmpfs.done, tmpfs.failed
             );
         }
         // "Nothing to absorb" is not "nothing is mounted". A declined mount is
@@ -1437,8 +1668,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     };
     if dry_run {
         println!(
-            "nomount absorb: {} mount(s) would be absorbed, {tmpfs_done} ROM tmpfs, {skipped_dirs} directory bind(s) skipped{drops}{leaks} (dry run)",
-            cands.len() as u32 - skipped_dirs - dropped
+            "nomount absorb: {} mount(s) would be absorbed, {} ROM tmpfs, {skipped_dirs} directory bind(s) skipped{drops}{leaks} (dry run)",
+            cands.len() as u32 - skipped_dirs - dropped,
+            tmpfs.done
         );
     } else {
         let dirs = if skipped_dirs > 0 {
@@ -1447,7 +1679,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             String::new()
         };
         println!(
-            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {tmpfs_done} ROM tmpfs emptied mountlessly, {} failed{dirs}{drops}{leaks}", failed + tmpfs_failed
+            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {} ROM tmpfs emptied mountlessly, {} failed{dirs}{drops}{leaks}",
+            tmpfs.done,
+            failed + tmpfs.failed
         );
     }
     Ok(())
@@ -1478,6 +1712,56 @@ mod tests {
     fn a_tmpfs_over_the_rom_is_recognised() {
         let line = "359 149 0:129 / /product/app/YouTube rw,relatime shared:77 - tmpfs none rw,seclabel";
         assert_eq!(rom_tmpfs_target(line).as_deref(), Some(Path::new("/product/app/YouTube")));
+    }
+
+    /// M-S8: the record is absorb's own, keyed on the boot in which the tmpfs was
+    /// last seen, so an entry can expire. Lines from an older build carry no stamp.
+    #[test]
+    fn the_tmpfs_record_round_trips_stamped_and_unstamped_lines() {
+        let v = parse_tmpfs_record(
+            "# header\n\
+             /product/app/YouTube\tb9f0-1\n\
+             \n\
+             /system/app/Old\n",
+        );
+        assert_eq!(
+            v,
+            vec![
+                (PathBuf::from("/product/app/YouTube"), "b9f0-1".to_string()),
+                (PathBuf::from("/system/app/Old"), String::new()),
+            ]
+        );
+    }
+
+    /// The expiry rule, which is the whole reverse path M-S8 asked for -- and the
+    /// regression it must not cause: absorb unmounts the tmpfs itself, so a second
+    /// pass in the SAME boot always finds it gone and must keep hiding anyway.
+    #[test]
+    fn a_takeover_expires_only_after_a_boot_without_its_tmpfs() {
+        // Seen in this very pass.
+        assert!(tmpfs_entry_lives(true, "old-boot", "this-boot", false));
+        // Not seen now, but seen earlier in THIS boot: absorb's own unmount.
+        assert!(tmpfs_entry_lives(false, "this-boot", "this-boot", false));
+        // Still mounted (opt-out, or an unmount that failed): not ours to expire.
+        assert!(tmpfs_entry_lives(false, "old-boot", "this-boot", true));
+        // Unstamped: kept, because an old sighting cannot be told from a new one.
+        assert!(tmpfs_entry_lives(false, "", "this-boot", false));
+        // The one case that expires: a whole boot went by with no tmpfs there, so
+        // the module that wanted the directory empty is gone.
+        assert!(!tmpfs_entry_lives(false, "old-boot", "this-boot", false));
+    }
+
+    /// `/my_` is a ROM_ROOTS prefix, so a tmpfs mounted on the PARTITION ROOT
+    /// itself is recognised -- and must then be refused, because hiding a whole
+    /// partition is the forkSystemServer abort every other guard here exists for.
+    /// `whiteout::validate` is that refusal, which is why the takeover still calls
+    /// it now that it no longer goes through `whiteout::add`.
+    #[test]
+    fn a_tmpfs_over_a_partition_root_is_recognised_but_never_hidden() {
+        let line = "360 149 0:130 / /my_product rw,relatime shared:78 - tmpfs none rw,seclabel";
+        assert_eq!(rom_tmpfs_target(line).as_deref(), Some(Path::new("/my_product")));
+        assert!(crate::whiteout::validate("/my_product").is_err());
+        assert!(crate::whiteout::validate("/product/app/YouTube").is_ok());
     }
 
     /// Stock tmpfs mounts live outside the ROM partitions, and real filesystems
