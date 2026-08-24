@@ -832,7 +832,13 @@ static __always_inline struct path *nm_stock_for_caller(struct nm_inode_info *in
 {
     if (!info || !info->s_path.dentry) return NULL;
     if (!(info->flags & NM_FLAG_SHADOWS_STOCK)) return NULL;
-    return nomount_is_uid_blocked(current_uid().val) ? &info->s_path : NULL;
+    /* Per-rule question, so ask nm_uid_hidden (which honours NM_FLAG_PUBLIC),
+     * not the raw uid: a PUBLIC rule shadowing a stock file the PackageManager
+     * has already parsed as ours must serve OUR bytes to a blocked reader, or
+     * read()/stat() disagree with the version and signature PM published for
+     * that path. nomount_is_uid_blocked here made NM_FLAG_PUBLIC a no-op for
+     * open/getattr/xattr -- the reader still got the stock file. */
+    return nm_uid_hidden(info->flags) ? &info->s_path : NULL;
 }
 
 static int nm_open(struct inode *inode, struct file *file)
@@ -868,8 +874,12 @@ static int nm_open(struct inode *inode, struct file *file)
      * bug to fix with a relabel, not something to paper over in the kernel. */
     real_file = dentry_open(&info->r_path, file->f_flags, current_cred());
     if (IS_ERR(real_file)) {
-        nm_warn("open of backing file denied for uid %u (relabel the module tree)\n",
-                current_uid().val);
+        /* _once, and without the uid: an unprivileged open() of an injected path
+         * whose backing file the caller cannot read drives this, so an app could
+         * loop it -- emitting the tag (which names the project in .rodata AND at
+         * runtime) once per attempt and evicting the rest of the ring buffer.
+         * The relabel hint is what the operator needs; the uid is not. */
+        nm_warn_once("open of backing file denied (relabel the module tree)\n");
         return PTR_ERR(real_file);
     }
 
@@ -1094,7 +1104,13 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
 
 /* A directory reports 2 + one link per subdirectory. Counted live rather than at
  * inode creation: the children of a synthesized dir are injected in batches, so
- * an inode created part-way through would bake in a count that never updates. */
+ * an inode created part-way through would bake in a count that never updates.
+ *
+ * Filtered by nm_child_visible, exactly as nm_dir_deltas does for a real
+ * hijacked parent: a uid-scoped or per-UID-hidden child the caller's readdir
+ * cannot emit must not move the caller's nlink either, or stat() and getdents()
+ * disagree -- a blocked reader would see nlink 3 on a dir whose listing shows no
+ * subdirectory, which no filesystem produces. */
 static unsigned int nm_vdir_nlink(struct nomount_dir_node *d)
 {
     struct nomount_child_node *ch;
@@ -1104,7 +1120,8 @@ static unsigned int nm_vdir_nlink(struct nomount_dir_node *d)
     if (!d) return links;
     rcu_read_lock();
     idr_for_each_entry(&d->children_idr, ch, cid)
-        if (ch->d_type == DT_DIR && !(ch->flags & NM_FLAG_WHITEOUT))
+        if (ch->d_type == DT_DIR && !(ch->flags & NM_FLAG_WHITEOUT) &&
+            nm_child_visible(ch))
             links++;
     rcu_read_unlock();
     return links;
@@ -1145,7 +1162,11 @@ static loff_t nm_vdir_size(struct nomount_dir_node *d, unsigned int blocksize)
         idr_for_each_entry(&d->children_idr, ch, cid) {
             unsigned int need;
 
-            if (ch->flags & NM_FLAG_WHITEOUT)
+            /* Same visibility filter as nm_vdir_nlink and nm_dir_deltas: a child
+             * the caller cannot list must not add to the size it reads, or the
+             * erofs formula an app recomputes from its own getdents() disagrees
+             * with stat().st_size by exactly the hidden entry's bytes. */
+            if ((ch->flags & NM_FLAG_WHITEOUT) || !nm_child_visible(ch))
                 continue;
             need = NM_EROFS_DIRENT_SZ + ch->name_len;
             /* An entry never straddles a block; the tail of the previous one
@@ -2194,15 +2215,12 @@ static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, s
     }
 }
 
-#define NM_DEFINE_RCU_FREE(_name, _type, _cache)                \
-static void _name(struct rcu_head *head)                        \
-{                                                               \
-    _type *obj = container_of(head, _type, rcu);                \
-    kmem_cache_free(_cache, obj);                               \
-}
-
-NM_DEFINE_RCU_FREE(nm_iop_rcu_free, struct nm_iop, nm_iop_cachep)
-NM_DEFINE_RCU_FREE(nm_fop_rcu_free, struct nm_fop, nm_fop_cachep)
+/* Retired hijack vtables, freed only at module exit -- see the note on struct
+ * nm_iop for why a grace period is not enough. Guarded by nm_retired_lock; the
+ * lists are write-only until nomount_exit(), so readers never walk them. */
+static DEFINE_SPINLOCK(nm_retired_lock);
+static LIST_HEAD(nm_retired_iops);
+static LIST_HEAD(nm_retired_fops);
 
 /* dir_node owns an idr of child nodes, so it can't use the plain struct-only
  * macro. Freed via call_rcu: lockless readers walk children_idr under RCU
@@ -2244,14 +2262,18 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
     if (nm_iop && nm_iop->dir_node == dir_node) {
         smp_store_release(&t_inode->i_op, nm_iop->orig_iop);
         nm_debug("Successfully cured i_op for dir %lu\n", t_inode->i_ino);
-        call_rcu(&nm_iop->rcu, nm_iop_rcu_free);
+        spin_lock(&nm_retired_lock);
+        list_add(&nm_iop->retired, &nm_retired_iops);
+        spin_unlock(&nm_retired_lock);
     }
 
     nm_fop = __get_nm(smp_load_acquire(&t_inode->i_fop), struct nm_fop, fake_fop, iterate_shared, nomount_hijacked_iterate_dir);
     if (nm_fop && nm_fop->dir_node == dir_node) {
         smp_store_release(&t_inode->i_fop, nm_fop->orig_fop);
         nm_debug("Successfully cured i_fop for dir %lu\n", t_inode->i_ino);
-        call_rcu(&nm_fop->rcu, nm_fop_rcu_free);
+        spin_lock(&nm_retired_lock);
+        list_add(&nm_fop->retired, &nm_retired_fops);
+        spin_unlock(&nm_retired_lock);
     }
     spin_unlock(&t_inode->i_lock);
     iput(t_inode);
@@ -2913,6 +2935,16 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         hash_for_each_possible(nomount_rules_ht, ex, vpath_node, h_parent) {
             if (ex->v_len == parent_len && memcmp(nm_get_vpath(ex), v_path, parent_len) == 0 &&
                 (ex->target_uid == 0 || ex->target_uid == target_rule->target_uid)) {
+                /* The matched ancestor must be a directory. A file rule adopted
+                 * as a parent gains a this_dir nothing can ever list (its inode
+                 * carries the file ops), makes nm_dir_deltas on the grandparent
+                 * count a phantom child, and wedges its own deletion at -EBUSY
+                 * because its idr is now non-empty. Reject the malformed topology
+                 * instead of building it. */
+                if (!(ex->flags & (NM_FLAG_VIRTUAL_DIR | NM_FLAG_IS_DIR))) {
+                    err = -ENOTDIR;
+                    break;
+                }
                 dir_node = ex->this_dir;
                 if (!dir_node) {
                     dir_node = __nomount_alloc_dir_node(NULL);
@@ -3148,7 +3180,14 @@ static void nomount_prune_empty_virtual_dirs(struct nomount_dir_node *dir_node, 
         bool parent_virtual;
 
         owner = dir_node->_tag_ptr & 1UL ? (struct nomount_rule *)(dir_node->_tag_ptr & ~1UL) : NULL;
-        if (!owner) break;
+        /* Only prune a SYNTHESIZED ancestor (NM_FLAG_VIRTUAL_DIR), same test
+         * nm_mark_public_up uses to decide "this dir exists only to hold
+         * children". A user-added directory rule (backing path, IS_DIR but not
+         * VIRTUAL_DIR) can also acquire a this_dir when a later rule turns out to
+         * be its child; pruning on empty would silently delete that user rule and
+         * keep climbing, and the netlink del returns 0 so userspace never learns
+         * its rule is gone. Stop at the first non-synthesized owner. */
+        if (!owner || !(owner->flags & NM_FLAG_VIRTUAL_DIR)) break;
 
         /* Capture the parent's kind BEFORE the delete: __nomount_delete_child_locked
          * can empty and free a REAL (tag 0) parent via call_rcu, so re-reading it
@@ -3819,19 +3858,44 @@ static bool nm_target_too_shallow(const char *p, u16 len)
     return true;
 }
 
-/* Does this rule's target name an APK?
+/* Is this rule's target inside a directory the PackageManager scans -- a path
+ * PM parses and advertises to every app (see NM_FLAG_PUBLIC)?
  *
- * Only used to decide whether a SHADOWS_STOCK rule may keep NM_FLAG_PUBLIC (see
- * the note at the strip below). Matches on the target's own name rather than a
- * directory prefix: userspace has already restricted the bit to the directories
- * the PackageManager scans, and re-deriving that policy here would put it in two
- * places that could drift. Case-sensitive because the PM's own scan is -- an
- * ".APK" is not parsed and so was never advertised. */
-static bool nm_vpath_is_apk(const struct nomount_rule *rule)
+ * The layout is <partition>/<scan-dir>/..., so the scan dir is the SECOND path
+ * component. Mirrors pmcache::PM_SCAN_DIRS in userspace, which is the source of
+ * truth for which rules get --public; the kernel keeps the same test only to
+ * decide whether a SHADOWS_STOCK rule may KEEP the bit at the strip below, so a
+ * mislabelling client cannot leak a replaced file PM never advertised. This
+ * covers a package's whole codePath -- Contacts.apk AND the shared libraries in
+ * its lib/<abi> dir -- not just the .apk, because PM publishes nativeLibraryDir;
+ * a blocked reader that got ENOENT on a lib PM said exists is the same tell a
+ * blocked reader of the stock .apk bytes is. Case-sensitive, like PM's scan. */
+static bool nm_vpath_in_pm_scandir(const struct nomount_rule *rule)
 {
+    static const char *const dirs[] = {
+        "app", "priv-app", "overlay", "app-ext", "priv-app-ext",
+    };
     const char *v = nm_get_vpath(rule);
+    u16 len = rule->v_len, i = 0, start = 0, seg = 0;
+    unsigned int d;
 
-    return rule->v_len >= 4 && memcmp(v + rule->v_len - 4, ".apk", 4) == 0;
+    for (i = 0; i <= len; i++) {
+        if (i != len && v[i] != '/')
+            continue;
+        if (i > start) {            /* a non-empty path segment ended here */
+            if (++seg == 2) {       /* the <scan-dir> slot */
+                u16 seglen = i - start;
+
+                for (d = 0; d < ARRAY_SIZE(dirs); d++)
+                    if (strlen(dirs[d]) == seglen &&
+                        memcmp(v + start, dirs[d], seglen) == 0)
+                        return true;
+                return false;
+            }
+        }
+        start = i + 1;
+    }
+    return false;
 }
 
 static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid)
@@ -3907,22 +3971,24 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
      * re-added rule (a reload resolves the vpath through the live injection, so
      * nm_alloc_rule always concludes "shadowing").
      *
-     * An APK is the exception, because "served the stock bytes" is NOT consistent
-     * there. The PackageManager runs as system_server, which is never blocked, so
-     * it parses the MODULE's APK and publishes THAT identity -- version, signature,
-     * codePath -- to every app that asks. A blocked reader handed the stock bytes
-     * for the same path computes a different signature and version than the PM just
-     * advertised, which is exactly the measurable disagreement PUBLIC exists to
-     * remove; hiding the module's copy buys nothing once the PM has already
+     * A PM-scanned codePath is the exception, because "served the stock bytes" is
+     * NOT consistent there. The PackageManager runs as system_server, which is
+     * never blocked, so it parses the MODULE's copy and publishes THAT identity --
+     * version, signature, codePath, nativeLibraryDir -- to every app that asks. A
+     * blocked reader handed the stock bytes (or ENOENT) for the same path computes
+     * something different from what PM just advertised, the exact disagreement
+     * PUBLIC exists to remove; hiding the module's copy buys nothing once PM has
      * described it. Measured on OP15: PM reported com.android.contacts 16.80.0
      * parsed from a 74641847-byte /product/priv-app/Contacts/Contacts.apk while a
-     * blocked uid read the 64249089-byte stock one at that path.
+     * blocked uid read the 64249089-byte stock one -- and the shared libraries
+     * under /product/priv-app/Mms/lib/arm64 were hidden while PM published that
+     * lib dir, so the exemption is the whole codePath, not just the .apk.
      *
-     * Restricted to *.apk so the anti-mislabelling guard still covers every other
-     * shadowing rule -- a client cannot leak an arbitrary replaced file by asking.
-     * Userspace only ever sets the bit for an APK in a directory the PM scans
-     * (pmcache::is_rom_apk), so this widens nothing it does not already request. */
-    if ((rule->flags & NM_FLAG_SHADOWS_STOCK) && !nm_vpath_is_apk(rule))
+     * Restricted to PM scan dirs so the anti-mislabelling guard still covers every
+     * other shadowing rule -- a client cannot leak an arbitrary replaced file by
+     * asking. Userspace only sets the bit for a file under a PM codePath
+     * (pmcache::is_pm_published), so this widens nothing it does not request. */
+    if ((rule->flags & NM_FLAG_SHADOWS_STOCK) && !nm_vpath_in_pm_scandir(rule))
         rule->flags &= ~NM_FLAG_PUBLIC;
 
     err = nomount_generate_virtual_topology(rule);
@@ -4055,11 +4121,18 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
     } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH] && attrs[NOMOUNT_ATTR_REAL_PATH]) {
         char *v_str = nla_data(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
         char *r_str = nla_data(attrs[NOMOUNT_ATTR_REAL_PATH]);
-        int v_len = nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) - 1;
-        int r_len = nla_len(attrs[NOMOUNT_ATTR_REAL_PATH]) - 1;
+        /* strnlen, not nla_len()-1: NLA_NUL_STRING only guarantees a NUL exists
+         * within the attribute, not that it is the LAST byte. A trailing-junk
+         * string would key the rule on "/a/b\0junk" (hash and child name) while
+         * kern_path resolves only "/a/b", so SHADOWS_STOCK, s_path, v_ino and the
+         * context all describe a different path than the rule is filed under --
+         * an inert rule that still reports applied. */
+        int v_len = strnlen(v_str, nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]));
+        int r_len = strnlen(r_str, nla_len(attrs[NOMOUNT_ATTR_REAL_PATH]));
         u32 flags = attrs[NOMOUNT_ATTR_FLAGS] ? nla_get_u32(attrs[NOMOUNT_ATTR_FLAGS]) : 0;
         u32 target_uid = attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID]) : 0;
 
+        if (v_len == 0) return -EINVAL;
         return __nomount_add_rule(v_str, r_str, v_len, r_len, flags, target_uid);
     }
     return -EINVAL;
@@ -4091,7 +4164,8 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
         mutex_unlock(&nomount_write_mutex);
     } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) {
         char *v_path = nla_data(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
-        int v_len = nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) - 1;
+        /* strnlen for the same reason as the add path above. */
+        int v_len = strnlen(v_path, nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]));
         u32 target_uid = attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID]) : 0;
 
         mutex_lock(&nomount_write_mutex);
@@ -4503,6 +4577,16 @@ static int nm_set_cmdline(const char *buf, size_t c)
     mutex_lock(&nm_procspoof_mutex);
     kfree(nm_fake_cmdline);
     nm_fake_cmdline = nb;
+    /* An empty write means "stop spoofing" -- passthrough. Doing the takeover
+     * anyway would replace the genuine proc entry with ours serving
+     * saved_command_line: same text, but a permanent and irreversible swap, and
+     * if the retry below ever failed /proc/cmdline would be gone for good --
+     * louder than the unsanitised value we were asked to stop hiding.
+     * nm_set_bootconfig already guards this case; mirror it. */
+    if (!nb && !nm_cmdline_pde) {
+        mutex_unlock(&nm_procspoof_mutex);
+        return 0;
+    }
     if (!nm_cmdline_pde) {
         remove_proc_entry("cmdline", NULL);
         nm_cmdline_pde = nm_mk_cmdline_pde();
@@ -4749,9 +4833,23 @@ static void __exit nomount_exit(void)
     __nomount_clear_all(true);
     mutex_unlock(&nomount_write_mutex);
 
-    /* Drain pending call_rcu frees (nm_iop / nm_fop / dir_node) before destroying
-     * their slab caches, else kmem_cache_destroy races the deferred kmem_cache_free. */
+    /* Drain pending call_rcu frees (dir_node) before destroying their slab caches,
+     * else kmem_cache_destroy races the deferred kmem_cache_free. */
     rcu_barrier();
+
+    /* Only now are the retired hijack vtables safe to free: every inode has had
+     * its i_op/i_fop restored by __nomount_clear_all above, and any struct file
+     * that cached one of these pointers is gone with the module's last reference.
+     * See the note on struct nm_iop. */
+    {
+        struct nm_iop *iop, *itmp;
+        struct nm_fop *fop, *ftmp;
+
+        list_for_each_entry_safe(iop, itmp, &nm_retired_iops, retired)
+            kmem_cache_free(nm_iop_cachep, iop);
+        list_for_each_entry_safe(fop, ftmp, &nm_retired_fops, retired)
+            kmem_cache_free(nm_fop_cachep, fop);
+    }
 
     kmem_cache_destroy(nm_dir_cachep);
     kmem_cache_destroy(nm_inode_cachep);

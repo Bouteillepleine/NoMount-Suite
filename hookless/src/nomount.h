@@ -105,7 +105,6 @@
 #define nm_find_sibling_meta                     __vfsx_047
 #define nm_fop                                   __vfsx_048
 #define nm_fop_cachep                            __vfsx_049
-#define nm_fop_rcu_free                          __vfsx_050
 #define nm_free_rule                             __vfsx_051
 #define nm_fsync                                 __vfsx_052
 #define nm_full_xattr_name                       __vfsx_053
@@ -121,7 +120,6 @@
 #define nm_install_dentry_ops                    __vfsx_063
 #define nm_iop                                   __vfsx_064
 #define nm_iop_cachep                            __vfsx_065
-#define nm_iop_rcu_free                          __vfsx_066
 #define nm_is_virtual_pos                        __vfsx_067
 #define nm_iter_dotdot                           __vfsx_068
 #define nm_listxattr                             __vfsx_069
@@ -235,7 +233,10 @@
 #define nomount_nl_dump_pathhide                 __vfsx_177
 #define nm_stock_map_dev                         __vfsx_178
 #define nm_target_too_shallow                    __vfsx_179
-#define nm_vpath_is_apk                          __vfsx_180
+#define nm_vpath_in_pm_scandir                   __vfsx_180
+#define nm_retired_lock                          __vfsx_181
+#define nm_retired_iops                          __vfsx_182
+#define nm_retired_fops                          __vfsx_183
 
 #endif /* NOMOUNT_STEALTH_SYMS */
 
@@ -262,7 +263,7 @@
  * leaving it behind means a release announces a version its engine does not
  * speak. That happened: the engine went to 16 while this still said 15.0, and
  * the build summary reported "NoMount version: 15.0". Bump both together. */
-#define NM_MODULE_VERSION "17.0"
+#define NM_MODULE_VERSION "18.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -308,8 +309,19 @@
  *    Measured on OP15 against a 16 engine: PM reported com.android.contacts
  *    16.80.0 from a 74641847-byte /product/priv-app/Contacts/Contacts.apk while a
  *    blocked uid read the 64249089-byte stock APK there. Userspace sets the bit
- *    identically either way, so this is invisible without a version to gate on. */
-#define NOMOUNT_VERSION    17
+ *    identically either way, so this is invisible without a version to gate on.
+ *
+ * 18: 17 kept the bit but nothing acted on it -- nm_stock_for_caller() decided
+ *    with the raw blocked-uid test, so open/getattr/xattr still handed a blocked
+ *    reader the stock file and 17 was observationally identical to 16. It now
+ *    asks nm_uid_hidden(), so a PUBLIC shadowing rule really does serve OUR bytes.
+ *    The exemption also widened from "*.apk" to "anything under a directory the
+ *    PackageManager scans", because PM publishes a package's nativeLibraryDir as
+ *    well as its APK: measured on OP15, a blocked uid got ENOENT for all 25
+ *    shared libraries under /product/priv-app/Mms/lib/arm64 while PM advertised
+ *    that directory to every app. Below 18 a Suite cannot tell whether the bit it
+ *    set is honoured, so `doctor` cannot report the difference. */
+#define NOMOUNT_VERSION    18
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -345,21 +357,29 @@
  * walks the package list at startup, calls getResourcesForApplication() on each
  * entry, and SIGSEGVs on the IOException from 139 unopenable overlay APKs.
  *
- * So a rule the PM already advertises opts out of hiding. Set by userspace for
- * an added ROM APK; STRIPPED by the kernel when the rule shadows a stock file
- * that is NOT an APK, because there the blocked reader is served the stock bytes
- * and revealing the module's copy instead would be a real leak.
+ * So a rule the PM already advertises opts out of hiding. Set by userspace for a
+ * file under a PM-scanned codePath; STRIPPED by the kernel when the rule shadows
+ * a stock file OUTSIDE such a directory, because there the blocked reader is
+ * served the stock bytes and revealing the module's copy would be a real leak.
  *
- * A shadowed APK keeps the bit (engine >= 17). "Served the stock bytes" is only
- * consistent while nothing else has described the file; for an APK the PM has,
+ * A shadowing rule inside a PM scan dir keeps the bit (engine >= 18), and from 18
+ * the bit is actually honoured on the read paths -- nm_stock_for_caller() asks
+ * nm_uid_hidden() rather than the raw blocked-uid test, which is what makes the
+ * flag change any observable byte. "Served the stock bytes" is only consistent
+ * while nothing else has described the file; for a PM-scanned path the PM has,
  * having parsed the module's copy as system_server, so a blocked reader handed
- * the stock bytes disagrees with the version and signature the PM publishes for
- * that path. Hiding the module's copy there conceals nothing the PM has not
- * already announced and adds a mismatch that was not there before. */
+ * the stock bytes (or ENOENT for an added lib) disagrees with the version,
+ * signature and nativeLibraryDir the PM publishes. Hiding the module's copy there
+ * conceals nothing PM has not announced and adds a mismatch that was not
+ * there before. */
 #define NM_FLAG_PUBLIC      (1 << 6)
 /* Bits a client may set; anything else is kernel-derived and must be stripped.
- * NB: nomount_child_node.flags is a u8, so a client-settable bit must be < 8. */
-#define NM_FLAGS_USER_MASK  (NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR | NM_FLAG_WHITEOUT |                              NM_FLAG_PUBLIC)
+ * NB: nomount_child_node.flags is a u8, so a client-settable bit must be < 8.
+ * NM_FLAG_IS_DIR is NOT here on purpose: it is always derived from the backing
+ * path (S_ISDIR in nm_alloc_rule) or, for a whiteout, from the shadowed path, so
+ * a client value only ever mislabels -- a regular file with a client IS_DIR gets
+ * DT_DIR in getdents() while stat() reports S_IFREG, a one-syscall-pair tell. */
+#define NM_FLAGS_USER_MASK  (NM_FLAG_VIRTUAL_DIR | NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96   /* inline SELinux context; Android's are ~30B */
 
 /* logs
@@ -397,6 +417,9 @@
 #endif
 #define nm_warn(fmt, ...) printk(KERN_WARNING NM_LOG_TAG "[WARN] " fmt, ##__VA_ARGS__)
 #define nm_err(fmt, ...)  printk(KERN_ERR NM_LOG_TAG "[ERROR] " fmt, ##__VA_ARGS__)
+/* For a warning an UNPRIVILEGED caller can drive: printing it per attempt lets an
+ * app emit the tag at will and push everything else out of the ring buffer. */
+#define nm_warn_once(fmt, ...) printk_once(KERN_WARNING NM_LOG_TAG "[WARN] " fmt, ##__VA_ARGS__)
 
 static DEFINE_HASHTABLE(nomount_rules_ht, NOMOUNT_HASH_BITS);
 static LIST_HEAD(nomount_sb_list);
@@ -408,18 +431,31 @@ static DEFINE_MUTEX(nomount_write_mutex);
 #define nm_get_rpath(rule) ((rule)->paths + (rule)->v_len + 1)
 
 
+/* `retired` instead of `rcu`: a hijack vtable is NEVER freed while the module is
+ * loaded, because the VFS caches the pointer outside any RCU read-side section.
+ * do_dentry_open() copies i_fop into file->f_op once, and iterate_dir() then
+ * dispatches through that copy for the fd's whole lifetime -- so an RCU grace
+ * period says nothing about whether a reader still holds it. `nm clear` (which
+ * the Suite runs on every mount/reload pass) used to call_rcu-free these, and any
+ * process holding an open DIR* across that -- system_server or installd scanning
+ * /product/overlay -- would call a function pointer out of recycled slab on its
+ * next getdents64(). i_op has a narrower version of the same hole: the VFS loads
+ * inode->i_op and makes the indirect call outside RCU. So restore the pointers
+ * and park the object on a graveyard list; free it in nomount_exit() after
+ * rcu_barrier(), which is the same lifetime rule this file already applies to
+ * hijacked superblocks. Cost is ~100 bytes per hijacked directory. */
 struct nm_iop {
     struct inode_operations fake_iop; /* MUST be exactly at offset 0 */
     const struct inode_operations *orig_iop;
     struct nomount_dir_node *dir_node;
-    struct rcu_head rcu;
+    struct list_head retired;
 };
 
 struct nm_fop {
     struct file_operations fake_fop;  /* MUST be exactly at offset 0 */
     const struct file_operations *orig_fop;
     struct nomount_dir_node *dir_node;
-    struct rcu_head rcu;
+    struct list_head retired;
 };
 
 struct nm_sop {
