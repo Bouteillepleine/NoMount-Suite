@@ -695,7 +695,13 @@ pub fn run_doctor() -> Result<()> {
                         level: Level::Error,
                         check: "ghost cloak over-reaches",
                         detail: format!(
-                            "{} of {checked} sampled ghost path(s) are still VISIBLE to hidden                              uid {uid}, so those paths answer stat=OK and                              truncate/chmod/listxattr=ENOENT at the same time -- a                              contradiction no real file can produce, and a stronger tell than                              the one the cloak closes. Only INJECTED-ONLY paths belong in the                              table; a rule that shadows a stock file, or is public, must not.                              Re-run the mount pass to rebuild it: {}",
+                            "{} of {checked} sampled ghost path(s) are still VISIBLE to hidden \
+                             uid {uid}, so those paths answer stat=OK and \
+                             truncate/chmod/listxattr=ENOENT at the same time -- a contradiction \
+                             no real file can produce, and a stronger tell than the one the cloak \
+                             closes. Only INJECTED-ONLY paths belong in the table; a rule that \
+                             shadows a stock file, or is public, must not. Re-run the mount pass \
+                             to rebuild it: {}",
                             visible.len(),
                             name(&visible)
                         ),
@@ -706,7 +712,11 @@ pub fn run_doctor() -> Result<()> {
                         level: Level::Warn,
                         check: "ghost cloak compiled in but not effective",
                         detail: format!(
-                            "{} of {checked} sampled ghost path(s) are hidden from stat yet                              still answer getxattr(security.selinux) for uid {uid}: the guards                              are present and not firing. _ghost is boot-verified on 6.12 only,                              so on 6.6/6.1/5.15/5.10 this is the expected shape of a variant                              that applied to the wrong wrapper for this tree: {}",
+                            "{} of {checked} sampled ghost path(s) are hidden from stat yet still \
+                             answer getxattr(security.selinux) for uid {uid}: the guards are \
+                             present and not firing. _ghost is boot-verified on 6.12 only, so on \
+                             6.6/6.1/5.15/5.10 this is the expected shape of a variant that \
+                             applied to the wrong wrapper for this tree: {}",
                             leaked.len(),
                             name(&leaked)
                         ),
@@ -717,7 +727,9 @@ pub fn run_doctor() -> Result<()> {
                         level: Level::Info,
                         check: "ghost cloak verified on this kernel",
                         detail: format!(
-                            "{checked} of {} ghost path(s) sampled: each is indistinguishable                              from a non-existent path for hidden uid {uid}, by stat and by                              getxattr. Measured here rather than assumed from the build",
+                            "{checked} of {} ghost path(s) sampled: each is indistinguishable \
+                             from a non-existent path for hidden uid {uid}, by stat and by \
+                             getxattr. Measured here rather than assumed from the build",
                             gpaths.len()
                         ),
                     });
