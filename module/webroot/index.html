@@ -1118,6 +1118,15 @@
 
 <script>
   "use strict";
+  // Stamped by scripts/package.sh into the ZIP's copy, never into the tree's --
+  // so a webroot opened straight from a checkout honestly says "dev". This is
+  // the version of the code that is ACTUALLY RUNNING, which module.prop cannot
+  // tell you: ksud writes the incoming module.prop and an `update` marker into
+  // the LIVE module directory while the new content waits in modules_update, so
+  // between an install and the next reboot the active module advertises a
+  // version whose files are not on disk yet. Comparing the two is the only way
+  // this page can know which side of that swap it is on.
+  const SUITE_VERSION = "dev";
   let execId = 0;
   const KSU = window.ksu;
   const $ = (id) => document.getElementById(id);
@@ -2413,9 +2422,26 @@
   async function refreshAll(btn) {
     const ic = btn && btn.querySelector("svg");
     if (ic) ic.classList.add("spin");
-    const v = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
-    $("ver").textContent = v || "v?";
-    $("footver").textContent = v ? ("Suite " + v) : "";
+    // `nm version` returns the ENGINE's capability counter -- a bare integer
+    // (26), not a release. The footer printed it as "Suite 26", which is the one
+    // number on the page a reader is most likely to quote back, and it named the
+    // kernel's number after the module. The two CANNOT be merged: the engine
+    // ships in the kernel and the Suite ships as a zip, they are installed
+    // separately, and userspace gates features on `engine >= N` precisely so a
+    // new Suite can run on an old kernel and know what it may ask for.
+    const ev = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
+    const eng = ev ? ("engine v" + ev) : "engine offline";
+    // module.prop is what ksud ADVERTISES; SUITE_VERSION is what is running.
+    const pv = (await exec(
+      "sed -n 's/^version=//p' /data/adb/modules/meta-nomount/module.prop"
+    )).stdout.trim();
+    const staged = SUITE_VERSION !== "dev" && pv && pv !== SUITE_VERSION;
+    $("ver").textContent = SUITE_VERSION + (staged ? " ·" : "");
+    $("ver").title = staged
+      ? pv + " is installed but NOT live yet -- its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
+      : "Suite " + SUITE_VERSION + " -- " + eng + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
+    $("footver").textContent = "Suite " + SUITE_VERSION + " · " + eng +
+      (staged ? " · " + pv + " staged — reboot to activate" : "");
     await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshIsolated(), refreshWhiteouts(), checkManagerSwitches()]);
     if (rulesShown) loadRules();
     loadPkgList();

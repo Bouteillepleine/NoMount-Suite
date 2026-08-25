@@ -296,6 +296,19 @@ package_zip() {
     fi
     if [ -n "$webroot_src" ]; then
         cp -r "$webroot_src" "$staging/webroot"
+        # Bake the release into the page. Stamped on the STAGING copy only: the
+        # tree's webroot keeps saying "dev", which is what it is.
+        if [ -f "$staging/webroot/index.html" ]; then
+            sed -i "s/const SUITE_VERSION = \"[^\"]*\"/const SUITE_VERSION = \"${VERSION}\"/" \
+                "$staging/webroot/index.html"
+            # ASSERT. A sed that matches nothing is silent, and the failure mode
+            # here is a shipped WebUI that calls itself "dev" and then reports
+            # every real release as a staged update forever.
+            if ! grep -q "const SUITE_VERSION = \"${VERSION}\"" "$staging/webroot/index.html"; then
+                echo "FATAL: could not stamp SUITE_VERSION into webroot/index.html" >&2
+                exit 1
+            fi
+        fi
     fi
 
     # META-INF
