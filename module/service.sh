@@ -170,16 +170,59 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
     nmto 10 "$NM_BIN" k g "p-" >/dev/null 2>&1 || nmlog "⚠ ghost: path table clear FAILED"
     nmto 10 "$NM_BIN" k g "u-" >/dev/null 2>&1 || nmlog "⚠ ghost: uid table clear FAILED"
 
-    # Paths: every live INJECTION target. Not whiteouts -- a whiteout's whole job
-    # is to make a name absent, which is already what a hidden reader sees, and
-    # feeding one here would ghost a path the engine is not serving. `vfs list`
-    # appends " -> target", " (public)" and " (virtual dir)", so strip from the
-    # first space; a stray annotation would be sent as a path and rejected.
-    _ghn=0; _ghf=0
-    for _ghp in $("$NM_BIN" l 2>/dev/null | sed 's/ ->.*//; s/ (.*//' | grep '^/' | sort -u); do
-        _ghn=$((_ghn + 1))
-        nmto 10 "$NM_BIN" k g "p+$_ghp" >/dev/null 2>&1 || _ghf=$((_ghf + 1))
-    done
+    # Paths: ONLY those a hidden caller is supposed to see NOTHING at.
+    #
+    # Feeding it every injection target was wrong, and measurably worse than not
+    # running _ghost at all. Where a rule SHADOWS a stock file the engine serves
+    # the hidden reader that stock file on purpose ("Hidden reader of a shadowing
+    # rule: report the stock file it is entitled to", nomount.c), and a PUBLIC
+    # rule stays visible on purpose too. Ghosting either makes ONE path answer
+    # stat=OK and chmod/truncate/utimensat/listxattr=ENOENT at the same time --
+    # a self-contradiction no real file can produce, so a scanner does not even
+    # need a control path to see it. Measured on OP15 at v1.3.57: of 260 rules
+    # 259 were of this kind, i.e. the cloak closed the oracle on ONE path and
+    # opened a louder one on the other 259.
+    #
+    # The predicate is the engine's own behaviour, asked rather than modelled:
+    # become a uid that IS hidden and test the path. Absent -> injected-only ->
+    # ghost it. Visible -> the engine intends it to be seen -> leave it alone.
+    # That covers shadowing, public and virtual-dir rules without this script
+    # having to know which is which. ONE `su` for the whole list: 260 separate
+    # ones is slow at boot and is exactly the root-exec burst OOS flags.
+    #
+    # Fail-safe by construction: if the hide pass has not taken effect, or `su`
+    # will not run, every path reads as visible, the table stays EMPTY and
+    # _ghost is inert. Inert is the honest state -- a half-populated table
+    # cloaks some paths and not others, which is a pattern of its own.
+    _ghn=0; _ghg=0; _ghf=0
+    _ghprobe=""
+    if [ -f "$NMDIR/uidhide.cache" ]; then
+        while IFS= read -r _ghl; do
+            _ghl=$(echo "$_ghl" | tr -d '\r')
+            case "$_ghl" in ''|\#*) continue ;; esac
+            _ghi=${_ghl##*[!0-9]}
+            case "$_ghi" in ''|*[!0-9]*) continue ;; esac
+            [ "$_ghi" = "0" ] && continue
+            _ghprobe="$_ghi"; break
+        done < "$NMDIR/uidhide.cache"
+    fi
+    # `vfs list` appends " -> target", " (public)" and " (virtual dir)", so strip
+    # from the first space; a stray annotation would be sent as a path and
+    # rejected. Whiteouts are already excluded upstream -- a whiteout's whole job
+    # is to make a name absent, which is what a hidden reader sees anyway.
+    _ghcand=$("$NM_BIN" l 2>/dev/null | sed 's/ ->.*//; s/ (.*//' | grep '^/' | sort -u)
+    _ghn=$(printf '%s\n' "$_ghcand" | grep -c '^/')
+    if [ -n "$_ghprobe" ] && [ "$_ghn" -gt 0 ]; then
+        _ghlist=$(printf '%s\n' "$_ghcand" | su "$_ghprobe" -c \
+            'while IFS= read -r p; do [ -e "$p" ] || printf "%s\n" "$p"; done' 2>/dev/null)
+        for _ghp in $_ghlist; do
+            case "$_ghp" in /*) ;; *) continue ;; esac
+            _ghg=$((_ghg + 1))
+            nmto 10 "$NM_BIN" k g "p+$_ghp" >/dev/null 2>&1 || _ghf=$((_ghf + 1))
+        done
+    else
+        nmlog "⚠ ghost: no hidden uid to probe with — path table left EMPTY (cloak inert)"
+    fi
 
     # Uids: exactly the set per-UID hiding already uses, read from the cache the
     # hide pass just wrote. Deriving it a second way is how the two would drift,
@@ -208,11 +251,11 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
     # empty is honestly inert, partial means some paths are cloaked and others
     # are not, which is itself a pattern.
     if [ "$_ghf" -gt 0 ] || [ "$_ghuf" -gt 0 ]; then
-        nmlog "⚠ ghost cloak: $_ghf/$_ghn path(s) and $_ghuf/$_ghu uid(s) REJECTED — the existence oracles stay OPEN for those"
-    elif [ "$_ghn" = 0 ] || [ "$_ghu" = 0 ]; then
-        nmlog "⚠ ghost cloak inert: $_ghn path(s), $_ghu uid(s) — BOTH tables must be non-empty for any guard to fire"
+        nmlog "⚠ ghost cloak: $_ghf/$_ghg path(s) and $_ghuf/$_ghu uid(s) REJECTED — the existence oracles stay OPEN for those"
+    elif [ "$_ghg" = 0 ] || [ "$_ghu" = 0 ]; then
+        nmlog "⚠ ghost cloak inert: $_ghg of $_ghn path(s), $_ghu uid(s) — BOTH tables must be non-empty for any guard to fire"
     else
-        nmlog "ghost cloak populated ($_ghn paths, $_ghu uids)"
+        nmlog "ghost cloak populated ($_ghg of $_ghn paths ghostable, $_ghu uids)"
     fi
 fi
 
