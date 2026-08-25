@@ -57,11 +57,54 @@ pub enum Commands {
         action: WhiteoutAction,
     },
     /// Prove the hiding holds on THIS device: replay every detection oracle we
-    /// have closed and report what was actually measured. A skipped check is not
-    /// a pass.
-    Audit,
+    /// have closed and report what was actually measured.
+    ///
+    /// Verdicts are PASS, FAIL, REBOOT, N/A and UNMEASURED. The last two used to
+    /// be one "SKIP": "nothing here to test" is not a warning, and "something
+    /// stopped me testing" is. Neither is ever a pass.
+    Audit {
+        /// Emit one JSON object instead of prose. The WebUI reads this; the
+        /// human output is unchanged and is still the default.
+        #[arg(long)]
+        json: bool,
+        /// With --json, also cache the result to /data/adb/nomount/audit.json so
+        /// the WebUI can show a verdict on open instead of a dash. Written by the
+        /// boot pass.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Only the mount-table questions: is anything an app could see mounted over
+    /// the ROM. The same three checks `audit` runs, so the posture shield and the
+    /// audit cannot disagree.
+    Posture {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record that you have looked at a failing check and decided to live with it.
+    ///
+    /// This never marks anything clean. The verdict stays FAIL, it stays visible,
+    /// it renders grey rather than green, and it comes back at full severity if
+    /// the evidence changes. Some findings genuinely have no fix the Suite can
+    /// apply -- a hook framework's bind, an installer's own tmpfs -- and a
+    /// permanently red chip is one the reader learns to ignore.
+    Accept {
+        /// Check id, as printed by `audit --json` ("id" field). Omit to list.
+        check: Option<String>,
+        /// Why. Required, stored, and shown next to the finding.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Stop accepting this check.
+        #[arg(long)]
+        remove: bool,
+        /// Show every acceptance on this device.
+        #[arg(long)]
+        list: bool,
+    },
     /// Lint the mount plan (and live rules) for known bootloop/no-op hazards
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     /// Print what the mount pass would do (resolved target, kind, source) without
     /// applying anything. Read-only.
     Plan,
@@ -74,6 +117,8 @@ pub enum Commands {
         /// Persist the result to /data/adb/nomount/health.txt (used at boot)
         #[arg(long)]
         write: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Freeze the current healthy fingerprint as the baseline for `verify`
     Snapshot,

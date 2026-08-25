@@ -1,4 +1,5 @@
 mod absorb;
+mod accept;
 mod audit;
 mod bind;
 mod blocklist;
@@ -6,6 +7,7 @@ mod cli;
 mod dirshape;
 mod doctor;
 mod health;
+mod json;
 mod manager;
 mod mount;
 mod nm;
@@ -35,8 +37,12 @@ fn main() -> Result<()> {
         Commands::Mount => mount::run_mount(),
         Commands::Vfs { action } => cli::handlers::handle_vfs(action),
         Commands::Uid { action } => cli::handlers::handle_uid(action),
-        Commands::Doctor => doctor::run_doctor(),
-        Commands::Audit => audit::run_audit(),
+        Commands::Doctor { json } => doctor::run_doctor(json),
+        Commands::Audit { json, write } => audit::run_audit(json, write),
+        Commands::Posture { json } => audit::run_posture(json),
+        Commands::Accept { check, reason, remove, list } => {
+            audit::run_accept(check, reason, remove, list)
+        }
         Commands::Plan => mount::run_plan(),
         Commands::Reload => mount::run_reload(),
         Commands::Absorb { dry_run, include_dirs, early } => {
@@ -49,7 +55,7 @@ fn main() -> Result<()> {
             cli::WhiteoutAction::Apply => whiteout::apply(),
             cli::WhiteoutAction::Suggest => whiteout::suggest(),
         },
-        Commands::Selfcheck { write } => health::run_selfcheck(write),
+        Commands::Selfcheck { write, json } => health::run_selfcheck(write, json),
         Commands::Snapshot => health::run_snapshot(),
         Commands::Verify => health::run_verify(),
         Commands::Export { dir } => health::run_export(dir),

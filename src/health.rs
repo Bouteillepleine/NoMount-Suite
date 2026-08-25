@@ -261,7 +261,7 @@ fn gather() -> Fingerprint {
 /// `nomount selfcheck [--write]` — runtime health, human-readable. With `--write`
 /// it also persists to health.txt (service.sh calls this at boot_completed).
 /// Exit is non-zero when the consistency canary or guard indicates trouble.
-pub fn run_selfcheck(write: bool) -> Result<()> {
+pub fn run_selfcheck(write: bool, json: bool) -> Result<()> {
     let fp = gather();
     let ok_guard = fp.guard == "armed";
     let ok_engine = fp.engine != "down";
@@ -272,7 +272,9 @@ pub fn run_selfcheck(write: bool) -> Result<()> {
     // legitimate can't-check by design and stays healthy.
     let unverified = fp.consistency == "unchecked";
 
-    print!("{}", fp.to_text());
+    if !json {
+        print!("{}", fp.to_text());
+    }
     let verdict = if mismatch {
         "PER-UID INCONSISTENCY (injection visible to a normal app differently than root)"
     } else if !ok_engine {
@@ -284,7 +286,41 @@ pub fn run_selfcheck(write: bool) -> Result<()> {
     } else {
         "healthy"
     };
-    println!("verdict={verdict}");
+    if json {
+        use crate::json::J;
+        // The fingerprint is already a flat key=value document, so it maps
+        // straight onto an object -- no second description of the same fields to
+        // drift from the first.
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for line in fp.to_text().lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                fields.push((k.to_string(), v.to_string()));
+            }
+        }
+        let doc = J::Obj(vec![
+            ("kind", J::s("selfcheck")),
+            ("verdict", J::s(verdict)),
+            // The states the caller actually branches on, as booleans. The WebUI
+            // used to regex `verdict=(.+)` and ladder on prose.
+            ("healthy", J::Bool(!mismatch && ok_engine && ok_guard && !unverified)),
+            ("engine_up", J::Bool(ok_engine)),
+            ("guard_armed", J::Bool(ok_guard)),
+            ("consistency_mismatch", J::Bool(mismatch)),
+            ("consistency_unverified", J::Bool(unverified)),
+            (
+                "fields",
+                J::Arr(
+                    fields
+                        .iter()
+                        .map(|(k, v)| J::Obj(vec![("key", J::s(k)), ("value", J::s(v))]))
+                        .collect(),
+                ),
+            ),
+        ]);
+        println!("{}", doc.render());
+    } else {
+        println!("verdict={verdict}");
+    }
 
     if write {
         fs::create_dir_all(NM_DIR).ok();

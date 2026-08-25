@@ -21,17 +21,97 @@ use anyhow::Result;
 
 use crate::nm::Nm;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum Verdict {
     Pass,
     Fail,
     /// Real, but already cured -- a reboot applies the fix that is pending.
     Reboot,
-    /// Could not be measured here (nothing to sample, wrong fs, no engine).
-    Skip,
+    /// The check does not apply to THIS device or THIS configuration, and no
+    /// arrangement of the two would make it apply as things stand. No overlay
+    /// mount, no single-block erofs parent, no app on the hide list yet.
+    ///
+    /// Split out of `Skip` because collapsing the two is what made a healthy
+    /// device render amber. "There was nothing here to test" and "something
+    /// stopped me testing" are different answers, and only the second is a
+    /// warning. A clean device now reads `undetected` with a grey `n/a` count
+    /// beside it instead of `4 unverified` in amber with an alert dot.
+    ///
+    /// This is NOT a softening of the honesty rule in this file's header. The
+    /// rule is that an unrun check must never be reported as clean, and it still
+    /// is not: `NotApplicable` is counted, printed and JSON-emitted as its own
+    /// state, never folded into the pass count.
+    NotApplicable,
+    /// The check COULD have applied and did not run: mountinfo unreadable, fork
+    /// failed, the probe child said nothing, a directory that would not
+    /// enumerate. Stays amber, because this is precisely the state the "a check
+    /// that cannot run says so" rule exists for.
+    Unmeasured,
+}
+
+/// How much an app needs to do to read this oracle. Every FAIL used to render
+/// identically fatal; they are not remotely equivalent, and sorting by this is
+/// what tells a user which one to fix first.
+#[derive(PartialEq, Clone, Copy)]
+pub enum Reach {
+    /// One syscall, any app, no permission. `getdents64` on a directory,
+    /// `/proc/self/maps`, `/proc/self/mountinfo`.
+    AnyApp,
+    /// Reachable by an app, but it has to model the filesystem to interpret what
+    /// it read -- bucket a whole directory's inodes, or replay erofs block
+    /// packing -- so it takes a detector built for the purpose.
+    Effort,
+    /// Not reachable from an app domain at all on a stock policy.
+    ///
+    /// No check in this file is currently RootOnly, and that is a property of
+    /// what the audit chooses to bundle rather than an oversight: every oracle
+    /// here was found by measuring what an APP can read, because an oracle root
+    /// alone can reach is not a detection risk. Kept so a future check can say so
+    /// rather than being forced to overstate itself as `Effort`.
+    #[allow(dead_code)]
+    RootOnly,
+}
+
+impl Reach {
+    fn slug(self) -> &'static str {
+        match self {
+            Reach::AnyApp => "any-app",
+            Reach::Effort => "needs-effort",
+            Reach::RootOnly => "root-only",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Reach::AnyApp => "any app",
+            Reach::Effort => "needs effort",
+            Reach::RootOnly => "root only",
+        }
+    }
+    /// Sort key: the thing any app can read comes first.
+    fn rank(self) -> u8 {
+        match self {
+            Reach::AnyApp => 0,
+            Reach::Effort => 1,
+            Reach::RootOnly => 2,
+        }
+    }
+}
+
+/// One thing the user can do about a finding, which the WebUI renders as a
+/// button. A finding with an owner but no action is still an improvement on a
+/// finding with neither; a finding with both is one tap from closed.
+pub struct Action {
+    /// Stable id the WebUI switches on. Never shown.
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Path, module id, or whatever the action needs.
+    pub arg: Option<String>,
 }
 
 pub struct Check {
+    /// Stable slug. This is what an acceptance is keyed on and what the WebUI
+    /// uses for element ids, so it must not change when the display name does.
+    pub id: &'static str,
     pub name: &'static str,
     pub verdict: Verdict,
     /// What was actually read. Always populated, including on a pass -- a bare
@@ -39,19 +119,128 @@ pub struct Check {
     pub evidence: String,
     /// What an attacker would do with a failure. Only on Fail.
     pub oracle: Option<&'static str>,
+    /// One line in the reader's terms, always present, on every verdict.
+    ///
+    /// The evidence strings are written for whoever is debugging the engine and
+    /// they are good at that job: "2 injected inode(s) alone in the 3M bucket, no
+    /// stock there" says exactly what was measured. It also says nothing at all
+    /// to the person who installed a module and wants to know if they are fine.
+    /// This field is that person's sentence; the evidence stays, one disclosure
+    /// away.
+    pub meaning: String,
+    pub reach: Reach,
+    /// Who caused this: a module id, the kernel, the root manager, or the user's
+    /// own configuration. `None` where the question does not apply (a pass).
+    ///
+    /// A finding without an owner is a finding nobody can close. `absorb` already
+    /// resolves a leaked mount to its owning module and the audit used to throw
+    /// that answer away for exactly the case where it mattered.
+    pub owner: Option<String>,
+    pub action: Option<Action>,
+}
+
+/// Builder, so a check body stays about what it measured. Everything except the
+/// verdict-specific parts has a sane default; the `with_*` methods add what the
+/// individual check knows.
+fn chk(id: &'static str, name: &'static str, verdict: Verdict, evidence: String) -> Check {
+    Check {
+        id,
+        name,
+        verdict,
+        evidence,
+        oracle: None,
+        meaning: String::new(),
+        reach: Reach::AnyApp,
+        owner: None,
+        action: None,
+    }
+}
+
+impl Check {
+    fn meaning(mut self, m: impl Into<String>) -> Check {
+        self.meaning = m.into();
+        self
+    }
+    fn reach(mut self, r: Reach) -> Check {
+        self.reach = r;
+        self
+    }
+    fn owner(mut self, o: impl Into<String>) -> Check {
+        self.owner = Some(o.into());
+        self
+    }
+    fn action(mut self, id: &'static str, label: &'static str, arg: Option<String>) -> Check {
+        self.action = Some(Action { id, label, arg });
+        self
+    }
+    /// Fingerprint of the evidence, for [`crate::accept`].
+    pub fn fingerprint(&self) -> String {
+        crate::json::fingerprint(&self.evidence)
+    }
+    fn verdict_slug(&self) -> &'static str {
+        match self.verdict {
+            Verdict::Pass => "pass",
+            Verdict::Fail => "fail",
+            Verdict::Reboot => "reboot",
+            Verdict::NotApplicable => "n/a",
+            Verdict::Unmeasured => "unmeasured",
+        }
+    }
+    fn tag(&self) -> &'static str {
+        match self.verdict {
+            Verdict::Pass => "PASS",
+            Verdict::Fail => "FAIL",
+            Verdict::Reboot => "REBOOT",
+            Verdict::NotApplicable => "N/A",
+            Verdict::Unmeasured => "UNMEASURED",
+        }
+    }
 }
 
 fn pass(name: &'static str, evidence: String) -> Check {
-    Check { name, verdict: Verdict::Pass, evidence, oracle: None }
+    chk(id_of(name), name, Verdict::Pass, evidence)
 }
 fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
-    Check { name, verdict: Verdict::Fail, evidence, oracle: Some(oracle) }
+    let mut c = chk(id_of(name), name, Verdict::Fail, evidence);
+    c.oracle = Some(oracle);
+    c
 }
-fn skip(name: &'static str, evidence: String) -> Check {
-    Check { name, verdict: Verdict::Skip, evidence, oracle: None }
+/// "Does not apply here." Grey, never amber, never counted as a pass.
+fn na(name: &'static str, evidence: String) -> Check {
+    chk(id_of(name), name, Verdict::NotApplicable, evidence)
+}
+/// "Could have applied, did not run." Amber -- this is the honesty rule's state.
+fn unmeasured(name: &'static str, evidence: String) -> Check {
+    chk(id_of(name), name, Verdict::Unmeasured, evidence)
 }
 fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
-    Check { name, verdict: Verdict::Reboot, evidence, oracle: Some(oracle) }
+    let mut c = chk(id_of(name), name, Verdict::Reboot, evidence);
+    c.oracle = Some(oracle);
+    c
+}
+
+/// Display name -> stable id.
+///
+/// Kept as one table rather than threaded through every constructor: the display
+/// names are already unique and already passed everywhere, and a second literal
+/// at each call site is a second thing to keep in sync. A name with no entry
+/// falls back to itself, which is stable enough to key an acceptance on and loud
+/// enough to notice.
+fn id_of(name: &str) -> &'static str {
+    match name {
+        "zero-mount posture" => "zero-mount",
+        "kernel surfaces" => "kernel-surfaces",
+        "readdir cookie magic" => "dirent-cookie",
+        "readdir ino vs stat ino" => "dino-vs-stat",
+        "injected inode band" => "inode-band",
+        "overlay dir inode range" => "overlay-dir-ino",
+        "erofs directory shape" => "erofs-dir-shape",
+        "injected files in maps" => "maps-deleted",
+        "PM-published files open for a hidden app" => "pm-published-open",
+        "tmpfs over the ROM" => "rom-tmpfs",
+        "foreign mount over the ROM" => "rom-foreign-mount",
+        _ => "unknown-check",
+    }
 }
 
 // ---------------------------------------------------------------- raw readdir
@@ -173,7 +362,10 @@ fn ino_of(p: &Path) -> Option<u64> {
 /// how the old counter reported zero regardless of reality.
 fn check_zero_mount() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
-        return skip("zero-mount posture", "cannot read /proc/self/mountinfo".into());
+        // UNMEASURED, not n/a: every device has a mount table, so failing to read
+        // it means the check did not run -- exactly the state that must stay amber.
+        return unmeasured("zero-mount posture", "cannot read /proc/self/mountinfo".into())
+            .meaning("Could not read the mount table, so whether any module mount is visible to apps is unknown.");
     };
     // /adb/, not /adb/modules/: a module is free to bind from anywhere under
     // /data/adb and several do. Issue #14 is the case in point -- a YouTube
@@ -214,13 +406,48 @@ fn check_zero_mount() -> Check {
                 show(&by_design)
             )
         };
-        pass("zero-mount posture", note)
+        let meaning = if by_design.is_empty() {
+            "Nothing the Suite or your modules do shows up in the mount table.".to_string()
+        } else {
+            format!(
+                "Nothing unexpected. {} hook-framework bind(s) remain on purpose — absorb never \
+                 takes those over, because breaking a Zygisk/Xposed hook surfaces hours later \
+                 during app install, not at boot.",
+                by_design.len()
+            )
+        };
+        pass("zero-mount posture", note).meaning(meaning)
     } else {
+        // Name the owner. `module_dir_of` was already being called to decide the
+        // by-design split and its answer was thrown away for the leaked case --
+        // the one case where the reader has something to do with it.
+        let owners: Vec<String> = {
+            let mut v: Vec<String> = leaked
+                .iter()
+                .filter_map(|(_, src)| crate::absorb::module_dir_of(src))
+                .filter_map(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let owner = if owners.is_empty() {
+            "a bind from outside /data/adb/modules".to_string()
+        } else {
+            owners.join(", ")
+        };
         fail(
             "zero-mount posture",
             format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked)),
             "any app can read /proc/self/mountinfo and see a module mounted over the ROM",
         )
+        .meaning(format!(
+            "{} mount(s) laid over the ROM are readable by any app in its own mount table. The \
+             Suite adds none of its own — these come from {owner}.",
+            leaked.len()
+        ))
+        .owner(owner)
+        .action("absorb", "Absorb now", None)
     }
 }
 
@@ -258,13 +485,17 @@ fn check_surfaces() -> Check {
     // A hit is a hit however partial the scan was, so `found` still fails below.
     // Only an EMPTY result depends on having been able to look everywhere.
     if found.is_empty() && !unread.is_empty() {
-        return skip(
+        return unmeasured(
             "kernel surfaces",
             format!(
                 "could not enumerate {} — nothing named nomount was found in the rest, but \
                  this check did NOT clear the surfaces it could not read",
                 unread.join(", ")
             ),
+        )
+        .meaning(
+            "Part of the kernel's public directory listing could not be read, so this is not a \
+             clean result — only an incomplete one.",
         );
     }
     if found.is_empty() {
@@ -283,12 +514,18 @@ fn check_surfaces() -> Check {
              unreadable by app domains)"
                 .into(),
         )
+        .meaning("The engine has no directory entry anywhere an app can list that names it.")
     } else {
         fail(
             "kernel surfaces",
             found.join(", "),
             "a named surface identifies the engine outright, with no analysis needed",
         )
+        .meaning(
+            "The kernel exposes a directory entry with the engine's name in it. Anything that \
+             lists that directory identifies your setup outright, with no analysis at all.",
+        )
+        .owner("the kernel build")
     }
 }
 
@@ -306,16 +543,35 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
         }
     }
     if scanned == 0 {
-        return skip("readdir cookie magic", "no injected directory could be read".into());
+        // The two reasons a directory scan finds nothing are different answers.
+        // With no rules live there is nothing to inject into and never was:
+        // n/a. With rules live but no parent readable, the check that would have
+        // run did not: unmeasured.
+        return if parents.is_empty() {
+            na("readdir cookie magic", "no injection rules are live, so no directory to read".into())
+                .meaning("Nothing is being injected yet, so there are no listings to check.")
+        } else {
+            unmeasured(
+                "readdir cookie magic",
+                format!("{} injected directory(ies), none could be read", parents.len()),
+            )
+            .meaning("The injected directories could not be listed, so this was not tested.")
+        };
     }
     if hits == 0 {
         pass("readdir cookie magic", format!("0 of {scanned} dirents carry the magic"))
+            .meaning("Directory listings of injected folders look the same as the ROM's own.")
     } else {
         fail(
             "readdir cookie magic",
             format!("{hits} of {scanned} dirents have 0x6e6d in the top 16 bits of d_off"),
             "one getdents64 on an injected directory identifies the engine, no root needed",
         )
+        .meaning(
+            "Listing an injected folder returns entries carrying the engine's marker. One \
+             ordinary directory read identifies your setup — this is the cheapest oracle there is.",
+        )
+        .owner("the kernel engine")
     }
 }
 
@@ -361,19 +617,31 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
         }
     }
     if eligible == 0 {
-        return skip(
+        return na(
             "readdir ino vs stat ino",
             "no injected file on a non-overlay filesystem to compare".into(),
+        )
+        .meaning(
+            "This one only applies where the ROM is NOT overlayfs — on overlay, stock files \
+             disagree the same way, so the comparison proves nothing. Your injected files are \
+             all on overlay.",
         );
     }
     if bad.is_empty() {
         pass("readdir ino vs stat ino", format!("{checked}/{eligible} injected file(s) agree"))
+            .meaning("Injected files report the same identity when listed as when inspected.")
     } else {
         fail(
             "readdir ino vs stat ino",
             format!("{} of {eligible} eligible failed ({checked} compared): {}", bad.len(), bad.join("; ")),
             "listing a directory and stat-ing its entries separates injected files from stock",
         )
+        .meaning(
+            "An injected file reports one identity when the folder is listed and a different one \
+             when the file itself is inspected. Comparing the two picks the injected files out of \
+             the stock ones.",
+        )
+        .owner("the kernel engine")
     }
 }
 
@@ -417,21 +685,35 @@ fn check_inode_band(targets: &[PathBuf]) -> Check {
         }
     }
     if examined == 0 {
-        return skip(
+        return na(
             "injected inode band",
             "no directory with both enough injections and a stock population to compare".into(),
-        );
+        )
+        .meaning(
+            "Nothing to compare: this needs a folder holding at least four injected files \
+             alongside the ROM's own, and none of yours is shaped that way.",
+        )
+        .reach(Reach::Effort);
     }
     match worst {
         None => pass(
             "injected inode band",
             format!("{examined} directory(ies): every injected inode shares a bucket with stock"),
-        ),
+        )
+        .meaning("Injected files sit in the same numeric range as the ROM's own files.")
+        .reach(Reach::Effort),
         Some((dir, b, n)) => fail(
             "injected inode band",
             format!("{dir}: {n} injected inode(s) alone in the {}M bucket, no stock there", b),
             "bucket every inode in a directory and the all-ours band names the injections",
-        ),
+        )
+        .meaning(
+            "Injected files carry identity numbers from a range the ROM never uses, so a \
+             detector that groups a folder's files by that number gets one group that is \
+             entirely yours. It has to be built for the purpose — this is not a one-syscall tell.",
+        )
+        .owner("the kernel engine")
+        .reach(Reach::Effort),
     }
 }
 
@@ -473,19 +755,32 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
         }
     }
     if examined == 0 {
-        return skip("overlay dir inode range", "no injected directory on an overlay mount".into());
+        return na("overlay dir inode range", "no injected directory on an overlay mount".into())
+            .meaning(
+                "This one only applies to folders the Suite creates on an overlayfs ROM, and you \
+                 have none.",
+            )
+            .reach(Reach::Effort);
     }
     if outliers.is_empty() {
         pass(
             "overlay dir inode range",
             format!("{examined} overlay dir(s): synthesized inodes sit inside the stock range"),
         )
+        .meaning("Folders the Suite creates carry identity numbers the ROM could plausibly issue.")
+        .reach(Reach::Effort)
     } else {
         fail(
             "overlay dir inode range",
             outliers.join("; "),
             "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
         )
+        .meaning(
+            "Folders the Suite created carry identity numbers far outside anything the ROM \
+             issues, so a single search filtered on that number returns exactly the created ones.",
+        )
+        .owner("the kernel engine")
+        .reach(Reach::Effort)
     }
 }
 
@@ -516,13 +811,23 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
         }
     }
     if ok == 0 && bad.is_empty() {
-        return skip(
+        return na(
             "erofs directory shape",
             "no single-block erofs parent among the injected paths".into(),
-        );
+        )
+        .meaning(
+            "This one only applies to small folders on an erofs ROM, where the folder's size is a \
+             fixed formula over its contents. None of yours is both.",
+        )
+        .reach(Reach::Effort);
     }
     if bad.is_empty() {
         pass("erofs directory shape", format!("{ok} erofs parent(s) match the dirent model"))
+            .meaning(
+                "Folders holding injected or hidden files still report the size their contents \
+                 imply, so adding or hiding a name left no arithmetic trace.",
+            )
+            .reach(Reach::Effort)
     } else {
         fail(
             "erofs directory shape",
@@ -530,6 +835,13 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
             "st_size stops matching the listing, so a stat plus a getdents64 shows a name was \
              added or hidden",
         )
+        .meaning(
+            "A folder's reported size no longer matches what its contents imply, which says a \
+             name was added or hidden. Reading it takes a detector that models how this \
+             filesystem packs folders.",
+        )
+        .owner("the kernel engine")
+        .reach(Reach::Effort)
     }
 }
 
@@ -545,11 +857,13 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
 /// privilege at all.
 fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     if targets.is_empty() {
-        return skip("injected files in maps", "no live rules".into());
+        return na("injected files in maps", "no live rules".into())
+            .meaning("Nothing is being injected yet, so no process can have one mapped.");
     }
     let want: HashSet<&Path> = targets.iter().map(PathBuf::as_path).collect();
     let Ok(rd) = fs::read_dir("/proc") else {
-        return skip("injected files in maps", "cannot read /proc".into());
+        return unmeasured("injected files in maps", "cannot read /proc".into())
+            .meaning("The process list could not be read, so this was not tested.");
     };
     let mut hits: Vec<String> = Vec::new();
     let mut scanned = 0u32;
@@ -572,6 +886,10 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
         return pass(
             "injected files in maps",
             format!("{scanned} process(es): no injected file mapped as deleted"),
+        )
+        .meaning(
+            "No running app has an injected file marked deleted in its own memory map — which is \
+             the version of this that an app can read about itself, with no permission at all.",
         );
     }
     let shown = hits.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
@@ -584,7 +902,15 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             "injected files in maps",
             format!("{} injected file(s) mapped as deleted: {shown} -- pending reboot after a rule change", hits.len()),
             "still readable until the reboot: any app can see which of its files are injected",
-        );
+        )
+        .meaning(format!(
+            "You changed a rule over {} file(s) that were already open. The rule is right; the \
+             processes still holding the old copy show it as deleted until they restart. A reboot \
+             finishes this — nothing else is needed.",
+            hits.len()
+        ))
+        .owner("a rule change made since boot")
+        .action("reboot", "Reboot to finish", None);
     }
     {
         fail(
@@ -592,6 +918,14 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             format!("{} injected file(s) mapped as deleted: {shown}", hits.len()),
             "any app can read its own /proc/self/maps and see which of its files are injected",
         )
+        .meaning(format!(
+            "{} injected file(s) show as deleted in a running process's own memory map. An app can \
+             read that about itself with no permission, and it names exactly which of its files \
+             were swapped.",
+            hits.len()
+        ))
+        .owner("the kernel engine")
+        .action("reboot", "Reboot", None)
     }
 }
 
@@ -617,17 +951,23 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     const NAME: &str = "PM-published files open for a hidden app";
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
     if apks.is_empty() {
-        return skip(NAME, "no PM-published rules live".into());
+        return na(NAME, "no PM-published rules live".into())
+            .meaning("No module here replaces an app the system has registered, so there is nothing for a hidden app to be denied.");
     }
     let blocked = Nm::new().uid_list_live().unwrap_or_default();
     let Some(&appid) = blocked.first() else {
-        return skip(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()));
+        // n/a, not amber: "you have not hidden any apps yet" is a statement about
+        // the user's configuration, not a measurement that failed. This is the
+        // single most common amber on a fresh install.
+        return na(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()))
+            .meaning("You have not hidden any apps yet, so there is nothing to test here. Hide one and this check starts running.");
     };
     // Only paths root can open are worth asking about: one the module itself
     // cannot serve is a different bug, and this check must not claim it.
     let readable: Vec<&&PathBuf> = apks.iter().filter(|p| fs::File::open(p).is_ok()).collect();
     if readable.is_empty() {
-        return skip(NAME, format!("{} PM-published file rule(s), none readable as root", apks.len()));
+        return unmeasured(NAME, format!("{} PM-published file rule(s), none readable as root", apks.len()))
+            .meaning("None of the published files could be opened even as root, so the question this check asks could not be put.");
     }
     // The size WE are served, to compare the hidden child against. Opening is only
     // half the question: a rule that shadows a stock APK answers a blocked reader
@@ -641,13 +981,15 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
 
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return skip(NAME, "pipe() failed".into());
+        return unmeasured(NAME, "pipe() failed".into())
+            .meaning("The probe could not be set up, so this was not tested.");
     }
     let (rd, wr) = (fds[0], fds[1]);
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         unsafe { libc::close(rd); libc::close(wr) };
-        return skip(NAME, "fork() failed".into());
+        return unmeasured(NAME, "fork() failed".into())
+            .meaning("The probe could not be started, so this was not tested.");
     }
     if pid == 0 {
         unsafe { libc::close(rd) };
@@ -691,12 +1033,14 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     let mut status = 0i32;
     unsafe { libc::waitpid(pid, &mut status, 0) };
     if got != 8 {
-        return skip(NAME, "probe child said nothing".into());
+        return unmeasured(NAME, "probe child said nothing".into())
+            .meaning("The probe exited without answering, so this was not tested.");
     }
     let denied = u32::from_ne_bytes(buf[..4].try_into().unwrap_or_default());
     let mismatched = u32::from_ne_bytes(buf[4..].try_into().unwrap_or_default());
     if denied == u32::MAX {
-        return skip(NAME, format!("could not drop to uid {appid}"));
+        return unmeasured(NAME, format!("could not drop to uid {appid}"))
+            .meaning("The probe could not take on the hidden app's identity, so this was not tested.");
     }
     if denied == 0 && mismatched == 0 {
         return pass(
@@ -705,6 +1049,11 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
                 "uid {appid} (hidden) opened all {} PM-published rule target(s), same bytes we serve",
                 readable.len()
             ),
+        )
+        .meaning(
+            "A hidden app can still open every file Android told it about, and gets the same \
+             bytes everyone else does. This is the check that keeps hiding from crashing apps \
+             that walk the package list.",
         );
     }
     if denied == 0 {
@@ -746,7 +1095,8 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
 /// /linkerconfig and /tmp. Visible to any app in its own mountinfo.
 fn check_no_rom_tmpfs() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
-        return skip("tmpfs over the ROM", "cannot read /proc/self/mountinfo".into());
+        return unmeasured("tmpfs over the ROM", "cannot read /proc/self/mountinfo".into())
+            .meaning("Could not read the mount table, so whether a module emptied a ROM folder this way is unknown.");
     };
     let roots = ["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
     let mut hits: Vec<String> = Vec::new();
@@ -762,12 +1112,22 @@ fn check_no_rom_tmpfs() -> Check {
     }
     if hits.is_empty() {
         pass("tmpfs over the ROM", "no tmpfs mounted inside a ROM partition".into())
+            .meaning("No ROM folder has been emptied by mounting scratch space over it.")
     } else {
         fail(
             "tmpfs over the ROM",
             format!("{} ROM path(s) emptied by a tmpfs: {}", hits.len(), hits.join(", ")),
             "stock never mounts tmpfs inside /system, /product or /vendor -- any app can read it from its own mountinfo",
         )
+        .meaning(format!(
+            "{} ROM folder(s) have been emptied by mounting scratch space over them. No stock \
+             device does that anywhere under /system, /product or /vendor, and any app can see \
+             it in its own mount table. Some installers (ReVanced, several debloaters) do this \
+             themselves — the Suite does not.",
+            hits.len()
+        ))
+        .owner("another module's installer")
+        .action("absorb", "Absorb now", None)
     }
 }
 
@@ -784,7 +1144,8 @@ fn check_no_rom_tmpfs() -> Check {
 /// not match -- and a plain tmpfs (root "/", its own dev) is left to the check above.
 fn check_no_foreign_rom_mount() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
-        return skip("foreign mount over the ROM", "cannot read /proc/self/mountinfo".into());
+        return unmeasured("foreign mount over the ROM", "cannot read /proc/self/mountinfo".into())
+            .meaning("Could not read the mount table, so whether anything foreign is mounted over the ROM is unknown.");
     };
     let roots = ["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
     let rows = crate::absorb::parse_mountinfo(&mi);
@@ -805,19 +1166,41 @@ fn check_no_foreign_rom_mount() -> Check {
     }
     if hits.is_empty() {
         pass("foreign mount over the ROM", "no non-/data/adb bind or image mounted over a ROM partition".into())
+            .meaning("Nothing outside the module system is mounted over a read-only ROM partition.")
     } else {
         fail(
             "foreign mount over the ROM",
             format!("{} foreign mount(s) over the ROM: {}", hits.len(), hits.join(", ")),
             "a bind from /data/local/tmp or /cache, or an image over the ROM, is visible in any app's mountinfo just like a module mount",
         )
+        .meaning(format!(
+            "{} mount(s) over the ROM are served from somewhere other than the module \
+             system — scratch space, cache, or a disk image. An app reads those out of its own \
+             mount table exactly like a module mount.",
+            hits.len()
+        ))
+        .owner("a mount made outside /data/adb")
     }
 }
 
-pub fn run_audit() -> Result<()> {
+/// The three checks that read the mount table.
+///
+/// Split out so `nomount posture` can run exactly these and nothing else. Before
+/// this existed the WebUI's posture shield answered the same question with its
+/// own `awk '$4 ~ "/adb/modules/"'`, which is the pattern this file's own
+/// regression test exists to reject: it cannot see a bind out of
+/// `/data/adb/rvhc` (issue #14), and it DOES see a hook framework's by-design
+/// bind, which the audit deliberately does not count. Measured on an OP15 with
+/// LSPosed installed: the shield rendered a permanent amber "another module is
+/// mounting" over the one mount the audit reports as expected. A front page
+/// contradicting the audit two taps away teaches the reader to trust neither.
+pub fn mount_checks() -> Vec<Check> {
+    vec![check_zero_mount(), check_no_rom_tmpfs(), check_no_foreign_rom_mount()]
+}
+
+fn all_checks() -> (Vec<Check>, usize, usize) {
     let targets = live_targets();
     let parents = parents_of(&targets);
-
     let checks = vec![
         check_zero_mount(),
         check_surfaces(),
@@ -831,49 +1214,411 @@ pub fn run_audit() -> Result<()> {
         check_no_rom_tmpfs(),
         check_no_foreign_rom_mount(),
     ];
+    (checks, targets.len(), parents.len())
+}
 
-    println!("nomount audit: {} live rule(s) across {} directory(ies)\n", targets.len(), parents.len());
-    let (mut p, mut fl, mut sk, mut rb) = (0, 0, 0, 0);
-    for c in &checks {
-        let tag = match c.verdict {
-            Verdict::Pass => {
-                p += 1;
-                "PASS"
+/// Tallies, with `accepted` broken out of `failed` rather than subtracted from it.
+pub struct Tally {
+    pub passed: usize,
+    pub failed: usize,
+    pub reboot: usize,
+    pub na: usize,
+    pub unmeasured: usize,
+    /// Findings that are still FAIL/REBOOT and are covered by an acceptance.
+    /// Counted IN `failed` as well -- an acceptance never reduces the failure
+    /// count, it only adds the fact that someone looked at it.
+    pub accepted: usize,
+}
+
+impl Tally {
+    fn of(checks: &[Check], acc: &[crate::accept::Acceptance]) -> Tally {
+        let mut t =
+            Tally { passed: 0, failed: 0, reboot: 0, na: 0, unmeasured: 0, accepted: 0 };
+        for c in checks {
+            match c.verdict {
+                Verdict::Pass => t.passed += 1,
+                Verdict::Fail => t.failed += 1,
+                Verdict::Reboot => t.reboot += 1,
+                Verdict::NotApplicable => t.na += 1,
+                Verdict::Unmeasured => t.unmeasured += 1,
             }
-            Verdict::Fail => {
-                fl += 1;
-                "FAIL"
+            if matches!(c.verdict, Verdict::Fail | Verdict::Reboot)
+                && crate::accept::covering(acc, c.id, &c.fingerprint()).is_some()
+            {
+                t.accepted += 1;
             }
-            Verdict::Reboot => {
-                rb += 1;
-                "REBOOT"
-            }
-            Verdict::Skip => {
-                sk += 1;
-                "SKIP"
-            }
-        };
-        println!("[{tag}] {}\n       {}", c.name, c.evidence);
-        if let Some(o) = c.oracle {
-            println!("       oracle: {o}");
         }
+        t
     }
-    println!("\nsummary: {p} passed, {fl} failed, {sk} skipped, {rb} pending reboot");
-    if rb > 0 {
-        println!("note: a pending-reboot check is still detectable until you reboot.");
+    /// Findings that are failing AND not accepted -- the number the chip should
+    /// go red on.
+    pub fn open_failures(&self) -> usize {
+        (self.failed + self.reboot).saturating_sub(self.accepted)
     }
-    if sk > 0 {
-        println!("note: a skipped check was NOT verified — it is not a pass.");
+}
+
+/// One check as JSON. Shared by `audit --json` and `posture --json` so the two
+/// cannot describe the same measurement differently.
+pub fn check_json(c: &Check, acc: &[crate::accept::Acceptance]) -> crate::json::J {
+    use crate::json::J;
+    let fp = c.fingerprint();
+    let covering = crate::accept::covering(acc, c.id, &fp);
+    let lapsed = if covering.is_none() { crate::accept::stale(acc, c.id, &fp) } else { None };
+    J::Obj(vec![
+        ("id", J::s(c.id)),
+        ("name", J::s(c.name)),
+        ("verdict", J::s(c.verdict_slug())),
+        ("evidence", J::s(&c.evidence)),
+        ("meaning", J::s(&c.meaning)),
+        ("oracle", J::os(c.oracle)),
+        ("reach", J::s(c.reach.slug())),
+        ("reach_label", J::s(c.reach.label())),
+        ("owner", J::os(c.owner.clone())),
+        ("fingerprint", J::s(&fp)),
+        (
+            "action",
+            match &c.action {
+                Some(a) => J::Obj(vec![
+                    ("id", J::s(a.id)),
+                    ("label", J::s(a.label)),
+                    ("arg", J::os(a.arg.clone())),
+                ]),
+                None => J::Null,
+            },
+        ),
+        ("accepted", J::Bool(covering.is_some())),
+        ("accepted_reason", J::os(covering.map(|a| a.reason.clone()))),
+        ("accepted_at", J::Num(covering.map(|a| a.when as i64).unwrap_or(0))),
+        // An acceptance whose evidence has since moved. The single most useful
+        // line the report can print about a finding that came back: "you accepted
+        // this when it said something else".
+        ("acceptance_lapsed", J::Bool(lapsed.is_some())),
+        ("acceptance_lapsed_reason", J::os(lapsed.map(|a| a.reason.clone()))),
+    ])
+}
+
+fn tally_json(t: &Tally) -> crate::json::J {
+    use crate::json::J;
+    J::Obj(vec![
+        ("passed", J::Num(t.passed as i64)),
+        ("failed", J::Num(t.failed as i64)),
+        ("reboot", J::Num(t.reboot as i64)),
+        ("not_applicable", J::Num(t.na as i64)),
+        ("unmeasured", J::Num(t.unmeasured as i64)),
+        ("accepted", J::Num(t.accepted as i64)),
+        ("open_failures", J::Num(t.open_failures() as i64)),
+    ])
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// `nomount posture [--json]` — only the mount-table questions.
+///
+/// Exists so one implementation answers "is anything mounted that an app can
+/// see" for the audit, the posture shield and anything else that asks.
+pub fn run_posture(json: bool) -> Result<()> {
+    let checks = mount_checks();
+    let acc = crate::accept::load();
+    let t = Tally::of(&checks, &acc);
+    if json {
+        use crate::json::J;
+        let doc = J::Obj(vec![
+            ("kind", J::s("posture")),
+            ("ts", J::Num(now_secs())),
+            ("summary", tally_json(&t)),
+            ("checks", J::Arr(checks.iter().map(|c| check_json(c, &acc)).collect())),
+        ]);
+        println!("{}", doc.render());
+    } else {
+        for c in &checks {
+            println!("[{}] {}\n       {}", c.tag(), c.name, c.evidence);
+        }
+        println!(
+            "\nsummary: {} passed, {} failed, {} not applicable, {} unmeasured",
+            t.passed, t.failed, t.na, t.unmeasured
+        );
     }
-    if fl > 0 || rb > 0 {
+    if t.open_failures() > 0 {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+/// Where the boot pass caches the last audit, so the WebUI can paint a verdict on
+/// open instead of a dash. `service.sh` writes it at boot_completed and the page
+/// shows it with an age; pressing the button refreshes it.
+pub const CACHE: &str = "/data/adb/nomount/audit.json";
+
+pub fn run_audit(json: bool, write: bool) -> Result<()> {
+    let (mut checks, rules, dirs) = all_checks();
+    let acc = crate::accept::load();
+
+    // Worst first, and within a verdict the cheapest oracle first. Every FAIL
+    // used to print in source order and read as equally fatal: `readdir cookie
+    // magic` is one getdents64 from any app, `erofs directory shape` needs a
+    // caller that replays erofs block packing. A reader fixing one thing should
+    // be told which one.
+    //
+    // An ACCEPTED failure sorts with the pass block: the user has already dealt
+    // with it, so it must not sit at the top pushing live findings down.
+    let rank = |c: &Check| -> u8 {
+        let accepted = crate::accept::covering(&acc, c.id, &c.fingerprint()).is_some();
+        match c.verdict {
+            Verdict::Fail if !accepted => 0,
+            Verdict::Reboot if !accepted => 1,
+            Verdict::Unmeasured => 2,
+            Verdict::Fail | Verdict::Reboot => 3, // accepted
+            Verdict::Pass => 4,
+            Verdict::NotApplicable => 5,
+        }
+    };
+    checks.sort_by(|a, b| rank(a).cmp(&rank(b)).then(a.reach.rank().cmp(&b.reach.rank())));
+
+    let t = Tally::of(&checks, &acc);
+
+    if json {
+        use crate::json::J;
+        let doc = J::Obj(vec![
+            ("kind", J::s("audit")),
+            ("ts", J::Num(now_secs())),
+            ("suite", J::s(env!("CARGO_PKG_VERSION"))),
+            ("rules", J::Num(rules as i64)),
+            ("directories", J::Num(dirs as i64)),
+            ("summary", tally_json(&t)),
+            ("checks", J::Arr(checks.iter().map(|c| check_json(c, &acc)).collect())),
+        ]);
+        let text = doc.render();
+        println!("{text}");
+        if write {
+            // Best-effort: a cache that could not be written must never fail the
+            // audit itself. The consumer treats a missing or stale file as "no
+            // cached verdict", which is what it is.
+            let _ = fs::write(CACHE, &text);
+            let _ = fs::set_permissions(
+                CACHE,
+                std::os::unix::fs::PermissionsExt::from_mode(0o600),
+            );
+        }
+    } else {
+        println!("nomount audit: {rules} live rule(s) across {dirs} directory(ies)\n");
+        for c in &checks {
+            let fp = c.fingerprint();
+            let covering = crate::accept::covering(&acc, c.id, &fp);
+            let tag = if covering.is_some() && matches!(c.verdict, Verdict::Fail | Verdict::Reboot)
+            {
+                // The verdict itself is untouched -- the word FAIL is still
+                // printed. Only "and you accepted it" is added.
+                "FAIL/ACCEPTED"
+            } else {
+                c.tag()
+            };
+            println!("[{tag}] {} ({})", c.name, c.reach.label());
+            if !c.meaning.is_empty() {
+                println!("       {}", c.meaning);
+            }
+            println!("       measured: {}", c.evidence);
+            if let Some(o) = c.owner.as_deref() {
+                println!("       from: {o}");
+            }
+            if let Some(o) = c.oracle {
+                println!("       oracle: {o}");
+            }
+            if let Some(a) = covering {
+                println!("       accepted: {}", a.reason);
+            } else if let Some(a) = crate::accept::stale(&acc, c.id, &fp) {
+                println!(
+                    "       note: you accepted this once (\"{}\") but the evidence has changed \
+                     since, so the acceptance no longer applies",
+                    a.reason
+                );
+            }
+        }
+        println!(
+            "\nsummary: {} passed, {} failed, {} pending reboot, {} not applicable, {} unmeasured",
+            t.passed, t.failed, t.reboot, t.na, t.unmeasured
+        );
+        if t.accepted > 0 {
+            println!("         {} of the failures are accepted (still failing, still shown)", t.accepted);
+        }
+        if t.reboot > 0 {
+            println!("note: a pending-reboot check is still detectable until you reboot.");
+        }
+        if t.unmeasured > 0 {
+            println!("note: an unmeasured check was NOT verified — it is not a pass.");
+        }
+        if t.na > 0 {
+            println!(
+                "note: a not-applicable check had nothing to test on this device — that is not a \
+                 warning, and not a pass either."
+            );
+        }
+    }
+
+    // Exit non-zero on OPEN failures only. An accepted one has been dealt with;
+    // failing the exit status on it would keep every wrapper script red forever
+    // and is the scripting equivalent of the permanent chip this change removes.
+    if t.open_failures() > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `nomount accept` — record, list or drop an acceptance.
+pub fn run_accept(check: Option<String>, reason: Option<String>, remove: bool, list: bool) -> Result<()> {
+    let acc = crate::accept::load();
+    if list || check.is_none() {
+        if acc.is_empty() {
+            println!("no accepted findings");
+            return Ok(());
+        }
+        for a in &acc {
+            println!("{}\t{}\t{}", a.check, a.fingerprint, a.reason);
+        }
+        return Ok(());
+    }
+    let id = check.unwrap();
+    if remove {
+        if crate::accept::remove(&id)? {
+            println!("no longer accepting: {id}");
+        } else {
+            println!("nothing accepted for: {id}");
+        }
+        return Ok(());
+    }
+    // Fingerprint the CURRENT evidence, so the acceptance is bound to what the
+    // user is looking at right now. Accepting a check whose id does not exist,
+    // or which is not currently failing, is refused: an acceptance for a finding
+    // that was never measured is a mute, and this is deliberately not a mute.
+    let (checks, _, _) = all_checks();
+    let Some(c) = checks.iter().find(|c| c.id == id) else {
+        anyhow::bail!(
+            "unknown check id: {id}\nrun `nomount audit --json` and use the \"id\" field of the finding"
+        );
+    };
+    if !matches!(c.verdict, Verdict::Fail | Verdict::Reboot) {
+        anyhow::bail!(
+            "{id} is not currently failing (it is {}), so there is nothing to accept",
+            c.verdict_slug()
+        );
+    }
+    let reason = reason.unwrap_or_default();
+    crate::accept::add(&id, &c.fingerprint(), &reason)?;
+    println!("accepted {id}: {reason}");
+    println!("this does NOT mark it clean — it stays a failure, shown in grey, and comes back at");
+    println!("full severity if the evidence changes.");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn c(id: &'static str, v: Verdict, ev: &str) -> Check {
+        chk(id, id, v, ev.to_string())
+    }
+
+    /// The change this whole split exists for: a device where every check either
+    /// passed or had nothing to test must not render as a warning.
+    #[test]
+    fn not_applicable_is_neither_a_pass_nor_a_warning() {
+        let checks = vec![
+            c("zero-mount", Verdict::Pass, "clean"),
+            c("dino-vs-stat", Verdict::NotApplicable, "all on overlay"),
+            c("pm-published-open", Verdict::NotApplicable, "no app is hidden"),
+        ];
+        let t = Tally::of(&checks, &[]);
+        assert_eq!(t.passed, 1, "an n/a must never be counted as a pass");
+        assert_eq!(t.na, 2);
+        assert_eq!(t.unmeasured, 0);
+        assert_eq!(t.open_failures(), 0, "nothing here is a failure");
+    }
+
+    /// ...while a check that COULD have run and did not stays amber. This is the
+    /// half of the old `Skip` that the honesty rule is actually about.
+    #[test]
+    fn unmeasured_stays_distinct_from_both() {
+        let checks = vec![c("zero-mount", Verdict::Unmeasured, "cannot read mountinfo")];
+        let t = Tally::of(&checks, &[]);
+        assert_eq!((t.passed, t.na, t.unmeasured), (0, 0, 1));
+    }
+
+    /// An acceptance never reduces the failure count -- it only records that
+    /// someone looked. `failed` stays 1; only `open_failures` moves.
+    #[test]
+    fn an_acceptance_never_turns_a_failure_into_a_pass() {
+        let checks = vec![c("rom-tmpfs", Verdict::Fail, "one tmpfs")];
+        let fp = checks[0].fingerprint();
+        let acc = vec![crate::accept::Acceptance {
+            check: "rom-tmpfs".into(),
+            fingerprint: fp,
+            when: 1,
+            reason: "ReVanced, on purpose".into(),
+        }];
+        let t = Tally::of(&checks, &acc);
+        assert_eq!(t.passed, 0);
+        assert_eq!(t.failed, 1, "still a failure, still counted as one");
+        assert_eq!(t.accepted, 1);
+        assert_eq!(t.open_failures(), 0, "but not one the user still has to act on");
+    }
+
+    /// The safety property, at the tally level: accepting one measured state does
+    /// not accept the next one.
+    #[test]
+    fn an_acceptance_lapses_when_the_evidence_moves() {
+        let checks = vec![c("rom-tmpfs", Verdict::Fail, "TWO tmpfs now")];
+        let acc = vec![crate::accept::Acceptance {
+            check: "rom-tmpfs".into(),
+            fingerprint: "stale-fingerprint".into(),
+            when: 1,
+            reason: "was one tmpfs".into(),
+        }];
+        let t = Tally::of(&checks, &acc);
+        assert_eq!(t.accepted, 0);
+        assert_eq!(t.open_failures(), 1, "the finding is back at full severity");
+    }
+
+    /// Reachability orders the report: one syscall from any app outranks
+    /// something that needs a purpose-built detector.
+    #[test]
+    fn reach_ranks_the_cheapest_oracle_first() {
+        assert!(Reach::AnyApp.rank() < Reach::Effort.rank());
+        assert!(Reach::Effort.rank() < Reach::RootOnly.rank());
+    }
+
+    /// Every check name must map to a real id: the fallback is what an
+    /// acceptance would be keyed on, and two checks sharing "unknown-check" would
+    /// let one acceptance silence the other.
+    #[test]
+    fn every_shipped_check_name_has_its_own_id() {
+        let (checks, _, _) = (
+            vec![
+                "zero-mount posture",
+                "kernel surfaces",
+                "readdir cookie magic",
+                "readdir ino vs stat ino",
+                "injected inode band",
+                "overlay dir inode range",
+                "erofs directory shape",
+                "injected files in maps",
+                "PM-published files open for a hidden app",
+                "tmpfs over the ROM",
+                "foreign mount over the ROM",
+            ],
+            0,
+            0,
+        );
+        let mut ids: Vec<&str> = checks.iter().map(|n| id_of(n)).collect();
+        assert!(!ids.contains(&"unknown-check"), "a check name lost its id: {ids:?}");
+        ids.sort_unstable();
+        let n = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "two checks share an id");
+    }
 
     /// Issue #14: a ReVanced module binds its APK from /data/adb/rvhc, not from
     /// /data/adb/modules, over the installed app. The old filter keyed on

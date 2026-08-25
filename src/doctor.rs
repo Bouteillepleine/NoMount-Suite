@@ -206,7 +206,7 @@ fn expansion_level(count: usize) -> Option<Level> {
     }
 }
 
-pub fn run_doctor() -> Result<()> {
+pub fn run_doctor(json: bool) -> Result<()> {
     // partition -> count of non-overlay entries not in zygote's FD allowlist
     let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut f: Vec<Finding> = Vec::new();
@@ -755,15 +755,20 @@ pub fn run_doctor() -> Result<()> {
         m.dedup();
         m.len()
     };
-    println!(
-        "nomount doctor: {modules} modules planned | {injects} injects, {whiteouts} whiteouts, \
-         {binds} my_* binds, {skipped} blocklisted | live: {}",
-        if live_ok {
-            format!("{live_count} rules")
-        } else {
-            "engine not responding".to_string()
-        }
-    );
+    // Suppressed under --json: stdout has to be one parseable object. The plan
+    // refusals from collect_plan are already eprintln, so stderr is the only
+    // other writer and the caller keeps the two apart.
+    if !json {
+        println!(
+            "nomount doctor: {modules} modules planned | {injects} injects, {whiteouts} whiteouts, \
+             {binds} my_* binds, {skipped} blocklisted | live: {}",
+            if live_ok {
+                format!("{live_count} rules")
+            } else {
+                "engine not responding".to_string()
+            }
+        );
+    }
 
     f.sort_by(|a, b| a.level.cmp(&b.level).then(a.check.cmp(b.check)));
     // Any module-backed mount still standing is an app-visible detection surface:
@@ -1057,6 +1062,63 @@ pub fn run_doctor() -> Result<()> {
     let errors = f.iter().filter(|x| x.level == Level::Error).count();
     let warns = f.iter().filter(|x| x.level == Level::Warn).count();
     let infos = f.iter().filter(|x| x.level == Level::Info).count();
+
+    if json {
+        use crate::json::J;
+        let doc = J::Obj(vec![
+            ("kind", J::s("doctor")),
+            (
+                "summary",
+                J::Obj(vec![
+                    ("errors", J::Num(errors as i64)),
+                    ("warnings", J::Num(warns as i64)),
+                    ("informational", J::Num(infos as i64)),
+                ]),
+            ),
+            // The two switches the WebUI banner needs, as booleans rather than as
+            // prose for it to regex. That match has already shipped broken once:
+            // the kernel-umount half tested for /manager: kernel umount is ON/
+            // while this file prints "manager kernel umount ON", so half of a
+            // warning that exists because these switches have broken root on real
+            // hardware was dead code. A field cannot drift the way a sentence can.
+            (
+                "manager",
+                J::Obj(vec![
+                    (
+                        "global_umount_on",
+                        J::Bool(f.iter().any(|x| x.check == "manager global umount ON")),
+                    ),
+                    (
+                        "kernel_umount_on",
+                        J::Bool(f.iter().any(|x| x.check == "manager kernel umount ON")),
+                    ),
+                ]),
+            ),
+            (
+                "findings",
+                J::Arr(
+                    f.iter()
+                        .map(|x| {
+                            J::Obj(vec![
+                                (
+                                    "level",
+                                    J::s(match x.level {
+                                        Level::Error => "error",
+                                        Level::Warn => "warn",
+                                        Level::Info => "info",
+                                    }),
+                                ),
+                                ("check", J::s(x.check)),
+                                ("detail", J::s(&x.detail)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]);
+        println!("{}", doc.render());
+        return Ok(());
+    }
 
     if f.is_empty() {
         println!("[ok] no problems found");
