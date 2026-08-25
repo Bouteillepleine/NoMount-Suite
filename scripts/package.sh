@@ -124,12 +124,23 @@ setup_toolchain() {
     # Honour the environment first; the previous hardcoded /opt path made this
     # script unusable on any machine that installs the NDK anywhere else.
     local ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+    # The prebuilt toolchain directory is named after the HOST, so linux-x86_64
+    # was as unportable as the /opt path above it -- setting ANDROID_NDK_HOME on
+    # a Windows/Git-Bash or macOS box still failed with "NDK not found", which
+    # reads as "you did not set it" rather than "your host is not Linux".
+    local hostdir=""
+    for h in linux-x86_64 windows-x86_64 darwin-x86_64; do
+        [ -n "$ndk" ] && [ -d "$ndk/toolchains/llvm/prebuilt/$h/bin" ] && hostdir="$h" && break
+    done
     if [ -z "$ndk" ]; then
-        for c in /opt/android-ndk-r25b "$HOME"/Android/Sdk/ndk/* "$HOME"/android-ndk-*; do
-            [ -d "$c/toolchains/llvm/prebuilt/linux-x86_64/bin" ] && ndk="$c"
+        for c in /opt/android-ndk-r25b "$HOME"/Android/Sdk/ndk/* "$HOME"/android-ndk-* \
+                 "$LOCALAPPDATA"/Android/Sdk/ndk/*; do
+            for h in linux-x86_64 windows-x86_64 darwin-x86_64; do
+                [ -d "$c/toolchains/llvm/prebuilt/$h/bin" ] && ndk="$c" && hostdir="$h"
+            done
         done
     fi
-    export NDK_BIN="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    export NDK_BIN="$ndk/toolchains/llvm/prebuilt/${hostdir:-linux-x86_64}/bin"
     if [ -z "$ndk" ] || [ ! -d "$NDK_BIN" ]; then
         echo "FATAL: Android NDK not found. Set ANDROID_NDK_HOME." >&2
         exit 1
@@ -302,7 +313,16 @@ UPDATER
     echo "    Sums:    $(wc -l < "$staging/nomount.sha256sums") files hashed"
 
     rm -f "$out_path"
-    (cd "$staging" && zip -r9 "$out_path" .)
+    if command -v zip >/dev/null 2>&1; then
+        (cd "$staging" && zip -r9 "$out_path" .)
+    else
+        # No zip on this host (Git Bash ships none). Do NOT reach for
+        # Compress-Archive as a substitute: it writes backslash-separated entry
+        # names, which the installer cannot resolve, and drops the unix mode so
+        # every binary lands non-executable. Build the archive explicitly.
+        python3 "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path" \
+            || python "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path"
+    fi
     rm -rf "$staging"
 
     echo "    Output:  $out_path"

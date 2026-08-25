@@ -238,7 +238,21 @@ fn check_surfaces() -> Check {
         }
     }
     if found.is_empty() {
-        pass("kernel surfaces", "no nomount entry in /sys/kernel, /sys/module, /proc".into())
+        // Say what was actually tested. This walks DIRECTORY ENTRY NAMES only,
+        // so the old wording ("no nomount entry in /proc") read as though the
+        // contents of /proc had been cleared -- while /proc/kallsyms carries 56
+        // matching symbol names on a shipped build, because the symbol cloak is
+        // deliberately off. That residual is real but app-unreachable: the live
+        // policy gives proc_kallsyms:file allowed=0 to every app domain
+        // (measured on OP15). An audit that overstates its own coverage is the
+        // same class of defect as a green card over a failed pass.
+        pass(
+            "kernel surfaces",
+            "no entry named nomount in /sys/kernel, /sys/module, /proc (names only; \
+             /proc/kallsyms symbols are a separate, deliberately-uncloaked residual, \
+             unreadable by app domains)"
+                .into(),
+        )
     } else {
         fail(
             "kernel surfaces",

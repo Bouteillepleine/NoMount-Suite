@@ -28,6 +28,16 @@ find "$NMDIR" -maxdepth 1 -type f -exec chmod 0600 {} + 2>/dev/null
 # where rollback-bin sat unreadable for two days across several updates. 0700 to
 # match $NMDIR itself -- these hold root-read state, so no wider.
 find "$NMDIR" -maxdepth 1 -mindepth 1 -type d -exec chmod 0700 {} + 2>/dev/null
+# ...and the SELinux label, which had drifted the same way. Measured on OP15:
+# $NMDIR carried u:object_r:system_file:s0 while its parent /data/adb carries
+# adb_data_file. That matters because the live policy grants every app domain
+# read+search on system_file (dir 0x11140053, file 0x2044412) and NOTHING on
+# adb_data_file (0 for both) -- so the only thing keeping spoof.conf, uidhide,
+# pathhide.conf and blocklist away from an app was the parent refusing
+# traversal. Unreachable today, but the files name exactly which apps we hide,
+# so match the parent and stop relying on one directory up. Nothing in the
+# Suite ever set system_file here; it is drift, not intent.
+chcon -R u:object_r:adb_data_file:s0 "$NMDIR" 2>/dev/null
 
 # --- durable boot log ---------------------------------------------------------
 # Every boot diagnostic below used to go ONLY to /dev/kmsg. On this hardware the
