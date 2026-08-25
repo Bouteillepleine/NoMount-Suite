@@ -1,12 +1,7 @@
 #!/system/bin/sh
-# Magisk fallback (no metamodule hook). KSU/APatch use metamount.sh instead --
-# for the MOUNT PASS. They do not skip this file outright any more: KSU and APatch
-# both run every module's post-fs-data.sh, in module-id order, and that is the
-# only hook the Suite has which is guaranteed to run AFTER another module's bind
-# and BEFORE zygote. The pre-zygote absorb below needs exactly that slot.
-NM_MAGISK=1
-[ -n "$KSU" ] && NM_MAGISK=0
-[ -n "$APATCH" ] && NM_MAGISK=0
+# Magisk fallback (no metamodule hook). KSU/APatch use metamount.sh instead.
+[ -n "$KSU" ] && exit 0
+[ -n "$APATCH" ] && exit 0
 MODDIR="${0%/*}"
 NMDIR=/data/adb/nomount
 umask 077                     # see metamount.sh
@@ -54,6 +49,13 @@ export NM_BIN="$MODDIR/bin/$ABI/nm"
 chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 
 # --- pre-zygote absorb (my_* only, trial-gated) --------------------------------
+# MAGISK ONLY. KSU/APatch have already exited above and run this from
+# post-mount.sh instead, which is strictly better: it fires after EVERY module's
+# post-fs-data.sh. Magisk has no post-mount stage, so post-fs-data is the last
+# hook before zygote there, and a module whose own post-fs-data.sh runs after
+# ours will still be missed. Measured shape of that miss, on KSU before the
+# stage moved: "nothing mounted over the ROM (posture clean)" while 84 mounts
+# went up afterwards.
 # A module that binds its own content over a my_* path leaves that mount in every
 # app's mountinfo, naming /data/adb/modules -- the loudest root signal there is,
 # and the one thing the mountless posture exists to deny. The runtime pass in
@@ -85,9 +87,6 @@ if [ ! -f "$NMDIR/disabled" ] && [ -x "$BIN" ] \
         nmlog "early absorb: $(printf '%s\n' "$_ea" | tail -1)"
     fi
 fi
-
-# KSU/APatch stop here: metamount.sh owns their mount pass and bootloop guard.
-[ "$NM_MAGISK" = 1 ] || exit 0
 
 # --- bootloop guard ---
 # The spoof add-on runs INSIDE the guard (below), not before it -- same reasoning

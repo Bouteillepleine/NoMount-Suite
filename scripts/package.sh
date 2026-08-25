@@ -116,6 +116,7 @@ SCRIPTS=(
     customize.sh
     metamount.sh
     post-fs-data.sh
+    post-mount.sh
     service.sh
     spoof.sh
     scan.sh
