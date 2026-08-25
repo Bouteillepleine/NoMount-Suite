@@ -1447,7 +1447,14 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
     st
 }
 
-pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
+/// `early` is the post-fs-data pass. See `Commands::Absorb::early`: it exists
+/// solely to widen what may be taken over to include `my_*` targets, and nothing
+/// else about the run changes. Deliberately NOT pushed down into
+/// `disposition_of`, so `survey()` -- and therefore doctor and the WebUI -- keep
+/// describing each mount the same way whoever is asking; only the ACTION is
+/// phase-dependent, and a mount this pass defers is reported as deferred rather
+/// than silently dropped from the count.
+pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> {
     // Serialise against a concurrent mount/reload (M-S9): those clear and rebuild
     // the engine, and absorb unmounts and re-adds rules -- interleaving the two
     // corrupts both. A dry run changes nothing, so it needs no lock.
@@ -1560,11 +1567,29 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         );
     }
 
+    // `runtime_droppable` is exactly the "does this touch a my_* partition"
+    // question, so it is the gate for BOTH dispositions here -- reused rather
+    // than restated, so the two can never drift apart.
+    let mut deferred = 0usize;
     let cands: Vec<Candidate> = surveyed
         .into_iter()
         .filter(|s| match s.disposition {
-            Disposition::Absorb => true,
-            Disposition::Redundant => runtime_droppable(&s.target, &aliases),
+            Disposition::Absorb => {
+                if early || runtime_droppable(&s.target, &aliases) {
+                    true
+                } else {
+                    deferred += 1;
+                    false
+                }
+            }
+            Disposition::Redundant => {
+                if early || runtime_droppable(&s.target, &aliases) {
+                    true
+                } else {
+                    deferred += 1;
+                    false
+                }
+            }
             _ => false,
         })
         .map(|s| Candidate {
@@ -1573,6 +1598,14 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
             source: s.source,
         })
         .collect();
+    // Say what was put off, and until when. A my_* mount that this pass will not
+    // touch is not "left by design" -- the early pass CAN take it -- so reporting
+    // it in the declined bucket would be a different claim from the true one.
+    if deferred > 0 {
+        println!(
+            "nomount absorb: {deferred} my_* mount(s) deferred to the pre-zygote pass              (absorbing them on a live system has rebooted a device); they are taken              at the next boot if the my_hookless trial is enabled"
+        );
+    }
     if cands.is_empty() {
         // A ROM tmpfs is taken over above, not through the candidate list, so say
         // so here -- otherwise a run that emptied one still reported "nothing to

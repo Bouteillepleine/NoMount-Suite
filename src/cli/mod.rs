@@ -39,6 +39,16 @@ pub enum Commands {
         /// listing, so files the owning module adds later would never appear.
         #[arg(long)]
         include_dirs: bool,
+        /// PRE-ZYGOTE pass. Only post-fs-data may pass this.
+        ///
+        /// It permits exactly one thing the ordinary pass refuses: taking over a
+        /// bind whose target is on a `my_*` partition. Refused at runtime because
+        /// re-asserting a my_* rule on a live system has rebooted a device --
+        /// measured on an OP11, four rules in a burst, clean sys.boot.reason with
+        /// no tombstone. Before zygote there is no live system to lose, which is
+        /// what makes the same work safe here and only here.
+        #[arg(long)]
+        early: bool,
     },
     /// Durable whiteouts: hide stock ROM files that are themselves a tell.
     /// The list survives reboots and is re-applied at boot.

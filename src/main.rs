@@ -39,7 +39,9 @@ fn main() -> Result<()> {
         Commands::Audit => audit::run_audit(),
         Commands::Plan => mount::run_plan(),
         Commands::Reload => mount::run_reload(),
-        Commands::Absorb { dry_run, include_dirs } => absorb::run_absorb(dry_run, include_dirs),
+        Commands::Absorb { dry_run, include_dirs, early } => {
+            absorb::run_absorb(dry_run, include_dirs, early)
+        }
         Commands::Whiteout { action } => match action {
             cli::WhiteoutAction::Add { path, force } => whiteout::add(&path, force),
             cli::WhiteoutAction::Remove { path } => whiteout::remove(&path),

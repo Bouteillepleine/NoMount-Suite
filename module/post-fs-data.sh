@@ -1,7 +1,12 @@
 #!/system/bin/sh
-# Magisk fallback (no metamodule hook). KSU/APatch use metamount.sh instead.
-[ -n "$KSU" ] && exit 0
-[ -n "$APATCH" ] && exit 0
+# Magisk fallback (no metamodule hook). KSU/APatch use metamount.sh instead --
+# for the MOUNT PASS. They do not skip this file outright any more: KSU and APatch
+# both run every module's post-fs-data.sh, in module-id order, and that is the
+# only hook the Suite has which is guaranteed to run AFTER another module's bind
+# and BEFORE zygote. The pre-zygote absorb below needs exactly that slot.
+NM_MAGISK=1
+[ -n "$KSU" ] && NM_MAGISK=0
+[ -n "$APATCH" ] && NM_MAGISK=0
 MODDIR="${0%/*}"
 NMDIR=/data/adb/nomount
 umask 077                     # see metamount.sh
@@ -47,6 +52,42 @@ export NM_BIN="$MODDIR/bin/$ABI/nm"
 # nm the whole pass aborts before it can inject. metamount.sh has always done
 # this; the Magisk path was a degraded twin that did not.
 chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
+
+# --- pre-zygote absorb (my_* only, trial-gated) --------------------------------
+# A module that binds its own content over a my_* path leaves that mount in every
+# app's mountinfo, naming /data/adb/modules -- the loudest root signal there is,
+# and the one thing the mountless posture exists to deny. The runtime pass in
+# service.sh cannot take those over: re-asserting a my_* rule on a live system has
+# rebooted a device (OP11, Suite v1.3.22, engine v14 -- four rules in a burst,
+# clean sys.boot.reason, no tombstone), so it defers them here and says so.
+#
+# Here there is no live system to lose. Module post-fs-data.sh scripts run in
+# module-id order, so this catches every module sorted before `meta-nomount` --
+# which is the common case, and NOT a claim to catch all of them. A module sorted
+# after us still binds after this runs and stays deferred; `nomount doctor` names
+# whatever is left either way.
+#
+# Gated on the my_hookless TRIAL marker, because taking these over means serving
+# my_* by injection, and a leaf my_* inject may trip zygote's FD allowlist at
+# forkSystemServer. Without the marker this block does nothing at all. With it,
+# the bootloop guard below (and metamount.sh's, on KSU) still writes `disabled`
+# after GUARD_MAX failed boots, and this block honours that file -- so a bad trial
+# self-recovers instead of needing a flash.
+if [ ! -f "$NMDIR/disabled" ] && [ -x "$BIN" ] \
+   && { [ -f "$NMDIR/my_hookless" ] || [ "$NM_MY_HOOKLESS" = 1 ]; }; then
+    _ea=$(nmto 60 "$BIN" absorb --early 2>&1)
+    _ea_rc=$?
+    if [ "$_ea_rc" -eq 124 ]; then
+        nmlog "⚠ early absorb TIMED OUT after 60s - continuing boot"
+    elif [ "$_ea_rc" -ne 0 ]; then
+        nmlog "⚠ early absorb FAILED (rc=$_ea_rc): $(printf '%s\n' "$_ea" | tail -1)"
+    else
+        nmlog "early absorb: $(printf '%s\n' "$_ea" | tail -1)"
+    fi
+fi
+
+# KSU/APatch stop here: metamount.sh owns their mount pass and bootloop guard.
+[ "$NM_MAGISK" = 1 ] || exit 0
 
 # --- bootloop guard ---
 # The spoof add-on runs INSIDE the guard (below), not before it -- same reasoning
