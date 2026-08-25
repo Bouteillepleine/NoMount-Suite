@@ -213,8 +213,19 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
     _ghcand=$("$NM_BIN" l 2>/dev/null | sed 's/ ->.*//; s/ (.*//' | grep '^/' | sort -u)
     _ghn=$(printf '%s\n' "$_ghcand" | grep -c '^/')
     if [ -n "$_ghprobe" ] && [ "$_ghn" -gt 0 ]; then
+        # `[ -e ]` is false for ENOENT and for EACCES alike, and the two must not
+        # be conflated: ghosting a path that is merely UNREACHABLE turns its EACCES
+        # into ENOENT, while a genuinely absent name under the same unsearchable
+        # parent still answers EACCES -- a new tell, of exactly the shape this
+        # cloak exists to remove. There is no errno in shell, so test the parent's
+        # searchability first and skip the path when we cannot tell the two apart.
+        # Measured on OP15 v1.3.63: 0 of 260 rule paths answer EACCES to a hidden
+        # uid, so this changes nothing there. It is the device where a rule sits
+        # under a non-world-searchable directory that needs it.
         _ghlist=$(printf '%s\n' "$_ghcand" | su "$_ghprobe" -c \
-            'while IFS= read -r p; do [ -e "$p" ] || printf "%s\n" "$p"; done' 2>/dev/null)
+            'while IFS= read -r p; do d=${p%/*}; [ -n "$d" ] || d=/; \
+             [ -x "$d" ] || continue; \
+             [ -e "$p" ] || printf "%s\n" "$p"; done' 2>/dev/null)
         for _ghp in $_ghlist; do
             case "$_ghp" in /*) ;; *) continue ;; esac
             _ghg=$((_ghg + 1))

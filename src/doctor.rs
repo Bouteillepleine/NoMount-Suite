@@ -89,9 +89,16 @@ fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
             return GhostSeen::Unknown;
         }
         if pid == 0 {
-            // gid before uid: dropping uid first would forfeit the privilege
-            // needed to drop gid, leaving the child with root's groups.
-            if libc::setresgid(uid, uid, uid) != 0 || libc::setresuid(uid, uid, uid) != 0 {
+            // Supplementary groups FIRST, then gid, then uid. Each step needs
+            // the privilege the next one drops. Without setgroups the child keeps
+            // root's group list, so a path readable through one of those groups
+            // stats OK here and not for a real app -- reported as an over-reach
+            // that is not one. The error is in the safe direction (a false alarm,
+            // never a false pass), which is exactly why it would have survived.
+            if libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setresgid(uid, uid, uid) != 0
+                || libc::setresuid(uid, uid, uid) != 0
+            {
                 libc::_exit(3);
             }
             let mut st: libc::stat = std::mem::zeroed();

@@ -47,6 +47,21 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # The Rust is linted on every push; the SHELL was not, and the module is
+      # nine scripts that run as root at boot. Every bug found in the 2026-08-25
+      # audit session was in shell, not Rust: a uid parser that split on a space
+      # where the file uses a tab, a `\|` alternation toybox does not support, a
+      # `[ -e ]` that cannot tell ENOENT from EACCES.
+      #
+      # -s sh, because /system/bin/sh is mksh/ash, not bash. Error level only:
+      # `local` is flagged as non-POSIX (SC3043) but works fine on mksh, and
+      # spoof.sh uses it ~25 times, so warning level would be noise that gets
+      # ignored -- and an ignored gate is not a gate.
+      - name: Shellcheck module scripts
+        run: |
+          sudo apt-get install -y shellcheck >/dev/null 2>&1 || true
+          shellcheck -s sh -S error -f gcc module/*.sh
+
   build:
     runs-on: ubuntu-latest
     strategy:
