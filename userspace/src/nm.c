@@ -18,6 +18,10 @@ void c_main(long *sp) {
 
     int fd = sys3(SYS_SOCKET, AF_NETLINK, SOCK_RAW, NOMOUNT_NL_PROTO);
     if (fd < 0) { exit_code = 2; goto do_exit; }
+    /* Before the FIRST read, and covering every later one: a kernel that takes
+     * the message and never replies must not hang us, because nm runs during
+     * post-fs-data and a hang there hangs boot. See NM_RECV_TIMEOUT_SEC. */
+    set_recv_timeout(fd);
 
     /* No family resolution: the private raw-netlink protocol is addressed
      * directly (kernel is portid 0); the command rides in nlmsg_type. */
@@ -116,7 +120,12 @@ void c_main(long *sp) {
 
             int header_size = (target_cmd == 2) ? 12 : 6;
             if ((cursor - mem.payload) + header_size + v_len + r_len > MAX_PAYLOAD) {
-                exit_code |= (do_nm_cmd(fd,target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem) < 0);
+                int rc = do_nm_cmd(fd,target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem);
+                /* A silent kernel will not answer the NEXT batch either, and
+                 * grinding through the rest of a large `nm add` at five seconds
+                 * a batch is the boot-time stall this bound exists to prevent. */
+                if (nm_timed_out(rc)) goto do_timeout;
+                exit_code |= (rc < 0);
                 cursor = mem.payload;
             }
 
@@ -136,8 +145,11 @@ void c_main(long *sp) {
             }
         }
 
-        if (cursor > mem.payload)
-            exit_code |= (do_nm_cmd(fd,target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem) < 0);
+        if (cursor > mem.payload) {
+            int rc = do_nm_cmd(fd,target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem);
+            if (nm_timed_out(rc)) goto do_timeout;
+            exit_code |= (rc < 0);
+        }
 
         goto do_exit;
 
@@ -149,51 +161,71 @@ void c_main(long *sp) {
             if (*s < '0' || *s > '9') { exit_code = 3; goto do_exit; }
             uid = (uid << 3) + (uid << 1) + (*s++ - '0');
         }
-        exit_code = (do_nm_cmd(fd,6 - (cmd == 'b'), 4, &uid, 4, 5, &mem) < 0);
+        int rc = do_nm_cmd(fd,6 - (cmd == 'b'), 4, &uid, 4, 5, &mem);
+        if (nm_timed_out(rc)) goto do_timeout;
+        exit_code = (rc < 0);
         goto do_exit;
 
     } else if (cmd == 'k') {
         /* k <r|v|c|b> <value> -- boot-identity knob, formerly a sysfs attribute.
          * Payload: [u32 knob][value bytes]; an empty value clears the override. */
-        unsigned int knob;
+        int knob = -1;
         const char *val;
         int vlen = 0;
 
+        /* Exact knob WORDS, for the reason the command table above matches words
+         * (see the note at `nm_cmds`): this was `p_args[0][0]`, so any token
+         * beginning with the right letter selected that knob. `nm k cold` rewrote
+         * /proc/cmdline, `nm k dir` flipped the directory-shape knob, `nm k boot
+         * ...` rewrote /proc/bootconfig -- each from a word that was never a knob
+         * name, and each exiting 0. Every caller in the tree passes the bare
+         * letter (spoof.sh's nm_knob r|v|c|b, service.sh / customize.sh / the
+         * WebUI's `nm k p`, nm.rs's `k i` and `k d`), so the letters are the whole
+         * vocabulary; anything else is refused rather than guessed at.
+         *
+         *   r/v -- uname release / version override
+         *   c/b -- sanitized /proc/cmdline / /proc/bootconfig
+         *   d <0|1> -- this device's ROM dirs are dirent-packed (erofs-shaped),
+         *     so a synthesized dir must report the formula rather than 4096.
+         *     Measured by the Suite; see NM_KNOB_VDIR_EROFS_SIZE.
+         *   i <0..3> -- which isolated-process pools per-UID hiding covers:
+         *     1 = app-zygote, 2 = platform, 3 = both (default), 0 = neither.
+         *     See NM_KNOB_HIDE_ISOLATED for the trade this expresses.
+         *   p <cmd> -- one _pathhide control command: "+needle" adds, "~needle"
+         *     removes, "-" clears. `nm k p` with NO value is a presence probe
+         *     that exits 0 only when the pathhide patch set is compiled in; it is
+         *     not a clear. See NM_KNOB_PATHHIDE. */
+        static const struct { const char *name; int knob; } nm_knobs[] = {
+            { "r", 0 }, { "v", 1 }, { "c", 2 }, { "b", 3 },
+            { "d", 4 }, { "i", 5 }, { "p", 6 },
+        };
         if (p_count < 1) goto do_exit;
-        switch (p_args[0][0]) {
-        case 'r': knob = 0; break;
-        case 'v': knob = 1; break;
-        case 'c': knob = 2; break;
-        case 'b': knob = 3; break;
-        /* d <0|1> -- this device's ROM dirs are dirent-packed (erofs-shaped), so
-         * a synthesized dir must report the formula rather than 4096. Measured
-         * by the Suite; see NM_KNOB_VDIR_EROFS_SIZE. */
-        case 'd': knob = 4; break;
-        /* i <0..3> -- which isolated-process pools per-UID hiding covers:
-         * 1 = app-zygote, 2 = platform, 3 = both (default), 0 = neither.
-         * See NM_KNOB_HIDE_ISOLATED for the trade this expresses. */
-        case 'i': knob = 5; break;
-        /* p <cmd> -- one _pathhide control command: "+needle" adds, "~needle"
-         * removes, "-" clears. `nm k p` with NO value is a presence probe that
-         * exits 0 only when the pathhide patch set is compiled in; it is not a
-         * clear. See NM_KNOB_PATHHIDE. */
-        case 'p': knob = 6; break;
-        default: exit_code = 3; goto do_exit;
+        for (unsigned int ki = 0; ki < sizeof(nm_knobs) / sizeof(nm_knobs[0]); ki++) {
+            if (strcmp(p_args[0], nm_knobs[ki].name) == 0) { knob = nm_knobs[ki].knob; break; }
+        }
+        if (knob < 0) {
+            print_str("nm: unknown knob\n");
+            exit_code = 3; goto do_exit;
         }
         val = (p_count > 1) ? p_args[1] : "";
         while (val[vlen]) vlen++;
         if (4 + vlen > MAX_PAYLOAD) { exit_code = 3; goto do_exit; }
-        *(unsigned int *)mem.payload = knob;
+        *(unsigned int *)mem.payload = (unsigned int)knob;
         if (vlen) memcpy(mem.payload + 4, val, vlen);
-        exit_code = (do_nm_cmd(fd, 9, 6, mem.payload, 4 + vlen, 5, &mem) < 0);
+        int rc = do_nm_cmd(fd, 9, 6, mem.payload, 4 + vlen, 5, &mem);
+        if (nm_timed_out(rc)) goto do_timeout;
+        exit_code = (rc < 0);
         goto do_exit;
 
     } else if (cmd == 'c') {
-        exit_code = (do_nm_cmd(fd,4, 0, (void *)0, 0, 5, &mem) < 0);
+        int rc = do_nm_cmd(fd,4, 0, (void *)0, 0, 5, &mem);
+        if (nm_timed_out(rc)) goto do_timeout;
+        exit_code = (rc < 0);
         goto do_exit;
 
     } else if (cmd == 'v') {
         int vlen_rx = do_nm_cmd(fd, 1, 0, (void *)0, 0, 1, &mem);
+        if (nm_timed_out(vlen_rx)) goto do_timeout;
         struct nlmsghdr *vh = (struct nlmsghdr *)mem.rx_buf;
         /* Bound the header's own length claim by what was actually READ before
          * walking attributes off it. The list path below already does this per
@@ -230,8 +262,16 @@ void c_main(long *sp) {
         /* A dump that aborts mid-stream (kernel returns -EAGAIN when the rule
          * table mutated under the cursor) must NOT look like success: callers
          * feed this list straight into the reload delta, so a silently truncated
-         * list is acted on as if it were the whole live set. */
-        if (len < 0) { exit_code = 4; goto do_exit; }
+         * list is acted on as if it were the whole live set.
+         *
+         * That guard used to cover only this FIRST read. A dump of any real size
+         * spans several -- and the continuation read at the foot of the loop had
+         * no guard at all: an -ENOBUFS, a receive timeout or a premature EOF
+         * simply failed `while (len > 0)` and fell through to list_done with
+         * exit_code still 0. The Suite then pruned every rule the dump had not
+         * reached yet. See the loop's tail. */
+        if (nm_timed_out(len)) goto do_timeout;
+        if (len < 0) { exit_code = 4; goto list_fail; }
         exit_code = 0;
         if (is_json) print_str("[\n");
 
@@ -300,11 +340,36 @@ void c_main(long *sp) {
                     }
                 }
             }
-            len = sys3(SYS_READ, fd, (long)mem.rx_buf, RX_BUF_SIZE);
+            len = nm_read(fd, &mem);
+            if (nm_timed_out(len)) goto do_timeout;
         }
+        /* Reaching HERE means the loop ran out of input without ever seeing
+         * NLMSG_DONE or NLMSG_ERROR -- those are the only two exits, and both
+         * jump to list_done. So the stream ended early: read() failed (-ENOBUFS
+         * is the realistic one on a large raw-netlink dump) or returned 0.
+         * Whatever was printed is a PREFIX of the rule set, and the reload delta
+         * cannot tell a prefix from the whole set. Fail. */
+        exit_code = 4;
+list_fail:
+        /* Deliberately NOT closing the JSON array. Exit code 4 is the contract
+         * (nm.rs's Nm::run bails on any non-zero status, which is how every Rust
+         * caller sees this), but a truncated `nm l j` also has to be unparseable
+         * for anyone who forgets to check, and an unterminated array is. The
+         * diagnostic goes to stderr so it cannot be read back as a rule. */
+        print_err("nm: rule dump ended early - list is incomplete\n");
+        goto do_exit;
 list_done:
         if (is_json) print_str("\n]\n");
     }
+    goto do_exit;
+
+do_timeout:
+    /* Distinct from every other failure: the kernel took the message and never
+     * answered within NM_RECV_TIMEOUT_SEC. Before the SO_RCVTIMEO bound this
+     * blocked forever, and because metamount.sh and post-fs-data.sh run nm during
+     * post-fs-data, forever meant the device never finished booting. */
+    print_err("nm: no answer from the kernel (timed out)\n");
+    exit_code = NM_EXIT_TIMEOUT;
 
 do_exit:
     sys1(SYS_EXIT, exit_code);
