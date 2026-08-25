@@ -194,10 +194,17 @@ void c_main(long *sp) {
          *   p <cmd> -- one _pathhide control command: "+needle" adds, "~needle"
          *     removes, "-" clears. `nm k p` with NO value is a presence probe
          *     that exits 0 only when the pathhide patch set is compiled in; it is
-         *     not a clear. See NM_KNOB_PATHHIDE. */
+         *     not a clear. See NM_KNOB_PATHHIDE.
+         *   g <cmd> -- one _ghost control command: "p+/abs/path" / "p~/abs/path"
+         *     / "p-" for the hidden-path table, "u+<uid>" / "u~<uid>" / "u-" for
+         *     the hidden-uid table. Same presence-probe rule as p: `nm k g` with
+         *     NO value exits 0 only when _ghost is compiled in AND the engine is
+         *     >= v26 (below that the knob does not exist and the kernel answers
+         *     -EINVAL). _ghost's guards are dead code until BOTH tables are
+         *     populated, so this knob is what makes them live. */
         static const struct { const char *name; int knob; } nm_knobs[] = {
             { "r", 0 }, { "v", 1 }, { "c", 2 }, { "b", 3 },
-            { "d", 4 }, { "i", 5 }, { "p", 6 },
+            { "d", 4 }, { "i", 5 }, { "p", 6 }, { "g", 7 },
         };
         if (p_count < 1) goto do_exit;
         for (unsigned int ki = 0; ki < sizeof(nm_knobs) / sizeof(nm_knobs[0]); ki++) {

@@ -146,6 +146,76 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k p >/dev/null 2>&1; then
     fi
 fi
 
+# --- Ghost: populate the existence cloak's two tables ------------------------
+# _ghost closes the four (now seven) "resolve a path, then act" oracles that no
+# hijacked filesystem op can answer -- O_PATH handing back the path, getxattr
+# handing back the SELinux label, a trailing component answering ENOTDIR, link()
+# answering EXDEV, and truncate/utimensat/chmod answering EROFS where an absent
+# path answers ENOENT.
+#
+# Its guards are DEAD CODE until both tables are populated: ghost_hidden_path()
+# short-circuits to false on an empty table. Measured on OP15 -- a kernel built
+# WITH the _ghost patches but with nothing feeding it leaked all four oracles
+# exactly as an unpatched kernel does. This block is what makes them live.
+#
+# `nm k g` with no value is the presence probe: it exits 0 only when _ghost is
+# compiled in AND the engine is >= v26 (the knob does not exist below that), so
+# this stays inert on every other kernel.
+if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
+    # Clear first, unlike the pathhide block above. There the kernel's list is
+    # empty at boot and a clear could only stomp another module's rules; here the
+    # tables describe OUR rule set, which the mount pass has just rebuilt, so a
+    # stale entry from a previous configuration is the thing to avoid. Both
+    # clears are separate commands, so a failure of one is still visible.
+    nmto 10 "$NM_BIN" k g "p-" >/dev/null 2>&1 || nmlog "⚠ ghost: path table clear FAILED"
+    nmto 10 "$NM_BIN" k g "u-" >/dev/null 2>&1 || nmlog "⚠ ghost: uid table clear FAILED"
+
+    # Paths: every live INJECTION target. Not whiteouts -- a whiteout's whole job
+    # is to make a name absent, which is already what a hidden reader sees, and
+    # feeding one here would ghost a path the engine is not serving. `vfs list`
+    # appends " -> target", " (public)" and " (virtual dir)", so strip from the
+    # first space; a stray annotation would be sent as a path and rejected.
+    _ghn=0; _ghf=0
+    for _ghp in $("$NM_BIN" l 2>/dev/null | sed 's/ ->.*//; s/ (.*//' | grep '^/' | sort -u); do
+        _ghn=$((_ghn + 1))
+        nmto 10 "$NM_BIN" k g "p+$_ghp" >/dev/null 2>&1 || _ghf=$((_ghf + 1))
+    done
+
+    # Uids: exactly the set per-UID hiding already uses, read from the cache the
+    # hide pass just wrote. Deriving it a second way is how the two would drift,
+    # and a uid in one table but not the other is a path that is hidden by the
+    # ops but not by the guards, or the reverse.
+    _ghu=0; _ghuf=0
+    if [ -f "$NMDIR/uidhide.cache" ]; then
+        while IFS= read -r _ghl; do
+            _ghl=$(echo "$_ghl" | tr -d '\r')
+            case "$_ghl" in ''|\#*) continue ;; esac
+            # cache lines are "<pkg>	<uid>" -- TAB separated, verified on device.
+            # Strip up to the last NON-DIGIT rather than up to the last space:
+            # "${_ghl##* }" silently matched nothing on a tab, skipped every uid,
+            # and left the table empty -- i.e. _ghost stays inert, which is the
+            # exact failure this block exists to fix. This form handles either
+            # separator, and a package name ending in a digit too.
+            _ghi=${_ghl##*[!0-9]}
+            case "$_ghi" in ''|*[!0-9]*) continue ;; esac
+            [ "$_ghi" = "0" ] && continue          # root is never hidden from
+            _ghu=$((_ghu + 1))
+            nmto 10 "$NM_BIN" k g "u+$_ghi" >/dev/null 2>&1 || _ghuf=$((_ghuf + 1))
+        done < "$NMDIR/uidhide.cache"
+    fi
+
+    # Report the truth. A partially populated table is WORSE than an empty one:
+    # empty is honestly inert, partial means some paths are cloaked and others
+    # are not, which is itself a pattern.
+    if [ "$_ghf" -gt 0 ] || [ "$_ghuf" -gt 0 ]; then
+        nmlog "⚠ ghost cloak: $_ghf/$_ghn path(s) and $_ghuf/$_ghu uid(s) REJECTED — the existence oracles stay OPEN for those"
+    elif [ "$_ghn" = 0 ] || [ "$_ghu" = 0 ]; then
+        nmlog "⚠ ghost cloak inert: $_ghn path(s), $_ghu uid(s) — BOTH tables must be non-empty for any guard to fire"
+    else
+        nmlog "ghost cloak populated ($_ghn paths, $_ghu uids)"
+    fi
+fi
+
 # Pre-build the Cloak Xposed-module cache in the background so the WebUI opens
 # instantly (reads the cache) instead of scanning ~all installed APKs on open.
 [ -f /data/adb/modules/meta-nomount/scan.sh ] && \
