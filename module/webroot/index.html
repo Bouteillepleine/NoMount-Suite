@@ -1947,8 +1947,18 @@
   async function loadAuditCache() {
     const r = await exec("cat /data/adb/nomount/audit.json 2>/dev/null");
     const d = auParse(r);
-    if (d) auRender(d);
-    else auRender(null);
+    if (d) {
+      // Never let a cached result overwrite a fresher one. Pressing Refresh
+      // after running the audit would otherwise replace what was just measured
+      // with whatever the last boot wrote -- older evidence under a newer age.
+      if (AUDIT && AUDIT.ts && d.ts && d.ts < AUDIT.ts) return;
+      auRender(d);
+      return;
+    }
+    // No cache. If something is already on screen it stays: it is the most
+    // recent thing we know, and blanking it would leave the chip holding a
+    // verdict with no findings under it.
+    if (!AUDIT) auRender(null);
   }
 
   async function auAct(btn, i) {
