@@ -250,18 +250,35 @@ void c_main(long *sp) {
         }
 
     } else if (cmd == 'l') {
-        int is_json = 0, is_uids = 0, is_ph = 0;
+        int is_json = 0, is_uids = 0, is_ph = 0, is_gh = 0;
+        /* WHOLE-TOKEN, not first-character. `p_args[i][0] == 'x'` was the same
+         * bug class already fixed for commands and for knobs: any word starting
+         * with the right letter selected the mode, and any word that started
+         * with none of them was silently ignored rather than refused. That is
+         * exactly how `nm l g` came to print the ordinary rule list -- 'g'
+         * matched nothing, so the ghost dump looked empty-but-working while it
+         * had never been requested at all. Every caller passes a bare letter. */
         for (int i = 0; i < p_count; i++) {
-            if (p_args[i][0] == 'j') is_json = 1;
-            if (p_args[i][0] == 'u') is_uids = 1;
-            /* `nm l p` -- the _pathhide rule list. Plain one-per-line by
-             * default so it drops straight into the shell loops that used to
-             * `cat /proc/pathhide`. */
-            if (p_args[i][0] == 'p') is_ph = 1;
+            const char *a = p_args[i];
+            if (a[0] && !a[1]) {
+                if (a[0] == 'j') { is_json = 1; continue; }
+                if (a[0] == 'u') { is_uids = 1; continue; }
+                /* `nm l p` -- the _pathhide rule list. Plain one-per-line by
+                 * default so it drops straight into the shell loops that used to
+                 * `cat /proc/pathhide`. */
+                if (a[0] == 'p') { is_ph = 1; continue; }
+                /* `nm l g` -- the _ghost tables, as "p /abs/path" and "u <uid>".
+                 * Same plain-lines shape as `l p`, and the only way to tell a
+                 * FULL table from a populated one: a partial table cloaks some
+                 * paths and not others, which is its own pattern. */
+                if (a[0] == 'g') { is_gh = 1; continue; }
+            }
+            print_str("nm: unknown list option\n");
+            exit_code = 3; goto do_exit;
         }
         if (is_uids) is_json = 1;
 
-        int target_cmd = is_ph ? 10 : is_uids ? 8 : 7;
+        int target_cmd = is_gh ? 11 : is_ph ? 10 : is_uids ? 8 : 7;
         /* signed: a negative errno from do_nm_cmd()/read() must fail the while(len>0)
          * guard, not wrap to a huge unsigned length that walks rx_buf out of bounds. */
         int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
@@ -291,7 +308,7 @@ void c_main(long *sp) {
                     goto list_done;
                 }
 
-                if (is_ph) {
+                if (is_gh || is_ph) {
                     /* The needle rides in NOMOUNT_ATTR_VIRTUAL_PATH -- see the
                      * kernel dump for why that attribute is reused. */
                     char *rule = get_attr(msg, 1);
