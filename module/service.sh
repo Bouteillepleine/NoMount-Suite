@@ -226,10 +226,17 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
             'while IFS= read -r p; do d=${p%/*}; [ -n "$d" ] || d=/; \
              [ -x "$d" ] || continue; \
              [ -e "$p" ] || printf "%s\n" "$p"; done' 2>/dev/null)
+        _ghrej=""
         for _ghp in $_ghlist; do
             case "$_ghp" in /*) ;; *) continue ;; esac
             _ghg=$((_ghg + 1))
-            nmto 10 "$NM_BIN" k g "p+$_ghp" >/dev/null 2>&1 || _ghf=$((_ghf + 1))
+            if ! nmto 10 "$NM_BIN" k g "p+$_ghp" >/dev/null 2>&1; then
+                _ghf=$((_ghf + 1))
+                # Keep the first few. A count alone is not diagnosable: working out
+                # WHICH four of 260 the GH_MAX_RULES=256 overflow dropped took a
+                # separate `nm l g` and an argument about sort order.
+                [ "$_ghf" -le 3 ] && _ghrej="$_ghrej $_ghp"
+            fi
         done
     else
         nmlog "⚠ ghost: no hidden uid to probe with — path table left EMPTY (cloak inert)"
@@ -262,7 +269,12 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
     # empty is honestly inert, partial means some paths are cloaked and others
     # are not, which is itself a pattern.
     if [ "$_ghf" -gt 0 ] || [ "$_ghuf" -gt 0 ]; then
-        nmlog "⚠ ghost cloak: $_ghf/$_ghg path(s) and $_ghuf/$_ghu uid(s) REJECTED — the existence oracles stay OPEN for those"
+        # The kernel refuses a path for exactly two reasons, and they need
+        # different responses: the table is full (GH_MAX_RULES), or the path is
+        # too long for GH_RULE_LEN. Measured on OP15: the longest rule is 68
+        # chars and the longest path on the whole ROM is 134, against a 191 cap,
+        # so full-table is the one to suspect first.
+        nmlog "⚠ ghost cloak: $_ghf/$_ghg path(s) and $_ghuf/$_ghu uid(s) REJECTED — the existence oracles stay OPEN for those; first:$_ghrej (table full, or a path over the kernel's rule-length cap)"
     elif [ "$_ghg" = 0 ] || [ "$_ghu" = 0 ]; then
         nmlog "⚠ ghost cloak inert: $_ghg of $_ghn path(s), $_ghu uid(s) — BOTH tables must be non-empty for any guard to fire"
     else
