@@ -296,6 +296,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_attributes = rule->v_attributes;
                 rule_info->v_attr_mask = rule->v_attr_mask;
                 rule_info->v_blksize = rule->v_blksize;
+                rule_info->v_cratio = rule->v_cratio;
                 rule_info->v_result_mask = rule->v_result_mask;
                 rule_info->v_cap = rule->v_cap;
                 rule_info->v_uid = rule->v_uid;
@@ -634,6 +635,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     info->v_attributes = rule_info->v_attributes;
     info->v_attr_mask = rule_info->v_attr_mask;
     info->v_blksize = rule_info->v_blksize;
+    info->v_cratio = rule_info->v_cratio;
     info->v_result_mask = rule_info->v_result_mask;
     info->v_cap = rule_info->v_cap;
 
@@ -1315,6 +1317,94 @@ static long nm_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
  * Sampled from a stock file (the one a rule shadows, or a sibling on the same
  * partition) so the ops can replay them for the injected file, whose backing
  * lives on a different filesystem. See NM_CAP_*. */
+/* Turn a sampled (size, blocks) pair into the 1/1024 ratio v_cratio stores.
+ *
+ * Only meaningful above one block: erofs compresses whole blocks, so a file
+ * under 4 KiB occupies one block whether or not it compressed, and the
+ * st_blocks*512 >= st_size predicate is true for stock and injected alike
+ * there -- correctly no signal. Measured on OP15 /product/etc: build_flags.json
+ * 77887 bytes in 16 sectors (ratio ~108), NOTICE.xml.gz 159485 in 312 (~1025,
+ * already gzipped so incompressible), build.prop 2647 in 8 (single block).
+ *
+ * Clamped to 1/8..7/8. An unclamped sample lets one atypical neighbour make us
+ * claim absurd compression, and a file whose CONTENT a detector can read while
+ * st_blocks says it compressed 10x is a louder tell than the one being closed. */
+static u16 nm_size_ratio(loff_t size, blkcnt_t blocks)
+{
+    u64 alloc = (u64)blocks << 9;
+    u64 r;
+
+    if (size < 8192 || alloc == 0)
+        return 0;
+    r = div64_u64(alloc << 10, (u64)size);
+    if (r < 128) r = 128;
+    if (r > 896) r = 896;
+    return (u16)r;
+}
+
+/* Replay it. Rounds UP to a whole filesystem block, because a partially used
+ * block is still allocated -- reporting a non-block-multiple st_blocks would
+ * itself be an outlier no erofs file produces. */
+static void nm_mirror_blocks(const struct nm_inode_info *info, struct kstat *stat)
+{
+    u64 want;
+
+    if (!info->v_cratio || stat->size < 8192)
+        return;
+    want = div64_u64((u64)stat->size * info->v_cratio, 1024);
+    want = (want + 4095) & ~4095ULL;
+    if (want >= (u64)stat->size)                 /* never claim MORE than stock would */
+        want = ((u64)stat->size) & ~4095ULL;
+    if (!want)
+        return;
+    stat->blocks = (blkcnt_t)(want >> 9);
+}
+
+/* Two existence oracles that the ops layer CAN answer, unlike the four that need
+ * a VFS or LSM patch (O_PATH, getxattr(security.*), the d_can_lookup ENOTDIR and
+ * link()'s EXDEV). Both were measured on OP15 against a hidden pure-addition for
+ * all 24 blocked uids, with a 7020-path genuinely-absent control that produced
+ * zero false positives:
+ *
+ *   readlink(path)  hidden -> EINVAL   absent -> ENOENT
+ *   statfs(path)    hidden -> succeeds absent -> ENOENT
+ *
+ * A hidden reader must not be able to tell "not there" from "there but refused",
+ * so both now answer ENOENT for it and behave normally for everyone else.
+ *
+ * readlink: nm_alloc_rule resolves with LOOKUP_FOLLOW, so an injected inode
+ * mirrors the symlink TARGET and S_ISLNK is never true -- a non-hidden caller
+ * therefore gets -EINVAL, exactly what vfs_readlink() produces on its own for a
+ * non-symlink, so nothing changes for them. */
+static int nm_readlink(struct dentry *dentry, char __user *buf, int buflen)
+{
+    struct inode *inode = d_backing_inode(dentry);
+
+    if (inode && unlikely(nm_hidden_from_caller(inode->i_private)))
+        return -ENOENT;
+    return -EINVAL;
+}
+
+/* statfs: our inodes live on the PARENT's superblock, so statfs_by_dentry()
+ * reached the real fs and succeeded for a path we tell the same caller does not
+ * exist. Forward everything else untouched -- this is the whole partition's
+ * statfs, and every other file on it depends on the real answer. */
+static int nomount_hijacked_statfs(struct dentry *dentry, struct kstatfs *buf)
+{
+    struct inode *inode = d_backing_inode(dentry);
+    struct nm_sop *nm_sop;
+
+    if (inode && (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) &&
+        unlikely(nm_hidden_from_caller(inode->i_private)))
+        return -ENOENT;
+
+    nm_sop = __get_nm(smp_load_acquire(&dentry->d_sb->s_op), struct nm_sop, fake_sop,
+                      destroy_inode, nomount_hijacked_destroy_inode);
+    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->statfs)
+        return nm_sop->orig_sop->statfs(dentry, buf);
+    return -ENOSYS;
+}
+
 static u8 nm_stock_caps(struct inode *ino)
 {
     u8 cap = NM_CAP_KNOWN;   /* reaching here IS the sample; see NM_CAP_KNOWN */
@@ -1825,6 +1915,8 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
 #endif
         if (S_ISDIR(stat->mode))
             nm_dir_size_fix(info, stat);
+        else
+            nm_mirror_blocks(info, stat);   /* see nm_size_ratio() */
     }
     return res;
 }
@@ -1918,6 +2010,8 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
 #endif
         if (S_ISDIR(stat->mode))
             nm_dir_size_fix(info, stat);
+        else
+            nm_mirror_blocks(info, stat);   /* see nm_size_ratio() */
     }
     return res;
 }
@@ -2664,6 +2758,7 @@ static const struct inode_operations nm_file_iops = {
      * so an injected inode mirrors the symlink TARGET and S_ISLNK is never true.
      * Kept for the day that resolution changes; see the symlink note there. */
     .get_link = nm_get_link,
+    .readlink = nm_readlink,
     .fiemap = nm_fiemap,
 };
 
@@ -2743,6 +2838,10 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
     nm_sop->fake_sop.drop_inode = nomount_hijacked_drop_inode;
     nm_sop->fake_sop.evict_inode = nomount_hijacked_evict_inode;
     nm_sop->fake_sop.put_super = nomount_hijacked_put_super;   /* cure on runtime umount */
+    /* Only when the fs actually has one: installing a ->statfs where the
+     * original had none would make an unsupported call start answering. */
+    if (sb->s_op->statfs)
+        nm_sop->fake_sop.statfs = nomount_hijacked_statfs;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
     if (!nm_sop->orig_sop->destroy_inode && !nm_sop->orig_sop->free_inode)
         nm_sop->fake_sop.free_inode = free_inode_nonrcu;
@@ -4333,6 +4432,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_mtime = kst.mtime;
             rule->v_ctime = kst.ctime;
             rule->v_blksize = kst.blksize;
+            rule->v_cratio = nm_size_ratio(kst.size, kst.blocks);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             rule->v_result_mask = kst.result_mask;
 #endif
@@ -4394,6 +4494,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_mtime = sib.mtime;
             rule->v_ctime = sib.ctime;
             rule->v_blksize    = sib.blksize;
+            rule->v_cratio     = nm_size_ratio(sib.size, sib.blocks);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             rule->v_result_mask = sib.result_mask;
 #endif

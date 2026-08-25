@@ -114,6 +114,10 @@
 #define nm_inode_info_rcu_free                   __vfsx_193
 #define nm_reval_fresh                           __vfsx_194
 #define nm_lookup_backing_child                  __vfsx_195
+#define nm_size_ratio                            __vfsx_196
+#define nm_mirror_blocks                         __vfsx_197
+#define nm_readlink                              __vfsx_198
+#define nomount_hijacked_statfs                  __vfsx_199
 #define nm_tag_passthrough_dentry                __vfsx_189
 #define nm_child_ino                             __vfsx_190
 #define nm_dirent_ino                            __vfsx_191
@@ -285,7 +289,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.20.0"
+#define NM_MODULE_VERSION "1.21.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -367,7 +371,7 @@
  *    measured at /product/etc (dir ino 15018, siblings 7166..20309) minting
  *    children at 1226252..2181515. Neither is userspace-settable; the bump
  *    exists so `doctor` can tell this engine from v19. */
-#define NOMOUNT_VERSION    20
+#define NOMOUNT_VERSION    21
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -567,6 +571,13 @@ struct nm_inode_info {
     struct timespec64 v_atime, v_mtime, v_ctime;
     u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
     u32 v_blksize;                   /* mirrored st_blksize */
+    /* Stock allocated-size RATIO in 1/1024 units (0 = never sampled).
+     * Stock ROM files are erofs-compressed while injected ones are served from
+     * f2fs uncompressed, so the predicate st_blocks*512 >= st_size held for
+     * 41/41 injected files >=64KiB and 0/191 stock ones -- one stat(), no root,
+     * no baseline device, fully disjoint per directory. Replaying a sampled
+     * ratio puts the injected file back inside the population. */
+    u16 v_cratio;
     u32 v_result_mask;               /* statx result_mask a STOCK file reports */
     u8  v_cap;                       /* NM_CAP_*: file-op answers a STOCK file gives */
     kuid_t v_uid;                    /* virtual-dir owner (mirrored from nearest real ancestor) */
@@ -669,6 +680,13 @@ struct nomount_rule {
     struct timespec64 v_atime, v_mtime, v_ctime;
     u64 v_attributes, v_attr_mask;   /* mirrored statx STATX_ATTR_* of the stock/sibling file */
     u32 v_blksize;                   /* mirrored st_blksize */
+    /* Stock allocated-size RATIO in 1/1024 units (0 = never sampled).
+     * Stock ROM files are erofs-compressed while injected ones are served from
+     * f2fs uncompressed, so the predicate st_blocks*512 >= st_size held for
+     * 41/41 injected files >=64KiB and 0/191 stock ones -- one stat(), no root,
+     * no baseline device, fully disjoint per directory. Replaying a sampled
+     * ratio puts the injected file back inside the population. */
+    u16 v_cratio;
     u32 v_result_mask;               /* statx result_mask a STOCK file reports */
     u8  v_cap;                       /* NM_CAP_*: file-op answers a STOCK file gives */
     kuid_t v_uid;                    /* virtual-dir owner (mirrored from nearest real ancestor) */
@@ -717,6 +735,13 @@ struct nm_rule_info {
     struct timespec64 v_atime, v_mtime, v_ctime;
     u64 v_attributes, v_attr_mask;
     u32 v_blksize;
+    /* Stock allocated-size RATIO in 1/1024 units (0 = never sampled).
+     * Stock ROM files are erofs-compressed while injected ones are served from
+     * f2fs uncompressed, so the predicate st_blocks*512 >= st_size held for
+     * 41/41 injected files >=64KiB and 0/191 stock ones -- one stat(), no root,
+     * no baseline device, fully disjoint per directory. Replaying a sampled
+     * ratio puts the injected file back inside the population. */
+    u16 v_cratio;
     u32 v_result_mask;
     u8  v_cap;
     kuid_t v_uid;
