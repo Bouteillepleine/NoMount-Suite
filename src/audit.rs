@@ -93,7 +93,12 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
             // within d_reclen; we never read past `n`.
             let h = unsafe { &*(buf.as_ptr().add(off) as *const Dirent64Hdr) };
             let reclen = h.d_reclen as usize;
-            if reclen == 0 || off + reclen > n as usize {
+            // `< 19` too, not just 0: `nstart` is off+19 and the slice below is
+            // buf[nstart..off+reclen], so a d_reclen of 1..=18 gives start > end
+            // and PANICS the slice index -- in the tool whose job is to report
+            // rather than abort. Real kernels always emit >= 24; a truncated or
+            // hostile getdents64 buffer should end the walk, not the process.
+            if reclen < 19 || off + reclen > n as usize {
                 break;
             }
             let nstart = off + 19; // offsetof(name)
@@ -222,20 +227,45 @@ fn check_zero_mount() -> Check {
 /// The engine must expose no /sys, /proc or module surface of its own.
 fn check_surfaces() -> Check {
     let mut found = Vec::new();
+    // Which probes actually RAN. Each was an `if let Ok(..)` with no else, so a
+    // directory that could not be enumerated contributed nothing to `found` and
+    // the check still reported "no entry named nomount in /sys/kernel,
+    // /sys/module, /proc" — asserting three directories had been scanned when one
+    // or more had not. This file's own header says a check that cannot run says
+    // so; this was the check that did not.
+    let mut unread: Vec<&str> = Vec::new();
     for dir in ["/sys/kernel", "/sys/module", "/proc"] {
-        if let Ok(rd) = fs::read_dir(dir) {
-            for e in rd.flatten() {
-                let n = e.file_name().to_string_lossy().to_lowercase();
-                if n.contains("nomount") {
-                    found.push(format!("{dir}/{n}"));
+        match fs::read_dir(dir) {
+            Ok(rd) => {
+                for e in rd.flatten() {
+                    let n = e.file_name().to_string_lossy().to_lowercase();
+                    if n.contains("nomount") {
+                        found.push(format!("{dir}/{n}"));
+                    }
                 }
             }
+            Err(_) => unread.push(dir),
         }
     }
-    if let Ok(f) = fs::read_to_string("/proc/filesystems") {
-        if f.to_lowercase().contains("nomount") {
-            found.push("/proc/filesystems".into());
+    match fs::read_to_string("/proc/filesystems") {
+        Ok(f) => {
+            if f.to_lowercase().contains("nomount") {
+                found.push("/proc/filesystems".into());
+            }
         }
+        Err(_) => unread.push("/proc/filesystems"),
+    }
+    // A hit is a hit however partial the scan was, so `found` still fails below.
+    // Only an EMPTY result depends on having been able to look everywhere.
+    if found.is_empty() && !unread.is_empty() {
+        return skip(
+            "kernel surfaces",
+            format!(
+                "could not enumerate {} — nothing named nomount was found in the rest, but \
+                 this check did NOT clear the surfaces it could not read",
+                unread.join(", ")
+            ),
+        );
     }
     if found.is_empty() {
         // Say what was actually tested. This walks DIRECTORY ENTRY NAMES only,

@@ -730,11 +730,13 @@ pub struct Candidate {
 /// the entry is stuck in mountinfo until reboot, which is the one thing the
 /// zero-mount posture exists to prevent. Absorb runs after boot and cannot undo
 /// it, so the unmount has to happen before the injection, not after.
-pub(crate) fn mounted_targets() -> std::collections::HashSet<PathBuf> {
-    let Ok(body) = std::fs::read_to_string(MOUNTINFO) else {
-        return Default::default();
-    };
-    parse_mountinfo(&body).into_iter().map(|r| r.target).collect()
+/// `None` when the mount table could not be read. NOT an empty set: an empty set
+/// means "nothing is mounted anywhere", which is the reading that made the mount
+/// pass inject over every live mount and strand each one in mountinfo until
+/// reboot while reporting `0 failed`.
+pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
+    let body = std::fs::read_to_string(MOUNTINFO).ok()?;
+    Some(parse_mountinfo(&body).into_iter().map(|r| r.target).collect())
 }
 
 /// Targets absorb is currently serving. Read by `reload` so they survive a
@@ -749,16 +751,31 @@ pub(crate) fn mounted_targets() -> std::collections::HashSet<PathBuf> {
 /// source lets the boot pass re-serve it directly, so the module never needs to
 /// mount at all. Lines without a tab are the old format and yield no source.
 pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
-    fs::read_to_string(ABSORBED_LIST)
-        .map(|s| {
-            s.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .filter_map(|l| l.split_once('\t'))
-                .map(|(t, src)| (PathBuf::from(t), PathBuf::from(src)))
-                .collect()
-        })
-        .unwrap_or_default()
+    read_absorbed_pairs().unwrap_or_default()
+}
+
+/// `Err` only when the record exists but could not be READ. A missing file is
+/// `Ok(empty)`, because "nothing has been absorbed yet" is a real answer.
+///
+/// `reload`'s prune guard is the one caller that must not confuse the two: this
+/// set is the ONLY thing protecting absorbed rules from being deleted, so an
+/// unreadable file collapsing to an empty set makes reload drop every absorbed
+/// rule and report `-N rules` as if that were the plan.
+pub fn read_absorbed_pairs() -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+    match fs::read_to_string(ABSORBED_LIST) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+        Ok(s) => Ok(parse_absorbed_pairs(&s)),
+    }
+}
+
+fn parse_absorbed_pairs(body: &str) -> Vec<(PathBuf, PathBuf)> {
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(t, src)| (PathBuf::from(t), PathBuf::from(src)))
+        .collect()
 }
 
 /// Re-serve the absorbed APK rules recorded by a previous run.
@@ -774,18 +791,38 @@ pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
 /// GraphicsEnvironment.queryAngleChoice NPE, twice, once taking the system with
 /// it). The label is an xattr and the boot pass relabels /data/adb/nomount, so a
 /// hand-applied chcon does not survive: re-assert it every time we serve.
-fn label_apk_readable(p: &Path) {
-    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return };
+/// Returns whether the label is now correct. The result used to be discarded
+/// entirely, so a setxattr that failed (EOPNOTSUPP, EPERM under a restrictive
+/// policy, ENOENT on a source that vanished) still went on to `nm.add` and was
+/// counted as "re-served" -- and the consequence, per the paragraph above, is the
+/// app force-closing or taking the system with it. For a call whose failure is
+/// documented as system-crashing, the caller has to be able to decline.
+fn label_apk_readable(p: &Path) -> bool {
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return false };
     let ctx = c"u:object_r:apk_data_file:s0";
-    unsafe {
-        libc::setxattr(
+    // lsetxattr, not setxattr: `p` comes from absorbed.list, and setxattr FOLLOWS
+    // symlinks -- so a symlinked source relabels whatever it points at as
+    // apk_data_file. Writing that file needs root today, so this is
+    // defence-in-depth, but it costs nothing and the record has no business
+    // reaching through a link.
+    let rc = unsafe {
+        libc::lsetxattr(
             c.as_ptr(),
             c"security.selinux".as_ptr(),
             ctx.as_ptr().cast(),
             ctx.to_bytes_with_nul().len(),
             0,
+        )
+    };
+    if rc != 0 {
+        eprintln!(
+            "nomount: could not label {} apk_data_file ({}) - NOT serving it: an app cannot              read adb_data_file, and serving it anyway gives a null Resources and a crash              in handleBindApplication",
+            p.display(),
+            std::io::Error::last_os_error()
         );
+        return false;
     }
+    true
 }
 
 pub fn reapply_absorbed(nm: &Nm) -> u32 {
@@ -795,7 +832,19 @@ pub fn reapply_absorbed(nm: &Nm) -> u32 {
 /// Same, against a record read earlier -- `run_mount` has to snapshot it before it
 /// clears the file.
 pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
-    let live = nm.list().unwrap_or_default();
+    // NOT unwrap_or_default(). This dump IS the "already live" guard, and an empty
+    // string disarms it: every recorded pair is re-added, and re-adding a live
+    // rule d_drops the dentry and marks the file "(deleted)" in /proc/<pid>/maps
+    // for every process that mapped it — which absorb then reports as "re-served
+    // N recorded APK rule(s)", i.e. the damage counted as work done. Skip the
+    // re-serve instead; the next pass repeats it.
+    let Ok(live) = nm.list() else {
+        eprintln!(
+            "nomount: cannot enumerate live rules - skipping the absorbed-rule re-serve this \
+             pass (re-adding blind would d_drop rules that are already live)"
+        );
+        return 0;
+    };
     let mut n = 0;
     for (target, source) in pairs {
         if !is_app_apk(target) || !source.exists() || !target.exists() {
@@ -807,8 +856,13 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
         if live.lines().any(|l| l.rsplit_once(" -> ").is_some_and(|(t, _)| t.trim() == tgt)) {
             continue;
         }
-        label_apk_readable(source);
-        let _ = fs::symlink_metadata(target);
+        // Decline rather than serve an unreadable label. The result was
+        // discarded, so a failed relabel still went on to add the rule and count
+        // it -- and the documented consequence is the app force-closing, or the
+        // system going down with it, behind a "re-served N" success line.
+        if !label_apk_readable(source) {
+            continue;
+        }
         if nm.add(target, source).is_ok() {
             n += 1;
         }
@@ -819,8 +873,12 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
 /// The absorbed TARGET set, derived from the pairs record (the file is always the
 /// tab-separated pairs format now — see H18). `reload`'s prune guard is the only
 /// consumer and it needs just the targets.
-pub fn absorbed_targets() -> HashSet<PathBuf> {
-    absorbed_pairs().into_iter().map(|(t, _)| t).collect()
+/// `Err` when the record exists but could not be read — see [`read_absorbed_pairs`].
+/// There is deliberately no infallible twin: `reload`'s prune guard is the only
+/// caller, and for that caller an empty set on error deletes every absorbed rule
+/// on the device.
+pub fn read_absorbed_targets() -> std::io::Result<HashSet<PathBuf>> {
+    Ok(read_absorbed_pairs()?.into_iter().map(|(t, _)| t).collect())
 }
 
 /// Replace the record. `run_mount` calls this with an empty set: it issues
@@ -841,9 +899,17 @@ pub fn set_absorbed_pairs(pairs: &[(PathBuf, PathBuf)]) {
         body.push_str(&src.to_string_lossy());
         body.push('\n');
     }
+    // O_TRUNC does NOT reset an existing file's mode, and main.rs's umask only
+    // covers files this binary CREATES -- so absorbed.list stayed 0666 forever on
+    // any device that ran a pre-umask build (which is exactly where the 0666 was
+    // observed). It names which patched APK is injected over which package, i.e.
+    // the module fingerprint the hiding posture exists to deny, so state the mode
+    // instead of inheriting it.
     if let Err(e) = fs::write(ABSORBED_LIST, &body) {
         eprintln!("nomount: could not record absorbed targets: {e:#}");
+        return;
     }
+    let _ = fs::set_permissions(ABSORBED_LIST, std::os::unix::fs::PermissionsExt::from_mode(0o600));
 }
 
 /// Is anything still mounted here? The authority on whether an unmount worked:
@@ -852,7 +918,15 @@ pub fn set_absorbed_pairs(pairs: &[(PathBuf, PathBuf)]) {
 pub(crate) fn still_mounted(p: &Path) -> bool {
     std::fs::read_to_string(MOUNTINFO)
         .map(|b| parse_mountinfo(&b).iter().any(|r| r.target == p))
-        .unwrap_or(false)
+        // FAIL CLOSED. `unwrap_or(false)` said "nothing is mounted here" when the
+        // question could not be asked at all -- and every caller reads a `false`
+        // as permission to proceed: `unmount_before_serving` serves the target
+        // (injecting over a live mount strands it in mountinfo until reboot,
+        // which is the exact damage the doc above describes), and the two absorb
+        // loops treat a failed umount2 as a stranded peer. "Could not read the
+        // mount table" has to mean "assume it is still there", which costs one
+        // unserved target and a message, not a permanent leak.
+        .unwrap_or(true)
 }
 
 /// The path to re-assert rules at. `target` itself when it is servable; otherwise
@@ -1418,7 +1492,15 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
     // Seeded from the tmpfs pass: a tmpfs absorb would not convert is still a
     // mount over the ROM, and the "posture clean" line below must not be reachable
     // while one is up.
-    let (mut leaking, mut declined) = (tmpfs.leaked, tmpfs.declined);
+    // tmpfs.failed belongs in `leaking` too. The only way to reach it while the
+    // tmpfs is still UP is the `umount_detach && still_mounted` branch in
+    // absorb_rom_tmpfs — i.e. exactly a foreign mount that survived. Leaving it
+    // out let the summary print "0 ROM tmpfs emptied mountlessly (1 failed)" and
+    // then, as its FINAL line, "nothing mounted over the ROM (posture clean)"
+    // about a mount sitting in every process's mountinfo. The other two failure
+    // modes there have already unmounted, so counting all of tmpfs.failed here can
+    // at worst over-report a leak, which is the safe direction for this line.
+    let (mut leaking, mut declined) = (tmpfs.leaked + tmpfs.failed, tmpfs.declined);
     for s in &surveyed {
         if matches!(s.disposition, Disposition::Declined(_)) {
             declined += 1;
@@ -1625,7 +1707,14 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool) -> Result<()> {
         // means nm_alloc_rule mirrors metadata from the REAL stock file rather
         // than through the bind -- which is what makes absorption remove the
         // bind's dev/ino/mtime tell instead of preserving it.
-        if !umount_detach(&c.target) {
+        // ...and CONFIRM against mountinfo, like the redundant branch above and
+        // the tmpfs pass both already do. umount2 reports EINVAL both for "never a
+        // mountpoint" and for "a peer already took it away", and only the second
+        // is fine — so the main path, the one place that trusted umount2 alone,
+        // printed "cannot unmount X" and then SKIPPED the inject for a mount that
+        // was already gone. A false failure and content genuinely left unserved,
+        // which the deepest-first sort makes routine on a multi-mountpoint tree.
+        if !umount_detach(&c.target) && still_mounted(&c.target) {
             eprintln!(
                 "nomount: cannot unmount {} - leaving it alone (injecting anyway would \
                  strand it in mountinfo)",

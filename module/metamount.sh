@@ -60,6 +60,17 @@ nmlog() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [metamount] $*" >> "$BOOTLOG" 2>/dev/null
 }
 
+# Bounded exec. Every engine call on this path already went through `timeout`,
+# but that hardcodes a binary this script does not otherwise require: on a device
+# without toybox `timeout` the command does not run UNBOUNDED, it does not run AT
+# ALL ("timeout: not found"), which is the silent no-op this file spends most of
+# its comments removing. Prefer the bound; fall back to running it bare.
+if command -v timeout >/dev/null 2>&1; then
+    nmto() { timeout "$@"; }
+else
+    nmto() { shift; "$@"; }
+fi
+
 # Single-run guard. Was a noclobber file in /dev: world-writable (boot umask),
 # named after the project, and "held" by mere existence -- so anything able to
 # create that path pre-empted the whole mount pass. flock releases on exit and
@@ -168,6 +179,13 @@ fi
 # bootlooping on a spoof setting with no self-recovery path.
 GUARD_MAX=3
 COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
+# Sanitize before the arithmetic. A bootcount corrupted to something like "3 3"
+# (power loss mid-write, or a stray editor) makes $((COUNT + 1)) a FATAL
+# arithmetic-syntax error in both mksh and ash -- the shell exits on the spot, so
+# the counter is never rewritten, nothing is injected, nothing is logged, and the
+# module stays a silent no-op on every boot from then on. Unparsable means
+# "start over", which re-arms the guard rather than wedging it.
+case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
 COUNT=$((COUNT + 1))
 echo "$COUNT" > "$NMDIR/bootcount"
 
@@ -185,7 +203,7 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
         echo "bootcount=$COUNT guard_max=$GUARD_MAX"
         echo "kernel=$(uname -r)"
         echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
-        echo "rules_at_trip=$("$NM_BIN" list 2>/dev/null | wc -l)"
+        echo "rules_at_trip=$(nmto 15 "$NM_BIN" list 2>/dev/null | wc -l)"
         echo "modules_enabled=$(for m in /data/adb/modules/*/; do
                 [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ] && continue
                 basename "$m"
@@ -205,17 +223,43 @@ else
     # zygote/system_server come up, and still kept separate from the mount pass
     # so a spoof failure can't affect mounting -- but now guard-gated, so a
     # tripped counter (or a manual `disabled`) stops it like everything else.
-    [ -f "$MODDIR/spoof.sh" ] && sh "$MODDIR/spoof.sh" 2>/dev/null
+    # BOUNDED, like the engine calls below. The comment above says it outright --
+    # spoof.sh drives resetprop, uname, /proc/cmdline and /proc/bootconfig, "a
+    # larger bootloop surface than the injection pass" -- yet it was the one call
+    # on this path with no bound at all. It also shells out to `nm`, whose netlink
+    # recv has no SO_RCVTIMEO (userspace/src/nm.h do_nm_cmd), so a kernel that
+    # accepts the message and never answers hangs post-fs-data forever. A HANG is
+    # worse here than a crash: the boot never completes, so nothing clears
+    # bootcount and the user sees a dead device rather than a self-recovering one.
+    [ -f "$MODDIR/spoof.sh" ] && nmto 90 sh "$MODDIR/spoof.sh" 2>/dev/null
 
     if [ -x "$BIN" ]; then
-        timeout 60 "$BIN" mount 2>/dev/null
+        # Capture the status, NOT just the fact that we called it. `_engine_ran=1`
+        # below means "the binary was executable and we invoked it", and the status
+        # card then renders the green tick as long as SOME rules exist -- so a pass
+        # that exited non-zero, or that `timeout` killed at 60s having injected 200
+        # of 260 rules, ended the boot on "[NoMount ✅ 200 rules] fully mountless".
+        # A partial injection reported as a complete one is the same false green
+        # the rest of this file removes, one layer down.
+        nmto 60 "$BIN" mount 2>/dev/null
+        _mrc=$?
+        if [ "$_mrc" -ne 0 ]; then
+            nmlog "⚠ mount pass exited $_mrc ($([ "$_mrc" -eq 124 ] && echo "TIMED OUT after 60s" || echo "failed")) — the injection set may be INCOMPLETE"
+        fi
         # Durable whiteouts, HERE rather than only in service.sh. A whiteout hides a
         # stock path that is itself the tell, and service.sh does not run it until
         # after sys.boot_completed plus a 10s settle -- so every such path was plainly
         # visible for the whole of boot, to anything that looked early. Nothing here
         # needs packages.list, so it belongs in the same pass as the injections.
         # service.sh still re-applies, which is idempotent and catches a late failure.
-        [ -s "$NMDIR/whiteouts.txt" ] && timeout 30 "$BIN" whiteout apply 2>/dev/null
+        if [ -s "$NMDIR/whiteouts.txt" ]; then
+            nmto 30 "$BIN" whiteout apply 2>/dev/null
+            _wrc=$?
+            # Same reasoning as the mount pass: a whiteout hides a stock path that
+            # is itself the tell, so a failed apply means that path is VISIBLE for
+            # the whole boot. Never silent.
+            [ "$_wrc" -ne 0 ] && nmlog "⚠ whiteout apply exited $_wrc — hidden paths are still VISIBLE this boot"
+        fi
         _engine_ran=1
     else
         # The missing `else`. Without it a binary that is absent, not executable,
@@ -252,7 +296,12 @@ if command -v ksud >/dev/null 2>&1; then
     # post-fs-data on a 14-module device, all returning the same answer. The
     # engine's own directory scan was optimised precisely because this stage sits
     # under the OPlus boot watchdog; spending it again here made no sense.
-    _NMLIST=$("$NM_BIN" list 2>/dev/null)
+    # BOUNDED. This runs OUTSIDE the bootloop guard -- it is not gated on
+    # `disabled` -- so an unbounded call here can hang post-fs-data on exactly the
+    # device that has already self-disabled to recover. `nm`'s netlink recv has no
+    # SO_RCVTIMEO, so "the engine accepted the message and never replied" is a
+    # permanent block, not a slow one.
+    _NMLIST=$(nmto 15 "$NM_BIN" list 2>/dev/null)
     # grep -c on an empty stream prints 0 and exits 1, so guard the empty case.
     _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
     _vf=""; _ov=""
@@ -308,7 +357,13 @@ if command -v ksud >/dev/null 2>&1; then
 
     # The Suite's own card doubles as the at-a-glance status readout, so put the live
     # numbers there rather than restating the tagline the module.prop already carries.
-    _rules=$(_nmcount .)
+    # EXCLUDE the (virtual dir) rows. `grep -c .` counts every line of the dump,
+    # which on this device is 260 while `selfcheck`, `audit` and health.txt all
+    # say 257 -- the difference being 3 directories the engine materialises, which
+    # are not rules. The card is the surface most users read, so having it
+    # disagree with every other number the Suite prints made a real discrepancy
+    # indistinguishable from a bug. Measured on OP15: 260 lines, 3 virtual dirs.
+    _rules=$(_nmcount -vc '(virtual dir)')
     _rro=$(_nmcount '/overlay/[^ ]*\.apk')
     _mods=0
     for _x in $_vf $_ov; do _mods=$((_mods + 1)); done

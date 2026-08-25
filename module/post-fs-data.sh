@@ -23,6 +23,16 @@ nmlog() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [post-fs-data] $*" >> "$BOOTLOG" 2>/dev/null
 }
 
+# Bounded exec (see metamount.sh). On a device without toybox `timeout` a bare
+# `timeout 60 cmd` does not run the command unbounded, it does not run it at all
+# -- the silent no-op this file exists to remove. Prefer the bound, fall back to
+# running bare.
+if command -v timeout >/dev/null 2>&1; then
+    nmto() { timeout "$@"; }
+else
+    nmto() { shift; "$@"; }
+fi
+
 ABI=$(getprop ro.product.cpu.abi)
 # Unchecked, an empty ABI builds "$MODDIR/bin//nomount" and the [ -x "$BIN" ]
 # test below then fails forever, silently (see metamount.sh).
@@ -45,6 +55,11 @@ chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 # /proc/cmdline, /proc/bootconfig).
 GUARD_MAX=3
 COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
+# Sanitize before the arithmetic (see metamount.sh): a bootcount corrupted to
+# something like "3 3" makes $((COUNT + 1)) a FATAL arithmetic-syntax error in
+# both mksh and ash, so the shell exits on the spot, the counter is never
+# rewritten, and the module is a silent no-op on every boot from then on.
+case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
 COUNT=$((COUNT + 1))
 echo "$COUNT" > "$NMDIR/bootcount"
 
@@ -61,7 +76,7 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
         echo "bootcount=$COUNT guard_max=$GUARD_MAX (magisk post-fs-data path)"
         echo "kernel=$(uname -r)"
         echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
-        echo "rules_at_trip=$("$NM_BIN" list 2>/dev/null | wc -l)"
+        echo "rules_at_trip=$(nmto 15 "$NM_BIN" list 2>/dev/null | wc -l)"
         _t=$(ls -t /data/tombstones/tombstone_* 2>/dev/null | grep -v '\.pb$' | head -1)
         if [ -n "$_t" ]; then
             echo "tombstone=$_t"
@@ -72,17 +87,33 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
 else
     # --- spoof add-on (dynamic vbmeta.digest) ---
     # Same stage as the KSU/APatch metamount hook, but for the Magisk path.
-    [ -f "$MODDIR/spoof.sh" ] && sh "$MODDIR/spoof.sh" 2>/dev/null
+    # BOUNDED, like the engine calls below -- spoof.sh was the one call on this
+    # path with no bound at all, despite driving resetprop, uname, /proc/cmdline
+    # and /proc/bootconfig AND shelling out to `nm`, whose netlink recv has no
+    # SO_RCVTIMEO (userspace/src/nm.h do_nm_cmd). A kernel that accepts the
+    # message and never answers hangs post-fs-data forever.
+    [ -f "$MODDIR/spoof.sh" ] && nmto 90 sh "$MODDIR/spoof.sh" 2>/dev/null
     if [ -x "$BIN" ]; then
         # Bounded, like metamount.sh. A hung mount pass here is a HANG, not a
         # crash, so the bootloop counter never reaches GUARD_MAX and the device
         # never self-recovers -- which makes the timeout matter more on this path
         # than on the KSU one, not less.
-        timeout 60 "$BIN" mount 2>/dev/null
+        #
+        # And the STATUS, not just the fact that we called it: a pass that exited
+        # non-zero, or that `timeout` killed at 60s having injected part of the
+        # rule set, used to leave no trace anywhere. On this path there is no
+        # status card to contradict, which makes boot.log the only record there is.
+        nmto 60 "$BIN" mount 2>/dev/null
+        _mrc=$?
+        [ "$_mrc" -ne 0 ] && nmlog "⚠ mount pass exited $_mrc — the injection set may be INCOMPLETE"
         # Durable whiteouts in the same pass as the injections, for the same
         # reason as metamount.sh: a whiteout hides a stock path that is itself the
         # tell, and there is no service.sh re-apply early enough to cover boot.
-        [ -s "$NMDIR/whiteouts.txt" ] && timeout 30 "$BIN" whiteout apply 2>/dev/null
+        if [ -s "$NMDIR/whiteouts.txt" ]; then
+            nmto 30 "$BIN" whiteout apply 2>/dev/null
+            _wrc=$?
+            [ "$_wrc" -ne 0 ] && nmlog "⚠ whiteout apply exited $_wrc — hidden paths are still VISIBLE this boot"
+        fi
     else
         # Never silent. See metamount.sh: with no else arm a missing binary meant
         # a boot that injected nothing and reported nothing.

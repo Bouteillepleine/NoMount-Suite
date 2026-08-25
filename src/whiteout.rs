@@ -232,11 +232,22 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     list.push(t.clone());
     write(&list)?;
     // Apply immediately so the effect does not wait for a reboot.
+    // The message was right and the EXIT CODE was not: both arms returned Ok(()),
+    // so `nomount whiteout add` exited 0 whether or not the engine took it. The
+    // WebUI gates purely on errno (index.html woAdd / woSuggest) — so a failed
+    // apply toasted "Hidden" and removed the row from the suggestion list, for a
+    // file every app can still read. The list entry IS saved, which is why this is
+    // a warning in the text and a failure in the status.
     match Nm::new().whiteout(Path::new(&t)) {
-        Ok(()) => println!("ok: {t} hidden (persists across reboots)"),
-        Err(e) => println!("saved {t}, but applying now failed: {e:#}"),
+        Ok(()) => {
+            println!("ok: {t} hidden (persists across reboots)");
+            Ok(())
+        }
+        Err(e) => Err(e.context(format!(
+            "saved {t} to the durable list, but applying it now FAILED — the path is still \
+             visible until the next reboot"
+        ))),
     }
-    Ok(())
 }
 
 pub fn remove(target: &str) -> Result<()> {
@@ -253,14 +264,20 @@ pub fn remove(target: &str) -> Result<()> {
     // refuses the `del` the path stays whited out for the rest of the session, and
     // "no longer hidden" -- printed by the CLI and echoed by the WebUI -- asserts
     // the opposite of what the user will see.
+    // ...and the exit code has to say so too. `Ok(())` on both arms made the
+    // WebUI, which reads only errno, toast "No longer hidden" for a path that
+    // stays whited out for the rest of the session — the exact assertion the
+    // comment above says must not be made.
     match Nm::new().del(Path::new(t)) {
-        Ok(()) => println!("ok: {t} no longer hidden"),
-        Err(e) => println!(
-            "removed {t} from the list, but un-hiding it now failed: {e:#} — it stays \
+        Ok(()) => {
+            println!("ok: {t} no longer hidden");
+            Ok(())
+        }
+        Err(e) => Err(e.context(format!(
+            "removed {t} from the durable list, but un-hiding it now FAILED — it stays \
              hidden until the next reboot"
-        ),
+        ))),
     }
-    Ok(())
 }
 
 /// Targets the engine is currently whiting out, from `nm list`.

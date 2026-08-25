@@ -29,10 +29,14 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             # were archived 644 and would install unrunnable. Path is the
             # reliable signal here, with the stat bit kept as a fallback for
             # hosts where it does mean something.
+            # update-binary is named by neither rule but IS executed by some
+            # recoveries, and on a Windows filesystem the st_mode fallback below
+            # cannot rescue it -- so the recovery installer shipped 0644.
             executable = (
                 rel.endswith(".sh")
                 or rel.startswith("bin/")
                 or "/bin/" in rel
+                or rel.endswith("/update-binary")
                 or bool(st.st_mode & stat.S_IXUSR)
             )
             mode = 0o755 if executable else 0o644

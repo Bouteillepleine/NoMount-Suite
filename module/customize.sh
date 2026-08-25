@@ -74,6 +74,13 @@ done
 # A WARNING, never an abort: flashing from recovery is legitimate and the
 # recovery kernel has no engine, so aborting would block a valid install.
 _abi=$(getprop ro.product.cpu.abi 2>/dev/null)
+# Same fallback the boot scripts carry. An empty ABI builds "$MODPATH/bin//nm",
+# which is never executable, so BOTH probes below ([ -x "$_nm" ]) fell through in
+# silence: the install printed nothing about the engine at all, and then declared
+# "kernel pathhide not present" on a kernel that has it. Neither is true; both
+# read as a finding.
+[ -n "$_abi" ] || _abi=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
+[ -n "$_abi" ] || _abi=arm64-v8a
 _nm="$MODPATH/bin/${_abi}/nm"
 if [ -x "$_nm" ]; then
     _ev=$("$_nm" v 2>/dev/null | tr -dc '0-9')
@@ -113,7 +120,15 @@ seed_conf spoof_uname 0
 seed_conf uname_tail ""
 seed_conf uname_date ""
 seed_conf fix_shell_tmp 1
-set_perm "$CONF" 0 0 0644
+# 0600 + the explicit context, like every other file in $NMDIR. Two problems in
+# one line: 0644 made spoof.conf the only group/world-readable file in the state
+# dir, and the MISSING 5th argument relabelled it to u:object_r:system_file:s0 --
+# which the live policy grants every app domain read on (file 0x2044412), while
+# granting nothing on adb_data_file. The 0700 parent was the only thing standing
+# between an app and this file, which is exactly the reliance the $NMDIR fix
+# above removed. spoof.conf records the boot-identity spoof settings; only root
+# (spoof.sh at post-fs-data, and the WebUI through an exec) ever reads it.
+set_perm "$CONF" 0 0 0600 u:object_r:adb_data_file:s0
 [ -f "$MODPATH/spoof.sh" ] && set_perm "$MODPATH/spoof.sh" 0 0 0755
 ui_print "- Spoof add-on enabled: dynamic vbmeta.digest"
 ui_print "  config: $CONF"

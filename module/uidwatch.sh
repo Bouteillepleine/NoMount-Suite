@@ -47,6 +47,11 @@ NMDIR=/data/adb/nomount
 [ -s "$NMDIR/uidhide" ] || [ -s "$NMDIR/absorbed.list" ] || exit 0
 
 ABI=$(getprop ro.product.cpu.abi)
+# Same fallback the boot entry points carry: an empty ABI builds
+# "$MODDIR/bin//nomount", which can never be executable, so the handler exits 0
+# and the hide list silently stops following installs.
+[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
+[ -n "$ABI" ] || ABI=arm64-v8a
 BIN="$MODDIR/bin/$ABI/nomount"
 [ -x "$BIN" ] || exit 0
 export NM_BIN="$MODDIR/bin/$ABI/nm"
@@ -98,8 +103,16 @@ sleep 3
 # under 180.
 if [ -s "$NMDIR/uidhide" ]; then
     _out=$(timeout 60 "$BIN" uid apply 2>&1)
-    if [ $? -eq 124 ]; then
+    _urc=$?
+    # 124 is not the only failure. A plain non-zero exit means the apply itself
+    # failed -- apps the user believes are hidden are not -- and the else arm
+    # logged that outcome as "hide list re-applied". service.sh says of the very
+    # same call that "a failed apply is the one thing here that must not pass
+    # quietly"; this path, which runs on EVERY install and update, did not.
+    if [ "$_urc" -eq 124 ]; then
         nmlog "⚠ hide list apply after package change TIMED OUT after 60s — apps you expect to be hidden are NOT"
+    elif [ "$_urc" -ne 0 ]; then
+        nmlog "⚠ hide list apply after package change FAILED (exit $_urc) — apps you expect to be hidden are NOT ($_out)"
     else
         nmlog "hide list re-applied after package change ($_out)"
     fi

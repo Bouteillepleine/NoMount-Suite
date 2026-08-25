@@ -31,14 +31,15 @@ struct Fingerprint {
     engine: String, // "vN" or "down"
     rules: usize,
     whiteouts: usize,
-    mounts: usize,
+    /// `None` = the mount table could not be read. Rendered `unknown`, never 0.
+    mounts: Option<usize>,
     blocked: String, // count, or "unknown" when the engine could not be asked
     consistency: String, // "ok" | "mismatch:<path>(root=A app=B)" | "unchecked"
     guard: String,       // "armed" | "tripped"
     /// Module mounts that are NOT left by design, i.e. actual leaks. Carried
     /// separately so the card can stop calling an expected hook-framework bind a
     /// warning.
-    mounts_foreign: usize,
+    mounts_foreign: Option<usize>,
     /// The root manager's `kernel_umount`: "on" | "off" | "unknown".
     ///
     /// Carried in the fingerprint so the manager's state travels with every
@@ -59,8 +60,9 @@ impl Fingerprint {
         let _ = writeln!(s, "engine={}", self.engine);
         let _ = writeln!(s, "rules={}", self.rules);
         let _ = writeln!(s, "whiteouts={}", self.whiteouts);
-        let _ = writeln!(s, "mounts={}", self.mounts);
-        let _ = writeln!(s, "mounts_foreign={}", self.mounts_foreign);
+        let unk = |v: Option<usize>| v.map_or_else(|| "unknown".to_string(), |n| n.to_string());
+        let _ = writeln!(s, "mounts={}", unk(self.mounts));
+        let _ = writeln!(s, "mounts_foreign={}", unk(self.mounts_foreign));
         let _ = writeln!(s, "blocked={}", self.blocked);
         let _ = writeln!(s, "consistency={}", self.consistency);
         let _ = writeln!(s, "guard={}", self.guard);
@@ -108,8 +110,13 @@ fn app_size(uid: u32, path: &str) -> String {
 /// counting it the same as a leak made the card contradict itself: it read
 /// "⚠ 1 module mount(s)" and "fully mountless" in the same sentence, with no way
 /// for a reader to tell the expected one from a real leak.
-fn count_mounts_split() -> (usize, usize) {
-    let Ok(body) = fs::read_to_string("/proc/self/mountinfo") else { return (0, 0) };
+/// `None` when the mount table could not be read. `(0, 0)` said "there are no
+/// module mounts" for a question that was never asked -- and `service.sh` reads
+/// `mounts_foreign` straight off this, so an unreadable mountinfo rendered the
+/// manager card as "0 mounts ... fully mountless". That is the same constant-zero
+/// defect the doc above records, reintroduced through the error path.
+fn count_mounts_split() -> Option<(usize, usize)> {
+    let Ok(body) = fs::read_to_string("/proc/self/mountinfo") else { return None };
     let rows = crate::absorb::parse_mountinfo(&body);
     let roots = crate::absorb::fs_roots(&rows);
     let (mut total, mut by_design) = (0usize, 0usize);
@@ -130,7 +137,7 @@ fn count_mounts_split() -> (usize, usize) {
             by_design += 1;
         }
     }
-    (total, by_design)
+    Some((total, by_design))
 }
 
 /// The unprivileged uid the consistency canary probes as (`shell`).
@@ -231,15 +238,15 @@ fn gather() -> Fingerprint {
     } else {
         "armed"
     };
-    let (mounts_total, mounts_by_design) = count_mounts_split();
+    let split = count_mounts_split();
     Fingerprint {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uname: read_cmd("uname", &["-r"]),
         engine,
         rules: rules.len(),
         whiteouts,
-        mounts: mounts_total,
-        mounts_foreign: mounts_total - mounts_by_design,
+        mounts: split.map(|(t, _)| t),
+        mounts_foreign: split.map(|(t, d)| t - d),
         blocked,
         consistency: consistency_probe(&rules, probe_hidden),
         guard: guard.to_string(),
@@ -367,7 +374,24 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         let fp = gather();
         fp.to_text()
     });
-    let shared = ["/sdcard", "/storage", "/mnt/sdcard"].iter().any(|p| out.starts_with(p));
+    // /data/media/0 is the REAL backing store of /sdcard on A11+, and it is the
+    // path a root shell naturally types -- so `nomount export /data/media/0/Download`
+    // failed this test, skipped the PRIVATE guard below, and wrote `uidhide`,
+    // `uidhide.cache` and `spoof.conf` -- files that name exactly which detectors
+    // are being hidden from -- into storage any app with a storage permission can
+    // read. The /mnt/user and /mnt/runtime views are the same store by other names.
+    let shared = [
+        "/sdcard",
+        "/storage",
+        "/mnt/sdcard",
+        "/data/media",
+        "/mnt/user",
+        "/mnt/runtime",
+        "/mnt/androidwritable",
+        "/mnt/pass_through",
+    ]
+    .iter()
+    .any(|p| out.starts_with(p));
     // On shared storage the ` [UID: n]` suffix on a per-UID rule names an appid we
     // are hiding from -- the same secret as the hide list -- so strip it there.
     let rules = nm.list().unwrap_or_else(|e| format!("(nm list failed: {e})"));

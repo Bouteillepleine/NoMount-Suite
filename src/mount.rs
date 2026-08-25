@@ -753,15 +753,19 @@ fn warn_whiteout_hole(target: &Path, module: &str) {
     }
 }
 
-pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
+/// `Err` when the module tree could not be ENUMERATED, which is not the same as
+/// "there are no modules". `run_mount` calls this, then `nm clear()`, then applies
+/// the result -- so an empty-on-error plan wiped every rule and printed
+/// `0 modules | 0 rules, ... 0 failed` with no error and exit 0. `run_reload` was
+/// worse: it pruned every live rule and reported `-N rules` as if intended.
+pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
     let blocklist = load_blocklist();
     let mut plan = Vec::new();
     let mut skipped = 0u32;
     // Sorted for the same reason plan_tree sorts: a contested target must resolve
     // to the same module on every boot.
-    let Ok(dirs) = fs::read_dir(MODULES_DIR) else {
-        return (plan, skipped);
-    };
+    let dirs = fs::read_dir(MODULES_DIR)
+        .with_context(|| format!("cannot enumerate {MODULES_DIR} -- refusing to treat that as \"no modules installed\", which would clear every rule"))?;
     let mut dirs: Vec<_> = dirs.flatten().collect();
     dirs.sort_by_key(|e| e.file_name());
     for entry in dirs {
@@ -806,12 +810,12 @@ pub(crate) fn collect_plan() -> (Vec<PlanEntry>, u32) {
             }
         }
     }
-    (plan, skipped)
+    Ok((plan, skipped))
 }
 
 /// `nomount plan`: print the resolved plan (target, kind, source) without applying.
 pub fn run_plan() -> Result<()> {
-    let (plan, skipped) = collect_plan();
+    let (plan, skipped) = collect_plan()?;
     for e in &plan {
         let k = match e.kind {
             PlanKind::Inject => "inject",
@@ -907,7 +911,7 @@ pub fn run_reload() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding -- is the CONFIG_NOMOUNT kernel loaded?")?;
 
-    let (plan, skipped) = collect_plan();
+    let (plan, skipped) = collect_plan()?;
 
     // Desired, split by handling: hookless leaf rules vs my_* binds.
     let mut desired_hookless: HashMap<&Path, &PlanEntry> = HashMap::new();
@@ -938,9 +942,20 @@ pub fn run_reload() -> Result<()> {
     // Both were therefore deleted by a single Reload while their on-disk list still
     // said "applied", and neither came back until a reboot: the whiteout stopped
     // hiding, and the absorbed content silently reverted to the stock file.
-    let durable_whiteouts: HashSet<PathBuf> =
-        crate::whiteout::read().unwrap_or_default().into_iter().map(PathBuf::from).collect();
-    let mut absorbed = crate::absorb::absorbed_targets();
+    // NOT unwrap_or_default(). These two sets are the only thing standing between
+    // the prune loop below and every durable whiteout / absorbed rule on the
+    // device: collapsing an I/O error to an empty set deletes all of them and
+    // counts them into `removed`, so `reload` prints `-37 rules ... (gap-free)`
+    // while the on-disk lists still say "applied" and nothing comes back until a
+    // reboot. That is the regression the `reload_never_prunes_durable_or_absorbed_rules`
+    // test pins, reached through the error path the test does not exercise.
+    let durable_whiteouts: HashSet<PathBuf> = crate::whiteout::read()
+        .context("cannot read the durable whiteout list -- refusing to reload, because an empty list here would PRUNE every whiteout")?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let mut absorbed = crate::absorb::read_absorbed_targets()
+        .context("cannot read the absorbed-rule record -- refusing to reload, because an empty record here would PRUNE every absorbed rule")?;
     // The ROM-tmpfs takeovers are absorb's rules too (M-S8): whiteouts on paths no
     // module plan names, so the prune below would drop them and the emptied
     // directory would fill back in on the first reload after a takeover.
@@ -950,7 +965,9 @@ pub fn run_reload() -> Result<()> {
     // Add new rules, and re-apply a live rule whose SOURCE or KIND changed (not
     // just presence): a target moving between modules or flipping inject<->whiteout
     // must update, or the stale rule would be frozen until a full mount.
-    let mounted = crate::absorb::mounted_targets();
+    let mounted = crate::absorb::mounted_targets().context(
+        "cannot read /proc/self/mountinfo -- refusing to serve, because assuming \"nothing is mounted\"          injects over live mounts and strands each one in mountinfo until reboot",
+    )?;
     for (t, e) in &desired_hookless {
         let up_to_date = match live.get(&((*t).to_path_buf(), 0)) {
             Some(LiveRule::Inject(src)) => {
@@ -1129,7 +1146,7 @@ pub fn run_mount() -> Result<()> {
     // Build the plan BEFORE clearing the engine (M-S9): collect_plan only reads the
     // module tree, and enumerating it after `clear()` would, on any failure between
     // the two, leave the engine empty with nothing to re-serve.
-    let (plan, skipped) = collect_plan();
+    let (plan, skipped) = collect_plan()?;
 
     // Measure the ROM's directory shape and tell the engine, BEFORE any rule
     // exists: a synthesized dir inherits its parent's superblock, which on an
@@ -1151,7 +1168,13 @@ pub fn run_mount() -> Result<()> {
 
     // Start clean so uninstalled/updated modules don't leave stale rules, and tear
     // down any my_* binds from the previous pass so removed modules don't leak one.
-    let _ = nm.clear();
+    // NOT `let _ =`. `nm.version()` already succeeded, so the binary is there --
+    // a failure here is the engine refusing, and the contract of this call is
+    // "start clean so uninstalled/updated modules do not leave stale rules". A
+    // silent failure keeps every rule belonging to a module the user just removed
+    // and then reports the whole pass as a clean rebuild.
+    nm.clear()
+        .context("could not clear the engine before rebuilding -- rules from uninstalled or updated modules would survive the pass")?;
     // `clear` dropped the kernel's hidden-UID set along with the rules — per-UID
     // hiding is runtime state and CLEAR_ALL is its reset. Without this, every mount
     // pass after boot (the WebUI's Re-apply button is one) silently unhid every app
@@ -1208,7 +1231,9 @@ pub fn run_mount() -> Result<()> {
         failed: 0,
         whiteouts: 0,
     };
-    let mounted = crate::absorb::mounted_targets();
+    let mounted = crate::absorb::mounted_targets().context(
+        "cannot read /proc/self/mountinfo -- refusing to serve, because assuming \"nothing is mounted\"          injects over live mounts and strands each one in mountinfo until reboot",
+    )?;
     for e in &plan {
         served.insert(e.module.as_str());
         if !unmount_before_serving(&mounted, &e.target) {

@@ -382,6 +382,21 @@ do_props() {
         && $RESETPROP -n ro.kernel.qemu "" 2>/dev/null && log "prop ro.kernel.qemu cleared"
 
     rp_del ro.boot.verifiedbooterror
+    # DELETE on SDK >= 36, rewrite to 0 below it -- and the delete is the correct
+    # stock state on Android 16, not an oversight. This has been re-raised as a
+    # "gap" twice on the assumption that stock answers 0; measured on a live OP15
+    # (SDK 36) it does not answer at all:
+    #   * sys.oem_unlock_allowed has NO entry in any property_contexts under
+    #     /system/etc/selinux or /vendor/etc/selinux -- the property has no
+    #     defined SELinux label on this platform;
+    #   * nothing under /system/etc/init or /vendor/etc/init references it, so
+    #     no stock boot path ever sets it;
+    #   * ro.oem_unlock_supported=1 and `settings get global oem_unlock_disabled`
+    #     returns null, i.e. the state lives in settings, not in a property.
+    # So on SDK >= 36 "absent" IS stock, and writing 0 would be the divergence a
+    # detector could read. Pre-36 platforms do define and set it, hence the
+    # conditional rewrite on the other arm. props_status() mirrors both arms:
+    # present counts as dirty here, present-and-differs counts as dirty there.
     if [ "$(getprop ro.build.version.sdk 2>/dev/null)" -ge 36 ] 2>/dev/null; then
         rp_del sys.oem_unlock_allowed
     else

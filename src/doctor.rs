@@ -108,7 +108,7 @@ pub fn run_doctor() -> Result<()> {
     // partition -> count of non-overlay entries not in zygote's FD allowlist
     let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut f: Vec<Finding> = Vec::new();
-    let (plan, skipped) = collect_plan();
+    let (plan, skipped) = collect_plan()?;
 
     // ---- plan-level checks -------------------------------------------------
     let mut by_target: HashMap<&Path, Vec<&str>> = HashMap::new();
@@ -338,7 +338,13 @@ pub fn run_doctor() -> Result<()> {
     // header says must never be guessed, and the one that broke root here in July.
     // Only when a KernelSU-family manager is actually installed: a manager that
     // keeps no allowlist has nothing to fail at reading.
-    if crate::manager::ksu_manager_present() && (global_umount.is_none() || flags.is_none()) {
+    // kernel_umount.is_none() belongs here too: ksud missing, the exec failing, or
+    // its output moving all render as "off" to a reader, and the WebUI banner keys
+    // on THIS check's name so it stays hidden as well -- the precise argument the
+    // detail text makes for the other two switches.
+    if crate::manager::ksu_manager_present()
+        && (global_umount.is_none() || flags.is_none() || kernel_umount.is_none())
+    {
         f.push(Finding {
             level: Level::Warn,
             check: "manager umount config unreadable",
@@ -363,15 +369,54 @@ pub fn run_doctor() -> Result<()> {
     // per-UID hiding despite the PackageManager advertising them. Only meaningful
     // on an engine that reports flags (>= 17); see the finding below.
     let mut pm_rules_no_public: Vec<PathBuf> = Vec::new();
+    // An engine that is not responding means NOTHING below was verified -- yet the
+    // only trace used to be the header line `live: engine not responding`, which
+    // is not part of the summary the WebUI chip and the manager card parse. On a
+    // mountless device with a clean plan that produced `no problems found` /
+    // `summary: 0 errors, 0 warnings` and a green "healthy" chip. `health.rs`
+    // reports ENGINE DOWN for the same condition; the greener surface was winning.
+    if !live_ok {
+        f.push(Finding {
+            level: Level::Error,
+            check: "engine not responding",
+            detail: "the hookless NoMount engine did not answer `nm v`, so NONE of the live                      checks below ran: rules, per-UID hiding, PM-published opt-outs and the                      partition-root guard are all UNVERIFIED, not clean. Usual causes: no                      CONFIG_NOMOUNT kernel, or an `nm` client built against a different                      NOMOUNT_NL_PROTO than the running kernel"
+                .to_string(),
+        });
+    }
     if live_ok {
-        if let Ok(list) = nm.list() {
+        // `if let Ok(..)` with no else: an engine that answered `v` but would not
+        // ENUMERATE left live_count at 0, printed `live: 0 rules`, and skipped the
+        // partition-root, FD-allowlist, size-mismatch and all three PM-published
+        // checks -- rendering identically to "the engine has zero rules".
+        let listed = nm.list();
+        if let Err(e) = &listed {
+            f.push(Finding {
+                level: Level::Error,
+                check: "engine rule dump failed",
+                detail: format!(
+                    "the engine answered `nm v` but `nm list` failed ({e:#}), so the live rule                      checks did not run. `live: 0 rules` below means \"could not enumerate\",                      not \"nothing is served\""
+                ),
+            });
+        }
+        if let Ok(list) = listed {
             let live = parse_live(&list);
             live_count = live.len();
             for r in &live {
                 let target = &r.target;
                 // Broadened from is_rom_apk: the opt-out now covers a package's whole
                 // codePath (the nativeLibraryDir .so too), so count that.
-                if crate::pmcache::is_pm_published(target) {
+                // INJECT rules only. `is_pm_published` tests the path, and a
+                // whiteout is added with `nm w` which never carries --public, so
+                // every whiteout on a PM-advertised path counted here and landed
+                // in pm_rules_no_public. A `.replace` on /product/app expands to
+                // ~75 of them, so doctor warned that 75 rules "get ENOENT on a
+                // path the PackageManager advertises" -- which is a whiteout's
+                // entire purpose. Unactionable, permanently amber, and it
+                // inflated pm_rules in two other messages. audit.rs's
+                // live_targets() was fixed for exactly this; this copy was not.
+                if r.kind == crate::nm::LiveKind::Inject
+                    && crate::pmcache::is_pm_published(target)
+                {
                     pm_rules += 1;
                     if !r.public {
                         pm_rules_no_public.push(target.clone());

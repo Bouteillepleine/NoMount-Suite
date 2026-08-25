@@ -1201,7 +1201,12 @@
       return 0;
     }
     const ruleLines = list.stdout.split("\n").map(s => s.trim()).filter(Boolean);
-    const rules = ruleLines.length;
+    // Exclude the "(virtual dir)" rows: those are directories the engine
+    // materialises, not rules. Counting every line gave 260 on this device while
+    // `selfcheck`, `audit`, health.txt and the manager card all say 257 — so the
+    // one number on the front page disagreed with every other number the Suite
+    // prints, which makes a real discrepancy indistinguishable from a bug.
+    const rules = ruleLines.filter(l => !l.includes("(virtual dir)")).length;
     $("mRules").textContent = rules;
     // RRO overlays are now hookless rules (virtual path under */overlay/ ending .apk),
     // not overlayfs mounts — count them from the rule list.
@@ -1534,6 +1539,19 @@
     if (!el) return;
     const r = await nm("doctor");
     const txt = (r.stdout || "") + (r.stderr || "");
+    // A doctor that did not run is not "both switches are off". With no status
+    // check, an engine that is down or a binary that will not exec produced an
+    // empty `txt`, neither pattern matched, and the banner HID itself -- silently
+    // asserting the clean state for the two switches that have broken root on
+    // real hardware. Say we could not tell instead.
+    if (r.errno !== 0 || !txt.trim()) {
+      el.hidden = false;
+      el.innerHTML = "⚠️ Could not read your root manager’s umount switches " +
+        "(<code>nomount doctor</code> did not run). Check <b>Umount modules by default</b> and " +
+        "<b>Kernel umount</b> are OFF by hand — nothing here is a mount, so they hide nothing " +
+        "the Suite serves, and both have broken root on real devices.";
+      return;
+    }
     const bad = [];
     // Match doctor's CHECK NAMES, not its prose. The detail text carries quotes
     // and wording that drift; the check name is the stable half. The kernel-umount
@@ -2294,14 +2312,28 @@
     // literal today, so this is not reachable -- but it was the one interpolation
     // here that could break out of its quoting, and a key is exactly the kind of
     // thing that later becomes a variable.
-    await exec(
+    // The result was AWAITED AND DISCARDED, and every caller
+    // (toggleSpoof / toggleSpoofBool / saveUname) then toasted green
+    // unconditionally -- so a write that never happened, or an exec bridge that
+    // is not there at all (exec() resolves errno:-1 when KSU.exec is missing),
+    // still told the user "Enabled". Return the status and let the caller judge.
+    //
+    // The chmod is load-bearing too: `mv "$f.tmp" "$f"` RENAMES the temp over the
+    // conf, so the conf takes the temp's mode -- created under whatever umask the
+    // root WebView happens to have, i.e. 0644. spoof.conf was therefore
+    // re-widened on every toggle, undoing customize.sh. Every other writer of
+    // $NMDIR states 0600; this one now does too.
+    const r = await exec(
       "f=/data/adb/nomount/spoof.conf; k=" + shq(key) + "; [ -f \"$f\" ] || : > \"$f\"; " +
-      "grep -v \"^$k=\" \"$f\" > \"$f.tmp\" 2>/dev/null; mv \"$f.tmp\" \"$f\"; " +
-      "printf '%s=%s\\n' \"$k\" " + shq("'" + String(val).replace(/'/g, "'\\''") + "'") + " >> \"$f\""
+      "grep -v \"^$k=\" \"$f\" > \"$f.tmp\" 2>/dev/null; mv \"$f.tmp\" \"$f\" || exit 1; " +
+      "printf '%s=%s\\n' \"$k\" " + shq("'" + String(val).replace(/'/g, "'\\''") + "'") + " >> \"$f\" || exit 1; " +
+      "chmod 0600 \"$f\" 2>/dev/null; exit 0"
     );
+    return r.errno === 0;
   }
   async function toggleSpoof(key, el) {
-    await setConf(key, el.checked ? "auto" : "off");
+    const ok = await setConf(key, el.checked ? "auto" : "off");
+    if (!ok) { el.checked = !el.checked; toast("Could not write spoof.conf — nothing changed", "bad"); return; }
     toast(el.checked ? "Enabled — reboot or Apply now" : "Off at next boot", "ok");
   }
   async function applySpoof(btn) {
@@ -2326,7 +2358,8 @@
     refreshSpoof();
   }
   async function toggleSpoofBool(key, el) {
-    await setConf(key, el.checked ? "1" : "0");
+    const ok = await setConf(key, el.checked ? "1" : "0");
+    if (!ok) { el.checked = !el.checked; toast("Could not write spoof.conf — nothing changed", "bad"); return; }
     toast(el.checked ? "Enabled — reboot or Apply now" : "Off at next boot", "ok");
   }
   function toggleUnameAdv(btn) {
@@ -2339,8 +2372,9 @@
     if (d) $("spUnameDate").value = d;
   }
   async function saveUname(btn) {
-    await setConf("uname_tail", $("spUnameTail").value.trim());
-    await setConf("uname_date", $("spUnameDate").value.trim());
+    const a = await setConf("uname_tail", $("spUnameTail").value.trim());
+    const b = await setConf("uname_date", $("spUnameDate").value.trim());
+    if (!a || !b) { toast("Could not write spoof.conf — the strings were NOT saved", "bad"); refreshSpoof(); return; }
     toast("uname strings saved — reboot or Apply now", "ok");
     refreshSpoof();
   }

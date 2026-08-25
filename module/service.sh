@@ -9,8 +9,25 @@ umask 077                     # state files are 0600, not the boot umask 0666 (s
 # change, so these are the same values the later section used to recompute.
 MODDIR="${0%/*}"
 ABI=$(getprop ro.product.cpu.abi)
+# The SAME fallback metamount.sh and post-fs-data.sh both carry, which this path
+# was missing. An empty ABI builds "$MODDIR/bin//nomount", which can never be
+# executable -- and EVERY block below is gated on [ -x "$BIN" ] with no else arm,
+# so absorb, the whiteout re-apply, the authoritative `uid apply`, the package
+# watcher, the selfcheck canary and the card refresh all silently did nothing.
+# The card then kept whatever metamount.sh wrote at post-fs-data, so the boot
+# looked complete.
+[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
+[ -n "$ABI" ] || ABI=arm64-v8a
 BIN="$MODDIR/bin/$ABI/nomount"
 export NM_BIN="$MODDIR/bin/$ABI/nm"
+
+# Bounded exec (see metamount.sh): prefer `timeout`, fall back to running bare
+# rather than not running the command at all where toybox timeout is absent.
+if command -v timeout >/dev/null 2>&1; then
+    nmto() { timeout "$@"; }
+else
+    nmto() { shift; "$@"; }
+fi
 
 # Tee every diagnostic to a durable log as well as /dev/kmsg. On this hardware
 # the kernel ring is flooded by WMI roam-stats spam within minutes of boot, so
@@ -35,10 +52,25 @@ nmlog() {
 # Boot epoch = now minus uptime. A record stamped before that is not this boot's.
 _now=$(date +%s 2>/dev/null || echo 0)
 _up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
-case "$_now$_up" in *[!0-9]*|"") _now=0; _up=0 ;; esac
+# FAIL CLOSED when the boot epoch is unknowable. Zeroing both left
+# _bootepoch=0, which makes the >= test below true for EVERY timestamp -- so the
+# one input that defeats the freshness check (an unreadable date or
+# /proc/uptime) made a stale record from last boot read as this boot's, which is
+# precisely the false green the check exists to stop. "Cannot tell" has to mean
+# "not fresh", the same way an unparsable ts= already does.
+_epoch_known=1
+case "$_now$_up" in *[!0-9]*|"") _now=0; _up=0; _epoch_known=0 ;; esac
 _bootepoch=$((_now - _up))
+# ...and refuse an IMPLAUSIBLE epoch too, not just an unreadable one. On a device
+# that lost its RTC (or had the clock set backward across the reboot) _bootepoch
+# comes out small or negative, and LAST boot's ts -- a real, large epoch -- then
+# satisfies ">= -60" and reads as fresh. That is the precise scenario the
+# freshness check was added for, so the check must not be the thing that misses
+# it. 1000000000 = 2001-09-09; anything below it is not a real wall clock.
+[ "$_bootepoch" -ge 1000000000 ] 2>/dev/null || _epoch_known=0
 # 0 unless health.txt exists AND was stamped at or after this boot began.
 _health_fresh() {
+    [ "$_epoch_known" = 1 ] || return 1
     _hts=$(sed -n 's/^ts=//p' "$NMDIR/health.txt" 2>/dev/null)
     case "$_hts" in ''|*[!0-9]*) return 1 ;; esac
     [ "$_hts" -ge "$_bootepoch" ]
@@ -90,13 +122,27 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k p >/dev/null 2>&1; then
     # dropped from pathhide.conf and simply not re-added on the next boot, and
     # the WebUI's Apply handles the live case.
     if [ -f "$NMDIR/pathhide.conf" ]; then
+        # COUNT the rejections. Every add was sent to /dev/null with its status
+        # discarded and the line below then said "re-applied" whatever happened --
+        # so a kernel that refused every rule (list full, malformed needle, a
+        # pathhide build that answers the presence probe but not the add) reported
+        # the cloak as restored while nothing was hidden. The WebUI's Apply button
+        # counts its failures for exactly this reason; the boot path did not.
+        # Redirected `while … done < file`, not `cat | while`: a pipeline puts the
+        # loop in a subshell and every _phf increment would be lost on exit.
+        _phn=0; _phf=0
         while IFS= read -r _phr; do
             _phr=$(echo "$_phr" | tr -d '\r')
             [ -z "$_phr" ] && continue
             case "$_phr" in \#*) continue ;; esac
-            "$NM_BIN" k p "+$_phr" >/dev/null 2>&1
+            _phn=$((_phn + 1))
+            nmto 10 "$NM_BIN" k p "+$_phr" >/dev/null 2>&1 || _phf=$((_phf + 1))
         done < "$NMDIR/pathhide.conf"
-        nmlog "pathhide cloak rules re-applied"
+        if [ "$_phf" -gt 0 ]; then
+            nmlog "⚠ pathhide cloak: $_phf of $_phn rule(s) REJECTED by the kernel — those paths are still visible in /proc/<pid>/maps and fd"
+        else
+            nmlog "pathhide cloak rules re-applied ($_phn)"
+        fi
     fi
 fi
 
@@ -166,12 +212,19 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     # always succeeds -- so `_ab=$(timeout 90 ... | tail -1); [ $? -eq 124 ]`
     # could never be true and the timeout branch was dead code. Verified:
     # `x=$(sh -c "exit 124" | tail -1)` leaves $? at 0; without the pipe, 124.
-    _ab_all=$(timeout 90 "$BIN" absorb 2>&1)
+    _ab_all=$(nmto 90 "$BIN" absorb 2>&1)
     _ab_rc=$?
+    _ab=$(printf '%s\n' "$_ab_all" | tail -1)
     if [ "$_ab_rc" -eq 124 ]; then
         nmlog "absorb TIMED OUT after 90s - continuing boot"
+    elif [ "$_ab_rc" -ne 0 ]; then
+        # A non-zero, non-124 exit is a FAILED absorb: every mount it could not
+        # take over stays in every app's mountinfo. The status was captured but
+        # only 124 was acted on, so a plain failure was logged with its own
+        # summary line -- written before absorb knew it would fail -- in exactly
+        # the voice of a successful pass.
+        nmlog "⚠ absorb FAILED (exit $_ab_rc) — foreign mounts may still be visible: $_ab"
     else
-        _ab=$(printf '%s\n' "$_ab_all" | tail -1)
         nmlog "$_ab"
     fi
     # Second pass, later. Not every module binds by the time this runs: a
@@ -184,8 +237,21 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     # no-op when nothing new turned up.
     (
         sleep 45
-        _ab2=$("$BIN" absorb 2>&1 | tail -1)
-        nmlog "late absorb pass: $_ab2"
+        # Bounded and status-checked like the foreground pass. Backgrounded, so a
+        # hang cannot delay boot -- but it CAN sit forever on the engine-wide pass
+        # lock and hold it against uidwatch.sh, and a failed late pass reported by
+        # its last line alone reads as a success. Status captured BEFORE any pipe.
+        _ab2_all=$(nmto 90 "$BIN" absorb 2>&1)
+        _ab2_rc=$?
+        _ab2=$(printf '%s
+' "$_ab2_all" | tail -1)
+        if [ "$_ab2_rc" -eq 124 ]; then
+            nmlog "late absorb pass TIMED OUT after 90s"
+        elif [ "$_ab2_rc" -ne 0 ]; then
+            nmlog "⚠ late absorb pass FAILED (exit $_ab2_rc): $_ab2"
+        else
+            nmlog "late absorb pass: $_ab2"
+        fi
     ) &
 fi
 
@@ -193,8 +259,20 @@ fi
 # Whiteouts live in kernel memory and are empty after every reboot; the list on
 # disk is the durable record.
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/whiteouts.txt" ]; then
-    _wo=$("$BIN" whiteout apply 2>&1 | tail -1)
-    nmlog "$_wo"
+    # Status BEFORE the pipe. `$(cmd | tail -1)` leaves $? as tail's, which always
+    # succeeds -- the same trap documented for absorb above, still live here. A
+    # failed whiteout apply means the stock paths the user asked to hide are
+    # VISIBLE for the whole session, which is the one result that must not be
+    # logged in the same voice as a success.
+    _wo_all=$(nmto 30 "$BIN" whiteout apply 2>&1)
+    _wo_rc=$?
+    _wo=$(printf '%s
+' "$_wo_all" | tail -1)
+    if [ "$_wo_rc" -ne 0 ]; then
+        nmlog "⚠ whiteout apply FAILED (exit $_wo_rc) — hidden paths are still VISIBLE: $_wo"
+    else
+        nmlog "$_wo"
+    fi
 fi
 
 # --- re-apply the persistent per-app hide list (authoritative pass) ---
@@ -206,7 +284,7 @@ fi
 # stable, so it re-resolves, refreshes the mirror, and retires any appid an entry
 # no longer maps to (appids get reused after an uninstall). Guard-gated.
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
-    _bl=$("$BIN" uid apply 2>&1)
+    _bl=$(nmto 60 "$BIN" uid apply 2>&1)
     if [ $? -eq 0 ]; then
         nmlog "hide list re-applied ($_bl)"
     else
@@ -233,6 +311,17 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
     inotifyd "$MODDIR/uidwatch.sh" /data/system >/dev/null 2>&1 &
     nmlog "hide-list package watcher started"
+fi
+
+# The missing `else`. Every block above is gated on [ -x "$BIN" ] and NONE of them
+# had one, so a binary that is absent, not executable, or under an ABI directory
+# this device does not have made absorb, the whiteout re-apply, the authoritative
+# `uid apply`, the package watcher and the health canary ALL no-ops -- in silence,
+# on a boot that otherwise completed. The card block below is gated the same way,
+# so it would not even restate the post-fs-data text; the user simply sees their
+# modules stop working. Say it once, where the WebUI already looks.
+if [ ! -x "$BIN" ]; then
+    nmlog "⛔ engine binary is missing or not executable ($BIN) — absorb, whiteouts, per-app hiding and the health canary were ALL skipped this boot"
 fi
 
 # --- runtime health canary (writes health.txt; complements plan-time doctor) ---
@@ -281,9 +370,15 @@ fi
 if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     # One dump, both counts (see metamount.sh): two `nm list` runs returning the
     # same answer is two full netlink dumps of the whole rule table.
-    _NMLIST=$("$NM_BIN" list 2>/dev/null)
+    _NMLIST=$(nmto 15 "$NM_BIN" list 2>/dev/null)
     _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
-    _rules=$(_nmcount .)
+    # EXCLUDE the (virtual dir) rows. `grep -c .` counts every line of the dump,
+    # which on this device is 260 while `selfcheck`, `audit` and health.txt all
+    # say 257 -- the difference being 3 directories the engine materialises, which
+    # are not rules. The card is the surface most users read, so having it
+    # disagree with every other number the Suite prints made a real discrepancy
+    # indistinguishable from a bug. Measured on OP15: 260 lines, 3 virtual dirs.
+    _rules=$(_nmcount -vc '(virtual dir)')
     _rro=$(_nmcount '/overlay/[^ ]*\.apk')
     # Match on mountinfo FIELD 4, the mount's root within its own filesystem. A bind
     # out of a module reads "/adb/modules/<id>/..." there, because /data is its own
@@ -340,7 +435,11 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # Through _health_get too: a stale record's foreign count describes last
     # boot's mount table, and here it would override the live one we just read.
     _fgn=$(_health_get mounts_foreign)
-    _fgn=${_fgn:-$_mnt}
+    # health.rs now writes `unknown` when it could not read the mount table, so it
+    # can stop rendering a failed read as a measurement of zero. Anything
+    # non-numeric here means "the record does not know", which is the same case as
+    # a stale/absent record: fall back to the count we just took live.
+    case "$_fgn" in ''|*[!0-9]*) _fgn=$_mnt ;; esac
     if [ "${_fgn:-0}" -gt 0 ]; then
         _mstate="⚠ $_fgn module mount(s)"
         _tail="Prism VFS + RRO injection is mountless; $_fgn foreign mount(s) present"

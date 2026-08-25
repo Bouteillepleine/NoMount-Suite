@@ -37,6 +37,18 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             } else {
                 println!("ok");
             }
+            // A non-zero `failed` is embedded in the message but used to leave the
+            // EXIT CODE at 0, and the WebUI gates on errno alone -- so
+            // `nomount vfs clear` with the engine down toasted a green "Rules
+            // cleared" while every hidden app had just been un-hidden (CLEAR_ALL
+            // drops the hidden-UID set). `UidAction::Apply` already bails for the
+            // same condition; the other verbs did not.
+            if re.failed > 0 {
+                bail!(
+                    "{} hide-list entr(ies) could not be re-applied after the clear -- those apps are NOT hidden",
+                    re.failed
+                );
+            }
         }
         VfsAction::List => {
             let list = nm.list()?;
@@ -199,9 +211,19 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             // still maps to it.
             if let Some(old) = cache.get(key) {
                 if *old != uid && !desired.values().any(|v| *v == *old) {
-                    let _ = nm.uid_unblock(*old);
-                    live.retain(|u| appid(*u) != *old);
-                    rep.retired += 1;
+                    // Count the RESULT, not the attempt. `let _ =` + an
+                    // unconditional `retired += 1` reported a retire the engine
+                    // refused -- and `cache_replace` below then drops the mirror
+                    // entry, so the appid stays in the kernel's hidden set with
+                    // NOTHING on disk still naming it. Appids are reused after an
+                    // uninstall, so the next app to get it is hidden by accident
+                    // and no future pass can find it: the only cure is `nm clear`.
+                    if nm.uid_unblock(*old).is_ok() {
+                        live.retain(|u| appid(*u) != *old);
+                        rep.retired += 1;
+                    } else {
+                        rep.failed += 1;
+                    }
                 }
             }
         }
@@ -240,9 +262,15 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             if desired.values().any(|v| *v == *old) {
                 continue;
             }
-            let _ = nm.uid_unblock(*old);
-            live.retain(|u| appid(*u) != *old);
-            rep.retired += 1;
+            // Same reasoning as the drift branch above: a refused unblock must not
+            // be counted as a retire, because cache_replace() is about to delete
+            // the only record that this appid is still hidden.
+            if nm.uid_unblock(*old).is_ok() {
+                live.retain(|u| appid(*u) != *old);
+                rep.retired += 1;
+            } else {
+                rep.failed += 1;
+            }
         }
         // One write for the whole pass. Per-entry `cache_put`/`cache_forget` each
         // re-read and rewrote the file, which a ~50-entry preset turned into ~50
@@ -307,6 +335,11 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     rep.hidden,
                     rep.fail_note()
                 );
+                // See the note in `VfsAction::Clear`: `failed` in the text but
+                // exit 0 renders as a green toast in the WebUI.
+                if rep.failed > 0 {
+                    bail!("{} hide-list entr(ies) could not be applied", rep.failed);
+                }
                 return Ok(());
             }
             // Resolve BEFORE persisting, so a refused target doesn't linger in the
@@ -357,6 +390,13 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     );
                 } else {
                     println!("ok: {target} was not in the hide list");
+                }
+                // See VfsAction::Clear: `failed` in the text but exit 0 renders as
+                // a green toast in the WebUI, which reads errno and nothing else.
+                // Here a failure means an app the user just un-hid is STILL hidden,
+                // or one they kept hidden no longer is.
+                if rep.failed > 0 {
+                    bail!("{} hide-list entr(ies) could not be re-applied", rep.failed);
                 }
                 return Ok(());
             }
@@ -510,6 +550,12 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 rep.hidden,
                 rep.fail_note()
             );
+            // See VfsAction::Clear. A preset is the largest batch this tool
+            // applies (~50 entries), so "48 failed" behind a green toast is the
+            // loudest instance of the same bug.
+            if rep.failed > 0 {
+                bail!("{} preset entr(ies) could not be applied", rep.failed);
+            }
         }
         UidAction::Isolated { mode } => match mode {
             None => println!("{}", isolated_mode_name(blocklist::hide_isolated())),

@@ -68,6 +68,10 @@ VERSION="v${NEW_VERSION}"
 # prebuilt under module/bin/ -- so a local build shipped a STALE nm whenever
 # userspace/src/nm.c had changed, with nothing in the output saying so. Build it
 # here when zig is around, and refuse to ship a prebuilt older than its source.
+# 1 = no zig (fall back to a prebuilt, which the staleness check then polices)
+# 2 = zig IS here and the compile FAILED. Collapsing both into `return 1` made a
+#     genuine compile error print "no zig on PATH", which sends the reader looking
+#     for a toolchain they already have instead of at the error they just caused.
 build_nm() {
     local zig
     zig="$(command -v zig || true)"
@@ -77,7 +81,7 @@ build_nm() {
     make -s -C "$PROJECT_ROOT/userspace/tools/sstrip" >/dev/null 2>&1 || true
     "$zig" cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
         -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
-        "$PROJECT_ROOT/userspace/src/nm.c" -o "$PROJECT_ROOT/nm-arm64" || return 1
+        "$PROJECT_ROOT/userspace/src/nm.c" -o "$PROJECT_ROOT/nm-arm64" || return 2
     "$PROJECT_ROOT/userspace/tools/sstrip/sstrip" -z "$PROJECT_ROOT/nm-arm64" >/dev/null 2>&1 || true
     local profile
     for profile in debug release; do
@@ -90,9 +94,15 @@ build_nm() {
 }
 
 if $BUILD; then
-    if ! build_nm; then
-        echo "==> nm: no zig on PATH, will fall back to a prebuilt"
-    fi
+    build_nm || _nmrc=$?
+    case "${_nmrc:-0}" in
+        0) ;;
+        2) echo "FATAL: zig is on PATH but compiling userspace/src/nm.c FAILED." >&2
+           echo "       Fix the compile error; shipping the previous prebuilt would" >&2
+           echo "       package a binary that does not match the source in this zip." >&2
+           exit 1 ;;
+        *) echo "==> nm: no zig on PATH, will fall back to a prebuilt" ;;
+    esac
 fi
 
 mkdir -p "$RELEASE_DIR/debug" "$RELEASE_DIR/release"
@@ -230,6 +240,24 @@ package_zip() {
         if [ -f "$nomount_src" ]; then
             cp "$nomount_src" "$staging/bin/$abi/nomount"; found_nomount=$((found_nomount + 1))
         elif [ -f "$MODULE_DIR/bin/$abi/nomount" ]; then
+            # The SAME staleness guard nm gets 20 lines below, which this arm did
+            # not have. Without it, `package.sh` (no --build) with an empty or
+            # partial target/ dir silently packages an arbitrarily old `nomount`
+            # -- and the version stamping at the top of this script has already
+            # written the NEW version into module.prop, so the zip is labelled
+            # v1.3.51 while the binary inside answers whatever it was built as.
+            # That is the "a version that lies about itself" failure the stamping
+            # comment says a release must never produce, reached the other way.
+            local _newer
+            _newer="$(find "$PROJECT_ROOT/src" "$PROJECT_ROOT/Cargo.toml"                         -newer "$MODULE_DIR/bin/$abi/nomount" -print -quit 2>/dev/null)"
+            if [ -n "$_newer" ]; then
+                echo "FATAL: $MODULE_DIR/bin/$abi/nomount predates the Rust sources" >&2
+                echo "       (newer: $_newer). Re-run with --build." >&2
+                rm -rf "$staging"
+                exit 1
+            fi
+            echo "    !! nomount/$abi: NO built binary in target/$target/$target_subdir —" >&2
+            echo "       packaging the committed prebuilt from module/bin/$abi instead." >&2
             cp "$MODULE_DIR/bin/$abi/nomount" "$staging/bin/$abi/nomount"; found_nomount=$((found_nomount + 1))
         fi
 
@@ -287,6 +315,11 @@ chmod 755 "$MODPATH"/*.sh "$MODPATH"/bin/*/nomount "$MODPATH"/bin/*/nm 2>/dev/nu
 ui_print "NoMount installed via recovery"
 exit 0
 UPDATER
+    # 0755: some recoveries EXEC update-binary rather than handing it to sh. The
+    # heredoc above creates it 0644 under the build umask, and mkzip.py's
+    # path-based exec heuristic (.sh / bin/) does not cover this name either, so
+    # both packaging paths were shipping the recovery installer non-executable.
+    chmod 0755 "$staging/META-INF/com/google/android/update-binary"
     echo "" > "$staging/META-INF/com/google/android/updater-script"
 
     # Verify no eliminated scripts
