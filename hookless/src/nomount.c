@@ -57,6 +57,13 @@
 #define NM_PATHHIDE_RULE_MAX 128
 extern int pathhide_ctl(const char *buf, size_t count) __attribute__((weak));
 extern int pathhide_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
+/* Same weak-extern arrangement for _ghost. NM_GHOST_RULE_MAX must be >=
+ * ghost.c's GH_RULE_LEN (192) plus its two-character command prefix; if it ever
+ * drifts, ghost_get_rule() rejects the undersized buffer and the dump comes back
+ * empty rather than truncated. */
+#define NM_GHOST_RULE_MAX 200
+extern int ghost_ctl(const char *buf, size_t count) __attribute__((weak));
+extern int ghost_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
 
 static atomic_t nm_rule_gen = ATOMIC_INIT(0);
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
@@ -6110,6 +6117,30 @@ static int nomount_nl_dump_uids(struct sk_buff *skb, struct netlink_callback *cb
  * A kernel without the _pathhide patch set has the weak symbol NULL and returns
  * an empty dump, so `nm l p` prints nothing instead of an error the caller
  * would have to tell apart from "no rules configured". */
+static int nomount_nl_dump_ghost(struct sk_buff *skb, struct netlink_callback *cb)
+{
+    char rule[NM_GHOST_RULE_MAX];
+    int idx = cb->args[0];
+    void *hdr;
+
+    if (!ghost_get_rule)
+        return 0;
+
+    while (ghost_get_rule(idx, rule, sizeof(rule)) > 0) {
+        hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
+                        NM_CMD_TO_TYPE(NM_CMD_GET_GHOST), 0, NLM_F_MULTI);
+        if (!hdr) break;
+        if (nla_put_string(skb, NOMOUNT_ATTR_VIRTUAL_PATH, rule)) {
+            nlmsg_cancel(skb, hdr);
+            break;
+        }
+        nlmsg_end(skb, hdr);
+        idx++;
+    }
+    cb->args[0] = idx;
+    return skb->len;
+}
+
 static int nomount_nl_dump_pathhide(struct sk_buff *skb, struct netlink_callback *cb)
 {
     char rule[NM_PATHHIDE_RULE_MAX];
@@ -6188,11 +6219,12 @@ static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
         return -EPERM;
 
     if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS ||
-        cmd == NM_CMD_GET_PATHHIDE) {
+        cmd == NM_CMD_GET_PATHHIDE || cmd == NM_CMD_GET_GHOST) {
         struct netlink_dump_control c = {
-            .dump = cmd == NM_CMD_GET_LIST ? nomount_nl_dump_rules
-                  : cmd == NM_CMD_GET_UIDS ? nomount_nl_dump_uids
-                                           : nomount_nl_dump_pathhide,
+            .dump = cmd == NM_CMD_GET_LIST     ? nomount_nl_dump_rules
+                  : cmd == NM_CMD_GET_UIDS     ? nomount_nl_dump_uids
+                  : cmd == NM_CMD_GET_GHOST    ? nomount_nl_dump_ghost
+                                               : nomount_nl_dump_pathhide,
             /* Without this netlink allocates NLMSG_GOODSIZE (~3968B on 4K
              * pages), which cannot hold one rule whose two PATH_MAX strings the
              * attribute policy allows -- and an un-emittable first rule ends the
@@ -6471,6 +6503,13 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
         /* Forwarded verbatim otherwise -- _pathhide owns the parser, and
          * duplicating it here is how the two would drift. */
         return pathhide_ctl(val, vlen);
+    case NM_KNOB_GHOST:
+        if (!ghost_ctl)
+            return -EINVAL;
+        if (vlen == 0)          /* presence probe; see NM_KNOB_GHOST */
+            return 0;
+        /* Verbatim, same reasoning as pathhide: _ghost owns its parser. */
+        return ghost_ctl(val, vlen);
     default:
         return -EINVAL;
     }

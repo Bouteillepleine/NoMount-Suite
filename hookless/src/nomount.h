@@ -114,6 +114,7 @@
 #define nm_inode_info_rcu_free                   __vfsx_193
 #define nm_reval_fresh                           __vfsx_194
 #define nm_lookup_backing_child                  __vfsx_195
+#define nomount_nl_dump_ghost                    __vfsx_220
 #define nm_size_ratio                            __vfsx_196
 #define nm_mirror_blocks                         __vfsx_197
 #define nm_readlink                              __vfsx_198
@@ -309,7 +310,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.25.0"
+#define NM_MODULE_VERSION "1.26.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -455,8 +456,22 @@
  *    snapshot of the backing directory, so size, blocks and cookies agree by
  *    construction. Narrowly gated to the pure "serve a /data dir as a ROM dir"
  *    shape; a directory that also has injected children keeps the existing
- *    merge semantics. */
-#define NOMOUNT_VERSION    25
+ *    merge semantics.
+ *
+ * 26: NM_KNOB_GHOST and NM_CMD_GET_GHOST exist, i.e. this engine can forward
+ *    control commands to the _ghost existence cloak and dump its tables. Same
+ *    shape as the NM_KNOB_PATHHIDE pair added in 16, including the empty-value
+ *    presence probe.
+ *
+ *    This matters more than a usual capability bump. _ghost's guards are INERT
+ *    until its two tables are populated -- ghost_hidden_path() short-circuits to
+ *    false on an empty table -- so a kernel carrying the patches without this
+ *    forwarder behaves exactly like an unpatched one. Measured on OP15: a v25
+ *    kernel built WITH _ghost still leaked all four oracles (O_PATH returned the
+ *    path, getxattr the label, a trailing component ENOTDIR, link EXDEV) because
+ *    nothing could reach ghost_ctl(). Below 26 a Suite cannot populate them and
+ *    cannot tell that it cannot. */
+#define NOMOUNT_VERSION    26
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -982,6 +997,7 @@ enum {
     /* Dump the _pathhide rule list. Answers empty (not an error) on a kernel
      * built without that patch set, so a caller need not special-case it. */
     NM_CMD_GET_PATHHIDE,
+    NM_CMD_GET_GHOST,
     __NM_CMD_MAX,
 };
 
@@ -1026,6 +1042,20 @@ enum {
      * explicit "-" command. Userspace needs it because NM_CMD_GET_PATHHIDE
      * answers empty both for "not built" and for "built, no rules". */
     NM_KNOB_PATHHIDE,
+    /* One _ghost control command, forwarded verbatim to its parser:
+     * "p+/abs/path" / "p~/abs/path" / "p-" for the hidden-path table,
+     * "u+<uid>" / "u~<uid>" / "u-" for the hidden-uid table.
+     *
+     * Same presence-probe rule as NM_KNOB_PATHHIDE: an EMPTY value returns 0
+     * iff _ghost is compiled in, and clearing is the explicit "-" command.
+     * Userspace needs it for the same reason -- NM_CMD_GET_GHOST answers empty
+     * both for "not built" and for "built, no rules".
+     *
+     * _ghost is INERT until both tables are populated: ghost_hidden_path()
+     * short-circuits to false on an empty table, so a kernel carrying the
+     * patches but no forwarder behaves exactly like an unpatched one. This knob
+     * is the forwarder. Ship both, or ship neither. */
+    NM_KNOB_GHOST,
     __NM_KNOB_MAX,
 };
 
