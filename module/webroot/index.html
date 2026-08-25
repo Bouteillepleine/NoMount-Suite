@@ -1656,8 +1656,20 @@
     const out = (await exec(
       'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; ' +
       'id=$(basename "$d"); ' +
-      '[ "$id" = meta-nomount ] && { echo "$id|suite"; continue; }; ' +
-      '[ "$id" = kernelnosu ] && { echo "$id|su"; continue; }; ' +
+      // mountinfo field 4 is the mount root WITHIN ITS FILESYSTEM: a module bind reads
+      // "/adb/modules/<id>/...", not "/data/adb/modules/...", because /data is its own
+      // filesystem. The old grep matched nothing, so every module row showed the green
+      // "mountless" tag even while it owned a real, app-visible mount.
+      //
+      // Counted HERE, above the two short-circuit rows, because those `echo`s emitted
+      // two fields and nothing else -- so p[4] was undefined and both rows fell to the
+      // mnt<0 "mounts ?" branch on every refresh. That pinned a permanent unknown on
+      // precisely the row whose entire claim is that it owns no mount: the metamodule
+      // reported its own visibility as unreadable, forever, and the one row a reader
+      // checks first was the one row that never answered.
+      'mnt=$(awk -v m="$id" \'$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); ' +
+      '[ "$id" = meta-nomount ] && { echo "$id|suite|||$mnt"; continue; }; ' +
+      '[ "$id" = kernelnosu ] && { echo "$id|su|||$mnt"; continue; }; ' +
       'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && st=off; ' +
       // Mirror the injector (src/mount.rs): content lives under ANY top-level dir that maps to
       // a real partition, not just system/. auto_mount modules ship product/ etc. directly.
@@ -1678,11 +1690,6 @@
       '[ -n "$(find $roots -type f ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
       'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
       'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
-      // mountinfo field 4 is the mount root WITHIN ITS FILESYSTEM: a module bind reads
-      // "/adb/modules/<id>/...", not "/data/adb/modules/...", because /data is its own
-      // filesystem. The old grep matched nothing, so every module row showed the green
-      // "mountless" tag even while it owned a real, app-visible mount.
-      'mnt=$(awk -v m="$id" \'$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); ' +
       'echo "$id|$st|$mech|$cnt|$mnt"; done'
     )).stdout.trim();
     if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
