@@ -76,7 +76,10 @@ static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
  * app can make. */
 static int nm_read_secctx(struct inode *in, char *dst, u16 *dlen)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+/* 6.14, not 6.13: v6.13 include/linux/security.h still declares
+ * security_inode_getsecctx(struct inode *, void **, u32 *) and
+ * security_release_secctx(char *, u32); both took struct lsm_context * at v6.14. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
     struct lsm_context lc;
 
     if (security_inode_getsecctx(in, &lc)) return -ENODATA;
@@ -274,6 +277,15 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
      * the per-dir hash table (O(bucket)) rather than a full O(children) scan, so
      * large-fanout dirs stay fast even once the 64-bit bloom filter saturates. */
     if (!(READ_ONCE(dir_node->bloom_mask) & (1ULL << (hash & 63)))) return false;
+    /* Sample the rule generation BEFORE reading the table, never after.
+     * nm_inode_info.gen is what nm_d_revalidate()'s RCU fast path compares
+     * against, so a stamp taken afterwards can carry a generation this snapshot
+     * was never validated against: an add/del landing in between bumps the
+     * counter, the inode is stamped with the NEW value, and the fast path then
+     * keeps answering 1 for a dentry the topology change should have pushed
+     * through the ref-walk. Sampling first can only ever record a STALER
+     * generation, which costs one ref-walk and re-stamps there. */
+    rule_info->gen = (u32)atomic_read(&nm_rule_gen);
     rule_info->r_path.dentry = NULL;
     rule_info->r_path.mnt = NULL;
     rule_info->s_path.dentry = NULL;
@@ -599,8 +611,11 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
 
     info->flags = rule_info->flags;
     /* Stamped BEFORE the inode goes live, and re-stamped by nm_d_revalidate()
-     * whenever the slow path confirms it. Read lockless -- see nm_inode_info.gen. */
-    info->gen = (u32)atomic_read(&nm_rule_gen);
+     * whenever the slow path confirms it. Read lockless -- see nm_inode_info.gen.
+     * The value comes from the SNAPSHOT (sampled before the rule table was read)
+     * rather than from a fresh atomic_read here, so it can never be newer than
+     * the topology this inode was actually built from. */
+    info->gen = rule_info->gen;
     info->v_ctx_len = rule_info->v_ctx_len;
     if (rule_info->v_ctx_len) memcpy(info->v_ctx, rule_info->v_ctx, rule_info->v_ctx_len + 1);
     /* Own ref for the inode's cached copy: the caller still holds its get_rule_info
@@ -908,25 +923,33 @@ static void nomount_hijacked_destroy_inode(struct inode *inode)
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         if (inode->i_private) {
             struct nm_inode_info *info = inode->i_private;
+
+            /* UNPUBLISH FIRST, free last.
+             *
+             * call_rcu() only promises to wait for read-side sections that were
+             * ALREADY IN PROGRESS when it was armed. A reader entering after
+             * that point and still finding the pointer in i_private is not
+             * covered by that grace period -- so arming the callback before
+             * clearing i_private (which is what this did) left a window in which
+             * nm_d_revalidate()'s RCU fast path could load the payload and then
+             * dereference it after the callback had already freed it. Clearing
+             * the pointer first means no reader can acquire it from here on, and
+             * the call_rcu below covers exactly the ones that already had it. */
+            WRITE_ONCE(inode->i_private, NULL);
             if (info->r_path.dentry) path_put(&info->r_path);
             if (info->s_path.dentry) path_put(&info->s_path);
             if (info->dir_node) nm_dir_node_put(info->dir_node);
             /* The puts stay SYNCHRONOUS -- dput() can sleep and an RCU callback
-             * runs in softirq -- but the struct itself must outlive any in-flight
-             * lockless reader, so only the free is deferred. Null the two path
-             * dentries first: nm_d_revalidate()'s RCU fast path tests
-             * s_path.dentry for NULL, and after the put above that pointer is
-             * dangling. It is never dereferenced there, but leaving a freed
-             * pointer behind to be compared is not worth the argument.
-             *
-             * Ordering note: i_private is cleared AFTER call_rcu is armed, so a
-             * reader either sees the (still-allocated) info or NULL -- never a
-             * freed one. Both are handled. */
+             * runs in softirq -- but the struct itself must outlive any reader
+             * that loaded i_private before the store above, so only the free is
+             * deferred. Null the two path dentries: nm_d_revalidate()'s RCU fast
+             * path tests s_path.dentry for NULL, and after the put above that
+             * pointer is dangling. It is never dereferenced there, but leaving a
+             * freed pointer behind to be compared is not worth the argument. */
             info->r_path.dentry = NULL;
             info->s_path.dentry = NULL;
             info->dir_node = NULL;
             call_rcu(&info->rcu, nm_inode_info_rcu_free);
-            inode->i_private = NULL;
         }
     }
     nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
@@ -1787,7 +1810,12 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
     if (orig_iop && orig_iop->getattr)
         res = orig_iop->getattr(IDMAP_CALL path, stat, request_mask, query_flags);
     else {
-# if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+/* The request_mask argument arrived at 6.6, NOT with the mnt_idmap conversion at
+ * 6.3. v6.5 include/linux/fs.h: generic_fillattr(struct mnt_idmap *, struct
+ * inode *, struct kstat *); v6.6: (struct mnt_idmap *, u32, struct inode *,
+ * struct kstat *). IDMAP_CALL is right from 6.3 either way -- only the extra
+ * argument moved, and passing it on 6.3..6.5 is a hard build failure there. */
+# if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
         generic_fillattr(IDMAP_CALL request_mask, inode, stat);
 # else
         generic_fillattr(IDMAP_CALL inode, stat);
@@ -1947,7 +1975,8 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     }
 
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+/* 6.6, not 6.3 -- see the note on the other generic_fillattr call site. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
         generic_fillattr(IDMAP_CALL request_mask, v_inode, stat);
 #else
         generic_fillattr(IDMAP_CALL v_inode, stat);
@@ -2260,6 +2289,10 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     struct nm_rule_info ri;
     struct dentry *child, *res;
     struct inode *new_inode, *r_child;
+    /* Sampled before the backing lookup, for the reason nomount_get_rule_info()
+     * spells out: an inode may be stamped with a staler generation than the
+     * current one, never a newer one. */
+    u32 gen = (u32)atomic_read(&nm_rule_gen);
 
     child = nm_lookup_backing_child(dentry->d_name.name, info->r_path.dentry,
                                     dentry->d_name.len);
@@ -2273,6 +2306,7 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     }
 
     memset(&ri, 0, sizeof(ri));
+    ri.gen = gen;
     /* Same ref discipline as nomount_get_rule_info(): ri owns a path ref of its
      * own, released by nm_put_rule_info() once nomount_create_new_inode() has
      * taken its. The lookup's own ref on @child is dropped separately below. */
@@ -2520,18 +2554,25 @@ static inline int nm_reval_stale(struct dentry *dentry)
  * Only ever called where the verdict is already 1, and only for a positive
  * dentry carrying one of our inodes -- so this narrows nothing and can only
  * turn a future -ECHILD into the same 1 the slow path just produced. */
-static inline int nm_reval_fresh(struct dentry *dentry)
+static inline int nm_reval_fresh(struct dentry *dentry, u32 gen)
 {
     struct inode *ino = d_inode(dentry);
 
+    /* @gen is sampled at ENTRY to nm_d_revalidate, before the verdict below it
+     * reads the rule table -- deliberately NOT re-read here. Re-reading would
+     * stamp a generation the verdict was never checked against whenever an
+     * add/del lands mid-call, and the RCU fast path would then trust that dentry
+     * until the NEXT topology change. An older stamp costs one more ref-walk. */
     if (ino && ino->i_private &&
         (ino->i_op == &nm_file_iops || ino->i_op == &nm_dir_iops))
-        WRITE_ONCE(((struct nm_inode_info *)ino->i_private)->gen,
-                   (u32)atomic_read(&nm_rule_gen));
+        WRITE_ONCE(((struct nm_inode_info *)ino->i_private)->gen, gen);
     return 1;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+/* 6.14, not 6.13: v6.13 include/linux/dcache.h still has
+ * int (*d_revalidate)(struct dentry *, unsigned int); the parent/name form
+ * appears at v6.14. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
 static int nm_d_revalidate(struct inode *dir, const struct qstr *name, struct dentry *dentry, unsigned int flags)
 #else
 static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
@@ -2541,7 +2582,7 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     struct nm_iop *nm_iop;
     struct nomount_dir_node *pdir = NULL;
     struct nm_rule_info rule_info;
-    u32 hash;
+    u32 hash, gen;
     bool injected;
 
     /* RCU-walk fast path.
@@ -2590,13 +2631,16 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         return 1;
     }
 
+    /* Sampled BEFORE the verdict below reads the rule table; see nm_reval_fresh. */
+    gen = (u32)atomic_read(&nm_rule_gen);
+
     /* Is this a dentry WE instantiated (an injected file/dir inode)? Used below to
      * drop stale ghosts and to keep the per-UID view consistent. */
     injected = dentry->d_inode &&
         (dentry->d_inode->i_op == &nm_file_iops ||
          dentry->d_inode->i_op == &nm_dir_iops);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
     parent_dir = dir;
 #else
     parent_dir = d_inode(dentry->d_parent);
@@ -2679,12 +2723,12 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
                 struct nm_inode_info *ii = dentry->d_inode->i_private;
                 if (!(rule_info.flags & NM_FLAG_SHADOWS_STOCK) ||
                     (ii && ii->s_path.dentry))
-                    return nm_reval_fresh(dentry);
+                    return nm_reval_fresh(dentry, gen);
                 return 0;
             }
             return 1;
         }
-        return injected ? nm_reval_fresh(dentry) : nm_reval_stale(dentry);
+        return injected ? nm_reval_fresh(dentry, gen) : nm_reval_stale(dentry);
     }
     nm_dir_node_put(pdir);                                /* pin no longer needed past the lookup */
     return nm_reval_stale(dentry);                        /* rule gone -> re-resolve */
@@ -2770,7 +2814,10 @@ static const struct file_operations nm_dir_fops = {
     .read = generic_read_dir,
     .fsync = nm_dir_fsync,
     .iterate_shared = nm_dir_iterate_dir,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+/* 6.5, not 6.6: v6.4 include/linux/fs.h still has int (*iterate)(struct file *,
+ * struct dir_context *); v6.5 does not. Naming the member on 6.5.x is a build
+ * failure, so the boundary has to be the version it actually went away in. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
     .iterate = nm_dir_iterate_dir,
 #endif
 };
@@ -2781,6 +2828,14 @@ static const struct inode_operations nm_dir_iops = {
     .getattr = nm_file_getattr,
     .setattr = nm_setattr,
     .listxattr = nm_listxattr,
+    /* Directories need the readlink answer too, and for the same reason files
+     * do. Without it a hidden reader gets -EINVAL here (the VFS answer for "not
+     * a symlink") while a genuinely absent path answers -ENOENT -- exactly the
+     * existence oracle nm_readlink() closes for nm_file_iops, still open for
+     * every rule whose target is a directory and for every synthesized dir,
+     * both of which land on THIS vtable. Non-hidden callers see no change:
+     * nm_readlink returns the same -EINVAL do_readlinkat would have produced. */
+    .readlink = nm_readlink,
 };
 
 static const struct dentry_operations nm_dops = {
@@ -2899,7 +2954,7 @@ static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_no
      * file_operations that nothing can ever find, re-arm or neuter. Refuse to
      * hijack what we cannot identify. */
     if (unlikely(!inode->i_fop->iterate_shared
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
                  && !inode->i_fop->iterate
 #endif
         )) return;
@@ -2919,7 +2974,7 @@ static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_no
          * nm_get_fop() probes both, so the hijack is still recognisable. */
         if (nm_fop->orig_fop->iterate_shared)
             nm_fop->fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
         if (nm_fop->orig_fop->iterate)
             nm_fop->fake_fop.iterate = nomount_hijacked_iterate_dir;
 #endif
@@ -2943,6 +2998,17 @@ static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, s
         smp_store_release(&nm_iop->dir_node, dir_node);
         return;
     }
+    /* An inode_operations with no ->lookup carries no marker once copied, so
+     * __get_nm() could never recover the nm_iop again: the inode would be left
+     * pointing at a heap vtable nothing can re-arm, neuter or restore, AND the
+     * ->getattr installed below would then find orig_iop == NULL and answer
+     * every stat with generic_fillattr instead of the filesystem's own -- for
+     * the life of the boot. Reachable, not theoretical: the topology walk hijacks
+     * whatever the parent path resolves to, and `nm add /system/etc/hosts/x y`
+     * resolves that parent to a REGULAR FILE. Refuse what we cannot identify,
+     * exactly as nomount_hijack_virtual_parent() does for a missing readdir op.
+     * The rule is simply inert then; its dir_node is reclaimed on delete. */
+    if (unlikely(!inode->i_op->lookup)) return;
 
     nm_iop = kmem_cache_zalloc(nm_iop_cachep, GFP_KERNEL);
     if (likely(nm_iop)) {
@@ -4948,8 +5014,28 @@ static void __nomount_clear_all(bool is_exit)
 {
     struct nomount_rule *rule;
     struct hlist_node *tmp;
-    int bkt;
+    int bkt, i;
     HLIST_HEAD(r_victims);
+
+    /* Drop the per-directory inode samples with the rules they were taken for.
+     *
+     * nm_ino_pop carries `mine` (up to NM_INO_MINE exact placements) and `hw`,
+     * and nm_place_ino() steps around both so two injections in one directory
+     * never collide. Those marks describe rules that no longer exist after this
+     * function returns, and the Suite clears before every re-injection pass --
+     * so without this the marks ACCUMULATE across passes: the 139 rules in
+     * /product/overlay leave 139 marks, the next pass adds 139 more, and the
+     * third crosses NM_INO_MINE and falls into nm_place_ino's exhausted branch,
+     * which walks up from `hw` and hands out a DENSE CONSECUTIVE RUN -- the
+     * clustering tell the sampled-placement design exists to remove, measured as
+     * 139 consecutive inodes against 25 ragged stock clusters. Resetting also
+     * restores the "same file, same ino" property across a reload, since the
+     * placement is a pure function of (stock population, spread) once `mine` is
+     * empty. Within ONE pass nothing changes: the cache is only invalidated
+     * here, so consecutive adds in the same directory still see each other. */
+    nm_sib_cache_valid = false;
+    for (i = 0; i < NM_RANGE_SLOTS; i++)
+        nm_range_cache[i].valid = false;
 
     static_branch_disable(&nomount_active_uids);
     hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {

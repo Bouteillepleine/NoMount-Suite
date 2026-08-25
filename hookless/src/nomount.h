@@ -751,6 +751,11 @@ struct nm_rule_info {
     u16 v_ctx_len;
     struct path r_path;
     struct nomount_dir_node *this_dir;
+    /* Rule generation sampled BEFORE the snapshot was taken, carried through to
+     * nm_inode_info.gen. Sampling on this side is what keeps the stamp from ever
+     * being newer than the topology the inode was built from -- see the note in
+     * nomount_get_rule_info(). */
+    u32 gen;
 };
 
 static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nm_rule_info *rule_info);
@@ -998,6 +1003,15 @@ static inline void nm_sync_inode_times(struct inode *v_inode, struct inode *r_in
     v_inode->i_mtime_nsec = r_inode->i_mtime_nsec;
     v_inode->i_ctime_sec = r_inode->i_ctime_sec;
     v_inode->i_ctime_nsec = r_inode->i_ctime_nsec;
+/* 6.7 renamed i_atime/i_mtime to __i_atime/__i_mtime (v6.6 include/linux/fs.h
+ * still spells them i_atime/i_mtime; v6.7 does not) and added the accessors that
+ * replace them. Naming the fields directly therefore only compiles on 6.6
+ * itself, which is why 6.7..6.11 gets its own arm. The >= 6.12 arm above stays
+ * on the discrete second/nanosecond fields it was written for. */
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+    inode_set_atime_to_ts(v_inode, inode_get_atime(r_inode));
+    inode_set_mtime_to_ts(v_inode, inode_get_mtime(r_inode));
+    inode_set_ctime_to_ts(v_inode, inode_get_ctime(r_inode));
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
     v_inode->i_atime = r_inode->i_atime;
     v_inode->i_mtime = r_inode->i_mtime;
@@ -1013,7 +1027,8 @@ static inline int nm_call_iterate(struct file *file, struct dir_context *ctx, co
 {
     if (fop->iterate_shared)
         return fop->iterate_shared(file, ctx);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+/* ->iterate was removed at 6.5, not 6.6 (v6.4 fs.h has it, v6.5 does not). */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
     else if (fop->iterate)
         return fop->iterate(file, ctx);
 #endif
@@ -1023,12 +1038,12 @@ static inline int nm_call_iterate(struct file *file, struct dir_context *ctx, co
 /* Recover our nm_fop from a (possibly hijacked) file_operations.
  *
  * The hijack mirrors whichever readdir op the filesystem itself implements, so
- * the identity probe has to check both: before 6.6 the VFS picks the SHARED or
+ * the identity probe has to check both: before 6.5 the VFS picks the SHARED or
  * EXCLUSIVE inode lock by whether ->iterate_shared is set, and installing it on a
  * filesystem that only implements ->iterate silently downgrades the exclusion
- * that split exists to express. From 6.6 ->iterate is gone and only the first
- * probe can match. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+ * that split exists to express. From 6.5 ->iterate is gone (v6.4 fs.h declares
+ * it, v6.5 does not) and only the first probe can match. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
 #define nm_get_fop(p) ({                                                        \
     const struct file_operations *__nf = (p);                                   \
     struct nm_fop *__nr = __get_nm(__nf, struct nm_fop, fake_fop,               \
