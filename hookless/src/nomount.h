@@ -289,7 +289,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.21.0"
+#define NM_MODULE_VERSION "1.22.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -370,8 +370,26 @@
  *    only preserved magnitude when the parent ino already exceeded 1 MB;
  *    measured at /product/etc (dir ino 15018, siblings 7166..20309) minting
  *    children at 1226252..2181515. Neither is userspace-settable; the bump
- *    exists so `doctor` can tell this engine from v19. */
-#define NOMOUNT_VERSION    21
+ *    exists so `doctor` can tell this engine from v19.
+ *
+ * 22: an adversarial re-read of 20/21 found two lifetime bugs in that work and a
+ *    set of wrong version guards. nomount_hijacked_destroy_inode armed call_rcu
+ *    BEFORE clearing i_private -- call_rcu only waits for readers already in
+ *    progress, so a reader entering after the arm (nm_d_revalidate's own RCU fast
+ *    path does exactly this read) could load a pointer the callback was free to
+ *    release; it now unpublishes first. nm_rule_gen was sampled AFTER reading the
+ *    rule table while writers publish-then-increment, so an add/del landing in
+ *    that window stamped an inode with the NEW generation although it had been
+ *    validated against the OLD topology -- an `nm del` racing a revalidate kept
+ *    serving the deleted rule from the cached dentry; sampling before makes the
+ *    error one-directional (a stamp can only be staler, costing one ref-walk).
+ *    Userspace-observable, and the reason for the bump: .readlink is now on
+ *    nm_dir_iops too, so a hidden DIRECTORY answers -ENOENT rather than the
+ *    -EINVAL-vs--ENOENT discriminator (21 fixed only nm_file_iops), and
+ *    __nomount_clear_all now resets the inode-placement caches, so injected
+ *    st_ino is stable across reload passes instead of drifting and eventually
+ *    re-creating the dense consecutive run nm_place_ino exists to avoid. */
+#define NOMOUNT_VERSION    22
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
