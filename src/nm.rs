@@ -172,6 +172,12 @@ impl Nm {
     pub fn list(&self) -> Result<String> {
         self.run(&["list"])
     }
+
+    /// `nm l g` — the _ghost tables as `p /abs/path` and `u <uid>` lines.
+    /// Errors on an engine below v26, where the knob does not exist.
+    pub fn ghost_list(&self) -> Result<String> {
+        self.run(&["l", "g"])
+    }
 }
 
 impl Default for Nm {

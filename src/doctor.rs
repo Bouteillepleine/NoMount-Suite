@@ -44,6 +44,101 @@ struct Finding {
     detail: String,
 }
 
+/// What a hidden caller sees at a ghosted path. Ordered by severity.
+#[derive(PartialEq)]
+enum GhostSeen {
+    /// Indistinguishable from a path that does not exist. What _ghost is for.
+    Absent,
+    /// The path is VISIBLE to a uid the cloak claims to hide it from, so the
+    /// cloak is lying about it: `stat` succeeds while the guarded syscalls
+    /// answer ENOENT, a contradiction no real file can produce.
+    Visible,
+    /// Hidden from `stat`, but `getxattr(security.selinux)` still answers. The
+    /// guards are compiled in and not effective -- the shape a kernel takes when
+    /// the patch applied but the wrapper it targets is not the one this tree
+    /// actually routes through.
+    XattrLeak,
+    Unknown,
+}
+
+/// Become `uid` in a forked child and look at `path`. READ-ONLY: `stat` and
+/// `lgetxattr` only, never the write-ish members of the oracle class -- those
+/// are safe on a read-only ROM and unsafe anywhere else, and a check that has to
+/// reason about which one it is on does not belong in a linter.
+///
+/// This exists because _ghost is boot-proven on 6.12 alone; 6.6, 6.1, 5.15 and
+/// 5.10 are only apply- and compile-verified, and no amount of CI can close that
+/// gap. The device can: the guards are inert until the tables are populated, so
+/// what is genuinely unknown on those kernels is not whether they boot but
+/// whether the cloak WORKS. That is a question the running kernel can be asked.
+fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return GhostSeen::Unknown;
+    };
+    let Ok(attr) = std::ffi::CString::new("security.selinux") else {
+        return GhostSeen::Unknown;
+    };
+    // Exit statuses, because the answer has to cross a fork.
+    const ABSENT: i32 = 0;
+    const VISIBLE: i32 = 1;
+    const XLEAK: i32 = 2;
+    unsafe {
+        let pid = libc::fork();
+        if pid < 0 {
+            return GhostSeen::Unknown;
+        }
+        if pid == 0 {
+            // gid before uid: dropping uid first would forfeit the privilege
+            // needed to drop gid, leaving the child with root's groups.
+            if libc::setresgid(uid, uid, uid) != 0 || libc::setresuid(uid, uid, uid) != 0 {
+                libc::_exit(3);
+            }
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::stat(cpath.as_ptr(), &mut st) == 0 {
+                libc::_exit(VISIBLE);
+            }
+            let mut buf = [0u8; 256];
+            let n = libc::lgetxattr(
+                cpath.as_ptr(),
+                attr.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            );
+            libc::_exit(if n >= 0 { XLEAK } else { ABSENT });
+        }
+        let mut status: i32 = 0;
+        if libc::waitpid(pid, &mut status, 0) < 0 || !libc::WIFEXITED(status) {
+            return GhostSeen::Unknown;
+        }
+        match libc::WEXITSTATUS(status) {
+            ABSENT => GhostSeen::Absent,
+            VISIBLE => GhostSeen::Visible,
+            XLEAK => GhostSeen::XattrLeak,
+            _ => GhostSeen::Unknown,
+        }
+    }
+}
+
+/// Split `nm l g` output into its two tables.
+fn parse_ghost_tables(txt: &str) -> (Vec<PathBuf>, Vec<u32>) {
+    let mut paths = Vec::new();
+    let mut uids = Vec::new();
+    for line in txt.lines() {
+        let line = line.trim();
+        if let Some(p) = line.strip_prefix("p ") {
+            if p.starts_with('/') {
+                paths.push(PathBuf::from(p));
+            }
+        } else if let Some(u) = line.strip_prefix("u ") {
+            if let Ok(v) = u.trim().parse::<u32>() {
+                uids.push(v);
+            }
+        }
+    }
+    (paths, uids)
+}
+
 fn partition_of(p: &Path) -> Option<String> {
     p.components()
         .nth(1)
@@ -561,6 +656,74 @@ pub fn run_doctor() -> Result<()> {
                 hidden_apps.len()
             ),
         });
+    }
+
+    // _ghost: is the cloak telling the truth on THIS kernel?
+    //
+    // Two failures, and they need opposite responses. OVER-REACH is ours and it
+    // is the dangerous one: a path that a hidden caller can still see must never
+    // be in the table, because ghosting it makes one path answer stat=OK and
+    // chmod=ENOENT at once -- louder than the oracle it replaces, and visible
+    // without a control path. Shipped that way in v1.3.55-.57 with 259 of 260
+    // entries wrong. INEFFECTIVE is the kernel's: guards compiled in that do not
+    // fire, which is exactly what an untested 6.6/6.1/5.15/5.10 build might do
+    // and what no CI can rule out.
+    //
+    // Sampled, not exhaustive: each path costs a fork, and the table is built by
+    // one predicate, so a systematic error shows up in the first few. The count
+    // is reported so a clean verdict cannot be mistaken for a full sweep.
+    if live_ok && engine_v >= 26 {
+        if let Ok(txt) = nm.ghost_list() {
+            let (gpaths, guids) = parse_ghost_tables(&txt);
+            if let (Some(&uid), false) = (guids.first(), gpaths.is_empty()) {
+                const SAMPLE: usize = 16;
+                let checked = gpaths.len().min(SAMPLE);
+                let mut visible: Vec<&PathBuf> = Vec::new();
+                let mut leaked: Vec<&PathBuf> = Vec::new();
+                for p in gpaths.iter().take(SAMPLE) {
+                    match ghost_seen_by(uid, p) {
+                        GhostSeen::Visible => visible.push(p),
+                        GhostSeen::XattrLeak => leaked.push(p),
+                        _ => {}
+                    }
+                }
+                let name = |v: &[&PathBuf]| -> String {
+                    v.iter().take(3).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                };
+                if !visible.is_empty() {
+                    f.push(Finding {
+                        level: Level::Error,
+                        check: "ghost cloak over-reaches",
+                        detail: format!(
+                            "{} of {checked} sampled ghost path(s) are still VISIBLE to hidden                              uid {uid}, so those paths answer stat=OK and                              truncate/chmod/listxattr=ENOENT at the same time -- a                              contradiction no real file can produce, and a stronger tell than                              the one the cloak closes. Only INJECTED-ONLY paths belong in the                              table; a rule that shadows a stock file, or is public, must not.                              Re-run the mount pass to rebuild it: {}",
+                            visible.len(),
+                            name(&visible)
+                        ),
+                    });
+                }
+                if !leaked.is_empty() {
+                    f.push(Finding {
+                        level: Level::Warn,
+                        check: "ghost cloak compiled in but not effective",
+                        detail: format!(
+                            "{} of {checked} sampled ghost path(s) are hidden from stat yet                              still answer getxattr(security.selinux) for uid {uid}: the guards                              are present and not firing. _ghost is boot-verified on 6.12 only,                              so on 6.6/6.1/5.15/5.10 this is the expected shape of a variant                              that applied to the wrong wrapper for this tree: {}",
+                            leaked.len(),
+                            name(&leaked)
+                        ),
+                    });
+                }
+                if visible.is_empty() && leaked.is_empty() {
+                    f.push(Finding {
+                        level: Level::Info,
+                        check: "ghost cloak verified on this kernel",
+                        detail: format!(
+                            "{checked} of {} ghost path(s) sampled: each is indistinguishable                              from a non-existent path for hidden uid {uid}, by stat and by                              getxattr. Measured here rather than assumed from the build",
+                            gpaths.len()
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     // ---- report ------------------------------------------------------------
