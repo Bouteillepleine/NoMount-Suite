@@ -1087,6 +1087,36 @@
 
   <div class="group-label">Start here</div>
 
+  <!-- WHAT THIS DOES AND DOES NOT COVER.
+       The "Residual tells present" state on the Modules tab reports verified-boot,
+       build keys and SELinux mode -- none of which a VFS engine is responsible
+       for -- and users read it as the Suite failing. The things it genuinely
+       cannot cover (PackageManager parsing the injected APK, SELinux-policy
+       detection) were documented in a <details> on the per-UID card that almost
+       nobody opens. Say it once, up front, where the verdicts are. -->
+  <div class="card collapsed" id="cardScope">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+      <h2>What this can and can't hide</h2><span class="chev">›</span>
+    </div>
+    <p class="note">Worth two minutes before you read a verdict below — several things a detector can see are <b>not</b> the Suite's to fix, and one of them has its own switch.</p>
+    <div class="subsec">
+      <div class="subsec-h">What it covers</div>
+      <p class="note" style="margin-top:6px">Your modules' files are served by <b>redirecting them inside the kernel</b>, with no mount of any kind. There is no overlay, no bind, no entry in the mount table, and no <code>st_dev</code> that disagrees with the ROM's. Per-app hiding shows a listed app the stock filesystem instead. Root is <code>sucompat</code>, which is also mountless.</p>
+    </div>
+    <div class="subsec">
+      <div class="subsec-h">What it can't cover — and never claimed to</div>
+      <p class="note" style="margin-top:6px"><b>Android itself still sees your files.</b> The PackageManager scans and parses an injected APK as the system, then hands its version and signature to any app that asks. That is what makes injection work at all; it also means an app can learn about the file from Android rather than from the filesystem.</p>
+      <p class="note"><b>SELinux-policy detection.</b> Probing the loaded policy for root-framework types is a different layer entirely. Some kernels ship a cloak for it; that is a kernel build option, not something this module can switch on.</p>
+      <p class="note"><b>Anything a system service reads on the app's behalf.</b> Per-app hiding keys on the calling UID, so a system service asking on behalf of a hidden app is not hidden — it is the system asking.</p>
+    </div>
+    <div class="subsec">
+      <div class="subsec-h">Not the Suite's, but fixable here</div>
+      <p class="note" style="margin-top:6px"><b>Verified-boot state</b> and <b>build keys</b> are read straight from properties and the kernel command line. They have nothing to do with mounts or injection — an unlocked bootloader says so regardless of what any module does — but the <b>Boot-state</b> switch in Tools › Spoofing normalises both. If the posture card shows "residual tells present", that switch is where they go.</p>
+      <div class="btns"><button class="act" onclick="showTab('tools',document.getElementById('nb-tools'));document.getElementById('cardSpoof')&&document.getElementById('cardSpoof').classList.remove('collapsed')">Open Spoofing</button></div>
+    </div>
+  </div>
+
   <!-- ONE button that answers "am I OK?". The three cards below stay exactly as
        they were; this runs all three and reconciles them into one verdict, which
        is the thing a reader had to do by hand. -->
@@ -1120,6 +1150,20 @@
       <summary>Raw output</summary>
       <pre class="rules" id="auditout">…</pre>
     </details>
+  </div>
+
+  <!-- KERNEL FEATURES: what the running kernel actually gives us.
+       Half the Suite's cloaks go INERT rather than half-applying when the kernel
+       cannot support them -- which is the right call and is currently announced
+       only in boot.log and /dev/kmsg, where the roam-stats flood buries it within
+       minutes. Users find out by asking why a toggle did nothing. -->
+  <div class="card collapsed" id="cardFeat">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
+      <h2>Kernel features</h2><span class="chip" id="featchip">—</span><span class="chev">›</span>
+    </div>
+    <p class="note">Each of these lives in the kernel, not in this module. Where one is missing the Suite goes <b>inert</b> rather than half-applying it — a half-applied cloak is a pattern of its own — so nothing here breaks, but the protection is not there either.</p>
+    <div class="list" id="featlist"></div>
   </div>
 
   <div class="group-label">Health</div>
@@ -2046,6 +2090,89 @@
     const dd = await getDoctor(false);
     paintManagerBanner(dd);
     doctorPaintChip(dd.json);
+  }
+
+  // ---- kernel features ------------------------------------------------------
+  //
+  // Three states per feature and they are genuinely different:
+  //   present  -- compiled in AND doing its job here (measured where possible)
+  //   inert    -- compiled in, nothing feeding it, so no guard can fire
+  //   absent   -- not in this kernel at all; flash one that has it
+  //
+  // "inert" is the one worth surfacing. It is a deliberate design choice
+  // (a half-populated table cloaks some paths and not others, which is itself a
+  // pattern) and it is invisible: the toggle is there, it accepts input, and
+  // nothing happens.
+  async function refreshFeatures() {
+    const list = $("featlist");
+    const chip = $("featchip");
+    if (!list) return;
+    const NMB = shq(await nmc());
+    const ev = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
+    const has = async function (knob) {
+      return (await exec(NMB + " k " + knob + " >/dev/null 2>&1 && echo y")).stdout.indexOf("y") >= 0;
+    };
+    const phOk = await has("p");
+    const ghOk = await has("g");
+
+    // Ghost: presence is a probe, EFFECTIVENESS is doctor's -- it forks into a
+    // hidden uid and asks the running kernel whether the cloak actually holds,
+    // because _ghost is boot-proven on 6.12 alone.
+    const dd = await getDoctor(false);
+    const f = (dd && dd.json && dd.json.findings) || [];
+    const hasCheck = function (name) { return f.some(function (x) { return x.check === name; }); };
+    const ghVerified = hasCheck("ghost cloak verified on this kernel");
+    const ghOverreach = hasCheck("ghost cloak over-reaches");
+    const ghIneffective = hasCheck("ghost cloak compiled in but not effective");
+
+    const rows = [];
+    let worst = "ok";
+    const add = function (name, state, why) {
+      rows.push({ name: name, state: state, why: why });
+      if (state === "bad") worst = "bad";
+      else if (state === "inert" && worst === "ok") worst = "inert";
+    };
+
+    add("Injection engine",
+        ev ? "ok" : "bad",
+        ev ? "Prism engine v" + ev + " is answering. This is what serves your modules with no mounts."
+           : "The engine is not answering. Nothing is being injected — this kernel may not have NoMount compiled in.");
+
+    add("Maps / fd cloak",
+        phOk ? "ok" : "absent",
+        phOk ? "Present. Hides selected module files from every process's memory map and open-file list. Pick what it covers in Tools › Cloak."
+             : "Not in this kernel. Module APKs stay visible in /proc/<pid>/maps and fd to anything that looks. Needs a pathhide-enabled kernel.");
+
+    if (!ghOk) {
+      add("Existence cloak", "absent",
+          "Not in this kernel. A hidden file can be told apart from a missing one by a handful of syscalls the engine cannot answer.");
+    } else if (ghOverreach) {
+      add("Existence cloak", "bad",
+          "Present but MIS-AIMED: it is hiding paths that are meant to be visible, which is a louder tell than the one it closes. Re-run the mount pass.");
+    } else if (ghIneffective) {
+      add("Existence cloak", "bad",
+          "Compiled in but not firing on this kernel — the guards landed in a function this tree does not route through. Verified on 6.12; this looks like a 6.6/6.1/5.15/5.10 mis-fit.");
+    } else if (ghVerified) {
+      add("Existence cloak", "ok",
+          "Present and measured working here: a hidden path answers exactly like one that never existed.");
+    } else {
+      add("Existence cloak", "inert",
+          "Present but idle. It needs both a hidden app and injected-only paths before any guard can fire — hide an app in Tools › Per-UID hiding to arm it.");
+    }
+
+    const tagOf = { ok: "vfs", inert: "warn", absent: "off", bad: "warn" };
+    const labelOf = { ok: "active", inert: "idle", absent: "not in kernel", bad: "needs attention" };
+    list.innerHTML = rows.map(function (r) {
+      return '<div class="frow"><div class="fname">' + esc(r.name) + "</div>" +
+             '<div class="fmean">' + esc(r.why) + "</div>" +
+             '<div class="fmeta"><span class="tag ' + tagOf[r.state] + '">' +
+             labelOf[r.state] + "</span></div></div>";
+    }).join("");
+    const absent = rows.filter(function (r) { return r.state === "absent"; }).length;
+    const bad = rows.filter(function (r) { return r.state === "bad"; }).length;
+    const inert = rows.filter(function (r) { return r.state === "inert"; }).length;
+    chip.textContent = bad ? bad + " to fix" : inert ? inert + " idle" : absent ? absent + " missing" : "all active";
+    chip.className = "chip " + (bad ? "bad" : (inert || absent) ? "warn" : "ok");
   }
 
   // ---- runtime health (selfcheck / snapshot / verify / export) ----
@@ -2991,7 +3118,7 @@
       : "Suite " + SUITE_VERSION + " -- " + eng + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
     $("footver").textContent = "Suite " + SUITE_VERSION + " · " + eng +
       (staged ? " · " + pv + " staged — reboot to activate" : "");
-    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshIsolated(), refreshWhiteouts(), checkManagerSwitches(), loadAuditCache()]);
+    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshIsolated(), refreshWhiteouts(), checkManagerSwitches(), loadAuditCache(), refreshFeatures()]);
     if (rulesShown) loadRules();
     loadPkgList();
     if (ic) ic.classList.remove("spin");

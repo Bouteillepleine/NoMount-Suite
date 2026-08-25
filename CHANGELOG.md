@@ -1,5 +1,107 @@
 # Changelog
 
+## Unreleased
+
+Requires **Prism engine v26** for the existence cloak; the injection engine and
+everything else here works from v16 as before. Pairs with a kernel built from
+`kbuild@hookless` at `347ec5c` or later and `kernel_patches@main` at `8a41f77`
+or later.
+
+### The detection audit reports differently
+
+Nothing about what is measured has changed, and no verdict has been softened.
+What changed is that the report stopped describing two different situations with
+the same word.
+
+- **`SKIP` is now `N/A` or `UNMEASURED`.** A check with nothing to test here —
+  no app on the hide list, no overlay mount, no single-block erofs parent — is
+  **not applicable**, renders grey, and never colours the chip or the tab. A
+  check that *could* have run and did not — mountinfo unreadable, the probe
+  child said nothing, a directory that would not enumerate — is **unmeasured**
+  and stays amber. Neither is ever counted as a pass.
+
+  This is why a perfectly healthy device used to open on `4 unverified` in amber
+  with an alert dot. It now reads `undetected`, with a grey `4 didn't apply`
+  beside it.
+- **Every check carries a plain-language line**, on every verdict, alongside the
+  evidence it already printed. The evidence is unchanged and one disclosure away.
+- **Findings name their owner.** `absorb` already resolved a leaked mount to the
+  module that made it and the audit discarded that answer for the one case where
+  the reader could act on it.
+- **Findings carry a reachability tag** — `any app`, `needs effort` — and sort by
+  it. One `getdents64` from any app and something needing a purpose-built erofs
+  model are not the same problem and no longer look the same.
+- **`nomount accept`** records that you have looked at a failing check and decided
+  to live with it: a hook framework's bind, an installer's own tmpfs. It never
+  marks anything clean. The verdict stays `FAIL`, it stays visible, it renders
+  grey rather than green, it is counted separately, and it lapses the moment the
+  evidence changes.
+- **`--json` on `audit`, `doctor`, `selfcheck`**, plus a new `nomount posture`.
+  The WebUI reads these instead of regexing prose.
+- The boot pass caches the audit, so the WebUI opens on a verdict and an age
+  instead of a dash.
+
+### Fixed
+
+- **The posture shield contradicted the audit.** It counted foreign mounts with
+  `awk '$4 ~ "/adb/modules/"'`, which misses a bind from anywhere else under
+  `/data/adb` (a ReVanced module binds out of `/data/adb/rvhc`; the audit has a
+  regression test for it) and *counts* a hook framework's by-design bind, which
+  the audit deliberately does not. Measured on an OP15 with LSPosed: the shield
+  sat on a permanent amber "another module is mounting" over the one mount the
+  audit reports as expected. Both now come from `nomount posture`, which runs the
+  audit's own three mount checks.
+- **The ghost path populator split rule paths on spaces.** A target containing
+  one was torn in half: the fragment was submitted as a rule and accepted, the
+  remainder dropped, and the boot log still reported the cloak fully populated
+  while that path's existence oracles stayed open.
+- **Every WebUI refresh ran a full `doctor` to read two booleans.** That resolves
+  the whole mount plan, decodes the KSU allowlist and forks up to sixteen
+  children to sample the ghost table — then threw the result away and left the
+  Health card blank until the user pressed a button that ran it again. One run
+  now paints both.
+- The ghost rejection message named `GH_MAX_RULES=256`; the kernel has held 512
+  since the table was resized. It no longer names a number the kernel owns.
+
+### WebUI
+
+- **Check my setup** runs the audit, the plan check and the runtime check and
+  gives one verdict. Every individual button is unchanged.
+- **Copy report** puts device, ROM, kernel, engine and Suite versions and every
+  non-clean finding on the clipboard in one press.
+- **Kernel features** says whether each cloak is active, idle or absent. These go
+  inert rather than half-applying when the kernel cannot support them, which was
+  previously announced only in `boot.log` and `/dev/kmsg`.
+- **What this can and can't hide** states up front what a VFS engine is and is not
+  responsible for, so verified-boot state and build keys stop reading as Suite
+  failures — and links to the switch that does normalise them.
+
+### Build
+
+- The shell lint gate moved from `-S error` to `-S warning -e SC3043`. The four
+  suppressions this needed each carry their reason at the site.
+
+## v1.3.48 – v1.3.65
+
+These shipped without notes. Rather than reconstruct eighteen entries after the
+fact, here is the part that actually affects whether a build works for you:
+
+- **Engine floor rose to v26** over this range, for the existence cloak
+  (`_ghost`) and the `nm k g` control plane it is driven through. The injection
+  engine itself still works from v16 — on an older kernel the cloak goes inert
+  and nothing else changes.
+- **The existence cloak went live**, and is populated at boot from the live rule
+  set. It closes seven "resolve a path, then act" oracles that could tell a
+  hidden file from a missing one.
+- **The state directory's SELinux label was repaired.** An earlier build
+  relabelled `/data/adb/nomount` to a type every app domain can read, leaving
+  `/data/adb` refusing traversal as the only thing between an app and the hide
+  list. Reinstalling fixes it.
+- **The early absorb pass moved to post-mount**, and `my_*` binds are absorbed
+  before zygote.
+
+Per-commit detail is in `git log v1.3.47..v1.3.65`.
+
 ## v1.3.47
 
 Pairs with a kernel built from `kbuild@hookless` at 27f8d95 or later. Nothing here
