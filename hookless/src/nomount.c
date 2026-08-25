@@ -1277,6 +1277,32 @@ static long nm_ioctl_as_stock(struct file *file, unsigned int cmd, unsigned long
     if (unlikely(!info) || !info->s_path.dentry)
         return -ENOTTY;
 
+    /* Answer WITHOUT the open when the stock file could not have answered
+     * anything else. dentry_open() would hand the new file that inode's own
+     * i_fop, so if the inode carries neither ioctl op the dispatch below is
+     * guaranteed to fall through to -ENOTTY -- and the open, dispatch and fput
+     * exist only to arrive at a value we already know.
+     *
+     * That round trip was measurable. On OP15, ioctl() with an unknown cmd on
+     * erofs-backed paths (n=12 each side, 3000 reps per file, per-file median):
+     * injected 938..1823ns vs stock siblings 521..781ns -- DISJOINT, so a single
+     * threshold classified every file, unprivileged, with each file its own
+     * baseline. Skipping the open collapses the injected cost onto the stock
+     * path for exactly the filesystems where stock has no ioctl (plain erofs:
+     * /system, /my_*). Overlay-backed paths keep the open, because
+     * ovl_file_operations DOES implement ->unlocked_ioctl and forwarding is the
+     * correct answer there. */
+    {
+        struct inode *si = d_backing_inode(info->s_path.dentry);
+
+        if (si && si->i_fop && !si->i_fop->unlocked_ioctl
+#ifdef CONFIG_COMPAT
+            && !si->i_fop->compat_ioctl
+#endif
+           )
+            return -ENOTTY;
+    }
+
     sf = dentry_open(&info->s_path, O_RDONLY | O_LARGEFILE, current_cred());
     if (IS_ERR(sf))
         return -ENOTTY;
