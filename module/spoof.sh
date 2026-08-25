@@ -131,6 +131,9 @@ SLOT=""
 # read a big-endian u32 at <file> <offset>
 be_u32() {
     local f=$1 o=$2
+    # shellcheck disable=SC2046  # the split IS the parse: od prints one decimal
+    # byte per field and this turns them into $1..$4. Quoting would hand the
+    # whole line to $1 and the arithmetic below would read 0.
     set -- $(dd if="$f" bs=1 skip="$o" count=4 2>/dev/null | od -An -tu1)
     echo $(( ${1:-0}*16777216 + ${2:-0}*65536 + ${3:-0}*256 + ${4:-0} ))
 }
@@ -138,6 +141,7 @@ be_u32() {
 # high word means a corrupt/unexpected field, so we treat it as invalid -> 0)
 be_u64() {
     local f=$1 o=$2 hi lo
+    # shellcheck disable=SC2046  # same as be_u32: the split is the parse.
     set -- $(dd if="$f" bs=1 skip="$o" count=8 2>/dev/null | od -An -tu1)
     hi=$(( ${1:-0}*16777216 + ${2:-0}*65536 + ${3:-0}*256 + ${4:-0} ))
     lo=$(( ${5:-0}*16777216 + ${6:-0}*65536 + ${7:-0}*256 + ${8:-0} ))

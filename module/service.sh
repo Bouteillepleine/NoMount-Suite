@@ -227,17 +227,40 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
              [ -x "$d" ] || continue; \
              [ -e "$p" ] || printf "%s\n" "$p"; done' 2>/dev/null)
         _ghrej=""
+        # NEWLINE-ONLY IFS around the loop. Unquoted, the default IFS splits on
+        # spaces too, so a rule target containing one was torn in half: the
+        # fragment "/product/app/My" passed the /* test AND ghost_rule_sane() and
+        # was submitted as a rule, "App.apk" was dropped by the case guard, and
+        # _ghg counted the fragment -- so the summary below reported the cloak
+        # fully populated while that path's existence oracles stayed wide open.
+        # Silent, and only on a module that ships a filename with a space.
+        #
+        # A `while read` pipeline would be the idiomatic fix and is wrong here:
+        # it puts the loop in a subshell, so _ghg/_ghf/_ghrej would be discarded
+        # and the report would always read 0 of 0. Save and restore instead.
+        _oifs=$IFS
+        IFS='
+'
         for _ghp in $_ghlist; do
-            case "$_ghp" in /*) ;; *) continue ;; esac
+            IFS=$_oifs
+            case "$_ghp" in /*) ;; *) IFS='
+'; continue ;; esac
             _ghg=$((_ghg + 1))
             if ! nmto 10 "$NM_BIN" k g "p+$_ghp" >/dev/null 2>&1; then
                 _ghf=$((_ghf + 1))
                 # Keep the first few. A count alone is not diagnosable: working out
-                # WHICH four of 260 the GH_MAX_RULES=256 overflow dropped took a
-                # separate `nm l g` and an argument about sort order.
+                # WHICH of the rules an overflow dropped took a separate `nm l g`
+                # and an argument about sort order. The cap is the kernel's
+                # GH_MAX_RULES (512 since "size the ghost path table for a real
+                # rule set"); this message deliberately does not name a number,
+                # because the last one it named went stale at 256 and sent whoever
+                # read it looking for the wrong cause.
                 [ "$_ghf" -le 3 ] && _ghrej="$_ghrej $_ghp"
             fi
+            IFS='
+'
         done
+        IFS=$_oifs
     else
         nmlog "⚠ ghost: no hidden uid to probe with — path table left EMPTY (cloak inert)"
     fi
@@ -273,7 +296,10 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
         # different responses: the table is full (GH_MAX_RULES), or the path is
         # too long for GH_RULE_LEN. Measured on OP15: the longest rule is 68
         # chars and the longest path on the whole ROM is 134, against a 191 cap,
-        # so full-table is the one to suspect first.
+        # so full-table is the one to suspect first. Neither number is repeated
+        # in the message: the kernel owns them, they have already moved once
+        # (GH_MAX_RULES 256 -> 512), and a diagnostic that names a stale constant
+        # sends its reader after the wrong cause.
         nmlog "⚠ ghost cloak: $_ghf/$_ghg path(s) and $_ghuf/$_ghu uid(s) REJECTED — the existence oracles stay OPEN for those; first:$_ghrej (table full, or a path over the kernel's rule-length cap)"
     elif [ "$_ghg" = 0 ] || [ "$_ghu" = 0 ]; then
         nmlog "⚠ ghost cloak inert: $_ghg of $_ghn path(s), $_ghu uid(s) — BOTH tables must be non-empty for any guard to fire"
@@ -503,6 +529,37 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     fi
 fi
 
+# --- detection audit, cached for the WebUI --------------------------------------
+# `selfcheck` has run at boot and persisted to health.txt since the beginning; the
+# audit never did. So the Detection audit card opened with a dash and the first
+# time a user saw a finding was also the first time they had heard of the tool --
+# and only if they went looking for a button on the Diagnostics tab.
+#
+# Runs AFTER the selfcheck settle window on purpose: several checks read live
+# per-UID state, and asking before the hide pass has settled is the same
+# too-early measurement that produced the false "per-UID" warning the canary
+# retries around.
+#
+# Bounded and best-effort in both directions: a failed run leaves no cache, and
+# the WebUI treats a missing or stale file as "no cached verdict" -- which is
+# exactly what it is. `audit --json --write` writes the file itself (0600, in the
+# state dir) so nothing here has to know the format. Exit is non-zero whenever a
+# finding is open, which is the normal case for some setups and must not read as
+# an error here.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+    if nmto 60 "$BIN" audit --json --write >/dev/null 2>&1; then
+        nmlog "detection audit cached — nothing open"
+    elif [ -s "$NMDIR/audit.json" ]; then
+        # Distinguish "ran, found something" from "did not run at all". The first
+        # is a normal, actionable state; the second means the card will show an
+        # age with no verdict behind it.
+        nmlog "detection audit cached — one or more findings are open (see the Detection audit card)"
+    else
+        rm -f "$NMDIR/audit.json"
+        nmlog "⚠ detection audit did not complete — the WebUI will show no cached verdict"
+    fi
+fi
+
 if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     # One dump, both counts (see metamount.sh): two `nm list` runs returning the
     # same answer is two full netlink dumps of the whole rule table.
@@ -596,6 +653,8 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # record is exactly the "say nothing rather than accuse" case above.
     _mu=$(_health_get manager_umount | head -1)
     if [ "$_mu" = "on" ]; then
+        # shellcheck disable=SC1111  # typographic quotes on purpose: this names
+        # the manager's own label inside a sentence shown to the user.
         _muc=" · ⚠️ turn OFF “kernel umount” in your root manager (it hides nothing here)"
         _mul=", ⚠ manager kernel_umount is ON — turn it off"
     else
