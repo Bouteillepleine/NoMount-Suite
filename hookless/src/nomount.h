@@ -289,7 +289,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.22.0"
+#define NM_MODULE_VERSION "1.23.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -388,8 +388,20 @@
  *    -EINVAL-vs--ENOENT discriminator (21 fixed only nm_file_iops), and
  *    __nomount_clear_all now resets the inode-placement caches, so injected
  *    st_ino is stable across reload passes instead of drifting and eventually
- *    re-creating the dense consecutive run nm_place_ino exists to avoid. */
-#define NOMOUNT_VERSION    22
+ *    re-creating the dense consecutive run nm_place_ino exists to avoid.
+ *
+ * 23: ioctl() no longer pays for an open it cannot need. nm_ioctl_as_stock
+ *    always did dentry_open + dispatch + fput on the stock path, even when that
+ *    inode carries neither ->unlocked_ioctl nor ->compat_ioctl and the dispatch
+ *    was therefore guaranteed to reach -ENOTTY. Both sides returned the same
+ *    errno, so only the COST separated them -- and it did, cleanly. Measured on
+ *    OP15 with an unknown cmd on erofs-backed paths, n=12 per side, 3000 reps
+ *    per file, per-file median: injected 938..1823ns against stock siblings
+ *    521..781ns. Disjoint, so one threshold classified every file, unprivileged,
+ *    with each file its own baseline. Now short-circuited to -ENOTTY when stock
+ *    could not have answered otherwise; overlay-backed paths still open and
+ *    forward, because ovl_file_operations DOES implement ->unlocked_ioctl. */
+#define NOMOUNT_VERSION    23
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
