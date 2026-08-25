@@ -13,6 +13,7 @@
 #include <linux/sizes.h>
 #include <linux/magic.h>
 #include <linux/hash.h>
+#include <linux/sort.h>
 #include "nomount.h"
 
 /* Android packs (user_id, appid) into a uid: uid = user_id*NM_PER_USER_RANGE + appid.
@@ -196,6 +197,11 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
                                     u32 request_mask, unsigned int query_flags);
 #endif
 static u64 nm_child_dotdot_of(const char *dirpath);
+/* Defined with the dir-target snapshot below; nomount_hijacked_destroy_inode()
+ * sits above it and has to release the cache's reference, and nm_llseek() has to
+ * answer SEEK_END with the size the snapshot dictates. */
+static void nm_dsnap_drop(struct nm_inode_info *info);
+static loff_t nm_dsnap_dir_size(struct inode *v_inode, struct nm_inode_info *info);
 
 /* Returns the raw (unpinned) dir_node behind a hijacked inode. Safe ONLY under
  * nomount_write_mutex, which excludes the del/clear paths that call_rcu-free a
@@ -623,6 +629,10 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
      * ref is dropped in nomount_hijacked_destroy_inode(). */
     info->dir_node = rule_info->this_dir;
     if (info->dir_node) atomic_inc(&info->dir_node->refcount);
+    /* Lazily filled on the first stat()/readdir() that qualifies -- see the
+     * dir-target snapshot header. */
+    info->dsnap = NULL;
+    spin_lock_init(&info->dsnap_lock);
     if (rule_info->flags & NM_FLAG_VIRTUAL_DIR) {
         info->r_path.dentry = NULL;
         info->r_path.mnt = NULL;
@@ -939,6 +949,9 @@ static void nomount_hijacked_destroy_inode(struct inode *inode)
             if (info->r_path.dentry) path_put(&info->r_path);
             if (info->s_path.dentry) path_put(&info->s_path);
             if (info->dir_node) nm_dir_node_put(info->dir_node);
+            /* Release the CACHE's reference. An in-flight readdir/stat holds
+             * its own, so the buffers survive until that reader puts it. */
+            nm_dsnap_drop(info);
             /* The puts stay SYNCHRONOUS -- dput() can sleep and an RCU callback
              * runs in softirq -- but the struct itself must outlive any reader
              * that loaded i_private before the store above, so only the free is
@@ -1164,6 +1177,29 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
         if (offset < 0) return -EINVAL;
         file->f_pos = offset;
         return offset;
+    }
+
+    /* A dir-target directory whose listing comes from the cached snapshot lives
+     * in OUR cookie space and reports OUR size, so SEEK_END has to land on that
+     * size rather than on the backing f2fs directory's. Forwarding it would
+     * recreate, one arm over, exactly the stat-vs-lseek divergence the
+     * synthesized-dir arm above exists to remove. Gated on real_file being the
+     * backing dir, like every other dir-target decision: a hidden reader holding
+     * the pinned STOCK directory seeks in the stock file's own space. */
+    if (whence == SEEK_END && S_ISDIR(file_inode(file)->i_mode)) {
+        struct nm_inode_info *di = file_inode(file)->i_private;
+
+        if (di && di->r_path.dentry &&
+            real_file->f_path.dentry == di->r_path.dentry) {
+            loff_t sz = nm_dsnap_dir_size(file_inode(file), di);
+
+            if (sz > 0) {
+                offset += sz;
+                if (offset < 0) return -EINVAL;
+                file->f_pos = offset;
+                return offset;
+            }
+        }
     }
 
     real_file->f_pos = file->f_pos;
@@ -1702,6 +1738,592 @@ static loff_t nm_vdir_size(struct nomount_dir_node *d, unsigned int blocksize)
     return full + used;
 }
 
+/* parent_ino() was a static inline in include/linux/fs.h through v6.10 and was
+ * replaced by the out-of-line d_parent_ino() in include/linux/dcache.h at
+ * v6.11 -- checked against the trees, not from memory: v6.10 fs.h:3439 defines
+ * `static inline ino_t parent_ino(struct dentry *)` and dir_emit_dotdot() at
+ * fs.h:3577 calls it, while v6.11 fs.h:3610 calls d_parent_ino() and
+ * dcache.h:286 declares it. Mirror whichever one the building tree's own
+ * dir_emit_dotdot() uses. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+# define NM_PARENT_INO(dentry) d_parent_ino(dentry)
+#else
+# define NM_PARENT_INO(dentry) parent_ino(dentry)
+#endif
+
+/* ---- erofs directory-cookie replay -----------------------------------------
+ *
+ * getdents64() never hands userspace the offset an entry was emitted AT. It
+ * fills each entry's d_off from the offset of the entry AFTER it, and the LAST
+ * entry's d_off from the final ctx->pos (v6.6 fs/readdir.c: filldir64() does
+ * unsafe_put_user(offset, &prev->d_off), and SYSCALL_DEFINE3(getdents64) does
+ * put_user(buf.ctx.pos, &lastdirent->d_off)).
+ *
+ * erofs emits dirent j of block b with ctx->pos == b*blocksize + 12*j, stepping
+ * ctx->pos by sizeof(struct erofs_dirent) per entry, and closes the final block
+ * with ctx->pos = erofs_pos(sb,i) + maxsize -- which on the last block is
+ * exactly i_size (v6.6 fs/erofs/dir.c erofs_readdir/erofs_fill_dentries). So a
+ * stock single-block erofs directory shows d_off = 12, 24, ... and a last d_off
+ * equal to st_size. Measured on OP15, /system/etc/init, 66 entries, no rules:
+ * 12, 24, 36 ... 1610 with i_size == 1610.
+ *
+ * A dir NoMount synthesizes whole used to emit a plain per-child counter --
+ * measured 1, 3, 4 ... 28 on a 27-entry dir whose i_size was already the
+ * correct 780. One getdents64() separated it from every stock directory on the
+ * device: interior cookies that are not multiples of 12, and a final d_off that
+ * misses st_size. (Hijacked REAL erofs dirs were never affected -- their
+ * cookies come from erofs itself; /my_product/etc/extension, 167 entries with
+ * 81 injected, measured 12, 24 ... 3671 == i_size.)
+ *
+ * This replays erofs's packing with the SAME block walk nm_vdir_size() uses, so
+ * the terminal cookie and the size getattr reports are the same number by
+ * construction rather than by two calculations that happen to agree.
+ */
+struct nm_epack {
+    unsigned int blocksize;
+    loff_t full;         /* bytes already committed to whole blocks */
+    unsigned int used;   /* bytes used in the block being filled */
+    unsigned int slot;   /* dirents already placed in that block */
+};
+
+/* Account one entry and return the file offset erofs would emit it at. */
+static loff_t nm_epack_step(struct nm_epack *p, unsigned int namelen)
+{
+    unsigned int need = NM_EROFS_DIRENT_SZ + namelen;
+    loff_t off;
+
+    /* An entry never straddles a block -- the same rule nm_vdir_size() replays,
+     * and the reason a multi-block dir is not a flat sum. */
+    if (p->blocksize && p->used + need > p->blocksize) {
+        p->full += p->blocksize;
+        p->used = 0;
+        p->slot = 0;
+    }
+    /* Dirents are packed at the head of the block, names after it, so the j'th
+     * dirent of a block sits at block_base + 12*j. */
+    off = p->full + (loff_t)NM_EROFS_DIRENT_SZ * p->slot;
+    p->used += need;
+    p->slot++;
+    return off;
+}
+
+/* The EOF cookie: identical to nm_vdir_size() over the same entry sequence.
+ *
+ * It can never collide with an entry offset, which is what makes a resume from
+ * it decode as EOF without a special case: within the final block the used
+ * count is 12*slots + sum(namelen) >= 12*slots, strictly greater than the last
+ * dirent's in-block offset 12*(slots-1); and every earlier block's offsets are
+ * below this block's base. */
+static inline loff_t nm_epack_end(const struct nm_epack *p)
+{
+    return p->full + p->used;
+}
+
+/* Emit a FULLY SYNTHESIZED directory with erofs-shaped cookies.
+ *
+ * Ordinal k is the k'th entry of the listing: 0 -> ".", 1 -> "..", k >= 2 -> the
+ * (k-2)'th VISIBLE child in idr order. That is the same order and the same
+ * visibility filter nomount_emit_virtual_children() emits with and
+ * nm_vdir_size() measures, so listing, size and cookies cannot disagree about
+ * what is in the directory.
+ *
+ * Positions are ORDINAL-derived, not idr-id-derived (nm_pack_pos), because an
+ * erofs cookie is a byte offset and therefore a function of every entry BEFORE
+ * it -- an id cannot produce it. Resuming a paginated read costs one walk from
+ * ordinal 0 to the resume point, O(k). Synthesized dirs hold tens of entries and
+ * a continuation only happens when the caller's buffer filled, so this is a few
+ * hundred pointer derefs on a path that already sleeps in copy_to_user.
+ *
+ * TRADE-OFF, deliberate and stated rather than left implicit: an id-keyed
+ * position is stable across a concurrent insertion into the same directory, an
+ * ordinal-keyed one is not. An `nm add` landing here BETWEEN two getdents64()
+ * calls on the same fd shifts the remaining ordinals and can make that fd skip
+ * or repeat one entry. Accepted because injections happen at boot and at an
+ * explicit reload, readdir-concurrent-with-add is rare, and the alternative is a
+ * permanent one-syscall tell on every synthesized directory for every caller.
+ */
+static int nm_vdir_iterate_erofs(struct file *file, struct dir_context *ctx,
+                                 struct nm_inode_info *info,
+                                 struct nomount_dir_node *d,
+                                 unsigned int blocksize)
+{
+    struct nm_epack pk = { .blocksize = blocksize, .full = 0, .used = 0, .slot = 0 };
+    struct inode *v_inode = file_inode(file);
+    loff_t start = ctx->pos;
+    bool emitting = false, full = false;
+    int id = 0, k;
+
+    if (start < 0) start = 0;
+
+    /* Keep the node alive across the dir_emit sleeps below without holding RCU,
+     * exactly as nomount_emit_virtual_children() does. */
+    if (d && !atomic_inc_not_zero(&d->refcount)) d = NULL;
+
+    for (k = 0; ; k++) {
+        char name[NAME_MAX + 1];
+        int nlen;
+        u64 eino;
+        unsigned char dt;
+        loff_t off;
+
+        if (k == 0) {
+            /* Same ino choice nm_emit_dots() makes -- see the note there on why
+             * an overlay-backed dir must serve the DIRENT ino, not stat's. */
+            name[0] = '.'; nlen = 1; dt = DT_DIR;
+            eino = (info->flags & NM_FLAG_OVL_INO)
+                 ? (info->v_dino ? info->v_dino : info->v_ino)
+                 : v_inode->i_ino;
+        } else if (k == 1) {
+            name[0] = '.'; name[1] = '.'; nlen = 2; dt = DT_DIR;
+            eino = (info->flags & NM_FLAG_OVL_INO)
+                 ? (info->v_pdino ? info->v_pdino : info->v_ino)
+                 : NM_PARENT_INO(file->f_path.dentry);
+        } else {
+            struct nomount_child_node *child;
+            int found = -1;
+
+            if (!d) break;
+            /* SNAPSHOT under RCU: dir_emit -> filldir64 -> copy_to_user can
+             * fault and SLEEP, which rcu_read_lock() forbids. */
+            rcu_read_lock();
+            nlen = 0; eino = 0; dt = 0;
+            while ((child = idr_get_next(&d->children_idr, &id)) != NULL) {
+                if (nm_child_visible(child) && !(child->flags & NM_FLAG_WHITEOUT)) {
+                    found = id;
+                    nlen = min_t(int, (int)child->name_len, NAME_MAX);
+                    memcpy(name, child->name, nlen);
+                    eino = child->fake_ino;
+                    dt = child->d_type;
+                    break;
+                }
+                id++;
+            }
+            rcu_read_unlock();
+            if (found < 0) break;
+            id = found + 1;
+        }
+
+        off = nm_epack_step(&pk, (unsigned int)nlen);
+        if (!emitting) {
+            /* Resume at the first entry AT OR AFTER the requested cookie.
+             * seekdir()/telldir() and getdents64 pagination always hand back a
+             * cookie that is exactly some entry's offset, so the common case is
+             * an exact hit; erofs itself rounds a mid-dirent position up to the
+             * next dirent slot rather than failing (the `initial` branch of
+             * erofs_readdir), so rounding up is both closer to stock and safer
+             * than treating a non-exact position as EOF -- a sloppy seek loses
+             * nothing. A cookie at or past nm_epack_end() matches no entry and
+             * falls out of the loop as EOF. */
+            if (off < start) continue;
+            emitting = true;
+        }
+        ctx->pos = off;
+        if (!dir_emit(ctx, name, nlen, eino, dt)) {
+            /* Buffer full. ctx->pos is THIS entry's own offset, so the next
+             * getdents64() resumes here and re-emits it; the entry already
+             * written before it takes this offset as its d_off, which is what
+             * erofs would have produced at the same cut point. */
+            full = true;
+            break;
+        }
+    }
+
+    /* Walked to the end: leave the EOF cookie, which getdents64() copies into
+     * the last emitted entry's d_off and which equals the size getattr and
+     * SEEK_END report. */
+    if (!full)
+        ctx->pos = nm_epack_end(&pk);
+
+    if (d) nm_dir_node_put(d);
+    return 0;
+}
+
+/* ---- dir-target backing-directory snapshot ---------------------------------
+ *
+ * A rule whose TARGET is a directory serves that directory's children straight
+ * out of the backing tree on /data, so two facts about it come from f2fs rather
+ * than from the erofs directory it is impersonating. Both were measured on OP15
+ * with a test dir-target rule:
+ *
+ *   SIZE. The injected directory reported size=3452 blocks=7 -- the f2fs values
+ *   -- where every stock erofs dir on the same partition reports the closed form
+ *   12*N + sum(namelen) (/product/etc = 417) and st_blocks rounded up from it.
+ *   nm_dir_size_fix() cannot help: it bails on its first check because the
+ *   backing sb is f2fs, and all it knows how to do is apply a DELTA to a size the
+ *   backing filesystem already computed the erofs way.
+ *
+ *   ORDER. The same rule listed its children in f2fs hash order -- measured
+ *   out-of-order=3 on 4 entries -- where erofs stores dirents sorted by name and
+ *   every rule-free ROM directory sampled came out fully sorted.
+ *
+ * Both need the same thing, the backing directory's entry NAMES, and enumerating
+ * those per stat() is far too expensive. So one bounded, sorted snapshot is
+ * cached per injected inode and both answers are derived from it -- which is also
+ * what keeps them consistent: the listing's terminal cookie is nm_epack_end()
+ * over the same sequence stat() reports as st_size, by construction.
+ *
+ * NARROW ON PURPOSE. Used only when the directory's dir_node holds no injected
+ * children at all -- the pure "serve this /data directory as a ROM directory"
+ * shape, which is the shape that was measured. The moment a rule injects into
+ * the same directory the listing becomes a MERGE (in-place shadowing of a stock
+ * name, whiteouts, per-uid filtering, appended names) whose ordering and size
+ * semantics belong to nomount_actor_proxy() and nm_dir_deltas(); those are left
+ * exactly as they are, and that case keeps today's behaviour unchanged.
+ *
+ * INVALIDATION. The snapshot carries the backing directory's (i_size, mtime) as
+ * sampled BEFORE the walk, and is rebuilt whenever either moves. A create,
+ * unlink or rename in a directory updates that directory's mtime on every
+ * filesystem a module tree can live on, so a tree edited underneath a live rule
+ * is picked up on the next stat() or readdir(). Sampling the stamp before the
+ * walk rather than after means a directory changed DURING the walk carries the
+ * older stamp and rebuilds next time, instead of certifying a listing that is
+ * already stale. Residual: two changes that leave i_size untouched inside a
+ * single nanosecond-resolution timestamp tick.
+ *
+ * BOUNDED. At most NM_DSNAP_MAX_ENTS names and NM_DSNAP_MAX_BYTES of name bytes.
+ * A backing directory larger than either gets a snapshot marked NOT ok, which is
+ * still cached (so the walk is not retried on every stat) and which sends both
+ * callers back to the unmodified paths. So neither readdir nor stat can be made
+ * to allocate more than a fixed ~48 KiB transient / ~40 KiB resident per injected
+ * directory no matter how large the backing directory is, and every allocation
+ * carries __GFP_NOWARN -- an order-3 failure splat in dmesg would itself be a
+ * tell. Plain kmalloc, not kvmalloc: kvmalloc does not exist before 4.12 and the
+ * caps are chosen to stay inside what kmalloc serves. GFP_NOFS, not GFP_KERNEL:
+ * the readdir caller reaches here holding the injected inode's i_rwsem, so
+ * direct reclaim must not be allowed to re-enter a filesystem from under it.
+ */
+#define NM_DSNAP_MAX_ENTS  1024
+#define NM_DSNAP_MAX_BYTES (32 * 1024)
+
+struct nm_dsnap_ent {
+    u32 noff;        /* byte offset of the name within nm_dsnap.names */
+    u16 len;
+    u8  d_type;
+};
+
+struct nm_dsnap {
+    atomic_t refcount;   /* cache's ref + one per in-flight reader */
+    bool ok;             /* false: too large / unreadable -- cached negative */
+    loff_t stamp_size;   /* backing dir i_size + mtime at build time */
+    s64 stamp_sec;
+    long stamp_nsec;
+    loff_t size;         /* erofs closed form over ".", ".." and every entry */
+    unsigned int n;
+    unsigned int nbytes;
+    struct nm_dsnap_ent *ent;   /* n entries, sorted by name */
+    char *names;                /* nbytes of names, in that same order */
+};
+
+/* Build-time scratch: name POINTERS, so the sort comparator needs no context
+ * argument and plain sort() is enough (sort_r's cmp signature is not stable
+ * across the supported range). */
+struct nm_dsnap_bent {
+    const char *p;
+    u16 len;
+    u8  d_type;
+};
+
+struct nm_dsnap_walk {
+    struct dir_context ctx;
+    struct nm_dsnap_bent *ent;
+    char *names;
+    unsigned int n;
+    unsigned int nbytes;
+    bool overflow;
+};
+
+/* mkfs.erofs orders dirents by strcmp() over NUL-terminated names, so a shared
+ * prefix puts the shorter name first. Reproduce that, not memcmp over the
+ * shorter length alone. */
+static int nm_dsnap_cmp(const void *a, const void *b)
+{
+    const struct nm_dsnap_bent *x = a, *y = b;
+    unsigned int m = min(x->len, y->len);
+    int r = memcmp(x->p, y->p, m);
+
+    if (r) return r;
+    return (int)x->len - (int)y->len;
+}
+
+static NM_ACTOR_RET nm_dsnap_actor(struct dir_context *ctx, const char *name, int namelen,
+                                   loff_t off, u64 ino, unsigned int dt)
+{
+    struct nm_dsnap_walk *b = container_of(ctx, struct nm_dsnap_walk, ctx);
+
+    /* "." and ".." are ordinals 0 and 1 of the emitted listing and are accounted
+     * separately, exactly as they are for a synthesized directory. */
+    if (namelen == 1 && name[0] == '.') return NM_ACTOR_CONTINUE;
+    if (namelen == 2 && name[0] == '.' && name[1] == '.') return NM_ACTOR_CONTINUE;
+    if (namelen <= 0 || namelen > NAME_MAX ||
+        b->n >= NM_DSNAP_MAX_ENTS ||
+        b->nbytes + (unsigned int)namelen > NM_DSNAP_MAX_BYTES) {
+        b->overflow = true;
+        return !NM_ACTOR_CONTINUE;      /* stop: bool actors want false, int ones nonzero */
+    }
+    b->ent[b->n].p = b->names + b->nbytes;
+    b->ent[b->n].len = (u16)namelen;
+    b->ent[b->n].d_type = (u8)dt;
+    memcpy(b->names + b->nbytes, name, namelen);
+    b->nbytes += (unsigned int)namelen;
+    b->n++;
+    return NM_ACTOR_CONTINUE;
+}
+
+static void nm_dsnap_free(struct nm_dsnap *s)
+{
+    if (!s) return;
+    kfree(s->ent);
+    kfree(s->names);
+    kfree(s);
+}
+
+static void nm_dsnap_put(struct nm_dsnap *s)
+{
+    if (s && atomic_dec_and_test(&s->refcount))
+        nm_dsnap_free(s);
+}
+
+static bool nm_dsnap_fresh(const struct nm_dsnap *s, struct inode *bi)
+{
+    struct timespec64 mt = nm_inode_mtime(bi);
+
+    return s->stamp_size == i_size_read(bi) &&
+           s->stamp_sec == mt.tv_sec && s->stamp_nsec == mt.tv_nsec;
+}
+
+/* Enumerate the backing directory once. Always returns a STAMPED snapshot (or
+ * NULL only if even the descriptor could not be allocated), so a directory that
+ * does not qualify caches its own negative instead of re-walking on every
+ * stat(). Privileged (nm_root_cred) and read-only, like every other backing-tree
+ * scan in this file: the answer must not depend on which uid happened to stat
+ * the directory first, and st_size is readable without read permission anyway. */
+static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *bi,
+                                      unsigned int blocksize)
+{
+    struct nm_dsnap_walk b = { .ctx.actor = nm_dsnap_actor };
+    struct nm_epack pk = { .blocksize = blocksize, .full = 0, .used = 0, .slot = 0 };
+    const struct cred *old;
+    struct file *dir;
+    struct nm_dsnap *s;
+    struct timespec64 mt;
+    unsigned int i, off = 0;
+
+    s = kzalloc(sizeof(*s), GFP_NOFS | __GFP_NOWARN);
+    if (!s) return NULL;
+    atomic_set(&s->refcount, 1);
+    mt = nm_inode_mtime(bi);
+    s->stamp_size = i_size_read(bi);
+    s->stamp_sec = mt.tv_sec;
+    s->stamp_nsec = mt.tv_nsec;
+
+    b.ent = kmalloc_array(NM_DSNAP_MAX_ENTS, sizeof(*b.ent), GFP_NOFS | __GFP_NOWARN);
+    b.names = kmalloc(NM_DSNAP_MAX_BYTES, GFP_NOFS | __GFP_NOWARN);
+    if (!b.ent || !b.names) goto out;
+
+    /* iterate_dir(), not a hand dispatch: it takes the backing directory's
+     * i_rwsem, runs the LSM hook and the IS_DEADDIR check. The backing dir lives
+     * on a WRITABLE filesystem, so that rwsem is exactly what keeps a concurrent
+     * create/unlink out of this walk. Lock order is our inode's i_rwsem (held by
+     * the VFS on the readdir path) then the backing dir's -- the same order
+     * nm_dir_child_lookup()'s lookup_one_len_unlocked() already establishes. */
+    old = override_creds(nm_root_cred);
+    dir = dentry_open(&info->r_path, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+    if (!IS_ERR(dir)) {
+        /* A failed or truncated walk must NOT become a snapshot: a listing that
+         * is short by one name would move st_size, the cookie sequence and the
+         * emitted set together, i.e. produce a self-consistent LIE about the
+         * directory. Fall back to the untouched proxy path instead. */
+        if (iterate_dir(dir, &b.ctx) < 0)
+            b.overflow = true;
+        fput(dir);
+    } else {
+        b.overflow = true;
+    }
+    revert_creds(old);
+    if (b.overflow) goto out;
+
+    sort(b.ent, b.n, sizeof(*b.ent), nm_dsnap_cmp, NULL);
+
+    s->ent = kmalloc_array(b.n + 1, sizeof(*s->ent), GFP_NOFS | __GFP_NOWARN);
+    s->names = kmalloc(b.nbytes + 1, GFP_NOFS | __GFP_NOWARN);
+    if (!s->ent || !s->names) goto out;
+
+    /* Copy the names down in SORTED order, so the resident copy is both smaller
+     * than the scratch and walked sequentially by the emitter. */
+    nm_epack_step(&pk, 1);      /* "."  */
+    nm_epack_step(&pk, 2);      /* ".." */
+    for (i = 0; i < b.n; i++) {
+        memcpy(s->names + off, b.ent[i].p, b.ent[i].len);
+        s->ent[i].noff = off;
+        s->ent[i].len = b.ent[i].len;
+        s->ent[i].d_type = b.ent[i].d_type;
+        off += b.ent[i].len;
+        nm_epack_step(&pk, b.ent[i].len);
+    }
+    s->n = b.n;
+    s->nbytes = b.nbytes;
+    s->size = nm_epack_end(&pk);
+    s->ok = true;
+
+out:
+    kfree(b.ent);
+    kfree(b.names);
+    return s;
+}
+
+/* A usable snapshot for this injected directory, with a reference, or NULL. */
+static struct nm_dsnap *nm_dsnap_get(struct nm_inode_info *info, unsigned int blocksize)
+{
+    struct nm_dsnap *s, *stale;
+    struct inode *bi;
+
+    if (!info || !info->r_path.dentry) return NULL;
+    if (info->flags & NM_FLAG_VIRTUAL_DIR) return NULL;
+    /* Merged listings keep nomount_actor_proxy()'s semantics -- see the header. */
+    if (info->dir_node && !idr_is_empty(&info->dir_node->children_idr)) return NULL;
+    bi = d_backing_inode(info->r_path.dentry);
+    if (!bi || !S_ISDIR(bi->i_mode)) return NULL;
+
+    spin_lock(&info->dsnap_lock);
+    s = info->dsnap;
+    if (s && nm_dsnap_fresh(s, bi)) {
+        if (!s->ok) { spin_unlock(&info->dsnap_lock); return NULL; }
+        atomic_inc(&s->refcount);
+        spin_unlock(&info->dsnap_lock);
+        return s;
+    }
+    spin_unlock(&info->dsnap_lock);
+
+    s = nm_dsnap_make(info, bi, blocksize);
+    if (!s) return NULL;
+
+    /* Two threads can race here and both build; the loser's snapshot is simply
+     * dropped by its own put. Both describe the same directory. */
+    spin_lock(&info->dsnap_lock);
+    stale = info->dsnap;
+    info->dsnap = s;
+    atomic_inc(&s->refcount);          /* cache ref; the build ref is the caller's */
+    spin_unlock(&info->dsnap_lock);
+    nm_dsnap_put(stale);
+
+    if (!s->ok) { nm_dsnap_put(s); return NULL; }
+    return s;
+}
+
+/* Dropped when the injected inode goes away. Readers hold their own reference,
+ * so this only releases the cache's. */
+static void nm_dsnap_drop(struct nm_inode_info *info)
+{
+    struct nm_dsnap *s;
+
+    spin_lock(&info->dsnap_lock);
+    s = info->dsnap;
+    info->dsnap = NULL;
+    spin_unlock(&info->dsnap_lock);
+    nm_dsnap_put(s);
+}
+
+/* FIX 2: report the erofs closed form over the backing directory's own children
+ * instead of f2fs's block-quantised size. Returns true if it answered.
+ *
+ * st_blocks has to move with it or the pair becomes its own tell: erofs sets
+ * i_blocks = round_up(i_size, blocksize) >> 9 for an uncompressed inode, and a
+ * directory is always uncompressed (v6.6 fs/erofs/inode.c, the !nblks arm). */
+/* The size a dir-target directory has to REPORT everywhere -- stat(), SEEK_END,
+ * and the terminal readdir cookie all read it from here so they cannot drift
+ * apart. 0 means the snapshot does not apply and nothing should be overridden
+ * (a real answer is never 0: "." and ".." alone are 27 bytes). */
+static loff_t nm_dsnap_dir_size(struct inode *v_inode, struct nm_inode_info *info)
+{
+    struct super_block *sb = v_inode->i_sb;
+    unsigned int bs = sb->s_blocksize ? sb->s_blocksize : 4096;
+    struct nm_dsnap *s;
+    loff_t sz;
+
+    /* Same gate as the synthesized-dir size in nm_file_getattr(): the closed form
+     * is an erofs fact, and on a filesystem that really does quantise directories
+     * to a block, applying it would MANUFACTURE the divergence it removes. */
+    if (sb->s_magic != EROFS_SUPER_MAGIC_V1 && !READ_ONCE(nm_vdir_erofs_size))
+        return 0;
+    s = nm_dsnap_get(info, bs);
+    if (!s) return 0;
+    sz = s->size;
+    nm_dsnap_put(s);
+    return sz;
+}
+
+static bool nm_dsnap_size_fix(struct nm_inode_info *info, struct inode *v_inode,
+                              struct kstat *stat)
+{
+    unsigned int bs = v_inode->i_sb->s_blocksize ? v_inode->i_sb->s_blocksize : 4096;
+    loff_t sz = nm_dsnap_dir_size(v_inode, info);
+
+    if (sz <= 0) return false;
+    stat->size = sz;
+    stat->blocks = (blkcnt_t)(round_up(sz, (loff_t)bs) >> 9);
+    return true;
+}
+
+/* FIX 3: emit the backing directory's children SORTED, with erofs cookies.
+ *
+ * Structurally identical to nm_vdir_iterate_erofs() -- ordinal 0 is ".", 1 is
+ * "..", k >= 2 is snapshot entry k-2 -- and it inherits that function's position
+ * contract wholesale: cookies are byte offsets replayed by nm_epack_step(), a
+ * resume walks from ordinal 0, and the terminal cookie is nm_epack_end(), which
+ * is the same number nm_dsnap_size_fix() reports as st_size.
+ *
+ * The stability trade-off is BETTER here than for a synthesized dir: the ordinals
+ * come from a snapshot that is immutable once built and pinned by the caller's
+ * reference, so a change to the backing directory cannot renumber the ordinals of
+ * a read already in progress. It is only seen by the NEXT open or the next resume,
+ * which rebuilds against the new stamp -- the same window every cached readdir has.
+ *
+ * d_ino comes from nm_dirent_ino(), exactly as the proxy path derives it, so
+ * getdents64 and a following stat() on the same name keep telling one story. */
+static int nm_dsnap_iterate(struct file *file, struct dir_context *ctx,
+                            struct nm_inode_info *info, struct nm_dsnap *s,
+                            unsigned int blocksize)
+{
+    struct nm_epack pk = { .blocksize = blocksize, .full = 0, .used = 0, .slot = 0 };
+    loff_t start = ctx->pos;
+    bool emitting = false, full = false;
+    int k;
+
+    if (start < 0) start = 0;
+
+    for (k = 0; ; k++) {
+        const char *name;
+        int nlen;
+        u64 eino;
+        unsigned char dt;
+        loff_t off;
+
+        if (k == 0) {
+            name = "."; nlen = 1; dt = DT_DIR;
+        } else if (k == 1) {
+            name = ".."; nlen = 2; dt = DT_DIR;
+        } else {
+            unsigned int i = (unsigned int)(k - 2);
+
+            if (i >= s->n) break;
+            name = s->names + s->ent[i].noff;
+            nlen = s->ent[i].len;
+            dt = s->ent[i].d_type;
+        }
+        eino = nm_dirent_ino(info, name, nlen);
+        off = nm_epack_step(&pk, (unsigned int)nlen);
+        if (!emitting) {
+            if (off < start) continue;
+            emitting = true;
+        }
+        ctx->pos = off;
+        if (!dir_emit(ctx, name, nlen, eino, dt)) { full = true; break; }
+    }
+    if (!full)
+        ctx->pos = nm_epack_end(&pk);
+    return 0;
+}
+
 /* Reported (getattr-level) stat of a path — i.e. what a userspace detector
  * sees, not the raw backing inode->i_sb->s_dev. On an overlay mount this yields
  * the underlying layer's dev; on plain erofs it equals the sb dev. We mirror
@@ -1964,9 +2586,20 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
         /* The sb here is the PARENT's -- overlayfs on an overlay-backed ROM path,
          * which is why this guard alone left those dirs at 4096. The knob is
          * userspace's measured answer for this device. */
-        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size))
-            stat->size = nm_vdir_size(info->dir_node,
-                                      v_inode->i_sb->s_blocksize);
+        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
+            unsigned long vbs = v_inode->i_sb->s_blocksize;
+
+            stat->size = nm_vdir_size(info->dir_node, vbs);
+            /* st_blocks has to follow st_size, or fixing one half just moves the
+             * tell. nomount_create_new_inode() stamps i_blocks = 8 (one 4K block)
+             * and nothing updated it, so a synthesized dir whose size is now the
+             * exact erofs closed form still reported 8 sectors -- correct only
+             * while that size fits in one block, and visibly wrong the moment it
+             * does not. erofs computes an uncompressed inode's blocks as the size
+             * rounded up to a block (fs/erofs/inode.c), so do the same. */
+            if (vbs)
+                stat->blocks = (blkcnt_t)((((u64)stat->size + vbs - 1) & ~((u64)vbs - 1)) >> 9);
+        }
         return 0;
     }
 
@@ -1993,10 +2626,17 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
          * stock sibling produces. Narrow to the stock mask -- never widen. */
         if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #endif
-        if (S_ISDIR(stat->mode))
-            nm_dir_size_fix(info, stat);
-        else
+        if (S_ISDIR(stat->mode)) {
+            /* Fix 2 first: a dir-target directory's size comes from the
+             * backing f2fs dir, which nm_dir_size_fix() cannot correct at
+             * all. It falls through to the delta correction whenever the
+             * snapshot does not apply (merged listing, non-erofs shape,
+             * backing dir too large). */
+            if (!nm_dsnap_size_fix(info, v_inode, stat))
+                nm_dir_size_fix(info, stat);
+        } else {
             nm_mirror_blocks(info, stat);   /* see nm_size_ratio() */
+        }
     }
     return res;
 }
@@ -2060,9 +2700,20 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
         /* The sb here is the PARENT's -- overlayfs on an overlay-backed ROM path,
          * which is why this guard alone left those dirs at 4096. The knob is
          * userspace's measured answer for this device. */
-        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size))
-            stat->size = nm_vdir_size(info->dir_node,
-                                      v_inode->i_sb->s_blocksize);
+        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
+            unsigned long vbs = v_inode->i_sb->s_blocksize;
+
+            stat->size = nm_vdir_size(info->dir_node, vbs);
+            /* st_blocks has to follow st_size, or fixing one half just moves the
+             * tell. nomount_create_new_inode() stamps i_blocks = 8 (one 4K block)
+             * and nothing updated it, so a synthesized dir whose size is now the
+             * exact erofs closed form still reported 8 sectors -- correct only
+             * while that size fits in one block, and visibly wrong the moment it
+             * does not. erofs computes an uncompressed inode's blocks as the size
+             * rounded up to a block (fs/erofs/inode.c), so do the same. */
+            if (vbs)
+                stat->blocks = (blkcnt_t)((((u64)stat->size + vbs - 1) & ~((u64)vbs - 1)) >> 9);
+        }
         return 0;
     }
 
@@ -2089,10 +2740,17 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
          * stock sibling produces. Narrow to the stock mask -- never widen. */
         if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #endif
-        if (S_ISDIR(stat->mode))
-            nm_dir_size_fix(info, stat);
-        else
+        if (S_ISDIR(stat->mode)) {
+            /* Fix 2 first: a dir-target directory's size comes from the
+             * backing f2fs dir, which nm_dir_size_fix() cannot correct at
+             * all. It falls through to the delta correction whenever the
+             * snapshot does not apply (merged listing, non-erofs shape,
+             * backing dir too large). */
+            if (!nm_dsnap_size_fix(info, v_inode, stat))
+                nm_dir_size_fix(info, stat);
+        } else {
             nm_mirror_blocks(info, stat);   /* see nm_size_ratio() */
+        }
     }
     return res;
 }
@@ -2208,6 +2866,41 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
     struct nomount_dir_node *dir_node = info ? info->dir_node : NULL;
     struct file *real_file = file->private_data;
     int res = 0;
+
+    /* Both erofs-cookie emitters own their listing from ordinal 0, so they are
+     * decided BEFORE nm_is_virtual_pos() -- that test only means anything for a
+     * dir whose cookies SIT ABOVE a real backing pass, and letting it run first
+     * would short-circuit a resume into the counter-based emitter.
+     *
+     * Gated exactly like the erofs SIZE in nm_file_getattr() and nm_llseek():
+     * the terminal cookie IS the reported size, so the two are on or off
+     * together. Off (non-erofs sb, knob clear) keeps the previous behaviour byte
+     * for byte, as does every case either emitter declines. */
+    if (likely(info)) {
+        struct super_block *sb = file_inode(file)->i_sb;
+
+        if (sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
+            /* Fully synthesized: no real pass exists at all. */
+            if (!real_file && (info->flags & NM_FLAG_VIRTUAL_DIR))
+                return nm_vdir_iterate_erofs(file, ctx, info, dir_node,
+                                             sb->s_blocksize);
+            /* Dir-target rule serving its OWN backing directory. Gated on
+             * real_file being that directory: a hidden reader is handed the
+             * pinned STOCK dir by nm_open(), and that one's order and cookies
+             * are already genuine erofs. */
+            if (real_file && !(info->flags & NM_FLAG_VIRTUAL_DIR) &&
+                info->r_path.dentry &&
+                real_file->f_path.dentry == info->r_path.dentry) {
+                struct nm_dsnap *snap = nm_dsnap_get(info, sb->s_blocksize);
+
+                if (snap) {
+                    res = nm_dsnap_iterate(file, ctx, info, snap, sb->s_blocksize);
+                    nm_dsnap_put(snap);
+                    return res;
+                }
+            }
+        }
+    }
 
     if (unlikely(nm_is_virtual_pos(dir_node, ctx->pos))) {
         nomount_emit_virtual_children(ctx, dir_node,

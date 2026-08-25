@@ -118,6 +118,26 @@
 #define nm_mirror_blocks                         __vfsx_197
 #define nm_readlink                              __vfsx_198
 #define nomount_hijacked_statfs                  __vfsx_199
+#define nm_epack                                 __vfsx_200
+#define nm_epack_step                            __vfsx_201
+#define nm_epack_end                             __vfsx_202
+#define nm_vdir_iterate_erofs                    __vfsx_203
+#define nm_dsnap                                 __vfsx_204
+#define nm_dsnap_ent                             __vfsx_205
+#define nm_dsnap_bent                            __vfsx_206
+#define nm_dsnap_walk                            __vfsx_207
+#define nm_dsnap_cmp                             __vfsx_208
+#define nm_dsnap_actor                           __vfsx_209
+#define nm_dsnap_free                            __vfsx_210
+#define nm_dsnap_put                             __vfsx_211
+#define nm_dsnap_fresh                           __vfsx_212
+#define nm_dsnap_make                            __vfsx_213
+#define nm_dsnap_get                             __vfsx_214
+#define nm_dsnap_drop                            __vfsx_215
+#define nm_dsnap_size_fix                        __vfsx_216
+#define nm_dsnap_iterate                         __vfsx_217
+#define nm_inode_mtime                           __vfsx_218
+#define nm_dsnap_dir_size                        __vfsx_219
 #define nm_tag_passthrough_dentry                __vfsx_189
 #define nm_child_ino                             __vfsx_190
 #define nm_dirent_ino                            __vfsx_191
@@ -289,7 +309,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.24.0"
+#define NM_MODULE_VERSION "1.25.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -413,8 +433,30 @@
  *    byte read zero. Now generic_file_readonly_mmap(), which is exactly what
  *    erofs_file_mmap is -- so an injected file gets the same generic_file_vm_ops
  *    as its stock siblings, and a shared+maywrite mapping is refused with
- *    -EINVAL as stock refuses it, instead of being allowed by f2fs. */
-#define NOMOUNT_VERSION    24
+ *    -EINVAL as stock refuses it, instead of being allowed by f2fs.
+ *
+ * 25: readdir cookies. A SYNTHESIZED directory emitted d_off as a plain counter
+ *    (1, 3, 4 ... 28) where erofs emits each dirent at its byte offset in the
+ *    directory -- 12*(j+1) within a block, ending on i_size. Measured on OP15:
+ *    /product/priv-app/Mms/lib/arm64 gave 1,3,4..28 against its stock peer
+ *    /product/priv-app/AIUnit/lib/arm64 at 12,24,36..314. i_size was already
+ *    right, so only the cookies betrayed it. The emitter now replays the same
+ *    block walk nm_vdir_size() uses, so the terminal cookie and the reported
+ *    size are one computation rather than two that happen to agree; the model
+ *    was checked against four real erofs dirs (190/432/942/1284 entries, up to
+ *    12 blocks) with zero mismatches. st_blocks now follows st_size for those
+ *    dirs too -- it was stamped at 8 sectors and never updated, which was only
+ *    correct while the size fit in one block.
+ *
+ *    A DIR-TARGET rule (backing directory on /data) additionally reported the
+ *    f2fs directory's own size and hash-ordered children: measured 3452 bytes
+ *    and out-of-order=3 where stock erofs dirs on the same path are the closed
+ *    form and fully sorted. Both now come from one bounded, cached, sorted
+ *    snapshot of the backing directory, so size, blocks and cookies agree by
+ *    construction. Narrowly gated to the pure "serve a /data dir as a ROM dir"
+ *    shape; a directory that also has injected children keeps the existing
+ *    merge semantics. */
+#define NOMOUNT_VERSION    25
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -598,6 +640,8 @@ struct nm_sop {
     struct list_head list;
 };
 
+struct nm_dsnap;
+
 struct nm_inode_info {
     struct path r_path;
     /* The STOCK file this injection shadows, pinned at rule creation. A hidden
@@ -632,6 +676,12 @@ struct nm_inode_info {
      * clear has happened since, so that path bails to the ref-walk which re-runs
      * the full verdict and re-stamps. See nomount_generation. */
     u32 gen;
+    /* Cached sorted snapshot of a dir-target rule's BACKING directory, and
+     * the lock that publishes it. NULL until the first qualifying
+     * stat()/readdir(); see the nm_dsnap block in nomount.c for what it is
+     * for, how it is bounded and when it is invalidated. */
+    struct nm_dsnap *dsnap;
+    spinlock_t dsnap_lock;
     /* Freed via call_rcu, NOT immediately. destroy_inode() runs synchronously
      * (fs/inode.c), so a plain kmem_cache_free here would pull this struct out
      * from under the RCU fast path, which reads i_private with no reference. The
@@ -1063,6 +1113,21 @@ static inline void nm_sync_inode_times(struct inode *v_inode, struct inode *r_in
     v_inode->i_atime = r_inode->i_atime;
     v_inode->i_mtime = r_inode->i_mtime;
     v_inode->i_ctime = r_inode->i_ctime;
+#endif
+}
+
+/* Read a directory's mtime for the dir-target snapshot's validity stamp.
+ * inode_get_mtime() arrives at v6.7, which is also where the field became
+ * __i_mtime -- verified against the trees, not from memory: v6.6
+ * include/linux/fs.h:675 declares `struct timespec64 i_mtime` and has no
+ * inode_get_mtime; v6.7 fs.h:675 declares __i_mtime and fs.h:1559 defines
+ * inode_get_mtime(). Same split nm_sync_inode_times() above uses. */
+static inline struct timespec64 nm_inode_mtime(struct inode *inode)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
+    return inode_get_mtime(inode);
+#else
+    return inode->i_mtime;
 #endif
 }
 
