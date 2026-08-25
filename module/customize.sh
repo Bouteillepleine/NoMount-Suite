@@ -92,7 +92,14 @@ fi
 
 NMDIR=/data/adb/nomount
 mkdir -p "$NMDIR"
-set_perm "$NMDIR" 0 0 0700
+# The 5th argument is NOT optional here. set_perm() defaults its SELinux
+# context to u:object_r:system_file:s0, and the live policy grants every app
+# domain read+search on system_file (dir 0x11140053, file 0x2044412) while
+# granting NOTHING on adb_data_file -- so omitting it relabelled the whole
+# state directory on every install, and the only thing keeping spoof.conf,
+# uidhide, pathhide.conf and blocklist away from an app was /data/adb refusing
+# traversal one level up. Measured on OP15. Match the parent explicitly.
+set_perm "$NMDIR" 0 0 0700 u:object_r:adb_data_file:s0
 CONF="$NMDIR/spoof.conf"
 [ -f "$CONF" ] || cat > "$CONF" <<'EOF'
 # NoMount Suite — spoof add-on config
@@ -166,12 +173,12 @@ if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
         echo "zygisksu"
     } > "$NMDIR/absorb-skip.txt"
 fi
-set_perm "$NMDIR/absorb-skip.txt" 0 0 0600
+set_perm "$NMDIR/absorb-skip.txt" 0 0 0600 u:object_r:adb_data_file:s0
 # 0600, not 0644: this is the cloak rule list -- it names exactly which packages
 # are being hidden from maps/fd -- and every other file in the 0700 $NMDIR is
 # 0600. Only root reads it (service.sh at boot, the WebUI through an exec), so
 # nothing needs the group/other bits.
-set_perm "$NMDIR/pathhide.conf" 0 0 0600
+set_perm "$NMDIR/pathhide.conf" 0 0 0600 u:object_r:adb_data_file:s0
 # Probe over the netlink knob, not a /proc node: pathhide no longer creates one
 # (any app could find it with a single readdir of /proc). `nm k p` with no value
 # is side-effect-free and exits 0 only when the patch set is compiled in.
