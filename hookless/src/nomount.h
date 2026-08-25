@@ -289,7 +289,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.23.0"
+#define NM_MODULE_VERSION "1.24.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -400,8 +400,21 @@
  *    521..781ns. Disjoint, so one threshold classified every file, unprivileged,
  *    with each file its own baseline. Now short-circuited to -ENOTTY when stock
  *    could not have answered otherwise; overlay-backed paths still open and
- *    forward, because ovl_file_operations DOES implement ->unlocked_ioctl. */
-#define NOMOUNT_VERSION    23
+ *    forward, because ovl_file_operations DOES implement ->unlocked_ioctl.
+ *
+ * 24: the mmap path no longer installs the BACKING filesystem's vm_ops over our
+ *    file. It used to point vma->vm_file at the backing file, call its ->mmap,
+ *    and restore vm_file -- leaving f2fs_file_vm_ops behind, whose .fault and
+ *    .page_mkwrite begin with F2FS_I_SB(file_inode(vma->vm_file)) on what is now
+ *    an erofs or overlayfs inode. Measured from the device's own BTF:
+ *    f2fs_sb_info.iostat_enable at +4376 and iostat_lock at +3676 against a
+ *    472-byte erofs_sb_info (176 for ovl_fs), i.e. a ~4KB out-of-bounds read on
+ *    every faulted page of every injected mapping, surviving only because that
+ *    byte read zero. Now generic_file_readonly_mmap(), which is exactly what
+ *    erofs_file_mmap is -- so an injected file gets the same generic_file_vm_ops
+ *    as its stock siblings, and a shared+maywrite mapping is refused with
+ *    -EINVAL as stock refuses it, instead of being allowed by f2fs. */
+#define NOMOUNT_VERSION    24
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)

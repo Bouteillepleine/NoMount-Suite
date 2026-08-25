@@ -1214,38 +1214,64 @@ static ssize_t nm_write_iter(struct kiocb *iocb, struct iov_iter *from)
     return ret;
 }
 
+/* Map through the GENERIC path, never the backing filesystem's ->mmap.
+ *
+ * The old shape -- point vma->vm_file at the backing file, call its ->mmap,
+ * then restore vma->vm_file to ours -- left the backing fs's vm_ops installed
+ * over OUR file. f2fs_file_mmap() sets vma->vm_ops = &f2fs_file_vm_ops, whose
+ * .fault and .page_mkwrite both start with F2FS_I_SB(file_inode(vma->vm_file)),
+ * i.e. inode->i_sb->s_fs_info reinterpreted as a struct f2fs_sb_info *. After
+ * the restore that inode is ours, on erofs or overlayfs. Read from the device's
+ * own BTF: f2fs_sb_info.iostat_enable sits at offset 4376 and iostat_lock at
+ * 3676, while erofs_sb_info is 472 bytes and ovl_fs is 176 -- so every faulted
+ * page of every injected mapping read ~4KB past a live slab object, and a
+ * non-zero byte there would have taken a spinlock and written counters into
+ * whatever allocation follows. CONFIG_F2FS_IOSTAT=y on OP15, and the linker
+ * mmaps every injected .so, so this was the hot path, surviving on the stray
+ * byte happening to read zero -- a property of struct layout, not of anything
+ * we control.
+ *
+ * The generic path is also what STOCK does here: erofs_file_mmap is literally
+ * generic_file_readonly_mmap, so an injected file now gets the same
+ * generic_file_vm_ops as its stock siblings instead of f2fs's. filemap_fault()
+ * resolves pages through vmf->vma->vm_file->f_mapping, and nm_open() already
+ * points our f_mapping at whichever file we serve (the module file, or the
+ * stock one for a hidden reader), so page contents are unchanged and f2fs's
+ * a_ops still do the decryption/decompression.
+ *
+ * READONLY rather than plain generic_file_mmap, deliberately: it rejects a
+ * shared+maywrite mapping with -EINVAL exactly as stock erofs does. Forwarding
+ * to f2fs used to ALLOW that, which is its own one-syscall divergence -- and no
+ * legitimate consumer can depend on it, because the same mmap fails on a stock
+ * device. MAP_PRIVATE (what the linker and AssetManager use) is unaffected. */
 static int nm_mmap(struct file *file, struct vm_area_struct *vma)
 {
     struct file *real_file = file->private_data;
-    int ret;
-    if (!real_file || !real_file->f_op->mmap) return -ENODEV;
 
-    /* Restore on FAILURE too. mmap_region() took its ref on `file` and its error
-     * path does fput(vma->vm_file): leaving real_file there over-puts a reference
-     * we never took (backing struct file UAF) and leaks the one on `file`. */
-    vma->vm_file = real_file;
-    ret = real_file->f_op->mmap(real_file, vma);
-    if (vma->vm_file == real_file) vma->vm_file = file;
-
-    return ret;
+    if (!real_file) return -ENODEV;
+    return generic_file_readonly_mmap(file, vma);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+/* Same reasoning as nm_mmap(), on the 6.16+ ->mmap_prepare path: forwarding to
+ * the backing fs installed ITS vm_ops over our file. generic_file_readonly_mmap_prepare
+ * landed in 6.17 (absent in 6.16), and erofs's own erofs_file_mmap_prepare is
+ * exactly that call, so this matches stock on every version that has the hook.
+ * On 6.16 there is no generic _prepare to call, so fall back to reporting no
+ * support: the VFS then uses ->mmap, which is nm_mmap() above and already
+ * correct. nm_file_fops_mmap_prepare is only installed when the backing inode
+ * advertises ->mmap_prepare (see nomount_create_new_inode). */
 static int nm_mmap_prepare(struct vm_area_desc *desc)
 {
     struct file *file = desc->file;
     struct file *real_file = file->private_data;
-    int ret;
-    if (!real_file || !real_file->f_op->mmap_prepare) return -ENODEV;
 
-    /* desc->file is const-qualified as of 6.18. The vm_area_desc is a mutable
-     * on-stack object on the mmap path, so redirect through a cast (preserving
-     * the pre-6.18 behaviour) and restore it afterwards. */
-    *(struct file **)&desc->file = real_file;
-    ret = real_file->f_op->mmap_prepare(desc);
-    if (desc->file == real_file) *(struct file **)&desc->file = file;   /* on failure too */
-
-    return ret;
+    if (!real_file) return -ENODEV;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+    return generic_file_readonly_mmap_prepare(desc);
+#else
+    return -ENOSYS;
+#endif
 }
 #endif
 
