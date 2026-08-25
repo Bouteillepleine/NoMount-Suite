@@ -1603,7 +1603,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     // it in the declined bucket would be a different claim from the true one.
     if deferred > 0 {
         println!(
-            "nomount absorb: {deferred} my_* mount(s) deferred to the pre-zygote pass              (absorbing them on a live system has rebooted a device); they are taken              at the next boot if the my_hookless trial is enabled"
+            "nomount absorb: {deferred} my_* mount(s) deferred to the pre-zygote pass \
+             (absorbing them on a live system has rebooted a device); they are taken at the \
+             next boot if the my_hookless trial is enabled"
         );
     }
     if cands.is_empty() {
