@@ -815,11 +815,12 @@
     </div>
   </header>
 
-  <!-- Global warning: the root manager's umount switches. Deliberately OUTSIDE
-       every <section> so it shows on any tab -- a switch that can break root
-       should not require navigating to the right tab to discover. -->
-  <div class="banner warn" id="mgrwarn" hidden></div>
-  <div class="banner warn" id="incwarn" hidden></div>
+  <!-- Global warnings: the root manager's Kernel-umount switch, and a bootloop
+       guard that has tripped. Deliberately OUTSIDE every <section> so they show on
+       any tab -- neither "a switch that can break root" nor "the Suite turned
+       itself off" should require navigating to the right tab to discover. -->
+  <div class="banner" id="mgrwarn" hidden></div>
+  <div class="banner" id="incwarn" hidden></div>
 
   <section class="tab on" id="tab-status">
   <div class="banner" id="banner" hidden>Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
@@ -838,11 +839,12 @@
       <div class="metric"><div class="k">Modules served</div><div class="v" id="mMod">—</div></div>
     </div>
     <!-- THE diagnostic surface for most people.
-         Diagnostics used to be a fifth nav tab, which told every user there was a
-         fifth job to do here. There isn't: the overwhelmingly common answer is
-         "nothing is detectable", and that is one line, not a screen. It is fed by
-         the audit the boot pass already cached, so showing it costs nothing, and
-         it only asks for attention when a finding is actually open. -->
+         Diagnostics used to be its own nav tab, which told every user there was
+         another job to do here. There isn't: the overwhelmingly common answer is
+         "nothing is detectable", and that is one line, not a screen. It reads the
+         report the boot pass already cached, so showing it costs nothing -- and it
+         asks for attention only when the report actually has some, or when the
+         report is not a complete answer yet. -->
     <button class="healthline" id="healthline" onclick="openDetail()">
       <span class="hl-dot" id="hlDot"></span>
       <span class="hl-txt" id="hlTxt">Checking…</span>
