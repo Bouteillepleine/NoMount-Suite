@@ -305,9 +305,23 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
                 if t.starts_with('#') || t.is_empty() {
                     continue;
                 }
-                let kind = if (["cp ", "mv ", "ln ", "touch ", "rm "]
+                // The ROM path must be the DESTINATION. `cp /system/etc/hosts
+                // $MODPATH/system/etc/hosts` reads a stock file to seed a module
+                // copy -- the standard opening move of every hosts module -- and
+                // reporting that as a write told the user their module would not
+                // work when nothing was wrong. Require that no `$MODPATH`/`$MODDIR`
+                // destination follows the ROM path on the line.
+                let rom_is_source = PARTS.iter().any(|p| {
+                    t.find(&format!(" /{p}/")).is_some_and(|at| {
+                        t[at..].contains("$MODPATH") || t[at..].contains("$MODDIR")
+                    })
+                });
+                // " rm " with spaces, not "rm ": the latter is a substring of
+                // "perm ", so `set_perm /system/bin/foo 0 0 0755` matched.
+                let kind = if (["cp ", "mv ", "ln ", "touch ", " rm "]
                     .iter()
                     .any(|v| t.contains(v))
+                    && !rom_is_source
                     && PARTS.iter().any(|p| t.contains(&format!(" /{p}/"))))
                     || (t.contains("remount")
                         && PARTS.iter().any(|p| {
@@ -315,8 +329,12 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
                         }))
                 {
                     Some(Incompat::RomWrite)
+                // A path component after /mirror, matching what the doc above
+                // claims. `MIRROR=$MAGISKTMP/mirror` on its own is boilerplate --
+                // 50 of 182 corpus matches were exactly that and never read
+                // through it.
                 } else if t.contains(".magisk/mirror/")
-                    || (t.contains("MAGISKTMP") && t.contains("/mirror"))
+                    || (t.contains("MAGISKTMP") && t.contains("/mirror/"))
                     || t.contains("mirror/system")
                     || t.contains("mirror/vendor")
                 {
@@ -405,7 +423,9 @@ fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
         let name = e.file_name();
         let name = name.to_string_lossy().to_lowercase();
         if IMG_EXT.iter().any(|x| name.ends_with(x)) {
-            return Some(e.file_name().to_string_lossy().into_owned());
+            // The path, not the basename: the doc promises module-relative and a
+            // bare `rootfs.img` gives the reader nowhere to look.
+            return Some(e.path().to_string_lossy().into_owned());
         }
     }
     for d in dirs {
@@ -727,20 +747,8 @@ pub fn run_doctor(json: bool) -> Result<()> {
                         .join(", ");
                     format!("{mods}: {names}")
                 } else {
-                    // Longest common ancestor of the group, so the message points
-                    // at the subtree the module actually owns.
-                    let mut prefix: Vec<&std::ffi::OsStr> =
-                        dirs[0].0.iter().collect();
-                    for (p, _) in dirs.iter().skip(1) {
-                        let other: Vec<&std::ffi::OsStr> = p.iter().collect();
-                        let keep = prefix
-                            .iter()
-                            .zip(other.iter())
-                            .take_while(|(a, b)| a == b)
-                            .count();
-                        prefix.truncate(keep);
-                    }
-                    let _ = &prefix; // parent is already in the group key
+                    // No common-ancestor walk here: the group key already carries
+                    // the parent, so computing one was dead work.
                     format!("{mods}: {} directories ({files} file(s) total)", dirs.len())
                 }
             })

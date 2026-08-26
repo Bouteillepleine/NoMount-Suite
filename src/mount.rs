@@ -576,12 +576,24 @@ pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Col
         if last.get(&e.target) != Some(&i) {
             continue;
         }
-        if let Some(l) = losers.remove(&e.target) {
-            collisions.push(Collision {
-                target: e.target.clone(),
-                winner: e.module.clone(),
-                losers: l,
-            });
+        if let Some(mut l) = losers.remove(&e.target) {
+            // Only a contest between DIFFERENT modules is worth reporting. One
+            // module can reach the same target twice on its own -- shipping both
+            // `vendor/etc/x` and `system/vendor/etc/x`, which the SAR alias folds
+            // together -- and printing "claimed by 2, serving M, skipping M"
+            // describes a conflict that does not exist. doctor already dedupes
+            // module names for its own collision check, so reporting it here made
+            // the two disagree.
+            l.retain(|m| m != &e.module);
+            l.sort_unstable();
+            l.dedup();
+            if !l.is_empty() {
+                collisions.push(Collision {
+                    target: e.target.clone(),
+                    winner: e.module.clone(),
+                    losers: l,
+                });
+            }
         }
         kept.push(e);
     }
@@ -905,6 +917,10 @@ pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
 /// `nomount plan`: print the resolved plan (target, kind, source) without applying.
 pub fn run_plan() -> Result<()> {
     let (plan, skipped) = collect_plan()?;
+    // Same collapse run_mount applies, so `plan` describes what will actually be
+    // served. Without it the output listed both halves of a contested target
+    // while only one was ever applied.
+    let (plan, _) = dedupe_by_target(plan);
     for e in &plan {
         let k = match e.kind {
             PlanKind::Inject => "inject",
