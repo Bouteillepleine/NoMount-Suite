@@ -1,6 +1,6 @@
 [package]
 name = "nomount"
-version = "1.3.92"
+version = "1.3.93"
 edition = "2021"
 
 [dependencies]
