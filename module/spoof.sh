@@ -1,5 +1,13 @@
 #!/system/bin/sh
-# NoMount Suite — spoof add-on.
+# NoMount Suite — spoof add-on.  ⚠️ DEFERRED / EXPERIMENTAL — OFF BY DEFAULT.
+#
+# Not part of the supported surface for this release. It ships, it is wired into
+# the boot path, and every knob it reads defaults to `off` in spoof.conf, so on a
+# fresh install it does nothing at all. Two known defects in the digest
+# computation (marked DEFECT below) are unfixed and can produce a digest that is
+# the right SHAPE and the wrong VALUE — which is worse than not setting one, and
+# is why the defaults are off rather than merely conservative. Turn a knob on only
+# if you are prepared to verify the result yourself.
 #
 # Recomputes ro.boot.vbmeta.digest from the real AVB vbmeta chain on this device
 # (no "paste it from the Key Attestation demo" step). Set only when the property
@@ -46,8 +54,12 @@ log() {
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---- config (persistent, seeded by customize.sh) --------------------------
-vbmeta_digest=auto     # auto = set only when missing | force = always | off
-vbmeta_size=auto       # auto = set alongside digest | off
+# These are the values used when spoof.conf is absent or does not name the key.
+# `off`, matching what customize.sh seeds: the add-on is deferred (see the header),
+# so the built-in default has to be inert too -- otherwise a device that loses or
+# never gets a spoof.conf silently opts back in to the defective digest path.
+vbmeta_digest=off      # off = do nothing | auto = set only when missing | force = always
+vbmeta_size=off        # off = do nothing | auto = set alongside digest
 spoof_props=0          # 1 = normalize boot-state props (conditional writes only)
 spoof_uname=0          # 1 = apply the uname override
 # spoof_cmdline: sanitize /proc/cmdline + /proc/bootconfig. Unset = follow spoof_props
@@ -214,6 +226,18 @@ emit_struct() {
             nlen=$(be_u32 "$dev" $(( p + 20 )))          # partition_name_len
             if [ "$nlen" -gt 0 ] && [ "$nlen" -le 64 ]; then
                 nm=$(dd if="$dev" bs=1 skip=$(( p + 92 )) count="$nlen" 2>/dev/null)
+                # ⚠️ DEFECT (unfixed, deferred): the recursive status is DISCARDED.
+                # emit_struct returns 1 for a chained partition it could not read
+                # -- absent device node, implausible struct length, unreadable
+                # magic -- and every one of those paths returns BEFORE appending
+                # anything to $ACC. Nothing here notices, so the walk carries on
+                # and compute_vbmeta_digest goes on to hash whatever did land in
+                # $ACC. The result is a full-length, well-formed digest taken over
+                # a PARTIAL chain: it passes the 64/128-hex shape check below, it
+                # gets written to vbmeta_digest.cache, and it is served on every
+                # subsequent boot. A wrong digest is worse than no digest, and
+                # this is the path that produces one silently. Do not trust the
+                # output of this function until the status is propagated.
                 [ -n "$nm" ] && emit_struct "$nm" $(( depth + 1 ))
             fi
         fi
@@ -234,6 +258,14 @@ compute_vbmeta_digest() {
     fi
     local alg dg=""
     alg=$(getprop ro.boot.vbmeta.hash_alg 2>/dev/null)
+    # ⚠️ DEFECT (unfixed, deferred): SILENT ALGORITHM DOWNGRADE. When the device
+    # says sha512 and sha512_of fails or is unavailable, dg is empty and the next
+    # line quietly computes a SHA-256 instead. The digest is then 64 hex chars
+    # where the bootloader's is 128 -- the shape check in do_vbmeta accepts both
+    # lengths, so it is cached and set, and ro.boot.vbmeta.hash_alg still says
+    # sha512 next to it. That mismatch is a sharper tell than an absent digest.
+    # The fallback must be conditional on the device NOT having asked for sha512;
+    # it is not, and nothing logs the downgrade. Deferred, not fixed.
     [ "$alg" = "sha512" ] && dg=$(sha512_of "$ACC")
     [ -z "$dg" ] && dg=$(sha256_of "$ACC")
     VB_SIZE=$(wc -c < "$ACC" 2>/dev/null | tr -d ' \n')
@@ -298,7 +330,7 @@ do_vbmeta_size() {
     local mode=$1 cur="" sz="" szcache="$NMDIR/vbmeta_size.cache"
 
     # Set only when missing (unless forced). VALIDATE once against the real prop.
-    [ "${vbmeta_size:-auto}" = "off" ] && return 0
+    [ "${vbmeta_size:-off}" = "off" ] && return 0
     [ -n "$RESETPROP" ] || return 0
     # Decide whether there is anything to DO before doing any work. Walking the AVB
     # chain costs ~1.9s (dd bs=1 over every chained partition) and this runs at

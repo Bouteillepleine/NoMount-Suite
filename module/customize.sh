@@ -125,11 +125,24 @@ set_perm "$NMDIR" 0 0 0700 u:object_r:adb_data_file:s0
 CONF="$NMDIR/spoof.conf"
 [ -f "$CONF" ] || cat > "$CONF" <<'EOF'
 # NoMount Suite — spoof add-on config
-# vbmeta_digest: auto (set only when the prop is missing) | force | off
+#
+# ⚠️ DEFERRED / EXPERIMENTAL. Every knob below ships OFF. The vbmeta digest
+# computation has two known unfixed defects (see the DEFECT comments in
+# spoof.sh) that can produce a well-formed digest with the wrong value, which
+# is a sharper tell than setting no digest at all. Turn one on only if you are
+# going to verify the result yourself.
+#
+# vbmeta_digest: off (default) | auto (set only when the prop is missing) | force
+# vbmeta_size:   off (default) | auto | force
 EOF
 seed_conf() { grep -q "^$1=" "$CONF" 2>/dev/null || echo "$1=$2" >> "$CONF"; }
-seed_conf vbmeta_digest auto
-seed_conf vbmeta_size auto
+# `off`, not `auto`. seed_conf only writes a key that is ABSENT, so a device that
+# already chose a value keeps it -- this changes the default for a FRESH install,
+# which is what "deferred for this release" has to mean in practice. It used to
+# seed `auto`, so every new install silently opted in to an add-on with two
+# unfixed defects in the value it computes.
+seed_conf vbmeta_digest off
+seed_conf vbmeta_size off
 seed_conf spoof_props 0
 seed_conf spoof_uname 0
 seed_conf uname_tail ""
@@ -145,7 +158,7 @@ seed_conf fix_shell_tmp 1
 # (spoof.sh at post-fs-data, and the WebUI through an exec) ever reads it.
 set_perm "$CONF" 0 0 0600 u:object_r:adb_data_file:s0
 [ -f "$MODPATH/spoof.sh" ] && set_perm "$MODPATH/spoof.sh" 0 0 0755
-ui_print "- Spoof add-on enabled: dynamic vbmeta.digest"
+ui_print "- Spoof add-on: DEFERRED, off by default (experimental)"
 ui_print "  config: $CONF"
 
 # --- per-UID hiding ---
