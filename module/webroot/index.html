@@ -146,12 +146,6 @@
   .card-h.open .chev { transform: rotate(90deg); }
   .card.collapsed > .card-h { margin-bottom: 0; }
   .card.collapsed > :not(.card-h) { display: none !important; }
-  .group-label {
-    font-size: 11px; font-weight: 700; letter-spacing: 1.3px; text-transform: uppercase;
-    color: var(--faint); margin: 20px 6px 9px;
-  }
-  .group-label:first-of-type { margin-top: 2px; }
-
   /* hero */
   .hero { padding: 20px 18px; position: relative; overflow: hidden; }
   .hero::after {
@@ -220,11 +214,6 @@
   .tag.suite { background: rgba(255,255,255,0.08); color: var(--txt); }
   .tag.off   { background: rgba(139,147,167,0.15); color: var(--muted); }
   .tag.warn  { background: rgba(251,191,36,0.15);  color: var(--warn); }
-  /* Reserved. Nothing uses it today: findings are amber, and red is spent only on
-     the "not running" states, which are chips and dots rather than tags. Kept so a
-     future row that genuinely means "broken" has a pill to reach for, instead of
-     re-deriving one and landing on amber like every other. */
-  .tag.bad   { background: rgba(248,113,122,0.15); color: var(--bad); }
   .tag.ok    { background: rgba(53,210,154,0.15);  color: var(--ok); }
   .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
 
@@ -259,7 +248,6 @@
   .frow .fowner { font-size: 11.5px; color: var(--muted); margin-top: 7px; }
   .frow .fowner b { color: var(--txt); font-weight: 620; }
   .frow .fmeta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
-  .frow .fmeta .sp { margin-left: auto; }
   .frow details { margin-top: 9px; }
   .frow details > summary {
     cursor: pointer; font-size: 11.5px; color: var(--muted); list-style: none;
@@ -283,9 +271,6 @@
   }
   .fgroup:first-child { margin-top: 4px; }
   .fgroup .cnt { font-variant-numeric: tabular-nums; opacity: .8; }
-  .fgroup.clp { cursor: pointer; }
-  .fgroup.clp::after { content: "›"; margin-left: auto; transition: transform .2s; font-size: 15px; }
-  .fgroup.clp.open::after { transform: rotate(90deg); }
   .auage { font-size: 11.5px; color: var(--muted); margin-top: 10px; font-variant-numeric: tabular-nums; }
 
   /* ---- the one-line health summary on the Status hero -------------------- */
@@ -494,40 +479,15 @@
   .blk.live .dot { background: var(--ok); }
   .blk.gone .dot { background: var(--faint); }
   .blk.pending .bs,  .blk.drift .bs  { color: var(--warn, #d9a441); }
-  .blk .bx, .row .bx {
-    flex: 0 0 auto; width: 24px; height: 24px; line-height: 22px; text-align: center;
+  .blk .bx {
+    flex: 0 0 auto; width: 30px; height: 30px; line-height: 28px; text-align: center;
     border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
     background: rgba(255,255,255,0.06); color: var(--dim);
   }
-  .blk .bx:hover, .row .bx:hover { background: rgba(255,90,90,0.16); color: #ff6b6b; }
-  .row .bx:disabled { opacity: 0.4; }
-  html[data-theme="light"] .blk .bx, html[data-theme="light"] .row .bx { background: rgba(16,26,48,0.06); }
+  .blk .bx:hover { background: rgba(255,90,90,0.16); color: #ff6b6b; }
+  html[data-theme="light"] .blk .bx { background: rgba(16,26,48,0.06); }
   .blk .bx.save:hover { background: rgba(90,220,150,0.16); color: #57e6c3; }
   .blk .bx:disabled { opacity: 0.4; }
-
-  /* toggle switch (spoofing controls) */
-  .swrow { display: flex; align-items: center; gap: 12px; padding: 12px 2px; border-top: 1px solid rgba(255,255,255,0.055); }
-  .swrow:first-child { border-top: none; }
-  .swrow .swi { flex: 1; min-width: 0; }
-  .swrow .swi .lbl { font-size: 13.5px; font-weight: 640; }
-  .swrow .swi .val { font-size: 11.5px; color: var(--muted); margin-top: 3px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* The verify status is a full sentence, not a hash — let it wrap in full.
-     NB: do NOT call this modifier `.wrap` — that is the page wrapper, which
-     carries `padding-bottom: 108px` to clear the floating nav; reusing the name
-     injected 108px of dead space into the card (the old `overflow:hidden` had
-     been hiding it). */
-  .swrow .swi .val.multiline { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.45; }
-  .switch { position: relative; width: 46px; height: 27px; flex: none; }
-  .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
-  .switch .sl { position: absolute; inset: 0; border-radius: 999px; background: rgba(255,255,255,0.14); border: 1px solid var(--brd2); transition: .22s; pointer-events: none; }
-  .switch .sl::before { content: ""; position: absolute; width: 21px; height: 21px; left: 2px; top: 2px; border-radius: 50%; background: #fff; transition: .22s; box-shadow: 0 2px 5px rgba(0,0,0,.35); }
-  .switch input:checked + .sl { background: linear-gradient(135deg, var(--acc), var(--acc2)); border-color: transparent; }
-  .switch input:checked + .sl::before { transform: translateX(19px); }
-  html[data-theme="light"] .switch .sl { background: rgba(16,26,48,0.14); }
-  .txin { display: block; width: 100%; background: rgba(0,0,0,0.26); border: 1px solid var(--brd2); color: var(--txt); border-radius: 13px; padding: 12px 14px; font-size: 12.5px; outline: none; margin-top: 9px; font-family: var(--mono); }
-  .txin:focus { border-color: var(--acc); }
-  .txin::placeholder { color: var(--faint); }
-  html[data-theme="light"] .txin { background: rgba(16,26,48,0.05); }
 
   /* `display:none` here beat `el.hidden = false`, so BOTH global banners -- the
      root-manager umount warning and the bootloop-guard notice -- have never
@@ -596,6 +556,35 @@
   }
   html[data-theme="light"] #toast.ok  { border-color: rgba(14,154,108,.45); }
   html[data-theme="light"] #toast.bad { border-color: rgba(210,58,68,.45); }
+
+  /* ---- confirmation sheet -------------------------------------------------
+     Every control that destroys something goes through this. Deliberately NOT
+     window.confirm: a root manager's WebView need not implement onJsConfirm at
+     all, and a safety gate that silently answers "no" is a dead button while one
+     that silently answers "yes" is worse than no gate. It is also the only way
+     the prompt can say what will actually happen in the reader's terms rather
+     than echoing an internal verb. */
+  .cfwrap {
+    position: fixed; inset: 0; z-index: 90; display: flex;
+    align-items: flex-end; justify-content: center;
+    padding: 16px 15px calc(16px + env(safe-area-inset-bottom));
+    background: rgba(4,6,12,.62); backdrop-filter: blur(3px);
+  }
+  .cfwrap[hidden] { display: none; }
+  html[data-theme="light"] .cfwrap { background: rgba(20,32,64,.34); }
+  .cfbox {
+    width: 100%; max-width: 430px; border-radius: 22px; padding: 20px 18px 16px;
+    border: 1px solid var(--brd); background: var(--bg2); box-shadow: var(--shadow);
+    animation: cfin .18s ease both;
+  }
+  @keyframes cfin { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+  .cfbox .cft { font-size: 17px; font-weight: 720; letter-spacing: -0.2px; }
+  .cfbox .cfb { font-size: 13px; line-height: 1.6; color: var(--muted); margin-top: 9px; }
+  .cfbox .btns { margin-top: 18px; }
+  /* Cancel is the wide, comfortable target; the destructive one is not the
+     default and never the one a thumb lands on by accident. */
+  .cfbox .btns .act { min-height: 48px; }
+  .cfbox .btns #cfNo { flex: 1.4 1 0; }
 
   .spin { animation: spin .9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -708,7 +697,7 @@
     transform: translateY(-.5px) scale(1.06);
     filter: drop-shadow(0 1px 0 rgba(0,0,0,.5)) drop-shadow(0 0 7px rgba(124,156,255,.55));
   }
-  .navb.on span:not(.nbdot) {
+  .navb.on span {
     background: linear-gradient(135deg, #ffffff, #cfe0ff 60%, #9df0dc);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
@@ -717,14 +706,6 @@
     .navb.on { transform: none; }
     /* the overshoot is the point of the pill, so drop it entirely here */
     .navpill { transition: opacity .2s ease; }
-  }
-
-  .navb .nbdot { display: none; }
-  .navb.alert .nbdot {
-    display: block; position: absolute; top: 9px; right: 12px;
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--bad);
-    box-shadow: 0 0 0 2px rgba(8,10,17,.9), 0 0 8px rgba(248,113,122,.8);
   }
 
   /* ---- light theme -------------------------------------------------------
@@ -793,11 +774,10 @@
   html[data-theme="light"] .navb.on svg {
     filter: drop-shadow(0 1px 0 rgba(255,255,255,.9)) drop-shadow(0 0 6px rgba(63,99,224,.45));
   }
-  html[data-theme="light"] .navb.on span:not(.nbdot) {
+  html[data-theme="light"] .navb.on span {
     background-image: linear-gradient(135deg, #0d1220, #2b3f96 60%, #0c7f6b);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-  html[data-theme="light"] .navb.alert .nbdot { box-shadow: 0 0 0 2px #fff, 0 0 8px rgba(210,58,68,.7); }
   html[data-theme="light"] .banner { color: #6b4d00; }
   html[data-theme="light"] button.act.danger {
     color: #a3252e; border-color: rgba(210,58,68,0.40); background: rgba(210,58,68,0.08);
@@ -835,11 +815,12 @@
     </div>
   </header>
 
-  <!-- Global warning: the root manager's umount switches. Deliberately OUTSIDE
-       every <section> so it shows on any tab -- a switch that can break root
-       should not require navigating to the right tab to discover. -->
-  <div class="banner warn" id="mgrwarn" hidden></div>
-  <div class="banner warn" id="incwarn" hidden></div>
+  <!-- Global warnings: the root manager's Kernel-umount switch, and a bootloop
+       guard that has tripped. Deliberately OUTSIDE every <section> so they show on
+       any tab -- neither "a switch that can break root" nor "the Suite turned
+       itself off" should require navigating to the right tab to discover. -->
+  <div class="banner" id="mgrwarn" hidden></div>
+  <div class="banner" id="incwarn" hidden></div>
 
   <section class="tab on" id="tab-status">
   <div class="banner" id="banner" hidden>Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
@@ -858,11 +839,12 @@
       <div class="metric"><div class="k">Modules served</div><div class="v" id="mMod">—</div></div>
     </div>
     <!-- THE diagnostic surface for most people.
-         Diagnostics used to be a fifth nav tab, which told every user there was a
-         fifth job to do here. There isn't: the overwhelmingly common answer is
-         "nothing is detectable", and that is one line, not a screen. It is fed by
-         the audit the boot pass already cached, so showing it costs nothing, and
-         it only asks for attention when a finding is actually open. -->
+         Diagnostics used to be its own nav tab, which told every user there was
+         another job to do here. There isn't: the overwhelmingly common answer is
+         "nothing is detectable", and that is one line, not a screen. It reads the
+         report the boot pass already cached, so showing it costs nothing -- and it
+         asks for attention only when the report actually has some, or when the
+         report is not a complete answer yet. -->
     <button class="healthline" id="healthline" onclick="openDetail()">
       <span class="hl-dot" id="hlDot"></span>
       <span class="hl-txt" id="hlTxt">Checking…</span>
@@ -873,7 +855,13 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
         Reload
       </button>
-      <button class="act danger" onclick="clearRules(this)">
+    </div>
+    <!-- Clear rules is not a sibling of Reload. Side by side and the same size,
+         they read as a pair of equals and are nothing of the sort: one re-applies
+         what you already have, the other takes every injected file away. It is
+         small, on its own line, and it asks first. -->
+    <div class="btns" style="margin-top:9px">
+      <button class="act danger" style="flex:none;min-width:0;padding:9px 14px;font-size:12.5px" onclick="clearRules(this)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
         Clear rules
       </button>
@@ -891,6 +879,59 @@
       <div class="metric"><div class="k">Android</div><div class="v" id="dAndroid" style="font-size:15px">—</div></div>
       <div class="metric"><div class="k">API level</div><div class="v" id="dApi" style="font-size:15px">—</div></div>
       <div class="metric"><div class="k">Kernel</div><div class="v" id="dKernel" style="font-size:11px;word-break:break-all;line-height:1.35">—</div></div>
+    </div>
+  </div>
+
+  <div class="card" id="cardPerUID">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+      <h2>Per-UID hiding</h2><span class="chip" id="uidchip">—</span><span class="chev">›</span>
+    </div>
+    <div class="uidbar">
+      <div class="pkgwrap">
+        <input id="uid" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+               placeholder="Package name, UID, or glob (*.duckdetector)"
+               oninput="pkgFilter()" onfocus="pkgFilter()" onblur="pkgBlur()" onkeydown="pkgKey(event)" />
+        <div id="pkgdd" class="pkgdd"></div>
+      </div>
+      <button class="act" onclick="uidOp('block',this)">Hide</button>
+      <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
+    </div>
+
+    <div class="presetrow">
+      <button class="act" onclick="uidScan(this)">Scan for candidates</button>
+      <button class="act" id="usShow" style="display:none" onclick="usToggle(this)">Show list</button>
+      <button class="act" onclick="addGlobs(this)">Add detector globs</button>
+      <span class="presethint">Scan finds apps <b>installed here</b> worth hiding from and says why —
+        nothing is hidden until you pick it. The globs are the part a scan cannot give you: they keep
+        matching detectors installed later, or repackaged under a new name.</span>
+    </div>
+    <div id="usList" class="uslist" style="display:none"></div>
+
+    <div id="blocked" class="blocklist"></div>
+
+    <details class="ndet">
+      <summary>What hiding covers</summary>
+      <p class="note">Shows the listed app the stock filesystem — no injected files, no hidden paths. One entry covers the app in every user, work profile and clone. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root and <code>su</code> are unaffected, and so is anything a system service reads on the app's behalf.</p>
+      <p class="note">A <b>glob</b> covers a moving target: <code>*.duckdetector</code>,
+        <code>me.garfieldhan.*</code> or <code>*chunqiu*</code> re-match on every apply, so a detector
+        that reinstalls under a new package name stays hidden. Anchors go at the ends only, and a glob
+        needs at least four literal characters.</p>
+    </details>
+
+    <div class="subsec">
+      <div class="subsec-h">Isolated processes</div>
+      <div class="seg" id="isoSeg" role="radiogroup" aria-label="Which isolated-process pools hiding covers">
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="both" onclick="setIsolated('both')">All</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="appzygote" onclick="setIsolated('appzygote')">App-zygote</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="platform" onclick="setIsolated('platform')">Platform</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="off" onclick="setIsolated('off')">None</button>
+      </div>
+      <div class="segstate" id="isoState">Reading…</div>
+      <details class="ndet">
+        <summary>Why this trades one tell for another</summary>
+        <p class="note">An isolated process's UID says nothing about which app started it, so hiding from one app means hiding from <i>every</i> isolated process. That closes the hole where a hidden app probes through a helper — but while it's on, an app that <b>isn't</b> hidden can spot the difference between its own view and its helper's. Both pools are covered by default.</p>
+      </details>
     </div>
   </div>
 
@@ -953,206 +994,34 @@
     <p class="note" id="rulecount" style="display:none"></p>
   </div>
 
-  <!-- OVERLAYS -->
+  <!-- ONE card, two kinds of row.
+       A file redirect and an RRO overlay APK are the same mechanism -- a rule in
+       the same dump -- and they had two cards, two filter boxes and two copies of
+       the same rendering code. Which kind a row is belongs ON the row. The hero
+       still counts them apart, because the counts are the part that differs. -->
   <div class="card">
-    <div class="card-h clp" onclick="toggleVfsFull(this)">
+    <div class="card-h clp" onclick="toggleFiles(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
-      <h2>File redirects</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
+      <h2>Injected files</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
     </div>
     <div class="uidbar" id="vfsfilterbar" style="display:none;margin-bottom:11px">
-      <input id="vfsfilter" type="text" placeholder="Filter files…" oninput="renderVfsFull()" />
+      <input id="vfsfilter" type="text" placeholder="Filter files…" oninput="renderFilesFull()" />
     </div>
     <div class="list" id="vfsdirs" style="display:none"></div>
     <div class="list" id="vfsfull" style="display:none"></div>
-  </div>
-
-  <div class="card">
-    <div class="card-h clp" onclick="toggleOvFull(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
-      <h2>RRO overlays</h2><span class="chip" id="ovcount">0</span><span class="chev">›</span>
-    </div>
-    <div class="uidbar" id="ovfilterbar" style="display:none;margin-bottom:11px">
-      <input id="ovfilter" type="text" placeholder="Filter overlays…" oninput="renderOvFull()" />
-    </div>
-    <div class="list" id="overlays" style="display:none"></div>
-    <div class="list" id="overlaysfull" style="display:none"></div>
-  </div>
-
-  </section>
-
-  <section class="tab" id="tab-tools">
-
-  <div class="group-label">Spoofing</div>
-  <!-- SPOOFING -->
-  <div class="card collapsed" id="cardSpoof">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>
-      <h2>Spoofing</h2><span class="chip" id="spchip">—</span><span class="chev">›</span>
-    </div>
-    <div class="list">
-      <div class="swrow">
-        <div class="swi">
-          <div class="lbl">Verified boot (hash + size)</div>
-          <div class="val" id="spVbVal">…</div>
-          <div class="val multiline" id="spVbCheck" style="margin-top:2px"></div>
-        </div>
-        <label class="switch"><input type="checkbox" id="spVb" onchange="toggleSpoof('vbmeta_digest',this)"><span class="sl"></span></label>
-      </div>
-
-      <div class="swrow">
-        <div class="swi">
-          <div class="lbl">Boot-state (props + procfs)</div>
-          <div class="val multiline" id="spPropsVal">…</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="spProps" onchange="toggleSpoofBool('spoof_props',this)"><span class="sl"></span></label>
-      </div>
-
-      <div class="swrow">
-        <div class="swi">
-          <div class="lbl">Kernel uname</div>
-          <div class="val" id="spUnameVal">…</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="spUname" onchange="toggleSpoofBool('spoof_uname',this)"><span class="sl"></span></label>
-      </div>
-
-      <button class="act" id="spUnameEditBtn" style="margin-top:10px" onclick="toggleUnameAdv(this)">Edit strings</button>
-      <div id="spUnameAdv" style="display:none">
-        <div class="val" id="spUnameCur" style="margin-bottom:9px">current uname: …</div>
-        <input class="txin" id="spUnameTail" placeholder="uname  —  blank = keep · paste stock uname -r to override">
-        <div class="val" id="spDateCur" style="margin-top:9px">current date: …</div>
-        <input class="txin" id="spUnameDate" placeholder="date  —  blank = keep · paste stock uname -v (or a date)">
-        <div class="btns" style="flex-wrap:wrap;margin-top:9px">
-          <button class="act" onclick="fillUnameRomDate()">Use ROM date</button>
-          <button class="act" onclick="resetUname(this)">Reset to kernel default</button>
-          <button class="act primary" onclick="saveUname(this)">Save</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="btns"><button class="act primary" onclick="applySpoof(this)">Apply now</button></div>
-    <p class="note" id="spNote">Recomputes the verified-boot digest from the real AVB chain on this device, and normalizes the lock-state, warranty and debuggable properties that a scanner reads. Both are read straight from properties and have nothing to do with mounts.</p>
-  </div>
-
-  <!-- HEALTH CHECK -->
-
-  <!-- RUNTIME HEALTH -->
-
-  <!-- LAST INCIDENT -->
-
-  <div class="group-label">Hiding</div>
-  <!-- CLOAK (pathhide maps/fd) -->
-  <div class="card collapsed" id="cardCloak">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>
-      <h2>Cloak (maps / fd)</h2><span class="chip" id="phchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Hide selected Xposed/LSPosed module APKs from every process's <code>/proc/&lt;pid&gt;/maps</code> and <code>/proc/&lt;pid&gt;/fd</code> via the kernel <code>pathhide</code> interface — applied live and re-applied on boot.</p>
-    <div class="btns">
-      <button class="act" id="phScan" onclick="scanCloak(this)">Scan Xposed modules</button>
-      <button class="act" id="phShow" onclick="phShowList(this)">Show list</button>
-    </div>
-    <div style="display:flex;gap:8px;margin:8px 0 2px">
-      <input class="txin" id="phManual" placeholder="add package / substring" autocapitalize="off" autocorrect="off" spellcheck="false" style="flex:1">
-      <button class="act" style="flex:none;min-width:0;padding:7px 13px" onclick="addCloak()">Add</button>
-    </div>
-    <div class="list" id="phList" style="display:none"></div>
-    <div class="btns"><button class="act primary" id="phApply" onclick="applyCloak(this)">Apply &amp; save</button></div>
-  </div>
-
-  <div class="card collapsed" id="cardWhiteout">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
-      <h2>Hidden paths</h2><span class="chip" id="wochip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Makes a stock ROM file disappear — for paths that are themselves the tell, like <code>install-recovery.sh</code>. Saved to a list and re-applied every boot. <b>Scan</b> proposes paths that exist on this device and are worth hiding.</p>
-    <div style="display:flex;gap:8px;margin:8px 0 2px">
-      <input class="txin" id="woPath" placeholder="/system/bin/install-recovery.sh" autocapitalize="off" autocorrect="off" spellcheck="false" style="flex:1">
-      <button class="act" style="flex:none;min-width:0;padding:7px 13px" onclick="woAdd(this)">Hide</button>
-    </div>
-    <div class="btns"><button class="act" id="woScanBtn" onclick="woScan(this)">Scan this device</button></div>
-    <div class="list" id="woFound" style="display:none"></div>
-    <div class="list" id="woList"></div>
-  </div>
-
-  <div class="card collapsed" id="cardMounts">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v5H3z"/><path d="M6 12v5M18 12v5"/><path d="M3 17h18v4H3z"/></svg>
-      <h2>Foreign mounts</h2><span class="chip" id="abchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Mounts another module laid over the ROM. Any app can read these in its own mount table, which is the whole thing a mountless setup avoids. <b>Absorb</b> re-serves what it safely can as injections and unmounts them; it runs at every boot.</p>
-    <div class="btns">
-      <button class="act" onclick="absorbScan(this)">Scan</button>
-      <button class="act primary" onclick="absorbRun(this)">Absorb now</button>
-    </div>
-    <pre class="rules" id="abOut" style="display:none">…</pre>
-  </div>
-
-  <div class="card collapsed" id="cardPerUID">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
-      <h2>Per-UID hiding</h2><span class="chip" id="uidchip">—</span><span class="chev">›</span>
-    </div>
-    <div class="uidbar">
-      <div class="pkgwrap">
-        <input id="uid" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
-               placeholder="Package name, UID, or glob (*.duckdetector)"
-               oninput="pkgFilter()" onfocus="pkgFilter()" onblur="pkgBlur()" onkeydown="pkgKey(event)" />
-        <div id="pkgdd" class="pkgdd"></div>
-      </div>
-      <button class="act" onclick="uidOp('block',this)">Hide</button>
-      <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
-    </div>
-
-    <div class="presetrow">
-      <button class="act" onclick="uidScan(this)">Scan for candidates</button>
-      <button class="act" id="usShow" style="display:none" onclick="usToggle(this)">Show list</button>
-      <button class="act" onclick="addGlobs(this)">Add detector globs</button>
-      <span class="presethint">Scan finds apps <b>installed here</b> worth hiding from and says why —
-        nothing is hidden until you pick it. The globs are the part a scan cannot give you: they keep
-        matching detectors installed later, or repackaged under a new name.</span>
-    </div>
-    <div id="usList" class="uslist" style="display:none"></div>
-
-    <div id="blocked" class="blocklist"></div>
-
-    <details class="ndet">
-      <summary>What hiding covers</summary>
-      <p class="note">Shows the listed app the stock filesystem — no injected files, no hidden paths. One entry covers the app in every user, work profile and clone. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root and <code>su</code> are unaffected, and so is anything a system service reads on the app's behalf.</p>
-      <p class="note">A <b>glob</b> covers a moving target: <code>*.duckdetector</code>,
-        <code>me.garfieldhan.*</code> or <code>*chunqiu*</code> re-match on every apply, so a detector
-        that reinstalls under a new package name stays hidden. Anchors go at the ends only, and a glob
-        needs at least four literal characters.</p>
-    </details>
-
-    <div class="subsec">
-      <div class="subsec-h">Isolated processes</div>
-      <div class="seg" id="isoSeg" role="radiogroup" aria-label="Which isolated-process pools hiding covers">
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="both" onclick="setIsolated('both')">All</button>
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="appzygote" onclick="setIsolated('appzygote')">App-zygote</button>
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="platform" onclick="setIsolated('platform')">Platform</button>
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="off" onclick="setIsolated('off')">None</button>
-      </div>
-      <div class="segstate" id="isoState">Reading…</div>
-      <details class="ndet">
-        <summary>Why this trades one tell for another</summary>
-        <p class="note">An isolated process's UID says nothing about which app started it, so hiding from one app means hiding from <i>every</i> isolated process. That closes the hole where a hidden app probes through a helper — but while it's on, an app that <b>isn't</b> hidden can spot the difference between its own view and its helper's. Both pools are covered by default.</p>
-      </details>
-    </div>
   </div>
 
   </section>
 
   <section class="tab" id="tab-diag">
 
-  <!-- ONE card.
-       This pane used to carry seven: three subsystems (detection, plan,
-       runtime) each with its own chip and button, two reference cards, and one
-       conditional. Three subsystems is a fact about the code, not a question
-       anybody arrives with -- and you get here by tapping a line that says
-       "2 things need attention", so landing on seven cards, one of which is
-       about the thing you tapped, is the wrong answer to the tap.
-       Findings from all three sources merge into one list; which subsystem
-       produced a row is a detail OF the row. -->
+  <!-- ONE card, because there is one report.
+       This pane used to carry seven: three subsystems (detection, plan, runtime)
+       each with its own chip and button, two reference cards and one conditional.
+       Three subsystems was a fact about the code, not a question anybody arrives
+       with -- and you get here by tapping a line that says "2 things need
+       attention", so landing on seven cards was the wrong answer to the tap.
+       The backend now answers in one shape, so this is one list. -->
   <button class="backline" onclick="showTab('status',document.getElementById('nb-status'))">
     <span class="bk-go">‹</span><span>Back to Status</span>
   </button>
@@ -1160,19 +1029,19 @@
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
-      <h2>Findings</h2><span class="chip" id="fchip">—</span>
+      <h2>Check</h2><span class="chip" id="fchip">—</span>
     </div>
-    <p class="note" id="fsub">Checks everything: what apps can see, what your next boot will do, and whether it is running correctly now.</p>
+    <p class="note" id="fsub">Two halves, one report: what your module set will do at the next boot, and what apps can actually see on this device right now.</p>
     <div class="btns" style="flex-wrap:wrap">
-      <button class="act primary" onclick="runAll(this)">Check my setup</button>
-      <button class="act" id="auCopy" onclick="copyAudit(this)" style="display:none">Copy report</button>
+      <button class="act primary" onclick="runCheck(this)">Check my setup</button>
+      <button class="act" id="auCopy" onclick="copyReport(this)" style="display:none">Copy report</button>
     </div>
     <div class="auage" id="auage" style="display:none"></div>
     <div class="list" id="findlist"></div>
 
     <details class="ndet" id="devtools">
       <summary>Developer tools</summary>
-      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today's state as a baseline. <b>Verify</b> diffs the live system against it. <b>Export</b> dumps diagnostics to <code>/sdcard/Download</code>.</p>
+      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today’s fingerprint as the baseline, replacing any earlier one. <b>Verify</b> diffs the live system against it. <b>Export</b> writes <code>check.txt</code>, <code>fingerprint.txt</code> and the mount table to <code>/sdcard/Download</code> — your hide list and the apps it names are deliberately left out of a shared destination.</p>
       <div class="btns" style="flex-wrap:wrap">
         <button class="act" onclick="runSnapshot(this)">Snapshot</button>
         <button class="act" onclick="runVerify(this)">Verify</button>
@@ -1180,18 +1049,9 @@
       </div>
       <pre class="rules" id="healthout" style="display:none">…</pre>
       <details class="ndet">
-        <summary>Raw output</summary>
+        <summary>Raw report</summary>
         <pre class="rules" id="auditout">…</pre>
-        <pre class="rules" id="doctorout" style="display:none">…</pre>
       </details>
-      <div id="doctorsum" style="display:none"></div>
-      <div id="auRawWrap" style="display:none"></div>
-      <div id="featlist" style="display:none"></div>
-      <span id="featchip" style="display:none"></span>
-      <span id="auchip" style="display:none"></span>
-      <span id="dchip" style="display:none"></span>
-      <span id="hchip" style="display:none"></span>
-      <div id="checkAllOut" style="display:none"></div>
     </details>
   </div>
 
@@ -1225,22 +1085,29 @@
     <span class="navpill noanim" id="navpill"></span>
     <button class="navb on" id="nb-status" role="tab" aria-selected="true" onclick="showTab('status',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
-      <span>Status</span><span class="nbdot"></span>
+      <span>Status</span>
     </button>
     <button class="navb" id="nb-modules" role="tab" aria-selected="false" onclick="showTab('modules',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-      <span>Modules</span><span class="nbdot"></span>
+      <span>Modules</span>
     </button>
     <button class="navb" id="nb-rules" role="tab" aria-selected="false" onclick="showTab('rules',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-      <span>Rules</span><span class="nbdot"></span>
-    </button>
-    <button class="navb" id="nb-tools" role="tab" aria-selected="false" onclick="showTab('tools',this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5-1.4-1.4 2.5-2.5z"/></svg>
-      <span>Tools</span><span class="nbdot"></span>
+      <span>Rules</span>
     </button>
   </div>
 </nav>
+
+<div class="cfwrap" id="confirm" hidden>
+  <div class="cfbox" role="alertdialog" aria-modal="true" aria-labelledby="cfTitle" aria-describedby="cfBody">
+    <div class="cft" id="cfTitle"></div>
+    <div class="cfb" id="cfBody"></div>
+    <div class="btns">
+      <button class="act" id="cfNo">Cancel</button>
+      <button class="act danger" id="cfYes">Continue</button>
+    </div>
+  </div>
+</div>
 
 <div id="toast"></div>
 
@@ -1269,6 +1136,10 @@
   // silently turns the rest of the tag into garbage.
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // Single-quote a string for safe use in a shell command. Everything this page
+  // runs goes through a ROOT shell, so every interpolated value -- a package
+  // name, a rule target, a path built from a property -- gets wrapped here.
+  function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
   document.getElementById("banner").hidden = !!(KSU && KSU.exec);
 
   function exec(cmd, opts = {}) {
@@ -1354,36 +1225,113 @@
     clearTimeout(t._t); t._t = setTimeout(() => { t.className = ""; }, 2400);
   }
 
+  // Ask before destroying anything.
+  //
+  // The rule: a control that unmounts, clears rules, deletes a record or turns
+  // the engine off asks first, and the question says what will actually happen --
+  // not "run vfs clear" but "your modules stop being served". Refreshing and
+  // re-running a check stay one tap, because neither can lose anything.
+  //
+  // Resolves false on Escape, on a tap outside the sheet, and on Cancel. Only
+  // the destructive button resolves true.
+  let _cfClose = null;
+  function confirmAction(title, body, verb) {
+    return new Promise(function (resolve) {
+      const wrap = $("confirm"), yes = $("cfYes"), no = $("cfNo");
+      if (!wrap) { resolve(false); return; }
+      // A second sheet cannot open over the first: answer the outstanding one no.
+      if (_cfClose) _cfClose(false);
+      $("cfTitle").textContent = title;
+      $("cfBody").textContent = body;
+      yes.textContent = verb;
+      wrap.hidden = false;
+      const onKey = function (e) { if (e.key === "Escape") done(false); };
+      const onWrap = function (e) { if (e.target === wrap) done(false); };
+      function done(v) {
+        if (_cfClose !== done) return;
+        _cfClose = null;
+        wrap.hidden = true;
+        yes.onclick = null; no.onclick = null; wrap.onclick = null;
+        document.removeEventListener("keydown", onKey);
+        resolve(v);
+      }
+      _cfClose = done;
+      yes.onclick = function () { done(true); };
+      no.onclick = function () { done(false); };
+      wrap.onclick = onWrap;
+      document.addEventListener("keydown", onKey);
+      try { no.focus(); } catch (e) {}
+    });
+  }
+
+  // ---- the rule dump: ONE read per refresh, shared -------------------------
+  //
+  // Five things on this page describe the same list -- the hero counters, the
+  // Rules summary and its bar, the redirect list, the overlay list and the raw
+  // list -- and each one used to shell out for its own copy. Opening the page ran
+  // `nm vfs list` five times over, and on OxygenOS a burst of root exec is exactly
+  // the heuristic that flags root WebUI apps as malicious. It also gave five
+  // chances to disagree about one number.
+  //
+  // `ok:false` is UNKNOWN, and every caller renders it as unknown. Four of the
+  // five dropped errno and fell back to the reassuring empty state -- telling the
+  // reader there is nothing there when we simply did not know.
+  //
+  // The cache holds the PROMISE, not the resolved dump: `refreshAll` fires its
+  // readers in parallel, so a cache that only filled on resolution let every one
+  // of them race past a null and shell out anyway -- the exact burst this exists
+  // to stop, measured as four `vfs list` calls per page open.
+  let RULES = null;
+  function ruleDump() {
+    if (RULES) return RULES;
+    RULES = nm("vfs list").then(function (r) {
+      const lines = r.errno === 0
+        ? r.stdout.split("\n").map(x => x.trim()).filter(Boolean) : [];
+      const d = {
+        ok: r.errno === 0,
+        raw: (r.stdout || "").trim(),
+        lines: lines,
+        // The virtual path of each rule, without the "(virtual dir)" marker.
+        targets: lines.map(l => (l.split(" ->")[0] || "").trim().replace(/\s*\(virtual dir\)$/, "")),
+        // Structural entries are directories the engine materialises, not rules.
+        // Counting them gave 260 on a device where `nomount check`, health.txt and
+        // the manager card all said 257 -- so the one number on the front page
+        // disagreed with every other number the Suite prints, which makes a real
+        // discrepancy indistinguishable from a bug.
+        rules: lines.filter(l => !l.includes("(virtual dir)")).length,
+      };
+      // RRO overlays are hookless rules now (a virtual path under */overlay/
+      // ending .apk), not overlayfs mounts, so they come out of the same dump.
+      d.rro = d.targets.filter(t => /\/overlay\/[^\s]*\.apk$/.test(t));
+      return d;
+    });
+    return RULES;
+  }
+
   // ---- status ----
   async function refreshStatus() {
-    const list = await nm("vfs list");
+    const d = await ruleDump();
     const dot = $("dot");
-    if (list.errno !== 0) {
+    if (!d.ok) {
       $("state").textContent = "Engine offline";
       $("substate").textContent = "kernel driver not responding";
       dot.className = "dot bad";
+      // Both counters, not just one. Leaving the overlay count at whatever it
+      // last said pins a stale number beside an "Engine offline" that says the
+      // number could not be read.
       $("mRules").textContent = "—";
+      $("mOv").textContent = "—";
       return 0;
     }
-    const ruleLines = list.stdout.split("\n").map(s => s.trim()).filter(Boolean);
-    // Exclude the "(virtual dir)" rows: those are directories the engine
-    // materialises, not rules. Counting every line gave 260 on this device while
-    // `selfcheck`, `audit`, health.txt and the manager card all say 257 — so the
-    // one number on the front page disagreed with every other number the Suite
-    // prints, which makes a real discrepancy indistinguishable from a bug.
-    const rules = ruleLines.filter(l => !l.includes("(virtual dir)")).length;
-    $("mRules").textContent = rules;
-    // RRO overlays are now hookless rules (virtual path under */overlay/ ending .apk),
-    // not overlayfs mounts — count them from the rule list.
-    const rro = ruleLines.filter(l => /\/overlay\/[^\s]*\.apk$/.test((l.split(" ->")[0] || "").trim())).length;
-    $("mOv").textContent = rro;
-    $("state").textContent = rules > 0 ? "Active" : "Idle";
-    $("substate").textContent = rules > 0 ? "modules injected" : "no rules — re-apply";
-    dot.className = "dot " + (rules > 0 ? "ok" : "warn");
-    return rules;
+    $("mRules").textContent = d.rules;
+    $("mOv").textContent = d.rro.length;
+    $("state").textContent = d.rules > 0 ? "Active" : "Idle";
+    $("substate").textContent = d.rules > 0 ? "modules injected" : "no rules — re-apply";
+    dot.className = "dot " + (d.rules > 0 ? "ok" : "warn");
+    return d.rules;
   }
 
-  // ---- detection posture (live root-view vs non-root app-view) ----
+  // ---- device identity ----
   async function refreshDevice() {
     const r = await exec('echo "$(getprop ro.product.marketname)|$(getprop ro.product.manufacturer)|$(getprop ro.product.model)|$(getprop ro.build.version.release)|$(getprop ro.build.version.sdk)|$(uname -r)"');
     const p = (r.stdout || "").trim().split("|");
@@ -1393,11 +1341,24 @@
     $("dApi").textContent = p[4] || "—";
     $("dKernel").textContent = p[5] || "—";
   }
+  // What an app can see, on the Modules tab.
+  //
+  // The MOUNT verdict is the check report's, not this card's. It used to run its
+  // own `posture --json` and count foreign mounts with its own awk, and that
+  // pattern was wrong in both directions -- it missed a bind from anywhere else
+  // under /data/adb, and it counted a hook framework's by-design bind that the
+  // report calls expected. A front page contradicting the report two taps away
+  // teaches the reader to trust neither number. Those are three ordinary rows
+  // now (`zero-mount-posture`, `tmpfs-over-the-rom`, `foreign-mount-over-the-rom`)
+  // and this reads them.
+  //
+  // What this card still measures for itself is what the report cannot: whether a
+  // non-root process sees a different mount table than root, and the residual
+  // tells a scanner reads straight out of properties whatever the mount table
+  // says.
   async function refreshStealth() {
-    // root view (ksu.exec runs as root -> sees every mount)
     const r = await exec(
       'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
-      'echo "root_ov=$(grep -c \'^nomount_ov \' /proc/self/mounts 2>/dev/null)"; ' +
       'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
       'vb=$(grep -hoE \'verifiedbootstate[ ="]*(green|orange|yellow|red)\' /proc/cmdline /proc/bootconfig 2>/dev/null | grep -oE \'green|orange|yellow|red\'); ' +
       'vbad=$(printf \'%s\\n\' "$vb" | grep -E \'orange|yellow|red\' | head -1); ' +
@@ -1408,169 +1369,146 @@
     const kv = {};
     r.stdout.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1).trim(); });
     const sucompat = kv.sucompat === "1";
-    const rootOv = parseInt(kv.root_ov || "0", 10);
     const rootNm = parseInt(kv.root_nm || "0", 10);
 
-    // Foreign mounts come from the ENGINE, not from an awk here.
-    //
-    // This card used to count them with `awk '$4 ~ "/adb/modules/"'`, and that
-    // pattern is wrong in both directions:
-    //
-    //   * it MISSES a bind from anywhere else under /data/adb -- a ReVanced
-    //     module binds out of /data/adb/rvhc, which the audit has a regression
-    //     test for (issue #14). So the shield read a green "fully mountless"
-    //     over a mount any app could see.
-    //   * it COUNTS a hook framework's bind, which absorb deliberately never
-    //     takes over and the audit reports as expected. Measured on an OP15 with
-    //     LSPosed: the shield sat on a permanent amber "another module is
-    //     mounting" for the one mount the audit calls clean.
-    //
-    // A front page that contradicts the audit two taps away teaches the reader
-    // to trust neither number. `posture --json` runs the same three checks the
-    // audit runs, so there is one implementation and one answer.
-    const pj = auParse(await nm("posture --json"));
-    const pChecks = (pj && pj.checks) || [];
-    const pBad = pChecks.filter(function (c) { return c.verdict === "fail"; });
-    // null, not 0, when the mount table could not be read at all: "there are no
-    // foreign mounts" and "nobody asked" are different answers, and the second
-    // one must not render green.
-    const pUnknown = !pj || pChecks.some(function (c) { return c.verdict === "unmeasured"; });
-    const fmnt = pUnknown ? -1 : pBad.length;
-    const fmntWhy = pBad.map(function (c) { return c.meaning || c.name; }).join(" ");
-    const fmntOwner = pBad.map(function (c) { return c.owner; }).filter(Boolean).join(", ");
-
-    // app view: drop to a non-root uid and count nomount_* mounts. If the kernel
+    // App view: drop to a non-root uid and count nomount_* mounts. If the kernel
     // mount-hide hook is active, non-root readers get them filtered out (-> 0).
     // NB: grep -c exits 1 when the count is 0 (the hidden case!), so don't gate on
     // errno — parse stdout as a number instead.
-    const appR = await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"');
-    const appOut = (appR.stdout || "").trim();
+    const appOut = ((await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"')).stdout || "").trim();
     const appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
 
-    // Residual tells a scanner can still read even when the mount surface is clean.
+    // -1, not 0, when the rows are missing or unmeasured: "there are no foreign
+    // mounts" and "nobody asked" are different answers, and the second must not
+    // render green.
+    const mrows = ["zero-mount-posture", "tmpfs-over-the-rom", "foreign-mount-over-the-rom"].map(checkById);
+    const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
+    const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
+    const fmnt = measured ? bad.length : -1;
+
     const vbs = (kv.vbs || "").toLowerCase();
     const fp = kv.fp || "";
     const se = (kv.se || "").trim();
     const vbTell = vbs !== "" && vbs !== "green";
-    // `dev-keys` is a real signing tag — spoof.sh normalises it right alongside
-    // test-keys in both its fingerprint and its description rewrites — and its
-    // absence here rendered a dev-keys build as a green "release-keys". An EMPTY
-    // fingerprint is not a pass either: getprop returning nothing means we could
-    // not read it, and the row below now says n/a rather than asserting a clean
-    // one, the same way the Verified boot and SELinux rows already do.
+    // `dev-keys` is a real signing tag, and its absence here rendered a dev-keys
+    // build as a green "release-keys". An EMPTY fingerprint is not a pass either:
+    // getprop returning nothing means we could not read it.
     const keyMatch = fp === "" ? null : fp.match(/test-keys|dev-keys|userdebug|:eng\//);
-    const keyTell = !!keyMatch;
     const seTell = se !== "" && se !== "Enforcing";
+    const tells = [];
+    if (vbTell) tells.push("verified-boot=" + vbs);
+    if (keyMatch) tells.push("build keys");
+    if (seTell) tells.push("SELinux " + se);
 
-    $("mSu").innerHTML = sucompat ? 'sucompat <small>kernel · mountless</small>' : 'external <small>unmanaged</small>';
-    // mOv (RRO overlay count) is set from the rule list in refreshStatus — RRO is now
-    // hookless (mountless), so it is NOT counted from nomount_ov mounts (which are 0).
+    // "external · unmanaged" is a claim, and a probe that did not run has not
+    // earned it any more than it earns the reassuring one. Same rule, other
+    // direction: absent must say absent.
+    $("mSu").innerHTML = r.errno !== 0 ? 'not measured <small>probe did not run</small>'
+      : sucompat ? 'sucompat <small>kernel · mountless</small>'
+      : 'external <small>unmanaged</small>';
 
-    // posture rows (label | value | tag)
     const rows = [
       { k: "File injections", v: "mountless", t: "vfs" },
       { k: "Root · su", v: sucompat ? "sucompat · mountless" : "external", t: sucompat ? "vfs" : "off" },
     ];
     if (rootNm > 0) {
-      if (appNm === 0) rows.push({ k: "Real mounts", v: `root ${rootNm} · apps 0 — hidden`, t: "vfs" });
-      else if (appNm > 0) rows.push({ k: "Real mounts", v: `apps see ${appNm} — VISIBLE`, t: "warn" });
-      else rows.push({ k: "Real mounts", v: `root ${rootNm} · app-view n/a`, t: "off" });
-    } else if (fmnt > 0) {
-      rows.push({ k: "Real mounts", v: `${fmnt} visible to apps`, t: "warn" });
-    } else if (fmnt < 0) {
-      // The engine could not read the mount table. Not zero -- unknown.
-      rows.push({ k: "Real mounts", v: "could not check", t: "off" });
+      rows.push(appNm === 0 ? { k: "Real mounts", v: "root " + rootNm + " · apps 0 — hidden", t: "vfs" }
+              : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " — VISIBLE", t: "warn" }
+              : { k: "Real mounts", v: "root " + rootNm + " · app-view n/a", t: "off" });
     } else {
-      rows.push({ k: "Real mounts", v: "none — pure Prism", t: "vfs" });
+      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " visible to apps", t: "warn" }
+              : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
+              : { k: "Real mounts", v: "none — pure Prism", t: "vfs" });
     }
-    rows.push({ k: "Verified boot", v: vbs ? (vbTell ? vbs + " · tell" : vbs) : "n/a", t: vbTell ? "warn" : (vbs ? "vfs" : "off") });
+    rows.push({ k: "Verified boot", v: vbs ? (vbTell ? vbs + " · tell" : vbs) : "n/a",
+                t: vbTell ? "warn" : (vbs ? "vfs" : "off") });
     // Name the tag that actually matched, so a dev-keys build is not reported as
     // "test-keys" — the row is the only place the user sees which one it is.
-    rows.push({
-      k: "Build keys",
-      v: fp === "" ? "n/a" : keyTell ? keyMatch[0].replace(/^:|\/$/g, "") + " · tell" : "release-keys",
-      t: fp === "" ? "off" : keyTell ? "warn" : "vfs",
-    });
+    rows.push({ k: "Build keys",
+                v: fp === "" ? "n/a" : keyMatch ? keyMatch[0].replace(/^:|\/$/g, "") + " · tell" : "release-keys",
+                t: fp === "" ? "off" : keyMatch ? "warn" : "vfs" });
     rows.push({ k: "SELinux", v: se || "n/a", t: seTell ? "warn" : (se ? "vfs" : "off") });
     $("posture").innerHTML = rows.map((x) =>
       `<div class="row"><span class="name">${x.k}</span><span class="tag ${x.t}">${esc(x.v)}</span></div>`
     ).join("");
 
-    const shield = $("shield");
-    if (appNm > 0) {
-      shield.className = "shield warn";
-      $("stealthT").textContent = "Mount visible to apps";
-      $("stealthD").textContent = `uid 2000 sees ${appNm} nomount_* mount${appNm > 1 ? "s" : ""}`;
-      $("stealthNote").innerHTML = "A live non-root check sees <code>nomount_*</code> mounts. v2.3.7+ is <b>fully mountless</b> (Prism RRO) — if you see this, an older overlay build is still active; re-run the mount pass or reboot.";
-    } else if (appNm === 0) {
-      shield.className = "shield clean";
-      if (rootNm === 0 && fmnt > 0) {
-        // The Suite is mountless, but the mount TABLE is not: another module's bind is
-        // just as readable to an app as one of ours would be, and claiming "zero mounts"
-        // over the top of it was the one false reassurance this card exists to prevent.
-        //
-        // These are the audit's OWN failures now, so a hook framework's by-design
-        // bind never lands here and a bind from outside /data/adb/modules always
-        // does. The wording comes from the same check, which means the shield and
-        // the audit cannot describe the same mount differently.
-        shield.className = "shield warn";
-        $("stealthT").textContent = "Something is mounting over the ROM";
-        $("stealthD").textContent = fmntOwner ? "from " + fmntOwner
-                                              : `${fmnt} finding${fmnt > 1 ? "s" : ""} in the mount table`;
-        $("stealthNote").innerHTML = esc(fmntWhy) +
-          " <code>nomount absorb</code> converts what it safely can into Prism injections and runs at every boot. " +
-          "Open <b>Detection audit</b> on the Diagnostics tab — it names each one, who caused it, and what you can do.";
-      } else if (rootNm === 0 && fmnt < 0) {
-        // Unknown is not clean. The whole card is a claim about what an app can
-        // see; if the mount table could not be read, nothing measured that claim.
-        shield.className = "shield warn";
-        $("stealthT").textContent = "Mount posture unknown";
-        $("stealthD").textContent = "the mount table could not be read";
-        $("stealthNote").innerHTML = "File injections and RRO are Prism and su is sucompat, so the Suite adds " +
-          "no mounts by construction — but this check could not read <code>/proc/self/mountinfo</code>, so it is " +
-          "not confirming anything here.";
-      } else if (rootNm === 0) {
-        $("stealthT").textContent = "Fully mountless";
-        $("stealthD").textContent = "zero mounts — nothing to hide";
-        $("stealthNote").innerHTML = "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat (kernel&nbsp;· mountless), and RRO overlays are Prism too — OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> mount table, so there is no mount-gap for a scanner to flag.";
-      } else {
-        $("stealthT").textContent = "Clean — nothing visible to apps";
-        $("stealthD").textContent = `${rootNm} mount${rootNm > 1 ? "s" : ""} hidden from non-root`;
-        $("stealthNote").innerHTML = "Injections are mountless and su is sucompat. Any remaining <code>nomount_*</code> mount is kernel-hidden from non-root readers of <code>/proc/*/mountinfo</code>; root still sees everything.";
+    // The verdict, worst first. Every arm that is not the last one is a reason
+    // this card may NOT say "clean" -- an unknown is never green here, because
+    // the whole card is a claim about what an app can see and an unknown means
+    // nothing measured that claim.
+    //
+    // Residual tells OVERRIDE whatever the mount ladder concluded: even with a
+    // spotless mount surface these are read directly by a scanner. A mount
+    // finding is the more actionable problem, so its wording is kept and the
+    // tells are appended rather than clobbering it.
+    let told = false;
+    const say = function (kind, title, desc, note) {
+      if (tells.length && !told) {
+        kind = "warn";
+        note += " Also readable by a scanner, whatever the mount table says: " +
+                tells.map(esc).join(", ") + ".";
       }
+      $("shield").className = "shield " + kind;
+      $("stealthT").textContent = title;
+      $("stealthD").textContent = desc;
+      $("stealthNote").innerHTML = note;
+    };
+    if (engineDown(CHECK)) {
+      // A DEAD ENGINE OUTRANKS THE MOUNT VERDICT. With it down there genuinely
+      // are no mounts, so every row above passes and this card would render its
+      // greenest state on a device where nothing is being injected at all. Every
+      // statement true, the conclusion false.
+      say("warn", "The engine isn’t running", "nothing is being injected",
+        "There are no mounts because there is nothing being served. This card cannot say " +
+        "anything about how you look to an app until the engine answers — open <b>Check</b> " +
+        "from the Status tab.");
+    } else if (appNm > 0) {
+      say("warn", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
+        "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
+        "mountless</b> (Prism RRO) — if you see this, an older overlay build is still active; reboot.");
+    } else if (fmnt > 0) {
+      // The Suite is mountless, but the mount TABLE is not: another module's bind
+      // is just as readable to an app as one of ours would be, and claiming "zero
+      // mounts" over the top of it was the one false reassurance this card exists
+      // to prevent. The wording comes from the report's own row, so the shield and
+      // the report cannot describe the same mount differently.
+      const owner = bad.map(function (c) { return c.owner; }).filter(Boolean).join(", ");
+      say("warn", "Something is mounting over the ROM",
+        owner ? "from " + owner : fmnt + " finding(s) in the mount table",
+        esc(bad.map(function (c) { return c.meaning || c.name; }).join(" ")) +
+        " Open <b>Check</b> from the Status tab — it names each one, who caused it, and what " +
+        "you can do about it.");
+    } else if (fmnt < 0) {
+      say("warn", "Mount posture not measured", "no check has read the mount table yet",
+        "File injections and RRO are Prism and su is sucompat, so the Suite adds no mounts by " +
+        "construction — but nothing has measured that here yet. Run <b>Check my setup</b> from " +
+        "the Status tab.");
+    } else if (appNm < 0 && rootNm > 0) {
+      // `su 2000` is exactly the call that stops answering once uid 2000 lands on
+      // the hide list, so this is a real state, not a broken one.
+      say("warn", "Detection posture", "app-view check unavailable",
+        "Couldn’t drop to a non-root uid to verify here, and root sees " + rootNm +
+        " <code>nomount_*</code> mount(s).");
+    } else if (rootNm > 0) {
+      // appNm === 0: the mounts EXIST and are kernel-hidden from non-root
+      // readers. "Zero mounts — nothing to hide" would be a plain falsehood
+      // here; there is something, and hiding it is what is working.
+      say("clean", "Clean — nothing visible to apps",
+        rootNm + " mount" + (rootNm > 1 ? "s" : "") + " hidden from non-root",
+        "Injections are mountless and su is sucompat. Any remaining <code>nomount_*</code> mount " +
+        "is kernel-hidden from non-root readers of <code>/proc/*/mountinfo</code>; root still " +
+        "sees everything.");
+    } else if (tells.length) {
+      told = true;
+      say("warn", "Residual tells present", tells.join(" · "),
+        "Mount surface is clean, but a scanner can still read: " + tells.map(esc).join(", ") +
+        ". These are properties and boot state, not mounts — nothing on this page changes them.");
     } else {
-      // UNVERIFIED, not clean. This whole card is a claim about what a non-root
-      // process can see; if the probe could not drop to a non-root uid, nothing
-      // measured that claim. Green here asserted a posture the code explicitly
-      // says it could not check -- and `su 2000` is exactly the call that stops
-      // answering once uid 2000 lands on the hide list. The text was already
-      // honest; only the colour lied.
-      shield.className = "shield warn";
-      $("stealthT").textContent = "Detection posture";
-      $("stealthD").textContent = "app-view check unavailable";
-      $("stealthNote").innerHTML = `File injections and RRO are Prism; su is sucompat. Couldn't drop to a non-root uid to verify here; root sees ${rootNm} <code>nomount_*</code> mount(s).`;
-    }
-
-    // Residual tells override the mount-only verdict: even with a clean mount surface,
-    // these are directly readable by a scanner.
-    const extraTells = [];
-    if (vbTell) extraTells.push("verified-boot=" + vbs);
-    if (keyTell) extraTells.push("build keys");
-    if (seTell) extraTells.push("SELinux " + se);
-    if (extraTells.length) {
-      shield.className = "shield warn";
-      if (appNm > 0 || fmnt > 0 || fmnt < 0) {
-        // A visible mount is the more actionable problem — keep its title/desc and
-        // just append the residual tells rather than clobbering the mount warning.
-        $("stealthNote").innerHTML +=
-          " Also readable by a scanner: " + extraTells.map(esc).join(", ") + ".";
-      } else {
-        $("stealthT").textContent = "Residual tells present";
-        $("stealthD").textContent = extraTells.join(" · ");
-        $("stealthNote").innerHTML = "Mount surface is clean, but a scanner can still read: " +
-          extraTells.map(esc).join(", ") +
-          ". Verified-boot (props + <code>/proc/cmdline</code>/<code>bootconfig</code>) and build keys are both handled by <b>Boot-state (props + procfs)</b> in Tools › Spoofing.";
-      }
+      say("clean", "Fully mountless", "zero mounts — nothing to hide",
+        "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat " +
+        "(kernel&nbsp;· mountless), and RRO overlays are Prism too — OverlayManager&nbsp;+ idmap2 " +
+        "read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> " +
+        "mount table, so there is no mount-gap for a scanner to flag.");
     }
   }
 
@@ -1678,7 +1616,7 @@
   // takes you to it; re-running is the explicit button's job.
   function openDetail() {
     showTab("diag", null);
-    if (!AUDIT) runAll(null);
+    if (!CHECK) runCheck(null);
   }
 
   // ---- rules filter ----
@@ -1717,142 +1655,89 @@
       : lines.length + " rules";
   }
 
-  // ---- health check ----
+  // ---- the one check ------------------------------------------------------
   //
-  // ONE doctor run per refresh, shared.
+  // `nomount check` is the whole diagnostic surface now. It replaced `doctor`,
+  // `audit`, `posture`, `selfcheck` and `plan` -- five verbs over two verdict
+  // enums, three JSON shapes and a fourth key=value one -- and this page is where
+  // that cost was being paid: `mergeFindings` existed only to normalise three
+  // report shapes into one list in JavaScript, because one list is what a reader
+  // wants. It is gone. `checks[]` IS the merged list: already sorted worst-first,
+  // and every row carries its own verdict, severity, meaning and owner.
   //
-  // `doctor` resolves the whole mount plan, parses the live rule list, decodes
-  // the KSU allowlist and -- since engine v26 -- forks up to sixteen children to
-  // sample the ghost table. The manager banner used to run all of that on every
-  // page open to read two booleans out of the prose, throw the rest away, and
-  // leave the Health card showing a dash until the user pressed a button that
-  // ran it a second time. On OxygenOS a burst of root exec is also exactly the
-  // heuristic that flags root WebUI apps as malicious.
+  // Two sections, one shape:
+  //   plan   -- will this module set produce a bad rule? Static, no running
+  //             process involved, so the answer does not change with the clock.
+  //   device -- is what we serve detectable, and is it being served? MEASURED
+  //             here, now, and several of these need an app to have opened an
+  //             injected file -- which is why they can honestly say `unmeasured`.
   //
-  // So: one call, cached for the life of the refresh, and both consumers read
-  // it. `runDoctor` forces a fresh one, because pressing the button means "check
-  // again".
-  let DOCTOR = null;
-
-  async function getDoctor(force) {
-    if (DOCTOR && !force) return DOCTOR;
-    const r = await nm("doctor --json");
-    const d = auParse(r);
-    // Keep the human text alongside the parsed object: the card shows prose, the
-    // banner switches on fields, and re-running doctor to get the other form
-    // would put the double call straight back.
-    DOCTOR = d ? { json: d, errno: r.errno, text: "" } : { json: null, errno: r.errno, text: "" };
-    return DOCTOR;
-  }
-
-  function doctorPaintChip(d) {
-    const chip = $("dchip");
-    if (!d || !d.summary) { chip.textContent = "—"; chip.className = "chip"; return; }
-    const errs = d.summary.errors || 0, warns = d.summary.warnings || 0;
-    chip.textContent = errs ? errs + " error" + (errs > 1 ? "s" : "")
-                     : warns ? warns + " warning" + (warns > 1 ? "s" : "")
-                     : "healthy";
-    // Both amber. A plan error and a plan warning differ in what they will do to
-    // your next boot, and the chip already says which by counting them
-    // separately -- "2 errors" is not "2 warnings".
-    chip.className = "chip " + (errs || warns ? "warn" : "ok");
-  }
-
-  // Findings as text, from the structured form -- same layout doctor prints, so
-  // anyone who knows the CLI output recognises the card.
-  function doctorText(d) {
-    if (!d) return "(no output)";
-    const f = d.findings || [];
-    const body = f.length
-      ? f.map(function (x) { return "[" + x.level + "] " + x.check + ": " + x.detail; }).join("\n")
-      : "[ok] no problems found";
-    const s = d.summary || {};
-    return body + "\n\nsummary: " + (s.errors || 0) + " errors, " + (s.warnings || 0) +
-           " warnings" + (s.informational ? ", " + s.informational + " informational" : "");
-  }
-
-  // Errors and warnings in the open; the eleven [info] lines a healthy device
-  // produces behind the disclosure. The old card printed all of them into one
-  // scrolling block, where a real error read exactly like a note about zygote
-  // FD allowlisting.
-  function doctorPaintSummary(d) {
-    const el = $("doctorsum");
-    if (!el) return;
-    if (!d) { el.innerHTML = ""; return; }
-    const f = (d.findings || []).filter(function (x) { return x.level !== "info"; });
-    const s = d.summary || {};
-    if (!f.length) {
-      el.innerHTML = '<div class="row"><span class="name">No errors or warnings in the mount plan.</span>' +
-        '<span class="tag vfs">clean</span></div>' +
-        (s.informational ? '<div class="row"><span class="name">' + s.informational +
-          ' informational note' + (s.informational > 1 ? "s" : "") + ' — in the full report below.</span>' +
-          '<span class="tag off">fyi</span></div>' : "");
-      return;
-    }
-    el.innerHTML = f.map(function (x) {
-      return '<div class="frow"><div class="fname">' + esc(x.check) + "</div>" +
-             '<div class="fmean">' + esc(x.detail) + "</div>" +
-             '<div class="fmeta"><span class="tag warn">' + esc(x.level) + "</span></div></div>";
-    }).join("");
-  }
-
-  async function runDoctor(btn) {
-    const done = busy(btn, "Checking…");
-    const out = $("doctorout");
-    const wrap = $("doctorRawWrap");
-    $("doctorsum").innerHTML = '<div class="empty">Resolving the mount plan…</div>';
-    const dd = await getDoctor(true);
-    if (!dd.json) {
-      $("doctorsum").innerHTML = '<div class="empty">The health check did not return a result (exit ' +
-        dd.errno + ").</div>";
-      wrap.style.display = "none";
-      doctorPaintChip(null);
-      done();
-      return;
-    }
-    out.textContent = doctorText(dd.json);
-    wrap.style.display = "";
-    doctorPaintSummary(dd.json);
-    doctorPaintChip(dd.json);
-    paintManagerBanner(dd);
-    done();
-  }
-
-  // ---- detection audit ----
-  //
-  // Reads `audit --json`, not the prose. Four call sites on this page used to
-  // regex the human output of four subcommands, and that contract has already
-  // shipped broken once (the kernel-umount half of the manager banner tested for
-  // a sentence doctor does not print, so it could never fire). A field cannot
-  // drift the way a sentence can.
-  //
-  // stdout ONLY. Every other reader here concatenates stdout+stderr, which is
+  // stdout ONLY. Every prose reader here concatenates stdout+stderr, which is
   // right for prose and fatal for JSON: the mount pass writes plan refusals to
   // stderr, and one of those glued to the front of the object breaks the parse.
-  let AUDIT = null;
+  let CHECK = null;
 
-  function auParse(r) {
+  function parseJson(r) {
     const raw = (r.stdout || "").trim();
     if (!raw) return null;
     try { return JSON.parse(raw); } catch (e) { return null; }
   }
 
-  // Verdict -> how it reads. The whole point of the n/a split lives in this
-  // table: `n/a` is grey and never touches the chip, `unmeasured` is amber
-  // because a check that could have run and did not is exactly what the
-  // honesty rule is about, and neither is ever green.
+  // Did this run include that half? Read off `sections`, which the report carries
+  // precisely so a cached file is not ambiguous -- "the plan is clean" and "the
+  // plan was never looked at" are different answers. Falls back to scanning the
+  // rows for a report written before the field existed.
+  function ranSection(r, s) {
+    if (!r) return false;
+    if (r.sections && r.sections.length) return r.sections.indexOf(s) >= 0;
+    return !!(r.checks || []).some(function (c) { return c.section === s; });
+  }
+
+  function findCheck(r, id) {
+    const cs = (r && r.checks) || [];
+    for (var i = 0; i < cs.length; i++) if (cs[i].id === id) return cs[i];
+    return null;
+  }
+  function checkById(id) { return findCheck(CHECK, id); }
+
+  // The two states that mean NOTHING IS BEING INJECTED, as opposed to "you might
+  // be detectable". They are the only things on this page that get red, and they
+  // outrank every finding: with either true, every other row is describing a
+  // device that is not hiding anything.
+  //
+  // The engine is only ASKED in the device half, so a plan-only report carries
+  // `engine: null` without anything being wrong. Reading that as "the engine is
+  // down" would paint the loudest state on the page over a run that never put the
+  // question.
+  function engineDown(r) {
+    return !!r && ranSection(r, "device") && r.engine === null;
+  }
+  function guardTripped(r) {
+    const g = findCheck(r, "boot-guard-armed");
+    return !!g && g.verdict === "fail";
+  }
+
+  // Verdict -> how the row reads.
+  //
+  // Two of these seven are new here. `warn` is a hazard in the plan -- nothing has
+  // gone wrong yet, something will -- and it belongs with the failures, because
+  // the answer to both is "look at this". `note` is a standing observation about a
+  // working setup and belongs with `n/a`: out of the list entirely, or the amber
+  // count teaches its reader to ignore the thing.
+  //
   // AMBER for everything actionable; RED is reserved for "the Suite is not
-  // working" (engine down, guard tripped) and never used for a finding.
-  //
-  // A detection finding is something to look at, not an emergency -- the setup is
-  // running and serving your modules either way. Spending red on it leaves
-  // nothing louder for the state where nothing is being injected at all, which is
-  // categorically worse and is the one a reader must not scroll past.
-  //
-  // The three amber states are still distinguished, by LABEL and by GROUP rather
-  // than by hue: "detectable" under `Needs your attention`, "reboot to finish"
-  // under it too, "not verified" under `Not verified`. That is the distinction
-  // doing the work; the colour only says "look".
+  // working" (engine down, guard tripped) and never used for a finding. A
+  // detection finding is something to look at, not an emergency -- the setup is
+  // running and serving your modules either way. Spending red on it leaves nothing
+  // louder for the state where nothing is being injected at all.
+  const VERDICT_LABEL = {
+    fail: "needs attention",
+    reboot: "reboot to finish",
+    warn: "will bite later",
+    unmeasured: "not measured",
+  };
+  function isAttention(v) { return v === "fail" || v === "reboot" || v === "warn"; }
+  function isShown(v) { return isAttention(v) || v === "unmeasured"; }
 
   function auAge(ts) {
     if (!ts) return "";
@@ -1865,287 +1750,249 @@
     return Math.round(hrs / 24) + "d ago";
   }
 
-  // One finding. The order is deliberate: name and state, then the sentence a
-  // reader can act on, then who caused it, then the buttons -- and only then,
-  // behind a disclosure, the evidence that was written for whoever debugs the
-  // engine.
-  // `i` indexes AUDIT.checks. The buttons dispatch on that index and read the
-  // finding back out of the array -- nothing from the finding is ever
-  // interpolated into an onclick attribute.
+  // One line, on the hero, from the same report the detail pane reads -- so the
+  // front page and the detail view cannot disagree, which is the whole failure
+  // mode that started this work.
   //
-  // This is not style. `esc()` renders ' as &#39;, and an HTML attribute is
-  // entity-decoded BEFORE the JS in it is parsed, so an escaped quote arrives at
-  // the parser as a real one and closes the string early. A rule target is
-  // allowed to contain a quote -- json.rs is hardened for exactly that -- so
-  // interpolating c.action.arg here would have turned a legal filename into
-  // script injection with root behind it.
-  
-  
-  
-  // Paint the chip from a summary. Shared by a fresh run and by the cached
-  // boot-time result, so the two can never disagree about what a state looks
-  // like.
-  //
-  // `open_failures` is the number the chip goes red on -- failures MINUS the ones
-  // shown; an acceptance records that someone looked, it does not un-fail
-  // anything.
-  
-  // One line, on the hero, from the same summary object the audit chip reads --
-  // so the front page and the detail view cannot disagree, which is the whole
-  // failure mode that started this work.
-  //
-  // Four states and only one of them asks for anything:
+  // FIVE states, and the fourth is the one this refactor exists for:
+  //   engine down   -> red, "nothing is being injected"
   //   open findings -> "N things need attention", emphasised, tap to act
-  //   unmeasured    -> "N checks couldn't run", plain
+  //   not measured  -> "we haven't looked yet" — NEVER green
+  //   plan only     -> the device half was not measured at all
   //   clean         -> "Nothing detectable", green, and that is the end of it
   //
-  // `not_applicable` deliberately never appears here. A check with nothing to
-  // test on this device is not news, and putting it on the front page is how the
-  // old amber chip taught people to ignore the thing.
-  function paintHealthLine(sum, ts, engine) {
+  // `not_applicable` and `note` deliberately never appear here. A check with
+  // nothing to test on this device is not news.
+  function paintHealthLine(r) {
     const el = $("healthline"), dot = $("hlDot"), txt = $("hlTxt");
     if (!el) return;
-    if (!sum) {
-      el.classList.remove("attn", "down");
+    el.classList.remove("attn", "down");
+    if (!r || !r.summary) {
       dot.className = "hl-dot";
       txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\">— tap to run a check</span>";
       return;
     }
-    // A DEAD ENGINE OUTRANKS EVERY OTHER STATE, and this is not a hypothetical.
-    // With the engine down `live_targets()` is empty, so the target-dependent
-    // checks correctly report n/a and the mount checks correctly pass -- there
-    // genuinely are no mounts -- and the summary came back "4 passed, 0 failed".
-    // Every statement true; the conclusion false. This line then rendered a green
-    // "Nothing detectable" directly beside the hero's own red "Engine offline",
-    // on a device where nothing was being injected at all. Measured by pointing
-    // NM_BIN at a path that does not exist.
-    //
-    // `engine === undefined` means the caller did not pass it (an older cached
-    // audit.json, written before the field existed). Absent is not "down": fall
-    // through and let the summary speak, rather than inventing a fault.
-    if (engine === null) {
-      // The ONE red state on this line. Nothing is being injected -- that is not
-      // "you might be detectable", it is "the thing you installed is not running".
+    // NOT-RUNNING OUTRANKS EVERY FINDING, and this is not a hypothetical. With
+    // the engine down the target-dependent checks correctly report n/a and the
+    // mount checks correctly pass -- there genuinely are no mounts -- and the
+    // summary comes back clean. Every statement true; the conclusion false. A
+    // tripped boot guard is the same state by a different route: the Suite
+    // disabled itself, and "3 things need attention" is the wrong sentence for a
+    // device that is injecting nothing at all.
+    if (engineDown(r) || guardTripped(r)) {
       el.classList.add("attn", "down");
       dot.className = "hl-dot bad";
-      txt.innerHTML = "<b>The engine isn\u2019t running</b> " +
-                      "<span class=\"age\">\u00b7 nothing is being injected</span>";
+      txt.innerHTML = engineDown(r)
+        ? "<b>The engine isn’t running</b> <span class=\"age\">· nothing is being injected</span>"
+        : "<b>The bootloop guard tripped</b> <span class=\"age\">· the Suite disabled itself</span>";
       return;
     }
-    const open = sum.open_failures || 0;
-    const unm = sum.unmeasured || 0;
-    const age = ts ? ' <span class="age">· checked ' + esc(auAge(ts)) + "</span>" : "";
-    if (open > 0) {
+    const s = r.summary;
+    const attn = (s.open_failures || 0) + (s.warn || 0);
+    const unm = s.unmeasured || 0;
+    const age = r.ts ? ' <span class="age">· checked ' + esc(auAge(r.ts)) + "</span>" : "";
+    if (attn > 0) {
       el.classList.add("attn");
-      el.classList.remove("down");
       dot.className = "hl-dot warn";
-      txt.innerHTML = "<b>" + open + (open > 1 ? " things need" : " thing needs") +
+      txt.innerHTML = "<b>" + attn + (attn > 1 ? " things need" : " thing needs") +
                       " attention</b>" + age;
-    } else if (unm > 0) {
-      el.classList.remove("attn", "down");
+    } else if (!ranSection(r, "device")) {
+      // A plan-only run said NOTHING about detectability. That outranks a partial
+      // device run, because there is no device answer here at all.
       dot.className = "hl-dot warn";
-      txt.innerHTML = "<b>" + unm + (unm > 1 ? " checks" : " check") +
-                      " couldn\u2019t run</b>" + age;
+      txt.innerHTML = "<b>Only your plan was checked</b> " +
+                      "<span class=\"age\">— tap to check the device too</span>";
+    } else if (unm > 0 || s.complete === false) {
+      // NOT green. The boot pass runs before any app has opened an injected file,
+      // so its process-dependent checks have nothing to look at -- and the
+      // audit.json it caches is what this line shows for the rest of the uptime.
+      // "We have not looked yet" and "we looked and it is fine" are different
+      // answers and must not share a colour.
+      dot.className = "hl-dot warn";
+      txt.innerHTML = "<b>Not fully checked yet</b> <span class=\"age\">— " +
+                      (unm || 1) + (unm === 1 ? " check" : " checks") +
+                      " had nothing to look at</span>";
     } else {
-      el.classList.remove("attn", "down");
       dot.className = "hl-dot ok";
       txt.innerHTML = "<b>Nothing detectable</b>" + age;
     }
   }
 
-  
-  
-  // Merge every source into ONE list.
-  //
-  // A finding is a finding. Which subsystem produced it (`source`) belongs on
-  // the row, not in the page structure -- that was the whole reason this pane
-  // had seven cards. Rows are normalised to the audit's shape, which doctor
-  // findings now also carry.
-  function mergeFindings(audit, doctor, health) {
-    const out = [];
-    if (audit && audit.checks) {
-      audit.checks.forEach(function (c) {
-        const live = c.verdict === "fail" || c.verdict === "reboot";
-        if (!live && c.verdict !== "unmeasured") return;      // passes/n-a are hidden
-        out.push({
-          bucket: live ? "attention" : "unverified",
-          name: c.name, meaning: c.meaning, evidence: c.evidence, owner: c.owner,
-          source: "detection"
-        });
-      });
-    }
-    if (doctor && doctor.findings) {
-      doctor.findings.forEach(function (x) {
-        if (x.severity !== "attention") return;               // info is hidden
-        out.push({
-          bucket: "attention", name: x.check, meaning: x.meaning || x.detail,
-          evidence: x.detail, owner: x.owner, source: "plan"
-        });
-      });
-    }
-    if (health && !health.healthy) {
-      const why = health.consistency_mismatch
-            ? "A normal app sees different injected files than root does. That is the one runtime fault worth acting on."
-        : !health.engine_up ? "The kernel engine is not answering, so nothing is being injected."
-        : !health.guard_armed ? "The bootloop guard has tripped and disabled the Suite."
-        : "The consistency check had nothing to sample, so it did not run.";
-      out.push({
-        bucket: health.consistency_unverified ? "unverified" : "attention",
-        name: "runtime health", meaning: why, evidence: health.verdict,
-        owner: null, reach: "right now", action: null, source: "runtime"
-      });
-    }
-    return out;
-  }
-
-  // The one entry point the card has. Runs all three, merges, renders.
-  let FINDINGS = [];
-  async function runAll(btn) {
-    const done = busy(btn, "Checking\u2026");
-    $("findlist").innerHTML = '<div class="empty">Checking\u2026</div>';
-
-    const ar = auParse(await nm("audit --json --write"));
-    const dd = await getDoctor(true);
-    const hr = auParse(await nm("selfcheck --json"));
-
-    AUDIT = ar;
-    if (dd && dd.json) paintManagerBanner(dd);
-    renderFindings(ar, dd && dd.json, hr);
+  // The one entry point the card has. One command, one parse, one render.
+  async function runCheck(btn) {
+    const done = busy(btn, "Checking…");
+    $("findlist").innerHTML = '<div class="empty">Checking…</div>';
+    CHECK = parseJson(await nm("check --json --write"));
+    renderCheck(CHECK);
+    paintManagerBanner(CHECK);
+    refreshStealth();
     done();
   }
 
-  function renderFindings(audit, doctor, health) {
+  // Opening the pane paints from the boot cache; the button re-runs everything.
+  // Painting this on open is what turns the card from "press a button to find
+  // out" into "here is where you stand".
+  async function loadCheckCache() {
+    CHECK = parseJson(await exec("cat /data/adb/nomount/audit.json 2>/dev/null"));
+    renderCheck(CHECK);
+    paintManagerBanner(CHECK);
+  }
+
+  function renderCheck(r) {
     const list = $("findlist"), chip = $("fchip"), sub = $("fsub"), age = $("auage");
-    FINDINGS = mergeFindings(audit, doctor, health);
+    paintHealthLine(r);
+    $("auCopy").style.display = r ? "" : "none";
 
     // Nothing ran at all is not "nothing wrong".
-    if (!audit && !doctor && !health) {
-      list.innerHTML = '<div class="empty">Nothing could be checked \u2014 the engine did not answer.</div>';
-      chip.textContent = "unknown"; chip.className = "chip warn";
-      $("auCopy").style.display = "none";
+    if (!r || !r.checks) {
+      list.innerHTML = '<div class="empty">Not checked yet — press <b>Check my setup</b>.</div>';
+      chip.textContent = "not checked"; chip.className = "chip warn";
+      age.style.display = "none";
       return;
     }
 
-    const attention = FINDINGS.filter(function (f) { return f.bucket === "attention"; });
-    const unver     = FINDINGS.filter(function (f) { return f.bucket === "unverified"; });
-    const engineDown = audit && audit.engine === null;
-    // The guard above only fires when ALL THREE are missing. If the detection
-    // audit alone failed to parse while doctor and selfcheck came back, it
-    // contributed no rows -- and "no rows" then read as "all clear", over the one
-    // source that actually tests for detectability. runCheckAll already says
-    // "Detection audit did not run."; this path did not.
-    const noDetection = !audit;
+    $("auditout").textContent = JSON.stringify(r, null, 1);
+    age.style.display = "";
+    age.textContent = "Checked " + (auAge(r.ts) || "now") + " · " +
+      (r.sections && r.sections.length ? r.sections.join(" + ") : "unknown") + " · " +
+      (r.verdict || "");
 
-    // Chip: one number, the one that means "act".
-    if (engineDown) { chip.textContent = "engine down"; chip.className = "chip bad"; }
+    const rows = r.checks.filter(function (c) { return isShown(c.verdict); });
+    const attention = rows.filter(function (c) { return isAttention(c.verdict); });
+    const unmeasured = rows.filter(function (c) { return c.verdict === "unmeasured"; });
+    const down = engineDown(r);
+
+    if (down) { chip.textContent = "engine down"; chip.className = "chip bad"; }
+    else if (guardTripped(r)) { chip.textContent = "guard tripped"; chip.className = "chip bad"; }
     else if (attention.length) { chip.textContent = attention.length + " to look at"; chip.className = "chip warn"; }
-    else if (unver.length) { chip.textContent = unver.length + " unverified"; chip.className = "chip warn"; }
-    else if (noDetection) { chip.textContent = "not checked"; chip.className = "chip warn"; }
+    else if (!ranSection(r, "device")) { chip.textContent = "plan only"; chip.className = "chip warn"; }
+    else if (unmeasured.length) { chip.textContent = unmeasured.length + " not measured"; chip.className = "chip warn"; }
     else { chip.textContent = "all clear"; chip.className = "chip ok"; }
 
-    const checked = (audit && audit.summary ? audit.summary.passed + audit.summary.not_applicable : 0) +
-                    (doctor && doctor.summary ? doctor.summary.informational : 0);
+    const s = r.summary || {};
+    const clean = (s.pass || 0) + (s.not_applicable || 0) + (s.note || 0);
 
-    if (noDetection && !attention.length && !unver.length && !engineDown) {
-      sub.textContent = "The detection audit did not run.";
-      list.innerHTML = '<div class="frow"><div class="fname">Not checked</div>' +
-        '<div class="fmean">The detection audit did not return a result, so nothing here ' +
-        'has been tested for detectability. Press <b>Check my setup</b>.</div>' +
-        '<div class="fmeta"><span class="tag warn">not checked</span></div></div>';
-    } else if (!attention.length && !unver.length && !engineDown) {
+    if (!rows.length && ranSection(r, "device")) {
       sub.textContent = "Nothing needs your attention.";
-      // Name only the sources that actually reported. The old sentence claimed
-      // all three every time, including on the cache-load path where doctor and
-      // the runtime check are both null by construction.
-      const ran = [];
-      if (audit && audit.summary) ran.push("detection");
-      if (doctor && doctor.summary) ran.push("your mount plan");
-      if (health) ran.push("the running system");
-      const src = ran.length === 1 ? ran[0]
-                : ran.slice(0, -1).join(", ") + " and " + ran[ran.length - 1];
       list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
-        '<div class="fmean">' + checked + ' check' + (checked === 1 ? "" : "s") +
-        ' ran across ' + src + ', and found nothing to act on.</div>' +
+        '<div class="fmean">' + clean + " check" + (clean === 1 ? "" : "s") +
+        " ran across " + (r.sections || []).join(" and ") +
+        ", and found nothing to act on.</div>" +
         '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>';
-    } else {
-      sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
-      const group = function (title, rows) {
-        return rows.length
-          ? '<div class="fgroup">' + title + ' <span class="cnt">' + rows.length + "</span></div>" +
-            rows.map(findRow).join("")
-          : "";
-      };
-      list.innerHTML = group("Needs your attention", attention) +
-                       group("Not verified", unver);
+      return;
     }
 
-    $("auCopy").style.display = audit ? "" : "none";
-    if (audit) {
-      const bits = ["Checked " + (auAge(audit.ts) || "now")];
-      age.style.display = ""; age.textContent = bits.join(" \u00b7 ");
-      paintHealthLine(audit.summary, audit.ts, audit.engine);
-      $("auditout").textContent = JSON.stringify(audit, null, 1);
+    sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
+    const group = function (title, gr) {
+      return gr.length
+        ? '<div class="fgroup">' + title + ' <span class="cnt">' + gr.length + "</span></div>" +
+          gr.map(checkRow).join("")
+        : "";
+    };
+    // A run that was never asked about the device says nothing about
+    // detectability, so it goes at the very top: everything below it is about the
+    // module set, not about what an app can see.
+    let head = "";
+    if (!ranSection(r, "device")) {
+      head = '<div class="frow"><div class="fname">Only your plan was checked</div>' +
+        '<div class="fmean">This report covers what your module set will do at the next boot. ' +
+        "Nothing on the device itself was measured, so nothing here says whether what you " +
+        "serve is detectable.</div>" +
+        '<div class="fmeta"><span class="tag warn">plan only</span>' +
+        '<button class="act" style="flex:none;min-width:0;padding:12px 16px;font-size:12.5px;margin-left:auto" ' +
+        'onclick="runCheck(this)">Check the device</button></div></div>';
     }
-    if (doctor) $("doctorout").textContent = doctorText(doctor);
+    // The incompleteness notice heads the unmeasured group rather than the whole
+    // list. It is the sentence a reader most needs when nothing else is wrong --
+    // the rows are absent answers, not passes -- but it is a CONSEQUENCE when
+    // something above it failed (with the engine down, seven checks have nothing
+    // to look at precisely because the engine is down), and leading with the
+    // consequence buries the cause.
+    let unmHead = "";
+    if (unmeasured.length || s.complete === false) {
+      unmHead = '<div class="frow"><div class="fname">' +
+        (attention.length ? "Not a complete answer" : "This is not a clean result yet") + "</div>" +
+        '<div class="fmean">' + unmeasured.length + " check" +
+        (unmeasured.length === 1 ? "" : "s") + " had nothing to look at when this ran, so " +
+        (unmeasured.length === 1 ? "it is" : "they are") + " not " +
+        (unmeasured.length === 1 ? "a pass" : "passes") + ". " +
+        (attention.length
+          ? "Fix what is above first — several of these depend on it."
+          : "The usual reason is timing: the boot pass runs before any app has opened an " +
+            "injected file, so the checks that need a running app cannot answer then. " +
+            "Run them now that the device is up.") + "</div>" +
+        '<div class="fmeta"><span class="tag warn">not measured</span>' +
+        '<button class="act" style="flex:none;min-width:0;padding:12px 16px;font-size:12.5px;margin-left:auto" ' +
+        'onclick="runCheck(this)">Run them now</button></div></div>';
+    }
+    list.innerHTML = head +
+      group("Needs your attention", attention) +
+      (unmeasured.length ? '<div class="fgroup">Not measured <span class="cnt">' +
+        unmeasured.length + "</span></div>" + unmHead + unmeasured.map(checkRow).join("")
+        : unmHead);
   }
 
-  // Opening the pane paints from the boot cache; the button re-runs everything.
-  async function loadFindingsCache() {
-    const a = auParse(await exec("cat /data/adb/nomount/audit.json 2>/dev/null"));
-    if (!a) { $("findlist").innerHTML = '<div class="empty">Not checked yet \u2014 press <b>Check my setup</b>.</div>'; return; }
-    AUDIT = a;
-    renderFindings(a, null, null);
-  }
-
-  function findRow(f) {
+  // One row. The order is deliberate: name and state, then the sentence a reader
+  // can act on, then who caused it, then -- behind a disclosure -- the evidence,
+  // which is written for whoever debugs the engine.
+  //
+  // Nothing from the row is ever interpolated into an onclick attribute. That is
+  // not style: `esc()` renders ' as &#39;, an HTML attribute is entity-decoded
+  // BEFORE the JS in it is parsed, and a rule target is allowed to contain a
+  // quote -- so interpolating one would have turned a legal filename into script
+  // injection with root behind it.
+  function checkRow(c) {
     const b = [];
-    b.push('<div class="frow">');
-    b.push('<div class="fname">' + esc(f.name) + "</div>");
-    if (f.meaning) b.push('<div class="fmean">' + esc(f.meaning) + "</div>");
-    if (f.owner) b.push('<div class="fowner">From: <b>' + esc(f.owner) + "</b></div>");
+    b.push('<div class="frow" id="chk-' + esc(c.id) + '">');
+    b.push('<div class="fname">' + esc(c.name) + "</div>");
+    if (c.meaning) b.push('<div class="fmean">' + esc(c.meaning) + "</div>");
+    if (c.owner) b.push('<div class="fowner">From: <b>' + esc(c.owner) + "</b></div>");
     b.push('<div class="fmeta"><span class="tag warn">' +
-           (f.bucket === "unverified" ? "not verified" : "needs attention") + "</span></div>");
-    b.push("<details><summary>What was measured</summary><div class=\"ev\">" +
-           esc(f.evidence || "(nothing recorded)") + "</div></details>");
+           esc(VERDICT_LABEL[c.verdict] || c.verdict) + "</span>" +
+           '<span class="tag off">' + esc(c.section || "") + "</span></div>");
+    b.push('<details><summary>What was measured</summary><div class="ev">' +
+           esc(c.evidence || "(nothing recorded)") +
+           (c.oracle ? "\n\nhow an app would use it: " + esc(c.oracle) : "") +
+           "</div></details>");
     b.push("</div>");
     return b.join("");
   }
 
-  
-  // The cached verdict the boot pass wrote. Painting this on open is what turns
-  // the card from "press a button to find out" into "here is where you stand" --
-  // previously the first time a user saw a finding was also the first time they
-  // had heard of the tool.
-  
-  
-  
   // Everything a bug report needs, in one paste. Every "it says 2 detectable,
   // what do I do" thread currently opens with three round-trips asking for
   // exactly these fields.
-  async function copyAudit(btn) {
-    if (!AUDIT) { toast("Run the audit first."); return; }
+  async function copyReport(btn) {
+    if (!CHECK) { toast("Run the check first."); return; }
     const done = busy(btn, "Copying…");
     const env = await exec(
       'echo "$(getprop ro.product.marketname)|$(getprop ro.build.version.release)|' +
       '$(getprop ro.build.id)|$(uname -r)"'
     );
     const p = (env.stdout || "").trim().split("|");
-    const s = AUDIT.summary || {};
+    const s = CHECK.summary || {};
     const lines = [
-      "NoMount Suite " + (AUDIT.suite || SUITE_VERSION) +
-        (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " — detection audit",
+      "NoMount Suite " + (CHECK.suite || SUITE_VERSION) +
+        (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " — check",
       "device: " + (p[0] || "?") + " · Android " + (p[1] || "?") + " · " + (p[2] || "?"),
       "kernel: " + (p[3] || "?"),
-      "rules: " + (AUDIT.rules || 0) + " across " + (AUDIT.directories || 0) + " directories",
-      "summary: " + (s.passed || 0) + " clean, " + (s.failed || 0) + " failed, " +
-        (s.reboot || 0) + " pending reboot, " + (s.not_applicable || 0) + " n/a, " +
-        (s.unmeasured || 0) + " unverified",
+      "engine: " + (CHECK.engine === null || CHECK.engine === undefined ? "not responding" : "v" + CHECK.engine),
+      "sections: " + ((CHECK.sections || []).join(", ") || "?"),
+      "rules: " + (CHECK.rules || 0) + " across " + (CHECK.directories || 0) + " directories",
+      "summary: " + (s.fail || 0) + " failed, " + (s.reboot || 0) + " pending reboot, " +
+        (s.unmeasured || 0) + " unmeasured, " + (s.warn || 0) + " warnings, " +
+        (s.pass || 0) + " passed, " + (s.not_applicable || 0) + " n/a, " + (s.note || 0) + " notes",
+      "verdict: " + (CHECK.verdict || "?"),
       ""
     ];
-    // Only what is not clean. A paste nobody reads is the same as no paste.
-    AUDIT.checks.forEach(function (c) {
-      if (c.verdict === "pass" || c.verdict === "n/a") return;
-      lines.push("[" + c.verdict.toUpperCase() + "] " + c.name);
+    // Only what is not clean. A paste nobody reads is the same as no paste --
+    // and this is a SHARED DESTINATION, so leaving `note` rows out is load-
+    // bearing, not just brevity: the plan's "stale legacy blocklist entries"
+    // note prints hidden package names verbatim, which is the same secret as the
+    // hide list. `nomount export` withholds them with NM_REDACT_HIDE_LIST for the
+    // same reason; a clipboard headed for a bug thread is no different.
+    (CHECK.checks || []).forEach(function (c) {
+      if (!isShown(c.verdict)) return;
+      lines.push("[" + String(c.verdict).toUpperCase() + "] " + c.name + " (" + c.section + ")");
       if (c.owner) lines.push("  from: " + c.owner);
       lines.push("  measured: " + c.evidence);
       lines.push("");
@@ -2162,261 +2009,72 @@
       // A clipboard the WebView will not give us is not a dead end: show the text
       // so it can be selected by hand.
       $("auditout").textContent = text;
-      $("auRawWrap").style.display = "";
-      $("auRawWrap").open = true;
-      toast("Clipboard unavailable — the report is in Raw output, ready to select.");
+      const d = $("auditout").closest("details");
+      if (d) d.open = true;
+      $("devtools").open = true;
+      toast("Clipboard unavailable — the report is in Raw report, ready to select.");
     }
   }
 
-  // ---- root-manager umount switches (global banner) ----
-  // Both switches are readable now: kernel_umount through ksud, and the global
-  // "Umount modules by default" from the allowlist sentinel, which doctor
-  // decodes. Neither can hide anything the Suite serves, and both have broken
-  // root on real hardware -- so this is a banner, not a buried card.
-  // Reads doctor's `manager` object -- two booleans -- instead of regexing its
-  // prose for check names. That match had already shipped broken once: the
-  // kernel-umount half tested for /manager: kernel umount is ON/ while doctor
-  // prints "manager kernel umount ON", so half of a banner that exists because
-  // these switches have broken root on real hardware was dead code for months.
-  // Its sibling happened to match, which is how it survived. A field cannot
-  // drift that way.
-  function paintManagerBanner(dd) {
+  // ---- root-manager umount switch (global banner) ----
+  //
+  // ONE switch is read now. The global "Umount modules by default" and the
+  // per-app umount profiles were decoded out of ksud's private allowlist format,
+  // and by their own argument neither can hide anything the Suite serves -- so
+  // that decode is gone and so are their arms here.
+  //
+  // Reads a check by ID, not by regexing prose for a check name. That match had
+  // already shipped broken once: the kernel-umount half tested for a sentence the
+  // tool does not print, so half of a banner that exists because this switch has
+  // broken root on real hardware was dead code for months. An id cannot drift
+  // that way.
+  function paintManagerBanner(r) {
     const el = $("mgrwarn");
     if (!el) return;
-    // A doctor that did not run is not "both switches are off". Absent must say
-    // absent, or this silently asserts the clean state for the two switches that
-    // have broken root on real hardware.
-    if (!dd || !dd.json || !dd.json.manager) {
+    // A plan section that did not run is not "the switch is off". Absent must say
+    // absent, or this silently asserts the clean state for a switch that has
+    // broken root on real devices.
+    if (!ranSection(r, "plan")) {
       el.hidden = false;
-      el.innerHTML = "⚠️ Could not read your root manager’s umount switches " +
-        "(<code>nomount doctor</code> did not run). Check <b>Umount modules by default</b> and " +
-        "<b>Kernel umount</b> are OFF by hand — nothing here is a mount, so they hide nothing " +
-        "the Suite serves, and both have broken root on real devices.";
+      el.innerHTML = "⚠️ Your root manager’s <b>Kernel umount</b> switch was not checked " +
+        "(<code>nomount check --plan</code> has not run). Check it is OFF by hand — nothing here " +
+        "is a mount, so it hides nothing the Suite serves, and it has broken root on real devices.";
       return;
     }
-    const m = dd.json.manager;
-    const bad = [];
-    if (m.global_umount_on) bad.push("Umount modules by default");
-    if (m.kernel_umount_on) bad.push("Kernel umount");
-    if (!bad.length) { el.hidden = true; return; }
-    el.hidden = false;
-    el.innerHTML =
-      "\u26a0\ufe0f Turn <b>" + bad.join("</b> and <b>") + "</b> OFF in your root manager. " +
-      "Nothing here is a mount, so " + (bad.length > 1 ? "they hide" : "it hides") +
-      " nothing the Suite serves \u2014 and it has broken root on real devices. " +
-      "To hide from one app, use <code>nomount uid block &lt;uid&gt;</code> instead.";
-  }
-
-  // Called from refreshAll. Paints the banner AND the Health card chip off the
-  // same run, so the card is no longer blank until someone presses a button that
-  // repeats the work.
-  async function checkManagerSwitches() {
-    const dd = await getDoctor(false);
-    paintManagerBanner(dd);
-    doctorPaintChip(dd.json);
-    doctorPaintSummary(dd.json);
-    if (dd.json) {
-      $("doctorout").textContent = doctorText(dd.json);
-      $("doctorRawWrap").style.display = "";
+    if (checkById("manager-kernel-umount-on")) {
+      el.hidden = false;
+      el.innerHTML = "⚠️ Turn <b>Kernel umount</b> OFF in your root manager. Nothing here is " +
+        "a mount, so it hides nothing the Suite serves — and it has broken root on real devices. " +
+        "To hide from one app, use <b>Per-UID hiding</b> on the Status tab instead.";
+      return;
     }
-  }
-
-  // ---- kernel features ------------------------------------------------------
-  //
-  // Three states per feature and they are genuinely different:
-  //   present  -- compiled in AND doing its job here (measured where possible)
-  //   inert    -- compiled in, nothing feeding it, so no guard can fire
-  //   absent   -- not in this kernel at all; flash one that has it
-  //
-  // "inert" is the one worth surfacing. It is a deliberate design choice
-  // (a half-populated table cloaks some paths and not others, which is itself a
-  // pattern) and it is invisible: the toggle is there, it accepts input, and
-  // nothing happens.
-  async function refreshFeatures() {
-    const list = $("featlist");
-    const chip = $("featchip");
-    if (!list) return;
-    const NMB = shq(await nmc());
-    const ev = await engineVersion();
-    const has = async function (knob) {
-      return (await exec(NMB + " k " + knob + " >/dev/null 2>&1 && echo y")).stdout.indexOf("y") >= 0;
-    };
-    const phOk = await has("p");
-    const ghOk = await has("g");
-
-    // Ghost: presence is a probe, EFFECTIVENESS is doctor's -- it forks into a
-    // hidden uid and asks the running kernel whether the cloak actually holds,
-    // because _ghost is boot-proven on 6.12 alone.
-    const dd = await getDoctor(false);
-    const f = (dd && dd.json && dd.json.findings) || [];
-    const hasCheck = function (name) { return f.some(function (x) { return x.check === name; }); };
-    const ghVerified = hasCheck("ghost cloak verified on this kernel");
-    const ghOverreach = hasCheck("ghost cloak over-reaches");
-    const ghIneffective = hasCheck("ghost cloak compiled in but not effective");
-
-    const rows = [];
-    let worst = "ok";
-    const add = function (name, state, why) {
-      rows.push({ name: name, state: state, why: why });
-      if (state === "bad") worst = "bad";
-      else if (state === "inert" && worst === "ok") worst = "inert";
-    };
-
-    add("Injection engine",
-        ev ? "ok" : "bad",
-        ev ? "Prism engine v" + ev + " is answering. This is what serves your modules with no mounts."
-           : "The engine is not answering. Nothing is being injected — this kernel may not have NoMount compiled in.");
-
-    add("Maps / fd cloak",
-        phOk ? "ok" : "absent",
-        phOk ? "Present. Hides selected module files from every process's memory map and open-file list. Pick what it covers in Tools › Cloak."
-             : "Not in this kernel. Module APKs stay visible in /proc/<pid>/maps and fd to anything that looks. Needs a pathhide-enabled kernel.");
-
-    if (!ghOk) {
-      add("Existence cloak", "absent",
-          "Not in this kernel. A hidden file can be told apart from a missing one by a handful of syscalls the engine cannot answer.");
-    } else if (ghOverreach) {
-      add("Existence cloak", "bad",
-          "Present but MIS-AIMED: it is hiding paths that are meant to be visible, which is a louder tell than the one it closes. Re-run the mount pass.");
-    } else if (ghIneffective) {
-      add("Existence cloak", "bad",
-          "Compiled in but not firing on this kernel — the guards landed in a function this tree does not route through. Verified on 6.12; this looks like a 6.6/6.1/5.15/5.10 mis-fit.");
-    } else if (ghVerified) {
-      add("Existence cloak", "ok",
-          "Present and measured working here: a hidden path answers exactly like one that never existed.");
-    } else {
-      add("Existence cloak", "inert",
-          "Present but idle. It needs both a hidden app and injected-only paths before any guard can fire — hide an app in Tools › Per-UID hiding to arm it.");
+    const unknown = checkById("check-a-setting-in-your-root-manager");
+    if (unknown) {
+      el.hidden = false;
+      el.innerHTML = "⚠️ " + esc(unknown.meaning || unknown.evidence);
+      return;
     }
-
-    const tagOf = { ok: "vfs", inert: "warn", absent: "off", bad: "warn" };
-    const labelOf = { ok: "active", inert: "idle", absent: "not in kernel", bad: "needs attention" };
-    list.innerHTML = rows.map(function (r) {
-      return '<div class="frow"><div class="fname">' + esc(r.name) + "</div>" +
-             '<div class="fmean">' + esc(r.why) + "</div>" +
-             '<div class="fmeta"><span class="tag ' + tagOf[r.state] + '">' +
-             labelOf[r.state] + "</span></div></div>";
-    }).join("");
-    const absent = rows.filter(function (r) { return r.state === "absent"; }).length;
-    const bad = rows.filter(function (r) { return r.state === "bad"; }).length;
-    const inert = rows.filter(function (r) { return r.state === "inert"; }).length;
-    chip.textContent = bad ? bad + " to fix" : inert ? inert + " idle" : absent ? absent + " missing" : "all active";
-    chip.className = "chip " + ((bad || inert || absent) ? "warn" : "ok");
+    el.hidden = true;
   }
 
-  // ---- runtime health (selfcheck / snapshot / verify / export) ----
+  // ---- snapshot / verify / export ----
+  //
+  // These three survive the collapse because they answer a question `check`
+  // structurally cannot: not "is this device healthy now" but "has anything moved
+  // since the boot I was happy with". That needs a baseline the USER chose.
   function _healthShow(txt) { const o = $("healthout"); o.style.display = ""; o.textContent = txt.trim() || "(no output)"; }
-  // Switches on selfcheck's own booleans rather than pattern-matching its
-  // verdict sentence. The prose ladder here tested /INCONSISTENCY|DOWN|TRIPPED/
-  // against a string the Rust builds; both sides had to agree on wording that
-  // nothing enforced.
-  async function runSelfcheck(btn) {
-    const done = busy(btn, "Checking…");
-    const r = await nm("selfcheck --json");
-    const d = auParse(r);
-    const chip = $("hchip");
-    // No result at all is NOT a pass. An engine that is down, a binary that will
-    // not exec, or a selfcheck that aborted all land here, and the old ladder
-    // fell through to a green "healthy" -- the same absent-means-fine bug the
-    // amber states exist to fix.
-    if (!d) {
-      _healthShow(((r.stdout || "") + (r.stderr || "")).trim() ||
-                  "The self-check did not return a result (exit " + r.errno + ").");
-      chip.textContent = "unknown";
-      chip.className = "chip warn";
-      done();
-      return;
-    }
-    // Render the fingerprint the way selfcheck prints it, so the card and the
-    // CLI stay recognisably the same output.
-    _healthShow((d.fields || []).map(function (f) { return f.key + "=" + f.value; }).join("\n") +
-                "\nverdict=" + d.verdict);
-    const bad = d.consistency_mismatch || !d.engine_up || !d.guard_armed;
-    const unver = !!d.consistency_unverified;
-    chip.textContent = bad ? "attention" : unver ? "unverified" : "healthy";
-    chip.className = "chip " + (bad ? "bad" : unver ? "warn" : "ok");
-    done();
-    return d;
-  }
 
-  // ---- one button that answers "is my setup fine?" -------------------------
-  //
-  // Diagnostics offered three cards and six buttons, and a user who just wants
-  // to know whether they are OK had no way to tell which to press -- so they
-  // pressed all of them and reconciled three summaries by hand. This runs the
-  // three that answer that question and prints ONE verdict; every individual
-  // button stays exactly where it was for people who want them.
-  async function runCheckAll(btn) {
-    const done = busy(btn, "Checking…");
-    const el = $("checkAllOut");
-    el.style.display = "";
-    el.innerHTML = '<div class="empty">Running the detection audit, the plan check and the runtime check…</div>';
-
-    await runAll(null);
-    const dd = await getDoctor(true);
-    doctorPaintChip(dd.json);
-    paintManagerBanner(dd);
-    if (dd.json) {
-      $("doctorout").textContent = doctorText(dd.json);
-      $("doctorRawWrap").style.display = "";
-      doctorPaintSummary(dd.json);
-    }
-    const hc = await runSelfcheck(null);
-
-    const a = (AUDIT && AUDIT.summary) || null;
-    const dsum = (dd.json && dd.json.summary) || null;
-
-    const parts = [];
-    let worst = "ok";
-    const bump = function (lvl) {
-      if (lvl === "bad") worst = "bad";
-      else if (lvl === "warn" && worst !== "bad") worst = "warn";
-    };
-
-    if (AUDIT && AUDIT.engine === null) {
-      parts.push(["bad", "The kernel engine is not answering — nothing is being injected, so " +
-                         "everything below is describing a device with no hiding on it."]);
-      bump("bad");
-    }
-    if (!a) { parts.push(["warn", "Detection audit did not run."]); bump("warn"); }
-    else if (a.open_failures > 0) {
-      parts.push(["bad", a.open_failures + " detection finding" + (a.open_failures > 1 ? "s" : "") +
-                  " need your attention."]);
-      bump("bad");
-    } else if (a.unmeasured > 0) {
-      parts.push(["warn", a.unmeasured + " detection check" + (a.unmeasured > 1 ? "s" : "") +
-                  " could not be verified."]);
-      bump("warn");
-    } else {
-      parts.push(["ok", "Nothing detectable."]);
-    }
-
-    if (!dsum) { parts.push(["warn", "Plan check did not run."]); bump("warn"); }
-    else if (dsum.errors > 0) { parts.push(["bad", dsum.errors + " plan error(s) — fix before rebooting."]); bump("bad"); }
-    else if (dsum.warnings > 0) { parts.push(["warn", dsum.warnings + " plan warning(s)."]); bump("warn"); }
-    else parts.push(["ok", "Mount plan is clean."]);
-
-    if (!hc) { parts.push(["warn", "Runtime check did not run."]); bump("warn"); }
-    else if (hc.consistency_mismatch || !hc.engine_up || !hc.guard_armed) {
-      parts.push(["bad", "Runtime: " + hc.verdict]); bump("bad");
-    } else if (hc.consistency_unverified) {
-      parts.push(["warn", "Runtime healthy, but the consistency canary had nothing to sample."]);
-      bump("warn");
-    } else parts.push(["ok", "Runtime healthy."]);
-
-    const head = worst === "bad" ? "Needs attention"
-               : worst === "warn" ? "Mostly fine, with gaps"
-               : "Everything checks out";
-    el.innerHTML =
-      '<div class="fgroup">' + esc(head) + "</div>" +
-      parts.map(function (x) {
-        return '<div class="row"><span class="name">' + esc(x[1]) +
-               '</span><span class="tag ' + (x[0] === "ok" ? "vfs" : "warn") +
-               '">' + (x[0] === "ok" ? "ok" : x[0] === "bad" ? "action" : "check") + "</span></div>";
-      }).join("");
-    done();
-  }
   async function runSnapshot(btn) {
+    // Only when there is a baseline to lose. Asking before the FIRST snapshot
+    // would be a gate in front of nothing, which is how a confirmation stops
+    // being read.
+    const had = (await exec("[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0")).stdout.trim() === "1";
+    if (had && !(await confirmAction(
+      "Replace the saved baseline?",
+      "Verify compares this device against the snapshot you took when you were happy with it. " +
+      "A new one overwrites that reference with today's state — including anything that has " +
+      "drifted since — and the old baseline cannot be recovered.",
+      "Replace"))) return;
     const done = busy(btn, "Saving…");
     const r = await nm("snapshot");
     _healthShow((r.stdout || "") + (r.stderr || ""));
@@ -2429,10 +2087,9 @@
     const txt = (r.stdout || "") + (r.stderr || "");
     _healthShow(txt);
     // "No DRIFT in the output" is not "matches the snapshot": empty output, a
-    // verify that never ran, and "no snapshot yet — run `nomount snapshot`" all
-    // contain no DRIFT and all used to toast a green "Matches snapshot". Only
-    // verify's own no-drift line is a pass; everything else gets its own state.
-    // (src/health.rs run_verify prints exactly one of these three.)
+    // verify that never ran, and "no snapshot yet" all contain no DRIFT and all
+    // used to toast a green "Matches snapshot". Only verify's own no-drift line is
+    // a pass; everything else gets its own state.
     if (r.errno !== 0 || !txt.trim()) toast("Verify did not run", "bad");
     else if (/DRIFT/.test(txt)) toast("Drift from snapshot — see output", "bad");
     else if (/no snapshot yet/.test(txt)) toast("No baseline yet — take a snapshot first", "");
@@ -2441,6 +2098,15 @@
     done();
   }
   async function runExport(btn) {
+    // Not destructive, but it publishes: /sdcard/Download is readable by any app
+    // holding a storage permission, and the whole point of an export is to hand
+    // it to someone. Say where it lands and what is deliberately withheld.
+    if (!(await confirmAction(
+      "Write diagnostics to /sdcard/Download?",
+      "Any app with storage permission can read that folder. The check report, the fingerprint, " +
+      "your rule list and your mount table go there. The apps you hide from, and what is being " +
+      "spoofed, are deliberately left out of a shared destination.",
+      "Export"))) return;
     const done = busy(btn, "Exporting…");
     const r = await nm("export");
     const txt = (r.stdout || "") + (r.stderr || "");
@@ -2461,12 +2127,10 @@
   // NOT hidden here when there is no incident: `paintManagerBanner` owns the
   // same element and runs on every refresh, so clearing it from here would race
   // the umount warning off the screen.
-  let INCIDENT = false;
   async function refreshIncident() {
     const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
-    INCIDENT = !!txt;
     if (!txt) { card.style.display = "none"; return; }
     card.style.display = "";
     $("incidentout").textContent = txt;
@@ -2475,12 +2139,17 @@
       el.hidden = false;
       el.innerHTML = "\u26a0\ufe0f The bootloop guard tripped and disabled the Suite on an earlier " +
         "boot. <b>Nothing is being injected</b> until you re-arm it. " +
-        '<button class="act" style="padding:5px 11px;font-size:11.5px;margin-left:6px" ' +
+        '<button class="act" style="flex:none;min-width:0;padding:11px 15px;font-size:12px;margin-left:8px" ' +
         'onclick="openDetail()">See what happened</button>';
     }
   }
   async function clearIncident(btn) {
-    { const el = $("incwarn"); if (el) el.hidden = true; INCIDENT = false; }
+    if (!(await confirmAction(
+      "Delete the incident record?",
+      "The saved crash from the boot that disabled the Suite is removed for good. It is the only " +
+      "copy, and it usually names the file that caused the failure.",
+      "Delete"))) return;
+    { const el = $("incwarn"); if (el) el.hidden = true; }
     btn.disabled = true;
     await exec("rm -f /data/adb/nomount/incident.log");
     toast("Incident record cleared", "ok");
@@ -2583,23 +2252,18 @@
   // this the tab looked overlay-only: the vfs rules exist but sit inside the
   // collapsed "Active rules" card.
   async function refreshRuleSummary() {
-    const r = await nm("vfs list");
-    // errno was dropped, so a call that never ran rendered as the reassuring
-    // empty state. Same rule as the whiteout list: never fall back to the
-    // answer the user wants to hear, show it as unknown.
-    if (r.errno !== 0) {
+    const d = await ruleDump();
+    if (!d.ok) {
       $("rulechip").textContent = "?";
       $("rulebreak").textContent = "Unknown \u2014 the engine did not answer.";
       return;
     }
-    const lines = r.stdout.split("\n").map(x => x.trim()).filter(Boolean);
-    const rro = lines.filter(l => /\/overlay\/[^\s]*\.apk/.test(l)).length;
-    const vfs = lines.length - rro;
-    $("rulechip").textContent = lines.length;
-    $("rulebreak").textContent = lines.length
+    const rro = d.rro.length, vfs = d.lines.length - rro;
+    $("rulechip").textContent = d.lines.length;
+    $("rulebreak").textContent = d.lines.length
       ? `${vfs} file redirect${vfs === 1 ? "" : "s"} · ${rro} RRO overlay APK${rro === 1 ? "" : "s"} — all Prism, no mounts`
       : "No rules active.";
-    _paintRuleModuleBar(lines);
+    _paintRuleModuleBar(d.lines);
   }
 
   // Rules-by-module breakdown: a stacked bar + legend over the owning module of
@@ -2631,131 +2295,75 @@
     box.innerHTML = `<div class="rmbar">${seg}</div><div class="rmlegend">${legend}</div>`;
   }
 
-  // The non-overlay half of the rule set, grouped by target directory — the same
-  // shape as the overlay card, so the Rules tab shows both halves rather than
-  // burying the redirects inside the collapsed raw list.
-  var _vfsFiles = [], _ovFiles = [];
-  async function refreshVfs() {
+  // Every rule the engine is serving, grouped by the directory it lands in, and
+  // then one row per file behind the same disclosure. Both kinds come out of the
+  // one dump; `ov` marks the RRO overlay APKs.
+  var _files = [];
+  async function refreshFiles() {
     const box = $("vfsdirs");
-    const list = await nm("vfs list");
-    // errno was ignored, so a call that never ran rendered as the reassuring
-    // empty state -- telling the user there is nothing there when we simply do
-    // not know. Same rule as the whiteout list: show it as unknown.
-    if (list.errno !== 0) {
+    const d = await ruleDump();
+    if (!d.ok) {
       $("vfscount").textContent = "?";
-      box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
-      _vfsFiles = [];
+      box.innerHTML = '<div class="empty">Unknown \u2014 the engine did not answer.</div>';
+      _files = [];
       return;
     }
-    const lines = list.stdout.split("\n").map(x => x.trim()).filter(Boolean);
+    const isOv = (p) => /\/overlay\/[^\s]*\.apk$/.test(p);
     const dirs = {};
-    _vfsFiles = [];
-    for (const l of lines) {
-      const raw = (l.split(" ->")[0] || "").trim();
-      if (!raw || /\/overlay\/[^\s]*\.apk$/.test(raw)) continue;
-      const vp = raw.replace(/\s*\(virtual dir\)$/, ""); // structural entries count as rules too
-      _vfsFiles.push(vp);
+    _files = d.targets.filter(Boolean).sort();
+    for (const vp of _files) {
       const dir = vp.replace(/\/[^/]*$/, "") || "/";
-      dirs[dir] = (dirs[dir] || 0) + 1;
+      const e = dirs[dir] || (dirs[dir] = { n: 0, ov: 0 });
+      e.n++; if (isOv(vp)) e.ov++;
     }
-    _vfsFiles.sort();
-    const keys = Object.keys(dirs).sort((a, b) => dirs[b] - dirs[a] || a.localeCompare(b));
-    const total = keys.reduce((a, k) => a + dirs[k], 0);
-    $("vfscount").textContent = total;
-    if (!keys.length) { box.innerHTML = '<div class="empty">No file redirects.</div>'; }
-    else box.innerHTML = keys.map((d) =>
-      `<div class="row"><span class="name mono">${esc(d)}</span>` +
-      `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} file${dirs[d] > 1 ? "s" : ""}</span>` +
-      `<span class="tag vfs">Prism</span></div>`
-    ).join("");
-    if ($("vfsfull").style.display !== "none") renderVfsFull();
-  }
-  // full per-file list (basename shown, full path in title), each with a hookless capsule
-  function _fileRows(paths, q) {
-    const f = q ? paths.filter(p => p.toLowerCase().indexOf(q) !== -1) : paths;
-    if (!f.length) return '<div class="empty">(no match)</div>';
-    return f.map(p => {
-      const base = p.replace(/^.*\//, "");
-      return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(base)}</span>` +
-             `<span class="tag vfs">Prism</span></div>`;
+    const keys = Object.keys(dirs).sort((a, b) => dirs[b].n - dirs[a].n || a.localeCompare(b));
+    $("vfscount").textContent = _files.length;
+    if (!keys.length) box.innerHTML = '<div class="empty">No rules active.</div>';
+    else box.innerHTML = keys.map((k) => {
+      const e = dirs[k], ov = e.ov === e.n;
+      return `<div class="row"><span class="name mono">${esc(k)}</span>` +
+        `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${e.n} ` +
+        `${ov ? "apk" : "file"}${e.n > 1 ? "s" : ""}</span>` +
+        `<span class="tag ${ov ? "ov" : "vfs"}">${ov ? "RRO" : "Prism"}</span></div>`;
     }).join("");
+    if ($("vfsfull").style.display !== "none") renderFilesFull();
   }
-  function renderVfsFull() {
-    $("vfsfull").innerHTML = _fileRows(_vfsFiles, ($("vfsfilter").value || "").trim().toLowerCase());
+  // Full per-file list: basename shown, full path in the title attribute, because
+  // a phone cannot show /system/product/overlay/… and the name in one line.
+  function renderFilesFull() {
+    const q = ($("vfsfilter").value || "").trim().toLowerCase();
+    const f = q ? _files.filter(p => p.toLowerCase().indexOf(q) !== -1) : _files;
+    $("vfsfull").innerHTML = !f.length ? '<div class="empty">(no match)</div>'
+      : f.map(p => {
+          const ov = /\/overlay\/[^\s]*\.apk$/.test(p);
+          return `<div class="row"><span class="name mono" title="${esc(p)}">` +
+                 `${esc(p.replace(/^.*\//, ""))}</span>` +
+                 `<span class="tag ${ov ? "ov" : "vfs"}">${ov ? "RRO" : "Prism"}</span></div>`;
+        }).join("");
   }
   function toggleModules(h) {
     const on = h.classList.toggle("open");
     $("modules").style.display = on ? "" : "none";
   }
-  function toggleVfsFull(h) {
+  function toggleFiles(h) {
     const on = h.classList.toggle("open");
     $("vfsdirs").style.display = on ? "" : "none";
     $("vfsfull").style.display = on ? "" : "none";
     $("vfsfilterbar").style.display = on ? "" : "none";
-    if (on) renderVfsFull();
-  }
-
-  // ---- overlays (now hookless: injected overlay APKs, no overlayfs mount) ----
-  async function refreshOverlays() {
-    const box = $("overlays");
-    const list = await nm("vfs list");
-    // errno was ignored, so a call that never ran rendered as the reassuring
-    // empty state -- telling the user there is nothing there when we simply do
-    // not know. Same rule as the whiteout list: show it as unknown.
-    if (list.errno !== 0) {
-      $("ovcount").textContent = "?";
-      box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
-      _ovFiles = [];
-      return;
-    }
-    const lines = list.stdout.split("\n").map(s => s.trim()).filter(Boolean);
-    const dirs = {};
-    _ovFiles = [];
-    for (const l of lines) {
-      const vp = (l.split(" ->")[0] || "").trim();
-      if (/\/overlay\/[^\s]*\.apk$/.test(vp)) {
-        _ovFiles.push(vp);
-        const dir = vp.replace(/\/[^/]*$/, "");
-        dirs[dir] = (dirs[dir] || 0) + 1;
-      }
-    }
-    _ovFiles.sort();
-    const keys = Object.keys(dirs).sort();
-    const total = keys.reduce((a, k) => a + dirs[k], 0);
-    $("ovcount").textContent = total;
-    if (!keys.length) { box.innerHTML = '<div class="empty">No RRO overlays.</div>'; }
-    else box.innerHTML = keys.map((d) =>
-      `<div class="row"><span class="name mono">${esc(d)}</span>` +
-      `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} apk${dirs[d] > 1 ? "s" : ""}</span>` +
-      `<span class="tag ov">Prism</span></div>`
-    ).join("");
-    if ($("overlaysfull").style.display !== "none") renderOvFull();
-  }
-  function renderOvFull() {
-    $("overlaysfull").innerHTML = _fileRows(_ovFiles, ($("ovfilter").value || "").trim().toLowerCase());
-  }
-  function toggleOvFull(h) {
-    const on = h.classList.toggle("open");
-    $("overlays").style.display = on ? "" : "none";
-    $("overlaysfull").style.display = on ? "" : "none";
-    $("ovfilterbar").style.display = on ? "" : "none";
-    if (on) renderOvFull();
+    if (on) renderFilesFull();
   }
 
   // ---- rules ----
   let rulesShown = false;
   async function loadRules() {
-    const r = await nm("vfs list");
-    // errno was dropped, so a call that never ran rendered as the reassuring
-    // empty state. Same rule as the whiteout list: never fall back to the
-    // answer the user wants to hear, show it as unknown.
-    if (r.errno !== 0) {
+    const d = await ruleDump();
+    if (!d.ok) {
       _rulesRaw = "";
       $("ruleslist").textContent = "unknown — the engine did not answer";
       $("rulecount").style.display = "none";
       return;
     }
-    _rulesRaw = r.stdout.trim();
+    _rulesRaw = d.raw;
     if (!_rulesRaw) {
       $("ruleslist").textContent = "no rules";
       $("rulecount").style.display = "none";
@@ -2785,15 +2393,28 @@
     refreshAll();
   }
   async function clearRules(btn) {
+    if (!(await confirmAction(
+      "Clear every injection rule?",
+      "Every file your modules add disappears straight away — apps go back to seeing the stock " +
+      "ROM, and anything relying on an injected file may misbehave until you put them back. " +
+      "Nothing is uninstalled: Reload, or a reboot, restores all of it.",
+      "Clear rules"))) return;
     const done = busy(btn, "Clearing…");
     // A clear drops the kernel's hidden-app set along with the rules, so nomount
     // re-hides the saved list straight after; the toast reports what it re-hid.
     const r = await nm("vfs clear");
     if (r.errno === 0) toast((r.stdout || "").trim().replace(/^ok\b\s*/, "Rules cleared ") || "Rules cleared", "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
+    RULES = null;
     done(); refreshStatus(); refreshBlocked(); if (rulesShown) loadRules();
   }
   async function rearm(btn) {
+    if (!(await confirmAction(
+      "Re-arm the bootloop guard?",
+      "This deletes the record of the boot that failed, including the crash log — which is the " +
+      "only copy and usually names the file that caused it. Read or copy it first. The Suite " +
+      "stays off until you reboot.",
+      "Delete and re-arm"))) return;
     btn.disabled = true;
     // Also drop the incident record: re-arming means acknowledging the trip, so the
     // saved card should not linger past the fix (it only made sense while disabled).
@@ -2815,6 +2436,17 @@
     const v = $("uid").value.trim();
     if (!v) { toast("Enter a package name or UID", "bad"); return; }
     if (!UID_TARGET_RE.test(v)) { toast("Letters, digits, dots, underscores, and * for a glob", "bad"); return; }
+    // Hiding is additive and instantly undone. Un-hiding removes a saved entry --
+    // and if that entry is a glob it un-hides everything it ever matched, which is
+    // not something to lose to a mis-tap.
+    if (op === "unblock" && !(await confirmAction(
+      "Stop hiding " + v + "?",
+      v.indexOf("*") >= 0
+        ? "That entry is a pattern. Every app it matches stops being hidden — now, and any that " +
+          "install later — and the pattern itself is deleted from your list."
+        : "This app sees your injected files again the moment it next looks, and the entry is " +
+          "removed from your list.",
+      "Stop hiding"))) return;
     const done = busy(btn, op === "block" ? "Hiding…" : "Unhiding…");
     const r = await nm(`uid ${op} ${shq(v)}`);
     if (r.errno === 0) {
@@ -3113,6 +2745,14 @@
   }
 
   async function unblockOne(target, btn) {
+    if (!(await confirmAction(
+      "Stop hiding " + target + "?",
+      target.indexOf("*") >= 0
+        ? "That entry is a pattern. Every app it matches stops being hidden — now, and any that " +
+          "install later — and the pattern itself is deleted from your list."
+        : "This app sees your injected files again the moment it next looks, and the entry is " +
+          "removed from your list.",
+      "Stop hiding"))) return;
     btn.disabled = true;
     const r = await nm(`uid unblock ${shq(target)}`);
     if (r.errno === 0) toast(`${target} unhidden`, "ok");
@@ -3127,173 +2767,22 @@
     refreshBlocked();
   }
 
-  // ---- spoofing (vbmeta.digest) ----
-  async function refreshSpoof() {
-    const conf = (await exec("cat /data/adb/nomount/spoof.conf 2>/dev/null")).stdout;
-    const get = (k, d) => {
-      const m = conf.match(new RegExp("^" + k + "=(.*)$", "m"));
-      if (!m) return d;
-      let v = m[1].trim();
-      if (v.length >= 2 && v[0] === "'" && v[v.length - 1] === "'") v = v.slice(1, -1).replace(/'\\''/g, "'");
-      return v;
-    };
-    const vb = get("vbmeta_digest", "auto");
-    $("spVb").checked = vb !== "off";
-    $("spProps").checked = get("spoof_props", "0") === "1";
-    $("spUname").checked = get("spoof_uname", "0") === "1";
-    $("spUnameTail").value = get("uname_tail", "");
-    $("spUnameDate").value = get("uname_date", "");
-
-    const dig = (await exec("getprop ro.boot.vbmeta.digest")).stdout.trim();
-    $("spVbVal").textContent = dig
-      ? dig.slice(0, 16) + "… (" + dig.length + " hex)"
-      : "empty — set at next boot";
-
-    // Compare the current property against a fresh compute so the user knows,
-    // before touching anything, whether it is already correct.
-    const chk = $("spVbCheck");
-    chk.textContent = "checking against the AVB chain…";
-    chk.style.color = "var(--muted)";
-    const v = (await exec("sh /data/adb/modules/meta-nomount/spoof.sh verify 2>/dev/null")).stdout.trim();
-    const st = v.split(" ")[0];
-    if (st === "match") {
-      chk.textContent = "✓ matches the bootloader — nothing to fix";
-      chk.style.color = "var(--ok)";
-    } else if (st === "mismatch") {
-      chk.textContent = "⚠ differs from the real chain — Apply now will correct it";
-      chk.style.color = "var(--warn)";
-    } else if (st === "absent") {
-      chk.textContent = "not set — Apply now (or a reboot) will set it";
-      chk.style.color = "var(--muted)";
-    } else {
-      chk.textContent = "could not compute the digest on this device";
-      chk.style.color = "var(--muted)";
-    }
-
-    const ps = (await exec("sh /data/adb/modules/meta-nomount/spoof.sh props 2>/dev/null")).stdout.trim();
-    const pv = $("spPropsVal");
-    if (ps === "clean") {
-      pv.textContent = "✓ all props already clean — nothing to fix"; pv.style.color = "var(--ok)";
-    } else if (ps.indexOf("dirty") === 0) {
-      pv.textContent = "⚠ " + (ps.split(" ")[1] || "?") + " prop(s) differ — Apply to fix"; pv.style.color = "var(--warn)";
-    } else {
-      pv.textContent = $("spProps").checked ? "on" : "off"; pv.style.color = "var(--muted)";
-    }
-
-    const ur = (await exec("uname -r")).stdout.trim();
-    const uv = (await exec("uname -v")).stdout.trim();
-    const curDate = (uv.match(/(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*$/) || [uv])[0];
-    $("spUnameCur").textContent = "current uname: " + ur;
-    $("spDateCur").textContent  = "current date: "  + curDate;
-
-    // shq like every other call site: the path is built from
-    // getprop ro.product.cpu.abi, and a bare "${...}" inside double quotes still
-    // expands $, ` and \.
-    const uw = (await exec(`[ -x ${shq(await nmc())} ] && echo 1 || echo 0`)).stdout.trim();
-    const uvl = $("spUnameVal");
-    if (uw !== "1") { uvl.textContent = "needs kernel support"; }
-    else if (!$("spUname").checked) { uvl.textContent = "off"; }
-    else { uvl.textContent = (get("uname_tail", "") || get("uname_date", "")) ? "active" : "on — keeping current"; }
-
-    const anyOn = $("spVb").checked || $("spProps").checked || $("spUname").checked;
-    const chip = $("spchip");
-    if (!anyOn) { chip.textContent = "off"; chip.className = "chip"; }
-    else { chip.textContent = "on"; chip.className = "chip ok"; }
-  }
-  // single-quote a string for safe use in a shell command
-  function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
-  async function setConf(key, val) {
-    // rewrite the key line without sed, so arbitrary values (spaces, / # &, the
-    // '#1 SMP PREEMPT …' build string) are written verbatim and safely.
-    // `key` goes through shq() for the grep pattern too. Every caller passes a
-    // literal today, so this is not reachable -- but it was the one interpolation
-    // here that could break out of its quoting, and a key is exactly the kind of
-    // thing that later becomes a variable.
-    // The result was AWAITED AND DISCARDED, and every caller
-    // (toggleSpoof / toggleSpoofBool / saveUname) then toasted green
-    // unconditionally -- so a write that never happened, or an exec bridge that
-    // is not there at all (exec() resolves errno:-1 when KSU.exec is missing),
-    // still told the user "Enabled". Return the status and let the caller judge.
-    //
-    // The chmod is load-bearing too: `mv "$f.tmp" "$f"` RENAMES the temp over the
-    // conf, so the conf takes the temp's mode -- created under whatever umask the
-    // root WebView happens to have, i.e. 0644. spoof.conf was therefore
-    // re-widened on every toggle, undoing customize.sh. Every other writer of
-    // $NMDIR states 0600; this one now does too.
-    const r = await exec(
-      "f=/data/adb/nomount/spoof.conf; k=" + shq(key) + "; [ -f \"$f\" ] || : > \"$f\"; " +
-      "grep -v \"^$k=\" \"$f\" > \"$f.tmp\" 2>/dev/null; mv \"$f.tmp\" \"$f\" || exit 1; " +
-      "printf '%s=%s\\n' \"$k\" " + shq("'" + String(val).replace(/'/g, "'\\''") + "'") + " >> \"$f\" || exit 1; " +
-      "chmod 0600 \"$f\" 2>/dev/null; exit 0"
-    );
-    return r.errno === 0;
-  }
-  async function toggleSpoof(key, el) {
-    const ok = await setConf(key, el.checked ? "auto" : "off");
-    if (!ok) { el.checked = !el.checked; toast("Could not write spoof.conf — nothing changed", "bad"); return; }
-    toast(el.checked ? "Enabled — reboot or Apply now" : "Off at next boot", "ok");
-  }
-  async function applySpoof(btn) {
-    const done = busy(btn, "Applying…");
-    const r = await exec("sh /data/adb/modules/meta-nomount/spoof.sh 2>&1");
-    // spoof.sh is best-effort and ALWAYS exits 0 — a spoof failure must never
-    // abort boot — so errno cannot be the verdict. It reports its real failures
-    // in its own log lines instead ("resetprop not found", "vbmeta.digest: could
-    // not compute", "cmdline: skipped", "uname: kernel interface absent"), which
-    // this used to await and throw away before toasting green regardless. Those
-    // lines reach us on stderr (see log() in spoof.sh), folded in by the 2>&1.
-    const txt = ((r.stdout || "") + (r.stderr || "")).trim();
-    const fail = txt.split("\n").filter(function (l) {
-      return /nomount-spoof:/.test(l) &&
-        /(not found|unavailable|not creatable|could not|cannot|failed|skipped|absent)/i.test(l);
-    });
-    if (r.errno !== 0) toast("Apply did not run", "bad");
-    else if (fail.length) toast(fail[0].replace(/^.*nomount-spoof:\s*/, "") +
-                                (fail.length > 1 ? " (+" + (fail.length - 1) + " more)" : ""), "bad");
-    else toast("Applied", "ok");
-    done();
-    refreshSpoof();
-  }
-  async function toggleSpoofBool(key, el) {
-    const ok = await setConf(key, el.checked ? "1" : "0");
-    if (!ok) { el.checked = !el.checked; toast("Could not write spoof.conf — nothing changed", "bad"); return; }
-    toast(el.checked ? "Enabled — reboot or Apply now" : "Off at next boot", "ok");
-  }
-  function toggleUnameAdv(btn) {
-    const a = $("spUnameAdv"), show = a.style.display === "none";
-    a.style.display = show ? "block" : "none";
-    btn.textContent = show ? "Hide strings" : "Edit strings";
-  }
-  async function fillUnameRomDate() {
-    const d = (await exec("getprop ro.build.date")).stdout.trim();
-    if (d) $("spUnameDate").value = d;
-  }
-  async function saveUname(btn) {
-    const a = await setConf("uname_tail", $("spUnameTail").value.trim());
-    const b = await setConf("uname_date", $("spUnameDate").value.trim());
-    if (!a || !b) { toast("Could not write spoof.conf — the strings were NOT saved", "bad"); refreshSpoof(); return; }
-    toast("uname strings saved — reboot or Apply now", "ok");
-    refreshSpoof();
-  }
-  async function resetUname(btn) {
-    const r = (await exec("sh /data/adb/modules/meta-nomount/spoof.sh reset-uname 2>/dev/null")).stdout.trim();
-    if (r === "no-baseline") { toast("Reboot once so the stock uname is captured, then Reset is instant", "bad"); return; }
-    $("spUnameTail").value = ""; $("spUnameDate").value = "";
-    toast("Reset to kernel default", "ok");
-    refreshSpoof();
-  }
-  // ---- Tools accordion: collapse/expand cards, remembered per card ----
+  // ---- collapsible cards, remembered per card ----
   function toggleCard(h) {
     const card = h.closest(".card");
     const on = card.classList.toggle("collapsed");
     h.classList.toggle("open", !on);
     if (card.id) { try { localStorage.setItem("nmcol:" + card.id, on ? "1" : "0"); } catch (e) {} }
   }
+  // The markup states each card's DEFAULT (the `collapsed` class or its absence);
+  // localStorage only overrides it. Hard-coding "collapsed unless explicitly
+  // expanded" was right for a drawer of eight tools and wrong for the one control
+  // most people came here to use, which now has to open closed on first run.
   function applyCardState() {
-    document.querySelectorAll("#tab-tools .card[id]").forEach(card => {
+    document.querySelectorAll(".card[id]").forEach(card => {
       let v = null;
       try { v = localStorage.getItem("nmcol:" + card.id); } catch (e) {}
-      const collapsed = v !== "0"; // default collapsed unless explicitly expanded
+      const collapsed = v === null ? card.classList.contains("collapsed") : v === "1";
       card.classList.toggle("collapsed", collapsed);
       const h = card.querySelector(".card-h");
       if (h) h.classList.toggle("open", !collapsed);
@@ -3303,10 +2792,10 @@
   async function refreshAll(btn) {
     const ic = btn && btn.querySelector("svg");
     if (ic) ic.classList.add("spin");
-    // Drop the cached doctor: the cache exists to stop ONE refresh running it
-    // twice, not to survive across refreshes -- a refresh is the user asking
+    // Drop the cached rule dump: the cache exists to stop ONE refresh reading it
+    // five times, not to survive across refreshes -- a refresh is the user asking
     // again, usually right after changing something.
-    DOCTOR = null;
+    RULES = null;
     // `nm version` returns the ENGINE's capability counter -- a bare integer
     // (26), not a release. The footer printed it as "Suite 26", which is the one
     // number on the page a reader is most likely to quote back, and it named the
@@ -3314,6 +2803,9 @@
     // ships in the kernel and the Suite ships as a zip, they are installed
     // separately, and userspace gates features on `engine >= N` precisely so a
     // new Suite can run on an old kernel and know what it may ask for.
+    // The cached report first, and awaited: the hero line, the manager banner
+    // and the posture card all read it, so nothing below should be racing it.
+    await loadCheckCache();
     const ev = await engineVersion();
     const eng = ev ? ("engine v" + ev) : "engine offline";
     // module.prop is what ksud ADVERTISES; SUITE_VERSION is what is running.
@@ -3328,301 +2820,16 @@
     const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
     $("footver").textContent = "Suite " + suiteId + " · " + eng +
       (staged ? " · " + pv + " staged — reboot to activate" : "");
-    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshIsolated(), refreshWhiteouts(), checkManagerSwitches(), loadFindingsCache()]);
+    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
+                       refreshModules(), refreshFiles(), refreshRuleSummary(),
+                       refreshIncident(), refreshBlocked(), refreshIsolated()]);
     if (rulesShown) loadRules();
     loadPkgList();
     if (ic) ic.classList.remove("spin");
   }
 
-  // ---- Hidden paths (durable whiteouts) ----------------------------------
-  // The CLI has had `nomount whiteout add/remove/list/suggest` for a while with no
-  // way to reach it short of a root shell, so the feature effectively did not exist
-  // for anyone using the manager.
-  async function refreshWhiteouts() {
-    const r = await nm("whiteout list");
-    const box = $("woList");
-    // errno was ignored, so an engine that did not answer rendered as the green
-    // "Nothing hidden." — telling the user their hidden paths are gone when in
-    // fact we simply do not know. refreshIsolated() is the model: never fall back
-    // to the reassuring state, show it as unknown instead.
-    if (r.errno !== 0) {
-      $("wochip").textContent = "?";
-      box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
-      return;
-    }
-    const lines = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
-    if (!lines.length || /^no whiteouts/.test(lines[0])) {
-      $("wochip").textContent = "0";
-      box.innerHTML = '<div class="empty">Nothing hidden.</div>';
-      return;
-    }
-    $("wochip").textContent = String(lines.length);
-    box.innerHTML = lines.map(l => {
-      const [path, stateRaw] = l.split("\t");
-      const st = (stateRaw || "").trim();
-      // Only "hidden" means the engine is actually serving it right now.
-      const cls = /^hidden/.test(st) ? "vfs" : /^not applied \(and no such path/.test(st) ? "off" : "warn";
-      return `<div class="row"><span class="name mono" title="${esc(path)}">${esc(path)}</span>` +
-             `<span class="tag ${cls}" title="${esc(st)}">${esc(st.split(" - ")[0])}</span>` +
-             `<button class="bx" title="Stop hiding" data-p="${encodeURIComponent(path)}" onclick="woRemove(this)">✕</button></div>`;
-    }).join("");
-  }
-  // Whiteout paths reach a shell command, so they get the same treatment as UID
-  // targets: reject anything a shell would act on, then single-quote. `*` and `?`
-  // matter as much as `;` here -- unquoted they are pathname-expanded, so a rule
-  // typed as /system/app/* would silently become whatever happened to match.
-  const WO_PATH_RE = /^\/[^\s'"`;|&$<>()*?\[\]{}\\]*$/;
-  function woSafe(p) {
-    if (WO_PATH_RE.test(p)) return true;
-    toast("That path has characters nomount won't take", "bad");
-    return false;
-  }
-  async function woAdd(btn) {
-    const v = ($("woPath").value || "").trim();
-    if (!v) { toast("Enter an absolute path", "bad"); return; }
-    if (v[0] !== "/") { toast("Must be an absolute path", "bad"); return; }
-    if (!woSafe(v)) return;
-    const done = busy(btn, "Hiding…");
-    const r = await nm(`whiteout add ${shq(v)}`);
-    const txt = ((r.stdout || "") + (r.stderr || "")).trim();
-    toast(r.errno === 0 ? (txt.split("\n").pop() || "Hidden") : "Failed: " + txt, r.errno === 0 ? "ok" : "bad");
-    if (r.errno === 0) $("woPath").value = "";
-    done(); refreshWhiteouts(); refreshStatus();
-  }
-  async function woRemove(btn) {
-    const path = decodeURIComponent(btn.dataset.p || "");
-    if (!woSafe(path)) return;
-    const done = busy(btn);
-    const r = await nm(`whiteout remove ${shq(path)}`);
-    toast(r.errno === 0 ? "No longer hidden" : "Failed", r.errno === 0 ? "ok" : "bad");
-    done(); refreshWhiteouts(); refreshStatus();
-  }
-  // Walks the ROM for files only a root setup leaves behind and lists what it
-  // found, each with its reason and its own Hide button. Nothing is applied:
-  // hiding a ROM path is a decision, and a scan button must not make it.
-  async function woScan(btn) {
-    const done = busy(btn, "Scanning…");
-    const r = await nm("whiteout suggest");
-    const out = (r.stdout || "") + (r.stderr || "");
-    const box = $("woFound");
-    const cands = out.split("\n").map(x => x.trim()).filter(l => l.indexOf("\t") > 0);
-    // The notes explain what was filtered — an empty result with a reason is a
-    // real answer, not a failure, so show it rather than a bare "nothing found".
-    const notes = out.split("\n").map(x => x.trim())
-      .filter(l => /^\(|^nothing to suggest/.test(l)).join(" ");
-    box.style.display = "";
-    if (!cands.length) {
-      box.innerHTML = `<div class="empty">${esc(notes || "Nothing found.")}</div>`;
-      toast("Nothing to hide on this device", "ok");
-    } else {
-      box.innerHTML =
-        `<div class="blk-head">Found · ${cands.length}</div>` +
-        cands.map(l => {
-          const p = l.split("\t")[0], why = l.split("\t")[1] || "";
-          return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(p)}</span>` +
-                 `<span class="tag warn" title="${esc(why)}">${esc(why.split(";")[0])}</span>` +
-                 `<button class="bx" title="Hide this path" data-p="${encodeURIComponent(p)}" onclick="woAddPath(this)">+</button></div>`;
-        }).join("") +
-        (notes ? `<div class="empty">${esc(notes)}</div>` : "");
-      toast(cands.length + " candidate(s) found", "ok");
-    }
-    done();
-  }
-  // Path arrives via a data attribute, like the Cloak rows: inlining it into the
-  // onclick as a JSON string put a bare " inside a double-quoted attribute, which
-  // ended the attribute at the first character of the path and left the button
-  // completely inert.
-  async function woAddPath(btn) {
-    const path = decodeURIComponent(btn.dataset.p || "");
-    if (!woSafe(path)) return;
-    const done = busy(btn);
-    const r = await nm(`whiteout add ${shq(path)}`);
-    toast(r.errno === 0 ? "Hidden" : "Failed", r.errno === 0 ? "ok" : "bad");
-    done(); refreshWhiteouts();
-    if (r.errno === 0) btn.closest(".row").remove();
-  }
 
-  // ---- Foreign mounts (absorb) -------------------------------------------
-  function _abPaint(txt) {
-    const o = $("abOut"); o.style.display = ""; o.textContent = txt.trim() || "(no output)";
-    // The summary line is the honest one: "nothing to absorb" is not "nothing is
-    // mounted", and the CLI already words that distinction carefully.
-    const chip = $("abchip");
-    // A real run reports its own failures. src/absorb.rs prints
-    //   "{done} mount(s) absorbed as {rules} rule(s), {n} ROM tmpfs emptied
-    //    mountlessly, {m} failed…"
-    // and the old matcher only ever looked at {done}, so
-    // "3 mount(s) absorbed …, 5 failed" painted green. A failure means those
-    // mounts are STILL mounted and still readable by any app — the one thing
-    // this chip exists to surface. Check it first, before anything else.
-    const failed = +((txt.match(/(\d+) failed/) || [0, 0])[1]);
-    if (failed > 0) { chip.textContent = failed + " failed"; chip.className = "chip bad"; return; }
-    if (/posture clean/.test(txt)) { chip.textContent = "clean"; chip.className = "chip ok"; return; }
-    if (/NOT clean|LEAK/.test(txt)) { chip.textContent = "leaking"; chip.className = "chip bad"; return; }
-    // Dry run and real run are not the same news: "would be absorbed" means they
-    // are still there (amber, there is work to do), "absorbed" means they are
-    // gone (green). One chip label for both read as a warning either way.
-    const dry = /\(dry run\)/.test(txt);
-    const m = txt.match(/(\d+) mount\(s\) (?:would be absorbed|absorbed)/);
-    if (m && +m[1] > 0) {
-      chip.textContent = dry ? m[1] + " to absorb" : m[1] + " absorbed";
-      chip.className = "chip " + (dry ? "warn" : "ok");
-    } else {
-      chip.textContent = /left by design/.test(txt) ? "by design" : "—";
-      chip.className = "chip";
-    }
-  }
-  async function absorbScan(btn) {
-    const done = busy(btn, "Scanning…");
-    const r = await nm("absorb --dry-run");
-    _abPaint((r.stdout || "") + (r.stderr || ""));
-    done();
-  }
-  async function absorbRun(btn) {
-    const done = busy(btn, "Absorbing…");
-    const r = await nm("absorb");
-    const txt = (r.stdout || "") + (r.stderr || "");
-    _abPaint(txt);
-    // The toast was hardcoded to "ok" and keyed on the word "absorbed" appearing
-    // anywhere, which says nothing about whether the run worked: the summary line
-    // carries its own failure count, and every failure is a mount still visible
-    // to every app on the device.
-    const failed = +((txt.match(/(\d+) failed/) || [0, 0])[1]);
-    const absorbed = +((txt.match(/(\d+) mount\(s\) absorbed/) || [0, 0])[1]);
-    toast(
-      r.errno !== 0 ? "Absorb did not run"
-        : failed > 0 ? failed + " mount(s) could not be absorbed — still visible"
-        : absorbed > 0 ? absorbed + " mount(s) absorbed"
-        : "Nothing absorbed",
-      (r.errno !== 0 || failed > 0) ? "bad" : "ok"
-    );
-    done();
-    refreshStealth(); refreshModules(); refreshStatus();
-  }
 
-  // ---- Cloak (pathhide maps/fd) ------------------------------------------
-  const PH_CONF = "/data/adb/nomount/pathhide.conf";
-  let PH = new Map(); let phShown = false;
-  function phClean(s) { return (s || "").replace(/[^A-Za-z0-9._:\/\-]/g, "").trim(); }
-  async function loadCloak() {
-    // Presence probe over the netlink knob. `nm k p` with no value exits 0 only
-    // when the pathhide patch set is compiled into the running kernel; the old
-    // `[ -e /proc/pathhide ]` test no longer works because that node is gone
-    // (any app could find it with one readdir of /proc).
-    const NMB = shq(await nmc());
-    const ok = (await exec(NMB + " k p >/dev/null 2>&1 && echo y")).stdout.indexOf("y") >= 0;
-    document.getElementById("phApply").disabled = !ok;
-    document.getElementById("phScan").disabled = !ok;
-    if (!ok) document.getElementById("phchip").textContent = "no kernel";
-    const r = await exec("cat " + PH_CONF + " 2>/dev/null");
-    r.stdout.split("\n").map(function (l) { return l.replace(/\r/g, "").trim(); })
-      .filter(function (l) { return l && l[0] !== "#"; })
-      .forEach(function (rule) { PH.set(rule, { hidden: true, xposed: false, label: rule }); });
-    // Instant: cached Xposed-module list (rebuilt in the background at boot / by Scan).
-    const c = await exec("sh /data/adb/modules/meta-nomount/scan.sh --cached 2>/dev/null");
-    c.stdout.split("\n").map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (p) {
-      const e = PH.get(p) || { hidden: false, label: p }; e.xposed = true; e.label = p; PH.set(p, e);
-    });
-    renderCloak();
-  }
-  async function scanCloak(btn) {
-    const done = busy(btn, "Scanning…");
-    toast("Scanning Xposed modules…");
-    const r = await exec("sh /data/adb/modules/meta-nomount/scan.sh 2>/dev/null");
-    r.stdout.split("\n").map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (p) {
-      const e = PH.get(p) || { hidden: false, label: p }; e.xposed = true; e.label = p; PH.set(p, e);
-    });
-    done();
-    if (!phShown) phShowList(document.getElementById("phShow"));
-    renderCloak();
-    toast("Found " + [...PH.values()].filter(function (e) { return e.xposed; }).length + " Xposed module(s)", "ok");
-  }
-  function phShowList(btn) {
-    phShown = !phShown;
-    document.getElementById("phList").style.display = phShown ? "" : "none";
-    btn.textContent = phShown ? "Hide list" : "Show list";
-  }
-  function addCloak() {
-    const el = document.getElementById("phManual"); const v = phClean(el.value);
-    if (!v) { toast("Enter a package or substring", "bad"); return; }
-    const e = PH.get(v) || { xposed: false, label: v }; e.hidden = true; PH.set(v, e); el.value = "";
-    if (!phShown) phShowList(document.getElementById("phShow"));
-    renderCloak();
-  }
-  function renderCloak() {
-    const items = [...PH.entries()].sort(function (a, b) {
-      return (b[1].xposed ? 1 : 0) - (a[1].xposed ? 1 : 0) || a[0].localeCompare(b[0]);
-    });
-    const hid = items.filter(function (x) { return x[1].hidden; }).length;
-    const chip = document.getElementById("phchip");
-    if (chip.textContent !== "no kernel") chip.textContent = items.length ? (hid + " / " + items.length) : "0";
-    const list = document.getElementById("phList");
-    if (!items.length) { list.innerHTML = '<div class="note" style="padding:8px 2px">No rules — scan or add a package.</div>'; return; }
-    list.innerHTML = items.map(function (it) {
-      const rule = it[0], e = it[1];
-      return '<div class="swrow"><div class="swi"><div class="lbl">' + e.label + '</div><div class="val">' +
-        (e.xposed ? 'xposed · ' : '') + rule + '</div></div>' +
-        '<label class="switch"><input type="checkbox" data-r="' + encodeURIComponent(rule) + '" ' +
-        (e.hidden ? 'checked' : '') + ' onchange="phToggle(this)"><span class="sl"></span></label></div>';
-    }).join("");
-  }
-  function phToggle(cb) {
-    const k = decodeURIComponent(cb.dataset.r); const e = PH.get(k);
-    if (e) { e.hidden = cb.checked; PH.set(k, e); } renderCloak();
-  }
-  async function applyCloak(btn) {
-    const rules = [...PH.entries()].filter(function (x) { return x[1].hidden; })
-      .map(function (x) { return phClean(x[0]); }).filter(Boolean);
-    const done = busy(btn, "Applying…");
-    // The kernel list is SHARED: "-" wipes every rule on it, including ones
-    // another module put there. Clearing is still needed so an un-ticked rule
-    // goes away live, so preserve what is not ours: read the current list, keep
-    // the entries our conf does not claim, then re-add those alongside ours.
-    //
-    // `nm l p` makes that read RELIABLE. The old /proc node could be write-only
-    // to this caller, which forced a branch that wiped foreign rules and merely
-    // warned about it; the netlink dump always answers, so that branch is gone.
-    // Every value is shq()'d: a rule string reaches a ROOT shell here.
-    const NMB = shq(await nmc());
-    // The old command ended `…; fi; echo OK` with every inner `nm k p` sent to
-    // /dev/null and its status discarded, so `stdout.indexOf("OK") >= 0` was true
-    // whenever ANY shell ran at all. A kernel without pathhide, a moved `nm`, a
-    // rule the kernel rejected, or a failed re-add of the preserved foreign rules
-    // all produced the green "Cloaking N — live & saved" while nothing whatsoever
-    // was hidden. Count the failures in the shell and report the count.
-    // -1 is reserved for "this kernel has no pathhide" — saved, but not live.
-    const FT = "/data/adb/nomount/.cloak.foreign";
-    let cmd = "mkdir -p /data/adb/nomount; { echo '# NoMount Cloak — pathhide rule list (managed by WebUI)'; ";
-    rules.forEach(function (r) { cmd += "echo " + shq(r) + "; "; });
-    cmd += "} > " + shq(PH_CONF) + "; ";
-    // This file names exactly which packages are being hidden, which is the same
-    // secret the hide list is. The 0700 parent was doing all the work; state the
-    // mode here like every other writer of $NMDIR does.
-    cmd += "chmod 0600 " + shq(PH_CONF) + " 2>/dev/null; ";
-    cmd += "_nf=0; ";
-    cmd += "if " + NMB + " k p >/dev/null 2>&1; then ";
-    cmd +=   "_ours=" + shq(rules.join("\n")) + "; ";
-    cmd +=   "_cur=$(" + NMB + " l p 2>/dev/null); ";
-    cmd +=   "_foreign=$(printf '%s\\n' \"$_cur\" | grep -vxF \"$_ours\" 2>/dev/null); ";
-    cmd +=   NMB + " k p - >/dev/null 2>&1 || _nf=$((_nf+1)); ";
-    // Redirected `while … done < file`, NOT `printf | while`: a pipeline puts the
-    // loop in a SUBSHELL, so every _nf increment inside it would be discarded on
-    // exit and foreign-rule failures would go uncounted. The temp lives in the
-    // 0700 state dir, so it leaks nothing while it exists.
-    cmd +=   "if [ -n \"$_foreign\" ]; then printf '%s\\n' \"$_foreign\" > " + shq(FT) + "; ";
-    cmd +=     "while IFS= read -r _fr; do [ -n \"$_fr\" ] || continue; ";
-    cmd +=       NMB + " k p \"+$_fr\" >/dev/null 2>&1 || _nf=$((_nf+1)); ";
-    cmd +=     "done < " + shq(FT) + "; rm -f " + shq(FT) + "; fi; ";
-    rules.forEach(function (r) { cmd += NMB + " k p " + shq("+" + r) + " >/dev/null 2>&1 || _nf=$((_nf+1)); "; });
-    cmd += "else _nf=-1; fi; echo \"OK $_nf\"";
-    const r = await exec(cmd); done();
-    const m = (r.stdout || "").match(/OK (-?\d+)/);
-    if (r.errno !== 0 || !m) { toast("Failed — the rules were not applied", "bad"); return; }
-    const nf = parseInt(m[1], 10);
-    if (nf < 0) toast("Saved, but this kernel has no pathhide support — nothing is hidden", "bad");
-    else if (nf > 0) toast(nf + " rule(s) rejected by the kernel — saved, NOT fully live", "bad");
-    else toast(rules.length ? "Cloaking " + rules.length + " — live & saved" : "Cleared all rules", "ok");
-  }
 
   // ---- init (top level: must not live inside an action handler) ----
   (function restoreTab() {
@@ -3637,7 +2844,6 @@
 
   applyCardState();
   refreshAll();
-  loadCloak();
 </script>
 </body>
 </html>
