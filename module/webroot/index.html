@@ -992,29 +992,21 @@
     <p class="note" id="rulecount" style="display:none"></p>
   </div>
 
-  <!-- OVERLAYS -->
+  <!-- ONE card, two kinds of row.
+       A file redirect and an RRO overlay APK are the same mechanism -- a rule in
+       the same dump -- and they had two cards, two filter boxes and two copies of
+       the same rendering code. Which kind a row is belongs ON the row. The hero
+       still counts them apart, because the counts are the part that differs. -->
   <div class="card">
-    <div class="card-h clp" onclick="toggleVfsFull(this)">
+    <div class="card-h clp" onclick="toggleFiles(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
-      <h2>File redirects</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
+      <h2>Injected files</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
     </div>
     <div class="uidbar" id="vfsfilterbar" style="display:none;margin-bottom:11px">
-      <input id="vfsfilter" type="text" placeholder="Filter files…" oninput="renderVfsFull()" />
+      <input id="vfsfilter" type="text" placeholder="Filter files…" oninput="renderFilesFull()" />
     </div>
     <div class="list" id="vfsdirs" style="display:none"></div>
     <div class="list" id="vfsfull" style="display:none"></div>
-  </div>
-
-  <div class="card">
-    <div class="card-h clp" onclick="toggleOvFull(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
-      <h2>RRO overlays</h2><span class="chip" id="ovcount">0</span><span class="chev">›</span>
-    </div>
-    <div class="uidbar" id="ovfilterbar" style="display:none;margin-bottom:11px">
-      <input id="ovfilter" type="text" placeholder="Filter overlays…" oninput="renderOvFull()" />
-    </div>
-    <div class="list" id="overlays" style="display:none"></div>
-    <div class="list" id="overlaysfull" style="display:none"></div>
   </div>
 
   </section>
@@ -2274,101 +2266,62 @@
     box.innerHTML = `<div class="rmbar">${seg}</div><div class="rmlegend">${legend}</div>`;
   }
 
-  // The non-overlay half of the rule set, grouped by target directory — the same
-  // shape as the overlay card, so the Rules tab shows both halves rather than
-  // burying the redirects inside the collapsed raw list.
-  var _vfsFiles = [], _ovFiles = [];
-  async function refreshVfs() {
+  // Every rule the engine is serving, grouped by the directory it lands in, and
+  // then one row per file behind the same disclosure. Both kinds come out of the
+  // one dump; `ov` marks the RRO overlay APKs.
+  var _files = [];
+  async function refreshFiles() {
     const box = $("vfsdirs");
     const d = await ruleDump();
     if (!d.ok) {
       $("vfscount").textContent = "?";
-      box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
-      _vfsFiles = [];
+      box.innerHTML = '<div class="empty">Unknown \u2014 the engine did not answer.</div>';
+      _files = [];
       return;
     }
+    const isOv = (p) => /\/overlay\/[^\s]*\.apk$/.test(p);
     const dirs = {};
-    _vfsFiles = [];
-    for (const vp of d.targets) {
-      if (!vp || /\/overlay\/[^\s]*\.apk$/.test(vp)) continue;
-      _vfsFiles.push(vp);
+    _files = d.targets.filter(Boolean).sort();
+    for (const vp of _files) {
       const dir = vp.replace(/\/[^/]*$/, "") || "/";
-      dirs[dir] = (dirs[dir] || 0) + 1;
+      const e = dirs[dir] || (dirs[dir] = { n: 0, ov: 0 });
+      e.n++; if (isOv(vp)) e.ov++;
     }
-    _vfsFiles.sort();
-    const keys = Object.keys(dirs).sort((a, b) => dirs[b] - dirs[a] || a.localeCompare(b));
-    const total = keys.reduce((a, k) => a + dirs[k], 0);
-    $("vfscount").textContent = total;
-    if (!keys.length) { box.innerHTML = '<div class="empty">No file redirects.</div>'; }
-    else box.innerHTML = keys.map((d) =>
-      `<div class="row"><span class="name mono">${esc(d)}</span>` +
-      `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} file${dirs[d] > 1 ? "s" : ""}</span>` +
-      `<span class="tag vfs">Prism</span></div>`
-    ).join("");
-    if ($("vfsfull").style.display !== "none") renderVfsFull();
-  }
-  // full per-file list (basename shown, full path in title), each with a hookless capsule
-  function _fileRows(paths, q) {
-    const f = q ? paths.filter(p => p.toLowerCase().indexOf(q) !== -1) : paths;
-    if (!f.length) return '<div class="empty">(no match)</div>';
-    return f.map(p => {
-      const base = p.replace(/^.*\//, "");
-      return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(base)}</span>` +
-             `<span class="tag vfs">Prism</span></div>`;
+    const keys = Object.keys(dirs).sort((a, b) => dirs[b].n - dirs[a].n || a.localeCompare(b));
+    $("vfscount").textContent = _files.length;
+    if (!keys.length) box.innerHTML = '<div class="empty">No rules active.</div>';
+    else box.innerHTML = keys.map((k) => {
+      const e = dirs[k], ov = e.ov === e.n;
+      return `<div class="row"><span class="name mono">${esc(k)}</span>` +
+        `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${e.n} ` +
+        `${ov ? "apk" : "file"}${e.n > 1 ? "s" : ""}</span>` +
+        `<span class="tag ${ov ? "ov" : "vfs"}">${ov ? "RRO" : "Prism"}</span></div>`;
     }).join("");
+    if ($("vfsfull").style.display !== "none") renderFilesFull();
   }
-  function renderVfsFull() {
-    $("vfsfull").innerHTML = _fileRows(_vfsFiles, ($("vfsfilter").value || "").trim().toLowerCase());
+  // Full per-file list: basename shown, full path in the title attribute, because
+  // a phone cannot show /system/product/overlay/… and the name in one line.
+  function renderFilesFull() {
+    const q = ($("vfsfilter").value || "").trim().toLowerCase();
+    const f = q ? _files.filter(p => p.toLowerCase().indexOf(q) !== -1) : _files;
+    $("vfsfull").innerHTML = !f.length ? '<div class="empty">(no match)</div>'
+      : f.map(p => {
+          const ov = /\/overlay\/[^\s]*\.apk$/.test(p);
+          return `<div class="row"><span class="name mono" title="${esc(p)}">` +
+                 `${esc(p.replace(/^.*\//, ""))}</span>` +
+                 `<span class="tag ${ov ? "ov" : "vfs"}">${ov ? "RRO" : "Prism"}</span></div>`;
+        }).join("");
   }
   function toggleModules(h) {
     const on = h.classList.toggle("open");
     $("modules").style.display = on ? "" : "none";
   }
-  function toggleVfsFull(h) {
+  function toggleFiles(h) {
     const on = h.classList.toggle("open");
     $("vfsdirs").style.display = on ? "" : "none";
     $("vfsfull").style.display = on ? "" : "none";
     $("vfsfilterbar").style.display = on ? "" : "none";
-    if (on) renderVfsFull();
-  }
-
-  // ---- overlays (now hookless: injected overlay APKs, no overlayfs mount) ----
-  async function refreshOverlays() {
-    const box = $("overlays");
-    const d = await ruleDump();
-    if (!d.ok) {
-      $("ovcount").textContent = "?";
-      box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
-      _ovFiles = [];
-      return;
-    }
-    const dirs = {};
-    _ovFiles = d.rro.slice();
-    for (const vp of _ovFiles) {
-      const dir = vp.replace(/\/[^/]*$/, "");
-      dirs[dir] = (dirs[dir] || 0) + 1;
-    }
-    _ovFiles.sort();
-    const keys = Object.keys(dirs).sort();
-    const total = keys.reduce((a, k) => a + dirs[k], 0);
-    $("ovcount").textContent = total;
-    if (!keys.length) { box.innerHTML = '<div class="empty">No RRO overlays.</div>'; }
-    else box.innerHTML = keys.map((d) =>
-      `<div class="row"><span class="name mono">${esc(d)}</span>` +
-      `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${dirs[d]} apk${dirs[d] > 1 ? "s" : ""}</span>` +
-      `<span class="tag ov">Prism</span></div>`
-    ).join("");
-    if ($("overlaysfull").style.display !== "none") renderOvFull();
-  }
-  function renderOvFull() {
-    $("overlaysfull").innerHTML = _fileRows(_ovFiles, ($("ovfilter").value || "").trim().toLowerCase());
-  }
-  function toggleOvFull(h) {
-    const on = h.classList.toggle("open");
-    $("overlays").style.display = on ? "" : "none";
-    $("overlaysfull").style.display = on ? "" : "none";
-    $("ovfilterbar").style.display = on ? "" : "none";
-    if (on) renderOvFull();
+    if (on) renderFilesFull();
   }
 
   // ---- rules ----
@@ -2839,7 +2792,7 @@
     $("footver").textContent = "Suite " + suiteId + " · " + eng +
       (staged ? " · " + pv + " staged — reboot to activate" : "");
     await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
-                       refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(),
+                       refreshModules(), refreshFiles(), refreshRuleSummary(),
                        refreshIncident(), refreshBlocked(), refreshIsolated()]);
     if (rulesShown) loadRules();
     loadPkgList();
