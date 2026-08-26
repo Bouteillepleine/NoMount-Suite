@@ -1687,7 +1687,20 @@
   }
 
   // The Status health line is the only way in.
-  function openDetail() { showTab("diag", null); }
+  //
+  // With no result yet the line reads "tap to run a check", and it has to mean
+  // it. Navigating to a screen where the reader then has to find a second button
+  // is not what that sentence promises -- so when there is nothing cached, this
+  // opens the detail AND starts the run. Once a verdict exists, tapping just
+  // takes you to it; re-running is the explicit button's job.
+  function openDetail() {
+    showTab("diag", null);
+    if (!AUDIT) {
+      const card = $("cardAudit");
+      if (card) card.classList.remove("collapsed");
+      runAudit(null);
+    }
+  }
 
   // ---- rules filter ----
   let _rulesRaw = "";
@@ -2093,7 +2106,13 @@
   async function runAudit(btn) {
     const done = busy(btn, "Auditing…");
     $("auditlist").innerHTML = '<div class="empty">Replaying detection oracles…</div>';
-    const r = await nm("audit --json");
+    // --write, not just --json. Without it a manual run rendered a verdict that
+    // existed only in this page's memory: close the WebUI, reopen it, and
+    // `loadAuditCache` found nothing and fell back to "Not checked yet" -- so the
+    // button appeared to do nothing durable, and the Status line only ever told
+    // the truth between a boot and the next time you looked. The boot pass writes
+    // the same file; this keeps it current in between.
+    const r = await nm("audit --json --write");
     const d = auParse(r);
     if (!d) {
       // Never leave the previous verdict on screen next to a failed run -- that
