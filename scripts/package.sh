@@ -177,6 +177,18 @@ setup_toolchain() {
         done
     fi
     export NDK_BIN="$ndk/toolchains/llvm/prebuilt/${hostdir:-linux-x86_64}/bin"
+    # On a Windows NDK the driver is a .cmd wrapper; the bare name in
+    # .cargo/config.toml is a Unix-only file and rustc reports it as
+    # "linker not found". config.toml stays correct for CI, and the
+    # per-target env var (which outranks it) points at the wrapper here --
+    # so the host detection above actually produces a build on the host it
+    # just detected, instead of getting as far as the link step and dying.
+    if [ "$hostdir" = "windows-x86_64" ]; then
+        export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android26-clang.cmd"
+        export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_BIN/armv7a-linux-androideabi26-clang.cmd"
+        export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_BIN/x86_64-linux-android26-clang.cmd"
+        export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$NDK_BIN/i686-linux-android26-clang.cmd"
+    fi
     if [ -z "$ndk" ] || [ ! -d "$NDK_BIN" ]; then
         echo "FATAL: Android NDK not found. Set ANDROID_NDK_HOME." >&2
         exit 1
