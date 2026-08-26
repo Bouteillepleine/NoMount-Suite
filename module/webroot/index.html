@@ -1362,6 +1362,28 @@
   // control plane is a kernel knob, so it is addressed directly rather than
   // through a Suite subcommand.
   async function nmc() { return (await bin()).replace(/nomount$/, "nm"); }
+  // The ENGINE's version, from the engine.
+  //
+  // `nm("version")` runs the SUITE binary (`nomount version` -> "nomount
+  // v1.3.72"). The engine's number comes from the netlink client (`nm v` -> a
+  // bare "26"), and the two are deliberately independent: the engine ships in the
+  // kernel, the Suite ships as a zip, and userspace gates features on
+  // `engine >= N` precisely so a new Suite can run on an old kernel.
+  //
+  // Reading the wrong one produced a footer that said "Suite v1.3.72 · engine
+  // vv1.3.72" -- the Suite version twice, the second time mislabelled, with a
+  // doubled `v` because the caller prepended one to a string that already had it.
+  // Kernel features said "Prism engine v1.3.72 is answering" for the same reason.
+  // A reader quoting either number back was quoting nothing about their kernel.
+  //
+  // Empty string when the engine does not answer; every caller already treats
+  // that as offline.
+  async function engineVersion() {
+    const r = await exec(shq(await nmc()) + " v 2>/dev/null");
+    const v = (r.stdout || "").trim();
+    return /^\d+$/.test(v) ? v : "";
+  }
+
   // The Suite binary shells to the `nm` netlink client beside it.
   async function nm(args) {
     const b = await bin();
@@ -2359,7 +2381,7 @@
     const chip = $("featchip");
     if (!list) return;
     const NMB = shq(await nmc());
-    const ev = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
+    const ev = await engineVersion();
     const has = async function (knob) {
       return (await exec(NMB + " k " + knob + " >/dev/null 2>&1 && echo y")).stdout.indexOf("y") >= 0;
     };
@@ -3384,7 +3406,7 @@
     // ships in the kernel and the Suite ships as a zip, they are installed
     // separately, and userspace gates features on `engine >= N` precisely so a
     // new Suite can run on an old kernel and know what it may ask for.
-    const ev = (await nm("version")).stdout.trim().replace(/^nomount\s*/i, "");
+    const ev = await engineVersion();
     const eng = ev ? ("engine v" + ev) : "engine offline";
     // module.prop is what ksud ADVERTISES; SUITE_VERSION is what is running.
     const pv = (await exec(
