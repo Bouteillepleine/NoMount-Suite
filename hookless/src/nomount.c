@@ -3962,7 +3962,15 @@ static int __nomount_inject_child_locked(struct nomount_dir_node *dir_node, stru
 
     if (unlikely(!dir_node)) return -ENOMEM;
     name_hash = full_name_hash(NULL, name, name_len);
-    rule->parent_dir = dir_node;
+    /* rule->parent_dir is published only where the link is actually made -- in
+     * the REPLACEMENT branch and after the fresh child is allocated -- not
+     * up here. Setting it before the walk left a rule naming a parent that had
+     * refused it (the -ENOMEM arms below), and the invariant this back-pointer
+     * has to hold is exactly "the parent's child node points AT this rule".
+     * nm_detach_rule_locked() and nomount_prune_empty_virtual_dirs() both
+     * dereference it, and __nomount_delete_child_locked() can drop the last ref
+     * on a real parent and call_rcu-free it, so a rule that is not the parent's
+     * child any more must not be able to name it. */
     hash_for_each_possible(dir_node->children_ht, child, hnode, name_hash) {
         if (child->name_hash == name_hash && child->name_len == name_len &&
             memcmp(child->name, name, name_len) == 0) {
@@ -3991,8 +3999,22 @@ static int __nomount_inject_child_locked(struct nomount_dir_node *dir_node, stru
              * derives the size correction from the live child flags on the same
              * walk as nlink, so it cannot go stale here and cannot ignore the
              * caller's uid either. */
+            /* The OUTGOING rule stops being this parent's child right here. It is
+             * normally a victim the caller is about to free, but not always: two
+             * vpaths that differ only in redundant slashes used to reach this
+             * branch with NO victim recorded (the rule-hash dedup keys on exact
+             * bytes, this node keys on parent + name), leaving the outgoing rule
+             * live in the table with a back-pointer to a node nothing links it to.
+             * Deleting the rule that DID keep the child then empties that node,
+             * __nomount_delete_child_locked() drops its last ref, call_rcu frees
+             * it -- and the orphan's next `nm del` runs atomic_inc_not_zero() and
+             * an idr walk over freed memory. nm_norm_vpath() closes that spelling
+             * gap; clearing the pointer closes the class. */
+            if (child->rule && child->rule != rule)
+                child->rule->parent_dir = NULL;
             child->flags = rule->flags;
             child->rule = rule;
+            rule->parent_dir = dir_node;
             child->d_type = (rule->flags & NM_FLAG_IS_DIR) ? DT_DIR : DT_REG;
             WRITE_ONCE(child->fake_ino, rule->v_dino ? rule->v_dino : rule->v_ino);
             if (rule->flags & NM_FLAG_PUBLIC)
@@ -4034,6 +4056,8 @@ static int __nomount_inject_child_locked(struct nomount_dir_node *dir_node, stru
     if (rule->flags & NM_FLAG_PUBLIC)
         WRITE_ONCE(dir_node->has_public, true);
     hash_add_rcu(dir_node->children_ht, &child->hnode, name_hash);
+    /* Link made: now the back-pointer is true. */
+    rule->parent_dir = dir_node;
     return 0;
 }
 
@@ -4048,6 +4072,14 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
             hash_del_rcu(&child->hnode);
             idr_remove(&dir_node->children_idr, id);
             kfree_rcu(child, rcu);
+            /* Other half of the invariant __nomount_inject_child_locked()
+             * establishes: the rule is no longer this parent's child, so it must
+             * not keep naming the node -- which the tail of this function can
+             * free outright. Every caller that still needs the parent captured
+             * it before calling here (nm_detach_rule_locked into a local,
+             * nomount_prune_empty_virtual_dirs into `parent`), for exactly the
+             * lifetime reason that makes this necessary. */
+            rule->parent_dir = NULL;
             break;
         }
     }
@@ -5214,6 +5246,53 @@ static int nm_find_sibling_meta(const char *vpath, struct kstat *out,
     return ret;
 }
 
+/* Does this path contain a run of two or more '/'? */
+static bool nm_vpath_has_slash_run(const char *p, size_t len)
+{
+    size_t i;
+
+    for (i = 1; i < len; i++)
+        if (p[i] == '/' && p[i - 1] == '/')
+            return true;
+    return false;
+}
+
+/* Collapse runs of '/' out of a client-supplied virtual path while copying it.
+ *
+ * A rule is KEYED on the vpath bytes -- hash, length and memcmp -- but every
+ * consumer of the same string splits it on '/' and skips the empty components a
+ * doubled slash produces. So "/system/etc//zz" and "/system/etc/zz" are two
+ * different keys naming one file, and the pair walks straight past both dedup
+ * loops in __nomount_add_rule(): the second add reaches the REPLACEMENT branch
+ * of __nomount_inject_child_locked() instead, which keys on parent + name, and
+ * re-points that child at the incoming rule with no victim recorded. The
+ * outgoing rule stays in the table, reachable by `nm del`, still naming a
+ * dir_node that no longer links to it -- and deleting the rule that DID keep the
+ * child can empty and call_rcu-free that node underneath it.
+ *
+ * Normalising at rule creation makes the two spellings one key, so the dedup
+ * fires and a replacement becomes a proper victim again. (The dangling
+ * back-pointer is fixed on its own terms in __nomount_inject_child_locked();
+ * this closes the only way found to reach it.)
+ *
+ * Writes at most @len bytes plus a NUL to @dst and returns the collapsed length,
+ * which is never longer than @len. A trailing '/' is trimmed by the caller
+ * before this runs. '.' and '..' components are deliberately NOT resolved:
+ * doing that lexically is wrong wherever a symlink is involved, and no caller
+ * produces them -- both the bundled client and the Suite send resolved paths. */
+static size_t nm_norm_vpath(char *dst, const char *src, size_t len)
+{
+    size_t i, o = 0;
+
+    for (i = 0; i < len; i++) {
+        if (src[i] == '/' && o > 0 && dst[o - 1] == '/')
+            continue;
+        dst[o++] = src[i];
+    }
+    dst[o] = '\0';
+    return o;
+}
+
 static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid)
 {
     struct nomount_rule *rule;
@@ -5231,16 +5310,20 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
     if (!is_whiteout) { while (r_len > 1 && r_path[r_len - 1] == '/') { r_len--; } }
 
     if (is_whiteout) r_len = 0;
+    /* Sized on the CALLER's v_len: nm_norm_vpath() can only shrink the vpath, so
+     * the rpath still fits at the (lower) offset the collapsed length puts it at
+     * -- at worst a couple of bytes go unused. */
     rule = kzalloc((sizeof(struct nomount_rule) + v_len + 1 + r_len + 1), GFP_KERNEL);
     if (!rule) return ERR_PTR(-ENOMEM);
 
     INIT_HLIST_NODE(&rule->vpath_node);
-    rule->v_hash = full_name_hash(NULL, v_path, v_len);
     rule->flags = flags & NM_FLAGS_USER_MASK;
-    rule->v_len = v_len;
     rule->target_uid = target_uid;
-    memcpy(nm_get_vpath(rule), v_path, v_len);
-    nm_get_vpath(rule)[v_len] = '\0';
+    /* v_len is set from the NORMALISED copy and before anything reaches for the
+     * rpath, which nm_get_rpath() offsets by it. Hash the stored bytes too, or
+     * the two spellings would still be two keys. */
+    rule->v_len = (u16)nm_norm_vpath(nm_get_vpath(rule), v_path, v_len);
+    rule->v_hash = full_name_hash(NULL, nm_get_vpath(rule), rule->v_len);
 
     if (is_whiteout) {
         nm_get_rpath(rule)[0] = '\0';
@@ -5671,12 +5754,15 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
      * stays in the table and is still listed, but nothing can ever reach it, and
      * deleting it finds no child to remove and reports success. Refuse the
      * collision rather than build a topology that cannot represent it. */
+    /* rule->v_len, not the caller's: nm_alloc_rule() trims a trailing '/' and
+     * collapses '/' runs, so comparing on the raw length would let two spellings
+     * of one path past the dedup. See nm_norm_vpath(). */
     hash_for_each_possible(nomount_rules_ht, existing, vpath_node, rule->v_hash) {
-        if (existing->v_hash == rule->v_hash && existing->v_len == v_len &&
+        if (existing->v_hash == rule->v_hash && existing->v_len == rule->v_len &&
             existing->target_uid != target_uid &&
-            memcmp(nm_get_vpath(existing), nm_get_vpath(rule), v_len) == 0) {
+            memcmp(nm_get_vpath(existing), nm_get_vpath(rule), rule->v_len) == 0) {
             nm_warn("refusing rule on '%.*s' for uid %u: uid %u already owns this path\n",
-                    (int)v_len, v_path, target_uid, existing->target_uid);
+                    (int)rule->v_len, nm_get_vpath(rule), target_uid, existing->target_uid);
             mutex_unlock(&nomount_write_mutex);
             nm_free_rule(rule);
             return -EEXIST;
@@ -5684,9 +5770,9 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     }
 
     hash_for_each_possible(nomount_rules_ht, existing, vpath_node, rule->v_hash) {
-        if (existing->v_hash == rule->v_hash && existing->v_len == v_len &&
+        if (existing->v_hash == rule->v_hash && existing->v_len == rule->v_len &&
              existing->target_uid == target_uid &&
-             memcmp(nm_get_vpath(existing), nm_get_vpath(rule), v_len) == 0) {
+             memcmp(nm_get_vpath(existing), nm_get_vpath(rule), rule->v_len) == 0) {
             /* Refuse to shadow a rule that still owns a populated virtual
              * subtree: freeing its dir_node (nm_free_rule -> call_rcu) would
              * leave descendant rules' parent_dir dangling and UAF on a later
@@ -5840,7 +5926,23 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 static int __nomount_del_rule(const char *v_path, size_t v_len, unsigned int target_uid, struct hlist_head *r_victims)
 {
     struct nomount_rule *rule;
-    u32 hash = full_name_hash(NULL, v_path, v_len);
+    char *norm = NULL;
+    int ret = -ENOENT;
+    u32 hash;
+
+    /* Rules are filed under the NORMALISED vpath (nm_norm_vpath), so a del that
+     * spells the same path with a trailing or doubled '/' has to be brought to
+     * the same spelling or it reports -ENOENT for a rule that is plainly there --
+     * and the client, having been told the rule is gone, stops trying. Trim
+     * in place; only pay for a copy when there is a '/' run to collapse. */
+    while (v_len > 1 && v_path[v_len - 1] == '/') v_len--;
+    if (unlikely(nm_vpath_has_slash_run(v_path, v_len))) {
+        norm = kmalloc(v_len + 1, GFP_KERNEL);
+        if (!norm) return -ENOMEM;
+        v_len = nm_norm_vpath(norm, v_path, v_len);
+        v_path = norm;
+    }
+    hash = full_name_hash(NULL, v_path, v_len);
 
     hash_for_each_possible(nomount_rules_ht, rule, vpath_node, hash) {
         if (rule->v_hash == hash && rule->v_len == v_len && rule->target_uid == target_uid &&
@@ -5851,13 +5953,17 @@ static int __nomount_del_rule(const char *v_path, size_t v_len, unsigned int tar
              * caller must remove the children first. Mirrors the shadow-path guard
              * in __nomount_add_rule(). (nm clear is unaffected: it detaches every
              * rule before any dir_node is freed.) */
-            if (rule->this_dir && !idr_is_empty(&rule->this_dir->children_idr))
-                return -EBUSY;
+            if (rule->this_dir && !idr_is_empty(&rule->this_dir->children_idr)) {
+                ret = -EBUSY;
+                break;
+            }
             nm_detach_rule_locked(rule, r_victims, true);
-            return 0;
+            ret = 0;
+            break;
         }
     }
-    return -ENOENT;
+    kfree(norm);
+    return ret;
 }
 
 /* NB: this drops the blocked-UID set as well as the rules -- per-UID hiding is
