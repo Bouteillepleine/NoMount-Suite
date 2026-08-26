@@ -133,7 +133,13 @@ fn write_all(list: &[Acceptance]) -> Result<()> {
     Ok(())
 }
 
-pub fn add(check: &str, fingerprint: &str, reason: &str) -> Result<()> {
+/// The rules an acceptance has to satisfy, with no I/O.
+///
+/// Split out of [`add`] so the CLI can reject bad input BEFORE fingerprinting --
+/// which means running the whole audit, forking a probe child and reading
+/// /proc/<pid>/maps for every process on the device -- and so a test can reach
+/// the rules at all. One copy, two callers.
+pub fn validate<'a>(check: &str, reason: &'a str) -> Result<&'a str> {
     let reason = reason.trim();
     if reason.is_empty() {
         bail!("a reason is required: an acceptance nobody can explain later is indistinguishable from a bug being ignored");
@@ -141,6 +147,11 @@ pub fn add(check: &str, fingerprint: &str, reason: &str) -> Result<()> {
     if check.contains('\t') || reason.contains('\t') || reason.contains('\n') {
         bail!("check id and reason must not contain a tab or newline (the store is tab-separated)");
     }
+    Ok(reason)
+}
+
+pub fn add(check: &str, fingerprint: &str, reason: &str) -> Result<()> {
+    let reason = validate(check, reason)?;
     let mut list = load();
     // One acceptance per check. Re-accepting after the evidence moved REPLACES
     // the old row rather than stacking, so the store cannot grow a history of
@@ -197,6 +208,25 @@ mod tests {
         // ...and the lapsed one is still findable, so the report can say so.
         assert!(stale(&list, "zero-mount", "bbbbbbbbbbbbbbbb").is_some());
         assert!(stale(&list, "zero-mount", "aaaaaaaaaaaaaaaa").is_none());
+    }
+
+    /// The acceptance rules, tested where they actually live.
+    ///
+    /// Deliberately NOT through `add`: on a build host `/data/adb/nomount`
+    /// does not exist, so `fs::write` fails and `is_err()` would hold no
+    /// matter what the validation did. A test that cannot fail is worse than
+    /// no test, so the rules moved into `validate` and this exercises that.
+    #[test]
+    fn an_acceptance_needs_a_reason_and_no_separators() {
+        // Empty and whitespace-only are both "no reason".
+        assert!(validate("x", "").is_err());
+        assert!(validate("x", "   ").is_err());
+        // A tab would split the record; a newline would end it early.
+        assert!(validate("x", "a\tb").is_err());
+        assert!(validate("x", "a\nb").is_err());
+        assert!(validate("x\ty", "fine").is_err());
+        // ...and an ordinary one comes back trimmed, which is what is stored.
+        assert_eq!(validate("x", "  by design  ").unwrap(), "by design");
     }
 
     /// A different check is never covered by another's acceptance.

@@ -70,6 +70,12 @@ pub enum Reach {
     /// rather than being forced to overstate itself as `Effort`.
     #[allow(dead_code)]
     RootOnly,
+    /// Not a detection oracle in any form -- nobody learns anything about you
+    /// from it. `engine responding` is the case: a dead engine means your modules
+    /// are not applied, which is a different axis entirely from "can an app tell".
+    /// It renders "(any app)" otherwise, which contradicts that check's own text
+    /// saying nothing detects you by it.
+    NotAnOracle,
 }
 
 impl Reach {
@@ -78,6 +84,7 @@ impl Reach {
             Reach::AnyApp => "any-app",
             Reach::Effort => "needs-effort",
             Reach::RootOnly => "root-only",
+            Reach::NotAnOracle => "not-an-oracle",
         }
     }
     fn label(self) -> &'static str {
@@ -85,6 +92,7 @@ impl Reach {
             Reach::AnyApp => "any app",
             Reach::Effort => "needs effort",
             Reach::RootOnly => "root only",
+            Reach::NotAnOracle => "not a detection",
         }
     }
     /// Sort key: the thing any app can read comes first.
@@ -93,6 +101,10 @@ impl Reach {
             Reach::AnyApp => 0,
             Reach::Effort => 1,
             Reach::RootOnly => 2,
+            // Sorts last among equals. It never competes in practice -- a failing
+            // engine check is force-ranked ahead of everything in `run_audit` --
+            // but ranking it with the oracles would be a claim it is one.
+            Reach::NotAnOracle => 3,
         }
     }
 }
@@ -228,6 +240,7 @@ fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
 /// enough to notice.
 fn id_of(name: &str) -> &'static str {
     match name {
+        "engine responding" => "engine-live",
         "zero-mount posture" => "zero-mount",
         "kernel surfaces" => "kernel-surfaces",
         "readdir cookie magic" => "dirent-cookie",
@@ -533,8 +546,18 @@ fn check_surfaces() -> Check {
 fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
     const NM_MAGIC: i64 = 0x6e6d; // "nm"
     let (mut scanned, mut hits) = (0usize, 0usize);
+    // Directories that would not enumerate. This used to be a bare `continue`,
+    // so a run where 90 of 93 parents failed to open reported
+    // "0 of 12 dirents carry the magic" and PASSED -- a clean verdict over 13% of
+    // the evidence, with nothing on screen saying so. `check_surfaces` had this
+    // exact defect and it was fixed there; the fix was never carried across to
+    // its siblings.
+    let mut unread = 0usize;
     for p in parents {
-        let Some(entries) = getdents(p) else { continue };
+        let Some(entries) = getdents(p) else {
+            unread += 1;
+            continue;
+        };
         for e in entries {
             scanned += 1;
             if (e.d_off >> 48) == NM_MAGIC {
@@ -559,6 +582,22 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
         };
     }
     if hits == 0 {
+        // A hit is a hit however partial the scan was, so a FAIL below stands
+        // regardless. Only a CLEAN result depends on having looked everywhere.
+        if unread > 0 {
+            return unmeasured(
+                "readdir cookie magic",
+                format!(
+                    "{scanned} dirent(s) carried no magic, but {unread} of {} injected \
+                     directory(ies) could not be listed and were NOT checked",
+                    parents.len()
+                ),
+            )
+            .meaning(format!(
+                "Part of the check could not run: {unread} injected folder(s) would not open. \
+                 What was read looks right, but this is not a clean result."
+            ));
+        }
         pass("readdir cookie magic", format!("0 of {scanned} dirents carry the magic"))
             .meaning("Directory listings of injected folders look the same as the ROM's own.")
     } else {
@@ -788,16 +827,28 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
 /// so an injected or hidden name must be reflected in the parent's size.
 fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     let (mut ok, mut bad) = (0usize, Vec::new());
+    // Same accounting as `check_dirent_cookie`: an erofs parent that would not
+    // stat or list is evidence that was not gathered, not evidence of health.
+    // Note the two `continue`s ABOVE this counter are different in kind -- a
+    // non-erofs parent and a multi-block one are genuinely out of scope for this
+    // model, which is what makes the whole check n/a when none qualifies.
+    let mut unread = 0usize;
     for parent in parents_of(targets) {
         if fs_type(&parent) != "erofs" {
             continue;
         }
-        let Ok(md) = fs::metadata(&parent) else { continue };
+        let Ok(md) = fs::metadata(&parent) else {
+            unread += 1;
+            continue;
+        };
         let size = md.len();
         if size == 0 || size >= 4096 {
             continue; // multi-block padding has no closed form
         }
-        let Ok(rd) = fs::read_dir(&parent) else { continue };
+        let Ok(rd) = fs::read_dir(&parent) else {
+            unread += 1;
+            continue;
+        };
         let (mut n, mut bytes) = (0u64, 0u64);
         for e in rd.flatten() {
             n += 1;
@@ -819,6 +870,17 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
             "This one only applies to small folders on an erofs ROM, where the folder's size is a \
              fixed formula over its contents. None of yours is both.",
         )
+        .reach(Reach::Effort);
+    }
+    if bad.is_empty() && unread > 0 {
+        return unmeasured(
+            "erofs directory shape",
+            format!("{ok} erofs parent(s) match the dirent model; {unread} could not be read"),
+        )
+        .meaning(format!(
+            "Part of the check could not run: {unread} folder(s) would not open. What was read \
+             looks right, but this is not a clean result."
+        ))
         .reach(Reach::Effort);
     }
     if bad.is_empty() {
@@ -1183,6 +1245,49 @@ fn check_no_foreign_rom_mount() -> Check {
     }
 }
 
+/// Is the engine actually there?
+///
+/// Every other check in this file answers "is the hiding detectable". With the
+/// engine down there IS no hiding -- `live_targets()` comes back empty, every
+/// target-dependent check correctly reports n/a, the three mount checks correctly
+/// pass because nothing is mounted, and the summary reads `4 passed, 0 failed`.
+///
+/// Every one of those statements is true and the conclusion a reader draws from
+/// them is false. Measured: with `NM_BIN` pointed at a non-existent binary the
+/// audit reported `"open_failures":0`, so the Status health line rendered a green
+/// "Nothing detectable" directly beside the hero's own red "Engine offline" on a
+/// device where nothing was being injected at all.
+///
+/// So liveness is a check, not an assumption. It is deliberately NOT framed as an
+/// oracle -- nobody detects you by your engine being down; your modules simply
+/// are not applied -- but it has to be able to make the summary non-clean,
+/// because "your setup is fine" is the question the summary is read as answering.
+fn check_engine_live() -> Check {
+    const NAME: &str = "engine responding";
+    match Nm::new().version() {
+        Ok(v) => pass(NAME, format!("Prism engine v{v} answered over netlink"))
+            .reach(Reach::NotAnOracle)
+            .meaning(format!(
+                "The kernel engine is running (v{v}). This is what serves your modules with no \
+                 mounts."
+            )),
+        Err(e) => fail(
+            NAME,
+            format!("nm could not get a version from the engine: {e:#}"),
+            "not an oracle -- nothing detects you by this. It means your modules are NOT being \
+             served, so every other check below is describing a device that is not hiding anything",
+        )
+        .meaning(
+            "The kernel engine is not answering, so nothing is being injected. Everything else \
+             here is measuring a device with no hiding on it — the results below are not a clean \
+             bill of health. Either this kernel has no NoMount support, or the module and kernel \
+             are out of step and need flashing as a set.",
+        )
+        .owner("the kernel, or a module/kernel version mismatch")
+        .reach(Reach::NotAnOracle),
+    }
+}
+
 /// The three checks that read the mount table.
 ///
 /// Split out so `nomount posture` can run exactly these and nothing else. Before
@@ -1202,6 +1307,7 @@ fn all_checks() -> (Vec<Check>, usize, usize) {
     let targets = live_targets();
     let parents = parents_of(&targets);
     let checks = vec![
+        check_engine_live(),
         check_zero_mount(),
         check_surfaces(),
         check_dirent_cookie(&parents),
@@ -1367,6 +1473,12 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
     // An ACCEPTED failure sorts with the pass block: the user has already dealt
     // with it, so it must not sit at the top pushing live findings down.
     let rank = |c: &Check| -> u8 {
+        // A dead engine outranks everything: with it down, every other row is
+        // describing a device that is not hiding anything, so it has to be read
+        // first or not at all.
+        if c.id == "engine-live" && c.verdict == Verdict::Fail {
+            return 0;
+        }
         let accepted = crate::accept::covering(&acc, c.id, &c.fingerprint()).is_some();
         match c.verdict {
             Verdict::Fail if !accepted => 0,
@@ -1387,6 +1499,15 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
             ("kind", J::s("audit")),
             ("ts", J::Num(now_secs())),
             ("suite", J::s(env!("CARGO_PKG_VERSION"))),
+            // Hoisted out of the checks array so a consumer does not have to find
+            // the row to answer "is this describing a live system at all".
+            (
+                "engine",
+                match Nm::new().version() {
+                    Ok(v) => J::Num(v as i64),
+                    Err(_) => J::Null,
+                },
+            ),
             ("rules", J::Num(rules as i64)),
             ("directories", J::Num(dirs as i64)),
             ("summary", tally_json(&t)),
@@ -1481,7 +1602,14 @@ pub fn run_accept(check: Option<String>, reason: Option<String>, remove: bool, l
         }
         return Ok(());
     }
-    let id = check.unwrap();
+    // `check` is Some here -- the `check.is_none()` arm above returned -- but
+    // saying so with `unwrap` leaves a panic in a root binary standing on a
+    // control-flow argument. Bind it instead, so a future edit to that arm
+    // cannot turn a refactor into a crash.
+    let Some(id) = check else {
+        println!("no accepted findings");
+        return Ok(());
+    };
     if remove {
         if crate::accept::remove(&id)? {
             println!("no longer accepting: {id}");
@@ -1494,6 +1622,14 @@ pub fn run_accept(check: Option<String>, reason: Option<String>, remove: bool, l
     // user is looking at right now. Accepting a check whose id does not exist,
     // or which is not currently failing, is refused: an acceptance for a finding
     // that was never measured is a mute, and this is deliberately not a mute.
+    // Validate what the caller gave us before doing any work. Fingerprinting the
+    // finding means running the whole audit -- which forks a probe child and
+    // reads /proc/<pid>/maps for every process on the device -- and rejecting an
+    // empty reason after all of that is seconds spent to refuse input we had at
+    // the start. Same rules `accept::add` enforces, checked early.
+    let reason = reason.unwrap_or_default();
+    let trimmed = crate::accept::validate(&id, &reason)?.to_string();
+
     let (checks, _, _) = all_checks();
     let Some(c) = checks.iter().find(|c| c.id == id) else {
         anyhow::bail!(
@@ -1506,9 +1642,8 @@ pub fn run_accept(check: Option<String>, reason: Option<String>, remove: bool, l
             c.verdict_slug()
         );
     }
-    let reason = reason.unwrap_or_default();
-    crate::accept::add(&id, &c.fingerprint(), &reason)?;
-    println!("accepted {id}: {reason}");
+    crate::accept::add(&id, &c.fingerprint(), &trimmed)?;
+    println!("accepted {id}: {trimmed}");
     println!("this does NOT mark it clean — it stays a failure, shown in grey, and comes back at");
     println!("full severity if the evidence changes.");
     Ok(())
@@ -1582,6 +1717,38 @@ mod tests {
         assert_eq!(t.open_failures(), 1, "the finding is back at full severity");
     }
 
+    /// A dead engine has to make the summary non-clean.
+    ///
+    /// Regression for the false green this check exists to close: with the
+    /// engine down `live_targets()` is empty, so every target-dependent check
+    /// correctly reports n/a and the mount checks correctly pass -- nothing IS
+    /// mounted -- and the old summary read "4 passed, 0 failed, open_failures 0".
+    /// The Status health line then rendered a green "Nothing detectable" beside
+    /// the hero's own red "Engine offline". Measured by pointing NM_BIN at a path
+    /// that does not exist.
+    #[test]
+    fn a_dead_engine_is_never_a_clean_summary() {
+        let checks = vec![
+            c("engine-live", Verdict::Fail, "nm could not get a version"),
+            c("zero-mount", Verdict::Pass, "0 module mounts"),
+            c("rom-tmpfs", Verdict::Pass, "no tmpfs"),
+            c("dino-vs-stat", Verdict::NotApplicable, "no rules live"),
+        ];
+        let t = Tally::of(&checks, &[]);
+        assert_eq!(t.open_failures(), 1, "a dead engine must reach open_failures");
+        assert_eq!(t.passed, 2, "the mount checks still passed, and honestly so");
+        assert_eq!(t.na, 1);
+    }
+
+    /// ...and it must not be describable as an oracle, because nothing detects
+    /// you by it. Rendering "(any app)" contradicted the check's own text.
+    #[test]
+    fn the_engine_check_is_not_an_oracle() {
+        assert_eq!(Reach::NotAnOracle.label(), "not a detection");
+        assert_eq!(Reach::NotAnOracle.slug(), "not-an-oracle");
+        assert!(Reach::NotAnOracle.rank() > Reach::Effort.rank());
+    }
+
     /// Reachability orders the report: one syscall from any app outranks
     /// something that needs a purpose-built detector.
     #[test]
@@ -1597,6 +1764,7 @@ mod tests {
     fn every_shipped_check_name_has_its_own_id() {
         let (checks, _, _) = (
             vec![
+                "engine responding",
                 "zero-mount posture",
                 "kernel surfaces",
                 "readdir cookie magic",

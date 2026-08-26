@@ -1955,9 +1955,10 @@
   // the user has explicitly accepted. `failed` itself is untouched and still
   // shown; an acceptance records that someone looked, it does not un-fail
   // anything.
-  function auPaintChip(sum) {
+  function auPaintChip(sum, engine) {
     const chip = $("auchip");
     if (!sum) { chip.textContent = "—"; chip.className = "chip"; return; }
+    if (engine === null) { chip.textContent = "engine down"; chip.className = "chip bad"; return; }
     const open = sum.open_failures || 0;
     const unm = sum.unmeasured || 0;
     const acc = sum.accepted || 0;
@@ -1998,13 +1999,32 @@
   // `not_applicable` deliberately never appears here. A check with nothing to
   // test on this device is not news, and putting it on the front page is how the
   // old amber chip taught people to ignore the thing.
-  function paintHealthLine(sum, ts) {
+  function paintHealthLine(sum, ts, engine) {
     const el = $("healthline"), dot = $("hlDot"), txt = $("hlTxt");
     if (!el) return;
     if (!sum) {
       el.classList.remove("attn");
       dot.className = "hl-dot";
       txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\">— tap to run a check</span>";
+      return;
+    }
+    // A DEAD ENGINE OUTRANKS EVERY OTHER STATE, and this is not a hypothetical.
+    // With the engine down `live_targets()` is empty, so the target-dependent
+    // checks correctly report n/a and the mount checks correctly pass -- there
+    // genuinely are no mounts -- and the summary came back "4 passed, 0 failed".
+    // Every statement true; the conclusion false. This line then rendered a green
+    // "Nothing detectable" directly beside the hero's own red "Engine offline",
+    // on a device where nothing was being injected at all. Measured by pointing
+    // NM_BIN at a path that does not exist.
+    //
+    // `engine === undefined` means the caller did not pass it (an older cached
+    // audit.json, written before the field existed). Absent is not "down": fall
+    // through and let the summary speak, rather than inventing a fault.
+    if (engine === null) {
+      el.classList.add("attn");
+      dot.className = "hl-dot bad";
+      txt.innerHTML = "<b>The engine isn\u2019t running</b> " +
+                      "<span class=\"age\">\u00b7 nothing is being injected</span>";
       return;
     }
     const open = sum.open_failures || 0;
@@ -2058,8 +2078,8 @@
       auGroup("Clean", clean, true) +
       auGroup("Doesn't apply here", na, true) ||
       '<div class="empty">Nothing to report.</div>';
-    auPaintChip(d.summary);
-    paintHealthLine(d.summary, d.ts);
+    auPaintChip(d.summary, d.engine);
+    paintHealthLine(d.summary, d.ts, d.engine);
     $("auCopy").style.display = "";
     const age = $("auage");
     age.style.display = "";
@@ -2413,6 +2433,11 @@
       else if (lvl === "warn" && worst !== "bad") worst = "warn";
     };
 
+    if (AUDIT && AUDIT.engine === null) {
+      parts.push(["bad", "The kernel engine is not answering — nothing is being injected, so " +
+                         "everything below is describing a device with no hiding on it."]);
+      bump("bad");
+    }
     if (!a) { parts.push(["warn", "Detection audit did not run."]); bump("warn"); }
     else if (a.open_failures > 0) {
       parts.push(["bad", a.open_failures + " detection finding" + (a.open_failures > 1 ? "s" : "") +

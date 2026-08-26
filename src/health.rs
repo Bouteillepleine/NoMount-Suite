@@ -454,8 +454,27 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // doctor's "stale legacy blocklist entries" finding prints hidden package
     // names verbatim; NM_REDACT_HIDE_LIST tells it to withhold them for a shared
     // destination (see M-S2 in doctor.rs).
-    let redact = if shared { "NM_REDACT_HIDE_LIST=1 " } else { "" };
-    write("doctor.txt", &read_cmd("sh", &["-c", &format!("{redact}'{self_exe}' doctor 2>&1 || true")]));
+    // No shell. The old form built `NM_REDACT_HIDE_LIST=1 '<self_exe>' doctor`
+    // and handed it to `sh -c`, with `self_exe` dropped into single quotes but
+    // NOT escaped -- while two other call sites in this crate (`app_size` above
+    // and `whiteout::app_can_see`) correctly escape the same way. Running the
+    // binary from a path containing a quote was all it took, and the shell was
+    // only ever there to set one environment variable. `Command::env` does that
+    // without a shell at all, so there is nothing left to quote.
+    let mut doctor = Command::new(&self_exe);
+    doctor.arg("doctor");
+    if shared {
+        doctor.env("NM_REDACT_HIDE_LIST", "1");
+    }
+    let doctor_out = doctor
+        .output()
+        .map(|o| {
+            let mut t = String::from_utf8_lossy(&o.stdout).into_owned();
+            t.push_str(&String::from_utf8_lossy(&o.stderr));
+            t
+        })
+        .unwrap_or_else(|e| format!("could not run {self_exe} doctor: {e}"));
+    write("doctor.txt", &doctor_out);
     write("dmesg-nomount.txt", &read_cmd("sh", &["-c", "dmesg | grep -i nomount 2>/dev/null || true"]));
     write("mountinfo.txt", &fs::read_to_string("/proc/self/mountinfo").unwrap_or_default());
     write("uname.txt", &read_cmd("uname", &["-a"]));
