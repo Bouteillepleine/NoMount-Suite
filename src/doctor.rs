@@ -444,17 +444,42 @@ pub fn run_doctor(json: bool) -> Result<()> {
     // its output moving all render as "off" to a reader, and the WebUI banner keys
     // on THIS check's name so it stays hidden as well -- the precise argument the
     // detail text makes for the other two switches.
-    if crate::manager::ksu_manager_present()
-        && (global_umount.is_none() || flags.is_none() || kernel_umount.is_none())
-    {
+    // Name WHICH of the three signals could not be read, and say nothing about the
+    // ones that could.
+    //
+    // The old text fired if any one of them was missing and then declared the
+    // whole umount configuration unknown, telling the reader to check both
+    // switches by hand. Measured on a CPH2645 running ksud 4.1.0: `kernel_umount`
+    // read cleanly (Value: 0) and all 14 per-app profiles decoded — only the
+    // global default was missing, because that version of ksud no longer writes
+    // the `$`/9999 sentinel record the value lives in. So the finding sent its
+    // reader to re-check two settings the Suite had already read, on the strength
+    // of a third it had not. A diagnostic that overstates what it does not know
+    // is the same defect as one that overstates what it does.
+    let mut unread: Vec<&str> = Vec::new();
+    if kernel_umount.is_none() {
+        unread.push("\"Kernel umount\" (ksud did not answer)");
+    }
+    if flags.is_none() {
+        unread.push("the per-app umount profiles (.allowlist missing, truncated, or in a layout this build does not decode)");
+    }
+    if global_umount.is_none() {
+        unread.push("\"Umount modules by default\" (no sentinel record in .allowlist — newer ksud builds do not write one)");
+    }
+    if crate::manager::ksu_manager_present() && !unread.is_empty() {
         f.push(Finding {
             level: Level::Warn,
             check: "manager umount config unreadable",
-            detail: "could not read the manager's umount configuration \
-                     (/data/adb/ksu/.allowlist missing, truncated, or in a layout this build \
-                     does not decode) — \"Umount modules by default\" and the per-app umount \
-                     profiles are UNKNOWN here, not off. Check them in the manager by hand"
-                .to_string(),
+            detail: format!(
+                "could not read {} of the 3 root-manager umount settings: {}. \
+                 UNKNOWN here, not off — check {} in the manager by hand. Nothing the Suite \
+                 serves is a mount, so {} hides nothing either way; the reason this is reported \
+                 at all is that both switches have broken root on real devices.",
+                unread.len(),
+                unread.join("; "),
+                if unread.len() > 1 { "them" } else { "it" },
+                if unread.len() > 1 { "they" } else { "it" },
+            ),
         });
     }
 
