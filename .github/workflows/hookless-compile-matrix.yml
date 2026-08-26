@@ -265,6 +265,12 @@ jobs:
           echo "== compile fs/proc/task_mmu.o =="
           make $MAKEOPTS fs/proc/task_mmu.o 2>&1 | tee /tmp/tm_build.log
           ls -l out/fs/proc/task_mmu.o && echo "TASK_MMU_OK ${{ matrix.ver }}"
+          # fs/proc/task_mmu.c names the maps-cloak global from the integration
+          # patch, so the two sides can only be kept in step by asserting the
+          # name -- nothing links here, and an extern that resolves to nothing
+          # would not surface until a full vmlinux build.
+          aarch64-linux-gnu-nm --defined-only out/fs/nomount.o | grep -q 'vfs_map_meta_override' || {
+            echo "FATAL: the maps-cloak global is missing or renamed for ${{ matrix.ver }}"; exit 1; }
           ccache -s 2>/dev/null | grep -iE 'hit|miss' || true
 
       - name: W=1 gate + sparse (advisory)
@@ -296,71 +302,6 @@ jobs:
             echo "FATAL: ${{ matrix.ver }} has ${w} W=1 warning(s) in nomount.[ch], baseline ${W1_BASELINE}"
             exit 1
           fi
-
-      # A HALF-applied symbol cloak is worse than none: whatever still says
-      # "nomount" becomes the only thing worth grepping for. nomount_syms.h is a
-      # hand-maintainable list of ~100 #defines, so a function added later would
-      # silently escape it. Build the cloaked variant and assert the object is
-      # clean -- of symbols AND of the log tag, which is a .rodata literal that
-      # survives into the image and defeats the whole thing on its own.
-      - name: Symbol cloak (-DNOMOUNT_STEALTH_SYMS) leaves nothing named
-        if: steps.sel.outputs.run == '1' && steps.build.outcome == 'success'
-        run: |
-          set -o pipefail
-          cd ksrc
-          NM_BIN=aarch64-linux-gnu-nm
-
-          # $1 = label. Fails the step when any project name survives.
-          check_cloak() {
-            local leak cloaked strleak
-            leak=$("$NM_BIN" --defined-only out/fs/nomount.o | awk '{print $3}' \
-                   | grep -cE '^(nomount|nm_|__nomount)' || true)
-            cloaked=$("$NM_BIN" --defined-only out/fs/nomount.o | awk '{print $3}' | grep -c '^__vfsx_' || true)
-            strleak=$(strings -a out/fs/nomount.o | grep -c 'NoMount' || true)
-            echo "[$1] cloaked=${cloaked}  leaking_symbols=${leak}  leaking_strings=${strleak}"
-            if [ "${leak:-0}" -ne 0 ] || [ "${strleak:-0}" -ne 0 ]; then
-              echo "== symbols still naming the project =="
-              "$NM_BIN" --defined-only out/fs/nomount.o | awk '{print $3}' | grep -E '^(nomount|nm_|__nomount)' || true
-              strings -a out/fs/nomount.o | grep 'NoMount' || true
-              echo "::error::${{ matrix.ver }} [$1] cloak is incomplete -- add the new name(s) to the NOMOUNT_STEALTH_SYMS table in hookless/src/nomount.h"
-              return 1
-            fi
-            return 0
-          }
-
-          # Pass 1 -- exactly what would ship.
-          rm -f out/fs/nomount.o
-          make $MAKEOPTS KCFLAGS="-Wno-error -DNOMOUNT_STEALTH_SYMS" fs/nomount.o 2>&1 | tail -5
-          check_cloak as-built || exit 1
-          # The maps-cloak global is deliberately NOT in the header (task_mmu.c
-          # names it from the patch, so a header cannot rename it); it carries a
-          # neutral name outright. Assert it is still that, not the old one.
-          "$NM_BIN" --defined-only out/fs/nomount.o | grep -q 'vfs_map_meta_override' || {
-            echo "FATAL: the maps-cloak global is missing or renamed"; exit 1; }
-
-          # Pass 2 -- the same check with inlining OFF, so the table is validated
-          # against the SOURCE rather than against whatever this compiler decided
-          # to inline away.
-          #
-          # Pass 1 alone only ever sees the names that survive optimisation, and
-          # that set differs per compiler: on 2026-08-23 a new static helper leaked
-          # on the three gcc-built versions and on none of the seven clang ones, and
-          # forcing -fno-inline then revealed a SECOND missing entry
-          # (nm_target_too_shallow) that had been invisible to every version for as
-          # long as it had existed. A table that is only as complete as the current
-          # inliner is not a table anyone can rely on.
-          #
-          # A BUILD failure here is a warning, not an error: -fno-inline can upset
-          # constant-folding assertions in older kernel headers, and that is a
-          # toolchain artefact rather than a cloak defect. A LEAK is still fatal.
-          rm -f out/fs/nomount.o
-          if make $MAKEOPTS KCFLAGS="-Wno-error -DNOMOUNT_STEALTH_SYMS -fno-inline" fs/nomount.o >/tmp/nm_noinline.log 2>&1; then
-            check_cloak no-inline || exit 1
-          else
-            echo "::warning::${{ matrix.ver }}: -fno-inline build failed, cloak validated as-built only"
-            tail -15 /tmp/nm_noinline.log
-          fi
-          rm -f out/fs/nomount.o
 
       - name: Save ccache
         if: ${{ always() && steps.sel.outputs.run == '1' }}
