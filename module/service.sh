@@ -356,6 +356,66 @@ fi
 # module list into a status readout you can trust without opening the WebUI.
 # (MODDIR/ABI/BIN/NM_BIN are set at the top of this script.)
 
+# --- let bindhosts take the mountless path it already has ---
+#
+# bindhosts probes its environment and picks one of eleven operating modes. One
+# of them, mode 0, exists precisely for a metamodule like this one -- its own
+# comment reads "for nomount metamodule, just use mode 0. it performs injection
+# rather than mounts". Mode 0's handler does nothing at all: it ships
+# system/etc/hosts as an ordinary module file and lets the metamodule serve it.
+#
+# That detection never fires here. It needs BOTH of:
+#
+#     [ -L /data/adb/metamodule ]          <- present, points at meta-nomount
+#     [ -d /data/adb/modules/nomount ]     <- absent, we install as meta-nomount
+#
+# so it fails on a hardcoded directory name while the symlink it already checks
+# points straight at the real one. The result is not breakage -- bindhosts falls
+# through to a bind mount and absorb takes that over -- but it is a mount created
+# and then removed on every boot for no reason.
+#
+# mode_override.sh is bindhosts' own documented extension point, so this is not
+# a patch to another module; it is answering the question bindhosts asked with
+# the answer it was looking for.
+#
+# The override is written CONDITIONAL rather than as a bare `mode=0`. If NoMount
+# is later removed or disabled, a hardcoded mode 0 would leave bindhosts serving
+# its hosts file through a metamodule that is no longer there -- adblocking would
+# stop silently, which is exactly the failure class the rest of this work exists
+# to remove. Evaluating the condition at bindhosts' runtime means the override
+# no-ops the moment we are gone and it picks its own mode again.
+#
+# Takes effect from the NEXT boot: bindhosts sorts before meta-nomount, so its
+# post-fs-data has already run by the time this does.
+_bh_dir=/data/adb/bindhosts
+if [ -d "$_bh_dir" ] && [ -d /data/adb/modules/bindhosts ] &&
+   [ ! -f /data/adb/modules/bindhosts/remove ]; then
+    _bh_ovr="$_bh_dir/mode_override.sh"
+    if ! grep -q 'NoMount Suite' "$_bh_ovr" 2>/dev/null; then
+        cat > "$_bh_ovr" <<'BHEOF'
+# Written by the NoMount Suite. Safe to delete.
+#
+# bindhosts mode 0 = ship system/etc/hosts as a normal module file and let the
+# metamodule serve it, with no mount of its own. bindhosts already prefers this
+# when it detects a nomount metamodule; its check looks for
+# /data/adb/modules/nomount and this Suite installs as meta-nomount, so it does
+# not match. Resolve the metamodule symlink instead.
+#
+# Deliberately conditional: with no live metamodule this leaves `mode` alone and
+# bindhosts chooses for itself, so removing NoMount cannot silently stop it.
+_nm=$(readlink -f /data/adb/metamodule 2>/dev/null)
+if [ -n "$_nm" ] && [ -d "$_nm" ] && [ ! -f "$_nm/disable" ] &&
+   [ ! -f "$_nm/remove" ] && [ ! -f /data/adb/nomount/disabled ]; then
+    mode=0
+fi
+unset _nm
+BHEOF
+        chmod 0644 "$_bh_ovr" 2>/dev/null
+        nmlog "bindhosts: wrote mode_override.sh — it will use its mountless mode 0 from the next boot"
+    fi
+fi
+unset _bh_dir _bh_ovr
+
 # --- pick up content modules wrote after the mount pass ---
 # The mount pass runs at post-fs-data. Measured across 576 module payloads, 56%
 # build their payload tree at RUNTIME rather than shipping it in the zip -- and
