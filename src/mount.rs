@@ -29,6 +29,12 @@ fn is_char_dev(_ft: &fs::FileType) -> bool { false }
 /// The third whiteout dialect a module can speak, alongside `.replace` and the
 /// 0:0 char device. `trusted.*` is root-only, which is why it needs a raw
 /// getxattr rather than anything in std.
+///
+/// `lgetxattr`, not `getxattr`: `p` is a path inside a module tree, and the plain
+/// call follows symlinks -- so a module symlinking to a directory that carries
+/// the attribute would have its link read as an opaque whiteout marker, expanding
+/// into a whiteout per stock entry of a directory the module never named. A
+/// symlink is never itself an opaque dir, so ENODATA is the right answer.
 #[cfg(unix)]
 fn is_opaque_dir(p: &Path) -> bool {
     use std::ffi::CString;
@@ -41,7 +47,7 @@ fn is_opaque_dir(p: &Path) -> bool {
     };
     let mut buf = [0u8; 4];
     let n = unsafe {
-        libc::getxattr(path.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len())
+        libc::lgetxattr(path.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len())
     };
     n > 0 && buf[0] == b'y'
 }

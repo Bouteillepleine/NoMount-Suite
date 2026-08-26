@@ -94,38 +94,51 @@ fn is_mounted(target: &Path) -> bool {
 /// this an app reading the my_* file hits an avc denial. Fails hard: a mislabeled
 /// override is worse than none (broken read + a detection tell).
 /// Read a path's SELinux label, if it has one.
+///
+/// `lgetxattr`, never `getxattr`. Both `source` and `target` here are
+/// module-supplied: `source` is `<module>/my_product/...` straight off the module
+/// tree, and `target` is the path that tree implies. `getxattr` FOLLOWS symlinks,
+/// so a module shipping a symlink would have this read -- and, worse, have
+/// `restore_selinux` and `mirror_selinux` WRITE -- the label of whatever the link
+/// points at. absorb.rs::label_apk_readable already refuses that for the same
+/// reason. A symlink's own label is what the bind machinery is about; if the
+/// answer is "there is no label on the link itself", that is the honest answer.
 fn read_selinux(p: &Path) -> Option<Vec<u8>> {
     let c = cstr(p).ok()?;
     let mut buf = [0u8; 256];
     let n = unsafe {
-        libc::getxattr(c.as_ptr(), SELINUX_XATTR.as_ptr() as *const libc::c_char,
-                       buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+        libc::lgetxattr(c.as_ptr(), SELINUX_XATTR.as_ptr() as *const libc::c_char,
+                        buf.as_mut_ptr() as *mut libc::c_void, buf.len())
     };
     if n <= 0 { None } else { Some(buf[..n as usize].to_vec()) }
 }
 
-/// Put a previously captured label back on `p`.
+/// Put a previously captured label back on `p`. `lsetxattr`: see [`read_selinux`].
 fn restore_selinux(p: &Path, label: &[u8]) {
     if let Ok(c) = cstr(p) {
         unsafe {
-            libc::setxattr(c.as_ptr(), SELINUX_XATTR.as_ptr() as *const libc::c_char,
-                           label.as_ptr() as *const libc::c_void, label.len(), 0);
+            libc::lsetxattr(c.as_ptr(), SELINUX_XATTR.as_ptr() as *const libc::c_char,
+                            label.as_ptr() as *const libc::c_void, label.len(), 0);
         }
     }
 }
 
+/// Copy `target`'s label onto `source`. Both ends use the `l`-prefixed calls --
+/// the write side is the one that turns a module symlink into an arbitrary-file
+/// relabel, and the read side would otherwise report a label the bind will not
+/// actually serve. See [`read_selinux`].
 fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     let (sc, tc) = (cstr(source)?, cstr(target)?);
     let name = SELINUX_XATTR.as_ptr() as *const libc::c_char;
     let mut buf = [0u8; 256];
     let n = unsafe {
-        libc::getxattr(tc.as_ptr(), name, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+        libc::lgetxattr(tc.as_ptr(), name, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
     };
     if n <= 0 {
         bail!("read selinux label of {}", target.display());
     }
     let r = unsafe {
-        libc::setxattr(sc.as_ptr(), name, buf.as_ptr() as *const libc::c_void, n as usize, 0)
+        libc::lsetxattr(sc.as_ptr(), name, buf.as_ptr() as *const libc::c_void, n as usize, 0)
     };
     if r != 0 {
         bail!("set selinux label on {}: {}", source.display(), std::io::Error::last_os_error());
@@ -151,6 +164,19 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     // existing OnePlus files, so require the target to exist.
     if !target.exists() {
         bail!("bind target missing (new-file unsupported): {t}");
+    }
+    // A symlink source cannot be bound correctly, so refuse it rather than bind
+    // something else. `mount(MS_BIND)` resolves the path, so it would serve the
+    // link's TARGET -- while the label mirroring above lands on the link itself
+    // (lsetxattr, deliberately). The file actually served would then carry
+    // `adb_data_file` under a `my_*` path: an avc denial on every read and a
+    // detection tell, with nothing in the log to say why. The same refusal keeps a
+    // module from naming a source outside its own tree by way of a link.
+    if fs::symlink_metadata(source).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        bail!(
+            "bind source {s} is a symlink; a bind would serve its target instead, with the \
+             wrong SELinux label. Ship the file itself"
+        );
     }
 
     let _lock = Lock::acquire()?;
