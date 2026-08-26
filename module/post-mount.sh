@@ -43,7 +43,7 @@ else
     # No toybox `timeout`. Poll a backgrounded child rather than running it
     # unbounded: every caller here has a 124 recovery path, and dropping the
     # bound turns a hung engine call into a hung boot -- absorb, the whiteout
-    # re-apply, `uid apply`, uidwatch and selfcheck all run after these.
+    # re-apply, `uid apply`, uidwatch and `check` all run after these.
     # Same contract as timeout(1): the command's status, or 124 if killed.
     nmto() {
         _nmto_s=$1

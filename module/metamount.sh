@@ -71,7 +71,7 @@ else
     # No toybox `timeout`. Poll a backgrounded child rather than running it
     # unbounded: every caller here has a 124 recovery path, and dropping the
     # bound turns a hung engine call into a hung boot -- absorb, the whiteout
-    # re-apply, `uid apply`, uidwatch and selfcheck all run after these.
+    # re-apply, `uid apply`, uidwatch and `check` all run after these.
     # Same contract as timeout(1): the command's status, or 124 if killed.
     nmto() {
         _nmto_s=$1
@@ -397,7 +397,7 @@ if command -v ksud >/dev/null 2>&1; then
     # The Suite's own card doubles as the at-a-glance status readout, so put the live
     # numbers there rather than restating the tagline the module.prop already carries.
     # EXCLUDE the (virtual dir) rows. `grep -c .` counts every line of the dump,
-    # which on this device is 260 while `selfcheck`, `audit` and health.txt all
+    # which on this device is 260 while `nomount check` and health.txt both
     # say 257 -- the difference being 3 directories the engine materialises, which
     # are not rules. The card is the surface most users read, so having it
     # disagree with every other number the Suite prints made a real discrepancy

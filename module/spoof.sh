@@ -459,7 +459,7 @@ do_shell_tmp() {
     return 0
 }
 
-# Report-only, for the doctor/UI: "clean" or the fields that still differ. The
+# Report-only, for `check`/the UI: "clean" or the fields that still differ. The
 # inode is informational — lowering a real inode is the separate hijacker module,
 # not something a chmod can fix.
 shell_tmp_status() {

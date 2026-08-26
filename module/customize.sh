@@ -161,7 +161,7 @@ ui_print "  config: $CONF"
 # dexopt on app install, not at boot, so a broken hook surfaces hours later as
 # "modules stopped applying to new apps" and is near-impossible to attribute.
 # Skipped by default. The cost is one file keeping the bind's dev/ino/mtime
-# tell, which `nomount doctor` reports so it is not invisible. Delete a line to
+# tell, which `nomount check --plan` reports so it is not invisible. Delete a line to
 # absorb that module once you have verified your fork.
 # Migrate the pre-v1.2.1 extensionless name. COPY, never move: the outgoing
 # binary is still live until the next reboot and reads the OLD name, so renaming

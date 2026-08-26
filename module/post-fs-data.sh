@@ -33,7 +33,7 @@ else
     # No toybox `timeout`. Poll a backgrounded child rather than running it
     # unbounded: every caller here has a 124 recovery path, and dropping the
     # bound turns a hung engine call into a hung boot -- absorb, the whiteout
-    # re-apply, `uid apply`, uidwatch and selfcheck all run after these.
+    # re-apply, `uid apply`, uidwatch and `check` all run after these.
     # Same contract as timeout(1): the command's status, or 124 if killed.
     nmto() {
         _nmto_s=$1
@@ -90,7 +90,7 @@ chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 # Here there is no live system to lose. Module post-fs-data.sh scripts run in
 # module-id order, so this catches every module sorted before `meta-nomount` --
 # which is the common case, and NOT a claim to catch all of them. A module sorted
-# after us still binds after this runs and stays deferred; `nomount doctor` names
+# after us still binds after this runs and stays deferred; `nomount check` names
 # whatever is left either way.
 #
 # Gated on the my_hookless TRIAL marker, because taking these over means serving

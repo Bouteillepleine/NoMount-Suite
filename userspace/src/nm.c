@@ -337,7 +337,7 @@ void c_main(long *sp) {
                     if (v && r) {
                         int is_whiteout    = (flags && (*flags & 4));
                         int is_virtual_dir = (flags && (*flags & 2)); 
-                        /* Reported so `nomount doctor` can tell an added ROM APK
+                        /* Reported so `nomount check` can tell an added ROM APK
                          * that opted out of hiding from one that did not -- the
                          * kernel may have stripped the bit (a shadowing rule), so
                          * what was asked for is not always what is live. */

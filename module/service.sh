@@ -13,7 +13,7 @@ ABI=$(getprop ro.product.cpu.abi)
 # was missing. An empty ABI builds "$MODDIR/bin//nomount", which can never be
 # executable -- and EVERY block below is gated on [ -x "$BIN" ] with no else arm,
 # so absorb, the whiteout re-apply, the authoritative `uid apply`, the package
-# watcher, the selfcheck canary and the card refresh all silently did nothing.
+# watcher, the check canary and the card refresh all silently did nothing.
 # The card then kept whatever metamount.sh wrote at post-fs-data, so the boot
 # looked complete.
 [ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
@@ -29,7 +29,7 @@ else
     # No toybox `timeout`. Poll a backgrounded child rather than running it
     # unbounded: every caller here has a 124 recovery path, and dropping the
     # bound turns a hung engine call into a hung boot -- absorb, the whiteout
-    # re-apply, `uid apply`, uidwatch and selfcheck all run after these.
+    # re-apply, `uid apply`, uidwatch and `check` all run after these.
     # Same contract as timeout(1): the command's status, or 124 if killed.
     nmto() {
         _nmto_s=$1
@@ -67,7 +67,7 @@ nmlog() {
 
 # --- health.txt freshness -----------------------------------------------------
 # health.txt carries a `ts=` field (written by src/health.rs) that NOTHING read.
-# So a selfcheck that failed to write -- or an engine that hung and never
+# So a check run that failed to write -- or an engine that hung and never
 # returned -- silently left LAST BOOT's file in place, and every consumer below
 # sed'd yesterday's verdict out of it as if it were current. Worse, the empty
 # case mapped to _consbad=0 and the card printed "healthy" off a file that did
@@ -497,7 +497,7 @@ fi
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     # Bounded. This is FOREGROUND and everything below it -- the whiteout
     # re-apply, the authoritative `uid apply`, the package watcher, the
-    # selfcheck canary -- only runs once it returns. absorb now takes the
+    # check canary -- only runs once it returns. absorb now takes the
     # process-wide pass lock, so a concurrent WebUI reload can make it wait;
     # without a timeout here that wait would silently cost per-UID hiding for
     # the rest of the boot. 90s is well past a worst-case absorb (measured in
@@ -631,31 +631,47 @@ if [ ! -x "$BIN" ]; then
     nmlog "⛔ engine binary is missing or not executable ($BIN) — absorb, whiteouts, per-app hiding and the health canary were ALL skipped this boot"
 fi
 
-# --- runtime health canary (writes health.txt; complements plan-time doctor) ---
-# Runs the per-UID self-consistency probe that the d_drop regression would have
-# failed on the first boot: does a normal app see the same injected files as root?
-# The probe can transiently disagree right after boot, before every app UID has
-# launched and materialised its per-UID injection, so retry across a settle window
-# and keep the *settled* verdict — a boot-time blip must not stamp a scary
-# "inconsistency" on the card. Only a verdict that PERSISTS through the whole
-# window is a real d_drop-style regression. Non-fatal; surfaced on the card / WebUI.
+# --- one check pass: plan + device, cached for the WebUI and the card ----------
+# `check` replaced `selfcheck` and `audit` (and `doctor`, `posture`, `plan`): one
+# run, one report, both artifacts. It writes audit.json for the WebUI AND the
+# health.txt fingerprint the card reads, so the two calls this block used to make
+# would now measure the same device twice and cache the second answer over the
+# first.
+#
+# The device half runs the per-UID self-consistency probe that the d_drop
+# regression would have failed on the first boot: does a normal app see the same
+# injected files as root? That probe can transiently disagree right after boot,
+# before every app UID has launched and materialised its per-UID injection, so
+# retry across a settle window and keep the *settled* answer — a boot-time blip
+# must not stamp a scary "inconsistency" on the card. Only a disagreement that
+# PERSISTS through the whole window is a real d_drop-style regression.
+#
+# `consistency` doubles as the settle signal for the detection oracles too, which
+# is why the audit no longer needs a pass of its own AFTER the window: the run
+# that reports a settled hide pass measured the oracles at that same settled
+# moment. Non-fatal in every arm; surfaced on the card / WebUI.
+#
+# Cost note: one try here is heavier than the old `selfcheck` alone — the canary's
+# su spawns plus a /proc walk for the oracles. The common case is now ONE run
+# instead of two, and the retry path only engages when the probe actually
+# disagrees. Bounded per call, like every other engine call on this path: a hung
+# engine must not hold the rest of the boot pass (card refresh included) hostage,
+# nor leave a stale health.txt to be read as if it were this boot's.
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     _try=0
+    _arc=0
     while [ "$_try" -lt 6 ]; do
-        # Bounded, like every other engine call on this path. selfcheck runs the
-        # per-UID probe, which takes the engine-wide pass lock and can wait behind
-        # a concurrent WebUI reload; unbounded, a hung engine held the whole rest
-        # of the boot pass (card refresh included) hostage AND left the stale
-        # health.txt below to be read as if it were this boot's.
-        timeout 20 "$BIN" selfcheck --write >/dev/null 2>&1
+        nmto 60 "$BIN" check --write >/dev/null 2>&1
+        _arc=$?
+        # A run that timed out will time out again. Re-asking costs another 60s of
+        # boot for the same non-answer, and the settle window exists to smooth a
+        # transient DISAGREEMENT, not to re-ask a question that produced nothing.
+        [ "$_arc" -eq 124 ] && break
         _cons=$(_health_get consistency)
         if ! _health_fresh; then
             # No record from THIS boot: the write failed, or the probe never
-            # finished. The settle window exists to smooth a transient *verdict*,
-            # not to re-ask a question that produced no answer — so stop rather
-            # than spend 6 x 15s of boot on it, and let the "unknown" state below
-            # carry the result. (It is the state `doctor` already models
-            # correctly; the canary just never used it.)
+            # finished. Stop rather than spend 6 x 15s of boot on it, and let the
+            # "unknown" state below carry the result.
             break
         fi
         # "unchecked" and its qualified forms (unchecked:probe-uid-hidden, when
@@ -664,53 +680,36 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
             ok|unchecked*|"") break ;;
         esac
         _try=$((_try + 1))
+        [ "$_try" -lt 6 ] || break
         sleep 15
     done
     if _health_fresh; then
         _hv=$(_health_get verdict)
-        nmlog "selfcheck verdict=${_hv:-unknown} consistency=${_cons:-unknown} (settle tries=$_try)"
+        nmlog "check verdict=${_hv:-unknown} consistency=${_cons:-unknown} (settle tries=$_try)"
     else
-        nmlog "⚠ selfcheck wrote no health record this boot — health is UNKNOWN, not healthy"
+        nmlog "⚠ check wrote no health record this boot — health is UNKNOWN, not healthy"
     fi
-fi
-
-# --- detection audit, cached for the WebUI --------------------------------------
-# `selfcheck` has run at boot and persisted to health.txt since the beginning; the
-# audit never did. So the Detection audit card opened with a dash and the first
-# time a user saw a finding was also the first time they had heard of the tool --
-# and only if they went looking for a button on the Diagnostics tab.
-#
-# Runs AFTER the selfcheck settle window on purpose: several checks read live
-# per-UID state, and asking before the hide pass has settled is the same
-# too-early measurement that produced the false "per-UID" warning the canary
-# retries around.
-#
-# Bounded and best-effort in both directions: a failed run leaves no cache, and
-# the WebUI treats a missing or stale file as "no cached verdict" -- which is
-# exactly what it is. `audit --json --write` writes the file itself (0600, in the
-# state dir) so nothing here has to know the format. Exit is non-zero whenever a
-# finding is open, which is the normal case for some setups and must not read as
-# an error here.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
-    nmto 60 "$BIN" audit --json --write >/dev/null 2>&1
-    _arc=$?
+    # The cache ladder, unchanged in meaning. `check --write` writes audit.json
+    # itself (0600, in the state dir) so nothing here has to know the format, and
+    # exits 1 whenever a finding is open — the normal case for some setups, which
+    # must not read as an error here.
     if [ "$_arc" -eq 0 ]; then
-        nmlog "detection audit cached — nothing open"
+        nmlog "check cached — nothing open"
     elif [ "$_arc" -eq 124 ]; then
-        # A TIMEOUT is not a verdict. `audit --json --write` exits 1 when a
-        # finding is open and 124 when timeout killed it, and the old test could
-        # not tell them apart: it saw a non-empty audit.json -- LAST boot's --
-        # and logged it as this boot's result. The WebUI then painted a cached
-        # verdict, with an age, for a run that never finished.
+        # A TIMEOUT is not a verdict. `check --write` exits 1 when a finding is
+        # open and 124 when timeout killed it, and the old test could not tell
+        # them apart: it saw a non-empty audit.json -- LAST boot's -- and logged
+        # it as this boot's result. The WebUI then painted a cached verdict, with
+        # an age, for a run that never finished.
         rm -f "$NMDIR/audit.json"
-        nmlog "⚠ detection audit TIMED OUT after 60s — dropped the stale cache; the WebUI will show no verdict"
+        nmlog "⚠ check TIMED OUT after 60s — dropped the stale cache; the WebUI will show no verdict"
     elif [ -s "$NMDIR/audit.json" ]; then
         # Exit 1 with a cache present: it ran and found something. Normal and
         # actionable, unlike the two above.
-        nmlog "detection audit cached — one or more findings are open (see the Detection audit card)"
+        nmlog "check cached — one or more findings are open (see the Detection audit card)"
     else
         rm -f "$NMDIR/audit.json"
-        nmlog "⚠ detection audit did not complete — the WebUI will show no cached verdict"
+        nmlog "⚠ check did not complete — the WebUI will show no cached verdict"
     fi
     unset _arc
 fi
@@ -721,7 +720,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     _NMLIST=$(nmto 15 "$NM_BIN" list 2>/dev/null)
     _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
     # EXCLUDE the (virtual dir) rows. `grep -c .` counts every line of the dump,
-    # which on this device is 260 while `selfcheck`, `audit` and health.txt all
+    # which on this device is 260 while `nomount check` and health.txt both
     # say 257 -- the difference being 3 directories the engine materialises, which
     # are not rules. The card is the surface most users read, so having it
     # disagree with every other number the Suite prints made a real discrepancy
@@ -735,21 +734,29 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # (It also used `|| echo 0` after a grep that already prints 0 and exits 1 when
     # it does, appending a second line and making every later -gt test a bad number.)
     _mnt=$(awk '$4 ~ "/adb/modules/" {n++} END{print n+0}' /proc/self/mountinfo 2>/dev/null); _mnt=${_mnt:-0}
-    # Distinguish "doctor found nothing" from "doctor never answered". Parsing an
-    # EMPTY capture through awk yields 0 errors / 0 warnings, so a timeout or a
+    # Distinguish "the plan is clean" from "the plan was never answered".
+    # Parsing an EMPTY capture yields 0 errors / 0 warnings, so a timeout or a
     # crash used to render the card as "healthy" -- the one word it must not say
     # when it does not know. _docok=0 means unknown, and the card says so.
-    _doc=$(timeout 30 "$BIN" doctor 2>/dev/null | sed -n 's/^summary: \([0-9]*\) errors, \([0-9]*\) warnings.*$/\1 \2/p')
-    if [ -n "$_doc" ]; then
-        _docok=1
-        _err=$(echo "$_doc" | awk '{print $1+0}')
-        _wrn=$(echo "$_doc" | awk '{print $2+0}')
-    else
-        _docok=0
-        _err=0
-        _wrn=0
-    fi
-    # runtime consistency canary trumps plan-time doctor for card health: a
+    #
+    # `check --plan --json`, not the prose: the old sed matched a summary line
+    # ("summary: N errors, M warnings") that no longer exists, so it captured
+    # nothing on every boot and the card silently sat in the unknown arm. The
+    # plan half reads no running process, which is what makes re-asking it here
+    # cheap enough to do after the device pass above.
+    _sum_get() {
+        printf '%s' "$2" | sed -n 's/.*"summary":{\([^}]*\)}.*/\1/p' \
+            | tr ',' '\n' | sed -n "s/^\"$1\"://p" | head -1
+    }
+    _doc=$(nmto 30 "$BIN" check --plan --json 2>/dev/null)
+    _err=$(_sum_get fail "$_doc")
+    _wrn=$(_sum_get warn "$_doc")
+    case "$_err$_wrn" in
+        ''|*[!0-9]*) _docok=0; _err=0; _wrn=0 ;;
+        *) _docok=1 ;;
+    esac
+    unset _doc
+    # runtime consistency canary trumps the plan half for card health: a
     # per-UID inconsistency is a live regression, not a plan hazard.
     # Same not-a-verdict rule as the canary loop, but read through _health_get so
     # a record left over from LAST boot cannot supply the answer. _hfresh keeps
@@ -771,9 +778,9 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
         _health="healthy"
     elif [ "${_docok:-0}" = 1 ]; then
-        _health="health unknown — no selfcheck record this boot"
+        _health="health unknown — no health record this boot"
     else
-        _health="health unknown — doctor did not finish"
+        _health="health unknown — the plan check did not finish"
     fi
     # Distinguish a LEAK from a mount absorb leaves on purpose (a Zygisk/Xposed
     # hook bind). Counting them the same made the card read
