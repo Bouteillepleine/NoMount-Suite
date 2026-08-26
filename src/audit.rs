@@ -1410,9 +1410,20 @@ impl Tally {
 
 /// One check as JSON. Shared by `audit --json` and `posture --json` so the two
 /// cannot describe the same measurement differently.
-pub fn check_json(c: &Check, acc: &[crate::accept::Acceptance]) -> crate::json::J {
+pub fn check_json(
+    c: &Check,
+    acc: &[crate::accept::Acceptance],
+    hist: Option<&crate::history::History>,
+) -> crate::json::J {
     use crate::json::J;
     let fp = c.fingerprint();
+    // When this finding was first seen with THIS evidence. Absent for anything
+    // that is not currently open -- "first seen" is meaningless for a pass.
+    let first_seen = hist
+        .and_then(|h| h.seen.get(c.id))
+        .filter(|s| s.fingerprint == fp)
+        .map(|s| s.first_seen)
+        .unwrap_or(0);
     let covering = crate::accept::covering(acc, c.id, &fp);
     let lapsed = if covering.is_none() { crate::accept::stale(acc, c.id, &fp) } else { None };
     J::Obj(vec![
@@ -1445,6 +1456,7 @@ pub fn check_json(c: &Check, acc: &[crate::accept::Acceptance]) -> crate::json::
         // this when it said something else".
         ("acceptance_lapsed", J::Bool(lapsed.is_some())),
         ("acceptance_lapsed_reason", J::os(lapsed.map(|a| a.reason.clone()))),
+        ("first_seen", J::Num(first_seen)),
     ])
 }
 
@@ -1459,6 +1471,25 @@ fn tally_json(t: &Tally) -> crate::json::J {
         ("accepted", J::Num(t.accepted as i64)),
         ("open_failures", J::Num(t.open_failures() as i64)),
     ])
+}
+
+/// "3 days ago" / "2 hours ago". Coarse on purpose: the exact second a finding
+/// appeared is not a fact anyone acts on, and printing it invites the reader to
+/// treat the number as more precise than the boot it was measured in.
+fn ago(secs: i64) -> String {
+    let s = secs.max(0);
+    if s < 120 {
+        return "just now".into();
+    }
+    let m = s / 60;
+    if m < 120 {
+        return format!("{m} minutes ago");
+    }
+    let h = m / 60;
+    if h < 48 {
+        return format!("{h} hours ago");
+    }
+    format!("{} days ago", h / 24)
 }
 
 fn now_secs() -> i64 {
@@ -1482,7 +1513,7 @@ pub fn run_posture(json: bool) -> Result<()> {
             ("kind", J::s("posture")),
             ("ts", J::Num(now_secs())),
             ("summary", tally_json(&t)),
-            ("checks", J::Arr(checks.iter().map(|c| check_json(c, &acc)).collect())),
+            ("checks", J::Arr(checks.iter().map(|c| check_json(c, &acc, None)).collect())),
         ]);
         println!("{}", doc.render());
     } else {
@@ -1538,11 +1569,34 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
 
     let t = Tally::of(&checks, &acc);
 
+    // What is OPEN right now: failing, and not accepted. This is the set the
+    // history is keyed on -- an accepted finding is the user saying "stop telling
+    // me", so letting it churn the signature would undo that.
+    let open_now: Vec<(String, String)> = checks
+        .iter()
+        .filter(|c| matches!(c.verdict, Verdict::Fail | Verdict::Reboot))
+        .filter(|c| crate::accept::covering(&acc, c.id, &c.fingerprint()).is_none())
+        .map(|c| (c.id.to_string(), c.fingerprint()))
+        .collect();
+    let now = now_secs();
+    // Read the PREVIOUS history for reporting, then fold this run into it. The
+    // report has to describe the run that just happened relative to the one
+    // before it, so the two have to be kept apart.
+    let prev = crate::history::load();
+    let prev_sig = prev.signature.clone();
+    let hist = crate::history::update(prev, &open_now, now, &crate::history::boot_id());
+    let changed = crate::history::signature(&open_now) != prev_sig && !prev_sig.is_empty();
+    // Only the run that persists the verdict persists the memory of it, or a
+    // read-only `nomount audit` would silently advance the boot streak.
+    if write {
+        crate::history::save(&hist);
+    }
+
     if json {
         use crate::json::J;
         let doc = J::Obj(vec![
             ("kind", J::s("audit")),
-            ("ts", J::Num(now_secs())),
+            ("ts", J::Num(now)),
             ("suite", J::s(env!("CARGO_PKG_VERSION"))),
             // Hoisted out of the checks array so a consumer does not have to find
             // the row to answer "is this describing a live system at all".
@@ -1556,7 +1610,20 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
             ("rules", J::Num(rules as i64)),
             ("directories", J::Num(dirs as i64)),
             ("summary", tally_json(&t)),
-            ("checks", J::Arr(checks.iter().map(|c| check_json(c, &acc)).collect())),
+            (
+                "history",
+                J::Obj(vec![
+                    // When the set of open findings last MOVED. Lets the reader be
+                    // told "unchanged since Tuesday" instead of being handed the
+                    // same list to re-judge every time.
+                    ("changed_at", J::Num(hist.changed_at)),
+                    ("changed_now", J::Bool(changed)),
+                    ("clean_boots", J::Num(hist.clean_boots as i64)),
+                    ("total_boots", J::Num(hist.total_boots as i64)),
+                    ("first_run", J::Bool(prev_sig.is_empty())),
+                ]),
+            ),
+            ("checks", J::Arr(checks.iter().map(|c| check_json(c, &acc, Some(&hist))).collect())),
         ]);
         let text = doc.render();
         println!("{text}");
@@ -1591,6 +1658,15 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
             if let Some(o) = c.owner.as_deref() {
                 println!("       from: {o}");
             }
+            if matches!(c.verdict, Verdict::Fail | Verdict::Reboot) {
+                if let Some(seen) = hist.seen.get(c.id).filter(|s| s.fingerprint == fp) {
+                    if seen.first_seen >= now.saturating_sub(60) {
+                        println!("       NEW since your last check");
+                    } else {
+                        println!("       first seen: {}", ago(now - seen.first_seen));
+                    }
+                }
+            }
             if let Some(o) = c.oracle {
                 println!("       oracle: {o}");
             }
@@ -1608,6 +1684,25 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
             "\nsummary: {} passed, {} failed, {} pending reboot, {} not applicable, {} unmeasured",
             t.passed, t.failed, t.reboot, t.na, t.unmeasured
         );
+        // "Unchanged since X" is worth saying about a FINDING. Said about a clean
+        // device it is noise -- there is nothing to be unchanged about, and the
+        // streak below already makes the point better. So: report change only
+        // when something is open, or when something just moved.
+        if !prev_sig.is_empty() && (changed || t.open_failures() > 0) {
+            if changed {
+                println!("         this is DIFFERENT from the last check");
+            } else if hist.changed_at > 0 {
+                println!("         unchanged since {}", ago(now - hist.changed_at));
+            }
+        }
+        // Only once there is more than one boot behind it: "clean on the last 1
+        // of 1" reads as a hedge, not as confidence.
+        if hist.total_boots > 1 && t.open_failures() == 0 {
+            println!(
+                "         clean on the last {} of {} boots checked",
+                hist.clean_boots, hist.total_boots
+            );
+        }
         if t.accepted > 0 {
             println!("         {} of the failures are accepted (still failing, still shown)", t.accepted);
         }

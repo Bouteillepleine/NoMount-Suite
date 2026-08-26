@@ -7,6 +7,7 @@ mod cli;
 mod dirshape;
 mod doctor;
 mod health;
+mod history;
 mod json;
 mod manager;
 mod mount;

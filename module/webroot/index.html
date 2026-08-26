@@ -278,6 +278,11 @@
      "and you looked at it" is added. Muting the whole row is the visual half of
      that promise -- it recedes without disappearing. */
   .frow.accepted { opacity: .62; }
+  /* A finding that appeared since the last check. The one thing on the row that
+     tells you whether to act NOW: something that turned up after you installed a
+     module is a different problem from something that has been there since the
+     day you set this up. */
+  .tag.newly { background: rgba(124,156,255,0.16); color: var(--acc); }
   .fgroup {
     font-size: 11px; font-weight: 680; letter-spacing: .5px; text-transform: uppercase;
     color: var(--muted); margin: 16px 0 2px; display: flex; align-items: center; gap: 8px;
@@ -1967,6 +1972,13 @@
     // Reach is shown on every row, not just failures: on a pass it is what tells
     // the reader how much the pass is worth.
     bits.push('<span class="tag off">' + esc(c.reach_label || "") + "</span>");
+    // How long this has been true. A finding with no history behind it (first
+    // ever run, or a fresh install) simply says nothing rather than guessing.
+    if ((c.verdict === "fail" || c.verdict === "reboot") && c.first_seen) {
+      const age = Math.floor(Date.now() / 1000) - c.first_seen;
+      if (age < 120) bits.push('<span class="tag newly">new</span>');
+      else bits.push('<span class="tag off">seen ' + esc(auAge(c.first_seen)) + "</span>");
+    }
     const live = c.verdict === "fail" || c.verdict === "reboot";
     if (live) {
       bits.push('<span class="sp"></span>');
@@ -2059,7 +2071,7 @@
   // `not_applicable` deliberately never appears here. A check with nothing to
   // test on this device is not news, and putting it on the front page is how the
   // old amber chip taught people to ignore the thing.
-  function paintHealthLine(sum, ts, engine) {
+  function paintHealthLine(sum, ts, engine, hist) {
     const el = $("healthline"), dot = $("hlDot"), txt = $("hlTxt");
     if (!el) return;
     if (!sum) {
@@ -2112,8 +2124,23 @@
     } else {
       el.classList.remove("attn", "down");
       dot.className = "hl-dot ok";
-      txt.innerHTML = "<b>Nothing detectable</b>" + age;
+      // A streak says more about whether a setup is stable than any single run.
+      // Only shown once there is more than one boot behind it, so it never reads
+      // "clean on the last 1 of 1", which sounds like a hedge.
+      const streak = hist && hist.total_boots > 1
+        ? ' <span class="age">· clean on the last ' + hist.clean_boots +
+          " of " + hist.total_boots + " boots</span>"
+        : age;
+      txt.innerHTML = "<b>Nothing detectable</b>" + streak;
     }
+  }
+
+  // Rows the quiet card is holding back until asked.
+  let AUDIT_QUIET_ROWS = "";
+  function auShowAll() {
+    if (!AUDIT_QUIET_ROWS) return;
+    $("auditlist").innerHTML += AUDIT_QUIET_ROWS;
+    AUDIT_QUIET_ROWS = "";
   }
 
   function auRender(d) {
@@ -2134,22 +2161,53 @@
       else if (c.verdict === "n/a") na.push(auRow(c, i));
       else clean.push(auRow(c, i));
     });
-    list.innerHTML =
-      auGroup("Needs your attention", open, false) +
-      auGroup("Not verified", unmeasured, false) +
-      auGroup("Accepted by you", accepted, true) +
-      auGroup("Clean", clean, true) +
-      auGroup("Doesn't apply here", na, true) ||
-      '<div class="empty">Nothing to report.</div>';
+    // QUIET WHEN THERE IS NOTHING TO SAY.
+    //
+    // A clean device rendered twelve rows of "clean" and "doesn't apply" — a
+    // screenful of reassurance nobody asked for, which buries the one line that
+    // matters on the day something IS wrong. The Status line already carries the
+    // verdict; this card only needs to speak when it has something to add.
+    //
+    // "Nothing open" is the test, not "everything passed": an accepted finding
+    // or an unverified check is still worth showing.
+    const quiet = !open.length && !unmeasured.length && !accepted.length;
+    if (quiet) {
+      const n = (d.summary && d.summary.passed) || 0;
+      const naN = (d.summary && d.summary.not_applicable) || 0;
+      list.innerHTML =
+        '<div class="frow"><div class="fname">Nothing to report</div>' +
+        '<div class="fmean">' + n + ' check' + (n === 1 ? "" : "s") + ' ran and found nothing an app could use' +
+        (naN ? ", and " + naN + " did not apply to this device" : "") + ".</div>" +
+        '<div class="fmeta"><span class="tag vfs">clean</span>' +
+        '<span class="sp"></span>' +
+        '<button class="act" style="padding:6px 12px;font-size:11.5px" onclick="auShowAll()">Show all checks</button>' +
+        "</div></div>";
+      AUDIT_QUIET_ROWS = auGroup("Clean", clean, true) + auGroup("Doesn't apply here", na, true);
+    } else {
+      AUDIT_QUIET_ROWS = "";
+      list.innerHTML =
+        auGroup("Needs your attention", open, false) +
+        auGroup("Not verified", unmeasured, false) +
+        auGroup("Accepted by you", accepted, true) +
+        auGroup("Clean", clean, true) +
+        auGroup("Doesn't apply here", na, true) ||
+        '<div class="empty">Nothing to report.</div>';
+    }
     auPaintChip(d.summary, d.engine);
-    paintHealthLine(d.summary, d.ts, d.engine);
+    paintHealthLine(d.summary, d.ts, d.engine, d.history);
     $("auCopy").style.display = "";
     const age = $("auage");
     age.style.display = "";
-    const naN = (d.summary && d.summary.not_applicable) || 0;
-    age.textContent = "Checked " + (auAge(d.ts) || "now") +
-      " · " + ((d.summary && d.summary.passed) || 0) + " clean" +
-      (naN ? " · " + naN + " didn't apply" : "");
+    const h = d.history || {};
+    const bits = ["Checked " + (auAge(d.ts) || "now")];
+    // What changed is more useful than what was counted.
+    if (h.first_run) bits.push("first check on this device");
+    else if (h.changed_now) bits.push("different from last time");
+    else if (h.changed_at) bits.push("unchanged since " + auAge(h.changed_at));
+    if (h.total_boots && !(d.summary && d.summary.open_failures)) {
+      bits.push("clean on the last " + h.clean_boots + " of " + h.total_boots + " boots");
+    }
+    age.textContent = bits.join(" · ");
     $("auRawWrap").style.display = "";
   }
 
