@@ -894,6 +894,59 @@
     </div>
   </div>
 
+  <div class="card" id="cardPerUID">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+      <h2>Per-UID hiding</h2><span class="chip" id="uidchip">—</span><span class="chev">›</span>
+    </div>
+    <div class="uidbar">
+      <div class="pkgwrap">
+        <input id="uid" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+               placeholder="Package name, UID, or glob (*.duckdetector)"
+               oninput="pkgFilter()" onfocus="pkgFilter()" onblur="pkgBlur()" onkeydown="pkgKey(event)" />
+        <div id="pkgdd" class="pkgdd"></div>
+      </div>
+      <button class="act" onclick="uidOp('block',this)">Hide</button>
+      <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
+    </div>
+
+    <div class="presetrow">
+      <button class="act" onclick="uidScan(this)">Scan for candidates</button>
+      <button class="act" id="usShow" style="display:none" onclick="usToggle(this)">Show list</button>
+      <button class="act" onclick="addGlobs(this)">Add detector globs</button>
+      <span class="presethint">Scan finds apps <b>installed here</b> worth hiding from and says why —
+        nothing is hidden until you pick it. The globs are the part a scan cannot give you: they keep
+        matching detectors installed later, or repackaged under a new name.</span>
+    </div>
+    <div id="usList" class="uslist" style="display:none"></div>
+
+    <div id="blocked" class="blocklist"></div>
+
+    <details class="ndet">
+      <summary>What hiding covers</summary>
+      <p class="note">Shows the listed app the stock filesystem — no injected files, no hidden paths. One entry covers the app in every user, work profile and clone. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root and <code>su</code> are unaffected, and so is anything a system service reads on the app's behalf.</p>
+      <p class="note">A <b>glob</b> covers a moving target: <code>*.duckdetector</code>,
+        <code>me.garfieldhan.*</code> or <code>*chunqiu*</code> re-match on every apply, so a detector
+        that reinstalls under a new package name stays hidden. Anchors go at the ends only, and a glob
+        needs at least four literal characters.</p>
+    </details>
+
+    <div class="subsec">
+      <div class="subsec-h">Isolated processes</div>
+      <div class="seg" id="isoSeg" role="radiogroup" aria-label="Which isolated-process pools hiding covers">
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="both" onclick="setIsolated('both')">All</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="appzygote" onclick="setIsolated('appzygote')">App-zygote</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="platform" onclick="setIsolated('platform')">Platform</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="off" onclick="setIsolated('off')">None</button>
+      </div>
+      <div class="segstate" id="isoState">Reading…</div>
+      <details class="ndet">
+        <summary>Why this trades one tell for another</summary>
+        <p class="note">An isolated process's UID says nothing about which app started it, so hiding from one app means hiding from <i>every</i> isolated process. That closes the hole where a hidden app probes through a helper — but while it's on, an app that <b>isn't</b> hidden can spot the difference between its own view and its helper's. Both pools are covered by default.</p>
+      </details>
+    </div>
+  </div>
+
   <!-- BOOTGUARD -->
   <div class="card">
     <div class="card-h">
@@ -976,168 +1029,6 @@
     </div>
     <div class="list" id="overlays" style="display:none"></div>
     <div class="list" id="overlaysfull" style="display:none"></div>
-  </div>
-
-  </section>
-
-  <section class="tab" id="tab-tools">
-
-  <div class="group-label">Spoofing</div>
-  <!-- SPOOFING -->
-  <div class="card collapsed" id="cardSpoof">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>
-      <h2>Spoofing</h2><span class="chip" id="spchip">—</span><span class="chev">›</span>
-    </div>
-    <div class="list">
-      <div class="swrow">
-        <div class="swi">
-          <div class="lbl">Verified boot (hash + size)</div>
-          <div class="val" id="spVbVal">…</div>
-          <div class="val multiline" id="spVbCheck" style="margin-top:2px"></div>
-        </div>
-        <label class="switch"><input type="checkbox" id="spVb" onchange="toggleSpoof('vbmeta_digest',this)"><span class="sl"></span></label>
-      </div>
-
-      <div class="swrow">
-        <div class="swi">
-          <div class="lbl">Boot-state (props + procfs)</div>
-          <div class="val multiline" id="spPropsVal">…</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="spProps" onchange="toggleSpoofBool('spoof_props',this)"><span class="sl"></span></label>
-      </div>
-
-      <div class="swrow">
-        <div class="swi">
-          <div class="lbl">Kernel uname</div>
-          <div class="val" id="spUnameVal">…</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="spUname" onchange="toggleSpoofBool('spoof_uname',this)"><span class="sl"></span></label>
-      </div>
-
-      <button class="act" id="spUnameEditBtn" style="margin-top:10px" onclick="toggleUnameAdv(this)">Edit strings</button>
-      <div id="spUnameAdv" style="display:none">
-        <div class="val" id="spUnameCur" style="margin-bottom:9px">current uname: …</div>
-        <input class="txin" id="spUnameTail" placeholder="uname  —  blank = keep · paste stock uname -r to override">
-        <div class="val" id="spDateCur" style="margin-top:9px">current date: …</div>
-        <input class="txin" id="spUnameDate" placeholder="date  —  blank = keep · paste stock uname -v (or a date)">
-        <div class="btns" style="flex-wrap:wrap;margin-top:9px">
-          <button class="act" onclick="fillUnameRomDate()">Use ROM date</button>
-          <button class="act" onclick="resetUname(this)">Reset to kernel default</button>
-          <button class="act primary" onclick="saveUname(this)">Save</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="btns"><button class="act primary" onclick="applySpoof(this)">Apply now</button></div>
-    <p class="note" id="spNote">Recomputes the verified-boot digest from the real AVB chain on this device, and normalizes the lock-state, warranty and debuggable properties that a scanner reads. Both are read straight from properties and have nothing to do with mounts.</p>
-  </div>
-
-  <!-- HEALTH CHECK -->
-
-  <!-- RUNTIME HEALTH -->
-
-  <!-- LAST INCIDENT -->
-
-  <div class="group-label">Hiding</div>
-  <!-- CLOAK (pathhide maps/fd) -->
-  <div class="card collapsed" id="cardCloak">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>
-      <h2>Cloak (maps / fd)</h2><span class="chip" id="phchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Hide selected Xposed/LSPosed module APKs from every process's <code>/proc/&lt;pid&gt;/maps</code> and <code>/proc/&lt;pid&gt;/fd</code> via the kernel <code>pathhide</code> interface — applied live and re-applied on boot.</p>
-    <div class="btns">
-      <button class="act" id="phScan" onclick="scanCloak(this)">Scan Xposed modules</button>
-      <button class="act" id="phShow" onclick="phShowList(this)">Show list</button>
-    </div>
-    <div style="display:flex;gap:8px;margin:8px 0 2px">
-      <input class="txin" id="phManual" placeholder="add package / substring" autocapitalize="off" autocorrect="off" spellcheck="false" style="flex:1">
-      <button class="act" style="flex:none;min-width:0;padding:7px 13px" onclick="addCloak()">Add</button>
-    </div>
-    <div class="list" id="phList" style="display:none"></div>
-    <div class="btns"><button class="act primary" id="phApply" onclick="applyCloak(this)">Apply &amp; save</button></div>
-  </div>
-
-  <div class="card collapsed" id="cardWhiteout">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
-      <h2>Hidden paths</h2><span class="chip" id="wochip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Makes a stock ROM file disappear — for paths that are themselves the tell, like <code>install-recovery.sh</code>. Saved to a list and re-applied every boot. <b>Scan</b> proposes paths that exist on this device and are worth hiding.</p>
-    <div style="display:flex;gap:8px;margin:8px 0 2px">
-      <input class="txin" id="woPath" placeholder="/system/bin/install-recovery.sh" autocapitalize="off" autocorrect="off" spellcheck="false" style="flex:1">
-      <button class="act" style="flex:none;min-width:0;padding:7px 13px" onclick="woAdd(this)">Hide</button>
-    </div>
-    <div class="btns"><button class="act" id="woScanBtn" onclick="woScan(this)">Scan this device</button></div>
-    <div class="list" id="woFound" style="display:none"></div>
-    <div class="list" id="woList"></div>
-  </div>
-
-  <div class="card collapsed" id="cardMounts">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v5H3z"/><path d="M6 12v5M18 12v5"/><path d="M3 17h18v4H3z"/></svg>
-      <h2>Foreign mounts</h2><span class="chip" id="abchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Mounts another module laid over the ROM. Any app can read these in its own mount table, which is the whole thing a mountless setup avoids. <b>Absorb</b> re-serves what it safely can as injections and unmounts them; it runs at every boot.</p>
-    <div class="btns">
-      <button class="act" onclick="absorbScan(this)">Scan</button>
-      <button class="act primary" onclick="absorbRun(this)">Absorb now</button>
-    </div>
-    <pre class="rules" id="abOut" style="display:none">…</pre>
-  </div>
-
-  <div class="card collapsed" id="cardPerUID">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
-      <h2>Per-UID hiding</h2><span class="chip" id="uidchip">—</span><span class="chev">›</span>
-    </div>
-    <div class="uidbar">
-      <div class="pkgwrap">
-        <input id="uid" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
-               placeholder="Package name, UID, or glob (*.duckdetector)"
-               oninput="pkgFilter()" onfocus="pkgFilter()" onblur="pkgBlur()" onkeydown="pkgKey(event)" />
-        <div id="pkgdd" class="pkgdd"></div>
-      </div>
-      <button class="act" onclick="uidOp('block',this)">Hide</button>
-      <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
-    </div>
-
-    <div class="presetrow">
-      <button class="act" onclick="uidScan(this)">Scan for candidates</button>
-      <button class="act" id="usShow" style="display:none" onclick="usToggle(this)">Show list</button>
-      <button class="act" onclick="addGlobs(this)">Add detector globs</button>
-      <span class="presethint">Scan finds apps <b>installed here</b> worth hiding from and says why —
-        nothing is hidden until you pick it. The globs are the part a scan cannot give you: they keep
-        matching detectors installed later, or repackaged under a new name.</span>
-    </div>
-    <div id="usList" class="uslist" style="display:none"></div>
-
-    <div id="blocked" class="blocklist"></div>
-
-    <details class="ndet">
-      <summary>What hiding covers</summary>
-      <p class="note">Shows the listed app the stock filesystem — no injected files, no hidden paths. One entry covers the app in every user, work profile and clone. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root and <code>su</code> are unaffected, and so is anything a system service reads on the app's behalf.</p>
-      <p class="note">A <b>glob</b> covers a moving target: <code>*.duckdetector</code>,
-        <code>me.garfieldhan.*</code> or <code>*chunqiu*</code> re-match on every apply, so a detector
-        that reinstalls under a new package name stays hidden. Anchors go at the ends only, and a glob
-        needs at least four literal characters.</p>
-    </details>
-
-    <div class="subsec">
-      <div class="subsec-h">Isolated processes</div>
-      <div class="seg" id="isoSeg" role="radiogroup" aria-label="Which isolated-process pools hiding covers">
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="both" onclick="setIsolated('both')">All</button>
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="appzygote" onclick="setIsolated('appzygote')">App-zygote</button>
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="platform" onclick="setIsolated('platform')">Platform</button>
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="off" onclick="setIsolated('off')">None</button>
-      </div>
-      <div class="segstate" id="isoState">Reading…</div>
-      <details class="ndet">
-        <summary>Why this trades one tell for another</summary>
-        <p class="note">An isolated process's UID says nothing about which app started it, so hiding from one app means hiding from <i>every</i> isolated process. That closes the hole where a hidden app probes through a helper — but while it's on, an app that <b>isn't</b> hidden can spot the difference between its own view and its helper's. Both pools are covered by default.</p>
-      </details>
-    </div>
   </div>
 
   </section>
@@ -1234,10 +1125,6 @@
     <button class="navb" id="nb-rules" role="tab" aria-selected="false" onclick="showTab('rules',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <span>Rules</span><span class="nbdot"></span>
-    </button>
-    <button class="navb" id="nb-tools" role="tab" aria-selected="false" onclick="showTab('tools',this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5-1.4-1.4 2.5-2.5z"/></svg>
-      <span>Tools</span><span class="nbdot"></span>
     </button>
   </div>
 </nav>
@@ -2221,88 +2108,6 @@
     }
   }
 
-  // ---- kernel features ------------------------------------------------------
-  //
-  // Three states per feature and they are genuinely different:
-  //   present  -- compiled in AND doing its job here (measured where possible)
-  //   inert    -- compiled in, nothing feeding it, so no guard can fire
-  //   absent   -- not in this kernel at all; flash one that has it
-  //
-  // "inert" is the one worth surfacing. It is a deliberate design choice
-  // (a half-populated table cloaks some paths and not others, which is itself a
-  // pattern) and it is invisible: the toggle is there, it accepts input, and
-  // nothing happens.
-  async function refreshFeatures() {
-    const list = $("featlist");
-    const chip = $("featchip");
-    if (!list) return;
-    const NMB = shq(await nmc());
-    const ev = await engineVersion();
-    const has = async function (knob) {
-      return (await exec(NMB + " k " + knob + " >/dev/null 2>&1 && echo y")).stdout.indexOf("y") >= 0;
-    };
-    const phOk = await has("p");
-    const ghOk = await has("g");
-
-    // Ghost: presence is a probe, EFFECTIVENESS is doctor's -- it forks into a
-    // hidden uid and asks the running kernel whether the cloak actually holds,
-    // because _ghost is boot-proven on 6.12 alone.
-    const dd = await getDoctor(false);
-    const f = (dd && dd.json && dd.json.findings) || [];
-    const hasCheck = function (name) { return f.some(function (x) { return x.check === name; }); };
-    const ghVerified = hasCheck("ghost cloak verified on this kernel");
-    const ghOverreach = hasCheck("ghost cloak over-reaches");
-    const ghIneffective = hasCheck("ghost cloak compiled in but not effective");
-
-    const rows = [];
-    let worst = "ok";
-    const add = function (name, state, why) {
-      rows.push({ name: name, state: state, why: why });
-      if (state === "bad") worst = "bad";
-      else if (state === "inert" && worst === "ok") worst = "inert";
-    };
-
-    add("Injection engine",
-        ev ? "ok" : "bad",
-        ev ? "Prism engine v" + ev + " is answering. This is what serves your modules with no mounts."
-           : "The engine is not answering. Nothing is being injected — this kernel may not have NoMount compiled in.");
-
-    add("Maps / fd cloak",
-        phOk ? "ok" : "absent",
-        phOk ? "Present. Hides selected module files from every process's memory map and open-file list. Pick what it covers in Tools › Cloak."
-             : "Not in this kernel. Module APKs stay visible in /proc/<pid>/maps and fd to anything that looks. Needs a pathhide-enabled kernel.");
-
-    if (!ghOk) {
-      add("Existence cloak", "absent",
-          "Not in this kernel. A hidden file can be told apart from a missing one by a handful of syscalls the engine cannot answer.");
-    } else if (ghOverreach) {
-      add("Existence cloak", "bad",
-          "Present but MIS-AIMED: it is hiding paths that are meant to be visible, which is a louder tell than the one it closes. Re-run the mount pass.");
-    } else if (ghIneffective) {
-      add("Existence cloak", "bad",
-          "Compiled in but not firing on this kernel — the guards landed in a function this tree does not route through. Verified on 6.12; this looks like a 6.6/6.1/5.15/5.10 mis-fit.");
-    } else if (ghVerified) {
-      add("Existence cloak", "ok",
-          "Present and measured working here: a hidden path answers exactly like one that never existed.");
-    } else {
-      add("Existence cloak", "inert",
-          "Present but idle. It needs both a hidden app and injected-only paths before any guard can fire — hide an app in Tools › Per-UID hiding to arm it.");
-    }
-
-    const tagOf = { ok: "vfs", inert: "warn", absent: "off", bad: "warn" };
-    const labelOf = { ok: "active", inert: "idle", absent: "not in kernel", bad: "needs attention" };
-    list.innerHTML = rows.map(function (r) {
-      return '<div class="frow"><div class="fname">' + esc(r.name) + "</div>" +
-             '<div class="fmean">' + esc(r.why) + "</div>" +
-             '<div class="fmeta"><span class="tag ' + tagOf[r.state] + '">' +
-             labelOf[r.state] + "</span></div></div>";
-    }).join("");
-    const absent = rows.filter(function (r) { return r.state === "absent"; }).length;
-    const bad = rows.filter(function (r) { return r.state === "bad"; }).length;
-    const inert = rows.filter(function (r) { return r.state === "inert"; }).length;
-    chip.textContent = bad ? bad + " to fix" : inert ? inert + " idle" : absent ? absent + " missing" : "all active";
-    chip.className = "chip " + ((bad || inert || absent) ? "warn" : "ok");
-  }
 
   // ---- runtime health (selfcheck / snapshot / verify / export) ----
   function _healthShow(txt) { const o = $("healthout"); o.style.display = ""; o.textContent = txt.trim() || "(no output)"; }
@@ -3127,173 +2932,22 @@
     refreshBlocked();
   }
 
-  // ---- spoofing (vbmeta.digest) ----
-  async function refreshSpoof() {
-    const conf = (await exec("cat /data/adb/nomount/spoof.conf 2>/dev/null")).stdout;
-    const get = (k, d) => {
-      const m = conf.match(new RegExp("^" + k + "=(.*)$", "m"));
-      if (!m) return d;
-      let v = m[1].trim();
-      if (v.length >= 2 && v[0] === "'" && v[v.length - 1] === "'") v = v.slice(1, -1).replace(/'\\''/g, "'");
-      return v;
-    };
-    const vb = get("vbmeta_digest", "auto");
-    $("spVb").checked = vb !== "off";
-    $("spProps").checked = get("spoof_props", "0") === "1";
-    $("spUname").checked = get("spoof_uname", "0") === "1";
-    $("spUnameTail").value = get("uname_tail", "");
-    $("spUnameDate").value = get("uname_date", "");
-
-    const dig = (await exec("getprop ro.boot.vbmeta.digest")).stdout.trim();
-    $("spVbVal").textContent = dig
-      ? dig.slice(0, 16) + "… (" + dig.length + " hex)"
-      : "empty — set at next boot";
-
-    // Compare the current property against a fresh compute so the user knows,
-    // before touching anything, whether it is already correct.
-    const chk = $("spVbCheck");
-    chk.textContent = "checking against the AVB chain…";
-    chk.style.color = "var(--muted)";
-    const v = (await exec("sh /data/adb/modules/meta-nomount/spoof.sh verify 2>/dev/null")).stdout.trim();
-    const st = v.split(" ")[0];
-    if (st === "match") {
-      chk.textContent = "✓ matches the bootloader — nothing to fix";
-      chk.style.color = "var(--ok)";
-    } else if (st === "mismatch") {
-      chk.textContent = "⚠ differs from the real chain — Apply now will correct it";
-      chk.style.color = "var(--warn)";
-    } else if (st === "absent") {
-      chk.textContent = "not set — Apply now (or a reboot) will set it";
-      chk.style.color = "var(--muted)";
-    } else {
-      chk.textContent = "could not compute the digest on this device";
-      chk.style.color = "var(--muted)";
-    }
-
-    const ps = (await exec("sh /data/adb/modules/meta-nomount/spoof.sh props 2>/dev/null")).stdout.trim();
-    const pv = $("spPropsVal");
-    if (ps === "clean") {
-      pv.textContent = "✓ all props already clean — nothing to fix"; pv.style.color = "var(--ok)";
-    } else if (ps.indexOf("dirty") === 0) {
-      pv.textContent = "⚠ " + (ps.split(" ")[1] || "?") + " prop(s) differ — Apply to fix"; pv.style.color = "var(--warn)";
-    } else {
-      pv.textContent = $("spProps").checked ? "on" : "off"; pv.style.color = "var(--muted)";
-    }
-
-    const ur = (await exec("uname -r")).stdout.trim();
-    const uv = (await exec("uname -v")).stdout.trim();
-    const curDate = (uv.match(/(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*$/) || [uv])[0];
-    $("spUnameCur").textContent = "current uname: " + ur;
-    $("spDateCur").textContent  = "current date: "  + curDate;
-
-    // shq like every other call site: the path is built from
-    // getprop ro.product.cpu.abi, and a bare "${...}" inside double quotes still
-    // expands $, ` and \.
-    const uw = (await exec(`[ -x ${shq(await nmc())} ] && echo 1 || echo 0`)).stdout.trim();
-    const uvl = $("spUnameVal");
-    if (uw !== "1") { uvl.textContent = "needs kernel support"; }
-    else if (!$("spUname").checked) { uvl.textContent = "off"; }
-    else { uvl.textContent = (get("uname_tail", "") || get("uname_date", "")) ? "active" : "on — keeping current"; }
-
-    const anyOn = $("spVb").checked || $("spProps").checked || $("spUname").checked;
-    const chip = $("spchip");
-    if (!anyOn) { chip.textContent = "off"; chip.className = "chip"; }
-    else { chip.textContent = "on"; chip.className = "chip ok"; }
-  }
-  // single-quote a string for safe use in a shell command
-  function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
-  async function setConf(key, val) {
-    // rewrite the key line without sed, so arbitrary values (spaces, / # &, the
-    // '#1 SMP PREEMPT …' build string) are written verbatim and safely.
-    // `key` goes through shq() for the grep pattern too. Every caller passes a
-    // literal today, so this is not reachable -- but it was the one interpolation
-    // here that could break out of its quoting, and a key is exactly the kind of
-    // thing that later becomes a variable.
-    // The result was AWAITED AND DISCARDED, and every caller
-    // (toggleSpoof / toggleSpoofBool / saveUname) then toasted green
-    // unconditionally -- so a write that never happened, or an exec bridge that
-    // is not there at all (exec() resolves errno:-1 when KSU.exec is missing),
-    // still told the user "Enabled". Return the status and let the caller judge.
-    //
-    // The chmod is load-bearing too: `mv "$f.tmp" "$f"` RENAMES the temp over the
-    // conf, so the conf takes the temp's mode -- created under whatever umask the
-    // root WebView happens to have, i.e. 0644. spoof.conf was therefore
-    // re-widened on every toggle, undoing customize.sh. Every other writer of
-    // $NMDIR states 0600; this one now does too.
-    const r = await exec(
-      "f=/data/adb/nomount/spoof.conf; k=" + shq(key) + "; [ -f \"$f\" ] || : > \"$f\"; " +
-      "grep -v \"^$k=\" \"$f\" > \"$f.tmp\" 2>/dev/null; mv \"$f.tmp\" \"$f\" || exit 1; " +
-      "printf '%s=%s\\n' \"$k\" " + shq("'" + String(val).replace(/'/g, "'\\''") + "'") + " >> \"$f\" || exit 1; " +
-      "chmod 0600 \"$f\" 2>/dev/null; exit 0"
-    );
-    return r.errno === 0;
-  }
-  async function toggleSpoof(key, el) {
-    const ok = await setConf(key, el.checked ? "auto" : "off");
-    if (!ok) { el.checked = !el.checked; toast("Could not write spoof.conf — nothing changed", "bad"); return; }
-    toast(el.checked ? "Enabled — reboot or Apply now" : "Off at next boot", "ok");
-  }
-  async function applySpoof(btn) {
-    const done = busy(btn, "Applying…");
-    const r = await exec("sh /data/adb/modules/meta-nomount/spoof.sh 2>&1");
-    // spoof.sh is best-effort and ALWAYS exits 0 — a spoof failure must never
-    // abort boot — so errno cannot be the verdict. It reports its real failures
-    // in its own log lines instead ("resetprop not found", "vbmeta.digest: could
-    // not compute", "cmdline: skipped", "uname: kernel interface absent"), which
-    // this used to await and throw away before toasting green regardless. Those
-    // lines reach us on stderr (see log() in spoof.sh), folded in by the 2>&1.
-    const txt = ((r.stdout || "") + (r.stderr || "")).trim();
-    const fail = txt.split("\n").filter(function (l) {
-      return /nomount-spoof:/.test(l) &&
-        /(not found|unavailable|not creatable|could not|cannot|failed|skipped|absent)/i.test(l);
-    });
-    if (r.errno !== 0) toast("Apply did not run", "bad");
-    else if (fail.length) toast(fail[0].replace(/^.*nomount-spoof:\s*/, "") +
-                                (fail.length > 1 ? " (+" + (fail.length - 1) + " more)" : ""), "bad");
-    else toast("Applied", "ok");
-    done();
-    refreshSpoof();
-  }
-  async function toggleSpoofBool(key, el) {
-    const ok = await setConf(key, el.checked ? "1" : "0");
-    if (!ok) { el.checked = !el.checked; toast("Could not write spoof.conf — nothing changed", "bad"); return; }
-    toast(el.checked ? "Enabled — reboot or Apply now" : "Off at next boot", "ok");
-  }
-  function toggleUnameAdv(btn) {
-    const a = $("spUnameAdv"), show = a.style.display === "none";
-    a.style.display = show ? "block" : "none";
-    btn.textContent = show ? "Hide strings" : "Edit strings";
-  }
-  async function fillUnameRomDate() {
-    const d = (await exec("getprop ro.build.date")).stdout.trim();
-    if (d) $("spUnameDate").value = d;
-  }
-  async function saveUname(btn) {
-    const a = await setConf("uname_tail", $("spUnameTail").value.trim());
-    const b = await setConf("uname_date", $("spUnameDate").value.trim());
-    if (!a || !b) { toast("Could not write spoof.conf — the strings were NOT saved", "bad"); refreshSpoof(); return; }
-    toast("uname strings saved — reboot or Apply now", "ok");
-    refreshSpoof();
-  }
-  async function resetUname(btn) {
-    const r = (await exec("sh /data/adb/modules/meta-nomount/spoof.sh reset-uname 2>/dev/null")).stdout.trim();
-    if (r === "no-baseline") { toast("Reboot once so the stock uname is captured, then Reset is instant", "bad"); return; }
-    $("spUnameTail").value = ""; $("spUnameDate").value = "";
-    toast("Reset to kernel default", "ok");
-    refreshSpoof();
-  }
-  // ---- Tools accordion: collapse/expand cards, remembered per card ----
+  // ---- collapsible cards, remembered per card ----
   function toggleCard(h) {
     const card = h.closest(".card");
     const on = card.classList.toggle("collapsed");
     h.classList.toggle("open", !on);
     if (card.id) { try { localStorage.setItem("nmcol:" + card.id, on ? "1" : "0"); } catch (e) {} }
   }
+  // The markup states each card's DEFAULT (the `collapsed` class or its absence);
+  // localStorage only overrides it. Hard-coding "collapsed unless explicitly
+  // expanded" was right for a drawer of eight tools and wrong for the one control
+  // most people came here to use, which now has to open closed on first run.
   function applyCardState() {
-    document.querySelectorAll("#tab-tools .card[id]").forEach(card => {
+    document.querySelectorAll(".card[id]").forEach(card => {
       let v = null;
       try { v = localStorage.getItem("nmcol:" + card.id); } catch (e) {}
-      const collapsed = v !== "0"; // default collapsed unless explicitly expanded
+      const collapsed = v === null ? card.classList.contains("collapsed") : v === "1";
       card.classList.toggle("collapsed", collapsed);
       const h = card.querySelector(".card-h");
       if (h) h.classList.toggle("open", !collapsed);
@@ -3328,301 +2982,17 @@
     const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
     $("footver").textContent = "Suite " + suiteId + " · " + eng +
       (staged ? " · " + pv + " staged — reboot to activate" : "");
-    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshIsolated(), refreshWhiteouts(), checkManagerSwitches(), loadFindingsCache()]);
+    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
+                       refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(),
+                       refreshIncident(), refreshBlocked(), refreshIsolated(),
+                       checkManagerSwitches(), loadFindingsCache()]);
     if (rulesShown) loadRules();
     loadPkgList();
     if (ic) ic.classList.remove("spin");
   }
 
-  // ---- Hidden paths (durable whiteouts) ----------------------------------
-  // The CLI has had `nomount whiteout add/remove/list/suggest` for a while with no
-  // way to reach it short of a root shell, so the feature effectively did not exist
-  // for anyone using the manager.
-  async function refreshWhiteouts() {
-    const r = await nm("whiteout list");
-    const box = $("woList");
-    // errno was ignored, so an engine that did not answer rendered as the green
-    // "Nothing hidden." — telling the user their hidden paths are gone when in
-    // fact we simply do not know. refreshIsolated() is the model: never fall back
-    // to the reassuring state, show it as unknown instead.
-    if (r.errno !== 0) {
-      $("wochip").textContent = "?";
-      box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
-      return;
-    }
-    const lines = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
-    if (!lines.length || /^no whiteouts/.test(lines[0])) {
-      $("wochip").textContent = "0";
-      box.innerHTML = '<div class="empty">Nothing hidden.</div>';
-      return;
-    }
-    $("wochip").textContent = String(lines.length);
-    box.innerHTML = lines.map(l => {
-      const [path, stateRaw] = l.split("\t");
-      const st = (stateRaw || "").trim();
-      // Only "hidden" means the engine is actually serving it right now.
-      const cls = /^hidden/.test(st) ? "vfs" : /^not applied \(and no such path/.test(st) ? "off" : "warn";
-      return `<div class="row"><span class="name mono" title="${esc(path)}">${esc(path)}</span>` +
-             `<span class="tag ${cls}" title="${esc(st)}">${esc(st.split(" - ")[0])}</span>` +
-             `<button class="bx" title="Stop hiding" data-p="${encodeURIComponent(path)}" onclick="woRemove(this)">✕</button></div>`;
-    }).join("");
-  }
-  // Whiteout paths reach a shell command, so they get the same treatment as UID
-  // targets: reject anything a shell would act on, then single-quote. `*` and `?`
-  // matter as much as `;` here -- unquoted they are pathname-expanded, so a rule
-  // typed as /system/app/* would silently become whatever happened to match.
-  const WO_PATH_RE = /^\/[^\s'"`;|&$<>()*?\[\]{}\\]*$/;
-  function woSafe(p) {
-    if (WO_PATH_RE.test(p)) return true;
-    toast("That path has characters nomount won't take", "bad");
-    return false;
-  }
-  async function woAdd(btn) {
-    const v = ($("woPath").value || "").trim();
-    if (!v) { toast("Enter an absolute path", "bad"); return; }
-    if (v[0] !== "/") { toast("Must be an absolute path", "bad"); return; }
-    if (!woSafe(v)) return;
-    const done = busy(btn, "Hiding…");
-    const r = await nm(`whiteout add ${shq(v)}`);
-    const txt = ((r.stdout || "") + (r.stderr || "")).trim();
-    toast(r.errno === 0 ? (txt.split("\n").pop() || "Hidden") : "Failed: " + txt, r.errno === 0 ? "ok" : "bad");
-    if (r.errno === 0) $("woPath").value = "";
-    done(); refreshWhiteouts(); refreshStatus();
-  }
-  async function woRemove(btn) {
-    const path = decodeURIComponent(btn.dataset.p || "");
-    if (!woSafe(path)) return;
-    const done = busy(btn);
-    const r = await nm(`whiteout remove ${shq(path)}`);
-    toast(r.errno === 0 ? "No longer hidden" : "Failed", r.errno === 0 ? "ok" : "bad");
-    done(); refreshWhiteouts(); refreshStatus();
-  }
-  // Walks the ROM for files only a root setup leaves behind and lists what it
-  // found, each with its reason and its own Hide button. Nothing is applied:
-  // hiding a ROM path is a decision, and a scan button must not make it.
-  async function woScan(btn) {
-    const done = busy(btn, "Scanning…");
-    const r = await nm("whiteout suggest");
-    const out = (r.stdout || "") + (r.stderr || "");
-    const box = $("woFound");
-    const cands = out.split("\n").map(x => x.trim()).filter(l => l.indexOf("\t") > 0);
-    // The notes explain what was filtered — an empty result with a reason is a
-    // real answer, not a failure, so show it rather than a bare "nothing found".
-    const notes = out.split("\n").map(x => x.trim())
-      .filter(l => /^\(|^nothing to suggest/.test(l)).join(" ");
-    box.style.display = "";
-    if (!cands.length) {
-      box.innerHTML = `<div class="empty">${esc(notes || "Nothing found.")}</div>`;
-      toast("Nothing to hide on this device", "ok");
-    } else {
-      box.innerHTML =
-        `<div class="blk-head">Found · ${cands.length}</div>` +
-        cands.map(l => {
-          const p = l.split("\t")[0], why = l.split("\t")[1] || "";
-          return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(p)}</span>` +
-                 `<span class="tag warn" title="${esc(why)}">${esc(why.split(";")[0])}</span>` +
-                 `<button class="bx" title="Hide this path" data-p="${encodeURIComponent(p)}" onclick="woAddPath(this)">+</button></div>`;
-        }).join("") +
-        (notes ? `<div class="empty">${esc(notes)}</div>` : "");
-      toast(cands.length + " candidate(s) found", "ok");
-    }
-    done();
-  }
-  // Path arrives via a data attribute, like the Cloak rows: inlining it into the
-  // onclick as a JSON string put a bare " inside a double-quoted attribute, which
-  // ended the attribute at the first character of the path and left the button
-  // completely inert.
-  async function woAddPath(btn) {
-    const path = decodeURIComponent(btn.dataset.p || "");
-    if (!woSafe(path)) return;
-    const done = busy(btn);
-    const r = await nm(`whiteout add ${shq(path)}`);
-    toast(r.errno === 0 ? "Hidden" : "Failed", r.errno === 0 ? "ok" : "bad");
-    done(); refreshWhiteouts();
-    if (r.errno === 0) btn.closest(".row").remove();
-  }
 
-  // ---- Foreign mounts (absorb) -------------------------------------------
-  function _abPaint(txt) {
-    const o = $("abOut"); o.style.display = ""; o.textContent = txt.trim() || "(no output)";
-    // The summary line is the honest one: "nothing to absorb" is not "nothing is
-    // mounted", and the CLI already words that distinction carefully.
-    const chip = $("abchip");
-    // A real run reports its own failures. src/absorb.rs prints
-    //   "{done} mount(s) absorbed as {rules} rule(s), {n} ROM tmpfs emptied
-    //    mountlessly, {m} failed…"
-    // and the old matcher only ever looked at {done}, so
-    // "3 mount(s) absorbed …, 5 failed" painted green. A failure means those
-    // mounts are STILL mounted and still readable by any app — the one thing
-    // this chip exists to surface. Check it first, before anything else.
-    const failed = +((txt.match(/(\d+) failed/) || [0, 0])[1]);
-    if (failed > 0) { chip.textContent = failed + " failed"; chip.className = "chip bad"; return; }
-    if (/posture clean/.test(txt)) { chip.textContent = "clean"; chip.className = "chip ok"; return; }
-    if (/NOT clean|LEAK/.test(txt)) { chip.textContent = "leaking"; chip.className = "chip bad"; return; }
-    // Dry run and real run are not the same news: "would be absorbed" means they
-    // are still there (amber, there is work to do), "absorbed" means they are
-    // gone (green). One chip label for both read as a warning either way.
-    const dry = /\(dry run\)/.test(txt);
-    const m = txt.match(/(\d+) mount\(s\) (?:would be absorbed|absorbed)/);
-    if (m && +m[1] > 0) {
-      chip.textContent = dry ? m[1] + " to absorb" : m[1] + " absorbed";
-      chip.className = "chip " + (dry ? "warn" : "ok");
-    } else {
-      chip.textContent = /left by design/.test(txt) ? "by design" : "—";
-      chip.className = "chip";
-    }
-  }
-  async function absorbScan(btn) {
-    const done = busy(btn, "Scanning…");
-    const r = await nm("absorb --dry-run");
-    _abPaint((r.stdout || "") + (r.stderr || ""));
-    done();
-  }
-  async function absorbRun(btn) {
-    const done = busy(btn, "Absorbing…");
-    const r = await nm("absorb");
-    const txt = (r.stdout || "") + (r.stderr || "");
-    _abPaint(txt);
-    // The toast was hardcoded to "ok" and keyed on the word "absorbed" appearing
-    // anywhere, which says nothing about whether the run worked: the summary line
-    // carries its own failure count, and every failure is a mount still visible
-    // to every app on the device.
-    const failed = +((txt.match(/(\d+) failed/) || [0, 0])[1]);
-    const absorbed = +((txt.match(/(\d+) mount\(s\) absorbed/) || [0, 0])[1]);
-    toast(
-      r.errno !== 0 ? "Absorb did not run"
-        : failed > 0 ? failed + " mount(s) could not be absorbed — still visible"
-        : absorbed > 0 ? absorbed + " mount(s) absorbed"
-        : "Nothing absorbed",
-      (r.errno !== 0 || failed > 0) ? "bad" : "ok"
-    );
-    done();
-    refreshStealth(); refreshModules(); refreshStatus();
-  }
 
-  // ---- Cloak (pathhide maps/fd) ------------------------------------------
-  const PH_CONF = "/data/adb/nomount/pathhide.conf";
-  let PH = new Map(); let phShown = false;
-  function phClean(s) { return (s || "").replace(/[^A-Za-z0-9._:\/\-]/g, "").trim(); }
-  async function loadCloak() {
-    // Presence probe over the netlink knob. `nm k p` with no value exits 0 only
-    // when the pathhide patch set is compiled into the running kernel; the old
-    // `[ -e /proc/pathhide ]` test no longer works because that node is gone
-    // (any app could find it with one readdir of /proc).
-    const NMB = shq(await nmc());
-    const ok = (await exec(NMB + " k p >/dev/null 2>&1 && echo y")).stdout.indexOf("y") >= 0;
-    document.getElementById("phApply").disabled = !ok;
-    document.getElementById("phScan").disabled = !ok;
-    if (!ok) document.getElementById("phchip").textContent = "no kernel";
-    const r = await exec("cat " + PH_CONF + " 2>/dev/null");
-    r.stdout.split("\n").map(function (l) { return l.replace(/\r/g, "").trim(); })
-      .filter(function (l) { return l && l[0] !== "#"; })
-      .forEach(function (rule) { PH.set(rule, { hidden: true, xposed: false, label: rule }); });
-    // Instant: cached Xposed-module list (rebuilt in the background at boot / by Scan).
-    const c = await exec("sh /data/adb/modules/meta-nomount/scan.sh --cached 2>/dev/null");
-    c.stdout.split("\n").map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (p) {
-      const e = PH.get(p) || { hidden: false, label: p }; e.xposed = true; e.label = p; PH.set(p, e);
-    });
-    renderCloak();
-  }
-  async function scanCloak(btn) {
-    const done = busy(btn, "Scanning…");
-    toast("Scanning Xposed modules…");
-    const r = await exec("sh /data/adb/modules/meta-nomount/scan.sh 2>/dev/null");
-    r.stdout.split("\n").map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (p) {
-      const e = PH.get(p) || { hidden: false, label: p }; e.xposed = true; e.label = p; PH.set(p, e);
-    });
-    done();
-    if (!phShown) phShowList(document.getElementById("phShow"));
-    renderCloak();
-    toast("Found " + [...PH.values()].filter(function (e) { return e.xposed; }).length + " Xposed module(s)", "ok");
-  }
-  function phShowList(btn) {
-    phShown = !phShown;
-    document.getElementById("phList").style.display = phShown ? "" : "none";
-    btn.textContent = phShown ? "Hide list" : "Show list";
-  }
-  function addCloak() {
-    const el = document.getElementById("phManual"); const v = phClean(el.value);
-    if (!v) { toast("Enter a package or substring", "bad"); return; }
-    const e = PH.get(v) || { xposed: false, label: v }; e.hidden = true; PH.set(v, e); el.value = "";
-    if (!phShown) phShowList(document.getElementById("phShow"));
-    renderCloak();
-  }
-  function renderCloak() {
-    const items = [...PH.entries()].sort(function (a, b) {
-      return (b[1].xposed ? 1 : 0) - (a[1].xposed ? 1 : 0) || a[0].localeCompare(b[0]);
-    });
-    const hid = items.filter(function (x) { return x[1].hidden; }).length;
-    const chip = document.getElementById("phchip");
-    if (chip.textContent !== "no kernel") chip.textContent = items.length ? (hid + " / " + items.length) : "0";
-    const list = document.getElementById("phList");
-    if (!items.length) { list.innerHTML = '<div class="note" style="padding:8px 2px">No rules — scan or add a package.</div>'; return; }
-    list.innerHTML = items.map(function (it) {
-      const rule = it[0], e = it[1];
-      return '<div class="swrow"><div class="swi"><div class="lbl">' + e.label + '</div><div class="val">' +
-        (e.xposed ? 'xposed · ' : '') + rule + '</div></div>' +
-        '<label class="switch"><input type="checkbox" data-r="' + encodeURIComponent(rule) + '" ' +
-        (e.hidden ? 'checked' : '') + ' onchange="phToggle(this)"><span class="sl"></span></label></div>';
-    }).join("");
-  }
-  function phToggle(cb) {
-    const k = decodeURIComponent(cb.dataset.r); const e = PH.get(k);
-    if (e) { e.hidden = cb.checked; PH.set(k, e); } renderCloak();
-  }
-  async function applyCloak(btn) {
-    const rules = [...PH.entries()].filter(function (x) { return x[1].hidden; })
-      .map(function (x) { return phClean(x[0]); }).filter(Boolean);
-    const done = busy(btn, "Applying…");
-    // The kernel list is SHARED: "-" wipes every rule on it, including ones
-    // another module put there. Clearing is still needed so an un-ticked rule
-    // goes away live, so preserve what is not ours: read the current list, keep
-    // the entries our conf does not claim, then re-add those alongside ours.
-    //
-    // `nm l p` makes that read RELIABLE. The old /proc node could be write-only
-    // to this caller, which forced a branch that wiped foreign rules and merely
-    // warned about it; the netlink dump always answers, so that branch is gone.
-    // Every value is shq()'d: a rule string reaches a ROOT shell here.
-    const NMB = shq(await nmc());
-    // The old command ended `…; fi; echo OK` with every inner `nm k p` sent to
-    // /dev/null and its status discarded, so `stdout.indexOf("OK") >= 0` was true
-    // whenever ANY shell ran at all. A kernel without pathhide, a moved `nm`, a
-    // rule the kernel rejected, or a failed re-add of the preserved foreign rules
-    // all produced the green "Cloaking N — live & saved" while nothing whatsoever
-    // was hidden. Count the failures in the shell and report the count.
-    // -1 is reserved for "this kernel has no pathhide" — saved, but not live.
-    const FT = "/data/adb/nomount/.cloak.foreign";
-    let cmd = "mkdir -p /data/adb/nomount; { echo '# NoMount Cloak — pathhide rule list (managed by WebUI)'; ";
-    rules.forEach(function (r) { cmd += "echo " + shq(r) + "; "; });
-    cmd += "} > " + shq(PH_CONF) + "; ";
-    // This file names exactly which packages are being hidden, which is the same
-    // secret the hide list is. The 0700 parent was doing all the work; state the
-    // mode here like every other writer of $NMDIR does.
-    cmd += "chmod 0600 " + shq(PH_CONF) + " 2>/dev/null; ";
-    cmd += "_nf=0; ";
-    cmd += "if " + NMB + " k p >/dev/null 2>&1; then ";
-    cmd +=   "_ours=" + shq(rules.join("\n")) + "; ";
-    cmd +=   "_cur=$(" + NMB + " l p 2>/dev/null); ";
-    cmd +=   "_foreign=$(printf '%s\\n' \"$_cur\" | grep -vxF \"$_ours\" 2>/dev/null); ";
-    cmd +=   NMB + " k p - >/dev/null 2>&1 || _nf=$((_nf+1)); ";
-    // Redirected `while … done < file`, NOT `printf | while`: a pipeline puts the
-    // loop in a SUBSHELL, so every _nf increment inside it would be discarded on
-    // exit and foreign-rule failures would go uncounted. The temp lives in the
-    // 0700 state dir, so it leaks nothing while it exists.
-    cmd +=   "if [ -n \"$_foreign\" ]; then printf '%s\\n' \"$_foreign\" > " + shq(FT) + "; ";
-    cmd +=     "while IFS= read -r _fr; do [ -n \"$_fr\" ] || continue; ";
-    cmd +=       NMB + " k p \"+$_fr\" >/dev/null 2>&1 || _nf=$((_nf+1)); ";
-    cmd +=     "done < " + shq(FT) + "; rm -f " + shq(FT) + "; fi; ";
-    rules.forEach(function (r) { cmd += NMB + " k p " + shq("+" + r) + " >/dev/null 2>&1 || _nf=$((_nf+1)); "; });
-    cmd += "else _nf=-1; fi; echo \"OK $_nf\"";
-    const r = await exec(cmd); done();
-    const m = (r.stdout || "").match(/OK (-?\d+)/);
-    if (r.errno !== 0 || !m) { toast("Failed — the rules were not applied", "bad"); return; }
-    const nf = parseInt(m[1], 10);
-    if (nf < 0) toast("Saved, but this kernel has no pathhide support — nothing is hidden", "bad");
-    else if (nf > 0) toast(nf + " rule(s) rejected by the kernel — saved, NOT fully live", "bad");
-    else toast(rules.length ? "Cloaking " + rules.length + " — live & saved" : "Cleared all rules", "ok");
-  }
 
   // ---- init (top level: must not live inside an action handler) ----
   (function restoreTab() {
@@ -3637,7 +3007,6 @@
 
   applyCardState();
   refreshAll();
-  loadCloak();
 </script>
 </body>
 </html>
