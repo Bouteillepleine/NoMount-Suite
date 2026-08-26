@@ -170,7 +170,7 @@ setup_toolchain() {
     done
     if [ -z "$ndk" ]; then
         for c in /opt/android-ndk-r25b "$HOME"/Android/Sdk/ndk/* "$HOME"/android-ndk-* \
-                 "$LOCALAPPDATA"/Android/Sdk/ndk/*; do
+                 "${LOCALAPPDATA:-/nonexistent}"/Android/Sdk/ndk/*; do
             for h in linux-x86_64 windows-x86_64 darwin-x86_64; do
                 [ -d "$c/toolchains/llvm/prebuilt/$h/bin" ] && ndk="$c" && hostdir="$h"
             done

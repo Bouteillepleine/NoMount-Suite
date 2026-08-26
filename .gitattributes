@@ -1,3 +1,12 @@
+# Default for everything. The per-extension rules below predate this and are
+# kept because they are the ones that matter on-device, but they left every
+# extensionless file (Makefile, .gitignore, this file) to core.autocrlf --
+# checked out CRLF on Windows, LF in the index, and so permanently "modified"
+# to any git that does not convert. package.sh reads exactly that to decide
+# the +dirty suffix, so a local build stamped every zip as not matching its
+# own commit. text=auto still leaves real binaries alone.
+* text=auto eol=lf
+
 # The module ships shell scripts that /system/bin/sh executes directly, and a
 # WebUI the manager loads verbatim. core.autocrlf=true on a Windows clone would
 # check these out with CRLF, and a local package.sh run would zip them that way —
