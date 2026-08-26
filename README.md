@@ -1,8 +1,8 @@
 # 🫥 NoMount
 
-> **WARNING:** NoMount operates directly at the kernel VFS layer and is intended for research and development. It's in beta — the full chain is tested end-to-end on a OnePlus 15 (Android 16, 6.12, SukiSU-Ultra), but edge cases are expected across other devices, ROMs, and kernels. Proceed with caution, and [open an issue](https://github.com/Bouteillepleine/nomount2.0/issues) if something breaks.
+> **WARNING:** NoMount operates directly at the kernel VFS layer and is intended for research and development. It's in beta — the full chain is tested end-to-end on a OnePlus 15 (Android 16, 6.12, SukiSU-Ultra), but edge cases are expected across other devices, ROMs, and kernels. Proceed with caution, and [open an issue](https://github.com/Bouteillepleine/nomount/issues) if something breaks.
 
-**NoMount** is a kernel-based file injection and path-redirection framework for Android, packaged as a **KernelSU / SukiSU metamodule**. It loads your root modules **without touching the mount table** — and, where a module genuinely needs a real mount (RRO theming overlays), it uses a hidden `overlayfs` so those work too.
+**NoMount** is a kernel-based file injection and path-redirection framework for Android, packaged as a **KernelSU / SukiSU metamodule**. It loads your root modules **without touching the mount table** — every kind of module content, RRO theming overlays included. There is no `overlayfs`, no `tmpfs` and no bind: the mount table stays 100% stock.
 
 Unlike traditional root solutions that rely on `mount --bind` (which pollutes `/proc/mounts`, changes mount namespaces, and is easily detected), NoMount's primary engine operates **purely at the VFS (Virtual File System) layer**. It manipulates path resolution and directory iteration directly inside the kernel, making injections effective yet virtually invisible to userspace detection.
 
@@ -12,20 +12,34 @@ Traditional methods (such as Magic Mount) modify the mount table. Detectors and 
 
 **NoMount changes the paradigm:**
 
-1. **No mounts (for direct-path files):** no `mount()` syscalls for regular module files — the mount table stays 100% stock.
+1. **No mounts. At all.** No `mount()` syscall is made for any module content — the mount table stays 100% stock, and `su` comes from the kernel's `sucompat`, which is mountless too.
 2. **Visual injection:** advanced `iterate_dir` hooking makes "new" files appear in read-only directories (like `/vendor`) without physically touching the partition.
 3. **File redirection:** any path passing through `getname_hook` is intercepted, so any file can be redirected from anywhere.
 4. **Native permission delegation:** it redirects the underlying inode without permission hooks, inherently bypassing restrictions while keeping **SELinux** perfectly intact.
 
-## Hybrid: real overlays where the kernel demands them
+## RRO overlays, without an overlay mount
 
-Pure VFS redirection can't satisfy Android's **RRO overlay** pipeline — `OverlayManager` + `idmap2` need the overlay APKs on a **real filesystem mount**, or they sit in `STATE_NO_IDMAP` and never enable (theming silently breaks). So for module `*/overlay/*.apk` directories, NoMount mounts a real `overlayfs` — staged on `tmpfs`, because `/data` (f2fs with `casefold`) is rejected by overlayfs as a lowerdir — and then **hides that mount** with KernelSU's native per-app umount.
+Android's **RRO overlay** pipeline once looked like the one thing pure VFS
+redirection could not serve: `OverlayManager` + `idmap2` were understood to need
+the overlay APKs on a real filesystem mount, or they sit in `STATE_NO_IDMAP` and
+never enable. Earlier builds of this project therefore mounted a real `overlayfs`
+on `tmpfs` and hid it with the manager's per-app umount.
 
-The result: a theming module (e.g. OxygenCustomizer) idmaps and applies correctly, while a plain APK/lib/priv-app module leaves no mount trace at all. Each module is served by whichever mechanism fits, automatically.
+That is no longer how it works, and the mount is gone. A module's
+`**/overlay/*.apk` files are **not** special-cased: they are hookless-injected
+into `/product/overlay` (or wherever they belong) like any other file, and
+OverlayManagerService picks them up during the `system_server` package scan —
+which runs *after* the metamodule's post-fs-data pass. Theming modules idmap and
+apply correctly with **zero mounts**, so there is nothing to hide and no reason
+to enable a per-app umount for it. Leave the manager's "umount modules" switches
+**off**; they hide nothing here.
 
 ## Metamodule
 
-NoMount is a metamodule: at boot it scans `/data/adb/modules/`, classifies every file, serves direct-path files via the VFS driver and RRO overlays via `overlayfs`, then enables the engine — no per-module setup. Only **one** metamodule can be active at a time, so NoMount refuses to install alongside another.
+NoMount is a metamodule: at boot it scans `/data/adb/modules/`, classifies every
+file, and serves all of it through hookless VFS injection — then enables the
+engine, with no per-module setup. Only **one** metamodule can be active at a
+time, so NoMount refuses to install alongside another.
 
 ## Key Features
 
@@ -34,12 +48,12 @@ NoMount is a metamodule: at boot it scans `/data/adb/modules/`, classifies every
 * **Security-context correct** — `inode_permission` / `generic_permission` handling keeps injected files traversable and readable with correct system-partition attributes, SELinux intact.
 * **Per-UID hiding** — named apps are shown the 100% stock filesystem: no injected files, no whiteouts, stock directory metadata. Matching is on the *appid*, so one entry covers the app in every user, work profile and clone, and follows it into its SDK-runtime sandbox. The list (`/data/adb/nomount/uidhide`) is applied by the mount pass at post-fs-data and re-resolved once boot completes. Isolated processes carry a pool UID that names no owner, so they are hidden as a group — `nomount uid isolated` sets which pools, and the note there explains the trade.
 
-  One class of injection is deliberately **not** hidden: a ROM APK. The PackageManager scans `/system/app`, `/product/overlay` and friends as `system_server`, which is never on the hide list, so it registers an injected APK and then names that path to every app that asks about the package. Hiding the file would leave a hidden app holding a path the system says exists and `open()` answers `ENOENT` for — a louder inconsistency than the injection, and a real crash: IBM Trusteer (La Banque Postale) walks the package list at startup and `SIGSEGV`s on the resulting `IOException`. So those rules are served with `--public` and stay readable; the kernel strips the flag from any rule that turns out to *replace* a stock APK, where the hidden app is served the stock bytes instead. Needs engine **v15+** — `nomount doctor` says so when the running one is older, and `nomount audit` measures it by dropping to a hidden appid and opening every ROM APK rule.
-* **Real overlayfs for RRO** — hidden overlay mounts so `idmap2`/theming works.
+  One class of injection is deliberately **not** hidden: a ROM APK. The PackageManager scans `/system/app`, `/product/overlay` and friends as `system_server`, which is never on the hide list, so it registers an injected APK and then names that path to every app that asks about the package. Hiding the file would leave a hidden app holding a path the system says exists and `open()` answers `ENOENT` for — a louder inconsistency than the injection, and a real crash: IBM Trusteer (La Banque Postale) walks the package list at startup and `SIGSEGV`s on the resulting `IOException`. So those rules are served with `--public` and stay readable; the kernel strips the flag from any rule that turns out to *replace* a stock APK, where the hidden app is served the stock bytes instead. Needs engine **v15+** — `nomount check --plan` says so when the running one is older, and `nomount check --device` measures it by dropping to a hidden appid and opening every ROM APK rule.
+* **RRO overlays, mountlessly** — overlay APKs are injected into the ROM's overlay directories and idmapped by `system_server` on its normal scan. No `overlayfs`, no staging `tmpfs`, no per-app umount.
 * **Detection hiding (own footprint)** — the Prism engine has no `/dev/nomount` and no mounts of its own to hide: the control plane is a private netlink protocol behind `CAP_NET_ADMIN`, and injected inodes carry the stock `st_dev`, SELinux context and directory metadata.
 * **Self-mounting module skip list** — modules that mount themselves are skipped (built-in list + `/data/adb/nomount/blocklist`, one module id per line). Distinct from the per-app hide list above, which lives in `uidhide`.
 * **Bootloop guard** — a boot counter self-disables NoMount after repeated failed boots and re-arms once the system boots healthy.
-* **Manager tags** — each module's description in the root manager is tagged with how it's served (`vfs` / `overlay` / `vfs + overlay`).
+* **Manager tags** — each module's description in the root manager is tagged with what it ships (`vfs` / `overlay` / `vfs + overlay`) and how many rules it actually got. `overlay` names the module's RRO APKs, not a mount.
 * **Install integrity** — a bundled `sha256` manifest is verified at install; a corrupt or tampered zip aborts.
 
 ## Kernel Integration
@@ -59,23 +73,67 @@ Enable with `CONFIG_NOMOUNT=y`.
 ## Usage (Userspace)
 
 The subsystem is controlled via the `nomount` binary, which drives the engine
-through the bundled freestanding `nm` netlink client.
+through the bundled freestanding `nm` netlink client. This is the full command
+set; `nomount help` and `nomount <command> --help` are the authority.
 
-| Command | Syntax | Description |
-| :--- | :--- | :--- |
-| **Metamodule pass** | `nomount mount` | Scan modules → inject direct-path files → overlay RRO dirs → enable. |
-| **Add Rule** | `nomount vfs add <virtual> <real>` | Inject `real` file at `virtual` path. |
-| **Delete Rule** | `nomount vfs del <virtual>` | Remove a specific injection rule. |
-| **List Rules** | `nomount vfs list` | Show currently active rules. |
-| **Clear All** | `nomount vfs clear` | Flush all rules immediately. |
-| **Engine** | `nomount vfs enable\|disable\|refresh` | Toggle the engine / refresh the dcache. |
-| **Status** | `nomount vfs query-status` | Driver version, engine state, rule count. |
-| **Hide from app** | `nomount uid block <pkg\|uid>` | Show that app the stock filesystem. Persists; `--force` for platform uids. |
-| **Hide list** | `nomount uid list` | Saved entries cross-referenced against the kernel's live set. |
-| **Re-apply** | `nomount uid apply [--early]` | Re-assert the list (the mount pass clears the kernel's set). |
-| **Isolated pools** | `nomount uid isolated <mode>` | `both` (default) \| `appzygote` \| `platform` \| `off`. |
-| **Unblock UID** | `nomount uid unblock <uid>` | Restore injection visibility for a UID. |
-| **Version** | `nomount version` | Show the subsystem version. |
+### Metamodule pass
+
+| Command | Description |
+| :--- | :--- |
+| `nomount mount` | The boot pass: classify every enabled module and route it into Prism injections. Run by `metamount.sh`/`post-fs-data.sh`; you rarely run it by hand. |
+| `nomount reload` | Gap-free hot load/unload — reconcile live rules to the current module set, applying only the delta (no clear). Run this after installing or removing a module instead of rebooting. |
+| `nomount absorb [--dry-run] [--include-dirs] [--early]` | Take over bind mounts **other** modules made: re-serve each as a Prism injection, then unmount it. Restores the zero-mount posture even for a module that knows nothing about NoMount. Runs on its own every boot: an `--early` pre-zygote pass (post-mount on KSU/APatch, post-fs-data on Magisk) and a full pass once boot completes, plus again whenever a package changes. `--early` is the only mode allowed to take over a bind whose target is on a `my_*` partition — re-asserting a `my_*` rule on a live system has rebooted a device. `--include-dirs` is off by default because injection snapshots a directory listing, so files the owning module adds later would never appear. |
+
+### Rules
+
+| Command | Description |
+| :--- | :--- |
+| `nomount vfs add <virtual> <real>` | Inject `real` at `virtual`. |
+| `nomount vfs del <virtual>` | Remove one rule. |
+| `nomount vfs whiteout <path>` | Make `path` appear absent (this rule only, not the durable list). |
+| `nomount vfs list` | Show the live rules. |
+| `nomount vfs clear` | Flush every rule immediately. |
+
+### Durable whiteouts
+
+Hide a stock ROM file that is itself a tell. Unlike `vfs whiteout`, this list
+survives reboots and is re-applied by the boot pass.
+
+| Command | Description |
+| :--- | :--- |
+| `nomount whiteout add <path> [--force]` | Hide it now and on every boot. `--force` overrides the refusal on a filesystem where the resulting hole is measurable. |
+| `nomount whiteout remove <path>` | Stop hiding it. |
+| `nomount whiteout list` | The list, and whether each entry is currently applied. |
+| `nomount whiteout apply` | Re-apply the whole list. |
+| `nomount whiteout suggest` | Propose paths that exist on **this** device and are worth hiding. |
+
+### Per-app hiding
+
+| Command | Description |
+| :--- | :--- |
+| `nomount uid block <pkg\|uid\|glob> [--force]` | Show that app the stock filesystem. A package name is durable across reinstalls; a glob (`*.duckdetector`, `me.garfieldhan.*`) re-matches every apply, so it covers apps installed later too. `--force` is needed for a platform appid (< 10000) — hiding from those hides injections from Android itself. |
+| `nomount uid unblock <pkg\|uid>` | Re-show injections, and drop the entry from the persistent list. |
+| `nomount uid list` | The persistent list with each entry's resolved UID and state. |
+| `nomount uid apply [--early]` | Re-assert the list to the kernel (the mount pass clears the kernel's set). `--early` resolves from the cached appid mirror, for post-fs-data before `packages.list` is meaningful. |
+| `nomount uid preset [name] [--dry-run]` | Add a curated preset. `detectors` covers the known root/environment detectors; no argument lists what is available. |
+| `nomount uid isolated [mode]` | Which isolated-process pools hiding covers: `both` (default) \| `appzygote` \| `platform` \| `off`. No argument shows the current setting. |
+
+### Diagnostics
+
+| Command | Description |
+| :--- | :--- |
+| `nomount check [--plan] [--device] [--json] [--write]` | **The** diagnostic. One report, one shape, two sections: `--plan` is the static half (does the module set resolve into a bad rule?), cheap and safe at post-fs-data; `--device` is the measured half (is what we serve detectable, and is it being served?). Neither flag runs both. Exits 1 when a check has FAILED or needs a reboot. `--write` caches the report to `audit.json` and the fingerprint to `health.txt`, which is what the WebUI and the module card read. |
+| `nomount snapshot` | Freeze the current fingerprint as the baseline for `verify`. |
+| `nomount verify` | Diff the live fingerprint against that baseline and name what drifted. |
+| `nomount export [dir]` | Dump diagnostics to a timestamped folder (default `/sdcard/Download`). |
+| `nomount version` | Print the version. |
+
+Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`, `N/A` and `NOTE`.
+`UNMEASURED` and `N/A` are deliberately different: "nothing here to test" is not
+a warning, "something stopped me testing" is, and neither is ever a pass.
+
+`check` replaced `doctor`, `audit`, `posture`, `selfcheck` and `plan`. Those
+verbs no longer exist; see the changelog for the mapping.
 
 ### Examples
 
@@ -97,9 +155,23 @@ nomount vfs add /vendor/etc/audio_effects.conf /data/adb/modules/my_mod/audio_ef
 nomount uid block com.bank.app
 ```
 
+**Pick up a module you just installed, without rebooting:**
+
+```bash
+nomount reload
+```
+
+**Check the setup and get machine-readable output:**
+
+```bash
+nomount check            # both sections, human-readable
+nomount check --plan     # static half only: cheap, reads no running process
+nomount check --json     # what the WebUI reads
+```
+
 ## WebUI
 
-A self-contained dashboard (root manager → NoMount → ⚙️): engine status (driver version, rule count) with an enable toggle, **Remount** / **Refresh**, bootloop-guard status + re-arm, the **Modules** list with per-module mechanism tags, an **Active rules** viewer, an **Overlay mounts** list, and **UID exclusions**.
+A self-contained dashboard (root manager → NoMount → ⚙️): engine status (driver version, rule count) with an enable toggle, **Remount** / **Refresh**, bootloop-guard status + re-arm, the **Modules** list with per-module tags, an **Active rules** viewer, the cached **`nomount check`** report as one findings list, and the **per-app hide list**. There is no overlay-mounts pane, because there are no overlay mounts.
 
 ## Requirements
 

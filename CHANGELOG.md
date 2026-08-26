@@ -1,11 +1,197 @@
 # Changelog
 
+## Unreleased
+
+Pairs with a kernel built from `kbuild@hookless`. The `kernel_patches/`
+directory has been **removed** — it held the original `/dev/nomount` char-device
+engine with `fs/namei.c` hooks and an ioctl control plane, which nothing in this
+repo could drive any more: `nm` and `src/nm.rs` speak netlink only, so a kernel
+built from those patches answered no CLI command. The README's Requirements
+section still pointed users at it, 50 lines after the text saying it was dead.
+
+### Seven diagnostic verbs became one
+
+`doctor`, `audit`, `posture`, `selfcheck` and `plan` are **gone**, replaced by
+`nomount check`. They were five verbs over two verdict enums, three JSON shapes
+and a fourth `key=value` one, and the WebUI existed to merge all of it back into
+one list.
+
+| was | now |
+| :--- | :--- |
+| `nomount doctor [--json]` | `nomount check --plan [--json]` |
+| `nomount audit [--json] [--write]` | `nomount check --device [--json] [--write]` |
+| `nomount selfcheck [--write] [--json]` | `nomount check --device [--json] [--write]` |
+| `nomount posture` | removed — its three mount checks are rows in the one report |
+| `nomount plan` | removed, no replacement (it had no caller anywhere) |
+
+`check` with neither flag runs both sections. It exits 1 when, and only when,
+`summary.open_failures > 0` — the rule `audit` had, so the boot pass reads it the
+same way.
+
+One verdict enum, seven states: `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`,
+`N/A`, `NOTE`. `UNMEASURED` and `N/A` stay deliberately distinct — "nothing here
+to test" is not a warning, "something stopped me testing" is, and neither is ever
+a pass.
+
+`snapshot`, `verify` and `export` are unchanged. `snapshot` was kept where
+`posture` and `plan` were dropped because it answers a question `check`
+structurally cannot: not "is this device healthy now" but "has anything moved
+since the boot I was happy with".
+
+### The boot pass runs one measurement, not two
+
+`service.sh` used to run `selfcheck --write` in a settle loop and then
+`audit --json --write` separately. `check --device` does both halves in one pass,
+so the loop runs the combined command once and only retries when the per-UID
+consistency probe actually disagrees. The settle window and the "unchecked is not
+a verdict" rule are unchanged.
+
+The module card's health line parsed `summary: N errors, M warnings` out of
+`doctor`'s prose. That line no longer exists, so the regex matched nothing on
+every boot and the card silently sat in its "unknown" arm. It reads
+`check --plan --json` now.
+
+### A boot that never ran the mount pass says so
+
+On a KernelSU build **without metamodule support**, `metamount.sh` is never
+invoked and `post-fs-data.sh` hands over to it because `$KSU` is set — so the
+module was a completely silent no-op: no kmsg line, no `boot.log` entry, no
+`incident.log`, no card. Both entry points now stamp `mountpass.ts`, and
+`service.sh` reports a boot with no stamp on the card and in `incident.log`.
+
+The same for install-time: `customize.sh` now says so when the zip carries no
+binaries for the device's ABI (it ships **arm64-v8a only**), and when the engine
+probe could not run at all — a case that previously printed nothing.
+
+### Packaging
+
+- **The staleness guard could not catch the case that actually happens.** It
+  compared mtimes with `find src/ -newer <binary>` and deliberately excluded
+  `Cargo.toml` — but the version string is `env!("CARGO_PKG_VERSION")`, which
+  comes *from* `Cargo.toml`, so a version-bump-only release could never trip it.
+  It did not: the shipped v1.3.94 zip carries a binary reporting 1.3.92. The
+  staged binary is now asked its version directly, and packaging aborts if it
+  disagrees with the version being stamped.
+- **The sha256 manifest was unverifiable on Android.** A Windows/Git-Bash host's
+  `sha256sum` defaults to binary mode and writes `<hash> *./path`; Android's
+  toybox reads the `*` as part of the filename and fails every entry, and
+  `customize.sh` aborted the install with the reason hidden behind
+  `>/dev/null 2>&1`. The manifest is forced to text mode, and a failed check now
+  prints what `sha256sum -c` actually said.
+- **The recovery `update-binary` never ran `customize.sh`.** It unzipped,
+  chmod'd, printed a success line and exited 0 — skipping the integrity check,
+  the "only one metamodule" refusal (a bootloop vector), the `$NMDIR` SELinux
+  labelling and the bootcount reset. It also returned success when the `unzip`
+  had failed, and unpacked `META-INF` into the module directory. It now provides
+  the helpers `customize.sh` expects and sources it.
+- The release path no longer hardcodes one maintainer's `~/.cargo`.
+
+### Boot path
+
+- The per-module card/tagging block in `metamount.sh` ran **outside** the
+  bootloop guard and walked every enabled module's tree with an unbounded `find`.
+  A device that had already written `disabled` to save itself still paid for that
+  walk at post-fs-data. The loop is skipped once the guard has tripped, and each
+  `find` is bounded.
+- `bind` and opaque-directory reads no longer follow module symlinks.
+
+### Docs
+
+- The README documented roughly 40% of the CLI. Two documented commands did not
+  exist (`vfs enable|disable|refresh`, `vfs query-status`) and eleven real ones
+  were undocumented, `absorb` — which runs twice every boot — among them.
+- The README described a **hybrid overlayfs** design, "real overlayfs for RRO"
+  and per-app-umount hiding. The engine is 100% mountless: RRO overlay APKs are
+  hookless-injected into `/product/overlay` and friends, and OverlayManagerService
+  + idmap2 pick them up at the `system_server` scan. Those claims are gone.
+- Issue links pointed at `Bouteillepleine/nomount2.0`; security disclosure
+  pointed at `Enginex0/nomount`, a different owner entirely.
+
+### Deferred
+
+- **The spoof add-on (`module/spoof.sh`) is deferred and now ships off.** Every
+  knob defaults to `off` rather than `auto`. Two defects in the vbmeta digest
+  computation are known and unfixed, and both can produce a digest with the right
+  shape and the wrong value — which is a sharper tell than setting none: the
+  recursive chain-partition walk discards its status (a full-length digest over a
+  partial chain), and a device asking for SHA-512 silently gets a SHA-256 when
+  `sha512_of` fails. Both sites are marked in the source.
+
+## v1.3.94
+
+- An inert SUSFS module is reported as information, not a warning.
+
+## v1.3.93
+
+- An absent bootcount reads as zero, not as unknown.
+
+## v1.3.92
+
+- A process that vanished mid-probe is no longer counted as a failed measurement.
+
+## v1.3.91
+
+- `uninstall.sh` ships executable.
+- Stray indentation stopped leaking into user-facing messages.
+- **Unmeasured stopped being reported as clean.**
+- The absorbed record and the PackageManager cache are kept honest across a
+  re-absorb.
+- The release path was fixed: `customize.sh`, `uninstall.sh` and `package.sh`.
+
+## v1.3.88
+
+- The build commit is stamped beside the version, so a phone reporting a version
+  also says which commit it came from.
+- False greens the audit found were closed.
+- **One findings list instead of seven cards** in the WebUI.
+- Acceptance, history and the reach pill were **dropped** — including the
+  `nomount accept` command announced under v1.3.69 below, which no longer exists.
+- The mount table is read before the engine is cleared.
+- `uninstall.sh` ships, and unknown stopped being reported as nothing.
+- The release build stopped reporting itself dirty.
+- Packaging builds on a Windows NDK host too.
+
+## v1.3.81
+
+- A mount the table says is not there is no longer asserted.
+- A hand-written bindhosts override is not clobbered.
+- The `timeout` fallback is bounded rather than dropped, so a device without
+  toybox `timeout` still runs the command under a bound.
+- The drift check is reachable again, and `absorb` stopped losing a rule.
+- The lints stopped reporting things that are not happening.
+
+## v1.3.80
+
+- One inode is not a bucket.
+- An app's lib directory is treated as part of its codepath.
+
+## v1.3.78
+
+- Each target is applied once, and what cannot work on this device is named.
+- `absorb` re-points when it serves a target that already has a rule.
+- Directories that hold nothing but injections are named.
+- A finding is stated once per module, not once per country directory.
+- An image a module ships but never mentions is noticed.
+- The question bindhosts asks about metamodules is answered.
+
+## v1.3.76
+
+- An absorb a `my_*` bind cannot accept is no longer offered.
+- A deferred `my_*` bind points at a reboot, not at editing a module.
+- The umount setting that could not be read is named.
+- The engine version is read from the engine.
+- The manager warning is written for the person reading it.
+- User-facing messages were shortened.
+- The last check is remembered, and the report stays quiet when there is nothing
+  to say.
+
 ## v1.3.69
 
 Requires **Prism engine v26** for the existence cloak; the injection engine and
 everything else here works from v16 as before. Pairs with a kernel built from
-`kbuild@hookless` at `347ec5c` or later and `kernel_patches@main` at `8a41f77`
-or later.
+`kbuild@hookless` at `347ec5c` or later. (The second requirement named here,
+`kernel_patches@main` at `8a41f77`, referred to the superseded ioctl engine; that
+directory has since been removed.)
 
 ### The detection audit reports differently
 
@@ -31,7 +217,8 @@ the same word.
 - **Findings carry a reachability tag** — `any app`, `needs effort` — and sort by
   it. One `getdents64` from any app and something needing a purpose-built erofs
   model are not the same problem and no longer look the same.
-- **`nomount accept`** records that you have looked at a failing check and decided
+- **`nomount accept`** (REMOVED in v1.3.88 — see above) records that you have
+  looked at a failing check and decided
   to live with it: a hook framework's bind, an installer's own tmpfs. It never
   marks anything clean. The verdict stays `FAIL`, it stays visible, it renders
   grey rather than green, it is counted separately, and it lapses the moment the

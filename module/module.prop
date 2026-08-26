@@ -3,5 +3,5 @@ name=NoMount Suite
 version=v1.3.94
 versionCode=103094
 author=XxxY
-description=NoMount Suite — fully mountless: Prism engine — hookless VFS injection + RRO overlays (no overlayfs). Root/su independent (sucompat). ⚠️ Leave the manager's "umount modules" switches OFF — nothing here is a mount, so they hide nothing; use `nomount uid block <uid>` to hide from an app. 🫥
+description=Fully mountless module loading on the Prism engine: hookless VFS injection, RRO overlays included — no overlayfs, no binds, no tmpfs. su is external (sucompat). ⚠️ Leave the manager's "umount modules" switches OFF; nothing here is a mount, so they hide nothing — use `nomount uid block <pkg>` to hide from an app. 🫥
 metamodule=1
