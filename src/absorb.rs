@@ -816,7 +816,7 @@ fn label_apk_readable(p: &Path) -> bool {
     };
     if rc != 0 {
         eprintln!(
-            "nomount: could not label {} apk_data_file ({}) - NOT serving it: an app cannot              read adb_data_file, and serving it anyway gives a null Resources and a crash              in handleBindApplication",
+            "nomount: could not label {} apk_data_file ({}) - NOT serving it: an app cannot read adb_data_file, and serving it anyway gives a null Resources and a crash in handleBindApplication",
             p.display(),
             std::io::Error::last_os_error()
         );

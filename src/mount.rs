@@ -1071,7 +1071,7 @@ pub fn run_reload() -> Result<()> {
     // just presence): a target moving between modules or flipping inject<->whiteout
     // must update, or the stale rule would be frozen until a full mount.
     let mounted = crate::absorb::mounted_targets().context(
-        "cannot read /proc/self/mountinfo -- refusing to serve, because assuming \"nothing is mounted\"          injects over live mounts and strands each one in mountinfo until reboot",
+        "cannot read /proc/self/mountinfo -- refusing to serve, because assuming \"nothing is mounted\" injects over live mounts and strands each one in mountinfo until reboot",
     )?;
     for (t, e) in &desired_hookless {
         let up_to_date = match live.get(&((*t).to_path_buf(), 0)) {
@@ -1299,7 +1299,7 @@ pub fn run_mount() -> Result<()> {
     // plan: everything that can refuse the pass runs while the engine is still
     // serving.
     let mounted = crate::absorb::mounted_targets().context(
-        "cannot read /proc/self/mountinfo -- refusing to serve, because assuming \"nothing is mounted\"          injects over live mounts and strands each one in mountinfo until reboot",
+        "cannot read /proc/self/mountinfo -- refusing to serve, because assuming \"nothing is mounted\" injects over live mounts and strands each one in mountinfo until reboot",
     )?;
 
     // Start clean so uninstalled/updated modules don't leave stale rules, and tear

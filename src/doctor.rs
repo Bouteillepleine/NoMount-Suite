@@ -1557,7 +1557,7 @@ pub fn run_doctor(json: bool) -> Result<()> {
             (
                 Level::Info,
                 format!(
-                    "{detail}. Not on this boot though — {} owns no mount in /proc/mounts,                      so that branch of its scripts did not run.",
+                    "{detail}. Not on this boot though — {} owns no mount in /proc/mounts, so that branch of its scripts did not run.",
                     h.module
                 ),
             )
