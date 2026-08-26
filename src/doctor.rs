@@ -456,29 +456,51 @@ pub fn run_doctor(json: bool) -> Result<()> {
     // reader to re-check two settings the Suite had already read, on the strength
     // of a third it had not. A diagnostic that overstates what it does not know
     // is the same defect as one that overstates what it does.
+    // Written for whoever is looking at the card, not for whoever wrote the
+    // parser. The previous text opened with "manager umount config unreadable"
+    // and explained itself with "no sentinel record in .allowlist" -- an
+    // implementation detail of a file format nobody outside this repo has read --
+    // then said both "check it by hand" and "it hides nothing either way", which
+    // leaves a reader unable to tell whether they should care. Name the setting
+    // the way the manager's own UI names it, say what it does, say what to do,
+    // and say that the note is permanent so nobody re-reads it every boot
+    // wondering what they missed.
     let mut unread: Vec<&str> = Vec::new();
     if kernel_umount.is_none() {
-        unread.push("\"Kernel umount\" (ksud did not answer)");
-    }
-    if flags.is_none() {
-        unread.push("the per-app umount profiles (.allowlist missing, truncated, or in a layout this build does not decode)");
+        unread.push("\"Kernel umount\"");
     }
     if global_umount.is_none() {
-        unread.push("\"Umount modules by default\" (no sentinel record in .allowlist — newer ksud builds do not write one)");
+        unread.push("\"Umount modules by default\"");
+    }
+    if flags.is_none() {
+        unread.push("the per-app \"umount modules\" list");
     }
     if crate::manager::ksu_manager_present() && !unread.is_empty() {
+        let (it, them) = if unread.len() > 1 {
+            ("these settings", "they are")
+        } else {
+            ("this setting", "it is")
+        };
         f.push(Finding {
             level: Level::Warn,
-            check: "manager umount config unreadable",
+            check: "check a setting in your root manager",
             detail: format!(
-                "could not read {} of the 3 root-manager umount settings: {}. \
-                 UNKNOWN here, not off — check {} in the manager by hand. Nothing the Suite \
-                 serves is a mount, so {} hides nothing either way; the reason this is reported \
-                 at all is that both switches have broken root on real devices.",
-                unread.len(),
-                unread.join("; "),
+                "Your root manager has {} — {}. NoMount normally reads {} and tells you if \
+                 anything is switched on, but this manager version does not record {} anywhere \
+                 NoMount can see. \
+                 WHY IT MATTERS: that kind of switch strips module files away from apps, and it \
+                 has broken root on real devices. NoMount does not need it — nothing NoMount \
+                 serves is a mount, so turning it on hides nothing and only risks breaking \
+                 things. \
+                 WHAT TO DO: open your root manager's settings once and make sure {} off. \
+                 This note will keep appearing afterwards, because NoMount still cannot read \
+                 {} — it means \"not checked\", not \"something is wrong\".",
+                if unread.len() > 1 { "some settings NoMount could not read" } else { "a setting NoMount could not read" },
+                unread.join(" and "),
+                it,
+                it,
+                them,
                 if unread.len() > 1 { "them" } else { "it" },
-                if unread.len() > 1 { "they" } else { "it" },
             ),
         });
     }
