@@ -91,6 +91,10 @@
 #define nm_dir_size_fix                          __vfsx_033
 #define nm_dops                                  __vfsx_034
 #define nm_dotdot_actor                          __vfsx_035
+/* Appended rather than slotted into the numeric run: the ids are opaque tokens
+ * and only have to be unique, so renumbering 150 entries to keep them in step
+ * with alphabetical order would churn the whole table for no gain. */
+#define nm_drop_cached_vpath                     __vfsx_221
 #define nm_dotdot_scan                           __vfsx_036
 #define nm_dup_trim                              __vfsx_037
 #define nm_emit_dots                             __vfsx_038
