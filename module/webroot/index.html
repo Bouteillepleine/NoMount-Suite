@@ -220,6 +220,10 @@
   .tag.suite { background: rgba(255,255,255,0.08); color: var(--txt); }
   .tag.off   { background: rgba(139,147,167,0.15); color: var(--muted); }
   .tag.warn  { background: rgba(251,191,36,0.15);  color: var(--warn); }
+  /* Reserved. Nothing uses it today: findings are amber, and red is spent only on
+     the "not running" states, which are chips and dots rather than tags. Kept so a
+     future row that genuinely means "broken" has a pill to reach for, instead of
+     re-deriving one and landing on amber like every other. */
   .tag.bad   { background: rgba(248,113,122,0.15); color: var(--bad); }
   .tag.ok    { background: rgba(53,210,154,0.15);  color: var(--ok); }
   .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
@@ -303,9 +307,13 @@
   .hl-txt b { font-weight: 650; }
   .hl-txt .age { color: var(--muted); font-variant-numeric: tabular-nums; }
   .hl-go { flex: none; color: var(--muted); font-size: 17px; line-height: 1; }
-  /* An open finding is the only thing that earns emphasis here. */
-  .healthline.attn { border-color: rgba(248,113,122,.45); background: rgba(248,113,122,.08); }
-  html[data-theme="light"] .healthline.attn { background: rgba(248,113,122,.10); }
+  /* Amber frame for anything actionable... */
+  .healthline.attn { border-color: rgba(251,191,36,.45); background: rgba(251,191,36,.08); }
+  html[data-theme="light"] .healthline.attn { background: rgba(251,191,36,.12); }
+  /* ...and red only for "not running at all", so the loudest treatment on the
+     page is spent on the one state where nothing is being injected. */
+  .healthline.attn.down { border-color: rgba(248,113,122,.45); background: rgba(248,113,122,.08); }
+  html[data-theme="light"] .healthline.attn.down { background: rgba(248,113,122,.10); }
 
   .backline {
     display: inline-flex; align-items: center; gap: 7px;
@@ -1774,7 +1782,10 @@
     chip.textContent = errs ? errs + " error" + (errs > 1 ? "s" : "")
                      : warns ? warns + " warning" + (warns > 1 ? "s" : "")
                      : "healthy";
-    chip.className = "chip " + (errs ? "bad" : warns ? "warn" : "ok");
+    // Both amber. A plan error and a plan warning differ in what they will do to
+    // your next boot, and the chip already says which by counting them
+    // separately -- "2 errors" is not "2 warnings".
+    chip.className = "chip " + (errs || warns ? "warn" : "ok");
   }
 
   // Findings as text, from the structured form -- same layout doctor prints, so
@@ -1811,8 +1822,7 @@
     el.innerHTML = f.map(function (x) {
       return '<div class="frow"><div class="fname">' + esc(x.check) + "</div>" +
              '<div class="fmean">' + esc(x.detail) + "</div>" +
-             '<div class="fmeta"><span class="tag ' + (x.level === "error" ? "bad" : "warn") + '">' +
-             esc(x.level) + "</span></div></div>";
+             '<div class="fmeta"><span class="tag warn">' + esc(x.level) + "</span></div></div>";
     }).join("");
   }
 
@@ -1861,15 +1871,20 @@
   // table: `n/a` is grey and never touches the chip, `unmeasured` is amber
   // because a check that could have run and did not is exactly what the
   // honesty rule is about, and neither is ever green.
-  // Three amber-or-worse states that are NOT the same thing, and the row has to
-  // say which:
-  //   fail       RED   -- a hole that is open right now
-  //   reboot     AMBER -- already fixed; a reboot finishes applying it
-  //   unmeasured AMBER -- not a hole and not a pass; the check did not run
-  // Before `.tag.bad` existed all three fell back to amber, so a readable hole
-  // and a check that merely could not run looked identical.
+  // AMBER for everything actionable; RED is reserved for "the Suite is not
+  // working" (engine down, guard tripped) and never used for a finding.
+  //
+  // A detection finding is something to look at, not an emergency -- the setup is
+  // running and serving your modules either way. Spending red on it leaves
+  // nothing louder for the state where nothing is being injected at all, which is
+  // categorically worse and is the one a reader must not scroll past.
+  //
+  // The three amber states are still distinguished, by LABEL and by GROUP rather
+  // than by hue: "detectable" under `Needs your attention`, "reboot to finish"
+  // under it too, "not verified" under `Not verified`. That is the distinction
+  // doing the work; the colour only says "look".
   const AU_VERDICT = {
-    "fail":       { tag: "bad",  label: "detectable" },
+    "fail":       { tag: "warn", label: "detectable" },
     "reboot":     { tag: "warn", label: "reboot to finish" },
     "unmeasured": { tag: "warn", label: "not verified" },
     "pass":       { tag: "ok",   label: "clean" },
@@ -1984,8 +1999,10 @@
     const unm = sum.unmeasured || 0;
     const acc = sum.accepted || 0;
     if (open > 0) {
+      // Amber, not red: red belongs to `engine down` two lines up, which is a
+      // different kind of bad.
       chip.textContent = open + " detectable";
-      chip.className = "chip bad";
+      chip.className = "chip warn";
     } else if (unm > 0) {
       chip.textContent = unm + " unverified";
       chip.className = "chip warn";
@@ -2024,7 +2041,7 @@
     const el = $("healthline"), dot = $("hlDot"), txt = $("hlTxt");
     if (!el) return;
     if (!sum) {
-      el.classList.remove("attn");
+      el.classList.remove("attn", "down");
       dot.className = "hl-dot";
       txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\">— tap to run a check</span>";
       return;
@@ -2042,7 +2059,9 @@
     // audit.json, written before the field existed). Absent is not "down": fall
     // through and let the summary speak, rather than inventing a fault.
     if (engine === null) {
-      el.classList.add("attn");
+      // The ONE red state on this line. Nothing is being injected -- that is not
+      // "you might be detectable", it is "the thing you installed is not running".
+      el.classList.add("attn", "down");
       dot.className = "hl-dot bad";
       txt.innerHTML = "<b>The engine isn\u2019t running</b> " +
                       "<span class=\"age\">\u00b7 nothing is being injected</span>";
@@ -2054,21 +2073,22 @@
     const age = ts ? ' <span class="age">· checked ' + esc(auAge(ts)) + "</span>" : "";
     if (open > 0) {
       el.classList.add("attn");
-      dot.className = "hl-dot bad";
+      el.classList.remove("down");
+      dot.className = "hl-dot warn";
       txt.innerHTML = "<b>" + open + (open > 1 ? " things need" : " thing needs") +
                       " attention</b>" + age;
     } else if (unm > 0) {
-      el.classList.remove("attn");
+      el.classList.remove("attn", "down");
       dot.className = "hl-dot warn";
       txt.innerHTML = "<b>" + unm + (unm > 1 ? " checks" : " check") +
                       " couldn\u2019t run</b>" + age;
     } else if (acc > 0) {
-      el.classList.remove("attn");
+      el.classList.remove("attn", "down");
       dot.className = "hl-dot";
       txt.innerHTML = "<b>Nothing open</b> <span class=\"age\">· " + acc +
                       " accepted by you</span>" + age;
     } else {
-      el.classList.remove("attn");
+      el.classList.remove("attn", "down");
       dot.className = "hl-dot ok";
       txt.innerHTML = "<b>Nothing detectable</b>" + age;
     }
@@ -2376,7 +2396,7 @@
           "Present but idle. It needs both a hidden app and injected-only paths before any guard can fire — hide an app in Tools › Per-UID hiding to arm it.");
     }
 
-    const tagOf = { ok: "vfs", inert: "warn", absent: "off", bad: "bad" };
+    const tagOf = { ok: "vfs", inert: "warn", absent: "off", bad: "warn" };
     const labelOf = { ok: "active", inert: "idle", absent: "not in kernel", bad: "needs attention" };
     list.innerHTML = rows.map(function (r) {
       return '<div class="frow"><div class="fname">' + esc(r.name) + "</div>" +
@@ -2388,7 +2408,7 @@
     const bad = rows.filter(function (r) { return r.state === "bad"; }).length;
     const inert = rows.filter(function (r) { return r.state === "inert"; }).length;
     chip.textContent = bad ? bad + " to fix" : inert ? inert + " idle" : absent ? absent + " missing" : "all active";
-    chip.className = "chip " + (bad ? "bad" : (inert || absent) ? "warn" : "ok");
+    chip.className = "chip " + ((bad || inert || absent) ? "warn" : "ok");
   }
 
   // ---- runtime health (selfcheck / snapshot / verify / export) ----
@@ -2499,7 +2519,7 @@
       '<div class="fgroup">' + esc(head) + "</div>" +
       parts.map(function (x) {
         return '<div class="row"><span class="name">' + esc(x[1]) +
-               '</span><span class="tag ' + (x[0] === "bad" ? "bad" : x[0] === "warn" ? "warn" : "vfs") +
+               '</span><span class="tag ' + (x[0] === "ok" ? "vfs" : "warn") +
                '">' + (x[0] === "ok" ? "ok" : x[0] === "bad" ? "action" : "check") + "</span></div>";
       }).join("");
     done();
