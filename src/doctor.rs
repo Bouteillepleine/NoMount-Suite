@@ -1624,9 +1624,22 @@ pub fn run_doctor(json: bool) -> Result<()> {
             // fallback branch loses nothing here -- saying remove would cost the
             // user the content they installed it for.
             let known_absent = susfs == crate::manager::Susfs::Absent;
+            // INFO, not Warn -- every case here is. A module that drives SUSFS on a
+            // kernel without it is INERT: it hides nothing, and, crucially, it makes
+            // the user no more detectable than they were. The detection audit is
+            // untouched by it (measured: 12/12 with such a module installed), and
+            // this is the plan check, not the detection one.
+            //
+            // The parts that CAN hurt still warn on their own: a module flipping
+            // manager settings is Warn from scan_manager_writes, and one that mounts
+            // is classified by its mount habit. Nothing is hidden by this.
+            //
+            // People run NoMount deliberately on SUSFS-capable kernels and were
+            // being shown an amber for a module doing nothing to them. An amber a
+            // reader learns to dismiss costs more than the note is worth.
             let (level, detail) = match (u.susfs_is_its_purpose, known_absent) {
                 (true, true) => (
-                    Level::Warn,
+                    Level::Info,
                     format!(
                         "{} is a SUSFS module and this kernel has no SUSFS — it hides \
                          nothing here while its side effects still apply. Remove it",
