@@ -284,6 +284,39 @@
   .fgroup.clp.open::after { transform: rotate(90deg); }
   .auage { font-size: 11.5px; color: var(--muted); margin-top: 10px; font-variant-numeric: tabular-nums; }
 
+  /* ---- the one-line health summary on the Status hero -------------------- */
+  .healthline {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    margin: 14px 0 0; padding: 11px 13px; border-radius: 14px;
+    border: 1px solid var(--brd2); background: var(--card2);
+    color: var(--txt); font: inherit; font-size: 13px; text-align: left;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .healthline:hover { border-color: var(--brd); }
+  .healthline:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+  .hl-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
+  .hl-dot.ok   { background: var(--ok); }
+  .hl-dot.warn { background: var(--warn); }
+  .hl-dot.bad  { background: var(--bad); }
+  .hl-txt { flex: 1 1 auto; min-width: 0; line-height: 1.4; }
+  .hl-txt b { font-weight: 650; }
+  .hl-txt .age { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .hl-go { flex: none; color: var(--muted); font-size: 17px; line-height: 1; }
+  /* An open finding is the only thing that earns emphasis here. */
+  .healthline.attn { border-color: rgba(248,113,122,.45); background: rgba(248,113,122,.08); }
+  html[data-theme="light"] .healthline.attn { background: rgba(248,113,122,.10); }
+
+  .backline {
+    display: inline-flex; align-items: center; gap: 7px;
+    margin: 0 0 4px; padding: 7px 12px 7px 9px; border-radius: 999px;
+    border: 1px solid var(--brd2); background: var(--card2);
+    color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .backline:hover { color: var(--txt); border-color: var(--brd); }
+  .backline:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+  .backline .bk-go { font-size: 16px; line-height: 1; }
+
   /* module list: name on its own line so it is never truncated */
   .mrow {
     display: block; padding: 11px 12px; margin: 8px 0; border-radius: 14px;
@@ -792,6 +825,7 @@
        every <section> so it shows on any tab -- a switch that can break root
        should not require navigating to the right tab to discover. -->
   <div class="banner warn" id="mgrwarn" hidden></div>
+  <div class="banner warn" id="incwarn" hidden></div>
 
   <section class="tab on" id="tab-status">
   <div class="banner" id="banner">Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
@@ -809,6 +843,17 @@
       <div class="metric"><div class="k">Root · su</div><div class="v" id="mSu">—</div></div>
       <div class="metric"><div class="k">Modules served</div><div class="v" id="mMod">—</div></div>
     </div>
+    <!-- THE diagnostic surface for most people.
+         Diagnostics used to be a fifth nav tab, which told every user there was a
+         fifth job to do here. There isn't: the overwhelmingly common answer is
+         "nothing is detectable", and that is one line, not a screen. It is fed by
+         the audit the boot pass already cached, so showing it costs nothing, and
+         it only asks for attention when a finding is actually open. -->
+    <button class="healthline" id="healthline" onclick="openDetail()">
+      <span class="hl-dot" id="hlDot"></span>
+      <span class="hl-txt" id="hlTxt">Checking…</span>
+      <span class="hl-go">›</span>
+    </button>
     <div class="btns">
       <button class="act primary" onclick="reloadRules(this)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
@@ -1085,6 +1130,12 @@
 
   <section class="tab" id="tab-diag">
 
+  <!-- Reached from the Status health line, not from the nav. There is no tab
+       button for this pane, so it needs its own way back. -->
+  <button class="backline" onclick="showTab('status',document.getElementById('nb-status'))">
+    <span class="bk-go">‹</span><span>Back to Status</span>
+  </button>
+
   <div class="group-label">Start here</div>
 
   <!-- WHAT THIS DOES AND DOES NOT COVER.
@@ -1175,7 +1226,14 @@
     </div>
     <p class="note">Lints the mount plan the way it will actually be applied, plus the live rules — partition-root redirects, overlay APKs on partitions zygote will not accept, missing backings, and targets two modules both claim. Run it before rebooting after a module change.</p>
     <div class="btns"><button class="act primary" onclick="runDoctor(this)">Run health check</button></div>
-    <pre class="rules" id="doctorout" style="display:none">…</pre>
+    <div id="doctorsum" class="list"></div>
+    <!-- The full finding list is long and mostly informational -- eleven [info]
+         lines on a healthy device. The chip and the summary answer the question;
+         the dump is for whoever is diagnosing something. -->
+    <details class="ndet" id="doctorRawWrap" style="display:none">
+      <summary>Full report</summary>
+      <pre class="rules" id="doctorout">…</pre>
+    </details>
   </div>
 
   <div class="card collapsed" id="cardRuntime">
@@ -1183,14 +1241,23 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>
       <h2>Runtime health</h2><span class="chip" id="hchip">—</span><span class="chev">›</span>
     </div>
-    <p class="note">The live counterpart to the plan-time check above. <b>Self-check</b> runs the per-UID consistency canary — does a normal app see the same injected files as root? — and reports engine, mounts and guard. <b>Snapshot</b> freezes today's healthy state; <b>Verify</b> diffs the live system against it and names any drift. <b>Export</b> dumps diagnostics to <code>/sdcard/Download</code>.</p>
-    <div class="btns" style="flex-wrap:wrap">
-      <button class="act primary" onclick="runSelfcheck(this)">Self-check</button>
-      <button class="act" onclick="runSnapshot(this)">Snapshot</button>
-      <button class="act" onclick="runVerify(this)">Verify</button>
-      <button class="act" onclick="runExport(this)">Export</button>
-    </div>
+    <p class="note">Asks whether a normal app sees the same injected files as root. A disagreement for an app you have <em>not</em> hidden is the one runtime fault worth knowing about — it means the kernel is serving two different views of the same file by accident.</p>
+    <div class="btns"><button class="act primary" onclick="runSelfcheck(this)">Self-check</button></div>
     <pre class="rules" id="healthout" style="display:none">…</pre>
+    <!-- Snapshot / Verify / Export are developer tools wearing user clothes.
+         Snapshot means nothing until you already suspect drift, Verify is
+         meaningless without one, and Export produces a folder for someone else
+         to read. Sitting them next to Self-check implied four equal choices and
+         made the card unreadable to the person who just wanted a yes or no. -->
+    <details class="ndet">
+      <summary>Developer tools</summary>
+      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today's state as a baseline. <b>Verify</b> diffs the live system against that baseline and names every field that drifted — useless until you have taken a snapshot. <b>Export</b> dumps diagnostics to <code>/sdcard/Download</code> for sharing.</p>
+      <div class="btns" style="flex-wrap:wrap">
+        <button class="act" onclick="runSnapshot(this)">Snapshot</button>
+        <button class="act" onclick="runVerify(this)">Verify</button>
+        <button class="act" onclick="runExport(this)">Export</button>
+      </div>
+    </details>
   </div>
 
   <div class="card collapsed" id="incidentcard" style="display:none">
@@ -1235,10 +1302,6 @@
     <button class="navb" id="nb-tools" role="tab" aria-selected="false" onclick="showTab('tools',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.5 2.5-1.4-1.4 2.5-2.5z"/></svg>
       <span>Tools</span><span class="nbdot"></span>
-    </button>
-    <button class="navb" id="nb-diag" role="tab" aria-selected="false" onclick="showTab('diag',this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h3l2 5 4-12 2 7h5"/></svg>
-      <span>Diagnostics</span><span class="nbdot"></span>
     </button>
   </div>
 </nav>
@@ -1610,10 +1673,21 @@
       b.classList.remove("on"); b.setAttribute("aria-selected", "false");
     });
     if (btn) { btn.classList.add("on"); btn.setAttribute("aria-selected", "true"); }
-    movePill(true);
+    // The detail pane has no nav button. `movePill` bails out when nothing is
+    // selected, which would leave the capsule sitting under whichever tab was
+    // last active -- pointing at a tab you are no longer on. Park it instead.
+    var pill = document.getElementById("navpill");
+    if (!btn) {
+      if (pill) pill.style.opacity = "0";
+    } else {
+      movePill(true);
+    }
     try { sessionStorage.setItem("nm_tab", name); } catch (e) {}
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
+
+  // The Status health line is the only way in.
+  function openDetail() { showTab("diag", null); }
 
   // ---- rules filter ----
   let _rulesRaw = "";
@@ -1681,14 +1755,12 @@
 
   function doctorPaintChip(d) {
     const chip = $("dchip");
-    const nb = $("nb-diag");
     if (!d || !d.summary) { chip.textContent = "—"; chip.className = "chip"; return; }
     const errs = d.summary.errors || 0, warns = d.summary.warnings || 0;
     chip.textContent = errs ? errs + " error" + (errs > 1 ? "s" : "")
                      : warns ? warns + " warning" + (warns > 1 ? "s" : "")
                      : "healthy";
     chip.className = "chip " + (errs ? "bad" : warns ? "warn" : "ok");
-    if (nb) nb.classList.toggle("alert", errs > 0);
   }
 
   // Findings as text, from the structured form -- same layout doctor prints, so
@@ -1704,19 +1776,49 @@
            " warnings" + (s.informational ? ", " + s.informational + " informational" : "");
   }
 
+  // Errors and warnings in the open; the eleven [info] lines a healthy device
+  // produces behind the disclosure. The old card printed all of them into one
+  // scrolling block, where a real error read exactly like a note about zygote
+  // FD allowlisting.
+  function doctorPaintSummary(d) {
+    const el = $("doctorsum");
+    if (!el) return;
+    if (!d) { el.innerHTML = ""; return; }
+    const f = (d.findings || []).filter(function (x) { return x.level !== "info"; });
+    const s = d.summary || {};
+    if (!f.length) {
+      el.innerHTML = '<div class="row"><span class="name">No errors or warnings in the mount plan.</span>' +
+        '<span class="tag vfs">clean</span></div>' +
+        (s.informational ? '<div class="row"><span class="name">' + s.informational +
+          ' informational note' + (s.informational > 1 ? "s" : "") + ' — in the full report below.</span>' +
+          '<span class="tag off">fyi</span></div>' : "");
+      return;
+    }
+    el.innerHTML = f.map(function (x) {
+      return '<div class="frow"><div class="fname">' + esc(x.check) + "</div>" +
+             '<div class="fmean">' + esc(x.detail) + "</div>" +
+             '<div class="fmeta"><span class="tag ' + (x.level === "error" ? "warn" : "warn") + '">' +
+             esc(x.level) + "</span></div></div>";
+    }).join("");
+  }
+
   async function runDoctor(btn) {
     const done = busy(btn, "Checking…");
     const out = $("doctorout");
-    out.style.display = "";
-    out.textContent = "Running…";
+    const wrap = $("doctorRawWrap");
+    $("doctorsum").innerHTML = '<div class="empty">Resolving the mount plan…</div>';
     const dd = await getDoctor(true);
     if (!dd.json) {
-      out.textContent = "The health check did not return a result (exit " + dd.errno + ").";
+      $("doctorsum").innerHTML = '<div class="empty">The health check did not return a result (exit ' +
+        dd.errno + ").</div>";
+      wrap.style.display = "none";
       doctorPaintChip(null);
       done();
       return;
     }
     out.textContent = doctorText(dd.json);
+    wrap.style.display = "";
+    doctorPaintSummary(dd.json);
     doctorPaintChip(dd.json);
     paintManagerBanner(dd);
     done();
@@ -1855,8 +1957,7 @@
   // anything.
   function auPaintChip(sum) {
     const chip = $("auchip");
-    const nb = $("nb-diag");
-    if (!sum) { chip.textContent = "—"; chip.className = "chip"; if (nb) nb.classList.remove("alert"); return; }
+    if (!sum) { chip.textContent = "—"; chip.className = "chip"; return; }
     const open = sum.open_failures || 0;
     const unm = sum.unmeasured || 0;
     const acc = sum.accepted || 0;
@@ -1876,10 +1977,60 @@
       chip.textContent = "undetected";
       chip.className = "chip ok";
     }
-    // The n/a count deliberately does NOT reach the chip or the tab dot. That is
-    // the entire fix: a healthy device with four inapplicable checks used to
-    // render "4 unverified" in amber with an alert on the Diagnostics tab.
-    if (nb) nb.classList.toggle("alert", open > 0);
+    // The n/a count deliberately does NOT reach the chip. That is the entire
+    // fix: a healthy device with four inapplicable checks used to render
+    // "4 unverified" in amber with an alert dot on the Diagnostics tab. There is
+    // no longer a Diagnostics tab to put a dot on, and the one place that still
+    // asks for attention -- the Status health line -- is painted by
+    // `paintHealthLine` from this same summary.
+  }
+
+  // One line, on the hero, from the same summary object the audit chip reads --
+  // so the front page and the detail view cannot disagree, which is the whole
+  // failure mode that started this work.
+  //
+  // Four states and only one of them asks for anything:
+  //   open findings -> "N things need attention", emphasised, tap to act
+  //   unmeasured    -> "N checks couldn't run", plain
+  //   accepted only -> "nothing open" + the count you accepted, plain, NOT green
+  //   clean         -> "Nothing detectable", green, and that is the end of it
+  //
+  // `not_applicable` deliberately never appears here. A check with nothing to
+  // test on this device is not news, and putting it on the front page is how the
+  // old amber chip taught people to ignore the thing.
+  function paintHealthLine(sum, ts) {
+    const el = $("healthline"), dot = $("hlDot"), txt = $("hlTxt");
+    if (!el) return;
+    if (!sum) {
+      el.classList.remove("attn");
+      dot.className = "hl-dot";
+      txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\">— tap to run a check</span>";
+      return;
+    }
+    const open = sum.open_failures || 0;
+    const unm = sum.unmeasured || 0;
+    const acc = sum.accepted || 0;
+    const age = ts ? ' <span class="age">· checked ' + esc(auAge(ts)) + "</span>" : "";
+    if (open > 0) {
+      el.classList.add("attn");
+      dot.className = "hl-dot bad";
+      txt.innerHTML = "<b>" + open + (open > 1 ? " things need" : " thing needs") +
+                      " attention</b>" + age;
+    } else if (unm > 0) {
+      el.classList.remove("attn");
+      dot.className = "hl-dot warn";
+      txt.innerHTML = "<b>" + unm + (unm > 1 ? " checks" : " check") +
+                      " couldn\u2019t run</b>" + age;
+    } else if (acc > 0) {
+      el.classList.remove("attn");
+      dot.className = "hl-dot";
+      txt.innerHTML = "<b>Nothing open</b> <span class=\"age\">· " + acc +
+                      " accepted by you</span>" + age;
+    } else {
+      el.classList.remove("attn");
+      dot.className = "hl-dot ok";
+      txt.innerHTML = "<b>Nothing detectable</b>" + age;
+    }
   }
 
   function auRender(d) {
@@ -1888,6 +2039,7 @@
     if (!d || !d.checks) {
       list.innerHTML = '<div class="empty">No audit result yet — press <b>Run detection audit</b>.</div>';
       $("auCopy").style.display = "none";
+      paintHealthLine(null, 0);
       return;
     }
     const open = [], unmeasured = [], accepted = [], clean = [], na = [];
@@ -1907,6 +2059,7 @@
       auGroup("Doesn't apply here", na, true) ||
       '<div class="empty">Nothing to report.</div>';
     auPaintChip(d.summary);
+    paintHealthLine(d.summary, d.ts);
     $("auCopy").style.display = "";
     const age = $("auage");
     age.style.display = "";
@@ -1932,6 +2085,7 @@
       $("auditout").textContent = ((r.stdout || "") + (r.stderr || "")).trim() || "(no output)";
       $("auRawWrap").style.display = "";
       auPaintChip(null);
+      paintHealthLine(null, 0);
       done();
       return;
     }
@@ -2100,6 +2254,11 @@
     const dd = await getDoctor(false);
     paintManagerBanner(dd);
     doctorPaintChip(dd.json);
+    doctorPaintSummary(dd.json);
+    if (dd.json) {
+      $("doctorout").textContent = doctorText(dd.json);
+      $("doctorRawWrap").style.display = "";
+    }
   }
 
   // ---- kernel features ------------------------------------------------------
@@ -2237,7 +2396,11 @@
     const dd = await getDoctor(true);
     doctorPaintChip(dd.json);
     paintManagerBanner(dd);
-    if (dd.json) $("doctorout").textContent = doctorText(dd.json);
+    if (dd.json) {
+      $("doctorout").textContent = doctorText(dd.json);
+      $("doctorRawWrap").style.display = "";
+      doctorPaintSummary(dd.json);
+    }
     const hc = await runSelfcheck(null);
 
     const a = (AUDIT && AUDIT.summary) || null;
@@ -2324,17 +2487,36 @@
   }
 
   // ---- last incident ----
+  // A recorded incident used to raise the alert dot on the Diagnostics tab. With
+  // the tab gone that signal needs somewhere to land, and it must not be the
+  // health line -- that line answers "are you detectable", and a guard trip is a
+  // different question with a different fix. It gets the global banner, next to
+  // the manager-umount warning, because a Suite that disabled itself is the one
+  // thing worth interrupting any tab for.
+  //
+  // NOT hidden here when there is no incident: `paintManagerBanner` owns the
+  // same element and runs on every refresh, so clearing it from here would race
+  // the umount warning off the screen.
+  let INCIDENT = false;
   async function refreshIncident() {
     const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
-    const nb = $("nb-diag"); // card moved to Diagnostics
-    if (!txt) { card.style.display = "none"; if (nb) nb.classList.remove("alert"); return; }
+    INCIDENT = !!txt;
+    if (!txt) { card.style.display = "none"; return; }
     card.style.display = "";
     $("incidentout").textContent = txt;
-    if (nb) nb.classList.add("alert");
+    const el = $("incwarn");
+    if (el) {
+      el.hidden = false;
+      el.innerHTML = "\u26a0\ufe0f The bootloop guard tripped and disabled the Suite on an earlier " +
+        "boot. <b>Nothing is being injected</b> until you re-arm it. " +
+        '<button class="act" style="padding:5px 11px;font-size:11.5px;margin-left:6px" ' +
+        'onclick="openDetail()">See what happened</button>';
+    }
   }
   async function clearIncident(btn) {
+    { const el = $("incwarn"); if (el) el.hidden = true; INCIDENT = false; }
     btn.disabled = true;
     await exec("rm -f /data/adb/nomount/incident.log");
     toast("Incident record cleared", "ok");
