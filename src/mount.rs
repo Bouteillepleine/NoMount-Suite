@@ -1,9 +1,13 @@
 //! Metamodule mount pass for the NoMount Suite.
 //!
 //! For every enabled module the Suite classifies content and routes it:
-//! - RRO `**/overlay/*.apk` dirs        → real overlayfs via [`crate::overlay`]
 //! - `.replace` markers / char devices  → whiteout via `nm w`
 //! - everything else (files, symlinks)  → hookless VFS redirect via `nm add`
+//!
+//! RRO overlay APKs are NOT special-cased and there is no overlayfs mount: their
+//! APKs are injected into e.g. `/product/overlay` like any other file, and
+//! OverlayManagerService + idmap2 pick them up at the system_server scan, which
+//! runs after this post-fs-data pass. See `resolve_dir` below. Zero mounts total.
 //!
 //! The Suite does NOT manage root/su — su is provided independently and
 //! mountlessly by the kernel's sucompat. Keeping su out of the mount pass means
