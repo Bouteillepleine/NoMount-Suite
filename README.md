@@ -50,12 +50,11 @@ netlink control plane, built from
 That is what the kernel builders apply and what the bundled `nm` client speaks to.
 Enable with `CONFIG_NOMOUNT=y`.
 
-> **`kernel_patches/` is the superseded engine.** Those patches implement the
-> original `/dev/nomount` char device with `fs/namei.c` hooks and an ioctl control
-> plane (`NOMOUNT_IOC_*`). Nothing in this repo can drive them any more: `nm` and
-> `src/nm.rs` speak netlink only, so a kernel built from them answers no CLI
-> command — per-UID hiding included. Kept for reference; see
-> [`kernel_patches/README.md`](kernel_patches/README.md).
+> The original `/dev/nomount` char device — `fs/namei.c` hooks and an ioctl
+> control plane (`NOMOUNT_IOC_*`) — is gone. Nothing in this repo could drive it
+> any more: `nm` and `src/nm.rs` speak netlink only, so a kernel built that way
+> answered no CLI command, per-UID hiding included. Its patch set used to sit in
+> `kernel_patches/`; that directory has been removed.
 
 ## Usage (Userspace)
 
@@ -104,16 +103,22 @@ A self-contained dashboard (root manager → NoMount → ⚙️): engine status 
 
 ## Requirements
 
-- Rooted device with **KernelSU** or **SukiSU** (metamodule support required).
-- A kernel built with the **NoMount patch** (`CONFIG_NOMOUNT=y`) — see [`kernel_patches/`](kernel_patches/).
-- SUSFS is **optional**; if your kernel has it, use the `susfs/` patch variant so NoMount and SUSFS coexist.
+- Rooted device with **KernelSU** or **SukiSU** (metamodule support required), on **arm64**
+  — the zip ships an `arm64-v8a` binary only.
+- A kernel built with the **Prism** engine (`CONFIG_NOMOUNT=y`), from
+  [`Bouteillepleine/kbuild@hookless`](https://github.com/Bouteillepleine/kbuild/tree/hookless).
+  That branch is what the kernel builders apply and what the bundled `nm` client
+  speaks to.
+- SUSFS is **optional**. The Suite does not use it — RRO goes through the same
+  hookless injection as everything else, so there is nothing here for SUSFS to
+  hide — but the two coexist.
 
 ## Compatibility
 
 | Android | Kernel | Root | Status |
 | :--- | :--- | :--- | :--- |
 | 16 | 6.12 | SukiSU-Ultra | ✅ Tested end-to-end (VFS + overlay + hiding) on OnePlus 15 |
-| 12–15 | 5.10 / 5.15 / 6.1 / 6.6 | KernelSU / SukiSU | 🧩 Patches provided, not device-tested |
+| 12–15 | 5.10 / 5.15 / 6.1 / 6.6 | KernelSU / SukiSU | 🧩 Kernel support in `kbuild@hookless`, not device-tested |
 
 APatch metamodule hooks exist but are unverified. Tested another combo? Open an issue.
 
