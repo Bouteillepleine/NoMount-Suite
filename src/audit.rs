@@ -896,13 +896,25 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             continue;
         }
         // A process that will not yield its maps is not a process that showed us
-        // nothing. Unread used to be a bare `continue`, so `scanned` counted only
-        // successes and a run where NO map was readable returned
-        // "0 process(es): no injected file mapped as deleted" -- as a PASS. Same
-        // defect the dirent and erofs checks already track with `unread`.
-        let Ok(maps) = fs::read_to_string(format!("/proc/{pid}/maps")) else {
-            unread += 1;
-            continue;
+        // nothing: a bare `continue` here meant `scanned` counted only successes,
+        // so a run where NO map was readable returned "0 process(es): no injected
+        // file mapped as deleted" -- as a PASS.
+        //
+        // But NotFound is not a refusal. /proc is a snapshot: between the readdir
+        // that listed this pid and the open a moment later, the process exited.
+        // It maps nothing because it no longer exists, so nothing was lost. On a
+        // live device that happens on most passes -- counting it as unread made
+        // this check flip to amber at random (measured: UNMEASURED on one run,
+        // PASS over 1353 processes on the next). A check that cries wolf on a
+        // healthy device teaches people to ignore it, which costs more than the
+        // hole it was guarding. Only a REFUSAL is missing evidence.
+        let maps = match fs::read_to_string(format!("/proc/{pid}/maps")) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                unread += 1;
+                continue;
+            }
         };
         scanned += 1;
         for line in maps.lines() {
