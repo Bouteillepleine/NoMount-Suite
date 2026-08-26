@@ -4448,6 +4448,80 @@ static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
     return pop;
 }
 
+/* Unhash any dentry cached for `v_path`, so the next lookup resolves through
+ * whichever rule owns the name NOW.
+ *
+ * Replacing a rule re-points the parent's child node (see the REPLACEMENT branch
+ * in __nomount_inject_child_locked), but a dentry already cached for that name
+ * still points at the OUTGOING rule's inode. When the parent is a real ROM
+ * directory the ordinary lookup path revalidates and the stale dentry goes; when
+ * the parent is one of our synthesized directories nothing does, and the name
+ * keeps resolving to the old inode for the life of the dcache entry.
+ *
+ * Measured on an OP15, engine v26, two sources with different content:
+ *
+ *     /system/etc/x.txt      (real ROM dir)   add A, add B -> reads B   correct
+ *     /system/etc/nmt/x.txt  (synthesized)    add A, add B -> reads A   stale
+ *
+ * The rule table takes B in both cases, so the table and the bytes disagree and
+ * nothing in userspace can see it: a re-add reports success, `nm list` shows the
+ * new source, and reading the path returns the old one. Userspace worked around
+ * it by issuing del+add; this makes the plain add correct so it does not have to.
+ *
+ * Deliberately best-effort. A path that no longer resolves, a parent that is not
+ * a directory, or no cached dentry at all all mean there is nothing stale to
+ * drop -- none of which is an error worth failing an add over.
+ */
+static void nm_drop_cached_vpath(const char *v_path, u16 v_len)
+{
+    struct dentry *dentry;
+    struct path p_path;
+    struct qstr qname;
+    const char *child;
+    size_t child_len, parent_len;
+    char *parent;
+    int i;
+
+    if (unlikely(!v_path || v_len < 2))
+        return;
+
+    /* Split on the last '/'. v_path is not guaranteed NUL-terminated at v_len,
+     * so scan rather than reaching for strrchr. */
+    parent_len = 0;
+    for (i = (int)v_len - 1; i > 0; i--) {
+        if (v_path[i] == '/') {
+            parent_len = (size_t)i;
+            break;
+        }
+    }
+    if (!parent_len)                       /* "/name": parent is the root */
+        return;
+
+    child = v_path + parent_len + 1;
+    child_len = (size_t)v_len - parent_len - 1;
+    if (!child_len || child_len > NAME_MAX)
+        return;
+
+    parent = kstrndup(v_path, parent_len, GFP_KERNEL);
+    if (unlikely(!parent))
+        return;
+
+    if (kern_path(parent, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &p_path) == 0) {
+        qname.name = child;
+        qname.len = child_len;
+        qname.hash = full_name_hash(p_path.dentry, child, child_len);
+        if (p_path.dentry->d_flags & DCACHE_OP_HASH)
+            p_path.dentry->d_op->d_hash(p_path.dentry, &qname);
+        dentry = d_lookup(p_path.dentry, &qname);
+        if (dentry) {
+            d_drop(dentry);
+            dput(dentry);
+        }
+        path_put(&p_path);
+    }
+    kfree(parent);
+}
+
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 {
     struct nomount_rule *irule, *ex, *current_rule = target_rule;
@@ -5726,6 +5800,14 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
         synchronize_rcu();
         nm_free_rule(victim);
     }
+
+    /* This add REPLACED a live rule, so a dentry cached for the name may still
+     * point at the outgoing rule's inode. Drop it, or the path keeps serving the
+     * old source while the table names the new one -- see nm_drop_cached_vpath
+     * for the measurement. Done after the mutex is released: it resolves a path,
+     * which must not run under nomount_write_mutex. */
+    if (unlikely(victim))
+        nm_drop_cached_vpath(v_path, v_len);
 
     if (flags & NM_FLAG_WHITEOUT)
         nm_debug("Successfully added whiteout rule: %s\n", nm_get_vpath(rule));
