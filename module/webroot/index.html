@@ -1691,20 +1691,28 @@
     return !!(r.checks || []).some(function (c) { return c.section === s; });
   }
 
-  function checkById(id) {
-    if (!CHECK || !CHECK.checks) return null;
-    for (var i = 0; i < CHECK.checks.length; i++) {
-      if (CHECK.checks[i].id === id) return CHECK.checks[i];
-    }
+  function findCheck(r, id) {
+    const cs = (r && r.checks) || [];
+    for (var i = 0; i < cs.length; i++) if (cs[i].id === id) return cs[i];
     return null;
   }
+  function checkById(id) { return findCheck(CHECK, id); }
 
+  // The two states that mean NOTHING IS BEING INJECTED, as opposed to "you might
+  // be detectable". They are the only things on this page that get red, and they
+  // outrank every finding: with either true, every other row is describing a
+  // device that is not hiding anything.
+  //
   // The engine is only ASKED in the device half, so a plan-only report carries
   // `engine: null` without anything being wrong. Reading that as "the engine is
   // down" would paint the loudest state on the page over a run that never put the
   // question.
   function engineDown(r) {
     return !!r && ranSection(r, "device") && r.engine === null;
+  }
+  function guardTripped(r) {
+    const g = findCheck(r, "boot-guard-armed");
+    return !!g && g.verdict === "fail";
   }
 
   // Verdict -> how the row reads.
@@ -1762,15 +1770,19 @@
       txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\">— tap to run a check</span>";
       return;
     }
-    // A DEAD ENGINE OUTRANKS EVERY OTHER STATE, and this is not a hypothetical.
-    // With it down the target-dependent checks correctly report n/a and the mount
-    // checks correctly pass -- there genuinely are no mounts -- and the summary
-    // comes back clean. Every statement true; the conclusion false.
-    if (engineDown(r)) {
+    // NOT-RUNNING OUTRANKS EVERY FINDING, and this is not a hypothetical. With
+    // the engine down the target-dependent checks correctly report n/a and the
+    // mount checks correctly pass -- there genuinely are no mounts -- and the
+    // summary comes back clean. Every statement true; the conclusion false. A
+    // tripped boot guard is the same state by a different route: the Suite
+    // disabled itself, and "3 things need attention" is the wrong sentence for a
+    // device that is injecting nothing at all.
+    if (engineDown(r) || guardTripped(r)) {
       el.classList.add("attn", "down");
       dot.className = "hl-dot bad";
-      txt.innerHTML = "<b>The engine isn’t running</b> " +
-                      "<span class=\"age\">· nothing is being injected</span>";
+      txt.innerHTML = engineDown(r)
+        ? "<b>The engine isn’t running</b> <span class=\"age\">· nothing is being injected</span>"
+        : "<b>The bootloop guard tripped</b> <span class=\"age\">· the Suite disabled itself</span>";
       return;
     }
     const s = r.summary;
@@ -1849,6 +1861,7 @@
     const down = engineDown(r);
 
     if (down) { chip.textContent = "engine down"; chip.className = "chip bad"; }
+    else if (guardTripped(r)) { chip.textContent = "guard tripped"; chip.className = "chip bad"; }
     else if (attention.length) { chip.textContent = attention.length + " to look at"; chip.className = "chip warn"; }
     else if (!ranSection(r, "device")) { chip.textContent = "plan only"; chip.className = "chip warn"; }
     else if (unmeasured.length) { chip.textContent = unmeasured.length + " not measured"; chip.className = "chip warn"; }
