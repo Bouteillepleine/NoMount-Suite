@@ -1576,7 +1576,14 @@
 
   // ---- guard ----
   async function refreshGuard() {
-    const cr = await exec("cat /data/adb/nomount/bootcount 2>/dev/null");
+    // `cat` on a MISSING bootcount exits 1, and an absent bootcount is the
+    // healthy state -- the guard deletes it the moment a boot completes. Reading
+    // that exit as "could not read" put a "?" on the chip of every healthy
+    // device. Ask the question so that the normal answer is a success: absent
+    // means zero, and a non-zero exit then means the read genuinely failed.
+    const cr = await exec(
+      "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi"
+    );
     const dr = await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0");
     // The worst false green in the file: with errno dropped, a failed read gave
     // disabled === false, so a Suite that had TRIPPED and was injecting nothing
