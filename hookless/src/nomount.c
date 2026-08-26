@@ -4576,8 +4576,42 @@ static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
     return pop;
 }
 
+/* Would re-resolving this name build an inode indistinguishable from the one
+ * already cached on @dentry, given that @incoming is the rule that now owns it?
+ *
+ * Every field compared here is one nomount_create_new_inode() copies straight
+ * out of the rule, so equality across all of them means the drop below would
+ * unhash a dentry only to have the next lookup mint its twin. That is not free:
+ * an unhashed dentry is d_unlinked() forever, and d_path() appends " (deleted)"
+ * to it in every /proc/PID/maps that already has the file mapped. A `nomount
+ * reload` re-adds over every live rule -- 260 of them on the measured device,
+ * almost all with an unchanged source -- so the drop fired ~260 times per reload
+ * for no benefit at all, and marked whatever system_server had mapped. */
+static bool nm_dentry_matches_rule(struct dentry *dentry, const struct nomount_rule *incoming)
+{
+    const struct nm_inode_info *info;
+    struct inode *ino;
+
+    if (!incoming)
+        return false;
+    ino = d_inode(dentry);
+    if (!ino || (ino->i_op != &nm_file_iops && ino->i_op != &nm_dir_iops))
+        return false;                 /* stock dentry, or not ours: must be dropped */
+    info = ino->i_private;
+    return info &&
+           info->flags == incoming->flags &&
+           info->r_path.dentry == incoming->r_path.dentry &&
+           info->r_path.mnt == incoming->r_path.mnt &&
+           info->v_ino == incoming->v_ino &&
+           info->v_dev == incoming->v_dev &&
+           info->v_dino == incoming->v_dino;
+}
+
 /* Unhash any dentry cached for `v_path`, so the next lookup resolves through
- * whichever rule owns the name NOW.
+ * whichever rule owns the name NOW -- unless what is cached is already exactly
+ * that, in which case leave it hashed (see nm_dentry_matches_rule). Pass a NULL
+ * @incoming to drop unconditionally, which is what the caller wants when the
+ * rule that owned the name is about to be freed and nothing replaces it.
  *
  * Replacing a rule re-points the parent's child node (see the REPLACEMENT branch
  * in __nomount_inject_child_locked), but a dentry already cached for that name
@@ -4600,7 +4634,8 @@ static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
  * a directory, or no cached dentry at all all mean there is nothing stale to
  * drop -- none of which is an error worth failing an add over.
  */
-static void nm_drop_cached_vpath(const char *v_path, u16 v_len)
+static void nm_drop_cached_vpath(const char *v_path, u16 v_len,
+                                 const struct nomount_rule *incoming)
 {
     struct dentry *dentry;
     struct path p_path;
@@ -4642,7 +4677,8 @@ static void nm_drop_cached_vpath(const char *v_path, u16 v_len)
             p_path.dentry->d_op->d_hash(p_path.dentry, &qname);
         dentry = d_lookup(p_path.dentry, &qname);
         if (dentry) {
-            d_drop(dentry);
+            if (!nm_dentry_matches_rule(dentry, incoming))
+                d_drop(dentry);
             dput(dentry);
         }
         path_put(&p_path);
@@ -4841,7 +4877,18 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 
                 dentry = d_lookup(p_path.dentry, &qname);
                 if (dentry) {
-                    d_drop(dentry);
+                    /* Same test, same reason, as the one in
+                     * nm_drop_cached_vpath(): a re-add whose cached dentry
+                     * already describes the incoming rule has nothing to
+                     * invalidate, and unhashing it would only stamp
+                     * " (deleted)" onto every mapping of the file. A
+                     * synthesized ancestor (current_rule != target_rule) is not
+                     * stamped with its final identity yet, so it never matches
+                     * and is dropped exactly as before -- which costs nothing,
+                     * since d_path() only reads d_unlinked() of the LEAF and a
+                     * directory is never the leaf of a mapping. */
+                    if (!nm_dentry_matches_rule(dentry, current_rule))
+                        d_drop(dentry);
                     dput(dentry);
                 }
                 err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
@@ -5959,8 +6006,11 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
         /* The victim is out of the hash and about to be freed, but a dentry
          * cached for this name may still point at its inode -- and after this
          * return nothing in the table can ever reconcile it. Drop it here,
-         * while `rule` still holds the normalized vpath to name it by. */
-        nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len);
+         * while `rule` still holds the normalized vpath to name it by.
+         * Unconditional (NULL, not `rule`): the add FAILED, so nothing is left
+         * to serve this name and there is no incoming rule for a cached dentry
+         * to still be describing. */
+        nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len, NULL);
         mutex_unlock(&nomount_write_mutex);
         nm_free_rule(rule);
         if (victim && !victims) {
@@ -5977,12 +6027,19 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
      * this add replaced; without dropping it the path keeps serving the old
      * source while the table names the new one. See nm_drop_cached_vpath.
      *
-     * Unconditional, NOT gated on `victim`: that only tracks rule-hash dedup,
-     * which keys on exact vpath bytes, while the child-node REPLACEMENT in
-     * __nomount_inject_child_locked keys on parent + name -- so two vpaths that
-     * differ only in redundant slashes re-point the same child with no victim
-     * recorded. Dropping a dentry that was not stale costs a re-lookup, which is
-     * far cheaper than serving the wrong file.
+     * NOT gated on `victim`: that only tracks rule-hash dedup, and the topology
+     * walk can re-point a child node without one being recorded.
+     *
+     * It IS gated on the cached dentry actually differing from `rule`, which is
+     * a change from "always drop": unhashing costs far more than a re-lookup.
+     * d_unlinked() is permanent for whoever already holds the dentry, and
+     * d_path() then reports the file " (deleted)" in their /proc/PID/maps for as
+     * long as the mapping lives. A reload re-adds over every live rule with an
+     * unchanged source, so the always-drop form marked the module's whole
+     * footprint at once -- measured on OP15 as Contacts.apk reading "(deleted)"
+     * in system_server's maps with a perfectly mirrored dev and inode. See
+     * nm_dentry_matches_rule() for what "differing" is tested on; anything that
+     * is not byte-for-byte the same rule is still dropped.
      *
      * Inside the lock, like the identical sequence in
      * nomount_generate_virtual_topology: kern_path under nomount_write_mutex is
@@ -5994,7 +6051,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
      * nm_get_vpath(rule)/rule->v_len, not the caller's: nm_alloc_rule trims a
      * trailing '/', and the untrimmed form makes the split produce an empty
      * child name and drop nothing at all. */
-    nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len);
+    nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len, rule);
     /* Same argument on the success path: the topology walk normally re-points the
      * parent's child node at `rule`, but it can return 0 having taken a branch
      * that did not (a replacement whose name resolves through a different
