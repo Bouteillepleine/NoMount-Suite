@@ -142,6 +142,11 @@ SCRIPTS=(
     scan.sh
     uidscan.sh
     uidwatch.sh
+    # Shipped, or removing the Suite leaves the bindhosts mode_override.sh
+    # behind -- the exact "a file we wrote selects a mode under a metamodule
+    # we do not control" case its own header warns about. It sat in module/
+    # unlisted, so no zip ever carried it and no uninstall ever ran it.
+    uninstall.sh
 )
 
 # OnePlus (and any device that can run this kernel) is arm64-v8a only — the

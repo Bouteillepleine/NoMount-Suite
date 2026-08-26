@@ -2449,7 +2449,7 @@
   // ---- modules ----
   async function refreshModules() {
     const box = $("modules");
-    const out = (await exec(
+    const r = (await exec(
       'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; ' +
       'id=$(basename "$d"); ' +
       // mountinfo field 4 is the mount root WITHIN ITS FILESYSTEM: a module bind reads
@@ -2487,7 +2487,16 @@
       'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
       'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
       'echo "$id|$st|$mech|$cnt|$mnt"; done'
-    )).stdout.trim();
+    ));
+    // errno was ignored, so a call that never ran rendered as the reassuring
+    // empty state -- telling the user there is nothing there when we simply do
+    // not know. Same rule as the whiteout list: show it as unknown.
+    if (r.errno !== 0) {
+      box.innerHTML = '<div class="empty">Unknown — the module list could not be read.</div>';
+      $("modcount").textContent = "?"; $("mMod").textContent = "?";
+      return;
+    }
+    const out = r.stdout.trim();
     if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
     const rows = out.split("\n").filter(Boolean);
     $("modcount").textContent = rows.length;
@@ -2580,7 +2589,16 @@
   async function refreshVfs() {
     const box = $("vfsdirs");
     const list = await nm("vfs list");
-    const lines = (list.errno === 0 ? list.stdout : "").split("\n").map(x => x.trim()).filter(Boolean);
+    // errno was ignored, so a call that never ran rendered as the reassuring
+    // empty state -- telling the user there is nothing there when we simply do
+    // not know. Same rule as the whiteout list: show it as unknown.
+    if (list.errno !== 0) {
+      $("vfscount").textContent = "?";
+      box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
+      _vfsFiles = [];
+      return;
+    }
+    const lines = list.stdout.split("\n").map(x => x.trim()).filter(Boolean);
     const dirs = {};
     _vfsFiles = [];
     for (const l of lines) {
@@ -2632,7 +2650,16 @@
   async function refreshOverlays() {
     const box = $("overlays");
     const list = await nm("vfs list");
-    const lines = (list.errno === 0 ? list.stdout : "").split("\n").map(s => s.trim()).filter(Boolean);
+    // errno was ignored, so a call that never ran rendered as the reassuring
+    // empty state -- telling the user there is nothing there when we simply do
+    // not know. Same rule as the whiteout list: show it as unknown.
+    if (list.errno !== 0) {
+      $("ovcount").textContent = "?";
+      box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
+      _ovFiles = [];
+      return;
+    }
+    const lines = list.stdout.split("\n").map(s => s.trim()).filter(Boolean);
     const dirs = {};
     _ovFiles = [];
     for (const l of lines) {

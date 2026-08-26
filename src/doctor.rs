@@ -500,6 +500,28 @@ fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
     None
 }
 
+/// Whether a mount habit can be reported as informational rather than a warning:
+/// we looked at the mount table and the module owns nothing in it, so the branch
+/// that would have mounted was not taken.
+///
+/// `Namespace` is excluded. A module that mounts inside its OWN mount namespace is
+/// invisible in the table we read, by construction -- that absence is the habit's
+/// signature, not evidence against it. Testing it that way made this return true
+/// unconditionally for exactly the habit the warning exists to raise, so that
+/// warning could not fire on any device. The other habits do land in the table we
+/// read, so for them the absence is real evidence.
+///
+/// An unreadable table never demotes: "no evidence" is not "no mount".
+fn looks_inert(
+    habit: crate::preflight::MountHabit,
+    mountinfo_readable: bool,
+    module_owns_a_mount: bool,
+) -> bool {
+    mountinfo_readable
+        && habit != crate::preflight::MountHabit::Namespace
+        && !module_owns_a_mount
+}
+
 pub fn run_doctor(json: bool) -> Result<()> {
     // partition -> count of non-overlay entries not in zygote's FD allowlist
     let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -1490,9 +1512,11 @@ pub fn run_doctor(json: bool) -> Result<()> {
     let mountinfo_readable = std::fs::metadata("/proc/self/mountinfo").is_ok();
 
     for h in crate::preflight::scan_all("/data/adb/modules", "meta-nomount") {
-        // Demote to informational when we can see it did not happen. Never when
-        // the table could not be read -- "no evidence" is not "no mount".
-        let inert = mountinfo_readable && !mounted_modules.contains(&h.module);
+        let inert = looks_inert(
+            h.habit,
+            mountinfo_readable,
+            mounted_modules.contains(&h.module),
+        );
         let (level, check, detail) = match h.habit {
             crate::preflight::MountHabit::Namespace => (
                 Level::Warn,
@@ -1756,6 +1780,30 @@ pub fn run_doctor(json: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The namespace habit is invisible in our mount table BY CONSTRUCTION, so
+    /// its absence there must never be read as "it did not happen". This is the
+    /// regression: demoting on that absence silenced the warning on every device.
+    #[test]
+    fn an_unseen_namespace_mount_is_not_evidence_of_no_mount() {
+        use crate::preflight::MountHabit::*;
+
+        // Table read, module owns nothing in it -- the only case that can demote.
+        assert!(!looks_inert(Namespace, true, false), "namespace must stay a warning");
+        assert!(looks_inert(ForeignFs, true, false));
+        assert!(looks_inert(Absorbable, true, false));
+        assert!(looks_inert(Pseudo, true, false));
+
+        // Owns a mount: it demonstrably happened, nothing demotes.
+        for h in [Namespace, ForeignFs, Absorbable, Pseudo] {
+            assert!(!looks_inert(h, true, true));
+        }
+
+        // Table unreadable: no evidence is not no mount.
+        for h in [Namespace, ForeignFs, Absorbable, Pseudo] {
+            assert!(!looks_inert(h, false, false));
+        }
+    }
     use super::*;
     use crate::nm::LiveKind;
 
