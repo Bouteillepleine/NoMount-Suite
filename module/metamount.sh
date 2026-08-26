@@ -68,7 +68,31 @@ nmlog() {
 if command -v timeout >/dev/null 2>&1; then
     nmto() { timeout "$@"; }
 else
-    nmto() { shift; "$@"; }
+    # No toybox `timeout`. Poll a backgrounded child rather than running it
+    # unbounded: every caller here has a 124 recovery path, and dropping the
+    # bound turns a hung engine call into a hung boot -- absorb, the whiteout
+    # re-apply, `uid apply`, uidwatch and selfcheck all run after these.
+    # Same contract as timeout(1): the command's status, or 124 if killed.
+    nmto() {
+        _nmto_s=$1
+        shift
+        "$@" &
+        _nmto_p=$!
+        _nmto_n=0
+        while [ "$_nmto_n" -lt "$_nmto_s" ]; do
+            kill -0 "$_nmto_p" 2>/dev/null || break
+            sleep 1
+            _nmto_n=$((_nmto_n + 1))
+        done
+        if kill -0 "$_nmto_p" 2>/dev/null; then
+            kill -TERM "$_nmto_p" 2>/dev/null
+            sleep 1
+            kill -KILL "$_nmto_p" 2>/dev/null
+            wait "$_nmto_p" 2>/dev/null
+            return 124
+        fi
+        wait "$_nmto_p"
+    }
 fi
 
 # Single-run guard. Was a noclobber file in /dev: world-writable (boot umask),
