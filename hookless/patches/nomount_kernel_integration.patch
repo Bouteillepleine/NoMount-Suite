@@ -1,0 +1,81 @@
+One integration patch for every supported kernel: 4.9 4.14 4.19 5.4 5.10 5.15
+6.1 6.6 6.12 6.18.
+
+There used to be ten of these, one per version, and the content was the same
+content ten times over: the fs/Kconfig body was byte-identical in all ten, and
+so was the fs/proc/task_mmu.c body. What differed was only the CONTEXT each
+hunk was anchored on -- and five of the ten (5.10 5.15 6.1 6.6 6.12) carried a
+task_mmu.c hunk whose header understated its own line counts, which `git apply`
+rejects outright and only `patch --fuzz` would take.
+
+The anchors below are therefore chosen to be lines that are byte-identical
+across all ten trees, so one hunk applies everywhere at nothing worse than an
+offset. Each was checked against the pristine tree of every version, not
+assumed:
+
+  fs/Kconfig          `menu "File systems"` and the DCACHE_WORD_ACCESS block
+                      that opens the menu on all ten. The config therefore
+                      lands at the TOP of the File systems menu rather than at
+                      the bottom, where the only anchor on offer is a bare
+                      `endmenu` -- and fs/Kconfig has five of those.
+  fs/Makefile         the quota/proc/kernfs/sysfs run. It has to come AFTER the
+                      `obj-y :=` assignment, because CONFIG_NOMOUNT=y expands
+                      the new line to `obj-y +=` and a `:=` below it would
+                      throw the object away again. The end of the obj-y block
+                      (where the old per-version hunks sat) is where the ten
+                      trees diverge most, and on 4.9 it has no trailing context
+                      to anchor on at all.
+  fs/proc/task_mmu.c  the dev/ino pair and the pgoff line after it -- the only
+                      four consecutive lines of show_map_vma() that 4.9 and
+                      6.18 still agree on. The `if (file)` above them became
+                      `if (vma->vm_file)` at 6.12, and file_inode() became
+                      file_user_inode().
+
+A hunk with no trailing context is not an option anywhere here: `git apply`
+reads one as "this hunk ends at EOF" and refuses to match it mid-file.
+
+Apply with `patch -p1` from the kernel tree root, then drop fs/nomount.c and
+fs/nomount.h in beside it. The compile matrix asserts per version that all
+three hunks landed and that the task_mmu.c one is inside show_map_vma().
+
+diff --git a/fs/Kconfig b/fs/Kconfig
+--- a/fs/Kconfig
++++ b/fs/Kconfig
+@@ -5,5 +5,12 @@
+ menu "File systems"
+ 
++config NOMOUNT
++	bool "NoMount Path Redirection Subsystem"
++	default n
++	help
++	  NoMount allows path redirection and virtual file injection
++	  without mounting filesystems. Useful for systemless modifications.
++
+ # Use unaligned word dcache accesses
+ config DCACHE_WORD_ACCESS
+        bool
+diff --git a/fs/Makefile b/fs/Makefile
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -56,6 +56,8 @@
+ obj-y				+= quota/
+ 
++obj-$(CONFIG_NOMOUNT) += nomount.o
++
+ obj-$(CONFIG_PROC_FS)		+= proc/
+ obj-$(CONFIG_KERNFS)		+= kernfs/
+ obj-$(CONFIG_SYSFS)		+= sysfs/
+ obj-$(CONFIG_CONFIGFS_FS)	+= configfs/
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -400,4 +400,9 @@
+ 		dev = inode->i_sb->s_dev;
+ 		ino = inode->i_ino;
++#ifdef CONFIG_NOMOUNT
++		{ extern void vfs_map_meta_override(const struct inode *,
++							  dev_t *, unsigned long *);
++		  vfs_map_meta_override(inode, &dev, &ino); }
++#endif
+ 		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
+ 	}

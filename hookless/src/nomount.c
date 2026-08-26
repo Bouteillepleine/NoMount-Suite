@@ -4586,7 +4586,14 @@ static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
  * to it in every /proc/PID/maps that already has the file mapped. A `nomount
  * reload` re-adds over every live rule -- 260 of them on the measured device,
  * almost all with an unchanged source -- so the drop fired ~260 times per reload
- * for no benefit at all, and marked whatever system_server had mapped. */
+ * for no benefit at all, and marked whatever system_server had mapped.
+ *
+ * s_path is deliberately NOT in the comparison, and keeping the cached inode is
+ * the better answer there rather than a compromise: a re-add over a live
+ * injection resolves its own vpath through that injection, so nm_alloc_rule
+ * refuses to pin one of our inodes as "stock" and the incoming rule carries no
+ * s_path at all. The inode already holding the real one is the accurate copy;
+ * dropping it is what would lose the blocked reader's stock fallback. */
 static bool nm_dentry_matches_rule(struct dentry *dentry, const struct nomount_rule *incoming)
 {
     const struct nm_inode_info *info;

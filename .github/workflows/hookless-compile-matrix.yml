@@ -188,7 +188,15 @@ jobs:
         run: |
           set -e
           cd ksrc
-          patch -p1 --forward --fuzz=3 < "$GITHUB_WORKSPACE/repo/hookless/patches/nomount_${{ matrix.ver }}_kernel_integration.patch"
+          P="$GITHUB_WORKSPACE/repo/hookless/patches/nomount_kernel_integration.patch"
+          # git apply FIRST, as a gate rather than as the applier: it does no
+          # fuzz, so a pass proves every hunk's context matched byte for byte on
+          # this tree, and it rejects a malformed hunk header outright. Five of
+          # the ten patches this replaced carried exactly such a header and went
+          # green for months because `patch --fuzz` accepted them.
+          git apply -p1 --check "$P" || {
+            echo "FATAL: the integration patch no longer applies cleanly to ${{ matrix.ver }}"; exit 1; }
+          patch -p1 --forward --fuzz=3 < "$P"
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.c" fs/nomount.c
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.h" fs/nomount.h
           grep -n 'CONFIG_NOMOUNT' fs/Makefile fs/Kconfig || true
