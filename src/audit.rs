@@ -478,11 +478,24 @@ fn check_zero_mount() -> Check {
             leaked.len()
         );
         if !deferred.is_empty() {
+            // REBOOT FIRST. The runtime pass refuses a my_* bind for a real
+            // reason, and the first version of this text turned that refusal into
+            // "go edit another module's script" -- which is the heavier fix and
+            // usually the wrong one.
+            //
+            // The pre-zygote pass (`absorb --early`, post-mount) is allowed to
+            // take exactly these, because before zygote there is no live system
+            // to lose. Measured on an OP11 carrying two redundant
+            // /my_product/media/bootanimation binds: one reboot on a current
+            // Suite reported "2 redundant mount(s) dropped" and the audit went
+            // from 2 failures to clean, with the content still served by
+            // injection. Nothing was edited.
             why.push_str(&format!(
                 " {} of them sit on a my_* partition, which cannot be taken over while Android is \
-                 running — doing that has rebooted a device. Delete the bind from {owner}'s \
-                 post-fs-data.sh instead: the next boot serves the same content by injection, with \
-                 no mount to absorb.",
+                 running — doing that has rebooted a device. A REBOOT fixes this: the pre-zygote \
+                 pass drops a redundant bind safely, and the content stays served by injection. \
+                 If it comes back every boot, {owner} is re-creating it — delete the bind from its \
+                 post-fs-data.sh and injection serves the same files with no mount at all.",
                 deferred.len()
             ));
         }
@@ -494,10 +507,13 @@ fn check_zero_mount() -> Check {
         )
         .meaning(why)
         .owner(owner);
-        // Only offer the button when at least one mount is something absorb will
-        // actually take.
+        // Offer the action that will actually work. Absorb when it can take at
+        // least one of them; otherwise a reboot, which is what clears a deferred
+        // my_* bind. Never a button that cannot move the finding.
         if absorbable {
             c.action("absorb", "Absorb now", None)
+        } else if !deferred.is_empty() {
+            c.action("reboot", "Reboot to clear", None)
         } else {
             c
         }
