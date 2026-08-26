@@ -5774,6 +5774,11 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
             __nomount_delete_child_locked(victim->parent_dir, victim);
         if (victim && victims)
             hlist_add_head(&victim->victim_node, victims);
+        /* The victim is out of the hash and about to be freed, but a dentry
+         * cached for this name may still point at its inode -- and after this
+         * return nothing in the table can ever reconcile it. Drop it here,
+         * while `rule` still holds the normalized vpath to name it by. */
+        nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len);
         mutex_unlock(&nomount_write_mutex);
         nm_free_rule(rule);
         if (victim && !victims) {
@@ -5785,6 +5790,29 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     hash_add_rcu(nomount_rules_ht, &rule->vpath_node, rule->v_hash);
     atomic_inc(&nm_rule_gen);
+
+    /* A dentry cached for this name may still point at the inode of whatever
+     * this add replaced; without dropping it the path keeps serving the old
+     * source while the table names the new one. See nm_drop_cached_vpath.
+     *
+     * Unconditional, NOT gated on `victim`: that only tracks rule-hash dedup,
+     * which keys on exact vpath bytes, while the child-node REPLACEMENT in
+     * __nomount_inject_child_locked keys on parent + name -- so two vpaths that
+     * differ only in redundant slashes re-point the same child with no victim
+     * recorded. Dropping a dentry that was not stale costs a re-lookup, which is
+     * far cheaper than serving the wrong file.
+     *
+     * Inside the lock, like the identical sequence in
+     * nomount_generate_virtual_topology: kern_path under nomount_write_mutex is
+     * the established pattern here (nm_alloc_rule does it twice per add), and
+     * dropping after the unlock spans synchronize_rcu -- a window in which a
+     * concurrent lookup installs a fresh dentry that we would then unhash for
+     * nothing.
+     *
+     * nm_get_vpath(rule)/rule->v_len, not the caller's: nm_alloc_rule trims a
+     * trailing '/', and the untrimmed form makes the split produce an empty
+     * child name and drop nothing at all. */
+    nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len);
     /* Same argument on the success path: the topology walk normally re-points the
      * parent's child node at `rule`, but it can return 0 having taken a branch
      * that did not (a replacement whose name resolves through a different
@@ -5800,14 +5828,6 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
         synchronize_rcu();
         nm_free_rule(victim);
     }
-
-    /* This add REPLACED a live rule, so a dentry cached for the name may still
-     * point at the outgoing rule's inode. Drop it, or the path keeps serving the
-     * old source while the table names the new one -- see nm_drop_cached_vpath
-     * for the measurement. Done after the mutex is released: it resolves a path,
-     * which must not run under nomount_write_mutex. */
-    if (unlikely(victim))
-        nm_drop_cached_vpath(v_path, v_len);
 
     if (flags & NM_FLAG_WHITEOUT)
         nm_debug("Successfully added whiteout rule: %s\n", nm_get_vpath(rule));
