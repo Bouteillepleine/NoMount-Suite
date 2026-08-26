@@ -2,7 +2,7 @@ name: NoMount hookless — compile-test matrix
 
 # Validates the hookless kernel patch (fs/nomount.c + fs/nomount.h) against the
 # canonical source tree for each of the 10 supported kernel versions.
-# Compile test (builds fs/nomount.o only), not a full device build.
+# Compile test (builds fs/nomount.o only), not a full device build
 
 on:
   push:
