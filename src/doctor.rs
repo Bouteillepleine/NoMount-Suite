@@ -490,6 +490,115 @@ pub fn run_doctor(json: bool) -> Result<()> {
         });
     }
 
+    // A directory whose every entry is injected is its own detection oracle.
+    //
+    // Injected files carry inode numbers from a band the ROM never allocates
+    // from. In a directory that also holds stock files that is harmless -- the
+    // stock inodes are camouflage. In a directory the module invented, every
+    // inode is in the injected band, so bucketing that directory by inode range
+    // yields one bucket that is entirely ours and names every file in it.
+    //
+    // `audit` already measures this, but only after the fact, on a device that
+    // has already booted with the module. Saying it here means the user learns
+    // at install time, when moving the files into an existing directory is still
+    // an easy change.
+    //
+    // The stock/injected test works whether or not the engine is live: with
+    // rules applied, read_dir returns the synthesised listing (ours only, if the
+    // directory is wholly new); without them it returns the stock listing, or
+    // fails outright when the directory does not exist yet. In every case, "no
+    // entry here that is not one of ours" is the question worth asking.
+    let served: Vec<&Path> = plan
+        .iter()
+        .filter(|e| e.kind != PlanKind::Whiteout) // whiteouts hide, they materialise nothing
+        .map(|e| e.target.as_path())
+        .collect();
+
+    // Is this path one we serve, or a directory on the way down to one? A
+    // sub-DIRECTORY that only holds injections is not stock camouflage, and
+    // treating it as one is what made a first cut miss `/system/etc/nmt`
+    // entirely: it saw the `nested/` child, did not recognise it as ours, and
+    // called the directory mixed.
+    let ours = |p: &Path| served.iter().any(|t| *t == p || t.starts_with(p));
+
+    // An APK has to live in a directory of its own -- that is the layout
+    // PackageManager requires, and stock `/system/priv-app/Mms` holds nothing
+    // but `Mms.apk` either. Flagging those would be advice with no available
+    // remedy, so they are deliberately not reported.
+    let is_apk_container = |p: &Path| {
+        p.parent().and_then(|g| g.file_name()).is_some_and(|n| {
+            matches!(n.to_str(), Some("app" | "priv-app" | "overlay" | "framework"))
+        })
+    };
+
+    let mut invented: HashMap<PathBuf, (Vec<String>, usize)> = HashMap::new();
+    for e in &plan {
+        if e.kind == PlanKind::Whiteout {
+            continue;
+        }
+        let Some(parent) = e.target.parent() else { continue };
+        if is_partition_root(parent) || parent.parent().is_none() || is_apk_container(parent) {
+            continue;
+        }
+        let has_stock = match fs::read_dir(parent) {
+            Ok(rd) => rd.flatten().any(|d| !ours(&parent.join(d.file_name()))),
+            // Does not exist yet: once the pass runs, nothing but ours is in it.
+            Err(_) => false,
+        };
+        if has_stock {
+            continue;
+        }
+        let slot = invented.entry(parent.to_path_buf()).or_insert((Vec::new(), 0));
+        slot.0.push(e.module.clone());
+        slot.1 += 1;
+    }
+
+    // Report the SHALLOWEST invented directory of a chain. A module shipping
+    // `etc/foo/bar/baz/x` invents four directories, and naming all four says the
+    // same thing four times -- the actionable unit is the top of the new subtree.
+    let invented_dirs: std::collections::HashSet<PathBuf> = invented.keys().cloned().collect();
+    let mut rolled: Vec<(PathBuf, Vec<String>, usize)> = invented
+        .into_iter()
+        // Every ancestor, not just the immediate parent: a chain like
+        // `nmt/nested/deep/a/b` has intermediate levels that hold no file of
+        // their own, so they never enter the map and checking one level up
+        // finds no ancestor to roll into.
+        .filter(|(p, _)| !p.ancestors().skip(1).any(|a| invented_dirs.contains(a)))
+        .map(|(p, (mods, n))| {
+            // Count everything served underneath, not just the immediate level,
+            // so a rolled-up chain reports the size of the whole subtree.
+            let total = served.iter().filter(|t| t.starts_with(&p)).count();
+            let mut m = mods;
+            m.sort_unstable();
+            m.dedup();
+            (p, m, total.max(n))
+        })
+        .collect();
+    rolled.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if !rolled.is_empty() {
+        // One finding, not one per directory. The explanation is the same every
+        // time and repeating it buries the list it is about.
+        let list = rolled
+            .iter()
+            .map(|(p, m, n)| format!("{} ({n} file(s), {})", p.display(), m.join(", ")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        f.push(Finding {
+            level: Level::Warn,
+            check: "directory holds only injected files",
+            detail: format!(
+                "{list}. Injected files carry inode numbers from a band the ROM never \
+                 allocates from, so a directory with no stock files in it groups into one \
+                 inode bucket that is entirely yours and names every file at once — that \
+                 is what `audit`'s \"injected inode band\" check measures. Shipping the \
+                 files into a directory that already has stock content removes the tell; \
+                 app/priv-app/overlay directories are excluded here because an APK cannot \
+                 share one."
+            ),
+        });
+    }
+
     // Modules that cannot work here, named before the user goes hunting.
     //
     // All three of these fail SILENTLY today: the write lands nowhere, the
