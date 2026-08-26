@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.3.69
 
 Requires **Prism engine v26** for the existence cloak; the injection engine and
 everything else here works from v16 as before. Pairs with a kernel built from
@@ -94,6 +94,29 @@ the same word.
   any screen for.
 - **Check my setup** runs the audit, the plan check and the runtime check and
   gives one verdict. Every individual button is unchanged.
+- **Red is reserved for a Suite that is not running.** A detection finding — even
+  an open one — is amber: the setup is up and serving your modules either way.
+  Red is spent only on engine-down and a tripped bootloop guard, which are
+  categorically worse and must not read like everything else. The three amber
+  findings (`detectable`, `reboot to finish`, `not verified`) are told apart by
+  label and by group rather than by hue.
+- **A dead engine is now a finding.** With the engine down `live_targets()` is
+  empty, so every target-dependent check correctly reported n/a and the mount
+  checks correctly passed — nothing *is* mounted — and the summary read
+  `4 passed, 0 failed`. Every statement true, the conclusion false: the Status
+  line rendered a green "Nothing detectable" beside the hero's own red "Engine
+  offline". Liveness is a check now, ranked ahead of everything, and it carries
+  its own reachability class (`not a detection`) because nobody detects you by it.
+- **Checks no longer pass over a partial sample.** `readdir cookie magic` and
+  `erofs directory shape` each skipped an unreadable input and then passed over
+  whatever was left — a run where most parents failed to open still printed a
+  clean verdict. Both now count what they could not read and report
+  `unmeasured`. A *hit* still fails regardless of coverage; only a clean result
+  needs full coverage. (`kernel surfaces` was fixed this way long ago; the fix
+  was never carried to its siblings.)
+- **A manual audit persists.** The button ran `audit --json` with no `--write`,
+  so a verdict lived only in the page: close the WebUI, reopen it, and the
+  Status line fell back to "Not checked yet" until the next boot.
 - **Copy report** puts device, ROM, kernel, engine and Suite versions and every
   non-clean finding on the clipboard in one press.
 - **Kernel features** says whether each cloak is active, idle or absent. These go
@@ -102,6 +125,18 @@ the same word.
 - **What this can and can't hide** states up front what a VFS engine is and is not
   responsible for, so verified-boot state and build keys stop reading as Suite
   failures — and links to the switch that does normalise them.
+
+### Fixed (second pass)
+
+- `nomount export` built `NM_REDACT_HIDE_LIST=1 '<self_exe>' doctor` and handed
+  it to `sh -c`, with the path single-quoted but **not escaped** — while two
+  other call sites in the same crate escape correctly. The shell was only ever
+  there to set one environment variable; `Command::env` does that with no shell,
+  so there is nothing left to quote.
+- `nomount accept` validated its `--reason` *after* fingerprinting the finding,
+  which means running the whole audit — forking a probe child and reading
+  `/proc/<pid>/maps` for every process on the device — to then reject input it
+  had at the start. The rules moved to `accept::validate` and are checked first.
 
 ### Build
 
