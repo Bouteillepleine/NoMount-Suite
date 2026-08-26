@@ -1032,12 +1032,62 @@ fn already_serving(target: &Path, source: &Path) -> bool {
 /// `del` first sidesteps the whole distinction. It costs one netlink round trip,
 /// fails harmlessly when there was no rule, and the APK re-point path in this
 /// file has always done it this way.
-fn add_repointing(nm: &Nm, target: &Path, source: &Path) -> bool {
-    let _ = nm.del(target);
-    nm.add(target, source).is_ok()
+fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool {
+    match live.get(target) {
+        // Already serving exactly this. Re-issuing would drop and rebuild a
+        // correct rule for nothing, and every drop is a window where the path
+        // resolves to stock.
+        Some(cur) if cur.as_path() == source => true,
+        Some(prev) => {
+            let prev = prev.clone();
+            let _ = nm.del(target);
+            if nm.add(target, source).is_ok() {
+                return true;
+            }
+            #[allow(clippy::needless_return)]
+            // The del already happened and absorb has already unmounted, so
+            // doing nothing here leaves the path on stock. Put back what was
+            // there; it is stale, but it is content rather than nothing.
+            if nm.add(target, &prev).is_ok() {
+                eprintln!(
+                    "nomount: absorb: could not re-point {} at {} -- restored the previous rule",
+                    target.display(),
+                    source.display()
+                );
+            } else {
+                eprintln!(
+                    "nomount: absorb: {} now has NO rule -- re-point and restore both failed",
+                    target.display()
+                );
+            }
+            false
+        }
+        // No live rule: a bare add cannot destroy anything, and there is no
+        // stale dentry to drop because nothing was serving this path.
+        None => nm.add(target, source).is_ok(),
+    }
 }
 
-fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> u32 {
+/// Live `target -> source` for injects, read once per pass.
+type LiveMap = std::collections::HashMap<PathBuf, PathBuf>;
+
+/// Snapshot the engine's inject rules. An unreadable list yields an empty map,
+/// which degrades `add_repointing` to the bare-add branch -- the pre-session
+/// behaviour, which is safe: it cannot delete a rule it does not know about.
+fn live_injects(nm: &Nm) -> LiveMap {
+    nm.list()
+        .map(|l| {
+            crate::nm::parse_list(&l)
+                .into_iter()
+                .filter(|r| r.uid == 0)
+                .filter_map(|r| r.source.map(|src| (r.target, src)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>,
+          live: &LiveMap) -> u32 {
     let mut failed = 0u32;
     if source.is_dir() {
         let entries = match std::fs::read_dir(source) {
@@ -1055,14 +1105,14 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
             let child_src = e.path();
             let child_tgt = target.join(e.file_name());
             if ft.is_dir() {
-                failed += inject(nm, &child_src, &child_tgt, out);
-            } else if add_repointing(nm, &child_tgt, &child_src) {
+                failed += inject(nm, &child_src, &child_tgt, out, live);
+            } else if add_repointing(nm, &child_tgt, &child_src, live) {
                 out.push((child_tgt, child_src));
             } else {
                 failed += 1;
             }
         }
-    } else if add_repointing(nm, target, source) {
+    } else if add_repointing(nm, target, source, live) {
         out.push((target.to_path_buf(), source.to_path_buf()));
     } else {
         failed += 1;
@@ -1663,6 +1713,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     // One re-assert per servable target: the same rules are reachable from both
     // mountpoints of a propagated bind, and re-adding them twice in a burst is
     // exactly what preceded the reboot this path now avoids on my_*.
+    // One snapshot for the whole pass: add_repointing needs to know what a
+    // target is currently served from before it drops anything.
+    let live_map = live_injects(&nm);
     let mut reasserted: HashSet<PathBuf> = HashSet::new();
     // Recorded so `reload` does not prune them: an absorbed rule is not in any
     // module plan, and the reconcile drops whatever the plan does not name. Held
@@ -1717,7 +1770,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 continue;
             }
             let mut refreshed = Vec::new();
-            let fails = inject(&nm, &c.source, &at, &mut refreshed);
+            let fails = inject(&nm, &c.source, &at, &mut refreshed, &live_map);
             if fails > 0 {
                 eprintln!(
                     "nomount: {} unmounted but re-asserting {fails} of its rule(s) failed - that content may have reverted to the stock file",
@@ -1783,7 +1836,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             continue;
         }
         let before = fresh.len();
-        let fails = inject(&nm, &c.source, &c.target, &mut fresh);
+        let fails = inject(&nm, &c.source, &c.target, &mut fresh, &live_map);
         let served = fresh.len() - before;
         if fails == 0 {
             done += 1;

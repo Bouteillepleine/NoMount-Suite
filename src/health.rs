@@ -251,7 +251,7 @@ fn head(path: &str, n: usize) -> Option<Vec<u8>> {
 /// Compares the served path against the rule's source directly. Reading the
 /// target goes through the engine, reading the source does not, so a
 /// disagreement is exactly the drift being looked for.
-fn drift_probe(rules: &[(String, String)]) -> String {
+fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     // Every rule, not a sample. `consistency_probe` samples because each check
     // costs a `su` spawn; this one is two stats and two 4 KiB reads, so on a
     // 262-rule device it is roughly a thousand syscalls -- cheap enough that
@@ -262,23 +262,29 @@ fn drift_probe(rules: &[(String, String)]) -> String {
     // budget.
     const CAP: usize = 20_000;
     let mut checked = 0;
-    for (target, source) in rules.iter().take(CAP) {
-        // Virtual dirs and whiteouts have no bytes to compare, and a source
-        // outside the module tree is not ours to reason about.
-        if !Path::new(source).is_file() {
+    for rule in rules.iter().take(CAP) {
+        // Virtual dirs and whiteouts carry no source and have no bytes to
+        // compare. `source` is typed here rather than string-sliced, which is
+        // what keeps `(public)` and `[UID: N]` rules in the sample instead of
+        // silently dropping every PM-published path.
+        let Some(source) = rule.source.as_deref() else { continue };
+        let target = rule.target.as_path();
+        let Ok(sm) = fs::metadata(source) else { continue };
+        if !sm.is_file() {
             continue;
         }
         let Ok(tm) = fs::metadata(target) else { continue };
-        let Ok(sm) = fs::metadata(source) else { continue };
         if !tm.is_file() {
             continue;
         }
+        let (target, source) = (target.display(), source.display());
         checked += 1;
         if tm.len() != sm.len() {
             return format!("drift:{target}(rule={source} size {} vs {})", tm.len(), sm.len());
         }
         // Equal length proves nothing; compare the bytes.
-        let (Some(a), Some(b)) = (head(target, DRIFT_BYTES), head(source, DRIFT_BYTES)) else {
+        let (ta, sa) = (target.to_string(), source.to_string());
+        let (Some(a), Some(b)) = (head(&ta, DRIFT_BYTES), head(&sa, DRIFT_BYTES)) else {
             continue;
         };
         if a != b {
@@ -332,7 +338,7 @@ fn gather() -> Fingerprint {
         mounts_foreign: split.map(|(t, d)| t - d),
         blocked,
         consistency: consistency_probe(&rules, probe_hidden),
-        served_matches_rule: drift_probe(&rules),
+        served_matches_rule: drift_probe(&crate::nm::parse_list(&list)),
         guard: guard.to_string(),
         manager_umount: match crate::manager::kernel_umount_enabled() {
             Some(true) => "on".to_string(),
@@ -389,7 +395,7 @@ pub fn run_selfcheck(write: bool, json: bool) -> Result<()> {
             ("verdict", J::s(verdict)),
             // The states the caller actually branches on, as booleans. The WebUI
             // used to regex `verdict=(.+)` and ladder on prose.
-            ("healthy", J::Bool(!mismatch && ok_engine && ok_guard && !unverified)),
+            ("healthy", J::Bool(!drift && !mismatch && ok_engine && ok_guard && !unverified)),
             ("engine_up", J::Bool(ok_engine)),
             ("guard_armed", J::Bool(ok_guard)),
             ("consistency_mismatch", J::Bool(mismatch)),
@@ -420,7 +426,7 @@ pub fn run_selfcheck(write: bool, json: bool) -> Result<()> {
 
     // "unverified" is not a pass but not an abort-boot failure either: only a real
     // inconsistency, a down engine, or a tripped guard exits non-zero.
-    if mismatch || !ok_engine || !ok_guard {
+    if drift || mismatch || !ok_engine || !ok_guard {
         std::process::exit(1);
     }
     Ok(())

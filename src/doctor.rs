@@ -580,12 +580,21 @@ pub fn run_doctor(json: bool) -> Result<()> {
         .map(|e| e.target.as_path())
         .collect();
 
+    // Every path we serve, plus every directory on the way down to one. Built
+    // once so the "is this entry ours" test is a hash lookup rather than a scan
+    // of the whole plan -- the scan made this check quadratic in plan size on a
+    // path that runs under `timeout 30` at boot.
+    let ours_set: std::collections::HashSet<&Path> = served
+        .iter()
+        .flat_map(|t| t.ancestors())
+        .collect();
+
     // Is this path one we serve, or a directory on the way down to one? A
     // sub-DIRECTORY that only holds injections is not stock camouflage, and
     // treating it as one is what made a first cut miss `/system/etc/nmt`
     // entirely: it saw the `nested/` child, did not recognise it as ours, and
     // called the directory mixed.
-    let ours = |p: &Path| served.iter().any(|t| *t == p || t.starts_with(p));
+    let ours = |p: &Path| ours_set.contains(p);
 
     // An APK has to live in a directory of its own -- that is the layout
     // PackageManager requires, and stock `/system/priv-app/Mms` holds nothing
@@ -608,7 +617,9 @@ pub fn run_doctor(json: bool) -> Result<()> {
         })
     };
 
-    let mut invented: HashMap<PathBuf, (Vec<String>, usize)> = HashMap::new();
+    // Bucket by parent FIRST. The stock test is a property of the directory, so
+    // doing it per plan entry repeated the same readdir once per file in it.
+    let mut by_parent: HashMap<&Path, (Vec<String>, usize)> = HashMap::new();
     for e in &plan {
         if e.kind == PlanKind::Whiteout {
             continue;
@@ -617,6 +628,13 @@ pub fn run_doctor(json: bool) -> Result<()> {
         if is_partition_root(parent) || parent.parent().is_none() || is_apk_container(parent) {
             continue;
         }
+        let slot = by_parent.entry(parent).or_insert((Vec::new(), 0));
+        slot.0.push(e.module.clone());
+        slot.1 += 1;
+    }
+
+    let mut invented: HashMap<PathBuf, (Vec<String>, usize)> = HashMap::new();
+    for (parent, slot) in by_parent {
         let has_stock = match fs::read_dir(parent) {
             Ok(rd) => rd.flatten().any(|d| !ours(&parent.join(d.file_name()))),
             // Does not exist yet: once the pass runs, nothing but ours is in it.
@@ -625,10 +643,7 @@ pub fn run_doctor(json: bool) -> Result<()> {
         if has_stock {
             continue;
         }
-        let slot = invented.entry(parent.to_path_buf()).or_insert((Vec::new(), 0));
-        // (count accumulates below; the single-file case is filtered after)
-        slot.0.push(e.module.clone());
-        slot.1 += 1;
+        invented.insert(parent.to_path_buf(), slot);
     }
 
     // Report the SHALLOWEST invented directory of a chain. A module shipping
