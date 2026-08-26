@@ -533,19 +533,25 @@ pub(crate) struct Collision {
 ///
 /// The plan is sorted, so "last" is the last module name alphabetically, which
 /// is the documented precedence. This used to be left to `nm.add` overwriting
-/// the earlier rule -- and measured on an OP15, it does not overwrite the way
-/// that assumed. Applying A then B for one target leaves the rule table naming
-/// B while the already-materialised inode keeps serving A's bytes:
+/// the earlier rule, and that only works for SOME targets. Measured on an OP15,
+/// engine v26, with two sources of different content:
 ///
-///     add B on a clean target -> serves B
-///     add A over it           -> STILL serves B   (table now says A)
-///     del, then add A         -> serves A
+///     /system/etc/x.txt      (real ROM dir)  add A, add B -> serves B  ok
+///     /system/etc/nmt/x.txt  (virtual dir)   add A, add B -> serves A  WRONG
 ///
-/// So the table and the filesystem disagree, `selfcheck` reports
-/// consistency=ok throughout (its canary compares root's view against an
-/// unprivileged uid's, never the served bytes against the rule's source), and
-/// neither `vfs refresh` nor `reload` heals it -- reload reconciles against the
-/// table, which is already correct, so it computes no delta at all.
+/// A directory the engine materialised itself keeps serving whichever source
+/// got there first; the rule table takes the second either way. A contested
+/// target is very often inside such a directory, because two modules shipping
+/// the same new path both cause it to be synthesised -- which is exactly how
+/// this was found.
+///
+/// When it goes wrong the table and the filesystem disagree, `selfcheck`
+/// reports consistency=ok throughout (its canary compares root's view against
+/// an unprivileged uid's, never the served bytes against the rule's source),
+/// and neither `vfs refresh` nor `reload` heals it -- reload reconciles against
+/// the table, which is already correct, so it computes no delta at all. Only
+/// del+add re-points, which is what `absorb::add_repointing` does for the same
+/// reason.
 ///
 /// Applying each target exactly once sidesteps the whole thing and makes the
 /// documented precedence true instead of aspirational. The collisions are

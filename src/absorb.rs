@@ -1013,6 +1013,30 @@ fn already_serving(target: &Path, source: &Path) -> bool {
 /// the caller can record a directory bind's children -- the old code returned bare
 /// child targets and the caller then matched them against the parent candidate,
 /// recording nothing for a directory bind (M-S12).
+/// `nm add`, but guaranteed to re-point a target that already has a rule.
+///
+/// A plain `add` over a live rule re-points correctly when the target sits in a
+/// real ROM directory -- and does NOT when it sits inside a directory the engine
+/// materialised itself. Measured on an OP15, engine v26:
+///
+///     /system/etc/nmt_x.txt      (stock dir)    add A, add B -> serves B
+///     /system/etc/nmt/collide    (virtual dir)  add A, add B -> serves A
+///
+/// The rule table takes the second source either way; only the virtual case
+/// keeps serving the first one's bytes. Absorb is exactly where that bites: it
+/// unmounts BEFORE injecting (see the note on unmount ordering above), so if the
+/// re-point silently does nothing, the content the bind was serving is simply
+/// gone for the rest of the session -- no mount, and a rule pointing somewhere
+/// it is not actually reading from.
+///
+/// `del` first sidesteps the whole distinction. It costs one netlink round trip,
+/// fails harmlessly when there was no rule, and the APK re-point path in this
+/// file has always done it this way.
+fn add_repointing(nm: &Nm, target: &Path, source: &Path) -> bool {
+    let _ = nm.del(target);
+    nm.add(target, source).is_ok()
+}
+
 fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> u32 {
     let mut failed = 0u32;
     if source.is_dir() {
@@ -1032,13 +1056,13 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
             let child_tgt = target.join(e.file_name());
             if ft.is_dir() {
                 failed += inject(nm, &child_src, &child_tgt, out);
-            } else if nm.add(&child_tgt, &child_src).is_ok() {
+            } else if add_repointing(nm, &child_tgt, &child_src) {
                 out.push((child_tgt, child_src));
             } else {
                 failed += 1;
             }
         }
-    } else if nm.add(target, source).is_ok() {
+    } else if add_repointing(nm, target, source) {
         out.push((target.to_path_buf(), source.to_path_buf()));
     } else {
         failed += 1;
