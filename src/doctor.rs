@@ -89,12 +89,6 @@ fn owner_of(f: &Finding) -> Option<String> {
         "module hides where the hole remains",
         "whiteout leaves a measurable hole",
         "wide replacement expansion",
-        "mounts its own filesystem",
-        "mounts into other namespaces",
-        "self-mounts, absorbed",
-        "mounts a pseudo-fs",
-        "SUSFS calls, no SUSFS",
-        "rewrites manager setting",
     ];
     if !PER_MODULE.contains(&f.check) {
         return None;
@@ -669,28 +663,6 @@ fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
         }
     }
     None
-}
-
-/// Whether a mount habit can be reported as informational rather than a warning:
-/// we looked at the mount table and the module owns nothing in it, so the branch
-/// that would have mounted was not taken.
-///
-/// `Namespace` is excluded. A module that mounts inside its OWN mount namespace is
-/// invisible in the table we read, by construction -- that absence is the habit's
-/// signature, not evidence against it. Testing it that way made this return true
-/// unconditionally for exactly the habit the warning exists to raise, so that
-/// warning could not fire on any device. The other habits do land in the table we
-/// read, so for them the absence is real evidence.
-///
-/// An unreadable table never demotes: "no evidence" is not "no mount".
-fn looks_inert(
-    habit: crate::preflight::MountHabit,
-    mountinfo_readable: bool,
-    module_owns_a_mount: bool,
-) -> bool {
-    mountinfo_readable
-        && habit != crate::preflight::MountHabit::Namespace
-        && !module_owns_a_mount
 }
 
 pub fn run_doctor(json: bool) -> Result<()> {
@@ -1700,192 +1672,6 @@ pub fn run_doctor(json: bool) -> Result<()> {
         });
     }
 
-    // Static pre-flight: what each module's OWN scripts will do to the mount
-    // table. The checks above describe mounts that already exist; this one runs
-    // off the scripts on disk, so it lands BEFORE boot -- which is the only
-    // point at which the nsenter family can still be avoided rather than
-    // discovered. See preflight.rs for the survey this is sized from.
-    // Which modules actually own a mount right now. A static scan reads every
-    // branch of a script, including ones that never execute -- and modules with
-    // several mount strategies are common. bindhosts is the case that showed
-    // this up: it picks one of ELEVEN modes at boot, its service.sh contains an
-    // `mount -t overlay` for two of them, and on a metamodule device it selects
-    // mode 0, which mounts nothing at all. The finding still read "sets up
-    // overlayfs -- absorb cannot re-serve it, so it stays a real mount" on a
-    // device where `/proc/mounts` had no such mount and the hosts file was being
-    // served as an injection.
-    //
-    // So: keep the static scan (it is the only thing that can warn BEFORE a
-    // boot), but when the mount table is readable and the module owns nothing in
-    // it, say the branch was not taken rather than asserting a mount exists.
-    let mounted_modules: std::collections::HashSet<String> = std::fs::read_to_string(
-        "/proc/self/mountinfo",
-    )
-    .ok()
-    .map(|body| {
-        let rows = crate::absorb::parse_mountinfo(&body);
-        let roots = crate::absorb::fs_roots(&rows);
-        rows.iter()
-            .filter_map(|r| crate::absorb::source_of(r, &roots))
-            .filter_map(|src| crate::absorb::module_dir_of(&src))
-            .filter_map(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .collect()
-    })
-    .unwrap_or_default();
-    let mountinfo_readable = std::fs::metadata("/proc/self/mountinfo").is_ok();
-
-    for h in crate::preflight::scan_all("/data/adb/modules", "meta-nomount") {
-        let inert = looks_inert(
-            h.habit,
-            mountinfo_readable,
-            mounted_modules.contains(&h.module),
-        );
-        let (level, check, detail) = match h.habit {
-            crate::preflight::MountHabit::Namespace => (
-                Level::Warn,
-                "mounts into other namespaces",
-                format!(
-                    "{} uses {} — mounts in other processes' namespaces; absorb cannot \
-                     remove those",
-                    h.module, h.evidence
-                ),
-            ),
-            crate::preflight::MountHabit::ForeignFs => (
-                Level::Warn,
-                "mounts its own filesystem",
-                format!(
-                    "{} sets up {} — absorb cannot re-serve it, so it stays a real mount",
-                    h.module, h.evidence
-                ),
-            ),
-            crate::preflight::MountHabit::Pseudo => (
-                Level::Info,
-                "mounts a pseudo-fs",
-                format!(
-                    "{} mounts {} — kernel pseudo-fs, no module content", h.module, h.evidence
-                ),
-            ),
-            crate::preflight::MountHabit::Absorbable => (
-                Level::Info,
-                "self-mounts, absorbed",
-                format!(
-                    "{} uses {} — absorb takes it over at boot", h.module, h.evidence
-                ),
-            ),
-        };
-        // Softened when the module owns no mount on this boot: the branch that
-        // would have created one was not taken, and stating it as fact is how a
-        // clean device ends up showing a warning nobody can act on.
-        let (level, detail) = if inert && level == Level::Warn {
-            (
-                Level::Info,
-                format!(
-                    "{detail}. Not on this boot though — {} owns no mount in /proc/mounts, so that branch of its scripts did not run.",
-                    h.module
-                ),
-            )
-        } else {
-            (level, detail)
-        };
-        f.push(Finding { level, check, detail });
-    }
-
-    // A module rewriting the root manager's global settings from its own
-    // scripts. Separate from the mount scan because the module that motivated it
-    // makes no mount call at all: it drives a susfs binary, so the mount scan is
-    // blind to it while it flips kernel_umount on every boot.
-    // A SUSFS module on a kernel without SUSFS. This is the case where the
-    // advice really is "remove it", not "adjust it": every hiding call it makes
-    // is a no-op here, while its side effects -- manager settings, props,
-    // mounts -- still apply in full. Checked against the kernel, not assumed, so
-    // it stays silent on a SUSFS build where these modules do their job.
-    // Only claim something about SUSFS when the manager actually answered. On a
-    // manager whose ksud has no `susfs` command (KernelSU Next) the probe says
-    // nothing about the kernel, and treating that as "no SUSFS" told a user with a
-    // SUSFS kernel to delete a working module (KsuNext_NMS#13). The Suite does not
-    // use SUSFS and knows nothing of its internals, so silence is the honest answer
-    // when nobody could tell us.
-    let susfs = crate::manager::susfs_state();
-    if susfs != crate::manager::Susfs::Present {
-        for u in crate::preflight::scan_susfs_users("/data/adb/modules", "meta-nomount") {
-            // "Remove it" is only right for a module whose PURPOSE is SUSFS
-            // hiding. A content module making a best-effort SUSFS call in a
-            // fallback branch loses nothing here -- saying remove would cost the
-            // user the content they installed it for.
-            let known_absent = susfs == crate::manager::Susfs::Absent;
-            // INFO, not Warn -- every case here is. A module that drives SUSFS on a
-            // kernel without it is INERT: it hides nothing, and, crucially, it makes
-            // the user no more detectable than they were. The detection audit is
-            // untouched by it (measured: 12/12 with such a module installed), and
-            // this is the plan check, not the detection one.
-            //
-            // The parts that CAN hurt still warn on their own: a module flipping
-            // manager settings is Warn from scan_manager_writes, and one that mounts
-            // is classified by its mount habit. Nothing is hidden by this.
-            //
-            // People run NoMount deliberately on SUSFS-capable kernels and were
-            // being shown an amber for a module doing nothing to them. An amber a
-            // reader learns to dismiss costs more than the note is worth.
-            let (level, detail) = match (u.susfs_is_its_purpose, known_absent) {
-                (true, true) => (
-                    Level::Info,
-                    format!(
-                        "{} is a SUSFS module and this kernel has no SUSFS — it hides \
-                         nothing here while its side effects still apply. Remove it",
-                        u.module
-                    ),
-                ),
-                // Same module, but we could not confirm the kernel. State the
-                // condition, do not assert it, and do not tell anyone to delete
-                // something that may well be working.
-                (true, false) => (
-                    Level::Info,
-                    format!(
-                        "{} is a SUSFS module. This manager cannot report whether the kernel \
-                         has SUSFS — if it does not, the module hides nothing here while its \
-                         side effects still apply",
-                        u.module
-                    ),
-                ),
-                (false, true) => (
-                    Level::Info,
-                    format!(
-                        "{} makes SUSFS calls (no SUSFS here, so they no-op) but ships its \
-                         own content — keep it", u.module
-                    ),
-                ),
-                (false, false) => (
-                    Level::Info,
-                    format!(
-                        "{} makes SUSFS calls but ships its own content — keep it", u.module
-                    ),
-                ),
-            };
-            let check = if known_absent { "SUSFS calls, no SUSFS" } else { "SUSFS calls" };
-            f.push(Finding { level, check, detail });
-        }
-    }
-
-    for w in crate::preflight::scan_manager_writes("/data/adb/modules", "meta-nomount") {
-        let shown = w.value.clone().unwrap_or_else(|| "<computed>".into());
-        let (level, detail) = match w.harm {
-            Some(why) => (
-                Level::Warn,
-                format!(
-                    "{} sets {}={} every boot — your manual change will not stick. {}",
-                    w.module, w.key, shown, why
-                ),
-            ),
-            None => (
-                Level::Info,
-                format!(
-                    "{} sets {}={} every boot", w.module, w.key, shown
-                ),
-            ),
-        };
-        f.push(Finding { level, check: "rewrites manager setting", detail });
-    }
-
     for (part, n) in &fd_note {
         f.push(Finding {
             level: Level::Info,
@@ -2017,29 +1803,6 @@ pub fn run_doctor(json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
 
-    /// The namespace habit is invisible in our mount table BY CONSTRUCTION, so
-    /// its absence there must never be read as "it did not happen". This is the
-    /// regression: demoting on that absence silenced the warning on every device.
-    #[test]
-    fn an_unseen_namespace_mount_is_not_evidence_of_no_mount() {
-        use crate::preflight::MountHabit::*;
-
-        // Table read, module owns nothing in it -- the only case that can demote.
-        assert!(!looks_inert(Namespace, true, false), "namespace must stay a warning");
-        assert!(looks_inert(ForeignFs, true, false));
-        assert!(looks_inert(Absorbable, true, false));
-        assert!(looks_inert(Pseudo, true, false));
-
-        // Owns a mount: it demonstrably happened, nothing demotes.
-        for h in [Namespace, ForeignFs, Absorbable, Pseudo] {
-            assert!(!looks_inert(h, true, true));
-        }
-
-        // Table unreadable: no evidence is not no mount.
-        for h in [Namespace, ForeignFs, Absorbable, Pseudo] {
-            assert!(!looks_inert(h, false, false));
-        }
-    }
     use super::*;
     use crate::nm::LiveKind;
 
