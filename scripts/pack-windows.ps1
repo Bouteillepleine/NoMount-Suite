@@ -65,7 +65,11 @@ $payload = @(
 $lines = foreach ($rel in $payload) {
     $p = Join-Path $stage ($rel -replace '/', '\')
     $h = (Get-FileHash -Algorithm SHA256 -Path $p).Hash.ToLower()
-    "$h *./$rel"
+    # TEXT mode: two spaces, no asterisk. The "<hash> *path" binary-mode marker
+    # is accepted by busybox and coreutils but NOT by Android's toybox, which
+    # reads the asterisk as the first character of the filename and fails every
+    # entry -- and customize.sh aborts the install when the check fails.
+    "$h  ./$rel"
 }
 [IO.File]::WriteAllText((Join-Path $stage 'nomount.sha256sums'), (($lines -join "`n") + "`n"))
 

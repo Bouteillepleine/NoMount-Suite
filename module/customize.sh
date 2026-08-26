@@ -13,15 +13,30 @@ ui_print "- version $(grep_prop version "$MODPATH/module.prop")"
 SUMS="$MODPATH/nomount.sha256sums"
 if [ -f "$SUMS" ]; then
     if command -v sha256sum >/dev/null 2>&1; then
-        if (cd "$MODPATH" && sha256sum -c "$SUMS" >/dev/null 2>&1); then
+        # KEEP the output. `>/dev/null 2>&1` threw away the one thing that tells a
+        # corrupt download apart from a manifest this device cannot read at all --
+        # and the second case really happened: a manifest written in BINARY mode
+        # ("<hash> *./path") makes toybox read the asterisk as part of the
+        # filename, so every entry fails to open and the install aborts with the
+        # reason hidden. An abort with no reason is a bug report nobody can act on.
+        _sumout=$(cd "$MODPATH" && sha256sum -c "$SUMS" 2>&1)
+        if [ $? -eq 0 ]; then
             ui_print "- Integrity check passed ($(wc -l < "$SUMS") files)"
         else
             ui_print "*********************************************************"
             ui_print "! Integrity check FAILED — a file does not match its hash."
             ui_print "! This zip is corrupted or was modified. Re-download it."
+            ui_print "! What sha256sum -c reported:"
+            # Only the failing lines, and a bounded number of them: a manifest
+            # this device cannot parse fails EVERY entry, and 250 identical
+            # lines scrolled the actual message off the recovery screen.
+            printf '%s\n' "$_sumout" | grep -v ': OK$' | head -n 8 | while IFS= read -r _l; do
+                ui_print "!   $_l"
+            done
             ui_print "*********************************************************"
             abort "- Aborting install: integrity check failed"
         fi
+        unset _sumout
     else
         ui_print "- sha256sum unavailable; skipping integrity check"
     fi

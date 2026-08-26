@@ -202,13 +202,12 @@ setup_toolchain() {
         exit 1
     fi
     echo "==> NDK: $ndk"
-    if [ -f "/home/president/.cargo/bin/cargo" ]; then
-        export RUSTUP_HOME=/home/president/.rustup
-        export CARGO_HOME=/home/president/.cargo
-        CARGO="/home/president/.cargo/bin/cargo"
-    else
-        CARGO="cargo"
-    fi
+    # Whatever cargo is on PATH, or whatever $CARGO already names. This used to
+    # hardcode one maintainer's home directory (/home/president/.cargo) and force
+    # RUSTUP_HOME/CARGO_HOME to match it, so on that machine every release was
+    # built by a toolchain nobody else could reproduce, and on every other machine
+    # the block was dead weight. Set CARGO=... in the environment to pick one.
+    CARGO="${CARGO:-cargo}"
     export PATH="$NDK_BIN:$PATH"
 }
 
@@ -232,6 +231,32 @@ build_rust() {
     echo "==> [$profile] All Rust targets built"
 }
 
+
+# Does this `nomount` binary actually answer with the version being stamped?
+#
+# Two ways, because the packaging host is usually not the target. Running it is
+# the direct answer and works when packaging on arm64 (or under qemu-user
+# binfmt); otherwise read the literal out of the file, which is exact rather
+# than heuristic: the version is `env!("CARGO_PKG_VERSION")`, a compile-time
+# string constant, so a binary built at 1.3.92 contains "1.3.92" and cannot
+# contain "1.3.94". Verified against a stripped aarch64 release build, where the
+# expected version is the only version-shaped literal present.
+verify_binary_version() {
+    local bin="$1" want="$2" got=""
+    if got="$("$bin" version 2>/dev/null)" && [ -n "$got" ]; then
+        case "$got" in
+            *"$want"*) return 0 ;;
+            *) echo "       binary reports: $got" >&2; return 1 ;;
+        esac
+    fi
+    if grep -qaF -- "$want" "$bin"; then
+        return 0
+    fi
+    local seen
+    seen="$(grep -aoE '[0-9]+\.[0-9]+\.[0-9]+' "$bin" 2>/dev/null | sort -u | tr '\n' ' ')"
+    echo "       binary contains no \"$want\"; version-shaped literals: ${seen:-<none>}" >&2
+    return 1
+}
 
 # Package one ZIP from a given Rust profile
 package_zip() {
@@ -284,44 +309,30 @@ package_zip() {
 
         local nomount_src="$PROJECT_ROOT/target/$target/$target_subdir/nomount"
         if [ -f "$nomount_src" ]; then
-            # The SAME staleness guard the fallback arm below has had all along.
-            # Without it: build at v1.3.88, then run package.sh with no --build,
-            # which bumps to v1.3.89 and stamps module.prop and the WebUI -- and
-            # ships the 1.3.88 binary inside. The WebUI reports the BINARY's
-            # version, so the device then disagrees with the module it came from.
-            local _stale
-            _stale="$(find "$PROJECT_ROOT/src" -newer "$nomount_src" -print -quit 2>/dev/null)"
-            if [ -n "$_stale" ]; then
-                echo "FATAL: $nomount_src predates the Rust sources (newer: $_stale)." >&2
-                echo "       Re-run with --build." >&2
-                rm -rf "$staging"
-                exit 1
-            fi
             cp "$nomount_src" "$staging/bin/$abi/nomount"; found_nomount=$((found_nomount + 1))
         elif [ -f "$MODULE_DIR/bin/$abi/nomount" ]; then
-            # The SAME staleness guard nm gets 20 lines below, which this arm did
-            # not have. Without it, `package.sh` (no --build) with an empty or
-            # partial target/ dir silently packages an arbitrarily old `nomount`
-            # -- and the version stamping at the top of this script has already
-            # written the NEW version into module.prop, so the zip is labelled
-            # v1.3.51 while the binary inside answers whatever it was built as.
-            # That is the "a version that lies about itself" failure the stamping
-            # comment says a release must never produce, reached the other way.
-            # src/ only. Cargo.toml was rewritten by the version bump at the top
-            # of THIS run, seconds ago, so including it made the guard fire every
-            # time -- packaging without --build always died, blaming a stale
-            # prebuilt for what is really a missing build.
-            local _newer
-            _newer="$(find "$PROJECT_ROOT/src"                         -newer "$MODULE_DIR/bin/$abi/nomount" -print -quit 2>/dev/null)"
-            if [ -n "$_newer" ]; then
-                echo "FATAL: $MODULE_DIR/bin/$abi/nomount predates the Rust sources" >&2
-                echo "       (newer: $_newer). Re-run with --build." >&2
-                rm -rf "$staging"
-                exit 1
-            fi
             echo "    !! nomount/$abi: NO built binary in target/$target/$target_subdir —" >&2
             echo "       packaging the committed prebuilt from module/bin/$abi instead." >&2
             cp "$MODULE_DIR/bin/$abi/nomount" "$staging/bin/$abi/nomount"; found_nomount=$((found_nomount + 1))
+        fi
+        # Ask the binary what version it is, instead of guessing from mtimes.
+        #
+        # Both arms above used to be policed by `find "$PROJECT_ROOT/src" -newer
+        # <binary>`, which deliberately excluded Cargo.toml -- and the version
+        # string is `env!("CARGO_PKG_VERSION")`, so it comes FROM Cargo.toml. A
+        # release commit touches only Cargo.toml, Cargo.lock and module.prop, so
+        # a version-bump-only release could never trip that guard. It did not:
+        # the shipped v1.3.94 zip carries a binary that reports 1.3.92, confirmed
+        # by hash on-device. A timestamp cannot answer this question; the binary
+        # can, and that also makes the -newer logic redundant.
+        if [ -f "$staging/bin/$abi/nomount" ]; then
+            verify_binary_version "$staging/bin/$abi/nomount" "${VERSION#v}" || {
+                echo "FATAL: [$profile] bin/$abi/nomount does not report ${VERSION#v}." >&2
+                echo "       The zip would be labelled ${VERSION} around a binary that" >&2
+                echo "       answers something else. Re-run with --build." >&2
+                rm -rf "$staging"
+                exit 1
+            }
         fi
 
         # nm is arch-shared C, built by build_nm() above (or by CI) into the target
@@ -384,17 +395,67 @@ package_zip() {
     mkdir -p "$staging/META-INF/com/google/android"
     cat > "$staging/META-INF/com/google/android/update-binary" << 'UPDATER'
 #!/sbin/sh
+# Recovery installer.
+#
+# Everything that makes an install SAFE lives in customize.sh: the sha256
+# manifest check, the "only one metamodule" refusal (two metamodules fighting in
+# post-fs-data is a bootloop vector), the $NMDIR mode + SELinux label, and the
+# bootcount reset. This script used to unzip, chmod, print a success line and
+# exit 0 -- skipping all four, and reporting success even when the unzip failed.
+# So it now builds the handful of helpers customize.sh expects and sources it.
 
 OUTFD=/proc/self/fd/$2
 ZIPFILE="$3"
 
-ui_print() { echo -e "ui_print $1\nui_print" >> $OUTFD; }
+# Two echoes rather than `echo -e`: recovery's /sbin/sh is usually busybox or
+# toybox ash, where -e is not a flag and gets printed literally.
+ui_print() { echo "ui_print $1" >> $OUTFD; echo "ui_print" >> $OUTFD; }
+abort() { ui_print "$1"; rm -rf "$MODPATH"; exit 1; }
+grep_prop() {
+    _gp_re="s/^$1=//p"
+    shift
+    sed -n "$_gp_re" "$@" 2>/dev/null | head -n 1
+}
+# The manager's set_perm, including its FIFTH argument. Dropping the SELinux
+# context is not cosmetic here: customize.sh labels $NMDIR adb_data_file
+# explicitly because the default (system_file) is readable by every app domain.
+set_perm() {
+    chown "$2:$3" "$1" 2>/dev/null
+    chmod "$4" "$1" 2>/dev/null
+    if [ -n "$5" ]; then
+        chcon "$5" "$1" 2>/dev/null
+    else
+        chcon u:object_r:system_file:s0 "$1" 2>/dev/null
+    fi
+    return 0
+}
 
 MODPATH="${MODPATH:-/data/adb/modules/meta-nomount}"
-mkdir -p "$MODPATH"
-unzip -o "$ZIPFILE" -d "$MODPATH" >&2
-chmod 755 "$MODPATH"/*.sh "$MODPATH"/bin/*/nomount "$MODPATH"/bin/*/nm 2>/dev/null || true
-ui_print "NoMount installed via recovery"
+mkdir -p "$MODPATH" || { ui_print "! cannot create $MODPATH"; exit 1; }
+
+# -x META-INF: this installer is not module content, and unzipping it into the
+# module directory left an update-binary sitting under /data/adb/modules. And the
+# status is CHECKED -- the old `exit 0` reported a successful install of nothing
+# when the unzip had failed.
+if ! unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" >&2; then
+    ui_print "*********************************************************"
+    ui_print "! Unpacking the zip FAILED - nothing was installed."
+    ui_print "! The download is truncated or the storage is full."
+    ui_print "*********************************************************"
+    rm -rf "$MODPATH"
+    exit 1
+fi
+
+chmod 755 "$MODPATH"/*.sh "$MODPATH"/bin/*/nomount "$MODPATH"/bin/*/nm 2>/dev/null
+
+# Sourced, not exec'd, so customize.sh's abort() is this script's abort().
+if [ -f "$MODPATH/customize.sh" ]; then
+    . "$MODPATH/customize.sh"
+else
+    ui_print "! customize.sh is missing from this zip - install NOT verified."
+fi
+
+ui_print "- NoMount installed via recovery"
 exit 0
 UPDATER
     # 0755: some recoveries EXEC update-binary rather than handing it to sh. The
@@ -418,13 +479,31 @@ UPDATER
     # (the recovery installer, not staged into the module) and the manifest
     # itself. customize.sh verifies this on-device to catch a corrupted or
     # tampered download before it runs the root binary.
+    #
+    # TEXT MODE, forced. On a Windows/Git-Bash host `sha256sum` defaults to
+    # BINARY mode and writes "<hash> *./path" -- one space and an asterisk.
+    # busybox and coreutils both accept that marker; Android's toybox does not,
+    # and reads the `*` as the first character of the filename, so EVERY entry
+    # fails to open and customize.sh aborts the install. Demonstrated on-device.
+    # The sed normalises whichever form the host produced into the two-space text
+    # form toybox reads, so this no longer depends on the packaging host.
     (
         cd "$staging"
         find . -type f \
             ! -path './META-INF/*' \
             ! -name 'nomount.sha256sums' \
-            -print0 | sort -z | xargs -0 sha256sum > nomount.sha256sums
+            -print0 | sort -z | xargs -0 sha256sum \
+            | sed 's/^\([0-9a-f]\{64\}\) \*/\1  /' > nomount.sha256sums
     )
+    # ASSERT it, the same way the WebUI stamping above is asserted: a manifest
+    # that still carries a binary-mode marker is one every Android install will
+    # reject, and the only place that shows up is on someone's phone.
+    if grep -q '^[0-9a-f]\{64\} \*' "$staging/nomount.sha256sums"; then
+        echo "FATAL: nomount.sha256sums is in binary mode (<hash> *path)." >&2
+        echo "       Android's toybox cannot verify that form." >&2
+        rm -rf "$staging"
+        exit 1
+    fi
     echo "    Sums:    $(wc -l < "$staging/nomount.sha256sums") files hashed"
 
     rm -f "$out_path"
