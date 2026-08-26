@@ -1373,7 +1373,39 @@ pub fn run_doctor(json: bool) -> Result<()> {
     // off the scripts on disk, so it lands BEFORE boot -- which is the only
     // point at which the nsenter family can still be avoided rather than
     // discovered. See preflight.rs for the survey this is sized from.
+    // Which modules actually own a mount right now. A static scan reads every
+    // branch of a script, including ones that never execute -- and modules with
+    // several mount strategies are common. bindhosts is the case that showed
+    // this up: it picks one of ELEVEN modes at boot, its service.sh contains an
+    // `mount -t overlay` for two of them, and on a metamodule device it selects
+    // mode 0, which mounts nothing at all. The finding still read "sets up
+    // overlayfs -- absorb cannot re-serve it, so it stays a real mount" on a
+    // device where `/proc/mounts` had no such mount and the hosts file was being
+    // served as an injection.
+    //
+    // So: keep the static scan (it is the only thing that can warn BEFORE a
+    // boot), but when the mount table is readable and the module owns nothing in
+    // it, say the branch was not taken rather than asserting a mount exists.
+    let mounted_modules: std::collections::HashSet<String> = std::fs::read_to_string(
+        "/proc/self/mountinfo",
+    )
+    .ok()
+    .map(|body| {
+        let rows = crate::absorb::parse_mountinfo(&body);
+        let roots = crate::absorb::fs_roots(&rows);
+        rows.iter()
+            .filter_map(|r| crate::absorb::source_of(r, &roots))
+            .filter_map(|src| crate::absorb::module_dir_of(&src))
+            .filter_map(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect()
+    })
+    .unwrap_or_default();
+    let mountinfo_readable = std::fs::metadata("/proc/self/mountinfo").is_ok();
+
     for h in crate::preflight::scan_all("/data/adb/modules", "meta-nomount") {
+        // Demote to informational when we can see it did not happen. Never when
+        // the table could not be read -- "no evidence" is not "no mount".
+        let inert = mountinfo_readable && !mounted_modules.contains(&h.module);
         let (level, check, detail) = match h.habit {
             crate::preflight::MountHabit::Namespace => (
                 Level::Warn,
@@ -1406,6 +1438,20 @@ pub fn run_doctor(json: bool) -> Result<()> {
                     "{} uses {} — absorb takes it over at boot", h.module, h.evidence
                 ),
             ),
+        };
+        // Softened when the module owns no mount on this boot: the branch that
+        // would have created one was not taken, and stating it as fact is how a
+        // clean device ends up showing a warning nobody can act on.
+        let (level, detail) = if inert && level == Level::Warn {
+            (
+                Level::Info,
+                format!(
+                    "{detail}. Not on this boot though — {} owns no mount in /proc/mounts,                      so that branch of its scripts did not run.",
+                    h.module
+                ),
+            )
+        } else {
+            (level, detail)
         };
         f.push(Finding { level, check, detail });
     }
