@@ -140,6 +140,15 @@ ui_print "  config: $CONF"
 # file (uidhide) now; an existing shared file is split on first read.
 [ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
 
+# Executable, not just readable. `ksud module install` leaves the scripts it
+# does not know about at 0644, and whether the manager runs this one as
+# `sh uninstall.sh` or execs it directly is not something we can read off the
+# binary -- so the difference is only discovered by uninstalling, which is
+# exactly when nobody is watching. This file had never shipped in a zip at
+# all until now, so it has never run anywhere: give it the bit and the
+# question stops mattering.
+[ -f "$MODPATH/uninstall.sh" ] && set_perm "$MODPATH/uninstall.sh" 0 0 0755
+
 # --- Cloak (pathhide maps/fd) add-on ---
 [ -f "$MODPATH/scan.sh" ] && set_perm "$MODPATH/scan.sh" 0 0 0755
 [ -f "$NMDIR/pathhide.conf" ] || echo "# NoMount Cloak — pathhide rule list (managed by WebUI › Tools › Cloak)" > "$NMDIR/pathhide.conf"
