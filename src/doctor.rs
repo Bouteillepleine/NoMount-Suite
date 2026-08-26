@@ -9,7 +9,7 @@
 //! Live rules are cross-checked too when the engine is up, because some hazards can only
 //! come from a hand-written `nm add` (the plan can no longer produce them).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -229,6 +229,177 @@ fn is_partition_root(p: &Path) -> bool {
 /// whiteouts and virtual dirs too, which the pre-typed parser dropped.
 fn parse_live(list: &str) -> Vec<LiveRule> {
     crate::nm::parse_list(list)
+}
+
+/// Does the engine actually hold the rules the plan describes -- and nothing else?
+///
+/// doctor already read both halves and never compared them. It resolves the whole
+/// plan for the checks above, then dumps the live rule list for the per-rule
+/// checks, and the only trace of the two ever meeting was the header line.
+/// Measured on an OP15: `258 injects, 0 whiteouts, 0 my_* binds | live: 261 rules`
+/// followed by `summary: 0 errors, 0 warnings`. Three live rules the plan could
+/// not account for, and the verdict was clean.
+///
+/// The accounting is [`crate::mount::run_reload`]'s, read-only. Three exemptions
+/// are load-bearing, and without them this cries wolf on a healthy device:
+///
+///   * per-UID rules (`uid != 0`) come from the hide path, not from any module
+///     tree, and `nm del` cannot even address them;
+///   * a durable whiteout (`nomount whiteout add`) hides a STOCK path, so it has
+///     no module and no plan entry;
+///   * an absorbed rule was created from another module's bind, whose source can
+///     sit anywhere in that module -- including where the plan walk never goes.
+///
+/// Reload's prune pass exempts exactly these, so a rule it would keep is not one
+/// doctor may call unexplained. Virtual dirs are the engine materialising a
+/// parent for a rule, never a rule in their own right.
+///
+/// When either durable list cannot be READ, no extras are reported at all: the
+/// alternative is naming every whiteout and every absorbed rule on the device as
+/// unaccounted-for, which is the same collapse-an-error-into-an-empty-set that
+/// reload refuses by hand.
+fn reconcile_plan_and_live(
+    plan: &[PlanEntry],
+    live: &[LiveRule],
+    durable: Option<&HashSet<PathBuf>>,
+    absorbed: Option<&HashSet<PathBuf>>,
+) -> Vec<Finding> {
+    let mut out = Vec::new();
+    // Only the two kinds that become rules. A my_* bind is a real mount, tracked
+    // in binds.list, and produces no engine rule at all.
+    let planned: HashMap<&Path, &PlanEntry> = plan
+        .iter()
+        .filter(|e| e.kind != PlanKind::Bind)
+        .map(|e| (e.target.as_path(), e))
+        .collect();
+    let global: HashMap<&Path, &LiveRule> = live
+        .iter()
+        .filter(|r| r.uid == 0 && r.kind != crate::nm::LiveKind::VirtualDir)
+        .map(|r| (r.target.as_path(), r))
+        .collect();
+
+    // Planned but not live, or live with the wrong source/kind. Either way the
+    // module's file is not being served the way the plan says it is.
+    let mut missing: Vec<String> = Vec::new();
+    let mut wrong: Vec<String> = Vec::new();
+    for (t, e) in &planned {
+        match global.get(t) {
+            None => missing.push(format!("{} (from {})", t.display(), e.module)),
+            Some(r) => {
+                let agrees = match (e.kind, r.kind) {
+                    (PlanKind::Inject, crate::nm::LiveKind::Inject) => {
+                        r.source.as_deref() == Some(e.source.as_path())
+                    }
+                    (PlanKind::Whiteout, crate::nm::LiveKind::Whiteout) => true,
+                    _ => false,
+                };
+                if !agrees {
+                    wrong.push(format!(
+                        "{} (plan: {} from {}; live: {})",
+                        t.display(),
+                        match e.kind {
+                            PlanKind::Whiteout => "whiteout".to_string(),
+                            _ => e.source.display().to_string(),
+                        },
+                        e.module,
+                        match (&r.kind, &r.source) {
+                            (crate::nm::LiveKind::Inject, Some(s)) => s.display().to_string(),
+                            (k, _) => format!("{k:?}"),
+                        }
+                    ));
+                }
+            }
+        }
+    }
+
+    // Live and unexplained. A failure to READ either exemption list means the
+    // question cannot be answered, not that the answer is "all of them".
+    let extra: Option<Vec<String>> = match (durable, absorbed) {
+        (Some(d), Some(a)) => Some(
+            global
+                .iter()
+                .filter(|(t, _)| {
+                    !planned.contains_key(*t) && !d.contains(**t) && !a.contains(**t)
+                })
+                .map(|(t, r)| match (&r.kind, &r.source) {
+                    (crate::nm::LiveKind::Inject, Some(s)) => {
+                        format!("{} -> {}", t.display(), s.display())
+                    }
+                    _ => format!("{} (whiteout)", t.display()),
+                })
+                .collect(),
+        ),
+        _ => None,
+    };
+
+    // Three lists, three findings, each naming a handful. A device where the plan
+    // and the engine have genuinely diverged can diverge by hundreds of rules, and
+    // one line each is what keeps this from burying every other finding.
+    let name = |v: &[String]| -> String {
+        let shown: Vec<&str> = v.iter().take(5).map(String::as_str).collect();
+        let more = v.len().saturating_sub(shown.len());
+        format!(
+            "{}{}",
+            shown.join(", "),
+            if more > 0 { format!(", and {more} more") } else { String::new() }
+        )
+    };
+    if !missing.is_empty() {
+        missing.sort();
+        out.push(Finding {
+            level: Level::Warn,
+            check: "planned rule not live",
+            detail: format!(
+                "{} rule(s) the plan describes are not in the engine, so those files are NOT \
+                 being served -- the stock ROM version is what apps see. Run `nomount reload`; \
+                 if they do not come back, the add failed. {}",
+                missing.len(),
+                name(&missing)
+            ),
+        });
+    }
+    if !wrong.is_empty() {
+        wrong.sort();
+        out.push(Finding {
+            level: Level::Error,
+            check: "live rule disagrees with the plan",
+            detail: format!(
+                "{} live rule(s) name a different source or kind than the plan resolves for the \
+                 same path, so the content being served is not the content the module set \
+                 implies. Run `nomount reload`. {}",
+                wrong.len(),
+                name(&wrong)
+            ),
+        });
+    }
+    match extra {
+        Some(mut e) if !e.is_empty() => {
+            e.sort();
+            out.push(Finding {
+                level: Level::Warn,
+                check: "live rule the plan cannot account for",
+                detail: format!(
+                    "{} rule(s) are live that no enabled module, durable whiteout or absorbed \
+                     mount explains -- a hand-written `nomount vfs add`, or a leftover from a \
+                     module removed without a reload. `nomount reload` prunes them. {}",
+                    e.len(),
+                    name(&e)
+                ),
+            });
+        }
+        None => {
+            out.push(Finding {
+                level: Level::Info,
+                check: "live rules not fully accounted for",
+                detail: "the durable whiteout list or the absorbed-rule record could not be \
+                         read, so live rules were checked for missing entries only -- an extra \
+                         rule would not have been reported."
+                    .to_string(),
+            });
+        }
+        _ => {}
+    }
+    out
 }
 
 
@@ -1099,6 +1270,24 @@ pub fn run_doctor(json: bool) -> Result<()> {
         if let Ok(list) = listed {
             let live = parse_live(&list);
             live_count = live.len();
+            // The comparison the header line only ever hinted at. The two
+            // exemption lists are read here, and an unreadable one is passed
+            // through as None rather than as an empty set -- the same distinction
+            // `reload` refuses to collapse before it prunes anything.
+            let durable: Option<HashSet<PathBuf>> = crate::whiteout::read()
+                .ok()
+                .map(|v| v.into_iter().map(PathBuf::from).collect());
+            let absorbed: Option<HashSet<PathBuf>> =
+                crate::absorb::read_absorbed_targets().ok().map(|mut a| {
+                    a.extend(crate::absorb::absorbed_tmpfs_targets());
+                    a
+                });
+            f.extend(reconcile_plan_and_live(
+                &plan,
+                &live,
+                durable.as_ref(),
+                absorbed.as_ref(),
+            ));
             for r in &live {
                 let target = &r.target;
                 // Broadened from is_rom_apk: the opt-out now covers a package's whole
@@ -1888,6 +2077,85 @@ mod tests {
         assert_eq!(got[0].2, 3);
         assert!(got[0].0.ends_with(".replace"));
         assert_eq!(got[1].2, 1);
+    }
+
+    fn inj(module: &str, target: &str, source: &str) -> PlanEntry {
+        PlanEntry {
+            module: module.to_string(),
+            target: PathBuf::from(target),
+            source: PathBuf::from(source),
+            kind: PlanKind::Inject,
+        }
+    }
+
+    /// The gap this check closes. On an OP15 doctor printed
+    /// `258 injects ... live: 261 rules` and then `0 errors, 0 warnings`: it read
+    /// the plan, it read the live rules, and it never compared them.
+    #[test]
+    fn a_plan_and_a_rule_set_that_disagree_are_a_finding() {
+        let plan = vec![
+            inj("m", "/system/etc/a", "/data/adb/modules/m/system/etc/a"),
+            inj("m", "/system/etc/served-by-nobody", "/data/adb/modules/m/system/etc/x"),
+        ];
+        let live = parse_live(
+            "/system/etc/a -> /data/adb/modules/m/system/etc/a
+             /system/etc/stray -> /data/adb/modules/gone/system/etc/stray
+",
+        );
+        let empty = HashSet::new();
+        let f = reconcile_plan_and_live(&plan, &live, Some(&empty), Some(&empty));
+        let checks: Vec<&str> = f.iter().map(|x| x.check).collect();
+        assert!(checks.contains(&"planned rule not live"), "{checks:?}");
+        assert!(checks.contains(&"live rule the plan cannot account for"), "{checks:?}");
+        assert!(!checks.contains(&"live rule disagrees with the plan"), "{checks:?}");
+    }
+
+    /// The three exemptions reload's prune pass makes, made here too. Without
+    /// them every durable whiteout, every absorbed rule and every per-UID rule on
+    /// a healthy device reads as unaccounted-for.
+    #[test]
+    fn durable_absorbed_and_per_uid_rules_are_not_unexplained() {
+        let plan = vec![inj("m", "/system/etc/a", "/data/adb/modules/m/system/etc/a")];
+        let live = parse_live(
+            "/system/etc/a -> /data/adb/modules/m/system/etc/a
+             /system/etc/hidden (whiteout)
+             /product/app/X/X.apk -> /data/adb/rvhc/x.apk
+             /system/etc/b -> /data/adb/modules/m/system/etc/b [UID: 10123]
+             /system/etc/nmt (virtual dir)
+",
+        );
+        let durable: HashSet<PathBuf> = [PathBuf::from("/system/etc/hidden")].into_iter().collect();
+        let absorbed: HashSet<PathBuf> =
+            [PathBuf::from("/product/app/X/X.apk")].into_iter().collect();
+        let f = reconcile_plan_and_live(&plan, &live, Some(&durable), Some(&absorbed));
+        assert!(f.is_empty(), "{:?}", f.iter().map(|x| x.detail.as_str()).collect::<Vec<_>>());
+    }
+
+    /// A source that moved between modules is the dangerous shape: the rule count
+    /// still matches, so nothing that only counts could ever see it.
+    #[test]
+    fn a_live_rule_naming_another_source_is_an_error() {
+        let plan = vec![inj("winner", "/system/etc/a", "/data/adb/modules/winner/system/etc/a")];
+        let live = parse_live("/system/etc/a -> /data/adb/modules/loser/system/etc/a
+");
+        let empty = HashSet::new();
+        let f = reconcile_plan_and_live(&plan, &live, Some(&empty), Some(&empty));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].check, "live rule disagrees with the plan");
+        assert_eq!(f[0].level, Level::Error);
+    }
+
+    /// An unreadable exemption list must not turn every whiteout on the device
+    /// into an "unaccounted-for" rule.
+    #[test]
+    fn an_unreadable_exemption_list_reports_nothing_extra() {
+        let plan: Vec<PlanEntry> = Vec::new();
+        let live = parse_live("/system/etc/hidden (whiteout)
+");
+        let f = reconcile_plan_and_live(&plan, &live, None, None);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].check, "live rules not fully accounted for");
+        assert_eq!(f[0].level, Level::Info);
     }
 
     /// A report, never a cap: the levels escalate but nothing is ever withheld.
