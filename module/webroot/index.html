@@ -535,7 +535,13 @@
   .txin::placeholder { color: var(--faint); }
   html[data-theme="light"] .txin { background: rgba(16,26,48,0.05); }
 
-  .banner { background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.3); color: #ffe6a8; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: none; line-height: 1.5; }
+  /* `display:none` here beat `el.hidden = false`, so BOTH global banners -- the
+     root-manager umount warning and the bootloop-guard notice -- have never
+     rendered on any device, in any state. `hidden` only removes the UA rule; an
+     author rule outranks it. Drive visibility from the attribute instead, so the
+     markup and the JS agree. */
+  .banner { background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.3); color: #ffe6a8; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: block; line-height: 1.5; }
+  .banner[hidden] { display: none; }
   .foot { text-align: center; color: var(--faint); font-size: 11px; margin-top: 16px; line-height: 1.7; }
 
   /* ---- rules-by-module breakdown bar (Rules tab) ------------------------- */
@@ -842,7 +848,7 @@
   <div class="banner warn" id="incwarn" hidden></div>
 
   <section class="tab on" id="tab-status">
-  <div class="banner" id="banner">Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
+  <div class="banner" id="banner" hidden>Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
 
   <!-- HERO: engine status -->
   <div class="card hero">
@@ -1347,7 +1353,7 @@
   // silently turns the rest of the tag into garbage.
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  document.getElementById("banner").style.display = (KSU && KSU.exec) ? "none" : "block";
+  document.getElementById("banner").hidden = !!(KSU && KSU.exec);
 
   function exec(cmd, opts = {}) {
     return new Promise((resolve) => {
@@ -2176,7 +2182,12 @@
     //
     // "Nothing open" is the test, not "everything passed": an accepted finding
     // or an unverified check is still worth showing.
-    const quiet = !open.length && !unmeasured.length && !accepted.length;
+    // NEVER quiet with the engine down. With it dead the target checks correctly
+    // report n/a and the mount checks correctly pass, so all three buckets are
+    // empty and `quiet` was true -- printing a green "clean" pill directly under
+    // a chip that reads red "engine down". The quiet card re-opened the exact
+    // hole the health line had just been hardened against.
+    const quiet = !open.length && !unmeasured.length && !accepted.length && d.engine !== null;
     if (quiet) {
       const n = (d.summary && d.summary.passed) || 0;
       const naN = (d.summary && d.summary.not_applicable) || 0;
@@ -2237,6 +2248,12 @@
         "the raw output below is everything it printed.</div>";
       $("auditout").textContent = ((r.stdout || "") + (r.stderr || "")).trim() || "(no output)";
       $("auRawWrap").style.display = "";
+      // Drop the previous run. Leaving it meant `runCheckAll` read a stale
+      // summary and could print a green "Nothing detectable" for a run that
+      // never happened, and `openDetail`'s `if (!AUDIT)` saw a truthy value --
+      // so the line saying "tap to run a check" navigated and ran nothing.
+      AUDIT = null;
+      AUDIT_QUIET_ROWS = "";
       auPaintChip(null);
       paintHealthLine(null, 0);
       done();

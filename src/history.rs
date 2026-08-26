@@ -161,15 +161,41 @@ pub fn signature(open: &[(String, String)]) -> String {
 /// its inputs and the boot-boundary behaviour is testable at all. Reading
 /// /proc/sys/kernel/random/boot_id inside made every test see the HOST's real
 /// boot id, so "same boot" could never be exercised.
-pub fn update(mut h: History, open: &[(String, String)], now: i64, boot: &str) -> History {
+/// `assessable` is false when the run could not actually measure — any check
+/// came back `Unmeasured`. Such a boot must NOT touch the streak in either
+/// direction.
+///
+/// This was the streak's one false green, and it was the worst kind: the streak
+/// is the single number in the whole report with no evidence printed beside it,
+/// so nothing on screen contradicts it. `open` is built from Fail|Reboot only,
+/// so a boot where /proc/self/mountinfo would not open — every mount check
+/// Unmeasured, every target check n/a because the rule list came back empty —
+/// produced `open.is_empty()`, incremented the counter, and printed
+/// "clean on the last 9 of 9 boots" over a boot in which nothing was read.
+///
+/// Not counting it at all is the honest third state: the streak means "boots
+/// that were checked and were clean", so a boot that could not be checked is
+/// not a member of either set.
+pub fn update(
+    mut h: History,
+    open: &[(String, String)],
+    now: i64,
+    boot: &str,
+    assessable: bool,
+) -> History {
     let new_boot = !boot.is_empty() && boot != h.boot_id;
     let clean = open.is_empty();
 
-    if new_boot {
+    if new_boot && assessable {
         h.boot_id = boot.to_string();
         h.total_boots = h.total_boots.saturating_add(1);
         h.clean_boots = if clean { h.clean_boots.saturating_add(1) } else { 0 };
         h.this_boot_clean = clean;
+    } else if new_boot {
+        // Remember the boot so a later, assessable run in the same boot is not
+        // mistaken for a new one -- but leave both counters untouched.
+        h.boot_id = boot.to_string();
+        h.this_boot_clean = false;
     } else if !clean && h.this_boot_clean {
         // A later run in the same boot found something the boot pass did not.
         // The boot was not clean after all: take it back rather than let the
@@ -217,7 +243,7 @@ mod tests {
         let mut h = h0();
         h.boot_id = "boot-a".into();
         // Same boot as stored -> no counter movement.
-        h = update(h, &[], 100, "boot-a");
+        h = update(h, &[], 100, "boot-a", true);
         assert_eq!(h.total_boots, 0);
         assert_eq!(h.clean_boots, 0);
     }
@@ -229,10 +255,25 @@ mod tests {
         let mut h = h0();
         h.clean_boots = 4;
         h.total_boots = 4;
-        h = update(h, &[], 100, "boot-b");
+        h = update(h, &[], 100, "boot-b", true);
         assert_eq!((h.total_boots, h.clean_boots), (5, 5));
-        h = update(h, &[f("rom-tmpfs", "x")], 200, "boot-c");
+        h = update(h, &[f("rom-tmpfs", "x")], 200, "boot-c", true);
         assert_eq!((h.total_boots, h.clean_boots), (6, 0), "a finding resets the streak");
+    }
+
+    /// A boot that could not be measured is not a clean boot.
+    #[test]
+    fn an_unassessable_boot_does_not_extend_the_streak() {
+        let mut h = h0();
+        h.clean_boots = 9;
+        h.total_boots = 9;
+        // New boot, nothing open -- but nothing measurable either.
+        h = update(h, &[], 100, "boot-z", false);
+        assert_eq!((h.total_boots, h.clean_boots), (9, 9), "neither counter moves");
+        assert!(!h.this_boot_clean, "and the boot is not banked as clean");
+        // A later run in the same boot that CAN measure still counts it.
+        h = update(h, &[], 200, "boot-z", true);
+        assert_eq!((h.total_boots, h.clean_boots), (9, 9), "same boot, already seen");
     }
 
     /// A finding whose evidence is unchanged keeps its original first-seen, so
@@ -240,9 +281,9 @@ mod tests {
     #[test]
     fn an_unchanged_finding_keeps_its_first_seen() {
         let mut h = h0();
-        h = update(h, &[f("rom-tmpfs", "aaaa")], 100, "boot-a");
+        h = update(h, &[f("rom-tmpfs", "aaaa")], 100, "boot-a", true);
         assert_eq!(h.seen["rom-tmpfs"].first_seen, 100);
-        h = update(h, &[f("rom-tmpfs", "aaaa")], 500, "boot-a");
+        h = update(h, &[f("rom-tmpfs", "aaaa")], 500, "boot-a", true);
         assert_eq!(h.seen["rom-tmpfs"].first_seen, 100, "still the original sighting");
     }
 
@@ -250,8 +291,8 @@ mod tests {
     #[test]
     fn changed_evidence_restarts_the_clock() {
         let mut h = h0();
-        h = update(h, &[f("rom-tmpfs", "aaaa")], 100, "boot-a");
-        h = update(h, &[f("rom-tmpfs", "bbbb")], 500, "boot-a");
+        h = update(h, &[f("rom-tmpfs", "aaaa")], 100, "boot-a", true);
+        h = update(h, &[f("rom-tmpfs", "bbbb")], 500, "boot-a", true);
         assert_eq!(h.seen["rom-tmpfs"].first_seen, 500);
     }
 
@@ -259,10 +300,10 @@ mod tests {
     #[test]
     fn a_fixed_finding_is_forgotten_and_returns_as_new() {
         let mut h = h0();
-        h = update(h, &[f("rom-tmpfs", "aaaa")], 100, "boot-a");
-        h = update(h, &[], 200, "boot-a");
+        h = update(h, &[f("rom-tmpfs", "aaaa")], 100, "boot-a", true);
+        h = update(h, &[], 200, "boot-a", true);
         assert!(h.seen.is_empty());
-        h = update(h, &[f("rom-tmpfs", "aaaa")], 300, "boot-a");
+        h = update(h, &[f("rom-tmpfs", "aaaa")], 300, "boot-a", true);
         assert_eq!(h.seen["rom-tmpfs"].first_seen, 300);
     }
 
@@ -271,12 +312,12 @@ mod tests {
     #[test]
     fn the_signature_is_stable_while_the_findings_are() {
         let mut h = h0();
-        h = update(h, &[f("a", "1"), f("b", "2")], 100, "boot-a");
+        h = update(h, &[f("a", "1"), f("b", "2")], 100, "boot-a", true);
         let at = h.changed_at;
         // Same findings, different order: same signature.
-        h = update(h, &[f("b", "2"), f("a", "1")], 900, "boot-a");
+        h = update(h, &[f("b", "2"), f("a", "1")], 900, "boot-a", true);
         assert_eq!(h.changed_at, at, "reordering is not a change");
-        h = update(h, &[f("a", "1")], 950, "boot-a");
+        h = update(h, &[f("a", "1")], 950, "boot-a", true);
         assert_eq!(h.changed_at, 950, "losing one IS a change");
     }
 
@@ -287,7 +328,7 @@ mod tests {
         let mut h = h0();
         h.this_boot_clean = true;
         h.clean_boots = 9;
-        h = update(h, &[f("rom-tmpfs", "aaaa")], 100, "boot-a");
+        h = update(h, &[f("rom-tmpfs", "aaaa")], 100, "boot-a", true);
         assert_eq!(h.clean_boots, 0);
         assert!(!h.this_boot_clean);
     }

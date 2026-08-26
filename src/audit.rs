@@ -914,17 +914,11 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
             bad.push(format!("{} size={size} model={model}", parent.display()));
         }
     }
-    if ok == 0 && bad.is_empty() {
-        return na(
-            "erofs directory shape",
-            "no single-block erofs parent among the injected paths".into(),
-        )
-        .meaning(
-            "Needs a small folder on an erofs ROM, where folder size is a fixed formula over its \
-             contents. None of yours is both.",
-        )
-        .reach(Reach::Effort);
-    }
+    // `unread` FIRST. This test used to sit BELOW the n/a return, which made it
+    // dead exactly when it mattered: one qualifying erofs parent, unreadable, gave
+    // ok=0/bad=[] and returned n/a saying "no single-block erofs parent among the
+    // injected paths" -- a false statement, rendered grey and counted as nothing to
+    // see. Evidence that could not be gathered is not evidence of health.
     if bad.is_empty() && unread > 0 {
         return unmeasured(
             "erofs directory shape",
@@ -934,6 +928,17 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
             "{unread} folder(s) would not open, so they were not checked. What was read looks \
              fine."
         ))
+        .reach(Reach::Effort);
+    }
+    if ok == 0 && bad.is_empty() {
+        return na(
+            "erofs directory shape",
+            "no single-block erofs parent among the injected paths".into(),
+        )
+        .meaning(
+            "Needs a small folder on an erofs ROM, where folder size is a fixed formula over its \
+             contents. None of yours is both.",
+        )
         .reach(Reach::Effort);
     }
     if bad.is_empty() {
@@ -1584,7 +1589,11 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
     // before it, so the two have to be kept apart.
     let prev = crate::history::load();
     let prev_sig = prev.signature.clone();
-    let hist = crate::history::update(prev, &open_now, now, &crate::history::boot_id());
+    // A run with ANY unmeasured check has not assessed this boot, so it must not
+    // move the streak in either direction. See history::update.
+    let assessable = t.unmeasured == 0;
+    let hist =
+        crate::history::update(prev, &open_now, now, &crate::history::boot_id(), assessable);
     let changed = crate::history::signature(&open_now) != prev_sig && !prev_sig.is_empty();
     // Only the run that persists the verdict persists the memory of it, or a
     // read-only `nomount audit` would silently advance the boot streak.

@@ -1,3 +1,10 @@
 /target/
 /release/
 /module/bin/
+
+# Transient output of the zig `nm` build. package.sh removes its own copy,
+# but the CI workflow builds nm in a separate step and leaves this behind --
+# which made `git status --porcelain` report `?? nm-arm64` and stamped EVERY
+# CI zip, including tagged releases, as `+dirty`. A suffix that is always
+# present is a suffix nobody reads.
+/nm-arm64
