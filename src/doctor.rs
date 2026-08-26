@@ -346,8 +346,74 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
                 }
             }
         }
+
+        // A shipped filesystem image, with nothing in the scripts to match on.
+        //
+        // Everything above reads script TEXT, so a module that ships a prebuilt
+        // rootfs and mounts it from a compiled binary, a helper the scan does not
+        // read, or an init script would go unreported.
+        //
+        // Honest impact: ZERO modules in the 576-payload corpus need this. The
+        // single module there that ships a real .img also says `losetup` in its
+        // scripts, so the text rule already had it. It was added on the strength
+        // of a corpus signal that counted .tar.gz as a filesystem image, and once
+        // that was corrected the case it was meant to cover evaporated.
+        //
+        // Kept anyway, at depth 2 rather than a full walk: doctor reading only
+        // script text is a real hole in its coverage, and this closes it for
+        // roughly the cost of a readdir. Delete it without hesitation if the
+        // cost ever shows up -- nothing measured depends on it.
+        //
+        // Only if the module did not already report ImageBacked from its scripts;
+        // saying it twice for one module helps nobody.
+        if !seen.contains(&Incompat::ImageBacked) {
+            if let Some(img) = find_shipped_image(&mdir, 0) {
+                out.push((id.clone(), "shipped file".to_string(), Incompat::ImageBacked, img));
+            }
+        }
     }
     out
+}
+
+/// First filesystem image found in a module tree, as a module-relative path.
+///
+/// Depth 2, not a full walk. A module that ships an image puts it at the top
+/// level or one directory down; walking a large module tree to depth 6 on every
+/// `doctor` run costs real I/O to find nothing. Extensions only -- sniffing
+/// magic bytes would mean opening every file in every module on every run.
+fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
+    const IMG_EXT: [&str; 6] = [".img", ".img.xz", ".img.gz", ".rootfs", ".ext4", ".erofs"];
+    if depth > 2 {
+        return None;
+    }
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut dirs = Vec::new();
+    for e in entries.flatten() {
+        let ft = match e.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        // file_type does not follow symlinks, which is what keeps a link back up
+        // the tree from being descended.
+        if ft.is_dir() {
+            dirs.push(e.path());
+            continue;
+        }
+        if !ft.is_file() {
+            continue;
+        }
+        let name = e.file_name();
+        let name = name.to_string_lossy().to_lowercase();
+        if IMG_EXT.iter().any(|x| name.ends_with(x)) {
+            return Some(e.file_name().to_string_lossy().into_owned());
+        }
+    }
+    for d in dirs {
+        if let Some(found) = find_shipped_image(&d, depth + 1) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 pub fn run_doctor(json: bool) -> Result<()> {
