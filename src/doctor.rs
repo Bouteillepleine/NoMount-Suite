@@ -1089,6 +1089,16 @@ pub fn run_doctor(json: bool) -> Result<()> {
     // enabling it once cost ~8 reboots: su used to arrive as a module overlay,
     // so anything stripping module content stripped su with it. The Suite keeps
     // su out entirely now (kernel sucompat), but there is still no upside.
+    //
+    // This is the ONE manager setting still read, and it is read through
+    // `ksud feature get`. The global "Umount modules by default" and the per-app
+    // "umount modules" profiles were decoded out of ksud's private `.allowlist`
+    // binary format, and that decode is gone: by its own argument neither can
+    // hide anything the Suite serves, so all three findings were notes about
+    // settings that do nothing here -- bought with a 784-byte record layout that
+    // would rot to "unknown" on any ksud change and be believed until someone
+    // noticed. The manager's own UI is where those two live and where they are
+    // changed.
     let kernel_umount = crate::manager::kernel_umount_enabled();
     if kernel_umount == Some(true) {
         f.push(Finding {
@@ -1100,98 +1110,24 @@ pub fn run_doctor(json: bool) -> Result<()> {
         });
     }
 
-    // The GLOBAL "Umount modules by default". This is the dangerous one: it
-    // strips module content from every app WITHOUT a profile, which in July
-    // included any app the moment it asked for root, and that is what broke root
-    // on this device. Warned above kernel_umount's own finding because enabling
-    // kernel_umount is what silently turned THIS on.
-    let global_umount = crate::manager::global_umount_default();
-    if global_umount == Some(true) {
-        f.push(Finding {
-            level: Level::Warn,
-            check: "manager global umount ON",
-            detail: "manager \"Umount modules by default\" is ON — strips module content from \
-                     every profile-less app and hides nothing here. Turn it OFF"
-                .to_string(),
-        });
-    }
-
-    // Per-app "umount modules" profiles. Read from the allowlist rather than
-    // guessed: the layout is verified against known uids before it is trusted,
-    // and a decode that stops making sense yields nothing instead of invented
-    // flags. Info, not warn -- these are harmless here, just pointless.
-    let flags = crate::manager::app_umount_flags();
-    if let Some(flags) = &flags {
-        let umounters: Vec<&str> =
-            flags.iter().filter(|a| a.umount_modules).map(|a| a.package.as_str()).collect();
-        if !umounters.is_empty() {
-            let shown: Vec<&str> = umounters.iter().take(2).copied().collect();
-            f.push(Finding {
-                level: Level::Info,
-                check: "per-app umount profiles",
-                detail: format!(
-                    "{} app(s) have an \"umount modules\" profile ({}{}) — harmless here, hides \
-                     nothing we inject",
-                    umounters.len(),
-                    shown.join(", "),
-                    if umounters.len() > shown.len() { ", …" } else { "" }
-                ),
-            });
-        }
-    }
-
-    // ...and say so when we could NOT read it. The two checks above are silent
-    // both when the switches are off and when the allowlist is missing, truncated,
-    // or its record layout has moved, and those render identically to a reader who
-    // then concludes the dangerous global is off. It is the one this module's
-    // header says must never be guessed, and the one that broke root here in July.
-    // Only when a KernelSU-family manager is actually installed: a manager that
-    // keeps no allowlist has nothing to fail at reading.
-    // kernel_umount.is_none() belongs here too: ksud missing, the exec failing, or
-    // its output moving all render as "off" to a reader, and the WebUI banner keys
-    // on THIS check's name so it stays hidden as well -- the precise argument the
-    // detail text makes for the other two switches.
-    // Name WHICH of the three signals could not be read, and say nothing about the
-    // ones that could.
-    //
-    // The old text fired if any one of them was missing and then declared the
-    // whole umount configuration unknown, telling the reader to check both
-    // switches by hand. Measured on a CPH2645 running ksud 4.1.0: `kernel_umount`
-    // read cleanly (Value: 0) and all 14 per-app profiles decoded — only the
-    // global default was missing, because that version of ksud no longer writes
-    // the `$`/9999 sentinel record the value lives in. So the finding sent its
-    // reader to re-check two settings the Suite had already read, on the strength
-    // of a third it had not. A diagnostic that overstates what it does not know
-    // is the same defect as one that overstates what it does.
-    // Written for whoever is looking at the card, not for whoever wrote the
-    // parser. The previous text opened with "manager umount config unreadable"
-    // and explained itself with "no sentinel record in .allowlist" -- an
-    // implementation detail of a file format nobody outside this repo has read --
-    // then said both "check it by hand" and "it hides nothing either way", which
-    // leaves a reader unable to tell whether they should care. Name the setting
-    // the way the manager's own UI names it, say what it does, say what to do,
-    // and say that the note is permanent so nobody re-reads it every boot
+    // ...and say so when we could NOT read it. The check above is silent both
+    // when the switch is off and when ksud is missing, the exec failed, or its
+    // output moved, and those render identically to a reader who then concludes
+    // the switch is off. Written for whoever is looking at the card: name the
+    // setting the way the manager's own UI names it, say what it does, say what
+    // to do, and say the note is permanent so nobody re-reads it every boot
     // wondering what they missed.
-    let mut unread: Vec<&str> = Vec::new();
-    if kernel_umount.is_none() {
-        unread.push("\"Kernel umount\"");
-    }
-    if global_umount.is_none() {
-        unread.push("\"Umount modules by default\"");
-    }
-    if flags.is_none() {
-        unread.push("the per-app \"umount modules\" list");
-    }
-    if crate::manager::ksu_manager_present() && !unread.is_empty() {
+    //
+    // Only when a KernelSU-family manager is actually installed: a manager with
+    // no state directory has nothing to fail at reading.
+    if kernel_umount.is_none() && crate::manager::ksu_manager_present() {
         f.push(Finding {
             level: Level::Warn,
             check: "check a setting in your root manager",
-            detail: format!(
-                "Could not read your root manager's {} — so it is UNKNOWN, not off. That switch \
-                 strips module files from apps and has broken root. NoMount never needs it: check \
-                 it once, in the manager.",
-                unread.join(" and "),
-            ),
+            detail: "Could not read your root manager's \"Kernel umount\" — so it is UNKNOWN, \
+                     not off. That switch strips module files from apps and has broken root. \
+                     NoMount never needs it: check it once, in the manager."
+                .to_string(),
         });
     }
 
@@ -1737,16 +1673,10 @@ pub fn run_doctor(json: bool) -> Result<()> {
             // hardware was dead code. A field cannot drift the way a sentence can.
             (
                 "manager",
-                J::Obj(vec![
-                    (
-                        "global_umount_on",
-                        J::Bool(f.iter().any(|x| x.check == "manager global umount ON")),
-                    ),
-                    (
-                        "kernel_umount_on",
-                        J::Bool(f.iter().any(|x| x.check == "manager kernel umount ON")),
-                    ),
-                ]),
+                J::Obj(vec![(
+                    "kernel_umount_on",
+                    J::Bool(f.iter().any(|x| x.check == "manager kernel umount ON")),
+                )]),
             ),
             (
                 "findings",
@@ -1932,18 +1862,6 @@ mod tests {
         assert_eq!(expansion_level(75), Some(Level::Info)); // /product/app
         assert_eq!(expansion_level(199), Some(Level::Info));
         assert_eq!(expansion_level(224), Some(Level::Warn)); // /system/fonts
-    }
-
-    /// Verbatim from `ksud feature get kernel_umount` on OP15 / ReSukiSU.
-    /// The parser itself now lives in manager.rs; this keeps the real-device
-    /// sample exercising it from here too.
-    #[test]
-    fn parses_ksud_feature_output() {
-        let off = "Feature: kernel_umount (1)\nDescription: Kernel Umount - controls whether \
-                   kernel automatically unmounts modules when not needed\nValue: 0\n";
-        assert_eq!(crate::manager::parse_feature_value(off), Some(0));
-        assert_eq!(crate::manager::parse_feature_value("Feature: x (1)\nValue: 1\n"), Some(1));
-        assert_eq!(crate::manager::parse_feature_value("no value here"), None);
     }
 
     #[test]
