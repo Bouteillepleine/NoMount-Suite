@@ -304,9 +304,8 @@ pub fn run_doctor(json: bool) -> Result<()> {
             level: Level::Info,
             check: "module hides where the hole remains",
             detail: format!(
-                "{module} applies {n} hide(s) the engine cannot make consistent (multi-block \
-                 erofs parents). Hides on single-block parents are corrected and not counted \
-                 here. Uninstall the module or move its targets if that matters more"
+                "{module} hides {n} path(s) the engine cannot fully mask (their folder spans several \
+             blocks). Uninstall it or move its targets if that matters."
             ),
         });
     }
@@ -367,7 +366,9 @@ pub fn run_doctor(json: bool) -> Result<()> {
                 level: Level::Info,
                 check: "stale legacy blocklist entries",
                 detail: format!(
-                    "{} entry/entries in /data/adb/nomount/blocklist are hidden APPS, already migrated to uidhide, and inert there ({}). That file is read as a module-id skip list; remove them if you want it to mean only what it says",
+                    "{} entry/entries in /data/adb/nomount/blocklist are hidden APPS ({}). They moved \
+                 to `uidhide` and do nothing here. Remove them if you want that file to mean only \
+                 \"skip this module\".",
                     stale.len(),
                     names
                 ),
@@ -476,31 +477,14 @@ pub fn run_doctor(json: bool) -> Result<()> {
         unread.push("the per-app \"umount modules\" list");
     }
     if crate::manager::ksu_manager_present() && !unread.is_empty() {
-        let (it, them) = if unread.len() > 1 {
-            ("these settings", "they are")
-        } else {
-            ("this setting", "it is")
-        };
         f.push(Finding {
             level: Level::Warn,
             check: "check a setting in your root manager",
             detail: format!(
-                "Your root manager has {} — {}. NoMount normally reads {} and tells you if \
-                 anything is switched on, but this manager version does not record {} anywhere \
-                 NoMount can see. \
-                 WHY IT MATTERS: that kind of switch strips module files away from apps, and it \
-                 has broken root on real devices. NoMount does not need it — nothing NoMount \
-                 serves is a mount, so turning it on hides nothing and only risks breaking \
-                 things. \
-                 WHAT TO DO: open your root manager's settings once and make sure {} off. \
-                 This note will keep appearing afterwards, because NoMount still cannot read \
-                 {} — it means \"not checked\", not \"something is wrong\".",
-                if unread.len() > 1 { "some settings NoMount could not read" } else { "a setting NoMount could not read" },
+                "Could not read your root manager's {} — so it is UNKNOWN, not off. That switch \
+                 strips module files from apps and has broken root. NoMount never needs it: check \
+                 it once, in the manager.",
                 unread.join(" and "),
-                it,
-                it,
-                them,
-                if unread.len() > 1 { "them" } else { "it" },
             ),
         });
     }
@@ -528,7 +512,8 @@ pub fn run_doctor(json: bool) -> Result<()> {
         f.push(Finding {
             level: Level::Error,
             check: "engine not responding",
-            detail: "the hookless NoMount engine did not answer `nm v`, so NONE of the live                      checks below ran: rules, per-UID hiding, PM-published opt-outs and the                      partition-root guard are all UNVERIFIED, not clean. Usual causes: no                      CONFIG_NOMOUNT kernel, or an `nm` client built against a different                      NOMOUNT_NL_PROTO than the running kernel"
+            detail: "the engine did not answer, so none of the live checks below ran. `live: 0 rules` \
+                 means \"could not ask\", not \"no rules\". Flash the kernel and module as a set."
                 .to_string(),
         });
     }
@@ -543,7 +528,8 @@ pub fn run_doctor(json: bool) -> Result<()> {
                 level: Level::Error,
                 check: "engine rule dump failed",
                 detail: format!(
-                    "the engine answered `nm v` but `nm list` failed ({e:#}), so the live rule                      checks did not run. `live: 0 rules` below means \"could not enumerate\",                      not \"nothing is served\""
+                    "the engine answered, but listing its rules failed ({e:#}). The live rule checks did \
+             not run: `live: 0 rules` means \"could not enumerate\", not \"none\"."
                 ),
             });
         }
@@ -653,9 +639,9 @@ pub fn run_doctor(json: bool) -> Result<()> {
             level: Level::Warn,
             check: "PM-published rule not opted out of hiding",
             detail: format!(
-                "engine v{engine_v}: {} PM-published rule(s) are live WITHOUT the (public) flag \
-                 while {} app(s) are hidden, so those apps get ENOENT on a path the \
-                 PackageManager advertises: {}{}",
+                "engine v{engine_v}: {} rule(s) Android registered are hidden from your {} hidden \
+                 app(s), so those apps get \"not found\" for a file Android says exists. Re-run \
+                 the mount pass. {}{}",
                 pm_rules_no_public.len(),
                 hidden_apps.len(),
                 shown.join(", "),
@@ -674,10 +660,9 @@ pub fn run_doctor(json: bool) -> Result<()> {
             level: Level::Warn,
             check: "engine predates the hiding opt-out",
             detail: format!(
-                "engine v{engine_v} < 15: {pm_rules} PM-published rule(s) cannot opt out of \
-                 per-UID hiding, so the {} hidden app(s) see a PackageManager-registered path \
-                 that open() refuses. Rebuild the kernel from kbuild@hookless >= 15, or unhide \
-                 any app that walks the package list",
+                "engine v{engine_v} is too old to exempt registered apps from hiding, so your {} \
+                 hidden app(s) get \"not found\" for {pm_rules} file(s) Android says exist. That \
+                 crashes apps that walk the package list. Update the kernel.",
                 hidden_apps.len()
             ),
         });
@@ -703,10 +688,9 @@ pub fn run_doctor(json: bool) -> Result<()> {
             level: Level::Warn,
             check: "engine strips the opt-out from a replaced PM-published file",
             detail: format!(
-                "engine v{engine_v} < 17: of {pm_rules} PM-published rule(s), any that REPLACE a \
-                 stock file still serve the stock bytes to the {} hidden app(s), while the \
-                 PackageManager advertises the module's version and signature for that same \
-                 path. Rebuild the kernel from kbuild@hookless >= 17",
+                "engine v{engine_v} serves stock bytes to your {} hidden app(s) for any rule that \
+                 REPLACES a ROM file, while Android advertises the module's version for it. \
+                 Rebuild the kernel from kbuild@hookless >= 17.",
                 hidden_apps.len()
             ),
         });
@@ -749,13 +733,9 @@ pub fn run_doctor(json: bool) -> Result<()> {
                         level: Level::Error,
                         check: "ghost cloak over-reaches",
                         detail: format!(
-                            "{} of {checked} sampled ghost path(s) are still VISIBLE to hidden \
-                             uid {uid}, so those paths answer stat=OK and \
-                             truncate/chmod/listxattr=ENOENT at the same time -- a contradiction \
-                             no real file can produce, and a stronger tell than the one the cloak \
-                             closes. Only INJECTED-ONLY paths belong in the table; a rule that \
-                             shadows a stock file, or is public, must not. Re-run the mount pass \
-                             to rebuild it: {}",
+                            "{} of {checked} sampled path(s) are still visible to hidden uid {uid} — they \
+                 answer \"exists\" and \"does not exist\" at once, which is louder than the leak \
+                 this closes. Re-run the mount pass: {}",
                             visible.len(),
                             name(&visible)
                         ),
@@ -766,11 +746,8 @@ pub fn run_doctor(json: bool) -> Result<()> {
                         level: Level::Warn,
                         check: "ghost cloak compiled in but not effective",
                         detail: format!(
-                            "{} of {checked} sampled ghost path(s) are hidden from stat yet still \
-                             answer getxattr(security.selinux) for uid {uid}: the guards are \
-                             present and not firing. _ghost is boot-verified on 6.12 only, so on \
-                             6.6/6.1/5.15/5.10 this is the expected shape of a variant that \
-                             applied to the wrong wrapper for this tree: {}",
+                            "{} of {checked} sampled path(s) hide from `stat` but still leak their label — \
+                 the guards are compiled in and not firing on this kernel: {}",
                             leaked.len(),
                             name(&leaked)
                         ),
@@ -781,9 +758,8 @@ pub fn run_doctor(json: bool) -> Result<()> {
                         level: Level::Info,
                         check: "ghost cloak verified on this kernel",
                         detail: format!(
-                            "{checked} of {} ghost path(s) sampled: each is indistinguishable \
-                             from a non-existent path for hidden uid {uid}, by stat and by \
-                             getxattr. Measured here rather than assumed from the build",
+                            "{checked} of {} hidden path(s) sampled: each looks exactly like a path that never \
+             existed, to uid {uid}. Measured here, not assumed from the build.",
                             gpaths.len()
                         ),
                     });
@@ -929,8 +905,8 @@ pub fn run_doctor(json: bool) -> Result<()> {
             level: Level::Warn,
             check: "foreign mount in another namespace",
             detail: format!(
-                "{} <- {} is mounted in {} but not here, so `nomount absorb` can neither \
-                 see nor unmount it — it was replicated with nsenter and is visible to apps",
+                "{} (from {}) is mounted in {} but not here, so absorb cannot see or unmount \
+                 it. It was replicated with nsenter, and apps can see it.",
                 e.mount.target.display(),
                 e.mount.source.display(),
                 e.seen_in
@@ -1081,10 +1057,9 @@ pub fn run_doctor(json: bool) -> Result<()> {
             level: Level::Info,
             check: "whiteout leaves a measurable hole",
             detail: format!(
-                "{module}: {} path(s) whose parent is multi-block erofs (or the engine \
-                 predates v13) — the size and link count still count the hidden entry and \
-                 cannot be recomputed there, so a caller replaying erofs block packing can \
-                 spot it. Applied anyway; declining would silently neuter the module. {}{}",
+                "{module}: {} path(s) the engine cannot fully mask — their folder spans several \
+                 blocks, so its size still counts the hidden entry. Applied anyway; declining \
+                 would silently neuter the module. {}{}",
                 targets.len(),
                 shown.join(", "),
                 if more > 0 { format!(", and {more} more") } else { String::new() }
@@ -1098,9 +1073,8 @@ pub fn run_doctor(json: bool) -> Result<()> {
             level,
             check: "wide replacement expansion",
             detail: format!(
-                "{module}: {} expands to {count} whiteouts, one per stock entry it does \
-                 not ship. Correct and applied in full, but that is a lot of rules from \
-                 one marker — narrow the replacement if it was meant to cover less",
+                "{module}: {} expands to {count} hides, one per ROM entry it does not ship. \
+                 Correct, but a lot from one marker — narrow it if it was meant to cover less.",
                 marker.display()
             ),
         });

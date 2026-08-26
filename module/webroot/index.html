@@ -1025,7 +1025,7 @@
     </div>
 
     <div class="btns"><button class="act primary" onclick="applySpoof(this)">Apply now</button></div>
-    <p class="note" id="spNote">Verified boot recomputes <code>ro.boot.vbmeta.digest</code> and <code>.size</code> from the real AVB chain on-device. Boot-state normalizes the lock-state/warranty/debuggable props and, where the kernel exposes it, the raw <code>/proc/cmdline</code> + <code>/proc/bootconfig</code> boot-state to match — only ever changing a prop that already exists, and skipping procfs if the kernel has no nomount knobs. Kernel uname keeps the running kernel's base and swaps the tail + build date so <code>uname</code> matches the ROM; blank keeps the current values, or paste them from a stock device. <b>Apply now</b> runs it immediately.</p>
+    <p class="note" id="spNote">Recomputes the verified-boot digest from the real AVB chain on this device, and normalizes the lock-state, warranty and debuggable properties that a scanner reads. Both are read straight from properties and have nothing to do with mounts.</p>
   </div>
 
   <!-- HEALTH CHECK -->
@@ -1059,7 +1059,7 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
       <h2>Hidden paths</h2><span class="chip" id="wochip">—</span><span class="chev">›</span>
     </div>
-    <p class="note">Make a <b>stock ROM file</b> disappear — for paths that are themselves the tell, like <code>install-recovery.sh</code>. Saved to a list and re-applied on every boot, in the same pass as the injections. This is not a module: nothing is installed and nothing is mounted. <b>Scan</b> walks the ROM for files only a root setup leaves behind; on a mountless install it usually finds nothing, which is the correct answer — nothing is written to <code>/system</code>, so there is nothing on it to hide.</p>
+    <p class="note">Makes a stock ROM file disappear — for paths that are themselves the tell, like <code>install-recovery.sh</code>. Saved to a list and re-applied every boot. <b>Scan</b> proposes paths that exist on this device and are worth hiding.</p>
     <div style="display:flex;gap:8px;margin:8px 0 2px">
       <input class="txin" id="woPath" placeholder="/system/bin/install-recovery.sh" autocapitalize="off" autocorrect="off" spellcheck="false" style="flex:1">
       <button class="act" style="flex:none;min-width:0;padding:7px 13px" onclick="woAdd(this)">Hide</button>
@@ -1074,7 +1074,7 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18v5H3z"/><path d="M6 12v5M18 12v5"/><path d="M3 17h18v4H3z"/></svg>
       <h2>Foreign mounts</h2><span class="chip" id="abchip">—</span><span class="chev">›</span>
     </div>
-    <p class="note">Mounts that <b>another module</b> laid over the ROM. Every one is readable by any app in <code>/proc/&lt;pid&gt;/mountinfo</code>, which is the whole thing the mountless posture denies. <b>Absorb</b> re-serves each as a Prism injection and drops the mount; it also runs at every boot. A hook framework (Zygisk/Xposed) is deliberately left alone — breaking one only surfaces later, during dexopt.</p>
+    <p class="note">Mounts another module laid over the ROM. Any app can read these in its own mount table, which is the whole thing a mountless setup avoids. <b>Absorb</b> re-serves what it safely can as injections and unmounts them; it runs at every boot.</p>
     <div class="btns">
       <button class="act" onclick="absorbScan(this)">Scan</button>
       <button class="act primary" onclick="absorbRun(this)">Absorb now</button>
@@ -1112,7 +1112,7 @@
 
     <details class="ndet">
       <summary>What hiding covers</summary>
-      <p class="note">Shows the listed app the <b>stock filesystem</b> — no injected files, no whiteouts, stock directory metadata. One entry covers the app in every user, work profile and clone (matching is on the appid), and its SDK-sandbox process too. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root is unaffected, and so is <code>su</code> — that's sucompat, not the engine. Doesn't cover SELinux-policy detection, or anything a system service reads on the app's behalf (PackageManager still parses the injected APK).</p>
+      <p class="note">Shows the listed app the stock filesystem — no injected files, no hidden paths. One entry covers the app in every user, work profile and clone. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root and <code>su</code> are unaffected, and so is anything a system service reads on the app's behalf.</p>
       <p class="note">A <b>glob</b> covers a moving target: <code>*.duckdetector</code>,
         <code>me.garfieldhan.*</code> or <code>*chunqiu*</code> re-match on every apply, so a detector
         that reinstalls under a new package name stays hidden. Anchors go at the ends only, and a glob
@@ -1130,7 +1130,7 @@
       <div class="segstate" id="isoState">Reading…</div>
       <details class="ndet">
         <summary>Why this trades one tell for another</summary>
-        <p class="note">An isolated process gets a pool UID that says nothing about which app spawned it, so hiding from a listed app can only mean hiding from <i>every</i> isolated process. That closes the hole where a hidden app farms its probing out to an isolated helper — but while it's on, an app that <b>isn't</b> hidden can spot the injection by diffing its own view against its own isolated child's. Both pools are hidden by default; narrow it here if you'd rather not arm that comparison. No effect unless at least one app is hidden.</p>
+        <p class="note">An isolated process's UID says nothing about which app started it, so hiding from one app means hiding from <i>every</i> isolated process. That closes the hole where a hidden app probes through a helper — but while it's on, an app that <b>isn't</b> hidden can spot the difference between its own view and its helper's. Both pools are covered by default.</p>
       </details>
     </div>
   </div>
@@ -1162,17 +1162,17 @@
     <p class="note">Worth two minutes before you read a verdict below — several things a detector can see are <b>not</b> the Suite's to fix, and one of them has its own switch.</p>
     <div class="subsec">
       <div class="subsec-h">What it covers</div>
-      <p class="note" style="margin-top:6px">Your modules' files are served by <b>redirecting them inside the kernel</b>, with no mount of any kind. There is no overlay, no bind, no entry in the mount table, and no <code>st_dev</code> that disagrees with the ROM's. Per-app hiding shows a listed app the stock filesystem instead. Root is <code>sucompat</code>, which is also mountless.</p>
+      <p class="note" style="margin-top:6px">Your modules' files are served by redirecting them inside the kernel — no overlay, no bind, nothing in the mount table. Per-app hiding shows a listed app the stock filesystem instead. Root is <code>sucompat</code>, also mountless.</p>
     </div>
     <div class="subsec">
       <div class="subsec-h">What it can't cover — and never claimed to</div>
-      <p class="note" style="margin-top:6px"><b>Android itself still sees your files.</b> The PackageManager scans and parses an injected APK as the system, then hands its version and signature to any app that asks. That is what makes injection work at all; it also means an app can learn about the file from Android rather than from the filesystem.</p>
+      <p class="note" style="margin-top:6px"><b>Android itself still sees your files.</b> The PackageManager parses an injected APK as the system and hands its version and signature to any app that asks. That is what makes injection work — and it means an app can learn about the file from Android rather than from the filesystem.</p>
       <p class="note"><b>SELinux-policy detection.</b> Probing the loaded policy for root-framework types is a different layer entirely. Some kernels ship a cloak for it; that is a kernel build option, not something this module can switch on.</p>
       <p class="note"><b>Anything a system service reads on the app's behalf.</b> Per-app hiding keys on the calling UID, so a system service asking on behalf of a hidden app is not hidden — it is the system asking.</p>
     </div>
     <div class="subsec">
       <div class="subsec-h">Not the Suite's, but fixable here</div>
-      <p class="note" style="margin-top:6px"><b>Verified-boot state</b> and <b>build keys</b> are read straight from properties and the kernel command line. They have nothing to do with mounts or injection — an unlocked bootloader says so regardless of what any module does — but the <b>Boot-state</b> switch in Tools › Spoofing normalises both. If the posture card shows "residual tells present", that switch is where they go.</p>
+      <p class="note" style="margin-top:6px"><b>Verified boot</b> and <b>build keys</b> come from properties and the kernel command line — nothing to do with mounts or injection. An unlocked bootloader says so whatever any module does. The <b>Boot-state</b> switch in Tools › Spoofing normalises both.</p>
       <div class="btns"><button class="act" onclick="showTab('tools',document.getElementById('nb-tools'));document.getElementById('cardSpoof')&&document.getElementById('cardSpoof').classList.remove('collapsed')">Open Spoofing</button></div>
     </div>
   </div>
@@ -1274,7 +1274,7 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
       <h2>Last incident</h2><span class="chip bad">guard tripped</span><span class="chev">›</span>
     </div>
-    <p class="note">Recorded when the bootloop guard self-disabled the Suite — including the newest native crash and its abort message, which usually names the offending path outright. This is a saved record, not live state — it survives reboots until a new trip overwrites it or you clear it. Whether the Suite is disabled <em>right now</em> is the guard chip on Status.</p>
+    <p class="note">Recorded when the bootloop guard disabled the Suite, including the newest native crash and its abort message — which usually names the offending path outright. This is a saved record, not live state; whether the Suite is disabled <em>now</em> is the guard chip on Status.</p>
     <pre class="rules" id="incidentout">…</pre>
     <div class="btns"><button class="act danger" onclick="clearIncident(this)">Clear incident</button></div>
   </div>

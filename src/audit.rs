@@ -591,8 +591,8 @@ fn check_surfaces() -> Check {
             "a named surface identifies the engine outright, with no analysis needed",
         )
         .meaning(
-            "The kernel exposes a directory entry with the engine's name in it. Anything that \
-             lists that directory identifies your setup outright, with no analysis at all.",
+            "The kernel has a folder named after the engine. Anything that lists it identifies \
+             your setup instantly.",
         )
         .owner("the kernel build")
     }
@@ -650,8 +650,8 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
                 ),
             )
             .meaning(format!(
-                "Part of the check could not run: {unread} injected folder(s) would not open. \
-                 What was read looks right, but this is not a clean result."
+                "{unread} injected folder(s) would not open, so they were not checked. What was read \
+             looks fine."
             ));
         }
         pass("readdir cookie magic", format!("0 of {scanned} dirents carry the magic"))
@@ -663,8 +663,8 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
             "one getdents64 on an injected directory identifies the engine, no root needed",
         )
         .meaning(
-            "Listing an injected folder returns entries carrying the engine's marker. One \
-             ordinary directory read identifies your setup — this is the cheapest oracle there is.",
+            "Injected folders return entries carrying the engine's marker. One ordinary folder \
+             listing gives you away.",
         )
         .owner("the kernel engine")
     }
@@ -717,9 +717,8 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
             "no injected file on a non-overlay filesystem to compare".into(),
         )
         .meaning(
-            "This one only applies where the ROM is NOT overlayfs — on overlay, stock files \
-             disagree the same way, so the comparison proves nothing. Your injected files are \
-             all on overlay.",
+            "Your injected files are all on overlayfs, where the ROM's own files disagree the \
+             same way — so this test would prove nothing.",
         );
     }
     if bad.is_empty() {
@@ -732,9 +731,8 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
             "listing a directory and stat-ing its entries separates injected files from stock",
         )
         .meaning(
-            "An injected file reports one identity when the folder is listed and a different one \
-             when the file itself is inspected. Comparing the two picks the injected files out of \
-             the stock ones.",
+            "An injected file reports one identity in a folder listing and another when \
+             inspected. Comparing the two picks out the injected files.",
         )
         .owner("the kernel engine")
     }
@@ -785,8 +783,8 @@ fn check_inode_band(targets: &[PathBuf]) -> Check {
             "no directory with both enough injections and a stock population to compare".into(),
         )
         .meaning(
-            "Nothing to compare: this needs a folder holding at least four injected files \
-             alongside the ROM's own, and none of yours is shaped that way.",
+            "Needs a folder with at least four injected files next to the ROM's own. None of \
+             yours is.",
         )
         .reach(Reach::Effort);
     }
@@ -803,9 +801,8 @@ fn check_inode_band(targets: &[PathBuf]) -> Check {
             "bucket every inode in a directory and the all-ours band names the injections",
         )
         .meaning(
-            "Injected files carry identity numbers from a range the ROM never uses, so a \
-             detector that groups a folder's files by that number gets one group that is \
-             entirely yours. It has to be built for the purpose — this is not a one-syscall tell.",
+            "Injected files carry ID numbers from a range the ROM never uses. Grouping a folder's \
+             files by that number yields one group that is entirely yours.",
         )
         .owner("the kernel engine")
         .reach(Reach::Effort),
@@ -871,8 +868,8 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
             "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
         )
         .meaning(
-            "Folders the Suite created carry identity numbers far outside anything the ROM \
-             issues, so a single search filtered on that number returns exactly the created ones.",
+            "Folders the Suite created carry ID numbers far outside the ROM's range, so one \
+             filtered search returns exactly those folders.",
         )
         .owner("the kernel engine")
         .reach(Reach::Effort)
@@ -923,8 +920,8 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
             "no single-block erofs parent among the injected paths".into(),
         )
         .meaning(
-            "This one only applies to small folders on an erofs ROM, where the folder's size is a \
-             fixed formula over its contents. None of yours is both.",
+            "Needs a small folder on an erofs ROM, where folder size is a fixed formula over its \
+             contents. None of yours is both.",
         )
         .reach(Reach::Effort);
     }
@@ -934,16 +931,16 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
             format!("{ok} erofs parent(s) match the dirent model; {unread} could not be read"),
         )
         .meaning(format!(
-            "Part of the check could not run: {unread} folder(s) would not open. What was read \
-             looks right, but this is not a clean result."
+            "{unread} folder(s) would not open, so they were not checked. What was read looks \
+             fine."
         ))
         .reach(Reach::Effort);
     }
     if bad.is_empty() {
         pass("erofs directory shape", format!("{ok} erofs parent(s) match the dirent model"))
             .meaning(
-                "Folders holding injected or hidden files still report the size their contents \
-                 imply, so adding or hiding a name left no arithmetic trace.",
+                "Folders holding injected or hidden files still report the size their contents imply \
+             — no arithmetic trace.",
             )
             .reach(Reach::Effort)
     } else {
@@ -954,9 +951,8 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
              added or hidden",
         )
         .meaning(
-            "A folder's reported size no longer matches what its contents imply, which says a \
-             name was added or hidden. Reading it takes a detector that models how this \
-             filesystem packs folders.",
+            "A folder's size no longer matches its contents, which shows a name was added or \
+             hidden. Reading it needs a purpose-built detector.",
         )
         .owner("the kernel engine")
         .reach(Reach::Effort)
@@ -1006,8 +1002,8 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             format!("{scanned} process(es): no injected file mapped as deleted"),
         )
         .meaning(
-            "No running app has an injected file marked deleted in its own memory map — which is \
-             the version of this that an app can read about itself, with no permission at all.",
+            "No running app shows an injected file as deleted in its own memory map — something \
+             any app can read about itself.",
         );
     }
     let shown = hits.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
@@ -1022,9 +1018,8 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             "still readable until the reboot: any app can see which of its files are injected",
         )
         .meaning(format!(
-            "You changed a rule over {} file(s) that were already open. The rule is right; the \
-             processes still holding the old copy show it as deleted until they restart. A reboot \
-             finishes this — nothing else is needed.",
+            "You changed a rule over {} file(s) that were already open. A reboot finishes it — \
+             nothing else is needed.",
             hits.len()
         ))
         .owner("a rule change made since boot")
@@ -1037,9 +1032,8 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             "any app can read its own /proc/self/maps and see which of its files are injected",
         )
         .meaning(format!(
-            "{} injected file(s) show as deleted in a running process's own memory map. An app can \
-             read that about itself with no permission, and it names exactly which of its files \
-             were swapped.",
+            "{} injected file(s) show as deleted in a running app's own memory map. Any app can \
+             read that about itself, and it names which files were swapped.",
             hits.len()
         ))
         .owner("the kernel engine")
@@ -1070,7 +1064,8 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
     if apks.is_empty() {
         return na(NAME, "no PM-published rules live".into())
-            .meaning("No module here replaces an app the system has registered, so there is nothing for a hidden app to be denied.");
+            .meaning("No module replaces an app Android has registered, so a hidden app has nothing to be \
+             denied.");
     }
     let blocked = Nm::new().uid_list_live().unwrap_or_default();
     let Some(&appid) = blocked.first() else {
@@ -1169,9 +1164,8 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             ),
         )
         .meaning(
-            "A hidden app can still open every file Android told it about, and gets the same \
-             bytes everyone else does. This is the check that keeps hiding from crashing apps \
-             that walk the package list.",
+            "A hidden app can still open every file Android told it about, with the same bytes. \
+             This is what stops hiding from crashing apps.",
         );
     }
     if denied == 0 {
@@ -1238,10 +1232,8 @@ fn check_no_rom_tmpfs() -> Check {
             "stock never mounts tmpfs inside /system, /product or /vendor -- any app can read it from its own mountinfo",
         )
         .meaning(format!(
-            "{} ROM folder(s) have been emptied by mounting scratch space over them. No stock \
-             device does that anywhere under /system, /product or /vendor, and any app can see \
-             it in its own mount table. Some installers (ReVanced, several debloaters) do this \
-             themselves — the Suite does not.",
+            "{} ROM folder(s) were emptied by mounting scratch space over them. No stock device \
+             does that, and any app can see it in its own mount table.",
             hits.len()
         ))
         .owner("another module's installer")
@@ -1292,9 +1284,8 @@ fn check_no_foreign_rom_mount() -> Check {
             "a bind from /data/local/tmp or /cache, or an image over the ROM, is visible in any app's mountinfo just like a module mount",
         )
         .meaning(format!(
-            "{} mount(s) over the ROM are served from somewhere other than the module \
-             system — scratch space, cache, or a disk image. An app reads those out of its own \
-             mount table exactly like a module mount.",
+            "{} mount(s) over the ROM come from outside the module system — scratch space, cache, \
+             or a disk image. Any app can read them in its own mount table.",
             hits.len()
         ))
         .owner("a mount made outside /data/adb")
@@ -1334,10 +1325,8 @@ fn check_engine_live() -> Check {
              served, so every other check below is describing a device that is not hiding anything",
         )
         .meaning(
-            "The kernel engine is not answering, so nothing is being injected. Everything else \
-             here is measuring a device with no hiding on it — the results below are not a clean \
-             bill of health. Either this kernel has no NoMount support, or the module and kernel \
-             are out of step and need flashing as a set.",
+            "The engine is not answering, so nothing is being injected. Everything below is \
+             measuring a device with no hiding on it — not a clean bill of health.",
         )
         .owner("the kernel, or a module/kernel version mismatch")
         .reach(Reach::NotAnOracle),
