@@ -277,12 +277,6 @@
   /* Accepted findings render GREY, never green: the verdict is untouched, only
      "and you looked at it" is added. Muting the whole row is the visual half of
      that promise -- it recedes without disappearing. */
-  .frow.accepted { opacity: .62; }
-  /* A finding that appeared since the last check. The one thing on the row that
-     tells you whether to act NOW: something that turned up after you installed a
-     module is a different problem from something that has been there since the
-     day you set this up. */
-  .tag.newly { background: rgba(124,156,255,0.16); color: var(--acc); }
   .fgroup {
     font-size: 11px; font-weight: 680; letter-spacing: .5px; text-transform: uppercase;
     color: var(--muted); margin: 16px 0 2px; display: flex; align-items: center; gap: 8px;
@@ -1840,13 +1834,6 @@
   // than by hue: "detectable" under `Needs your attention`, "reboot to finish"
   // under it too, "not verified" under `Not verified`. That is the distinction
   // doing the work; the colour only says "look".
-  const AU_VERDICT = {
-    "fail":       { tag: "warn", label: "detectable" },
-    "reboot":     { tag: "warn", label: "reboot to finish" },
-    "unmeasured": { tag: "warn", label: "not verified" },
-    "pass":       { tag: "ok",   label: "clean" },
-    "n/a":        { tag: "off",  label: "doesn't apply" }
-  };
 
   function auAge(ts) {
     if (!ts) return "";
@@ -1873,121 +1860,17 @@
   // allowed to contain a quote -- json.rs is hardened for exactly that -- so
   // interpolating c.action.arg here would have turned a legal filename into
   // script injection with root behind it.
-  function auRow(c, i) {
-    const v = AU_VERDICT[c.verdict] || { tag: "off", label: c.verdict, cls: "off" };
-    const accepted = !!c.accepted;
-    const bits = [];
-    bits.push('<div class="frow' + (accepted ? " accepted" : "") + '">');
-    bits.push('<div class="fname">' + esc(c.name) + "</div>");
-    if (c.meaning) bits.push('<div class="fmean">' + esc(c.meaning) + "</div>");
-    if (c.owner) bits.push('<div class="fowner">From: <b>' + esc(c.owner) + "</b></div>");
-    if (accepted && c.accepted_reason) {
-      bits.push('<div class="fowner">Accepted by you: ' + esc(c.accepted_reason) +
-                " — still failing, still shown.</div>");
-    }
-    // An acceptance whose evidence has moved is the single most useful thing the
-    // report can say about a finding that came back.
-    if (c.acceptance_lapsed) {
-      bits.push('<div class="fowner">You accepted this once (' +
-                esc(c.acceptance_lapsed_reason || "no reason recorded") +
-                ") but what was measured has changed since, so it is back.</div>");
-    }
-
-    bits.push('<div class="fmeta">');
-    // Grey when accepted, never amber and never green. Amber says "act on this"
-    // and the user has already decided not to; green would be the false clean
-    // this whole card refuses to print. Grey says "known", which is what it is.
-    bits.push('<span class="tag ' + (accepted ? "off" : v.tag) + '">' +
-              (accepted ? "accepted" : esc(v.label)) + "</span>");
-    // Reach is shown on every row, not just failures: on a pass it is what tells
-    // the reader how much the pass is worth.
-    bits.push('<span class="tag off">' + esc(c.reach_label || "") + "</span>");
-    // How long this has been true. A finding with no history behind it (first
-    // ever run, or a fresh install) simply says nothing rather than guessing.
-    if ((c.verdict === "fail" || c.verdict === "reboot") && c.first_seen) {
-      const age = Math.floor(Date.now() / 1000) - c.first_seen;
-      if (age < 120) bits.push('<span class="tag newly">new</span>');
-      else bits.push('<span class="tag off">seen ' + esc(auAge(c.first_seen)) + "</span>");
-    }
-    const live = c.verdict === "fail" || c.verdict === "reboot";
-    if (live) {
-      bits.push('<span class="sp"></span>');
-      if (c.action && c.action.id) {
-        bits.push('<button class="act" style="padding:6px 12px;font-size:11.5px" onclick="auAct(this,' +
-                  i + ')">' + esc(c.action.label) + "</button>");
-      }
-      bits.push('<button class="act" style="padding:6px 12px;font-size:11.5px" onclick="auAccept(this,' +
-                i + ')">' + (accepted ? "Un-accept" : "Accept") + "</button>");
-    }
-    bits.push("</div>");
-
-    bits.push("<details><summary>What was measured</summary>");
-    bits.push('<div class="ev">' + esc(c.evidence || "(nothing recorded)") +
-              (c.oracle ? "\n\nHow it would be read: " + esc(c.oracle) : "") + "</div>");
-    bits.push("</details>");
-    bits.push("</div>");
-    return bits.join("");
-  }
-
-  function auGroup(title, rows, collapsible) {
-    if (!rows.length) return "";
-    const id = "fg" + title.replace(/[^a-z]/gi, "");
-    if (!collapsible) {
-      return '<div class="fgroup">' + esc(title) + ' <span class="cnt">' + rows.length +
-             "</span></div>" + rows.join("");
-    }
-    return '<div class="fgroup clp" onclick="auToggle(this)">' + esc(title) +
-           ' <span class="cnt">' + rows.length + '</span></div>' +
-           '<div id="' + id + '" style="display:none">' + rows.join("") + "</div>";
-  }
-
-  function auToggle(el) {
-    el.classList.toggle("open");
-    const box = el.nextElementSibling;
-    if (box) box.style.display = box.style.display === "none" ? "" : "none";
-  }
-
+  
+  
+  
   // Paint the chip from a summary. Shared by a fresh run and by the cached
   // boot-time result, so the two can never disagree about what a state looks
   // like.
   //
   // `open_failures` is the number the chip goes red on -- failures MINUS the ones
-  // the user has explicitly accepted. `failed` itself is untouched and still
   // shown; an acceptance records that someone looked, it does not un-fail
   // anything.
-  function auPaintChip(sum, engine) {
-    const chip = $("auchip");
-    if (!sum) { chip.textContent = "—"; chip.className = "chip"; return; }
-    if (engine === null) { chip.textContent = "engine down"; chip.className = "chip bad"; return; }
-    const open = sum.open_failures || 0;
-    const unm = sum.unmeasured || 0;
-    const acc = sum.accepted || 0;
-    if (open > 0) {
-      // Amber, not red: red belongs to `engine down` two lines up, which is a
-      // different kind of bad.
-      chip.textContent = open + " detectable";
-      chip.className = "chip warn";
-    } else if (unm > 0) {
-      chip.textContent = unm + " unverified";
-      chip.className = "chip warn";
-    } else if (acc > 0) {
-      // Grey, not green. Nothing is open, but something IS failing and the user
-      // said so -- claiming "undetected" over the top of that would be the false
-      // green this whole card exists to avoid.
-      chip.textContent = acc + " accepted";
-      chip.className = "chip";
-    } else {
-      chip.textContent = "undetected";
-      chip.className = "chip ok";
-    }
-    // The n/a count deliberately does NOT reach the chip. That is the entire
-    // fix: a healthy device with four inapplicable checks used to render
-    // "4 unverified" in amber with an alert dot on the Diagnostics tab. There is
-    // no longer a Diagnostics tab to put a dot on, and the one place that still
-    // asks for attention -- the Status health line -- is painted by
-    // `paintHealthLine` from this same summary.
-  }
-
+  
   // One line, on the hero, from the same summary object the audit chip reads --
   // so the front page and the detail view cannot disagree, which is the whole
   // failure mode that started this work.
@@ -1995,13 +1878,12 @@
   // Four states and only one of them asks for anything:
   //   open findings -> "N things need attention", emphasised, tap to act
   //   unmeasured    -> "N checks couldn't run", plain
-  //   accepted only -> "nothing open" + the count you accepted, plain, NOT green
   //   clean         -> "Nothing detectable", green, and that is the end of it
   //
   // `not_applicable` deliberately never appears here. A check with nothing to
   // test on this device is not news, and putting it on the front page is how the
   // old amber chip taught people to ignore the thing.
-  function paintHealthLine(sum, ts, engine, hist) {
+  function paintHealthLine(sum, ts, engine) {
     const el = $("healthline"), dot = $("hlDot"), txt = $("hlTxt");
     if (!el) return;
     if (!sum) {
@@ -2033,7 +1915,6 @@
     }
     const open = sum.open_failures || 0;
     const unm = sum.unmeasured || 0;
-    const acc = sum.accepted || 0;
     const age = ts ? ' <span class="age">· checked ' + esc(auAge(ts)) + "</span>" : "";
     if (open > 0) {
       el.classList.add("attn");
@@ -2046,22 +1927,10 @@
       dot.className = "hl-dot warn";
       txt.innerHTML = "<b>" + unm + (unm > 1 ? " checks" : " check") +
                       " couldn\u2019t run</b>" + age;
-    } else if (acc > 0) {
-      el.classList.remove("attn", "down");
-      dot.className = "hl-dot";
-      txt.innerHTML = "<b>Nothing open</b> <span class=\"age\">· " + acc +
-                      " accepted by you</span>" + age;
     } else {
       el.classList.remove("attn", "down");
       dot.className = "hl-dot ok";
-      // A streak says more about whether a setup is stable than any single run.
-      // Only shown once there is more than one boot behind it, so it never reads
-      // "clean on the last 1 of 1", which sounds like a hedge.
-      const streak = hist && hist.total_boots > 1
-        ? ' <span class="age">· clean on the last ' + hist.clean_boots +
-          " of " + hist.total_boots + " boots</span>"
-        : age;
-      txt.innerHTML = "<b>Nothing detectable</b>" + streak;
+      txt.innerHTML = "<b>Nothing detectable</b>" + age;
     }
   }
 
@@ -2076,15 +1945,13 @@
   function mergeFindings(audit, doctor, health) {
     const out = [];
     if (audit && audit.checks) {
-      audit.checks.forEach(function (c, i) {
+      audit.checks.forEach(function (c) {
         const live = c.verdict === "fail" || c.verdict === "reboot";
         if (!live && c.verdict !== "unmeasured") return;      // passes/n-a are hidden
         out.push({
-          bucket: c.accepted ? "accepted" : (live ? "attention" : "unverified"),
+          bucket: live ? "attention" : "unverified",
           name: c.name, meaning: c.meaning, evidence: c.evidence, owner: c.owner,
-          reach: c.reach_label, action: c.action, accepted: c.accepted,
-          accepted_reason: c.accepted_reason, lapsed: c.acceptance_lapsed,
-          first_seen: c.first_seen, source: "detection", idx: i
+          source: "detection"
         });
       });
     }
@@ -2093,8 +1960,7 @@
         if (x.severity !== "attention") return;               // info is hidden
         out.push({
           bucket: "attention", name: x.check, meaning: x.meaning || x.detail,
-          evidence: x.detail, owner: x.owner, reach: "before your next boot",
-          action: null, source: "plan"
+          evidence: x.detail, owner: x.owner, source: "plan"
         });
       });
     }
@@ -2123,7 +1989,7 @@
     const dd = await getDoctor(true);
     const hr = auParse(await nm("selfcheck --json"));
 
-    AUDIT = ar;                       // auAct/auAccept index into this
+    AUDIT = ar;
     if (dd && dd.json) paintManagerBanner(dd);
     renderFindings(ar, dd && dd.json, hr);
     done();
@@ -2143,20 +2009,18 @@
 
     const attention = FINDINGS.filter(function (f) { return f.bucket === "attention"; });
     const unver     = FINDINGS.filter(function (f) { return f.bucket === "unverified"; });
-    const accepted  = FINDINGS.filter(function (f) { return f.bucket === "accepted"; });
     const engineDown = audit && audit.engine === null;
 
     // Chip: one number, the one that means "act".
     if (engineDown) { chip.textContent = "engine down"; chip.className = "chip bad"; }
     else if (attention.length) { chip.textContent = attention.length + " to look at"; chip.className = "chip warn"; }
     else if (unver.length) { chip.textContent = unver.length + " unverified"; chip.className = "chip warn"; }
-    else if (accepted.length) { chip.textContent = accepted.length + " accepted"; chip.className = "chip"; }
     else { chip.textContent = "all clear"; chip.className = "chip ok"; }
 
     const checked = (audit && audit.summary ? audit.summary.passed + audit.summary.not_applicable : 0) +
                     (doctor && doctor.summary ? doctor.summary.informational : 0);
 
-    if (!attention.length && !unver.length && !accepted.length && !engineDown) {
+    if (!attention.length && !unver.length && !engineDown) {
       sub.textContent = "Nothing needs your attention.";
       list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
         '<div class="fmean">' + checked + ' check' + (checked === 1 ? "" : "s") +
@@ -2171,21 +2035,14 @@
           : "";
       };
       list.innerHTML = group("Needs your attention", attention) +
-                       group("Not verified", unver) +
-                       group("Accepted by you", accepted);
+                       group("Not verified", unver);
     }
 
     $("auCopy").style.display = audit ? "" : "none";
     if (audit) {
-      const h = audit.history || {};
       const bits = ["Checked " + (auAge(audit.ts) || "now")];
-      if (h.first_run) bits.push("first check on this device");
-      else if (h.changed_now) bits.push("different from last time");
-      if (h.total_boots > 1 && !attention.length) {
-        bits.push("clean on the last " + h.clean_boots + " of " + h.total_boots + " boots");
-      }
       age.style.display = ""; age.textContent = bits.join(" \u00b7 ");
-      paintHealthLine(audit.summary, audit.ts, audit.engine, audit.history);
+      paintHealthLine(audit.summary, audit.ts, audit.engine);
       $("auditout").textContent = JSON.stringify(audit, null, 1);
     }
     if (doctor) $("doctorout").textContent = doctorText(doctor);
@@ -2201,33 +2058,12 @@
 
   function findRow(f) {
     const b = [];
-    b.push('<div class="frow' + (f.accepted ? " accepted" : "") + '">');
+    b.push('<div class="frow">');
     b.push('<div class="fname">' + esc(f.name) + "</div>");
     if (f.meaning) b.push('<div class="fmean">' + esc(f.meaning) + "</div>");
     if (f.owner) b.push('<div class="fowner">From: <b>' + esc(f.owner) + "</b></div>");
-    if (f.accepted && f.accepted_reason) {
-      b.push('<div class="fowner">Accepted by you: ' + esc(f.accepted_reason) + " — still failing, still shown.</div>");
-    }
-    if (f.lapsed) b.push('<div class="fowner">You accepted this once, but what was measured has changed.</div>');
-    b.push('<div class="fmeta">');
-    b.push('<span class="tag ' + (f.accepted ? "off" : f.bucket === "unverified" ? "warn" : "warn") + '">' +
-           (f.accepted ? "accepted" : f.bucket === "unverified" ? "not verified" : "needs attention") + "</span>");
-    if (f.reach) b.push('<span class="tag off">' + esc(f.reach) + "</span>");
-    if (f.first_seen) {
-      const age = Math.floor(Date.now() / 1000) - f.first_seen;
-      b.push('<span class="tag ' + (age < 120 ? "newly" : "off") + '">' +
-             (age < 120 ? "new" : "seen " + esc(auAge(f.first_seen))) + "</span>");
-    }
-    if (f.source === "detection" && typeof f.idx === "number") {
-      b.push('<span class="sp"></span>');
-      if (f.action && f.action.id) {
-        b.push('<button class="act" style="padding:6px 12px;font-size:11.5px" onclick="auAct(this,' +
-               f.idx + ')">' + esc(f.action.label) + "</button>");
-      }
-      b.push('<button class="act" style="padding:6px 12px;font-size:11.5px" onclick="auAccept(this,' +
-             f.idx + ')">' + (f.accepted ? "Un-accept" : "Accept") + "</button>");
-    }
-    b.push("</div>");
+    b.push('<div class="fmeta"><span class="tag warn">' +
+           (f.bucket === "unverified" ? "not verified" : "needs attention") + "</span></div>");
     b.push("<details><summary>What was measured</summary><div class=\"ev\">" +
            esc(f.evidence || "(nothing recorded)") + "</div></details>");
     b.push("</div>");
@@ -2240,65 +2076,8 @@
   // previously the first time a user saw a finding was also the first time they
   // had heard of the tool.
   
-  async function auAct(btn, i) {
-    const c = AUDIT && AUDIT.checks && AUDIT.checks[i];
-    if (!c || !c.action) { toast("That finding is no longer on screen — re-run the audit."); return; }
-    const id = c.action.id;
-    if (id === "reboot") {
-      toast("Reboot from your power menu to finish this.");
-      return;
-    }
-    if (id === "absorb") {
-      const done = busy(btn, "Absorbing…");
-      const before = (AUDIT && AUDIT.summary && AUDIT.summary.open_failures) || 0;
-      const r = await nm("absorb");
-      done();
-      await runAll(null);
-      const after = (AUDIT && AUDIT.summary && AUDIT.summary.open_failures) || 0;
-      // Report what CHANGED, not that the command exited.
-      //
-      // This used to toast "Absorb pass finished" on errno 0 and stop there. But
-      // absorb exits 0 when it declines too -- it declines a my_* bind on purpose,
-      // because taking one over on a live system has rebooted a device -- so on
-      // the phone where that is the whole finding, the reader tapped a button,
-      // nothing moved, and the UI congratulated itself. Measured on an OP11.
-      if (r.errno !== 0) {
-        toast("Absorb reported a problem — see the finding's details.", "bad");
-      } else if (after < before) {
-        toast("Absorbed " + (before - after) + " — re-checked.", "ok");
-      } else {
-        toast("Nothing changed. Absorb left these alone on purpose — open the finding for why.");
-      }
-      return;
-    }
-    toast("Nothing to do for this one.");
-  }
-
-  async function auAccept(btn, i) {
-    const c = AUDIT && AUDIT.checks && AUDIT.checks[i];
-    if (!c) { toast("That finding is no longer on screen — re-run the audit."); return; }
-    const id = c.id, isAccepted = !!c.accepted;
-    if (isAccepted) {
-      const done = busy(btn, "…");
-      await nm("accept " + shq(id) + " --remove");
-      done();
-      await runAll(null);
-      return;
-    }
-    const why = prompt(
-      "Why are you accepting this?\n\n" +
-      "It stays a failure and stays visible — this only records that you looked at it and " +
-      "decided to live with it. If what was measured changes, it comes back."
-    );
-    if (why === null) return;
-    if (!why.trim()) { toast("A reason is required."); return; }
-    const done = busy(btn, "…");
-    const r = await nm("accept " + shq(id) + " --reason " + shq(why.trim()));
-    done();
-    if (r.errno !== 0) { toast(((r.stderr || r.stdout || "").trim().split("\n")[0]) || "Could not accept."); return; }
-    await runAll(null);
-  }
-
+  
+  
   // Everything a bug report needs, in one paste. Every "it says 2 detectable,
   // what do I do" thread currently opens with three round-trips asking for
   // exactly these fields.
@@ -2317,16 +2096,15 @@
       "device: " + (p[0] || "?") + " · Android " + (p[1] || "?") + " · " + (p[2] || "?"),
       "kernel: " + (p[3] || "?"),
       "rules: " + (AUDIT.rules || 0) + " across " + (AUDIT.directories || 0) + " directories",
-      "summary: " + (s.passed || 0) + " clean, " + (s.failed || 0) + " failed (" +
-        (s.accepted || 0) + " accepted), " + (s.reboot || 0) + " pending reboot, " +
-        (s.not_applicable || 0) + " n/a, " + (s.unmeasured || 0) + " unverified",
+      "summary: " + (s.passed || 0) + " clean, " + (s.failed || 0) + " failed, " +
+        (s.reboot || 0) + " pending reboot, " + (s.not_applicable || 0) + " n/a, " +
+        (s.unmeasured || 0) + " unverified",
       ""
     ];
     // Only what is not clean. A paste nobody reads is the same as no paste.
     AUDIT.checks.forEach(function (c) {
       if (c.verdict === "pass" || c.verdict === "n/a") return;
-      lines.push("[" + c.verdict.toUpperCase() + (c.accepted ? "/ACCEPTED" : "") + "] " +
-                 c.name + " (" + c.reach_label + ")");
+      lines.push("[" + c.verdict.toUpperCase() + "] " + c.name);
       if (c.owner) lines.push("  from: " + c.owner);
       lines.push("  measured: " + c.evidence);
       lines.push("");
@@ -2569,8 +2347,7 @@
                   " could not be verified."]);
       bump("warn");
     } else {
-      parts.push(["ok", "Nothing detectable" + (a.accepted ? " beyond the " + a.accepted +
-                  " you accepted" : "") + "."]);
+      parts.push(["ok", "Nothing detectable."]);
     }
 
     if (!dsum) { parts.push(["warn", "Plan check did not run."]); bump("warn"); }

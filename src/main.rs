@@ -1,5 +1,4 @@
 mod absorb;
-mod accept;
 mod audit;
 mod bind;
 mod blocklist;
@@ -7,7 +6,6 @@ mod cli;
 mod dirshape;
 mod doctor;
 mod health;
-mod history;
 mod json;
 mod manager;
 mod mount;
@@ -41,9 +39,6 @@ fn main() -> Result<()> {
         Commands::Doctor { json } => doctor::run_doctor(json),
         Commands::Audit { json, write } => audit::run_audit(json, write),
         Commands::Posture { json } => audit::run_posture(json),
-        Commands::Accept { check, reason, remove, list } => {
-            audit::run_accept(check, reason, remove, list)
-        }
         Commands::Plan => mount::run_plan(),
         Commands::Reload => mount::run_reload(),
         Commands::Absorb { dry_run, include_dirs, early } => {

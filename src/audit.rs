@@ -49,77 +49,6 @@ pub enum Verdict {
     Unmeasured,
 }
 
-/// How much an app needs to do to read this oracle. Every FAIL used to render
-/// identically fatal; they are not remotely equivalent, and sorting by this is
-/// what tells a user which one to fix first.
-#[derive(PartialEq, Clone, Copy)]
-pub enum Reach {
-    /// One syscall, any app, no permission. `getdents64` on a directory,
-    /// `/proc/self/maps`, `/proc/self/mountinfo`.
-    AnyApp,
-    /// Reachable by an app, but it has to model the filesystem to interpret what
-    /// it read -- bucket a whole directory's inodes, or replay erofs block
-    /// packing -- so it takes a detector built for the purpose.
-    Effort,
-    /// Not reachable from an app domain at all on a stock policy.
-    ///
-    /// No check in this file is currently RootOnly, and that is a property of
-    /// what the audit chooses to bundle rather than an oversight: every oracle
-    /// here was found by measuring what an APP can read, because an oracle root
-    /// alone can reach is not a detection risk. Kept so a future check can say so
-    /// rather than being forced to overstate itself as `Effort`.
-    #[allow(dead_code)]
-    RootOnly,
-    /// Not a detection oracle in any form -- nobody learns anything about you
-    /// from it. `engine responding` is the case: a dead engine means your modules
-    /// are not applied, which is a different axis entirely from "can an app tell".
-    /// It renders "(any app)" otherwise, which contradicts that check's own text
-    /// saying nothing detects you by it.
-    NotAnOracle,
-}
-
-impl Reach {
-    fn slug(self) -> &'static str {
-        match self {
-            Reach::AnyApp => "any-app",
-            Reach::Effort => "needs-effort",
-            Reach::RootOnly => "root-only",
-            Reach::NotAnOracle => "not-an-oracle",
-        }
-    }
-    fn label(self) -> &'static str {
-        match self {
-            Reach::AnyApp => "any app",
-            Reach::Effort => "needs effort",
-            Reach::RootOnly => "root only",
-            Reach::NotAnOracle => "not a detection",
-        }
-    }
-    /// Sort key: the thing any app can read comes first.
-    fn rank(self) -> u8 {
-        match self {
-            Reach::AnyApp => 0,
-            Reach::Effort => 1,
-            Reach::RootOnly => 2,
-            // Sorts last among equals. It never competes in practice -- a failing
-            // engine check is force-ranked ahead of everything in `run_audit` --
-            // but ranking it with the oracles would be a claim it is one.
-            Reach::NotAnOracle => 3,
-        }
-    }
-}
-
-/// One thing the user can do about a finding, which the WebUI renders as a
-/// button. A finding with an owner but no action is still an improvement on a
-/// finding with neither; a finding with both is one tap from closed.
-pub struct Action {
-    /// Stable id the WebUI switches on. Never shown.
-    pub id: &'static str,
-    pub label: &'static str,
-    /// Path, module id, or whatever the action needs.
-    pub arg: Option<String>,
-}
-
 pub struct Check {
     /// Stable slug. This is what an acceptance is keyed on and what the WebUI
     /// uses for element ids, so it must not change when the display name does.
@@ -140,7 +69,6 @@ pub struct Check {
     /// This field is that person's sentence; the evidence stays, one disclosure
     /// away.
     pub meaning: String,
-    pub reach: Reach,
     /// Who caused this: a module id, the kernel, the root manager, or the user's
     /// own configuration. `None` where the question does not apply (a pass).
     ///
@@ -148,7 +76,6 @@ pub struct Check {
     /// resolves a leaked mount to its owning module and the audit used to throw
     /// that answer away for exactly the case where it mattered.
     pub owner: Option<String>,
-    pub action: Option<Action>,
 }
 
 /// Builder, so a check body stays about what it measured. Everything except the
@@ -162,9 +89,7 @@ fn chk(id: &'static str, name: &'static str, verdict: Verdict, evidence: String)
         evidence,
         oracle: None,
         meaning: String::new(),
-        reach: Reach::AnyApp,
         owner: None,
-        action: None,
     }
 }
 
@@ -173,21 +98,9 @@ impl Check {
         self.meaning = m.into();
         self
     }
-    fn reach(mut self, r: Reach) -> Check {
-        self.reach = r;
-        self
-    }
     fn owner(mut self, o: impl Into<String>) -> Check {
         self.owner = Some(o.into());
         self
-    }
-    fn action(mut self, id: &'static str, label: &'static str, arg: Option<String>) -> Check {
-        self.action = Some(Action { id, label, arg });
-        self
-    }
-    /// Fingerprint of the evidence, for [`crate::accept`].
-    pub fn fingerprint(&self) -> String {
-        crate::json::fingerprint(&self.evidence)
     }
     fn verdict_slug(&self) -> &'static str {
         match self.verdict {
@@ -463,9 +376,6 @@ fn check_zero_mount() -> Check {
         // Measured on an OP11 running this exact case (a bootanimation module
         // binding content NoMount already injects).
         let aliases = crate::absorb::mount_aliases(&rows);
-        let absorbable = leaked
-            .iter()
-            .any(|(r, _)| crate::absorb::runtime_droppable(&r.target, &aliases));
         let deferred: Vec<&str> = leaked
             .iter()
             .filter(|(r, _)| !crate::absorb::runtime_droppable(&r.target, &aliases))
@@ -500,23 +410,13 @@ fn check_zero_mount() -> Check {
             ));
         }
 
-        let c = fail(
+        fail(
             "zero-mount posture",
             format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked)),
             "any app can read /proc/self/mountinfo and see a module mounted over the ROM",
         )
         .meaning(why)
-        .owner(owner);
-        // Offer the action that will actually work. Absorb when it can take at
-        // least one of them; otherwise a reboot, which is what clears a deferred
-        // my_* bind. Never a button that cannot move the finding.
-        if absorbable {
-            c.action("absorb", "Absorb now", None)
-        } else if !deferred.is_empty() {
-            c.action("reboot", "Reboot to clear", None)
-        } else {
-            c
-        }
+        .owner(owner)
     }
 }
 
@@ -785,16 +685,14 @@ fn check_inode_band(targets: &[PathBuf]) -> Check {
         .meaning(
             "Needs a folder with at least four injected files next to the ROM's own. None of \
              yours is.",
-        )
-        .reach(Reach::Effort);
+        );
     }
     match worst {
         None => pass(
             "injected inode band",
             format!("{examined} directory(ies): every injected inode shares a bucket with stock"),
         )
-        .meaning("Injected files sit in the same numeric range as the ROM's own files.")
-        .reach(Reach::Effort),
+        .meaning("Injected files sit in the same numeric range as the ROM's own files."),
         Some((dir, b, n)) => fail(
             "injected inode band",
             format!("{dir}: {n} injected inode(s) alone in the {}M bucket, no stock there", b),
@@ -804,8 +702,7 @@ fn check_inode_band(targets: &[PathBuf]) -> Check {
             "Injected files carry ID numbers from a range the ROM never uses. Grouping a folder's \
              files by that number yields one group that is entirely yours.",
         )
-        .owner("the kernel engine")
-        .reach(Reach::Effort),
+        .owner("the kernel engine"),
     }
 }
 
@@ -851,8 +748,7 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
             .meaning(
                 "This one only applies to folders the Suite creates on an overlayfs ROM, and you \
                  have none.",
-            )
-            .reach(Reach::Effort);
+            );
     }
     if outliers.is_empty() {
         pass(
@@ -860,7 +756,6 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
             format!("{examined} overlay dir(s): synthesized inodes sit inside the stock range"),
         )
         .meaning("Folders the Suite creates carry identity numbers the ROM could plausibly issue.")
-        .reach(Reach::Effort)
     } else {
         fail(
             "overlay dir inode range",
@@ -872,7 +767,6 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
              filtered search returns exactly those folders.",
         )
         .owner("the kernel engine")
-        .reach(Reach::Effort)
     }
 }
 
@@ -927,8 +821,7 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
         .meaning(format!(
             "{unread} folder(s) would not open, so they were not checked. What was read looks \
              fine."
-        ))
-        .reach(Reach::Effort);
+        ));
     }
     if ok == 0 && bad.is_empty() {
         return na(
@@ -938,8 +831,7 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
         .meaning(
             "Needs a small folder on an erofs ROM, where folder size is a fixed formula over its \
              contents. None of yours is both.",
-        )
-        .reach(Reach::Effort);
+        );
     }
     if bad.is_empty() {
         pass("erofs directory shape", format!("{ok} erofs parent(s) match the dirent model"))
@@ -947,7 +839,6 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
                 "Folders holding injected or hidden files still report the size their contents imply \
              — no arithmetic trace.",
             )
-            .reach(Reach::Effort)
     } else {
         fail(
             "erofs directory shape",
@@ -960,7 +851,6 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
              hidden. Reading it needs a purpose-built detector.",
         )
         .owner("the kernel engine")
-        .reach(Reach::Effort)
     }
 }
 
@@ -1027,8 +917,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
              nothing else is needed.",
             hits.len()
         ))
-        .owner("a rule change made since boot")
-        .action("reboot", "Reboot to finish", None);
+        .owner("a rule change made since boot");
     }
     {
         fail(
@@ -1042,7 +931,6 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             hits.len()
         ))
         .owner("the kernel engine")
-        .action("reboot", "Reboot", None)
     }
 }
 
@@ -1242,7 +1130,6 @@ fn check_no_rom_tmpfs() -> Check {
             hits.len()
         ))
         .owner("another module's installer")
-        .action("absorb", "Absorb now", None)
     }
 }
 
@@ -1318,7 +1205,6 @@ fn check_engine_live() -> Check {
     const NAME: &str = "engine responding";
     match Nm::new().version() {
         Ok(v) => pass(NAME, format!("Prism engine v{v} answered over netlink"))
-            .reach(Reach::NotAnOracle)
             .meaning(format!(
                 "The kernel engine is running (v{v}). This is what serves your modules with no \
                  mounts."
@@ -1333,8 +1219,7 @@ fn check_engine_live() -> Check {
             "The engine is not answering, so nothing is being injected. Everything below is \
              measuring a device with no hiding on it — not a clean bill of health.",
         )
-        .owner("the kernel, or a module/kernel version mismatch")
-        .reach(Reach::NotAnOracle),
+        .owner("the kernel, or a module/kernel version mismatch"),
     }
 }
 
@@ -1373,23 +1258,18 @@ fn all_checks() -> (Vec<Check>, usize, usize) {
     (checks, targets.len(), parents.len())
 }
 
-/// Tallies, with `accepted` broken out of `failed` rather than subtracted from it.
+/// Tallies. One line, no derived states.
 pub struct Tally {
     pub passed: usize,
     pub failed: usize,
     pub reboot: usize,
     pub na: usize,
     pub unmeasured: usize,
-    /// Findings that are still FAIL/REBOOT and are covered by an acceptance.
-    /// Counted IN `failed` as well -- an acceptance never reduces the failure
-    /// count, it only adds the fact that someone looked at it.
-    pub accepted: usize,
 }
 
 impl Tally {
-    fn of(checks: &[Check], acc: &[crate::accept::Acceptance]) -> Tally {
-        let mut t =
-            Tally { passed: 0, failed: 0, reboot: 0, na: 0, unmeasured: 0, accepted: 0 };
+    fn of(checks: &[Check]) -> Tally {
+        let mut t = Tally { passed: 0, failed: 0, reboot: 0, na: 0, unmeasured: 0 };
         for c in checks {
             match c.verdict {
                 Verdict::Pass => t.passed += 1,
@@ -1398,39 +1278,17 @@ impl Tally {
                 Verdict::NotApplicable => t.na += 1,
                 Verdict::Unmeasured => t.unmeasured += 1,
             }
-            if matches!(c.verdict, Verdict::Fail | Verdict::Reboot)
-                && crate::accept::covering(acc, c.id, &c.fingerprint()).is_some()
-            {
-                t.accepted += 1;
-            }
         }
         t
     }
-    /// Findings that are failing AND not accepted -- the number the chip should
-    /// go red on.
+    /// Findings the reader still has to act on.
     pub fn open_failures(&self) -> usize {
-        (self.failed + self.reboot).saturating_sub(self.accepted)
+        self.failed + self.reboot
     }
 }
 
-/// One check as JSON. Shared by `audit --json` and `posture --json` so the two
-/// cannot describe the same measurement differently.
-pub fn check_json(
-    c: &Check,
-    acc: &[crate::accept::Acceptance],
-    hist: Option<&crate::history::History>,
-) -> crate::json::J {
+fn check_json(c: &Check) -> crate::json::J {
     use crate::json::J;
-    let fp = c.fingerprint();
-    // When this finding was first seen with THIS evidence. Absent for anything
-    // that is not currently open -- "first seen" is meaningless for a pass.
-    let first_seen = hist
-        .and_then(|h| h.seen.get(c.id))
-        .filter(|s| s.fingerprint == fp)
-        .map(|s| s.first_seen)
-        .unwrap_or(0);
-    let covering = crate::accept::covering(acc, c.id, &fp);
-    let lapsed = if covering.is_none() { crate::accept::stale(acc, c.id, &fp) } else { None };
     J::Obj(vec![
         ("id", J::s(c.id)),
         ("name", J::s(c.name)),
@@ -1438,30 +1296,7 @@ pub fn check_json(
         ("evidence", J::s(&c.evidence)),
         ("meaning", J::s(&c.meaning)),
         ("oracle", J::os(c.oracle)),
-        ("reach", J::s(c.reach.slug())),
-        ("reach_label", J::s(c.reach.label())),
         ("owner", J::os(c.owner.clone())),
-        ("fingerprint", J::s(&fp)),
-        (
-            "action",
-            match &c.action {
-                Some(a) => J::Obj(vec![
-                    ("id", J::s(a.id)),
-                    ("label", J::s(a.label)),
-                    ("arg", J::os(a.arg.clone())),
-                ]),
-                None => J::Null,
-            },
-        ),
-        ("accepted", J::Bool(covering.is_some())),
-        ("accepted_reason", J::os(covering.map(|a| a.reason.clone()))),
-        ("accepted_at", J::Num(covering.map(|a| a.when as i64).unwrap_or(0))),
-        // An acceptance whose evidence has since moved. The single most useful
-        // line the report can print about a finding that came back: "you accepted
-        // this when it said something else".
-        ("acceptance_lapsed", J::Bool(lapsed.is_some())),
-        ("acceptance_lapsed_reason", J::os(lapsed.map(|a| a.reason.clone()))),
-        ("first_seen", J::Num(first_seen)),
     ])
 }
 
@@ -1473,28 +1308,8 @@ fn tally_json(t: &Tally) -> crate::json::J {
         ("reboot", J::Num(t.reboot as i64)),
         ("not_applicable", J::Num(t.na as i64)),
         ("unmeasured", J::Num(t.unmeasured as i64)),
-        ("accepted", J::Num(t.accepted as i64)),
         ("open_failures", J::Num(t.open_failures() as i64)),
     ])
-}
-
-/// "3 days ago" / "2 hours ago". Coarse on purpose: the exact second a finding
-/// appeared is not a fact anyone acts on, and printing it invites the reader to
-/// treat the number as more precise than the boot it was measured in.
-fn ago(secs: i64) -> String {
-    let s = secs.max(0);
-    if s < 120 {
-        return "just now".into();
-    }
-    let m = s / 60;
-    if m < 120 {
-        return format!("{m} minutes ago");
-    }
-    let h = m / 60;
-    if h < 48 {
-        return format!("{h} hours ago");
-    }
-    format!("{} days ago", h / 24)
 }
 
 fn now_secs() -> i64 {
@@ -1510,15 +1325,14 @@ fn now_secs() -> i64 {
 /// see" for the audit, the posture shield and anything else that asks.
 pub fn run_posture(json: bool) -> Result<()> {
     let checks = mount_checks();
-    let acc = crate::accept::load();
-    let t = Tally::of(&checks, &acc);
+    let t = Tally::of(&checks);
     if json {
         use crate::json::J;
         let doc = J::Obj(vec![
             ("kind", J::s("posture")),
             ("ts", J::Num(now_secs())),
             ("summary", tally_json(&t)),
-            ("checks", J::Arr(checks.iter().map(|c| check_json(c, &acc, None)).collect())),
+            ("checks", J::Arr(checks.iter().map(check_json).collect())),
         ]);
         println!("{}", doc.render());
     } else {
@@ -1536,79 +1350,34 @@ pub fn run_posture(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Where the boot pass caches the last audit, so the WebUI can paint a verdict on
-/// open instead of a dash. `service.sh` writes it at boot_completed and the page
-/// shows it with an age; pressing the button refreshes it.
 pub const CACHE: &str = "/data/adb/nomount/audit.json";
 
 pub fn run_audit(json: bool, write: bool) -> Result<()> {
     let (mut checks, rules, dirs) = all_checks();
-    let acc = crate::accept::load();
 
-    // Worst first, and within a verdict the cheapest oracle first. Every FAIL
-    // used to print in source order and read as equally fatal: `readdir cookie
-    // magic` is one getdents64 from any app, `erofs directory shape` needs a
-    // caller that replays erofs block packing. A reader fixing one thing should
-    // be told which one.
-    //
-    // An ACCEPTED failure sorts with the pass block: the user has already dealt
-    // with it, so it must not sit at the top pushing live findings down.
+    // Worst first. A dead engine outranks everything: with it down, every other
+    // row is describing a device that is not hiding anything.
     let rank = |c: &Check| -> u8 {
-        // A dead engine outranks everything: with it down, every other row is
-        // describing a device that is not hiding anything, so it has to be read
-        // first or not at all.
         if c.id == "engine-live" && c.verdict == Verdict::Fail {
             return 0;
         }
-        let accepted = crate::accept::covering(&acc, c.id, &c.fingerprint()).is_some();
         match c.verdict {
-            Verdict::Fail if !accepted => 0,
-            Verdict::Reboot if !accepted => 1,
-            Verdict::Unmeasured => 2,
-            Verdict::Fail | Verdict::Reboot => 3, // accepted
+            Verdict::Fail => 1,
+            Verdict::Reboot => 2,
+            Verdict::Unmeasured => 3,
             Verdict::Pass => 4,
             Verdict::NotApplicable => 5,
         }
     };
-    checks.sort_by(|a, b| rank(a).cmp(&rank(b)).then(a.reach.rank().cmp(&b.reach.rank())));
-
-    let t = Tally::of(&checks, &acc);
-
-    // What is OPEN right now: failing, and not accepted. This is the set the
-    // history is keyed on -- an accepted finding is the user saying "stop telling
-    // me", so letting it churn the signature would undo that.
-    let open_now: Vec<(String, String)> = checks
-        .iter()
-        .filter(|c| matches!(c.verdict, Verdict::Fail | Verdict::Reboot))
-        .filter(|c| crate::accept::covering(&acc, c.id, &c.fingerprint()).is_none())
-        .map(|c| (c.id.to_string(), c.fingerprint()))
-        .collect();
-    let now = now_secs();
-    // Read the PREVIOUS history for reporting, then fold this run into it. The
-    // report has to describe the run that just happened relative to the one
-    // before it, so the two have to be kept apart.
-    let prev = crate::history::load();
-    let prev_sig = prev.signature.clone();
-    // A run with ANY unmeasured check has not assessed this boot, so it must not
-    // move the streak in either direction. See history::update.
-    let assessable = t.unmeasured == 0;
-    let hist =
-        crate::history::update(prev, &open_now, now, &crate::history::boot_id(), assessable);
-    let changed = crate::history::signature(&open_now) != prev_sig && !prev_sig.is_empty();
-    // Only the run that persists the verdict persists the memory of it, or a
-    // read-only `nomount audit` would silently advance the boot streak.
-    if write {
-        crate::history::save(&hist);
-    }
+    checks.sort_by_key(rank);
+    let t = Tally::of(&checks);
 
     if json {
         use crate::json::J;
         let doc = J::Obj(vec![
             ("kind", J::s("audit")),
-            ("ts", J::Num(now)),
+            ("ts", J::Num(now_secs())),
             ("suite", J::s(env!("CARGO_PKG_VERSION"))),
-            // Hoisted out of the checks array so a consumer does not have to find
-            // the row to answer "is this describing a live system at all".
             (
                 "engine",
                 match Nm::new().version() {
@@ -1619,47 +1388,19 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
             ("rules", J::Num(rules as i64)),
             ("directories", J::Num(dirs as i64)),
             ("summary", tally_json(&t)),
-            (
-                "history",
-                J::Obj(vec![
-                    // When the set of open findings last MOVED. Lets the reader be
-                    // told "unchanged since Tuesday" instead of being handed the
-                    // same list to re-judge every time.
-                    ("changed_at", J::Num(hist.changed_at)),
-                    ("changed_now", J::Bool(changed)),
-                    ("clean_boots", J::Num(hist.clean_boots as i64)),
-                    ("total_boots", J::Num(hist.total_boots as i64)),
-                    ("first_run", J::Bool(prev_sig.is_empty())),
-                ]),
-            ),
-            ("checks", J::Arr(checks.iter().map(|c| check_json(c, &acc, Some(&hist))).collect())),
+            ("checks", J::Arr(checks.iter().map(check_json).collect())),
         ]);
         let text = doc.render();
         println!("{text}");
         if write {
-            // Best-effort: a cache that could not be written must never fail the
-            // audit itself. The consumer treats a missing or stale file as "no
-            // cached verdict", which is what it is.
             let _ = fs::write(CACHE, &text);
-            let _ = fs::set_permissions(
-                CACHE,
-                std::os::unix::fs::PermissionsExt::from_mode(0o600),
-            );
+            let _ =
+                fs::set_permissions(CACHE, std::os::unix::fs::PermissionsExt::from_mode(0o600));
         }
     } else {
         println!("nomount audit: {rules} live rule(s) across {dirs} directory(ies)\n");
         for c in &checks {
-            let fp = c.fingerprint();
-            let covering = crate::accept::covering(&acc, c.id, &fp);
-            let tag = if covering.is_some() && matches!(c.verdict, Verdict::Fail | Verdict::Reboot)
-            {
-                // The verdict itself is untouched -- the word FAIL is still
-                // printed. Only "and you accepted it" is added.
-                "FAIL/ACCEPTED"
-            } else {
-                c.tag()
-            };
-            println!("[{tag}] {} ({})", c.name, c.reach.label());
+            println!("[{}] {}", c.tag(), c.name);
             if !c.meaning.is_empty() {
                 println!("       {}", c.meaning);
             }
@@ -1667,134 +1408,25 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
             if let Some(o) = c.owner.as_deref() {
                 println!("       from: {o}");
             }
-            if matches!(c.verdict, Verdict::Fail | Verdict::Reboot) {
-                if let Some(seen) = hist.seen.get(c.id).filter(|s| s.fingerprint == fp) {
-                    if seen.first_seen >= now.saturating_sub(60) {
-                        println!("       NEW since your last check");
-                    } else {
-                        println!("       first seen: {}", ago(now - seen.first_seen));
-                    }
-                }
-            }
             if let Some(o) = c.oracle {
                 println!("       oracle: {o}");
-            }
-            if let Some(a) = covering {
-                println!("       accepted: {}", a.reason);
-            } else if let Some(a) = crate::accept::stale(&acc, c.id, &fp) {
-                println!(
-                    "       note: you accepted this once (\"{}\") but the evidence has changed \
-                     since, so the acceptance no longer applies",
-                    a.reason
-                );
             }
         }
         println!(
             "\nsummary: {} passed, {} failed, {} pending reboot, {} not applicable, {} unmeasured",
             t.passed, t.failed, t.reboot, t.na, t.unmeasured
         );
-        // "Unchanged since X" is worth saying about a FINDING. Said about a clean
-        // device it is noise -- there is nothing to be unchanged about, and the
-        // streak below already makes the point better. So: report change only
-        // when something is open, or when something just moved.
-        if !prev_sig.is_empty() && (changed || t.open_failures() > 0) {
-            if changed {
-                println!("         this is DIFFERENT from the last check");
-            } else if hist.changed_at > 0 {
-                println!("         unchanged since {}", ago(now - hist.changed_at));
-            }
-        }
-        // Only once there is more than one boot behind it: "clean on the last 1
-        // of 1" reads as a hedge, not as confidence.
-        if hist.total_boots > 1 && t.open_failures() == 0 {
-            println!(
-                "         clean on the last {} of {} boots checked",
-                hist.clean_boots, hist.total_boots
-            );
-        }
-        if t.accepted > 0 {
-            println!("         {} of the failures are accepted (still failing, still shown)", t.accepted);
-        }
         if t.reboot > 0 {
             println!("note: a pending-reboot check is still detectable until you reboot.");
         }
         if t.unmeasured > 0 {
             println!("note: an unmeasured check was NOT verified — it is not a pass.");
         }
-        if t.na > 0 {
-            println!(
-                "note: a not-applicable check had nothing to test on this device — that is not a \
-                 warning, and not a pass either."
-            );
-        }
     }
 
-    // Exit non-zero on OPEN failures only. An accepted one has been dealt with;
-    // failing the exit status on it would keep every wrapper script red forever
-    // and is the scripting equivalent of the permanent chip this change removes.
     if t.open_failures() > 0 {
         std::process::exit(1);
     }
-    Ok(())
-}
-
-/// `nomount accept` — record, list or drop an acceptance.
-pub fn run_accept(check: Option<String>, reason: Option<String>, remove: bool, list: bool) -> Result<()> {
-    let acc = crate::accept::load();
-    if list || check.is_none() {
-        if acc.is_empty() {
-            println!("no accepted findings");
-            return Ok(());
-        }
-        for a in &acc {
-            println!("{}\t{}\t{}", a.check, a.fingerprint, a.reason);
-        }
-        return Ok(());
-    }
-    // `check` is Some here -- the `check.is_none()` arm above returned -- but
-    // saying so with `unwrap` leaves a panic in a root binary standing on a
-    // control-flow argument. Bind it instead, so a future edit to that arm
-    // cannot turn a refactor into a crash.
-    let Some(id) = check else {
-        println!("no accepted findings");
-        return Ok(());
-    };
-    if remove {
-        if crate::accept::remove(&id)? {
-            println!("no longer accepting: {id}");
-        } else {
-            println!("nothing accepted for: {id}");
-        }
-        return Ok(());
-    }
-    // Fingerprint the CURRENT evidence, so the acceptance is bound to what the
-    // user is looking at right now. Accepting a check whose id does not exist,
-    // or which is not currently failing, is refused: an acceptance for a finding
-    // that was never measured is a mute, and this is deliberately not a mute.
-    // Validate what the caller gave us before doing any work. Fingerprinting the
-    // finding means running the whole audit -- which forks a probe child and
-    // reads /proc/<pid>/maps for every process on the device -- and rejecting an
-    // empty reason after all of that is seconds spent to refuse input we had at
-    // the start. Same rules `accept::add` enforces, checked early.
-    let reason = reason.unwrap_or_default();
-    let trimmed = crate::accept::validate(&id, &reason)?.to_string();
-
-    let (checks, _, _) = all_checks();
-    let Some(c) = checks.iter().find(|c| c.id == id) else {
-        anyhow::bail!(
-            "unknown check id: {id}\nrun `nomount audit --json` and use the \"id\" field of the finding"
-        );
-    };
-    if !matches!(c.verdict, Verdict::Fail | Verdict::Reboot) {
-        anyhow::bail!(
-            "{id} is not currently failing (it is {}), so there is nothing to accept",
-            c.verdict_slug()
-        );
-    }
-    crate::accept::add(&id, &c.fingerprint(), &trimmed)?;
-    println!("accepted {id}: {trimmed}");
-    println!("this does NOT mark it clean — it stays a failure, shown in grey, and comes back at");
-    println!("full severity if the evidence changes.");
     Ok(())
 }
 
@@ -1815,7 +1447,7 @@ mod tests {
             c("dino-vs-stat", Verdict::NotApplicable, "all on overlay"),
             c("pm-published-open", Verdict::NotApplicable, "no app is hidden"),
         ];
-        let t = Tally::of(&checks, &[]);
+        let t = Tally::of(&checks);
         assert_eq!(t.passed, 1, "an n/a must never be counted as a pass");
         assert_eq!(t.na, 2);
         assert_eq!(t.unmeasured, 0);
@@ -1827,44 +1459,11 @@ mod tests {
     #[test]
     fn unmeasured_stays_distinct_from_both() {
         let checks = vec![c("zero-mount", Verdict::Unmeasured, "cannot read mountinfo")];
-        let t = Tally::of(&checks, &[]);
+        let t = Tally::of(&checks);
         assert_eq!((t.passed, t.na, t.unmeasured), (0, 0, 1));
     }
 
-    /// An acceptance never reduces the failure count -- it only records that
-    /// someone looked. `failed` stays 1; only `open_failures` moves.
-    #[test]
-    fn an_acceptance_never_turns_a_failure_into_a_pass() {
-        let checks = vec![c("rom-tmpfs", Verdict::Fail, "one tmpfs")];
-        let fp = checks[0].fingerprint();
-        let acc = vec![crate::accept::Acceptance {
-            check: "rom-tmpfs".into(),
-            fingerprint: fp,
-            when: 1,
-            reason: "ReVanced, on purpose".into(),
-        }];
-        let t = Tally::of(&checks, &acc);
-        assert_eq!(t.passed, 0);
-        assert_eq!(t.failed, 1, "still a failure, still counted as one");
-        assert_eq!(t.accepted, 1);
-        assert_eq!(t.open_failures(), 0, "but not one the user still has to act on");
-    }
 
-    /// The safety property, at the tally level: accepting one measured state does
-    /// not accept the next one.
-    #[test]
-    fn an_acceptance_lapses_when_the_evidence_moves() {
-        let checks = vec![c("rom-tmpfs", Verdict::Fail, "TWO tmpfs now")];
-        let acc = vec![crate::accept::Acceptance {
-            check: "rom-tmpfs".into(),
-            fingerprint: "stale-fingerprint".into(),
-            when: 1,
-            reason: "was one tmpfs".into(),
-        }];
-        let t = Tally::of(&checks, &acc);
-        assert_eq!(t.accepted, 0);
-        assert_eq!(t.open_failures(), 1, "the finding is back at full severity");
-    }
 
     /// A dead engine has to make the summary non-clean.
     ///
@@ -1883,28 +1482,13 @@ mod tests {
             c("rom-tmpfs", Verdict::Pass, "no tmpfs"),
             c("dino-vs-stat", Verdict::NotApplicable, "no rules live"),
         ];
-        let t = Tally::of(&checks, &[]);
+        let t = Tally::of(&checks);
         assert_eq!(t.open_failures(), 1, "a dead engine must reach open_failures");
         assert_eq!(t.passed, 2, "the mount checks still passed, and honestly so");
         assert_eq!(t.na, 1);
     }
 
-    /// ...and it must not be describable as an oracle, because nothing detects
-    /// you by it. Rendering "(any app)" contradicted the check's own text.
-    #[test]
-    fn the_engine_check_is_not_an_oracle() {
-        assert_eq!(Reach::NotAnOracle.label(), "not a detection");
-        assert_eq!(Reach::NotAnOracle.slug(), "not-an-oracle");
-        assert!(Reach::NotAnOracle.rank() > Reach::Effort.rank());
-    }
 
-    /// Reachability orders the report: one syscall from any app outranks
-    /// something that needs a purpose-built detector.
-    #[test]
-    fn reach_ranks_the_cheapest_oracle_first() {
-        assert!(Reach::AnyApp.rank() < Reach::Effort.rank());
-        assert!(Reach::Effort.rank() < Reach::RootOnly.rank());
-    }
 
     /// Every check name must map to a real id: the fallback is what an
     /// acceptance would be keyed on, and two checks sharing "unknown-check" would

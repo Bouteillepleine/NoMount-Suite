@@ -80,26 +80,6 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Record that you have looked at a failing check and decided to live with it.
-    ///
-    /// This never marks anything clean. The verdict stays FAIL, it stays visible,
-    /// it renders grey rather than green, and it comes back at full severity if
-    /// the evidence changes. Some findings genuinely have no fix the Suite can
-    /// apply -- a hook framework's bind, an installer's own tmpfs -- and a
-    /// permanently red chip is one the reader learns to ignore.
-    Accept {
-        /// Check id, as printed by `audit --json` ("id" field). Omit to list.
-        check: Option<String>,
-        /// Why. Required, stored, and shown next to the finding.
-        #[arg(long)]
-        reason: Option<String>,
-        /// Stop accepting this check.
-        #[arg(long)]
-        remove: bool,
-        /// Show every acceptance on this device.
-        #[arg(long)]
-        list: bool,
-    },
     /// Lint the mount plan (and live rules) for known bootloop/no-op hazards
     Doctor {
         #[arg(long)]

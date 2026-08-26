@@ -107,22 +107,6 @@ impl J {
     }
 }
 
-/// FNV-1a over the evidence text, as 16 lowercase hex digits.
-///
-/// Used to fingerprint a finding so an acceptance can be tied to the evidence it
-/// was granted for: if the evidence changes, the acceptance no longer matches and
-/// the finding comes back. Not a security primitive and never used as one -- the
-/// file it keys into is root-owned 0600, and the worst a collision could do is
-/// keep a finding suppressed one release too long.
-pub fn fingerprint(s: &str) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x1000_0000_01b3);
-    }
-    format!("{h:016x}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,12 +141,4 @@ mod tests {
         assert_eq!(j.render(), r#"{"n":-3,"ok":true,"owner":null,"xs":["a",1]}"#);
     }
 
-    /// An acceptance is keyed on the fingerprint, so the same evidence must
-    /// fingerprint the same way and different evidence must not.
-    #[test]
-    fn fingerprint_is_stable_and_discriminating() {
-        assert_eq!(fingerprint("abc"), fingerprint("abc"));
-        assert_ne!(fingerprint("abc"), fingerprint("abd"));
-        assert_eq!(fingerprint("abc").len(), 16);
-    }
 }
