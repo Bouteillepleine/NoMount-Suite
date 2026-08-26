@@ -1216,45 +1216,78 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
     return res;
 }
 
-static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
+/* Run the caller's read/write against the backing file on a PRIVATE kiocb.
+ *
+ * The caller's kiocb is never touched. That is the whole point: the previous
+ * shape borrowed it -- point ki_filp at the backing file, call down, restore --
+ * and could not restore an op that came back -EIOCBQUEUED, because the backing
+ * filesystem's completion still dereferences ki_filp (kiocb_end_write and the
+ * iomap/dio completions all do) and would have been handed a file belonging to a
+ * different inode. Leaving the backing file there is what the completion needs,
+ * and is exactly what breaks the reference accounting one layer up:
+ *
+ *   struct aio_kiocb's leading ki_filp UNIONS with rw.ki_filp, and iocb_destroy()
+ *   fputs iocb->ki_filp. So a queued AIO read of an injected file dropped a
+ *   reference on the BACKING file that nobody had taken -- while the reference
+ *   AIO holds on OUR file, the one iocb_destroy() meant to release, leaked. Our
+ *   file->private_data is usually the only thing pinning real_file, so that
+ *   stray fput frees it out from under a still-live nm_file, and every later
+ *   read/mmap of the same fd walks a freed struct file.
+ *
+ * Balancing it in place is not available to us: whether ki_filp owns the
+ * reference the completion will drop is a property of the SUBMITTER, not of the
+ * file. AIO owns it there; io_uring keeps its reference on req->file and would
+ * underflow if we adjusted ki_filp's. A filesystem cannot tell the two apart --
+ * which is why mainline gave stacking filesystems fs/backing-file.c, where
+ * overlayfs clones the kiocb (with its own get_file) instead of borrowing it.
+ *
+ * We clone without the async half: ki_complete NULL makes is_sync_kiocb() true,
+ * and every direct-I/O path keys its "queue and return -EIOCBQUEUED" behaviour
+ * off exactly that (dio->is_async, iomap's wait_for_completion), so the backing
+ * fs completes inline and returns a byte count. Both async submitters handle a
+ * non-(-EIOCBQUEUED) return by completing the request themselves -- that is the
+ * ordinary path for any buffered read, which is what nearly every read of an
+ * injected file already is. IOCB_NOWAIT rides along in ki_flags, so an io_uring
+ * NOWAIT probe still gets -EAGAIN and retries from its worker rather than
+ * blocking the submitter.
+ *
+ * Cost, stated: an O_DIRECT io_submit()/io_uring read of an INJECTED file now
+ * completes synchronously instead of being queued. Everything else -- ki_pos,
+ * ki_flags, ioprio, the readahead state on real_file->f_ra -- is carried across
+ * unchanged, and the sync read(2)/write(2) path behaves as it always did. */
+static ssize_t nm_forward_iter(struct kiocb *iocb, struct iov_iter *iter,
+                               struct file *real_file, bool is_write)
 {
-    struct file *file = iocb->ki_filp;
-    struct file *real_file = file->private_data;
+    struct kiocb kio = *iocb;
     ssize_t ret;
-    if (!real_file || !real_file->f_op->read_iter) return -EINVAL;
 
-    iocb->ki_filp = real_file;
-    ret = real_file->f_op->read_iter(iocb, to);
-    /* Do NOT restore on -EIOCBQUEUED. The op is still in flight and the backing
-     * filesystem's completion path reads iocb->ki_filp (kiocb_end_write and the
-     * iomap/dio completions all do); putting our synthetic file back there hands
-     * the completion a file belonging to a different inode with a vtable it never
-     * called into. Leaving the backing file is also safe for lifetime: the
-     * submitter holds a reference to OUR file for the duration, and real_file is
-     * pinned by its ->private_data, so it outlives the completion either way.
-     * Synchronous callers (is_sync_kiocb) never see -EIOCBQUEUED and are restored
-     * exactly as before. */
-    if (ret != -EIOCBQUEUED)
-        iocb->ki_filp = file;
+    kio.ki_filp = real_file;
+    kio.ki_complete = NULL;   /* -> is_sync_kiocb(): the op cannot be queued */
+    kio.private = NULL;
+
+    ret = is_write ? real_file->f_op->write_iter(&kio, iter)
+                   : real_file->f_op->read_iter(&kio, iter);
+    /* The backing fs advances its own copy; hand the position back. On an error
+     * return it is unchanged, so this is a copy of what the caller already had. */
+    iocb->ki_pos = kio.ki_pos;
 
     return ret;
 }
 
+static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
+{
+    struct file *real_file = iocb->ki_filp->private_data;
+
+    if (!real_file || !real_file->f_op->read_iter) return -EINVAL;
+    return nm_forward_iter(iocb, to, real_file, false);
+}
+
 static ssize_t nm_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
-    struct file *file = iocb->ki_filp;
-    struct file *real_file = file->private_data;
-    ssize_t ret;
+    struct file *real_file = iocb->ki_filp->private_data;
+
     if (!real_file || !real_file->f_op->write_iter) return -EINVAL;
-
-    iocb->ki_filp = real_file;
-    ret = real_file->f_op->write_iter(iocb, from);
-    /* Same as nm_read_iter: an in-flight (-EIOCBQUEUED) op keeps the backing file
-     * on the iocb, because that is what its completion will dereference. */
-    if (ret != -EIOCBQUEUED)
-        iocb->ki_filp = file;
-
-    return ret;
+    return nm_forward_iter(iocb, from, real_file, true);
 }
 
 /* Map through the GENERIC path, never the backing filesystem's ->mmap.
