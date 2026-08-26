@@ -1343,9 +1343,22 @@
     $("dApi").textContent = p[4] || "—";
     $("dKernel").textContent = p[5] || "—";
   }
+  // What an app can see, on the Modules tab.
+  //
+  // The MOUNT verdict is the check report's, not this card's. It used to run its
+  // own `posture --json` and count foreign mounts with its own awk, and that
+  // pattern was wrong in both directions -- it missed a bind from anywhere else
+  // under /data/adb, and it counted a hook framework's by-design bind that the
+  // report calls expected. A front page contradicting the report two taps away
+  // teaches the reader to trust neither number. Those are three ordinary rows
+  // now (`zero-mount-posture`, `tmpfs-over-the-rom`, `foreign-mount-over-the-rom`)
+  // and this reads them.
+  //
+  // What this card still measures for itself is what the report cannot: whether a
+  // non-root process sees a different mount table than root, and the residual
+  // tells a scanner reads straight out of properties whatever the mount table
+  // says.
   async function refreshStealth() {
-    // Root view (ksu.exec runs as root -> sees every mount) plus the residual
-    // tells a scanner reads straight out of properties.
     const r = await exec(
       'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
       'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
@@ -1360,44 +1373,34 @@
     const sucompat = kv.sucompat === "1";
     const rootNm = parseInt(kv.root_nm || "0", 10);
 
-    // The mount verdict comes from the CHECK REPORT, not from an awk here.
-    //
-    // This card used to count foreign mounts with its own pattern, and that
-    // pattern was wrong in both directions: it missed a bind from anywhere else
-    // under /data/adb (a ReVanced module binds out of /data/adb/rvhc), and it
-    // counted a hook framework's bind that the report deliberately reports as
-    // expected. A front page that contradicts the report two taps away teaches
-    // the reader to trust neither number. These are three ordinary rows now, so
-    // there is one implementation and one answer.
-    const MOUNT_ROWS = ["zero-mount-posture", "tmpfs-over-the-rom", "foreign-mount-over-the-rom"];
-    const mrows = MOUNT_ROWS.map(checkById);
-    // -1, not 0, when the rows are missing or unmeasured: "there are no foreign
-    // mounts" and "nobody asked" are different answers, and the second one must
-    // not render green.
-    const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
-    const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
-    const fmnt = measured ? bad.length : -1;
-    const fmntWhy = bad.map(function (c) { return c.meaning || c.name; }).join(" ");
-    const fmntOwner = bad.map(function (c) { return c.owner; }).filter(Boolean).join(", ");
-
     // App view: drop to a non-root uid and count nomount_* mounts. If the kernel
     // mount-hide hook is active, non-root readers get them filtered out (-> 0).
     // NB: grep -c exits 1 when the count is 0 (the hidden case!), so don't gate on
     // errno — parse stdout as a number instead.
-    const appR = await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"');
-    const appOut = (appR.stdout || "").trim();
+    const appOut = ((await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"')).stdout || "").trim();
     const appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
+
+    // -1, not 0, when the rows are missing or unmeasured: "there are no foreign
+    // mounts" and "nobody asked" are different answers, and the second must not
+    // render green.
+    const mrows = ["zero-mount-posture", "tmpfs-over-the-rom", "foreign-mount-over-the-rom"].map(checkById);
+    const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
+    const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
+    const fmnt = measured ? bad.length : -1;
 
     const vbs = (kv.vbs || "").toLowerCase();
     const fp = kv.fp || "";
     const se = (kv.se || "").trim();
     const vbTell = vbs !== "" && vbs !== "green";
-    // `dev-keys` is a real signing tag and its absence here rendered a dev-keys
+    // `dev-keys` is a real signing tag, and its absence here rendered a dev-keys
     // build as a green "release-keys". An EMPTY fingerprint is not a pass either:
     // getprop returning nothing means we could not read it.
     const keyMatch = fp === "" ? null : fp.match(/test-keys|dev-keys|userdebug|:eng\//);
-    const keyTell = !!keyMatch;
     const seTell = se !== "" && se !== "Enforcing";
+    const tells = [];
+    if (vbTell) tells.push("verified-boot=" + vbs);
+    if (keyMatch) tells.push("build keys");
+    if (seTell) tells.push("SELinux " + se);
 
     $("mSu").innerHTML = sucompat ? 'sucompat <small>kernel · mountless</small>' : 'external <small>unmanaged</small>';
 
@@ -1406,113 +1409,103 @@
       { k: "Root · su", v: sucompat ? "sucompat · mountless" : "external", t: sucompat ? "vfs" : "off" },
     ];
     if (rootNm > 0) {
-      if (appNm === 0) rows.push({ k: "Real mounts", v: `root ${rootNm} · apps 0 — hidden`, t: "vfs" });
-      else if (appNm > 0) rows.push({ k: "Real mounts", v: `apps see ${appNm} — VISIBLE`, t: "warn" });
-      else rows.push({ k: "Real mounts", v: `root ${rootNm} · app-view n/a`, t: "off" });
-    } else if (fmnt > 0) {
-      rows.push({ k: "Real mounts", v: `${fmnt} visible to apps`, t: "warn" });
-    } else if (fmnt < 0) {
-      rows.push({ k: "Real mounts", v: "not measured", t: "off" });
+      rows.push(appNm === 0 ? { k: "Real mounts", v: "root " + rootNm + " · apps 0 — hidden", t: "vfs" }
+              : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " — VISIBLE", t: "warn" }
+              : { k: "Real mounts", v: "root " + rootNm + " · app-view n/a", t: "off" });
     } else {
-      rows.push({ k: "Real mounts", v: "none — pure Prism", t: "vfs" });
+      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " visible to apps", t: "warn" }
+              : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
+              : { k: "Real mounts", v: "none — pure Prism", t: "vfs" });
     }
-    rows.push({ k: "Verified boot", v: vbs ? (vbTell ? vbs + " · tell" : vbs) : "n/a", t: vbTell ? "warn" : (vbs ? "vfs" : "off") });
+    rows.push({ k: "Verified boot", v: vbs ? (vbTell ? vbs + " · tell" : vbs) : "n/a",
+                t: vbTell ? "warn" : (vbs ? "vfs" : "off") });
     // Name the tag that actually matched, so a dev-keys build is not reported as
     // "test-keys" — the row is the only place the user sees which one it is.
-    rows.push({
-      k: "Build keys",
-      v: fp === "" ? "n/a" : keyTell ? keyMatch[0].replace(/^:|\/$/g, "") + " · tell" : "release-keys",
-      t: fp === "" ? "off" : keyTell ? "warn" : "vfs",
-    });
+    rows.push({ k: "Build keys",
+                v: fp === "" ? "n/a" : keyMatch ? keyMatch[0].replace(/^:|\/$/g, "") + " · tell" : "release-keys",
+                t: fp === "" ? "off" : keyMatch ? "warn" : "vfs" });
     rows.push({ k: "SELinux", v: se || "n/a", t: seTell ? "warn" : (se ? "vfs" : "off") });
     $("posture").innerHTML = rows.map((x) =>
       `<div class="row"><span class="name">${x.k}</span><span class="tag ${x.t}">${esc(x.v)}</span></div>`
     ).join("");
 
-    const shield = $("shield");
-    // A DEAD ENGINE OUTRANKS THE MOUNT VERDICT. With it down there genuinely are
-    // no mounts, so every row above passes and this card would render its
-    // greenest state -- "fully mountless, nothing to hide" -- on a device where
-    // nothing is being injected at all. Every statement true, the conclusion
-    // false. Same guard the hero line carries, for the same reason.
+    // The verdict, worst first. Every arm that is not the last one is a reason
+    // this card may NOT say "clean" -- an unknown is never green here, because
+    // the whole card is a claim about what an app can see and an unknown means
+    // nothing measured that claim.
+    //
+    // Residual tells OVERRIDE whatever the mount ladder concluded: even with a
+    // spotless mount surface these are read directly by a scanner. A mount
+    // finding is the more actionable problem, so its wording is kept and the
+    // tells are appended rather than clobbering it.
+    let told = false;
+    const say = function (kind, title, desc, note) {
+      if (tells.length && !told) {
+        kind = "warn";
+        note += " Also readable by a scanner, whatever the mount table says: " +
+                tells.map(esc).join(", ") + ".";
+      }
+      $("shield").className = "shield " + kind;
+      $("stealthT").textContent = title;
+      $("stealthD").textContent = desc;
+      $("stealthNote").innerHTML = note;
+    };
     if (engineDown(CHECK)) {
-      shield.className = "shield warn";
-      $("stealthT").textContent = "The engine isn’t running";
-      $("stealthD").textContent = "nothing is being injected";
-      $("stealthNote").innerHTML = "There are no mounts because there is nothing being served. " +
-        "This card cannot say anything about how you look to an app until the engine answers — " +
-        "open <b>Check</b> from the Status tab.";
-      return;
-    }
-    if (appNm > 0) {
-      shield.className = "shield warn";
-      $("stealthT").textContent = "Mount visible to apps";
-      $("stealthD").textContent = `uid 2000 sees ${appNm} nomount_* mount${appNm > 1 ? "s" : ""}`;
-      $("stealthNote").innerHTML = "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully mountless</b> (Prism RRO) — if you see this, an older overlay build is still active; reboot.";
-    } else if (appNm === 0) {
-      shield.className = "shield clean";
-      if (rootNm === 0 && fmnt > 0) {
-        // The Suite is mountless, but the mount TABLE is not: another module's bind
-        // is just as readable to an app as one of ours would be, and claiming "zero
-        // mounts" over the top of it was the one false reassurance this card exists
-        // to prevent. The wording comes from the report's own row, so the shield
-        // and the report cannot describe the same mount differently.
-        shield.className = "shield warn";
-        $("stealthT").textContent = "Something is mounting over the ROM";
-        $("stealthD").textContent = fmntOwner ? "from " + fmntOwner
-                                              : `${fmnt} finding${fmnt > 1 ? "s" : ""} in the mount table`;
-        $("stealthNote").innerHTML = esc(fmntWhy) +
-          " Open the check from the Status tab — it names each one, who caused it, and what you can do.";
-      } else if (rootNm === 0 && fmnt < 0) {
-        // Unknown is not clean. The whole card is a claim about what an app can
-        // see; if nothing measured the mount table, nothing measured that claim.
-        shield.className = "shield warn";
-        $("stealthT").textContent = "Mount posture not measured";
-        $("stealthD").textContent = "no check has read the mount table yet";
-        $("stealthNote").innerHTML = "File injections and RRO are Prism and su is sucompat, so the Suite adds " +
-          "no mounts by construction — but nothing has measured that here yet. Run <b>Check my setup</b> " +
-          "from the Status tab.";
-      } else if (rootNm === 0) {
-        $("stealthT").textContent = "Fully mountless";
-        $("stealthD").textContent = "zero mounts — nothing to hide";
-        $("stealthNote").innerHTML = "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat (kernel&nbsp;· mountless), and RRO overlays are Prism too — OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> mount table, so there is no mount-gap for a scanner to flag.";
-      } else {
-        $("stealthT").textContent = "Clean — nothing visible to apps";
-        $("stealthD").textContent = `${rootNm} mount${rootNm > 1 ? "s" : ""} hidden from non-root`;
-        $("stealthNote").innerHTML = "Injections are mountless and su is sucompat. Any remaining <code>nomount_*</code> mount is kernel-hidden from non-root readers of <code>/proc/*/mountinfo</code>; root still sees everything.";
-      }
+      // A DEAD ENGINE OUTRANKS THE MOUNT VERDICT. With it down there genuinely
+      // are no mounts, so every row above passes and this card would render its
+      // greenest state on a device where nothing is being injected at all. Every
+      // statement true, the conclusion false.
+      say("warn", "The engine isn’t running", "nothing is being injected",
+        "There are no mounts because there is nothing being served. This card cannot say " +
+        "anything about how you look to an app until the engine answers — open <b>Check</b> " +
+        "from the Status tab.");
+    } else if (appNm > 0) {
+      say("warn", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
+        "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
+        "mountless</b> (Prism RRO) — if you see this, an older overlay build is still active; reboot.");
+    } else if (fmnt > 0) {
+      // The Suite is mountless, but the mount TABLE is not: another module's bind
+      // is just as readable to an app as one of ours would be, and claiming "zero
+      // mounts" over the top of it was the one false reassurance this card exists
+      // to prevent. The wording comes from the report's own row, so the shield and
+      // the report cannot describe the same mount differently.
+      const owner = bad.map(function (c) { return c.owner; }).filter(Boolean).join(", ");
+      say("warn", "Something is mounting over the ROM",
+        owner ? "from " + owner : fmnt + " finding(s) in the mount table",
+        esc(bad.map(function (c) { return c.meaning || c.name; }).join(" ")) +
+        " Open <b>Check</b> from the Status tab — it names each one, who caused it, and what " +
+        "you can do about it.");
+    } else if (fmnt < 0) {
+      say("warn", "Mount posture not measured", "no check has read the mount table yet",
+        "File injections and RRO are Prism and su is sucompat, so the Suite adds no mounts by " +
+        "construction — but nothing has measured that here yet. Run <b>Check my setup</b> from " +
+        "the Status tab.");
+    } else if (appNm < 0 && rootNm > 0) {
+      // `su 2000` is exactly the call that stops answering once uid 2000 lands on
+      // the hide list, so this is a real state, not a broken one.
+      say("warn", "Detection posture", "app-view check unavailable",
+        "Couldn’t drop to a non-root uid to verify here, and root sees " + rootNm +
+        " <code>nomount_*</code> mount(s).");
+    } else if (rootNm > 0) {
+      // appNm === 0: the mounts EXIST and are kernel-hidden from non-root
+      // readers. "Zero mounts — nothing to hide" would be a plain falsehood
+      // here; there is something, and hiding it is what is working.
+      say("clean", "Clean — nothing visible to apps",
+        rootNm + " mount" + (rootNm > 1 ? "s" : "") + " hidden from non-root",
+        "Injections are mountless and su is sucompat. Any remaining <code>nomount_*</code> mount " +
+        "is kernel-hidden from non-root readers of <code>/proc/*/mountinfo</code>; root still " +
+        "sees everything.");
+    } else if (tells.length) {
+      told = true;
+      say("warn", "Residual tells present", tells.join(" · "),
+        "Mount surface is clean, but a scanner can still read: " + tells.map(esc).join(", ") +
+        ". These are properties and boot state, not mounts — nothing on this page changes them.");
     } else {
-      // UNVERIFIED, not clean. This whole card is a claim about what a non-root
-      // process can see; if the probe could not drop to a non-root uid, nothing
-      // measured that claim -- and `su 2000` is exactly the call that stops
-      // answering once uid 2000 lands on the hide list.
-      shield.className = "shield warn";
-      $("stealthT").textContent = "Detection posture";
-      $("stealthD").textContent = "app-view check unavailable";
-      $("stealthNote").innerHTML = `File injections and RRO are Prism; su is sucompat. Couldn't drop to a non-root uid to verify here; root sees ${rootNm} <code>nomount_*</code> mount(s).`;
-    }
-
-    // Residual tells override the mount-only verdict: even with a clean mount
-    // surface, these are directly readable by a scanner. Named, not fixed —
-    // nothing on this page changes them.
-    const extraTells = [];
-    if (vbTell) extraTells.push("verified-boot=" + vbs);
-    if (keyTell) extraTells.push("build keys");
-    if (seTell) extraTells.push("SELinux " + se);
-    if (extraTells.length) {
-      shield.className = "shield warn";
-      if (appNm > 0 || fmnt !== 0) {
-        // A visible mount is the more actionable problem — keep its title/desc and
-        // just append the residual tells rather than clobbering the mount warning.
-        $("stealthNote").innerHTML +=
-          " Also readable by a scanner: " + extraTells.map(esc).join(", ") + ".";
-      } else {
-        $("stealthT").textContent = "Residual tells present";
-        $("stealthD").textContent = extraTells.join(" · ");
-        $("stealthNote").innerHTML = "Mount surface is clean, but a scanner can still read: " +
-          extraTells.map(esc).join(", ") + ". These are properties and boot state, not mounts — " +
-          "nothing on this page changes them.";
-      }
+      say("clean", "Fully mountless", "zero mounts — nothing to hide",
+        "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat " +
+        "(kernel&nbsp;· mountless), and RRO overlays are Prism too — OverlayManager&nbsp;+ idmap2 " +
+        "read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> " +
+        "mount table, so there is no mount-gap for a scanner to flag.");
     }
   }
 
