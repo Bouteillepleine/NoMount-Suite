@@ -1150,133 +1150,54 @@
 
   <section class="tab" id="tab-diag">
 
-  <!-- Reached from the Status health line, not from the nav. There is no tab
-       button for this pane, so it needs its own way back. -->
+  <!-- ONE card.
+       This pane used to carry seven: three subsystems (detection, plan,
+       runtime) each with its own chip and button, two reference cards, and one
+       conditional. Three subsystems is a fact about the code, not a question
+       anybody arrives with -- and you get here by tapping a line that says
+       "2 things need attention", so landing on seven cards, one of which is
+       about the thing you tapped, is the wrong answer to the tap.
+       Findings from all three sources merge into one list; which subsystem
+       produced a row is a detail OF the row. -->
   <button class="backline" onclick="showTab('status',document.getElementById('nb-status'))">
     <span class="bk-go">‹</span><span>Back to Status</span>
   </button>
 
-  <div class="group-label">Start here</div>
-
-  <!-- WHAT THIS DOES AND DOES NOT COVER.
-       The "Residual tells present" state on the Modules tab reports verified-boot,
-       build keys and SELinux mode -- none of which a VFS engine is responsible
-       for -- and users read it as the Suite failing. The things it genuinely
-       cannot cover (PackageManager parsing the injected APK, SELinux-policy
-       detection) were documented in a <details> on the per-UID card that almost
-       nobody opens. Say it once, up front, where the verdicts are. -->
-  <div class="card collapsed" id="cardScope">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
-      <h2>What this can and can't hide</h2><span class="chev">›</span>
-    </div>
-    <p class="note">Worth two minutes before you read a verdict below — several things a detector can see are <b>not</b> the Suite's to fix, and one of them has its own switch.</p>
-    <div class="subsec">
-      <div class="subsec-h">What it covers</div>
-      <p class="note" style="margin-top:6px">Your modules' files are served by redirecting them inside the kernel — no overlay, no bind, nothing in the mount table. Per-app hiding shows a listed app the stock filesystem instead. Root is <code>sucompat</code>, also mountless.</p>
-    </div>
-    <div class="subsec">
-      <div class="subsec-h">What it can't cover — and never claimed to</div>
-      <p class="note" style="margin-top:6px"><b>Android itself still sees your files.</b> The PackageManager parses an injected APK as the system and hands its version and signature to any app that asks. That is what makes injection work — and it means an app can learn about the file from Android rather than from the filesystem.</p>
-      <p class="note"><b>SELinux-policy detection.</b> Probing the loaded policy for root-framework types is a different layer entirely. Some kernels ship a cloak for it; that is a kernel build option, not something this module can switch on.</p>
-      <p class="note"><b>Anything a system service reads on the app's behalf.</b> Per-app hiding keys on the calling UID, so a system service asking on behalf of a hidden app is not hidden — it is the system asking.</p>
-    </div>
-    <div class="subsec">
-      <div class="subsec-h">Not the Suite's, but fixable here</div>
-      <p class="note" style="margin-top:6px"><b>Verified boot</b> and <b>build keys</b> come from properties and the kernel command line — nothing to do with mounts or injection. An unlocked bootloader says so whatever any module does. The <b>Boot-state</b> switch in Tools › Spoofing normalises both.</p>
-      <div class="btns"><button class="act" onclick="showTab('tools',document.getElementById('nb-tools'));document.getElementById('cardSpoof')&&document.getElementById('cardSpoof').classList.remove('collapsed')">Open Spoofing</button></div>
-    </div>
-  </div>
-
-  <!-- ONE button that answers "am I OK?". The three cards below stay exactly as
-       they were; this runs all three and reconciles them into one verdict, which
-       is the thing a reader had to do by hand. -->
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
-      <h2>Check my setup</h2>
+      <h2>Findings</h2><span class="chip" id="fchip">—</span>
     </div>
-    <p class="note">Runs the detection audit, the mount-plan check and the runtime check together, and gives you one answer. Each of the three cards below still works on its own if you want the detail.</p>
-    <div class="btns"><button class="act primary" onclick="runCheckAll(this)">Check my setup</button></div>
-    <div class="list" id="checkAllOut" style="display:none"></div>
-  </div>
-
-  <div class="group-label">Detection</div>
-
-  <!-- AUDIT: replay every detection oracle against this device -->
-  <div class="card collapsed" id="cardAudit">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
-      <h2>Detection audit</h2><span class="chip" id="auchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Replays every detection oracle this project has found and closed — readdir cookies, inode banding, directory shape, mount visibility, kernel surfaces — against <b>your</b> device and ROM, and reports what it actually measured.</p>
-    <p class="note"><b>Not applicable</b> means there was nothing here to test — no app hidden yet, no overlay mount, no small erofs folder. That is not a warning. <b>Unverified</b> means a check could have run and didn't, which is not a pass either.</p>
+    <p class="note" id="fsub">Checks everything: what apps can see, what your next boot will do, and whether it is running correctly now.</p>
     <div class="btns" style="flex-wrap:wrap">
-      <button class="act primary" onclick="runAudit(this)">Run detection audit</button>
+      <button class="act primary" onclick="runAll(this)">Check my setup</button>
       <button class="act" id="auCopy" onclick="copyAudit(this)" style="display:none">Copy report</button>
     </div>
     <div class="auage" id="auage" style="display:none"></div>
-    <div class="list" id="auditlist"></div>
-    <details class="ndet" id="auRawWrap" style="display:none">
-      <summary>Raw output</summary>
-      <pre class="rules" id="auditout">…</pre>
-    </details>
-  </div>
+    <div class="list" id="findlist"></div>
 
-  <!-- KERNEL FEATURES: what the running kernel actually gives us.
-       Half the Suite's cloaks go INERT rather than half-applying when the kernel
-       cannot support them -- which is the right call and is currently announced
-       only in boot.log and /dev/kmsg, where the roam-stats flood buries it within
-       minutes. Users find out by asking why a toggle did nothing. -->
-  <div class="card collapsed" id="cardFeat">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
-      <h2>Kernel features</h2><span class="chip" id="featchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Each of these lives in the kernel, not in this module. Where one is missing the Suite goes <b>inert</b> rather than half-applying it — a half-applied cloak is a pattern of its own — so nothing here breaks, but the protection is not there either.</p>
-    <div class="list" id="featlist"></div>
-  </div>
-
-  <div class="group-label">Health</div>
-
-  <div class="card collapsed" id="cardHealth">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
-      <h2>Health check</h2><span class="chip" id="dchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Lints the mount plan the way it will actually be applied, plus the live rules — partition-root redirects, overlay APKs on partitions zygote will not accept, missing backings, and targets two modules both claim. Run it before rebooting after a module change.</p>
-    <div class="btns"><button class="act primary" onclick="runDoctor(this)">Run health check</button></div>
-    <div id="doctorsum" class="list"></div>
-    <!-- The full finding list is long and mostly informational -- eleven [info]
-         lines on a healthy device. The chip and the summary answer the question;
-         the dump is for whoever is diagnosing something. -->
-    <details class="ndet" id="doctorRawWrap" style="display:none">
-      <summary>Full report</summary>
-      <pre class="rules" id="doctorout">…</pre>
-    </details>
-  </div>
-
-  <div class="card collapsed" id="cardRuntime">
-    <div class="card-h clp" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg>
-      <h2>Runtime health</h2><span class="chip" id="hchip">—</span><span class="chev">›</span>
-    </div>
-    <p class="note">Asks whether a normal app sees the same injected files as root. A disagreement for an app you have <em>not</em> hidden is the one runtime fault worth knowing about — it means the kernel is serving two different views of the same file by accident.</p>
-    <div class="btns"><button class="act primary" onclick="runSelfcheck(this)">Self-check</button></div>
-    <pre class="rules" id="healthout" style="display:none">…</pre>
-    <!-- Snapshot / Verify / Export are developer tools wearing user clothes.
-         Snapshot means nothing until you already suspect drift, Verify is
-         meaningless without one, and Export produces a folder for someone else
-         to read. Sitting them next to Self-check implied four equal choices and
-         made the card unreadable to the person who just wanted a yes or no. -->
-    <details class="ndet">
+    <details class="ndet" id="devtools">
       <summary>Developer tools</summary>
-      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today's state as a baseline. <b>Verify</b> diffs the live system against that baseline and names every field that drifted — useless until you have taken a snapshot. <b>Export</b> dumps diagnostics to <code>/sdcard/Download</code> for sharing.</p>
+      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today's state as a baseline. <b>Verify</b> diffs the live system against it. <b>Export</b> dumps diagnostics to <code>/sdcard/Download</code>.</p>
       <div class="btns" style="flex-wrap:wrap">
         <button class="act" onclick="runSnapshot(this)">Snapshot</button>
         <button class="act" onclick="runVerify(this)">Verify</button>
         <button class="act" onclick="runExport(this)">Export</button>
       </div>
+      <pre class="rules" id="healthout" style="display:none">…</pre>
+      <details class="ndet">
+        <summary>Raw output</summary>
+        <pre class="rules" id="auditout">…</pre>
+        <pre class="rules" id="doctorout" style="display:none">…</pre>
+      </details>
+      <div id="doctorsum" style="display:none"></div>
+      <div id="auRawWrap" style="display:none"></div>
+      <div id="featlist" style="display:none"></div>
+      <span id="featchip" style="display:none"></span>
+      <span id="auchip" style="display:none"></span>
+      <span id="dchip" style="display:none"></span>
+      <span id="hchip" style="display:none"></span>
+      <div id="checkAllOut" style="display:none"></div>
     </details>
   </div>
 
@@ -1285,11 +1206,12 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
       <h2>Last incident</h2><span class="chip bad">guard tripped</span><span class="chev">›</span>
     </div>
-    <p class="note">Recorded when the bootloop guard disabled the Suite, including the newest native crash and its abort message — which usually names the offending path outright. This is a saved record, not live state; whether the Suite is disabled <em>now</em> is the guard chip on Status.</p>
+    <p class="note">Recorded when the bootloop guard disabled the Suite, including the newest native crash and its abort message — which usually names the offending path. A saved record, not live state.</p>
     <pre class="rules" id="incidentout">…</pre>
     <div class="btns"><button class="act danger" onclick="clearIncident(this)">Clear incident</button></div>
   </div>
-  </section>
+
+</section>
 
   <div class="foot">NoMount Suite · Prism engine via netlink <code>nm</code><br/><span id="footver"></span></div>
 </div>
@@ -1743,11 +1665,7 @@
   // takes you to it; re-running is the explicit button's job.
   function openDetail() {
     showTab("diag", null);
-    if (!AUDIT) {
-      const card = $("cardAudit");
-      if (card) card.classList.remove("collapsed");
-      runAudit(null);
-    }
+    if (!AUDIT) runAll(null);
   }
 
   // ---- rules filter ----
@@ -2147,144 +2065,181 @@
     }
   }
 
-  // Rows the quiet card is holding back until asked.
-  let AUDIT_QUIET_ROWS = "";
-  function auShowAll() {
-    if (!AUDIT_QUIET_ROWS) return;
-    $("auditlist").innerHTML += AUDIT_QUIET_ROWS;
-    AUDIT_QUIET_ROWS = "";
+  
+  
+  // Merge every source into ONE list.
+  //
+  // A finding is a finding. Which subsystem produced it (`source`) belongs on
+  // the row, not in the page structure -- that was the whole reason this pane
+  // had seven cards. Rows are normalised to the audit's shape, which doctor
+  // findings now also carry.
+  function mergeFindings(audit, doctor, health) {
+    const out = [];
+    if (audit && audit.checks) {
+      audit.checks.forEach(function (c, i) {
+        const live = c.verdict === "fail" || c.verdict === "reboot";
+        if (!live && c.verdict !== "unmeasured") return;      // passes/n-a are hidden
+        out.push({
+          bucket: c.accepted ? "accepted" : (live ? "attention" : "unverified"),
+          name: c.name, meaning: c.meaning, evidence: c.evidence, owner: c.owner,
+          reach: c.reach_label, action: c.action, accepted: c.accepted,
+          accepted_reason: c.accepted_reason, lapsed: c.acceptance_lapsed,
+          first_seen: c.first_seen, source: "detection", idx: i
+        });
+      });
+    }
+    if (doctor && doctor.findings) {
+      doctor.findings.forEach(function (x) {
+        if (x.severity !== "attention") return;               // info is hidden
+        out.push({
+          bucket: "attention", name: x.check, meaning: x.meaning || x.detail,
+          evidence: x.detail, owner: x.owner, reach: "before your next boot",
+          action: null, source: "plan"
+        });
+      });
+    }
+    if (health && !health.healthy) {
+      const why = health.consistency_mismatch
+            ? "A normal app sees different injected files than root does. That is the one runtime fault worth acting on."
+        : !health.engine_up ? "The kernel engine is not answering, so nothing is being injected."
+        : !health.guard_armed ? "The bootloop guard has tripped and disabled the Suite."
+        : "The consistency check had nothing to sample, so it did not run.";
+      out.push({
+        bucket: health.consistency_unverified ? "unverified" : "attention",
+        name: "runtime health", meaning: why, evidence: health.verdict,
+        owner: null, reach: "right now", action: null, source: "runtime"
+      });
+    }
+    return out;
   }
 
-  function auRender(d) {
-    AUDIT = d;
-    const list = $("auditlist");
-    if (!d || !d.checks) {
-      list.innerHTML = '<div class="empty">No audit result yet — press <b>Run detection audit</b>.</div>';
-      $("auCopy").style.display = "none";
-      paintHealthLine(null, 0);
-      return;
-    }
-    const open = [], unmeasured = [], accepted = [], clean = [], na = [];
-    d.checks.forEach(function (c, i) {
-      const live = c.verdict === "fail" || c.verdict === "reboot";
-      if (live && c.accepted) accepted.push(auRow(c, i));
-      else if (live) open.push(auRow(c, i));
-      else if (c.verdict === "unmeasured") unmeasured.push(auRow(c, i));
-      else if (c.verdict === "n/a") na.push(auRow(c, i));
-      else clean.push(auRow(c, i));
-    });
-    // QUIET WHEN THERE IS NOTHING TO SAY.
-    //
-    // A clean device rendered twelve rows of "clean" and "doesn't apply" — a
-    // screenful of reassurance nobody asked for, which buries the one line that
-    // matters on the day something IS wrong. The Status line already carries the
-    // verdict; this card only needs to speak when it has something to add.
-    //
-    // "Nothing open" is the test, not "everything passed": an accepted finding
-    // or an unverified check is still worth showing.
-    // NEVER quiet with the engine down. With it dead the target checks correctly
-    // report n/a and the mount checks correctly pass, so all three buckets are
-    // empty and `quiet` was true -- printing a green "clean" pill directly under
-    // a chip that reads red "engine down". The quiet card re-opened the exact
-    // hole the health line had just been hardened against.
-    const quiet = !open.length && !unmeasured.length && !accepted.length && d.engine !== null;
-    if (quiet) {
-      const n = (d.summary && d.summary.passed) || 0;
-      const naN = (d.summary && d.summary.not_applicable) || 0;
-      list.innerHTML =
-        '<div class="frow"><div class="fname">Nothing to report</div>' +
-        '<div class="fmean">' + n + ' check' + (n === 1 ? "" : "s") + ' ran and found nothing an app could use' +
-        (naN ? ", and " + naN + " did not apply to this device" : "") + ".</div>" +
-        '<div class="fmeta"><span class="tag vfs">clean</span>' +
-        '<span class="sp"></span>' +
-        '<button class="act" style="padding:6px 12px;font-size:11.5px" onclick="auShowAll()">Show all checks</button>' +
-        "</div></div>";
-      AUDIT_QUIET_ROWS = auGroup("Clean", clean, true) + auGroup("Doesn't apply here", na, true);
-    } else {
-      AUDIT_QUIET_ROWS = "";
-      list.innerHTML =
-        auGroup("Needs your attention", open, false) +
-        auGroup("Not verified", unmeasured, false) +
-        auGroup("Accepted by you", accepted, true) +
-        auGroup("Clean", clean, true) +
-        auGroup("Doesn't apply here", na, true) ||
-        '<div class="empty">Nothing to report.</div>';
-    }
-    auPaintChip(d.summary, d.engine);
-    paintHealthLine(d.summary, d.ts, d.engine, d.history);
-    $("auCopy").style.display = "";
-    const age = $("auage");
-    age.style.display = "";
-    const h = d.history || {};
-    const bits = ["Checked " + (auAge(d.ts) || "now")];
-    // What changed is more useful than what was counted.
-    if (h.first_run) bits.push("first check on this device");
-    else if (h.changed_now) bits.push("different from last time");
-    else if (h.changed_at) bits.push("unchanged since " + auAge(h.changed_at));
-    if (h.total_boots && !(d.summary && d.summary.open_failures)) {
-      bits.push("clean on the last " + h.clean_boots + " of " + h.total_boots + " boots");
-    }
-    age.textContent = bits.join(" · ");
-    $("auRawWrap").style.display = "";
-  }
+  // The one entry point the card has. Runs all three, merges, renders.
+  let FINDINGS = [];
+  async function runAll(btn) {
+    const done = busy(btn, "Checking\u2026");
+    $("findlist").innerHTML = '<div class="empty">Checking\u2026</div>';
 
-  async function runAudit(btn) {
-    const done = busy(btn, "Auditing…");
-    $("auditlist").innerHTML = '<div class="empty">Replaying detection oracles…</div>';
-    // --write, not just --json. Without it a manual run rendered a verdict that
-    // existed only in this page's memory: close the WebUI, reopen it, and
-    // `loadAuditCache` found nothing and fell back to "Not checked yet" -- so the
-    // button appeared to do nothing durable, and the Status line only ever told
-    // the truth between a boot and the next time you looked. The boot pass writes
-    // the same file; this keeps it current in between.
-    const r = await nm("audit --json --write");
-    const d = auParse(r);
-    if (!d) {
-      // Never leave the previous verdict on screen next to a failed run -- that
-      // is a stale green by another route. Say what happened and show whatever
-      // the binary did emit.
-      $("auditlist").innerHTML =
-        '<div class="empty">The audit did not return a result. It may not have run at all — ' +
-        "the raw output below is everything it printed.</div>";
-      $("auditout").textContent = ((r.stdout || "") + (r.stderr || "")).trim() || "(no output)";
-      $("auRawWrap").style.display = "";
-      // Drop the previous run. Leaving it meant `runCheckAll` read a stale
-      // summary and could print a green "Nothing detectable" for a run that
-      // never happened, and `openDetail`'s `if (!AUDIT)` saw a truthy value --
-      // so the line saying "tap to run a check" navigated and ran nothing.
-      AUDIT = null;
-      AUDIT_QUIET_ROWS = "";
-      auPaintChip(null);
-      paintHealthLine(null, 0);
-      done();
-      return;
-    }
-    $("auditout").textContent = ((r.stdout || "") + (r.stderr || "")).trim();
-    auRender(d);
+    const ar = auParse(await nm("audit --json --write"));
+    const dd = await getDoctor(true);
+    const hr = auParse(await nm("selfcheck --json"));
+
+    AUDIT = ar;                       // auAct/auAccept index into this
+    if (dd && dd.json) paintManagerBanner(dd);
+    renderFindings(ar, dd && dd.json, hr);
     done();
   }
 
+  function renderFindings(audit, doctor, health) {
+    const list = $("findlist"), chip = $("fchip"), sub = $("fsub"), age = $("auage");
+    FINDINGS = mergeFindings(audit, doctor, health);
+
+    // Nothing ran at all is not "nothing wrong".
+    if (!audit && !doctor && !health) {
+      list.innerHTML = '<div class="empty">Nothing could be checked \u2014 the engine did not answer.</div>';
+      chip.textContent = "unknown"; chip.className = "chip warn";
+      $("auCopy").style.display = "none";
+      return;
+    }
+
+    const attention = FINDINGS.filter(function (f) { return f.bucket === "attention"; });
+    const unver     = FINDINGS.filter(function (f) { return f.bucket === "unverified"; });
+    const accepted  = FINDINGS.filter(function (f) { return f.bucket === "accepted"; });
+    const engineDown = audit && audit.engine === null;
+
+    // Chip: one number, the one that means "act".
+    if (engineDown) { chip.textContent = "engine down"; chip.className = "chip bad"; }
+    else if (attention.length) { chip.textContent = attention.length + " to look at"; chip.className = "chip warn"; }
+    else if (unver.length) { chip.textContent = unver.length + " unverified"; chip.className = "chip warn"; }
+    else if (accepted.length) { chip.textContent = accepted.length + " accepted"; chip.className = "chip"; }
+    else { chip.textContent = "all clear"; chip.className = "chip ok"; }
+
+    const checked = (audit && audit.summary ? audit.summary.passed + audit.summary.not_applicable : 0) +
+                    (doctor && doctor.summary ? doctor.summary.informational : 0);
+
+    if (!attention.length && !unver.length && !accepted.length && !engineDown) {
+      sub.textContent = "Nothing needs your attention.";
+      list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
+        '<div class="fmean">' + checked + ' check' + (checked === 1 ? "" : "s") +
+        ' ran across detection, your mount plan and the running system, and found nothing to act on.</div>' +
+        '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>';
+    } else {
+      sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
+      const group = function (title, rows) {
+        return rows.length
+          ? '<div class="fgroup">' + title + ' <span class="cnt">' + rows.length + "</span></div>" +
+            rows.map(findRow).join("")
+          : "";
+      };
+      list.innerHTML = group("Needs your attention", attention) +
+                       group("Not verified", unver) +
+                       group("Accepted by you", accepted);
+    }
+
+    $("auCopy").style.display = audit ? "" : "none";
+    if (audit) {
+      const h = audit.history || {};
+      const bits = ["Checked " + (auAge(audit.ts) || "now")];
+      if (h.first_run) bits.push("first check on this device");
+      else if (h.changed_now) bits.push("different from last time");
+      if (h.total_boots > 1 && !attention.length) {
+        bits.push("clean on the last " + h.clean_boots + " of " + h.total_boots + " boots");
+      }
+      age.style.display = ""; age.textContent = bits.join(" \u00b7 ");
+      paintHealthLine(audit.summary, audit.ts, audit.engine, audit.history);
+      $("auditout").textContent = JSON.stringify(audit, null, 1);
+    }
+    if (doctor) $("doctorout").textContent = doctorText(doctor);
+  }
+
+  // Opening the pane paints from the boot cache; the button re-runs everything.
+  async function loadFindingsCache() {
+    const a = auParse(await exec("cat /data/adb/nomount/audit.json 2>/dev/null"));
+    if (!a) { $("findlist").innerHTML = '<div class="empty">Not checked yet \u2014 press <b>Check my setup</b>.</div>'; return; }
+    AUDIT = a;
+    renderFindings(a, null, null);
+  }
+
+  function findRow(f) {
+    const b = [];
+    b.push('<div class="frow' + (f.accepted ? " accepted" : "") + '">');
+    b.push('<div class="fname">' + esc(f.name) + "</div>");
+    if (f.meaning) b.push('<div class="fmean">' + esc(f.meaning) + "</div>");
+    if (f.owner) b.push('<div class="fowner">From: <b>' + esc(f.owner) + "</b></div>");
+    if (f.accepted && f.accepted_reason) {
+      b.push('<div class="fowner">Accepted by you: ' + esc(f.accepted_reason) + " — still failing, still shown.</div>");
+    }
+    if (f.lapsed) b.push('<div class="fowner">You accepted this once, but what was measured has changed.</div>');
+    b.push('<div class="fmeta">');
+    b.push('<span class="tag ' + (f.accepted ? "off" : f.bucket === "unverified" ? "warn" : "warn") + '">' +
+           (f.accepted ? "accepted" : f.bucket === "unverified" ? "not verified" : "needs attention") + "</span>");
+    if (f.reach) b.push('<span class="tag off">' + esc(f.reach) + "</span>");
+    if (f.first_seen) {
+      const age = Math.floor(Date.now() / 1000) - f.first_seen;
+      b.push('<span class="tag ' + (age < 120 ? "newly" : "off") + '">' +
+             (age < 120 ? "new" : "seen " + esc(auAge(f.first_seen))) + "</span>");
+    }
+    if (f.source === "detection" && typeof f.idx === "number") {
+      b.push('<span class="sp"></span>');
+      if (f.action && f.action.id) {
+        b.push('<button class="act" style="padding:6px 12px;font-size:11.5px" onclick="auAct(this,' +
+               f.idx + ')">' + esc(f.action.label) + "</button>");
+      }
+      b.push('<button class="act" style="padding:6px 12px;font-size:11.5px" onclick="auAccept(this,' +
+             f.idx + ')">' + (f.accepted ? "Un-accept" : "Accept") + "</button>");
+    }
+    b.push("</div>");
+    b.push("<details><summary>What was measured</summary><div class=\"ev\">" +
+           esc(f.evidence || "(nothing recorded)") + "</div></details>");
+    b.push("</div>");
+    return b.join("");
+  }
+
+  
   // The cached verdict the boot pass wrote. Painting this on open is what turns
   // the card from "press a button to find out" into "here is where you stand" --
   // previously the first time a user saw a finding was also the first time they
   // had heard of the tool.
-  async function loadAuditCache() {
-    const r = await exec("cat /data/adb/nomount/audit.json 2>/dev/null");
-    const d = auParse(r);
-    if (d) {
-      // Never let a cached result overwrite a fresher one. Pressing Refresh
-      // after running the audit would otherwise replace what was just measured
-      // with whatever the last boot wrote -- older evidence under a newer age.
-      if (AUDIT && AUDIT.ts && d.ts && d.ts < AUDIT.ts) return;
-      auRender(d);
-      return;
-    }
-    // No cache. If something is already on screen it stays: it is the most
-    // recent thing we know, and blanking it would leave the chip holding a
-    // verdict with no findings under it.
-    if (!AUDIT) auRender(null);
-  }
-
+  
   async function auAct(btn, i) {
     const c = AUDIT && AUDIT.checks && AUDIT.checks[i];
     if (!c || !c.action) { toast("That finding is no longer on screen — re-run the audit."); return; }
@@ -2298,7 +2253,7 @@
       const before = (AUDIT && AUDIT.summary && AUDIT.summary.open_failures) || 0;
       const r = await nm("absorb");
       done();
-      await runAudit(null);
+      await runAll(null);
       const after = (AUDIT && AUDIT.summary && AUDIT.summary.open_failures) || 0;
       // Report what CHANGED, not that the command exited.
       //
@@ -2327,7 +2282,7 @@
       const done = busy(btn, "…");
       await nm("accept " + shq(id) + " --remove");
       done();
-      await runAudit(null);
+      await runAll(null);
       return;
     }
     const why = prompt(
@@ -2341,7 +2296,7 @@
     const r = await nm("accept " + shq(id) + " --reason " + shq(why.trim()));
     done();
     if (r.errno !== 0) { toast(((r.stderr || r.stdout || "").trim().split("\n")[0]) || "Could not accept."); return; }
-    await runAudit(null);
+    await runAll(null);
   }
 
   // Everything a bug report needs, in one paste. Every "it says 2 detectable,
@@ -2578,7 +2533,7 @@
     el.style.display = "";
     el.innerHTML = '<div class="empty">Running the detection audit, the plan check and the runtime check…</div>';
 
-    await runAudit(null);
+    await runAll(null);
     const dd = await getDoctor(true);
     doctorPaintChip(dd.json);
     paintManagerBanner(dd);
@@ -3502,7 +3457,7 @@
     const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
     $("footver").textContent = "Suite " + suiteId + " · " + eng +
       (staged ? " · " + pv + " staged — reboot to activate" : "");
-    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshIsolated(), refreshWhiteouts(), checkManagerSwitches(), loadAuditCache(), refreshFeatures()]);
+    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshIsolated(), refreshWhiteouts(), checkManagerSwitches(), loadFindingsCache()]);
     if (rulesShown) loadRules();
     loadPkgList();
     if (ic) ic.classList.remove("spin");

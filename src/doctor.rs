@@ -44,6 +44,70 @@ struct Finding {
     detail: String,
 }
 
+/// Where a finding belongs in the ONE list the WebUI now shows.
+///
+/// The diagnostics pane used to carry three cards -- detection, plan, runtime --
+/// each with its own chip and its own button, because three subsystems produce
+/// findings. Nobody arrives with three questions; they arrive with "is this
+/// OK?". So the pane collapsed to a single list and the subsystem became a
+/// detail of the row rather than the structure of the page.
+///
+/// This is the axis that list sorts on. It is deliberately coarser than
+/// `Level`: a plan error and a plan warning both mean "look at this before you
+/// reboot", and the row already says which by name.
+fn severity_of(level: &Level) -> &'static str {
+    match level {
+        // Both, on purpose. Red is reserved for "the Suite is not running";
+        // anything the reader should act on is one bucket.
+        Level::Error | Level::Warn => "attention",
+        Level::Info => "info",
+    }
+}
+
+/// The plain-language line for a doctor finding.
+///
+/// Audit checks carry `meaning` as a separate field; doctor findings never did,
+/// and merging the two lists made that gap visible -- a doctor row would be the
+/// only kind with no sentence a non-technical reader could use. The `detail`
+/// strings were rewritten to be that sentence, so they serve directly; this
+/// exists so the two shapes match and a future doctor finding has somewhere to
+/// put a reader-facing line that is not the evidence.
+fn meaning_of(f: &Finding) -> &str {
+    &f.detail
+}
+
+/// Who a doctor finding is about, where the check name makes it recoverable.
+///
+/// Most doctor findings name their module in the detail text as the first word,
+/// because they are generated per module. Pulling it out lets the merged list
+/// show "from: <module>" the same way an audit finding does.
+fn owner_of(f: &Finding) -> Option<String> {
+    // These checks are emitted per module and start with the module id.
+    const PER_MODULE: &[&str] = &[
+        "partition-root target",
+        "no such partition",
+        "module hides where the hole remains",
+        "whiteout leaves a measurable hole",
+        "wide replacement expansion",
+        "mounts its own filesystem",
+        "mounts into other namespaces",
+        "self-mounts, absorbed",
+        "mounts a pseudo-fs",
+        "SUSFS calls, no SUSFS",
+        "rewrites manager setting",
+    ];
+    if !PER_MODULE.contains(&f.check) {
+        return None;
+    }
+    // The module id is the leading token up to the first space or colon.
+    let head = f.detail.split([' ', ':']).next().unwrap_or("");
+    if head.is_empty() || head.len() > 64 {
+        None
+    } else {
+        Some(head.trim_end_matches(':').to_string())
+    }
+}
+
 /// What a hidden caller sees at a ghosted path. Ordered by severity.
 #[derive(PartialEq)]
 enum GhostSeen {
@@ -1654,6 +1718,12 @@ pub fn run_doctor(json: bool) -> Result<()> {
                                 ),
                                 ("check", J::s(x.check)),
                                 ("detail", J::s(&x.detail)),
+                                // The fields the merged list needs, so a doctor
+                                // row and an audit row render identically.
+                                ("severity", J::s(severity_of(&x.level))),
+                                ("meaning", J::s(meaning_of(x))),
+                                ("owner", J::os(owner_of(x))),
+                                ("source", J::s("plan")),
                             ])
                         })
                         .collect(),
