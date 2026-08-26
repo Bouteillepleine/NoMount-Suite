@@ -920,44 +920,6 @@ pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
     Ok((plan, skipped))
 }
 
-/// `nomount plan`: print the resolved plan (target, kind, source) without applying.
-pub fn run_plan() -> Result<()> {
-    let (plan, skipped) = collect_plan()?;
-    // Same collapse run_mount applies, so `plan` describes what will actually be
-    // served. Without it the output listed both halves of a contested target
-    // while only one was ever applied.
-    let (plan, _) = dedupe_by_target(plan);
-    for e in &plan {
-        let k = match e.kind {
-            PlanKind::Inject => "inject",
-            PlanKind::Whiteout => "whiteout",
-            PlanKind::Bind => "bind",
-        };
-        // Two different ways a planned entry never becomes a rule. Both were
-        // silent before: the module installs, the manager says enabled, nothing
-        // happens. A debloat module is ENTIRELY these entries, so "planned" read
-        // as "working" when it did nothing at all.
-        let note = if !source_resolves(e) {
-            "  << UNSERVABLE: source does not resolve, no rule will be created"
-        } else if e.kind == PlanKind::Whiteout && whiteout_leaves_hole(&e.target) {
-            "  << applied, but the parent's size/nlink still count it (multi-block erofs)"
-        } else {
-            ""
-        };
-        println!("{k:8} {} <- {} [{}]{note}", e.target.display(), e.source.display(), e.module);
-    }
-    let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
-    let dead = plan.iter().filter(|e| !source_resolves(e)).count();
-    let declined = plan.iter()
-        .filter(|e| e.kind == PlanKind::Whiteout && whiteout_leaves_hole(&e.target))
-        .count();
-    let mut extra = String::new();
-    if dead > 0 { extra.push_str(&format!(", {dead} unservable")); }
-    if declined > 0 { extra.push_str(&format!(", {declined} whiteout(s) leaving a measurable hole")); }
-    println!("({} entries: {} binds, {skipped} blocklisted{extra})", plan.len(), binds);
-    Ok(())
-}
-
 /// A live leaf rule from `nm list`.
 enum LiveRule {
     Inject(PathBuf),

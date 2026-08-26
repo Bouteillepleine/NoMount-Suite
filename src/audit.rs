@@ -1,4 +1,4 @@
-//! `nomount audit` — prove the hiding actually holds, on THIS device.
+//! The DEVICE section of `nomount check` — prove the hiding actually holds here.
 //!
 //! Every check here reproduces a detection oracle that was found, and closed, by
 //! measuring a real device: an app that can run these can also run them against
@@ -19,154 +19,35 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::check::{slug, Check, Section, Verdict};
 use crate::nm::Nm;
 
-#[derive(PartialEq, Clone, Copy)]
-pub enum Verdict {
-    Pass,
-    Fail,
-    /// Real, but already cured -- a reboot applies the fix that is pending.
-    Reboot,
-    /// The check does not apply to THIS device or THIS configuration, and no
-    /// arrangement of the two would make it apply as things stand. No overlay
-    /// mount, no single-block erofs parent, no app on the hide list yet.
-    ///
-    /// Split out of `Skip` because collapsing the two is what made a healthy
-    /// device render amber. "There was nothing here to test" and "something
-    /// stopped me testing" are different answers, and only the second is a
-    /// warning. A clean device now reads `undetected` with a grey `n/a` count
-    /// beside it instead of `4 unverified` in amber with an alert dot.
-    ///
-    /// This is NOT a softening of the honesty rule in this file's header. The
-    /// rule is that an unrun check must never be reported as clean, and it still
-    /// is not: `NotApplicable` is counted, printed and JSON-emitted as its own
-    /// state, never folded into the pass count.
-    NotApplicable,
-    /// The check COULD have applied and did not run: mountinfo unreadable, fork
-    /// failed, the probe child said nothing, a directory that would not
-    /// enumerate. Stays amber, because this is precisely the state the "a check
-    /// that cannot run says so" rule exists for.
-    Unmeasured,
+/// Constructors. Each one names the verdict in the check body's own vocabulary
+/// so a check reads as what it measured; the shape they build is the one shared
+/// [`Check`], not a second one this file owns.
+///
+/// The id is derived from the display name by [`slug`]. There used to be a
+/// hand-maintained `id_of` table here and nothing at all on the plan side, so
+/// half the rows in the merged list had no id to key an acceptance on.
+fn chk(name: &'static str, verdict: Verdict, evidence: String) -> Check {
+    Check::new(Section::Device, slug(name), name, verdict, evidence)
 }
-
-pub struct Check {
-    /// Stable slug. This is what an acceptance is keyed on and what the WebUI
-    /// uses for element ids, so it must not change when the display name does.
-    pub id: &'static str,
-    pub name: &'static str,
-    pub verdict: Verdict,
-    /// What was actually read. Always populated, including on a pass -- a bare
-    /// "OK" is not evidence.
-    pub evidence: String,
-    /// What an attacker would do with a failure. Only on Fail.
-    pub oracle: Option<&'static str>,
-    /// One line in the reader's terms, always present, on every verdict.
-    ///
-    /// The evidence strings are written for whoever is debugging the engine and
-    /// they are good at that job: "2 injected inode(s) alone in the 3M bucket, no
-    /// stock there" says exactly what was measured. It also says nothing at all
-    /// to the person who installed a module and wants to know if they are fine.
-    /// This field is that person's sentence; the evidence stays, one disclosure
-    /// away.
-    pub meaning: String,
-    /// Who caused this: a module id, the kernel, the root manager, or the user's
-    /// own configuration. `None` where the question does not apply (a pass).
-    ///
-    /// A finding without an owner is a finding nobody can close. `absorb` already
-    /// resolves a leaked mount to its owning module and the audit used to throw
-    /// that answer away for exactly the case where it mattered.
-    pub owner: Option<String>,
-}
-
-/// Builder, so a check body stays about what it measured. Everything except the
-/// verdict-specific parts has a sane default; the `with_*` methods add what the
-/// individual check knows.
-fn chk(id: &'static str, name: &'static str, verdict: Verdict, evidence: String) -> Check {
-    Check {
-        id,
-        name,
-        verdict,
-        evidence,
-        oracle: None,
-        meaning: String::new(),
-        owner: None,
-    }
-}
-
-impl Check {
-    fn meaning(mut self, m: impl Into<String>) -> Check {
-        self.meaning = m.into();
-        self
-    }
-    fn owner(mut self, o: impl Into<String>) -> Check {
-        self.owner = Some(o.into());
-        self
-    }
-    fn verdict_slug(&self) -> &'static str {
-        match self.verdict {
-            Verdict::Pass => "pass",
-            Verdict::Fail => "fail",
-            Verdict::Reboot => "reboot",
-            Verdict::NotApplicable => "n/a",
-            Verdict::Unmeasured => "unmeasured",
-        }
-    }
-    fn tag(&self) -> &'static str {
-        match self.verdict {
-            Verdict::Pass => "PASS",
-            Verdict::Fail => "FAIL",
-            Verdict::Reboot => "REBOOT",
-            Verdict::NotApplicable => "N/A",
-            Verdict::Unmeasured => "UNMEASURED",
-        }
-    }
-}
-
 fn pass(name: &'static str, evidence: String) -> Check {
-    chk(id_of(name), name, Verdict::Pass, evidence)
+    chk(name, Verdict::Pass, evidence)
 }
 fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
-    let mut c = chk(id_of(name), name, Verdict::Fail, evidence);
-    c.oracle = Some(oracle);
-    c
+    chk(name, Verdict::Fail, evidence).oracle(oracle)
 }
 /// "Does not apply here." Grey, never amber, never counted as a pass.
 fn na(name: &'static str, evidence: String) -> Check {
-    chk(id_of(name), name, Verdict::NotApplicable, evidence)
+    chk(name, Verdict::NotApplicable, evidence)
 }
 /// "Could have applied, did not run." Amber -- this is the honesty rule's state.
 fn unmeasured(name: &'static str, evidence: String) -> Check {
-    chk(id_of(name), name, Verdict::Unmeasured, evidence)
+    chk(name, Verdict::Unmeasured, evidence)
 }
 fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
-    let mut c = chk(id_of(name), name, Verdict::Reboot, evidence);
-    c.oracle = Some(oracle);
-    c
-}
-
-/// Display name -> stable id.
-///
-/// Kept as one table rather than threaded through every constructor: the display
-/// names are already unique and already passed everywhere, and a second literal
-/// at each call site is a second thing to keep in sync. A name with no entry
-/// falls back to itself, which is stable enough to key an acceptance on and loud
-/// enough to notice.
-fn id_of(name: &str) -> &'static str {
-    match name {
-        "engine responding" => "engine-live",
-        "zero-mount posture" => "zero-mount",
-        "kernel surfaces" => "kernel-surfaces",
-        "readdir cookie magic" => "dirent-cookie",
-        "readdir ino vs stat ino" => "dino-vs-stat",
-        "injected inode band" => "inode-band",
-        "overlay dir inode range" => "overlay-dir-ino",
-        "erofs directory shape" => "erofs-dir-shape",
-        "injected files in maps" => "maps-deleted",
-        "PM-published files open for a hidden app" => "pm-published-open",
-        "tmpfs over the ROM" => "rom-tmpfs",
-        "foreign mount over the ROM" => "rom-foreign-mount",
-        _ => "unknown-check",
-    }
+    chk(name, Verdict::Reboot, evidence).oracle(oracle)
 }
 
 // ---------------------------------------------------------------- raw readdir
@@ -1334,21 +1215,6 @@ fn check_engine_live() -> Check {
     }
 }
 
-/// The three checks that read the mount table.
-///
-/// Split out so `nomount posture` can run exactly these and nothing else. Before
-/// this existed the WebUI's posture shield answered the same question with its
-/// own `awk '$4 ~ "/adb/modules/"'`, which is the pattern this file's own
-/// regression test exists to reject: it cannot see a bind out of
-/// `/data/adb/rvhc` (issue #14), and it DOES see a hook framework's by-design
-/// bind, which the audit deliberately does not count. Measured on an OP15 with
-/// LSPosed installed: the shield rendered a permanent amber "another module is
-/// mounting" over the one mount the audit reports as expected. A front page
-/// contradicting the audit two taps away teaches the reader to trust neither.
-pub fn mount_checks() -> Vec<Check> {
-    vec![check_zero_mount(), check_no_rom_tmpfs(), check_no_foreign_rom_mount()]
-}
-
 /// Every check that reads the live rule list, by the exact name it reports
 /// under. When the dump fails these are the ones that cannot run.
 const RULE_DEPENDENT: [&str; 7] = [
@@ -1361,29 +1227,40 @@ const RULE_DEPENDENT: [&str; 7] = [
     "PM-published files open for a hidden app",
 ];
 
-fn all_checks() -> (Vec<Check>, usize, usize) {
+/// Every measured check, plus the two counts the report header carries.
+pub fn device_checks() -> (Vec<Check>, usize, usize) {
     let Some(targets) = live_targets() else {
-        // The engine answered `version` but would not enumerate. The checks that
-        // do not touch the rule list still mean what they say, so they still run;
-        // the seven that do are reported as what they are. Amber, never grey:
-        // NotApplicable would read as "nothing to test here", which is the lie.
-        let mut checks = vec![
-            check_engine_live(),
-            fail(
-                "engine rule dump",
-                "the engine answered its version but refused to list its rules".into(),
-                "not an oracle -- this is the audit failing to read the device, not the \
-                 device leaking",
-            )
-            .meaning(
-                "The checks below that need the rule list could not run. Nothing here is a \
-                 clean result.",
-            ),
+        // The rule list could not be read. The checks that do not touch it still
+        // mean what they say, so they still run; the seven that do are reported as
+        // what they are. Amber, never grey: NotApplicable would read as "nothing
+        // to test here", which is the lie.
+        let live = check_engine_live();
+        // ...but only claim "it answered its version and then refused" when it
+        // actually did. With the engine wholly down `version` fails too, and this
+        // arm asserted the opposite -- a second FAIL, with a sentence describing a
+        // state the device was not in, beside the one row that had it right.
+        let answered = live.verdict != Verdict::Fail;
+        let mut checks = vec![live];
+        if answered {
+            checks.push(
+                fail(
+                    "engine rule dump",
+                    "the engine answered its version but refused to list its rules".into(),
+                    "not an oracle -- this is the audit failing to read the device, not the \
+                     device leaking",
+                )
+                .meaning(
+                    "The checks below that need the rule list could not run. Nothing here is \
+                     a clean result.",
+                ),
+            );
+        }
+        checks.extend([
             check_zero_mount(),
             check_surfaces(),
             check_no_rom_tmpfs(),
             check_no_foreign_rom_mount(),
-        ];
+        ]);
         for name in RULE_DEPENDENT {
             checks.push(
                 unmeasured(name, "the engine would not list its rules".into())
@@ -1410,325 +1287,46 @@ fn all_checks() -> (Vec<Check>, usize, usize) {
     (checks, targets.len(), parents.len())
 }
 
-/// Tallies. One line, no derived states.
-pub struct Tally {
-    pub passed: usize,
-    pub failed: usize,
-    pub reboot: usize,
-    pub na: usize,
-    pub unmeasured: usize,
-}
-
-impl Tally {
-    fn of(checks: &[Check]) -> Tally {
-        let mut t = Tally { passed: 0, failed: 0, reboot: 0, na: 0, unmeasured: 0 };
-        for c in checks {
-            match c.verdict {
-                Verdict::Pass => t.passed += 1,
-                Verdict::Fail => t.failed += 1,
-                Verdict::Reboot => t.reboot += 1,
-                Verdict::NotApplicable => t.na += 1,
-                Verdict::Unmeasured => t.unmeasured += 1,
-            }
-        }
-        t
-    }
-    /// Findings the reader still has to act on.
-    pub fn open_failures(&self) -> usize {
-        self.failed + self.reboot
-    }
-    /// Did every check that COULD apply actually get measured?
-    ///
-    /// `open_failures` answers "is there something to act on" and says nothing
-    /// about whether the run had anything to look at. That gap is not academic:
-    /// `service.sh` runs `audit --json --write` at boot_completed, the boot pass
-    /// necessarily leaves the process-dependent checks unmeasured, and the
-    /// audit.json it caches is what the module card and the WebUI show as the
-    /// device's verdict for the rest of the uptime. A summary that renders
-    /// "12 passed, 0 failed" for a run with an unmeasured check is telling its
-    /// reader something was verified that was not.
-    pub fn complete(&self) -> bool {
-        self.unmeasured == 0
-    }
-}
-
-fn check_json(c: &Check) -> crate::json::J {
-    use crate::json::J;
-    J::Obj(vec![
-        ("id", J::s(c.id)),
-        ("name", J::s(c.name)),
-        ("verdict", J::s(c.verdict_slug())),
-        ("evidence", J::s(&c.evidence)),
-        ("meaning", J::s(&c.meaning)),
-        ("oracle", J::os(c.oracle)),
-        ("owner", J::os(c.owner.clone())),
-    ])
-}
-
-fn tally_json(t: &Tally) -> crate::json::J {
-    use crate::json::J;
-    J::Obj(vec![
-        ("passed", J::Num(t.passed as i64)),
-        ("failed", J::Num(t.failed as i64)),
-        ("reboot", J::Num(t.reboot as i64)),
-        ("not_applicable", J::Num(t.na as i64)),
-        ("unmeasured", J::Num(t.unmeasured as i64)),
-        ("open_failures", J::Num(t.open_failures() as i64)),
-        // The field every cached-verdict reader needs and none of them had: a
-        // summary can be free of failures and still not be a clean answer.
-        ("complete", J::Bool(t.complete())),
-    ])
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// `nomount posture [--json]` — only the mount-table questions.
-///
-/// Exists so one implementation answers "is anything mounted that an app can
-/// see" for the audit, the posture shield and anything else that asks.
-pub fn run_posture(json: bool) -> Result<()> {
-    let checks = mount_checks();
-    let t = Tally::of(&checks);
-    if json {
-        use crate::json::J;
-        let doc = J::Obj(vec![
-            ("kind", J::s("posture")),
-            ("ts", J::Num(now_secs())),
-            ("summary", tally_json(&t)),
-            ("checks", J::Arr(checks.iter().map(check_json).collect())),
-        ]);
-        println!("{}", doc.render());
-    } else {
-        for c in &checks {
-            println!("[{}] {}\n       {}", c.tag(), c.name, c.evidence);
-        }
-        println!(
-            "\nsummary: {} passed, {} failed, {} not applicable, {} unmeasured",
-            t.passed, t.failed, t.na, t.unmeasured
-        );
-    }
-    if t.open_failures() > 0 {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
-pub const CACHE: &str = "/data/adb/nomount/audit.json";
-
-pub fn run_audit(json: bool, write: bool) -> Result<()> {
-    let (mut checks, rules, dirs) = all_checks();
-
-    // Worst first. A dead engine outranks everything: with it down, every other
-    // row is describing a device that is not hiding anything.
-    let rank = |c: &Check| -> u8 {
-        if c.id == "engine-live" && c.verdict == Verdict::Fail {
-            return 0;
-        }
-        match c.verdict {
-            Verdict::Fail => 1,
-            Verdict::Reboot => 2,
-            Verdict::Unmeasured => 3,
-            Verdict::Pass => 4,
-            Verdict::NotApplicable => 5,
-        }
-    };
-    checks.sort_by_key(rank);
-    let t = Tally::of(&checks);
-
-    if json {
-        use crate::json::J;
-        let doc = J::Obj(vec![
-            ("kind", J::s("audit")),
-            ("ts", J::Num(now_secs())),
-            ("suite", J::s(env!("CARGO_PKG_VERSION"))),
-            (
-                "engine",
-                match Nm::new().version() {
-                    Ok(v) => J::Num(v as i64),
-                    Err(_) => J::Null,
-                },
-            ),
-            ("rules", J::Num(rules as i64)),
-            ("directories", J::Num(dirs as i64)),
-            ("summary", tally_json(&t)),
-            ("checks", J::Arr(checks.iter().map(check_json).collect())),
-        ]);
-        let text = doc.render();
-        println!("{text}");
-        if write {
-            let _ = fs::write(CACHE, &text);
-            let _ =
-                fs::set_permissions(CACHE, std::os::unix::fs::PermissionsExt::from_mode(0o600));
-        }
-    } else {
-        println!("nomount audit: {rules} live rule(s) across {dirs} directory(ies)\n");
-        for c in &checks {
-            println!("[{}] {}", c.tag(), c.name);
-            if !c.meaning.is_empty() {
-                println!("       {}", c.meaning);
-            }
-            println!("       measured: {}", c.evidence);
-            if let Some(o) = c.owner.as_deref() {
-                println!("       from: {o}");
-            }
-            if let Some(o) = c.oracle {
-                println!("       oracle: {o}");
-            }
-        }
-        // The incompleteness goes ON the summary line, not only in a note under
-        // it. This line is what gets grepped, pasted and read at a glance, and a
-        // run whose process-dependent checks had nothing to look at must not read
-        // as "N passed" with the caveat somewhere else.
-        println!(
-            "\nsummary: {} passed, {} failed, {} pending reboot, {} not applicable, {} unmeasured{}",
-            t.passed,
-            t.failed,
-            t.reboot,
-            t.na,
-            t.unmeasured,
-            if t.complete() {
-                String::new()
-            } else {
-                format!(
-                    " — INCOMPLETE: {} check(s) were not measured, so this is not a clean result",
-                    t.unmeasured
-                )
-            }
-        );
-        if t.reboot > 0 {
-            println!("note: a pending-reboot check is still detectable until you reboot.");
-        }
-        if t.unmeasured > 0 {
-            println!("note: an unmeasured check was NOT verified — it is not a pass.");
-        }
-    }
-
-    if t.open_failures() > 0 {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn c(id: &'static str, v: Verdict, ev: &str) -> Check {
-        chk(id, id, v, ev.to_string())
-    }
-
-    /// The change this whole split exists for: a device where every check either
-    /// passed or had nothing to test must not render as a warning.
-    #[test]
-    fn not_applicable_is_neither_a_pass_nor_a_warning() {
-        let checks = vec![
-            c("zero-mount", Verdict::Pass, "clean"),
-            c("dino-vs-stat", Verdict::NotApplicable, "all on overlay"),
-            c("pm-published-open", Verdict::NotApplicable, "no app is hidden"),
-        ];
-        let t = Tally::of(&checks);
-        assert_eq!(t.passed, 1, "an n/a must never be counted as a pass");
-        assert_eq!(t.na, 2);
-        assert_eq!(t.unmeasured, 0);
-        assert_eq!(t.open_failures(), 0, "nothing here is a failure");
-    }
-
-    /// ...while a check that COULD have run and did not stays amber. This is the
-    /// half of the old `Skip` that the honesty rule is actually about.
-    #[test]
-    fn unmeasured_stays_distinct_from_both() {
-        let checks = vec![c("zero-mount", Verdict::Unmeasured, "cannot read mountinfo")];
-        let t = Tally::of(&checks);
-        assert_eq!((t.passed, t.na, t.unmeasured), (0, 0, 1));
-    }
-
-
-
-    /// A run with an unmeasured check must not read as clean anywhere.
+    /// Every shipped check name must yield its own id.
     ///
-    /// The boot pass is structurally in this state: `service.sh` runs
-    /// `audit --json --write` at boot_completed, before any app has opened a
-    /// module file, so `injected files in maps` has nothing to look at -- and the
-    /// audit.json it caches is what the module card and the WebUI show for the
-    /// rest of the uptime. Measured on an OP15: the cached file said 12/12 passed
-    /// while a manual run minutes later, same boot, said "11 passed, 1 failed".
-    #[test]
-    fn an_unmeasured_check_makes_the_summary_incomplete() {
-        let checks = vec![
-            c("zero-mount", Verdict::Pass, "0 module mounts"),
-            c("maps-deleted", Verdict::Unmeasured, "nothing mapped yet"),
-        ];
-        let t = Tally::of(&checks);
-        assert_eq!(t.open_failures(), 0, "an unmeasured check is not a failure");
-        assert!(!t.complete(), "...but it is not a clean result either");
-
-        let all_measured = vec![c("zero-mount", Verdict::Pass, "0 module mounts")];
-        assert!(Tally::of(&all_measured).complete());
-        // n/a is a measured answer: there was nothing here to test, and saying so
-        // IS the result. Only Unmeasured means the question went unanswered.
-        let na_only = vec![c("pm-published-open", Verdict::NotApplicable, "no app hidden")];
-        assert!(Tally::of(&na_only).complete());
-    }
-
-    /// A dead engine has to make the summary non-clean.
+    /// The ids used to come from a hand-maintained `id_of` table whose fallback
+    /// was a shared "unknown-check", so a name added without a table entry
+    /// collided with every other one that had been -- and an acceptance keyed on
+    /// that id would have silenced them all at once. They are derived now, which
+    /// removes the way to forget, but not the way to collide: two names that
+    /// differ only in punctuation slug the same.
     ///
-    /// Regression for the false green this check exists to close: with the
-    /// engine down `live_targets()` is empty, so every target-dependent check
-    /// correctly reports n/a and the mount checks correctly pass -- nothing IS
-    /// mounted -- and the old summary read "4 passed, 0 failed, open_failures 0".
-    /// The Status health line then rendered a green "Nothing detectable" beside
-    /// the hero's own red "Engine offline". Measured by pointing NM_BIN at a path
-    /// that does not exist.
-    #[test]
-    fn a_dead_engine_is_never_a_clean_summary() {
-        let checks = vec![
-            c("engine-live", Verdict::Fail, "nm could not get a version"),
-            c("zero-mount", Verdict::Pass, "0 module mounts"),
-            c("rom-tmpfs", Verdict::Pass, "no tmpfs"),
-            c("dino-vs-stat", Verdict::NotApplicable, "no rules live"),
-        ];
-        let t = Tally::of(&checks);
-        assert_eq!(t.open_failures(), 1, "a dead engine must reach open_failures");
-        assert_eq!(t.passed, 2, "the mount checks still passed, and honestly so");
-        assert_eq!(t.na, 1);
-    }
-
-
-
-    /// Every check name must map to a real id: the fallback is what an
-    /// acceptance would be keyed on, and two checks sharing "unknown-check" would
-    /// let one acceptance silence the other.
+    /// The tallies these tests used to exercise moved with `Tally` itself, to
+    /// `check.rs`, which is where the one verdict enum lives.
     #[test]
     fn every_shipped_check_name_has_its_own_id() {
-        let (checks, _, _) = (
-            vec![
-                "engine responding",
-                "zero-mount posture",
-                "kernel surfaces",
-                "readdir cookie magic",
-                "readdir ino vs stat ino",
-                "injected inode band",
-                "overlay dir inode range",
-                "erofs directory shape",
-                "injected files in maps",
-                "PM-published files open for a hidden app",
-                "tmpfs over the ROM",
-                "foreign mount over the ROM",
-            ],
-            0,
-            0,
-        );
-        let mut ids: Vec<&str> = checks.iter().map(|n| id_of(n)).collect();
-        assert!(!ids.contains(&"unknown-check"), "a check name lost its id: {ids:?}");
-        ids.sort_unstable();
+        let names = [
+            "engine responding",
+            "zero-mount posture",
+            "kernel surfaces",
+            "readdir cookie magic",
+            "readdir ino vs stat ino",
+            "injected inode band",
+            "overlay dir inode range",
+            "erofs directory shape",
+            "injected files in maps",
+            "PM-published files open for a hidden app",
+            "tmpfs over the ROM",
+            "foreign mount over the ROM",
+            "engine rule dump",
+        ];
+        let mut ids: Vec<String> = names.iter().map(|n| slug(n)).collect();
+        assert!(ids.iter().all(|i| i != "unnamed-check"), "a check name lost its id: {ids:?}");
         let n = ids.len();
+        ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), n, "two checks share an id");
+        // The one the report's sort keys on by name.
+        assert_eq!(slug("engine responding"), "engine-responding");
     }
 
     /// Issue #14: a ReVanced module binds its APK from /data/adb/rvhc, not from

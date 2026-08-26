@@ -56,51 +56,47 @@ pub enum Commands {
         #[command(subcommand)]
         action: WhiteoutAction,
     },
-    /// Prove the hiding holds on THIS device: replay every detection oracle we
-    /// have closed and report what was actually measured.
+    /// Is this setup sound, and is what it serves detectable? One report, one
+    /// shape, two sections.
     ///
-    /// Verdicts are PASS, FAIL, REBOOT, N/A and UNMEASURED. The last two used to
-    /// be one "SKIP": "nothing here to test" is not a warning, and "something
-    /// stopped me testing" is. Neither is ever a pass.
-    Audit {
-        /// Emit one JSON object instead of prose. The WebUI reads this; the
-        /// human output is unchanged and is still the default.
+    /// Replaces `doctor`, `audit`, `posture`, `selfcheck` and `plan`. Those were
+    /// five verbs over two verdict enums, three JSON shapes and a fourth
+    /// key=value one, and the WebUI merged all of it back into one list in
+    /// JavaScript -- which is what one list means. `posture` ran a strict SUBSET
+    /// of the device checks; `plan` had no caller anywhere.
+    ///
+    /// Verdicts are FAIL, REBOOT, UNMEASURED, WARN, PASS, N/A and NOTE. UNMEASURED
+    /// and N/A are deliberately distinct: "nothing here to test" is not a warning,
+    /// "something stopped me testing" is, and neither is ever a pass.
+    Check {
+        /// Only the static half: does the module set resolve into a bad rule?
+        /// Cheap, reads no running process, safe at post-fs-data.
+        #[arg(long)]
+        plan: bool,
+        /// Only the measured half: is what we serve detectable on this device,
+        /// and is it being served? Several of these need a process to have opened
+        /// an injected file, so the answer depends on when you ask.
+        #[arg(long)]
+        device: bool,
+        /// Emit one JSON object instead of prose. The WebUI reads this; the human
+        /// output is unchanged and is still the default.
         #[arg(long)]
         json: bool,
-        /// With --json, also cache the result to /data/adb/nomount/audit.json so
-        /// the WebUI can show a verdict on open instead of a dash. Written by the
-        /// boot pass.
+        /// Also cache to /data/adb/nomount/audit.json, and (unless --plan) write
+        /// the fingerprint to health.txt. Written by the boot pass so the WebUI
+        /// and the module card have a verdict on open instead of a dash.
         #[arg(long)]
         write: bool,
     },
-    /// Only the mount-table questions: is anything an app could see mounted over
-    /// the ROM. The same three checks `audit` runs, so the posture shield and the
-    /// audit cannot disagree.
-    Posture {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Lint the mount plan (and live rules) for known bootloop/no-op hazards
-    Doctor {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print what the mount pass would do (resolved target, kind, source) without
-    /// applying anything. Read-only.
-    Plan,
     /// Gap-free hot load/unload: reconcile live rules to the current module set,
     /// applying only the delta (no clear). Run after installing/removing a module.
     Reload,
-    /// Runtime health check: engine liveness, injection consistency, per-UID
-    /// self-consistency canary, guard state. `--write` persists to health.txt.
-    Selfcheck {
-        /// Persist the result to /data/adb/nomount/health.txt (used at boot)
-        #[arg(long)]
-        write: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Freeze the current healthy fingerprint as the baseline for `verify`
+    /// Freeze the current healthy fingerprint as the baseline for `verify`.
+    ///
+    /// Kept where `posture` and `plan` were dropped: this answers a question
+    /// `check` structurally cannot, because it needs a baseline the USER chose --
+    /// not "is this device healthy now" but "has anything moved since the boot I
+    /// was happy with". Same fingerprint `check` reports, same renderer.
     Snapshot,
     /// Diff the live fingerprint against the saved snapshot; name what drifted
     Verify,

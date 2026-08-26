@@ -1,4 +1,5 @@
-//! `nomount doctor` — lint the mount plan before a reboot turns a bad rule into a bootloop.
+//! The PLAN section of `nomount check` — lint the mount plan before a reboot
+//! turns a bad rule into a bootloop.
 //!
 //! The checks below are not generic: each one encodes a failure this engine (or the
 //! Android platform underneath it) actually produces, so a clean run means something.
@@ -15,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::check::{slug, Check, Section, Verdict};
 use crate::mount::{collect_plan, PlanEntry, PlanKind};
 use crate::nm::{LiveRule, Nm};
 
@@ -44,36 +46,25 @@ struct Finding {
     detail: String,
 }
 
-/// Where a finding belongs in the ONE list the WebUI now shows.
+/// This file's three levels, onto the one shared verdict.
 ///
-/// The diagnostics pane used to carry three cards -- detection, plan, runtime --
-/// each with its own chip and its own button, because three subsystems produce
-/// findings. Nobody arrives with three questions; they arrive with "is this
-/// OK?". So the pane collapsed to a single list and the subsystem became a
-/// detail of the row rather than the structure of the page.
+/// `Level` stays as the vocabulary the check bodies are WRITTEN in -- a plan lint
+/// naturally says "this is an error" -- and the translation happens once, here.
+/// The two enums were never really different: `Error` and
+/// `audit::Verdict::Fail` meant the same thing, `Info` and a passing observation
+/// meant the same thing, and the only reason there were two was that neither
+/// could express the other's remaining states.
 ///
-/// This is the axis that list sorts on. It is deliberately coarser than
-/// `Level`: a plan error and a plan warning both mean "look at this before you
-/// reboot", and the row already says which by name.
-fn severity_of(level: &Level) -> &'static str {
+/// `Info` becomes `Note`, not `Pass`. A plan finding is never a measurement, so
+/// it must not land in the pass count: "the plan does not obviously contain this
+/// hazard" is not evidence that the device is clean, and folding the two is how a
+/// green count gets inflated by observations.
+fn verdict_of(level: &Level) -> Verdict {
     match level {
-        // Both, on purpose. Red is reserved for "the Suite is not running";
-        // anything the reader should act on is one bucket.
-        Level::Error | Level::Warn => "attention",
-        Level::Info => "info",
+        Level::Error => Verdict::Fail,
+        Level::Warn => Verdict::Warn,
+        Level::Info => Verdict::Note,
     }
-}
-
-/// The plain-language line for a doctor finding.
-///
-/// Audit checks carry `meaning` as a separate field; doctor findings never did,
-/// and merging the two lists made that gap visible -- a doctor row would be the
-/// only kind with no sentence a non-technical reader could use. The `detail`
-/// strings were rewritten to be that sentence, so they serve directly; this
-/// exists so the two shapes match and a future doctor finding has somewhere to
-/// put a reader-facing line that is not the evidence.
-fn meaning_of(f: &Finding) -> &str {
-    &f.detail
 }
 
 /// Who a doctor finding is about, where the check name makes it recoverable.
@@ -665,7 +656,13 @@ fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
     None
 }
 
-pub fn run_doctor(json: bool) -> Result<()> {
+/// Every plan-side check, plus the counts the report carries as facts.
+///
+/// Returns rather than prints. It used to render its own header line, its own
+/// prose list, its own summary and its own JSON document -- and the header was
+/// the only place the plan and the live rule list ever met (see
+/// [`reconcile_plan_and_live`], which is what that meeting should have been).
+pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // partition -> count of non-overlay entries not in zygote's FD allowlist
     let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut f: Vec<Finding> = Vec::new();
@@ -1151,11 +1148,18 @@ pub fn run_doctor(json: bool) -> Result<()> {
     // `summary: 0 errors, 0 warnings` and a green "healthy" chip. `health.rs`
     // reports ENGINE DOWN for the same condition; the greener surface was winning.
     if !live_ok {
+        // WARN, and named for what it is about: the plan section's own live
+        // cross-checks. Whether the engine is up is the DEVICE section's verdict
+        // ("engine responding"), measured there and reported once. This used to be
+        // a second Error saying the same thing in different words, so a dead
+        // engine produced two top-of-list failures and the reader had to work out
+        // that they were one fact.
         f.push(Finding {
-            level: Level::Error,
-            check: "engine not responding",
-            detail: "the engine did not answer, so none of the live checks below ran. `live: 0 rules` \
-                 means \"could not ask\", not \"no rules\". Flash the kernel and module as a set."
+            level: Level::Warn,
+            check: "plan cross-checks did not run",
+            detail: "the engine did not answer, so the checks that compare the plan against the \
+                     live rules were skipped. Everything reported here is the plan alone. Run \
+                     `nomount check --device` for the engine's own verdict."
                 .to_string(),
         });
     }
@@ -1472,22 +1476,13 @@ pub fn run_doctor(json: bool) -> Result<()> {
         m.dedup();
         m.len()
     };
-    // Suppressed under --json: stdout has to be one parseable object. The plan
-    // refusals from collect_plan are already eprintln, so stderr is the only
-    // other writer and the caller keeps the two apart.
-    if !json {
-        println!(
-            "nomount doctor: {modules} modules planned | {injects} injects, {whiteouts} whiteouts, \
-             {binds} my_* binds, {skipped} blocklisted | live: {}",
-            if live_ok {
-                format!("{live_count} rules")
-            } else {
-                "engine not responding".to_string()
-            }
-        );
-    }
+    // The header that used to print here -- `{modules} modules planned | {injects}
+    // injects ... | live: {live_count} rules` -- printed both halves of the
+    // reconcile side by side and compared neither. On an OP15 it read `258
+    // injects ... live: 261 rules` above a `0 errors, 0 warnings` summary. The
+    // counts are facts now (returned below) and the comparison is a finding.
+    let _ = (live_ok, live_count);
 
-    f.sort_by(|a, b| a.level.cmp(&b.level).then(a.check.cmp(b.check)));
     // Any module-backed mount still standing is an app-visible detection surface:
     // it is the one thing the mountless posture exists to deny, and after absorb
     // has run the only ones left are those deliberately skipped. Report them, so
@@ -1649,85 +1644,49 @@ pub fn run_doctor(json: bool) -> Result<()> {
         });
     }
 
-    let errors = f.iter().filter(|x| x.level == Level::Error).count();
-    let warns = f.iter().filter(|x| x.level == Level::Warn).count();
-    let infos = f.iter().filter(|x| x.level == Level::Info).count();
+    // Sorted here so the plan rows arrive in a stable order; the report sorts
+    // the combined list again by verdict.
+    f.sort_by(|a, b| a.level.cmp(&b.level).then(a.check.cmp(b.check)));
 
-    if json {
-        use crate::json::J;
-        let doc = J::Obj(vec![
-            ("kind", J::s("doctor")),
-            (
-                "summary",
-                J::Obj(vec![
-                    ("errors", J::Num(errors as i64)),
-                    ("warnings", J::Num(warns as i64)),
-                    ("informational", J::Num(infos as i64)),
-                ]),
-            ),
-            // The two switches the WebUI banner needs, as booleans rather than as
-            // prose for it to regex. That match has already shipped broken once:
-            // the kernel-umount half tested for /manager: kernel umount is ON/
-            // while this file prints "manager kernel umount ON", so half of a
-            // warning that exists because these switches have broken root on real
-            // hardware was dead code. A field cannot drift the way a sentence can.
-            (
-                "manager",
-                J::Obj(vec![(
-                    "kernel_umount_on",
-                    J::Bool(f.iter().any(|x| x.check == "manager kernel umount ON")),
-                )]),
-            ),
-            (
-                "findings",
-                J::Arr(
-                    f.iter()
-                        .map(|x| {
-                            J::Obj(vec![
-                                (
-                                    "level",
-                                    J::s(match x.level {
-                                        Level::Error => "error",
-                                        Level::Warn => "warn",
-                                        Level::Info => "info",
-                                    }),
-                                ),
-                                ("check", J::s(x.check)),
-                                ("detail", J::s(&x.detail)),
-                                // The fields the merged list needs, so a doctor
-                                // row and an audit row render identically.
-                                ("severity", J::s(severity_of(&x.level))),
-                                ("meaning", J::s(meaning_of(x))),
-                                ("owner", J::os(owner_of(x))),
-                                ("source", J::s("plan")),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-        ]);
-        println!("{}", doc.render());
-        return Ok(());
-    }
+    // The counts that used to be a header line nobody could parse reliably --
+    // `service.sh` scraped "summary: N errors, M warnings" out of the prose with
+    // a sed expression. They are facts about the module set, so they travel with
+    // the rest of the facts.
+    let facts: Vec<crate::check::Fact> = vec![
+        ("modules".to_string(), modules.to_string()),
+        ("plan_injects".to_string(), injects.to_string()),
+        ("plan_whiteouts".to_string(), whiteouts.to_string()),
+        ("plan_binds".to_string(), binds.to_string()),
+        ("plan_blocklisted".to_string(), skipped.to_string()),
+        // NOT the manager's kernel_umount: the device section's fingerprint
+        // already carries it as `manager_umount`, and two keys holding one value
+        // is how a reader ends up asking which of them is current.
+    ];
 
-    if f.is_empty() {
-        println!("[ok] no problems found");
-    } else {
-        for x in &f {
-            let tag = match x.level {
-                Level::Error => "error",
-                Level::Warn => "warn",
-                Level::Info => "info",
-            };
-            println!("[{tag}] {}: {}", x.check, x.detail);
-        }
-    }
-    if infos > 0 {
-        println!("summary: {errors} errors, {warns} warnings, {infos} informational");
-    } else {
-        println!("summary: {errors} errors, {warns} warnings");
-    }
-    Ok(())
+    let checks = f
+        .into_iter()
+        .map(|x| {
+            let owner = owner_of(&x);
+            // `meaning` and `evidence` carry the same string on purpose: the
+            // detail texts in this file were rewritten to BE the reader-facing
+            // sentence when the three cards collapsed into one list, so there is
+            // no second sentence to invent. A future plan check with separate
+            // evidence has somewhere to put it.
+            let mut c = Check::new(
+                Section::Plan,
+                slug(x.check),
+                x.check,
+                verdict_of(&x.level),
+                x.detail.clone(),
+            )
+            .meaning(x.detail);
+            if let Some(o) = owner {
+                c = c.owner(o);
+            }
+            c
+        })
+        .collect();
+    Ok((checks, facts))
 }
 
 #[cfg(test)]

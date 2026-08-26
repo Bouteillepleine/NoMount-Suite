@@ -1,11 +1,20 @@
 //! Runtime health: the regression canary that would have caught the d_drop bug
 //! on the first boot instead of a three-hour hunt.
 //!
-//! `doctor` lints the *plan* before a reboot. This module checks the *running*
-//! system: is the engine live, are the injected files still byte-consistent, and
-//! — the Narcissus canary — does a normal app see the same filesystem as root?
-//! A per-UID divergence for an *unblocked* app is exactly the class of kernel
-//! regression (d_drop, dcache poisoning) that a self-consistency detector flags.
+//! The plan section of `nomount check` lints what the module set WOULD do. This
+//! module measures the running system: is the engine live, are the injected files
+//! still byte-consistent, and — the Narcissus canary — does a normal app see the
+//! same filesystem as root? A per-UID divergence for an *unblocked* app is
+//! exactly the class of kernel regression (d_drop, dcache poisoning) that a
+//! self-consistency detector flags.
+//!
+//! Two things come out of one [`gather`]: the flat key=value FACTS that
+//! `health.txt`, `snapshot` and `verify` are built on, and the [`Check`]s those
+//! facts imply. They used to be one and the same, which is why this module's
+//! answers were stringly typed -- `consistency` was "ok" | "mismatch:<path>(root=A
+//! app=B)" | "unchecked" | "unchecked:probe-uid-hidden", four states encoded as
+//! prefixes of one string because the field had to be both the verdict and the
+//! evidence at once. Now the verdict is a `Verdict` and the string is evidence.
 //!
 //! `snapshot` freezes a known-good fingerprint; `verify` diffs live-vs-snapshot
 //! and names what drifted. `export` dumps diagnostics for sharing.
@@ -17,15 +26,15 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use crate::check::{slug, Check, Section, Verdict};
 use crate::nm::Nm;
 
 const NM_DIR: &str = "/data/adb/nomount";
 const SNAPSHOT: &str = "/data/adb/nomount/snapshot.txt";
-const HEALTH: &str = "/data/adb/nomount/health.txt";
 
 /// One line-based `key=value` fingerprint of the live system. Field order is
 /// stable so a textual diff reads cleanly.
-struct Fingerprint {
+pub struct Fingerprint {
     version: String,
     uname: String,
     engine: String, // "vN" or "down"
@@ -58,22 +67,120 @@ struct Fingerprint {
 }
 
 impl Fingerprint {
-    fn to_text(&self) -> String {
-        let mut s = String::new();
-        let _ = writeln!(s, "version={}", self.version);
-        let _ = writeln!(s, "uname={}", self.uname);
-        let _ = writeln!(s, "engine={}", self.engine);
-        let _ = writeln!(s, "rules={}", self.rules);
-        let _ = writeln!(s, "whiteouts={}", self.whiteouts);
+    /// The flat key=value document `health.txt` and `snapshot.txt` are made of.
+    ///
+    /// Field order is stable so a textual diff reads cleanly, and the KEYS are
+    /// unchanged from when this rendered its own text: `service.sh` reads
+    /// `consistency` and `verdict` out of health.txt, and `verify` diffs a
+    /// snapshot taken by an older build against a fingerprint taken by this one.
+    /// Only the RENDERER moved -- to `check::Report::fingerprint_text`, which is
+    /// now the single one.
+    pub fn facts(&self) -> Vec<crate::check::Fact> {
         let unk = |v: Option<usize>| v.map_or_else(|| "unknown".to_string(), |n| n.to_string());
-        let _ = writeln!(s, "mounts={}", unk(self.mounts));
-        let _ = writeln!(s, "mounts_foreign={}", unk(self.mounts_foreign));
-        let _ = writeln!(s, "blocked={}", self.blocked);
-        let _ = writeln!(s, "consistency={}", self.consistency);
-        let _ = writeln!(s, "served_matches_rule={}", self.served_matches_rule);
-        let _ = writeln!(s, "guard={}", self.guard);
-        let _ = writeln!(s, "manager_umount={}", self.manager_umount);
-        s
+        [
+            ("version", self.version.clone()),
+            ("uname", self.uname.clone()),
+            ("engine", self.engine.clone()),
+            ("rules", self.rules.to_string()),
+            ("whiteouts", self.whiteouts.to_string()),
+            ("mounts", unk(self.mounts)),
+            ("mounts_foreign", unk(self.mounts_foreign)),
+            ("blocked", self.blocked.clone()),
+            ("consistency", self.consistency.clone()),
+            ("served_matches_rule", self.served_matches_rule.clone()),
+            ("guard", self.guard.clone()),
+            ("manager_umount", self.manager_umount.clone()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    }
+
+    /// The verdicts those facts imply, as ordinary checks.
+    ///
+    /// Every state below was already being expressed -- as a string prefix, in a
+    /// prose `verdict=` ladder, and again as a boolean in the JSON arm. Three
+    /// encodings of one answer, and the WebUI had to know all three. The engine's
+    /// own liveness is deliberately NOT one of them: `audit::check_engine_live`
+    /// already asks it, in the same report, and two rows disagreeing about whether
+    /// the engine is up is worse than either row alone.
+    pub fn checks(&self) -> Vec<Check> {
+        let mk = |name: &'static str, v: Verdict, ev: String| {
+            Check::new(Section::Device, slug(name), name, v, ev)
+        };
+        let mut out = Vec::new();
+
+        // The Narcissus canary. "unchecked:probe-uid-hidden" is a legitimate
+        // can't-check BY DESIGN -- shell is on the hide list, so the divergence
+        // this would report is the feature doing exactly what was asked -- while a
+        // bare "unchecked" means it sampled no injected file at all, which is the
+        // honesty rule's own state.
+        out.push(match self.consistency.as_str() {
+            "ok" => mk("per-UID consistency canary", Verdict::Pass, self.consistency.clone())
+                .meaning(
+                    "A normal app sees the same bytes at an injected path as root does, which is \
+                     what stops an app spotting the injection by diffing its own view.",
+                ),
+            "unchecked:probe-uid-hidden" => mk(
+                "per-UID consistency canary",
+                Verdict::NotApplicable,
+                self.consistency.clone(),
+            )
+            .meaning(
+                "The probe uid (shell) is itself on your hide list, so a divergence here would \
+                 be the hiding working. Nothing to test.",
+            ),
+            "unchecked" => mk("per-UID consistency canary", Verdict::Unmeasured, self.consistency.clone())
+                .meaning("No injected file could be sampled, so this was not tested."),
+            other => mk("per-UID consistency canary", Verdict::Fail, other.to_string())
+                .meaning(
+                    "A normal app sees something different at an injected path than root does. \
+                     That is the d_drop-class kernel regression this canary exists to catch.",
+                )
+                .oracle(
+                    "an app can diff its own view of an injected path against another uid's and \
+                     see the injection",
+                )
+                .owner("the kernel engine"),
+        });
+
+        // Does what is SERVED match the source the rule names? Fails independently
+        // of the canary: root and an app can agree perfectly while the bytes come
+        // from a module the rule does not name.
+        out.push(match self.served_matches_rule.as_str() {
+            "ok" => mk("served bytes match the rule", Verdict::Pass, self.served_matches_rule.clone())
+                .meaning("Every injected path serves the bytes its own rule names."),
+            "unchecked" => mk(
+                "served bytes match the rule",
+                Verdict::Unmeasured,
+                self.served_matches_rule.clone(),
+            )
+            .meaning("No rule had a comparable file at both ends, so this was not tested."),
+            other => mk("served bytes match the rule", Verdict::Fail, other.to_string())
+                .meaning(
+                    "A path is serving content that is not what its rule points at -- two rules \
+                     hit one target and the table names one source while the filesystem serves \
+                     the other.",
+                )
+                .owner("the mount pass"),
+        });
+
+        // The kill switch. Not an oracle -- nobody detects you by it -- but with it
+        // tripped nothing is being served at all, which is the question every other
+        // row is implicitly answering.
+        out.push(if self.guard == "armed" {
+            mk("boot guard armed", Verdict::Pass, self.guard.clone())
+                .meaning("The Suite is enabled; no boot-failure guard has tripped.")
+        } else {
+            mk("boot guard armed", Verdict::Fail, self.guard.clone())
+                .meaning(
+                    "The boot guard has tripped, so NOTHING is being injected. Delete \
+                     /data/adb/nomount/disabled once you know why, and reboot.",
+                )
+                .owner("a previous boot")
+        });
+
+        out
     }
 }
 
@@ -304,7 +411,7 @@ fn parse_rules(list: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn gather() -> Fingerprint {
+pub fn gather() -> Fingerprint {
     let nm = Nm::new();
     let engine = nm.version().map(|v| format!("v{v}")).unwrap_or_else(|_| "down".into());
     let list = nm.list().unwrap_or_default();
@@ -348,100 +455,31 @@ fn gather() -> Fingerprint {
     }
 }
 
-/// `nomount selfcheck [--write]` — runtime health, human-readable. With `--write`
-/// it also persists to health.txt (service.sh calls this at boot_completed).
-/// Exit is non-zero when the consistency canary or guard indicates trouble.
-pub fn run_selfcheck(write: bool, json: bool) -> Result<()> {
-    let fp = gather();
-    let ok_guard = fp.guard == "armed";
-    let ok_engine = fp.engine != "down";
-    let mismatch = fp.consistency.starts_with("mismatch");
-    let drift = fp.served_matches_rule.starts_with("drift");
-    // A bare "unchecked" means the canary could sample no injected file at all
-    // (every target failed to stat, or there were none): it is NOT a pass and NOT
-    // a hard failure -- a third, honest state. "unchecked:probe-uid-hidden" is a
-    // legitimate can't-check by design and stays healthy.
-    let unverified = fp.consistency == "unchecked";
-
-    if !json {
-        print!("{}", fp.to_text());
-    }
-    let verdict = if drift {
-        "RULE/BYTES DRIFT (a target serves content the rule does not name)"
-    } else if mismatch {
-        "PER-UID INCONSISTENCY (injection visible to a normal app differently than root)"
-    } else if !ok_engine {
-        "ENGINE DOWN"
-    } else if !ok_guard {
-        "GUARD TRIPPED"
-    } else if unverified {
-        "unverified (consistency canary sampled no injected file)"
-    } else {
-        "healthy"
-    };
-    if json {
-        use crate::json::J;
-        // The fingerprint is already a flat key=value document, so it maps
-        // straight onto an object -- no second description of the same fields to
-        // drift from the first.
-        let mut fields: Vec<(String, String)> = Vec::new();
-        for line in fp.to_text().lines() {
-            if let Some((k, v)) = line.split_once('=') {
-                fields.push((k.to_string(), v.to_string()));
-            }
-        }
-        let doc = J::Obj(vec![
-            ("kind", J::s("selfcheck")),
-            ("verdict", J::s(verdict)),
-            // The states the caller actually branches on, as booleans. The WebUI
-            // used to regex `verdict=(.+)` and ladder on prose.
-            ("healthy", J::Bool(!drift && !mismatch && ok_engine && ok_guard && !unverified)),
-            ("engine_up", J::Bool(ok_engine)),
-            ("guard_armed", J::Bool(ok_guard)),
-            ("consistency_mismatch", J::Bool(mismatch)),
-            ("served_matches_rule_drift", J::Bool(drift)),
-            ("consistency_unverified", J::Bool(unverified)),
-            (
-                "fields",
-                J::Arr(
-                    fields
-                        .iter()
-                        .map(|(k, v)| J::Obj(vec![("key", J::s(k)), ("value", J::s(v))]))
-                        .collect(),
-                ),
-            ),
-        ]);
-        println!("{}", doc.render());
-    } else {
-        println!("verdict={verdict}");
-    }
-
-    if write {
-        fs::create_dir_all(NM_DIR).ok();
-        let mut body = fp.to_text();
-        let _ = writeln!(body, "verdict={verdict}");
-        let _ = writeln!(body, "ts={}", read_cmd("date", &["+%s"]));
-        fs::write(HEALTH, body).context("write health.txt")?;
-    }
-
-    // "unverified" is not a pass but not an abort-boot failure either: only a real
-    // inconsistency, a down engine, or a tripped guard exits non-zero.
-    if drift || mismatch || !ok_engine || !ok_guard {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
 /// `nomount snapshot` — freeze the current fingerprint as the known-good baseline.
+///
+/// Kept, where `posture` and `plan` were not. It answers a question `check`
+/// structurally cannot: not "is this device healthy now" but "has anything moved
+/// since the boot I was happy with", which needs a baseline the user chose. Both
+/// this and `verify` render through [`crate::check::Report`], so the file they
+/// write and diff is the same fingerprint the report carries.
 pub fn run_snapshot() -> Result<()> {
-    let fp = gather();
+    let body = fingerprint_text()?;
     fs::create_dir_all(NM_DIR).ok();
-    let mut body = fp.to_text();
-    let _ = writeln!(body, "ts={}", read_cmd("date", &["+%s"]));
     fs::write(SNAPSHOT, &body).context("write snapshot.txt")?;
     print!("{body}");
     println!("snapshot saved to {SNAPSHOT}");
     Ok(())
+}
+
+/// The live fingerprint as `health.txt`/`snapshot.txt` text, stamped.
+///
+/// One producer for both verbs and for `check --write`; the three used to build
+/// the same document three times.
+fn fingerprint_text() -> Result<String> {
+    let r = crate::check::build(false, true)?;
+    let mut body = r.fingerprint_text();
+    let _ = writeln!(body, "ts={}", r.ts);
+    Ok(body)
 }
 
 /// `nomount verify` — diff the live fingerprint against the saved snapshot and
@@ -454,7 +492,7 @@ pub fn run_verify() -> Result<()> {
             return Ok(());
         }
     };
-    let live = gather().to_text();
+    let live = fingerprint_text()?;
 
     // Parse both into key->value and compare (ignore ts).
     let kv = |txt: &str| -> Vec<(String, String)> {
@@ -500,10 +538,9 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         }
     };
 
-    write("selfcheck.txt", &{
-        let fp = gather();
-        fp.to_text()
-    });
+    // The fingerprint, under its own name. The full report goes in check.txt
+    // below; this file is the flat key=value form a bug report is skimmed for.
+    write("fingerprint.txt", &fingerprint_text().unwrap_or_default());
     // /data/media/0 is the REAL backing store of /sdcard on A11+, and it is the
     // path a root shell naturally types -- so `nomount export /data/media/0/Download`
     // failed this test, skipped the PRIVATE guard below, and wrote `uidhide`,
@@ -545,9 +582,15 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     let self_exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "nomount".to_string());
-    // doctor's "stale legacy blocklist entries" finding prints hidden package
-    // names verbatim; NM_REDACT_HIDE_LIST tells it to withhold them for a shared
-    // destination (see M-S2 in doctor.rs).
+    // The plan section's "stale legacy blocklist entries" finding prints hidden
+    // package names verbatim; NM_REDACT_HIDE_LIST tells it to withhold them for a
+    // shared destination (see M-S2 in doctor.rs).
+    //
+    // Re-EXECs rather than calling `check::build` in-process, and deliberately:
+    // several device checks fork and drop privileges, and one of them has already
+    // been the reason this ran in a child. The subprocess also keeps a panic or a
+    // hang inside a probe from taking the export with it.
+    //
     // No shell. The old form built `NM_REDACT_HIDE_LIST=1 '<self_exe>' doctor`
     // and handed it to `sh -c`, with `self_exe` dropped into single quotes but
     // NOT escaped -- while two other call sites in this crate (`app_size` above
@@ -555,20 +598,20 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // binary from a path containing a quote was all it took, and the shell was
     // only ever there to set one environment variable. `Command::env` does that
     // without a shell at all, so there is nothing left to quote.
-    let mut doctor = Command::new(&self_exe);
-    doctor.arg("doctor");
+    let mut checker = Command::new(&self_exe);
+    checker.arg("check");
     if shared {
-        doctor.env("NM_REDACT_HIDE_LIST", "1");
+        checker.env("NM_REDACT_HIDE_LIST", "1");
     }
-    let doctor_out = doctor
+    let check_out = checker
         .output()
         .map(|o| {
             let mut t = String::from_utf8_lossy(&o.stdout).into_owned();
             t.push_str(&String::from_utf8_lossy(&o.stderr));
             t
         })
-        .unwrap_or_else(|e| format!("could not run {self_exe} doctor: {e}"));
-    write("doctor.txt", &doctor_out);
+        .unwrap_or_else(|e| format!("could not run {self_exe} check: {e}"));
+    write("check.txt", &check_out);
     write("dmesg-nomount.txt", &read_cmd("sh", &["-c", "dmesg | grep -i nomount 2>/dev/null || true"]));
     write("mountinfo.txt", &fs::read_to_string("/proc/self/mountinfo").unwrap_or_default());
     write("uname.txt", &read_cmd("uname", &["-a"]));
