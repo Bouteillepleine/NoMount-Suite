@@ -45,6 +45,28 @@ else
         echo "==> Version set: v${CURRENT_VERSION} → v${NEW_VERSION}"
 fi
 
+# The stamp below is written before anything that can fail -- it has to be, the
+# staged module.prop is what goes in the zip. But the binary-version guard further
+# down aborts DELIBERATELY and often (that is its job), and every abort used to
+# leave Cargo.toml and module.prop carrying a version no artifact was ever built
+# for. Re-running then bumped again from there, so two failed runs moved the
+# version two patches with nothing released. Roll the stamp back on any failure.
+_stamp_saved="$(mktemp -d)"
+cp "$PROJECT_ROOT/Cargo.toml"   "$_stamp_saved/Cargo.toml"
+cp "$MODULE_DIR/module.prop"    "$_stamp_saved/module.prop"
+[ -f "$PROJECT_ROOT/Cargo.lock" ] && cp "$PROJECT_ROOT/Cargo.lock" "$_stamp_saved/Cargo.lock"
+_unstamp() {
+    local rc=$?
+    if [ "$rc" -ne 0 ] && [ -f "$_stamp_saved/Cargo.toml" ]; then
+        cp "$_stamp_saved/Cargo.toml" "$PROJECT_ROOT/Cargo.toml"
+        cp "$_stamp_saved/module.prop" "$MODULE_DIR/module.prop"
+        [ -f "$_stamp_saved/Cargo.lock" ] && cp "$_stamp_saved/Cargo.lock" "$PROJECT_ROOT/Cargo.lock"
+        echo "       version stamp rolled back to v${CURRENT_VERSION}" >&2
+    fi
+    rm -rf "$_stamp_saved"
+}
+trap _unstamp EXIT
+
 # Stamp it EVERYWHERE, for an explicit --version just as much as an auto-bump.
 # These writes used to live inside the auto-bump branch, so `--version 1.3.9`
 # renamed the zip while Cargo.toml and module.prop stayed behind: the artifact
