@@ -1333,6 +1333,12 @@
   // version whose files are not on disk yet. Comparing the two is the only way
   // this page can know which side of that swap it is on.
   const SUITE_VERSION = "dev";
+  // Which commit this zip was built from. Stamped by package.sh alongside the
+  // version, because the version alone cannot answer "am I running the fix?" --
+  // commits land between releases, and a build carrying five of them still calls
+  // itself by the last release's number. A "+dirty" suffix means the zip was
+  // built from a tree with edits that are not in that commit.
+  const SUITE_COMMIT = "dev";
   let execId = 0;
   const KSU = window.ksu;
   const $ = (id) => document.getElementById(id);
@@ -2334,7 +2340,8 @@
     const p = (env.stdout || "").trim().split("|");
     const s = AUDIT.summary || {};
     const lines = [
-      "NoMount Suite " + (AUDIT.suite || SUITE_VERSION) + " — detection audit",
+      "NoMount Suite " + (AUDIT.suite || SUITE_VERSION) +
+        (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " — detection audit",
       "device: " + (p[0] || "?") + " · Android " + (p[1] || "?") + " · " + (p[2] || "?"),
       "kernel: " + (p[3] || "?"),
       "rules: " + (AUDIT.rules || 0) + " across " + (AUDIT.directories || 0) + " directories",
@@ -3475,7 +3482,8 @@
     $("ver").title = staged
       ? pv + " is installed but NOT live yet -- its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
       : "Suite " + SUITE_VERSION + " -- " + eng + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
-    $("footver").textContent = "Suite " + SUITE_VERSION + " · " + eng +
+    const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
+    $("footver").textContent = "Suite " + suiteId + " · " + eng +
       (staged ? " · " + pv + " staged — reboot to activate" : "");
     await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(), refreshModules(), refreshOverlays(), refreshVfs(), refreshRuleSummary(), refreshIncident(), refreshSpoof(), refreshBlocked(), refreshIsolated(), refreshWhiteouts(), checkManagerSwitches(), loadAuditCache(), refreshFeatures()]);
     if (rulesShown) loadRules();

@@ -62,6 +62,26 @@ sed -i "s/^versionCode=.*/versionCode=${vcode}/" "$MODULE_DIR/module.prop"
 
 VERSION="v${NEW_VERSION}"
 
+# WHICH COMMIT this zip was built from.
+#
+# The version alone is not enough and today proved it twice: five commits landed
+# on top of `release v1.3.80` without a bump, so a phone reporting v1.3.80 might
+# or might not carry the fix you were looking for, and the only way to tell was
+# to diff the repo by hand. The same shape bit the kernel side, where three
+# engine commits shipped without moving NM_MODULE_VERSION.
+#
+# DIRTY is not cosmetic. package.sh edits Cargo.toml and module.prop itself a few
+# lines above, so the tree is ALWAYS modified by the time we get here -- those
+# three are excluded, and anything else still-modified means the zip does not
+# match the commit it names. Better to say so than to stamp a SHA that lies.
+BUILD_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
+            | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$')" ]; then
+    BUILD_COMMIT="${BUILD_COMMIT}+dirty"
+fi
+export BUILD_COMMIT
+echo "==> Build commit: ${BUILD_COMMIT}"
+
 # --- nm: build it, or say plainly that a prebuilt is being shipped ------------
 # nm is freestanding C with no libc, so it needs a cross compiler rather than
 # cargo. Only CI ever built it, and packaging silently fell back to the gitignored
@@ -302,11 +322,17 @@ package_zip() {
         if [ -f "$staging/webroot/index.html" ]; then
             sed -i "s/const SUITE_VERSION = \"[^\"]*\"/const SUITE_VERSION = \"${VERSION}\"/" \
                 "$staging/webroot/index.html"
+            sed -i "s/const SUITE_COMMIT = \"[^\"]*\"/const SUITE_COMMIT = \"${BUILD_COMMIT}\"/" \
+                "$staging/webroot/index.html"
             # ASSERT. A sed that matches nothing is silent, and the failure mode
             # here is a shipped WebUI that calls itself "dev" and then reports
             # every real release as a staged update forever.
             if ! grep -q "const SUITE_VERSION = \"${VERSION}\"" "$staging/webroot/index.html"; then
                 echo "FATAL: could not stamp SUITE_VERSION into webroot/index.html" >&2
+                exit 1
+            fi
+            if ! grep -q "const SUITE_COMMIT = \"${BUILD_COMMIT}\"" "$staging/webroot/index.html"; then
+                echo "FATAL: could not stamp SUITE_COMMIT into webroot/index.html" >&2
                 exit 1
             fi
         fi
