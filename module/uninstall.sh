@@ -13,3 +13,14 @@ if [ -f "$_ovr" ] && grep -q 'NoMount Suite' "$_ovr" 2>/dev/null; then
     rm -f "$_ovr"
 fi
 unset _ovr
+
+# Our whole state directory. Everything in here is ours -- config the WebUI
+# writes, caches, logs, and the self-disable flag -- and none of it means
+# anything once the module is gone.
+#
+# `disabled` is the one that actually bites. The bootloop guard writes it and
+# only the WebUI clears it, so leaving it behind meant the classic recovery
+# ("uninstall, reinstall") produced an install that reports success, injects
+# nothing, and never says why -- because the fresh module reads the old
+# flag on its first boot.
+rm -rf /data/adb/nomount

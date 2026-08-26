@@ -2,6 +2,13 @@
 /release/
 /module/bin/
 
+# actions/download-artifact unpacks here in the packaging job. Untracked and
+# unignored, it made `git status --porcelain` emit `?? artifacts/`, which the
+# +dirty exclusion in package.sh does not filter -- so EVERY CI zip, tagged
+# releases included, was stamped as not matching the commit it names. A suffix
+# that is always on is a suffix nobody reads. Same failure as /nm-arm64 below.
+/artifacts/
+
 # Transient output of the zig `nm` build. package.sh removes its own copy,
 # but the CI workflow builds nm in a separate step and leaves this behind --
 # which made `git status --porcelain` report `?? nm-arm64` and stamped EVERY

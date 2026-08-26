@@ -258,6 +258,19 @@ jobs:
           set -euo pipefail
           zip=$(ls dist/00_NoMount-Module-*.zip | head -1)
           test -s "$zip"
+          # The zip is named from Cargo.toml; the release is named from the tag.
+          # Nothing asserted the two agreed, so tagging v1.4.0 on a tree whose
+          # Cargo.toml still said 1.3.88 published a release titled v1.4.0 whose
+          # asset was v1.3.88 -- and since managers key updates on versionCode,
+          # that "new release" is invisible as an update to every device.
+          zipver="${zip##*00_NoMount-Module-}"
+          zipver="${zipver%.zip}"
+          zipver="${zipver%-debug}"
+          if [ "$zipver" != "$TAG" ]; then
+            echo "FATAL: tag $TAG does not match the packaged version $zipver." >&2
+            echo "       Bump Cargo.toml and re-tag; do not publish a mismatch." >&2
+            exit 1
+          fi
           echo "publishing $TAG <- $zip ($(stat -c %s "$zip") bytes)"
           # The tag is authoritative for the name; the notes point at the commit
           # log rather than restating it, so this never goes stale.

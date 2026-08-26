@@ -212,4 +212,21 @@ else
     ui_print "- Cloak add-on: kernel pathhide not present (needs a pathhide-enabled kernel)"
 fi
 
+# A flash is an explicit user action, so the bootloop counter's premise -- "this
+# device keeps failing to finish booting on its own" -- no longer holds. Without
+# this, the classic recovery (flash the update that FIXES the bootloop) inherits
+# a counter already at 2: the new code's first boot trips it, writes `disabled`,
+# and skips the spoof and mount passes entirely -- before any of the new code has
+# run once. The user sees the update "not help".
+rm -f "$NMDIR/bootcount"
+
+# `disabled` is NOT cleared here. The guard writes it, but a user can also write
+# it by hand to park the Suite, and silently undoing that on every upgrade would
+# be its own surprise. Say so instead -- loudly, because an install that reports
+# success and then injects nothing, with no explanation, is the worse outcome.
+if [ -f "$NMDIR/disabled" ]; then
+    ui_print "- ⚠️  The Suite is DISABLED on this device — it will inject nothing at boot."
+    ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
+fi
+
 ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."

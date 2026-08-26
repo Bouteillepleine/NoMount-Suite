@@ -52,11 +52,19 @@ fi
 # that lies about itself is the one thing a release must never do.
 sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$PROJECT_ROOT/Cargo.toml"
 
-# major*10000 + minor*100 + patch. Plain dot-stripping regressed the code
+# major*100000 + minor*1000 + patch. Plain dot-stripping regressed the code
 # (1.2.0 -> "120" < 10102 for v1.1.2), which a manager reads as a downgrade.
+#
+# The field widths matter. The previous major*10000 + minor*100 + patch gave
+# each of minor and patch only two digits, so v1.3.100 and v1.4.0 both came
+# out 10400 -- and v1.3.101 (10401) OUTRANKED v1.4.0. Managers key updates on
+# versionCode alone, so that is a real release published as a downgrade, and
+# at v1.3.88 it was twelve patches away. Widening to three digits keeps every
+# code monotonic and every new code far above the largest old one (v1.3.88
+# was 10388, is now 103088), so no device sees this change as a downgrade.
 vbase="${NEW_VERSION%%-*}"
 IFS=. read -r vmaj vmin vpat <<< "$vbase"
-vcode=$(( ${vmaj:-0} * 10000 + ${vmin:-0} * 100 + ${vpat:-0} ))
+vcode=$(( ${vmaj:-0} * 100000 + ${vmin:-0} * 1000 + ${vpat:-0} ))
 sed -i "s/^version=.*/version=v${NEW_VERSION}/" "$MODULE_DIR/module.prop"
 sed -i "s/^versionCode=.*/versionCode=${vcode}/" "$MODULE_DIR/module.prop"
 
@@ -276,6 +284,19 @@ package_zip() {
 
         local nomount_src="$PROJECT_ROOT/target/$target/$target_subdir/nomount"
         if [ -f "$nomount_src" ]; then
+            # The SAME staleness guard the fallback arm below has had all along.
+            # Without it: build at v1.3.88, then run package.sh with no --build,
+            # which bumps to v1.3.89 and stamps module.prop and the WebUI -- and
+            # ships the 1.3.88 binary inside. The WebUI reports the BINARY's
+            # version, so the device then disagrees with the module it came from.
+            local _stale
+            _stale="$(find "$PROJECT_ROOT/src" -newer "$nomount_src" -print -quit 2>/dev/null)"
+            if [ -n "$_stale" ]; then
+                echo "FATAL: $nomount_src predates the Rust sources (newer: $_stale)." >&2
+                echo "       Re-run with --build." >&2
+                rm -rf "$staging"
+                exit 1
+            fi
             cp "$nomount_src" "$staging/bin/$abi/nomount"; found_nomount=$((found_nomount + 1))
         elif [ -f "$MODULE_DIR/bin/$abi/nomount" ]; then
             # The SAME staleness guard nm gets 20 lines below, which this arm did
@@ -286,8 +307,12 @@ package_zip() {
             # v1.3.51 while the binary inside answers whatever it was built as.
             # That is the "a version that lies about itself" failure the stamping
             # comment says a release must never produce, reached the other way.
+            # src/ only. Cargo.toml was rewritten by the version bump at the top
+            # of THIS run, seconds ago, so including it made the guard fire every
+            # time -- packaging without --build always died, blaming a stale
+            # prebuilt for what is really a missing build.
             local _newer
-            _newer="$(find "$PROJECT_ROOT/src" "$PROJECT_ROOT/Cargo.toml"                         -newer "$MODULE_DIR/bin/$abi/nomount" -print -quit 2>/dev/null)"
+            _newer="$(find "$PROJECT_ROOT/src"                         -newer "$MODULE_DIR/bin/$abi/nomount" -print -quit 2>/dev/null)"
             if [ -n "$_newer" ]; then
                 echo "FATAL: $MODULE_DIR/bin/$abi/nomount predates the Rust sources" >&2
                 echo "       (newer: $_newer). Re-run with --build." >&2
