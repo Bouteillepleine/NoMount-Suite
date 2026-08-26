@@ -1576,9 +1576,21 @@
 
   // ---- guard ----
   async function refreshGuard() {
-    const c = (await exec("cat /data/adb/nomount/bootcount 2>/dev/null")).stdout.trim();
-    const disabled = (await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0")).stdout.trim() === "1";
-    $("gchip").textContent = "boot " + (c === "" ? "0" : c) + "/3";
+    const cr = await exec("cat /data/adb/nomount/bootcount 2>/dev/null");
+    const dr = await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0");
+    // The worst false green in the file: with errno dropped, a failed read gave
+    // disabled === false, so a Suite that had TRIPPED and was injecting nothing
+    // rendered as "Armed" with a green dot and "boot 0/3".
+    if (dr.errno !== 0) {
+      $("gchip").textContent = "?";
+      $("gstate").textContent = "Unknown — could not read the guard";
+      $("gdot").className = "dot";
+      $("rearm").style.display = "";
+      return;
+    }
+    const c = cr.errno === 0 ? cr.stdout.trim() : "";
+    const disabled = dr.stdout.trim() === "1";
+    $("gchip").textContent = "boot " + (cr.errno !== 0 ? "?" : c === "" ? "0" : c) + "/3";
     if (disabled) {
       $("gstate").textContent = "Tripped — disabled"; $("gdot").className = "dot bad"; $("rearm").style.display = "";
     } else {
@@ -2010,21 +2022,43 @@
     const attention = FINDINGS.filter(function (f) { return f.bucket === "attention"; });
     const unver     = FINDINGS.filter(function (f) { return f.bucket === "unverified"; });
     const engineDown = audit && audit.engine === null;
+    // The guard above only fires when ALL THREE are missing. If the detection
+    // audit alone failed to parse while doctor and selfcheck came back, it
+    // contributed no rows -- and "no rows" then read as "all clear", over the one
+    // source that actually tests for detectability. runCheckAll already says
+    // "Detection audit did not run."; this path did not.
+    const noDetection = !audit;
 
     // Chip: one number, the one that means "act".
     if (engineDown) { chip.textContent = "engine down"; chip.className = "chip bad"; }
     else if (attention.length) { chip.textContent = attention.length + " to look at"; chip.className = "chip warn"; }
     else if (unver.length) { chip.textContent = unver.length + " unverified"; chip.className = "chip warn"; }
+    else if (noDetection) { chip.textContent = "not checked"; chip.className = "chip warn"; }
     else { chip.textContent = "all clear"; chip.className = "chip ok"; }
 
     const checked = (audit && audit.summary ? audit.summary.passed + audit.summary.not_applicable : 0) +
                     (doctor && doctor.summary ? doctor.summary.informational : 0);
 
-    if (!attention.length && !unver.length && !engineDown) {
+    if (noDetection && !attention.length && !unver.length && !engineDown) {
+      sub.textContent = "The detection audit did not run.";
+      list.innerHTML = '<div class="frow"><div class="fname">Not checked</div>' +
+        '<div class="fmean">The detection audit did not return a result, so nothing here ' +
+        'has been tested for detectability. Press <b>Check my setup</b>.</div>' +
+        '<div class="fmeta"><span class="tag warn">not checked</span></div></div>';
+    } else if (!attention.length && !unver.length && !engineDown) {
       sub.textContent = "Nothing needs your attention.";
+      // Name only the sources that actually reported. The old sentence claimed
+      // all three every time, including on the cache-load path where doctor and
+      // the runtime check are both null by construction.
+      const ran = [];
+      if (audit && audit.summary) ran.push("detection");
+      if (doctor && doctor.summary) ran.push("your mount plan");
+      if (health) ran.push("the running system");
+      const src = ran.length === 1 ? ran[0]
+                : ran.slice(0, -1).join(", ") + " and " + ran[ran.length - 1];
       list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
         '<div class="fmean">' + checked + ' check' + (checked === 1 ? "" : "s") +
-        ' ran across detection, your mount plan and the running system, and found nothing to act on.</div>' +
+        ' ran across ' + src + ', and found nothing to act on.</div>' +
         '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>';
     } else {
       sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
@@ -2543,7 +2577,15 @@
   // collapsed "Active rules" card.
   async function refreshRuleSummary() {
     const r = await nm("vfs list");
-    const lines = (r.errno === 0 ? r.stdout : "").split("\n").map(x => x.trim()).filter(Boolean);
+    // errno was dropped, so a call that never ran rendered as the reassuring
+    // empty state. Same rule as the whiteout list: never fall back to the
+    // answer the user wants to hear, show it as unknown.
+    if (r.errno !== 0) {
+      $("rulechip").textContent = "?";
+      $("rulebreak").textContent = "Unknown \u2014 the engine did not answer.";
+      return;
+    }
+    const lines = r.stdout.split("\n").map(x => x.trim()).filter(Boolean);
     const rro = lines.filter(l => /\/overlay\/[^\s]*\.apk/.test(l)).length;
     const vfs = lines.length - rro;
     $("rulechip").textContent = lines.length;
@@ -2697,7 +2739,16 @@
   let rulesShown = false;
   async function loadRules() {
     const r = await nm("vfs list");
-    _rulesRaw = (r.errno === 0 && r.stdout.trim()) ? r.stdout.trim() : "";
+    // errno was dropped, so a call that never ran rendered as the reassuring
+    // empty state. Same rule as the whiteout list: never fall back to the
+    // answer the user wants to hear, show it as unknown.
+    if (r.errno !== 0) {
+      _rulesRaw = "";
+      $("ruleslist").textContent = "unknown — the engine did not answer";
+      $("rulecount").style.display = "none";
+      return;
+    }
+    _rulesRaw = r.stdout.trim();
     if (!_rulesRaw) {
       $("ruleslist").textContent = "no rules";
       $("rulecount").style.display = "none";
@@ -2774,6 +2825,15 @@
   async function refreshBlocked() {
     const box = $("blocked");
     const r = await nm("uid list");
+    // errno was dropped, so a call that never ran rendered as the reassuring
+    // empty state. Same rule as the whiteout list: never fall back to the
+    // answer the user wants to hear, show it as unknown.
+    if (r.errno !== 0) {
+      const uc0 = $("uidchip");
+      if (uc0) uc0.textContent = "?";
+      box.innerHTML = `<div class="blk-none">Unknown \u2014 the hide list could not be read.</div>`;
+      return;
+    }
     const lines = (r.stdout || "").split("\n").map(s => s.trim()).filter(Boolean);
     const none = !lines.length || lines[0] === "no blocked apps";
     // Counted once the rows are classified: an entry nothing installed matches --

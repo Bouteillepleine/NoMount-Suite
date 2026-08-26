@@ -241,12 +241,25 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
 /// device with a debloat module (or a hand-written `nomount whiteout add`) would
 /// have reported a fabricated "readdir ino vs stat ino" FAIL on the audit users
 /// are told to trust. Route through the shared typed parser instead.
-fn live_targets() -> Vec<PathBuf> {
-    crate::nm::parse_list(&Nm::new().list().unwrap_or_default())
-        .into_iter()
-        .filter(|r| r.kind == crate::nm::LiveKind::Inject)
-        .map(|r| r.target)
-        .collect()
+fn live_targets() -> Option<Vec<PathBuf>> {
+    // `unwrap_or_default()` used to sit on this call, which made a REFUSED dump
+    // indistinguishable from "the engine has no rules". `version` is a separate
+    // `nm` invocation, so it still answered: check_engine_live PASSED, every
+    // target-dependent check found an empty list and returned NotApplicable, and
+    // the summary read all-clean with ZERO unmeasured -- a full green over a
+    // device whose rules were never read. doctor.rs already refuses this exact
+    // case ("engine rule dump failed"); the audit did not.
+    //
+    // An empty rule set is Ok(""), not Err, so None here means the engine
+    // genuinely would not answer.
+    let listed = Nm::new().list().ok()?;
+    Some(
+        crate::nm::parse_list(&listed)
+            .into_iter()
+            .filter(|r| r.kind == crate::nm::LiveKind::Inject)
+            .map(|r| r.target)
+            .collect(),
+    )
 }
 
 fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
@@ -876,12 +889,21 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     };
     let mut hits: Vec<String> = Vec::new();
     let mut scanned = 0u32;
+    let mut unread = 0u32;
     for e in rd.filter_map(Result::ok) {
         let pid = e.file_name().to_string_lossy().into_owned();
         if !pid.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        let Ok(maps) = fs::read_to_string(format!("/proc/{pid}/maps")) else { continue };
+        // A process that will not yield its maps is not a process that showed us
+        // nothing. Unread used to be a bare `continue`, so `scanned` counted only
+        // successes and a run where NO map was readable returned
+        // "0 process(es): no injected file mapped as deleted" -- as a PASS. Same
+        // defect the dirent and erofs checks already track with `unread`.
+        let Ok(maps) = fs::read_to_string(format!("/proc/{pid}/maps")) else {
+            unread += 1;
+            continue;
+        };
         scanned += 1;
         for line in maps.lines() {
             let Some(rest) = line.strip_suffix(" (deleted)") else { continue };
@@ -892,6 +914,25 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
         }
     }
     if hits.is_empty() {
+        // A hit is a hit however partial the scan was, so a FAIL below stands
+        // regardless. Only a CLEAN result depends on having looked.
+        if scanned == 0 {
+            return unmeasured(
+                "injected files in maps",
+                format!("{unread} process(es), none would yield its memory map"),
+            )
+            .meaning("No process would show its memory map, so this was not tested.");
+        }
+        if unread > 0 {
+            return unmeasured(
+                "injected files in maps",
+                format!(
+                    "{scanned} process(es) clean, but {unread} would not yield a map -- \
+                     not a complete answer"
+                ),
+            )
+            .meaning("Some processes could not be read, so a clean result is not proven.");
+        }
         return pass(
             "injected files in maps",
             format!("{scanned} process(es): no injected file mapped as deleted"),
@@ -960,7 +1001,17 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             .meaning("No module replaces an app Android has registered, so a hidden app has nothing to be \
              denied.");
     }
-    let blocked = Nm::new().uid_list_live().unwrap_or_default();
+    // An engine that will not answer is not a user with an empty hide list.
+    // `unwrap_or_default()` collapsed the two, and this check -- the one that
+    // guards the ENOENT-inconsistency class -- then reported "nothing to test
+    // here" over a device that may well have had apps hidden.
+    let Ok(blocked) = Nm::new().uid_list_live() else {
+        return unmeasured(
+            NAME,
+            "the engine would not list the per-UID hide set".into(),
+        )
+        .meaning("Not tested — the hide list could not be read.");
+    };
     let Some(&appid) = blocked.first() else {
         // n/a, not amber: "you have not hidden any apps yet" is a statement about
         // the user's configuration, not a measurement that failed. This is the
@@ -1238,8 +1289,49 @@ pub fn mount_checks() -> Vec<Check> {
     vec![check_zero_mount(), check_no_rom_tmpfs(), check_no_foreign_rom_mount()]
 }
 
+/// Every check that reads the live rule list, by the exact name it reports
+/// under. When the dump fails these are the ones that cannot run.
+const RULE_DEPENDENT: [&str; 7] = [
+    "readdir cookie magic",
+    "readdir ino vs stat ino",
+    "injected inode band",
+    "overlay dir inode range",
+    "erofs directory shape",
+    "injected files in maps",
+    "PM-published files open for a hidden app",
+];
+
 fn all_checks() -> (Vec<Check>, usize, usize) {
-    let targets = live_targets();
+    let Some(targets) = live_targets() else {
+        // The engine answered `version` but would not enumerate. The checks that
+        // do not touch the rule list still mean what they say, so they still run;
+        // the seven that do are reported as what they are. Amber, never grey:
+        // NotApplicable would read as "nothing to test here", which is the lie.
+        let mut checks = vec![
+            check_engine_live(),
+            fail(
+                "engine rule dump",
+                "the engine answered its version but refused to list its rules".into(),
+                "not an oracle -- this is the audit failing to read the device, not the \
+                 device leaking",
+            )
+            .meaning(
+                "The checks below that need the rule list could not run. Nothing here is a \
+                 clean result.",
+            ),
+            check_zero_mount(),
+            check_surfaces(),
+            check_no_rom_tmpfs(),
+            check_no_foreign_rom_mount(),
+        ];
+        for name in RULE_DEPENDENT {
+            checks.push(
+                unmeasured(name, "the engine would not list its rules".into())
+                    .meaning("Not tested — the rule list this needs could not be read."),
+            );
+        }
+        return (checks, 0, 0);
+    };
     let parents = parents_of(&targets);
     let checks = vec![
         check_engine_live(),

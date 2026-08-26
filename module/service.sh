@@ -692,17 +692,27 @@ fi
 # finding is open, which is the normal case for some setups and must not read as
 # an error here.
 if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
-    if nmto 60 "$BIN" audit --json --write >/dev/null 2>&1; then
+    nmto 60 "$BIN" audit --json --write >/dev/null 2>&1
+    _arc=$?
+    if [ "$_arc" -eq 0 ]; then
         nmlog "detection audit cached — nothing open"
+    elif [ "$_arc" -eq 124 ]; then
+        # A TIMEOUT is not a verdict. `audit --json --write` exits 1 when a
+        # finding is open and 124 when timeout killed it, and the old test could
+        # not tell them apart: it saw a non-empty audit.json -- LAST boot's --
+        # and logged it as this boot's result. The WebUI then painted a cached
+        # verdict, with an age, for a run that never finished.
+        rm -f "$NMDIR/audit.json"
+        nmlog "⚠ detection audit TIMED OUT after 60s — dropped the stale cache; the WebUI will show no verdict"
     elif [ -s "$NMDIR/audit.json" ]; then
-        # Distinguish "ran, found something" from "did not run at all". The first
-        # is a normal, actionable state; the second means the card will show an
-        # age with no verdict behind it.
+        # Exit 1 with a cache present: it ran and found something. Normal and
+        # actionable, unlike the two above.
         nmlog "detection audit cached — one or more findings are open (see the Detection audit card)"
     else
         rm -f "$NMDIR/audit.json"
         nmlog "⚠ detection audit did not complete — the WebUI will show no cached verdict"
     fi
+    unset _arc
 fi
 
 if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then

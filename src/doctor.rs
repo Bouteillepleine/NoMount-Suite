@@ -1278,16 +1278,28 @@ pub fn run_doctor(json: bool) -> Result<()> {
             let (gpaths, guids) = parse_ghost_tables(&txt);
             if let (Some(&uid), false) = (guids.first(), gpaths.is_empty()) {
                 const SAMPLE: usize = 16;
-                let checked = gpaths.len().min(SAMPLE);
+                // ATTEMPTED, not answered. `_ => {}` used to swallow Absent and
+                // Unknown alike, so a run where every probe FAILED -- fork or
+                // waitpid failing, or the child unable to drop privileges (exit 3),
+                // all of which are whole-sample-systematic -- left visible and
+                // leaked empty and printed "16 of N sampled: each looks exactly
+                // like a path that never existed. Measured here, not assumed from
+                // the build." Nothing had been measured at all, and the WebUI turns
+                // that line into a green "Present and measured working here".
+                let attempted = gpaths.len().min(SAMPLE);
                 let mut visible: Vec<&PathBuf> = Vec::new();
                 let mut leaked: Vec<&PathBuf> = Vec::new();
+                let mut absent = 0usize;
+                let mut unknown = 0usize;
                 for p in gpaths.iter().take(SAMPLE) {
                     match ghost_seen_by(uid, p) {
                         GhostSeen::Visible => visible.push(p),
                         GhostSeen::XattrLeak => leaked.push(p),
-                        _ => {}
+                        GhostSeen::Absent => absent += 1,
+                        GhostSeen::Unknown => unknown += 1,
                     }
                 }
+                let checked = attempted;
                 let name = |v: &[&PathBuf]| -> String {
                     v.iter().take(3).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
                 };
@@ -1316,15 +1328,37 @@ pub fn run_doctor(json: bool) -> Result<()> {
                         ),
                     });
                 }
-                if visible.is_empty() && leaked.is_empty() {
+                if visible.is_empty() && leaked.is_empty() && absent == 0 {
+                    // Nothing answered. Not a pass, and explicitly not the
+                    // "measured here" claim.
                     f.push(Finding {
-                        level: Level::Info,
-                        check: "ghost cloak verified on this kernel",
+                        level: Level::Warn,
+                        check: "ghost cloak NOT verified",
                         detail: format!(
-                            "{checked} of {} hidden path(s) sampled: each looks exactly like a path that never \
-             existed, to uid {uid}. Measured here, not assumed from the build.",
-                            gpaths.len()
+                            "none of the {attempted} sampled path(s) could be probed (the test process \
+             could not run), so the cloak was not tested on this kernel — this is not a pass"
                         ),
+                    });
+                } else if visible.is_empty() && leaked.is_empty() {
+                    f.push(Finding {
+                        level: if unknown > 0 { Level::Warn } else { Level::Info },
+                        check: if unknown > 0 {
+                            "ghost cloak only partly verified"
+                        } else {
+                            "ghost cloak verified on this kernel"
+                        },
+                        detail: if unknown > 0 {
+                            format!(
+                                "{absent} of {attempted} sampled path(s) look exactly like a path that never \
+             existed, to uid {uid} — but {unknown} could not be probed, so this is not a complete answer"
+                            )
+                        } else {
+                            format!(
+                                "{absent} of {} hidden path(s) sampled: each looks exactly like a path that never \
+             existed, to uid {uid}. Measured here, not assumed from the build.",
+                                gpaths.len()
+                            )
+                        },
                     });
                 }
             }
