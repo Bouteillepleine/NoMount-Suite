@@ -449,18 +449,58 @@ fn check_zero_mount() -> Check {
         } else {
             owners.join(", ")
         };
-        fail(
+        // Can absorb actually take these, or would the button do nothing?
+        //
+        // `runtime_droppable` is false for a `my_*` target, and that is not a
+        // limitation to route around: absorbing two /my_product binds on an OP11
+        // unmounted them, re-added four my_* rules in a burst, and the device
+        // rebooted mid-command. So absorb reports those and leaves them alone --
+        // correctly -- and offering "Absorb now" for them means the reader taps a
+        // button, absorb declines, the audit re-runs unchanged, and the UI says
+        // it finished. A button that cannot work is worse than no button: it
+        // spends the reader's trust and teaches them the actions are decorative.
+        //
+        // Measured on an OP11 running this exact case (a bootanimation module
+        // binding content NoMount already injects).
+        let aliases = crate::absorb::mount_aliases(&rows);
+        let absorbable = leaked
+            .iter()
+            .any(|(r, _)| crate::absorb::runtime_droppable(&r.target, &aliases));
+        let deferred: Vec<&str> = leaked
+            .iter()
+            .filter(|(r, _)| !crate::absorb::runtime_droppable(&r.target, &aliases))
+            .filter_map(|(r, _)| r.target.to_str())
+            .collect();
+
+        let mut why = format!(
+            "{} mount(s) laid over the ROM are readable by any app in its own mount table. The \
+             Suite adds none of its own — these come from {owner}.",
+            leaked.len()
+        );
+        if !deferred.is_empty() {
+            why.push_str(&format!(
+                " {} of them sit on a my_* partition, which cannot be taken over while Android is \
+                 running — doing that has rebooted a device. Delete the bind from {owner}'s \
+                 post-fs-data.sh instead: the next boot serves the same content by injection, with \
+                 no mount to absorb.",
+                deferred.len()
+            ));
+        }
+
+        let c = fail(
             "zero-mount posture",
             format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked)),
             "any app can read /proc/self/mountinfo and see a module mounted over the ROM",
         )
-        .meaning(format!(
-            "{} mount(s) laid over the ROM are readable by any app in its own mount table. The \
-             Suite adds none of its own — these come from {owner}.",
-            leaked.len()
-        ))
-        .owner(owner)
-        .action("absorb", "Absorb now", None)
+        .meaning(why)
+        .owner(owner);
+        // Only offer the button when at least one mount is something absorb will
+        // actually take.
+        if absorbable {
+            c.action("absorb", "Absorb now", None)
+        } else {
+            c
+        }
     }
 }
 

@@ -2192,10 +2192,25 @@
     }
     if (id === "absorb") {
       const done = busy(btn, "Absorbing…");
+      const before = (AUDIT && AUDIT.summary && AUDIT.summary.open_failures) || 0;
       const r = await nm("absorb");
-      toast(r.errno === 0 ? "Absorb pass finished — re-running the audit." : "Absorb reported a problem.");
       done();
       await runAudit(null);
+      const after = (AUDIT && AUDIT.summary && AUDIT.summary.open_failures) || 0;
+      // Report what CHANGED, not that the command exited.
+      //
+      // This used to toast "Absorb pass finished" on errno 0 and stop there. But
+      // absorb exits 0 when it declines too -- it declines a my_* bind on purpose,
+      // because taking one over on a live system has rebooted a device -- so on
+      // the phone where that is the whole finding, the reader tapped a button,
+      // nothing moved, and the UI congratulated itself. Measured on an OP11.
+      if (r.errno !== 0) {
+        toast("Absorb reported a problem — see the finding's details.", "bad");
+      } else if (after < before) {
+        toast("Absorbed " + (before - after) + " — re-checked.", "ok");
+      } else {
+        toast("Nothing changed. Absorb left these alone on purpose — open the finding for why.");
+      }
       return;
     }
     toast("Nothing to do for this one.");
