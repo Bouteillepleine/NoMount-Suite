@@ -615,6 +615,7 @@ pub fn run_doctor(json: bool) -> Result<()> {
             continue;
         }
         let slot = invented.entry(parent.to_path_buf()).or_insert((Vec::new(), 0));
+        // (count accumulates below; the single-file case is filtered after)
         slot.0.push(e.module.clone());
         slot.1 += 1;
     }
@@ -622,6 +623,23 @@ pub fn run_doctor(json: bool) -> Result<()> {
     // Report the SHALLOWEST invented directory of a chain. A module shipping
     // `etc/foo/bar/baz/x` invents four directories, and naming all four says the
     // same thing four times -- the actionable unit is the top of the new subtree.
+    // One injected file in a directory is not an inode BAND -- it is one inode,
+    // and a single number cannot be grouped against anything.
+    //
+    // This matters because the common shape is not an invented directory, it is a
+    // SHADOWED one: OnePlus_Dialer_Universal replaces the single stock file in each
+    // of 80 country directories under /my_product/etc/extension. Stock has one file
+    // there, the module serves one file there, and the directory looks exactly as
+    // the ROM shipped it. Reporting that as "holds only injected files" is true by
+    // the letter and useless: there is nothing to bucket, the module has no other
+    // layout available, and `audit`'s own inode-band check declines the case
+    // ("no directory with both enough injections and a stock population to
+    // compare") -- so the finding cited a measurement that does not apply to it.
+    //
+    // Threshold matches what the oracle actually needs: the harness directory it
+    // did fire on had 3 injected inodes alone in a band, with no stock there.
+    invented.retain(|_, (_, n)| *n > 1);
+
     let invented_dirs: std::collections::HashSet<PathBuf> = invented.keys().cloned().collect();
     let mut rolled: Vec<(PathBuf, Vec<String>, usize)> = invented
         .into_iter()
@@ -707,12 +725,14 @@ pub fn run_doctor(json: bool) -> Result<()> {
             check: "directory holds only injected files",
             detail: format!(
                 "{list}. Injected files carry inode numbers from a band the ROM never \
-                 allocates from, so a directory with no stock files in it groups into one \
-                 inode bucket that is entirely yours and names every file at once — that \
-                 is what `audit`'s \"injected inode band\" check measures. Shipping the \
-                 files into a directory that already has stock content removes the tell; \
-                 app/priv-app/overlay directories are excluded here because an APK cannot \
-                 share one."
+                 allocates from, so a directory holding several of them and no stock file \
+                 groups into one bucket that is entirely yours. Shipping into a directory \
+                 that already has stock content removes the tell. `audit`'s \"injected \
+                 inode band\" check may call this not-applicable: it compares against stock \
+                 inodes in the SAME directory and there are none here, while a detector \
+                 comparing against the partition's range does not need them. Single-file \
+                 directories and app/priv-app/overlay containers are excluded — one inode \
+                 is not a bucket, and an APK cannot share a directory."
             ),
         });
     }
