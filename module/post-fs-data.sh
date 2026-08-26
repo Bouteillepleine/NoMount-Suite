@@ -1,7 +1,12 @@
 #!/system/bin/sh
 # Magisk fallback (no metamodule hook). KSU/APatch use metamount.sh instead.
-[ -n "$KSU" ] && exit 0
-[ -n "$APATCH" ] && exit 0
+#
+# The KSU/APATCH exit moved DOWN, past the log setup. It used to be line 3, before
+# nmlog or $BOOTLOG existed, so on a KernelSU build without metamodule support --
+# where metamount.sh is never invoked at all -- the whole module was a silent
+# no-op: nothing on kmsg, nothing in boot.log, no incident.log, no card, nothing
+# for the user to report. Now this path says out loud that it is handing over, and
+# service.sh reports it when the handover led nowhere (see the mountpass.ts stamp).
 MODDIR="${0%/*}"
 NMDIR=/data/adb/nomount
 umask 077                     # see metamount.sh
@@ -22,6 +27,20 @@ nmlog() {
     echo "nomount: $*" > /dev/kmsg 2>/dev/null
     echo "$(date '+%Y-%m-%d %H:%M:%S') [post-fs-data] $*" >> "$BOOTLOG" 2>/dev/null
 }
+
+# The handover, now that there is somewhere to record it. metamount.sh is the
+# metamodule hook and does the whole pass on these managers -- but ONLY if the
+# manager supports metamodules. If it does not, nothing else runs and the stamp
+# metamount.sh writes never appears; service.sh checks for exactly that.
+if [ -n "$KSU" ] || [ -n "$APATCH" ]; then
+    nmlog "KSU/APatch detected — the metamodule hook (metamount.sh) owns this boot"
+    exit 0
+fi
+
+# Magisk path: THIS script is the mount pass, so it writes the same stamp
+# metamount.sh does. service.sh then needs no manager detection to tell "a boot
+# entry point ran" from "nothing ran at all".
+date +%s > "$NMDIR/mountpass.ts" 2>/dev/null
 
 # Bounded exec (see metamount.sh). On a device without toybox `timeout` a bare
 # `timeout 60 cmd` does not run the command unbounded, it does not run it at all

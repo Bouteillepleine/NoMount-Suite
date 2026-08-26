@@ -55,6 +55,18 @@ BOOTLOG="$NMDIR/boot.log"
     && mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
 : >> "$BOOTLOG" 2>/dev/null
 chmod 0600 "$BOOTLOG" 2>/dev/null
+
+# --- "a boot entry point ran this boot" stamp ---------------------------------
+# On a KernelSU build WITHOUT metamodule support this file is never invoked, and
+# post-fs-data.sh exits immediately because $KSU is set -- so the module produced
+# no kmsg line, no boot.log entry, no incident.log and no card. A completely
+# silent no-op is the worst failure this project can have, because there is
+# nothing for the user to report. Stamp the epoch here, BEFORE the bootloop guard
+# (a guard trip is still a boot where the hook ran), and let service.sh say so
+# when the stamp is missing. post-fs-data.sh writes the same file on the Magisk
+# path, so the reader needs no manager detection.
+date +%s > "$NMDIR/mountpass.ts" 2>/dev/null
+
 nmlog() {
     echo "nomount: $*" > /dev/kmsg 2>/dev/null
     echo "$(date '+%Y-%m-%d %H:%M:%S') [metamount] $*" >> "$BOOTLOG" 2>/dev/null
@@ -344,6 +356,18 @@ if command -v ksud >/dev/null 2>&1; then
     # grep -c on an empty stream prints 0 and exits 1, so guard the empty case.
     _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
     _vf=""; _ov=""
+    # The per-module tagging loop below runs a `find` over EVERY enabled module's
+    # tree, and this whole block sits OUTSIDE the bootloop guard. That combination
+    # is the one failure a boot cannot recover from on its own: a device that has
+    # already written `disabled` to save itself still walked every module tree
+    # here, at post-fs-data, under the OPlus boot watchdog. Nothing is being served
+    # in that state, so every badge the loop computes would read "0 served"
+    # anyway -- skip it entirely and go straight to the Suite's own card, which is
+    # cheap (the bounded `nm list` above, plus sed/awk) and is the surface that
+    # actually has to say what happened.
+    if [ -f "$NMDIR/disabled" ]; then
+        nmlog "guard is tripped - skipping per-module tagging (nothing is served)"
+    else
     for d in /data/adb/modules/*/; do
         [ -d "$d" ] || continue
         mid=$(basename "$d")
@@ -371,8 +395,14 @@ if command -v ksud >/dev/null 2>&1; then
         done
         [ -z "$_roots" ] && continue
         _o=0; _v=0
-        [ -n "$(find $_roots -path '*/overlay/*.apk' -print -quit 2>/dev/null)" ] && _o=1
-        [ -n "$(find $_roots -type f ! -path '*/overlay/*' -print -quit 2>/dev/null)" ] && _v=1
+        # BOUNDED, like every other call on this path. `-print -quit` stops at the
+        # first hit, but the NEGATIVE answer costs a full walk of the module tree --
+        # and a module shipping a large asset tree pays that twice, per boot, at
+        # post-fs-data. Unbounded it is a boot hang on the first bad module rather
+        # than a badge missing from one card. 10s is far more than any real module
+        # needs; a module that exceeds it simply goes untagged.
+        [ -n "$(nmto 10 find $_roots -path '*/overlay/*.apk' -print -quit 2>/dev/null)" ] && _o=1
+        [ -n "$(nmto 10 find $_roots -type f ! -path '*/overlay/*' -print -quit 2>/dev/null)" ] && _v=1
         [ "$_o" = 0 ] && [ "$_v" = 0 ] && continue
         if [ "$_o" = 1 ] && [ "$_v" = 1 ]; then _t="vfs + overlay"; _ov="$_ov $mid";
         elif [ "$_o" = 1 ]; then _t="overlay"; _ov="$_ov $mid";
@@ -393,6 +423,7 @@ if command -v ksud >/dev/null 2>&1; then
         KSU_MODULE="$mid" ksud module config set --temp override.description \
             "[NoMount · $_badge] $_orig" >/dev/null 2>&1
     done
+    fi
 
     # The Suite's own card doubles as the at-a-glance status readout, so put the live
     # numbers there rather than restating the tagline the module.prop already carries.

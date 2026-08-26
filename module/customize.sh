@@ -97,6 +97,21 @@ _abi=$(getprop ro.product.cpu.abi 2>/dev/null)
 [ -n "$_abi" ] || _abi=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
 [ -n "$_abi" ] || _abi=arm64-v8a
 _nm="$MODPATH/bin/${_abi}/nm"
+# ABI FIRST, and loudly. The zip ships arm64-v8a only, and the boot scripts load
+# bin/$(getprop ro.product.cpu.abi)/nomount -- so on any other ABI every one of
+# them takes an `[ -x "$BIN" ]` branch that is false and the module is a silent
+# no-op from the first boot onward. The install said nothing about it, because
+# the engine probe below is itself gated on [ -x "$_nm" ] with no else: no ABI
+# directory means no nm, means no probe, means no output at all.
+if [ ! -d "$MODPATH/bin/${_abi}" ]; then
+    ui_print "*********************************************************"
+    ui_print "! This zip has no binaries for this device's ABI."
+    ui_print "!   device ABI: ${_abi}"
+    ui_print "!   shipped:    $(ls "$MODPATH/bin" 2>/dev/null | tr '\n' ' ')"
+    ui_print "! The module will install and then inject NOTHING, on every"
+    ui_print "! boot, silently. NoMount is arm64-v8a only."
+    ui_print "*********************************************************"
+fi
 if [ -x "$_nm" ]; then
     _ev=$("$_nm" v 2>/dev/null | tr -dc '0-9')
     if [ -n "$_ev" ]; then
@@ -110,6 +125,19 @@ if [ -x "$_nm" ]; then
         ui_print "! Flash a NoMount-enabled kernel, then reboot."
         ui_print "*********************************************************"
     fi
+else
+    # The missing `else`. "The engine probe did not run" and "the engine did not
+    # answer" are different problems with the same symptom (nothing is injected),
+    # and this arm printed nothing at all -- so an install onto an unsupported ABI,
+    # or from a partial extraction that dropped the exec bit, reported success and
+    # then quietly did nothing forever.
+    ui_print "*********************************************************"
+    ui_print "! Could not run the engine probe: no executable at"
+    ui_print "!   bin/${_abi}/nm"
+    ui_print "! The engine state is UNKNOWN and the module may inject"
+    ui_print "! nothing. Re-flash the zip; a partial extraction or an"
+    ui_print "! unsupported ABI is the usual cause."
+    ui_print "*********************************************************"
 fi
 
 NMDIR=/data/adb/nomount

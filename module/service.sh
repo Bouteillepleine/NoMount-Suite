@@ -129,6 +129,38 @@ else
     nmlog "boot_completed never set - leaving guard counter armed"
 fi
 
+# --- did ANY boot entry point run this boot? ----------------------------------
+# metamount.sh (KSU/APatch metamodule hook) and post-fs-data.sh (Magisk) each
+# stamp $NMDIR/mountpass.ts at the top of their run. Neither stamp means neither
+# ran, and the case that produces is the one this check exists for: a KernelSU
+# build WITHOUT metamodule support never invokes metamount.sh, and post-fs-data.sh
+# hands over to it because $KSU is set. The module then does nothing at all, with
+# no kmsg line, no boot.log entry, no incident.log and no card -- a failure the
+# user cannot even report, because there is nothing to paste.
+#
+# Same freshness rule as health.txt, and the same fail-closed treatment: if the
+# boot epoch is unknowable we say nothing rather than accuse a working manager.
+_hookran=1
+if [ "$_epoch_known" = 1 ]; then
+    _mpts=$(cat "$NMDIR/mountpass.ts" 2>/dev/null)
+    case "$_mpts" in
+        ''|*[!0-9]*) _hookran=0 ;;
+        *) [ "$_mpts" -ge "$_bootepoch" ] || _hookran=0 ;;
+    esac
+fi
+if [ "$_hookran" = 0 ]; then
+    nmlog "⛔ the mount pass NEVER RAN this boot — nothing was injected. On KernelSU this means the manager has no metamodule support (metamount.sh is never invoked); on Magisk it means post-fs-data.sh did not run."
+    {
+        echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
+        echo "reason=no boot entry point ran: $NMDIR/mountpass.ts is absent or stale"
+        echo "ksu_env_seen_by_post_fs_data=see boot.log [post-fs-data] lines"
+        echo "manager=$(ksud -V 2>/dev/null | head -1)"
+        echo "kernel=$(uname -r)"
+        echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
+        echo "note=NoMount is a METAMODULE. It needs a KernelSU/SukiSU/APatch build that supports metamodules, or Magisk. Update the manager."
+    } > "$NMDIR/incident.log" 2>/dev/null
+fi
+
 # --- Cloak: re-apply the pathhide maps/fd rule list (managed by the WebUI) ---
 # Hides selected module APKs from every /proc/<pid>/maps and /proc/<pid>/fd.
 #
@@ -769,7 +801,13 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
         ok|unchecked*|"") _consbad=0 ;;
         *) _consbad=1 ;;
     esac
-    if [ "$_consbad" = 1 ]; then
+    if [ "${_hookran:-1}" = 0 ]; then
+        # Ahead of everything else: with no mount pass this boot, every other
+        # number on this card describes a device that is serving nothing, and
+        # naming a symptom ("0 rules") instead of the cause sends the reader
+        # looking in the wrong place.
+        _health="⛔ the mount pass never ran — see WebUI › Tools › Last incident"
+    elif [ "$_consbad" = 1 ]; then
         _health="⚠️ per-UID inconsistency — see WebUI › Tools"
     elif [ "${_err:-0}" -gt 0 ]; then
         _health="⚠️ $_err error(s) — see WebUI › Tools"
@@ -827,7 +865,9 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # the boot -- it overwrites whatever metamount.sh wrote. Mirror the same
     # guard, so a boot that served nothing cannot end on a green tick here after
     # metamount.sh refused to give it one.
-    if [ "${_rules:-0}" = 0 ]; then _mark="⚠️"; else _mark="✅"; fi
+    if [ "${_hookran:-1}" = 0 ]; then _mark="⛔"
+    elif [ "${_rules:-0}" = 0 ]; then _mark="⚠️"
+    else _mark="✅"; fi
     KSU_MODULE=meta-nomount ksud module config set --temp override.description \
         "[NoMount $_mark $_rules rules · $_rro RRO · $_mstate] $_health$_muc — $_tail" \
         >/dev/null 2>&1
