@@ -597,6 +597,35 @@
   html[data-theme="light"] #toast.ok  { border-color: rgba(14,154,108,.45); }
   html[data-theme="light"] #toast.bad { border-color: rgba(210,58,68,.45); }
 
+  /* ---- confirmation sheet -------------------------------------------------
+     Every control that destroys something goes through this. Deliberately NOT
+     window.confirm: a root manager's WebView need not implement onJsConfirm at
+     all, and a safety gate that silently answers "no" is a dead button while one
+     that silently answers "yes" is worse than no gate. It is also the only way
+     the prompt can say what will actually happen in the reader's terms rather
+     than echoing an internal verb. */
+  .cfwrap {
+    position: fixed; inset: 0; z-index: 90; display: flex;
+    align-items: flex-end; justify-content: center;
+    padding: 16px 15px calc(16px + env(safe-area-inset-bottom));
+    background: rgba(4,6,12,.62); backdrop-filter: blur(3px);
+  }
+  .cfwrap[hidden] { display: none; }
+  html[data-theme="light"] .cfwrap { background: rgba(20,32,64,.34); }
+  .cfbox {
+    width: 100%; max-width: 430px; border-radius: 22px; padding: 20px 18px 16px;
+    border: 1px solid var(--brd); background: var(--bg2); box-shadow: var(--shadow);
+    animation: cfin .18s ease both;
+  }
+  @keyframes cfin { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+  .cfbox .cft { font-size: 17px; font-weight: 720; letter-spacing: -0.2px; }
+  .cfbox .cfb { font-size: 13px; line-height: 1.6; color: var(--muted); margin-top: 9px; }
+  .cfbox .btns { margin-top: 18px; }
+  /* Cancel is the wide, comfortable target; the destructive one is not the
+     default and never the one a thumb lands on by accident. */
+  .cfbox .btns .act { min-height: 48px; }
+  .cfbox .btns #cfNo { flex: 1.4 1 0; }
+
   .spin { animation: spin .9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -873,7 +902,13 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
         Reload
       </button>
-      <button class="act danger" onclick="clearRules(this)">
+    </div>
+    <!-- Clear rules is not a sibling of Reload. Side by side and the same size,
+         they read as a pair of equals and are nothing of the sort: one re-applies
+         what you already have, the other takes every injected file away. It is
+         small, on its own line, and it asks first. -->
+    <div class="btns" style="margin-top:9px">
+      <button class="act danger" style="flex:none;min-width:0;padding:9px 14px;font-size:12.5px" onclick="clearRules(this)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
         Clear rules
       </button>
@@ -1118,6 +1153,17 @@
   </div>
 </nav>
 
+<div class="cfwrap" id="confirm" hidden>
+  <div class="cfbox" role="alertdialog" aria-modal="true" aria-labelledby="cfTitle" aria-describedby="cfBody">
+    <div class="cft" id="cfTitle"></div>
+    <div class="cfb" id="cfBody"></div>
+    <div class="btns">
+      <button class="act" id="cfNo">Cancel</button>
+      <button class="act danger" id="cfYes">Continue</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -1232,6 +1278,45 @@
     const t = $("toast");
     t.textContent = msg; t.className = "show " + kind;
     clearTimeout(t._t); t._t = setTimeout(() => { t.className = ""; }, 2400);
+  }
+
+  // Ask before destroying anything.
+  //
+  // The rule: a control that unmounts, clears rules, deletes a record or turns
+  // the engine off asks first, and the question says what will actually happen --
+  // not "run vfs clear" but "your modules stop being served". Refreshing and
+  // re-running a check stay one tap, because neither can lose anything.
+  //
+  // Resolves false on Escape, on a tap outside the sheet, and on Cancel. Only
+  // the destructive button resolves true.
+  let _cfClose = null;
+  function confirmAction(title, body, verb) {
+    return new Promise(function (resolve) {
+      const wrap = $("confirm"), yes = $("cfYes"), no = $("cfNo");
+      if (!wrap) { resolve(false); return; }
+      // A second sheet cannot open over the first: answer the outstanding one no.
+      if (_cfClose) _cfClose(false);
+      $("cfTitle").textContent = title;
+      $("cfBody").textContent = body;
+      yes.textContent = verb;
+      wrap.hidden = false;
+      const onKey = function (e) { if (e.key === "Escape") done(false); };
+      const onWrap = function (e) { if (e.target === wrap) done(false); };
+      function done(v) {
+        if (_cfClose !== done) return;
+        _cfClose = null;
+        wrap.hidden = true;
+        yes.onclick = null; no.onclick = null; wrap.onclick = null;
+        document.removeEventListener("keydown", onKey);
+        resolve(v);
+      }
+      _cfClose = done;
+      yes.onclick = function () { done(true); };
+      no.onclick = function () { done(false); };
+      wrap.onclick = onWrap;
+      document.addEventListener("keydown", onKey);
+      try { no.focus(); } catch (e) {}
+    });
   }
 
   // ---- status ----
@@ -1981,6 +2066,16 @@
   function _healthShow(txt) { const o = $("healthout"); o.style.display = ""; o.textContent = txt.trim() || "(no output)"; }
 
   async function runSnapshot(btn) {
+    // Only when there is a baseline to lose. Asking before the FIRST snapshot
+    // would be a gate in front of nothing, which is how a confirmation stops
+    // being read.
+    const had = (await exec("[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0")).stdout.trim() === "1";
+    if (had && !(await confirmAction(
+      "Replace the saved baseline?",
+      "Verify compares this device against the snapshot you took when you were happy with it. " +
+      "A new one overwrites that reference with today's state — including anything that has " +
+      "drifted since — and the old baseline cannot be recovered.",
+      "Replace"))) return;
     const done = busy(btn, "Saving…");
     const r = await nm("snapshot");
     _healthShow((r.stdout || "") + (r.stderr || ""));
@@ -2004,6 +2099,15 @@
     done();
   }
   async function runExport(btn) {
+    // Not destructive, but it publishes: /sdcard/Download is readable by any app
+    // holding a storage permission, and the whole point of an export is to hand
+    // it to someone. Say where it lands and what is deliberately withheld.
+    if (!(await confirmAction(
+      "Write diagnostics to /sdcard/Download?",
+      "Any app with storage permission can read that folder. The check report, the fingerprint, " +
+      "your rule list and your mount table go there. The apps you hide from, and what is being " +
+      "spoofed, are deliberately left out of a shared destination.",
+      "Export"))) return;
     const done = busy(btn, "Exporting…");
     const r = await nm("export");
     const txt = (r.stdout || "") + (r.stderr || "");
@@ -2043,6 +2147,11 @@
     }
   }
   async function clearIncident(btn) {
+    if (!(await confirmAction(
+      "Delete the incident record?",
+      "The saved crash from the boot that disabled the Suite is removed for good. It is the only " +
+      "copy, and it usually names the file that caused the failure.",
+      "Delete"))) return;
     { const el = $("incwarn"); if (el) el.hidden = true; INCIDENT = false; }
     btn.disabled = true;
     await exec("rm -f /data/adb/nomount/incident.log");
@@ -2348,6 +2457,12 @@
     refreshAll();
   }
   async function clearRules(btn) {
+    if (!(await confirmAction(
+      "Clear every injection rule?",
+      "Every file your modules add disappears straight away — apps go back to seeing the stock " +
+      "ROM, and anything relying on an injected file may misbehave until you put them back. " +
+      "Nothing is uninstalled: Reload, or a reboot, restores all of it.",
+      "Clear rules"))) return;
     const done = busy(btn, "Clearing…");
     // A clear drops the kernel's hidden-app set along with the rules, so nomount
     // re-hides the saved list straight after; the toast reports what it re-hid.
@@ -2357,6 +2472,12 @@
     done(); refreshStatus(); refreshBlocked(); if (rulesShown) loadRules();
   }
   async function rearm(btn) {
+    if (!(await confirmAction(
+      "Re-arm the bootloop guard?",
+      "This deletes the record of the boot that failed, including the crash log — which is the " +
+      "only copy and usually names the file that caused it. Read or copy it first. The Suite " +
+      "stays off until you reboot.",
+      "Delete and re-arm"))) return;
     btn.disabled = true;
     // Also drop the incident record: re-arming means acknowledging the trip, so the
     // saved card should not linger past the fix (it only made sense while disabled).
@@ -2378,6 +2499,17 @@
     const v = $("uid").value.trim();
     if (!v) { toast("Enter a package name or UID", "bad"); return; }
     if (!UID_TARGET_RE.test(v)) { toast("Letters, digits, dots, underscores, and * for a glob", "bad"); return; }
+    // Hiding is additive and instantly undone. Un-hiding removes a saved entry --
+    // and if that entry is a glob it un-hides everything it ever matched, which is
+    // not something to lose to a mis-tap.
+    if (op === "unblock" && !(await confirmAction(
+      "Stop hiding " + v + "?",
+      v.indexOf("*") >= 0
+        ? "That entry is a pattern. Every app it matches stops being hidden — now, and any that " +
+          "install later — and the pattern itself is deleted from your list."
+        : "This app sees your injected files again the moment it next looks, and the entry is " +
+          "removed from your list.",
+      "Stop hiding"))) return;
     const done = busy(btn, op === "block" ? "Hiding…" : "Unhiding…");
     const r = await nm(`uid ${op} ${shq(v)}`);
     if (r.errno === 0) {
@@ -2676,6 +2808,14 @@
   }
 
   async function unblockOne(target, btn) {
+    if (!(await confirmAction(
+      "Stop hiding " + target + "?",
+      target.indexOf("*") >= 0
+        ? "That entry is a pattern. Every app it matches stops being hidden — now, and any that " +
+          "install later — and the pattern itself is deleted from your list."
+        : "This app sees your injected files again the moment it next looks, and the entry is " +
+          "removed from your list.",
+      "Stop hiding"))) return;
     btn.disabled = true;
     const r = await nm(`uid unblock ${shq(target)}`);
     if (r.errno === 0) toast(`${target} unhidden`, "ok");
