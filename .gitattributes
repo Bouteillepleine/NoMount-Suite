@@ -1,0 +1,5 @@
+# The integration patch is applied with `git apply` as a gate, which does no
+# fuzz: a CRLF working copy puts a stray \r on the end of every context line
+# and nothing matches. core.autocrlf is on for this checkout, so say so here
+# rather than rely on nobody having it set.
+*.patch text eol=lf
