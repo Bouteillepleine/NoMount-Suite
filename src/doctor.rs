@@ -450,9 +450,9 @@ enum Incompat {
     /// Loop-mounts an image or runs a chroot. 6.2% of the corpus.
     ///
     /// No redirection can make a block device appear, so this is not something
-    /// the VFS engine will ever serve. The module keeps its own mount and
-    /// `posture` reports it honestly -- the point of naming it here is that the
-    /// mount is then explained rather than anonymous.
+    /// the VFS engine will ever serve. The module keeps its own mount and the
+    /// device section's mount checks report it honestly -- the point of naming it
+    /// here is that the mount is then explained rather than anonymous.
     ImageBacked,
 }
 
@@ -477,8 +477,8 @@ impl Incompat {
                  a Magisk-only module running on KSU, not something NoMount broke.",
             Incompat::ImageBacked =>
                 "no path redirection can make a block device appear, so the engine cannot \
-                 serve this. The module keeps its own mount; `posture` will report it, and \
-                 that report is correct rather than a leak.",
+                 serve this. The module keeps its own mount; the mount checks will report \
+                 it, and that report is correct rather than a leak.",
         }
     }
 }
@@ -617,7 +617,7 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
 ///
 /// Depth 2, not a full walk. A module that ships an image puts it at the top
 /// level or one directory down; walking a large module tree to depth 6 on every
-/// `doctor` run costs real I/O to find nothing. Extensions only -- sniffing
+/// plan run costs real I/O to find nothing. Extensions only -- sniffing
 /// magic bytes would mean opening every file in every module on every run.
 fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
     const IMG_EXT: [&str; 6] = [".img", ".img.xz", ".img.gz", ".rootfs", ".ext4", ".erofs"];
@@ -708,9 +708,9 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             // `exists()` follows symlinks, so a DANGLING symlink lands here too — and
             // reporting that as "source missing" sends the reader to a path that is
             // plainly there in `ls`. Injection resolves a symlink to its target, so a
-            // link with no target yields no rule at all: `plan` lists the entry and
-            // `reload` counts it, then the path simply never appears. Name which of
-            // the two it is, because the fixes differ.
+            // link with no target yields no rule at all: the plan resolves the
+            // entry and `reload` counts it, then the path simply never appears.
+            // Name which of the two it is, because the fixes differ.
             if !e.source.exists() {
                 let detail = match fs::symlink_metadata(&e.source) {
                     Ok(m) if m.file_type().is_symlink() => {
@@ -810,8 +810,8 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // inode is in the injected band, so bucketing that directory by inode range
     // yields one bucket that is entirely ours and names every file in it.
     //
-    // `audit` already measures this, but only after the fact, on a device that
-    // has already booted with the module. Saying it here means the user learns
+    // The device section already measures this, but only after the fact, on a
+    // device that has already booted with the module. Saying it here means the user learns
     // at install time, when moving the files into an existing directory is still
     // an easy change.
     //
@@ -904,7 +904,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // there, the module serves one file there, and the directory looks exactly as
     // the ROM shipped it. Reporting that as "holds only injected files" is true by
     // the letter and useless: there is nothing to bucket, the module has no other
-    // layout available, and `audit`'s own inode-band check declines the case
+    // layout available, and the measured inode-band check declines the case
     // ("no directory with both enough injections and a stock population to
     // compare") -- so the finding cited a measurement that does not apply to it.
     //
@@ -987,7 +987,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 "{list}. Injected files carry inode numbers from a band the ROM never \
                  allocates from, so a directory holding several of them and no stock file \
                  groups into one bucket that is entirely yours. Shipping into a directory \
-                 that already has stock content removes the tell. `audit`'s \"injected \
+                 that already has stock content removes the tell. The measured \"injected \
                  inode band\" check may call this not-applicable: it compares against stock \
                  inodes in the SAME directory and there are none here, while a detector \
                  comparing against the partition's range does not need them. Single-file \

@@ -42,7 +42,7 @@ pub fn ksu_manager_present() -> bool {
 ///
 /// `None` means ksud could not be asked, or answered in a shape this does not
 /// recognise -- NOT that the switch is off. Folding those together is what made
-/// "the switch is off" and "ksud is missing" render identically in `doctor`.
+/// "the switch is off" and "ksud is missing" render identically in the report.
 pub fn kernel_umount_enabled() -> Option<bool> {
     let out = std::process::Command::new("/data/adb/ksu/bin/ksud")
         .args(["feature", "get", "kernel_umount"])

@@ -493,7 +493,7 @@ const REDUNDANCY_FILE_BUDGET: usize = 5000;
 /// The uid-0 injections, target -> source.
 ///
 /// Reshaped from [`crate::nm::parse_list`], the one parser of `nm list` text
-/// (`mount` and `doctor` derive their own shapes from the same rows). This used
+/// (`mount` and the plan lint derive their own shapes from the same rows). This used
 /// to be its own reader and had already drifted from mount.rs's -- they split a
 /// line differently -- with nothing to make them converge again.
 ///

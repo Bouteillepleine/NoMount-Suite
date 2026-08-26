@@ -847,7 +847,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
         }
         // NOBODY has an injected file mapped, so nothing here could have carried
         // the suffix. This is the state the BOOT pass is always in: `service.sh`
-        // runs `audit --json --write` at boot_completed, before any app has opened
+        // runs the device section at boot_completed, before any app has opened
         // a module file, and every one of the ~1300 processes alive then maps zero
         // of our targets. The check could therefore never fire, reported
         // "{scanned} process(es): no injected file mapped as deleted" as a PASS,
