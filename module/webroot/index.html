@@ -146,12 +146,6 @@
   .card-h.open .chev { transform: rotate(90deg); }
   .card.collapsed > .card-h { margin-bottom: 0; }
   .card.collapsed > :not(.card-h) { display: none !important; }
-  .group-label {
-    font-size: 11px; font-weight: 700; letter-spacing: 1.3px; text-transform: uppercase;
-    color: var(--faint); margin: 20px 6px 9px;
-  }
-  .group-label:first-of-type { margin-top: 2px; }
-
   /* hero */
   .hero { padding: 20px 18px; position: relative; overflow: hidden; }
   .hero::after {
@@ -220,11 +214,6 @@
   .tag.suite { background: rgba(255,255,255,0.08); color: var(--txt); }
   .tag.off   { background: rgba(139,147,167,0.15); color: var(--muted); }
   .tag.warn  { background: rgba(251,191,36,0.15);  color: var(--warn); }
-  /* Reserved. Nothing uses it today: findings are amber, and red is spent only on
-     the "not running" states, which are chips and dots rather than tags. Kept so a
-     future row that genuinely means "broken" has a pill to reach for, instead of
-     re-deriving one and landing on amber like every other. */
-  .tag.bad   { background: rgba(248,113,122,0.15); color: var(--bad); }
   .tag.ok    { background: rgba(53,210,154,0.15);  color: var(--ok); }
   .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
 
@@ -259,7 +248,6 @@
   .frow .fowner { font-size: 11.5px; color: var(--muted); margin-top: 7px; }
   .frow .fowner b { color: var(--txt); font-weight: 620; }
   .frow .fmeta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
-  .frow .fmeta .sp { margin-left: auto; }
   .frow details { margin-top: 9px; }
   .frow details > summary {
     cursor: pointer; font-size: 11.5px; color: var(--muted); list-style: none;
@@ -283,9 +271,6 @@
   }
   .fgroup:first-child { margin-top: 4px; }
   .fgroup .cnt { font-variant-numeric: tabular-nums; opacity: .8; }
-  .fgroup.clp { cursor: pointer; }
-  .fgroup.clp::after { content: "›"; margin-left: auto; transition: transform .2s; font-size: 15px; }
-  .fgroup.clp.open::after { transform: rotate(90deg); }
   .auage { font-size: 11.5px; color: var(--muted); margin-top: 10px; font-variant-numeric: tabular-nums; }
 
   /* ---- the one-line health summary on the Status hero -------------------- */
@@ -494,40 +479,15 @@
   .blk.live .dot { background: var(--ok); }
   .blk.gone .dot { background: var(--faint); }
   .blk.pending .bs,  .blk.drift .bs  { color: var(--warn, #d9a441); }
-  .blk .bx, .row .bx {
-    flex: 0 0 auto; width: 24px; height: 24px; line-height: 22px; text-align: center;
+  .blk .bx {
+    flex: 0 0 auto; width: 30px; height: 30px; line-height: 28px; text-align: center;
     border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
     background: rgba(255,255,255,0.06); color: var(--dim);
   }
-  .blk .bx:hover, .row .bx:hover { background: rgba(255,90,90,0.16); color: #ff6b6b; }
-  .row .bx:disabled { opacity: 0.4; }
-  html[data-theme="light"] .blk .bx, html[data-theme="light"] .row .bx { background: rgba(16,26,48,0.06); }
+  .blk .bx:hover { background: rgba(255,90,90,0.16); color: #ff6b6b; }
+  html[data-theme="light"] .blk .bx { background: rgba(16,26,48,0.06); }
   .blk .bx.save:hover { background: rgba(90,220,150,0.16); color: #57e6c3; }
   .blk .bx:disabled { opacity: 0.4; }
-
-  /* toggle switch (spoofing controls) */
-  .swrow { display: flex; align-items: center; gap: 12px; padding: 12px 2px; border-top: 1px solid rgba(255,255,255,0.055); }
-  .swrow:first-child { border-top: none; }
-  .swrow .swi { flex: 1; min-width: 0; }
-  .swrow .swi .lbl { font-size: 13.5px; font-weight: 640; }
-  .swrow .swi .val { font-size: 11.5px; color: var(--muted); margin-top: 3px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* The verify status is a full sentence, not a hash — let it wrap in full.
-     NB: do NOT call this modifier `.wrap` — that is the page wrapper, which
-     carries `padding-bottom: 108px` to clear the floating nav; reusing the name
-     injected 108px of dead space into the card (the old `overflow:hidden` had
-     been hiding it). */
-  .swrow .swi .val.multiline { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.45; }
-  .switch { position: relative; width: 46px; height: 27px; flex: none; }
-  .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
-  .switch .sl { position: absolute; inset: 0; border-radius: 999px; background: rgba(255,255,255,0.14); border: 1px solid var(--brd2); transition: .22s; pointer-events: none; }
-  .switch .sl::before { content: ""; position: absolute; width: 21px; height: 21px; left: 2px; top: 2px; border-radius: 50%; background: #fff; transition: .22s; box-shadow: 0 2px 5px rgba(0,0,0,.35); }
-  .switch input:checked + .sl { background: linear-gradient(135deg, var(--acc), var(--acc2)); border-color: transparent; }
-  .switch input:checked + .sl::before { transform: translateX(19px); }
-  html[data-theme="light"] .switch .sl { background: rgba(16,26,48,0.14); }
-  .txin { display: block; width: 100%; background: rgba(0,0,0,0.26); border: 1px solid var(--brd2); color: var(--txt); border-radius: 13px; padding: 12px 14px; font-size: 12.5px; outline: none; margin-top: 9px; font-family: var(--mono); }
-  .txin:focus { border-color: var(--acc); }
-  .txin::placeholder { color: var(--faint); }
-  html[data-theme="light"] .txin { background: rgba(16,26,48,0.05); }
 
   /* `display:none` here beat `el.hidden = false`, so BOTH global banners -- the
      root-manager umount warning and the bootloop-guard notice -- have never
@@ -737,7 +697,7 @@
     transform: translateY(-.5px) scale(1.06);
     filter: drop-shadow(0 1px 0 rgba(0,0,0,.5)) drop-shadow(0 0 7px rgba(124,156,255,.55));
   }
-  .navb.on span:not(.nbdot) {
+  .navb.on span {
     background: linear-gradient(135deg, #ffffff, #cfe0ff 60%, #9df0dc);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
@@ -746,14 +706,6 @@
     .navb.on { transform: none; }
     /* the overshoot is the point of the pill, so drop it entirely here */
     .navpill { transition: opacity .2s ease; }
-  }
-
-  .navb .nbdot { display: none; }
-  .navb.alert .nbdot {
-    display: block; position: absolute; top: 9px; right: 12px;
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--bad);
-    box-shadow: 0 0 0 2px rgba(8,10,17,.9), 0 0 8px rgba(248,113,122,.8);
   }
 
   /* ---- light theme -------------------------------------------------------
@@ -822,11 +774,10 @@
   html[data-theme="light"] .navb.on svg {
     filter: drop-shadow(0 1px 0 rgba(255,255,255,.9)) drop-shadow(0 0 6px rgba(63,99,224,.45));
   }
-  html[data-theme="light"] .navb.on span:not(.nbdot) {
+  html[data-theme="light"] .navb.on span {
     background-image: linear-gradient(135deg, #0d1220, #2b3f96 60%, #0c7f6b);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-  html[data-theme="light"] .navb.alert .nbdot { box-shadow: 0 0 0 2px #fff, 0 0 8px rgba(210,58,68,.7); }
   html[data-theme="light"] .banner { color: #6b4d00; }
   html[data-theme="light"] button.act.danger {
     color: #a3252e; border-color: rgba(210,58,68,0.40); background: rgba(210,58,68,0.08);
@@ -1140,15 +1091,15 @@
     <span class="navpill noanim" id="navpill"></span>
     <button class="navb on" id="nb-status" role="tab" aria-selected="true" onclick="showTab('status',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
-      <span>Status</span><span class="nbdot"></span>
+      <span>Status</span>
     </button>
     <button class="navb" id="nb-modules" role="tab" aria-selected="false" onclick="showTab('modules',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-      <span>Modules</span><span class="nbdot"></span>
+      <span>Modules</span>
     </button>
     <button class="navb" id="nb-rules" role="tab" aria-selected="false" onclick="showTab('rules',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-      <span>Rules</span><span class="nbdot"></span>
+      <span>Rules</span>
     </button>
   </div>
 </nav>
@@ -1319,33 +1270,67 @@
     });
   }
 
+  // ---- the rule dump: ONE read per refresh, shared -------------------------
+  //
+  // Five things on this page describe the same list -- the hero counters, the
+  // Rules summary and its bar, the redirect list, the overlay list and the raw
+  // list -- and each one used to shell out for its own copy. Opening the page ran
+  // `nm vfs list` five times over, and on OxygenOS a burst of root exec is exactly
+  // the heuristic that flags root WebUI apps as malicious. It also gave five
+  // chances to disagree about one number.
+  //
+  // `ok:false` is UNKNOWN, and every caller renders it as unknown. Four of the
+  // five dropped errno and fell back to the reassuring empty state -- telling the
+  // reader there is nothing there when we simply did not know.
+  //
+  // The cache holds the PROMISE, not the resolved dump: `refreshAll` fires its
+  // readers in parallel, so a cache that only filled on resolution let every one
+  // of them race past a null and shell out anyway -- the exact burst this exists
+  // to stop, measured as four `vfs list` calls per page open.
+  let RULES = null;
+  function ruleDump() {
+    if (RULES) return RULES;
+    RULES = nm("vfs list").then(function (r) {
+      const lines = r.errno === 0
+        ? r.stdout.split("\n").map(x => x.trim()).filter(Boolean) : [];
+      const d = {
+        ok: r.errno === 0,
+        raw: (r.stdout || "").trim(),
+        lines: lines,
+        // The virtual path of each rule, without the "(virtual dir)" marker.
+        targets: lines.map(l => (l.split(" ->")[0] || "").trim().replace(/\s*\(virtual dir\)$/, "")),
+        // Structural entries are directories the engine materialises, not rules.
+        // Counting them gave 260 on a device where `nomount check`, health.txt and
+        // the manager card all said 257 -- so the one number on the front page
+        // disagreed with every other number the Suite prints, which makes a real
+        // discrepancy indistinguishable from a bug.
+        rules: lines.filter(l => !l.includes("(virtual dir)")).length,
+      };
+      // RRO overlays are hookless rules now (a virtual path under */overlay/
+      // ending .apk), not overlayfs mounts, so they come out of the same dump.
+      d.rro = d.targets.filter(t => /\/overlay\/[^\s]*\.apk$/.test(t));
+      return d;
+    });
+    return RULES;
+  }
+
   // ---- status ----
   async function refreshStatus() {
-    const list = await nm("vfs list");
+    const d = await ruleDump();
     const dot = $("dot");
-    if (list.errno !== 0) {
+    if (!d.ok) {
       $("state").textContent = "Engine offline";
       $("substate").textContent = "kernel driver not responding";
       dot.className = "dot bad";
       $("mRules").textContent = "—";
       return 0;
     }
-    const ruleLines = list.stdout.split("\n").map(s => s.trim()).filter(Boolean);
-    // Exclude the "(virtual dir)" rows: those are directories the engine
-    // materialises, not rules. Counting every line gave 260 on this device while
-    // `nomount check`, health.txt and the manager card all say 257 — so the
-    // one number on the front page disagreed with every other number the Suite
-    // prints, which makes a real discrepancy indistinguishable from a bug.
-    const rules = ruleLines.filter(l => !l.includes("(virtual dir)")).length;
-    $("mRules").textContent = rules;
-    // RRO overlays are now hookless rules (virtual path under */overlay/ ending .apk),
-    // not overlayfs mounts — count them from the rule list.
-    const rro = ruleLines.filter(l => /\/overlay\/[^\s]*\.apk$/.test((l.split(" ->")[0] || "").trim())).length;
-    $("mOv").textContent = rro;
-    $("state").textContent = rules > 0 ? "Active" : "Idle";
-    $("substate").textContent = rules > 0 ? "modules injected" : "no rules — re-apply";
-    dot.className = "dot " + (rules > 0 ? "ok" : "warn");
-    return rules;
+    $("mRules").textContent = d.rules;
+    $("mOv").textContent = d.rro.length;
+    $("state").textContent = d.rules > 0 ? "Active" : "Idle";
+    $("substate").textContent = d.rules > 0 ? "modules injected" : "no rules — re-apply";
+    dot.className = "dot " + (d.rules > 0 ? "ok" : "warn");
+    return d.rules;
   }
 
   // ---- device identity ----
@@ -2128,12 +2113,10 @@
   // NOT hidden here when there is no incident: `paintManagerBanner` owns the
   // same element and runs on every refresh, so clearing it from here would race
   // the umount warning off the screen.
-  let INCIDENT = false;
   async function refreshIncident() {
     const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
-    INCIDENT = !!txt;
     if (!txt) { card.style.display = "none"; return; }
     card.style.display = "";
     $("incidentout").textContent = txt;
@@ -2152,7 +2135,7 @@
       "The saved crash from the boot that disabled the Suite is removed for good. It is the only " +
       "copy, and it usually names the file that caused the failure.",
       "Delete"))) return;
-    { const el = $("incwarn"); if (el) el.hidden = true; INCIDENT = false; }
+    { const el = $("incwarn"); if (el) el.hidden = true; }
     btn.disabled = true;
     await exec("rm -f /data/adb/nomount/incident.log");
     toast("Incident record cleared", "ok");
@@ -2255,23 +2238,18 @@
   // this the tab looked overlay-only: the vfs rules exist but sit inside the
   // collapsed "Active rules" card.
   async function refreshRuleSummary() {
-    const r = await nm("vfs list");
-    // errno was dropped, so a call that never ran rendered as the reassuring
-    // empty state. Same rule as the whiteout list: never fall back to the
-    // answer the user wants to hear, show it as unknown.
-    if (r.errno !== 0) {
+    const d = await ruleDump();
+    if (!d.ok) {
       $("rulechip").textContent = "?";
       $("rulebreak").textContent = "Unknown \u2014 the engine did not answer.";
       return;
     }
-    const lines = r.stdout.split("\n").map(x => x.trim()).filter(Boolean);
-    const rro = lines.filter(l => /\/overlay\/[^\s]*\.apk/.test(l)).length;
-    const vfs = lines.length - rro;
-    $("rulechip").textContent = lines.length;
-    $("rulebreak").textContent = lines.length
+    const rro = d.rro.length, vfs = d.lines.length - rro;
+    $("rulechip").textContent = d.lines.length;
+    $("rulebreak").textContent = d.lines.length
       ? `${vfs} file redirect${vfs === 1 ? "" : "s"} · ${rro} RRO overlay APK${rro === 1 ? "" : "s"} — all Prism, no mounts`
       : "No rules active.";
-    _paintRuleModuleBar(lines);
+    _paintRuleModuleBar(d.lines);
   }
 
   // Rules-by-module breakdown: a stacked bar + legend over the owning module of
@@ -2309,23 +2287,17 @@
   var _vfsFiles = [], _ovFiles = [];
   async function refreshVfs() {
     const box = $("vfsdirs");
-    const list = await nm("vfs list");
-    // errno was ignored, so a call that never ran rendered as the reassuring
-    // empty state -- telling the user there is nothing there when we simply do
-    // not know. Same rule as the whiteout list: show it as unknown.
-    if (list.errno !== 0) {
+    const d = await ruleDump();
+    if (!d.ok) {
       $("vfscount").textContent = "?";
       box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
       _vfsFiles = [];
       return;
     }
-    const lines = list.stdout.split("\n").map(x => x.trim()).filter(Boolean);
     const dirs = {};
     _vfsFiles = [];
-    for (const l of lines) {
-      const raw = (l.split(" ->")[0] || "").trim();
-      if (!raw || /\/overlay\/[^\s]*\.apk$/.test(raw)) continue;
-      const vp = raw.replace(/\s*\(virtual dir\)$/, ""); // structural entries count as rules too
+    for (const vp of d.targets) {
+      if (!vp || /\/overlay\/[^\s]*\.apk$/.test(vp)) continue;
       _vfsFiles.push(vp);
       const dir = vp.replace(/\/[^/]*$/, "") || "/";
       dirs[dir] = (dirs[dir] || 0) + 1;
@@ -2370,26 +2342,18 @@
   // ---- overlays (now hookless: injected overlay APKs, no overlayfs mount) ----
   async function refreshOverlays() {
     const box = $("overlays");
-    const list = await nm("vfs list");
-    // errno was ignored, so a call that never ran rendered as the reassuring
-    // empty state -- telling the user there is nothing there when we simply do
-    // not know. Same rule as the whiteout list: show it as unknown.
-    if (list.errno !== 0) {
+    const d = await ruleDump();
+    if (!d.ok) {
       $("ovcount").textContent = "?";
       box.innerHTML = '<div class="empty">Unknown — the engine did not answer.</div>';
       _ovFiles = [];
       return;
     }
-    const lines = list.stdout.split("\n").map(s => s.trim()).filter(Boolean);
     const dirs = {};
-    _ovFiles = [];
-    for (const l of lines) {
-      const vp = (l.split(" ->")[0] || "").trim();
-      if (/\/overlay\/[^\s]*\.apk$/.test(vp)) {
-        _ovFiles.push(vp);
-        const dir = vp.replace(/\/[^/]*$/, "");
-        dirs[dir] = (dirs[dir] || 0) + 1;
-      }
+    _ovFiles = d.rro.slice();
+    for (const vp of _ovFiles) {
+      const dir = vp.replace(/\/[^/]*$/, "");
+      dirs[dir] = (dirs[dir] || 0) + 1;
     }
     _ovFiles.sort();
     const keys = Object.keys(dirs).sort();
@@ -2417,17 +2381,14 @@
   // ---- rules ----
   let rulesShown = false;
   async function loadRules() {
-    const r = await nm("vfs list");
-    // errno was dropped, so a call that never ran rendered as the reassuring
-    // empty state. Same rule as the whiteout list: never fall back to the
-    // answer the user wants to hear, show it as unknown.
-    if (r.errno !== 0) {
+    const d = await ruleDump();
+    if (!d.ok) {
       _rulesRaw = "";
       $("ruleslist").textContent = "unknown — the engine did not answer";
       $("rulecount").style.display = "none";
       return;
     }
-    _rulesRaw = r.stdout.trim();
+    _rulesRaw = d.raw;
     if (!_rulesRaw) {
       $("ruleslist").textContent = "no rules";
       $("rulecount").style.display = "none";
@@ -2469,6 +2430,7 @@
     const r = await nm("vfs clear");
     if (r.errno === 0) toast((r.stdout || "").trim().replace(/^ok\b\s*/, "Rules cleared ") || "Rules cleared", "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
+    RULES = null;
     done(); refreshStatus(); refreshBlocked(); if (rulesShown) loadRules();
   }
   async function rearm(btn) {
@@ -2855,6 +2817,10 @@
   async function refreshAll(btn) {
     const ic = btn && btn.querySelector("svg");
     if (ic) ic.classList.add("spin");
+    // Drop the cached rule dump: the cache exists to stop ONE refresh reading it
+    // five times, not to survive across refreshes -- a refresh is the user asking
+    // again, usually right after changing something.
+    RULES = null;
     // `nm version` returns the ENGINE's capability counter -- a bare integer
     // (26), not a release. The footer printed it as "Suite 26", which is the one
     // number on the page a reader is most likely to quote back, and it named the
