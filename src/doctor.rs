@@ -591,9 +591,20 @@ pub fn run_doctor(json: bool) -> Result<()> {
     // PackageManager requires, and stock `/system/priv-app/Mms` holds nothing
     // but `Mms.apk` either. Flagging those would be advice with no available
     // remedy, so they are deliberately not reported.
+    // The whole codePath, not just the directory holding the .apk.
+    //
+    // An app's native libraries live at <codePath>/lib/<abi>, which is two levels
+    // below priv-app, and PackageManager decides that layout -- the module has no
+    // more choice about it than it has about the .apk's own directory. Measured on
+    // an OP11: all 29 rules under /product/priv-app/Mms are served --public,
+    // because mount.rs already treats the codePath as one unit for the public
+    // flag. Checking only the immediate parent flagged Mms/lib/arm64 and left a
+    // warning nobody could act on.
     let is_apk_container = |p: &Path| {
-        p.parent().and_then(|g| g.file_name()).is_some_and(|n| {
-            matches!(n.to_str(), Some("app" | "priv-app" | "overlay" | "framework"))
+        p.ancestors().any(|a| {
+            a.parent().and_then(|g| g.file_name()).is_some_and(|n| {
+                matches!(n.to_str(), Some("app" | "priv-app" | "overlay" | "framework"))
+            })
         })
     };
 
