@@ -65,6 +65,33 @@ the same word.
 
 ### WebUI
 
+- **Diagnostics is no longer a tab.** The bottom nav is four places you *do*
+  something — Status, Modules, Rules, Tools. A fifth tab told every user there
+  was a fifth job here, and the alert dot on it actively pulled people toward the
+  one screen whose purpose is to enumerate what might be wrong.
+
+  In its place, **one line on the Status card**, fed by the audit the boot pass
+  already cached, so it costs nothing to show:
+
+  - *Nothing detectable · checked 3h ago* — green, and that is the end of it
+  - *2 things need attention ›* — the only state that asks for anything
+  - *1 check couldn't run* — amber, honest, not alarming
+  - *Nothing open · 1 accepted by you* — grey, because something IS still failing
+
+  The `not_applicable` count never appears there. Tapping the line opens the
+  findings list, with a way back; nothing else links to it.
+- **Snapshot, Verify and Export moved behind a "Developer tools" disclosure.**
+  Snapshot means nothing until you already suspect drift, Verify is meaningless
+  without one, and Export produces a folder for someone else to read. Sitting
+  them beside Self-check implied four equal choices. **Self-check** stays in the
+  open, because "does a normal app see what root sees" is a real question with a
+  yes/no answer.
+- **The plan check leads with errors and warnings**; the eleven informational
+  lines a healthy device produces sit behind *Full report*. Previously a real
+  error rendered identically to a note about zygote FD allowlisting.
+- **A tripped bootloop guard now raises a global banner** rather than a dot on a
+  tab that no longer exists. A Suite that disabled itself is worth interrupting
+  any screen for.
 - **Check my setup** runs the audit, the plan check and the runtime check and
   gives one verdict. Every individual button is unchanged.
 - **Copy report** puts device, ROM, kernel, engine and Suite versions and every
