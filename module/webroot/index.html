@@ -1314,7 +1314,11 @@
       $("state").textContent = "Engine offline";
       $("substate").textContent = "kernel driver not responding";
       dot.className = "dot bad";
+      // Both counters, not just one. Leaving the overlay count at whatever it
+      // last said pins a stale number beside an "Engine offline" that says the
+      // number could not be read.
       $("mRules").textContent = "—";
+      $("mOv").textContent = "—";
       return 0;
     }
     $("mRules").textContent = d.rules;
@@ -1394,7 +1398,12 @@
     if (keyMatch) tells.push("build keys");
     if (seTell) tells.push("SELinux " + se);
 
-    $("mSu").innerHTML = sucompat ? 'sucompat <small>kernel · mountless</small>' : 'external <small>unmanaged</small>';
+    // "external · unmanaged" is a claim, and a probe that did not run has not
+    // earned it any more than it earns the reassuring one. Same rule, other
+    // direction: absent must say absent.
+    $("mSu").innerHTML = r.errno !== 0 ? 'not measured <small>probe did not run</small>'
+      : sucompat ? 'sucompat <small>kernel · mountless</small>'
+      : 'external <small>unmanaged</small>';
 
     const rows = [
       { k: "File injections", v: "mountless", t: "vfs" },
@@ -1875,7 +1884,7 @@
         "Nothing on the device itself was measured, so nothing here says whether what you " +
         "serve is detectable.</div>" +
         '<div class="fmeta"><span class="tag warn">plan only</span>' +
-        '<button class="act" style="flex:none;padding:7px 13px;font-size:12px;margin-left:auto" ' +
+        '<button class="act" style="flex:none;min-width:0;padding:12px 16px;font-size:12.5px;margin-left:auto" ' +
         'onclick="runCheck(this)">Check the device</button></div></div>';
     }
     // The incompleteness notice heads the unmeasured group rather than the whole
@@ -1898,7 +1907,7 @@
             "injected file, so the checks that need a running app cannot answer then. " +
             "Run them now that the device is up.") + "</div>" +
         '<div class="fmeta"><span class="tag warn">not measured</span>' +
-        '<button class="act" style="flex:none;padding:7px 13px;font-size:12px;margin-left:auto" ' +
+        '<button class="act" style="flex:none;min-width:0;padding:12px 16px;font-size:12.5px;margin-left:auto" ' +
         'onclick="runCheck(this)">Run them now</button></div></div>';
     }
     list.innerHTML = head +
@@ -1960,7 +1969,12 @@
       "verdict: " + (CHECK.verdict || "?"),
       ""
     ];
-    // Only what is not clean. A paste nobody reads is the same as no paste.
+    // Only what is not clean. A paste nobody reads is the same as no paste --
+    // and this is a SHARED DESTINATION, so leaving `note` rows out is load-
+    // bearing, not just brevity: the plan's "stale legacy blocklist entries"
+    // note prints hidden package names verbatim, which is the same secret as the
+    // hide list. `nomount export` withholds them with NM_REDACT_HIDE_LIST for the
+    // same reason; a clipboard headed for a bug thread is no different.
     (CHECK.checks || []).forEach(function (c) {
       if (!isShown(c.verdict)) return;
       lines.push("[" + String(c.verdict).toUpperCase() + "] " + c.name + " (" + c.section + ")");
@@ -2110,7 +2124,7 @@
       el.hidden = false;
       el.innerHTML = "\u26a0\ufe0f The bootloop guard tripped and disabled the Suite on an earlier " +
         "boot. <b>Nothing is being injected</b> until you re-arm it. " +
-        '<button class="act" style="padding:5px 11px;font-size:11.5px;margin-left:6px" ' +
+        '<button class="act" style="flex:none;min-width:0;padding:11px 15px;font-size:12px;margin-left:8px" ' +
         'onclick="openDetail()">See what happened</button>';
     }
   }
