@@ -890,6 +890,10 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     let mut hits: Vec<String> = Vec::new();
     let mut scanned = 0u32;
     let mut unread = 0u32;
+    // Processes that have ANY injected file mapped, deleted or not. This is the
+    // check's denominator and it was missing entirely -- see the block below the
+    // loop for what its absence cost.
+    let mut mappers = 0u32;
     for e in rd.filter_map(Result::ok) {
         let pid = e.file_name().to_string_lossy().into_owned();
         if !pid.chars().all(|c| c.is_ascii_digit()) {
@@ -917,12 +921,27 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             }
         };
         scanned += 1;
+        let mut maps_one = false;
         for line in maps.lines() {
-            let Some(rest) = line.strip_suffix(" (deleted)") else { continue };
+            // Field 5 of a file-backed mapping is its path. Read it whether or not
+            // the " (deleted)" suffix is there: a process mapping an injected file
+            // WITHOUT the suffix is the control case, and it is the only thing
+            // that tells this check apart from one that had nothing to look at.
+            let (rest, deleted) = match line.strip_suffix(" (deleted)") {
+                Some(r) => (r, true),
+                None => (line, false),
+            };
             let Some(path) = rest.split_whitespace().nth(5) else { continue };
-            if want.contains(Path::new(path)) && !hits.iter().any(|h| h.starts_with(path)) {
+            if !want.contains(Path::new(path)) {
+                continue;
+            }
+            maps_one = true;
+            if deleted && !hits.iter().any(|h| h.starts_with(path)) {
                 hits.push(format!("{path} (pid {pid})"));
             }
+        }
+        if maps_one {
+            mappers += 1;
         }
     }
     if hits.is_empty() {
@@ -945,9 +964,38 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             )
             .meaning("Some processes could not be read, so a clean result is not proven.");
         }
+        // NOBODY has an injected file mapped, so nothing here could have carried
+        // the suffix. This is the state the BOOT pass is always in: `service.sh`
+        // runs `audit --json --write` at boot_completed, before any app has opened
+        // a module file, and every one of the ~1300 processes alive then maps zero
+        // of our targets. The check could therefore never fire, reported
+        // "{scanned} process(es): no injected file mapped as deleted" as a PASS,
+        // and that verdict was cached to audit.json and shown on the module card
+        // and in the WebUI for the whole uptime. Measured on an OP15: the cached
+        // file said 12/12 passed while a manual run minutes later, on the same
+        // boot, said "11 passed, 1 failed".
+        //
+        // UNMEASURED, not n/a: the rules ARE live and an app WILL map one -- the
+        // question applies and has simply not been answerable yet. That is exactly
+        // the distinction `Verdict::Unmeasured` was split out of `Skip` for.
+        if mappers == 0 {
+            return unmeasured(
+                "injected files in maps",
+                format!(
+                    "{scanned} process(es) scanned, none has an injected file mapped at all -- \
+                     nothing to measure yet (the normal state at boot)"
+                ),
+            )
+            .meaning(
+                "No app has opened an injected file yet, so there was nothing to look at. Run \
+                 this again once you have used the apps your modules change.",
+            );
+        }
         return pass(
             "injected files in maps",
-            format!("{scanned} process(es): no injected file mapped as deleted"),
+            format!(
+                "{mappers} of {scanned} process(es) map an injected file, none of them as deleted"
+            ),
         )
         .meaning(
             "No running app shows an injected file as deleted in its own memory map — something \
@@ -1389,6 +1437,19 @@ impl Tally {
     pub fn open_failures(&self) -> usize {
         self.failed + self.reboot
     }
+    /// Did every check that COULD apply actually get measured?
+    ///
+    /// `open_failures` answers "is there something to act on" and says nothing
+    /// about whether the run had anything to look at. That gap is not academic:
+    /// `service.sh` runs `audit --json --write` at boot_completed, the boot pass
+    /// necessarily leaves the process-dependent checks unmeasured, and the
+    /// audit.json it caches is what the module card and the WebUI show as the
+    /// device's verdict for the rest of the uptime. A summary that renders
+    /// "12 passed, 0 failed" for a run with an unmeasured check is telling its
+    /// reader something was verified that was not.
+    pub fn complete(&self) -> bool {
+        self.unmeasured == 0
+    }
 }
 
 fn check_json(c: &Check) -> crate::json::J {
@@ -1413,6 +1474,9 @@ fn tally_json(t: &Tally) -> crate::json::J {
         ("not_applicable", J::Num(t.na as i64)),
         ("unmeasured", J::Num(t.unmeasured as i64)),
         ("open_failures", J::Num(t.open_failures() as i64)),
+        // The field every cached-verdict reader needs and none of them had: a
+        // summary can be free of failures and still not be a clean answer.
+        ("complete", J::Bool(t.complete())),
     ])
 }
 
@@ -1516,9 +1580,25 @@ pub fn run_audit(json: bool, write: bool) -> Result<()> {
                 println!("       oracle: {o}");
             }
         }
+        // The incompleteness goes ON the summary line, not only in a note under
+        // it. This line is what gets grepped, pasted and read at a glance, and a
+        // run whose process-dependent checks had nothing to look at must not read
+        // as "N passed" with the caveat somewhere else.
         println!(
-            "\nsummary: {} passed, {} failed, {} pending reboot, {} not applicable, {} unmeasured",
-            t.passed, t.failed, t.reboot, t.na, t.unmeasured
+            "\nsummary: {} passed, {} failed, {} pending reboot, {} not applicable, {} unmeasured{}",
+            t.passed,
+            t.failed,
+            t.reboot,
+            t.na,
+            t.unmeasured,
+            if t.complete() {
+                String::new()
+            } else {
+                format!(
+                    " — INCOMPLETE: {} check(s) were not measured, so this is not a clean result",
+                    t.unmeasured
+                )
+            }
         );
         if t.reboot > 0 {
             println!("note: a pending-reboot check is still detectable until you reboot.");
@@ -1568,6 +1648,32 @@ mod tests {
     }
 
 
+
+    /// A run with an unmeasured check must not read as clean anywhere.
+    ///
+    /// The boot pass is structurally in this state: `service.sh` runs
+    /// `audit --json --write` at boot_completed, before any app has opened a
+    /// module file, so `injected files in maps` has nothing to look at -- and the
+    /// audit.json it caches is what the module card and the WebUI show for the
+    /// rest of the uptime. Measured on an OP15: the cached file said 12/12 passed
+    /// while a manual run minutes later, same boot, said "11 passed, 1 failed".
+    #[test]
+    fn an_unmeasured_check_makes_the_summary_incomplete() {
+        let checks = vec![
+            c("zero-mount", Verdict::Pass, "0 module mounts"),
+            c("maps-deleted", Verdict::Unmeasured, "nothing mapped yet"),
+        ];
+        let t = Tally::of(&checks);
+        assert_eq!(t.open_failures(), 0, "an unmeasured check is not a failure");
+        assert!(!t.complete(), "...but it is not a clean result either");
+
+        let all_measured = vec![c("zero-mount", Verdict::Pass, "0 module mounts")];
+        assert!(Tally::of(&all_measured).complete());
+        // n/a is a measured answer: there was nothing here to test, and saying so
+        // IS the result. Only Unmeasured means the question went unanswered.
+        let na_only = vec![c("pm-published-open", Verdict::NotApplicable, "no app hidden")];
+        assert!(Tally::of(&na_only).complete());
+    }
 
     /// A dead engine has to make the summary non-clean.
     ///
