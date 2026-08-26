@@ -388,11 +388,24 @@ fi
 # Takes effect from the NEXT boot: bindhosts sorts before meta-nomount, so its
 # post-fs-data has already run by the time this does.
 _bh_dir=/data/adb/bindhosts
+_bh_ovr="$_bh_dir/mode_override.sh"
+# `-L /data/adb/metamodule` also gates out Magisk, where that symlink does not
+# exist at all (see post-fs-data.sh): the override could only ever be inert
+# there, and writing one anyway would promise a mode 0 that never arrives.
 if [ -d "$_bh_dir" ] && [ -d /data/adb/modules/bindhosts ] &&
-   [ ! -f /data/adb/modules/bindhosts/remove ]; then
-    _bh_ovr="$_bh_dir/mode_override.sh"
-    if ! grep -q 'NoMount Suite' "$_bh_ovr" 2>/dev/null; then
-        cat > "$_bh_ovr" <<'BHEOF'
+   [ ! -f /data/adb/modules/bindhosts/remove ] && [ -L /data/adb/metamodule ]; then
+    # Absent, or already ours. `grep -q` alone answers the same for "no file"
+    # and "somebody else's file", and this is bindhosts' documented user-facing
+    # extension point -- truncating a hand-written override would be silent data
+    # loss, and unrecoverable, since our marker would then be present and this
+    # block would never look at it again.
+    if [ ! -e "$_bh_ovr" ] || grep -q 'NoMount Suite' "$_bh_ovr" 2>/dev/null; then
+        # Temp file then rename, the same discipline as the ksud de-link above.
+        # Writing straight onto the target means a short write (ENOSPC, killed
+        # shell) leaves a truncated file whose first line already carries the
+        # marker -- permanently unrepairable, and a syntax error in whatever
+        # sources it.
+        cat > "$_bh_ovr.nm_new" <<'BHEOF'
 # Written by the NoMount Suite. Safe to delete.
 #
 # bindhosts mode 0 = ship system/etc/hosts as a normal module file and let the
@@ -401,20 +414,28 @@ if [ -d "$_bh_dir" ] && [ -d /data/adb/modules/bindhosts ] &&
 # /data/adb/modules/nomount and this Suite installs as meta-nomount, so it does
 # not match. Resolve the metamodule symlink instead.
 #
-# Deliberately conditional: with no live metamodule this leaves `mode` alone and
-# bindhosts chooses for itself, so removing NoMount cannot silently stop it.
+# Conditional on OUR metamodule being live, not merely on one existing: the
+# sha256sums manifest is ours. Without that test a leftover copy of this file
+# would force mode 0 under a different metamodule after NoMount was removed.
 _nm=$(readlink -f /data/adb/metamodule 2>/dev/null)
-if [ -n "$_nm" ] && [ -d "$_nm" ] && [ ! -f "$_nm/disable" ] &&
-   [ ! -f "$_nm/remove" ] && [ ! -f /data/adb/nomount/disabled ]; then
+if [ -n "$_nm" ] && [ -d "$_nm" ] && [ -f "$_nm/nomount.sha256sums" ] &&
+   [ ! -f "$_nm/disable" ] && [ ! -f "$_nm/remove" ] &&
+   [ ! -f /data/adb/nomount/disabled ]; then
     mode=0
 fi
 unset _nm
 BHEOF
-        chmod 0644 "$_bh_ovr" 2>/dev/null
-        nmlog "bindhosts: wrote mode_override.sh — it will use its mountless mode 0 from the next boot"
+        _bh_rc=$?
+        if [ "$_bh_rc" -eq 0 ] && mv -f "$_bh_ovr.nm_new" "$_bh_ovr" 2>/dev/null; then
+            chmod 0644 "$_bh_ovr" 2>/dev/null
+            nmlog "bindhosts: wrote mode_override.sh — it will use its mountless mode 0 from the next boot"
+        else
+            rm -f "$_bh_ovr.nm_new"
+            nmlog "⚠ bindhosts: could not write mode_override.sh (rc=$_bh_rc) — it keeps its own mount mode"
+        fi
     fi
 fi
-unset _bh_dir _bh_ovr
+unset _bh_dir _bh_ovr _bh_rc
 
 # --- pick up content modules wrote after the mount pass ---
 # The mount pass runs at post-fs-data. Measured across 576 module payloads, 56%
@@ -492,7 +513,9 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
         # after the foreground reload. One more delta pass catches it.
         _rl2_all=$(nmto 60 "$BIN" reload 2>&1)
         _rl2_rc=$?
-        if [ "$_rl2_rc" -ne 0 ]; then
+        if [ "$_rl2_rc" -eq 124 ]; then
+            nmlog "late reload pass TIMED OUT after 60s"
+        elif [ "$_rl2_rc" -ne 0 ]; then
             nmlog "⚠ late reload pass FAILED (exit $_rl2_rc): $(printf '%s\n' "$_rl2_all" | tail -1)"
         else
             nmlog "late reload pass: $(printf '%s\n' "$_rl2_all" | tail -1)"
