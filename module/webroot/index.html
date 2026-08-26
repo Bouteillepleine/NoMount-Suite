@@ -220,6 +220,7 @@
   .tag.suite { background: rgba(255,255,255,0.08); color: var(--txt); }
   .tag.off   { background: rgba(139,147,167,0.15); color: var(--muted); }
   .tag.warn  { background: rgba(251,191,36,0.15);  color: var(--warn); }
+  .tag.bad   { background: rgba(248,113,122,0.15); color: var(--bad); }
   .tag.ok    { background: rgba(53,210,154,0.15);  color: var(--ok); }
   .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
 
@@ -1810,7 +1811,7 @@
     el.innerHTML = f.map(function (x) {
       return '<div class="frow"><div class="fname">' + esc(x.check) + "</div>" +
              '<div class="fmean">' + esc(x.detail) + "</div>" +
-             '<div class="fmeta"><span class="tag ' + (x.level === "error" ? "warn" : "warn") + '">' +
+             '<div class="fmeta"><span class="tag ' + (x.level === "error" ? "bad" : "warn") + '">' +
              esc(x.level) + "</span></div></div>";
     }).join("");
   }
@@ -1860,12 +1861,19 @@
   // table: `n/a` is grey and never touches the chip, `unmeasured` is amber
   // because a check that could have run and did not is exactly what the
   // honesty rule is about, and neither is ever green.
+  // Three amber-or-worse states that are NOT the same thing, and the row has to
+  // say which:
+  //   fail       RED   -- a hole that is open right now
+  //   reboot     AMBER -- already fixed; a reboot finishes applying it
+  //   unmeasured AMBER -- not a hole and not a pass; the check did not run
+  // Before `.tag.bad` existed all three fell back to amber, so a readable hole
+  // and a check that merely could not run looked identical.
   const AU_VERDICT = {
-    "fail":       { tag: "warn", label: "detectable", cls: "warn" },
-    "reboot":     { tag: "warn", label: "reboot to finish", cls: "warn" },
-    "unmeasured": { tag: "warn", label: "not verified", cls: "warn" },
-    "pass":       { tag: "ok",   label: "clean", cls: "ok" },
-    "n/a":        { tag: "off",  label: "doesn't apply", cls: "off" }
+    "fail":       { tag: "bad",  label: "detectable" },
+    "reboot":     { tag: "warn", label: "reboot to finish" },
+    "unmeasured": { tag: "warn", label: "not verified" },
+    "pass":       { tag: "ok",   label: "clean" },
+    "n/a":        { tag: "off",  label: "doesn't apply" }
   };
 
   function auAge(ts) {
@@ -2368,7 +2376,7 @@
           "Present but idle. It needs both a hidden app and injected-only paths before any guard can fire — hide an app in Tools › Per-UID hiding to arm it.");
     }
 
-    const tagOf = { ok: "vfs", inert: "warn", absent: "off", bad: "warn" };
+    const tagOf = { ok: "vfs", inert: "warn", absent: "off", bad: "bad" };
     const labelOf = { ok: "active", inert: "idle", absent: "not in kernel", bad: "needs attention" };
     list.innerHTML = rows.map(function (r) {
       return '<div class="frow"><div class="fname">' + esc(r.name) + "</div>" +
@@ -2491,7 +2499,7 @@
       '<div class="fgroup">' + esc(head) + "</div>" +
       parts.map(function (x) {
         return '<div class="row"><span class="name">' + esc(x[1]) +
-               '</span><span class="tag ' + (x[0] === "bad" ? "warn" : x[0] === "warn" ? "warn" : "vfs") +
+               '</span><span class="tag ' + (x[0] === "bad" ? "bad" : x[0] === "warn" ? "warn" : "vfs") +
                '">' + (x[0] === "ok" ? "ok" : x[0] === "bad" ? "action" : "check") + "</span></div>";
       }).join("");
     done();
