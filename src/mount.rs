@@ -1285,6 +1285,23 @@ pub fn run_mount() -> Result<()> {
         }
     }
 
+    // READ THE MOUNT TABLE BEFORE CLEARING.
+    //
+    // This used to sit 58 lines below `clear()`, and it is fallible: on a failed
+    // read of /proc/self/mountinfo the `?` returned -- with the engine already
+    // emptied, hidden UIDs re-applied and binds torn down. Every injection on the
+    // device was gone, and nothing re-served them until a later successful pass.
+    //
+    // It is the same hazard the comment above `collect_plan` records ("an
+    // empty-on-error plan wiped every rule"), reached through a different
+    // fallible call. `mounted_targets()` reads no module state and depends on
+    // nothing this pass does, so it belongs on the same side of `clear()` as the
+    // plan: everything that can refuse the pass runs while the engine is still
+    // serving.
+    let mounted = crate::absorb::mounted_targets().context(
+        "cannot read /proc/self/mountinfo -- refusing to serve, because assuming \"nothing is mounted\"          injects over live mounts and strands each one in mountinfo until reboot",
+    )?;
+
     // Start clean so uninstalled/updated modules don't leave stale rules, and tear
     // down any my_* binds from the previous pass so removed modules don't leak one.
     // NOT `let _ =`. `nm.version()` already succeeded, so the binary is there --
@@ -1350,9 +1367,7 @@ pub fn run_mount() -> Result<()> {
         failed: 0,
         whiteouts: 0,
     };
-    let mounted = crate::absorb::mounted_targets().context(
-        "cannot read /proc/self/mountinfo -- refusing to serve, because assuming \"nothing is mounted\"          injects over live mounts and strands each one in mountinfo until reboot",
-    )?;
+    // `mounted` was read before `clear()` -- see the note there.
     for e in &plan {
         served.insert(e.module.as_str());
         if !unmount_before_serving(&mounted, &e.target) {
