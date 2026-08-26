@@ -356,6 +356,34 @@ fi
 # module list into a status readout you can trust without opening the WebUI.
 # (MODDIR/ABI/BIN/NM_BIN are set at the top of this script.)
 
+# --- pick up content modules wrote after the mount pass ---
+# The mount pass runs at post-fs-data. Measured across 576 module payloads, 56%
+# build their payload tree at RUNTIME rather than shipping it in the zip -- and
+# a module's own service.sh runs at late_start, after that pass has already
+# walked it. Anything written there was invisible for the whole session: the
+# file existed in the module directory and no rule named it.
+#
+# Verified on an OP15 with a module writing one file per lifecycle stage: the
+# post-fs-data file was served on the same boot, the service.sh and
+# boot-completed.sh files were not, and a single `reload` served all three with
+# nothing else disturbed. That is this call.
+#
+# reload is a gap-free delta (it applies only what changed, never a clear), so
+# on the common case of nothing new it is a cheap no-op. It runs BEFORE absorb
+# so absorb sees the finished rule set.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+    _rl_all=$(nmto 60 "$BIN" reload 2>&1)
+    _rl_rc=$?
+    _rl=$(printf '%s\n' "$_rl_all" | tail -1)
+    if [ "$_rl_rc" -eq 124 ]; then
+        nmlog "post-boot reload TIMED OUT after 60s - late module content may be unserved"
+    elif [ "$_rl_rc" -ne 0 ]; then
+        nmlog "⚠ post-boot reload FAILED (exit $_rl_rc) — content written by module service.sh is NOT served: $_rl"
+    else
+        nmlog "post-boot reload: $_rl"
+    fi
+fi
+
 # --- absorb any bind mounts other modules made ---
 # Module boot scripts have all run by now. Anything that bind-mounted its own
 # content is visible in every app's mountinfo, which defeats the zero-mount
@@ -399,6 +427,16 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     # no-op when nothing new turned up.
     (
         sleep 45
+        # Same reason as the late absorb pass below it: boot-completed.sh runs
+        # after this script, and a module that writes its payload there lands
+        # after the foreground reload. One more delta pass catches it.
+        _rl2_all=$(nmto 60 "$BIN" reload 2>&1)
+        _rl2_rc=$?
+        if [ "$_rl2_rc" -ne 0 ]; then
+            nmlog "⚠ late reload pass FAILED (exit $_rl2_rc): $(printf '%s\n' "$_rl2_all" | tail -1)"
+        else
+            nmlog "late reload pass: $(printf '%s\n' "$_rl2_all" | tail -1)"
+        fi
         # Bounded and status-checked like the foreground pass. Backgrounded, so a
         # hang cannot delay boot -- but it CAN sit forever on the engine-wide pass
         # lock and hold it against uidwatch.sh, and a failed late pass reported by

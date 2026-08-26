@@ -52,7 +52,7 @@ use anyhow::{Context, Result};
 
 use crate::nm::Nm;
 
-const MODULES_DIR: &str = "/data/adb/modules";
+pub(crate) const MODULES_DIR: &str = "/data/adb/modules";
 /// Serialises the whole-engine passes (`mount`, `reload`, `absorb`) against each
 /// other. `run_mount` opens with `nm.clear()`, so a concurrent reload/absorb could
 /// see the engine momentarily empty (or two passes could interleave adds and
@@ -286,6 +286,27 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
     if is_partition_root(target) {
         return Serve::Refuse("a bare partition root (injecting one bootloops zygote)");
     }
+    // `/product/product/...`, `/system/system/...`: the path repeats a partition
+    // name, which no module can mean. It is what the installer's partition
+    // handler produces when a module ships BOTH a top-level `product/` and a
+    // `system/product/` -- it moves the second INTO the first instead of merging
+    // them, nesting the subtree one level too deep.
+    //
+    // Serving it anyway is worse than doing nothing: the content appears at a
+    // directory the ROM does not have, so nothing that wants the file finds it
+    // there, and the engine has materialised a top-level directory whose sole
+    // contents are injected -- a free existence oracle, for a path that helps
+    // nobody. Refuse, and let `doctor` tell the user to ship one layout or the
+    // other. Measured on an OP15: a module shipping both produced
+    // /product/product/etc/... and every rule involved looked healthy.
+    if let Some(second) = target.components().nth(2).and_then(|c| c.as_os_str().to_str()) {
+        if second == root && is_partition_root(Path::new(&format!("/{root}"))) {
+            return Serve::Refuse(
+                "the path repeats a partition name -- the module ships both `<part>/` and \
+                 `system/<part>/`, and the installer nested one inside the other",
+            );
+        }
+    }
     if is_my_partition(target) && !my_hookless_enabled() {
         return Serve::Bind;
     }
@@ -362,7 +383,7 @@ fn source_resolves(e: &PlanEntry) -> bool {
     e.kind != PlanKind::Inject || e.source.exists()
 }
 
-fn module_enabled(dir: &Path) -> bool {
+pub(crate) fn module_enabled(dir: &Path) -> bool {
     !dir.join("disable").exists()
         && !dir.join("remove").exists()
         && !dir.join("skip_mount").exists()
@@ -501,13 +522,75 @@ fn expand_replacement(
     }
 }
 
+/// One target claimed by more than one module: the winner, and who it beat.
+pub(crate) struct Collision {
+    pub target: PathBuf,
+    pub winner: String,
+    pub losers: Vec<String>,
+}
+
+/// Collapse entries claiming the same target, keeping the LAST.
+///
+/// The plan is sorted, so "last" is the last module name alphabetically, which
+/// is the documented precedence. This used to be left to `nm.add` overwriting
+/// the earlier rule -- and measured on an OP15, it does not overwrite the way
+/// that assumed. Applying A then B for one target leaves the rule table naming
+/// B while the already-materialised inode keeps serving A's bytes:
+///
+///     add B on a clean target -> serves B
+///     add A over it           -> STILL serves B   (table now says A)
+///     del, then add A         -> serves A
+///
+/// So the table and the filesystem disagree, `selfcheck` reports
+/// consistency=ok throughout (its canary compares root's view against an
+/// unprivileged uid's, never the served bytes against the rule's source), and
+/// neither `vfs refresh` nor `reload` heals it -- reload reconciles against the
+/// table, which is already correct, so it computes no delta at all.
+///
+/// Applying each target exactly once sidesteps the whole thing and makes the
+/// documented precedence true instead of aspirational. The collisions are
+/// returned rather than swallowed so the caller can say what it dropped.
+pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Collision>) {
+    let mut last: HashMap<PathBuf, usize> = HashMap::new();
+    for (i, e) in plan.iter().enumerate() {
+        last.insert(e.target.clone(), i);
+    }
+    if last.len() == plan.len() {
+        return (plan, Vec::new());
+    }
+    let mut losers: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for (i, e) in plan.iter().enumerate() {
+        if last.get(&e.target) != Some(&i) {
+            losers.entry(e.target.clone()).or_default().push(e.module.clone());
+        }
+    }
+    let mut collisions: Vec<Collision> = Vec::new();
+    let mut kept = Vec::with_capacity(last.len());
+    for (i, e) in plan.into_iter().enumerate() {
+        if last.get(&e.target) != Some(&i) {
+            continue;
+        }
+        if let Some(l) = losers.remove(&e.target) {
+            collisions.push(Collision {
+                target: e.target.clone(),
+                winner: e.module.clone(),
+                losers: l,
+            });
+        }
+        kept.push(e);
+    }
+    collisions.sort_by(|a, b| a.target.cmp(&b.target));
+    (kept, collisions)
+}
+
 fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
     // Sorted, not raw readdir order. Two modules may claim the same target (doctor
-    // reports it as "target claimed twice"), and the LAST plan entry wins -- in
-    // run_mount because its nm.add overwrites, in run_reload because desired_hookless
-    // is keyed on target. readdir order is the filesystem's, so the winner could
-    // differ between two boots of an unchanged device. Sorting makes the precedence
-    // stable and explainable (last name alphabetically wins) instead of incidental.
+    // reports it as "target claimed twice"), and the LAST plan entry wins -- which
+    // `dedupe_by_target` then enforces by applying only that one, because the
+    // engine does not re-point an inode when a second rule lands on its target.
+    // readdir order is the filesystem's, so the winner could differ between two
+    // boots of an unchanged device. Sorting makes the precedence stable and
+    // explainable (last name alphabetically wins) instead of incidental.
     let mut entries: Vec<_> = match fs::read_dir(dir) {
         Ok(e) => e.flatten().collect(),
         Err(_) => return,
@@ -1148,6 +1231,20 @@ pub fn run_mount() -> Result<()> {
     // the two, leave the engine empty with nothing to re-serve.
     let (plan, skipped) = collect_plan()?;
 
+    // Exactly one rule per target. See dedupe_by_target: applying both halves of
+    // a contested target leaves the table naming one module and the filesystem
+    // serving the other, which no later refresh or reload can reconcile.
+    let (plan, collisions) = dedupe_by_target(plan);
+    for c in &collisions {
+        eprintln!(
+            "nomount: {} claimed by {} -- serving {}, skipping {}",
+            c.target.display(),
+            c.losers.len() + 1,
+            c.winner,
+            c.losers.join(", ")
+        );
+    }
+
     // Measure the ROM's directory shape and tell the engine, BEFORE any rule
     // exists: a synthesized dir inherits its parent's superblock, which on an
     // overlay-backed path is overlayfs and says nothing about the layer whose
@@ -1314,6 +1411,70 @@ fn served_apks(plan: &[PlanEntry], absorbed: &[(PathBuf, PathBuf)]) -> Vec<(Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(module: &str, target: &str, source: &str) -> PlanEntry {
+        PlanEntry {
+            module: module.to_string(),
+            target: PathBuf::from(target),
+            source: PathBuf::from(source),
+            kind: PlanKind::Inject,
+        }
+    }
+
+    /// Two modules claiming one target must produce exactly one applied rule.
+    ///
+    /// Applying both is what left the rule table naming one module while the
+    /// filesystem served the other: `nm add` over a live target updates the
+    /// table but does not re-point the materialised inode.
+    #[test]
+    fn dedupe_keeps_the_last_claim() {
+        let plan = vec![
+            entry("a_mod", "/system/etc/x", "/data/adb/modules/a_mod/system/etc/x"),
+            entry("b_mod", "/system/etc/x", "/data/adb/modules/b_mod/system/etc/x"),
+            entry("c_mod", "/system/etc/y", "/data/adb/modules/c_mod/system/etc/y"),
+        ];
+        let (kept, collisions) = dedupe_by_target(plan);
+        assert_eq!(kept.len(), 2, "one rule per target");
+        let x = kept.iter().find(|e| e.target == Path::new("/system/etc/x")).unwrap();
+        assert_eq!(x.module, "b_mod", "last plan entry wins, as documented");
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0].winner, "b_mod");
+        assert_eq!(collisions[0].losers, vec!["a_mod".to_string()]);
+    }
+
+    /// An uncontested plan must pass through untouched -- no reordering, no
+    /// allocation of a collision list, nothing for the caller to report.
+    #[test]
+    fn dedupe_is_a_noop_without_collisions() {
+        let plan = vec![
+            entry("a", "/system/etc/one", "/data/adb/modules/a/system/etc/one"),
+            entry("b", "/system/etc/two", "/data/adb/modules/b/system/etc/two"),
+        ];
+        let (kept, collisions) = dedupe_by_target(plan);
+        assert_eq!(kept.len(), 2);
+        assert!(collisions.is_empty());
+        assert_eq!(kept[0].module, "a");
+        assert_eq!(kept[1].module, "b");
+    }
+
+    /// `/product/product/...` is the installer nesting `system/product` inside an
+    /// existing `product/`. Serving it puts content at a directory the ROM does
+    /// not have, which helps nobody and creates an existence oracle.
+    #[test]
+    fn serve_mode_refuses_repeated_partition_name() {
+        assert!(matches!(
+            serve_mode(Path::new("/product/product/etc/nmt/x.txt")),
+            Serve::Refuse(_)
+        ));
+        assert!(matches!(
+            serve_mode(Path::new("/system/system/etc/x")),
+            Serve::Refuse(_)
+        ));
+        // A directory that merely SHARES a name with a partition one level down
+        // is fine -- only the repeat at depth 1 is the installer's mistake.
+        assert_eq!(serve_mode(Path::new("/product/etc/product/x")), Serve::Inject);
+        assert_eq!(serve_mode(Path::new("/system/etc/system/x")), Serve::Inject);
+    }
 
     /// The whole point of `serve_mode` is that absorb gets the SAME answer this
     /// file acts on, so these are the cases where the two used to disagree.

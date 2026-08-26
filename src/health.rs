@@ -35,6 +35,11 @@ struct Fingerprint {
     mounts: Option<usize>,
     blocked: String, // count, or "unknown" when the engine could not be asked
     consistency: String, // "ok" | "mismatch:<path>(root=A app=B)" | "unchecked"
+    /// Does the served path match the source its own rule names?
+    /// "ok" | "drift:<path>(rule=<src> ...)" | "unchecked". Separate from
+    /// `consistency` because they fail independently: a target can be perfectly
+    /// consistent between root and an app and still serve another module's bytes.
+    served_matches_rule: String,
     guard: String,       // "armed" | "tripped"
     /// Module mounts that are NOT left by design, i.e. actual leaks. Carried
     /// separately so the card can stop calling an expected hook-framework bind a
@@ -65,6 +70,7 @@ impl Fingerprint {
         let _ = writeln!(s, "mounts_foreign={}", unk(self.mounts_foreign));
         let _ = writeln!(s, "blocked={}", self.blocked);
         let _ = writeln!(s, "consistency={}", self.consistency);
+        let _ = writeln!(s, "served_matches_rule={}", self.served_matches_rule);
         let _ = writeln!(s, "guard={}", self.guard);
         let _ = writeln!(s, "manager_umount={}", self.manager_umount);
         s
@@ -209,6 +215,83 @@ fn consistency_probe(rules: &[(String, String)], probe_uid_hidden: bool) -> Stri
     }
 }
 
+/// How much of a file to compare when sizes match. Two module files that
+/// collide on one target are very often the same length -- the case that found
+/// this compared "NMT12_WINNER_IS_A" against "NMT12_WINNER_IS_B", both 18
+/// bytes -- so a size-only check would have reported agreement during the exact
+/// failure it exists to catch.
+const DRIFT_BYTES: usize = 4096;
+
+fn head(path: &str, n: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut f = fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; n];
+    let mut got = 0;
+    while got < n {
+        match f.read(&mut buf[got..]) {
+            Ok(0) => break,
+            Ok(k) => got += k,
+            Err(_) => return None,
+        }
+    }
+    buf.truncate(got);
+    Some(buf)
+}
+
+/// Does what the engine SERVES at each target match the source its own rule
+/// names?
+///
+/// [`consistency_probe`] answers a different question -- whether root and an
+/// unprivileged app see the same thing at a path -- and both can agree perfectly
+/// while the bytes come from the wrong module entirely. That is not
+/// hypothetical: applying two rules to one target leaves the table naming the
+/// second source and the filesystem serving the first, and every existing check
+/// called that healthy.
+///
+/// Compares the served path against the rule's source directly. Reading the
+/// target goes through the engine, reading the source does not, so a
+/// disagreement is exactly the drift being looked for.
+fn drift_probe(rules: &[(String, String)]) -> String {
+    // Every rule, not a sample. `consistency_probe` samples because each check
+    // costs a `su` spawn; this one is two stats and two 4 KiB reads, so on a
+    // 262-rule device it is roughly a thousand syscalls -- cheap enough that
+    // sampling only buys blind spots. It bought one: a first pass capped at 24
+    // stratified nothing, and the contested target that motivated the check sat
+    // outside the window, so the probe reported ok on a device that was visibly
+    // serving the wrong module's bytes. The cap below is a runaway guard, not a
+    // budget.
+    const CAP: usize = 20_000;
+    let mut checked = 0;
+    for (target, source) in rules.iter().take(CAP) {
+        // Virtual dirs and whiteouts have no bytes to compare, and a source
+        // outside the module tree is not ours to reason about.
+        if !Path::new(source).is_file() {
+            continue;
+        }
+        let Ok(tm) = fs::metadata(target) else { continue };
+        let Ok(sm) = fs::metadata(source) else { continue };
+        if !tm.is_file() {
+            continue;
+        }
+        checked += 1;
+        if tm.len() != sm.len() {
+            return format!("drift:{target}(rule={source} size {} vs {})", tm.len(), sm.len());
+        }
+        // Equal length proves nothing; compare the bytes.
+        let (Some(a), Some(b)) = (head(target, DRIFT_BYTES), head(source, DRIFT_BYTES)) else {
+            continue;
+        };
+        if a != b {
+            return format!("drift:{target}(rule={source} bytes differ)");
+        }
+    }
+    if checked == 0 {
+        "unchecked".to_string()
+    } else {
+        "ok".to_string()
+    }
+}
+
 fn parse_rules(list: &str) -> Vec<(String, String)> {
     list.lines()
         .filter_map(|l| l.split_once(" -> ").map(|(t, s)| (t.trim().to_string(), s.trim().to_string())))
@@ -249,6 +332,7 @@ fn gather() -> Fingerprint {
         mounts_foreign: split.map(|(t, d)| t - d),
         blocked,
         consistency: consistency_probe(&rules, probe_hidden),
+        served_matches_rule: drift_probe(&rules),
         guard: guard.to_string(),
         manager_umount: match crate::manager::kernel_umount_enabled() {
             Some(true) => "on".to_string(),
@@ -266,6 +350,7 @@ pub fn run_selfcheck(write: bool, json: bool) -> Result<()> {
     let ok_guard = fp.guard == "armed";
     let ok_engine = fp.engine != "down";
     let mismatch = fp.consistency.starts_with("mismatch");
+    let drift = fp.served_matches_rule.starts_with("drift");
     // A bare "unchecked" means the canary could sample no injected file at all
     // (every target failed to stat, or there were none): it is NOT a pass and NOT
     // a hard failure -- a third, honest state. "unchecked:probe-uid-hidden" is a
@@ -275,7 +360,9 @@ pub fn run_selfcheck(write: bool, json: bool) -> Result<()> {
     if !json {
         print!("{}", fp.to_text());
     }
-    let verdict = if mismatch {
+    let verdict = if drift {
+        "RULE/BYTES DRIFT (a target serves content the rule does not name)"
+    } else if mismatch {
         "PER-UID INCONSISTENCY (injection visible to a normal app differently than root)"
     } else if !ok_engine {
         "ENGINE DOWN"
@@ -306,6 +393,7 @@ pub fn run_selfcheck(write: bool, json: bool) -> Result<()> {
             ("engine_up", J::Bool(ok_engine)),
             ("guard_armed", J::Bool(ok_guard)),
             ("consistency_mismatch", J::Bool(mismatch)),
+            ("served_matches_rule_drift", J::Bool(drift)),
             ("consistency_unverified", J::Bool(unverified)),
             (
                 "fields",

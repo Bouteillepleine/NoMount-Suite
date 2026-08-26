@@ -206,6 +206,150 @@ fn expansion_level(count: usize) -> Option<Level> {
     }
 }
 
+/// A way a module can be incompatible with this environment, and why.
+///
+/// One scanner for three findings that share a shape: something the module's
+/// own scripts do that cannot work here, where the failure is silent. Silence
+/// is the whole problem -- a module that copies into /system gets no error, it
+/// just carries on believing it worked, and the user is left with a feature
+/// that does nothing and no way to know why.
+///
+/// Measured across 576 real module payloads to size each one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Incompat {
+    /// Writes into a ROM partition at runtime. 5.9% of the corpus.
+    RomWrite,
+    /// Reads through Magisk's mirror. 23% of the corpus mentions it.
+    ///
+    /// NOT a NoMount limitation, and the finding says so: there is no mirror on
+    /// KernelSU at all -- no `/sbin/.magisk`, no `magisk` binary -- so these
+    /// modules read nothing on a KSU device with or without NoMount. Reported
+    /// because the user still ends up with a module that silently does nothing,
+    /// and nothing else on the device will tell them why.
+    MagiskMirror,
+    /// Loop-mounts an image or runs a chroot. 6.2% of the corpus.
+    ///
+    /// No redirection can make a block device appear, so this is not something
+    /// the VFS engine will ever serve. The module keeps its own mount and
+    /// `posture` reports it honestly -- the point of naming it here is that the
+    /// mount is then explained rather than anonymous.
+    ImageBacked,
+}
+
+impl Incompat {
+    fn check(self) -> &'static str {
+        match self {
+            Incompat::RomWrite => "writes into a ROM partition",
+            Incompat::MagiskMirror => "needs Magisk's mirror",
+            Incompat::ImageBacked => "image-backed or chroot module",
+        }
+    }
+
+    fn explain(self) -> &'static str {
+        match self {
+            Incompat::RomWrite =>
+                "NoMount serves ROM paths by read-only redirection, so this write goes \
+                 nowhere the module can read back and will fail silently. Expect that \
+                 feature of the module not to work.",
+            Incompat::MagiskMirror =>
+                "there is no Magisk mirror on KernelSU -- no /sbin/.magisk and no magisk \
+                 binary -- so this read returns nothing, with or without NoMount. This is \
+                 a Magisk-only module running on KSU, not something NoMount broke.",
+            Incompat::ImageBacked =>
+                "no path redirection can make a block device appear, so the engine cannot \
+                 serve this. The module keeps its own mount; `posture` will report it, and \
+                 that report is correct rather than a leak.",
+        }
+    }
+}
+
+/// Scan enabled modules' scripts for the three incompatibilities above.
+///
+/// Deliberately narrow, because the obvious patterns over-count badly and were
+/// measured doing so:
+///
+///   * `$MODPATH/system/...` is how 56% of modules build their payload and is
+///     completely fine. The ROM-write match therefore requires whitespace before
+///     the leading slash, which `$MODPATH/system/` cannot satisfy.
+///   * `mount -o rw,remount $MAGISKTMP` remounts the module's OWN tmpfs, not a
+///     ROM partition -- nine corpus modules do it. The remount arm requires the
+///     target to name a partition.
+///   * Merely assigning `MAGISKTMP=` is boilerplate; 50 of 182 corpus matches
+///     never path into the mirror at all. The mirror arm requires a path
+///     component after it.
+///
+/// One finding per (module, kind), not one per line.
+fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
+    const PARTS: [&str; 5] = ["system", "vendor", "product", "system_ext", "odm"];
+    const SCRIPTS: [&str; 5] = [
+        "post-fs-data.sh", "service.sh", "boot-completed.sh", "post-mount.sh", "customize.sh",
+    ];
+    let mut out: Vec<(String, String, Incompat, String)> = Vec::new();
+    let Ok(dirs) = std::fs::read_dir(crate::mount::MODULES_DIR) else { return out };
+    let mut dirs: Vec<_> = dirs.flatten().collect();
+    dirs.sort_by_key(|e| e.file_name());
+
+    for d in dirs {
+        let mdir = d.path();
+        if !mdir.is_dir() || !crate::mount::module_enabled(&mdir) {
+            continue;
+        }
+        let Some(id) = mdir.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            continue;
+        };
+        let mut seen: Vec<Incompat> = Vec::new();
+        for script in SCRIPTS {
+            let Ok(body) = std::fs::read_to_string(mdir.join(script)) else { continue };
+            for line in body.lines() {
+                let t = line.trim();
+                if t.starts_with('#') || t.is_empty() {
+                    continue;
+                }
+                let kind = if (["cp ", "mv ", "ln ", "touch ", "rm "]
+                    .iter()
+                    .any(|v| t.contains(v))
+                    && PARTS.iter().any(|p| t.contains(&format!(" /{p}/"))))
+                    || (t.contains("remount")
+                        && PARTS.iter().any(|p| {
+                            t.contains(&format!(" /{p} ")) || t.ends_with(&format!(" /{p}"))
+                        }))
+                {
+                    Some(Incompat::RomWrite)
+                } else if t.contains(".magisk/mirror/")
+                    || (t.contains("MAGISKTMP") && t.contains("/mirror"))
+                    || t.contains("mirror/system")
+                    || t.contains("mirror/vendor")
+                {
+                    Some(Incompat::MagiskMirror)
+                } else if t.contains("losetup")
+                    || t.contains("mount -o loop")
+                    || t.contains("mkfs.ext4")
+                    || t.contains("chroot ")
+                    || t.contains("proot ")
+                    || t.contains("nsenter")
+                    || t.contains("unshare ")
+                {
+                    Some(Incompat::ImageBacked)
+                } else {
+                    None
+                };
+                if let Some(k) = kind {
+                    if !seen.contains(&k) {
+                        seen.push(k);
+                        out.push((
+                            id.clone(),
+                            script.to_string(),
+                            k,
+                            t.chars().take(90).collect(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn run_doctor(json: bool) -> Result<()> {
     // partition -> count of non-overlay entries not in zygote's FD allowlist
     let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -310,7 +454,59 @@ pub fn run_doctor(json: bool) -> Result<()> {
         });
     }
 
-    // Two modules writing the same path: last one wins, silently.
+    // A target whose first two segments repeat a partition name -- /product/product,
+    // /system/system -- is not something a module can mean. It comes from the
+    // installer's partition handler moving `system/product` INTO an already-existing
+    // top-level `product/` instead of merging the two, which nests the subtree one
+    // level too deep. The rule that results serves real bytes at a directory the ROM
+    // does not have, which is both wrong and a free existence oracle, and nothing
+    // downstream notices because every individual rule looks healthy.
+    //
+    // Measured on an OP15: a module shipping BOTH `product/` and `system/product/`
+    // produced `/product/product/etc/...` and doctor reported zero errors. A module
+    // shipping only `system/product/` resolves correctly, so the trigger is the
+    // collision, not the SAR alias.
+    let mut nested: Vec<(&Path, &str)> = Vec::new();
+    for e in &plan {
+        let mut segs = e.target.components().skip(1).filter_map(|c| c.as_os_str().to_str());
+        if let (Some(a), Some(b)) = (segs.next(), segs.next()) {
+            if a == b && is_partition_root(Path::new(&format!("/{a}"))) {
+                nested.push((e.target.as_path(), e.module.as_str()));
+            }
+        }
+    }
+    nested.sort_by_key(|(t, _)| *t);
+    for (target, module) in &nested {
+        f.push(Finding {
+            level: Level::Error,
+            check: "partition name nested",
+            detail: format!(
+                "{} <- {module}: the path repeats a partition name, so this is serving \
+                 content at a directory the ROM does not have. It happens when a module \
+                 ships both `product/` and `system/product/` and the installer nests one \
+                 inside the other -- ship only one of the two.",
+                target.display()
+            ),
+        });
+    }
+
+    // Modules that cannot work here, named before the user goes hunting.
+    //
+    // All three of these fail SILENTLY today: the write lands nowhere, the
+    // mirror read returns nothing, the image mount is simply a mount the engine
+    // never touches. Each is shipped as a loud finding well before any attempt
+    // to support it, because a wrong answer the user can see beats a wrong
+    // answer they cannot.
+    for (module, script, kind, hit) in scan_module_incompat() {
+        f.push(Finding {
+            level: Level::Warn,
+            check: kind.check(),
+            detail: format!("{module} ({script}): `{hit}`. {}", kind.explain()),
+        });
+    }
+
+    // Two modules writing the same path: the plan is sorted and only the last is
+    // applied, so the winner is stable -- but the loser's content is simply absent.
     let mut collisions: Vec<(&Path, Vec<&str>)> = by_target
         .into_iter()
         .filter(|(_, m)| {
