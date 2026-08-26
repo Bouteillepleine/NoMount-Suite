@@ -579,9 +579,61 @@ pub fn run_doctor(json: bool) -> Result<()> {
     if !rolled.is_empty() {
         // One finding, not one per directory. The explanation is the same every
         // time and repeating it buries the list it is about.
-        let list = rolled
+        // Group by owning module before listing anything.
+        //
+        // Listing every directory reads fine on a handful and is unusable on a
+        // real device: measured on an OP15, OnePlus_Dialer_Universal ships one
+        // country-config file into each of 82 sibling directories under
+        // /my_product/etc/extension, and naming them individually produced a
+        // 6042-character finding that says the same thing 82 times. The module
+        // is the actionable unit -- there is one decision to make about it, not
+        // 82 -- so a module with more than a few directories is reported as its
+        // common prefix and a count.
+        // Key on (module, PARENT of the flagged directory), not on the module
+        // alone. A module that owns 78 country dirs under one parent and three
+        // more elsewhere has a longest-common-ancestor of "/", and "81
+        // directories under /" tells the reader nothing. Clustering by parent
+        // names the subtree each group actually sits in.
+        let mut by_mod: HashMap<String, Vec<(&Path, usize)>> = HashMap::new();
+        for (p, m, n) in &rolled {
+            let parent = p.parent().unwrap_or(Path::new("/")).display();
+            by_mod
+                .entry(format!("{} under {}", m.join(", "), parent))
+                .or_default()
+                .push((p.as_path(), *n));
+        }
+        let mut groups: Vec<(String, Vec<(&Path, usize)>)> = by_mod.into_iter().collect();
+        groups.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let list = groups
             .iter()
-            .map(|(p, m, n)| format!("{} ({n} file(s), {})", p.display(), m.join(", ")))
+            .map(|(mods, dirs)| {
+                let files: usize = dirs.iter().map(|(_, n)| n).sum();
+                if dirs.len() <= 3 {
+                    let names = dirs
+                        .iter()
+                        .map(|(p, n)| format!("{} ({n} file(s))", p.display()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{mods}: {names}")
+                } else {
+                    // Longest common ancestor of the group, so the message points
+                    // at the subtree the module actually owns.
+                    let mut prefix: Vec<&std::ffi::OsStr> =
+                        dirs[0].0.iter().collect();
+                    for (p, _) in dirs.iter().skip(1) {
+                        let other: Vec<&std::ffi::OsStr> = p.iter().collect();
+                        let keep = prefix
+                            .iter()
+                            .zip(other.iter())
+                            .take_while(|(a, b)| a == b)
+                            .count();
+                        prefix.truncate(keep);
+                    }
+                    let _ = &prefix; // parent is already in the group key
+                    format!("{mods}: {} directories ({files} file(s) total)", dirs.len())
+                }
+            })
             .collect::<Vec<_>>()
             .join("; ");
         f.push(Finding {
