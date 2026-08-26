@@ -269,11 +269,22 @@ else
         # of 260 rules, ended the boot on "[NoMount ✅ 200 rules] fully mountless".
         # A partial injection reported as a complete one is the same false green
         # the rest of this file removes, one layer down.
-        nmto 60 "$BIN" mount 2>/dev/null
+        _mout="$(nmto 60 "$BIN" mount 2>/dev/null)"
         _mrc=$?
+        [ -n "$_mout" ] && printf '%s\n' "$_mout"
         if [ "$_mrc" -ne 0 ]; then
             nmlog "⚠ mount pass exited $_mrc ($([ "$_mrc" -eq 124 ] && echo "TIMED OUT after 60s" || echo "failed")) — the injection set may be INCOMPLETE"
         fi
+        # An exit of 0 does NOT mean every rule landed: the pass deliberately
+        # survives individual failures rather than failing the boot over them.
+        # Without this, those were invisible -- no log line, and the status card
+        # still green because SOME rules exist.
+        case "$_mout" in
+            *"nomount: WARNING"*)
+                nmlog "$(printf '%s\n' "$_mout" | grep "nomount: WARNING" | head -1)"
+                ;;
+        esac
+        unset _mout
         # Durable whiteouts, HERE rather than only in service.sh. A whiteout hides a
         # stock path that is itself the tell, and service.sh does not run it until
         # after sys.boot_completed plus a 10s settle -- so every such path was plainly

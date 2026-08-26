@@ -1336,10 +1336,31 @@ pub fn run_mount() -> Result<()> {
     // below rebuilds those rules from it, so truncating the file here would throw
     // away the only thing that can. Read it first either way -- an earlier version
     // cleared the file and then read an empty list, and silently did nothing.
-    let recorded = crate::absorb::absorbed_pairs();
-    // Always the tab-separated pairs format (empty is fine — it just rewrites the
-    // header). The legacy bare-target writer is gone; see H18.
-    crate::absorb::set_absorbed_pairs(&recorded);
+    // `read_` not `absorbed_pairs()`: the latter is unwrap_or_default, and the
+    // write-back below would then TRUNCATE the record to a bare header on any
+    // read error -- destroying, permanently, the only thing that can re-serve a
+    // patched-APK rule. (`fs::write` truncates before writing, and metamount.sh
+    // SIGKILLs this pass at 60s, so a half-written record is reachable.) A
+    // missing file is Ok(empty) and still normal. run_reload already treats this
+    // read as fatal for the same reason; there it costs one pass, here it is the
+    // file.
+    let (recorded, record_readable) = match crate::absorb::read_absorbed_pairs() {
+        Ok(v) => (v, true),
+        Err(e) => {
+            eprintln!(
+                "nomount: could not read the absorbed-rule record ({e}) -- re-serving \
+                 nothing from it this pass and LEAVING THE FILE ALONE, because rewriting \
+                 it from an empty read would lose every patched-APK rule for good"
+            );
+            (Vec::new(), false)
+        }
+    };
+    // Only when we actually read it. Always the tab-separated pairs format (empty
+    // is fine — it just rewrites the header). The legacy bare-target writer is
+    // gone; see H18.
+    if record_readable {
+        crate::absorb::set_absorbed_pairs(&recorded);
+    }
     // Re-serve them here, before zygote starts and PackageManager scans, so a
     // patched-APK module never has to mount at all: no bind, so no process maps
     // one, so nothing carries the "(deleted)" marking a later takeover leaves
@@ -1367,6 +1388,15 @@ pub fn run_mount() -> Result<()> {
         failed: 0,
         whiteouts: 0,
     };
+    // What was actually APPLIED, not what was planned. pmcache::sync records the
+    // source identity of everything it is handed as "PM has now parsed these
+    // bytes". Handing it the plan meant a rule that FAILED to apply was recorded
+    // as served, so on the next boot -- when it applies -- identity(source) is
+    // unchanged, the entry is not stale, the cache is never dropped, and
+    // PackageManager keeps serving its parse of the STOCK apk. That is the
+    // "Theme.AppCompat" force-close this module documents, made permanent:
+    // nothing will ever mark that APK changed again.
+    let mut applied_apks: Vec<(PathBuf, PathBuf)> = Vec::new();
     // `mounted` was read before `clear()` -- see the note there.
     for e in &plan {
         served.insert(e.module.as_str());
@@ -1384,12 +1414,20 @@ pub fn run_mount() -> Result<()> {
             }
             PlanKind::Inject if !source_resolves(e) => st.failed += 1,
             PlanKind::Inject => match nm.add(&e.target, &e.source) {
-                Ok(()) => st.applied += 1,
+                Ok(()) => {
+                    st.applied += 1;
+                    applied_apks.push((e.target.clone(), e.source.clone()));
+                }
                 Err(_) => st.failed += 1,
             },
             PlanKind::Bind => match crate::bind::apply(&e.source, &e.target) {
-                Ok(crate::bind::BindOutcome::Bound) => binds += 1,
-                Ok(crate::bind::BindOutcome::AlreadyMounted) => {}
+                Ok(crate::bind::BindOutcome::Bound) => {
+                    binds += 1;
+                    applied_apks.push((e.target.clone(), e.source.clone()));
+                }
+                Ok(crate::bind::BindOutcome::AlreadyMounted) => {
+                    applied_apks.push((e.target.clone(), e.source.clone()));
+                }
                 Err(_) => st.failed += 1,
             },
         }
@@ -1405,7 +1443,7 @@ pub fn run_mount() -> Result<()> {
 
     // PM scans after this pass, so an entry dropped here is rebuilt with the
     // bytes we serve and nothing is left pending.
-    let pm = crate::pmcache::sync(&served_apks(&plan, &recorded));
+    let pm = crate::pmcache::sync(&served_apks_applied(&applied_apks, &recorded));
     crate::pmcache::clear_pending();
 
     let modules = served.len();
@@ -1425,6 +1463,18 @@ pub fn run_mount() -> Result<()> {
             "nomount: re-applied {tmpfs_hidden} ROM directory hide(s) taken over from a module tmpfs"
         );
     }
+    // A failure count buried in the summary line is not a report. The pass exits
+    // 0 (12 bad rules out of 260 must not fail the boot and trip the bootloop
+    // guard), and metamount.sh only logged non-zero exits -- so a partial
+    // injection ended the boot on a green tick with NOTHING in boot.log. Same
+    // false green the timeout path was fixed for, reached by exiting cleanly.
+    // metamount.sh greps for this marker.
+    if st.failed > 0 {
+        println!(
+            "nomount: WARNING {} rule(s) failed to apply — the injection set is INCOMPLETE",
+            st.failed
+        );
+    }
     if !pm.is_empty() {
         println!("nomount: re-parsed {} changed system APK(s) (package cache)", pm.len());
     }
@@ -1440,6 +1490,21 @@ fn served_apks(plan: &[PlanEntry], absorbed: &[(PathBuf, PathBuf)]) -> Vec<(Path
     plan.iter()
         .filter(|e| matches!(e.kind, PlanKind::Inject | PlanKind::Bind))
         .map(|e| (e.target.clone(), e.source.clone()))
+        .chain(absorbed.iter().cloned())
+        .filter(|(t, _)| crate::pmcache::is_rom_apk(t))
+        .collect()
+}
+
+/// Same filter, but over pairs that were actually applied rather than planned.
+/// Recording a FAILED rule as served is what makes a stale PackageManager parse
+/// permanent -- see the note at the apply loop.
+fn served_apks_applied(
+    applied: &[(PathBuf, PathBuf)],
+    absorbed: &[(PathBuf, PathBuf)],
+) -> Vec<(PathBuf, PathBuf)> {
+    applied
+        .iter()
+        .cloned()
         .chain(absorbed.iter().cloned())
         .filter(|(t, _)| crate::pmcache::is_rom_apk(t))
         .collect()
