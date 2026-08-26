@@ -3354,6 +3354,55 @@ static inline int nm_reval_fresh(struct dentry *dentry, u32 gen)
     return 1;
 }
 
+/* Is this dentry a PASSTHROUGH child -- an inode we minted in
+ * nm_dir_child_lookup() for a name that lives in a DIR-TARGET rule's backing
+ * directory and has no rule of its own?
+ *
+ * It never will have one, and that is the whole point of the question. A
+ * dir-target rule (`nm add /product/priv-app/Contacts <moduledir>`) serves every
+ * name beneath it by looking the name up in the backing directory and wrapping
+ * the result in one of our inodes, with our d_op on the dentry so the per-UID
+ * verdict keeps running. But the rule's dir_node only ever holds names that have
+ * rules of their OWN -- and a dir-target rule with no sub-rules has no dir_node
+ * at all -- so nm_d_revalidate found no rule for such a child and fell through
+ * to its two "the rule is gone, re-resolve" arms, verdict 0.
+ *
+ * The VFS answers a 0 with d_invalidate(), which unhashes the dentry; d_unlinked()
+ * is then true forever after, and d_path() appends " (deleted)" to it for every
+ * process that already had the file open or mapped. Measured on an OP15 with no
+ * cloak patches present, so this is the engine's own doing:
+ * "/product/priv-app/Contacts/Contacts.apk (deleted)" in system_server's
+ * /proc/PID/maps, with the dev field (00:38) and the inode both correctly
+ * mirrored -- the path string was the entire tell. _pathhide cannot answer it,
+ * because the observer is system_server, which can never be on a per-app hide
+ * list.
+ *
+ * The right verdict for such a child is "valid". Its parent's own dentry is
+ * revalidated on the way down by the same walk, so a rule that goes away takes
+ * the whole subtree with it through the parent -- the standard stacking-fs
+ * arrangement. What is checked here is only that this really is a passthrough
+ * child: our inode's backing dentry is still a live child of the parent's
+ * backing directory. A child minted from a RULE points somewhere else entirely
+ * (a module file under /data/adb), so a deleted rule still falls through to the
+ * re-resolve, which is what it needs. */
+static bool nm_is_passthrough_child(struct inode *parent_dir, struct dentry *dentry)
+{
+    const struct nm_inode_info *pinfo, *cinfo;
+    struct inode *cino = d_inode(dentry);
+
+    if (!parent_dir || parent_dir->i_op != &nm_dir_iops)
+        return false;
+    pinfo = parent_dir->i_private;
+    if (!pinfo || !pinfo->r_path.dentry)
+        return false;                 /* purely synthesized dir: nothing passes through */
+    if (!cino || (cino->i_op != &nm_file_iops && cino->i_op != &nm_dir_iops))
+        return false;
+    cinfo = cino->i_private;
+    return cinfo && cinfo->r_path.dentry &&
+           cinfo->r_path.dentry->d_parent == pinfo->r_path.dentry &&
+           !d_unhashed(cinfo->r_path.dentry);
+}
+
 /* 6.14, not 6.13: v6.13 include/linux/dcache.h still has
  * int (*d_revalidate)(struct dentry *, unsigned int); the parent/name form
  * appears at v6.14. */
@@ -3462,8 +3511,16 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
      * file ENOENT until eviction/reboot even though the rule is gone. A positive
      * real-fs dentry we merely tagged still reflects reality -> keep it. */
     if (!pdir) {
-        if (injected)
+        if (injected) {
+            /* A dir-target rule that owns no sub-rules has no dir_node, so this
+             * arm is also where every one of its passthrough children lands --
+             * not because the parent was un-hijacked, but because there was
+             * never a node to find. Invalidating them is what stamped
+             * "(deleted)" onto the maps of anything holding one open. */
+            if (nm_is_passthrough_child(parent_dir, dentry))
+                return nm_reval_fresh(dentry, gen);
             return 0;
+        }
         if (d_is_negative(dentry)) {
             d_drop(dentry);
             return 0;
@@ -3516,6 +3573,12 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         return injected ? nm_reval_fresh(dentry, gen) : nm_reval_stale(dentry);
     }
     nm_dir_node_put(pdir);                                /* pin no longer needed past the lookup */
+    /* No rule for this NAME, which for a passthrough child under a dir-target
+     * rule is the normal state rather than a removal -- see
+     * nm_is_passthrough_child(). The parent has a dir_node here (it owns at
+     * least one sub-rule), which is the only difference from the arm above. */
+    if (injected && nm_is_passthrough_child(parent_dir, dentry))
+        return nm_reval_fresh(dentry, gen);
     return nm_reval_stale(dentry);                        /* rule gone -> re-resolve */
 }
 
