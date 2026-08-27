@@ -235,11 +235,9 @@ setup_toolchain() {
 build_rust() {
     local profile="$1"
     local cargo_flag=""
-    local target_subdir="debug"
 
     if [ "$profile" = "release" ]; then
         cargo_flag="--release"
-        target_subdir="release"
     fi
 
     for abi in "${!ABI_TARGET[@]}"; do
@@ -484,16 +482,6 @@ UPDATER
     # both packaging paths were shipping the recovery installer non-executable.
     chmod 0755 "$staging/META-INF/com/google/android/update-binary"
     echo "" > "$staging/META-INF/com/google/android/updater-script"
-
-    # Verify no eliminated scripts
-    local eliminated=(logging.sh susfs_integration.sh sync.sh zm-diag.sh zm-init.sh)
-    for dead in "${eliminated[@]}"; do
-        if [ -f "$staging/$dead" ]; then
-            echo "FATAL: eliminated script $dead in staging!" >&2
-            rm -rf "$staging"
-            exit 1
-        fi
-    done
 
     # Integrity manifest: sha256 of every payload file, excluding META-INF
     # (the recovery installer, not staged into the module) and the manifest

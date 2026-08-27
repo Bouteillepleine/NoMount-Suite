@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # Scan installed 3rd-party apps for ones worth hiding injections from, and say WHY.
-# Emits "pkg<TAB>reason[,reason]"; cached to $CACHE. --cached prints the cache.
+# Emits "pkg<TAB>reason[,reason]"; cached to $CACHE.
 #
 # Adding a whole preset to the hide list buries the handful of apps that are
 # actually on THIS device under dozens of entries for apps that are not. A scan
@@ -18,11 +18,6 @@
 CACHE=/data/adb/nomount/uidscan_cache
 MODDIR="${0%/*}"
 mkdir -p /data/adb/nomount && chmod 0700 /data/adb/nomount
-
-if [ "$1" = "--cached" ]; then
-    cat "$CACHE" 2>/dev/null
-    exit 0
-fi
 
 ABI=$(getprop ro.product.cpu.abi)
 BIN="$MODDIR/bin/$ABI/nomount"
