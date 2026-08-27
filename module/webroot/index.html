@@ -1360,9 +1360,6 @@
     const r = await exec(
       'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
       'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
-      'vb=$(grep -hoE \'verifiedbootstate[ ="]*(green|orange|yellow|red)\' /proc/cmdline /proc/bootconfig 2>/dev/null | grep -oE \'green|orange|yellow|red\'); ' +
-      'vbad=$(printf \'%s\\n\' "$vb" | grep -E \'orange|yellow|red\' | head -1); ' +
-      'echo "vbs=${vbad:-$(printf \'%s\\n\' "$vb" | grep green | head -1)}"; ' +
       'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
       'echo "se=$(getenforce 2>/dev/null)";'
     );
@@ -1386,17 +1383,14 @@
     const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
     const fmnt = measured ? bad.length : -1;
 
-    const vbs = (kv.vbs || "").toLowerCase();
     const fp = kv.fp || "";
     const se = (kv.se || "").trim();
-    const vbTell = vbs !== "" && vbs !== "green";
     // `dev-keys` is a real signing tag, and its absence here rendered a dev-keys
     // build as a green "release-keys". An EMPTY fingerprint is not a pass either:
     // getprop returning nothing means we could not read it.
     const keyMatch = fp === "" ? null : fp.match(/test-keys|dev-keys|userdebug|:eng\//);
     const seTell = se !== "" && se !== "Enforcing";
     const tells = [];
-    if (vbTell) tells.push("verified-boot=" + vbs);
     if (keyMatch) tells.push("build keys");
     if (seTell) tells.push("SELinux " + se);
 
@@ -1420,8 +1414,12 @@
               : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
               : { k: "Real mounts", v: "none — pure Prism", t: "vfs" });
     }
-    rows.push({ k: "Verified boot", v: vbs ? (vbTell ? vbs + " · tell" : vbs) : "n/a",
-                t: vbTell ? "warn" : (vbs ? "vfs" : "off") });
+    // No "Verified boot" row. An unlocked bootloader reports orange, every user
+    // of a custom kernel has one, and nothing the Suite does can change it -- so
+    // the row was permanently amber for everyone and pushed the whole card into
+    // "Residual tells present" while the mount surface it actually measures was
+    // clean. Build keys and SELinux stay: those are states a user can genuinely
+    // be in for a fixable reason.
     // Name the tag that actually matched, so a dev-keys build is not reported as
     // "test-keys" — the row is the only place the user sees which one it is.
     rows.push({ k: "Build keys",
