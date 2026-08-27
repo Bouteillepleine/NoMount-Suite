@@ -98,13 +98,6 @@ impl Nm {
     /// it with every other unknown bit (`nomount check --plan` reports that case).
     pub fn add(&self, virtual_path: &Path, real: &Path) -> Result<()> {
         let public = crate::pmcache::is_pm_published(virtual_path);
-        self.add_flagged(virtual_path, real, public)
-    }
-
-    /// `nm add [--public] <virtual> <real>` — as `add`, with the hiding opt-out
-    /// stated explicitly. Only for a caller that knows better than the ROM-APK
-    /// rule above; everything else should use `add`.
-    pub fn add_flagged(&self, virtual_path: &Path, real: &Path, public: bool) -> Result<()> {
         self.run(&add_argv(public, path_str(virtual_path)?, path_str(real)?))
             .map(drop)
     }
@@ -177,12 +170,6 @@ impl Nm {
     /// Errors on an engine below v26, where the knob does not exist.
     pub fn ghost_list(&self) -> Result<String> {
         self.run(&["l", "g"])
-    }
-}
-
-impl Default for Nm {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

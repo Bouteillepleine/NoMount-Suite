@@ -16,17 +16,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-/// Magisk's whiteout marker is a 0:0 char device. Unix-only; on non-unix hosts
-/// (the Windows `cargo test` build) this is always false — the crate only *runs*
-/// on Android, this just lets the pure-logic tests compile here.
-#[cfg(unix)]
+/// Magisk's whiteout marker is a 0:0 char device.
 fn is_char_dev(ft: &fs::FileType) -> bool { ft.is_char_device() }
-#[cfg(not(unix))]
-fn is_char_dev(_ft: &fs::FileType) -> bool { false }
 
 /// Does this directory carry overlayfs's `trusted.overlay.opaque=y`?
 ///
@@ -39,7 +33,6 @@ fn is_char_dev(_ft: &fs::FileType) -> bool { false }
 /// the attribute would have its link read as an opaque whiteout marker, expanding
 /// into a whiteout per stock entry of a directory the module never named. A
 /// symlink is never itself an opaque dir, so ENODATA is the right answer.
-#[cfg(unix)]
 fn is_opaque_dir(p: &Path) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -55,8 +48,6 @@ fn is_opaque_dir(p: &Path) -> bool {
     };
     n > 0 && buf[0] == b'y'
 }
-#[cfg(not(unix))]
-fn is_opaque_dir(_p: &Path) -> bool { false }
 
 use anyhow::{Context, Result};
 

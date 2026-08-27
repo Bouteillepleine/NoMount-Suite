@@ -90,7 +90,6 @@ fn owner_of(f: &Finding) -> Option<String> {
     const PER_MODULE: &[&str] = &[
         "partition-root target",
         "no such partition",
-        "module hides where the hole remains",
         "whiteout leaves a measurable hole",
         "wide replacement expansion",
     ];
@@ -216,17 +215,6 @@ fn partition_of(p: &Path) -> Option<String> {
 
 fn is_partition_root(p: &Path) -> bool {
     p.components().skip(1).count() == 1
-}
-
-/// Parse `nm list` output into typed rules.
-///
-/// The parsing itself is [`crate::nm::parse_list`], which every reader of that
-/// text now shares -- this file's copy, `mount`'s and `absorb`'s had already
-/// drifted apart on how a line is split and which suffixes are peeled. Doctor
-/// keeps every row, whatever its kind: the partition-root check below has to see
-/// whiteouts and virtual dirs too, which the pre-typed parser dropped.
-fn parse_live(list: &str) -> Vec<LiveRule> {
-    crate::nm::parse_list(list)
 }
 
 /// Does the engine actually hold the rules the plan describes -- and nothing else?
@@ -756,29 +744,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         }
     }
 
-    // MODULE-LEVEL rollup, kept but inverted: with the policy flip nothing is
-    // declined, so the question is no longer "does this module work" but "how
-    // much detectable surface does it add". Reported per module because that is
-    // the unit a user installs and can uninstall.
-    let mut per_mod: HashMap<&str, usize> = HashMap::new();
-    for e in &plan {
-        if e.kind == PlanKind::Whiteout && crate::mount::whiteout_leaves_hole(&e.target) {
-            *per_mod.entry(e.module.as_str()).or_default() += 1;
-        }
-    }
-    let mut rolled: Vec<(&str, usize)> = per_mod.into_iter().collect();
-    rolled.sort_by_key(|(m, _)| *m);
-    for (module, n) in rolled {
-        f.push(Finding {
-            level: Level::Info,
-            check: "module hides where the hole remains",
-            detail: format!(
-                "{module} hides {n} path(s) the engine cannot fully mask (their folder spans several \
-             blocks). Uninstall it or move its targets if that matters."
-            ),
-        });
-    }
-
     // A target whose first two segments repeat a partition name -- /product/product,
     // /system/system -- is not something a module can mean. It comes from the
     // installer's partition handler moving `system/product` INTO an already-existing
@@ -1157,7 +1122,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let nm = Nm::new();
     let engine = nm.version().ok();
     let live_ok = engine.is_some();
-    let mut live_count = 0usize;
     // Apps hidden from the injections, and the live rules the PackageManager
     // advertises regardless -- the pair the opt-out check below is about.
     let hidden_apps = crate::blocklist::read().unwrap_or_default();
@@ -1190,7 +1154,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     }
     if live_ok {
         // `if let Ok(..)` with no else: an engine that answered `v` but would not
-        // ENUMERATE left live_count at 0, printed `live: 0 rules`, and skipped the
+        // ENUMERATE left the live rule count at 0, printed `live: 0 rules`, and skipped the
         // partition-root, FD-allowlist, size-mismatch and all three PM-published
         // checks -- rendering identically to "the engine has zero rules".
         let listed = nm.list();
@@ -1205,8 +1169,10 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             });
         }
         if let Ok(list) = listed {
-            let live = parse_live(&list);
-            live_count = live.len();
+            // Every row, whatever its kind: the partition-root check below has to
+            // see whiteouts and virtual dirs too, which the pre-typed parser this
+            // file used to carry dropped.
+            let live = crate::nm::parse_list(&list);
             // The comparison the header line only ever hinted at. The two
             // exemption lists are read here, and an unreadable one is passed
             // through as None rather than as an empty set -- the same distinction
@@ -1515,7 +1481,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // reconcile side by side and compared neither. On an OP15 it read `258
     // injects ... live: 261 rules` above a `0 errors, 0 warnings` summary. The
     // counts are facts now (returned below) and the comparison is a finding.
-    let _ = (live_ok, live_count);
 
     // Any module-backed mount still standing is an app-visible detection surface:
     // it is the one thing the mountless posture exists to deny, and after absorb
@@ -1783,7 +1748,7 @@ mod tests {
             inj("m", "/system/etc/a", "/data/adb/modules/m/system/etc/a"),
             inj("m", "/system/etc/served-by-nobody", "/data/adb/modules/m/system/etc/x"),
         ];
-        let live = parse_live(
+        let live = crate::nm::parse_list(
             "/system/etc/a -> /data/adb/modules/m/system/etc/a
              /system/etc/stray -> /data/adb/modules/gone/system/etc/stray
 ",
@@ -1802,7 +1767,7 @@ mod tests {
     #[test]
     fn durable_absorbed_and_per_uid_rules_are_not_unexplained() {
         let plan = vec![inj("m", "/system/etc/a", "/data/adb/modules/m/system/etc/a")];
-        let live = parse_live(
+        let live = crate::nm::parse_list(
             "/system/etc/a -> /data/adb/modules/m/system/etc/a
              /system/etc/hidden (whiteout)
              /product/app/X/X.apk -> /data/adb/rvhc/x.apk
@@ -1822,7 +1787,7 @@ mod tests {
     #[test]
     fn a_live_rule_naming_another_source_is_an_error() {
         let plan = vec![inj("winner", "/system/etc/a", "/data/adb/modules/winner/system/etc/a")];
-        let live = parse_live("/system/etc/a -> /data/adb/modules/loser/system/etc/a
+        let live = crate::nm::parse_list("/system/etc/a -> /data/adb/modules/loser/system/etc/a
 ");
         let empty = HashSet::new();
         let f = reconcile_plan_and_live(&plan, &live, Some(&empty), Some(&empty));
@@ -1836,7 +1801,7 @@ mod tests {
     #[test]
     fn an_unreadable_exemption_list_reports_nothing_extra() {
         let plan: Vec<PlanEntry> = Vec::new();
-        let live = parse_live("/system/etc/hidden (whiteout)
+        let live = crate::nm::parse_list("/system/etc/hidden (whiteout)
 ");
         let f = reconcile_plan_and_live(&plan, &live, None, None);
         assert_eq!(f.len(), 1);
@@ -1878,7 +1843,7 @@ mod tests {
     /// owns is the reading of those rows, exercised by the checks above.
     #[test]
     fn parse_live_still_yields_the_rows_the_checks_read() {
-        let v = parse_live(
+        let v = crate::nm::parse_list(
             "/product/x.apk -> /data/adb/modules/M/product/x.apk (public)\n\
              /system/y (whiteout)\n",
         );
