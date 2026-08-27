@@ -2,7 +2,8 @@
 
 > **WARNING:** NoMount operates directly at the kernel VFS layer and is intended for research and development. It's in beta — the full chain is tested end-to-end on a OnePlus 15 (Android 16, 6.12, SukiSU-Ultra), but edge cases are expected across other devices, ROMs, and kernels. Proceed with caution, and [open an issue](https://github.com/Bouteillepleine/nomount/issues) if something breaks.
 
-**NoMount** is a kernel-based file injection and path-redirection framework for Android, packaged as a **KernelSU / SukiSU metamodule**. It loads your root modules **without touching the mount table** — every kind of module content, RRO theming overlays included. There is no `overlayfs`, no `tmpfs` and no bind: the mount table stays 100% stock.
+**NoMount** is a kernel-based file injection and path-redirection framework for Android, packaged as a **KernelSU / SukiSU / APatch metamodule**, with a Magisk
+`post-fs-data` path for managers that have no metamodule support. It loads your root modules **without touching the mount table** — every kind of module content, RRO theming overlays included. There is no `overlayfs`, no `tmpfs` and no bind: the mount table stays 100% stock.
 
 Unlike traditional root solutions that rely on `mount --bind` (which pollutes `/proc/mounts`, changes mount namespaces, and is easily detected), NoMount's primary engine operates **purely at the VFS (Virtual File System) layer**. It manipulates path resolution and directory iteration directly inside the kernel, making injections effective yet virtually invisible to userspace detection.
 
@@ -115,7 +116,7 @@ survives reboots and is re-applied by the boot pass.
 | `nomount uid unblock <pkg\|uid>` | Re-show injections, and drop the entry from the persistent list. |
 | `nomount uid list` | The persistent list with each entry's resolved UID and state. |
 | `nomount uid apply [--early]` | Re-assert the list to the kernel (the mount pass clears the kernel's set). `--early` resolves from the cached appid mirror, for post-fs-data before `packages.list` is meaningful. |
-| `nomount uid preset [name] [--dry-run]` | Add a curated preset. `detectors` covers the known root/environment detectors; no argument lists what is available. |
+| `nomount uid preset [name] [--dry-run] [--globs]` | Add a curated preset. `detectors` covers the known root/environment detectors; no argument lists what is available. |
 | `nomount uid isolated [mode]` | Which isolated-process pools hiding covers: `both` (default) \| `appzygote` \| `platform` \| `off`. No argument shows the current setting. |
 
 ### Diagnostics
@@ -123,6 +124,7 @@ survives reboots and is re-applied by the boot pass.
 | Command | Description |
 | :--- | :--- |
 | `nomount check [--plan] [--device] [--json] [--write]` | **The** diagnostic. One report, one shape, two sections: `--plan` is the static half (does the module set resolve into a bad rule?), cheap and safe at post-fs-data; `--device` is the measured half (is what we serve detectable, and is it being served?). Neither flag runs both. Exits 1 when a check has FAILED or needs a reboot. `--write` caches the report to `audit.json` and the fingerprint to `health.txt`, which is what the WebUI and the module card read. |
+| `nomount plan` | Print what the mount pass would resolve to — target, kind, source, module — without applying anything. Read-only, and the only way to see a staged module's plan before it is ever served. |
 | `nomount snapshot` | Freeze the current fingerprint as the baseline for `verify`. |
 | `nomount verify` | Diff the live fingerprint against that baseline and name what drifted. |
 | `nomount export [dir]` | Dump diagnostics to a timestamped folder (default `/sdcard/Download`). |
@@ -132,8 +134,11 @@ Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`, `N/A` and `NOTE`.
 `UNMEASURED` and `N/A` are deliberately different: "nothing here to test" is not
 a warning, "something stopped me testing" is, and neither is ever a pass.
 
-`check` replaced `doctor`, `audit`, `posture`, `selfcheck` and `plan`. Those
-verbs no longer exist; see the changelog for the mapping.
+`check` replaced `doctor`, `audit`, `posture` and `selfcheck`; those four verbs
+are gone. `plan` was cut with them and then restored — it had no caller inside
+this repo, which is not the same as no caller, and the module test harness parses
+it to lint a staged module before it is ever applied. See the changelog for the
+mapping.
 
 ### Examples
 
@@ -175,8 +180,11 @@ A self-contained dashboard (root manager → NoMount → ⚙️): engine status 
 
 ## Requirements
 
-- Rooted device with **KernelSU** or **SukiSU** (metamodule support required), on **arm64**
-  — the zip ships an `arm64-v8a` binary only.
+- Rooted device on **arm64** — the zip ships an `arm64-v8a` binary only.
+  **KernelSU**, **SukiSU** or **APatch** with metamodule support is the primary
+  path; on **Magisk**, or a manager without metamodule support, `post-fs-data.sh`
+  runs the same pass instead. If neither path runs, the module says so loudly in
+  `boot.log` and on its card rather than doing nothing silently.
 - A kernel built with the **Prism** engine (`CONFIG_NOMOUNT=y`), from
   [`Bouteillepleine/kbuild@hookless`](https://github.com/Bouteillepleine/kbuild/tree/hookless).
   That branch is what the kernel builders apply and what the bundled `nm` client
@@ -187,12 +195,21 @@ A self-contained dashboard (root manager → NoMount → ⚙️): engine status 
 
 ## Compatibility
 
-| Android | Kernel | Root | Status |
-| :--- | :--- | :--- | :--- |
-| 16 | 6.12 | SukiSU-Ultra | ✅ Tested end-to-end (VFS + overlay + hiding) on OnePlus 15 |
-| 12–15 | 5.10 / 5.15 / 6.1 / 6.6 | KernelSU / SukiSU | 🧩 Kernel support in `kbuild@hookless`, not device-tested |
+| Kernel | Device | Status |
+| :--- | :--- | :--- |
+| 6.12 | OnePlus 15 | ✅ Boots, check clean, 258/258 rules verified |
+| 6.1 | OnePlus 13R | ✅ Boots, 261/261 rules verified |
+| 5.15 | OnePlus 11 | ✅ Boots, check clean, 118/118 rules verified |
+| 4.9 – 6.18 (others) | — | 🧩 Compiles; never booted |
 
-APatch metamodule hooks exist but are unverified. Tested another combo? Open an issue.
+Root managers: **KernelSU**, **SukiSU** and **APatch** via the metamodule hook;
+**Magisk** via `post-fs-data.sh`. The three tested devices above ran ReSukiSU.
+Tested another combo? Open an issue — `nomount export` produces a bundle with the
+hide list already redacted, which is the most useful thing to attach.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).
 
 ## Special thanks
 

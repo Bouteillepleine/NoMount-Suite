@@ -9,12 +9,37 @@ repo could drive any more: `nm` and `src/nm.rs` speak netlink only, so a kernel
 built from those patches answered no CLI command. The README's Requirements
 section still pointed users at it, 50 lines after the text saying it was dead.
 
+### Removed
+
+Older entries below still describe these. They are gone.
+
+- **WebUI "Tools" tab** — Spoofing, Cloak, Hidden paths, Foreign mounts. Per-UID
+  hiding moved to Status. Any "WebUI › Tools › …" pointer is stale.
+- **`spoof.sh`** — vbmeta/uname spoofing, 761 lines and ~38 KB per zip, inert by
+  default and carrying two unfixed digest defects. Its one live piece, the
+  `/data/local/tmp` permission restore, moved into the boot scripts and still
+  honours `fix_shell_tmp`. An existing `spoof.conf` is left alone.
+- **`pathhide`** — no longer applied. With rules loaded a hidden app showed zero
+  `/data/app` mappings in its own maps, against 13 and 45 for controls: it made
+  those apps easier to spot, not harder. An existing list is retired to
+  `pathhide.conf.disabled`.
+- **`scan.sh`** — scanned every installed APK on each boot to fill a cache whose
+  only reader was the deleted Cloak picker.
+
+### Findings graded by what a detector can do
+
+A tell nothing probes is no longer a failure. `erofs directory shape`,
+`readdir cookie magic`, `overlay dir inode range` and `injected inode band` moved
+FAIL → WARN; "directory holds only injected files" became a NOTE; a check that
+could not run is now `UNMEASURED`, so "I did not look" stops counting against a
+healthy device.
+
 ### Seven diagnostic verbs became one
 
-`doctor`, `audit`, `posture`, `selfcheck` and `plan` are **gone**, replaced by
-`nomount check`. They were five verbs over two verdict enums, three JSON shapes
-and a fourth `key=value` one, and the WebUI existed to merge all of it back into
-one list.
+`doctor`, `audit`, `posture` and `selfcheck` are **gone**, replaced by
+`nomount check`. They were verbs over two verdict enums, three JSON shapes and a
+fourth `key=value` one, and the WebUI existed to merge all of it back into one
+list. `plan` was dropped with them and then brought back — see the table.
 
 | was | now |
 | :--- | :--- |
@@ -22,7 +47,7 @@ one list.
 | `nomount audit [--json] [--write]` | `nomount check --device [--json] [--write]` |
 | `nomount selfcheck [--write] [--json]` | `nomount check --device [--json] [--write]` |
 | `nomount posture` | removed — its three mount checks are rows in the one report |
-| `nomount plan` | removed, no replacement (it had no caller anywhere) |
+| `nomount plan` | **restored.** Dropped here as having "no caller anywhere", which was true inside this repo and false outside it: the module test harness parses it to lint a staged module before it is ever applied, and nothing else can. |
 
 `check` with neither flag runs both sections. It exits 1 when, and only when,
 `summary.open_failures > 0` — the rule `audit` had, so the boot pass reads it the
@@ -34,8 +59,8 @@ to test" is not a warning, "something stopped me testing" is, and neither is eve
 a pass.
 
 `snapshot`, `verify` and `export` are unchanged. `snapshot` was kept where
-`posture` and `plan` were dropped because it answers a question `check`
-structurally cannot: not "is this device healthy now" but "has anything moved
+`posture` was dropped because it answers a question `check` structurally
+cannot: not "is this device healthy now" but "has anything moved
 since the boot I was happy with".
 
 ### The boot pass runs one measurement, not two
@@ -849,7 +874,14 @@ Audit fix pass over the v1.0.11-1.0.13 additions (dynamic resolver, my_* bind hy
   *settled* verdict; only a divergence that persists through the whole window —
   a real d_drop-style regression — reaches the card.
 
-## v2.1.0
+## v2.1.0 — superseded engine (historical)
+
+> **These notes describe the ORIGINAL `/dev/nomount` char-device engine and are
+> kept as a record, not as current behaviour.** Nothing below is true of the
+> Prism engine this Suite drives today: there is no `/dev/nomount` node, the
+> control plane is netlink, RRO overlays are injected hooklessly with **no
+> `overlayfs` and no tmpfs**, and SUSFS is optional and unused. The version
+> number also predates the 1.3.x line it sits below.
 
 First release of the reworked hybrid metamodule.
 
