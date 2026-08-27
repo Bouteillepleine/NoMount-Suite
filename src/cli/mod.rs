@@ -59,11 +59,14 @@ pub enum Commands {
     /// Is this setup sound, and is what it serves detectable? One report, one
     /// shape, two sections.
     ///
-    /// Replaces `doctor`, `audit`, `posture`, `selfcheck` and `plan`. Those were
-    /// five verbs over two verdict enums, three JSON shapes and a fourth
-    /// key=value one, and the WebUI merged all of it back into one list in
-    /// JavaScript -- which is what one list means. `posture` ran a strict SUBSET
-    /// of the device checks; `plan` had no caller anywhere.
+    /// Replaces `doctor`, `audit`, `posture` and `selfcheck`. Those were four
+    /// verbs over two verdict enums, three JSON shapes and a fourth key=value
+    /// one, and the WebUI merged all of it back into one list in JavaScript --
+    /// which is what one list means. `posture` ran a strict SUBSET of the device
+    /// checks, so it is gone for good. `plan` went with them and came BACK: it
+    /// had no caller inside this repo, which is not the same as no caller, and
+    /// the module test harness parses it to lint a staged module before it is
+    /// ever applied -- something nothing else can do.
     ///
     /// Verdicts are FAIL, REBOOT, UNMEASURED, WARN, PASS, N/A and NOTE. UNMEASURED
     /// and N/A are deliberately distinct: "nothing here to test" is not a warning,
@@ -88,11 +91,11 @@ pub enum Commands {
         #[arg(long)]
         write: bool,
     },
-    /// Gap-free hot load/unload: reconcile live rules to the current module set,
-    /// applying only the delta (no clear). Run after installing/removing a module.
     /// Print what the mount pass would do (resolved target, kind, source) without
     /// applying anything. Read-only.
     Plan,
+    /// Gap-free hot load/unload: reconcile live rules to the current module set,
+    /// applying only the delta (no clear). Run after installing/removing a module.
     Reload,
     /// Freeze the current healthy fingerprint as the baseline for `verify`.
     ///
