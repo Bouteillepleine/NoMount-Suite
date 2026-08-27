@@ -6623,18 +6623,26 @@ static void nm_nl_rcv(struct sk_buff *skb)
     netlink_rcv_skb(skb, &nm_nl_rcv_msg);
 }
 
-/*** uname override — write-through into init_uts_ns via /sys/kernel/nomount/ ***/
-/* Root-only (0600). A non-empty write that isn't the literal "default" replaces
- * that field in the initial UTS namespace, so every uname()/`/proc/version`
- * reader reflects it (Android apps share init's UTS ns). Empty/"default" = leave.
- * Built-in only (CONFIG_NOMOUNT=y): uts_sem/init_uts_ns are not exported. */
+/*** uname override — write-through into init_uts_ns, over the netlink knob ***/
+/* NM_KNOB_UNAME_RELEASE / _VERSION, i.e. `nm k r` / `nm k v`. There is no
+ * /sys/kernel/nomount/ and there never should be: the absence of a
+ * /sys/kernel/<name> kobject is one of the identity tells this driver closes
+ * deliberately (see the residual-surface note at the foot of this file).
+ * A non-empty value that isn't the literal "default" replaces that field in the
+ * initial UTS namespace, so every uname()/`/proc/version` reader reflects it
+ * (Android apps share init's UTS ns). Empty/"default" = leave alone.
+ * Built-in only (CONFIG_NOMOUNT=y): uts_sem/init_uts_ns are not exported.
+ * NOTE: the Suite does not drive this. It removed spoof.sh, its only caller,
+ * and ships no boot-time spoofing; these knobs are manual-only. */
 
 /* ---- /proc/cmdline + /proc/bootconfig spoofing --------------------------------
  * androidboot.* boot state (verifiedbootstate, lock, warranty, vbmeta.digest) lives in
  * /proc/cmdline and, on GKI, /proc/bootconfig. resetprop only moves the derived
  * ro.boot.* props, leaving these procfs sources contradicting them -- a detection tell.
  * A procfs seq-file has no backing inode to vtable-hijack, so on the first write to the
- * sysfs knob we take over the proc entry itself and serve the sanitized string. This
+ * netlink knob (NM_KNOB_CMDLINE / _BOOTCONFIG, `nm k c` / `nm k b` -- not a sysfs
+ * file; see above) we take over the proc entry itself and serve the sanitized string.
+ * The Suite does not write these either; they are manual-only. This
  * happens at post-fs-data (procfs long up), and init's early parse of the real kernel
  * command line is untouched. Empty write => passthrough (the real value). */
 static char *nm_fake_cmdline;
