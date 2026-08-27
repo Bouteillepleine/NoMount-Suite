@@ -980,17 +980,29 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             })
             .collect::<Vec<_>>()
             .join("; ");
+        // Info, not Warn. Creating a new directory under a ROM partition is one
+        // of the commonest module shapes there is, and this fires on every one of
+        // them -- a warning that common trains people to skip warnings. The
+        // measured "injected inode band" check covers the same ground and now
+        // passes correctly when a directory has no stock population to compare
+        // against; inferring the hazard from directory SHAPE on top of that is the
+        // infer-do-not-measure habit this tree deleted preflight.rs for.
+        //
+        // The partition-range assertion this used to make is also unsupported.
+        // Measured on a 6.1 device against every regular file under /system (2,801
+        // of them): stock inodes span 363..24,593,024 and 25 of our 27 sat inside
+        // it, the two outliers 0.4% and 2.5% above the maximum -- and that maximum
+        // is a floor, since directories and symlinks were not counted.
         f.push(Finding {
-            level: Level::Warn,
+            level: Level::Info,
             check: "directory holds only injected files",
             detail: format!(
                 "{list}. Injected files carry inode numbers from a band the ROM never \
                  allocates from, so a directory holding several of them and no stock file \
                  groups into one bucket that is entirely yours. Shipping into a directory \
-                 that already has stock content removes the tell. The measured \"injected \
-                 inode band\" check may call this not-applicable: it compares against stock \
-                 inodes in the SAME directory and there are none here, while a detector \
-                 comparing against the partition's range does not need them. Single-file \
+                 that already has stock content removes it. Whether those inodes also \
+                 stand out against the WHOLE partition depends on how tightly the ROM \
+                 packs them -- measured on one device, most did not. Single-file \
                  directories and app/priv-app/overlay containers are excluded — one inode \
                  is not a bucket, and an APK cannot share a directory."
             ),
