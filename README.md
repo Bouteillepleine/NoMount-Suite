@@ -207,9 +207,17 @@ Root managers: **KernelSU**, **SukiSU** and **APatch** via the metamodule hook;
 Tested another combo? Open an issue — `nomount export` produces a bundle with the
 hide list already redacted, which is the most useful thing to attach.
 
-## License
+## License and origin
 
 GPL-3.0. See [LICENSE](LICENSE).
+
+This is a modified derivative of
+**[maxsteeel/nomount](https://github.com/maxsteeel/nomount)**, and remains under
+its GPL-3.0 licence. The Suite and the Prism engine it drives are a rewrite: the
+original `/dev/nomount` char device and its ioctl control plane are gone,
+replaced by a per-inode ops hijack with a netlink control plane, and RRO overlays
+are injected hooklessly rather than mounted. Changes were made through 2026 by
+XxxY.
 
 ## Special thanks
 
