@@ -38,6 +38,17 @@ fn pass(name: &'static str, evidence: String) -> Check {
 fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Fail, evidence).oracle(oracle)
 }
+/// A real, measured inconsistency that nothing shipping actually probes.
+///
+/// Amber, not red, and the distinction is the Suite's whole posture: a FAIL on a
+/// user's device asserts "you are detectable", and for a tell no detector looks
+/// at that overclaims -- it teaches people to discount the row that does matter.
+/// The oracle string is still carried, because these stay the only regression
+/// canaries the engine layer has: if one fires, the engine really did produce an
+/// inconsistency and it is worth chasing, just not worth alarming a user over.
+fn soft(name: &'static str, evidence: String, oracle: &'static str) -> Check {
+    chk(name, Verdict::Warn, evidence).oracle(oracle)
+}
 /// "Does not apply here." Grey, never amber, never counted as a pass.
 fn na(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::NotApplicable, evidence)
@@ -465,7 +476,7 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
         pass("readdir cookie magic", format!("0 of {scanned} dirents carry the magic"))
             .meaning("Directory listings of injected folders look the same as the ROM's own.")
     } else {
-        fail(
+        soft(
             "readdir cookie magic",
             format!("{hits} of {scanned} dirents have 0x6e6d in the top 16 bits of d_off"),
             "one getdents64 on an injected directory identifies the engine, no root needed",
@@ -609,7 +620,7 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             format!("{examined} directory(ies): every injected inode shares a bucket with stock"),
         )
         .meaning("Injected files sit in the same numeric range as the ROM's own files."),
-        Some((dir, b, n)) => fail(
+        Some((dir, b, n)) => soft(
             "injected inode band",
             format!("{dir}: {n} injected inode(s) alone in the {}M bucket, no stock there", b),
             "bucket every inode in a directory and the all-ours band names the injections",
@@ -673,7 +684,7 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
         )
         .meaning("Folders the Suite creates carry identity numbers the ROM could plausibly issue.")
     } else {
-        fail(
+        soft(
             "overlay dir inode range",
             outliers.join("; "),
             "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
@@ -756,7 +767,7 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
              — no arithmetic trace.",
             )
     } else {
-        fail(
+        soft(
             "erofs directory shape",
             bad.join("; "),
             "st_size stops matching the listing, so a stat plus a getdents64 shows a name was \
