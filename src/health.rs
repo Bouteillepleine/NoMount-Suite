@@ -156,11 +156,23 @@ impl Fingerprint {
                 self.served_matches_rule.clone(),
             )
             .meaning("No rule had a comparable file at both ends, so this was not tested."),
+            // Two causes, and naming only the first misdiagnosed a real device.
+            // Measured on an OP11: ONE rule named the target, no second rule and
+            // no bind left in the mount table, yet the path served the stock file
+            // -- and a verbatim `nm add` of the same pair fixed it instantly. The
+            // rule was in the table but INERT, because it was registered while a
+            // module's own `mount --bind` still owned the dentry. So say both, and
+            // give the remedy that is actually safe: re-asserting a my_* rule at
+            // RUNTIME has rebooted a device (see absorb.rs), so the fix is to
+            // remove the owning module's bind and let the next boot register the
+            // rule with nothing shadowing it -- not to re-add it live.
             other => mk("served bytes match the rule", Verdict::Fail, other.to_string())
                 .meaning(
-                    "A path is serving content that is not what its rule points at -- two rules \
-                     hit one target and the table names one source while the filesystem serves \
-                     the other.",
+                    "A path serves content its own rule does not name. Either two rules hit one \
+                     target, or the rule was registered while another module's `mount --bind` \
+                     owned that path and never took effect. Check whether a module binds the \
+                     same path from its post-fs-data.sh: if one does, delete that bind and \
+                     reboot, and the rule will serve it with nothing shadowing it.",
                 )
                 .owner("the mount pass"),
         });

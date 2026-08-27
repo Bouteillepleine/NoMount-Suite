@@ -1265,11 +1265,20 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 if let Some(source) = &r.source {
                     if let (Ok(a), Ok(b)) = (fs::metadata(target), fs::metadata(source)) {
                         if a.is_file() && b.is_file() && a.len() != b.len() {
+                            // Name the likeliest cause, not just the two numbers.
+                            // Measured on an OP11: the rule was live in the table
+                            // and nothing else claimed the target, but a module's
+                            // own `mount --bind` had owned the path when the rule
+                            // was registered, so the injection never took and the
+                            // stock file kept being served. Two bare byte counts
+                            // left the user with nothing to act on.
                             f.push(Finding {
                                 level: Level::Warn,
                                 check: "size mismatch",
                                 detail: format!(
-                                    "{} is {} bytes, backing is {}",
+                                    "{} is {} bytes, backing is {} — the redirect is not being \
+                                     served. Usually a module binds this same path from its \
+                                     post-fs-data.sh: delete that bind and reboot.",
                                     target.display(),
                                     a.len(),
                                     b.len()
