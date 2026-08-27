@@ -212,7 +212,7 @@ pub fn add(target: &str, force: bool) -> Result<()> {
             "nomount: note - hiding {t} leaves a measurable hole: its parent is a multi-block \
              erofs directory (or the engine predates v13), so the size and link count still \
              count this entry and the engine cannot recompute them. Applying anyway; \
-             `nomount doctor` lists every such path."
+             `nomount check --plan` lists every such path."
         );
     }
     if !p.exists() {

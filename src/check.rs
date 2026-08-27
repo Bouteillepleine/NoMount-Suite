@@ -7,9 +7,11 @@
 //! stringly typed on top of that ("ok" | "mismatch:<path>(...)" | "unchecked").
 //! The tell was in the WebUI: `mergeFindings` existed only to normalise three
 //! report shapes into one list in JavaScript, because one list is what a reader
-//! wants. Two of the seven were pure duplication — `posture` ran a strict subset
-//! of `audit`'s checks, and `plan` had no caller anywhere, not in the module
-//! scripts, not in the WebUI, not in the docs.
+//! wants. `posture` was pure duplication — a strict subset of `audit`'s checks —
+//! and is gone for good. `plan` was cut on the same reasoning and it was WRONG:
+//! it had no caller in this repo, which is not the same as no caller. The module
+//! test harness parses its output to lint a staged module before it is ever
+//! applied, and nothing else can do that, so `plan` is back.
 //!
 //! What is NOT collapsed is the distinction that earns its keep:
 //!

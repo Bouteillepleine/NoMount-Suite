@@ -657,11 +657,11 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     if shared {
         // Name what was ACTUALLY withheld: the PRIVATE set (uidhide*, spoof.conf) --
         // NOT blocklist, which is now only module ids to skip and is included. The
-        // rules.txt UID suffixes and doctor's hide-list names were redacted in place.
+        // rules.txt UID suffixes and the check report's hide-list names were redacted in place.
         println!(
             "note: {} were left out — {out} is shared storage, readable by any app with a \
              storage permission, and they name the apps you are hiding from (rules.txt UID \
-             suffixes and doctor's hide-list names were redacted). Pass a private path to \
+             suffixes and the check report's hide-list names were redacted). Pass a private path to \
              include them in full: nomount export /data/adb/nomount",
             PRIVATE.join(", ")
         );

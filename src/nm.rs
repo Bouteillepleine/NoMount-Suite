@@ -95,7 +95,7 @@ impl Nm {
     /// crash for whichever module it serves. The flag is safe to set broadly --
     /// the kernel strips it from any rule that turns out to shadow a stock file,
     /// so only an ADDED APK is ever exempted, and an engine older than 15 drops
-    /// it with every other unknown bit (`nomount doctor` reports that case).
+    /// it with every other unknown bit (`nomount check --plan` reports that case).
     pub fn add(&self, virtual_path: &Path, real: &Path) -> Result<()> {
         let public = crate::pmcache::is_pm_published(virtual_path);
         self.add_flagged(virtual_path, real, public)

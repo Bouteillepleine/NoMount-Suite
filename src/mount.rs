@@ -431,7 +431,7 @@ pub(crate) enum PlanKind {
 
 /// One intended operation, resolved but not yet applied.
 ///
-/// Separating "what we would do" from "doing it" is what lets `nomount doctor`
+/// Separating "what we would do" from "doing it" is what lets `nomount check --plan`
 /// lint the exact same decisions the mount pass will make, before a reboot
 /// turns a bad rule into a bootloop.
 pub(crate) struct PlanEntry {
@@ -858,7 +858,7 @@ fn warn_whiteout_hole(target: &Path, module: &str) {
             "nomount: applying whiteout {} from {module}: its parent is multi-block erofs (or \
              the engine predates v13), so the size and link count still count the hidden entry \
              and cannot be recomputed. Applied because declining it would make {module} a \
-             no-op; see `nomount doctor`.",
+             no-op; see `nomount check --plan`.",
             target.display()
         );
     }
