@@ -179,12 +179,15 @@ void c_main(long *sp) {
          * /proc/cmdline, `nm k dir` flipped the directory-shape knob, `nm k boot
          * ...` rewrote /proc/bootconfig -- each from a word that was never a knob
          * name, and each exiting 0. Every caller in the tree passes the bare
-         * letter (spoof.sh's nm_knob r|v|c|b, service.sh / customize.sh / the
-         * WebUI's `nm k p`, nm.rs's `k i` and `k d`), so the letters are the whole
-         * vocabulary; anything else is refused rather than guessed at.
+         * letter (service.sh / customize.sh / the WebUI's `nm k p`, nm.rs's
+         * `k i` and `k d`), so the letters are the whole vocabulary; anything
+         * else is refused rather than guessed at.
          *
-         *   r/v -- uname release / version override
-         *   c/b -- sanitized /proc/cmdline / /proc/bootconfig
+         *   r/v -- uname release / version override.  c/b -- sanitized
+         *     /proc/cmdline / /proc/bootconfig.  The KERNEL still implements all
+         *     four; the Suite does NOT drive them and provides no boot-time
+         *     spoofing. spoof.sh, the only thing that ever wrote them, is gone.
+         *     They stay reachable by hand and have no automatic caller.
          *   d <0|1> -- this device's ROM dirs are dirent-packed (erofs-shaped),
          *     so a synthesized dir must report the formula rather than 4096.
          *     Measured by the Suite; see NM_KNOB_VDIR_EROFS_SIZE.
