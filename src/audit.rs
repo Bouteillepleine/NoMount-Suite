@@ -124,15 +124,6 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
 
 // ------------------------------------------------------------------- helpers
 
-/// Live INJECTION targets.
-///
-/// Deliberately not every rule: a whiteout's whole job is to make its target
-/// absent from the parent's listing, so feeding one to a check that asserts
-/// "this name appears in getdents" turns a working whiteout into a failure. The
-/// hand-rolled token split this replaced could not tell the kinds apart, so any
-/// device with a debloat module (or a hand-written `nomount whiteout add`) would
-/// have reported a fabricated "readdir ino vs stat ino" FAIL on the audit users
-/// are told to trust. Route through the shared typed parser instead.
 /// The directories the ENGINE materialised itself, as `nm list` reports them.
 ///
 /// Not injects, so `live_targets` drops them -- but they are ours, and any check
@@ -147,6 +138,15 @@ fn live_engine_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Live INJECTION targets.
+///
+/// Deliberately not every rule: a whiteout's whole job is to make its target
+/// absent from the parent's listing, so feeding one to a check that asserts
+/// "this name appears in getdents" turns a working whiteout into a failure. The
+/// hand-rolled token split this replaced could not tell the kinds apart, so any
+/// device with a debloat module (or a hand-written `nomount whiteout add`) would
+/// have reported a fabricated "readdir ino vs stat ino" FAIL on the audit users
+/// are told to trust. Route through the shared typed parser instead.
 fn live_targets() -> Option<Vec<PathBuf>> {
     // `unwrap_or_default()` used to sit on this call, which made a REFUSED dump
     // indistinguishable from "the engine has no rules". `version` is a separate

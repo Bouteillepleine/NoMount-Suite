@@ -778,10 +778,6 @@ fn parse_absorbed_pairs(body: &str) -> Vec<(PathBuf, PathBuf)> {
         .collect()
 }
 
-/// Re-serve the absorbed APK rules recorded by a previous run.
-///
-/// Skips a target already served and a source that has gone (module uninstalled),
-/// so a stale record cannot resurrect a rule pointing at nothing.
 /// Label an APK the Suite serves so the app can actually read it.
 ///
 /// An app runs as untrusted_app and can read `apk_data_file`, not
@@ -825,6 +821,10 @@ fn label_apk_readable(p: &Path) -> bool {
     true
 }
 
+/// Re-serve the absorbed APK rules recorded by a previous run.
+///
+/// Skips a target already served and a source that has gone (module uninstalled),
+/// so a stale record cannot resurrect a rule pointing at nothing.
 pub fn reapply_absorbed(nm: &Nm) -> u32 {
     reapply_absorbed_pairs(nm, &absorbed_pairs())
 }
@@ -983,10 +983,6 @@ pub(crate) fn umount_detach(p: &Path) -> bool {
     unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) == 0 }
 }
 
-/// Inject `source` at `target`. A directory bind is expanded to one rule per
-/// file rather than a single directory rule: a directory rule REPLACES the stock
-/// directory, hiding every entry the module did not ship, which is the same
-/// whole-partition masking that bootloops zygote.
 /// Is `target` already serving `source`? Compared by SIZE ALONE.
 ///
 /// mtime is deliberately NOT compared. An injection mirrors the STOCK file's
@@ -1012,16 +1008,6 @@ fn already_serving(target: &Path, source: &Path) -> bool {
     t.len() == s.len()
 }
 
-/// Serve `source` at `target`, recording each (target, source) pair actually
-/// served into `out`, and returning how many adds FAILED.
-///
-/// Errors are accumulated, not propagated with `?`: the bind is already unmounted
-/// by the time this runs, so bailing on the first failed `nm.add` would leave the
-/// rest of a directory's files reverted to stock. Serve as much as possible and
-/// let the caller report the count. `out` carries the (target, source) PAIRS so
-/// the caller can record a directory bind's children -- the old code returned bare
-/// child targets and the caller then matched them against the parent candidate,
-/// recording nothing for a directory bind (M-S12).
 /// `nm add`, but guaranteed to re-point a target that already has a rule.
 ///
 /// A plain `add` over a live rule re-points correctly when the target sits in a
@@ -1105,6 +1091,21 @@ fn live_injects(nm: &Nm) -> LiveMap {
         .unwrap_or_default()
 }
 
+/// Inject `source` at `target`. A directory bind is expanded to one rule per
+/// file rather than a single directory rule: a directory rule REPLACES the stock
+/// directory, hiding every entry the module did not ship, which is the same
+/// whole-partition masking that bootloops zygote.
+///
+/// Records each (target, source) pair actually served into `out`, and returns how
+/// many adds FAILED.
+///
+/// Errors are accumulated, not propagated with `?`: the bind is already unmounted
+/// by the time this runs, so bailing on the first failed `nm.add` would leave the
+/// rest of a directory's files reverted to stock. Serve as much as possible and
+/// let the caller report the count. `out` carries the (target, source) PAIRS so
+/// the caller can record a directory bind's children -- the old code returned bare
+/// child targets and the caller then matched them against the parent candidate,
+/// recording nothing for a directory bind (M-S12).
 fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>,
           live: &LiveMap) -> u32 {
     let mut failed = 0u32;
@@ -1139,7 +1140,6 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
     failed
 }
 
-/// `nomount absorb [--dry-run]`.
 /// The package an installed-APK path belongs to: `/data/app/~~a==/com.foo-b==/base.apk`
 /// yields `com.foo`. The trailing `-<hash>` (or `-1` on the old layout) is the
 /// install generation, and it is exactly what changes when the app updates.
@@ -1540,6 +1540,8 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
     st
 }
 
+/// `nomount absorb [--dry-run]`.
+///
 /// `early` is the post-fs-data pass. See `Commands::Absorb::early`: it exists
 /// solely to widen what may be taken over to include `my_*` targets, and nothing
 /// else about the run changes. Deliberately NOT pushed down into

@@ -432,13 +432,6 @@ pub(crate) struct PlanEntry {
     pub kind: PlanKind,
 }
 
-/// Recursively resolve a module subtree rooted at `dir` into plan entries.
-/// `.replace`/char-device markers become whiteouts; every other file — including
-/// RRO overlay APKs — becomes a hookless redirect. Symlinks are treated as files
-/// (file_type does not follow). RRO overlay dirs are NOT special-cased: their APKs
-/// are hookless-injected into e.g. `/product/overlay`, and OverlayManagerService +
-/// idmap2 pick them up at the system_server scan (which runs after this
-/// post-fs-data pass). So RRO works with no overlayfs mount — zero mounts total.
 /// Expand a "replace this directory" marker into rules the engine actually has.
 ///
 /// `.replace` and `trusted.overlay.opaque=y` both mean the same thing: the
@@ -602,6 +595,13 @@ pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Col
     (kept, collisions)
 }
 
+/// Recursively resolve a module subtree rooted at `dir` into plan entries.
+/// `.replace`/char-device markers become whiteouts; every other file — including
+/// RRO overlay APKs — becomes a hookless redirect. Symlinks are treated as files
+/// (file_type does not follow). RRO overlay dirs are NOT special-cased: their APKs
+/// are hookless-injected into e.g. `/product/overlay`, and OverlayManagerService +
+/// idmap2 pick them up at the system_server scan (which runs after this
+/// post-fs-data pass). So RRO works with no overlayfs mount — zero mounts total.
 fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
     // Sorted, not raw readdir order. Two modules may claim the same target (doctor
     // reports it as "target claimed twice"), and the LAST plan entry wins -- which
@@ -754,19 +754,6 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
     }
 }
 
-/// Build the full plan for every enabled, non-blocklisted module.
-/// Returns the entries plus how many modules were skipped by the blocklist.
-/// A module whiteout is skipped unless it hides cleanly.
-///
-/// `.replace` and Magisk's char-device marker both ask us to make a stock entry
-/// disappear, and off overlayfs that leaves the parent directory describing an
-/// entry that is no longer listed (see [`crate::whiteout`]). Applying it anyway
-/// would put a measurable hole on the device with nothing about it in any output
-/// the user reads, so the default is to decline and say why.
-///
-/// The override is the durable list rather than a new switch: a path the user
-/// added with `nomount whiteout add <path> --force` is a decision already made,
-/// so honour it here too.
 /// Drop any mount sitting on a target we are about to serve.
 ///
 /// Injecting d_drops the cached dentry for that name, and a mount hangs off a
@@ -855,6 +842,9 @@ fn warn_whiteout_hole(target: &Path, module: &str) {
     }
 }
 
+/// Build the full plan for every enabled, non-blocklisted module.
+/// Returns the entries plus how many modules were skipped by the blocklist.
+///
 /// `Err` when the module tree could not be ENUMERATED, which is not the same as
 /// "there are no modules". `run_mount` calls this, then `nm clear()`, then applies
 /// the result -- so an empty-on-error plan wiped every rule and printed

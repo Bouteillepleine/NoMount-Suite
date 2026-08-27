@@ -89,10 +89,6 @@ fn is_mounted(target: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Copy `target`'s SELinux label onto `source`, so the bound file reports the
-/// partition's context (e.g. `system_file`) instead of `adb_data_file` -- without
-/// this an app reading the my_* file hits an avc denial. Fails hard: a mislabeled
-/// override is worse than none (broken read + a detection tell).
 /// Read a path's SELinux label, if it has one.
 ///
 /// `lgetxattr`, never `getxattr`. Both `source` and `target` here are
@@ -123,10 +119,15 @@ fn restore_selinux(p: &Path, label: &[u8]) {
     }
 }
 
-/// Copy `target`'s label onto `source`. Both ends use the `l`-prefixed calls --
-/// the write side is the one that turns a module symlink into an arbitrary-file
-/// relabel, and the read side would otherwise report a label the bind will not
-/// actually serve. See [`read_selinux`].
+/// Copy `target`'s SELinux label onto `source`, so the bound file reports the
+/// partition's context (e.g. `system_file`) instead of `adb_data_file` -- without
+/// this an app reading the my_* file hits an avc denial. Fails hard: a mislabeled
+/// override is worse than none (broken read + a detection tell).
+///
+/// Both ends use the `l`-prefixed calls -- the write side is the one that turns a
+/// module symlink into an arbitrary-file relabel, and the read side would
+/// otherwise report a label the bind will not actually serve. See
+/// [`read_selinux`].
 fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     let (sc, tc) = (cstr(source)?, cstr(target)?);
     let name = SELINUX_XATTR.as_ptr() as *const libc::c_char;
