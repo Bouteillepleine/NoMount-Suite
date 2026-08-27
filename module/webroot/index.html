@@ -138,7 +138,7 @@
     text-shadow: none;
   }
 
-  /* collapsible cards (Tools accordion) */
+  /* collapsible cards  */
   .card-h.clp { cursor: pointer; user-select: none; transition: transform .1s ease; }
   .card-h.clp:active { transform: scale(0.985); }
   .card-h .chev { margin-left: auto; flex: none; color: var(--muted); font-size: 17px; line-height: 1; transition: transform .2s; }
@@ -473,7 +473,6 @@
   .blk .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
   .blk .bn { flex: 1 1 auto; min-width: 0; font-size: 13px; word-break: break-all; }
   .blk .bs { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
-  .blk.live    .dot { background: var(--acc2, #57e6c3); }
   .blk.live    .bs  { color: var(--acc2, #57e6c3); }
   .blk.pending .dot, .blk.drift .dot { background: var(--warn, #d9a441); }
   .blk.live .dot { background: var(--ok); }
@@ -1992,7 +1991,12 @@
       if (!isShown(c.verdict)) return;
       lines.push("[" + String(c.verdict).toUpperCase() + "] " + c.name + " (" + c.section + ")");
       if (c.owner) lines.push("  from: " + c.owner);
-      lines.push("  measured: " + c.evidence);
+      // Redact the numeric appid the same way the note rows are dropped above.
+      // A FAIL or UNMEASURED row's evidence carries "uid 10245 (hidden)", which
+      // names a hidden app just as surely as the package string does -- and this
+      // text is headed for a bug thread. `nomount export` already withholds it
+      // under NM_REDACT_HIDE_LIST; the clipboard is the same destination.
+      lines.push("  measured: " + String(c.evidence).replace(/uid \d+ \(hidden\)/g, "uid <redacted> (hidden)"));
       lines.push("");
     });
     const text = lines.join("\n");
@@ -2034,9 +2038,15 @@
     // broken root on real devices.
     if (!ranSection(r, "plan")) {
       el.hidden = false;
-      el.innerHTML = "⚠️ Your root manager’s <b>Kernel umount</b> switch was not checked " +
-        "(<code>nomount check --plan</code> has not run). Check it is OFF by hand — nothing here " +
-        "is a mount, so it hides nothing the Suite serves, and it has broken root on real devices.";
+      // Not checked is not the same as wrong, and it must not LOOK the same. This
+      // arm fires on a fresh install and whenever the cached report is missing,
+      // so a warning here puts a standing amber banner on every tab about a
+      // setting nothing has measured -- which is how people learn to skip
+      // banners. State it plainly; the arm below, where the switch is measured
+      // and ON, is the one that gets to be loud.
+      el.innerHTML = "Your root manager’s <b>Kernel umount</b> switch has not been checked yet " +
+        "(<code>nomount check --plan</code> has not run). Nothing here is a mount, so that " +
+        "switch hides nothing the Suite serves either way.";
       return;
     }
     if (checkById("manager-kernel-umount-on")) {

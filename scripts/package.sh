@@ -169,7 +169,6 @@ SCRIPTS=(
     post-mount.sh
     service.sh
     spoof.sh
-    scan.sh
     uidscan.sh
     uidwatch.sh
     # Shipped, or removing the Suite leaves the bindhosts mode_override.sh

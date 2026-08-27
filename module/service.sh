@@ -364,11 +364,6 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
     fi
 fi
 
-# Pre-build the Cloak Xposed-module cache in the background so the WebUI opens
-# instantly (reads the cache) instead of scanning ~all installed APKs on open.
-[ -f /data/adb/modules/meta-nomount/scan.sh ] && \
-    (sh /data/adb/modules/meta-nomount/scan.sh >/dev/null 2>&1 &)
-
 # --- /data/local/tmp: re-assert after boot ---
 # spoof.sh already normalized it at post-fs-data, but ksud and adbd stage files
 # there for the whole of boot and can put the mode/owner back.

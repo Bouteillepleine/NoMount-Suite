@@ -206,7 +206,6 @@ ui_print "  config: $CONF"
 [ -f "$MODPATH/uninstall.sh" ] && set_perm "$MODPATH/uninstall.sh" 0 0 0755
 
 # --- Cloak (pathhide maps/fd) add-on ---
-[ -f "$MODPATH/scan.sh" ] && set_perm "$MODPATH/scan.sh" 0 0 0755
 # The Cloak picker that populated this file is gone, and the boot loop that
 # enforces it is not -- so an upgrading user would keep an ACTIVE cloak with no
 # UI to manage it and nothing that reports it (`nomount check` has no pathhide
