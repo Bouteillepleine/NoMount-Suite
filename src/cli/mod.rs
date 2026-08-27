@@ -90,6 +90,9 @@ pub enum Commands {
     },
     /// Gap-free hot load/unload: reconcile live rules to the current module set,
     /// applying only the delta (no clear). Run after installing/removing a module.
+    /// Print what the mount pass would do (resolved target, kind, source) without
+    /// applying anything. Read-only.
+    Plan,
     Reload,
     /// Freeze the current healthy fingerprint as the baseline for `verify`.
     ///

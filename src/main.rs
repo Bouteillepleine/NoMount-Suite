@@ -39,6 +39,7 @@ fn main() -> Result<()> {
         Commands::Check { plan, device, json, write } => {
             check::run_check(plan, device, json, write)
         }
+        Commands::Plan => mount::run_plan(),
         Commands::Reload => mount::run_reload(),
         Commands::Absorb { dry_run, include_dirs, early } => {
             absorb::run_absorb(dry_run, include_dirs, early)
