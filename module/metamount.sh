@@ -65,7 +65,12 @@ chmod 0600 "$BOOTLOG" 2>/dev/null
 # (a guard trip is still a boot where the hook ran), and let service.sh say so
 # when the stamp is missing. post-fs-data.sh writes the same file on the Magisk
 # path, so the reader needs no manager detection.
-date +%s > "$NMDIR/mountpass.ts" 2>/dev/null
+# The stamp is the KERNEL BOOT ID, not a timestamp. Both entry points run at
+# post-fs-data, before the RTC is applied, so `date +%s` here returns a 1970
+# value that no later epoch comparison can ever accept -- which made this check
+# accuse a perfectly working manager on every single boot. boot_id is unique per
+# boot and immune to the clock.
+cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null
 
 nmlog() {
     echo "nomount: $*" > /dev/kmsg 2>/dev/null
@@ -441,18 +446,18 @@ if command -v ksud >/dev/null 2>&1; then
     [ -n "$_vf" ] && _list="vfs:$_vf"
     [ -n "$_ov" ] && _list="$_list${_list:+ | }overlay:$_ov"
     if [ -f "$NMDIR/disabled" ]; then
-        _desc="[NoMount ⛔ disabled] bootloop guard tripped — open WebUI › Tools › Last incident"
+        _desc="[NoMount ⛔ disabled] bootloop guard tripped — open the NoMount WebUI"
     elif [ "$_engine_ran" = 0 ]; then
         # This block is NOT gated on [ -x "$BIN" ], so it used to render the green
         # card even on the boot where the engine never ran. It is the only surface
         # most users ever read; it must not claim a posture nothing established.
-        _desc="[NoMount ⛔ engine did not run] the mount pass never executed this boot — open WebUI › Tools › Last incident"
+        _desc="[NoMount ⛔ engine did not run] the mount pass never executed this boot — open the NoMount WebUI"
     elif [ "${_rules:-0}" = 0 ]; then
         # ✅ next to "0 rules" is a contradiction the reader has to catch for
         # themselves. The engine ran, so this is not ⛔ — but it served nothing,
         # and a green tick on a boot that injected nothing is the same false
         # green, one branch further down.
-        _desc="[NoMount ⚠️ 0 rules] engine ran but injected nothing — open WebUI › Tools › Health"
+        _desc="[NoMount ⚠️ 0 rules] engine ran but injected nothing — open the NoMount WebUI"
     else
         _desc="[NoMount ✅ $_rules rules · $_rro RRO · $_mods modules] fully mountless — hookless VFS + RRO, no overlayfs, su via sucompat${_list:+. $_list}"
     fi

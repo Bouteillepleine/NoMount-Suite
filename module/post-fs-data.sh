@@ -40,7 +40,12 @@ fi
 # Magisk path: THIS script is the mount pass, so it writes the same stamp
 # metamount.sh does. service.sh then needs no manager detection to tell "a boot
 # entry point ran" from "nothing ran at all".
-date +%s > "$NMDIR/mountpass.ts" 2>/dev/null
+# The stamp is the KERNEL BOOT ID, not a timestamp. Both entry points run at
+# post-fs-data, before the RTC is applied, so `date +%s` here returns a 1970
+# value that no later epoch comparison can ever accept -- which made this check
+# accuse a perfectly working manager on every single boot. boot_id is unique per
+# boot and immune to the clock.
+cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null
 
 # Bounded exec (see metamount.sh). On a device without toybox `timeout` a bare
 # `timeout 60 cmd` does not run the command unbounded, it does not run it at all

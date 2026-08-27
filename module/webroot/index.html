@@ -2136,11 +2136,22 @@
     $("incidentout").textContent = txt;
     const el = $("incwarn");
     if (el) {
+      // incident.log is a SAVED record, and it is written for more than one
+      // reason -- a guard trip, or a boot where the mount pass never ran. Saying
+      // "nothing is being injected" purely because the file exists put that claim
+      // on screen directly above a card reporting 258 live rules and four modules
+      // served. Ask the device what is true NOW, and only make the strong claim
+      // when it holds.
+      const dr = await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0");
+      const off = ((dr && dr.stdout) || "").trim() === "1";
+      const btn = '<button class="act" style="flex:none;min-width:0;padding:11px 15px;' +
+        'font-size:12px;margin-left:8px" onclick="openDetail()">See what happened</button>';
       el.hidden = false;
-      el.innerHTML = "\u26a0\ufe0f The bootloop guard tripped and disabled the Suite on an earlier " +
-        "boot. <b>Nothing is being injected</b> until you re-arm it. " +
-        '<button class="act" style="flex:none;min-width:0;padding:11px 15px;font-size:12px;margin-left:8px" ' +
-        'onclick="openDetail()">See what happened</button>';
+      el.innerHTML = off
+        ? "\u26a0\ufe0f The bootloop guard tripped and disabled the Suite. " +
+          "<b>Nothing is being injected</b> until you re-arm it. " + btn
+        : "\u26a0\ufe0f An earlier boot recorded an incident. The Suite is running now \u2014 " +
+          "this is a saved record, not current state. " + btn;
     }
   }
   async function clearIncident(btn) {

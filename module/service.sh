@@ -138,15 +138,15 @@ fi
 # no kmsg line, no boot.log entry, no incident.log and no card -- a failure the
 # user cannot even report, because there is nothing to paste.
 #
-# Same freshness rule as health.txt, and the same fail-closed treatment: if the
-# boot epoch is unknowable we say nothing rather than accuse a working manager.
+# Matched on the KERNEL BOOT ID, not on an epoch. Both entry points stamp before
+# the RTC is applied, so their `date +%s` was a 1970 value and the old
+# "stamp >= boot epoch" test failed on EVERY boot -- reporting "the mount pass
+# never ran" on a device that had just injected 258 rules. Fail closed the same
+# way: if boot_id is unreadable we say nothing rather than accuse a working manager.
 _hookran=1
-if [ "$_epoch_known" = 1 ]; then
-    _mpts=$(cat "$NMDIR/mountpass.ts" 2>/dev/null)
-    case "$_mpts" in
-        ''|*[!0-9]*) _hookran=0 ;;
-        *) [ "$_mpts" -ge "$_bootepoch" ] || _hookran=0 ;;
-    esac
+_bootid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+if [ -n "$_bootid" ]; then
+    [ "$(cat "$NMDIR/mountpass.ts" 2>/dev/null)" = "$_bootid" ] || _hookran=0
 fi
 if [ "$_hookran" = 0 ]; then
     nmlog "⛔ the mount pass NEVER RAN this boot — nothing was injected. On KernelSU this means the manager has no metamodule support (metamount.sh is never invoked); on Magisk it means post-fs-data.sh did not run."
@@ -806,11 +806,11 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
         # number on this card describes a device that is serving nothing, and
         # naming a symptom ("0 rules") instead of the cause sends the reader
         # looking in the wrong place.
-        _health="⛔ the mount pass never ran — see WebUI › Tools › Last incident"
+        _health="⛔ the mount pass never ran — see the Last incident card"
     elif [ "$_consbad" = 1 ]; then
-        _health="⚠️ per-UID inconsistency — see WebUI › Tools"
+        _health="⚠️ per-UID inconsistency — see the NoMount WebUI"
     elif [ "${_err:-0}" -gt 0 ]; then
-        _health="⚠️ $_err error(s) — see WebUI › Tools"
+        _health="⚠️ $_err error(s) — see the NoMount WebUI"
     elif [ "${_wrn:-0}" -gt 0 ]; then
         _health="$_wrn warning(s)"
     elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
