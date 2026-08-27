@@ -36,6 +36,23 @@ Older entries below still describe these. They are gone.
   exists).
 - **`NOMOUNT_NL_VERSION`** — a generic-netlink leftover, referenced by neither
   the kernel nor the client.
+- **The boot-identity knobs and the pathhide forwarder, in the KERNEL too**
+  (`kbuild@hookless`). Retired: the uname release/version override, the
+  `/proc/cmdline` + `/proc/bootconfig` takeover, and the `_pathhide` control
+  forwarder and dump — 314 lines of driver, plus four includes nothing else
+  needed. `nm` loses the letters `r`, `v`, `c`, `b` and `p`.
+
+  Their enum SLOTS are reserved, not deleted. A knob is a raw `u32` at payload
+  offset 0 and a command travels as `NLMSG_MIN_TYPE + cmd`, so renumbering would
+  silently remap every knob and command below them for any `nm` already on a
+  device — `nm k d 1` would arrive as something else entirely. Slots 0-3 and 6
+  (knobs) and 10 (command) are reserved and will not be reused.
+
+  The `16:` capability claim in `nomount.h` is retracted in place rather than
+  removed, and `NOMOUNT_VERSION` stays 26: an engine reporting >= 16 no longer
+  implies pathhide support, but 17 and above still make claims that hold.
+  Validated by the ten-version compile matrix (4.9 through 6.18), zero warnings
+  at `W=1`.
 - **`spoof.log`** from `nomount export` — nothing has written it since `spoof.sh`
   was removed.
 - **`scan.sh`** — scanned every installed APK on each boot to fill a cache whose

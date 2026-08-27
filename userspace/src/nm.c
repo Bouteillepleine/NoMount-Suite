@@ -175,31 +175,27 @@ void c_main(long *sp) {
          * `k i` and `k d`), so the letters are the whole vocabulary; anything
          * else is refused rather than guessed at.
          *
-         *   r/v -- uname release / version override.  c/b -- sanitized
-         *     /proc/cmdline / /proc/bootconfig.  The KERNEL still implements all
-         *     four; the Suite does NOT drive them and provides no boot-time
-         *     spoofing. spoof.sh, the only thing that ever wrote them, is gone.
-         *     They stay reachable by hand and have no automatic caller.
+         *   Slots 0..3 (uname release/version, /proc/cmdline, /proc/bootconfig)
+         *     and slot 6 (_pathhide) are RETIRED -- no letter reaches them and
+         *     the kernel no longer implements them. The ordinals are reserved
+         *     rather than reused: the knob is a raw u32 on the wire, so a new
+         *     letter in an old slot would mean something different to an nm
+         *     binary built before the change.
          *   d <0|1> -- this device's ROM dirs are dirent-packed (erofs-shaped),
          *     so a synthesized dir must report the formula rather than 4096.
          *     Measured by the Suite; see NM_KNOB_VDIR_EROFS_SIZE.
          *   i <0..3> -- which isolated-process pools per-UID hiding covers:
          *     1 = app-zygote, 2 = platform, 3 = both (default), 0 = neither.
          *     See NM_KNOB_HIDE_ISOLATED for the trade this expresses.
-         *   p <cmd> -- one _pathhide control command: "+needle" adds, "~needle"
-         *     removes, "-" clears. `nm k p` with NO value is a presence probe
-         *     that exits 0 only when the pathhide patch set is compiled in; it is
-         *     not a clear. See NM_KNOB_PATHHIDE.
          *   g <cmd> -- one _ghost control command: "p+/abs/path" / "p~/abs/path"
          *     / "p-" for the hidden-path table, "u+<uid>" / "u~<uid>" / "u-" for
-         *     the hidden-uid table. Same presence-probe rule as p: `nm k g` with
+         *     the hidden-uid table. `nm k g` with
          *     NO value exits 0 only when _ghost is compiled in AND the engine is
          *     >= v26 (below that the knob does not exist and the kernel answers
          *     -EINVAL). _ghost's guards are dead code until BOTH tables are
          *     populated, so this knob is what makes them live. */
         static const struct { const char *name; int knob; } nm_knobs[] = {
-            { "r", 0 }, { "v", 1 }, { "c", 2 }, { "b", 3 },
-            { "d", 4 }, { "i", 5 }, { "p", 6 }, { "g", 7 },
+            { "d", 4 }, { "i", 5 }, { "g", 7 },
         };
         if (p_count < 1) goto do_exit;
         for (unsigned int ki = 0; ki < sizeof(nm_knobs) / sizeof(nm_knobs[0]); ki++) {
