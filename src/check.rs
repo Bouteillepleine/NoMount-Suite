@@ -449,7 +449,11 @@ impl Report {
             if !c.meaning.is_empty() {
                 let _ = writeln!(s, "       {}", c.meaning);
             }
-            let _ = writeln!(s, "       measured: {}", c.evidence);
+            // Plan findings carry one sentence that is both the explanation and the
+            // measurement, so printing both lines repeats it verbatim. Say it once.
+            if c.evidence != c.meaning {
+                let _ = writeln!(s, "       measured: {}", c.evidence);
+            }
             if let Some(o) = c.owner.as_deref() {
                 let _ = writeln!(s, "       from: {o}");
             }

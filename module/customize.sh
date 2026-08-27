@@ -207,7 +207,7 @@ ui_print "  config: $CONF"
 
 # --- Cloak (pathhide maps/fd) add-on ---
 [ -f "$MODPATH/scan.sh" ] && set_perm "$MODPATH/scan.sh" 0 0 0755
-[ -f "$NMDIR/pathhide.conf" ] || echo "# NoMount Cloak — pathhide rule list (managed by WebUI › Tools › Cloak)" > "$NMDIR/pathhide.conf"
+[ -f "$NMDIR/pathhide.conf" ] || echo "# NoMount Cloak — pathhide rule list (managed by hand; see 'nomount check')" > "$NMDIR/pathhide.conf"
 
 # --- absorb opt-out list -----------------------------------------------------
 # `nomount absorb` converts other modules' bind mounts into injections. Safe for
@@ -263,7 +263,7 @@ set_perm "$NMDIR/pathhide.conf" 0 0 0600 u:object_r:adb_data_file:s0
 # (any app could find it with a single readdir of /proc). `nm k p` with no value
 # is side-effect-free and exits 0 only when the patch set is compiled in.
 if [ -x "$_nm" ] && "$_nm" k p >/dev/null 2>&1; then
-    ui_print "- Cloak add-on: kernel pathhide FOUND — pick modules in WebUI › Tools › Cloak"
+    ui_print "- Cloak add-on: kernel pathhide FOUND — inert by default (no rules); edit $NMDIR/pathhide.conf to use it"
 else
     ui_print "- Cloak add-on: kernel pathhide not present (needs a pathhide-enabled kernel)"
 fi
