@@ -1,0 +1,285 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    # `prerelease` is where the audit work lands before it reaches `suite`, and it
+    # was building nowhere: every commit on it was verified only on the three
+    # phones and by a local cross-compile, never by CI. The `release` job below
+    # is gated on a v* TAG, so a branch build runs test/build/package and cannot
+    # publish anything.
+    branches: [main, suite, prerelease]
+    tags: ['v*']
+
+# Least privilege: this workflow only builds and uploads artifacts.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NDK_VERSION: r27c
+  NDK_HOME: /opt/ndk
+
+jobs:
+  # The unit tests are host tests (no NDK, no device), so they cost a minute and
+  # gate the thing that actually ships: `package` needs them green. `build` is
+  # deliberately NOT gated — the cross-compile is the slowest leg and there is no
+  # reason to hold it behind a fast check that cannot break it. A red test simply
+  # means no ZIP comes out the far end.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-host-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-host-test-
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # The Rust is linted on every push; the SHELL was not, and the module is
+      # eight scripts that run as root at boot. Every bug found in the 2026-08-25
+      # audit session was in shell, not Rust: a uid parser that split on a space
+      # where the file uses a tab, a `\|` alternation toybox does not support, a
+      # `[ -e ]` that cannot tell ENOENT from EACCES.
+      #
+      # -s sh, because /system/bin/sh is mksh/ash, not bash.
+      #
+      # WARNING level, not error, and NO rule exclusions. The gate was error-only
+      # at first because `local` is flagged as non-POSIX (SC3043) and spoof.sh
+      # used it ~25 times; that was then narrowed to `-e SC3043` so everything
+      # below "error" was checked again. spoof.sh is gone and no script left
+      # declares `local`, so the exclusion goes too -- a suppression kept past the
+      # file that needed it silently un-lints the next `local` somebody writes
+      # into a script that runs as root at boot.
+      #
+      # Honest about what this does NOT catch: shellcheck says nothing about
+      # `for x in $list`, because splitting there is usually intended, so the
+      # newline-IFS bug in the ghost populator would still have got through at
+      # any level. The three suppressions in the scripts each carry their reason
+      # inline; a bare -e list here would hide them from the file that needs them.
+      - name: Shellcheck module scripts
+        run: |
+          sudo apt-get install -y shellcheck >/dev/null 2>&1 || true
+          shellcheck -s sh -S warning -f gcc module/*.sh
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile: [debug, release]
+        # OnePlus (and anything that can run this kernel) is arm64-v8a only, and
+        # the module loads bin/$(getprop ro.product.cpu.abi) = arm64-v8a at
+        # runtime — so build and ship just arm64. Re-add targets for wider reach.
+        target: [aarch64-linux-android]
+        include:
+          - target: aarch64-linux-android
+            abi: arm64-v8a
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install NDK
+        run: |
+          curl -sSfL "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -o ndk.zip
+          unzip -q ndk.zip -d /opt
+          mv /opt/android-ndk-${NDK_VERSION} ${NDK_HOME}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.target }}-${{ matrix.profile }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.target }}-${{ matrix.profile }}-
+
+      - name: Build
+        run: |
+          export PATH="${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          FLAGS=""
+          if [ "$PROFILE" = "release" ]; then
+            FLAGS="--release"
+          fi
+          cargo build $FLAGS --target "$TARGET"
+        env:
+          PROFILE: ${{ matrix.profile }}
+          TARGET: ${{ matrix.target }}
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
+          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi26-clang
+          CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
+          CARGO_TARGET_I686_LINUX_ANDROID_LINKER: /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-clang
+
+      - name: Assert debug info preserved
+        if: matrix.profile == 'debug'
+        run: |
+          bin="target/${TARGET}/debug/nomount"
+          file "$bin"
+          if ! readelf -S "$bin" | grep -q debug_info; then
+            echo "::error::debug binary missing debug_info section"
+            exit 1
+          fi
+        env:
+          TARGET: ${{ matrix.target }}
+
+      - name: Assert stripped
+        if: matrix.profile == 'release'
+        run: |
+          bin="target/${TARGET}/release/nomount"
+          file "$bin"
+          if readelf -S "$bin" | grep -q debug_info; then
+            echo "::error::release binary still contains debug_info"
+            exit 1
+          fi
+        env:
+          TARGET: ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.abi }}-${{ matrix.profile }}
+          path: target/${{ matrix.target }}/${{ matrix.profile }}/nomount
+          retention-days: 7
+
+  package:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Place binaries into target tree
+        run: |
+          declare -A ABI_TARGET=(
+            [arm64-v8a]=aarch64-linux-android
+          )
+          for profile in debug release; do
+            for abi in "${!ABI_TARGET[@]}"; do
+              target="${ABI_TARGET[$abi]}"
+              src="artifacts/bin-${abi}-${profile}/nomount"
+              dst="target/${target}/${profile}/nomount"
+              mkdir -p "$(dirname "$dst")"
+              cp "$src" "$dst"
+              chmod +x "$dst"
+            done
+          done
+
+      - name: Setup zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Build nm (freestanding netlink client)
+        run: |
+          # The module shells out to bin/<abi>/nm; it is arch-shared C, built
+          # once here. Same zig incantation as the nomount source repo, then
+          # sstrip to ~3 KB. Placed next to nomount so package.sh bundles it.
+          make -C userspace/tools/sstrip
+          zig cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
+            -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
+            userspace/src/nm.c -o nm-arm64
+          userspace/tools/sstrip/sstrip -z nm-arm64
+          file nm-arm64; wc -c nm-arm64
+          for profile in debug release; do
+            install -Dm755 nm-arm64 "target/aarch64-linux-android/${profile}/nm"
+          done
+
+      - name: Read version
+        id: ver
+        run: |
+          ver=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=v${ver}" >> "$GITHUB_OUTPUT"
+
+      - name: Package ZIPs
+        run: scripts/package.sh --version "$VER"
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nomount-release-zip
+          path: release/release/00_NoMount-Module-*.zip
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nomount-debug-zip
+          path: release/debug/00_NoMount-Module-*.zip
+          retention-days: 30
+
+  # Publish on a v* tag.
+  #
+  # The tag already triggered a build, but the ZIP only ever became a 30-day
+  # ARTIFACT -- which needs a GitHub login to download, is not linkable, and is
+  # gone a month later. So "tagging a release" produced no release. This turns the
+  # tag into the thing people can actually install from.
+  #
+  # Release-only: `needs: package` means the tests gated it (package needs test),
+  # so nothing ships without them green.
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # Elevated for THIS job only -- the workflow default stays contents: read.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nomount-release-zip
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          zip=$(ls dist/00_NoMount-Module-*.zip | head -1)
+          test -s "$zip"
+          # The zip is named from Cargo.toml; the release is named from the tag.
+          # Nothing asserted the two agreed, so tagging v1.4.0 on a tree whose
+          # Cargo.toml still said 1.3.88 published a release titled v1.4.0 whose
+          # asset was v1.3.88 -- and since managers key updates on versionCode,
+          # that "new release" is invisible as an update to every device.
+          zipver="${zip##*00_NoMount-Module-}"
+          zipver="${zipver%.zip}"
+          zipver="${zipver%-debug}"
+          if [ "$zipver" != "$TAG" ]; then
+            echo "FATAL: tag $TAG does not match the packaged version $zipver." >&2
+            echo "       Bump Cargo.toml and re-tag; do not publish a mismatch." >&2
+            exit 1
+          fi
+          echo "publishing $TAG <- $zip ($(stat -c %s "$zip") bytes)"
+          # The tag is authoritative for the name; the notes point at the commit
+          # log rather than restating it, so this never goes stale.
+          gh release create "$TAG" "$zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "NoMount Suite $TAG" \
+            --generate-notes

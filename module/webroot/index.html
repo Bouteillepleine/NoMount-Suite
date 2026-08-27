@@ -1,0 +1,2868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>NoMount Suite</title>
+<!-- WebUI shortcut icon is driven by webroot/config.json + icon.png (KernelSU/MMRL WebUI) -->
+<link rel="icon" type="image/png" href="icon.png" />
+<style>
+  :root {
+    --bg:      #080a11;
+    --bg2:     #0e1220;
+    --card:    rgba(255,255,255,0.045);
+    --card2:   rgba(255,255,255,0.028);
+    --brd:     rgba(255,255,255,0.085);
+    --brd2:    rgba(255,255,255,0.055);
+    --txt:     #eaeef7;
+    --muted:   #8a93a9;
+    --dim:     #7d8699;
+    --faint:   #616a80;
+    --acc:     #7c9cff;
+    --acc2:    #57e6c3;
+    --ok:      #35d29a;
+    --warn:    #fbbf24;
+    --bad:     #f8717a;
+    --mono:    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --radius:  20px;
+    --shadow:  0 12px 34px rgba(0,0,0,0.42);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; overflow-x: hidden; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--txt);
+    background:
+      radial-gradient(1100px 640px at 12% -12%, rgba(124,156,255,0.16), transparent 58%),
+      radial-gradient(940px 560px at 112% 6%, rgba(87,230,195,0.11), transparent 54%),
+      linear-gradient(180deg, var(--bg2), var(--bg) 60%);
+    background-attachment: fixed;
+    min-height: 100vh;
+    padding: 0 15px calc(46px + env(safe-area-inset-bottom));
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 660px; margin: 0 auto; }
+
+  /* ---------- header ---------- */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 13px;
+    padding: max(16px, env(safe-area-inset-top)) 4px 14px;
+    background: linear-gradient(180deg, var(--bg2) 55%, rgba(14,18,32,0));
+    margin: 0 -15px 6px; padding-left: 19px; padding-right: 19px;
+  }
+  .logo {
+    width: 44px; height: 44px; border-radius: 13px; flex: none; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--acc), var(--acc2));
+    box-shadow: 0 8px 22px rgba(124,156,255,0.34);
+  }
+  .logo svg { width: 25px; height: 25px; }
+  .brand h1 {
+    margin: 0; font-size: 22px; font-weight: 760; letter-spacing: -0.4px; line-height: 1.1;
+    background: linear-gradient(90deg, #fff, #bcc8ff);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .brand p { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); letter-spacing: 0.2px; }
+  .hbtns { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .ver {
+    font-size: 12px; color: var(--muted); background: var(--card); border: 1px solid var(--brd);
+    padding: 6px 11px; border-radius: 999px; font-variant-numeric: tabular-nums;
+  }
+  .iconbtn {
+    width: 38px; height: 38px; border-radius: 12px; flex: none; display: grid; place-items: center;
+    background: var(--card); border: 1px solid var(--brd); color: var(--txt); cursor: pointer;
+    transition: transform .1s, background .2s;
+  }
+  .iconbtn:active { transform: scale(0.92); }
+  .iconbtn svg { width: 19px; height: 19px; }
+
+  /* ---------- cards ---------- */
+  .card {
+    position: relative;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.012) 42%, rgba(0,0,0,.05)),
+      var(--card);
+    border: 1px solid var(--brd); border-radius: var(--radius);
+    /* layered: ambient drop, contact shadow, lit top bevel, dark bottom bevel */
+    box-shadow:
+      var(--shadow),
+      0 2px 6px rgba(0,0,0,.28),
+      inset 0 1px 0 rgba(255,255,255,.11),
+      inset 0 -1px 0 rgba(0,0,0,.30);
+    padding: 17px 17px 18px; margin-bottom: 13px; backdrop-filter: blur(10px);
+  }
+  /* catch-light along the top edge — the cue that sells a raised surface */
+  .card::before {
+    content: ""; position: absolute; left: 12%; right: 12%; top: 0; height: 1px;
+    pointer-events: none; border-radius: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.26), transparent);
+  }
+  html[data-theme="light"] .card {
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.85), rgba(255,255,255,.35) 45%, rgba(16,26,48,.02)),
+      var(--card);
+    box-shadow:
+      var(--shadow),
+      0 2px 6px rgba(20,32,64,.10),
+      inset 0 1px 0 rgba(255,255,255,.95),
+      inset 0 -1px 0 rgba(16,26,48,.07);
+  }
+  html[data-theme="light"] .card::before {
+    background: linear-gradient(90deg, transparent, rgba(16,26,48,.10), transparent);
+  }
+  .card-h { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
+  .card-h h2 { margin: 0; font-size: 14px; font-weight: 680; letter-spacing: 0.2px; }
+  .card-h .ic { width: 17px; height: 17px; color: var(--acc); flex: none; }
+  .card-h .chip.ok   { background-color: rgba(53,210,154,0.15);  color: var(--ok); }
+  .card-h .chip.warn { background-color: rgba(251,191,36,0.15);  color: var(--warn); }
+  .card-h .chip.bad  { background-color: rgba(248,113,122,0.15); color: var(--bad); }
+  /* domed 3D — same treatment as .tag pills, so chips and pills read alike */
+  .card-h .chip {
+    margin-left: auto; font-size: 11px; font-weight: 680; letter-spacing: 0.2px; white-space: nowrap;
+    color: var(--muted); background-color: var(--card2); border: 1px solid rgba(255,255,255,.10);
+    padding: 4px 10px; border-radius: 999px; font-variant-numeric: tabular-nums;
+    background-image: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,0) 62%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.26),
+      inset 0 -1px 2px rgba(0,0,0,.22),
+      0 1px 2px rgba(0,0,0,.30);
+    text-shadow: 0 1px 0 rgba(0,0,0,.28);
+  }
+  html[data-theme="light"] .card-h .chip {
+    border-color: rgba(16,26,48,.10);
+    background-image: linear-gradient(180deg, rgba(255,255,255,.75), rgba(255,255,255,0) 65%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.90),
+      inset 0 -1px 2px rgba(16,26,48,.10),
+      0 1px 2px rgba(20,32,64,.12);
+    text-shadow: none;
+  }
+
+  /* collapsible cards  */
+  .card-h.clp { cursor: pointer; user-select: none; transition: transform .1s ease; }
+  .card-h.clp:active { transform: scale(0.985); }
+  .card-h .chev { margin-left: auto; flex: none; color: var(--muted); font-size: 17px; line-height: 1; transition: transform .2s; }
+  .card-h .chip + .chev { margin-left: 8px; }
+  .card-h.open .chev { transform: rotate(90deg); }
+  .card.collapsed > .card-h { margin-bottom: 0; }
+  .card.collapsed > :not(.card-h) { display: none !important; }
+  /* hero */
+  .hero { padding: 20px 18px; position: relative; overflow: hidden; }
+  .hero::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(420px 180px at 88% -30%, rgba(124,156,255,0.18), transparent 70%);
+  }
+  .statusline { display: flex; align-items: center; gap: 12px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--muted); transition: .3s; }
+  .dot.ok   { background: var(--ok);   box-shadow: 0 0 13px var(--ok),   0 0 0 5px rgba(53,210,154,0.14); }
+  .dot.warn { background: var(--warn); box-shadow: 0 0 13px var(--warn), 0 0 0 5px rgba(251,191,36,0.14); }
+  .dot.bad  { background: var(--bad);  box-shadow: 0 0 13px var(--bad),  0 0 0 5px rgba(248,113,122,0.14); }
+  .dot.off  { background: var(--muted); }
+  .statusline .st { font-size: 19px; font-weight: 720; letter-spacing: -0.2px; }
+  .statusline .sub { margin-left: auto; font-size: 12px; color: var(--muted); text-align: right; }
+
+  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 17px; }
+  .metric { background: var(--card2); border: 1px solid var(--brd2); border-radius: 13px; padding: 12px 13px; }
+  .metric .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.7px; }
+  .metric .v { font-size: 21px; font-weight: 750; margin-top: 4px; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; }
+  .metric .v small { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
+
+  /* actions */
+  .btns { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 16px; }
+  button.act {
+    appearance: none; border: 1px solid var(--brd); cursor: pointer; color: var(--txt);
+    background: rgba(255,255,255,0.05); padding: 12px 15px; border-radius: 13px;
+    font-size: 13.5px; font-weight: 640; transition: transform .08s, background .2s, border-color .2s;
+    flex: 1; min-width: 120px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  button.act svg { width: 16px; height: 16px; }
+  button.act:active { transform: scale(0.97); }
+  button.act.primary { background: linear-gradient(135deg, var(--acc), var(--acc2)); border-color: transparent; color: #08101c; }
+  button.act.danger { border-color: rgba(248,113,122,0.34); color: #ffd7d9; background: rgba(248,113,122,0.10); }
+  button.act:disabled { opacity: 0.45; cursor: default; }
+
+  /* rows / lists */
+  .list { margin-top: 2px; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 11px 2px; border-top: 1px solid rgba(255,255,255,0.055); font-size: 13.5px; }
+  .row:first-child { border-top: none; }
+  .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .name.mono { font-family: var(--mono); font-size: 12.5px; }
+  .tag {
+    font-size: 10.5px; padding: 4px 10px; border-radius: 999px; font-weight: 680;
+    letter-spacing: 0.2px; white-space: nowrap;
+    border: 1px solid rgba(255,255,255,.10);
+    /* domed: light from above, seated by a soft contact shadow */
+    background-image: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,0) 62%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.26),
+      inset 0 -1px 2px rgba(0,0,0,.22),
+      0 1px 2px rgba(0,0,0,.30);
+    text-shadow: 0 1px 0 rgba(0,0,0,.28);
+  }
+  html[data-theme="light"] .tag {
+    border-color: rgba(16,26,48,.10);
+    background-image: linear-gradient(180deg, rgba(255,255,255,.75), rgba(255,255,255,0) 65%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.90),
+      inset 0 -1px 2px rgba(16,26,48,.10),
+      0 1px 2px rgba(20,32,64,.12);
+    text-shadow: none;
+  }
+  .tag.vfs   { background: rgba(53,210,154,0.14);  color: var(--ok); }
+  .tag.ov    { background: rgba(124,156,255,0.16); color: var(--acc); }
+  .tag.su    { background: rgba(87,230,195,0.15);  color: var(--acc2); }
+  .tag.suite { background: rgba(255,255,255,0.08); color: var(--txt); }
+  .tag.off   { background: rgba(139,147,167,0.15); color: var(--muted); }
+  .tag.warn  { background: rgba(251,191,36,0.15);  color: var(--warn); }
+  .tag.ok    { background: rgba(53,210,154,0.15);  color: var(--ok); }
+  .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
+
+  /* ---- audit findings -----------------------------------------------------
+     Same visual language as .mrow (the module list), because a finding is read
+     the same way: a name, a state, and a line of detail. What differs is that a
+     finding carries a VERDICT and a REACH pill, and the reach is the one that
+     tells a reader which of two failures to fix first -- so it is never dropped
+     on a narrow screen. */
+  .frow {
+    display: block; padding: 12px 13px; margin: 8px 0; border-radius: 14px;
+    border: 1px solid var(--brd2);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.008)),
+      var(--card2);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 1px 3px rgba(0,0,0,.22);
+  }
+  html[data-theme="light"] .frow {
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.80), rgba(255,255,255,.30)),
+      var(--card2);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.90), 0 1px 3px rgba(20,32,64,.08);
+  }
+  .frow .fname {
+    font-size: 13.5px; font-weight: 620; color: var(--txt); line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+  /* The plain-language line. This is the sentence most readers will stop at, so
+     it gets normal text colour and comfortable leading -- the evidence behind it
+     is deliberately one disclosure away rather than competing with it. */
+  .frow .fmean { font-size: 12.5px; line-height: 1.6; color: var(--txt); margin-top: 7px; opacity: .92; }
+  .frow .fowner { font-size: 11.5px; color: var(--muted); margin-top: 7px; }
+  .frow .fowner b { color: var(--txt); font-weight: 620; }
+  .frow .fmeta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  .frow details { margin-top: 9px; }
+  .frow details > summary {
+    cursor: pointer; font-size: 11.5px; color: var(--muted); list-style: none;
+    padding: 3px 0; user-select: none;
+  }
+  .frow details > summary::-webkit-details-marker { display: none; }
+  .frow details > summary::before { content: "▸ "; }
+  .frow details[open] > summary::before { content: "▾ "; }
+  .frow details .ev {
+    font-family: var(--mono); font-size: 11px; line-height: 1.6; color: var(--muted);
+    background: rgba(0,0,0,0.22); border: 1px solid var(--brd2); border-radius: 10px;
+    padding: 9px 11px; margin-top: 6px; overflow-wrap: anywhere; white-space: pre-wrap;
+  }
+  html[data-theme="light"] .frow details .ev { background: rgba(16,26,48,0.04); }
+  /* Accepted findings render GREY, never green: the verdict is untouched, only
+     "and you looked at it" is added. Muting the whole row is the visual half of
+     that promise -- it recedes without disappearing. */
+  .fgroup {
+    font-size: 11px; font-weight: 680; letter-spacing: .5px; text-transform: uppercase;
+    color: var(--muted); margin: 16px 0 2px; display: flex; align-items: center; gap: 8px;
+  }
+  .fgroup:first-child { margin-top: 4px; }
+  .fgroup .cnt { font-variant-numeric: tabular-nums; opacity: .8; }
+  .auage { font-size: 11.5px; color: var(--muted); margin-top: 10px; font-variant-numeric: tabular-nums; }
+
+  /* ---- the one-line health summary on the Status hero -------------------- */
+  .healthline {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    margin: 14px 0 0; padding: 11px 13px; border-radius: 14px;
+    border: 1px solid var(--brd2); background: var(--card2);
+    color: var(--txt); font: inherit; font-size: 13px; text-align: left;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .healthline:hover { border-color: var(--brd); }
+  .healthline:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+  .hl-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
+  .hl-dot.ok   { background: var(--ok); }
+  .hl-dot.warn { background: var(--warn); }
+  .hl-dot.bad  { background: var(--bad); }
+  .hl-txt { flex: 1 1 auto; min-width: 0; line-height: 1.4; }
+  .hl-txt b { font-weight: 650; }
+  .hl-txt .age { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .hl-go { flex: none; color: var(--muted); font-size: 17px; line-height: 1; }
+  /* Amber frame for anything actionable... */
+  .healthline.attn { border-color: rgba(251,191,36,.45); background: rgba(251,191,36,.08); }
+  html[data-theme="light"] .healthline.attn { background: rgba(251,191,36,.12); }
+  /* ...and red only for "not running at all", so the loudest treatment on the
+     page is spent on the one state where nothing is being injected. */
+  .healthline.attn.down { border-color: rgba(248,113,122,.45); background: rgba(248,113,122,.08); }
+  html[data-theme="light"] .healthline.attn.down { background: rgba(248,113,122,.10); }
+
+  .backline {
+    display: inline-flex; align-items: center; gap: 7px;
+    margin: 0 0 4px; padding: 7px 12px 7px 9px; border-radius: 999px;
+    border: 1px solid var(--brd2); background: var(--card2);
+    color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .backline:hover { color: var(--txt); border-color: var(--brd); }
+  .backline:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+  .backline .bk-go { font-size: 16px; line-height: 1; }
+
+  /* module list: name on its own line so it is never truncated */
+  .mrow {
+    display: block; padding: 11px 12px; margin: 8px 0; border-radius: 14px;
+    border: 1px solid var(--brd2);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.008)),
+      var(--card2);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 1px 3px rgba(0,0,0,.22);
+  }
+  .mrow:first-child { margin-top: 2px; }
+  .mname {
+    font-size: 13.5px; font-weight: 620; color: var(--txt); line-height: 1.35;
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+  .mmeta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .mmeta .files {
+    font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-right: auto;
+  }
+  html[data-theme="light"] .mrow {
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.80), rgba(255,255,255,.30)),
+      var(--card2);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.90), 0 1px 3px rgba(20,32,64,.08);
+  }
+  .note { color: var(--muted); font-size: 12px; line-height: 1.55; margin: 12px 0 0; }
+  code { font-family: var(--mono); background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
+
+  pre.rules {
+    margin: 4px 0 0; max-height: 260px; overflow: auto; font-size: 11.5px; line-height: 1.65;
+    font-family: var(--mono); color: #c8d2ea; background: rgba(0,0,0,0.28);
+    border: 1px solid var(--brd2); border-radius: 13px; padding: 13px;
+    /* pre-wrap, not pre: doctor and audit emit full sentences, and `pre` ran
+       them off the right edge where a phone simply cannot read them. Paths wrap
+       at any point so a long target still fits; blank lines and indentation are
+       preserved, which is what the reports rely on for structure. */
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  /* .rules had DARK-ONLY colours and no light override, unlike every other
+     component here -- in light mode it rendered pale blue-grey text on a grey
+     box, which is unreadable on a phone. Same palette the other light-theme
+     surfaces use. */
+  html[data-theme="light"] .rules {
+    color: #16203a; background: rgba(16,26,48,0.05); border-color: rgba(16,26,48,0.12);
+  }
+
+  /* stealth readout */
+  .stealth-head { display: flex; align-items: center; gap: 11px; }
+  .shield { width: 40px; height: 40px; border-radius: 12px; flex: none; display: grid; place-items: center; border: 1px solid var(--brd2); }
+  .shield.clean { background: rgba(53,210,154,0.12); color: var(--ok); }
+  .shield.warn  { background: rgba(251,191,36,0.12); color: var(--warn); }
+  .shield svg { width: 21px; height: 21px; }
+  .stealth-head .t { font-size: 15px; font-weight: 700; }
+  .stealth-head .d { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  /* uid */
+  .uidbar { display: flex; flex-wrap: wrap; gap: 9px; }
+  .uidbar input {
+    flex: 1 1 100%; min-width: 0; background: rgba(0,0,0,0.26); border: 1px solid var(--brd2);
+    color: var(--txt); border-radius: 13px; padding: 12px 14px; font-size: 14px; outline: none;
+  }
+  .uidbar input:focus { border-color: var(--acc); }
+  .uidbar .act { flex: 1 1 0; }
+  /* custom app-picker dropdown — replaces the native <datalist> (which the WebView
+     renders as a mispositioned overlay that bleeds over the page). Solid bg, capped
+     height, absolutely positioned inside its own relative wrapper so it can't leak. */
+  .pkgwrap { position: relative; flex: 1 1 100%; min-width: 0; }
+  .pkgwrap input { width: 100%; }
+  .pkgdd {
+    position: absolute; left: 0; right: 0; top: calc(100% + 5px); z-index: 70;
+    max-height: 264px; overflow-y: auto; display: none;
+    background: var(--bg2); border: 1px solid var(--brd2); border-radius: 13px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+  }
+  .pkgdd.show { display: block; }
+  .pkgdd .opt {
+    padding: 11px 13px; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 8px;
+    border-top: 1px solid rgba(255,255,255,0.05);
+  }
+  .pkgdd .opt:first-child { border-top: none; }
+  .pkgdd .opt.sel, .pkgdd .opt:hover { background: rgba(255,255,255,0.07); }
+  .pkgdd .opt .pn { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pkgdd .opt .pu { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .pkgdd .none { padding: 11px 13px; font-size: 12.5px; color: var(--dim); }
+  .pkgdd .pkghead {
+    position: sticky; top: 0; z-index: 1; padding: 8px 13px; font-size: 10.5px; font-weight: 640;
+    letter-spacing: .04em; text-transform: uppercase; color: var(--dim);
+    background: var(--bg2); border-bottom: 1px solid var(--brd2);
+  }
+  /* Isolated-pool policy: a segmented control, not a <select>. The native select
+     popup is drawn by the OS -- it ignores the theme tokens entirely and covers the
+     card behind it, which is jarring against everything else here. Four short
+     mutually-exclusive options fit inline, and this way it is one tap, not two. */
+  .seg { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 4px;
+         padding: 4px; border-radius: 13px;
+         background: rgba(0,0,0,0.26); border: 1px solid var(--brd2); }
+  html[data-theme="light"] .seg { background: rgba(16,26,48,0.05); }
+  .seg-b { appearance: none; background: transparent; border: 1px solid transparent;
+           border-radius: 10px; padding: 9px 7px; font: inherit; font-size: 12.5px; line-height: 1.15;
+           color: var(--dim); cursor: pointer; transition: background .13s, color .13s, border-color .13s; }
+  .seg-b:hover { color: var(--txt); }
+  .seg-b.on { background: rgba(124,156,255,0.16); border-color: var(--acc); color: var(--txt); font-weight: 600; }
+  html[data-theme="light"] .seg-b.on { background: rgba(124,156,255,0.20); }
+  .seg-b:disabled { opacity: .5; cursor: default; }
+  /* Engine did not answer: show nothing selected rather than lying with the default. */
+  .seg.unknown { border-style: dashed; }
+  .seg.unknown .seg-b { opacity: .5; }
+  .segstate { margin-top: 7px; font-size: 11.5px; color: var(--dim); }
+  .segstate.bad { color: var(--bad); }
+
+  /* One-tap curated list, beside the free-text field. */
+  .presetrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+  .presethint { flex: 1 1 210px; font-size: 11.5px; line-height: 1.45; color: var(--dim); }
+
+  /* Candidate picker: rows are tappable anywhere, not just on a small checkbox. */
+  .uslist { display: flex; flex-direction: column; gap: 5px; margin-top: 11px; }
+  .usrow { display: flex; align-items: center; gap: 9px; padding: 9px 11px; border-radius: 11px;
+           background: var(--card2); border: 1px solid var(--brd2); cursor: pointer;
+           transition: background .12s, border-color .12s; }
+  .usrow:hover { border-color: var(--brd); }
+  .usrow.on { background: rgba(124,156,255,0.12); border-color: var(--acc); }
+  .uscb { flex: 0 0 18px; width: 18px; height: 18px; border-radius: 6px; border: 1px solid var(--brd);
+          display: flex; align-items: center; justify-content: center; font-size: 12px;
+          color: var(--acc); background: rgba(0,0,0,0.2); }
+  .usrow.on .uscb { border-color: var(--acc); }
+  .usn { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+         font-size: 12.5px; font-family: var(--mono); }
+  .usr { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+  .rch { font-size: 10px; padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+         border: 1px solid var(--brd2); color: var(--dim); }
+  .rch.r-det { color: var(--bad);  border-color: rgba(248,113,122,0.42); }
+  .rch.r-qr  { color: var(--warn); border-color: rgba(251,191,36,0.42); }
+  .rch.r-su  { color: var(--acc2); border-color: rgba(87,230,195,0.36); }
+  .usfoot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 11px; }
+
+  /* Long explanations fold away: they were most of this card's height. */
+  .ndet { margin-top: 12px; }
+  .ndet > summary { cursor: pointer; list-style: none; font-size: 12px; font-weight: 600;
+                    color: var(--dim); padding: 7px 0; }
+  .ndet > summary::-webkit-details-marker { display: none; }
+  .ndet > summary::before { content: "\203A"; display: inline-block; margin-right: 7px;
+                            transition: transform .16s; }
+  .ndet[open] > summary::before { transform: rotate(90deg); }
+  .ndet > summary:hover { color: var(--txt); }
+  .ndet .note { margin-top: 4px; }
+
+  .subsec { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--brd2); }
+  .subsec-h { margin-bottom: 9px; font-size: 10.5px; font-weight: 640; letter-spacing: .04em;
+              text-transform: uppercase; color: var(--dim); }
+  .blocklist { display: flex; flex-direction: column; gap: 6px; margin-top: 11px; }
+  .blocklist:empty { display: none; }
+  .blk-sub { font-size: 11px; line-height: 1.45; color: var(--dim); padding: 0 2px 4px; }
+  .blk-none { font-size: 12.5px; color: var(--dim); padding: 9px 11px; border: 1px dashed var(--brd2);
+              border-radius: 11px; text-align: center; }
+  .blk-head { font-size: 11px; font-weight: 640; letter-spacing: .04em; text-transform: uppercase;
+              color: var(--dim); margin: 2px 2px 1px; }
+  .blk {
+    display: flex; align-items: center; gap: 9px;
+    background: rgba(0,0,0,0.22); border: 1px solid var(--brd2);
+    border-radius: 11px; padding: 8px 10px 8px 12px;
+  }
+  .blk .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .blk .bn { flex: 1 1 auto; min-width: 0; font-size: 13px; word-break: break-all; }
+  .blk .bs { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .blk.live    .bs  { color: var(--acc2, #57e6c3); }
+  .blk.pending .dot, .blk.drift .dot { background: var(--warn, #d9a441); }
+  .blk.live .dot { background: var(--ok); }
+  .blk.gone .dot { background: var(--faint); }
+  .blk.pending .bs,  .blk.drift .bs  { color: var(--warn, #d9a441); }
+  .blk .bx {
+    flex: 0 0 auto; width: 30px; height: 30px; line-height: 28px; text-align: center;
+    border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
+    background: rgba(255,255,255,0.06); color: var(--dim);
+  }
+  .blk .bx:hover { background: rgba(255,90,90,0.16); color: #ff6b6b; }
+  html[data-theme="light"] .blk .bx { background: rgba(16,26,48,0.06); }
+  .blk .bx.save:hover { background: rgba(90,220,150,0.16); color: #57e6c3; }
+  .blk .bx:disabled { opacity: 0.4; }
+
+  /* `display:none` here beat `el.hidden = false`, so BOTH global banners -- the
+     root-manager umount warning and the bootloop-guard notice -- have never
+     rendered on any device, in any state. `hidden` only removes the UA rule; an
+     author rule outranks it. Drive visibility from the attribute instead, so the
+     markup and the JS agree. */
+  .banner { background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.3); color: #ffe6a8; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: block; line-height: 1.5; }
+  .banner[hidden] { display: none; }
+  .foot { text-align: center; color: var(--faint); font-size: 11px; margin-top: 16px; line-height: 1.7; }
+
+  /* ---- rules-by-module breakdown bar (Rules tab) ------------------------- */
+  .rmbar {
+    position: relative;
+    display: flex; height: 13px; border-radius: 7px; overflow: hidden;
+    margin: 12px 0 10px; background: var(--card2); border: 1px solid var(--brd2);
+    box-shadow: 0 1px 2px rgba(0,0,0,.30);
+  }
+  .rmbar span { display: block; height: 100%; }
+  /* Domed 3D, the same treatment as the .chip capsules so the bar reads as the
+     same material. It has to be an OVERLAY: the segments are children that fill
+     the bar, so an inset shadow on .rmbar itself would be painted underneath
+     them and never show. One gloss across the whole bar, not per segment, so it
+     domes as a single capsule rather than looking like separate beads. */
+  .rmbar::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    border-radius: inherit;
+    background-image: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,0) 62%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.26),
+      inset 0 -1px 2px rgba(0,0,0,.22);
+  }
+  html[data-theme="light"] .rmbar { box-shadow: 0 1px 2px rgba(20,32,64,.12); }
+  /* Lighter gloss than the capsule's .75: that value is tuned for a near-white
+     chip, and over saturated segment colours it goes chalky and eats the hue. */
+  html[data-theme="light"] .rmbar::after {
+    background-image: linear-gradient(180deg, rgba(255,255,255,.50), rgba(255,255,255,0) 65%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.85),
+      inset 0 -1px 2px rgba(16,26,48,.10);
+  }
+  .rmlegend { display: flex; flex-wrap: wrap; gap: 7px 14px; margin-bottom: 2px; }
+  .rmleg { font-size: 11.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+  .rmleg .rmname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
+  .rmleg b { color: var(--txt); font-weight: 680; font-variant-numeric: tabular-nums; }
+  .rmsw { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+
+  /* The surface is themed, not hardcoded: it used to be a fixed dark #141926 with
+     color:var(--txt), so in light mode it became near-black text on a near-black
+     box — an unreadable black rectangle. It also has to clear the floating nav
+     capsule (same z-index, bottom:24px) instead of landing on top of it. */
+  #toast {
+    position: fixed; left: 50%;
+    bottom: calc(96px + env(safe-area-inset-bottom));
+    transform: translate(-50%, 22px); opacity: 0; pointer-events: none;
+    background: #141926; border: 1px solid var(--brd); color: #eaeef7; padding: 12px 18px;
+    border-radius: 13px; font-size: 13px; font-weight: 640; box-shadow: var(--shadow);
+    transition: .28s cubic-bezier(.2,.8,.2,1); max-width: 90vw; z-index: 80; text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #toast.ok  { border-color: rgba(53,210,154,0.42); }
+  #toast.bad { border-color: rgba(248,113,122,0.42); }
+  html[data-theme="light"] #toast {
+    background: #ffffff; color: #101725;
+    border-color: rgba(16,26,48,.12);
+    box-shadow: 0 12px 30px rgba(20,32,64,.20), 0 2px 6px rgba(20,32,64,.10);
+  }
+  html[data-theme="light"] #toast.ok  { border-color: rgba(14,154,108,.45); }
+  html[data-theme="light"] #toast.bad { border-color: rgba(210,58,68,.45); }
+
+  /* ---- confirmation sheet -------------------------------------------------
+     Every control that destroys something goes through this. Deliberately NOT
+     window.confirm: a root manager's WebView need not implement onJsConfirm at
+     all, and a safety gate that silently answers "no" is a dead button while one
+     that silently answers "yes" is worse than no gate. It is also the only way
+     the prompt can say what will actually happen in the reader's terms rather
+     than echoing an internal verb. */
+  .cfwrap {
+    position: fixed; inset: 0; z-index: 90; display: flex;
+    align-items: flex-end; justify-content: center;
+    padding: 16px 15px calc(16px + env(safe-area-inset-bottom));
+    background: rgba(4,6,12,.62); backdrop-filter: blur(3px);
+  }
+  .cfwrap[hidden] { display: none; }
+  html[data-theme="light"] .cfwrap { background: rgba(20,32,64,.34); }
+  .cfbox {
+    width: 100%; max-width: 430px; border-radius: 22px; padding: 20px 18px 16px;
+    border: 1px solid var(--brd); background: var(--bg2); box-shadow: var(--shadow);
+    animation: cfin .18s ease both;
+  }
+  @keyframes cfin { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+  .cfbox .cft { font-size: 17px; font-weight: 720; letter-spacing: -0.2px; }
+  .cfbox .cfb { font-size: 13px; line-height: 1.6; color: var(--muted); margin-top: 9px; }
+  .cfbox .btns { margin-top: 18px; }
+  /* Cancel is the wide, comfortable target; the destructive one is not the
+     default and never the one a thumb lands on by accident. */
+  .cfbox .btns .act { min-height: 48px; }
+  .cfbox .btns #cfNo { flex: 1.4 1 0; }
+
+  .spin { animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+  /* ---- tabbed panes + floating capsule bar ------------------------------
+     Visual language mirrors the ReSukiSU manager's liquid-glass capsule:
+     24px radius, hairline white gradient border, soft elevation, and a
+     backdrop blur where the WebView supports it. */
+  .wrap { padding-bottom: 108px; }
+  .tab { display: none; }
+  .tab.on { display: block; animation: tabin .18s ease both; }
+  @keyframes tabin { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .navwrap {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+    display: flex; justify-content: center;
+    padding: 0 16px calc(14px + env(safe-area-inset-bottom)) 16px;
+    pointer-events: none;
+  }
+  @media (min-width: 400px) { .navwrap { padding-left: 24px; padding-right: 24px; } }
+  @media (min-width: 600px) { .navwrap { padding-left: 32px; padding-right: 32px; } }
+
+  .nav {
+    pointer-events: auto;
+    position: relative;
+    display: flex; gap: 4px; padding: 7px;
+    border-radius: 26px;
+    border: 1px solid var(--brd);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.018)),
+      linear-gradient(180deg, rgba(14,18,32,.92), rgba(8,10,17,.96));
+    box-shadow:
+      0 14px 38px rgba(0,0,0,.55),
+      0 2px 10px rgba(0,0,0,.35),
+      inset 0 1px 0 rgba(255,255,255,.10),
+      inset 0 -1px 0 rgba(0,0,0,.35);
+    max-width: 100%;
+  }
+  @supports (backdrop-filter: blur(20px)) {
+    .nav {
+      backdrop-filter: blur(24px) saturate(160%);
+      -webkit-backdrop-filter: blur(24px) saturate(160%);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)),
+        linear-gradient(180deg, rgba(14,18,32,.62), rgba(8,10,17,.72));
+    }
+  }
+  /* top edge catch-light — sells the glass as a raised surface */
+  .nav::before {
+    content: ""; position: absolute; inset: 0 14% auto 14%; height: 1px;
+    border-radius: 1px; pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.34), transparent);
+  }
+
+  .navb {
+    -webkit-tap-highlight-color: transparent;
+    appearance: none; border: 1px solid transparent; cursor: pointer;
+    position: relative; isolation: isolate;
+    background: transparent; color: var(--muted);
+    position: relative; z-index: 1;
+    min-width: 60px; height: 58px; padding: 0 12px;
+    border-radius: 19px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    font: 600 11px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: .01em;
+    transition: color .2s ease, transform .2s cubic-bezier(.2,.7,.3,1),
+                border-color .2s ease, box-shadow .2s ease;
+  }
+  .navb svg {
+    width: 21px; height: 21px;
+    stroke: currentColor;
+    /* engraved look when idle: a dark bottom edge under the stroke */
+    filter: drop-shadow(0 1.5px 0 rgba(0,0,0,.55));
+    transition: transform .2s cubic-bezier(.2,.7,.3,1), filter .2s ease;
+  }
+  .navb:active { transform: scale(.93); }
+  .navb:not(.on):hover { color: #b7c0d4; }
+
+  /* ACTIVE: the bounding capsule is a separate element that SLIDES between tabs.
+     Keeping it out of the button lets one pill animate across, instead of the
+     highlight blinking off one button and on to the next. */
+  .navpill {
+    position: absolute; left: 0; top: 7px; z-index: 0;
+    width: 0; height: 58px; border-radius: 19px;
+    opacity: 0; pointer-events: none;
+    border: 1px solid rgba(124,156,255,.55);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.02)),
+      linear-gradient(135deg, rgba(124,156,255,.42), rgba(87,230,195,.28));
+    box-shadow:
+      0 8px 20px rgba(124,156,255,.38),
+      0 2px 6px rgba(0,0,0,.42),
+      inset 0 1px 0 rgba(255,255,255,.38),
+      inset 0 -2px 7px rgba(0,0,0,.30);
+    /* Springy overshoot: the y1 term is what makes it rebound past the target
+       and settle back. 1.55 lands between a flat slide (1.0) and the bouncy
+       1.9 — enough to feel elastic without drawing attention to itself.
+       Transform leads, width trails slightly, so the pill stretches into the
+       move rather than both properties animating in lockstep. */
+    transition:
+      transform .42s cubic-bezier(.22,1.55,.36,1),
+      width .46s cubic-bezier(.22,1.62,.38,1),
+      opacity .2s ease;
+  }
+  .navpill.noanim { transition: none; }
+  .navb.on { color: var(--txt); }
+  .navb.on svg {
+    stroke: url(#navGrad);
+    transform: translateY(-.5px) scale(1.06);
+    filter: drop-shadow(0 1px 0 rgba(0,0,0,.5)) drop-shadow(0 0 7px rgba(124,156,255,.55));
+  }
+  .navb.on span {
+    background: linear-gradient(135deg, #ffffff, #cfe0ff 60%, #9df0dc);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .navb, .navb svg { transition: none; }
+    .navb.on { transform: none; }
+    /* the overshoot is the point of the pill, so drop it entirely here */
+    .navpill { transition: opacity .2s ease; }
+  }
+
+  /* ---- light theme -------------------------------------------------------
+     Same hues, re-weighted for a light ground: the accents are darkened so they
+     still pass as readable text/!icon colour on white, which the dark-theme
+     values (#7c9cff / #57e6c3) do not. */
+  html[data-theme="light"] {
+    --bg:      #eef1f8;
+    --bg2:     #ffffff;
+    --card:    rgba(16,26,48,0.040);
+    --card2:   rgba(16,26,48,0.022);
+    --brd:     rgba(16,26,48,0.105);
+    --brd2:    rgba(16,26,48,0.070);
+    --txt:     #101725;
+    --muted:   #576179;
+    --dim:     #6b7488;
+    --faint:   #7a8497;
+    --acc:     #3f63e0;
+    --acc2:    #0f9e84;
+    --ok:      #0e9a6c;
+    --warn:    #a46a00;
+    --bad:     #d23a44;
+    --shadow:  0 12px 30px rgba(20,32,64,0.13);
+  }
+  html[data-theme="light"] body { color: var(--txt); }
+  html[data-theme="light"] h1 {
+    background-image: linear-gradient(90deg, #0d1220, #33499f);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  html[data-theme="light"] .metric { background: rgba(16,26,48,0.045); }
+  html[data-theme="light"] .row { border-top-color: rgba(16,26,48,0.075); }
+  html[data-theme="light"] .tag.suite { background: rgba(16,26,48,0.075); }
+  html[data-theme="light"] code { background: rgba(16,26,48,0.06); }
+  html[data-theme="light"] .nav {
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.90), rgba(255,255,255,.72)),
+      linear-gradient(180deg, rgba(236,240,250,.95), rgba(226,232,245,.98));
+    box-shadow:
+      0 14px 34px rgba(20,32,64,.18),
+      0 2px 8px rgba(20,32,64,.10),
+      inset 0 1px 0 rgba(255,255,255,.85),
+      inset 0 -1px 0 rgba(16,26,48,.10);
+  }
+  @supports (backdrop-filter: blur(20px)) {
+    html[data-theme="light"] .nav {
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.72), rgba(255,255,255,.52)),
+        linear-gradient(180deg, rgba(236,240,250,.60), rgba(226,232,245,.70));
+    }
+  }
+  html[data-theme="light"] .nav::before {
+    background: linear-gradient(90deg, transparent, rgba(16,26,48,.16), transparent);
+  }
+  html[data-theme="light"] .navb svg { filter: drop-shadow(0 1px 0 rgba(255,255,255,.9)); }
+  html[data-theme="light"] .navpill {
+    border-color: rgba(63,99,224,.55);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.92), rgba(255,255,255,.55)),
+      linear-gradient(135deg, rgba(63,99,224,.30), rgba(15,158,132,.24));
+    box-shadow:
+      0 8px 18px rgba(63,99,224,.28),
+      0 2px 6px rgba(20,32,64,.16),
+      inset 0 1px 0 rgba(255,255,255,.95),
+      inset 0 -2px 6px rgba(16,26,48,.10);
+  }
+  html[data-theme="light"] .navb.on svg {
+    filter: drop-shadow(0 1px 0 rgba(255,255,255,.9)) drop-shadow(0 0 6px rgba(63,99,224,.45));
+  }
+  html[data-theme="light"] .navb.on span {
+    background-image: linear-gradient(135deg, #0d1220, #2b3f96 60%, #0c7f6b);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  html[data-theme="light"] .banner { color: #6b4d00; }
+  html[data-theme="light"] button.act.danger {
+    color: #a3252e; border-color: rgba(210,58,68,0.40); background: rgba(210,58,68,0.08);
+  }
+  html[data-theme="light"] button.act.primary { color: #ffffff; }
+  html[data-theme="light"] .logo svg { stroke: #ffffff; }
+
+  /* theme toggle icon swap */
+  .iconbtn .ico-moon { display: none; }
+  html[data-theme="light"] .iconbtn .ico-moon { display: block; }
+  html[data-theme="light"] .iconbtn .ico-sun  { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#08101c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 7l8-4 8 4v6c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/>
+      </svg>
+    </div>
+    <div class="brand">
+      <h1>NoMount Suite</h1>
+      <p>Prism VFS · RRO overlays · sucompat root</p>
+    </div>
+    <div class="hbtns">
+      <span class="ver" id="ver">v…</span>
+      <button class="iconbtn" id="themeBtn" onclick="toggleTheme()" title="Light / dark theme" aria-label="Toggle theme">
+        <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2.4M12 19.2v2.4M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2.4 12h2.4M19.2 12h2.4M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7"/></svg>
+        <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.4 8.4 0 1 0 10.5 10.5z"/></svg>
+      </button>
+      <button class="iconbtn" id="refreshBtn" onclick="refreshAll(this)" title="Refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Global warnings: the root manager's Kernel-umount switch, and a bootloop
+       guard that has tripped. Deliberately OUTSIDE every <section> so they show on
+       any tab -- neither "a switch that can break root" nor "the Suite turned
+       itself off" should require navigating to the right tab to discover. -->
+  <div class="banner" id="mgrwarn" hidden></div>
+  <div class="banner" id="incwarn" hidden></div>
+
+  <section class="tab on" id="tab-status">
+  <div class="banner" id="banner" hidden>Open this page from the KernelSU / APatch manager's WebUI to control the module.</div>
+
+  <!-- HERO: engine status -->
+  <div class="card hero">
+    <div class="statusline">
+      <span class="dot off" id="dot"></span>
+      <span class="st" id="state">Checking…</span>
+      <span class="sub" id="substate"></span>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="k">Injection rules</div><div class="v" id="mRules">—</div></div>
+      <div class="metric"><div class="k">RRO overlays</div><div class="v" id="mOv">—</div></div>
+      <div class="metric"><div class="k">Root · su</div><div class="v" id="mSu">—</div></div>
+      <div class="metric"><div class="k">Modules served</div><div class="v" id="mMod">—</div></div>
+    </div>
+    <!-- THE diagnostic surface for most people.
+         Diagnostics used to be its own nav tab, which told every user there was
+         another job to do here. There isn't: the overwhelmingly common answer is
+         "nothing is detectable", and that is one line, not a screen. It reads the
+         report the boot pass already cached, so showing it costs nothing -- and it
+         asks for attention only when the report actually has some, or when the
+         report is not a complete answer yet. -->
+    <button class="healthline" id="healthline" onclick="openDetail()">
+      <span class="hl-dot" id="hlDot"></span>
+      <span class="hl-txt" id="hlTxt">Checking…</span>
+      <span class="hl-go">›</span>
+    </button>
+    <div class="btns">
+      <button class="act primary" onclick="reloadRules(this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+        Reload
+      </button>
+    </div>
+    <!-- Clear rules is not a sibling of Reload. Side by side and the same size,
+         they read as a pair of equals and are nothing of the sort: one re-applies
+         what you already have, the other takes every injected file away. It is
+         small, on its own line, and it asks first. -->
+    <div class="btns" style="margin-top:9px">
+      <button class="act danger" style="flex:none;min-width:0;padding:9px 14px;font-size:12.5px" onclick="clearRules(this)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
+        Clear rules
+      </button>
+    </div>
+  </div>
+
+  <!-- DEVICE -->
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
+      <h2>Device</h2>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="k">Model</div><div class="v" id="dModel" style="font-size:15px">—</div></div>
+      <div class="metric"><div class="k">Android</div><div class="v" id="dAndroid" style="font-size:15px">—</div></div>
+      <div class="metric"><div class="k">API level</div><div class="v" id="dApi" style="font-size:15px">—</div></div>
+      <div class="metric"><div class="k">Kernel</div><div class="v" id="dKernel" style="font-size:11px;word-break:break-all;line-height:1.35">—</div></div>
+    </div>
+  </div>
+
+  <div class="card" id="cardPerUID">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+      <h2>Per-UID hiding</h2><span class="chip" id="uidchip">—</span><span class="chev">›</span>
+    </div>
+    <div class="uidbar">
+      <div class="pkgwrap">
+        <input id="uid" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+               placeholder="Package name, UID, or glob (*.duckdetector)"
+               oninput="pkgFilter()" onfocus="pkgFilter()" onblur="pkgBlur()" onkeydown="pkgKey(event)" />
+        <div id="pkgdd" class="pkgdd"></div>
+      </div>
+      <button class="act" onclick="uidOp('block',this)">Hide</button>
+      <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
+    </div>
+
+    <div class="presetrow">
+      <button class="act" onclick="uidScan(this)">Scan for candidates</button>
+      <button class="act" id="usShow" style="display:none" onclick="usToggle(this)">Show list</button>
+      <button class="act" onclick="addGlobs(this)">Add detector globs</button>
+      <span class="presethint">Scan finds apps <b>installed here</b> worth hiding from and says why —
+        nothing is hidden until you pick it. The globs are the part a scan cannot give you: they keep
+        matching detectors installed later, or repackaged under a new name.</span>
+    </div>
+    <div id="usList" class="uslist" style="display:none"></div>
+
+    <div id="blocked" class="blocklist"></div>
+
+    <details class="ndet">
+      <summary>What hiding covers</summary>
+      <p class="note">Shows the listed app the stock filesystem — no injected files, no hidden paths. One entry covers the app in every user, work profile and clone. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root and <code>su</code> are unaffected, and so is anything a system service reads on the app's behalf.</p>
+      <p class="note">A <b>glob</b> covers a moving target: <code>*.duckdetector</code>,
+        <code>me.garfieldhan.*</code> or <code>*chunqiu*</code> re-match on every apply, so a detector
+        that reinstalls under a new package name stays hidden. Anchors go at the ends only, and a glob
+        needs at least four literal characters.</p>
+    </details>
+
+    <div class="subsec">
+      <div class="subsec-h">Isolated processes</div>
+      <div class="seg" id="isoSeg" role="radiogroup" aria-label="Which isolated-process pools hiding covers">
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="both" onclick="setIsolated('both')">All</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="appzygote" onclick="setIsolated('appzygote')">App-zygote</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="platform" onclick="setIsolated('platform')">Platform</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="off" onclick="setIsolated('off')">None</button>
+      </div>
+      <div class="segstate" id="isoState">Reading…</div>
+      <details class="ndet">
+        <summary>Why this trades one tell for another</summary>
+        <p class="note">An isolated process's UID says nothing about which app started it, so hiding from one app means hiding from <i>every</i> isolated process. That closes the hole where a hidden app probes through a helper — but while it's on, an app that <b>isn't</b> hidden can spot the difference between its own view and its helper's. Both pools are covered by default.</p>
+      </details>
+    </div>
+  </div>
+
+  <!-- BOOTGUARD -->
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
+      <h2>Bootloop guard</h2><span class="chip" id="gchip">—</span>
+    </div>
+    <div class="statusline">
+      <span class="dot ok" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Armed</span>
+      <span class="sub">trips at boot #3</span>
+    </div>
+    <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
+  </div>
+
+  </section>
+
+  <section class="tab" id="tab-modules">
+
+  <!-- DETECTION POSTURE (moved from Status) -->
+  <div class="card">
+    <div class="stealth-head">
+      <div class="shield clean" id="shield">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
+      </div>
+      <div>
+        <div class="t" id="stealthT">Detection posture</div>
+        <div class="d" id="stealthD">Checking what apps can see…</div>
+      </div>
+    </div>
+    <div class="list" id="posture"></div>
+    <p class="note" id="stealthNote"></p>
+  </div>
+
+  <div class="card">
+    <div class="card-h clp" onclick="toggleModules(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <h2>Modules</h2><span class="chip" id="modcount">0</span><span class="chev">›</span>
+    </div>
+    <div class="list" id="modules" style="display:none"></div>
+  </div>
+
+  </section>
+
+  <section class="tab" id="tab-rules">
+  <div class="card">
+    <div class="card-h clp" onclick="toggleRules(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      <h2>Active rules</h2><span class="chip" id="rulechip">—</span><span class="chev">›</span>
+    </div>
+    <p class="note" id="rulebreak" style="margin-top:0">—</p>
+    <div id="ruleModuleBar" style="display:none"></div>
+    <div class="uidbar" id="rulefilterbar" style="display:none">
+      <input id="rulefilter" type="text" placeholder="Filter by path or module…" oninput="filterRules()" />
+      <button class="act" id="rulegroupBtn" style="flex:1 1 0" onclick="toggleRuleGroup(this)">Group by module</button>
+      <button class="act" style="flex:1 1 0" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
+    </div>
+    <pre class="rules" id="ruleslist" style="display:none">…</pre>
+    <p class="note" id="rulecount" style="display:none"></p>
+  </div>
+
+  <!-- ONE card, two kinds of row.
+       A file redirect and an RRO overlay APK are the same mechanism -- a rule in
+       the same dump -- and they had two cards, two filter boxes and two copies of
+       the same rendering code. Which kind a row is belongs ON the row. The hero
+       still counts them apart, because the counts are the part that differs. -->
+  <div class="card">
+    <div class="card-h clp" onclick="toggleFiles(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+      <h2>Injected files</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
+    </div>
+    <div class="uidbar" id="vfsfilterbar" style="display:none;margin-bottom:11px">
+      <input id="vfsfilter" type="text" placeholder="Filter files…" oninput="renderFilesFull()" />
+    </div>
+    <div class="list" id="vfsdirs" style="display:none"></div>
+    <div class="list" id="vfsfull" style="display:none"></div>
+  </div>
+
+  </section>
+
+  <section class="tab" id="tab-diag">
+
+  <!-- ONE card, because there is one report.
+       This pane used to carry seven: three subsystems (detection, plan, runtime)
+       each with its own chip and button, two reference cards and one conditional.
+       Three subsystems was a fact about the code, not a question anybody arrives
+       with -- and you get here by tapping a line that says "2 things need
+       attention", so landing on seven cards was the wrong answer to the tap.
+       The backend now answers in one shape, so this is one list. -->
+  <button class="backline" onclick="showTab('status',document.getElementById('nb-status'))">
+    <span class="bk-go">‹</span><span>Back to Status</span>
+  </button>
+
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
+      <h2>Check</h2><span class="chip" id="fchip">—</span>
+    </div>
+    <p class="note" id="fsub">Two halves, one report: what your module set will do at the next boot, and what apps can actually see on this device right now.</p>
+    <div class="btns" style="flex-wrap:wrap">
+      <button class="act primary" onclick="runCheck(this)">Check my setup</button>
+      <button class="act" id="auCopy" onclick="copyReport(this)" style="display:none">Copy report</button>
+    </div>
+    <div class="auage" id="auage" style="display:none"></div>
+    <div class="list" id="findlist"></div>
+
+    <details class="ndet" id="devtools">
+      <summary>Developer tools</summary>
+      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today’s fingerprint as the baseline, replacing any earlier one. <b>Verify</b> diffs the live system against it. <b>Export</b> writes <code>check.txt</code>, <code>fingerprint.txt</code> and the mount table to <code>/sdcard/Download</code> — your hide list and the apps it names are deliberately left out of a shared destination.</p>
+      <div class="btns" style="flex-wrap:wrap">
+        <button class="act" onclick="runSnapshot(this)">Snapshot</button>
+        <button class="act" onclick="runVerify(this)">Verify</button>
+        <button class="act" onclick="runExport(this)">Export</button>
+      </div>
+      <pre class="rules" id="healthout" style="display:none">…</pre>
+      <details class="ndet">
+        <summary>Raw report</summary>
+        <pre class="rules" id="auditout">…</pre>
+      </details>
+    </details>
+  </div>
+
+  <div class="card collapsed" id="incidentcard" style="display:none">
+    <div class="card-h clp" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+      <h2>Last incident</h2><span class="chip bad">guard tripped</span><span class="chev">›</span>
+    </div>
+    <p class="note">Recorded when the bootloop guard disabled the Suite, including the newest native crash and its abort message — which usually names the offending path. A saved record, not live state.</p>
+    <pre class="rules" id="incidentout">…</pre>
+    <div class="btns"><button class="act danger" onclick="clearIncident(this)">Clear incident</button></div>
+  </div>
+
+</section>
+
+  <div class="foot">NoMount Suite · Prism engine via netlink <code>nm</code><br/><span id="footver"></span></div>
+</div>
+
+
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <defs>
+    <linearGradient id="navGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="#a9c0ff"/>
+      <stop offset="55%"  stop-color="#7c9cff"/>
+      <stop offset="100%" stop-color="#57e6c3"/>
+    </linearGradient>
+  </defs>
+</svg>
+<nav class="navwrap" role="tablist" aria-label="Sections">
+  <div class="nav">
+    <span class="navpill noanim" id="navpill"></span>
+    <button class="navb on" id="nb-status" role="tab" aria-selected="true" onclick="showTab('status',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
+      <span>Status</span>
+    </button>
+    <button class="navb" id="nb-modules" role="tab" aria-selected="false" onclick="showTab('modules',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <span>Modules</span>
+    </button>
+    <button class="navb" id="nb-rules" role="tab" aria-selected="false" onclick="showTab('rules',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      <span>Rules</span>
+    </button>
+  </div>
+</nav>
+
+<div class="cfwrap" id="confirm" hidden>
+  <div class="cfbox" role="alertdialog" aria-modal="true" aria-labelledby="cfTitle" aria-describedby="cfBody">
+    <div class="cft" id="cfTitle"></div>
+    <div class="cfb" id="cfBody"></div>
+    <div class="btns">
+      <button class="act" id="cfNo">Cancel</button>
+      <button class="act danger" id="cfYes">Continue</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+  "use strict";
+  // Stamped by scripts/package.sh into the ZIP's copy, never into the tree's --
+  // so a webroot opened straight from a checkout honestly says "dev". This is
+  // the version of the code that is ACTUALLY RUNNING, which module.prop cannot
+  // tell you: ksud writes the incoming module.prop and an `update` marker into
+  // the LIVE module directory while the new content waits in modules_update, so
+  // between an install and the next reboot the active module advertises a
+  // version whose files are not on disk yet. Comparing the two is the only way
+  // this page can know which side of that swap it is on.
+  const SUITE_VERSION = "dev";
+  // Which commit this zip was built from. Stamped by package.sh alongside the
+  // version, because the version alone cannot answer "am I running the fix?" --
+  // commits land between releases, and a build carrying five of them still calls
+  // itself by the last release's number. A "+dirty" suffix means the zip was
+  // built from a tree with edits that are not in that commit.
+  const SUITE_COMMIT = "dev";
+  let execId = 0;
+  const KSU = window.ksu;
+  const $ = (id) => document.getElementById(id);
+  // Quotes included: every use of this sits inside an HTML attribute
+  // (title="...", data-...="..."), where a bare " ends the attribute early and
+  // silently turns the rest of the tag into garbage.
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // Single-quote a string for safe use in a shell command. Everything this page
+  // runs goes through a ROOT shell, so every interpolated value -- a package
+  // name, a rule target, a path built from a property -- gets wrapped here.
+  function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+  document.getElementById("banner").hidden = !!(KSU && KSU.exec);
+
+  function exec(cmd, opts = {}) {
+    return new Promise((resolve) => {
+      if (!KSU || !KSU.exec) { resolve({ errno: -1, stdout: "", stderr: "no webui env" }); return; }
+      const name = "__nmcb" + (execId++);
+      window[name] = (errno, stdout, stderr) => {
+        delete window[name];
+        resolve({ errno: Number(errno), stdout: stdout || "", stderr: stderr || "" });
+      };
+      try { KSU.exec(cmd, JSON.stringify(opts), name); }
+      catch (e) { delete window[name]; resolve({ errno: -1, stdout: "", stderr: String(e) }); }
+    });
+  }
+
+  let NMBIN = null;
+  async function bin() {
+    if (NMBIN) return NMBIN;
+    const abi = (await exec("getprop ro.product.cpu.abi")).stdout.trim() || "arm64-v8a";
+    NMBIN = `/data/adb/modules/meta-nomount/bin/${abi}/nomount`;
+    return NMBIN;
+  }
+  // Path to the raw `nm` netlink client beside the Suite binary. The pathhide
+  // control plane is a kernel knob, so it is addressed directly rather than
+  // through a Suite subcommand.
+  async function nmc() { return (await bin()).replace(/nomount$/, "nm"); }
+  // The ENGINE's version, from the engine.
+  //
+  // `nm("version")` runs the SUITE binary (`nomount version` -> "nomount
+  // v1.3.72"). The engine's number comes from the netlink client (`nm v` -> a
+  // bare "26"), and the two are deliberately independent: the engine ships in the
+  // kernel, the Suite ships as a zip, and userspace gates features on
+  // `engine >= N` precisely so a new Suite can run on an old kernel.
+  //
+  // Reading the wrong one produced a footer that said "Suite v1.3.72 · engine
+  // vv1.3.72" -- the Suite version twice, the second time mislabelled, with a
+  // doubled `v` because the caller prepended one to a string that already had it.
+  // Kernel features said "Prism engine v1.3.72 is answering" for the same reason.
+  // A reader quoting either number back was quoting nothing about their kernel.
+  //
+  // Empty string when the engine does not answer; every caller already treats
+  // that as offline.
+  async function engineVersion() {
+    const r = await exec(shq(await nmc()) + " v 2>/dev/null");
+    const v = (r.stdout || "").trim();
+    return /^\d+$/.test(v) ? v : "";
+  }
+
+  // The Suite binary shells to the `nm` netlink client beside it.
+  async function nm(args) {
+    const b = await bin();
+    const nmClient = b.replace(/nomount$/, "nm");
+    return exec(`NM_BIN=${shq(nmClient)} ${shq(b)} ${args}`);
+  }
+
+  // Shared busy state. Anything that shells out can take a noticeable moment --
+  // a Cloak scan unzips every third-party APK's manifest, absorb walks mountinfo
+  // and unmounts, doctor resolves the whole plan -- and with only a disabled
+  // button and changed label there was no sign it was still working. Every such
+  // control now shows the same spinning ring, so "is it doing anything?" is never
+  // a guess. Returns the restore function, so callers cannot forget which label
+  // to put back.
+  const _SPIN = '<svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="9" opacity=".25"/>' +
+    '<path d="M21 12a9 9 0 0 0-9-9"/></svg>';
+  function busy(btn, label) {
+    if (!btn) return function () {};
+    const html = btn.innerHTML, wasDisabled = btn.disabled;
+    btn.disabled = true;
+    btn.innerHTML = _SPIN + (label ? "<span>" + label + "</span>" : "");
+    let restored = false;
+    return function () {
+      if (restored) return;
+      restored = true;
+      btn.innerHTML = html;
+      btn.disabled = wasDisabled;
+    };
+  }
+
+  function toast(msg, kind = "") {
+    const t = $("toast");
+    t.textContent = msg; t.className = "show " + kind;
+    clearTimeout(t._t); t._t = setTimeout(() => { t.className = ""; }, 2400);
+  }
+
+  // Ask before destroying anything.
+  //
+  // The rule: a control that unmounts, clears rules, deletes a record or turns
+  // the engine off asks first, and the question says what will actually happen --
+  // not "run vfs clear" but "your modules stop being served". Refreshing and
+  // re-running a check stay one tap, because neither can lose anything.
+  //
+  // Resolves false on Escape, on a tap outside the sheet, and on Cancel. Only
+  // the destructive button resolves true.
+  let _cfClose = null;
+  function confirmAction(title, body, verb) {
+    return new Promise(function (resolve) {
+      const wrap = $("confirm"), yes = $("cfYes"), no = $("cfNo");
+      if (!wrap) { resolve(false); return; }
+      // A second sheet cannot open over the first: answer the outstanding one no.
+      if (_cfClose) _cfClose(false);
+      $("cfTitle").textContent = title;
+      $("cfBody").textContent = body;
+      yes.textContent = verb;
+      wrap.hidden = false;
+      const onKey = function (e) { if (e.key === "Escape") done(false); };
+      const onWrap = function (e) { if (e.target === wrap) done(false); };
+      function done(v) {
+        if (_cfClose !== done) return;
+        _cfClose = null;
+        wrap.hidden = true;
+        yes.onclick = null; no.onclick = null; wrap.onclick = null;
+        document.removeEventListener("keydown", onKey);
+        resolve(v);
+      }
+      _cfClose = done;
+      yes.onclick = function () { done(true); };
+      no.onclick = function () { done(false); };
+      wrap.onclick = onWrap;
+      document.addEventListener("keydown", onKey);
+      try { no.focus(); } catch (e) {}
+    });
+  }
+
+  // ---- the rule dump: ONE read per refresh, shared -------------------------
+  //
+  // Five things on this page describe the same list -- the hero counters, the
+  // Rules summary and its bar, the redirect list, the overlay list and the raw
+  // list -- and each one used to shell out for its own copy. Opening the page ran
+  // `nm vfs list` five times over, and on OxygenOS a burst of root exec is exactly
+  // the heuristic that flags root WebUI apps as malicious. It also gave five
+  // chances to disagree about one number.
+  //
+  // `ok:false` is UNKNOWN, and every caller renders it as unknown. Four of the
+  // five dropped errno and fell back to the reassuring empty state -- telling the
+  // reader there is nothing there when we simply did not know.
+  //
+  // The cache holds the PROMISE, not the resolved dump: `refreshAll` fires its
+  // readers in parallel, so a cache that only filled on resolution let every one
+  // of them race past a null and shell out anyway -- the exact burst this exists
+  // to stop, measured as four `vfs list` calls per page open.
+  let RULES = null;
+  function ruleDump() {
+    if (RULES) return RULES;
+    RULES = nm("vfs list").then(function (r) {
+      const lines = r.errno === 0
+        ? r.stdout.split("\n").map(x => x.trim()).filter(Boolean) : [];
+      const d = {
+        ok: r.errno === 0,
+        raw: (r.stdout || "").trim(),
+        lines: lines,
+        // The virtual path of each rule, without the "(virtual dir)" marker.
+        targets: lines.map(l => (l.split(" ->")[0] || "").trim().replace(/\s*\(virtual dir\)$/, "")),
+        // Structural entries are directories the engine materialises, not rules.
+        // Counting them gave 260 on a device where `nomount check`, health.txt and
+        // the manager card all said 257 -- so the one number on the front page
+        // disagreed with every other number the Suite prints, which makes a real
+        // discrepancy indistinguishable from a bug.
+        rules: lines.filter(l => !l.includes("(virtual dir)")).length,
+      };
+      // RRO overlays are hookless rules now (a virtual path under */overlay/
+      // ending .apk), not overlayfs mounts, so they come out of the same dump.
+      d.rro = d.targets.filter(t => /\/overlay\/[^\s]*\.apk$/.test(t));
+      return d;
+    });
+    return RULES;
+  }
+
+  // ---- status ----
+  async function refreshStatus() {
+    const d = await ruleDump();
+    const dot = $("dot");
+    if (!d.ok) {
+      $("state").textContent = "Engine offline";
+      $("substate").textContent = "kernel driver not responding";
+      dot.className = "dot bad";
+      // Both counters, not just one. Leaving the overlay count at whatever it
+      // last said pins a stale number beside an "Engine offline" that says the
+      // number could not be read.
+      $("mRules").textContent = "—";
+      $("mOv").textContent = "—";
+      return 0;
+    }
+    $("mRules").textContent = d.rules;
+    $("mOv").textContent = d.rro.length;
+    $("state").textContent = d.rules > 0 ? "Active" : "Idle";
+    $("substate").textContent = d.rules > 0 ? "modules injected" : "no rules — re-apply";
+    dot.className = "dot " + (d.rules > 0 ? "ok" : "warn");
+    return d.rules;
+  }
+
+  // ---- device identity ----
+  async function refreshDevice() {
+    const r = await exec('echo "$(getprop ro.product.marketname)|$(getprop ro.product.manufacturer)|$(getprop ro.product.model)|$(getprop ro.build.version.release)|$(getprop ro.build.version.sdk)|$(uname -r)"');
+    const p = (r.stdout || "").trim().split("|");
+    const name = (p[0] && p[0].trim()) ? p[0] : (((p[1] ? p[1] + " " : "")) + (p[2] || "—"));
+    $("dModel").textContent = name || "—";
+    $("dAndroid").textContent = p[3] || "—";
+    $("dApi").textContent = p[4] || "—";
+    $("dKernel").textContent = p[5] || "—";
+  }
+  // What an app can see, on the Modules tab.
+  //
+  // The MOUNT verdict is the check report's, not this card's. It used to run its
+  // own `posture --json` and count foreign mounts with its own awk, and that
+  // pattern was wrong in both directions -- it missed a bind from anywhere else
+  // under /data/adb, and it counted a hook framework's by-design bind that the
+  // report calls expected. A front page contradicting the report two taps away
+  // teaches the reader to trust neither number. Those are three ordinary rows
+  // now (`zero-mount-posture`, `tmpfs-over-the-rom`, `foreign-mount-over-the-rom`)
+  // and this reads them.
+  //
+  // What this card still measures for itself is what the report cannot: whether a
+  // non-root process sees a different mount table than root, and the residual
+  // tells a scanner reads straight out of properties whatever the mount table
+  // says.
+  async function refreshStealth() {
+    const r = await exec(
+      'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
+      'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
+      'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
+      'echo "se=$(getenforce 2>/dev/null)";'
+    );
+    const kv = {};
+    r.stdout.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1).trim(); });
+    const sucompat = kv.sucompat === "1";
+    const rootNm = parseInt(kv.root_nm || "0", 10);
+
+    // App view: drop to a non-root uid and count nomount_* mounts. If the kernel
+    // mount-hide hook is active, non-root readers get them filtered out (-> 0).
+    // NB: grep -c exits 1 when the count is 0 (the hidden case!), so don't gate on
+    // errno — parse stdout as a number instead.
+    const appOut = ((await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"')).stdout || "").trim();
+    const appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
+
+    // -1, not 0, when the rows are missing or unmeasured: "there are no foreign
+    // mounts" and "nobody asked" are different answers, and the second must not
+    // render green.
+    const mrows = ["zero-mount-posture", "tmpfs-over-the-rom", "foreign-mount-over-the-rom"].map(checkById);
+    const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
+    const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
+    const fmnt = measured ? bad.length : -1;
+
+    const fp = kv.fp || "";
+    const se = (kv.se || "").trim();
+    // `dev-keys` is a real signing tag, and its absence here rendered a dev-keys
+    // build as a green "release-keys". An EMPTY fingerprint is not a pass either:
+    // getprop returning nothing means we could not read it.
+    const keyMatch = fp === "" ? null : fp.match(/test-keys|dev-keys|userdebug|:eng\//);
+    const seTell = se !== "" && se !== "Enforcing";
+    const tells = [];
+    if (keyMatch) tells.push("build keys");
+    if (seTell) tells.push("SELinux " + se);
+
+    // "external · unmanaged" is a claim, and a probe that did not run has not
+    // earned it any more than it earns the reassuring one. Same rule, other
+    // direction: absent must say absent.
+    $("mSu").innerHTML = r.errno !== 0 ? 'not measured <small>probe did not run</small>'
+      : sucompat ? 'sucompat <small>kernel · mountless</small>'
+      : 'external <small>unmanaged</small>';
+
+    const rows = [
+      { k: "File injections", v: "mountless", t: "vfs" },
+      { k: "Root · su", v: sucompat ? "sucompat · mountless" : "external", t: sucompat ? "vfs" : "off" },
+    ];
+    if (rootNm > 0) {
+      rows.push(appNm === 0 ? { k: "Real mounts", v: "root " + rootNm + " · apps 0 — hidden", t: "vfs" }
+              : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " — VISIBLE", t: "warn" }
+              : { k: "Real mounts", v: "root " + rootNm + " · app-view n/a", t: "off" });
+    } else {
+      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " visible to apps", t: "warn" }
+              : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
+              : { k: "Real mounts", v: "none — pure Prism", t: "vfs" });
+    }
+    // No "Verified boot" row. An unlocked bootloader reports orange, every user
+    // of a custom kernel has one, and nothing the Suite does can change it -- so
+    // the row was permanently amber for everyone and pushed the whole card into
+    // "Residual tells present" while the mount surface it actually measures was
+    // clean. Build keys and SELinux stay: those are states a user can genuinely
+    // be in for a fixable reason.
+    // Name the tag that actually matched, so a dev-keys build is not reported as
+    // "test-keys" — the row is the only place the user sees which one it is.
+    rows.push({ k: "Build keys",
+                v: fp === "" ? "n/a" : keyMatch ? keyMatch[0].replace(/^:|\/$/g, "") + " · tell" : "release-keys",
+                t: fp === "" ? "off" : keyMatch ? "warn" : "vfs" });
+    rows.push({ k: "SELinux", v: se || "n/a", t: seTell ? "warn" : (se ? "vfs" : "off") });
+    $("posture").innerHTML = rows.map((x) =>
+      `<div class="row"><span class="name">${x.k}</span><span class="tag ${x.t}">${esc(x.v)}</span></div>`
+    ).join("");
+
+    // The verdict, worst first. Every arm that is not the last one is a reason
+    // this card may NOT say "clean" -- an unknown is never green here, because
+    // the whole card is a claim about what an app can see and an unknown means
+    // nothing measured that claim.
+    //
+    // Residual tells OVERRIDE whatever the mount ladder concluded: even with a
+    // spotless mount surface these are read directly by a scanner. A mount
+    // finding is the more actionable problem, so its wording is kept and the
+    // tells are appended rather than clobbering it.
+    let told = false;
+    const say = function (kind, title, desc, note) {
+      if (tells.length && !told) {
+        kind = "warn";
+        note += " Also readable by a scanner, whatever the mount table says: " +
+                tells.map(esc).join(", ") + ".";
+      }
+      $("shield").className = "shield " + kind;
+      $("stealthT").textContent = title;
+      $("stealthD").textContent = desc;
+      $("stealthNote").innerHTML = note;
+    };
+    if (engineDown(CHECK)) {
+      // A DEAD ENGINE OUTRANKS THE MOUNT VERDICT. With it down there genuinely
+      // are no mounts, so every row above passes and this card would render its
+      // greenest state on a device where nothing is being injected at all. Every
+      // statement true, the conclusion false.
+      say("warn", "The engine isn’t running", "nothing is being injected",
+        "There are no mounts because there is nothing being served. This card cannot say " +
+        "anything about how you look to an app until the engine answers — open <b>Check</b> " +
+        "from the Status tab.");
+    } else if (appNm > 0) {
+      say("warn", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
+        "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
+        "mountless</b> (Prism RRO) — if you see this, an older overlay build is still active; reboot.");
+    } else if (fmnt > 0) {
+      // The Suite is mountless, but the mount TABLE is not: another module's bind
+      // is just as readable to an app as one of ours would be, and claiming "zero
+      // mounts" over the top of it was the one false reassurance this card exists
+      // to prevent. The wording comes from the report's own row, so the shield and
+      // the report cannot describe the same mount differently.
+      const owner = bad.map(function (c) { return c.owner; }).filter(Boolean).join(", ");
+      say("warn", "Something is mounting over the ROM",
+        owner ? "from " + owner : fmnt + " finding(s) in the mount table",
+        esc(bad.map(function (c) { return c.meaning || c.name; }).join(" ")) +
+        " Open <b>Check</b> from the Status tab — it names each one, who caused it, and what " +
+        "you can do about it.");
+    } else if (fmnt < 0) {
+      say("warn", "Mount posture not measured", "no check has read the mount table yet",
+        "File injections and RRO are Prism and su is sucompat, so the Suite adds no mounts by " +
+        "construction — but nothing has measured that here yet. Run <b>Check my setup</b> from " +
+        "the Status tab.");
+    } else if (appNm < 0 && rootNm > 0) {
+      // `su 2000` is exactly the call that stops answering once uid 2000 lands on
+      // the hide list, so this is a real state, not a broken one.
+      say("warn", "Detection posture", "app-view check unavailable",
+        "Couldn’t drop to a non-root uid to verify here, and root sees " + rootNm +
+        " <code>nomount_*</code> mount(s).");
+    } else if (rootNm > 0) {
+      // appNm === 0: the mounts EXIST and are kernel-hidden from non-root
+      // readers. "Zero mounts — nothing to hide" would be a plain falsehood
+      // here; there is something, and hiding it is what is working.
+      say("clean", "Clean — nothing visible to apps",
+        rootNm + " mount" + (rootNm > 1 ? "s" : "") + " hidden from non-root",
+        "Injections are mountless and su is sucompat. Any remaining <code>nomount_*</code> mount " +
+        "is kernel-hidden from non-root readers of <code>/proc/*/mountinfo</code>; root still " +
+        "sees everything.");
+    } else if (tells.length) {
+      told = true;
+      say("warn", "Residual tells present", tells.join(" · "),
+        "Mount surface is clean, but a scanner can still read: " + tells.map(esc).join(", ") +
+        ". These are properties and boot state, not mounts — nothing on this page changes them.");
+    } else {
+      say("clean", "Fully mountless", "zero mounts — nothing to hide",
+        "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat " +
+        "(kernel&nbsp;· mountless), and RRO overlays are Prism too — OverlayManager&nbsp;+ idmap2 " +
+        "read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> " +
+        "mount table, so there is no mount-gap for a scanner to flag.");
+    }
+  }
+
+  // ---- guard ----
+  async function refreshGuard() {
+    // `cat` on a MISSING bootcount exits 1, and an absent bootcount is the
+    // healthy state -- the guard deletes it the moment a boot completes. Reading
+    // that exit as "could not read" put a "?" on the chip of every healthy
+    // device. Ask the question so that the normal answer is a success: absent
+    // means zero, and a non-zero exit then means the read genuinely failed.
+    const cr = await exec(
+      "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi"
+    );
+    const dr = await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0");
+    // The worst false green in the file: with errno dropped, a failed read gave
+    // disabled === false, so a Suite that had TRIPPED and was injecting nothing
+    // rendered as "Armed" with a green dot and "boot 0/3".
+    if (dr.errno !== 0) {
+      $("gchip").textContent = "?";
+      $("gstate").textContent = "Unknown — could not read the guard";
+      $("gdot").className = "dot";
+      $("rearm").style.display = "";
+      return;
+    }
+    const c = cr.errno === 0 ? cr.stdout.trim() : "";
+    const disabled = dr.stdout.trim() === "1";
+    $("gchip").textContent = "boot " + (cr.errno !== 0 ? "?" : c === "" ? "0" : c) + "/3";
+    if (disabled) {
+      $("gstate").textContent = "Tripped — disabled"; $("gdot").className = "dot bad"; $("rearm").style.display = "";
+    } else {
+      $("gstate").textContent = "Armed"; $("gdot").className = "dot ok"; $("rearm").style.display = "none";
+    }
+  }
+
+
+
+  // ---- theme ----
+  // Default follows the system; an explicit choice is remembered.
+  function applyTheme(t) {
+    document.documentElement.setAttribute("data-theme", t);
+    try { localStorage.setItem("nm_theme", t); } catch (e) {}
+  }
+  function toggleTheme() {
+    const cur = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+    applyTheme(cur === "light" ? "dark" : "light");
+  }
+  (function initTheme() {
+    let t = null;
+    try { t = localStorage.getItem("nm_theme"); } catch (e) {}
+    if (t !== "light" && t !== "dark") {
+      t = (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) ? "light" : "dark";
+    }
+    document.documentElement.setAttribute("data-theme", t);
+  })();
+
+
+  // Slide the capsule to whichever tab is active. Measured from layout rather than
+  // hard-coded, so it stays correct at any width / font scale.
+  function movePill(animate) {
+    const pill = document.getElementById("navpill");
+    const btn = document.querySelector(".navb.on");
+    if (!pill || !btn) return;
+    if (animate === false) pill.classList.add("noanim");
+    pill.style.width = btn.offsetWidth + "px";
+    pill.style.height = btn.offsetHeight + "px";
+    pill.style.transform = "translateX(" + btn.offsetLeft + "px)";
+    pill.style.opacity = "1";
+    if (animate === false) {
+      // drop the no-animation guard once this position has been painted
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { pill.classList.remove("noanim"); });
+      });
+    }
+  }
+  window.addEventListener("resize", function () { movePill(false); });
+
+  // ---- tabs ----
+  function showTab(name, btn) {
+    document.querySelectorAll(".tab").forEach(function (t) { t.classList.remove("on"); });
+    var pane = document.getElementById("tab-" + name);
+    if (pane) pane.classList.add("on");
+    document.querySelectorAll(".navb").forEach(function (b) {
+      b.classList.remove("on"); b.setAttribute("aria-selected", "false");
+    });
+    if (btn) { btn.classList.add("on"); btn.setAttribute("aria-selected", "true"); }
+    // The detail pane has no nav button. `movePill` bails out when nothing is
+    // selected, which would leave the capsule sitting under whichever tab was
+    // last active -- pointing at a tab you are no longer on. Park it instead.
+    var pill = document.getElementById("navpill");
+    if (!btn) {
+      if (pill) pill.style.opacity = "0";
+    } else {
+      movePill(true);
+    }
+    try { sessionStorage.setItem("nm_tab", name); } catch (e) {}
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  // The Status health line is the only way in.
+  //
+  // With no result yet the line reads "tap to run a check", and it has to mean
+  // it. Navigating to a screen where the reader then has to find a second button
+  // is not what that sentence promises -- so when there is nothing cached, this
+  // opens the detail AND starts the run. Once a verdict exists, tapping just
+  // takes you to it; re-running is the explicit button's job.
+  function openDetail() {
+    showTab("diag", null);
+    if (!CHECK) runCheck(null);
+  }
+
+  // ---- rules filter ----
+  let _rulesRaw = "";
+  var _ruleGroup = false;
+  // Owning module = the <name> in a backing path /data/adb/modules/<name>/...
+  function _ruleModule(line) {
+    const m = line.match(/\/data\/adb\/modules(?:_update)?\/([^/ ]+)/);
+    return m ? m[1] : "(other)";
+  }
+  function toggleRuleGroup(btn) {
+    _ruleGroup = !_ruleGroup;
+    btn.textContent = _ruleGroup ? "Flat list" : "Group by module";
+    btn.classList.toggle("primary", _ruleGroup);
+    filterRules();
+  }
+  function filterRules() {
+    const q = ($("rulefilter").value || "").trim().toLowerCase();
+    const lines = _rulesRaw.split("\n").filter(Boolean);
+    const keep = q ? lines.filter(function (l) { return l.toLowerCase().indexOf(q) !== -1; }) : lines;
+    if (!keep.length) {
+      $("ruleslist").textContent = "(no match)";
+    } else if (_ruleGroup) {
+      const groups = {};
+      keep.forEach(function (l) { (groups[_ruleModule(l)] = groups[_ruleModule(l)] || []).push(l); });
+      const names = Object.keys(groups).sort();
+      $("ruleslist").textContent = names.map(function (n) {
+        return "── " + n + " (" + groups[n].length + ") ──\n" + groups[n].join("\n");
+      }).join("\n\n");
+    } else {
+      $("ruleslist").textContent = keep.join("\n");
+    }
+    $("rulecount").style.display = "";
+    $("rulecount").textContent = q
+      ? keep.length + " of " + lines.length + " rules match"
+      : lines.length + " rules";
+  }
+
+  // ---- the one check ------------------------------------------------------
+  //
+  // `nomount check` is the whole diagnostic surface now. It replaced `doctor`,
+  // `audit`, `posture`, `selfcheck` and `plan` -- five verbs over two verdict
+  // enums, three JSON shapes and a fourth key=value one -- and this page is where
+  // that cost was being paid: `mergeFindings` existed only to normalise three
+  // report shapes into one list in JavaScript, because one list is what a reader
+  // wants. It is gone. `checks[]` IS the merged list: already sorted worst-first,
+  // and every row carries its own verdict, severity, meaning and owner.
+  //
+  // Two sections, one shape:
+  //   plan   -- will this module set produce a bad rule? Static, no running
+  //             process involved, so the answer does not change with the clock.
+  //   device -- is what we serve detectable, and is it being served? MEASURED
+  //             here, now, and several of these need an app to have opened an
+  //             injected file -- which is why they can honestly say `unmeasured`.
+  //
+  // stdout ONLY. Every prose reader here concatenates stdout+stderr, which is
+  // right for prose and fatal for JSON: the mount pass writes plan refusals to
+  // stderr, and one of those glued to the front of the object breaks the parse.
+  let CHECK = null;
+
+  function parseJson(r) {
+    const raw = (r.stdout || "").trim();
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) { return null; }
+  }
+
+  // Did this run include that half? Read off `sections`, which the report carries
+  // precisely so a cached file is not ambiguous -- "the plan is clean" and "the
+  // plan was never looked at" are different answers. Falls back to scanning the
+  // rows for a report written before the field existed.
+  function ranSection(r, s) {
+    if (!r) return false;
+    if (r.sections && r.sections.length) return r.sections.indexOf(s) >= 0;
+    return !!(r.checks || []).some(function (c) { return c.section === s; });
+  }
+
+  function findCheck(r, id) {
+    const cs = (r && r.checks) || [];
+    for (var i = 0; i < cs.length; i++) if (cs[i].id === id) return cs[i];
+    return null;
+  }
+  function checkById(id) { return findCheck(CHECK, id); }
+
+  // The two states that mean NOTHING IS BEING INJECTED, as opposed to "you might
+  // be detectable". They are the only things on this page that get red, and they
+  // outrank every finding: with either true, every other row is describing a
+  // device that is not hiding anything.
+  //
+  // The engine is only ASKED in the device half, so a plan-only report carries
+  // `engine: null` without anything being wrong. Reading that as "the engine is
+  // down" would paint the loudest state on the page over a run that never put the
+  // question.
+  function engineDown(r) {
+    return !!r && ranSection(r, "device") && r.engine === null;
+  }
+  function guardTripped(r) {
+    const g = findCheck(r, "boot-guard-armed");
+    return !!g && g.verdict === "fail";
+  }
+
+  // Verdict -> how the row reads.
+  //
+  // Two of these seven are new here. `warn` is a hazard in the plan -- nothing has
+  // gone wrong yet, something will -- and it belongs with the failures, because
+  // the answer to both is "look at this". `note` is a standing observation about a
+  // working setup and belongs with `n/a`: out of the list entirely, or the amber
+  // count teaches its reader to ignore the thing.
+  //
+  // AMBER for everything actionable; RED is reserved for "the Suite is not
+  // working" (engine down, guard tripped) and never used for a finding. A
+  // detection finding is something to look at, not an emergency -- the setup is
+  // running and serving your modules either way. Spending red on it leaves nothing
+  // louder for the state where nothing is being injected at all.
+  const VERDICT_LABEL = {
+    fail: "needs attention",
+    reboot: "reboot to finish",
+    warn: "will bite later",
+    unmeasured: "not measured",
+  };
+  function isAttention(v) { return v === "fail" || v === "reboot" || v === "warn"; }
+  function isShown(v) { return isAttention(v) || v === "unmeasured"; }
+
+  function auAge(ts) {
+    if (!ts) return "";
+    const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (secs < 90) return "just now";
+    const mins = Math.round(secs / 60);
+    if (mins < 90) return mins + " min ago";
+    const hrs = Math.round(mins / 60);
+    if (hrs < 36) return hrs + "h ago";
+    return Math.round(hrs / 24) + "d ago";
+  }
+
+  // One line, on the hero, from the same report the detail pane reads -- so the
+  // front page and the detail view cannot disagree, which is the whole failure
+  // mode that started this work.
+  //
+  // FIVE states, and the fourth is the one this refactor exists for:
+  //   engine down   -> red, "nothing is being injected"
+  //   open findings -> "N things need attention", emphasised, tap to act
+  //   not measured  -> "we haven't looked yet" — NEVER green
+  //   plan only     -> the device half was not measured at all
+  //   clean         -> "Nothing detectable", green, and that is the end of it
+  //
+  // `not_applicable` and `note` deliberately never appear here. A check with
+  // nothing to test on this device is not news.
+  function paintHealthLine(r) {
+    const el = $("healthline"), dot = $("hlDot"), txt = $("hlTxt");
+    if (!el) return;
+    el.classList.remove("attn", "down");
+    if (!r || !r.summary) {
+      dot.className = "hl-dot";
+      txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\">— tap to run a check</span>";
+      return;
+    }
+    // NOT-RUNNING OUTRANKS EVERY FINDING, and this is not a hypothetical. With
+    // the engine down the target-dependent checks correctly report n/a and the
+    // mount checks correctly pass -- there genuinely are no mounts -- and the
+    // summary comes back clean. Every statement true; the conclusion false. A
+    // tripped boot guard is the same state by a different route: the Suite
+    // disabled itself, and "3 things need attention" is the wrong sentence for a
+    // device that is injecting nothing at all.
+    if (engineDown(r) || guardTripped(r)) {
+      el.classList.add("attn", "down");
+      dot.className = "hl-dot bad";
+      txt.innerHTML = engineDown(r)
+        ? "<b>The engine isn’t running</b> <span class=\"age\">· nothing is being injected</span>"
+        : "<b>The bootloop guard tripped</b> <span class=\"age\">· the Suite disabled itself</span>";
+      return;
+    }
+    const s = r.summary;
+    const attn = (s.open_failures || 0) + (s.warn || 0);
+    const unm = s.unmeasured || 0;
+    const age = r.ts ? ' <span class="age">· checked ' + esc(auAge(r.ts)) + "</span>" : "";
+    if (attn > 0) {
+      el.classList.add("attn");
+      dot.className = "hl-dot warn";
+      txt.innerHTML = "<b>" + attn + (attn > 1 ? " things need" : " thing needs") +
+                      " attention</b>" + age;
+    } else if (!ranSection(r, "device")) {
+      // A plan-only run said NOTHING about detectability. That outranks a partial
+      // device run, because there is no device answer here at all.
+      dot.className = "hl-dot warn";
+      txt.innerHTML = "<b>Only your plan was checked</b> " +
+                      "<span class=\"age\">— tap to check the device too</span>";
+    } else if (unm > 0 || s.complete === false) {
+      // NOT green. The boot pass runs before any app has opened an injected file,
+      // so its process-dependent checks have nothing to look at -- and the
+      // audit.json it caches is what this line shows for the rest of the uptime.
+      // "We have not looked yet" and "we looked and it is fine" are different
+      // answers and must not share a colour.
+      dot.className = "hl-dot warn";
+      txt.innerHTML = "<b>Not fully checked yet</b> <span class=\"age\">— " +
+                      (unm || 1) + (unm === 1 ? " check" : " checks") +
+                      " had nothing to look at</span>";
+    } else {
+      dot.className = "hl-dot ok";
+      txt.innerHTML = "<b>Nothing detectable</b>" + age;
+    }
+  }
+
+  // The one entry point the card has. One command, one parse, one render.
+  async function runCheck(btn) {
+    const done = busy(btn, "Checking…");
+    $("findlist").innerHTML = '<div class="empty">Checking…</div>';
+    CHECK = parseJson(await nm("check --json --write"));
+    renderCheck(CHECK);
+    paintManagerBanner(CHECK);
+    refreshStealth();
+    done();
+  }
+
+  // Opening the pane paints from the boot cache; the button re-runs everything.
+  // Painting this on open is what turns the card from "press a button to find
+  // out" into "here is where you stand".
+  async function loadCheckCache() {
+    CHECK = parseJson(await exec("cat /data/adb/nomount/audit.json 2>/dev/null"));
+    renderCheck(CHECK);
+    paintManagerBanner(CHECK);
+  }
+
+  function renderCheck(r) {
+    const list = $("findlist"), chip = $("fchip"), sub = $("fsub"), age = $("auage");
+    paintHealthLine(r);
+    $("auCopy").style.display = r ? "" : "none";
+
+    // Nothing ran at all is not "nothing wrong".
+    if (!r || !r.checks) {
+      list.innerHTML = '<div class="empty">Not checked yet — press <b>Check my setup</b>.</div>';
+      chip.textContent = "not checked"; chip.className = "chip warn";
+      age.style.display = "none";
+      return;
+    }
+
+    $("auditout").textContent = JSON.stringify(r, null, 1);
+    age.style.display = "";
+    age.textContent = "Checked " + (auAge(r.ts) || "now") + " · " +
+      (r.sections && r.sections.length ? r.sections.join(" + ") : "unknown") + " · " +
+      (r.verdict || "");
+
+    const rows = r.checks.filter(function (c) { return isShown(c.verdict); });
+    const attention = rows.filter(function (c) { return isAttention(c.verdict); });
+    const unmeasured = rows.filter(function (c) { return c.verdict === "unmeasured"; });
+    const down = engineDown(r);
+
+    if (down) { chip.textContent = "engine down"; chip.className = "chip bad"; }
+    else if (guardTripped(r)) { chip.textContent = "guard tripped"; chip.className = "chip bad"; }
+    else if (attention.length) { chip.textContent = attention.length + " to look at"; chip.className = "chip warn"; }
+    else if (!ranSection(r, "device")) { chip.textContent = "plan only"; chip.className = "chip warn"; }
+    else if (unmeasured.length) { chip.textContent = unmeasured.length + " not measured"; chip.className = "chip warn"; }
+    else { chip.textContent = "all clear"; chip.className = "chip ok"; }
+
+    const s = r.summary || {};
+    const clean = (s.pass || 0) + (s.not_applicable || 0) + (s.note || 0);
+
+    if (!rows.length && ranSection(r, "device")) {
+      sub.textContent = "Nothing needs your attention.";
+      list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
+        '<div class="fmean">' + clean + " check" + (clean === 1 ? "" : "s") +
+        " ran across " + (r.sections || []).join(" and ") +
+        ", and found nothing to act on.</div>" +
+        '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>';
+      return;
+    }
+
+    sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
+    const group = function (title, gr) {
+      return gr.length
+        ? '<div class="fgroup">' + title + ' <span class="cnt">' + gr.length + "</span></div>" +
+          gr.map(checkRow).join("")
+        : "";
+    };
+    // A run that was never asked about the device says nothing about
+    // detectability, so it goes at the very top: everything below it is about the
+    // module set, not about what an app can see.
+    let head = "";
+    if (!ranSection(r, "device")) {
+      head = '<div class="frow"><div class="fname">Only your plan was checked</div>' +
+        '<div class="fmean">This report covers what your module set will do at the next boot. ' +
+        "Nothing on the device itself was measured, so nothing here says whether what you " +
+        "serve is detectable.</div>" +
+        '<div class="fmeta"><span class="tag warn">plan only</span>' +
+        '<button class="act" style="flex:none;min-width:0;padding:12px 16px;font-size:12.5px;margin-left:auto" ' +
+        'onclick="runCheck(this)">Check the device</button></div></div>';
+    }
+    // The incompleteness notice heads the unmeasured group rather than the whole
+    // list. It is the sentence a reader most needs when nothing else is wrong --
+    // the rows are absent answers, not passes -- but it is a CONSEQUENCE when
+    // something above it failed (with the engine down, seven checks have nothing
+    // to look at precisely because the engine is down), and leading with the
+    // consequence buries the cause.
+    let unmHead = "";
+    if (unmeasured.length || s.complete === false) {
+      unmHead = '<div class="frow"><div class="fname">' +
+        (attention.length ? "Not a complete answer" : "This is not a clean result yet") + "</div>" +
+        '<div class="fmean">' + unmeasured.length + " check" +
+        (unmeasured.length === 1 ? "" : "s") + " had nothing to look at when this ran, so " +
+        (unmeasured.length === 1 ? "it is" : "they are") + " not " +
+        (unmeasured.length === 1 ? "a pass" : "passes") + ". " +
+        (attention.length
+          ? "Fix what is above first — several of these depend on it."
+          : "The usual reason is timing: the boot pass runs before any app has opened an " +
+            "injected file, so the checks that need a running app cannot answer then. " +
+            "Run them now that the device is up.") + "</div>" +
+        '<div class="fmeta"><span class="tag warn">not measured</span>' +
+        '<button class="act" style="flex:none;min-width:0;padding:12px 16px;font-size:12.5px;margin-left:auto" ' +
+        'onclick="runCheck(this)">Run them now</button></div></div>';
+    }
+    list.innerHTML = head +
+      group("Needs your attention", attention) +
+      (unmeasured.length ? '<div class="fgroup">Not measured <span class="cnt">' +
+        unmeasured.length + "</span></div>" + unmHead + unmeasured.map(checkRow).join("")
+        : unmHead);
+  }
+
+  // One row. The order is deliberate: name and state, then the sentence a reader
+  // can act on, then who caused it, then -- behind a disclosure -- the evidence,
+  // which is written for whoever debugs the engine.
+  //
+  // Nothing from the row is ever interpolated into an onclick attribute. That is
+  // not style: `esc()` renders ' as &#39;, an HTML attribute is entity-decoded
+  // BEFORE the JS in it is parsed, and a rule target is allowed to contain a
+  // quote -- so interpolating one would have turned a legal filename into script
+  // injection with root behind it.
+  function checkRow(c) {
+    const b = [];
+    b.push('<div class="frow" id="chk-' + esc(c.id) + '">');
+    b.push('<div class="fname">' + esc(c.name) + "</div>");
+    if (c.meaning) b.push('<div class="fmean">' + esc(c.meaning) + "</div>");
+    if (c.owner) b.push('<div class="fowner">From: <b>' + esc(c.owner) + "</b></div>");
+    b.push('<div class="fmeta"><span class="tag warn">' +
+           esc(VERDICT_LABEL[c.verdict] || c.verdict) + "</span>" +
+           '<span class="tag off">' + esc(c.section || "") + "</span></div>");
+    b.push('<details><summary>What was measured</summary><div class="ev">' +
+           esc(c.evidence || "(nothing recorded)") +
+           (c.oracle ? "\n\nhow an app would use it: " + esc(c.oracle) : "") +
+           "</div></details>");
+    b.push("</div>");
+    return b.join("");
+  }
+
+  // Everything a bug report needs, in one paste. Every "it says 2 detectable,
+  // what do I do" thread currently opens with three round-trips asking for
+  // exactly these fields.
+  async function copyReport(btn) {
+    if (!CHECK) { toast("Run the check first."); return; }
+    const done = busy(btn, "Copying…");
+    const env = await exec(
+      'echo "$(getprop ro.product.marketname)|$(getprop ro.build.version.release)|' +
+      '$(getprop ro.build.id)|$(uname -r)"'
+    );
+    const p = (env.stdout || "").trim().split("|");
+    const s = CHECK.summary || {};
+    const lines = [
+      "NoMount Suite " + (CHECK.suite || SUITE_VERSION) +
+        (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " — check",
+      "device: " + (p[0] || "?") + " · Android " + (p[1] || "?") + " · " + (p[2] || "?"),
+      "kernel: " + (p[3] || "?"),
+      "engine: " + (CHECK.engine === null || CHECK.engine === undefined ? "not responding" : "v" + CHECK.engine),
+      "sections: " + ((CHECK.sections || []).join(", ") || "?"),
+      "rules: " + (CHECK.rules || 0) + " across " + (CHECK.directories || 0) + " directories",
+      "summary: " + (s.fail || 0) + " failed, " + (s.reboot || 0) + " pending reboot, " +
+        (s.unmeasured || 0) + " unmeasured, " + (s.warn || 0) + " warnings, " +
+        (s.pass || 0) + " passed, " + (s.not_applicable || 0) + " n/a, " + (s.note || 0) + " notes",
+      "verdict: " + (CHECK.verdict || "?"),
+      ""
+    ];
+    // Only what is not clean. A paste nobody reads is the same as no paste --
+    // and this is a SHARED DESTINATION, so leaving `note` rows out is load-
+    // bearing, not just brevity: the plan's "stale legacy blocklist entries"
+    // note prints hidden package names verbatim, which is the same secret as the
+    // hide list. `nomount export` withholds them with NM_REDACT_HIDE_LIST for the
+    // same reason; a clipboard headed for a bug thread is no different.
+    (CHECK.checks || []).forEach(function (c) {
+      if (!isShown(c.verdict)) return;
+      lines.push("[" + String(c.verdict).toUpperCase() + "] " + c.name + " (" + c.section + ")");
+      if (c.owner) lines.push("  from: " + c.owner);
+      // Redact the numeric appid the same way the note rows are dropped above.
+      // A FAIL or UNMEASURED row's evidence carries "uid 10245 (hidden)", which
+      // names a hidden app just as surely as the package string does -- and this
+      // text is headed for a bug thread. `nomount export` already withholds it
+      // under NM_REDACT_HIDE_LIST; the clipboard is the same destination.
+      lines.push("  measured: " + String(c.evidence).replace(/uid \d+ \(hidden\)/g, "uid <redacted> (hidden)"));
+      lines.push("");
+    });
+    const text = lines.join("\n");
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch (e) { ok = false; }
+    done();
+    if (ok) toast("Report copied.");
+    else {
+      // A clipboard the WebView will not give us is not a dead end: show the text
+      // so it can be selected by hand.
+      $("auditout").textContent = text;
+      const d = $("auditout").closest("details");
+      if (d) d.open = true;
+      $("devtools").open = true;
+      toast("Clipboard unavailable — the report is in Raw report, ready to select.");
+    }
+  }
+
+  // ---- root-manager umount switch (global banner) ----
+  //
+  // ONE switch is read now. The global "Umount modules by default" and the
+  // per-app umount profiles were decoded out of ksud's private allowlist format,
+  // and by their own argument neither can hide anything the Suite serves -- so
+  // that decode is gone and so are their arms here.
+  //
+  // Reads a check by ID, not by regexing prose for a check name. That match had
+  // already shipped broken once: the kernel-umount half tested for a sentence the
+  // tool does not print, so half of a banner that exists because this switch has
+  // broken root on real hardware was dead code for months. An id cannot drift
+  // that way.
+  function paintManagerBanner(r) {
+    const el = $("mgrwarn");
+    if (!el) return;
+    // A plan section that did not run is not "the switch is off". Absent must say
+    // absent, or this silently asserts the clean state for a switch that has
+    // broken root on real devices.
+    if (!ranSection(r, "plan")) {
+      el.hidden = false;
+      // Not checked is not the same as wrong, and it must not LOOK the same. This
+      // arm fires on a fresh install and whenever the cached report is missing,
+      // so a warning here puts a standing amber banner on every tab about a
+      // setting nothing has measured -- which is how people learn to skip
+      // banners. State it plainly; the arm below, where the switch is measured
+      // and ON, is the one that gets to be loud.
+      el.innerHTML = "Your root manager’s <b>Kernel umount</b> switch has not been checked yet " +
+        "(<code>nomount check --plan</code> has not run). Nothing here is a mount, so that " +
+        "switch hides nothing the Suite serves either way.";
+      return;
+    }
+    if (checkById("manager-kernel-umount-on")) {
+      el.hidden = false;
+      el.innerHTML = "⚠️ Turn <b>Kernel umount</b> OFF in your root manager. Nothing here is " +
+        "a mount, so it hides nothing the Suite serves — and it has broken root on real devices. " +
+        "To hide from one app, use <b>Per-UID hiding</b> on the Status tab instead.";
+      return;
+    }
+    const unknown = checkById("check-a-setting-in-your-root-manager");
+    if (unknown) {
+      el.hidden = false;
+      el.innerHTML = "⚠️ " + esc(unknown.meaning || unknown.evidence);
+      return;
+    }
+    el.hidden = true;
+  }
+
+  // ---- snapshot / verify / export ----
+  //
+  // These three survive the collapse because they answer a question `check`
+  // structurally cannot: not "is this device healthy now" but "has anything moved
+  // since the boot I was happy with". That needs a baseline the USER chose.
+  function _healthShow(txt) { const o = $("healthout"); o.style.display = ""; o.textContent = txt.trim() || "(no output)"; }
+
+  async function runSnapshot(btn) {
+    // Only when there is a baseline to lose. Asking before the FIRST snapshot
+    // would be a gate in front of nothing, which is how a confirmation stops
+    // being read.
+    const had = (await exec("[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0")).stdout.trim() === "1";
+    if (had && !(await confirmAction(
+      "Replace the saved baseline?",
+      "Verify compares this device against the snapshot you took when you were happy with it. " +
+      "A new one overwrites that reference with today's state — including anything that has " +
+      "drifted since — and the old baseline cannot be recovered.",
+      "Replace"))) return;
+    const done = busy(btn, "Saving…");
+    const r = await nm("snapshot");
+    _healthShow((r.stdout || "") + (r.stderr || ""));
+    toast(r.errno === 0 ? "Snapshot saved as baseline" : "Snapshot failed", r.errno === 0 ? "ok" : "bad");
+    done();
+  }
+  async function runVerify(btn) {
+    const done = busy(btn, "Verifying…");
+    const r = await nm("verify");
+    const txt = (r.stdout || "") + (r.stderr || "");
+    _healthShow(txt);
+    // "No DRIFT in the output" is not "matches the snapshot": empty output, a
+    // verify that never ran, and "no snapshot yet" all contain no DRIFT and all
+    // used to toast a green "Matches snapshot". Only verify's own no-drift line is
+    // a pass; everything else gets its own state.
+    if (r.errno !== 0 || !txt.trim()) toast("Verify did not run", "bad");
+    else if (/DRIFT/.test(txt)) toast("Drift from snapshot — see output", "bad");
+    else if (/no snapshot yet/.test(txt)) toast("No baseline yet — take a snapshot first", "");
+    else if (/no drift/.test(txt)) toast("Matches snapshot", "ok");
+    else toast("Verify gave no verdict — see output", "");
+    done();
+  }
+  async function runExport(btn) {
+    // Not destructive, but it publishes: /sdcard/Download is readable by any app
+    // holding a storage permission, and the whole point of an export is to hand
+    // it to someone. Say where it lands and what is deliberately withheld.
+    if (!(await confirmAction(
+      "Write diagnostics to /sdcard/Download?",
+      "Any app with storage permission can read that folder. The check report, the fingerprint, " +
+      "your rule list and your mount table go there. The apps you hide from, and what is being " +
+      "spoofed, are deliberately left out of a shared destination.",
+      "Export"))) return;
+    const done = busy(btn, "Exporting…");
+    const r = await nm("export");
+    const txt = (r.stdout || "") + (r.stderr || "");
+    _healthShow(txt);
+    const path = (txt.match(/exported to (\S+)/) || [])[1];
+    toast(path ? "Exported to " + path : "Export failed", path ? "ok" : "bad");
+    done();
+  }
+
+  // ---- last incident ----
+  // A recorded incident used to raise the alert dot on the Diagnostics tab. With
+  // the tab gone that signal needs somewhere to land, and it must not be the
+  // health line -- that line answers "are you detectable", and a guard trip is a
+  // different question with a different fix. It gets the global banner, next to
+  // the manager-umount warning, because a Suite that disabled itself is the one
+  // thing worth interrupting any tab for.
+  //
+  // NOT hidden here when there is no incident: `paintManagerBanner` owns the
+  // same element and runs on every refresh, so clearing it from here would race
+  // the umount warning off the screen.
+  async function refreshIncident() {
+    const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
+    const txt = (r.stdout || "").trim();
+    const card = $("incidentcard");
+    if (!txt) { card.style.display = "none"; return; }
+    card.style.display = "";
+    $("incidentout").textContent = txt;
+    const el = $("incwarn");
+    if (el) {
+      // incident.log is a SAVED record, and it is written for more than one
+      // reason -- a guard trip, or a boot where the mount pass never ran. Saying
+      // "nothing is being injected" purely because the file exists put that claim
+      // on screen directly above a card reporting 258 live rules and four modules
+      // served. Ask the device what is true NOW, and only make the strong claim
+      // when it holds.
+      const dr = await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0");
+      const off = ((dr && dr.stdout) || "").trim() === "1";
+      const btn = '<button class="act" style="flex:none;min-width:0;padding:11px 15px;' +
+        'font-size:12px;margin-left:8px" onclick="openDetail()">See what happened</button>';
+      el.hidden = false;
+      el.innerHTML = off
+        ? "\u26a0\ufe0f The bootloop guard tripped and disabled the Suite. " +
+          "<b>Nothing is being injected</b> until you re-arm it. " + btn
+        : "\u26a0\ufe0f An earlier boot recorded an incident. The Suite is running now \u2014 " +
+          "this is a saved record, not current state. " + btn;
+    }
+  }
+  async function clearIncident(btn) {
+    if (!(await confirmAction(
+      "Delete the incident record?",
+      "The saved crash from the boot that disabled the Suite is removed for good. It is the only " +
+      "copy, and it usually names the file that caused the failure.",
+      "Delete"))) return;
+    { const el = $("incwarn"); if (el) el.hidden = true; }
+    btn.disabled = true;
+    await exec("rm -f /data/adb/nomount/incident.log");
+    toast("Incident record cleared", "ok");
+    btn.disabled = false; refreshIncident();
+  }
+
+  // ---- modules ----
+  async function refreshModules() {
+    const box = $("modules");
+    const r = (await exec(
+      'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; ' +
+      'id=$(basename "$d"); ' +
+      // mountinfo field 4 is the mount root WITHIN ITS FILESYSTEM: a module bind reads
+      // "/adb/modules/<id>/...", not "/data/adb/modules/...", because /data is its own
+      // filesystem. The old grep matched nothing, so every module row showed the green
+      // "mountless" tag even while it owned a real, app-visible mount.
+      //
+      // Counted HERE, above the two short-circuit rows, because those `echo`s emitted
+      // two fields and nothing else -- so p[4] was undefined and both rows fell to the
+      // mnt<0 "mounts ?" branch on every refresh. That pinned a permanent unknown on
+      // precisely the row whose entire claim is that it owns no mount: the metamodule
+      // reported its own visibility as unreadable, forever, and the one row a reader
+      // checks first was the one row that never answered.
+      'mnt=$(awk -v m="$id" \'$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); ' +
+      '[ "$id" = meta-nomount ] && { echo "$id|suite|||$mnt"; continue; }; ' +
+      '[ "$id" = kernelnosu ] && { echo "$id|su|||$mnt"; continue; }; ' +
+      'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && st=off; ' +
+      // Mirror the injector (src/mount.rs): content lives under ANY top-level dir that maps to
+      // a real partition, not just system/. auto_mount modules ship product/ etc. directly.
+      // Plain `find` (no -L) is deliberate: a module's `system/product -> ../product`
+      // layout-convergence symlink must not be followed, or its files count twice.
+      // `[ -L ]` mirrors the injector's non-following file_type(): a top-level symlink
+      // (e.g. OnePlus_Dialer_Universal's `product -> ./system/product`) is NOT a partition
+      // root to walk — counting it would double-count the files it points at.
+      'roots=""; for pd in "$d"*/; do [ -d "$pd" ] || continue; [ -L "${pd%/}" ] && continue; n=$(basename "$pd"); ' +
+      'case "$n" in data|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp' +
+      '|debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin) continue;; ' +
+      'my_*) continue;; esac; [ -d "/$n" ] || continue; roots="$roots $pd"; done; ' +
+      '[ -z "$roots" ] && [ "$st" = on ] && st=nopart; ' +
+      'mech=""; cnt=0; ' +
+      'if [ "$st" = on ]; then ov=0; vf=0; ' +
+      'cnt=$(find $roots -type f 2>/dev/null | wc -l); ' +
+      '[ -n "$(find $roots -path "*/overlay/*.apk" -print -quit 2>/dev/null)" ] && ov=1; ' +
+      '[ -n "$(find $roots -type f ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
+      'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
+      'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
+      'echo "$id|$st|$mech|$cnt|$mnt"; done'
+    ));
+    // errno was ignored, so a call that never ran rendered as the reassuring
+    // empty state -- telling the user there is nothing there when we simply do
+    // not know. Same rule as the whiteout list: show it as unknown.
+    if (r.errno !== 0) {
+      box.innerHTML = '<div class="empty">Unknown — the module list could not be read.</div>';
+      $("modcount").textContent = "?"; $("mMod").textContent = "?";
+      return;
+    }
+    const out = r.stdout.trim();
+    if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
+    const rows = out.split("\n").filter(Boolean);
+    $("modcount").textContent = rows.length;
+    let served = 0;
+    box.innerHTML = rows.map((l) => {
+      const p = l.split("|");
+      const id = p[0];
+      const cnt = parseInt(p[3] || "0", 10);
+      // Defaulting a MISSING field to 0 made "could not read /proc/self/mountinfo"
+      // indistinguishable from "owns no mount", and the green `mountless` badge
+      // then went on every row — the single most reassuring thing this list says,
+      // handed out on no evidence. -1 is "unknown" and gets a neutral badge.
+      const mntRaw = (p[4] || "").trim();
+      const mnt = /^\d+$/.test(mntRaw) ? parseInt(mntRaw, 10) : -1;
+      let label, cls, showCnt = false, tip = "";
+      if (p[1] === "suite") { label = "suite"; cls = "suite"; tip = "The NoMount Suite metamodule itself."; }
+      else if (p[1] === "su") { label = "su backend"; cls = "su"; served++; tip = "Provides su; not injected by the Suite."; }
+      else {
+        const st = p[1], mech = p[2];
+        if (st === "nopart") { label = "script only"; cls = "off"; tip = "Ships no partition directory at all (scripts, zygisk, binaries) — nothing for the Suite to inject."; }
+        else if (st === "off") { label = "skipped"; cls = "off"; tip = "Has a disable / remove / skip_mount marker, so the Suite leaves it alone."; }
+        else if (mech === "overlay") { label = "overlay"; cls = "ov"; served++; showCnt = true; }
+        else if (mech === "vfs+overlay") { label = "vfs + overlay"; cls = "ov"; served++; showCnt = true; }
+        else if (mech === "vfs") { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
+        else { label = "0 files"; cls = "off"; tip = "Has a partition directory (product/, system/, …) but no files inside it, so it contributes nothing."; }
+      }
+      const files = (showCnt && cnt > 0) ? `<span class="files">${cnt} file${cnt > 1 ? "s" : ""}</span>` : `<span class="files"></span>`;
+      // Visibility: a module is only "hidden" if nothing it owns appears in the mount
+      // table. NoMount-served modules are mountless by construction; a module that
+      // mounts on its own is visible to any scanner reading /proc/*/mountinfo.
+      const vis = mnt < 0
+        ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown — it is not a claim that it owns no mount">mounts ?</span>`
+        : mnt > 0
+        ? `<span class="tag warn" title="This module has ${mnt} mount(s) of its own in the mount table — visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
+        : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
+      return `<div class="mrow"><div class="mname">${esc(id)}</div>` +
+             `<div class="mmeta">${files}${vis}<span class="tag ${cls}"${tip ? ` title="${esc(tip)}"` : ""}>${label}</span></div></div>`;
+    }).join("");
+    $("mMod").textContent = served;
+  }
+
+  // Summarise the rule set so the Rules tab shows both halves at a glance. Without
+  // this the tab looked overlay-only: the vfs rules exist but sit inside the
+  // collapsed "Active rules" card.
+  async function refreshRuleSummary() {
+    const d = await ruleDump();
+    if (!d.ok) {
+      $("rulechip").textContent = "?";
+      $("rulebreak").textContent = "Unknown \u2014 the engine did not answer.";
+      return;
+    }
+    const rro = d.rro.length, vfs = d.lines.length - rro;
+    $("rulechip").textContent = d.lines.length;
+    $("rulebreak").textContent = d.lines.length
+      ? `${vfs} file redirect${vfs === 1 ? "" : "s"} · ${rro} RRO overlay APK${rro === 1 ? "" : "s"} — all Prism, no mounts`
+      : "No rules active.";
+    _paintRuleModuleBar(d.lines);
+  }
+
+  // Rules-by-module breakdown: a stacked bar + legend over the owning module of
+  // each rule (the <name> in /data/adb/modules/<name>/…). Turns the bare rule
+  // count into a visual sense of which module owns what. Long tail folds into
+  // "other" so the legend stays readable.
+  const _RM_PALETTE = ["#57e6c3", "#7c9cff", "#c792ea", "#fbbf24", "#f8717a", "#4fd1e0", "#9ccc65"];
+  function _paintRuleModuleBar(lines) {
+    const box = $("ruleModuleBar"); if (!box) return;
+    if (!lines.length) { box.style.display = "none"; box.innerHTML = ""; return; }
+    const counts = {};
+    lines.forEach((l) => { const m = _ruleModule(l); counts[m] = (counts[m] || 0) + 1; });
+    const entries = Object.keys(counts).map((k) => [k, counts[k]]).sort((a, b) => b[1] - a[1]);
+    const total = lines.length;
+    const MAX = 5;
+    const shown = entries.slice(0, MAX);
+    const rest = entries.slice(MAX);
+    if (rest.length) shown.push(["other", rest.reduce((a, e) => a + e[1], 0), true]);
+    const col = (e, i) => e[2] ? "var(--faint)" : _RM_PALETTE[i % _RM_PALETTE.length];
+    const seg = shown.map((e, i) =>
+      `<span style="width:${(e[1] / total * 100).toFixed(2)}%;background:${col(e, i)}" title="${esc(e[0])}: ${e[1]}"></span>`
+    ).join("");
+    const legend = shown.map((e, i) => {
+      const nm = e[2] ? `other (${rest.length} module${rest.length > 1 ? "s" : ""})` : e[0];
+      return `<span class="rmleg"><span class="rmsw" style="background:${col(e, i)}"></span>` +
+             `<span class="rmname" title="${esc(nm)}">${esc(nm)}</span> <b>${e[1]}</b></span>`;
+    }).join("");
+    box.style.display = "";
+    box.innerHTML = `<div class="rmbar">${seg}</div><div class="rmlegend">${legend}</div>`;
+  }
+
+  // Every rule the engine is serving, grouped by the directory it lands in, and
+  // then one row per file behind the same disclosure. Both kinds come out of the
+  // one dump; `ov` marks the RRO overlay APKs.
+  var _files = [];
+  async function refreshFiles() {
+    const box = $("vfsdirs");
+    const d = await ruleDump();
+    if (!d.ok) {
+      $("vfscount").textContent = "?";
+      box.innerHTML = '<div class="empty">Unknown \u2014 the engine did not answer.</div>';
+      _files = [];
+      return;
+    }
+    const isOv = (p) => /\/overlay\/[^\s]*\.apk$/.test(p);
+    const dirs = {};
+    _files = d.targets.filter(Boolean).sort();
+    for (const vp of _files) {
+      const dir = vp.replace(/\/[^/]*$/, "") || "/";
+      const e = dirs[dir] || (dirs[dir] = { n: 0, ov: 0 });
+      e.n++; if (isOv(vp)) e.ov++;
+    }
+    const keys = Object.keys(dirs).sort((a, b) => dirs[b].n - dirs[a].n || a.localeCompare(b));
+    $("vfscount").textContent = _files.length;
+    if (!keys.length) box.innerHTML = '<div class="empty">No rules active.</div>';
+    else box.innerHTML = keys.map((k) => {
+      const e = dirs[k], ov = e.ov === e.n;
+      return `<div class="row"><span class="name mono">${esc(k)}</span>` +
+        `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${e.n} ` +
+        `${ov ? "apk" : "file"}${e.n > 1 ? "s" : ""}</span>` +
+        `<span class="tag ${ov ? "ov" : "vfs"}">${ov ? "RRO" : "Prism"}</span></div>`;
+    }).join("");
+    if ($("vfsfull").style.display !== "none") renderFilesFull();
+  }
+  // Full per-file list: basename shown, full path in the title attribute, because
+  // a phone cannot show /system/product/overlay/… and the name in one line.
+  function renderFilesFull() {
+    const q = ($("vfsfilter").value || "").trim().toLowerCase();
+    const f = q ? _files.filter(p => p.toLowerCase().indexOf(q) !== -1) : _files;
+    $("vfsfull").innerHTML = !f.length ? '<div class="empty">(no match)</div>'
+      : f.map(p => {
+          const ov = /\/overlay\/[^\s]*\.apk$/.test(p);
+          return `<div class="row"><span class="name mono" title="${esc(p)}">` +
+                 `${esc(p.replace(/^.*\//, ""))}</span>` +
+                 `<span class="tag ${ov ? "ov" : "vfs"}">${ov ? "RRO" : "Prism"}</span></div>`;
+        }).join("");
+  }
+  function toggleModules(h) {
+    const on = h.classList.toggle("open");
+    $("modules").style.display = on ? "" : "none";
+  }
+  function toggleFiles(h) {
+    const on = h.classList.toggle("open");
+    $("vfsdirs").style.display = on ? "" : "none";
+    $("vfsfull").style.display = on ? "" : "none";
+    $("vfsfilterbar").style.display = on ? "" : "none";
+    if (on) renderFilesFull();
+  }
+
+  // ---- rules ----
+  let rulesShown = false;
+  async function loadRules() {
+    const d = await ruleDump();
+    if (!d.ok) {
+      _rulesRaw = "";
+      $("ruleslist").textContent = "unknown — the engine did not answer";
+      $("rulecount").style.display = "none";
+      return;
+    }
+    _rulesRaw = d.raw;
+    if (!_rulesRaw) {
+      $("ruleslist").textContent = "no rules";
+      $("rulecount").style.display = "none";
+      return;
+    }
+    filterRules();
+  }
+  async function toggleRules(h) {
+    rulesShown = h.classList.toggle("open");
+    $("ruleslist").style.display = rulesShown ? "" : "none";
+    $("rulefilterbar").style.display = rulesShown ? "" : "none";
+    $("rulecount").style.display = rulesShown ? "" : "none";
+    if (rulesShown) { $("ruleslist").textContent = "Loading…"; loadRules(); }
+  }
+
+  // ---- actions ----
+  // Gap-free hot load/unload: reconciles live rules to the installed module set
+  // (adds new modules' files, drops removed ones) without clearing, so nothing
+  // un-hides mid-reload. Install/remove a module, tap Reload, no reboot.
+  async function reloadRules(btn) {
+    const svg = btn.querySelector("svg");
+    btn.disabled = true; if (svg) svg.classList.add("spin");
+    const r = await nm("reload");
+    if (r.errno === 0) toast(r.stdout.replace(/^nomount reload:\s*/, "").trim() || "Reloaded", "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    if (svg) svg.classList.remove("spin"); btn.disabled = false;
+    refreshAll();
+  }
+  async function clearRules(btn) {
+    if (!(await confirmAction(
+      "Clear every injection rule?",
+      "Every file your modules add disappears straight away — apps go back to seeing the stock " +
+      "ROM, and anything relying on an injected file may misbehave until you put them back. " +
+      "Nothing is uninstalled: Reload, or a reboot, restores all of it.",
+      "Clear rules"))) return;
+    const done = busy(btn, "Clearing…");
+    // A clear drops the kernel's hidden-app set along with the rules, so nomount
+    // re-hides the saved list straight after; the toast reports what it re-hid.
+    const r = await nm("vfs clear");
+    if (r.errno === 0) toast((r.stdout || "").trim().replace(/^ok\b\s*/, "Rules cleared ") || "Rules cleared", "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    RULES = null;
+    done(); refreshStatus(); refreshBlocked(); if (rulesShown) loadRules();
+  }
+  async function rearm(btn) {
+    if (!(await confirmAction(
+      "Re-arm the bootloop guard?",
+      "This deletes the record of the boot that failed, including the crash log — which is the " +
+      "only copy and usually names the file that caused it. Read or copy it first. The Suite " +
+      "stays off until you reboot.",
+      "Delete and re-arm"))) return;
+    btn.disabled = true;
+    // Also drop the incident record: re-arming means acknowledging the trip, so the
+    // saved card should not linger past the fix (it only made sense while disabled).
+    await exec("rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
+    toast("Guard re-armed — reboot to re-enable", "ok");
+    btn.disabled = false; refreshGuard(); refreshIncident();
+  }
+  // A package name is letters, digits, dots and underscores; an app id is digits.
+  // An allow-list is exact here. The old deny-list let glob characters (* ? [ ])
+  // and a backslash through to an unquoted shell word, so Hide could land on
+  // something other than what was typed.
+  // Globs are valid hide-list entries, so `*` has to pass -- but every target is
+  // interpolated into a shell command, and an unquoted `*` would be expanded by the
+  // shell against the cwd before nomount ever saw it. Two halves of one fix: this
+  // set excludes quotes/spaces/metacharacters, and every call site below wraps the
+  // target in single quotes.
+  const UID_TARGET_RE = /^[A-Za-z0-9._*]+$/;
+  async function uidOp(op, btn) {
+    const v = $("uid").value.trim();
+    if (!v) { toast("Enter a package name or UID", "bad"); return; }
+    if (!UID_TARGET_RE.test(v)) { toast("Letters, digits, dots, underscores, and * for a glob", "bad"); return; }
+    // Hiding is additive and instantly undone. Un-hiding removes a saved entry --
+    // and if that entry is a glob it un-hides everything it ever matched, which is
+    // not something to lose to a mis-tap.
+    if (op === "unblock" && !(await confirmAction(
+      "Stop hiding " + v + "?",
+      v.indexOf("*") >= 0
+        ? "That entry is a pattern. Every app it matches stops being hidden — now, and any that " +
+          "install later — and the pattern itself is deleted from your list."
+        : "This app sees your injected files again the moment it next looks, and the entry is " +
+          "removed from your list.",
+      "Stop hiding"))) return;
+    const done = busy(btn, op === "block" ? "Hiding…" : "Unhiding…");
+    const r = await nm(`uid ${op} ${shq(v)}`);
+    if (r.errno === 0) {
+      toast((r.stdout || "").replace(/^ok:\s*/, "").trim() || `${v} ${op === "block" ? "hidden" : "unhidden"}`, "ok");
+      if (op === "block") $("uid").value = "";
+      refreshBlocked();
+    } else {
+      toast("Failed: " + (r.stderr || "error"), "bad");
+    }
+    done();
+  }
+  // Blocked apps, cross-referenced against the kernel's LIVE set (nm l u) so
+  // drift shows: live = enforced now; pending = saved but not yet applied;
+  // drift = kernel is hiding it but it isn't saved (won't survive a reboot).
+  async function refreshBlocked() {
+    const box = $("blocked");
+    const r = await nm("uid list");
+    // errno was dropped, so a call that never ran rendered as the reassuring
+    // empty state. Same rule as the whiteout list: never fall back to the
+    // answer the user wants to hear, show it as unknown.
+    if (r.errno !== 0) {
+      const uc0 = $("uidchip");
+      if (uc0) uc0.textContent = "?";
+      box.innerHTML = `<div class="blk-none">Unknown \u2014 the hide list could not be read.</div>`;
+      return;
+    }
+    const lines = (r.stdout || "").split("\n").map(s => s.trim()).filter(Boolean);
+    const none = !lines.length || lines[0] === "no blocked apps";
+    // Counted once the rows are classified: an entry nothing installed matches --
+    // a glob with no match, a package that is not here -- is a rule waiting, not an
+    // app being hidden, and counting it as one overstates what is actually in force.
+    const uc = $("uidchip");
+    if (none && uc) uc.textContent = "0";
+    if (none) {
+      box.innerHTML = `<div class="blk-none">No per-UID hiding active — no apps hidden.</div>`;
+      return;
+    }
+    const rows = lines.map(l => {
+      const [name, stateRaw] = l.split("\t");
+      const s = (stateRaw || "").trim();
+      let cls = "live";
+      if (/not installed/.test(s) || /unreachable/.test(s) || /no match/.test(s)) cls = "gone";
+      else if (/not applied/.test(s)) cls = "pending";
+      else if (/not saved/.test(s)) cls = "drift";
+      // Target for actions: for a glob-matched row the row names a package but the
+      // hide-list entry is the glob, so removing must act on the glob — otherwise the
+      // ✕ would delete nothing and the next apply would just re-hide the app.
+      const uidM = s.match(/uid (\d+)/);
+      const viaM = s.match(/^via (\S+)/);
+      const target = viaM ? viaM[1]
+        : (/^uid \d+$/.test(name) ? (uidM ? uidM[1] : name) : name);
+      const xTitle = viaM ? `Remove ${viaM[1]} — un-hides every app it matches` : "Unhide";
+      const save = cls === "drift"
+        ? `<button class="bx save" title="Save so it survives reboot" data-act="save" data-nmt="${esc(target)}">💾</button>` : "";
+      return { active: cls !== "gone", html: `<div class="blk ${cls}">
+        <span class="dot"></span>
+        <span class="bn">${esc(name)}</span>
+        <span class="bs">${esc(s)}</span>
+        ${save}
+        <button class="bx" title="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>
+      </div>` };
+    });
+    const active = rows.filter(function (x) { return x.active; });
+    const waiting = rows.filter(function (x) { return !x.active; });
+    const htmlOf = function (a) { return a.map(function (x) { return x.html; }).join(""); };
+    if (uc) uc.textContent = String(active.length);
+    box.innerHTML =
+      (active.length ? `<div class="blk-head">Hidden apps · ${active.length}</div>` + htmlOf(active) : "") +
+      (waiting.length ? `<div class="blk-head">Waiting · ${waiting.length}</div>` +
+        `<div class="blk-sub">Nothing installed matches these yet. A glob keeps watching, so a
+          detector installed later is hidden the moment it appears.</div>` + htmlOf(waiting) : "");
+  }
+
+  // The list is built from a file a human can edit, so nothing from it is
+  // interpolated raw: esc() for the text nodes and for the data attribute the
+  // handler reads, and the buttons carry no generated inline code at all.
+  document.getElementById("blocked").addEventListener("click", ev => {
+    const b = ev.target.closest("button[data-act]");
+    if (!b) return;
+    const t = b.getAttribute("data-nmt") || "";
+    if (!UID_TARGET_RE.test(t)) { toast("That entry has characters nomount won't take", "bad"); return; }
+    if (b.getAttribute("data-act") === "save") saveOne(t, b); else unblockOne(t, b);
+  });
+  // Candidate rows are divs, and the package names come from `pm list packages`,
+  // but they are validated like every other target before reaching a command.
+  document.getElementById("usList").addEventListener("click", ev => {
+    const row = ev.target.closest("[data-act='uspick']");
+    if (!row) return;
+    const t = row.getAttribute("data-nmt") || "";
+    if (!UID_TARGET_RE.test(t)) { toast("That entry has characters nomount won't take", "bad"); return; }
+    usPick(t);
+  });
+  // Load installed third-party packages with their UIDs (once), for the custom
+  // app-picker dropdown below. Best-effort — the field still accepts free text.
+  var _pkgsLoaded = false, _pkgs = [], _pkgSel = -1;
+  async function loadPkgList() {
+    if (_pkgsLoaded) return;
+    // -U adds the uid so we can show it inline: "package:com.foo uid:10123"
+    const r = await exec("pm list packages -3 -U 2>/dev/null | sort");
+    _pkgs = (r.stdout || "").split("\n").map(function (l) {
+      const m = l.match(/^package:(\S+)\s+uid:(\d+)/);
+      return m ? { name: m[1], uid: m[2] } : null;
+    }).filter(Boolean);
+    if (_pkgs.length) _pkgsLoaded = true;
+  }
+  function pkgHide() { const d = $("pkgdd"); d.classList.remove("show"); d.innerHTML = ""; _pkgSel = -1; }
+  function pkgBlur() { setTimeout(pkgHide, 130); } // let a click/mousedown land first
+  function pkgFilter() {
+    const q = ($("uid").value || "").trim().toLowerCase();
+    const d = $("pkgdd"); _pkgSel = -1;
+    if (!_pkgs.length) { pkgHide(); return; }
+    // No cap — the whole list is browsable by scroll; typing narrows it. The box
+    // is height-limited in CSS and scrolls internally.
+    const matches = q
+      ? _pkgs.filter(function (p) { return p.name.toLowerCase().indexOf(q) !== -1 || p.uid.indexOf(q) !== -1; })
+      : _pkgs;
+    if (!matches.length) { d.innerHTML = '<div class="none">No matching installed app</div>'; d.classList.add("show"); return; }
+    const head = '<div class="pkghead">' + matches.length + ' app' + (matches.length > 1 ? 's' : '') +
+                 (q ? ' match' : '') + ' · type to filter</div>';
+    d.innerHTML = head + matches.map(function (p) {
+      const nm = p.name.replace(/'/g, "");
+      return '<div class="opt" data-nm="' + nm + '" onmousedown="pkgPick(this)">' +
+             '<span class="pn">' + p.name + '</span><span class="pu">uid ' + p.uid + '</span></div>';
+    }).join("");
+    d.classList.add("show");
+  }
+  function pkgPick(el) { $("uid").value = el.getAttribute("data-nm"); pkgHide(); }
+  function pkgKey(e) {
+    const d = $("pkgdd"); if (!d.classList.contains("show")) return;
+    const opts = d.querySelectorAll(".opt");
+    if (e.key === "Escape") { pkgHide(); return; }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!opts.length) return;
+      _pkgSel = (_pkgSel + (e.key === "ArrowDown" ? 1 : -1) + opts.length) % opts.length;
+      opts.forEach(function (o, i) { o.classList.toggle("sel", i === _pkgSel); });
+      opts[_pkgSel].scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter" && _pkgSel >= 0 && opts[_pkgSel]) {
+      e.preventDefault(); pkgPick(opts[_pkgSel]);
+    }
+  }
+  // Isolated-pool policy (a kernel knob, re-asserted from disk on every apply).
+  const ISO_MODES = {
+    both:      "Hiding covers every isolated process.",
+    appzygote: "Hiding covers the app-zygote pool only.",
+    platform:  "Hiding covers the platform pool (99000-99999) only.",
+    off:       "Isolated processes are not hidden from.",
+  };
+  function isoPaint(mode, note, bad) {
+    const seg = $("isoSeg"), st = $("isoState");
+    const known = Object.prototype.hasOwnProperty.call(ISO_MODES, mode);
+    seg.classList.toggle("unknown", !known);
+    seg.querySelectorAll(".seg-b").forEach(function (b) {
+      const on = known && b.dataset.v === mode;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-checked", on ? "true" : "false");
+    });
+    st.textContent = note || (known ? ISO_MODES[mode] : "");
+    st.classList.toggle("bad", !!bad);
+  }
+  async function refreshIsolated() {
+    const r = await nm("uid isolated");
+    const m = (r.stdout || "").trim().match(/^(both|appzygote|platform|off)/);
+    // Never fall back to showing the default: if the engine did not answer, the
+    // control would claim "covers every isolated process" whatever the kernel is
+    // actually doing. Show it as unknown instead.
+    if (r.errno === 0 && m) isoPaint(m[1]);
+    else isoPaint(null, "State unknown — the engine did not answer.", true);
+  }
+  async function setIsolated(mode) {
+    const seg = $("isoSeg");
+    const btns = Array.prototype.slice.call(seg.querySelectorAll(".seg-b"));
+    btns.forEach(function (b) { b.disabled = true; });
+    try {
+      const r = await nm(`uid isolated ${mode}`);
+      if (r.errno === 0) {
+        toast((r.stdout || "").replace(/^ok:/, "").trim() || "Updated", "ok");
+        isoPaint(mode);
+      } else {
+        toast("Failed: " + (r.stderr || "error"), "bad");
+        // Await it: re-enabling before the read lands let the control be clicked
+        // again while it still showed the stale value.
+        await refreshIsolated();
+      }
+    } finally {
+      btns.forEach(function (b) { b.disabled = false; });
+    }
+  }
+
+  // Candidate scan. Proposing only what is installed keeps the hide list to the
+  // handful of apps that matter on THIS device, instead of dozens of entries for
+  // apps that are not here. Same shape as the Cloak picker: scan, pick, apply.
+  const US = new Map();
+  let usShown = false;
+  const US_REASONS = {
+    detector:       { label: "known detector",   cls: "r-det",  pick: true },
+    "queries-root": { label: "looks for root",   cls: "r-qr",   pick: true },
+    "su-perm":      { label: "wants superuser",  cls: "r-su",   pick: false },
+    "queries-all":  { label: "enumerates apps",  cls: "r-qa",   pick: false },
+  };
+  function usParse(out) {
+    (out || "").split("\n").forEach(function (l) {
+      const [pkg, raw] = l.replace(/\r/g, "").split("\t");
+      if (!pkg || !raw) return;
+      const reasons = raw.trim().split(",").filter(Boolean);
+      const prev = US.get(pkg);
+      // Anything with a strong reason starts picked; su-perm alone does not, because
+      // those are usually the user's OWN root tools (file managers, app managers) and
+      // hiding from them shows them the stock tree instead of the module content.
+      const pick = reasons.some(function (r) { return US_REASONS[r] && US_REASONS[r].pick; });
+      US.set(pkg, { reasons: reasons, pick: prev ? prev.pick : pick });
+    });
+  }
+  async function uidScan(btn) {
+    const done = busy(btn, "Scanning…");
+    const r = await exec("sh /data/adb/modules/meta-nomount/uidscan.sh 2>/dev/null");
+    usParse(r.stdout);
+    // Drop what is already hidden — re-offering it, pre-picked, would invite a
+    // pointless second `uid block` and make the count meaningless.
+    const cur = await nm("uid list");
+    (cur.stdout || "").split("\n").forEach(function (l) {
+      const name = l.split("\t")[0].trim();
+      if (name && US.has(name)) US.delete(name);
+    });
+    done();
+    if (!usShown) usToggle($("usShow"));
+    usRender();
+    toast(US.size ? `${US.size} candidate(s)` : "Nothing worth hiding found", US.size ? "ok" : "");
+  }
+  function usToggle(btn) {
+    usShown = !usShown;
+    $("usList").style.display = usShown ? "" : "none";
+    btn.style.display = "";
+    btn.textContent = usShown ? "Hide list" : "Show list";
+  }
+  function usPick(pkg) {
+    const e = US.get(pkg); if (!e) return;
+    e.pick = !e.pick; usRender();
+  }
+  function usRender() {
+    const box = $("usList");
+    $("usShow").style.display = US.size ? "" : "none";
+    if (!US.size) {
+      box.innerHTML = '<div class="blk-none">Nothing left to pick — scan again after installing apps.</div>';
+      return;
+    }
+    const order = ["detector", "queries-root", "su-perm", "queries-all"];
+    const rank = (e) => Math.min.apply(null, e.reasons.map(function (r) {
+      const i = order.indexOf(r); return i < 0 ? 9 : i;
+    }));
+    const rows = [...US.entries()].sort(function (a, b) {
+      return rank(a[1]) - rank(b[1]) || a[0].localeCompare(b[0]);
+    }).map(function ([pkg, e]) {
+      const chips = e.reasons.map(function (r) {
+        const d = US_REASONS[r] || { label: r, cls: "" };
+        return `<span class="rch ${d.cls}">${esc(d.label)}</span>`;
+      }).join("");
+      return `<div class="usrow${e.pick ? " on" : ""}" data-act="uspick" data-nmt="${esc(pkg)}">
+        <span class="uscb">${e.pick ? "✓" : ""}</span>
+        <span class="usn">${esc(pkg)}</span>
+        <span class="usr">${chips}</span>
+      </div>`;
+    }).join("");
+    const n = [...US.values()].filter(function (e) { return e.pick; }).length;
+    box.innerHTML = `<div class="blk-head">Candidates · ${US.size}</div>${rows}
+      <div class="usfoot">
+        <button class="act primary" onclick="usApply(this)"${n ? "" : " disabled"}>Hide ${n} selected</button>
+        <span class="presethint">Picked by default: known detectors and apps that look for a root
+          manager. Apps that merely request superuser are left unpicked — those are usually your own
+          root tools, and hiding shows them the stock tree instead of your module content.</span>
+      </div>`;
+  }
+  async function usApply(btn) {
+    const picks = [...US.entries()].filter(function ([, e]) { return e.pick; }).map(function ([p]) { return p; });
+    if (!picks.length) return;
+    const done = busy(btn, "Hiding…");
+    let ok = 0, bad = 0;
+    for (const p of picks) {
+      const r = await nm(`uid block ${shq(p)}`);
+      if (r.errno === 0) { ok++; US.delete(p); } else bad++;
+    }
+    done();
+    usRender();
+    refreshBlocked();
+    toast(bad ? `${ok} hidden, ${bad} failed` : `${ok} app(s) hidden`, bad ? "bad" : "ok");
+  }
+  // The globs are separate from the scan on purpose: they are what covers a detector
+  // installed tomorrow, which a scan of what is installed today cannot.
+  async function addGlobs(btn) {
+    const done = busy(btn, "Adding…");
+    const r = await nm("uid preset detectors --globs");
+    if (r.errno === 0) toast((r.stdout || "").replace(/^preset /, "").trim() || "Added", "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    done();
+    refreshBlocked();
+  }
+
+  async function unblockOne(target, btn) {
+    if (!(await confirmAction(
+      "Stop hiding " + target + "?",
+      target.indexOf("*") >= 0
+        ? "That entry is a pattern. Every app it matches stops being hidden — now, and any that " +
+          "install later — and the pattern itself is deleted from your list."
+        : "This app sees your injected files again the moment it next looks, and the entry is " +
+          "removed from your list.",
+      "Stop hiding"))) return;
+    btn.disabled = true;
+    const r = await nm(`uid unblock ${shq(target)}`);
+    if (r.errno === 0) toast(`${target} unhidden`, "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    refreshBlocked();
+  }
+  async function saveOne(target, btn) {
+    btn.disabled = true;
+    const r = await nm(`uid block ${shq(target)}`);
+    if (r.errno === 0) toast(`${target} saved`, "ok");
+    else toast("Failed: " + (r.stderr || "error"), "bad");
+    refreshBlocked();
+  }
+
+  // ---- collapsible cards, remembered per card ----
+  function toggleCard(h) {
+    const card = h.closest(".card");
+    const on = card.classList.toggle("collapsed");
+    h.classList.toggle("open", !on);
+    if (card.id) { try { localStorage.setItem("nmcol:" + card.id, on ? "1" : "0"); } catch (e) {} }
+  }
+  // The markup states each card's DEFAULT (the `collapsed` class or its absence);
+  // localStorage only overrides it. Hard-coding "collapsed unless explicitly
+  // expanded" was right for a drawer of eight tools and wrong for the one control
+  // most people came here to use, which now has to open closed on first run.
+  function applyCardState() {
+    document.querySelectorAll(".card[id]").forEach(card => {
+      let v = null;
+      try { v = localStorage.getItem("nmcol:" + card.id); } catch (e) {}
+      const collapsed = v === null ? card.classList.contains("collapsed") : v === "1";
+      card.classList.toggle("collapsed", collapsed);
+      const h = card.querySelector(".card-h");
+      if (h) h.classList.toggle("open", !collapsed);
+    });
+  }
+
+  async function refreshAll(btn) {
+    const ic = btn && btn.querySelector("svg");
+    if (ic) ic.classList.add("spin");
+    // Drop the cached rule dump: the cache exists to stop ONE refresh reading it
+    // five times, not to survive across refreshes -- a refresh is the user asking
+    // again, usually right after changing something.
+    RULES = null;
+    // `nm version` returns the ENGINE's capability counter -- a bare integer
+    // (26), not a release. The footer printed it as "Suite 26", which is the one
+    // number on the page a reader is most likely to quote back, and it named the
+    // kernel's number after the module. The two CANNOT be merged: the engine
+    // ships in the kernel and the Suite ships as a zip, they are installed
+    // separately, and userspace gates features on `engine >= N` precisely so a
+    // new Suite can run on an old kernel and know what it may ask for.
+    // The cached report first, and awaited: the hero line, the manager banner
+    // and the posture card all read it, so nothing below should be racing it.
+    await loadCheckCache();
+    const ev = await engineVersion();
+    const eng = ev ? ("engine v" + ev) : "engine offline";
+    // module.prop is what ksud ADVERTISES; SUITE_VERSION is what is running.
+    const pv = (await exec(
+      "sed -n 's/^version=//p' /data/adb/modules/meta-nomount/module.prop"
+    )).stdout.trim();
+    const staged = SUITE_VERSION !== "dev" && pv && pv !== SUITE_VERSION;
+    $("ver").textContent = SUITE_VERSION + (staged ? " ·" : "");
+    $("ver").title = staged
+      ? pv + " is installed but NOT live yet -- its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
+      : "Suite " + SUITE_VERSION + " -- " + eng + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
+    const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
+    $("footver").textContent = "Suite " + suiteId + " · " + eng +
+      (staged ? " · " + pv + " staged — reboot to activate" : "");
+    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
+                       refreshModules(), refreshFiles(), refreshRuleSummary(),
+                       refreshIncident(), refreshBlocked(), refreshIsolated()]);
+    if (rulesShown) loadRules();
+    loadPkgList();
+    if (ic) ic.classList.remove("spin");
+  }
+
+
+
+
+  // ---- init (top level: must not live inside an action handler) ----
+  (function restoreTab() {
+    let t = null;
+    try { t = sessionStorage.getItem("nm_tab"); } catch (e) {}
+    if (t && document.getElementById("tab-" + t)) showTab(t, document.getElementById("nb-" + t));
+  })();
+  // Place the capsule now, and again after load in case metrics shift once
+  // fonts/layout settle. Both are unanimated so it never slides in from 0.
+  movePill(false);
+  window.addEventListener("load", function () { movePill(false); });
+
+  applyCardState();
+  refreshAll();
+</script>
+</body>
+</html>
