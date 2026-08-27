@@ -60,15 +60,13 @@
  *    and the PackageManager keeps advertising a path that app cannot open.
  *    Userspace can only warn about that if it can tell the two apart.
  *
- * 16: NM_KNOB_PATHHIDE and NM_CMD_GET_PATHHIDE exist, i.e. this engine can
- *    carry the _pathhide cloak's configuration. That patch set used to own a
- *    /proc node, which every app could find with one readdir -- a self-naming
- *    tell louder than the paths it concealed. It has no control plane of its
- *    own any more, so a Suite talking to an engine below 16 cannot configure it
- *    at all: the knob is refused as unknown and the rule list stays empty. That
- *    is silent unless userspace can tell 15 from 16, which is what this is for.
- *    (Whether pathhide is COMPILED IN is a separate question -- the weak symbol
- *    answers -EINVAL either way, so a live probe still needs `nm l p`.)
+ * 16: RETRACTED. This announced that the engine could carry the _pathhide
+ *    cloak's configuration. It no longer can: the knob and the dump command are
+ *    both retired (slots reserved, see below), because no builder applies that
+ *    patch set and the forwarder therefore answered -EINVAL on every kernel
+ *    that shipped. An engine reporting >= 16 does NOT imply pathhide support;
+ *    nothing in the Suite asks, and the version is not lowered because 17 and
+ *    above make claims that still hold.
  *
  * 17: NM_FLAG_PUBLIC now SURVIVES on a rule that shadows a stock APK, where 16
  *    and earlier stripped it unconditionally. Below 17 a blocked reader opening
@@ -182,7 +180,7 @@
  *
  * 26: NM_KNOB_GHOST and NM_CMD_GET_GHOST exist, i.e. this engine can forward
  *    control commands to the _ghost existence cloak and dump its tables. Same
- *    shape as the NM_KNOB_PATHHIDE pair added in 16, including the empty-value
+ *    shape as the retired pathhide pair (slot 6), including the empty-value
  *    presence probe.
  *
  *    This matters more than a usual capability bump. _ghost's guards are INERT
@@ -702,9 +700,11 @@ enum {
     NM_CMD_GET_LIST,
     NM_CMD_GET_UIDS,
     NM_CMD_SET_KNOB,
-    /* Dump the _pathhide rule list. Answers empty (not an error) on a kernel
-     * built without that patch set, so a caller need not special-case it. */
-    NM_CMD_GET_PATHHIDE,
+    /* 10: RETIRED. Dumped the _pathhide rule list. The command travels in
+     * nlmsg_type as NLMSG_MIN_TYPE + cmd, so the slot is reserved rather than
+     * deleted -- removing it would shift NM_CMD_GET_GHOST under every nm binary
+     * already installed. */
+    NM_CMD_RESERVED_10,
     NM_CMD_GET_GHOST,
     __NM_CMD_MAX,
 };
@@ -716,10 +716,19 @@ enum {
  * netlink control plane instead, which is CAP_NET_ADMIN-gated and not
  * enumerable. Payload layout: [u32 knob][value bytes], empty value = clear. */
 enum {
-    NM_KNOB_UNAME_RELEASE = 0,
-    NM_KNOB_UNAME_VERSION,
-    NM_KNOB_CMDLINE,
-    NM_KNOB_BOOTCONFIG,
+    /* 0..3: RETIRED boot-identity knobs -- uname release/version and the
+     * /proc/cmdline + /proc/bootconfig takeover. The Suite never drove them
+     * automatically once spoof.sh was removed, and it now provides no
+     * boot-identity spoofing at all, so the implementations are gone.
+     *
+     * The SLOTS stay. A knob is a raw u32 at payload offset 0, so deleting
+     * these would renumber every knob below and silently remap the knobs of any
+     * nm binary already on a device -- `nm k d 1` would arrive as a different
+     * knob entirely. Reserved, never reused. */
+    NM_KNOB_RESERVED_0 = 0,
+    NM_KNOB_RESERVED_1,
+    NM_KNOB_RESERVED_2,
+    NM_KNOB_RESERVED_3,
     /* "1" => this device's ROM directories are dirent-packed (erofs-shaped), so
      * a synthesized directory must report 12*(entries incl . and ..) + name
      * bytes rather than the 4096 placeholder.
@@ -740,23 +749,19 @@ enum {
      * app spotting the injection by diffing its own view against its own isolated
      * child's. Only meaningful while at least one appid is blocked. */
     NM_KNOB_HIDE_ISOLATED,
-    /* One _pathhide control command, forwarded verbatim to its parser:
-     * "+needle" adds, "~needle" removes, "-" clears. Lives here rather than on
-     * a /proc node of its own because this channel is CAP_NET_ADMIN-gated and
-     * creates no dirent for an app to find.
-     *
-     * NB: an EMPTY value is a presence probe here (returns 0 iff pathhide is
-     * compiled in), not "clear" as it is for the knobs above -- clearing is the
-     * explicit "-" command. Userspace needs it because NM_CMD_GET_PATHHIDE
-     * answers empty both for "not built" and for "built, no rules". */
-    NM_KNOB_PATHHIDE,
+    /* 6: RETIRED. Forwarded one _pathhide control command to its parser. No
+     * builder applies that patch set, so pathhide_ctl was a NULL weak symbol on
+     * every kernel these builders produce and this answered -EINVAL to every
+     * call -- including the empty-value presence probe, because the NULL test
+     * ran first. Reserved for the same wire reason as 0..3. */
+    NM_KNOB_RESERVED_6,
     /* One _ghost control command, forwarded verbatim to its parser:
      * "p+/abs/path" / "p~/abs/path" / "p-" for the hidden-path table,
      * "u+<uid>" / "u~<uid>" / "u-" for the hidden-uid table.
      *
-     * Same presence-probe rule as NM_KNOB_PATHHIDE: an EMPTY value returns 0
-     * iff _ghost is compiled in, and clearing is the explicit "-" command.
-     * Userspace needs it for the same reason -- NM_CMD_GET_GHOST answers empty
+     * An EMPTY value is a presence probe (returns 0 iff _ghost is compiled
+     * in), not "clear" as it is for the knobs above -- clearing is the explicit
+     * "-" command. Userspace needs it because NM_CMD_GET_GHOST answers empty
      * both for "not built" and for "built, no rules".
      *
      * _ghost is INERT until both tables are populated: ghost_hidden_path()

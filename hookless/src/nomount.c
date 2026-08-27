@@ -7,10 +7,6 @@
 #include <linux/security.h>
 #include <linux/version.h>
 #include <linux/module.h>
-#include <linux/utsname.h>
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-#include <linux/sizes.h>
 #include <linux/magic.h>
 #include <linux/hash.h>
 #include <linux/sort.h>
@@ -43,20 +39,6 @@
 #define NM_SDKSANDBOX_END   29999
 #define NM_SDKSANDBOX_OFF   10000
 
-/* _pathhide control plane, reached through WEAK symbols on purpose.
- *
- * The two patch sets have to stay independently applicable, so nomount.c does
- * NOT include pathhide.h -- that header only exists once the other set has been
- * applied. A kernel with nomount but without pathhide therefore still links,
- * and answers -EINVAL on the knob exactly as it would for any unknown one.
- *
- * NM_PATHHIDE_RULE_MAX must be >= pathhide.c's PH_RULE_LEN. If it ever drifts
- * below, pathhide_get_rule() rejects the undersized buffer with -EINVAL and the
- * dump ends empty -- a visibly short list -- rather than silently truncating a
- * rule into something that no longer matches what the kernel is enforcing. */
-#define NM_PATHHIDE_RULE_MAX 128
-extern int pathhide_ctl(const char *buf, size_t count) __attribute__((weak));
-extern int pathhide_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
 /* Same weak-extern arrangement for _ghost. NM_GHOST_RULE_MAX must be >=
  * ghost.c's GH_RULE_LEN (192) plus its two-character command prefix; if it ever
  * drifts, ghost_get_rule() rejects the undersized buffer and the dump comes back
@@ -6473,17 +6455,17 @@ static int nomount_nl_dump_uids(struct sk_buff *skb, struct netlink_callback *cb
     return skb->len;
 }
 
-/* Stream the _pathhide rule list.
+/* Stream the _ghost rule tables.
  *
- * Reuses NOMOUNT_ATTR_VIRTUAL_PATH for the needle rather than adding an
+ * Reuses NOMOUNT_ATTR_VIRTUAL_PATH for the rule text rather than adding an
  * attribute: it is already an NLA_NUL_STRING in the policy and already parsed
  * by the client, and a rule here occupies the same slot in the message that a
  * rule's target does in NM_CMD_GET_LIST.
  *
- * pathhide_get_rule() takes its own lock per call, so nothing is held across
+ * ghost_get_rule() takes its own lock per call, so nothing is held across
  * nlmsg_put() -- which is the whole reason it hands back one rule at a time.
- * A kernel without the _pathhide patch set has the weak symbol NULL and returns
- * an empty dump, so `nm l p` prints nothing instead of an error the caller
+ * A kernel without the _ghost patch set has the weak symbol NULL and returns
+ * an empty dump, so `nm l g` prints nothing instead of an error the caller
  * would have to tell apart from "no rules configured". */
 static int nomount_nl_dump_ghost(struct sk_buff *skb, struct netlink_callback *cb)
 {
@@ -6497,30 +6479,6 @@ static int nomount_nl_dump_ghost(struct sk_buff *skb, struct netlink_callback *c
     while (ghost_get_rule(idx, rule, sizeof(rule)) > 0) {
         hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
                         NM_CMD_TO_TYPE(NM_CMD_GET_GHOST), 0, NLM_F_MULTI);
-        if (!hdr) break;
-        if (nla_put_string(skb, NOMOUNT_ATTR_VIRTUAL_PATH, rule)) {
-            nlmsg_cancel(skb, hdr);
-            break;
-        }
-        nlmsg_end(skb, hdr);
-        idx++;
-    }
-    cb->args[0] = idx;
-    return skb->len;
-}
-
-static int nomount_nl_dump_pathhide(struct sk_buff *skb, struct netlink_callback *cb)
-{
-    char rule[NM_PATHHIDE_RULE_MAX];
-    int idx = cb->args[0];
-    void *hdr;
-
-    if (!pathhide_get_rule)
-        return 0;
-
-    while (pathhide_get_rule(idx, rule, sizeof(rule)) > 0) {
-        hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
-                        NM_CMD_TO_TYPE(NM_CMD_GET_PATHHIDE), 0, NLM_F_MULTI);
         if (!hdr) break;
         if (nla_put_string(skb, NOMOUNT_ATTR_VIRTUAL_PATH, rule)) {
             nlmsg_cancel(skb, hdr);
@@ -6586,13 +6544,11 @@ static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
     if (!netlink_capable(skb, CAP_NET_ADMIN))
         return -EPERM;
 
-    if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS ||
-        cmd == NM_CMD_GET_PATHHIDE || cmd == NM_CMD_GET_GHOST) {
+    if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS || cmd == NM_CMD_GET_GHOST) {
         struct netlink_dump_control c = {
-            .dump = cmd == NM_CMD_GET_LIST     ? nomount_nl_dump_rules
-                  : cmd == NM_CMD_GET_UIDS     ? nomount_nl_dump_uids
-                  : cmd == NM_CMD_GET_GHOST    ? nomount_nl_dump_ghost
-                                               : nomount_nl_dump_pathhide,
+            .dump = cmd == NM_CMD_GET_LIST ? nomount_nl_dump_rules
+                  : cmd == NM_CMD_GET_UIDS ? nomount_nl_dump_uids
+                                           : nomount_nl_dump_ghost,
             /* Without this netlink allocates NLMSG_GOODSIZE (~3968B on 4K
              * pages), which cannot hold one rule whose two PATH_MAX strings the
              * attribute policy allows -- and an un-emittable first rule ends the
@@ -6623,203 +6579,6 @@ static void nm_nl_rcv(struct sk_buff *skb)
     netlink_rcv_skb(skb, &nm_nl_rcv_msg);
 }
 
-/*** uname override — write-through into init_uts_ns, over the netlink knob ***/
-/* NM_KNOB_UNAME_RELEASE / _VERSION, i.e. `nm k r` / `nm k v`. There is no
- * /sys/kernel/nomount/ and there never should be: the absence of a
- * /sys/kernel/<name> kobject is one of the identity tells this driver closes
- * deliberately (see the residual-surface note at the foot of this file).
- * A non-empty value that isn't the literal "default" replaces that field in the
- * initial UTS namespace, so every uname()/`/proc/version` reader reflects it
- * (Android apps share init's UTS ns). Empty/"default" = leave alone.
- * Built-in only (CONFIG_NOMOUNT=y): uts_sem/init_uts_ns are not exported.
- * NOTE: the Suite does not drive this. It removed spoof.sh, its only caller,
- * and ships no boot-time spoofing; these knobs are manual-only. */
-
-/* ---- /proc/cmdline + /proc/bootconfig spoofing --------------------------------
- * androidboot.* boot state (verifiedbootstate, lock, warranty, vbmeta.digest) lives in
- * /proc/cmdline and, on GKI, /proc/bootconfig. resetprop only moves the derived
- * ro.boot.* props, leaving these procfs sources contradicting them -- a detection tell.
- * A procfs seq-file has no backing inode to vtable-hijack, so on the first write to the
- * netlink knob (NM_KNOB_CMDLINE / _BOOTCONFIG, `nm k c` / `nm k b` -- not a sysfs
- * file; see above) we take over the proc entry itself and serve the sanitized string.
- * The Suite does not write these either; they are manual-only. This
- * happens at post-fs-data (procfs long up), and init's early parse of the real kernel
- * command line is untouched. Empty write => passthrough (the real value). */
-static char *nm_fake_cmdline;
-static struct proc_dir_entry *nm_cmdline_pde;
-static DEFINE_MUTEX(nm_procspoof_mutex);
-
-static int nm_cmdline_show(struct seq_file *m, void *v)
-{
-    mutex_lock(&nm_procspoof_mutex);
-    seq_printf(m, "%s\n", nm_fake_cmdline ? nm_fake_cmdline : saved_command_line);
-    mutex_unlock(&nm_procspoof_mutex);
-    return 0;
-}
-
-#ifdef CONFIG_BOOT_CONFIG
-static char *nm_fake_bootconfig, *nm_orig_bootconfig;
-static struct proc_dir_entry *nm_bootconfig_pde;
-
-static int nm_bootconfig_show(struct seq_file *m, void *v)
-{
-    mutex_lock(&nm_procspoof_mutex);
-    if (nm_fake_bootconfig)      seq_puts(m, nm_fake_bootconfig);
-    else if (nm_orig_bootconfig) seq_puts(m, nm_orig_bootconfig);
-    mutex_unlock(&nm_procspoof_mutex);
-    return 0;
-}
-
-/* Snapshot the real /proc/bootconfig once, before we replace it, so an empty write can
- * fall back to the genuine text (bootconfig is not reproducible from a global). */
-static char *nm_snapshot_bootconfig(void)
-{
-    struct file *f;
-    char *buf;
-    loff_t pos = 0;
-    ssize_t n;
-
-    f = filp_open("/proc/bootconfig", O_RDONLY, 0);
-    if (IS_ERR(f)) return NULL;
-    buf = kmalloc(SZ_64K, GFP_KERNEL);
-    if (!buf) { filp_close(f, NULL); return NULL; }
-    n = kernel_read(f, buf, SZ_64K - 1, &pos);
-    filp_close(f, NULL);
-    if (n <= 0) { kfree(buf); return NULL; }
-    buf[n] = '\0';
-    return buf;
-}
-#endif /* CONFIG_BOOT_CONFIG */
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 17, 0)
-static int nm_cmdline_open(struct inode *i, struct file *f) { return single_open(f, nm_cmdline_show, NULL); }
-static const struct file_operations nm_cmdline_fops = {
-    .open = nm_cmdline_open, .read = seq_read, .llseek = seq_lseek, .release = single_release,
-};
-#ifdef CONFIG_BOOT_CONFIG
-static int nm_bootconfig_open(struct inode *i, struct file *f) { return single_open(f, nm_bootconfig_show, NULL); }
-static const struct file_operations nm_bootconfig_fops = {
-    .open = nm_bootconfig_open, .read = seq_read, .llseek = seq_lseek, .release = single_release,
-};
-#endif
-#endif /* < 4.17 */
-
-/* trim trailing newline/CR then dup; empty => NULL (passthrough) */
-static char *nm_dup_trim(const char *buf, size_t count)
-{
-    while (count && (buf[count - 1] == '\n' || buf[count - 1] == '\r')) count--;
-    return count ? kstrndup(buf, count, GFP_KERNEL) : NULL;
-}
-
-/* proc has no rename and refuses a duplicate name, so a takeover must
- * remove-then-create. If the create then fails the entry is gone for good, and a
- * MISSING /proc/cmdline is both a louder tell and more breaking than an
- * unsanitised one -- so retry, and report instead of failing silently. */
-static struct proc_dir_entry *nm_mk_cmdline_pde(void)
-{
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-    return proc_create_single("cmdline", 0444, NULL, nm_cmdline_show);
-#else
-    return proc_create("cmdline", 0444, NULL, &nm_cmdline_fops);
-#endif
-}
-
-#ifdef CONFIG_BOOT_CONFIG
-static struct proc_dir_entry *nm_mk_bootconfig_pde(void)
-{
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-    return proc_create_single("bootconfig", 0444, NULL, nm_bootconfig_show);
-#else
-    return proc_create("bootconfig", 0444, NULL, &nm_bootconfig_fops);
-#endif
-}
-#endif
-
-static int nm_set_cmdline(const char *buf, size_t c)
-{
-    char *nb = nm_dup_trim(buf, c);
-    mutex_lock(&nm_procspoof_mutex);
-    kfree(nm_fake_cmdline);
-    nm_fake_cmdline = nb;
-    /* An empty write means "stop spoofing" -- passthrough. Doing the takeover
-     * anyway would replace the genuine proc entry with ours serving
-     * saved_command_line: same text, but a permanent and irreversible swap, and
-     * if the retry below ever failed /proc/cmdline would be gone for good --
-     * louder than the unsanitised value we were asked to stop hiding.
-     * nm_set_bootconfig already guards this case; mirror it. */
-    if (!nb && !nm_cmdline_pde) {
-        mutex_unlock(&nm_procspoof_mutex);
-        return 0;
-    }
-    if (!nm_cmdline_pde) {
-        remove_proc_entry("cmdline", NULL);
-        nm_cmdline_pde = nm_mk_cmdline_pde();
-        if (!nm_cmdline_pde) nm_cmdline_pde = nm_mk_cmdline_pde();
-        if (!nm_cmdline_pde) {
-            kfree(nm_fake_cmdline);
-            nm_fake_cmdline = NULL;
-            nm_err("procspoof: /proc/cmdline takeover failed, entry lost\n");
-            mutex_unlock(&nm_procspoof_mutex);
-            return -EIO;
-        }
-    }
-    mutex_unlock(&nm_procspoof_mutex);
-    return 0;
-}
-
-#ifdef CONFIG_BOOT_CONFIG
-static int nm_set_bootconfig(const char *buf, size_t c)
-{
-    char *nb = nm_dup_trim(buf, c);
-    mutex_lock(&nm_procspoof_mutex);
-    if (!nm_bootconfig_pde) {
-        if (!nm_orig_bootconfig) nm_orig_bootconfig = nm_snapshot_bootconfig();
-        /* Never take over into an empty /proc/bootconfig: if we have neither a fake
-         * (empty write) nor a snapshot to passthrough, serving nothing is itself a
-         * tell (stock is never empty). Leave the genuine entry in place. */
-        if (!nb && !nm_orig_bootconfig) {
-            mutex_unlock(&nm_procspoof_mutex);
-            return 0;
-        }
-        kfree(nm_fake_bootconfig);
-        nm_fake_bootconfig = nb;
-        remove_proc_entry("bootconfig", NULL);
-        nm_bootconfig_pde = nm_mk_bootconfig_pde();
-        if (!nm_bootconfig_pde) nm_bootconfig_pde = nm_mk_bootconfig_pde();
-        if (!nm_bootconfig_pde) {
-            kfree(nm_fake_bootconfig);
-            nm_fake_bootconfig = NULL;
-            nm_err("procspoof: /proc/bootconfig takeover failed, entry lost\n");
-            mutex_unlock(&nm_procspoof_mutex);
-            return -EIO;
-        }
-    } else {
-        kfree(nm_fake_bootconfig);
-        nm_fake_bootconfig = nb;
-    }
-    mutex_unlock(&nm_procspoof_mutex);
-    return 0;
-}
-#endif /* CONFIG_BOOT_CONFIG */
-
-static int nm_uts_store(char *field, size_t fieldsz, const char *buf, size_t count)
-{
-    char tmp[__NEW_UTS_LEN + 1];
-    size_t n = count;
-
-    if (n && buf[n - 1] == '\n') n--;
-    if (n > __NEW_UTS_LEN) return -EINVAL;
-    memcpy(tmp, buf, n);
-    tmp[n] = '\0';
-    if (n == 0 || strcmp(tmp, "default") == 0) return 0;
-
-    down_write(&uts_sem);
-    memset(field, 0, fieldsz);
-    memcpy(field, tmp, n);
-    up_write(&uts_sem);
-    return 0;
-}
-
 /* Netlink knob setter. Payload: [u32 knob][value bytes]; empty value clears. */
 static int nomount_nl_set_knob(struct nlattr **attrs)
 {
@@ -6836,18 +6595,6 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
     vlen = len - 4;
 
     switch (knob) {
-    case NM_KNOB_UNAME_RELEASE:
-        return nm_uts_store(init_uts_ns.name.release,
-                            sizeof(init_uts_ns.name.release), val, vlen);
-    case NM_KNOB_UNAME_VERSION:
-        return nm_uts_store(init_uts_ns.name.version,
-                            sizeof(init_uts_ns.name.version), val, vlen);
-    case NM_KNOB_CMDLINE:
-        return nm_set_cmdline(val, vlen);
-#ifdef CONFIG_BOOT_CONFIG
-    case NM_KNOB_BOOTCONFIG:
-        return nm_set_bootconfig(val, vlen);
-#endif
     case NM_KNOB_VDIR_EROFS_SIZE:
         WRITE_ONCE(nm_vdir_erofs_size, vlen > 0 && val[0] == '1');
         return 0;
@@ -6865,20 +6612,6 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
         nm_info("Isolated-pool hiding set to %u\n", pools);
         return 0;
     }
-    case NM_KNOB_PATHHIDE:
-        if (!pathhide_ctl)
-            return -EINVAL;
-        /* Empty value = presence probe, NOT "clear" (that is the "-" command).
-         * Deliberately different from the other knobs, because userspace has no
-         * other way to tell "pathhide is not compiled into this kernel" from
-         * "pathhide is here and has no rules": the dump answers empty for both.
-         * A probe must not have a side effect, which rules out using an add or a
-         * clear for it. */
-        if (vlen == 0)
-            return 0;
-        /* Forwarded verbatim otherwise -- _pathhide owns the parser, and
-         * duplicating it here is how the two would drift. */
-        return pathhide_ctl(val, vlen);
     case NM_KNOB_GHOST:
         if (!ghost_ctl)
             return -EINVAL;
@@ -6889,34 +6622,6 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
     default:
         return -EINVAL;
     }
-}
-
-static void nm_procspoof_exit(void)
-{
-    struct proc_dir_entry *cpde;
-#ifdef CONFIG_BOOT_CONFIG
-    struct proc_dir_entry *bpde;
-#endif
-    /* Detach and free under the lock, but call remove_proc_entry OUTSIDE it:
-     * remove_proc_entry blocks until in-flight readers finish, and those readers
-     * (nm_cmdline_show/nm_bootconfig_show) take nm_procspoof_mutex themselves --
-     * holding it across the removal would be an ABBA deadlock. Once the pointer is
-     * NULLed under the lock, show falls back to saved_command_line (never freed). */
-    mutex_lock(&nm_procspoof_mutex);
-    cpde = nm_cmdline_pde; nm_cmdline_pde = NULL;
-    kfree(nm_fake_cmdline); nm_fake_cmdline = NULL;
-#ifdef CONFIG_BOOT_CONFIG
-    bpde = nm_bootconfig_pde; nm_bootconfig_pde = NULL;
-    kfree(nm_fake_bootconfig); nm_fake_bootconfig = NULL;
-    kfree(nm_orig_bootconfig); nm_orig_bootconfig = NULL;
-#endif
-    mutex_unlock(&nm_procspoof_mutex);
-
-    if (cpde) remove_proc_entry("cmdline", NULL);
-#ifdef CONFIG_BOOT_CONFIG
-    if (bpde) remove_proc_entry("bootconfig", NULL);
-#endif
-
 }
 
 static int __init nomount_init(void)
@@ -6996,7 +6701,6 @@ void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
 
 static void __exit nomount_exit(void)
 {
-    nm_procspoof_exit();
 
     netlink_kernel_release(nm_nl_sk);
 
