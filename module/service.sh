@@ -364,11 +364,48 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
     fi
 fi
 
-# --- /data/local/tmp: re-assert after boot ---
-# spoof.sh already normalized it at post-fs-data, but ksud and adbd stage files
+# --- /data/local/tmp: restore the AOSP owner/mode/context ---
+# ksud (and anything else that stages files there) commonly leaves it 0777
+# and/or root:root; AOSP ships 0771 shell:shell u:object_r:shell_data_file:s0.
+# The drift is caused by having a root manager rather than by anything the Suite
+# hides, so it is a zero-false-positive probe for any app that can stat the path
+# without root, and no amount of mount-hiding answers it. Restorative only: each
+# field is touched solely when it already differs, so a clean device is a no-op.
+# The post-fs-data entry point (metamount.sh / post-fs-data.sh) runs the same
+# pass earlier; this one re-asserts it because ksud and adbd keep staging files
 # there for the whole of boot and can put the mode/owner back.
-[ -f /data/adb/modules/meta-nomount/spoof.sh ] && \
-    sh /data/adb/modules/meta-nomount/spoof.sh shell-tmp >/dev/null 2>&1
+#
+# `fix_shell_tmp` in spoof.conf still gates it (default on), so a device that
+# turned it off keeps that choice across this update. PARSED, never sourced: the
+# file is read as root here, and sourcing a writable config is root code
+# execution. Only "1" or an absent/empty value runs, matching the old default.
+_fst=$(grep "^[ 	]*fix_shell_tmp[ 	]*=" "$NMDIR/spoof.conf" 2>/dev/null \
+       | tail -n 1 | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
+if [ "${_fst:-1}" = "1" ]; then
+    [ -d /data/local/tmp ] || mkdir -p /data/local/tmp 2>/dev/null
+    if [ ! -d /data/local/tmp ]; then
+        nmlog "shell-tmp: /data/local/tmp absent and not creatable"
+    else
+        # `stat -c %C` answers correctly from an interactive root shell but comes
+        # back as the bare letter "C" in a service context, so the label always
+        # compared unequal and every boot re-ran chcon over a change that had not
+        # happened. Take the reading only when it looks like a context and fall
+        # back to `ls -Zd`; an empty answer means "could not read", not "wrong".
+        _stm=$(stat -c %a /data/local/tmp 2>/dev/null)
+        _sto=$(stat -c %u:%g /data/local/tmp 2>/dev/null)
+        _stc=$(stat -c %C /data/local/tmp 2>/dev/null)
+        case "$_stc" in *:*:*) ;; *) _stc=$(ls -Zd /data/local/tmp 2>/dev/null | awk '{print $1}') ;; esac
+        case "$_stc" in *:*:*) ;; *) _stc="" ;; esac
+        _stw=""
+        [ "$_stm" = "771" ] || { chmod 0771 /data/local/tmp 2>/dev/null && _stw="$_stw mode:${_stm:-?}->771"; }
+        [ "$_sto" = "2000:2000" ] || { chown 2000:2000 /data/local/tmp 2>/dev/null && _stw="$_stw owner:${_sto:-?}->2000:2000"; }
+        if [ -n "$_stc" ] && [ "$_stc" != "u:object_r:shell_data_file:s0" ]; then
+            chcon u:object_r:shell_data_file:s0 /data/local/tmp 2>/dev/null \
+                && _stw="$_stw ctx:$_stc->shell_data_file"
+        fi
+        [ -n "$_stw" ] && nmlog "shell-tmp:$_stw"
+    fi
+fi
 
 # --- ksud de-link re-assertion (self-heal of the susfs-action guard) ---
 # metamount.sh de-links ksu_susfs from the ksud multicall at mount time; re-assert it

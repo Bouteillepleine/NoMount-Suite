@@ -137,10 +137,10 @@ if [ ! -f "$NMDIR/disabled" ] && [ -x "$BIN" ] \
 fi
 
 # --- bootloop guard ---
-# The spoof add-on runs INSIDE the guard (below), not before it -- same reasoning
-# as metamount.sh: `disabled` has to suppress spoof.sh too, or the counter cannot
-# protect against the one script most able to wedge a boot (resetprop, uname,
-# /proc/cmdline, /proc/bootconfig).
+# Everything this script still does at post-fs-data runs INSIDE the guard
+# (below), not before it -- same reasoning as metamount.sh: `disabled` has to
+# suppress all of it, or the counter cannot protect against whatever wedged the
+# boot.
 GUARD_MAX=3
 COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
 # Sanitize before the arithmetic (see metamount.sh): a bootcount corrupted to
@@ -177,14 +177,41 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
         fi
     } > "$NMDIR/incident.log" 2>/dev/null
 else
-    # --- spoof add-on (dynamic vbmeta.digest) ---
-    # Same stage as the KSU/APatch metamount hook, but for the Magisk path.
-    # BOUNDED, like the engine calls below -- spoof.sh was the one call on this
-    # path with no bound at all, despite driving resetprop, uname, /proc/cmdline
-    # and /proc/bootconfig AND shelling out to `nm`, whose netlink recv has no
-    # SO_RCVTIMEO (userspace/src/nm.h do_nm_cmd). A kernel that accepts the
-    # message and never answers hangs post-fs-data forever.
-    [ -f "$MODDIR/spoof.sh" ] && nmto 90 sh "$MODDIR/spoof.sh" 2>/dev/null
+    # --- /data/local/tmp: restore the AOSP owner/mode/context ---
+    # Same stage and same block as the KSU/APatch metamount hook, but for the
+    # Magisk path; service.sh re-asserts it after boot and carries the long-form
+    # reasoning. ksud stages files there and commonly leaves it 0777 and/or
+    # root:root against the 0771 shell:shell u:object_r:shell_data_file:s0 AOSP
+    # ships, which is a detector probe any app can stat without root.
+    # Restorative only, so a clean device is a no-op. Guard-gated, and gated
+    # again by `fix_shell_tmp` in spoof.conf (default on) -- PARSED, never
+    # sourced, because this file is read as root.
+    _fst=$(grep "^[ 	]*fix_shell_tmp[ 	]*=" "$NMDIR/spoof.conf" 2>/dev/null \
+           | tail -n 1 | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
+    if [ "${_fst:-1}" = "1" ]; then
+        [ -d /data/local/tmp ] || mkdir -p /data/local/tmp 2>/dev/null
+        if [ ! -d /data/local/tmp ]; then
+            nmlog "shell-tmp: /data/local/tmp absent and not creatable"
+        else
+            # `stat -c %C` comes back as the bare letter "C" in this context
+            # rather than a label, so trust a reading only when it looks like a
+            # context and fall back to `ls -Zd`; empty means "could not read",
+            # which is not "wrong".
+            _stm=$(stat -c %a /data/local/tmp 2>/dev/null)
+            _sto=$(stat -c %u:%g /data/local/tmp 2>/dev/null)
+            _stc=$(stat -c %C /data/local/tmp 2>/dev/null)
+            case "$_stc" in *:*:*) ;; *) _stc=$(ls -Zd /data/local/tmp 2>/dev/null | awk '{print $1}') ;; esac
+            case "$_stc" in *:*:*) ;; *) _stc="" ;; esac
+            _stw=""
+            [ "$_stm" = "771" ] || { chmod 0771 /data/local/tmp 2>/dev/null && _stw="$_stw mode:${_stm:-?}->771"; }
+            [ "$_sto" = "2000:2000" ] || { chown 2000:2000 /data/local/tmp 2>/dev/null && _stw="$_stw owner:${_sto:-?}->2000:2000"; }
+            if [ -n "$_stc" ] && [ "$_stc" != "u:object_r:shell_data_file:s0" ]; then
+                chcon u:object_r:shell_data_file:s0 /data/local/tmp 2>/dev/null \
+                    && _stw="$_stw ctx:$_stc->shell_data_file"
+            fi
+            [ -n "$_stw" ] && nmlog "shell-tmp:$_stw"
+        fi
+    fi
     if [ -x "$BIN" ]; then
         # Bounded, like metamount.sh. A hung mount pass here is a HANG, not a
         # crash, so the bootloop counter never reaches GUARD_MAX and the device

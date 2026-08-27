@@ -49,8 +49,9 @@ chcon -R u:object_r:adb_data_file:s0 "$NMDIR" 2>/dev/null
 # survive a boot that never reaches /data.
 BOOTLOG="$NMDIR/boot.log"
 # Rotate here rather than in service.sh/uidwatch.sh: this is the boot entry point
-# for KSU/APatch, so it runs exactly once per boot. Same shape as spoof.sh's log
-# rotation, including the chmod for a file an older build left wide.
+# for KSU/APatch, so it runs exactly once per boot. The chmod is for a file an
+# older build left wide: `tail > $BOOTLOG.tmp` creates the temp under whatever
+# umask is in force and `mv` carries that mode onto the log.
 [ -f "$BOOTLOG" ] && tail -n 400 "$BOOTLOG" > "$BOOTLOG.tmp" 2>/dev/null \
     && mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
 : >> "$BOOTLOG" 2>/dev/null
@@ -212,12 +213,11 @@ if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
 fi
 
 # --- bootloop guard ---
-# NB: the spoof add-on runs INSIDE this guard (below), not before it. It used to
-# run above, which meant `disabled` never suppressed it and the counter could not
-# protect against it: spoof.sh drives resetprop, uname, /proc/cmdline and
-# /proc/bootconfig -- a larger bootloop surface than the injection pass -- and it
-# kept running every boot after the guard had already tripped, leaving a user
-# bootlooping on a spoof setting with no self-recovery path.
+# NB: everything this script still does at post-fs-data runs INSIDE this guard
+# (below), not before it. Anything placed above it is something `disabled` never
+# suppresses and the counter cannot protect against -- it would keep running
+# every boot after the guard had already tripped, leaving a user bootlooping
+# with no self-recovery path.
 GUARD_MAX=3
 COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
 # Sanitize before the arithmetic. A bootcount corrupted to something like "3 3"
@@ -231,7 +231,7 @@ COUNT=$((COUNT + 1))
 echo "$COUNT" > "$NMDIR/bootcount"
 
 if [ -f "$NMDIR/disabled" ]; then
-    nmlog "disabled, skipping spoof + mount"
+    nmlog "disabled, skipping the mount pass"
 elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
     nmlog "bootloop guard tripped (count=$COUNT) -> self-disabling"
     : > "$NMDIR/disabled"
@@ -263,20 +263,48 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
         fi
     } > "$NMDIR/incident.log" 2>/dev/null
 else
-    # --- spoof add-on (dynamic vbmeta.digest) ---
-    # Still this post-fs-data stage, so the property is in place before
-    # zygote/system_server come up, and still kept separate from the mount pass
-    # so a spoof failure can't affect mounting -- but now guard-gated, so a
-    # tripped counter (or a manual `disabled`) stops it like everything else.
-    # BOUNDED, like the engine calls below. The comment above says it outright --
-    # spoof.sh drives resetprop, uname, /proc/cmdline and /proc/bootconfig, "a
-    # larger bootloop surface than the injection pass" -- yet it was the one call
-    # on this path with no bound at all. It also shells out to `nm`, whose netlink
-    # recv has no SO_RCVTIMEO (userspace/src/nm.h do_nm_cmd), so a kernel that
-    # accepts the message and never answers hangs post-fs-data forever. A HANG is
-    # worse here than a crash: the boot never completes, so nothing clears
-    # bootcount and the user sees a dead device rather than a self-recovering one.
-    [ -f "$MODDIR/spoof.sh" ] && nmto 90 sh "$MODDIR/spoof.sh" 2>/dev/null
+    # --- /data/local/tmp: restore the AOSP owner/mode/context ---
+    # ksud stages files there and commonly leaves it 0777 and/or root:root; AOSP
+    # ships 0771 shell:shell u:object_r:shell_data_file:s0, and the drift is a
+    # zero-false-positive detector probe any app can stat without root.
+    # Restorative only, so a clean device is a no-op. service.sh re-asserts the
+    # same pass after boot (ksud and adbd keep staging there all boot long) and
+    # carries the long-form reasoning; keep the two in step.
+    #
+    # Guard-gated, so a tripped counter or a manual `disabled` stops it like
+    # everything else. Unbounded on purpose now: this is four stat/chmod calls on
+    # one local directory, with none of the resetprop / uname / netlink surface
+    # that made the old add-on on this line worth a timeout.
+    #
+    # `fix_shell_tmp` in spoof.conf gates it (default on). PARSED, never sourced:
+    # the file is read as root here, and sourcing a writable config is root code
+    # execution. Only "1" or an absent/empty value runs.
+    _fst=$(grep "^[ 	]*fix_shell_tmp[ 	]*=" "$NMDIR/spoof.conf" 2>/dev/null \
+           | tail -n 1 | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
+    if [ "${_fst:-1}" = "1" ]; then
+        [ -d /data/local/tmp ] || mkdir -p /data/local/tmp 2>/dev/null
+        if [ ! -d /data/local/tmp ]; then
+            nmlog "shell-tmp: /data/local/tmp absent and not creatable"
+        else
+            # `stat -c %C` comes back as the bare letter "C" in this context
+            # rather than a label, so trust a reading only when it looks like a
+            # context and fall back to `ls -Zd`; empty means "could not read",
+            # which is not "wrong".
+            _stm=$(stat -c %a /data/local/tmp 2>/dev/null)
+            _sto=$(stat -c %u:%g /data/local/tmp 2>/dev/null)
+            _stc=$(stat -c %C /data/local/tmp 2>/dev/null)
+            case "$_stc" in *:*:*) ;; *) _stc=$(ls -Zd /data/local/tmp 2>/dev/null | awk '{print $1}') ;; esac
+            case "$_stc" in *:*:*) ;; *) _stc="" ;; esac
+            _stw=""
+            [ "$_stm" = "771" ] || { chmod 0771 /data/local/tmp 2>/dev/null && _stw="$_stw mode:${_stm:-?}->771"; }
+            [ "$_sto" = "2000:2000" ] || { chown 2000:2000 /data/local/tmp 2>/dev/null && _stw="$_stw owner:${_sto:-?}->2000:2000"; }
+            if [ -n "$_stc" ] && [ "$_stc" != "u:object_r:shell_data_file:s0" ]; then
+                chcon u:object_r:shell_data_file:s0 /data/local/tmp 2>/dev/null \
+                    && _stw="$_stw ctx:$_stc->shell_data_file"
+            fi
+            [ -n "$_stw" ] && nmlog "shell-tmp:$_stw"
+        fi
+    fi
 
     if [ -x "$BIN" ]; then
         # Capture the status, NOT just the fact that we called it. `_engine_ran=1`

@@ -77,9 +77,6 @@ for abi in arm64-v8a armeabi-v7a x86_64 x86; do
     done
 done
 
-# --- spoof add-on: dynamic vbmeta.digest ---
-# Seed the persistent config (append-only so user edits survive an update), and
-# make the add-on script executable. The work itself happens at boot in spoof.sh.
 # --- does this kernel actually have the engine? ---------------------------
 # The header above says this needs a CONFIG_NOMOUNT kernel, but nothing checked
 # it: installing on a kernel without the hookless engine "succeeded" and then
@@ -150,44 +147,21 @@ mkdir -p "$NMDIR"
 # uidhide, pathhide.conf and blocklist away from an app was /data/adb refusing
 # traversal one level up. Measured on OP15. Match the parent explicitly.
 set_perm "$NMDIR" 0 0 0700 u:object_r:adb_data_file:s0
+# Nothing is seeded into spoof.conf any more: the boot-identity add-on it
+# configured is gone, and the one key still read from it -- `fix_shell_tmp`,
+# which gates the /data/local/tmp restore in metamount.sh / post-fs-data.sh /
+# service.sh -- defaults to ON when the file or the key is absent, so a fresh
+# install needs no file at all. An EXISTING file is deliberately left where it
+# is rather than deleted: it is the user's, it may hold a deliberate
+# fix_shell_tmp=0, and an installer that silently removes state under
+# /data/adb is a worse surprise than a stale config. Re-assert its mode and
+# label if it is there, because it sits in a 0700 directory whose contents are
+# read as root: 0644 once made it the only group/world-readable file in the
+# state dir, and omitting set_perm's 5th argument relabelled it to
+# u:object_r:system_file:s0, which the live policy grants every app domain read
+# on (file 0x2044412) while granting nothing on adb_data_file.
 CONF="$NMDIR/spoof.conf"
-[ -f "$CONF" ] || cat > "$CONF" <<'EOF'
-# NoMount Suite — spoof add-on config
-#
-# ⚠️ DEFERRED / EXPERIMENTAL. Every knob below ships OFF. The vbmeta digest
-# computation has two known unfixed defects (see the DEFECT comments in
-# spoof.sh) that can produce a well-formed digest with the wrong value, which
-# is a sharper tell than setting no digest at all. Turn one on only if you are
-# going to verify the result yourself.
-#
-# vbmeta_digest: off (default) | auto (set only when the prop is missing) | force
-# vbmeta_size:   off (default) | auto | force
-EOF
-seed_conf() { grep -q "^$1=" "$CONF" 2>/dev/null || echo "$1=$2" >> "$CONF"; }
-# `off`, not `auto`. seed_conf only writes a key that is ABSENT, so a device that
-# already chose a value keeps it -- this changes the default for a FRESH install,
-# which is what "deferred for this release" has to mean in practice. It used to
-# seed `auto`, so every new install silently opted in to an add-on with two
-# unfixed defects in the value it computes.
-seed_conf vbmeta_digest off
-seed_conf vbmeta_size off
-seed_conf spoof_props 0
-seed_conf spoof_uname 0
-seed_conf uname_tail ""
-seed_conf uname_date ""
-seed_conf fix_shell_tmp 1
-# 0600 + the explicit context, like every other file in $NMDIR. Two problems in
-# one line: 0644 made spoof.conf the only group/world-readable file in the state
-# dir, and the MISSING 5th argument relabelled it to u:object_r:system_file:s0 --
-# which the live policy grants every app domain read on (file 0x2044412), while
-# granting nothing on adb_data_file. The 0700 parent was the only thing standing
-# between an app and this file, which is exactly the reliance the $NMDIR fix
-# above removed. spoof.conf records the boot-identity spoof settings; only root
-# (spoof.sh at post-fs-data, and the WebUI through an exec) ever reads it.
-set_perm "$CONF" 0 0 0600 u:object_r:adb_data_file:s0
-[ -f "$MODPATH/spoof.sh" ] && set_perm "$MODPATH/spoof.sh" 0 0 0755
-ui_print "- Spoof add-on: DEFERRED, off by default (experimental)"
-ui_print "  config: $CONF"
+[ -f "$CONF" ] && set_perm "$CONF" 0 0 0600 u:object_r:adb_data_file:s0
 
 # --- per-UID hiding ---
 # The hide list used to share /data/adb/nomount/blocklist with the module-skip
