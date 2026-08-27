@@ -684,7 +684,6 @@ static inline void nm_publish_real_eof(struct nomount_dir_node *d, loff_t eof_hi
 #ifndef NOMOUNT_NL_PROTO
 #define NOMOUNT_NL_PROTO 29
 #endif
-#define NOMOUNT_NL_VERSION 1
 
 /* The command travels in nlmsg_type, offset past the reserved control range
  * (0..NLMSG_MIN_TYPE-1). Kernel and client agree on this mapping. */
