@@ -572,7 +572,7 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             // "stock population" of one directory we created ourselves -- and
             // reported three of our own inodes as a band. Exactly the FAIL nobody
             // could act on that the guard exists to suppress.
-            if injected.iter().any(|t| **t == p) || engine_dirs.iter().any(|d| *d == p) {
+            if injected.iter().any(|t| **t == p) || engine_dirs.contains(&p) {
                 *ours_buckets.entry(b).or_default() += 1;
             } else {
                 *stock_buckets.entry(b).or_default() += 1;

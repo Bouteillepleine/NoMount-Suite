@@ -34,6 +34,18 @@ const ZYGOTE_FD_ALLOWLISTED: &[&str] = &[
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Level {
     Error,
+    /// The check could not run at all. NOT a hazard and NOT a pass -- the state
+    /// the device-side report already has a bucket for, and the one a plan
+    /// finding had no way to say. Reported as Warn, "the engine did not answer"
+    /// and "the cloak could not be probed" both counted against a device where
+    /// nothing was wrong; reported as Info they would have read as observations
+    /// about a working configuration, which is the opposite lie.
+    ///
+    /// Ordered above Warn deliberately: `Level` derives `Ord` and findings sort
+    /// by it, and `Verdict`'s own declaration order puts Unmeasured above Warn.
+    /// The two orders have to agree or the report and the plan disagree about
+    /// which line matters more.
+    Unmeasured,
     Warn,
     /// Worth printing, not worth acting on. Kept out of the warning count so a
     /// standing observation about a working configuration cannot bury a real one.
@@ -62,6 +74,7 @@ struct Finding {
 fn verdict_of(level: &Level) -> Verdict {
     match level {
         Level::Error => Verdict::Fail,
+        Level::Unmeasured => Verdict::Unmeasured,
         Level::Warn => Verdict::Warn,
         Level::Info => Verdict::Note,
     }
@@ -1167,7 +1180,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         // engine produced two top-of-list failures and the reader had to work out
         // that they were one fact.
         f.push(Finding {
-            level: Level::Warn,
+            level: Level::Unmeasured,
             check: "plan cross-checks did not run",
             detail: "the engine did not answer, so the checks that compare the plan against the \
                      live rules were skipped. Everything reported here is the plan alone. Run \
@@ -1454,7 +1467,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     // Nothing answered. Not a pass, and explicitly not the
                     // "measured here" claim.
                     f.push(Finding {
-                        level: Level::Warn,
+                        level: Level::Unmeasured,
                         check: "ghost cloak NOT verified",
                         detail: format!(
                             "none of the {attempted} sampled path(s) could be probed (the test process \
