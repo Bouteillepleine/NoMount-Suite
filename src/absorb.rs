@@ -987,9 +987,18 @@ pub(crate) fn umount_detach(p: &Path) -> bool {
 /// file rather than a single directory rule: a directory rule REPLACES the stock
 /// directory, hiding every entry the module did not ship, which is the same
 /// whole-partition masking that bootloops zygote.
-/// Is `target` already serving `source`? Compared by size and mtime, which is
-/// what an effective injection makes identical -- the rule mirrors the backing
-/// file's metadata.
+/// Is `target` already serving `source`? Compared by SIZE ALONE.
+///
+/// mtime is deliberately NOT compared. An injection mirrors the STOCK file's
+/// mtime rather than the backing file's -- that is what removes a bind's
+/// dev/ino/mtime tell -- so a rule that is serving perfectly still reports a
+/// different mtime from its source. Measured on an OP11 carrying 118 rules: 0 of
+/// 118 matched on mtime, while 116 of 118 matched on size and the two that did
+/// not were the one genuine drift the byte-level sweep also found. Comparing
+/// mtime therefore answered "not serving" for every live rule -- the answer that
+/// costs a d_drop each time, which is precisely what this function exists to
+/// avoid. Same size and different bytes is the residual it cannot see; `check`
+/// hashes both ends and still reports that.
 ///
 /// Re-adding a live rule is not free: `nm add` d_drops the cached dentry, and any
 /// process that already MAPPED the file keeps the now-unhashed one, which the
@@ -1000,7 +1009,7 @@ pub(crate) fn umount_detach(p: &Path) -> bool {
 /// (pure cost).
 fn already_serving(target: &Path, source: &Path) -> bool {
     let (Ok(t), Ok(s)) = (fs::metadata(target), fs::metadata(source)) else { return false };
-    t.len() == s.len() && t.modified().ok() == s.modified().ok()
+    t.len() == s.len()
 }
 
 /// Serve `source` at `target`, recording each (target, source) pair actually
@@ -1037,7 +1046,17 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
         // Already serving exactly this. Re-issuing would drop and rebuild a
         // correct rule for nothing, and every drop is a window where the path
         // resolves to stock.
-        Some(cur) if cur.as_path() == source => true,
+        //
+        // "The table names this source" is NOT proof the injection is live. A
+        // rule added while a bind shadowed the same name is inert until it is
+        // added again, and this function is only ever called after absorb has
+        // unmounted such a bind -- so trusting the table short-circuits exactly
+        // the case the re-assert exists for. Measured on an OP11: both
+        // /my_product/media/bootanimation rules were listed, both inert, absorb
+        // dropped the bind, re-added neither, reported 0 failed, and the path
+        // served the stock file for the rest of the session. Ask the filesystem,
+        // not the rule table.
+        Some(cur) if cur.as_path() == source && already_serving(target, source) => true,
         Some(prev) => {
             let prev = prev.clone();
             let _ = nm.del(target);
@@ -1588,7 +1607,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         }
         match &s.disposition {
             Disposition::Absorb => {}
-            Disposition::Redundant if runtime_droppable(&s.target, &aliases) => println!(
+            Disposition::Redundant if early || runtime_droppable(&s.target, &aliases) => println!(
                 "redundant {} <- {} (already served by an injection; unmounting only)",
                 s.target.display(),
                 s.source.display()
@@ -1764,11 +1783,12 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             if !reasserted.insert(at.clone()) {
                 continue;
             }
-            // Already serving: re-adding would only d_drop a dentry other
-            // processes may be mapping, for no gain (see `already_serving`).
-            if already_serving(&at, &c.source) {
-                continue;
-            }
+            // No `already_serving` guard here: `c.source` is usually a
+            // DIRECTORY, and one directory's own size says nothing about the
+            // files inside it -- on the OP11 pair it compared 106 against 3440
+            // and answered "not serving" for content that was half correct. The
+            // check that matters is per file, and it lives in `add_repointing`,
+            // which is the only place holding the two files a rule names.
             let mut refreshed = Vec::new();
             let fails = inject(&nm, &c.source, &at, &mut refreshed, &live_map);
             if fails > 0 {
@@ -2399,6 +2419,33 @@ mod tests {
         let red = Redundancy::new("/system/etc/x -> /whatever", &[]);
         assert!(!red.covers(&empty, Path::new("/system/etc/x")));
         assert!(!red.covers(&d.path().join("missing"), Path::new("/system/etc/x")));
+    }
+
+    /// Whether a target is serving its source is judged on SIZE, not mtime. An
+    /// injection mirrors the stock file's mtime on purpose, so a rule that serves
+    /// perfectly still reports a different mtime from the file it serves --
+    /// measured on an OP11, where 0 of 118 live rules matched on mtime and 116
+    /// matched on size. An mtime comparison would call every one of them "not
+    /// serving" and re-issue it, which is the d_drop this guard exists to avoid.
+    #[test]
+    fn serving_is_judged_on_size_not_mtime() {
+        let d = tempfile::tempdir().unwrap();
+        let served = d.path().join("served");
+        let source = d.path().join("source");
+        std::fs::write(&served, b"1234").unwrap();
+        std::fs::write(&source, b"1234").unwrap();
+        // Push the source's mtime far from the served file's, the way an
+        // injection that mirrors stock metadata leaves them.
+        let c = std::ffi::CString::new(source.to_str().unwrap()).unwrap();
+        let times = libc::utimbuf { actime: 1_000_000, modtime: 1_000_000 };
+        assert_eq!(unsafe { libc::utime(c.as_ptr(), &times) }, 0);
+        assert!(already_serving(&served, &source));
+        // A size difference is the drift this must still catch: it is what a
+        // dropped bind leaves behind when the rule underneath never took effect.
+        std::fs::write(&served, b"12345").unwrap();
+        assert!(!already_serving(&served, &source));
+        // Nothing to compare is not "serving".
+        assert!(!already_serving(&d.path().join("gone"), &source));
     }
 
     /// A redundant bind is only actionable while Android runs if re-asserting its

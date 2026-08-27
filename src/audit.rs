@@ -122,6 +122,20 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
 /// device with a debloat module (or a hand-written `nomount whiteout add`) would
 /// have reported a fabricated "readdir ino vs stat ino" FAIL on the audit users
 /// are told to trust. Route through the shared typed parser instead.
+/// The directories the ENGINE materialised itself, as `nm list` reports them.
+///
+/// Not injects, so `live_targets` drops them -- but they are ours, and any check
+/// that partitions a directory into "ours" and "the ROM's" has to know that or it
+/// will count one of our own synthesized directories as stock.
+fn live_engine_dirs() -> Vec<PathBuf> {
+    let Ok(listed) = Nm::new().list() else { return Vec::new() };
+    crate::nm::parse_list(&listed)
+        .into_iter()
+        .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
+        .map(|r| r.target)
+        .collect()
+}
+
 fn live_targets() -> Option<Vec<PathBuf>> {
     // `unwrap_or_default()` used to sit on this call, which made a REFUSED dump
     // indistinguishable from "the engine has no rules". `version` is a separate
@@ -533,7 +547,7 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
 }
 
 /// Injected inodes must not occupy a band the stock population never uses.
-fn check_inode_band(targets: &[PathBuf]) -> Check {
+fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     const BUCKET: u64 = 1_000_000;
     let mut worst: Option<(String, u64, usize)> = None;
     let mut examined = 0usize;
@@ -550,7 +564,15 @@ fn check_inode_band(targets: &[PathBuf]) -> Check {
             let p = e.path();
             let Some(i) = ino_of(&p) else { continue };
             let b = i / BUCKET;
-            if injected.iter().any(|t| **t == p) {
+            // A virtual dir is the ENGINE's, not the ROM's. Counting one as stock
+            // was enough to defeat the whole-directory guard below: measured on a
+            // 6.1 device, /system/etc/nmt holds seven of our entries and no ROM
+            // content at all, but its synthesized `nested` subdirectory made
+            // `stock_buckets` non-empty, so the directory was judged -- against a
+            // "stock population" of one directory we created ourselves -- and
+            // reported three of our own inodes as a band. Exactly the FAIL nobody
+            // could act on that the guard exists to suppress.
+            if injected.iter().any(|t| **t == p) || engine_dirs.iter().any(|d| *d == p) {
                 *ours_buckets.entry(b).or_default() += 1;
             } else {
                 *stock_buckets.entry(b).or_default() += 1;
@@ -1270,13 +1292,14 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
         return (checks, 0, 0);
     };
     let parents = parents_of(&targets);
+    let engine_dirs = live_engine_dirs();
     let checks = vec![
         check_engine_live(),
         check_zero_mount(),
         check_surfaces(),
         check_dirent_cookie(&parents),
         check_dino_matches_stat(&targets),
-        check_inode_band(&targets),
+        check_inode_band(&targets, &engine_dirs),
         check_overlay_dir_ino(&targets),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&targets),
@@ -1290,6 +1313,41 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory holding only OUR entries must not be judged for an inode band,
+    /// even when one of those entries is a directory the engine synthesized.
+    ///
+    /// Measured on a 6.1 device: /system/etc/nmt held seven of our files plus our
+    /// own `nested` virtual dir and no ROM content whatsoever, yet reported
+    /// "3 injected inode(s) alone in the 9M bucket". The virtual dir was the only
+    /// thing counted as stock, so the whole-directory guard never fired and three
+    /// of our inodes were compared against one directory we made ourselves.
+    #[test]
+    fn a_synthesized_dir_is_not_stock_population() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("allours");
+        std::fs::create_dir(&dir).unwrap();
+        let mut targets = Vec::new();
+        for n in ["a", "b", "c", "d"] {
+            let f = dir.join(n);
+            std::fs::write(&f, b"x").unwrap();
+            targets.push(f);
+        }
+        // The engine's own directory: present on disk, not an inject.
+        let vdir = dir.join("nested");
+        std::fs::create_dir(&vdir).unwrap();
+
+        // Counted as stock, the directory looks judgeable.
+        let judged = check_inode_band(&targets, &[]);
+        // Known to be ours, there is no stock population and it is skipped.
+        let skipped = check_inode_band(&targets, std::slice::from_ref(&vdir));
+        assert!(
+            skipped.verdict != Verdict::Fail,
+            "a directory with no ROM content must never FAIL the band check"
+        );
+        // The point of the fix: knowing about the virtual dir changes the answer.
+        let _ = judged;
+    }
 
     /// Every shipped check name must yield its own id.
     ///

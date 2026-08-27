@@ -170,9 +170,12 @@ impl Fingerprint {
                 .meaning(
                     "A path serves content its own rule does not name. Either two rules hit one \
                      target, or the rule was registered while another module's `mount --bind` \
-                     owned that path and never took effect. Check whether a module binds the \
-                     same path from its post-fs-data.sh: if one does, delete that bind and \
-                     reboot, and the rule will serve it with nothing shadowing it.",
+                     owned that path and never took effect. A bind made at post-fs-data is \
+                     already handled: the pre-zygote absorb pass drops it and re-asserts the \
+                     rule underneath, so this points at a bind that appeared AFTER boot -- \
+                     absorb leaves those alone on my_*, because re-asserting there on a live \
+                     system has rebooted a device. Delete that bind from the owning module \
+                     and reboot.",
                 )
                 .owner("the mount pass"),
         });
