@@ -207,7 +207,27 @@ ui_print "  config: $CONF"
 
 # --- Cloak (pathhide maps/fd) add-on ---
 [ -f "$MODPATH/scan.sh" ] && set_perm "$MODPATH/scan.sh" 0 0 0755
-[ -f "$NMDIR/pathhide.conf" ] || echo "# NoMount Cloak — pathhide rule list (managed by hand; see 'nomount check')" > "$NMDIR/pathhide.conf"
+# The Cloak picker that populated this file is gone, and the boot loop that
+# enforces it is not -- so an upgrading user would keep an ACTIVE cloak with no
+# UI to manage it and nothing that reports it (`nomount check` has no pathhide
+# awareness at all). Worse, the cloak strips a hidden app's OWN apk from its own
+# /proc/<pid>/maps: measured on a live device, a listed app showed zero
+# /data/app mappings while controls showed 13 and 45, and removing the rule
+# restored them. "I cannot see my own apk" is a categorical tell no stock kernel
+# produces, which is a worse trade than the name-level concealment it buys.
+#
+# So: retire an existing list rather than keep enforcing it. MOVE, not delete --
+# the rules are the user's, and they get them back by renaming the file. A fresh
+# install has no list and stays inert, which is the intended posture.
+if [ -f "$NMDIR/pathhide.conf" ] && grep -qvE '^[[:space:]]*(#|$)' "$NMDIR/pathhide.conf" 2>/dev/null; then
+    _phold=$(grep -cvE '^[[:space:]]*(#|$)' "$NMDIR/pathhide.conf" 2>/dev/null)
+    mv -f "$NMDIR/pathhide.conf" "$NMDIR/pathhide.conf.disabled" 2>/dev/null
+    ui_print "! Cloak: retired $_phold pathhide rule(s) — the cloak made those apps"
+    ui_print "  MORE detectable (their own apk vanished from their own maps)."
+    ui_print "  Your list is kept at $NMDIR/pathhide.conf.disabled"
+fi
+[ -f "$NMDIR/pathhide.conf" ] || echo "# NoMount Cloak — pathhide rule list. EMPTY BY DESIGN: loading rules trades a
+# heuristic tell for a categorical one. One package name per line to opt in." > "$NMDIR/pathhide.conf"
 
 # --- absorb opt-out list -----------------------------------------------------
 # `nomount absorb` converts other modules' bind mounts into injections. Safe for
