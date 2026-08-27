@@ -278,7 +278,7 @@ const PROBE_UID: u32 = 2000;
 /// If shell itself is on the hide list the probe is meaningless: the divergence it
 /// would report is the feature doing exactly what was asked. Say so, rather than
 /// stamping a permanent "per-UID inconsistency" on the manager card.
-fn consistency_probe(rules: &[(String, String)], probe_uid_hidden: bool) -> String {
+fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: bool) -> String {
     if probe_uid_hidden {
         return "unchecked:probe-uid-hidden".to_string();
     }
@@ -287,21 +287,24 @@ fn consistency_probe(rules: &[(String, String)], probe_uid_hidden: bool) -> Stri
     // partition. Stratify by (partition, owning module) and take round-robin across
     // buckets, so the sample spans the rule set. Budget bounds the `su` calls.
     const BUDGET: usize = 18;
-    let mut buckets: std::collections::BTreeMap<(String, String), Vec<&str>> =
+    let mut buckets: std::collections::BTreeMap<(String, String), Vec<&Path>> =
         std::collections::BTreeMap::new();
-    for (target, src) in rules.iter() {
-        let partition = target
-            .trim_start_matches('/')
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .to_string();
-        let module = crate::absorb::module_dir_of(Path::new(src))
+    for rule in rules.iter() {
+        // Injects only: a whiteout or a virtual dir has no source and no size to
+        // compare, and the probe below reads both ends as files.
+        let Some(src) = rule.source.as_deref() else { continue };
+        let partition = rule
+            .target
+            .components()
+            .nth(1)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let module = crate::absorb::module_dir_of(src)
             .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_default();
-        buckets.entry((partition, module)).or_default().push(target.as_str());
+        buckets.entry((partition, module)).or_default().push(rule.target.as_path());
     }
-    let mut sample: Vec<&str> = Vec::new();
+    let mut sample: Vec<&Path> = Vec::new();
     'outer: for i in 0.. {
         let mut progressed = false;
         for targets in buckets.values() {
@@ -323,6 +326,7 @@ fn consistency_probe(rules: &[(String, String)], probe_uid_hidden: bool) -> Stri
     for target in sample {
         let root = fs::metadata(target).ok().map(|m| m.len().to_string());
         let Some(root_sz) = root else { continue };
+        let Some(target) = target.to_str() else { continue };
         checked += 1;
         let app_sz = app_size(PROBE_UID, target);
         if app_sz != root_sz {
@@ -420,18 +424,19 @@ fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     }
 }
 
-fn parse_rules(list: &str) -> Vec<(String, String)> {
-    list.lines()
-        .filter_map(|l| l.split_once(" -> ").map(|(t, s)| (t.trim().to_string(), s.trim().to_string())))
-        .collect()
-}
-
 pub fn gather() -> Fingerprint {
     let nm = Nm::new();
     let engine = nm.version().map(|v| format!("v{v}")).unwrap_or_else(|_| "down".into());
     let list = nm.list().unwrap_or_default();
-    let rules = parse_rules(&list);
-    let whiteouts = list.lines().filter(|l| l.contains("(whiteout)")).count();
+    // [`crate::nm::parse_list`], not a local split. The copy that used to live
+    // here was the FOURTH reader of this text and the last one still wrong: it
+    // split on the FIRST ` -> `, so a target containing one was truncated, and it
+    // peeled neither ` (public)` nor ` [UID: N]`, so both suffixes landed inside
+    // the source path -- every `fs::metadata(source)` in the probes below then
+    // failed silently and skipped exactly the PM-published and per-UID rules.
+    let live_rules = crate::nm::parse_list(&list);
+    let rules = live_rules.iter().filter(|r| r.kind == crate::nm::LiveKind::Inject).count();
+    let whiteouts = live_rules.iter().filter(|r| r.kind == crate::nm::LiveKind::Whiteout).count();
     // Distinguish "nothing hidden" from "couldn't ask": `nm l u` fails loudly on
     // EPERM / engine-down, and reporting that as 0 hidden reads as a working
     // feature with an empty list.
@@ -454,13 +459,13 @@ pub fn gather() -> Fingerprint {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uname: read_cmd("uname", &["-r"]),
         engine,
-        rules: rules.len(),
+        rules,
         whiteouts,
         mounts: split.map(|(t, _)| t),
         mounts_foreign: split.map(|(t, d)| t - d),
         blocked,
-        consistency: consistency_probe(&rules, probe_hidden),
-        served_matches_rule: drift_probe(&crate::nm::parse_list(&list)),
+        consistency: consistency_probe(&live_rules, probe_hidden),
+        served_matches_rule: drift_probe(&live_rules),
         guard: guard.to_string(),
         manager_umount: match crate::manager::kernel_umount_enabled() {
             Some(true) => "on".to_string(),
@@ -667,4 +672,58 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three shapes this module's own parser got wrong before it was deleted.
+    ///
+    /// It split on the FIRST ` -> `, so a target containing one lost its tail and
+    /// gained a source that does not exist; and it peeled neither ` (public)` nor
+    /// ` [UID: N]`, so those suffixes ended up inside the source path. Every
+    /// consumer here reads `source` off the filesystem -- `drift_probe` stats and
+    /// hashes it, `consistency_probe` derives the owning module from it -- so a
+    /// mangled source silently dropped exactly the PM-published and per-UID rules
+    /// from both probes and still reported "ok".
+    #[test]
+    fn the_shared_parser_survives_the_three_shapes_the_local_one_mangled() {
+        let list = "/system/etc/a -> b -> /data/adb/modules/M/system/etc/ab\n\
+                    /product/overlay/F.apk -> /data/adb/modules/M/product/overlay/F.apk (public)\n\
+                    /system/lib64/libx.so -> /data/adb/modules/M/system/lib64/libx.so [UID: 10123]\n\
+                    /system/etc/gone (whiteout)\n\
+                    /system/etc/vdir (virtual dir)\n";
+        let live = crate::nm::parse_list(list);
+        let injects: Vec<_> =
+            live.iter().filter(|r| r.kind == crate::nm::LiveKind::Inject).collect();
+        assert_eq!(injects.len(), 3, "the fingerprint's `rules` count");
+
+        // Split on the LAST arrow: the target keeps its embedded ` -> `.
+        assert_eq!(injects[0].target, Path::new("/system/etc/a -> b"));
+        assert_eq!(
+            injects[0].source.as_deref(),
+            Some(Path::new("/data/adb/modules/M/system/etc/ab"))
+        );
+
+        // ` (public)` peeled off the source, not folded into it.
+        assert_eq!(
+            injects[1].source.as_deref(),
+            Some(Path::new("/data/adb/modules/M/product/overlay/F.apk"))
+        );
+        assert!(injects[1].public);
+
+        // ` [UID: N]` likewise, and the uid is kept.
+        assert_eq!(
+            injects[2].source.as_deref(),
+            Some(Path::new("/data/adb/modules/M/system/lib64/libx.so"))
+        );
+        assert_eq!(injects[2].uid, 10123);
+
+        // And the fingerprint's `whiteouts` count still sees only the whiteout.
+        assert_eq!(
+            live.iter().filter(|r| r.kind == crate::nm::LiveKind::Whiteout).count(),
+            1
+        );
+    }
 }
