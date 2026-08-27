@@ -4,9 +4,9 @@
 NMDIR=/data/adb/nomount
 umask 077                     # state files are 0600, not the boot umask 0666 (see metamount.sh)
 
-# Binary paths, hoisted to the top because the cloak block below now needs `nm`
-# too -- it used to write to /proc/pathhide, which needed nothing. $0 does not
-# change, so these are the same values the later section used to recompute.
+# Binary paths, hoisted to the top because the ghost block below needs `nm`.
+# $0 does not change, so these are the same values the later section used to
+# recompute.
 MODDIR="${0%/*}"
 ABI=$(getprop ro.product.cpu.abi)
 # The SAME fallback metamount.sh and post-fs-data.sh both carry, which this path
@@ -161,48 +161,6 @@ if [ "$_hookran" = 0 ]; then
     } > "$NMDIR/incident.log" 2>/dev/null
 fi
 
-# --- Cloak: re-apply the pathhide maps/fd rule list (managed by the WebUI) ---
-# Hides selected module APKs from every /proc/<pid>/maps and /proc/<pid>/fd.
-#
-# Driven over nomount's netlink knob (`nm k p`), not the old /proc/pathhide node.
-# That node was created unconditionally and any app could find it with a single
-# readdir of /proc -- a self-naming tell louder than the packages it concealed --
-# so it is gone unless a kernel was deliberately built with -DPH_ENABLE_PROC.
-# `nm k p` with no value is the presence probe: it exits 0 only when the pathhide
-# patch set is compiled in, so this stays inert on a kernel without it.
-if [ -x "$NM_BIN" ] && "$NM_BIN" k p >/dev/null 2>&1; then
-    # No clear here. The kernel's list starts EMPTY at boot, so clearing achieves
-    # nothing on the only path this runs -- except when another module has
-    # already added its rules, in which case it silently unhides everything that
-    # module was asked to hide. Removing one of OUR rules still works: it is
-    # dropped from pathhide.conf and simply not re-added on the next boot. There
-    # is no UI for the live case any more, so a removal takes effect on the next
-    # boot; `nm k p` by hand is the only way to drop one from a running kernel.
-    if [ -f "$NMDIR/pathhide.conf" ]; then
-        # COUNT the rejections. Every add was sent to /dev/null with its status
-        # discarded and the line below then said "re-applied" whatever happened --
-        # so a kernel that refused every rule (list full, malformed needle, a
-        # pathhide build that answers the presence probe but not the add) reported
-        # the cloak as restored while nothing was hidden. This is the only pass
-        # that applies the file, so an uncounted rejection is unrecoverable.
-        # Redirected `while … done < file`, not `cat | while`: a pipeline puts the
-        # loop in a subshell and every _phf increment would be lost on exit.
-        _phn=0; _phf=0
-        while IFS= read -r _phr; do
-            _phr=$(echo "$_phr" | tr -d '\r')
-            [ -z "$_phr" ] && continue
-            case "$_phr" in \#*) continue ;; esac
-            _phn=$((_phn + 1))
-            nmto 10 "$NM_BIN" k p "+$_phr" >/dev/null 2>&1 || _phf=$((_phf + 1))
-        done < "$NMDIR/pathhide.conf"
-        if [ "$_phf" -gt 0 ]; then
-            nmlog "⚠ pathhide cloak: $_phf of $_phn rule(s) REJECTED by the kernel — those paths are still visible in /proc/<pid>/maps and fd"
-        else
-            nmlog "pathhide cloak rules re-applied ($_phn)"
-        fi
-    fi
-fi
-
 # --- Ghost: populate the existence cloak's two tables ------------------------
 # _ghost closes the four (now seven) "resolve a path, then act" oracles that no
 # hijacked filesystem op can answer -- O_PATH handing back the path, getxattr
@@ -219,11 +177,10 @@ fi
 # compiled in AND the engine is >= v26 (the knob does not exist below that), so
 # this stays inert on every other kernel.
 if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
-    # Clear first, unlike the pathhide block above. There the kernel's list is
-    # empty at boot and a clear could only stomp another module's rules; here the
-    # tables describe OUR rule set, which the mount pass has just rebuilt, so a
-    # stale entry from a previous configuration is the thing to avoid. Both
-    # clears are separate commands, so a failure of one is still visible.
+    # Clear first: the tables describe OUR rule set, which the mount pass has
+    # just rebuilt, so a stale entry from a previous configuration is the thing
+    # to avoid. Both clears are separate commands, so a failure of one is still
+    # visible.
     nmto 10 "$NM_BIN" k g "p-" >/dev/null 2>&1 || nmlog "⚠ ghost: path table clear FAILED"
     nmto 10 "$NM_BIN" k g "u-" >/dev/null 2>&1 || nmlog "⚠ ghost: uid table clear FAILED"
 
@@ -267,7 +224,19 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
     # from the first space; a stray annotation would be sent as a path and
     # rejected. Whiteouts are already excluded upstream -- a whiteout's whole job
     # is to make a name absent, which is what a hidden reader sees anyway.
-    _ghcand=$("$NM_BIN" l 2>/dev/null | sed 's/ ->.*//; s/ (.*//' | grep '^/' | sort -u)
+    # Capture the dump ALONE, so $? is nm's rather than sort's. `nm` exits 4 on
+    # a truncated dump precisely so a caller can tell a prefix from the whole
+    # set (the contract is stated in userspace/src/nm.c). Piping it straight
+    # into sed discarded that, and a prefix here HALF-populates the path table
+    # -- the state the checks below call worse than an empty one, because a
+    # hidden reader then sees some paths ghosted and the rest not.
+    _ghraw=$(nmto 10 "$NM_BIN" l 2>/dev/null); _ghrc=$?
+    if [ "$_ghrc" -ne 0 ]; then
+        nmlog "⚠ ghost: rule dump FAILED (nm exit $_ghrc) — path table not populated"
+        _ghcand=
+    else
+        _ghcand=$(printf '%s\n' "$_ghraw" | sed 's/ ->.*//; s/ (.*//' | grep '^/' | sort -u)
+    fi
     _ghn=$(printf '%s\n' "$_ghcand" | grep -c '^/')
     if [ -n "$_ghprobe" ] && [ "$_ghn" -gt 0 ]; then
         # `[ -e ]` is false for ENOENT and for EACCES alike, and the two must not

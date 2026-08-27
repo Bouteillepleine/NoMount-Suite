@@ -19,12 +19,44 @@ Older entries below still describe these. They are gone.
   default and carrying two unfixed digest defects. Its one live piece, the
   `/data/local/tmp` permission restore, moved into the boot scripts and still
   honours `fix_shell_tmp`. An existing `spoof.conf` is left alone.
-- **`pathhide`** — no longer applied. With rules loaded a hidden app showed zero
-  `/data/app` mappings in its own maps, against 13 and 45 for controls: it made
-  those apps easier to spot, not harder. An existing list is retired to
-  `pathhide.conf.disabled`.
+- **`pathhide`, end to end.** No builder applies the patch, so `pathhide_ctl` is
+  a NULL weak symbol and the kernel answers `-EINVAL` to `nm k p` — including
+  the empty-value *presence probe*, because the NULL test runs before the probe
+  short-circuit. Both Suite gates therefore always took the false branch: the
+  boot pass in `service.sh` could never run, and `customize.sh` printed "kernel
+  pathhide not present (needs a pathhide-enabled kernel)" on **every install of
+  every kernel these builders produce**, naming a configuration gap that cannot
+  be closed. Gone: the boot pass, the install-time probe and its two messages,
+  the seeding and relabelling of `pathhide.conf`, and `nm`'s `l p` list option.
+  An existing `pathhide.conf` is now simply inert; nothing reads it.
+- **Dead `nm` surface** — the long-form aliases `whiteout`, `version` and `knob`
+  (no caller, no documentation), the `--uid` option (per-UID *rules* need it and
+  nothing has ever passed it; the wire field stays, always 0), and the `j` list
+  option (`l u` turns JSON on by itself, and no consumer of the JSON rule shape
+  exists).
+- **`NOMOUNT_NL_VERSION`** — a generic-netlink leftover, referenced by neither
+  the kernel nor the client.
+- **`spoof.log`** from `nomount export` — nothing has written it since `spoof.sh`
+  was removed.
 - **`scan.sh`** — scanned every installed APK on each boot to fill a cache whose
   only reader was the deleted Cloak picker.
+
+### Fixed
+
+- **`service.sh` discarded `nm`'s exit status when building the ghost path
+  table.** `nm` exits 4 on a truncated dump specifically so a caller can tell a
+  prefix from the whole set, but the call was piped straight into `sed`, so `$?`
+  was `sort`'s. A truncated dump half-populated the table — the state the same
+  script calls worse than an empty one, because a hidden reader then sees some
+  paths ghosted and the rest not. The dump is now captured on its own, the
+  status checked, and a failure logged instead of silently half-applied. It was
+  also the only `nm` call in the file without a timeout; it has one now.
+- **`nomount check` said nothing when the ghost tables were empty.** The kernel
+  answers an empty, *successful* dump both for "`_ghost` not compiled in" and
+  for "compiled in, tables empty", and the check had no else arm — so neither
+  case produced a finding of any level, and the silence was indistinguishable
+  from a pass while `service.sh` logged the cloak as inert on the same boot. It
+  now reports UNMEASURED with both table counts.
 
 ### Findings graded by what a detector can do
 

@@ -648,7 +648,7 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // -- but the secret moved with the content, and the guard has to move with it.
     const PRIVATE: &[&str] = &["uidhide", "uidhide.cache", "uidhide.conf", "spoof.conf"];
     for f in [
-        "uidhide", "uidhide.cache", "uidhide.conf", "blocklist", "spoof.conf", "spoof.log",
+        "uidhide", "uidhide.cache", "uidhide.conf", "blocklist", "spoof.conf",
         "incident.log", "health.txt", "snapshot.txt",
     ] {
         if shared && PRIVATE.contains(&f) {

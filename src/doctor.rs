@@ -1462,6 +1462,24 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         },
                     });
                 }
+            } else {
+                // The kernel answers an EMPTY, SUCCESSFUL dump both when _ghost
+                // is not compiled in and when it is present with empty tables
+                // (nomount.c: `if (!ghost_get_rule) return 0;`). This arm used
+                // not to exist, so both cases produced no Finding at all and the
+                // silence was indistinguishable from a pass -- while service.sh
+                // logged the cloak as inert on the very same boot.
+                f.push(Finding {
+                    level: Level::Unmeasured,
+                    check: "ghost cloak not populated",
+                    detail: format!(
+                        "the engine returned {} hidden path(s) and {} hidden uid(s); both tables must be \
+             non-empty for any guard to fire, so nothing was tested — a kernel built without _ghost \
+             answers exactly the same way",
+                        gpaths.len(),
+                        guids.len()
+                    ),
+                });
             }
         }
     }
