@@ -53,30 +53,30 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       # The Rust is linted on every push; the SHELL was not, and the module is
-      # nine scripts that run as root at boot. Every bug found in the 2026-08-25
+      # eight scripts that run as root at boot. Every bug found in the 2026-08-25
       # audit session was in shell, not Rust: a uid parser that split on a space
       # where the file uses a tab, a `\|` alternation toybox does not support, a
       # `[ -e ]` that cannot tell ENOENT from EACCES.
       #
       # -s sh, because /system/bin/sh is mksh/ash, not bash.
       #
-      # WARNING level, not error. The original gate was error-only because
-      # `local` is flagged as non-POSIX (SC3043) and spoof.sh uses it ~25 times,
-      # which would have been permanent noise. But that is ONE rule with a
-      # one-flag answer, and lowering the whole gate to accommodate it left
-      # everything below "error" unchecked -- which on a set of root-at-boot
-      # scripts is most of what shellcheck is good at. Exclude the one rule and
-      # keep the rest.
+      # WARNING level, not error, and NO rule exclusions. The gate was error-only
+      # at first because `local` is flagged as non-POSIX (SC3043) and spoof.sh
+      # used it ~25 times; that was then narrowed to `-e SC3043` so everything
+      # below "error" was checked again. spoof.sh is gone and no script left
+      # declares `local`, so the exclusion goes too -- a suppression kept past the
+      # file that needed it silently un-lints the next `local` somebody writes
+      # into a script that runs as root at boot.
       #
       # Honest about what this does NOT catch: shellcheck says nothing about
       # `for x in $list`, because splitting there is usually intended, so the
       # newline-IFS bug in the ghost populator would still have got through at
-      # any level. The four suppressions in the scripts each carry their reason
+      # any level. The three suppressions in the scripts each carry their reason
       # inline; a bare -e list here would hide them from the file that needs them.
       - name: Shellcheck module scripts
         run: |
           sudo apt-get install -y shellcheck >/dev/null 2>&1 || true
-          shellcheck -s sh -S warning -e SC3043 -f gcc module/*.sh
+          shellcheck -s sh -S warning -f gcc module/*.sh
 
   build:
     runs-on: ubuntu-latest
