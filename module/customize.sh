@@ -268,7 +268,7 @@ fi
 # device keeps failing to finish booting on its own" -- no longer holds. Without
 # this, the classic recovery (flash the update that FIXES the bootloop) inherits
 # a counter already at 2: the new code's first boot trips it, writes `disabled`,
-# and skips the spoof and mount passes entirely -- before any of the new code has
+# and skips the whole post-fs-data pass -- before any of the new code has
 # run once. The user sees the update "not help".
 rm -f "$NMDIR/bootcount"
 
