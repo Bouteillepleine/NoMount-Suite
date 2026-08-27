@@ -8,7 +8,7 @@ on:
     # phones and by a local cross-compile, never by CI. The `release` job below
     # is gated on a v* TAG, so a branch build runs test/build/package and cannot
     # publish anything.
-    branches: [suite, prerelease]
+    branches: [main, suite, prerelease]
     tags: ['v*']
 
 # Least privilege: this workflow only builds and uploads artifacts.
