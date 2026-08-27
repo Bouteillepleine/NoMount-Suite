@@ -3,7 +3,12 @@ name: Build
 on:
   workflow_dispatch:
   push:
-    branches: [suite]
+    # `prerelease` is where the audit work lands before it reaches `suite`, and it
+    # was building nowhere: every commit on it was verified only on the three
+    # phones and by a local cross-compile, never by CI. The `release` job below
+    # is gated on a v* TAG, so a branch build runs test/build/package and cannot
+    # publish anything.
+    branches: [suite, prerelease]
     tags: ['v*']
 
 # Least privilege: this workflow only builds and uploads artifacts.
