@@ -256,7 +256,10 @@ set_perm "$NMDIR/pathhide.conf" 0 0 0600 u:object_r:adb_data_file:s0
 # (any app could find it with a single readdir of /proc). `nm k p` with no value
 # is side-effect-free and exits 0 only when the patch set is compiled in.
 if [ -x "$_nm" ] && "$_nm" k p >/dev/null 2>&1; then
-    ui_print "- Cloak add-on: kernel pathhide FOUND — inert by default (no rules); edit $NMDIR/pathhide.conf to use it"
+    # No picker, no toggle: the rules are the file, and service.sh applies it at
+    # every boot. Say so, rather than announcing a feature with nowhere to press.
+    ui_print "- Cloak add-on: kernel pathhide FOUND — inert (no rules, and no UI)"
+    ui_print "  add one package per line to $NMDIR/pathhide.conf, then reboot"
 else
     ui_print "- Cloak add-on: kernel pathhide not present (needs a pathhide-enabled kernel)"
 fi

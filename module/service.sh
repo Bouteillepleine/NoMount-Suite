@@ -175,15 +175,16 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k p >/dev/null 2>&1; then
     # nothing on the only path this runs -- except when another module has
     # already added its rules, in which case it silently unhides everything that
     # module was asked to hide. Removing one of OUR rules still works: it is
-    # dropped from pathhide.conf and simply not re-added on the next boot, and
-    # the WebUI's Apply handles the live case.
+    # dropped from pathhide.conf and simply not re-added on the next boot. There
+    # is no UI for the live case any more, so a removal takes effect on the next
+    # boot; `nm k p` by hand is the only way to drop one from a running kernel.
     if [ -f "$NMDIR/pathhide.conf" ]; then
         # COUNT the rejections. Every add was sent to /dev/null with its status
         # discarded and the line below then said "re-applied" whatever happened --
         # so a kernel that refused every rule (list full, malformed needle, a
         # pathhide build that answers the presence probe but not the add) reported
-        # the cloak as restored while nothing was hidden. The WebUI's Apply button
-        # counts its failures for exactly this reason; the boot path did not.
+        # the cloak as restored while nothing was hidden. This is the only pass
+        # that applies the file, so an uncounted rejection is unrecoverable.
         # Redirected `while … done < file`, not `cat | while`: a pipeline puts the
         # loop in a subshell and every _phf increment would be lost on exit.
         _phn=0; _phf=0
