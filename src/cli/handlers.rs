@@ -15,7 +15,33 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
     let nm = Nm::new();
     match action {
         VfsAction::Add { virtual_path, real_path } => {
-            nm.add(Path::new(&virtual_path), Path::new(&real_path))?;
+            // A DIRECTORY source is the one rule shape the mount pass refuses to
+            // build (`mount::inject_would_mask_dir`), for two separate reasons.
+            // Masking is the documented one: serving a stock directory as a single
+            // rule hides every stock entry under it, which is what bootlooped
+            // zygote. The second was measured on a 6.1 device: a child served
+            // through a directory rule inherits the SOURCE's raw block count, so a
+            // 2 MB file on f2fs reports 2,002,944 bytes allocated where every stock
+            // erofs file of that size reports ~15% of it. `st_blocks * 512 >= st_size`
+            // then separates every child of that rule from every stock file in one
+            // stat. Refuse it here too rather than let the CLI build by hand the
+            // shape the mount pass will not.
+            let real = Path::new(&real_path);
+            if real.is_dir() {
+                anyhow::bail!(
+                    concat!(
+                        "{} is a directory.
+",
+                        "A directory rule hides every stock entry under its target, and its
+",
+                        "children report the source filesystem's block counts, which a single
+",
+                        "stat separates from stock. Add the files individually instead."
+                    ),
+                    real.display()
+                );
+            }
+            nm.add(Path::new(&virtual_path), real)?;
             println!("ok");
         }
         VfsAction::Del { virtual_path } => {
