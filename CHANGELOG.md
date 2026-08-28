@@ -60,6 +60,15 @@ Older entries below still describe these. They are gone.
 
 ### Fixed
 
+- **"Nothing to test" was reported as "did not run".** On a device where no
+  module provides files, the per-UID canary and the served-bytes check had no
+  injected file to sample — and said UNMEASURED, with a remedy ("the boot pass
+  runs before any app has opened an injected file — run them now") that could
+  never work, because running again cannot conjure a rule. The card read "not
+  fully measured" on a device that was working exactly as designed. Both are now
+  N/A when there are zero rules, and stay UNMEASURED when rules exist but
+  sampling failed — which is the distinction those two words are for.
+
 - **A device with zero rules showed one rule, called "no rules".** `nomount vfs
   list` printed that phrase on an empty engine, and the WebUI counts every
   non-blank line of it as a rule — so the message counted itself. Status read

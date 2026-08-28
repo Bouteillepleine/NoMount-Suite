@@ -110,6 +110,16 @@ impl Fingerprint {
         };
         let mut out = Vec::new();
 
+        // NOTHING TO TEST vs DID NOT RUN. Both are honest, and the report has a
+        // word for each -- N/A and UNMEASURED -- but the two probes below said
+        // UNMEASURED for both. With zero rules live there IS no injected file and
+        // never will be, so the amber row and its remedy ("the boot pass runs
+        // before any app has opened an injected file -- run them now") were both
+        // wrong: running them again cannot change the answer. Reported from an
+        // OP15 whose five modules are all script-only, where zero rules is the
+        // correct result and the card still read "not fully measured".
+        let nothing_to_serve = self.rules == 0;
+
         // The Narcissus canary. "unchecked:probe-uid-hidden" is a legitimate
         // can't-check BY DESIGN -- shell is on the hide list, so the divergence
         // this would report is the feature doing exactly what was asked -- while a
@@ -129,6 +139,15 @@ impl Fingerprint {
             .meaning(
                 "The probe uid (shell) is itself on your hide list, so a divergence here would \
                  be the hiding working. Nothing to test.",
+            ),
+            "unchecked" if nothing_to_serve => mk(
+                "per-UID consistency canary",
+                Verdict::NotApplicable,
+                self.consistency.clone(),
+            )
+            .meaning(
+                "No module here provides files to inject, so there is no injected path for an \
+                 app and root to disagree about. Nothing to test.",
             ),
             "unchecked" => mk("per-UID consistency canary", Verdict::Unmeasured, self.consistency.clone())
                 .meaning("No injected file could be sampled, so this was not tested."),
@@ -150,6 +169,12 @@ impl Fingerprint {
         out.push(match self.served_matches_rule.as_str() {
             "ok" => mk("served bytes match the rule", Verdict::Pass, self.served_matches_rule.clone())
                 .meaning("Every injected path serves the bytes its own rule names."),
+            "unchecked" if nothing_to_serve => mk(
+                "served bytes match the rule",
+                Verdict::NotApplicable,
+                self.served_matches_rule.clone(),
+            )
+            .meaning("There are no rules, so there are no served bytes to compare. Nothing to test."),
             "unchecked" => mk(
                 "served bytes match the rule",
                 Verdict::Unmeasured,
