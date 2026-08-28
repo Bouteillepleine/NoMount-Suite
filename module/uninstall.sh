@@ -23,4 +23,27 @@ unset _ovr
 # ("uninstall, reinstall") produced an install that reports success, injects
 # nothing, and never says why -- because the fresh module reads the old
 # flag on its first boot.
+# BUT NOT THE USER'S OWN CONFIG. ksud runs this on an UPDATE too, not only on a
+# real uninstall, so a plain `rm -rf` here silently threw away everything the
+# user had configured every time they flashed a newer Suite over an older one.
+# Measured on OP15 (2026-08-28, v1.3.106 -> v1.3.107): the hide list, the module
+# blocklist and the `my_hookless` opt-in all vanished. Losing the marker alone
+# moved 85 my_* files from injection back to bind mounts -- a silent revert to a
+# different serving mode, reported by `check` as someone else's foreign mounts.
+#
+# So: stash the user-owned files, drop everything else, and let customize.sh put
+# them back. The operational flags are deliberately NOT stashed -- `disabled` in
+# particular MUST die here, because that is the whole reason this rm exists.
+_bak=/data/adb/nomount.bak
+if [ -d /data/adb/nomount ]; then
+    rm -rf "$_bak"
+    for _f in uidhide uidhide.conf blocklist my_hookless absorb-skip.txt whiteouts.txt snapshot.txt; do
+        [ -e "/data/adb/nomount/$_f" ] || continue
+        [ -d "$_bak" ] || { mkdir -p "$_bak" && chmod 700 "$_bak"; } || break
+        cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null
+    done
+    unset _f
+fi
+unset _bak
+
 rm -rf /data/adb/nomount

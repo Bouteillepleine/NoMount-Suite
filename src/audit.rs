@@ -301,11 +301,47 @@ fn check_zero_mount() -> Check {
             .filter_map(|(r, _)| r.target.to_str())
             .collect();
 
-        let mut why = format!(
-            "{} mount(s) laid over the ROM are readable by any app in its own mount table. The \
-             Suite adds none of its own — these come from {owner}.",
-            leaked.len()
-        );
+        // WHO MADE THE MOUNT, not whose files it serves. `owner` above is derived
+        // from the bind SOURCE, so a bind the SUITE created to serve a module's my_*
+        // content was reported as that module's doing. It then told the reader to
+        // reboot (we re-create it every boot from binds.list) or to delete a bind
+        // from the module's post-fs-data.sh (there is none). Both are dead ends, and
+        // chasing them cost an evening on an OP15.
+        //
+        // binds.list is the record of what WE bound, so it settles authorship.
+        let ours: std::collections::HashSet<std::path::PathBuf> =
+            crate::bind::tracked().into_iter().map(|(t, _)| t).collect();
+        let mine = leaked.iter().filter(|(r, _)| ours.contains(&r.target)).count();
+        let mut why = if mine == leaked.len() {
+            format!(
+                "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
+                 The SUITE made these itself: a my_* target is served by a real bind unless the \
+                 `my_hookless` opt-in is set, because a leaf my_* injection can trip zygote's FD \
+                 allowlist. They serve content from {owner}. Set /data/adb/nomount/my_hookless \
+                 and reboot to serve them by injection instead, with no mount at all.",
+                leaked.len()
+            )
+        } else if mine > 0 {
+            format!(
+                "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
+                 {mine} of them the Suite made itself (a my_* target is served by bind; set \
+                 /data/adb/nomount/my_hookless to inject instead). The rest come from {owner}.",
+                leaked.len()
+            )
+        } else {
+            format!(
+                "{} mount(s) laid over the ROM are readable by any app in its own mount table. The \
+                 Suite adds none of its own — these come from {owner}.",
+                leaked.len()
+            )
+        };
+        // Only for mounts we did NOT create. Ours come back every boot by design,
+        // so "a REBOOT fixes this" is false for them, and there is no third-party
+        // post-fs-data.sh to edit.
+        let deferred: Vec<&str> = deferred
+            .into_iter()
+            .filter(|t| !ours.contains(std::path::Path::new(t)))
+            .collect();
         if !deferred.is_empty() {
             // REBOOT FIRST. The runtime pass refuses a my_* bind for a real
             // reason, and the first version of this text turned that refusal into

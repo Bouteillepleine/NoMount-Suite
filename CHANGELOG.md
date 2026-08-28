@@ -60,6 +60,24 @@ Older entries below still describe these. They are gone.
 
 ### Fixed
 
+- **An update threw away everything you had configured.** ksud runs the OLD
+  module's `uninstall.sh` when a newer Suite is flashed over it, and that did
+  `rm -rf /data/adb/nomount` — taking the per-app hide list, the module
+  blocklist and the `my_hookless` opt-in with it. Losing the marker alone moved
+  85 `my_*` files from injection back to bind mounts on a live OP15: 260 rules
+  became 175, and 85 mounts appeared over the ROM. `uninstall.sh` now stashes the
+  user-owned files and `customize.sh` restores them, saying how many it put back.
+  The operational flags are still cleared — `disabled` in particular, which is
+  why that `rm` exists at all.
+- **`check` blamed other modules for the Suite's own mounts.** The owner was
+  derived from the bind SOURCE, so a bind the Suite made to serve a module's
+  `my_*` content was reported as that module's doing, with two remedies that
+  could not work: reboot (we re-create them every boot from `binds.list`) and
+  "delete the bind from its post-fs-data.sh" (there is none). It now reads
+  `binds.list` to settle authorship, says plainly when the Suite made the mount,
+  points at the `my_hookless` opt-in, and offers the reboot/edit advice only for
+  mounts it did not create.
+
 - **`service.sh` discarded `nm`'s exit status when building the ghost path
   table.** `nm` exits 4 on a truncated dump specifically so a caller can tell a
   prefix from the whole set, but the call was piped straight into `sed`, so `$?`

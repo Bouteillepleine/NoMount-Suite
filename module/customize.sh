@@ -145,6 +145,33 @@ mkdir -p "$NMDIR"
 # uidhide and blocklist away from an app was /data/adb refusing
 # traversal one level up. Measured on OP15. Match the parent explicitly.
 set_perm "$NMDIR" 0 0 0700 u:object_r:adb_data_file:s0
+
+# Put back what uninstall.sh stashed. ksud runs the OLD module's uninstall.sh
+# when you flash a newer Suite over an older one, and that removes the state
+# directory -- so before this existed, every update silently threw away the hide
+# list, the module blocklist and the my_hookless opt-in. Losing the marker alone
+# switched 85 my_* files from injection back to bind mounts on a live OP15.
+#
+# Restore is best-effort and never overwrites: customize.sh seeds some of these
+# a few lines below, and a file already present is the newer truth.
+_bak=/data/adb/nomount.bak
+if [ -d "$_bak" ]; then
+    _rn=0
+    for _f in uidhide uidhide.conf blocklist my_hookless absorb-skip.txt whiteouts.txt snapshot.txt; do
+        [ -e "$_bak/$_f" ] || continue
+        [ -e "$NMDIR/$_f" ] && continue
+        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || continue
+        # Explicit label: omitting arg 5 defaults to system_file, which is
+        # app-readable. Match the parent, as every other state file does.
+        set_perm "$NMDIR/$_f" 0 0 0600 u:object_r:adb_data_file:s0
+        _rn=$((_rn + 1))
+    done
+    unset _f
+    [ "$_rn" -gt 0 ] && ui_print "- Restored $_rn setting(s) kept from your previous install"
+    rm -rf "$_bak"
+    unset _rn
+fi
+unset _bak
 # Nothing is seeded into spoof.conf any more: the boot-identity add-on it
 # configured is gone, and the one key still read from it -- `fix_shell_tmp`,
 # which gates the /data/local/tmp restore in metamount.sh / post-fs-data.sh /
