@@ -1364,10 +1364,12 @@
       $("substate").textContent = "nothing to inject — no module provides files";
       dot.className = "dot ok";
     } else if (ships > 0) {
-      // The one actionable case: content exists, no rule serves it. Amber dot,
-      // but still Active -- the engine is up, it just has not applied anything.
+      // Content exists and no rule serves it -- the one case here that wants the
+      // user. Deliberately GREEN anyway: this dot answers "is the engine up?",
+      // and `check` is what reports faults. Two alarms for one condition trained
+      // people to read the dot as noise. The substate still names the action.
       $("substate").textContent = "no rules — re-apply";
-      dot.className = "dot warn";
+      dot.className = "dot ok";
     } else {
       // Could not tell. Do not claim either way.
       $("substate").textContent = "no rules";

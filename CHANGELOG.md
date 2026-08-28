@@ -60,6 +60,7 @@ Older entries below still describe these. They are gone.
 
 ### Fixed
 
+- **The status dot answers "is the engine up?", not "is anything wrong?"** It is green whenever the Suite is running, including when a module ships files and no rule serves them — the substate still names the action there, and `check` is what reports faults. Two alarms for one condition taught people to read the dot as noise. It stays amber only when the probe could not tell either way.
 - **"Idle" is gone.** While the engine answers, the card says ACTIVE — that is what the word is for. The substate line says what the Suite is doing and the dot says whether anything needs you. "Idle" read as "switched off" to people whose setup was fine, and it read badly even in the case that does need attention, where the engine is running too. Only "Engine offline" replaces it. The headline word answered "are there rules?" when the question a user asks is "is it working?" — so a device serving exactly what it should read as switched off. ACTIVE now means the Suite is doing its job, including correctly having nothing to do; IDLE is reserved for the one case that needs the user.
 - **"no rules — re-apply" on a device with nothing to apply.** The status
   card had one message for both causes of zero rules, so a user whose modules are
