@@ -60,10 +60,12 @@ Older entries below still describe these. They are gone.
 
 ### Fixed
 
-- **An update threw away everything you had configured.** ksud runs the OLD
-  module's `uninstall.sh` when a newer Suite is flashed over it, and that did
-  `rm -rf /data/adb/nomount` — taking the per-app hide list, the module
-  blocklist and the `my_hookless` opt-in with it. Losing the marker alone moved
+- **Removing the module threw away everything you had configured.**
+  `uninstall.sh` did `rm -rf /data/adb/nomount`, taking the per-app hide list,
+  the module blocklist and the `my_hookless` opt-in with it — so the classic
+  recovery, remove then reinstall, silently reset your settings. (Flashing a
+  newer zip straight over an older one does NOT run it: measured on OP15,
+  v1.3.107 -> v1.3.108, all state intact.) Losing the marker alone moved
   85 `my_*` files from injection back to bind mounts on a live OP15: 260 rules
   became 175, and 85 mounts appeared over the ROM. `uninstall.sh` now stashes the
   user-owned files and `customize.sh` restores them, saying how many it put back.
