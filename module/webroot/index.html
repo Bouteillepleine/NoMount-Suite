@@ -1330,8 +1330,39 @@
     $("mRules").textContent = d.rules;
     $("mOv").textContent = d.rro.length;
     $("state").textContent = d.rules > 0 ? "Active" : "Idle";
-    $("substate").textContent = d.rules > 0 ? "modules injected" : "no rules — re-apply";
-    dot.className = "dot " + (d.rules > 0 ? "ok" : "warn");
+    if (d.rules > 0) {
+      $("substate").textContent = "modules injected";
+      dot.className = "dot ok";
+      return d.rules;
+    }
+    // ZERO RULES HAS TWO CAUSES AND ONLY ONE OF THEM IS ACTIONABLE.
+    // This said "no rules — re-apply" for both, so a user whose modules are
+    // all script-only was told to press Reload forever: there is nothing to
+    // apply, and the card can never reach Active. Reported from an OP15 with
+    // five script-only modules, where 0 rules is the correct answer.
+    // Only asked when the count is zero, so the normal path costs nothing.
+    let ships = -1;
+    try {
+      const q = await exec(
+        'n=0; for m in /data/adb/modules/*/; do ' +
+        '[ -f "$m/disable" ] && continue; [ -f "$m/remove" ] && continue; ' +
+        'for d in system vendor product odm my_product my_stock my_region ' +
+        'my_heytap my_carrier my_preload my_bigball; do ' +
+        '[ -d "$m$d" ] && { n=$((n+1)); break; }; done; done; echo $n'
+      );
+      if (q.errno === 0) ships = parseInt((q.stdout || '').trim(), 10);
+    } catch (e) { /* leave unknown */ }
+    if (ships === 0) {
+      // Correct and final. Not a warning: nothing is wrong and nothing to do.
+      $("substate").textContent = "nothing to inject — no module provides files";
+      dot.className = "dot ok";
+    } else if (ships > 0) {
+      $("substate").textContent = "no rules — re-apply";
+      dot.className = "dot warn";
+    } else {
+      $("substate").textContent = "no rules";
+      dot.className = "dot warn";
+    }
     return d.rules;
   }
 

@@ -60,6 +60,20 @@ Older entries below still describe these. They are gone.
 
 ### Fixed
 
+- **"Idle — no rules — re-apply" on a device with nothing to apply.** The status
+  card had one message for both causes of zero rules, so a user whose modules are
+  all script-only was told to press Reload — which can never work, and the card
+  can never reach Active. It now says "nothing to inject — no module provides
+  files", in green, and keeps "no rules — re-apply" for the case where a module
+  does ship content. The extra check only runs when the count is zero.
+- **The last plan check that said "not measured" when it meant "nothing to
+  test".** `Level` had no N/A, so a plan finding with nothing to look at had to
+  claim it could have run. On a script-only device nine device checks correctly
+  said n/a while the ghost row alone kept the card amber. `Level::NotApplicable`
+  now exists, ordered to match `Verdict`, and the ghost row uses it when nothing
+  is being injected — while staying amber when rules are live and the cloak
+  really is off.
+
 - **"Nothing to test" was reported as "did not run".** On a device where no
   module provides files, the per-UID canary and the served-bytes check had no
   injected file to sample — and said UNMEASURED, with a remedy ("the boot pass

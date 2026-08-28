@@ -47,6 +47,18 @@ enum Level {
     /// which line matters more.
     Unmeasured,
     Warn,
+    /// "Does not apply here" -- the plan side of the same word the device side
+    /// already had. Without it a plan check with nothing to look at had to say
+    /// Unmeasured, which claims the check COULD have run and did not, and sent
+    /// the reader after a remedy that cannot exist. Measured on an OP15 whose
+    /// modules are all script-only: nine device checks correctly said n/a while
+    /// the one plan check still said "not measured", so the card stayed amber on
+    /// a device doing exactly the right thing.
+    ///
+    /// Ordered between Warn and Info to match `Verdict`, whose declaration order
+    /// is Warn < Pass < NotApplicable < Note. `Level` derives `Ord` and findings
+    /// sort by it; the two orders have to agree.
+    NotApplicable,
     /// Worth printing, not worth acting on. Kept out of the warning count so a
     /// standing observation about a working configuration cannot bury a real one.
     Info,
@@ -76,6 +88,7 @@ fn verdict_of(level: &Level) -> Verdict {
         Level::Error => Verdict::Fail,
         Level::Unmeasured => Verdict::Unmeasured,
         Level::Warn => Verdict::Warn,
+        Level::NotApplicable => Verdict::NotApplicable,
         Level::Info => Verdict::Note,
     }
 }
@@ -1470,7 +1483,14 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 // silence was indistinguishable from a pass -- while service.sh
                 // logged the cloak as inert on the very same boot.
                 f.push(Finding {
-                    level: Level::Unmeasured,
+                    // Nothing injected anywhere means nothing for the cloak to
+                    // guard, which is n/a. With rules live and the tables still
+                    // empty, the cloak really is off and that stays amber.
+                    level: if plan.iter().any(|e| e.kind == PlanKind::Inject) {
+                        Level::Unmeasured
+                    } else {
+                        Level::NotApplicable
+                    },
                     check: "ghost cloak not populated",
                     detail: format!(
                         "the engine returned {} hidden path(s) and {} hidden uid(s); both tables must be \
