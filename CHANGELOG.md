@@ -69,6 +69,18 @@ Older entries below still describe these. They are gone.
   user-owned files and `customize.sh` restores them, saying how many it put back.
   The operational flags are still cleared — `disabled` in particular, which is
   why that `rm` exists at all.
+- **A Suite-made `my_*` bind is a NOTE, not a FAIL.** Serving `my_*` by bind is
+  the DEFAULT — the `my_hookless` marker is what switches it to injection, not
+  the reverse — so a stock install opened red on any device with a module that
+  ships `my_*` content. The posture cost is real and the text still states it,
+  but it is an accepted default, not a failure. A bind the Suite did NOT make
+  stays a FAIL: someone else's mount over the ROM is what the check is for.
+- **`foreign mount over the ROM` counted module mounts as foreign.** It flagged
+  every subtree bind over a ROM path, including binds sourced from
+  `/data/adb/modules` — while its own text read "come from outside the module
+  system" and its owner read "a mount made outside /data/adb". Both were the
+  opposite of the truth, and the same 85 binds were reported twice, in two
+  different red rows. Module binds now belong to `zero-mount posture` alone.
 - **`check` blamed other modules for the Suite's own mounts.** The owner was
   derived from the bind SOURCE, so a bind the Suite made to serve a module's
   `my_*` content was reported as that module's doing, with two remedies that

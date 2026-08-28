@@ -365,13 +365,24 @@ fn check_zero_mount() -> Check {
             ));
         }
 
-        fail(
-            "zero-mount posture",
-            format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked)),
-            "any app can read /proc/self/mountinfo and see a module mounted over the ROM",
-        )
-        .meaning(why)
-        .owner(owner)
+        // NOTE, not FAIL, when every one of them is ours.
+        //
+        // A my_* bind is the Suite's DEFAULT way to serve that content -- the
+        // `my_hookless` opt-in is what switches it to injection, not the other way
+        // round. Calling the default a failure means a stock install opens red on a
+        // device whose only crime is having a module with my_* content, and the
+        // posture cost is real but accepted and already stated in the text.
+        //
+        // Mixed stays FAIL: a bind we did not make is still someone else's mount
+        // over the ROM, and that is the case this check exists for.
+        let evidence = format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked));
+        let oracle = "any app can read /proc/self/mountinfo and see a module mounted over the ROM";
+        let c = if mine == leaked.len() {
+            chk("zero-mount posture", Verdict::Note, evidence).oracle(oracle)
+        } else {
+            fail("zero-mount posture", evidence, oracle)
+        };
+        c.meaning(why).owner(owner)
     }
 }
 
@@ -1219,6 +1230,19 @@ fn check_no_foreign_rom_mount() -> Check {
     for r in &rows {
         let t = r.target.to_string_lossy();
         if !roots.iter().any(|root| t.starts_with(root)) {
+            continue;
+        }
+        // A bind sourced from /data/adb/modules is a MODULE mount, which is the
+        // one thing this check is not about: its own text says "outside the module
+        // system" and its owner string says "a mount made outside /data/adb".
+        // Both were false for the 85 my_* binds the Suite itself makes, so a stock
+        // install reported them here AND in zero-mount posture -- two red rows for
+        // one cause, one of them describing the opposite of what happened.
+        // zero-mount posture owns module mounts; this owns everything else.
+        //
+        // mountinfo's root is relative to the source filesystem, so a bind off
+        // userdata reads as /adb/modules/... rather than /data/adb/modules/...
+        if r.root.starts_with("/adb/modules/") || r.root.starts_with("/data/adb/modules/") {
             continue;
         }
         let subtree_bind = r.root != "/";
