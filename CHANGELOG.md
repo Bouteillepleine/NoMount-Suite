@@ -60,6 +60,14 @@ Older entries below still describe these. They are gone.
 
 ### Fixed
 
+- **A device with zero rules showed one rule, called "no rules".** `nomount vfs
+  list` printed that phrase on an empty engine, and the WebUI counts every
+  non-blank line of it as a rule — so the message counted itself. Status read
+  `INJECTION RULES 1`, Rules read `Active rules 1 · (other) 1`, and the rule row
+  was the word itself. Reported from an OP15 whose five modules are all script
+  only, where 0 rules is the correct answer. The empty list now prints nothing,
+  and the parser only counts lines that look like a path.
+
 - **Removing the module threw away everything you had configured.**
   `uninstall.sh` did `rm -rf /data/adb/nomount`, taking the per-app hide list,
   the module blocklist and the `my_hookless` opt-in with it — so the classic

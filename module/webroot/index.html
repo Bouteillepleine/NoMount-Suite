@@ -1284,8 +1284,13 @@
   function ruleDump() {
     if (RULES) return RULES;
     RULES = nm("vfs list").then(function (r) {
+      // A rule line is a path. Anything else is prose from the CLI, and
+      // counting it produced a phantom rule named "no rules" on a device with
+      // none. The CLI no longer prints that, but the guard stays: this parser
+      // is fed by a human-facing command and should never count a sentence.
       const lines = r.errno === 0
-        ? r.stdout.split("\n").map(x => x.trim()).filter(Boolean) : [];
+        ? r.stdout.split("\n").map(x => x.trim())
+            .filter(x => x && x.startsWith("/")) : [];
       const d = {
         ok: r.errno === 0,
         raw: (r.stdout || "").trim(),
