@@ -60,7 +60,8 @@ Older entries below still describe these. They are gone.
 
 ### Fixed
 
-- **"Idle — no rules — re-apply" on a device with nothing to apply.** The status
+- **"Idle" on a healthy device.** The headline word answered "are there rules?" when the question a user asks is "is it working?" — so a device serving exactly what it should read as switched off. ACTIVE now means the Suite is doing its job, including correctly having nothing to do; IDLE is reserved for the one case that needs the user.
+- **"no rules — re-apply" on a device with nothing to apply.** The status
   card had one message for both causes of zero rules, so a user whose modules are
   all script-only was told to press Reload — which can never work, and the card
   can never reach Active. It now says "nothing to inject — no module provides

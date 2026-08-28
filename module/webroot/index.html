@@ -1329,7 +1329,11 @@
     }
     $("mRules").textContent = d.rules;
     $("mOv").textContent = d.rro.length;
-    $("state").textContent = d.rules > 0 ? "Active" : "Idle";
+    // ACTIVE means the Suite is doing its job, which includes correctly having
+    // nothing to do. IDLE is reserved for the one case that needs the user:
+    // modules DO ship content and no rule is live. Reading "Idle" on a healthy
+    // script-only device told people the Suite was not running when it was.
+    $("state").textContent = "Active";
     if (d.rules > 0) {
       $("substate").textContent = "modules injected";
       dot.className = "dot ok";
@@ -1357,9 +1361,13 @@
       $("substate").textContent = "nothing to inject — no module provides files";
       dot.className = "dot ok";
     } else if (ships > 0) {
+      // The one actionable case: content exists, no rule serves it.
+      $("state").textContent = "Idle";
       $("substate").textContent = "no rules — re-apply";
       dot.className = "dot warn";
     } else {
+      // Could not tell. Do not claim either way.
+      $("state").textContent = "Idle";
       $("substate").textContent = "no rules";
       dot.className = "dot warn";
     }
