@@ -174,11 +174,32 @@ jobs:
           set -o pipefail
           cd repo/kpm
           out=/tmp/kpm-syms-${{ matrix.ver }}.txt
-          make undefined \
+          # -s matters: without it make echoes each recipe to stdout and the
+          # compile command line lands IN the symbol list.
+          make -s undefined \
             TARGET_COMPILE=aarch64-linux-gnu- \
             KP_DIR="$GITHUB_WORKSPACE/kp" \
             KERNEL_DIR="$GITHUB_WORKSPACE/ksrc" \
             2>/tmp/kpm-compile-${{ matrix.ver }}.log | tee "$out"
+
+          # The engine object must be arm64. Worth checking explicitly: when
+          # this accidentally used the host compiler, the failure surfaced as
+          # assembler noise about register sizes and never once said "wrong
+          # architecture".
+          if [ -f nm_engine.o ]; then
+            arch=$(file -b nm_engine.o)
+            echo "nm_engine.o: $arch"
+            case "$arch" in
+              *aarch64*) ;;
+              *) echo "::error::nm_engine.o is not aarch64 ($arch)"; exit 1 ;;
+            esac
+          fi
+
+          # A symbol list is bare identifiers. Anything else means the capture
+          # is contaminated rather than genuinely empty.
+          if [ -s "$out" ] && grep -qvE '^[A-Za-z_][A-Za-z0-9_.]*$' "$out"; then
+            echo "::warning::symbol list contains non-identifier lines"
+          fi
           echo "count=$(wc -l < "$out")" >> "$GITHUB_OUTPUT"
 
       - name: Build nomount.kpm
