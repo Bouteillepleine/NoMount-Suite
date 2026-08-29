@@ -175,6 +175,10 @@ SCRIPTS=(
     # we do not control" case its own header warns about. It sat in module/
     # unlisted, so no zip ever carried it and no uninstall ever ran it.
     uninstall.sh
+    # LKM BRANCH ONLY. Sourced by customize.sh at install and metamount.sh on
+    # every boot to insert the engine module. Both would silently fall back to
+    # "this kernel has no engine" if the zip did not carry it.
+    lkm-load.sh
 )
 
 # OnePlus (and any device that can run this kernel) is arm64-v8a only — the
@@ -382,6 +386,51 @@ package_zip() {
 
 
     # WebUI
+    # --- LKM BRANCH ONLY: the engine modules and their loader -------------
+    #
+    # One .ko per GKI KMI generation, built by build-lkm-kmi.yml against the
+    # Android DDK containers. customize.sh picks the one that loads on this
+    # kernel and deletes the rest; metamount.sh re-inserts it every boot.
+    #
+    # Absence is NOT fatal here. A zip built without them is still a valid
+    # Suite -- it just cannot help a kernel that lacks CONFIG_NOMOUNT=y -- and
+    # failing the build would make `package.sh` unusable outside CI. It is
+    # reported instead, because a zip that silently lost its modules looks
+    # exactly like one that never had them.
+    local lkm_src=""
+    if [ -d "$MODULE_DIR/lkm" ]; then
+        lkm_src="$MODULE_DIR/lkm"
+    elif [ -d "$PROJECT_ROOT/staging/lkm" ]; then
+        lkm_src="$PROJECT_ROOT/staging/lkm"
+    fi
+    if [ -n "$lkm_src" ]; then
+        local n_ko
+        n_ko=$(find "$lkm_src" -name 'nomount-*.ko' | wc -l)
+        if [ "$n_ko" -gt 0 ]; then
+            mkdir -p "$staging/lkm"
+            cp "$lkm_src"/nomount-*.ko "$staging/lkm/"
+            echo "    lkm: $n_ko module(s) -> $(cd "$staging/lkm" && ls | tr '\n' ' ')"
+        else
+            echo "    lkm: directory present but empty -- zip carries NO engine modules"
+        fi
+    else
+        echo "    lkm: none bundled -- this zip needs a kernel with CONFIG_NOMOUNT=y"
+    fi
+
+    # ko-loader, for devices where ksud has no insmod and a bare insmod is
+    # refused by SELinux. Named `loader` in the zip, matching what
+    # lkm-load.sh looks for.
+    local loader_src=""
+    for _c in "$MODULE_DIR/bin/ko-loader-arm64" "$PROJECT_ROOT/staging/ko-loader-arm64"; do
+        [ -f "$_c" ] && { loader_src="$_c"; break; }
+    done
+    if [ -n "$loader_src" ]; then
+        install -m 0755 "$loader_src" "$staging/loader"
+        echo "    loader: $(basename "$loader_src")"
+    else
+        echo "    loader: none -- module loading falls back to ksud insmod / insmod"
+    fi
+
     local webroot_src=""
     if [ -d "$MODULE_DIR/webroot" ]; then
         webroot_src="$MODULE_DIR/webroot"

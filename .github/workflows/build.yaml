@@ -213,8 +213,57 @@ jobs:
           path: target/${{ matrix.target }}/${{ matrix.profile }}/nomount
           retention-days: 7
 
+  # LKM BRANCH ONLY -------------------------------------------------------
+  # One engine module per GKI KMI generation, built inside the Android DDK
+  # containers whose $KDIR already holds a released GKI kernel's real
+  # Module.symvers. No kernel is compiled here; the whole matrix takes ~2 min.
+  #
+  # The zip bundles all seven and customize.sh keeps whichever one loads. That
+  # is what lets this branch install on a kernel WITHOUT CONFIG_NOMOUNT=y.
+  kmi-modules:
+    name: ko ${{ matrix.kmi }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+    container:
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-20251104
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        run: |
+          set -eu
+          test -s "$KDIR/Module.symvers" || {
+            echo "::error::no Module.symvers in the DDK tree"; exit 1; }
+          # Deliberately no KBUILD_MODPOST_WARN. This links against a real
+          # export table, so an undefined symbol -- or a VFS namespace the
+          # module forgot to import -- has to fail the build. The ten-version
+          # compile gate suppresses exactly those, which is why it cannot stand
+          # in for this one.
+          make -j"$(nproc)" -C "$KDIR" ARCH=arm64 CC=clang \
+               M="$GITHUB_WORKSPACE/lkm" modules
+          install -Dm644 lkm/nomount.ko "out/nomount-${{ matrix.kmi }}.ko"
+          llvm-strip -d "out/nomount-${{ matrix.kmi }}.ko" || true
+          ls -l "out/nomount-${{ matrix.kmi }}.ko"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ko-${{ matrix.kmi }}
+          path: out/nomount-${{ matrix.kmi }}.ko
+          if-no-files-found: error
+
   package:
-    needs: [build, test]
+    needs: [build, test, kmi-modules]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -246,6 +295,29 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.14.1
+
+      # LKM BRANCH ONLY. The ko-* artifacts downloaded above become the
+      # module set the zip ships. Counted, because a zip that quietly lost one
+      # installs fine and then fails only on the devices whose KMI went
+      # missing -- the worst way to find out.
+      - name: Stage the engine modules
+        run: |
+          set -eu
+          mkdir -p module/lkm
+          find artifacts -name 'nomount-*.ko' -exec cp {} module/lkm/ \;
+          n=$(find module/lkm -name 'nomount-*.ko' | wc -l)
+          find module/lkm -name 'nomount-*.ko' -printf '  %f  %s bytes\n' | sort
+          [ "$n" -eq 7 ] || { echo "::error::expected 7 engine modules, got $n"; exit 1; }
+
+      - name: Build ko-loader
+        run: |
+          set -eu
+          # Loads a .ko where ksud has no insmod and a bare insmod is refused by
+          # SELinux. Built with the same zig set up above for nm.
+          git clone --depth 1 https://github.com/maxsteeel/ko-loader /tmp/kol
+          make -C /tmp/kol TARGET=aarch64-linux
+          install -Dm755 /tmp/kol/ko-loader module/bin/ko-loader-arm64
+          file module/bin/ko-loader-arm64
 
       - name: Build nm (freestanding netlink client)
         run: |

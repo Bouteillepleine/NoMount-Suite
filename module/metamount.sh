@@ -194,6 +194,43 @@ _engine_ran=0
 # don't preserve +x. Without it on nm the whole pass aborts before it can inject.
 chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 
+# --- LKM VARIANT: put the engine back ------------------------------------
+# ONLY ON THIS BRANCH. A kernel module does not survive a reboot, so an engine
+# that was inserted at install time is gone by now and every injection below
+# would take the "engine did not answer" path -- silently, on every boot after
+# the first.
+#
+# Ordered before anything that talks to the engine, and skipped entirely when it
+# already answers: on a kernel with CONFIG_NOMOUNT=y there is nothing to load
+# and lkm/ was deleted at install.
+if [ -f "$MODDIR/lkm-load.sh" ]; then
+    NM_LKM_SAY=:                       # boot: say nothing, log below instead
+    NM_LKM_NM="$NM_BIN"
+    NM_LKM_LOADER="$MODDIR/loader"
+    export NM_LKM_SAY NM_LKM_NM NM_LKM_LOADER
+    . "$MODDIR/lkm-load.sh"
+    chmod 0755 "$NM_LKM_LOADER" 2>/dev/null
+
+    if nm_lkm_probe; then
+        :                              # built in, or already loaded this boot
+    elif [ -f "$MODDIR/lkm/nomount.ko" ]; then
+        # The one install picked for this kernel. Re-inserting the same file is
+        # the normal path; the search only runs if it is missing.
+        if nm_lkm_insert "$MODDIR/lkm/nomount.ko"; then
+            nmlog "engine module loaded ($(uname -r))"
+        else
+            nmlog "⛔ engine module failed to load — NOTHING will be injected this boot"
+        fi
+    elif nm_lkm_load_best "$MODDIR/lkm"; then
+        # No pinned module: an install that ran from recovery could not test any
+        # of them, so the choice happens here instead, on the running kernel.
+        nm_lkm_prune "$MODDIR/lkm"
+        nmlog "engine module selected and loaded on first boot ($(uname -r))"
+    else
+        nmlog "⛔ no bundled engine module loads on $(uname -r) — NOTHING was injected this boot"
+    fi
+fi
+
 # --- ksud multicall guard (susfs4ksu action-button clobber protection) ---
 # On this build ksud/ksu_susfs/resetprop are ONE hardlinked multicall binary. The
 # SUSFS module's action button runs `cp -f <standalone> /data/adb/ksu/bin/ksu_susfs`,
