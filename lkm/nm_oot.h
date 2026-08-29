@@ -15,12 +15,35 @@
  * verbatim, so there is one copy of it in this repository and this variant
  * cannot drift from the in-tree build without the drift being a compile error.
  *
- * THE REDIRECT LIST IS EMPTY ON PURPOSE, for now. Which symbols need one is a
- * question for the linker, not for me: `make modules` names every undefined
- * symbol, and that list is the specification. Guessing it from grep would
- * produce redirects for symbols that are exported (harmless but noise) and miss
- * ones that are not (a build failure at best). See NM_SYM below and the
- * `undefined symbols` step in .github/workflows/build-lkm.yml.
+ * THE REDIRECT LIST IS EMPTY, AND THAT IS THE MEASURED ANSWER.
+ *
+ * Every function the engine calls is available to a module on every GKI KMI.
+ * That was checked against the real thing: build-lkm-kmi.yml builds inside the
+ * Android DDK containers, whose $KDIR carries the actual Module.symvers of a
+ * released GKI kernel (14000-17000 symbols depending on generation), and the
+ * module links against all seven with nothing undefined.
+ *
+ * TWO WRONG ANSWERS WERE REACHED FIRST. Both are recorded because each looks
+ * convincing:
+ *
+ *   1. "The linker says nothing is missing." True, but the compile gate runs
+ *      modpost under KBUILD_MODPOST_WARN=1, which downgrades every error
+ *      including a missing namespace import. It cannot be used as evidence that
+ *      a module would link, only that the engine still compiles.
+ *
+ *   2. "Six symbols are trimmed away by the GKI KMI." Reached by grepping the
+ *      union of all 36 android/abi_gki_aarch64* lists (9366 symbols) and
+ *      finding vfs_getxattr, vfs_setxattr, free_inode_nonrcu, netlink_rcv_skb
+ *      and the two security_inode_*secctx absent. They are not absent; those
+ *      lists are not the export table. The DDK's Module.symvers shows all six
+ *      exported on every KMI -- several of them into a NAMESPACE
+ *      (ANDROID_GKI_VFS_EXPORT_ONLY), which is exactly why a plain grep of the
+ *      abi lists misses them. What they need is not a kallsyms redirect but a
+ *      MODULE_IMPORT_NS, which nomount_lkm.c does.
+ *
+ * So NM_SYM below has no users. Keep it: if a future kernel does withhold a
+ * symbol, the DDK build fails loudly with its name, and this is where the fix
+ * goes. Do not populate it speculatively.
  */
 #ifndef _NM_OOT_H
 #define _NM_OOT_H
