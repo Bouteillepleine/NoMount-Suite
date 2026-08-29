@@ -75,7 +75,7 @@ rather than copying it, so neither can drift from what the Suite ships.
 | | branch | `/proc/modules` | maps spoof | kernels |
 | :--- | :--- | :--- | :--- | :--- |
 | **in-tree** | `main` | absent | yes | 4.9 – 6.18 |
-| **KPM** (KernelPatch/APatch) | [`KPM`](../../tree/KPM) | absent | not yet — the inline hook is unwritten | 5.4 – 6.6 |
+| **KPM** (KernelPatch/APatch) | [`KPM`](../../tree/KPM) | absent | not yet — the inline hook is unwritten | 6 KMIs, 5.10 – 6.6 |
 | **LKM** (loadable module) | [`LKM`](../../tree/LKM) | **listed** | no | 4.9 – 6.18 |
 
 Neither has been loaded on a device. They compile, and CI proves that much and
@@ -90,7 +90,7 @@ Both variants build from the Actions tab.
 | :--- | :--- | :--- |
 | **Build** | `LKM` | the module zip, with one `nomount-<kmi>.ko` bundled per GKI KMI generation plus a loader. The `ko <kmi>` jobs take ~2 minutes each. |
 | **NoMount LKM — out-of-tree build** | `LKM` | compile gate over all ten kernel versions. It proves the engine still builds as a module and nothing more — it runs modpost under `KBUILD_MODPOST_WARN=1`, which suppresses undefined symbols and missing namespace imports alike, so it cannot tell you a module would link. |
-| **NoMount KPM — build a KernelPatch module** | `KPM` | `nomount.kpm` for 5.4 → 6.6, failing if any symbol would be unresolvable at load. |
+| **NoMount KPM — build a KernelPatch module** | `KPM` | one `nomount-<kmi>.kpm` per KMI up to 6.6, built in the DDK containers, failing if any symbol would be unresolvable at load. Note the CFI caveat in `kpm/README.md`. |
 
 The per-KMI modules are built inside `ghcr.io/ylarod/ddk:<kmi>`, whose `$KDIR`
 already holds a released GKI kernel's real `Module.symvers` — so they link
