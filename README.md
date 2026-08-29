@@ -1,6 +1,10 @@
 # 🫥 NoMount Suite
 
-> **Beta.** It works at the kernel VFS layer.
+> **Beta.** It works at the kernel VFS layer, and the whole point of this stage
+> is getting it to stable. What moves it there is reports from setups outside
+> the tested set — a different device, a different root manager, a module that
+> behaves oddly. `nomount export` produces the bundle for that, hide list
+> already redacted.
 
 Loads root modules **without touching the mount table** — RRO theming overlays
 included. No `overlayfs`, no `tmpfs`, no bind mounts: `/proc/mounts` stays 100%
