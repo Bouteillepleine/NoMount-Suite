@@ -1,0 +1,234 @@
+name: NoMount KPM — build a KernelPatch module
+
+# Builds kpm/ into nomount.kpm, and -- when the build cannot yet complete --
+# produces the one artifact that unblocks it: the exact list of kernel symbols
+# the engine references.
+#
+# WHY THE SYMBOL LIST IS THE HARD PART, and why it is generated rather than
+# written by hand:
+#
+# A .kpm is not loaded by the kernel's module loader. It gets no relocation
+# against the export table, so EVERY external symbol has to be resolved through
+# kallsyms at load time -- not just the ones the kernel declines to export. The
+# LKM variant's result ("no symbol needs a redirect") is true for a module and
+# does not carry over here.
+#
+# The list also cannot be scraped from modpost, which caps its output
+# ("suppressed 90 unresolved symbol warnings") and so under-reports. `nm -u` over
+# the compiled engine object is exact, and that is what the survey job runs.
+#
+# VERSION CAP. KernelPatch does not come up on 6.12+ -- it hangs in its own
+# pagetable bring-up, so a module built for it could never load. The matrix stops
+# at 6.6 for that reason, and kpm/nm_kpm_shim.h fails the compile if anything
+# tries to build it higher. See kpm/README.md.
+
+on:
+  push:
+    branches: [KPM]
+    paths:
+      - 'kpm/**'
+      - 'hookless/src/**'
+      - '.github/workflows/build-kpm.yml'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Comma-separated versions (empty = all <=6.6). e.g. 6.1,6.6"
+        required: false
+        default: ''
+      variant_ref:
+        description: "Branch holding kpm/ (this file lives on main; the code does not)"
+        required: false
+        default: 'KPM'
+      kp_repo:
+        description: "KernelPatch SDK repo"
+        required: false
+        default: 'https://github.com/bmax121/KernelPatch'
+      kp_ref:
+        description: "KernelPatch ref (empty = its default branch)"
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kpm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.ver }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Stops at 6.6 on purpose -- see the version-cap note above.
+        include:
+          - { ver: '5.4',  kref: 'android11-5.4'  }
+          - { ver: '5.10', kref: 'android12-5.10' }
+          - { ver: '5.15', kref: 'android13-5.15' }
+          - { ver: '6.1',  kref: 'android14-6.1'  }
+          - { ver: '6.6',  kref: 'android15-6.6'  }
+    steps:
+      - name: Should this version run?
+        id: sel
+        env:
+          ONLY: ${{ github.event.inputs.only }}
+        run: |
+          set -eu
+          if [ -z "${ONLY:-}" ] || printf '%s' "$ONLY" | tr ',' '\n' | grep -qx '${{ matrix.ver }}'; then
+            echo "run=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=0" >> "$GITHUB_OUTPUT"; echo "skipped ${{ matrix.ver }}"
+          fi
+
+      # kpm/ lives on its own branch, but a workflow_dispatch file is only
+      # offered by GitHub when it sits on the default branch. So this file is on
+      # main and checks the variant branch out explicitly.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.sel.outputs.run == '1'
+        with:
+          path: repo
+          ref: ${{ github.event.inputs.variant_ref || 'KPM' }}
+
+      - name: Confirm the variant tree is here
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -eu
+          test -f repo/kpm/Makefile || { echo "::error::no kpm/Makefile on this ref"; exit 1; }
+          test -f repo/hookless/src/nomount.c || {
+            echo "::error::engine source missing; kpm/ includes it, so this cannot build"; exit 1; }
+
+      - name: Install toolchain
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev build-essential rsync \
+            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu >/dev/null
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Restore kernel clone
+        id: kcache
+        if: steps.sel.outputs.run == '1'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ksrc
+          key: kpm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+
+      - name: Clone kernel source on cache miss
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          git clone --depth 1 -b '${{ matrix.kref }}' \
+            https://android.googlesource.com/kernel/common ksrc
+          echo "Kernel: $(make -s -C ksrc kernelversion 2>/dev/null || echo unknown)"
+
+      - name: Save kernel clone
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ksrc
+          key: kpm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+
+      - name: Clone the KernelPatch SDK
+        if: steps.sel.outputs.run == '1'
+        env:
+          KP_REPO: ${{ github.event.inputs.kp_repo }}
+          KP_REF: ${{ github.event.inputs.kp_ref }}
+        run: |
+          set -eu
+          repo="${KP_REPO:-https://github.com/bmax121/KernelPatch}"
+          if [ -n "${KP_REF:-}" ]; then
+            git clone --depth 1 -b "$KP_REF" "$repo" kp
+          else
+            git clone --depth 1 "$repo" kp
+          fi
+          test -d kp/kernel/include || {
+            echo "::error::$repo does not look like a KernelPatch checkout (no kernel/include)"; exit 1; }
+          echo "KernelPatch at $(git -C kp rev-parse --short HEAD)"
+
+      - name: Prepare kernel headers
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -eux
+          cd ksrc
+          # modules_prepare is enough here: the engine object needs
+          # include/generated, not a linked vmlinux. Unlike the LKM release
+          # build, nothing in this job depends on Module.symvers -- a .kpm
+          # resolves through kallsyms, so an export table would not help it.
+          M='ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error'
+          make $M defconfig
+          make $M olddefconfig
+          make $M -j"$(nproc)" modules_prepare
+          test -f include/generated/autoconf.h || {
+            echo "::error::modules_prepare produced no generated headers"; exit 1; }
+
+      - name: Symbol survey (the redirect list this variant needs)
+        id: survey
+        if: steps.sel.outputs.run == '1'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd repo/kpm
+          out=/tmp/kpm-syms-${{ matrix.ver }}.txt
+          make undefined \
+            TARGET_COMPILE=aarch64-linux-gnu- \
+            KP_DIR="$GITHUB_WORKSPACE/kp" \
+            KERNEL_DIR="$GITHUB_WORKSPACE/ksrc" \
+            2>/tmp/kpm-compile-${{ matrix.ver }}.log | tee "$out"
+          echo "count=$(wc -l < "$out")" >> "$GITHUB_OUTPUT"
+
+      - name: Build nomount.kpm
+        id: kpmbuild
+        if: steps.sel.outputs.run == '1'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd repo/kpm
+          make \
+            TARGET_COMPILE=aarch64-linux-gnu- \
+            KP_DIR="$GITHUB_WORKSPACE/kp" \
+            KERNEL_DIR="$GITHUB_WORKSPACE/ksrc" \
+            2>&1 | tee -a /tmp/kpm-compile-${{ matrix.ver }}.log | tail -30
+          test -f nomount.kpm && cp nomount.kpm "$GITHUB_WORKSPACE/nomount-${{ matrix.ver }}.kpm"
+
+      - name: Report
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -eu
+          syms=/tmp/kpm-syms-${{ matrix.ver }}.txt
+          {
+            echo "### ${{ matrix.ver }}"
+            if [ '${{ steps.kpmbuild.outcome }}' = 'success' ] && [ -f "$GITHUB_WORKSPACE/nomount-${{ matrix.ver }}.kpm" ]; then
+              echo "Built \`nomount.kpm\` ($(stat -c%s "$GITHUB_WORKSPACE/nomount-${{ matrix.ver }}.kpm") bytes)."
+              echo
+              echo "This has NOT been loaded on a device. It links; that is all this job shows."
+            elif [ -s "$syms" ]; then
+              echo "Engine compiled. **$(wc -l < "$syms") symbols** need a kallsyms redirect:"
+              echo
+              echo '```'
+              cat "$syms"
+              echo '```'
+              echo "Each needs an enum entry in \`kpm/nm_kpm_syms.h\`, a table row in"
+              echo "\`kpm/nm_kpm_entry.c\`, and a TYPED redirect in \`kpm/nm_kpm_shim.h\`"
+              echo "whose signature is correct for this KMI."
+            else
+              echo "The engine did not compile for this kernel. Last lines:"
+              echo '```'
+              tail -30 /tmp/kpm-compile-${{ matrix.ver }}.log 2>/dev/null || echo "(no log)"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.sel.outputs.run == '1' && always()
+        with:
+          name: kpm-${{ matrix.ver }}
+          path: |
+            /tmp/kpm-syms-${{ matrix.ver }}.txt
+            /tmp/kpm-compile-${{ matrix.ver }}.log
+            nomount-${{ matrix.ver }}.kpm
+          if-no-files-found: warn
