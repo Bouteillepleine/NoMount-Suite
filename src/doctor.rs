@@ -619,7 +619,7 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
         // Only if the module did not already report ImageBacked from its scripts;
         // saying it twice for one module helps nobody.
         if !seen.contains(&Incompat::ImageBacked) {
-            if let Some(img) = find_shipped_image(&mdir, 0) {
+            if let Some(img) = find_shipped_image(&mdir, &mdir, 0) {
                 out.push((id.clone(), "shipped file".to_string(), Incompat::ImageBacked, img));
             }
         }
@@ -633,7 +633,11 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
 /// level or one directory down; walking a large module tree to depth 6 on every
 /// plan run costs real I/O to find nothing. Extensions only -- sniffing
 /// magic bytes would mean opening every file in every module on every run.
-fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
+fn find_shipped_image(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    depth: u32,
+) -> Option<String> {
     const IMG_EXT: [&str; 6] = [".img", ".img.xz", ".img.gz", ".rootfs", ".ext4", ".erofs"];
     if depth > 2 {
         return None;
@@ -657,13 +661,16 @@ fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
         let name = e.file_name();
         let name = name.to_string_lossy().to_lowercase();
         if IMG_EXT.iter().any(|x| name.ends_with(x)) {
-            // The path, not the basename: the doc promises module-relative and a
-            // bare `rootfs.img` gives the reader nowhere to look.
-            return Some(e.path().to_string_lossy().into_owned());
+            // MODULE-RELATIVE, which is what the doc above promises and what
+            // the reader needs. A bare `rootfs.img` gives them nowhere to look,
+            // and the absolute path this used to return repeats the
+            // /data/adb/modules/<id>/ prefix the finding already names.
+            let p = e.path();
+            return Some(p.strip_prefix(root).unwrap_or(&p).to_string_lossy().into_owned());
         }
     }
     for d in dirs {
-        if let Some(found) = find_shipped_image(&d, depth + 1) {
+        if let Some(found) = find_shipped_image(root, &d, depth + 1) {
             return Some(found);
         }
     }
@@ -1858,6 +1865,23 @@ mod tests {
         assert_eq!(expansion_level(75), Some(Level::Info)); // /product/app
         assert_eq!(expansion_level(199), Some(Level::Info));
         assert_eq!(expansion_level(224), Some(Level::Warn)); // /system/fonts
+    }
+
+    /// A shipped image is reported MODULE-RELATIVE, as its doc promises.
+    ///
+    /// It returned the absolute path, which repeats the
+    /// /data/adb/modules/<id>/ prefix the finding already carries.
+    #[test]
+    fn a_shipped_image_is_named_relative_to_its_module() {
+        let base = std::env::temp_dir().join("nm-doctor-img-test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("common")).unwrap();
+        std::fs::write(base.join("common/rootfs.img"), b"x").unwrap();
+        assert_eq!(
+            find_shipped_image(&base, &base, 0).as_deref(),
+            Some("common/rootfs.img")
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
