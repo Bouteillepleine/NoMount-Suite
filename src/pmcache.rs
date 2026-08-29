@@ -25,12 +25,32 @@ const PENDING: &str = "/data/adb/nomount/pm-reboot.list";
 /// ROM partitions whose APKs PM parses at scan time. A /data APK is PM's own
 /// and is never served by a rule.
 /// DELIBERATELY a fixed list, unlike `mount.rs`, which discovers partitions from
-/// the device. This one is half of a contract with the kernel: the PUBLIC-strip
-/// exemption there applies the same scan-dir predicate, and the note below says
-/// this file is its single source of truth. Widening it here alone would hand
-/// `--public` to paths the engine still strips it from, so an OEM partition
-/// missing from this list is a change to make in `kbuild@hookless` and here in
-/// the same breath -- never here on its own.
+/// the device. This one is half of a contract with the kernel: `nm_vpath_in_pm_scandir()`
+/// applies the same predicate to decide whether a SHADOWS_STOCK rule may keep
+/// NM_FLAG_PUBLIC, and userspace is the source of truth for granting it.
+/// `the_kernel_carries_the_same_pm_scan_lists` now asserts the two agree -- which
+/// only became possible when the engine moved into this repository.
+///
+/// KNOWN, MEASURED GAP. Widening it is not a one-line change, so the shortfall is
+/// recorded rather than quietly carried. On an OP11 (CPH2449, OOS15) the ROM has
+/// six top-level directories this list does not name: `/my_bigball`,
+/// `/my_manifest`, `/my_reserve`, `/special_preload`, `/odm_dlkm` and
+/// `/bootstrap-apex`. Only `/my_bigball` is a PackageManager scan target at all --
+/// it ships `app/`, `priv-app/` and `overlay/` -- and on that ROM all three are
+/// EMPTY, so nothing is currently mis-served. A module that shipped an APK there
+/// would get no `--public` and no cache invalidation.
+///
+/// Fixing it needs BOTH lists and a version gate, in that order:
+///   * widening userspace alone is worse than the gap -- the engine strips the bit
+///     from any shadowing rule on the new partition, so PM advertises the module's
+///     APK while a blocked reader is served the stock bytes, which is the exact
+///     inconsistency NM_FLAG_PUBLIC exists to remove;
+///   * widening the kernel alone changes nothing, since userspace never grants it;
+///   * widening both is only safe for a matched pair, and the Suite (a zip) and the
+///     engine (in the kernel) are flashed separately. So it needs a NOMOUNT_VERSION
+///     bump and an `engine >= N` gate here, exactly like the 15/17 opt-out gates in
+///     doctor.rs -- otherwise a Suite update on an unflashed kernel lands in the
+///     first bullet.
 const ROM_ROOTS: &[&str] = &[
     "/system/", "/system_ext/", "/product/", "/vendor/", "/odm/", "/my_product/", "/my_region/",
     "/my_stock/", "/my_company/", "/my_carrier/", "/my_engineering/", "/my_heytap/", "/my_preload/",
@@ -279,6 +299,83 @@ mod tests {
     /// Both layouts PM uses, measured on OP15: `Contacts-16-...` for a dir it
     /// owns, `OxygenCustomizerComponentCR1.apk-16-...` for one of the 139 APKs
     /// sharing /product/overlay.
+    /// The kernel carries the SAME two lists, and CI is now able to say so.
+    ///
+    /// `nm_vpath_in_pm_scandir()` in hookless/src/nomount.c repeats this test so a
+    /// mislabelling client cannot keep NM_FLAG_PUBLIC on a rule that shadows a
+    /// stock file PM never advertised. Its own comment calls pmcache.rs the source
+    /// of truth and says the kernel copy "must be at least as strict as
+    /// userspace" -- an invariant that, until the engine moved into this
+    /// repository, no test could reach: the two lists were hand-maintained in two
+    /// languages in two repos, and the only thing keeping them in step was
+    /// somebody remembering.
+    ///
+    /// Divergence is silent and asymmetric, which is why it is worth a test:
+    ///   * widen USERSPACE alone and a replaced APK on the new partition is
+    ///     granted --public here and stripped of it there, so a blocked app is
+    ///     served the stock bytes for a path PM advertises the module's version
+    ///     of -- the inconsistency the flag exists to remove, reintroduced;
+    ///   * widen the KERNEL alone and nothing happens at all, because userspace
+    ///     never grants the bit for those paths.
+    ///
+    /// Compared as sets: the order is not semantic, and the kernel spells the
+    /// partitions without the surrounding slashes this file uses.
+    #[test]
+    fn the_kernel_carries_the_same_pm_scan_lists() {
+        let src = std::fs::read_to_string("hookless/src/nomount.c").expect(
+            "hookless/src/nomount.c must be readable -- the engine lives in this repository \
+             precisely so this invariant can be checked; if it has moved out again, this test \
+             is the thing that has to move with it",
+        );
+        let fun = src
+            .split_once("fn_marker_nm_vpath_in_pm_scandir")
+            .map(|(_, r)| r)
+            .or_else(|| src.split_once("static bool nm_vpath_in_pm_scandir").map(|(_, r)| r))
+            .expect("nm_vpath_in_pm_scandir() not found -- was it renamed?");
+        let body = &fun[..fun.find("\n}").expect("unterminated function")];
+
+        // Pull the quoted words out of one `static const char *const <name>[] = {...}`.
+        let table = |name: &str| -> Vec<String> {
+            let at = body
+                .find(&format!("*const {name}[] = {{"))
+                .unwrap_or_else(|| panic!("the kernel's `{name}` table is gone or renamed"));
+            let rest = &body[at..];
+            let end = rest.find("};").expect("unterminated table");
+            let mut out = Vec::new();
+            let mut it = rest[..end].split('"');
+            let _ = it.next(); // before the first quote
+            while let Some(word) = it.next() {
+                out.push(word.to_string());
+                if it.next().is_none() {
+                    break; // the gap between this string and the next
+                }
+            }
+            out.sort();
+            out
+        };
+
+        // The kernel stores bare segments; this file stores "/<part>/".
+        let mut ours: Vec<String> = ROM_ROOTS
+            .iter()
+            .map(|r| r.trim_matches('/').to_string())
+            .collect();
+        ours.sort();
+        assert_eq!(
+            table("roots"),
+            ours,
+            "ROM_ROOTS and the kernel's roots[] have diverged -- a rule on a partition only \
+             userspace knows about is granted --public here and stripped of it by the engine"
+        );
+
+        let mut dirs: Vec<String> = PM_SCAN_DIRS.iter().map(|d| d.to_string()).collect();
+        dirs.sort();
+        assert_eq!(
+            table("dirs"),
+            dirs,
+            "PM_SCAN_DIRS and the kernel's dirs[] have diverged -- same failure, one level down"
+        );
+    }
+
     #[test]
     fn cache_keys_cover_file_and_dedicated_dir() {
         let dir = std::env::temp_dir().join("nm-pmcache-test/priv-app/Contacts");
