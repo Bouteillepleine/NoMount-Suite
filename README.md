@@ -142,6 +142,7 @@ are injected hooklessly rather than mounted.
 
 ## Special thanks
 
+- **[maxsteeel/nomount](https://github.com/maxsteeel/nomount)** — the original this is built on.
 - **[HymoFS](https://github.com/Anatdx/HymoFS)** — inspiration for the VFS approach.
 - **[A7mdwassa](https://github.com/A7mdwassa)** — tester and contributor.
 - **[ZQZCC](https://github.com/ZQZCC)** — WebUI MD3-style design.
