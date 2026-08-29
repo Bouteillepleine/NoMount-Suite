@@ -47,6 +47,18 @@ enum Level {
     /// which line matters more.
     Unmeasured,
     Warn,
+    /// "Does not apply here" -- the plan side of the same word the device side
+    /// already had. Without it a plan check with nothing to look at had to say
+    /// Unmeasured, which claims the check COULD have run and did not, and sent
+    /// the reader after a remedy that cannot exist. Measured on an OP15 whose
+    /// modules are all script-only: nine device checks correctly said n/a while
+    /// the one plan check still said "not measured", so the card stayed amber on
+    /// a device doing exactly the right thing.
+    ///
+    /// Ordered between Warn and Info to match `Verdict`, whose declaration order
+    /// is Warn < Pass < NotApplicable < Note. `Level` derives `Ord` and findings
+    /// sort by it; the two orders have to agree.
+    NotApplicable,
     /// Worth printing, not worth acting on. Kept out of the warning count so a
     /// standing observation about a working configuration cannot bury a real one.
     Info,
@@ -76,6 +88,7 @@ fn verdict_of(level: &Level) -> Verdict {
         Level::Error => Verdict::Fail,
         Level::Unmeasured => Verdict::Unmeasured,
         Level::Warn => Verdict::Warn,
+        Level::NotApplicable => Verdict::NotApplicable,
         Level::Info => Verdict::Note,
     }
 }
@@ -606,7 +619,7 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
         // Only if the module did not already report ImageBacked from its scripts;
         // saying it twice for one module helps nobody.
         if !seen.contains(&Incompat::ImageBacked) {
-            if let Some(img) = find_shipped_image(&mdir, 0) {
+            if let Some(img) = find_shipped_image(&mdir, &mdir, 0) {
                 out.push((id.clone(), "shipped file".to_string(), Incompat::ImageBacked, img));
             }
         }
@@ -620,7 +633,11 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
 /// level or one directory down; walking a large module tree to depth 6 on every
 /// plan run costs real I/O to find nothing. Extensions only -- sniffing
 /// magic bytes would mean opening every file in every module on every run.
-fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
+fn find_shipped_image(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    depth: u32,
+) -> Option<String> {
     const IMG_EXT: [&str; 6] = [".img", ".img.xz", ".img.gz", ".rootfs", ".ext4", ".erofs"];
     if depth > 2 {
         return None;
@@ -644,13 +661,16 @@ fn find_shipped_image(dir: &std::path::Path, depth: u32) -> Option<String> {
         let name = e.file_name();
         let name = name.to_string_lossy().to_lowercase();
         if IMG_EXT.iter().any(|x| name.ends_with(x)) {
-            // The path, not the basename: the doc promises module-relative and a
-            // bare `rootfs.img` gives the reader nowhere to look.
-            return Some(e.path().to_string_lossy().into_owned());
+            // MODULE-RELATIVE, which is what the doc above promises and what
+            // the reader needs. A bare `rootfs.img` gives them nowhere to look,
+            // and the absolute path this used to return repeats the
+            // /data/adb/modules/<id>/ prefix the finding already names.
+            let p = e.path();
+            return Some(p.strip_prefix(root).unwrap_or(&p).to_string_lossy().into_owned());
         }
     }
     for d in dirs {
-        if let Some(found) = find_shipped_image(&d, depth + 1) {
+        if let Some(found) = find_shipped_image(root, &d, depth + 1) {
             return Some(found);
         }
     }
@@ -1462,6 +1482,31 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         },
                     });
                 }
+            } else {
+                // The kernel answers an EMPTY, SUCCESSFUL dump both when _ghost
+                // is not compiled in and when it is present with empty tables
+                // (nomount.c: `if (!ghost_get_rule) return 0;`). This arm used
+                // not to exist, so both cases produced no Finding at all and the
+                // silence was indistinguishable from a pass -- while service.sh
+                // logged the cloak as inert on the very same boot.
+                f.push(Finding {
+                    // Nothing injected anywhere means nothing for the cloak to
+                    // guard, which is n/a. With rules live and the tables still
+                    // empty, the cloak really is off and that stays amber.
+                    level: if plan.iter().any(|e| e.kind == PlanKind::Inject) {
+                        Level::Unmeasured
+                    } else {
+                        Level::NotApplicable
+                    },
+                    check: "ghost cloak not populated",
+                    detail: format!(
+                        "the engine returned {} hidden path(s) and {} hidden uid(s); both tables must be \
+             non-empty for any guard to fire, so nothing was tested — a kernel built without _ghost \
+             answers exactly the same way",
+                        gpaths.len(),
+                        guids.len()
+                    ),
+                });
             }
         }
     }
@@ -1820,6 +1865,23 @@ mod tests {
         assert_eq!(expansion_level(75), Some(Level::Info)); // /product/app
         assert_eq!(expansion_level(199), Some(Level::Info));
         assert_eq!(expansion_level(224), Some(Level::Warn)); // /system/fonts
+    }
+
+    /// A shipped image is reported MODULE-RELATIVE, as its doc promises.
+    ///
+    /// It returned the absolute path, which repeats the
+    /// /data/adb/modules/<id>/ prefix the finding already carries.
+    #[test]
+    fn a_shipped_image_is_named_relative_to_its_module() {
+        let base = std::env::temp_dir().join("nm-doctor-img-test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("common")).unwrap();
+        std::fs::write(base.join("common/rootfs.img"), b"x").unwrap();
+        assert_eq!(
+            find_shipped_image(&base, &base, 0).as_deref(),
+            Some("common/rootfs.img")
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

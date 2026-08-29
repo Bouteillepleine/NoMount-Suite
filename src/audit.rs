@@ -97,8 +97,18 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
         let mut off = 0usize;
         while off + std::mem::size_of::<Dirent64Hdr>() <= n as usize {
             // SAFETY: the kernel guarantees a header plus a NUL-terminated name
-            // within d_reclen; we never read past `n`.
-            let h = unsafe { &*(buf.as_ptr().add(off) as *const Dirent64Hdr) };
+            // within d_reclen, and the loop condition above proved that
+            // size_of::<Dirent64Hdr>() bytes remain before `n`.
+            //
+            // read_unaligned, not `&*(... as *const Dirent64Hdr)`. `buf` is a
+            // Vec<u8>, whose allocation is only guaranteed 1-byte aligned, so
+            // forming a REFERENCE to an 8-byte-aligned struct inside it is
+            // undefined behaviour by Rust's rules even where the address happens
+            // to be aligned (getdents64 records are multiples of 8 and malloc
+            // returns 16-aligned, so it is -- which is exactly what keeps this
+            // kind of UB alive until an optimiser stops being kind). Copying the
+            // header out costs 24 bytes per dirent and is defined.
+            let h = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(off) as *const Dirent64Hdr) };
             let reclen = h.d_reclen as usize;
             // `< 19` too, not just 0: `nstart` is off+19 and the slice below is
             // buf[nstart..off+reclen], so a d_reclen of 1..=18 gives start > end
@@ -301,11 +311,47 @@ fn check_zero_mount() -> Check {
             .filter_map(|(r, _)| r.target.to_str())
             .collect();
 
-        let mut why = format!(
-            "{} mount(s) laid over the ROM are readable by any app in its own mount table. The \
-             Suite adds none of its own — these come from {owner}.",
-            leaked.len()
-        );
+        // WHO MADE THE MOUNT, not whose files it serves. `owner` above is derived
+        // from the bind SOURCE, so a bind the SUITE created to serve a module's my_*
+        // content was reported as that module's doing. It then told the reader to
+        // reboot (we re-create it every boot from binds.list) or to delete a bind
+        // from the module's post-fs-data.sh (there is none). Both are dead ends, and
+        // chasing them cost an evening on an OP15.
+        //
+        // binds.list is the record of what WE bound, so it settles authorship.
+        let ours: std::collections::HashSet<std::path::PathBuf> =
+            crate::bind::tracked().into_iter().map(|(t, _)| t).collect();
+        let mine = leaked.iter().filter(|(r, _)| ours.contains(&r.target)).count();
+        let mut why = if mine == leaked.len() {
+            format!(
+                "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
+                 The SUITE made these itself: a my_* target is served by a real bind unless the \
+                 `my_hookless` opt-in is set, because a leaf my_* injection can trip zygote's FD \
+                 allowlist. They serve content from {owner}. Set /data/adb/nomount/my_hookless \
+                 and reboot to serve them by injection instead, with no mount at all.",
+                leaked.len()
+            )
+        } else if mine > 0 {
+            format!(
+                "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
+                 {mine} of them the Suite made itself (a my_* target is served by bind; set \
+                 /data/adb/nomount/my_hookless to inject instead). The rest come from {owner}.",
+                leaked.len()
+            )
+        } else {
+            format!(
+                "{} mount(s) laid over the ROM are readable by any app in its own mount table. The \
+                 Suite adds none of its own — these come from {owner}.",
+                leaked.len()
+            )
+        };
+        // Only for mounts we did NOT create. Ours come back every boot by design,
+        // so "a REBOOT fixes this" is false for them, and there is no third-party
+        // post-fs-data.sh to edit.
+        let deferred: Vec<&str> = deferred
+            .into_iter()
+            .filter(|t| !ours.contains(std::path::Path::new(t)))
+            .collect();
         if !deferred.is_empty() {
             // REBOOT FIRST. The runtime pass refuses a my_* bind for a real
             // reason, and the first version of this text turned that refusal into
@@ -329,13 +375,24 @@ fn check_zero_mount() -> Check {
             ));
         }
 
-        fail(
-            "zero-mount posture",
-            format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked)),
-            "any app can read /proc/self/mountinfo and see a module mounted over the ROM",
-        )
-        .meaning(why)
-        .owner(owner)
+        // NOTE, not FAIL, when every one of them is ours.
+        //
+        // A my_* bind is the Suite's DEFAULT way to serve that content -- the
+        // `my_hookless` opt-in is what switches it to injection, not the other way
+        // round. Calling the default a failure means a stock install opens red on a
+        // device whose only crime is having a module with my_* content, and the
+        // posture cost is real but accepted and already stated in the text.
+        //
+        // Mixed stays FAIL: a bind we did not make is still someone else's mount
+        // over the ROM, and that is the case this check exists for.
+        let evidence = format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked));
+        let oracle = "any app can read /proc/self/mountinfo and see a module mounted over the ROM";
+        let c = if mine == leaked.len() {
+            chk("zero-mount posture", Verdict::Note, evidence).oracle(oracle)
+        } else {
+            fail("zero-mount posture", evidence, oracle)
+        };
+        c.meaning(why).owner(owner)
     }
 }
 
@@ -349,7 +406,14 @@ fn check_surfaces() -> Check {
     // or more had not. This file's own header says a check that cannot run says
     // so; this was the check that did not.
     let mut unread: Vec<&str> = Vec::new();
-    for dir in ["/sys/kernel", "/sys/module", "/proc"] {
+    // /dev is on this list because the Suite put a file there itself: uidwatch.sh
+    // held its handler lock at /dev/nomount_uidwatch.lock, in the one directory
+    // this probe did not read. The lock has moved into the 0700 state directory,
+    // and the probe now covers where it used to live so a regression cannot be
+    // silent. It is also where a char-device engine would announce itself -- the
+    // hookless driver deliberately has no /dev node, and this is the check that
+    // says so rather than assuming it.
+    for dir in ["/sys/kernel", "/sys/module", "/proc", "/dev"] {
         match fs::read_dir(dir) {
             Ok(rd) => {
                 for e in rd.flatten() {
@@ -397,7 +461,7 @@ fn check_surfaces() -> Check {
         // same class of defect as a green card over a failed pass.
         pass(
             "kernel surfaces",
-            "no entry named nomount in /sys/kernel, /sys/module, /proc (names only; \
+            "no entry named nomount in /sys/kernel, /sys/module, /proc, /dev (names only; \
              /proc/kallsyms symbols are a separate, deliberately-uncloaked residual, \
              unreadable by app domains)"
                 .into(),
@@ -1183,6 +1247,19 @@ fn check_no_foreign_rom_mount() -> Check {
     for r in &rows {
         let t = r.target.to_string_lossy();
         if !roots.iter().any(|root| t.starts_with(root)) {
+            continue;
+        }
+        // A bind sourced from /data/adb/modules is a MODULE mount, which is the
+        // one thing this check is not about: its own text says "outside the module
+        // system" and its owner string says "a mount made outside /data/adb".
+        // Both were false for the 85 my_* binds the Suite itself makes, so a stock
+        // install reported them here AND in zero-mount posture -- two red rows for
+        // one cause, one of them describing the opposite of what happened.
+        // zero-mount posture owns module mounts; this owns everything else.
+        //
+        // mountinfo's root is relative to the source filesystem, so a bind off
+        // userdata reads as /adb/modules/... rather than /data/adb/modules/...
+        if r.root.starts_with("/adb/modules/") || r.root.starts_with("/data/adb/modules/") {
             continue;
         }
         let subtree_bind = r.root != "/";

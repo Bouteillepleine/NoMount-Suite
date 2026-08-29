@@ -70,7 +70,23 @@ nmlog() {
 # collapses into one pass instead of a pile-up. The trap matters: without it a
 # killed handler leaves the lock behind and every later change is ignored for the
 # rest of the boot — the watcher would look alive and do nothing.
-LOCK=/dev/nomount_uidwatch.lock
+# NOT /dev. This was `/dev/nomount_uidwatch.lock`, which is the same design
+# metamount.sh removed from its own single-run guard and documented as wrong:
+# "world-writable (boot umask), named after the project, and 'held' by mere
+# existence -- so anything able to create that path pre-empted the whole mount
+# pass." Both objections apply here unchanged, and there is a third: `nomount
+# check`'s kernel-surface probe walks /sys/kernel, /sys/module and /proc looking
+# for an entry named after the engine, so the one such name the Suite created
+# for itself was in the only directory that probe does not read. The 0700 state
+# directory is writable by root alone, and nothing there is named in a listing
+# an app can take.
+#
+# /dev is a tmpfs, so the old path could never outlive a boot. This one can, so
+# both boot entry points delete it before anything can take it -- see the
+# `rm -f` beside the boot.log rotation in metamount.sh and post-fs-data.sh. The
+# 180s mtime reaper below is unchanged and still covers a handler killed
+# mid-run within a boot.
+LOCK=$NMDIR/.uidwatch.lock
 # The trap covers INT/TERM but not SIGKILL, which is exactly what Android's
 # low-memory killer sends to a background shell. Treat an abandoned lock as stale
 # instead of going deaf for the rest of the boot -- the failure the trap comment

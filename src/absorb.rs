@@ -1880,15 +1880,34 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     // `set_absorbed` used to run right after this and rewrite absorbed.list in the
     // legacy bare-target form, so `absorbed_pairs()` (which requires a tab) came
     // back empty forever and the APK re-serve feature was dead (H18).
-    {
-        let mut all = absorbed_pairs();
-        for p in fresh_pairs {
-            if !all.iter().any(|(t, _)| *t == p.0) {
-                all.push(p);
+    //
+    // `read_absorbed_pairs`, NOT `absorbed_pairs()`. The infallible twin is
+    // unwrap_or_default, so a record that exists but cannot be READ collapsed to
+    // an empty Vec here -- and `set_absorbed_pairs` truncates before writing, so
+    // one pass over an unreadable file destroyed every patched-APK rule on the
+    // device, permanently, and reported the run as a success. `run_mount` refuses
+    // exactly this by hand, with the note "rewriting it from an empty read would
+    // lose every patched-APK rule for good"; the same call in this file did not.
+    //
+    // On a read error, leave the file ALONE. The cost is that this pass's fresh
+    // rules go unrecorded until the next successful one, so a `reload` in between
+    // may prune them -- recoverable, and the next absorb re-creates them. Losing
+    // the file is not recoverable at all.
+    match read_absorbed_pairs() {
+        Ok(mut all) => {
+            for p in fresh_pairs {
+                if !all.iter().any(|(t, _)| *t == p.0) {
+                    all.push(p);
+                }
             }
+            all.sort();
+            set_absorbed_pairs(&all);
         }
-        all.sort();
-        set_absorbed_pairs(&all);
+        Err(e) => eprintln!(
+            "nomount: could not read {ABSORBED_LIST} ({e}) -- NOT rewriting it, because an \
+             empty read here would delete every recorded rule. {rules} rule(s) from this pass \
+             are unrecorded until the next successful absorb"
+        ),
     }
 
     // A leak is worth restating in the summary line: the per-mount notice above

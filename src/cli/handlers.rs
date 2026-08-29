@@ -77,10 +77,15 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             }
         }
         VfsAction::List => {
+            // NOTHING on an empty list, not a message. The WebUI reads this
+            // through `nomount vfs list` and counts every non-blank line as a
+            // rule, so the word "no rules" was itself counted: a device with
+            // zero rules showed `Active rules 1`, `(other) 1`, and a rule row
+            // named "no rules". Reported from an OP15 with five script-only
+            // modules. An empty list is an empty stdout; the UI already has its
+            // own empty state for it.
             let list = nm.list()?;
-            if list.trim().is_empty() {
-                println!("no rules");
-            } else {
+            if !list.trim().is_empty() {
                 print!("{list}");
             }
         }

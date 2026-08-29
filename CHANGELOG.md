@@ -19,12 +19,126 @@ Older entries below still describe these. They are gone.
   default and carrying two unfixed digest defects. Its one live piece, the
   `/data/local/tmp` permission restore, moved into the boot scripts and still
   honours `fix_shell_tmp`. An existing `spoof.conf` is left alone.
-- **`pathhide`** — no longer applied. With rules loaded a hidden app showed zero
-  `/data/app` mappings in its own maps, against 13 and 45 for controls: it made
-  those apps easier to spot, not harder. An existing list is retired to
-  `pathhide.conf.disabled`.
+- **`pathhide`, end to end.** No builder applies the patch, so `pathhide_ctl` is
+  a NULL weak symbol and the kernel answers `-EINVAL` to `nm k p` — including
+  the empty-value *presence probe*, because the NULL test runs before the probe
+  short-circuit. Both Suite gates therefore always took the false branch: the
+  boot pass in `service.sh` could never run, and `customize.sh` printed "kernel
+  pathhide not present (needs a pathhide-enabled kernel)" on **every install of
+  every kernel these builders produce**, naming a configuration gap that cannot
+  be closed. Gone: the boot pass, the install-time probe and its two messages,
+  the seeding and relabelling of `pathhide.conf`, and `nm`'s `l p` list option.
+  An existing `pathhide.conf` is now simply inert; nothing reads it.
+- **Dead `nm` surface** — the long-form aliases `whiteout`, `version` and `knob`
+  (no caller, no documentation), the `--uid` option (per-UID *rules* need it and
+  nothing has ever passed it; the wire field stays, always 0), and the `j` list
+  option (`l u` turns JSON on by itself, and no consumer of the JSON rule shape
+  exists).
+- **`NOMOUNT_NL_VERSION`** — a generic-netlink leftover, referenced by neither
+  the kernel nor the client.
+- **The boot-identity knobs and the pathhide forwarder, in the KERNEL too**
+  (`kbuild@hookless`). Retired: the uname release/version override, the
+  `/proc/cmdline` + `/proc/bootconfig` takeover, and the `_pathhide` control
+  forwarder and dump — 314 lines of driver, plus four includes nothing else
+  needed. `nm` loses the letters `r`, `v`, `c`, `b` and `p`.
+
+  Their enum SLOTS are reserved, not deleted. A knob is a raw `u32` at payload
+  offset 0 and a command travels as `NLMSG_MIN_TYPE + cmd`, so renumbering would
+  silently remap every knob and command below them for any `nm` already on a
+  device — `nm k d 1` would arrive as something else entirely. Slots 0-3 and 6
+  (knobs) and 10 (command) are reserved and will not be reused.
+
+  The `16:` capability claim in `nomount.h` is retracted in place rather than
+  removed, and `NOMOUNT_VERSION` stays 26: an engine reporting >= 16 no longer
+  implies pathhide support, but 17 and above still make claims that hold.
+  Validated by the ten-version compile matrix (4.9 through 6.18), zero warnings
+  at `W=1`.
+- **`spoof.log`** from `nomount export` — nothing has written it since `spoof.sh`
+  was removed.
 - **`scan.sh`** — scanned every installed APK on each boot to fill a cache whose
   only reader was the deleted Cloak picker.
+
+### Fixed
+
+- **The status dot answers "is the engine up?", not "is anything wrong?"** It is green whenever the Suite is running, including when a module ships files and no rule serves them — the substate still names the action there, and `check` is what reports faults. Two alarms for one condition taught people to read the dot as noise. It stays amber only when the probe could not tell either way.
+- **"Idle" is gone.** While the engine answers, the card says ACTIVE — that is what the word is for. The substate line says what the Suite is doing and the dot says whether anything needs you. "Idle" read as "switched off" to people whose setup was fine, and it read badly even in the case that does need attention, where the engine is running too. Only "Engine offline" replaces it. The headline word answered "are there rules?" when the question a user asks is "is it working?" — so a device serving exactly what it should read as switched off. ACTIVE now means the Suite is doing its job, including correctly having nothing to do; IDLE is reserved for the one case that needs the user.
+- **"no rules — re-apply" on a device with nothing to apply.** The status
+  card had one message for both causes of zero rules, so a user whose modules are
+  all script-only was told to press Reload — which can never work, and the card
+  can never reach Active. It now says "nothing to inject — no module provides
+  files", in green, and keeps "no rules — re-apply" for the case where a module
+  does ship content. The extra check only runs when the count is zero.
+- **The last plan check that said "not measured" when it meant "nothing to
+  test".** `Level` had no N/A, so a plan finding with nothing to look at had to
+  claim it could have run. On a script-only device nine device checks correctly
+  said n/a while the ghost row alone kept the card amber. `Level::NotApplicable`
+  now exists, ordered to match `Verdict`, and the ghost row uses it when nothing
+  is being injected — while staying amber when rules are live and the cloak
+  really is off.
+
+- **"Nothing to test" was reported as "did not run".** On a device where no
+  module provides files, the per-UID canary and the served-bytes check had no
+  injected file to sample — and said UNMEASURED, with a remedy ("the boot pass
+  runs before any app has opened an injected file — run them now") that could
+  never work, because running again cannot conjure a rule. The card read "not
+  fully measured" on a device that was working exactly as designed. Both are now
+  N/A when there are zero rules, and stay UNMEASURED when rules exist but
+  sampling failed — which is the distinction those two words are for.
+
+- **A device with zero rules showed one rule, called "no rules".** `nomount vfs
+  list` printed that phrase on an empty engine, and the WebUI counts every
+  non-blank line of it as a rule — so the message counted itself. Status read
+  `INJECTION RULES 1`, Rules read `Active rules 1 · (other) 1`, and the rule row
+  was the word itself. Reported from an OP15 whose five modules are all script
+  only, where 0 rules is the correct answer. The empty list now prints nothing,
+  and the parser only counts lines that look like a path.
+
+- **Removing the module threw away everything you had configured.**
+  `uninstall.sh` did `rm -rf /data/adb/nomount`, taking the per-app hide list,
+  the module blocklist and the `my_hookless` opt-in with it — so the classic
+  recovery, remove then reinstall, silently reset your settings. (Flashing a
+  newer zip straight over an older one does NOT run it: measured on OP15,
+  v1.3.107 -> v1.3.108, all state intact.) Losing the marker alone moved
+  85 `my_*` files from injection back to bind mounts on a live OP15: 260 rules
+  became 175, and 85 mounts appeared over the ROM. `uninstall.sh` now stashes the
+  user-owned files and `customize.sh` restores them, saying how many it put back.
+  The operational flags are still cleared — `disabled` in particular, which is
+  why that `rm` exists at all.
+- **A Suite-made `my_*` bind is a NOTE, not a FAIL.** Serving `my_*` by bind is
+  the DEFAULT — the `my_hookless` marker is what switches it to injection, not
+  the reverse — so a stock install opened red on any device with a module that
+  ships `my_*` content. The posture cost is real and the text still states it,
+  but it is an accepted default, not a failure. A bind the Suite did NOT make
+  stays a FAIL: someone else's mount over the ROM is what the check is for.
+- **`foreign mount over the ROM` counted module mounts as foreign.** It flagged
+  every subtree bind over a ROM path, including binds sourced from
+  `/data/adb/modules` — while its own text read "come from outside the module
+  system" and its owner read "a mount made outside /data/adb". Both were the
+  opposite of the truth, and the same 85 binds were reported twice, in two
+  different red rows. Module binds now belong to `zero-mount posture` alone.
+- **`check` blamed other modules for the Suite's own mounts.** The owner was
+  derived from the bind SOURCE, so a bind the Suite made to serve a module's
+  `my_*` content was reported as that module's doing, with two remedies that
+  could not work: reboot (we re-create them every boot from `binds.list`) and
+  "delete the bind from its post-fs-data.sh" (there is none). It now reads
+  `binds.list` to settle authorship, says plainly when the Suite made the mount,
+  points at the `my_hookless` opt-in, and offers the reboot/edit advice only for
+  mounts it did not create.
+
+- **`service.sh` discarded `nm`'s exit status when building the ghost path
+  table.** `nm` exits 4 on a truncated dump specifically so a caller can tell a
+  prefix from the whole set, but the call was piped straight into `sed`, so `$?`
+  was `sort`'s. A truncated dump half-populated the table — the state the same
+  script calls worse than an empty one, because a hidden reader then sees some
+  paths ghosted and the rest not. The dump is now captured on its own, the
+  status checked, and a failure logged instead of silently half-applied. It was
+  also the only `nm` call in the file without a timeout; it has one now.
+- **`nomount check` said nothing when the ghost tables were empty.** The kernel
+  answers an empty, *successful* dump both for "`_ghost` not compiled in" and
+  for "compiled in, tables empty", and the check had no else arm — so neither
+  case produced a finding of any level, and the silence was indistinguishable
+  from a pass while `service.sh` logged the cloak as inert on the same boot. It
+  now reports UNMEASURED with both table counts.
 
 ### Findings graded by what a detector can do
 

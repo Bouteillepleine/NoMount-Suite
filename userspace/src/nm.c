@@ -39,11 +39,10 @@ void c_main(long *sp) {
      * clear/list/l/v/k -- plus the obvious long forms. Anything else is refused
      * rather than guessed at. */
     static const struct { const char *name; char op; } nm_cmds[] = {
-        { "add", 'a' },      { "del", 'd' },     { "w", 'w' },
-        { "whiteout", 'w' }, { "block", 'b' },   { "unblock", 'u' },
-        { "clear", 'c' },    { "list", 'l' },    { "l", 'l' },
-        { "v", 'v' },        { "version", 'v' }, { "k", 'k' },
-        { "knob", 'k' },
+        { "add", 'a' },   { "del", 'd' },     { "w", 'w' },
+        { "block", 'b' }, { "unblock", 'u' },  { "clear", 'c' },
+        { "list", 'l' },  { "l", 'l' },        { "v", 'v' },
+        { "k", 'k' },
     };
     char cmd = 0;
     for (unsigned int ci = 0; ci < sizeof(nm_cmds) / sizeof(nm_cmds[0]); ci++) {
@@ -53,7 +52,10 @@ void c_main(long *sp) {
         print_str("nm: unknown command\n");
         exit_code = 3; goto do_exit;
     }
-    unsigned int target_uid = 0;
+    /* Wire field only. Per-UID RULES would need `--uid`, which no caller in the
+     * Suite has ever passed, so the option is gone and this stays 0. The kernel
+     * still reads the field, so it keeps its slot in the payload below. */
+    const unsigned int target_uid = 0;
     /* NM_FLAG_PUBLIC: this rule stays visible to a UID on the hide list. Only
      * meaningful on `add`, and only correct for a path the system already
      * advertises to that UID anyway -- a ROM APK the PackageManager has scanned
@@ -64,23 +66,13 @@ void c_main(long *sp) {
     int p_count = 0;
 
     for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--uid") == 0 && i + 1 < argc) {
-            const char *s = argv[++i];
-            /* Validate: the old loop turned any non-digit into arithmetic, so a
-             * typo silently targeted a garbage uid instead of failing. */
-            if (!*s) { exit_code = 3; goto do_exit; }
-            while (*s) {
-                if (*s < '0' || *s > '9') { exit_code = 3; goto do_exit; }
-                target_uid = (target_uid << 3) + (target_uid << 1) + (*s++ - '0');
-            }
-        } else if (strcmp(argv[i], "--public") == 0) {
+        if (strcmp(argv[i], "--public") == 0) {
             add_flags |= 64;
         } else if (argv[i][0] == '-' && argv[i][1] == '-') {
             /* Anything else spelled like an option is a mistake, and taking it for
              * a PATH is the worst way to handle one: a typo ("--publik") would be
              * accepted as the virtual path of the very rule it was meant to flag,
-             * and `--uid` with no value (which fails the branch above) as a path
-             * of its own. Both applied a wrong rule and exited 0. */
+             * applying a wrong rule and exiting 0. */
             print_str("nm: unknown option\n");
             exit_code = 3; goto do_exit;
         } else if (p_count < 64) {
@@ -179,32 +171,31 @@ void c_main(long *sp) {
          * /proc/cmdline, `nm k dir` flipped the directory-shape knob, `nm k boot
          * ...` rewrote /proc/bootconfig -- each from a word that was never a knob
          * name, and each exiting 0. Every caller in the tree passes the bare
-         * letter (spoof.sh's nm_knob r|v|c|b, service.sh / customize.sh / the
-         * WebUI's `nm k p`, nm.rs's `k i` and `k d`), so the letters are the whole
-         * vocabulary; anything else is refused rather than guessed at.
+         * letter (service.sh / customize.sh / the WebUI's `nm k p`, nm.rs's
+         * `k i` and `k d`), so the letters are the whole vocabulary; anything
+         * else is refused rather than guessed at.
          *
-         *   r/v -- uname release / version override
-         *   c/b -- sanitized /proc/cmdline / /proc/bootconfig
+         *   Slots 0..3 (uname release/version, /proc/cmdline, /proc/bootconfig)
+         *     and slot 6 (_pathhide) are RETIRED -- no letter reaches them and
+         *     the kernel no longer implements them. The ordinals are reserved
+         *     rather than reused: the knob is a raw u32 on the wire, so a new
+         *     letter in an old slot would mean something different to an nm
+         *     binary built before the change.
          *   d <0|1> -- this device's ROM dirs are dirent-packed (erofs-shaped),
          *     so a synthesized dir must report the formula rather than 4096.
          *     Measured by the Suite; see NM_KNOB_VDIR_EROFS_SIZE.
          *   i <0..3> -- which isolated-process pools per-UID hiding covers:
          *     1 = app-zygote, 2 = platform, 3 = both (default), 0 = neither.
          *     See NM_KNOB_HIDE_ISOLATED for the trade this expresses.
-         *   p <cmd> -- one _pathhide control command: "+needle" adds, "~needle"
-         *     removes, "-" clears. `nm k p` with NO value is a presence probe
-         *     that exits 0 only when the pathhide patch set is compiled in; it is
-         *     not a clear. See NM_KNOB_PATHHIDE.
          *   g <cmd> -- one _ghost control command: "p+/abs/path" / "p~/abs/path"
          *     / "p-" for the hidden-path table, "u+<uid>" / "u~<uid>" / "u-" for
-         *     the hidden-uid table. Same presence-probe rule as p: `nm k g` with
+         *     the hidden-uid table. `nm k g` with
          *     NO value exits 0 only when _ghost is compiled in AND the engine is
          *     >= v26 (below that the knob does not exist and the kernel answers
          *     -EINVAL). _ghost's guards are dead code until BOTH tables are
          *     populated, so this knob is what makes them live. */
         static const struct { const char *name; int knob; } nm_knobs[] = {
-            { "r", 0 }, { "v", 1 }, { "c", 2 }, { "b", 3 },
-            { "d", 4 }, { "i", 5 }, { "p", 6 }, { "g", 7 },
+            { "d", 4 }, { "i", 5 }, { "g", 7 },
         };
         if (p_count < 1) goto do_exit;
         for (unsigned int ki = 0; ki < sizeof(nm_knobs) / sizeof(nm_knobs[0]); ki++) {
@@ -250,7 +241,7 @@ void c_main(long *sp) {
         }
 
     } else if (cmd == 'l') {
-        int is_json = 0, is_uids = 0, is_ph = 0, is_gh = 0;
+        int is_json = 0, is_uids = 0, is_gh = 0;
         /* WHOLE-TOKEN, not first-character. `p_args[i][0] == 'x'` was the same
          * bug class already fixed for commands and for knobs: any word starting
          * with the right letter selected the mode, and any word that started
@@ -261,12 +252,7 @@ void c_main(long *sp) {
         for (int i = 0; i < p_count; i++) {
             const char *a = p_args[i];
             if (a[0] && !a[1]) {
-                if (a[0] == 'j') { is_json = 1; continue; }
                 if (a[0] == 'u') { is_uids = 1; continue; }
-                /* `nm l p` -- the _pathhide rule list. Plain one-per-line by
-                 * default so it drops straight into the shell loops that used to
-                 * `cat /proc/pathhide`. */
-                if (a[0] == 'p') { is_ph = 1; continue; }
                 /* `nm l g` -- the _ghost tables, as "p /abs/path" and "u <uid>".
                  * Same plain-lines shape as `l p`, and the only way to tell a
                  * FULL table from a populated one: a partial table cloaks some
@@ -278,7 +264,7 @@ void c_main(long *sp) {
         }
         if (is_uids) is_json = 1;
 
-        int target_cmd = is_gh ? 11 : is_ph ? 10 : is_uids ? 8 : 7;
+        int target_cmd = is_gh ? 11 : is_uids ? 8 : 7;
         /* signed: a negative errno from do_nm_cmd()/read() must fail the while(len>0)
          * guard, not wrap to a huge unsigned length that walks rx_buf out of bounds. */
         int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
@@ -300,15 +286,29 @@ void c_main(long *sp) {
         if (is_json) print_str("[\n");
 
         while (len > 0) {
-            for (struct nlmsghdr *msg = (void *)mem.rx_buf; msg->nlmsg_len && msg->nlmsg_len <= (unsigned int)len;
+            /* `len >= 16` FIRST, and `nlmsg_len >= 16` rather than merely
+             * non-zero. The old condition read msg->nlmsg_len before proving a
+             * whole nlmsghdr was left in what we actually read, and accepted a
+             * claimed length of 1..15 -- which the `v` path above already refuses
+             * for the same reason ("bound the header's own length claim by what
+             * was actually READ before walking attributes off it"). Nothing
+             * reaches past rx_buf either way, but this is the one place in the
+             * file that was not applying its own rule. */
+            for (struct nlmsghdr *msg = (void *)mem.rx_buf;
+                    len >= 16 && msg->nlmsg_len >= 16 && msg->nlmsg_len <= (unsigned int)len;
                     len -= msg->nlmsg_len, msg = (void *)((char *)msg + msg->nlmsg_len)) {
                 if (msg->nlmsg_type == 3) goto list_done;          /* NLMSG_DONE */
                 if (msg->nlmsg_type == 2) {                        /* NLMSG_ERROR */
-                    if (*(int *)((char *)msg + 16)) exit_code = 4; /* err 0 == plain ACK */
-                    goto list_done;
+                    /* The errno sits at offset 16, so a message that does not
+                     * carry 20 bytes has no error field to read. Treat that as a
+                     * FAILURE rather than reading past the message and calling
+                     * whatever is there a plain ACK: a truncated error reply is
+                     * not an acknowledgement. */
+                    if (msg->nlmsg_len < 20 || *(int *)((char *)msg + 16)) exit_code = 4;
+                    goto list_done;                                /* err 0 == plain ACK */
                 }
 
-                if (is_gh || is_ph) {
+                if (is_gh) {
                     /* The needle rides in NOMOUNT_ATTR_VIRTUAL_PATH -- see the
                      * kernel dump for why that attribute is reused. */
                     char *rule = get_attr(msg, 1);

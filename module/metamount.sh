@@ -57,6 +57,23 @@ BOOTLOG="$NMDIR/boot.log"
 : >> "$BOOTLOG" 2>/dev/null
 chmod 0600 "$BOOTLOG" 2>/dev/null
 
+# uidwatch.sh's handler lock lives in the state directory now rather than in
+# /dev (see the note there). /dev is a tmpfs and cleared every boot, which the
+# old path got for free and this one has to be given: a handler SIGKILLed by the
+# low-memory killer late in a session would otherwise leave a lock that outlives
+# the reboot, and the first package change of the next boot would be dropped
+# while the 180s mtime reaper waits. This is the boot entry point, so it runs
+# exactly once and before uidwatch.sh can be registered.
+rm -f "$NMDIR/.uidwatch.lock" 2>/dev/null
+
+# ...and a stash uninstall.sh left behind. It is consumed by customize.sh at
+# install time, so anything still here at boot belongs to an install that never
+# finished (an integrity abort, a metamodule conflict, a killed installer). It
+# holds `uidhide` -- the list of apps being hidden from -- so leaving it to rot
+# under a name derived from ours is exactly what uninstall.sh's own header says
+# must not happen.
+rm -rf /data/adb/nomount.bak 2>/dev/null
+
 # --- "a boot entry point ran this boot" stamp ---------------------------------
 # On a KernelSU build WITHOUT metamodule support this file is never invoked, and
 # post-fs-data.sh exits immediately because $KSU is set -- so the module produced

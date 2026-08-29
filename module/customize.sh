@@ -87,10 +87,8 @@ done
 # recovery kernel has no engine, so aborting would block a valid install.
 _abi=$(getprop ro.product.cpu.abi 2>/dev/null)
 # Same fallback the boot scripts carry. An empty ABI builds "$MODPATH/bin//nm",
-# which is never executable, so BOTH probes below ([ -x "$_nm" ]) fell through in
-# silence: the install printed nothing about the engine at all, and then declared
-# "kernel pathhide not present" on a kernel that has it. Neither is true; both
-# read as a finding.
+# which is never executable, so the probe below ([ -x "$_nm" ]) fell through in
+# silence and the install printed nothing about the engine at all.
 [ -n "$_abi" ] || _abi=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
 [ -n "$_abi" ] || _abi=arm64-v8a
 _nm="$MODPATH/bin/${_abi}/nm"
@@ -144,17 +142,52 @@ mkdir -p "$NMDIR"
 # domain read+search on system_file (dir 0x11140053, file 0x2044412) while
 # granting NOTHING on adb_data_file -- so omitting it relabelled the whole
 # state directory on every install, and the only thing keeping spoof.conf,
-# uidhide, pathhide.conf and blocklist away from an app was /data/adb refusing
+# uidhide and blocklist away from an app was /data/adb refusing
 # traversal one level up. Measured on OP15. Match the parent explicitly.
 set_perm "$NMDIR" 0 0 0700 u:object_r:adb_data_file:s0
+
+# Put back what uninstall.sh stashed. ksud runs the OLD module's uninstall.sh
+# when you flash a newer Suite over an older one, and that removes the state
+# directory -- so before this existed, every update silently threw away the hide
+# list, the module blocklist and the my_hookless opt-in. Losing the marker alone
+# switched 85 my_* files from injection back to bind mounts on a live OP15.
+#
+# Restore is best-effort and never overwrites: customize.sh seeds some of these
+# a few lines below, and a file already present is the newer truth.
+_bak=/data/adb/nomount.bak
+if [ -d "$_bak" ]; then
+    _rn=0
+    # Must stay in step with uninstall.sh's stash list, which documents why each
+    # file is on it. A name on one list and not the other is a file that is
+    # saved and never returned, or returned and never saved -- both silent.
+    for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
+              absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
+              absorbed.list binds.list; do
+        [ -e "$_bak/$_f" ] || continue
+        [ -e "$NMDIR/$_f" ] && continue
+        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || continue
+        # Explicit label: omitting arg 5 defaults to system_file, which is
+        # app-readable. Match the parent, as every other state file does.
+        set_perm "$NMDIR/$_f" 0 0 0600 u:object_r:adb_data_file:s0
+        _rn=$((_rn + 1))
+    done
+    unset _f
+    [ "$_rn" -gt 0 ] && ui_print "- Restored $_rn setting(s) kept from your previous install"
+    rm -rf "$_bak"
+    unset _rn
+fi
+unset _bak
 # Nothing is seeded into spoof.conf any more: the boot-identity add-on it
 # configured is gone, and the one key still read from it -- `fix_shell_tmp`,
 # which gates the /data/local/tmp restore in metamount.sh / post-fs-data.sh /
 # service.sh -- defaults to ON when the file or the key is absent, so a fresh
-# install needs no file at all. An EXISTING file is deliberately left where it
-# is rather than deleted: it is the user's, it may hold a deliberate
-# fix_shell_tmp=0, and an installer that silently removes state under
-# /data/adb is a worse surprise than a stale config. Re-assert its mode and
+# install needs no file at all. An EXISTING file is the user's and survives an
+# update: it may hold a deliberate fix_shell_tmp=0, and an installer that
+# silently removes state under /data/adb is a worse surprise than a stale
+# config. That claim used to be false -- uninstall.sh runs on updates too and
+# its `rm -rf` took spoof.conf with it, so every flash quietly put
+# fix_shell_tmp back to the default -- which is why the file is now on the
+# stash list above rather than merely described as safe. Re-assert its mode and
 # label if it is there, because it sits in a 0700 directory whose contents are
 # read as root: 0644 once made it the only group/world-readable file in the
 # state dir, and omitting set_perm's 5th argument relabelled it to
@@ -178,29 +211,6 @@ CONF="$NMDIR/spoof.conf"
 # all until now, so it has never run anywhere: give it the bit and the
 # question stops mattering.
 [ -f "$MODPATH/uninstall.sh" ] && set_perm "$MODPATH/uninstall.sh" 0 0 0755
-
-# --- Cloak (pathhide maps/fd) add-on ---
-# The Cloak picker that populated this file is gone, and the boot loop that
-# enforces it is not -- so an upgrading user would keep an ACTIVE cloak with no
-# UI to manage it and nothing that reports it (`nomount check` has no pathhide
-# awareness at all). Worse, the cloak strips a hidden app's OWN apk from its own
-# /proc/<pid>/maps: measured on a live device, a listed app showed zero
-# /data/app mappings while controls showed 13 and 45, and removing the rule
-# restored them. "I cannot see my own apk" is a categorical tell no stock kernel
-# produces, which is a worse trade than the name-level concealment it buys.
-#
-# So: retire an existing list rather than keep enforcing it. MOVE, not delete --
-# the rules are the user's, and they get them back by renaming the file. A fresh
-# install has no list and stays inert, which is the intended posture.
-if [ -f "$NMDIR/pathhide.conf" ] && grep -qvE '^[[:space:]]*(#|$)' "$NMDIR/pathhide.conf" 2>/dev/null; then
-    _phold=$(grep -cvE '^[[:space:]]*(#|$)' "$NMDIR/pathhide.conf" 2>/dev/null)
-    mv -f "$NMDIR/pathhide.conf" "$NMDIR/pathhide.conf.disabled" 2>/dev/null
-    ui_print "! Cloak: retired $_phold pathhide rule(s) — the cloak made those apps"
-    ui_print "  MORE detectable (their own apk vanished from their own maps)."
-    ui_print "  Your list is kept at $NMDIR/pathhide.conf.disabled"
-fi
-[ -f "$NMDIR/pathhide.conf" ] || echo "# NoMount Cloak — pathhide rule list. EMPTY BY DESIGN: loading rules trades a
-# heuristic tell for a categorical one. One package name per line to opt in." > "$NMDIR/pathhide.conf"
 
 # --- absorb opt-out list -----------------------------------------------------
 # `nomount absorb` converts other modules' bind mounts into injections. Safe for
@@ -247,23 +257,6 @@ if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
     } > "$NMDIR/absorb-skip.txt"
 fi
 set_perm "$NMDIR/absorb-skip.txt" 0 0 0600 u:object_r:adb_data_file:s0
-# 0600, not 0644: this is the cloak rule list -- it names exactly which packages
-# are being hidden from maps/fd -- and every other file in the 0700 $NMDIR is
-# 0600. Only root reads it (service.sh at boot, the WebUI through an exec), so
-# nothing needs the group/other bits.
-set_perm "$NMDIR/pathhide.conf" 0 0 0600 u:object_r:adb_data_file:s0
-# Probe over the netlink knob, not a /proc node: pathhide no longer creates one
-# (any app could find it with a single readdir of /proc). `nm k p` with no value
-# is side-effect-free and exits 0 only when the patch set is compiled in.
-if [ -x "$_nm" ] && "$_nm" k p >/dev/null 2>&1; then
-    # No picker, no toggle: the rules are the file, and service.sh applies it at
-    # every boot. Say so, rather than announcing a feature with nowhere to press.
-    ui_print "- Cloak add-on: kernel pathhide FOUND — inert (no rules, and no UI)"
-    ui_print "  add one package per line to $NMDIR/pathhide.conf, then reboot"
-else
-    ui_print "- Cloak add-on: kernel pathhide not present (needs a pathhide-enabled kernel)"
-fi
-
 # A flash is an explicit user action, so the bootloop counter's premise -- "this
 # device keeps failing to finish booting on its own" -- no longer holds. Without
 # this, the classic recovery (flash the update that FIXES the bootloop) inherits

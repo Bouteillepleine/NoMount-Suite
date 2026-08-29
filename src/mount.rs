@@ -19,8 +19,23 @@ use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-/// Magisk's whiteout marker is a 0:0 char device.
-fn is_char_dev(ft: &fs::FileType) -> bool { ft.is_char_device() }
+/// Magisk's whiteout marker is a 0:0 char device -- BOTH halves of that.
+///
+/// The type test alone accepted ANY character device, so a module shipping a
+/// real node in its payload tree (a vendored `null`/`zero`, anything a `mknod`
+/// in a build script left behind) was read as "delete the stock file at this
+/// path" and turned into a whiteout. The module then hid a ROM file it meant to
+/// add something at, and the plan gives no clue: a whiteout entry names its
+/// marker as the source, which for this case is the device node itself.
+///
+/// `rdev == 0` is the marker Magisk documents and the one every module ships;
+/// no real device node is major 0 minor 0. The type test comes first so the
+/// extra lstat is paid only by the char devices, which are rare.
+fn is_whiteout_marker(ft: &fs::FileType, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    ft.is_char_device()
+        && fs::symlink_metadata(path).map(|m| m.rdev() == 0).unwrap_or(false)
+}
 
 /// Does this directory carry overlayfs's `trusted.overlay.opaque=y`?
 ///
@@ -679,7 +694,7 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                     expand_replacement(module, parent, module_dir, &source, 0, out);
                 }
             }
-        } else if is_char_dev(&ft) {
+        } else if is_whiteout_marker(&ft, &source) {
             // A 0:0 char device is Magisk's whiteout marker: a pure deletion, with
             // no module content behind it. `can_whiteout` is the whole guard -- and
             // deliberately NOT `serve_mode`, see its doc: it permits my_*, where the
@@ -1013,6 +1028,21 @@ pub fn run_reload() -> Result<()> {
         .context("hookless NoMount engine not responding -- is the CONFIG_NOMOUNT kernel loaded?")?;
 
     let (plan, skipped) = collect_plan()?;
+    // The SAME collapse `run_mount` applies. The maps below are keyed by target,
+    // so the last claim already won and the served set was identical -- but the
+    // contest went unreported here, and `served_apks` was handed the raw plan, so
+    // a contested APK was recorded twice with two different source identities.
+    // One collapse, one precedence, one message, whichever pass ran.
+    let (plan, collisions) = dedupe_by_target(plan);
+    for c in &collisions {
+        eprintln!(
+            "nomount: {} claimed by {} -- serving {}, skipping {}",
+            c.target.display(),
+            c.losers.len() + 1,
+            c.winner,
+            c.losers.join(", ")
+        );
+    }
 
     // Desired, split by handling: hookless leaf rules vs my_* binds.
     let mut desired_hookless: HashMap<&Path, &PlanEntry> = HashMap::new();
@@ -1710,6 +1740,31 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).ok()?;
         Some(base)
+    }
+
+    /// Only a 0:0 char device is Magisk's whiteout marker.
+    ///
+    /// The type test alone made every character device a "delete this stock
+    /// path" instruction, so a module shipping a real node in its payload tree
+    /// hid a ROM file it meant to add one at. /dev/null is a char device with a
+    /// non-zero rdev, which is exactly the shape that used to be misread.
+    #[test]
+    fn only_a_zero_zero_char_device_is_a_whiteout_marker() {
+        let real = Path::new("/dev/null");
+        if let Ok(md) = fs::symlink_metadata(real) {
+            assert!(md.file_type().is_char_device(), "/dev/null should be a char device");
+            assert!(
+                !is_whiteout_marker(&md.file_type(), real),
+                "/dev/null has a non-zero rdev and is not a deletion marker"
+            );
+        }
+        // A regular file is never a marker however it is reached.
+        let Some(base) = test_base("whiteout-marker") else { return };
+        let f = base.join("plain");
+        fs::write(&f, b"x").unwrap();
+        let md = fs::symlink_metadata(&f).unwrap();
+        assert!(!is_whiteout_marker(&md.file_type(), &f));
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// A whiteout is a d_drop, not a serve, so it is allowed wherever the path

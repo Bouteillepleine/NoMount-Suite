@@ -1284,8 +1284,13 @@
   function ruleDump() {
     if (RULES) return RULES;
     RULES = nm("vfs list").then(function (r) {
+      // A rule line is a path. Anything else is prose from the CLI, and
+      // counting it produced a phantom rule named "no rules" on a device with
+      // none. The CLI no longer prints that, but the guard stays: this parser
+      // is fed by a human-facing command and should never count a sentence.
       const lines = r.errno === 0
-        ? r.stdout.split("\n").map(x => x.trim()).filter(Boolean) : [];
+        ? r.stdout.split("\n").map(x => x.trim())
+            .filter(x => x && x.startsWith("/")) : [];
       const d = {
         ok: r.errno === 0,
         raw: (r.stdout || "").trim(),
@@ -1324,9 +1329,72 @@
     }
     $("mRules").textContent = d.rules;
     $("mOv").textContent = d.rro.length;
-    $("state").textContent = d.rules > 0 ? "Active" : "Idle";
-    $("substate").textContent = d.rules > 0 ? "modules injected" : "no rules — re-apply";
-    dot.className = "dot " + (d.rules > 0 ? "ok" : "warn");
+    // The engine answered, so the Suite IS active -- that is what this word says,
+    // and it never varies while the driver is up. "Idle" read as "switched off" to
+    // people whose setup was working perfectly, and it was doing that job badly
+    // even in the case that needs attention: the engine is running there too.
+    // The substate line says what it is doing and the dot says whether anything
+    // needs the user. Engine-offline is handled earlier and is the only other
+    // headline this card has.
+    $("state").textContent = "Active";
+    if (d.rules > 0) {
+      $("substate").textContent = "modules injected";
+      dot.className = "dot ok";
+      return d.rules;
+    }
+    // ZERO RULES HAS TWO CAUSES AND ONLY ONE OF THEM IS ACTIONABLE.
+    // This said "no rules — re-apply" for both, so a user whose modules are
+    // all script-only was told to press Reload forever: there is nothing to
+    // apply, and the card can never reach Active. Reported from an OP15 with
+    // five script-only modules, where 0 rules is the correct answer.
+    // Only asked when the count is zero, so the normal path costs nothing.
+    let ships = -1;
+    try {
+      // DISCOVERED, not enumerated. A hardcoded partition list is the same
+      // defect this file's Modules pane already avoids: it answers "no module
+      // ships files" for a device whose OEM partition nobody thought to name,
+      // and OnePlus alone ships my_bigball, my_carrier, my_company,
+      // my_engineering, my_heytap, my_manifest, my_preload, my_product,
+      // my_region, my_stock -- with more on each new ROM. src/mount.rs decides
+      // this dynamically (is "/<name>" a real directory that is not one of the
+      // non-injectable roots?), so ask the device the same question.
+      //
+      // The exclusion list is NON_PARTITION_ROOTS from src/mount.rs, verbatim,
+      // `d` included -- that is the debugfs symlink, and it resolves to a
+      // directory, so a module shipping a top-level `d/` would otherwise count.
+      // `-L` skips a layout-convergence symlink (system/product -> ../product)
+      // for the same reason the Modules pane does.
+      // `skip_mount` is checked too: mount.rs treats it as disabled and this
+      // did not, so a skipped module counted as content that should be served.
+      const q = await exec(
+        'n=0; for m in /data/adb/modules/*/; do ' +
+        '[ -f "$m/disable" ] && continue; [ -f "$m/remove" ] && continue; ' +
+        '[ -f "$m/skip_mount" ] && continue; ' +
+        'for pd in "$m"*/; do [ -d "$pd" ] || continue; ' +
+        '[ -L "${pd%/}" ] && continue; p=${pd%/}; p=${p##*/}; ' +
+        'case "$p" in data|data_mirror|mnt|dev|proc|sys|cache|metadata|config' +
+        '|storage|sdcard|apex|tmp|debug_ramdisk|linkerconfig|postinstall' +
+        '|second_stage_resources|bin|sbin|d) continue;; esac; ' +
+        '[ -d "/$p" ] || continue; n=$((n+1)); break; done; done; echo $n'
+      );
+      if (q.errno === 0) ships = parseInt((q.stdout || '').trim(), 10);
+    } catch (e) { /* leave unknown */ }
+    if (ships === 0) {
+      // Correct and final. Not a warning: nothing is wrong and nothing to do.
+      $("substate").textContent = "nothing to inject — no module provides files";
+      dot.className = "dot ok";
+    } else if (ships > 0) {
+      // Content exists and no rule serves it -- the one case here that wants the
+      // user. Deliberately GREEN anyway: this dot answers "is the engine up?",
+      // and `check` is what reports faults. Two alarms for one condition trained
+      // people to read the dot as noise. The substate still names the action.
+      $("substate").textContent = "no rules — re-apply";
+      dot.className = "dot ok";
+    } else {
+      // Could not tell. Do not claim either way.
+      $("substate").textContent = "no rules";
+      dot.className = "dot warn";
+    }
     return d.rules;
   }
 
