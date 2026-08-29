@@ -189,13 +189,28 @@ pub(crate) fn validate(p: &str) -> Result<()> {
     if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         anyhow::bail!("refusing {p}: '..' is not allowed in a whiteout path (pass the resolved path)");
     }
-    if path.components().count() <= 2 {
-        anyhow::bail!("refusing a partition root: {p} would mask every stock entry under it");
-    }
-    if p.starts_with("/data") {
-        anyhow::bail!("refusing {p}: /data is not a ROM path");
-    }
-    Ok(())
+    // DELEGATE the rest to the predicate the module plan uses, rather than
+    // re-deriving a weaker subset of it.
+    //
+    // This used to be a bare depth test plus a `/data` prefix test, and it was
+    // strictly weaker than `mount::can_whiteout` in a way nothing surfaced:
+    // `/apex/com.android.art/bin/dex2oat`, `/proc/self/maps`, `/sys/...`,
+    // `/dev/...`, `/mnt/...` and `/storage/...` all passed here while the plan
+    // refuses every one of them as "not a ROM partition". That mattered because
+    // this function IS the gate on four paths that believe it is the same
+    // predicate and say so in their comments -- `whiteout add` (CLI and WebUI),
+    // `whiteout::apply` (both boot entry points, every boot),
+    // `mount::run_reload`'s durable-convergence loop, and
+    // `absorb::reapply_tmpfs_whiteouts`. A durable entry naming an /apex binary
+    // was therefore accepted, persisted, and re-asserted on every boot, with
+    // nothing in the product able to notice.
+    //
+    // The two tests above stay HERE and stay FIRST, because `can_whiteout`
+    // cannot make them: it does not resolve `..` either (so `/system/../product`
+    // clears its partition-root test and then resolves to one), and on a
+    // relative path its `components().nth(1)` reads the second component as the
+    // partition, which accepts `system/bin/x`.
+    crate::mount::can_whiteout(path).map_err(|why| anyhow::anyhow!("refusing {p}: {why}"))
 }
 
 pub fn add(target: &str, force: bool) -> Result<()> {
@@ -521,6 +536,45 @@ mod tests {
         assert!(validate("system/bin/x").is_err(), "relative must be refused");
         assert!(validate("/data/adb/x").is_err(), "/data is not a ROM path");
         assert!(validate("/system/bin/install-recovery.sh").is_ok());
+    }
+
+    /// The durable list may not name a path the module plan would refuse.
+    ///
+    /// `validate` is the gate on four separate paths that each believe it is the
+    /// same predicate `mount::can_whiteout` applies, and it was strictly weaker:
+    /// a depth test plus a `/data` prefix, with no idea that `/apex`, `/proc`,
+    /// `/sys`, `/dev`, `/mnt` and `/storage` are not ROM partitions. An entry
+    /// naming an /apex binary was accepted, written to whiteouts.txt, and
+    /// re-asserted on every boot by `whiteout::apply`.
+    #[test]
+    fn refuses_every_root_the_module_plan_refuses() {
+        for p in [
+            "/apex/com.android.art/bin/dex2oat",
+            "/apex/com.android.runtime/bin/dex2oat",
+            "/proc/self/maps",
+            "/sys/kernel/notes",
+            "/dev/binder",
+            "/mnt/vendor/persist/x",
+            "/storage/emulated/0/x",
+            "/data/adb/modules/x/y",
+            "/d/tracing/x",
+        ] {
+            assert!(validate(p).is_err(), "{p} must be refused");
+            assert!(
+                crate::mount::can_whiteout(Path::new(p)).is_err(),
+                "{p}: the two predicates must agree"
+            );
+        }
+        // ...and the ROM paths a whiteout is FOR still pass, on both.
+        for p in [
+            "/system/bin/install-recovery.sh",
+            "/product/app/AIMemory",
+            "/my_stock/app/OplusOperationManual",
+            "/vendor/etc/foo.conf",
+        ] {
+            assert!(validate(p).is_ok(), "{p} must be allowed");
+            assert!(crate::mount::can_whiteout(Path::new(p)).is_ok(), "{p}");
+        }
     }
 
     /// `..` must not be a way around the partition-root refusal.
