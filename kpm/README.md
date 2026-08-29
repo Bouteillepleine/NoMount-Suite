@@ -24,52 +24,66 @@ build; see the repository root README.
 
 ## Status
 
-**Builds for every supported kernel; never loaded on hardware.** The engine it
-wraps is `../hookless/src/nomount.c` at `NM_MODULE_VERSION 1.26.0` — the same one
-the in-tree build and the Suite ship, included rather than copied so it cannot
-drift.
+**Builds for every supported KMI; never loaded on hardware.** The engine it wraps
+is `../hookless/src/nomount.c` at `NM_MODULE_VERSION 1.26.0` — the same one the
+in-tree build and the Suite ship, included rather than copied so it cannot drift.
 
-CI builds a `nomount.kpm` of about 115 KB on 5.4, 5.10, 5.15, 6.1 and 6.6, and
-the only symbols left undefined in it are the two KernelPatch supplies to every
-module:
+CI builds a `nomount-<kmi>.kpm` for each GKI KMI generation up to 6.6, inside the
+Android DDK containers, and the only symbols left undefined in them are the two
+KernelPatch supplies to every module (`kallsyms_lookup_name`, `printk`).
+`.github/workflows/build-kpm.yml` fails the build if anything else survives,
+because KernelPatch's loader rejects the whole module on the first symbol it
+cannot resolve.
 
-```
-kallsyms_lookup_name
-printk
-```
+| KMI | size |
+| :--- | ---: |
+| `android12-5.10` | 1053600 |
+| `android13-5.10` | 1068560 |
+| `android13-5.15` | 1059496 |
+| `android14-5.15` | 1060936 |
+| `android14-6.1`  | 1082912 |
+| `android15-6.6`  | 737392 |
 
-That is the gate. `.github/workflows/build-kpm.yml` fails the build if anything
-else survives, because KernelPatch's loader rejects the whole module on the first
-symbol it cannot resolve.
+Building per KMI is a correctness requirement here, not a convenience. The engine
+half is compiled against real kernel headers because it dereferences `struct
+inode`, `dentry` and `super_block`, and those layouts follow the kernel's config
+— so a generic `make defconfig` tree can produce field offsets that do not match
+the kernel the module is loaded into, and that failure is not a link error but
+reading the wrong bytes at runtime. The DDK's `$KDIR` is a released GKI kernel's
+own configured tree. It also settles the unit: `android12-5.10` and
+`android13-5.10` are the same version and different KMIs, and nothing about a
+version number promises the structs agree.
 
-| | |
-| :--- | :--- |
-| `Makefile` | the dual-include-world build — SDK headers for the entry half, real kernel headers for the engine half, joined with `ld -r` — plus the `undefined` target that measures the symbol list |
-| `gen-shim.py` | generates the four files below from that measured list |
-| `nm_kpm_tramp.c` | 89 tail-call trampolines, one per kernel function the engine reaches |
-| `nm_kpm_syms.h` | the index enum shared by both halves |
-| `nm_kpm_table.h` | the resolution table, with per-KMI alternate names |
-| `nm_kpm_shim.h` | the residue trampolines cannot cover: `init_net`, the slab inlines, the weak `ghost_*` pair |
-| `nm_engine.c` | headers, then shim, then the engine; plus the string/memory routines the compiler emits calls to on its own |
-| `nm_kpm_entry.c` | `KPM_NAME`/`KPM_INIT`/`KPM_EXIT`, symbol resolution, and a refusal to start when a required symbol is missing |
+`android11-5.4` is absent because the DDK publishes no container for it.
+
+### ⚠️ CFI is disabled in this build, and that may matter
+
+A `.kpm` must be a plain relocatable ELF object, so LTO has to be off — and on
+5.10 and 5.15 CFI rides on LTO, so it goes too (clang refuses otherwise:
+*"invalid argument '-fsanitize=cfi' only allowed with '-flto'"*).
+
+The consequence, stated rather than buried in a compiler flag: on a
+`CONFIG_CFI_CLANG` kernel this object's functions carry no CFI type identifiers.
+The engine installs function pointers into kernel structures
+(`inode_operations`, `file_operations`) and the kernel reaches them through
+indirect calls that CFI checks. An unidentified target is exactly what CFI exists
+to stop. **This is a plausible panic on 5.10/5.15 and the build cannot prove it
+either way** — nobody has loaded it on hardware. If a load panics on those KMIs,
+suspect this first.
+
+The in-tree build has none of this problem: it is compiled with the kernel, LTO
+and CFI included. That remains the supported way to run the engine.
 
 ### What is still not done
 
 1. **The inline hook** replacing the in-tree `vfs_map_meta_override()` call in
    `fs/proc/task_mmu.c`. This is the thing a KPM can do and an LKM cannot, and
-   it is not written yet — so today this variant has the LKM's blind spot
-   without having been proven to have the KPM's advantage.
-2. **A load test on a real ≤6.6 APatch device.** Nothing here has been loaded on
-   hardware, and no OnePlus 15 can serve: it runs 6.12, above KernelPatch's
-   hard cap. Until someone loads it, this variant is `UNMEASURED` in the sense
-   the rest of this project uses the word — it builds, and that is a different
-   claim from it working.
-
-The previous port (against a much smaller engine, `NOMOUNT_VERSION 20`) is
-preserved in this repository's history and in the archived `nomount` repo under
-`kernel/kpm/`. It was the reference for the *shape* — the two-include-world
-build and the symbol table — not for the contents: that engine was 58 KB against
-the current 318 KB, and its shim was hand-written where this one is generated.
+   it is not written — so today this variant has the LKM's blind spot without
+   having been shown to have the KPM's advantage.
+2. **A load test on a real APatch device at 6.6 or below.** No OnePlus 15 can
+   serve: it runs 6.12, above KernelPatch's cap. Until someone loads it, this is
+   `UNMEASURED` in the sense the rest of this project uses the word — it builds,
+   which is a different claim from it working.
 
 ## How the symbol plumbing works
 
