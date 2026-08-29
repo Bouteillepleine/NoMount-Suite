@@ -1,0 +1,351 @@
+name: NoMount hookless — compile-test matrix
+
+# Validates the hookless kernel patch (fs/nomount.c + fs/nomount.h) against the
+# canonical source tree for each of the 10 supported kernel versions.
+# Compile test (builds fs/nomount.o only), not a full device build
+
+on:
+  push:
+    # Work branches too, not just hookless: a change that only compiles on one
+    # version is exactly what this matrix exists to catch, and catching it after
+    # the merge means hookless is broken while someone bisects ten jobs.
+    branches: [hookless, 'fix/**', 'feature/**', 'update/**', 'audit/**']
+    # Only rebuild when the patch/source or this workflow changes — NOT for docs
+    # (e.g. hookless/AUDIT.md), so documentation edits don't re-run all ten.
+    paths:
+      - 'hookless/src/**'
+      - 'hookless/patches/**'
+      - '.github/workflows/hookless-compile-matrix.yml'
+  pull_request:
+    branches: [hookless]
+    paths:
+      - 'hookless/src/**'
+      - 'hookless/patches/**'
+      - '.github/workflows/hookless-compile-matrix.yml'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Comma-separated versions to build (empty = all). e.g. 4.9,6.12'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+# Supersede an in-flight matrix when a newer commit lands on the branch.
+concurrency:
+  group: hookless-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: ${{ matrix.ver }}
+    runs-on: ubuntu-24.04
+    # A compile of fs/nomount.o takes 1-3 minutes; anything near 20 is wedged,
+    # not slow. Without this the job inherits GitHub's 6-hour default, so one
+    # stuck version holds the run open until someone cancels by hand -- which
+    # then reports the whole run as "cancelled" and hides whether the other
+    # versions actually passed. Fail it instead and rerun just that job.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ver: '4.9'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'deprecated/android-4.9-q'
+            tc: gcc
+            bootcfg: '0'
+          - ver: '4.14'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'deprecated/android-4.14-stable'
+            tc: gcc
+            bootcfg: '0'
+          - ver: '4.19'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'deprecated/android-4.19-stable'
+            tc: gcc
+            bootcfg: '0'
+          - ver: '5.4'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android11-5.4'
+            tc: clang
+            bootcfg: '0'
+          - ver: '5.10'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android12-5.10'
+            tc: clang
+            bootcfg: '1'
+          - ver: '5.15'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android13-5.15'
+            tc: clang
+            bootcfg: '1'
+          - ver: '6.1'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android14-6.1'
+            tc: clang
+            bootcfg: '1'
+          - ver: '6.6'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android15-6.6'
+            tc: clang
+            bootcfg: '1'
+          - ver: '6.12'
+            krepo: 'https://android.googlesource.com/kernel/common'
+            kref: 'android16-6.12'
+            tc: clang
+            bootcfg: '1'
+          - ver: '6.18'
+            krepo: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git'
+            kref: 'linux-6.18.y'
+            tc: clang
+            bootcfg: '1'
+    env:
+      # Toolchains are pinned via the pinned ubuntu-24.04 runner image
+      # (clang/lld/llvm 18, gcc-13). NB: the versioned LLVM=-18 suffix is NOT
+      # understood by pre-6.1 kbuild (it then looks for a plain 'ld.lld'), so we
+      # use LLVM=1 + the unversioned clang/lld/llvm packages across the matrix.
+      CCACHE_MAXSIZE: '2G'
+      CCACHE_DIR: /home/runner/.ccache
+    steps:
+      - name: Select
+        id: sel
+        run: |
+          only="${{ github.event.inputs.only }}"
+          if [ -z "$only" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          for v in ${only//,/ }; do
+            if [ "$v" = "${{ matrix.ver }}" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          done
+          echo "run=0" >> "$GITHUB_OUTPUT"
+          echo "::notice::Skipped ${{ matrix.ver }} (not in 'only' filter)"
+
+      - name: Checkout hookless (src + patches)
+        if: steps.sel.outputs.run == '1'
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Install build deps
+        if: steps.sel.outputs.run == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev cpio kmod \
+            build-essential git ca-certificates rsync ccache sparse \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          if [ "${{ matrix.tc }}" = "clang" ]; then
+            # unversioned packages -> clang/ld.lld/llvm-* 18 on ubuntu-24.04;
+            # LLVM=1 finds them by plain name (works on every kernel in the set).
+            sudo apt-get install -y --no-install-recommends clang lld llvm
+            clang --version | head -1
+          else
+            # distro aarch64 GCC (gcc-13) — satisfies compiler-gcc.h >=5.1 (the AOSP
+            # gcc-4.9 prebuilt is GCC 4.9, rejected as too old).
+            aarch64-linux-gnu-gcc --version | head -1
+          fi
+          # ccache masquerade: make the compilers we invoke resolve to ccache
+          # (which then finds the real one further down PATH). No CC override needed.
+          for n in clang clang++ gcc g++ cc c++ aarch64-linux-gnu-gcc aarch64-linux-gnu-g++; do
+            sudo ln -sf /usr/bin/ccache "/usr/lib/ccache/$n"
+          done
+          echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+
+      - name: Restore ccache
+        if: steps.sel.outputs.run == '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ matrix.ver }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.ver }}-
+
+      - name: Restore kernel clone
+        if: steps.sel.outputs.run == '1'
+        id: kcache
+        uses: actions/cache/restore@v4
+        with:
+          path: ksrc
+          key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+
+      - name: Clone kernel source (${{ matrix.kref }}) on cache miss
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          git clone --depth 1 -b "${{ matrix.kref }}" "${{ matrix.krepo }}" ksrc
+          echo "Kernel: $(head -3 ksrc/Makefile | tr '\n' ' ')"
+
+      - name: Save kernel clone (pristine) on cache miss
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ksrc
+          key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+
+      - name: Apply hookless patch + drop in source
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -e
+          cd ksrc
+          P="$GITHUB_WORKSPACE/repo/hookless/patches/nomount_kernel_integration.patch"
+          # git apply FIRST, as a gate rather than as the applier: it does no
+          # fuzz, so a pass proves every hunk's context matched byte for byte on
+          # this tree, and it rejects a malformed hunk header outright. Five of
+          # the ten patches this replaced carried exactly such a header and went
+          # green for months because `patch --fuzz` accepted them.
+          git apply -p1 --check "$P" || {
+            echo "FATAL: the integration patch no longer applies cleanly to ${{ matrix.ver }}"; exit 1; }
+          patch -p1 --forward --fuzz=3 < "$P"
+          cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.c" fs/nomount.c
+          cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.h" fs/nomount.h
+          grep -n 'CONFIG_NOMOUNT' fs/Makefile fs/Kconfig || true
+
+      - name: Configure + compile fs/nomount.o
+        id: build
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -o pipefail
+          cd ksrc
+          if [ "${{ matrix.tc }}" = "clang" ]; then
+            MAKEOPTS="ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          else
+            MAKEOPTS="ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          fi
+          # persist for the advisory step (ccache is applied via the PATH masquerade)
+          echo "MAKEOPTS=$MAKEOPTS" >> "$GITHUB_ENV"
+          # The integration patch is applied with --fuzz=3, so a hunk can land in
+          # the wrong place -- and `make fs/nomount.o` builds the object from
+          # kbuild's SINGLE-TARGET rule whether or not it is in obj-y. Verified:
+          # delete the obj- line and this job still exits 0 with a 763KB .o. So
+          # the compile proves nothing about the wiring; assert the wiring itself.
+          # (Same failure class already asserted for the task_mmu.c hunk below.)
+          echo "== assert fs/Makefile + fs/Kconfig hunks applied =="
+          grep -q 'obj-$(CONFIG_NOMOUNT) += nomount.o' fs/Makefile || {
+            echo "FATAL: fs/Makefile hunk did not apply for ${{ matrix.ver }} -- nomount.o would never be linked"; exit 1; }
+          grep -qE '^config NOMOUNT' fs/Kconfig || {
+            echo "FATAL: fs/Kconfig hunk did not apply for ${{ matrix.ver }}"; exit 1; }
+
+          echo "== defconfig =="
+          # The generic arm64 defconfig leaves CONFIG_BOOT_CONFIG unset, which
+          # silently excluded every #ifdef CONFIG_BOOT_CONFIG block
+          # (nm_snapshot_bootconfig, nm_bootconfig_show, nm_set_bootconfig,
+          # nm_mk_bootconfig_pde and the NM_KNOB_BOOTCONFIG dispatch) from ALL ten
+          # versions -- the bootconfig half of the boot-identity cloak had zero
+          # compile coverage. Turn the symbol on explicitly rather than switching
+          # to gki_defconfig: that pulls in GKI's KMI machinery, and on
+          # android16-6.12 it enables gendwarfksyms, which needs <dwarf.h> from
+          # libdw-dev and failed the job for a reason unrelated to this driver.
+          # `defconfig -e BOOT_CONFIG` gives CONFIG_BOOT_CONFIG=y on its own
+          # (BLK_DEV_INITRD, its only dependency, is already set) and leaves the
+          # rest of the matrix's config baseline alone.
+          make $MAKEOPTS defconfig 2>&1 | tail -5
+          ./scripts/config --file out/.config -e NOMOUNT
+          # bootconfig only exists from 5.6; on older trees the #ifdef is
+          # correctly compiling out real absence, so only assert where it exists.
+          ./scripts/config --file out/.config -e BOOT_CONFIG || true
+          make $MAKEOPTS olddefconfig 2>&1 | tail -5
+          grep -q '^CONFIG_NOMOUNT=y' out/.config || {
+            echo "FATAL: CONFIG_NOMOUNT did not stick in .config for ${{ matrix.ver }}"; exit 1; }
+          if [ "${{ matrix.bootcfg }}" = "1" ]; then
+            grep -q '^CONFIG_BOOT_CONFIG=y' out/.config || {
+              echo "FATAL: CONFIG_BOOT_CONFIG not enabled for ${{ matrix.ver }} -- the bootconfig spoof would go uncompiled"; exit 1; }
+            echo "CONFIG_BOOT_CONFIG=y (bootconfig paths covered)"
+          else
+            echo "::notice::${{ matrix.ver }} predates bootconfig (5.6) -- #ifdef CONFIG_BOOT_CONFIG correctly compiled out"
+          fi
+          echo "== prepare =="
+          make $MAKEOPTS prepare 2>&1 | tail -20
+          echo "== compile fs/nomount.o =="
+          make $MAKEOPTS fs/nomount.o 2>&1 | tee /tmp/nm_build.log
+          ls -l out/fs/nomount.o && echo "COMPILE_OK ${{ matrix.ver }}"
+          # The maps-cloak consumer is MANDATORY on all ten versions: show_map_vma()
+          # reads inode->i_sb->s_dev/i_ino raw, so without the hunk an injected
+          # mapping reports the overlay-top dev. This used to be a soft "skipping"
+          # branch, which let a malformed hunk (bare @@ header) silently no-op on
+          # five versions while the job still went green -- assert instead.
+          echo "== assert task_mmu.c hook present =="
+          grep -q 'vfs_map_meta_override' fs/proc/task_mmu.c || {
+            echo "FATAL: integration patch did not apply its task_mmu.c hunk for ${{ matrix.ver }}"; exit 1; }
+          awk '/^(static )?[a-zA-Z_].*\(/{last=$0} /vfs_map_meta_override\(inode/{print last; found=1; exit}
+               END{ if(!found) exit 1 }' fs/proc/task_mmu.c | grep -q 'show_map_vma' || {
+            echo "FATAL: task_mmu.c hunk applied OUTSIDE show_map_vma for ${{ matrix.ver }} (fuzzy misplacement)"; exit 1; }
+          echo "== compile fs/proc/task_mmu.o =="
+          make $MAKEOPTS fs/proc/task_mmu.o 2>&1 | tee /tmp/tm_build.log
+          ls -l out/fs/proc/task_mmu.o && echo "TASK_MMU_OK ${{ matrix.ver }}"
+          # fs/proc/task_mmu.c names the maps-cloak global from the integration
+          # patch, so the two sides can only be kept in step by asserting the
+          # name -- nothing links here, and an extern that resolves to nothing
+          # would not surface until a full vmlinux build.
+          aarch64-linux-gnu-nm --defined-only out/fs/nomount.o | grep -q 'vfs_map_meta_override' || {
+            echo "FATAL: the maps-cloak global is missing or renamed for ${{ matrix.ver }}"; exit 1; }
+          ccache -s 2>/dev/null | grep -iE 'hit|miss' || true
+
+      - name: W=1 gate + sparse (advisory)
+        if: steps.sel.outputs.run == '1' && steps.build.outcome == 'success'
+        run: |
+          cd ksrc
+          echo "== W=1 (advisory) =="
+          rm -f out/fs/nomount.o
+          make $MAKEOPTS W=1 fs/nomount.o 2>&1 | tee /tmp/nm_w1.log || true
+          echo "== sparse C=2 (advisory) =="
+          rm -f out/fs/nomount.o
+          make $MAKEOPTS C=2 CHECK="sparse" fs/nomount.o 2>&1 | tee /tmp/nm_sparse.log || true
+          # Count only OUR file's diagnostics — the W=1/sparse build can drag in
+          # kernel-tree noise (arm64 vdso missing-prototypes, defconfig quirks)
+          # that is not ours and not actionable here.
+          w=$(grep 'warning:' /tmp/nm_w1.log 2>/dev/null | grep -c 'nomount\.[ch]' || true)
+          s=$(grep 'warning:\|error:' /tmp/nm_sparse.log 2>/dev/null | grep -c 'nomount\.[ch]' || true)
+          echo "::notice::${{ matrix.ver }} (nomount.c only) — W=1 warnings: ${w:-0}, sparse notes: ${s:-0}"
+          # Sparse stays advisory (it is noisy against Android trees), but W=1 is a
+          # GATE. It used to be a bare ::notice:: on a continue-on-error step with
+          # KCFLAGS=-Wno-error inherited, so the number was computed and thrown
+          # away: a `set but not used` variable sat in nomount.c across releases
+          # with the one check that would have caught it reporting it to nobody.
+          # Baseline is 0 on every version -- raise it only with a reason.
+          W1_BASELINE=0
+          if [ "${w:-0}" -gt "$W1_BASELINE" ]; then
+            echo "== W=1 warnings in nomount.[ch] =="
+            grep 'warning:' /tmp/nm_w1.log | grep 'nomount\.[ch]' || true
+            echo "FATAL: ${{ matrix.ver }} has ${w} W=1 warning(s) in nomount.[ch], baseline ${W1_BASELINE}"
+            exit 1
+          fi
+
+      - name: Save ccache
+        if: ${{ always() && steps.sel.outputs.run == '1' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ matrix.ver }}-${{ github.run_id }}
+
+      - name: Upload logs
+        if: ${{ always() && steps.sel.outputs.run == '1' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ matrix.ver }}
+          path: |
+            /tmp/nm_build.log
+            /tmp/nm_w1.log
+            /tmp/nm_sparse.log
+          if-no-files-found: ignore
+
+  summary:
+    name: summary
+    needs: compile
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Render result grid
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "## NoMount hookless — compile matrix"
+            echo ""
+            echo "| kernel | fs/nomount.o |"
+            echo "|--------|--------------|"
+            gh run view "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --json jobs \
+              --jq '.jobs[] | select(.name|test("^[0-9]")) | "| \(.name) | \(if .conclusion=="success" then "✅ pass" elif .conclusion=="skipped" then "⏭ skip" else "❌ "+(.conclusion//"?") end) |"' \
+              | sort -V
+          } >> "$GITHUB_STEP_SUMMARY"
