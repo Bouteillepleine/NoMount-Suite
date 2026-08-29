@@ -50,7 +50,11 @@ jobs:
           # variant is for devices somebody would really load it on, and a green
           # tick on a kernel no device runs would be spending CI to prove
           # nothing.
-          - { ver: '5.10', kref: 'android12-5.10' }
+          # 5.10 is NOT built here yet. Ubuntu's clang cannot compile it
+          # (asm-offsets: "register 'sp' unsuitable for global register
+          # variables"), which is a toolchain mismatch, not a fault in this
+          # module. It needs the AOSP prebuilt clang the in-tree matrix uses.
+          # Listed here so its absence is deliberate and visible.
           - { ver: '5.15', kref: 'android13-5.15' }
           - { ver: '6.1',  kref: 'android14-6.1'  }
           - { ver: '6.6',  kref: 'android15-6.6'  }
@@ -125,22 +129,43 @@ jobs:
       - name: Undefined symbols (the redirect list this variant needs)
         if: steps.sel.outputs.run == '1'
         run: |
+          set -o pipefail
           log=/tmp/lkm-${{ matrix.ver }}.log
+          out=/tmp/redirects-${{ matrix.ver }}.txt
           echo "### ${{ matrix.ver }}" >> "$GITHUB_STEP_SUMMARY"
-          # modpost reports one line per symbol the module references and the
-          # kernel does not export. That list IS the work item -- each name needs
-          # an NM_SYM() entry in lkm/nm_oot.h.
-          if grep -qE 'undefined!|undefined symbol' "$log"; then
-            echo "Symbols needing a kallsyms redirect:" | tee -a "$GITHUB_STEP_SUMMARY"
-            grep -oE '"[a-zA-Z_][a-zA-Z0-9_]*" \[' "$log" | tr -d '"[ ' | sort -u \
-              | tee -a "$GITHUB_STEP_SUMMARY"
-          elif [ "${{ steps.build.outcome }}" = "success" ]; then
+
+          # Everything modpost called undefined. WITHOUT Module.symvers that is
+          # every external symbol, exported or not -- the first run of this
+          # workflow duly reported _printk, memcpy and init_net, all of which are
+          # exported. Building the kernel far enough to get a real Module.symvers
+          # costs ~30 minutes per version, so instead:
+          grep -oE '"[a-zA-Z_][a-zA-Z0-9_]*" \[' "$log" | tr -d '"[ ' | sort -u > /tmp/undef.txt || true
+
+          # ...subtract the kernel's OWN export set, read from its source. A
+          # symbol that survives this is one the module truly cannot link
+          # against, and that is the redirect list.
+          grep -rhoE '\bEXPORT_SYMBOL(_GPL|_NS|_NS_GPL)?\(\s*[a-zA-Z_][a-zA-Z0-9_]*' ksrc \
+            --include='*.c' --include='*.h' 2>/dev/null \
+            | sed 's/.*(\s*//' | sort -u > /tmp/exported.txt || true
+          echo "kernel exports seen in source: $(wc -l < /tmp/exported.txt)"
+
+          comm -23 /tmp/undef.txt /tmp/exported.txt > "$out" || true
+
+          if [ "${{ steps.build.outcome }}" = "success" ] && [ ! -s /tmp/undef.txt ]; then
             echo "Built clean: no undefined symbols." | tee -a "$GITHUB_STEP_SUMMARY"
             ls -l repo/lkm/*.ko || true
+          elif [ -s "$out" ]; then
+            {
+              echo "Needs a kallsyms redirect ($(wc -l < "$out") symbols):"
+              echo '```'
+              cat "$out"
+              echo '```'
+              echo "_(of $(wc -l < /tmp/undef.txt) undefined; the rest are exported and link normally once Module.symvers exists)_"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "Build failed for a reason other than undefined symbols:" \
-              | tee -a "$GITHUB_STEP_SUMMARY"
-            tail -40 "$log" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "No non-exported symbols. Remaining undefined ones are exported;" \
+                 "they resolve against a real Module.symvers." | tee -a "$GITHUB_STEP_SUMMARY"
+            tail -20 "$log" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -149,5 +174,6 @@ jobs:
           name: lkm-${{ matrix.ver }}
           path: |
             /tmp/lkm-${{ matrix.ver }}.log
+            /tmp/redirects-${{ matrix.ver }}.txt
             repo/lkm/*.ko
           if-no-files-found: ignore
