@@ -52,3 +52,11 @@ ccflags-y += -Wno-unused-function
 # LTO, CFI and all. That remains the supported way to run the engine.
 ccflags-y += -fno-lto
 ccflags-y += -fno-sanitize=cfi
+
+# And no stack protector. Turning CFI off changed codegen enough that
+# android12-5.10 started referencing __stack_chk_guard -- the canary VALUE, not
+# a function -- which no trampoline can stand in for: it is read directly by the
+# compiler's own prologue, so there is nothing to intercept. The entry and
+# trampoline objects are already built -fno-stack-protector; this makes the
+# engine object agree, and takes __stack_chk_fail out with it.
+ccflags-y += -fno-stack-protector
