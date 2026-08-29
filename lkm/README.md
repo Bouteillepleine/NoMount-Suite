@@ -68,3 +68,32 @@ make -C /path/to/kernel/source M=$PWD modules
 The engine source is not copied — `nomount_lkm.c` includes
 `../hookless/src/nomount.c` so there is exactly one copy of the engine in this
 repository, and this variant cannot silently drift from the in-tree one.
+
+### Building it in CI
+
+Two workflows, and the difference between them is the difference between "it
+still compiles" and "here is a module you can load".
+
+| workflow | what it does | cost |
+| :--- | :--- | :--- |
+| **NoMount LKM — out-of-tree build** | compile gate across all ten kernels on every push. Stops at `modules_prepare`, so there is no `Module.symvers` and modpost cannot tell an exported symbol from a missing one. Its `.ko` is not evidence of anything. | ~10 min |
+| **NoMount LKM — build a loadable module** | dispatch-only, one version at a time. Builds the kernel far enough for a real `Module.symvers`, so the link is genuine, then uploads `nomount.ko`. | ~40–60 min |
+
+Run the second from the Actions tab. It lives on `main` — GitHub only offers a
+`workflow_dispatch` file that sits on the default branch — and checks this
+branch out to build.
+
+**A downloaded `nomount.ko` will not load on an arbitrary device.** An
+out-of-tree module requires a matching vermagic, and with `CONFIG_MODVERSIONS`
+matching symbol CRCs too. Built against a stock GKI `defconfig` it will refuse
+your OnePlus kernel, correctly. To get one that loads, pass `kernel_repo`,
+`kernel_ref` and `defconfig` pointing at the source your kernel was actually
+built from, then compare:
+
+```
+cat /proc/version      # on the phone
+modinfo nomount.ko     # what CI built
+```
+
+If those disagree, `insmod` fails with *"version magic ... should be ..."* — the
+module declining to enter a kernel whose struct layouts it does not share.
