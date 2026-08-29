@@ -1,7 +1,6 @@
 # 🫥 NoMount Suite
 
-> **Beta.** It works at the kernel VFS layer. Verified end to end on three
-> devices (below); expect edges elsewhere.
+> **Beta.** It works at the kernel VFS layer.
 
 Loads root modules **without touching the mount table** — RRO theming overlays
 included. No `overlayfs`, no `tmpfs`, no bind mounts: `/proc/mounts` stays 100%
