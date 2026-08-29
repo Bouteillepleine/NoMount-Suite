@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-Pairs with a kernel built from `kbuild@hookless`. The `kernel_patches/`
+The kernel engine now lives in this repository under `hookless/`, merged from
+what was `kbuild@hookless`: it is versioned and flashed with the userspace that
+drives it, and CI can finally assert that the two agree on the one list they
+both carry (`pmcache::PM_SCAN_DIRS` and the engine's `nm_vpath_in_pm_scandir`).
+Separately, the `kernel_patches/`
 directory has been **removed** — it held the original `/dev/nomount` char-device
 engine with `fs/namei.c` hooks and an ioctl control plane, which nothing in this
 repo could drive any more: `nm` and `src/nm.rs` speak netlink only, so a kernel
