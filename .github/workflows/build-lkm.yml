@@ -165,9 +165,15 @@ jobs:
             | sed 's/.*(\s*//' | sort -u > /tmp/exported.txt || true
           comm -23 /tmp/undef.txt /tmp/exported.txt > "$out" || true
 
-          u=$(grep -c . /tmp/undef.txt || echo 0)
-          e=$(grep -c . /tmp/exported.txt || echo 0)
-          r=$(grep -c . "$out" || echo 0)
+          # `|| true`, NOT `|| echo 0`. grep -c PRINTS 0 and EXITS 1 when it
+          # matches nothing, so `|| echo 0` appends a second zero and the
+          # variable becomes "0
+0" -- which then fails `[ "$r" -eq 0 ]` with
+          # "integer expression expected" and reports a clean result as a
+          # failure. That is exactly what the first ten-version run did.
+          u=$(grep -c . /tmp/undef.txt || true)
+          e=$(grep -c . /tmp/exported.txt || true)
+          r=$(grep -c . "$out" || true)
 
           {
             echo "### ${{ matrix.ver }} (${{ matrix.tc }})"
