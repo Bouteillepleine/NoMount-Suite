@@ -677,6 +677,96 @@ fn find_shipped_image(
     None
 }
 
+/// The subject a finding is ABOUT: the first token of its detail.
+///
+/// Every plan finding that can be emitted more than once opens its detail with
+/// the thing it concerns -- a target path (`/product/app/Foo.apk <- ...`), a
+/// partition (`3 injected file(s) on /my_product`), or a module (`OxygenCust: 4
+/// path(s) ...`). `owner_of` already reads exactly this token for the "From:"
+/// line; this reuses it as the discriminator rather than inventing a second
+/// convention.
+/// A COUNT is never the subject. Several details open with one -- "3 injected
+/// file(s) on /my_product", "12 of 16 hidden path(s) sampled" -- and keying on it
+/// produced `not-fd-allowlisted-for-zygote-83`: unique, and worthless for the one
+/// thing the id is for, because it moves the moment a module gains or loses a
+/// file. Measured on an OP11: two of the three repeatable plan findings took a
+/// count this way. Fall through to the first PATH in the detail, which for every
+/// one of them is the partition or target the finding is really about.
+fn subject_of(f: &Finding) -> Option<&str> {
+    // A nested fn, not a closure: a closure's inferred argument lifetime cannot
+    // outlive the call, and these results are borrowed from `f.detail`.
+    fn trim(t: &str) -> &str {
+        t.trim_end_matches([',', ':', '.'])
+    }
+    fn numeric(t: &str) -> bool {
+        !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())
+    }
+    let head = trim(f.detail.split([' ', ':']).next().unwrap_or(""));
+    if !head.is_empty() && !numeric(head) && head.len() <= 128 {
+        return Some(head);
+    }
+    // No usable head: the first absolute path anywhere in the sentence.
+    f.detail
+        .split_whitespace()
+        .map(trim)
+        .find(|t| t.starts_with('/') && t.len() > 1 && t.len() <= 128)
+}
+
+/// Turn plan findings into checks, giving each one an id nothing else in the
+/// report shares.
+///
+/// `slug(check)` ALONE is not unique here, and that is structural rather than
+/// accidental: a plan check is emitted once per offending entity, so
+/// "module mount left by design" appears once per declined mount and
+/// "not FD-allowlisted for zygote" once per partition. Measured on an OP11
+/// running a clean setup: six plan checks, three distinct ids.
+///
+/// That matters because `Check::id` is documented as "what an acceptance would be
+/// keyed on and what the WebUI uses for element ids" -- and the WebUI renders
+/// `id="chk-<id>"`, so duplicates put repeated ids in the DOM and make its own
+/// `findCheck` lookup return whichever row happens to be first. `audit.rs` has a
+/// test asserting exactly this property for the device checks, whose comment
+/// warns that "an acceptance keyed on that id would have silenced them all at
+/// once". The plan side had no such guarantee and could not have satisfied one.
+///
+/// The subject is the discriminator, and the counter after it is the backstop:
+/// two findings of one check about one subject cannot happen today (each loop is
+/// keyed by the entity), but an id that is unique only by argument is the kind
+/// that stops being unique later without anyone noticing.
+fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    findings
+        .into_iter()
+        .map(|x| {
+            let owner = owner_of(&x);
+            let base = match subject_of(&x) {
+                Some(s) => format!("{}-{}", slug(x.check), slug(s)),
+                None => slug(x.check),
+            };
+            let n = seen.entry(base.clone()).or_insert(0);
+            *n += 1;
+            let id = if *n == 1 { base } else { format!("{base}-{n}") };
+            // `meaning` and `evidence` carry the same string on purpose: the
+            // detail texts in this file were rewritten to BE the reader-facing
+            // sentence when the three cards collapsed into one list, so there is
+            // no second sentence to invent. A future plan check with separate
+            // evidence has somewhere to put it.
+            let mut c = Check::new(
+                Section::Plan,
+                id,
+                x.check,
+                verdict_of(&x.level),
+                x.detail.clone(),
+            )
+            .meaning(x.detail);
+            if let Some(o) = owner {
+                c = c.owner(o);
+            }
+            c
+        })
+        .collect()
+}
+
 /// Every plan-side check, plus the counts the report carries as facts.
 ///
 /// Returns rather than prints. It used to render its own header line, its own
@@ -1270,34 +1360,27 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         }
                     }
                 }
-                // Served content should be byte-identical in size to its backing; a mismatch
-                // means the redirect is not actually being served. Injects only (a
-                // whiteout/virtual-dir has no backing file to compare against).
-                if let Some(source) = &r.source {
-                    if let (Ok(a), Ok(b)) = (fs::metadata(target), fs::metadata(source)) {
-                        if a.is_file() && b.is_file() && a.len() != b.len() {
-                            // Name the likeliest cause, not just the two numbers.
-                            // Measured on an OP11: the rule was live in the table
-                            // and nothing else claimed the target, but a module's
-                            // own `mount --bind` had owned the path when the rule
-                            // was registered, so the injection never took and the
-                            // stock file kept being served. Two bare byte counts
-                            // left the user with nothing to act on.
-                            f.push(Finding {
-                                level: Level::Warn,
-                                check: "size mismatch",
-                                detail: format!(
-                                    "{} is {} bytes, backing is {} — the redirect is not being \
-                                     served. Usually a module binds this same path from its \
-                                     post-fs-data.sh: delete that bind and reboot.",
-                                    target.display(),
-                                    a.len(),
-                                    b.len()
-                                ),
-                            });
-                        }
-                    }
-                }
+                // NO size-mismatch finding here any more.
+                //
+                // It compared metadata(target).len() against metadata(source).len()
+                // and raised a plan WARN. `health::drift_probe` asks the SAME
+                // question in the device section, on every rule, and answers it
+                // better: equal length proves nothing, so it also compares the
+                // first 4 KiB of bytes -- the case that found it was two module
+                // files of 18 bytes each ("NMT12_WINNER_IS_A" against
+                // "..._IS_B"), which a size test calls identical.
+                //
+                // So the two fired together on one condition, with two severities
+                // and two remedies, in two sections. That is the shape this tree
+                // already removed once, when `check_no_foreign_rom_mount` and
+                // `zero-mount posture` both claimed the same my_* binds: "two red
+                // rows for one cause, one of them describing the opposite of what
+                // happened."
+                //
+                // The device section owns it, which is also where it belongs by
+                // this command's own contract: `--plan` is documented as static
+                // and reading no running process, and what the engine is SERVING
+                // right now is a measurement, not a property of the module set.
             }
         }
     }
@@ -1707,30 +1790,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         // is how a reader ends up asking which of them is current.
     ];
 
-    let checks = f
-        .into_iter()
-        .map(|x| {
-            let owner = owner_of(&x);
-            // `meaning` and `evidence` carry the same string on purpose: the
-            // detail texts in this file were rewritten to BE the reader-facing
-            // sentence when the three cards collapsed into one list, so there is
-            // no second sentence to invent. A future plan check with separate
-            // evidence has somewhere to put it.
-            let mut c = Check::new(
-                Section::Plan,
-                slug(x.check),
-                x.check,
-                verdict_of(&x.level),
-                x.detail.clone(),
-            )
-            .meaning(x.detail);
-            if let Some(o) = owner {
-                c = c.owner(o);
-            }
-            c
-        })
-        .collect();
-    Ok((checks, facts))
+    Ok((to_checks(f), facts))
 }
 
 #[cfg(test)]
@@ -1882,6 +1942,89 @@ mod tests {
             Some("common/rootfs.img")
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// No two checks in one report may share an id.
+    ///
+    /// The plan side emits a check once per offending entity, so the same `check`
+    /// string arrives many times -- measured on an OP11 with a clean setup: six
+    /// plan checks, three distinct ids. `Check::id` is what the WebUI puts in
+    /// `id="chk-..."` and what an acceptance would key on, and `audit.rs` asserts
+    /// this same property for the device checks.
+    #[test]
+    fn plan_findings_never_share_an_id() {
+        let f = vec![
+            Finding {
+                level: Level::Info,
+                check: "module mount left by design",
+                detail: "/product/app/A.apk <- /data/adb/modules/m/a — m is a hook framework".into(),
+            },
+            Finding {
+                level: Level::Info,
+                check: "module mount left by design",
+                detail: "/product/app/B.apk <- /data/adb/modules/m/b — m is a hook framework".into(),
+            },
+            Finding {
+                level: Level::Info,
+                check: "not FD-allowlisted for zygote",
+                detail: "3 injected file(s) on /my_product — zygote does not preload these".into(),
+            },
+            Finding {
+                level: Level::Info,
+                check: "not FD-allowlisted for zygote",
+                detail: "9 injected file(s) on /my_stock — zygote does not preload these".into(),
+            },
+            // Same check AND same subject: the counter is the backstop.
+            Finding {
+                level: Level::Warn,
+                check: "target claimed twice",
+                detail: "/system/etc/x <- a, b".into(),
+            },
+            Finding {
+                level: Level::Warn,
+                check: "target claimed twice",
+                detail: "/system/etc/x <- c, d".into(),
+            },
+        ];
+        let n = f.len();
+        let checks = to_checks(f);
+        assert_eq!(checks.len(), n);
+        let mut ids: Vec<&str> = checks.iter().map(|c| c.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "two plan checks share an id: {ids:?}");
+        // The id still says what it is about, rather than being a bare counter.
+        assert!(
+            checks[0].id.starts_with("module-mount-left-by-design-product-app-a"),
+            "id should carry its subject, got {}",
+            checks[0].id
+        );
+        // ...and a detail that opens with a COUNT keys on the partition, not the
+        // number, so the id survives the module gaining a file.
+        assert_eq!(checks[2].id, "not-fd-allowlisted-for-zygote-my-product");
+        assert_eq!(checks[3].id, "not-fd-allowlisted-for-zygote-my-stock");
+        // ...and the display name is untouched by the disambiguation.
+        assert_eq!(checks[0].name, "module mount left by design");
+        assert_eq!(checks[1].name, "module mount left by design");
+    }
+
+    /// The subject is the first token, which is where every repeatable plan
+    /// finding puts the thing it is about.
+    #[test]
+    fn a_findings_subject_is_the_head_of_its_detail() {
+        let f = |d: &str| Finding { level: Level::Info, check: "c", detail: d.to_string() };
+        assert_eq!(subject_of(&f("/product/app/X.apk <- /data/adb/m")), Some("/product/app/X.apk"));
+        assert_eq!(subject_of(&f("OxygenCustomizer: 4 path(s) ...")), Some("OxygenCustomizer"));
+        // A count is not a subject: the partition is. `not-fd-allowlisted-83`
+        // was unique and moved whenever the module gained a file.
+        assert_eq!(subject_of(&f("3 injected file(s) on /my_product")), Some("/my_product"));
+        assert_eq!(
+            subject_of(&f("9 injected file(s) on /my_stock -- zygote does not preload these")),
+            Some("/my_stock")
+        );
+        // Nothing usable at all -- the counter alone keeps it unique.
+        assert_eq!(subject_of(&f("12 of 16 sampled look absent to uid 10471")), None);
+        assert_eq!(subject_of(&f("")), None);
     }
 
     #[test]
