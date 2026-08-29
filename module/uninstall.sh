@@ -34,15 +34,92 @@ unset _ovr
 # So: stash the user-owned files, drop everything else, and let customize.sh put
 # them back. The operational flags are deliberately NOT stashed -- `disabled` in
 # particular MUST die here, because that is the whole reason this rm exists.
+#
+# ...and ONLY on an update. This script runs for both, and a stash left behind by
+# a genuine uninstall is never collected: customize.sh is the only thing that
+# removes it, and after a real removal customize.sh never runs again. That left
+# /data/adb/nomount.bak on disk forever -- named after the module the user just
+# deleted, holding `uidhide`, which is the list of apps they were hiding from.
+# The header three paragraphs up promises none of this survives us, so it must
+# not.
+#
+# The discriminator is the manager's own `remove` marker: KernelSU, APatch and
+# Magisk all write it into the module directory when the USER asks for removal
+# and run this script at the next boot, whereas an update extracts the new module
+# over the old one with no marker at all. Belt and braces -- service.sh also
+# sweeps a stash that outlived a boot, so a manager that does not use the marker
+# still cannot leave one lying around.
+MODDIR="${0%/*}"
 _bak=/data/adb/nomount.bak
-if [ -d /data/adb/nomount ]; then
+_nmlog() {
+    echo "nomount: $*" > /dev/kmsg 2>/dev/null
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [uninstall] $*" >> /data/adb/nomount/boot.log 2>/dev/null
+}
+if [ -f "$MODDIR/remove" ]; then
+    _nmlog "removal requested - dropping the state directory without stashing anything"
+elif [ -d /data/adb/nomount ]; then
+    # Everything the USER chose, and the operational records that cannot be
+    # rebuilt from anywhere else:
+    #   uidhide/.conf/.cache  the hide list, its policy, and the resolved-appid
+    #                         mirror the post-fs-data pass hides from. Losing the
+    #                         mirror leaves every app unhidden from post-fs-data
+    #                         to boot_completed on the first boot after an update.
+    #   blocklist             module ids the mount pass must not inject.
+    #   my_hookless           the my_* serving mode. Losing it moved 85 files from
+    #                         injection back to bind mounts on an OP15.
+    #   absorb-skip.txt       hand-edited opt-outs.
+    #   whiteouts.txt         durable hides.
+    #   snapshot.txt          the baseline `verify` diffs against.
+    #   spoof.conf            the user's `fix_shell_tmp` choice. customize.sh says
+    #                         in as many words that an existing file "is
+    #                         deliberately left where it is ... it may hold a
+    #                         deliberate fix_shell_tmp=0" -- which stopped being
+    #                         true the moment this rm started running on updates.
+    #   absorbed.list         the ONLY thing that can re-serve a patched-APK rule
+    #                         for a module that no longer mounts. absorb.rs guards
+    #                         this file against a truncating rewrite in three
+    #                         places; deleting it wholesale on every update made
+    #                         all three moot.
+    #   binds.list            the only record of the my_* binds we made, and of the
+    #                         ROM SELinux label we put on each backing file. Drop
+    #                         it and the next boot cannot tear those down or put
+    #                         the labels back, so a module file keeps a partition
+    #                         label under /data/adb indefinitely.
+    _kept=0
+    _lost=0
     rm -rf "$_bak"
-    for _f in uidhide uidhide.conf blocklist my_hookless absorb-skip.txt whiteouts.txt snapshot.txt; do
-        [ -e "/data/adb/nomount/$_f" ] || continue
-        [ -d "$_bak" ] || { mkdir -p "$_bak" && chmod 700 "$_bak"; } || break
-        cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null
-    done
-    unset _f
+    if mkdir -p "$_bak" 2>/dev/null && chmod 0700 "$_bak" 2>/dev/null; then
+        # Match the parent's label explicitly rather than relying on the type
+        # transition, exactly as customize.sh does for $NMDIR itself: the files
+        # inside name which apps are being hidden from.
+        chcon u:object_r:adb_data_file:s0 "$_bak" 2>/dev/null
+        for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
+                  absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
+                  absorbed.list binds.list; do
+            [ -e "/data/adb/nomount/$_f" ] || continue
+            if cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null; then
+                _kept=$((_kept + 1))
+            else
+                _lost=$((_lost + 1))
+            fi
+        done
+        unset _f
+    else
+        # NEVER SILENT. The `rm -rf` below runs either way, so a stash that could
+        # not be created means the user's configuration is about to be destroyed
+        # with nothing to restore it from -- and this script had no diagnostic
+        # path at all, which made a total loss indistinguishable from a clean
+        # update.
+        _lost=-1
+    fi
+    if [ "$_lost" = "-1" ]; then
+        _nmlog "could not create $_bak - the hide list, whiteouts and settings will be LOST by this update"
+    elif [ "$_lost" -gt 0 ]; then
+        _nmlog "stashed $_kept setting(s) to $_bak, but $_lost could NOT be copied and will be lost"
+    else
+        _nmlog "stashed $_kept setting(s) to $_bak for the incoming install"
+    fi
+    unset _kept _lost
 fi
 unset _bak
 

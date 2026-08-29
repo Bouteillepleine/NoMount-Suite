@@ -157,7 +157,12 @@ set_perm "$NMDIR" 0 0 0700 u:object_r:adb_data_file:s0
 _bak=/data/adb/nomount.bak
 if [ -d "$_bak" ]; then
     _rn=0
-    for _f in uidhide uidhide.conf blocklist my_hookless absorb-skip.txt whiteouts.txt snapshot.txt; do
+    # Must stay in step with uninstall.sh's stash list, which documents why each
+    # file is on it. A name on one list and not the other is a file that is
+    # saved and never returned, or returned and never saved -- both silent.
+    for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
+              absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
+              absorbed.list binds.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
         cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || continue
@@ -176,10 +181,13 @@ unset _bak
 # configured is gone, and the one key still read from it -- `fix_shell_tmp`,
 # which gates the /data/local/tmp restore in metamount.sh / post-fs-data.sh /
 # service.sh -- defaults to ON when the file or the key is absent, so a fresh
-# install needs no file at all. An EXISTING file is deliberately left where it
-# is rather than deleted: it is the user's, it may hold a deliberate
-# fix_shell_tmp=0, and an installer that silently removes state under
-# /data/adb is a worse surprise than a stale config. Re-assert its mode and
+# install needs no file at all. An EXISTING file is the user's and survives an
+# update: it may hold a deliberate fix_shell_tmp=0, and an installer that
+# silently removes state under /data/adb is a worse surprise than a stale
+# config. That claim used to be false -- uninstall.sh runs on updates too and
+# its `rm -rf` took spoof.conf with it, so every flash quietly put
+# fix_shell_tmp back to the default -- which is why the file is now on the
+# stash list above rather than merely described as safe. Re-assert its mode and
 # label if it is there, because it sits in a 0700 directory whose contents are
 # read as root: 0644 once made it the only group/world-readable file in the
 # state dir, and omitting set_perm's 5th argument relabelled it to
