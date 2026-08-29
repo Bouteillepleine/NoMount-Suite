@@ -840,7 +840,12 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
         _tail="Prism VFS + RRO injection is mountless; $_fgn foreign mount(s) present"
     elif [ "${_mnt:-0}" -gt 0 ]; then
         _mstate="$_mnt by design"
-        _tail="fully mountless: Prism VFS + RRO, su via sucompat ($_mnt hook-framework mount left alone)"
+        # Two causes now, not one. `mounts_foreign` excludes a hook framework's
+        # bind (absorb never takes those over) AND a my_* bind the Suite makes
+        # itself (that is how my_* is served unless `my_hookless` is set), so
+        # naming only the first described the wrong thing on any device with a
+        # module shipping my_* content -- which is most OnePlus devices.
+        _tail="mountless where it can be: Prism VFS + RRO, su via sucompat ($_mnt mount(s) left alone by design -- a hook framework's, or a my_* bind of ours)"
     else
         _mstate="0 mounts"
         _tail="fully mountless: Prism VFS + RRO, su via sucompat"

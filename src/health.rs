@@ -118,7 +118,14 @@ impl Fingerprint {
         // wrong: running them again cannot change the answer. Reported from an
         // OP15 whose five modules are all script-only, where zero rules is the
         // correct result and the card still read "not fully measured".
-        let nothing_to_serve = self.rules == 0;
+        // ...and only when the engine ANSWERED. `gather` reads the rule list with
+        // unwrap_or_default(), so a driver that is down yields zero rules exactly
+        // as a device with nothing to inject does -- and this would then report
+        // "Nothing to test" for two probes on a device that could not be asked.
+        // That is the one substitution this file exists to prevent, made in the
+        // reassuring direction. `engine` is "vN" when the driver replied and
+        // "down" when it did not.
+        let nothing_to_serve = self.rules == 0 && self.engine != "down";
 
         // The Narcissus canary. "unchecked:probe-uid-hidden" is a legitimate
         // can't-check BY DESIGN -- shell is on the hide list, so the divergence
@@ -272,6 +279,16 @@ fn count_mounts_split() -> Option<(usize, usize)> {
     let Ok(body) = fs::read_to_string("/proc/self/mountinfo") else { return None };
     let rows = crate::absorb::parse_mountinfo(&body);
     let roots = crate::absorb::fs_roots(&rows);
+    // The binds WE made, from the record that settles authorship (binds.list).
+    // Without this, `by_design` meant "a hook framework's bind" alone, so every
+    // my_* bind the Suite creates itself counted as foreign -- and `mounts_foreign`
+    // is what service.sh renders on the manager card. `audit::check_zero_mount`
+    // learned to ask the same question and now grades an all-ours set as a NOTE,
+    // which left the two surfaces of one report disagreeing about the same mounts:
+    // the findings list said "the SUITE made these itself" while the card said
+    // "N foreign mount(s) present". Same source of truth for both.
+    let ours: std::collections::HashSet<std::path::PathBuf> =
+        crate::bind::tracked().into_iter().map(|(t, _)| t).collect();
     let (mut total, mut by_design) = (0usize, 0usize);
     for r in &rows {
         let Some(src) = crate::absorb::source_of(r, &roots) else { continue };
@@ -284,8 +301,12 @@ fn count_mounts_split() -> Option<(usize, usize)> {
             continue;
         }
         total += 1;
-        if crate::absorb::module_dir_of(&src)
-            .is_some_and(|d| crate::absorb::is_hook_framework(&d))
+        // Two ways a module mount is expected rather than leaked: a hook
+        // framework's bind, which absorb never takes over, and one of ours, which
+        // is how a my_* target is served unless the `my_hookless` opt-in is set.
+        if ours.contains(&r.target)
+            || crate::absorb::module_dir_of(&src)
+                .is_some_and(|d| crate::absorb::is_hook_framework(&d))
         {
             by_design += 1;
         }
@@ -601,6 +622,12 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         "/mnt/runtime",
         "/mnt/androidwritable",
         "/mnt/pass_through",
+        // Adopted storage and the raw sdcardfs/FUSE source view. Both are shared
+        // volumes reachable by any app holding a storage permission, and both are
+        // paths a root shell types by hand -- which is how /data/media/0 got onto
+        // this list in the first place.
+        "/mnt/media_rw",
+        "/mnt/expand",
     ]
     .iter()
     .any(|p| out.starts_with(p));
@@ -702,6 +729,55 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fp(engine: &str, rules: usize) -> Fingerprint {
+        Fingerprint {
+            version: "test".into(),
+            uname: "test".into(),
+            engine: engine.into(),
+            rules,
+            whiteouts: 0,
+            mounts: Some(0),
+            blocked: "0".into(),
+            consistency: "unchecked".into(),
+            served_matches_rule: "unchecked".into(),
+            guard: "armed".into(),
+            mounts_foreign: Some(0),
+            manager_umount: "off".into(),
+        }
+    }
+
+    /// The verdict TAG, not the enum: `Verdict` deliberately derives only what
+    /// its ordering needs, and a test is not a reason to widen a production type.
+    fn verdict_of(fp: &Fingerprint, id: &str) -> &'static str {
+        fp.checks()
+            .into_iter()
+            .find(|c| c.id == crate::check::slug(id))
+            .unwrap_or_else(|| panic!("no check named {id}"))
+            .verdict
+            .tag()
+    }
+
+    /// "Nothing to test" is only honest while the engine is ANSWERING.
+    ///
+    /// `gather` reads the rule list with unwrap_or_default, so a driver that is
+    /// down produces zero rules exactly as a device with nothing to inject does.
+    /// Both probes then reported N/A -- a measured "there is nothing here" --
+    /// for a question that could not be put at all.
+    #[test]
+    fn zero_rules_is_only_not_applicable_when_the_engine_answered() {
+        let up = fp("v26", 0);
+        assert_eq!(verdict_of(&up, "per-UID consistency canary"), "N/A");
+        assert_eq!(verdict_of(&up, "served bytes match the rule"), "N/A");
+
+        let down = fp("down", 0);
+        assert_eq!(verdict_of(&down, "per-UID consistency canary"), "UNMEASURED");
+        assert_eq!(verdict_of(&down, "served bytes match the rule"), "UNMEASURED");
+
+        // With rules live, an unchecked probe is unmeasured either way.
+        let serving = fp("v26", 12);
+        assert_eq!(verdict_of(&serving, "per-UID consistency canary"), "UNMEASURED");
+    }
 
     /// The three shapes this module's own parser got wrong before it was deleted.
     ///
