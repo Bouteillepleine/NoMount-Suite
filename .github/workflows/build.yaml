@@ -230,16 +230,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kmi:
-          - android12-5.10
-          - android13-5.10
-          - android13-5.15
-          - android14-5.15
-          - android14-6.1
-          - android15-6.6
-          - android16-6.12
+        # The tag is per-KMI, not one date for all of them: the DDK publishes
+        # each KMI on its own schedule, and android17-6.18 exists only under a
+        # later tag than the rest. Assuming a single date silently drops it.
+        include:
+          - { kmi: android12-5.10, tag: '20251104' }
+          - { kmi: android13-5.10, tag: '20251104' }
+          - { kmi: android13-5.15, tag: '20251104' }
+          - { kmi: android14-5.15, tag: '20251104' }
+          - { kmi: android14-6.1,  tag: '20251104' }
+          - { kmi: android15-6.6,  tag: '20251104' }
+          - { kmi: android16-6.12, tag: '20251104' }
+          - { kmi: android17-6.18, tag: '20260828' }
     container:
-      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-20251104
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-${{ matrix.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -310,7 +314,10 @@ jobs:
           find artifacts -name 'nomount-*.ko' -exec cp {} module/lkm/ \;
           n=$(find module/lkm -name 'nomount-*.ko' | wc -l)
           find module/lkm -name 'nomount-*.ko' -printf '  %f  %s bytes\n' | sort
-          [ "$n" -eq 7 ] || { echo "::error::expected 7 engine modules, got $n"; exit 1; }
+          # One per DDK KMI. Kept as an exact count rather than a minimum:
+          # a zip that quietly lost one installs fine and then fails only on the
+          # devices whose KMI went missing.
+          [ "$n" -eq 8 ] || { echo "::error::expected 8 engine modules, got $n"; exit 1; }
 
       - name: Build ko-loader
         run: |
@@ -319,6 +326,17 @@ jobs:
           # SELinux. Built with the same zig set up above for nm.
           git clone --depth 1 https://github.com/maxsteeel/ko-loader /tmp/kol
           make -C /tmp/kol TARGET=aarch64-linux
+
+          # sstrip, the same treatment nm gets below. zig emits a static binary
+          # with section headers and padding that nothing on the device reads;
+          # unstripped it was 234 KB, a fifth of the whole zip, to load one
+          # module once per boot.
+          make -C userspace/tools/sstrip
+          before=$(stat -c%s /tmp/kol/ko-loader)
+          userspace/tools/sstrip/sstrip -z /tmp/kol/ko-loader
+          after=$(stat -c%s /tmp/kol/ko-loader)
+          echo "ko-loader: $before -> $after bytes"
+
           install -Dm755 /tmp/kol/ko-loader module/bin/ko-loader-arm64
           file module/bin/ko-loader-arm64
 
