@@ -63,16 +63,40 @@ unsigned long nm_oot_lookup(const char *name)
     return addr;
 }
 
+/* Names in the order of enum nm_oot_sym. */
+static const char *const nm_oot_names[NM_OOT_SYM_COUNT] = {
+    "vfs_getxattr",
+    "vfs_setxattr",
+    "free_inode_nonrcu",
+    "netlink_rcv_skb",
+    "security_inode_getsecctx",
+    "security_inode_notifysecctx",
+};
+
 int nm_oot_resolve_all(void)
 {
+    int i;
+
     if (!nm_kln && nm_bootstrap_kln() < 0)
         return -ENOENT;
 
     /*
-     * Nothing to resolve yet. The redirect list in nm_oot.h is empty until the
-     * linker has named the symbols that actually need one -- see the note there
-     * and the `undefined symbols` step in the build workflow. Resolving a
-     * guessed list would report success for a set nobody verified.
+     * These six are EXPORT_SYMBOL'd in the kernel source but absent from every
+     * android/abi_gki_aarch64* list, so a GKI kernel built with
+     * CONFIG_TRIM_UNUSED_KSYMS drops their exports. kallsyms still knows them --
+     * trimming removes the export, not the symbol -- which is what makes a
+     * KMI-portable module possible at all.
+     *
+     * Resolving them here, before the engine's init runs, is the whole reason
+     * nomount_lkm.c intercepts fs_initcall(). A NULL left in the table would
+     * become a branch to zero the first time the engine touched an xattr.
      */
+    for (i = 0; i < NM_OOT_SYM_COUNT; i++) {
+        unsigned long addr = nm_oot_lookup(nm_oot_names[i]);
+
+        if (!addr)
+            return -ENOENT;
+        nm_oot_sym[i] = (void *)addr;
+    }
     return 0;
 }
