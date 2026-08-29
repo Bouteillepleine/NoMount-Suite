@@ -27,12 +27,28 @@ ccflags-y += -I$(src)/../hookless/src
 #   unused-function  -- vfs_map_meta_override() has no caller here
 ccflags-y += -Wno-unused-function
 
-# GKI 5.10 and 5.15 are built with ThinLTO, so kbuild emits LLVM bitcode rather
-# than an ELF object and the `ld -r` that assembles the .kpm rejects it with
-# "file format not recognized". 6.1 and 6.6 happened to link, which is exactly
-# the sort of partial success that hides this until half the matrix goes red.
+# LTO AND CFI, and what turning them off costs.
 #
-# We only ever want a plain relocatable object out of this, never a link-time
-# optimised image, so LTO is turned off for it specifically. ccflags-y is
-# appended after the kernel's own KBUILD_CFLAGS, so this wins.
+# GKI 5.10 and 5.15 are built with ThinLTO, so kbuild emits LLVM bitcode rather
+# than an ELF object, and the `ld -r` that assembles the .kpm rejects it:
+# "file format not recognized". 6.1 and 6.6 linked fine, which is the sort of
+# partial success that hides a problem until half the matrix goes red.
+#
+# A .kpm has to be a plain relocatable ELF object -- KernelPatch's loader
+# relocates it itself -- so LTO cannot stay on. And on those kernels CFI rides
+# on LTO: dropping one forces the other, or clang refuses with
+# "invalid argument '-fsanitize=cfi' only allowed with '-flto'".
+#
+# WHAT THAT MEANS, stated plainly rather than left as a flag nobody reads:
+# on a CONFIG_CFI_CLANG kernel this object's functions carry no CFI type
+# identifiers. The engine installs function pointers into kernel structures
+# (inode_operations, file_operations), and the kernel reaches them through
+# indirect calls that CFI checks. An unidentified target is what CFI exists to
+# stop, so this is a plausible panic on 5.10/5.15 and NOT something the build
+# can prove either way -- no one has loaded this on hardware. It is recorded in
+# kpm/README.md as the first thing to suspect if a load on those KMIs panics.
+#
+# The in-tree build has none of this problem: it is compiled with the kernel,
+# LTO, CFI and all. That remains the supported way to run the engine.
 ccflags-y += -fno-lto
+ccflags-y += -fno-sanitize=cfi
