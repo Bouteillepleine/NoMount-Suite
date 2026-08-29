@@ -286,12 +286,26 @@ void c_main(long *sp) {
         if (is_json) print_str("[\n");
 
         while (len > 0) {
-            for (struct nlmsghdr *msg = (void *)mem.rx_buf; msg->nlmsg_len && msg->nlmsg_len <= (unsigned int)len;
+            /* `len >= 16` FIRST, and `nlmsg_len >= 16` rather than merely
+             * non-zero. The old condition read msg->nlmsg_len before proving a
+             * whole nlmsghdr was left in what we actually read, and accepted a
+             * claimed length of 1..15 -- which the `v` path above already refuses
+             * for the same reason ("bound the header's own length claim by what
+             * was actually READ before walking attributes off it"). Nothing
+             * reaches past rx_buf either way, but this is the one place in the
+             * file that was not applying its own rule. */
+            for (struct nlmsghdr *msg = (void *)mem.rx_buf;
+                    len >= 16 && msg->nlmsg_len >= 16 && msg->nlmsg_len <= (unsigned int)len;
                     len -= msg->nlmsg_len, msg = (void *)((char *)msg + msg->nlmsg_len)) {
                 if (msg->nlmsg_type == 3) goto list_done;          /* NLMSG_DONE */
                 if (msg->nlmsg_type == 2) {                        /* NLMSG_ERROR */
-                    if (*(int *)((char *)msg + 16)) exit_code = 4; /* err 0 == plain ACK */
-                    goto list_done;
+                    /* The errno sits at offset 16, so a message that does not
+                     * carry 20 bytes has no error field to read. Treat that as a
+                     * FAILURE rather than reading past the message and calling
+                     * whatever is there a plain ACK: a truncated error reply is
+                     * not an acknowledgement. */
+                    if (msg->nlmsg_len < 20 || *(int *)((char *)msg + 16)) exit_code = 4;
+                    goto list_done;                                /* err 0 == plain ACK */
                 }
 
                 if (is_gh) {
