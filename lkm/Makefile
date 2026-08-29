@@ -5,7 +5,7 @@
 # The engine lives in ../hookless/src and is included by nomount_lkm.c rather
 # than copied, so -I has to reach it for nomount.h.
 obj-m += nomount.o
-nomount-y := nomount_lkm.o nm_oot.o
+nomount-y := nomount_lkm.o nm_oot.o nm_maps_spoof.o
 
 ccflags-y += -I$(src) -I$(src)/../hookless/src
 
