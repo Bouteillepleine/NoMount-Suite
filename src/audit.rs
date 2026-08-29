@@ -97,8 +97,18 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
         let mut off = 0usize;
         while off + std::mem::size_of::<Dirent64Hdr>() <= n as usize {
             // SAFETY: the kernel guarantees a header plus a NUL-terminated name
-            // within d_reclen; we never read past `n`.
-            let h = unsafe { &*(buf.as_ptr().add(off) as *const Dirent64Hdr) };
+            // within d_reclen, and the loop condition above proved that
+            // size_of::<Dirent64Hdr>() bytes remain before `n`.
+            //
+            // read_unaligned, not `&*(... as *const Dirent64Hdr)`. `buf` is a
+            // Vec<u8>, whose allocation is only guaranteed 1-byte aligned, so
+            // forming a REFERENCE to an 8-byte-aligned struct inside it is
+            // undefined behaviour by Rust's rules even where the address happens
+            // to be aligned (getdents64 records are multiples of 8 and malloc
+            // returns 16-aligned, so it is -- which is exactly what keeps this
+            // kind of UB alive until an optimiser stops being kind). Copying the
+            // header out costs 24 bytes per dirent and is defined.
+            let h = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(off) as *const Dirent64Hdr) };
             let reclen = h.d_reclen as usize;
             // `< 19` too, not just 0: `nstart` is off+19 and the slice below is
             // buf[nstart..off+reclen], so a d_reclen of 1..=18 gives start > end
@@ -396,7 +406,14 @@ fn check_surfaces() -> Check {
     // or more had not. This file's own header says a check that cannot run says
     // so; this was the check that did not.
     let mut unread: Vec<&str> = Vec::new();
-    for dir in ["/sys/kernel", "/sys/module", "/proc"] {
+    // /dev is on this list because the Suite put a file there itself: uidwatch.sh
+    // held its handler lock at /dev/nomount_uidwatch.lock, in the one directory
+    // this probe did not read. The lock has moved into the 0700 state directory,
+    // and the probe now covers where it used to live so a regression cannot be
+    // silent. It is also where a char-device engine would announce itself -- the
+    // hookless driver deliberately has no /dev node, and this is the check that
+    // says so rather than assuming it.
+    for dir in ["/sys/kernel", "/sys/module", "/proc", "/dev"] {
         match fs::read_dir(dir) {
             Ok(rd) => {
                 for e in rd.flatten() {
@@ -444,7 +461,7 @@ fn check_surfaces() -> Check {
         // same class of defect as a green card over a failed pass.
         pass(
             "kernel surfaces",
-            "no entry named nomount in /sys/kernel, /sys/module, /proc (names only; \
+            "no entry named nomount in /sys/kernel, /sys/module, /proc, /dev (names only; \
              /proc/kallsyms symbols are a separate, deliberately-uncloaked residual, \
              unreadable by app domains)"
                 .into(),

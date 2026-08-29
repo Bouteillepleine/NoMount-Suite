@@ -23,6 +23,13 @@ BOOTLOG="$NMDIR/boot.log"
     && mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
 : >> "$BOOTLOG" 2>/dev/null
 chmod 0600 "$BOOTLOG" 2>/dev/null
+
+# Same two sweeps metamount.sh does, for the Magisk path -- this is that path's
+# boot entry point. Done BEFORE the KSU/APatch handover below, because on those
+# managers metamount.sh has already run and both calls are then no-ops, while on
+# Magisk this is the only place either happens. See the notes in metamount.sh.
+rm -f "$NMDIR/.uidwatch.lock" 2>/dev/null
+rm -rf /data/adb/nomount.bak 2>/dev/null
 nmlog() {
     echo "nomount: $*" > /dev/kmsg 2>/dev/null
     echo "$(date '+%Y-%m-%d %H:%M:%S') [post-fs-data] $*" >> "$BOOTLOG" 2>/dev/null
