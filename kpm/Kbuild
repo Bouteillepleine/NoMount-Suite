@@ -26,3 +26,13 @@ ccflags-y += -I$(src)/../hookless/src
 # The engine is in-tree code being built somewhere it was not written for:
 #   unused-function  -- vfs_map_meta_override() has no caller here
 ccflags-y += -Wno-unused-function
+
+# GKI 5.10 and 5.15 are built with ThinLTO, so kbuild emits LLVM bitcode rather
+# than an ELF object and the `ld -r` that assembles the .kpm rejects it with
+# "file format not recognized". 6.1 and 6.6 happened to link, which is exactly
+# the sort of partial success that hides this until half the matrix goes red.
+#
+# We only ever want a plain relocatable object out of this, never a link-time
+# optimised image, so LTO is turned off for it specifically. ccflags-y is
+# appended after the kernel's own KBUILD_CFLAGS, so this wins.
+ccflags-y += -fno-lto
