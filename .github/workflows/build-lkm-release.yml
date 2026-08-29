@@ -214,7 +214,7 @@ jobs:
           fi
           sha256sum "$ko" | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@043fb46da28e7d3186b0c2d1ca4e5a3e35700d3f # v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nomount-lkm-${{ github.event.inputs.ver }}
           path: nomount.ko
