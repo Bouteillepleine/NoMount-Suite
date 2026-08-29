@@ -227,7 +227,6 @@ jobs:
       - name: Undefined symbols left in the .kpm
         id: kpmundef
         if: steps.sel.outputs.run == '1'
-        continue-on-error: true
         run: |
           set -eu
           kpm="$GITHUB_WORKSPACE/nomount-${{ matrix.ver }}.kpm"
@@ -235,21 +234,41 @@ jobs:
           out=/tmp/kpm-undef-${{ matrix.ver }}.txt
           aarch64-linux-gnu-nm -u "$kpm" | awk '{print $2}' | sort -u > "$out"
 
-          # What KernelPatch itself can supply: the symbols its own kernel-side
-          # object exports. Read from the SDK source rather than hardcoded, so
-          # this does not rot when the SDK changes.
-          grep -rhoE '^[a-zA-Z_][a-zA-Z0-9_]*' kp/kernel/base/*.c kp/kernel/include/*.h \
-            2>/dev/null | sort -u > /tmp/kp-syms.txt || true
+          # What KernelPatch supplies to a module itself. Its own docs
+          # (doc/en/module.md) list these as available to a KPM, and
+          # KP_EXPORT_SYMBOL in kernel/base/symbol.c is where they come from.
+          # Anything undefined that is NOT one of these fails the load.
+          cat > /tmp/kp-provided.txt <<'ALLOWED'
+          kallsyms_lookup_name
+          printk
+          symbol_lookup_name
+          ALLOWED
+          sed -i 's/^ *//' /tmp/kp-provided.txt
+          sort -u -o /tmp/kp-provided.txt /tmp/kp-provided.txt
 
-          left=$(comm -23 "$out" /tmp/kp-syms.txt || true)
+          left=/tmp/kpm-unresolvable-${{ matrix.ver }}.txt
+          comm -23 "$out" /tmp/kp-provided.txt > "$left" || true
           {
             echo "#### ${{ matrix.ver }} — undefined in the .kpm"
             echo '```'
-            if [ -s "$out" ]; then cat "$out"; else echo "(none)"; fi
+            if [ -s "$out" ]; then cat "$out"; else echo '(none)'; fi
             echo '```'
-            echo "_Anything here that KernelPatch does not itself provide will fail"
-            echo "the load with \"unknown symbol\"._"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s "$left" ]; then
+            {
+              echo
+              echo "**$(wc -l < "$left") of these are not provided by KernelPatch.**"
+              echo "The loader fails the whole module with \"unknown symbol\" on the"
+              echo "first one, so this .kpm would not load:"
+              echo '```'
+              cat "$left"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$(wc -l < "$left") symbols cannot be resolved at load"
+            exit 1
+          fi
+          echo "All undefined symbols are ones KernelPatch provides." >> "$GITHUB_STEP_SUMMARY"
           echo "count=$(wc -l < "$out")" >> "$GITHUB_OUTPUT"
 
       - name: Report
