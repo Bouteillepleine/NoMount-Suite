@@ -327,10 +327,13 @@ jobs:
           git clone --depth 1 https://github.com/maxsteeel/ko-loader /tmp/kol
           make -C /tmp/kol TARGET=aarch64-linux
 
-          # sstrip, the same treatment nm gets below. zig emits a static binary
-          # with section headers and padding that nothing on the device reads;
-          # unstripped it was 234 KB, a fifth of the whole zip, to load one
-          # module once per boot.
+          # sstrip, the same treatment nm gets below -- though it buys almost
+          # nothing here: ko-loader's own CFLAGS already pass -s, so this only
+          # removes section headers, measured at 234656 -> 233876 bytes. The
+          # binary is large because it statically links a libc, not because it
+          # carries debug info, and shrinking that would mean rewriting it
+          # freestanding the way nm is. Kept for the section-header trim and so
+          # the size is printed rather than assumed.
           make -C userspace/tools/sstrip
           before=$(stat -c%s /tmp/kol/ko-loader)
           userspace/tools/sstrip/sstrip -z /tmp/kol/ko-loader
