@@ -117,7 +117,7 @@ is written as one.
 | 6.1 | **OnePlus 13R** | ✅ Booted, 261/261 rules verified |
 | 5.15 | **OnePlus 11** | ✅ Booted, `check` clean, 118/118 rules verified |
 | 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, … (18 models) | ✅ Booted, 261/261 rules verified |
-| 5.10 | Ace 2, Ace 2V, Nord 3, … (6 models) | 🧩 Compiled, not booted |
+| 5.10 | Ace 2, Ace 2V, Nord 3, … (6 models) | 🧩 Compiled, not tested |
 | 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | — not used by any OnePlus | 🧩 Compiled, not tested |
 
 "Compiled" means `fs/nomount.o` builds against that version's canonical tree in
