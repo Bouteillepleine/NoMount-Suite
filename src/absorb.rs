@@ -1232,7 +1232,7 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
 /// these is never stock: measured on OP15, 21 mounts land inside a ROM partition
 /// (vfat firmware, ext4 dsp, the OEM's own overlayfs) and not one of them is a
 /// tmpfs -- stock keeps those at /dev, /mnt, /apex, /linkerconfig and /tmp.
-const ROM_ROOTS: &[&str] =
+pub(crate) const ROM_ROOTS: &[&str] =
     &["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
 
 /// Is this mountinfo line a tmpfs laid over a ROM path?
