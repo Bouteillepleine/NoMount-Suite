@@ -62,7 +62,7 @@ all: nomount.kpm
 nomount.kpm: nm_kpm_entry.o nm_engine.o
 	$(CC) -r -o $@ $^
 
-nm_kpm_entry.o: nm_kpm_entry.c nm_kpm_syms.h
+nm_kpm_entry.o: nm_kpm_entry.c nm_kpm_syms.h nm_kpm_table.h
 	$(CC) $(COMMON) $(KP_FLAGS) -c -o $@ $<
 
 nm_engine.o: nm_engine.c nm_kpm_shim.h nm_kpm_syms.h $(ENGINE_DIR)/nomount.c $(ENGINE_DIR)/nomount.h
