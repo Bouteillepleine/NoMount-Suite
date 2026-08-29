@@ -61,6 +61,48 @@ fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Reboot, evidence).oracle(oracle)
 }
 
+
+/// The name of every check this file emits, in one place.
+///
+/// These used to be bare string literals repeated across each check's return
+/// arms, and mirrored BY HAND in two more places: `RULE_DEPENDENT`, which stands
+/// in for the rule-reading checks when the dump fails, and the `names` array in
+/// `every_shipped_check_name_has_its_own_id`. Nothing bound the three together,
+/// so renaming a check left the stand-in emitting the old name under a different
+/// slug -- a row the WebUI cannot reconcile with the real one -- and the
+/// uniqueness test went on passing, because it was validating its own copy.
+///
+/// The id every consumer keys on is `check::slug()` of these, so this is also
+/// the list that has to stay collision-free.
+pub(crate) const N_ENGINE_LIVE: &str = "engine responding";
+pub(crate) const N_ZERO_MOUNT: &str = "zero-mount posture";
+pub(crate) const N_SURFACES: &str = "kernel surfaces";
+pub(crate) const N_DIRENT_COOKIE: &str = "readdir cookie magic";
+pub(crate) const N_DINO_STAT: &str = "readdir ino vs stat ino";
+pub(crate) const N_INODE_BAND: &str = "injected inode band";
+pub(crate) const N_OVERLAY_DIR_INO: &str = "overlay dir inode range";
+pub(crate) const N_EROFS_SHAPE: &str = "erofs directory shape";
+pub(crate) const N_MAPS_DELETED: &str = "injected files in maps";
+pub(crate) const N_PM_OPEN: &str = "PM-published files open for a hidden app";
+pub(crate) const N_ROM_TMPFS: &str = "tmpfs over the ROM";
+pub(crate) const N_FOREIGN_MOUNT: &str = "foreign mount over the ROM";
+pub(crate) const N_RULE_DUMP: &str = "engine rule dump";
+
+/// Every name above, so a test can assert over the shipped set rather than a
+/// transcription of it.
+///
+/// Test-only, and deliberately: the CONSTS are what production uses -- each
+/// check emits its own and `RULE_DEPENDENT` names the same ones, which is the
+/// binding that matters. This array only gives the uniqueness test a handle on
+/// them. Forgetting to add a new check here weakens that test; it can no longer
+/// let a check's name and its stand-in drift apart, which is what it used to.
+#[cfg(test)]
+pub(crate) const ALL_CHECK_NAMES: [&str; 13] = [
+    N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DIRENT_COOKIE, N_DINO_STAT,
+    N_INODE_BAND, N_OVERLAY_DIR_INO, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
+    N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP,
+];
+
 // ---------------------------------------------------------------- raw readdir
 
 #[repr(C)]
@@ -155,7 +197,7 @@ fn live_engine_dirs() -> Vec<PathBuf> {
 /// "this name appears in getdents" turns a working whiteout into a failure. The
 /// hand-rolled token split this replaced could not tell the kinds apart, so any
 /// device with a debloat module (or a hand-written `nomount whiteout add`) would
-/// have reported a fabricated "readdir ino vs stat ino" FAIL on the audit users
+/// have reported a fabricated N_DINO_STAT FAIL on the audit users
 /// are told to trust. Route through the shared typed parser instead.
 fn live_targets() -> Option<Vec<PathBuf>> {
     // `unwrap_or_default()` used to sit on this call, which made a REFUSED dump
@@ -219,7 +261,7 @@ fn check_zero_mount() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
         // UNMEASURED, not n/a: every device has a mount table, so failing to read
         // it means the check did not run -- exactly the state that must stay amber.
-        return unmeasured("zero-mount posture", "cannot read /proc/self/mountinfo".into())
+        return unmeasured(N_ZERO_MOUNT, "cannot read /proc/self/mountinfo".into())
             .meaning("Could not read the mount table, so whether any module mount is visible to apps is unknown.");
     };
     // /adb/, not /adb/modules/: a module is free to bind from anywhere under
@@ -271,7 +313,7 @@ fn check_zero_mount() -> Check {
                 by_design.len()
             )
         };
-        pass("zero-mount posture", note).meaning(meaning)
+        pass(N_ZERO_MOUNT, note).meaning(meaning)
     } else {
         // Name the owner. `module_dir_of` was already being called to decide the
         // by-design split and its answer was thrown away for the leaked case --
@@ -388,9 +430,9 @@ fn check_zero_mount() -> Check {
         let evidence = format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked));
         let oracle = "any app can read /proc/self/mountinfo and see a module mounted over the ROM";
         let c = if mine == leaked.len() {
-            chk("zero-mount posture", Verdict::Note, evidence).oracle(oracle)
+            chk(N_ZERO_MOUNT, Verdict::Note, evidence).oracle(oracle)
         } else {
-            fail("zero-mount posture", evidence, oracle)
+            fail(N_ZERO_MOUNT, evidence, oracle)
         };
         c.meaning(why).owner(owner)
     }
@@ -438,7 +480,7 @@ fn check_surfaces() -> Check {
     // Only an EMPTY result depends on having been able to look everywhere.
     if found.is_empty() && !unread.is_empty() {
         return unmeasured(
-            "kernel surfaces",
+            N_SURFACES,
             format!(
                 "could not enumerate {} — nothing named nomount was found in the rest, but \
                  this check did NOT clear the surfaces it could not read",
@@ -460,7 +502,7 @@ fn check_surfaces() -> Check {
         // (measured on OP15). An audit that overstates its own coverage is the
         // same class of defect as a green card over a failed pass.
         pass(
-            "kernel surfaces",
+            N_SURFACES,
             "no entry named nomount in /sys/kernel, /sys/module, /proc, /dev (names only; \
              /proc/kallsyms symbols are a separate, deliberately-uncloaked residual, \
              unreadable by app domains)"
@@ -469,7 +511,7 @@ fn check_surfaces() -> Check {
         .meaning("The engine has no directory entry anywhere an app can list that names it.")
     } else {
         fail(
-            "kernel surfaces",
+            N_SURFACES,
             found.join(", "),
             "a named surface identifies the engine outright, with no analysis needed",
         )
@@ -510,11 +552,11 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
         // n/a. With rules live but no parent readable, the check that would have
         // run did not: unmeasured.
         return if parents.is_empty() {
-            na("readdir cookie magic", "no injection rules are live, so no directory to read".into())
+            na(N_DIRENT_COOKIE, "no injection rules are live, so no directory to read".into())
                 .meaning("Nothing is being injected yet, so there are no listings to check.")
         } else {
             unmeasured(
-                "readdir cookie magic",
+                N_DIRENT_COOKIE,
                 format!("{} injected directory(ies), none could be read", parents.len()),
             )
             .meaning("The injected directories could not be listed, so this was not tested.")
@@ -525,7 +567,7 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
         // regardless. Only a CLEAN result depends on having looked everywhere.
         if unread > 0 {
             return unmeasured(
-                "readdir cookie magic",
+                N_DIRENT_COOKIE,
                 format!(
                     "{scanned} dirent(s) carried no magic, but {unread} of {} injected \
                      directory(ies) could not be listed and were NOT checked",
@@ -537,11 +579,11 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
              looks fine."
             ));
         }
-        pass("readdir cookie magic", format!("0 of {scanned} dirents carry the magic"))
+        pass(N_DIRENT_COOKIE, format!("0 of {scanned} dirents carry the magic"))
             .meaning("Directory listings of injected folders look the same as the ROM's own.")
     } else {
         soft(
-            "readdir cookie magic",
+            N_DIRENT_COOKIE,
             format!("{hits} of {scanned} dirents have 0x6e6d in the top 16 bits of d_off"),
             "one getdents64 on an injected directory identifies the engine, no root needed",
         )
@@ -563,6 +605,14 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     // those are now FAIL rows, and the evidence carries checked/eligible.
     let mut eligible = 0usize;
     let mut checked = 0usize;
+    // Parents that would not enumerate. Same accounting `check_dirent_cookie` and
+    // `check_erofs_dir_shape` were given and this sibling was not: a bare
+    // `continue` here dropped the whole directory from BOTH counters, so a device
+    // where none of them opened fell out with `eligible == 0` and returned n/a --
+    // "no injected file on a non-overlay filesystem to compare", a statement that
+    // is simply false when the reason is that nothing could be read. Grey, and
+    // counted as nothing to see.
+    let mut unread = 0usize;
     let mut bad = Vec::new();
     let mut by_parent: HashMap<PathBuf, Vec<&PathBuf>> = HashMap::new();
     for t in targets {
@@ -576,7 +626,10 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
         if fs_type(parent) == "overlay" {
             continue;
         }
-        let Some(entries) = getdents(parent) else { continue };
+        let Some(entries) = getdents(parent) else {
+            unread += 1;
+            continue;
+        };
         for k in kids {
             let Some(name) = k.file_name().and_then(|n| n.to_str()) else { continue };
             eligible += 1;
@@ -595,8 +648,18 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
         }
     }
     if eligible == 0 {
+        // Two different answers, and only one of them is "nothing to test".
+        if unread > 0 {
+            return unmeasured(
+                N_DINO_STAT,
+                format!("{unread} injected directory(ies) could not be listed, so nothing was compared"),
+            )
+            .meaning(
+                "The folders holding your injected files would not open, so this was not tested.",
+            );
+        }
         return na(
-            "readdir ino vs stat ino",
+            N_DINO_STAT,
             "no injected file on a non-overlay filesystem to compare".into(),
         )
         .meaning(
@@ -604,12 +667,26 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
              same way — so this test would prove nothing.",
         );
     }
+    // A mismatch is a mismatch however partial the scan was, so the FAIL below
+    // stands regardless. Only a CLEAN result depends on having looked everywhere.
+    if bad.is_empty() && unread > 0 {
+        return unmeasured(
+            N_DINO_STAT,
+            format!(
+                "{checked}/{eligible} injected file(s) agree, but {unread} directory(ies) could \
+                 not be listed and were NOT checked"
+            ),
+        )
+        .meaning(format!(
+            "{unread} folder(s) would not open, so they were not checked. What was read looks fine."
+        ));
+    }
     if bad.is_empty() {
-        pass("readdir ino vs stat ino", format!("{checked}/{eligible} injected file(s) agree"))
+        pass(N_DINO_STAT, format!("{checked}/{eligible} injected file(s) agree"))
             .meaning("Injected files report the same identity when listed as when inspected.")
     } else {
         fail(
-            "readdir ino vs stat ino",
+            N_DINO_STAT,
             format!("{} of {eligible} eligible failed ({checked} compared): {}", bad.len(), bad.join("; ")),
             "listing a directory and stat-ing its entries separates injected files from stock",
         )
@@ -626,8 +703,15 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     const BUCKET: u64 = 1_000_000;
     let mut worst: Option<(String, u64, usize)> = None;
     let mut examined = 0usize;
+    // See check_dino_matches_stat: an unreadable directory is evidence that was
+    // not gathered, and reporting it as "no directory qualified" is a false
+    // statement rendered grey.
+    let mut unread = 0usize;
     for parent in parents_of(targets) {
-        let Ok(rd) = fs::read_dir(&parent) else { continue };
+        let Ok(rd) = fs::read_dir(&parent) else {
+            unread += 1;
+            continue;
+        };
         let injected: Vec<&PathBuf> =
             targets.iter().filter(|t| t.parent() == Some(parent.as_path())).collect();
         if injected.len() < 4 {
@@ -662,15 +746,30 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             continue;
         }
         examined += 1;
-        for (b, n) in &ours_buckets {
+        // SORTED, and tie-broken on the bucket number. `ours_buckets` is a HashMap,
+        // so iterating it raw and keeping the first maximum picked an arbitrary one
+        // of two equally-sized bands -- and the evidence string then differed
+        // between two runs of an unchanged device. `Report::sort` exists so that
+        // "two runs of the same device produce a diffable report"; a nondeterministic
+        // evidence line breaks that just as surely as an unstable row order.
+        let mut bands: Vec<(&u64, &usize)> = ours_buckets.iter().collect();
+        bands.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (b, n) in bands {
             if !stock_buckets.contains_key(b) && worst.as_ref().is_none_or(|w| *n > w.2) {
                 worst = Some((parent.to_string_lossy().into_owned(), *b, *n));
             }
         }
     }
     if examined == 0 {
+        if unread > 0 {
+            return unmeasured(
+                N_INODE_BAND,
+                format!("{unread} directory(ies) could not be read, so none could be compared"),
+            )
+            .meaning("The folders this needed to read would not open, so this was not tested.");
+        }
         return na(
-            "injected inode band",
+            N_INODE_BAND,
             "no directory with both enough injections and a stock population to compare".into(),
         )
         .meaning(
@@ -678,14 +777,26 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
              yours is.",
         );
     }
+    if worst.is_none() && unread > 0 {
+        return unmeasured(
+            N_INODE_BAND,
+            format!(
+                "{examined} directory(ies) clean, but {unread} could not be read and were NOT \
+                 checked"
+            ),
+        )
+        .meaning(format!(
+            "{unread} folder(s) would not open, so they were not checked. What was read looks fine."
+        ));
+    }
     match worst {
         None => pass(
-            "injected inode band",
+            N_INODE_BAND,
             format!("{examined} directory(ies): every injected inode shares a bucket with stock"),
         )
         .meaning("Injected files sit in the same numeric range as the ROM's own files."),
         Some((dir, b, n)) => soft(
-            "injected inode band",
+            N_INODE_BAND,
             format!("{dir}: {n} injected inode(s) alone in the {}M bucket, no stock there", b),
             "bucket every inode in a directory and the all-ours band names the injections",
         )
@@ -702,11 +813,17 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
 fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut examined = 0usize;
+    // See check_dino_matches_stat. The non-overlay `continue` above is genuinely
+    // out of scope; this one is a failure to read and must not look the same.
+    let mut unread = 0usize;
     for parent in parents_of(targets) {
         if fs_type(&parent) != "overlay" {
             continue;
         }
-        let Ok(rd) = fs::read_dir(&parent) else { continue };
+        let Ok(rd) = fs::read_dir(&parent) else {
+            unread += 1;
+            continue;
+        };
         let mut stock_max = 0u64;
         let mut dirs = Vec::new();
         for e in rd.flatten() {
@@ -735,21 +852,40 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
         }
     }
     if examined == 0 {
-        return na("overlay dir inode range", "no injected directory on an overlay mount".into())
+        if unread > 0 {
+            return unmeasured(
+                N_OVERLAY_DIR_INO,
+                format!("{unread} overlay directory(ies) could not be read"),
+            )
+            .meaning("The folders this needed to read would not open, so this was not tested.");
+        }
+        return na(N_OVERLAY_DIR_INO, "no injected directory on an overlay mount".into())
             .meaning(
                 "This one only applies to folders the Suite creates on an overlayfs ROM, and you \
                  have none.",
             );
     }
+    if outliers.is_empty() && unread > 0 {
+        return unmeasured(
+            N_OVERLAY_DIR_INO,
+            format!(
+                "{examined} overlay dir(s) clean, but {unread} could not be read and were NOT \
+                 checked"
+            ),
+        )
+        .meaning(format!(
+            "{unread} folder(s) would not open, so they were not checked. What was read looks fine."
+        ));
+    }
     if outliers.is_empty() {
         pass(
-            "overlay dir inode range",
+            N_OVERLAY_DIR_INO,
             format!("{examined} overlay dir(s): synthesized inodes sit inside the stock range"),
         )
         .meaning("Folders the Suite creates carry identity numbers the ROM could plausibly issue.")
     } else {
         soft(
-            "overlay dir inode range",
+            N_OVERLAY_DIR_INO,
             outliers.join("; "),
             "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
         )
@@ -806,7 +942,7 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     // see. Evidence that could not be gathered is not evidence of health.
     if bad.is_empty() && unread > 0 {
         return unmeasured(
-            "erofs directory shape",
+            N_EROFS_SHAPE,
             format!("{ok} erofs parent(s) match the dirent model; {unread} could not be read"),
         )
         .meaning(format!(
@@ -816,7 +952,7 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     }
     if ok == 0 && bad.is_empty() {
         return na(
-            "erofs directory shape",
+            N_EROFS_SHAPE,
             "no single-block erofs parent among the injected paths".into(),
         )
         .meaning(
@@ -825,14 +961,14 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
         );
     }
     if bad.is_empty() {
-        pass("erofs directory shape", format!("{ok} erofs parent(s) match the dirent model"))
+        pass(N_EROFS_SHAPE, format!("{ok} erofs parent(s) match the dirent model"))
             .meaning(
                 "Folders holding injected or hidden files still report the size their contents imply \
              — no arithmetic trace.",
             )
     } else {
         soft(
-            "erofs directory shape",
+            N_EROFS_SHAPE,
             bad.join("; "),
             "st_size stops matching the listing, so a stat plus a getdents64 shows a name was \
              added or hidden",
@@ -843,6 +979,26 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
         )
         .owner("the kernel engine")
     }
+}
+
+/// The pathname of a `/proc/<pid>/maps` line: everything after the fifth field.
+///
+/// NOT `split_whitespace().nth(5)`. A mapping's path is the LAST field and it is
+/// not escaped, so a module shipping a filename with a space in it -- which
+/// nothing forbids, and which this tree has already been bitten by once in the
+/// ghost populator -- was truncated at the space. The truncated string then
+/// matched no rule target, so an injected file mapped "(deleted)" went unreported
+/// and the check passed. A false PASS on the loudest oracle in the set.
+///
+/// Skip five whitespace-delimited fields and take the rest verbatim.
+fn maps_pathname(rest: &str) -> Option<&str> {
+    let mut s = rest;
+    for _ in 0..5 {
+        s = s.trim_start();
+        s = &s[s.find(char::is_whitespace)?..];
+    }
+    let p = s.trim_start();
+    (!p.is_empty()).then_some(p)
 }
 
 /// An injected file must not be mapped as deleted.
@@ -857,12 +1013,12 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
 /// privilege at all.
 fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     if targets.is_empty() {
-        return na("injected files in maps", "no live rules".into())
+        return na(N_MAPS_DELETED, "no live rules".into())
             .meaning("Nothing is being injected yet, so no process can have one mapped.");
     }
     let want: HashSet<&Path> = targets.iter().map(PathBuf::as_path).collect();
     let Ok(rd) = fs::read_dir("/proc") else {
-        return unmeasured("injected files in maps", "cannot read /proc".into())
+        return unmeasured(N_MAPS_DELETED, "cannot read /proc".into())
             .meaning("The process list could not be read, so this was not tested.");
     };
     let mut hits: Vec<String> = Vec::new();
@@ -909,7 +1065,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
                 Some(r) => (r, true),
                 None => (line, false),
             };
-            let Some(path) = rest.split_whitespace().nth(5) else { continue };
+            let Some(path) = maps_pathname(rest) else { continue };
             if !want.contains(Path::new(path)) {
                 continue;
             }
@@ -927,14 +1083,14 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
         // regardless. Only a CLEAN result depends on having looked.
         if scanned == 0 {
             return unmeasured(
-                "injected files in maps",
+                N_MAPS_DELETED,
                 format!("{unread} process(es), none would yield its memory map"),
             )
             .meaning("No process would show its memory map, so this was not tested.");
         }
         if unread > 0 {
             return unmeasured(
-                "injected files in maps",
+                N_MAPS_DELETED,
                 format!(
                     "{scanned} process(es) clean, but {unread} would not yield a map -- \
                      not a complete answer"
@@ -958,7 +1114,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
         // the distinction `Verdict::Unmeasured` was split out of `Skip` for.
         if mappers == 0 {
             return unmeasured(
-                "injected files in maps",
+                N_MAPS_DELETED,
                 format!(
                     "{scanned} process(es) scanned, none has an injected file mapped at all -- \
                      nothing to measure yet (the normal state at boot)"
@@ -970,7 +1126,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             );
         }
         return pass(
-            "injected files in maps",
+            N_MAPS_DELETED,
             format!(
                 "{mappers} of {scanned} process(es) map an injected file, none of them as deleted"
             ),
@@ -987,7 +1143,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     let pending = crate::pmcache::pending();
     if !pending.is_empty() && hits.iter().all(|h| pending.iter().any(|p| h.starts_with(&*p.to_string_lossy()))) {
         return reboot(
-            "injected files in maps",
+            N_MAPS_DELETED,
             format!("{} injected file(s) mapped as deleted: {shown} -- pending reboot after a rule change", hits.len()),
             "still readable until the reboot: any app can see which of its files are injected",
         )
@@ -1000,7 +1156,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     }
     {
         fail(
-            "injected files in maps",
+            N_MAPS_DELETED,
             format!("{} injected file(s) mapped as deleted: {shown}", hits.len()),
             "any app can read its own /proc/self/maps and see which of its files are injected",
         )
@@ -1032,7 +1188,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
 /// what the engine keys on (nomount_is_uid_blocked reads current_uid()), so it
 /// measures the hiding decision and NOT the app's own domain permissions.
 fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
-    const NAME: &str = "PM-published files open for a hidden app";
+    const NAME: &str = N_PM_OPEN;
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
     if apks.is_empty() {
         return na(NAME, "no PM-published rules live".into())
@@ -1162,7 +1318,14 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
              file -- while the PackageManager parsed OUR copy and publishes its version and \
              signature for that path, a disagreement the app can measure. Engine >= 17 keeps \
              NM_FLAG_PUBLIC on a shadowed file; below that the kernel strips it",
-        );
+        )
+        .meaning(
+            "A hidden app CAN open every file Android told it about, but for some of them it is \
+             handed the ROM's original instead of your module's version -- while Android still \
+             advertises your version's number and signature for that path. An app that checks \
+             gets two different answers about one file.",
+        )
+        .owner("the kernel engine");
     }
     fail(
         NAME,
@@ -1176,6 +1339,12 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
          an inconsistency no stock device has, and one that crashes RASP code that walks \
          the package list (engine < 15 cannot express the opt-out; see NM_FLAG_PUBLIC)",
     )
+    .meaning(
+        "A hidden app is being told those files do not exist, while Android tells it they do. \
+         No ordinary device answers both ways about one file, and banking apps that walk the \
+         package list crash on it. Update the kernel, or stop hiding from that app.",
+    )
+    .owner("the kernel engine")
 }
 
 /// A tmpfs mounted inside a ROM partition is never stock.
@@ -1189,10 +1358,15 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
 /// /linkerconfig and /tmp. Visible to any app in its own mountinfo.
 fn check_no_rom_tmpfs() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
-        return unmeasured("tmpfs over the ROM", "cannot read /proc/self/mountinfo".into())
+        return unmeasured(N_ROM_TMPFS, "cannot read /proc/self/mountinfo".into())
             .meaning("Could not read the mount table, so whether a module emptied a ROM folder this way is unknown.");
     };
-    let roots = ["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
+    // absorb's list, not a third copy of it. There were three identical arrays --
+    // this one, its twin in check_no_foreign_rom_mount, and absorb::ROM_ROOTS --
+    // and a device whose OEM ships a partition none of them names would be missed
+    // by whichever two nobody remembered to edit. Same reasoning that collapsed
+    // `serve_mode` into one predicate with two callers.
+    let roots = crate::absorb::ROM_ROOTS;
     let mut hits: Vec<String> = Vec::new();
     for line in mi.lines() {
         let Some((pre, post)) = line.split_once(" - ") else { continue };
@@ -1205,11 +1379,11 @@ fn check_no_rom_tmpfs() -> Check {
         }
     }
     if hits.is_empty() {
-        pass("tmpfs over the ROM", "no tmpfs mounted inside a ROM partition".into())
+        pass(N_ROM_TMPFS, "no tmpfs mounted inside a ROM partition".into())
             .meaning("No ROM folder has been emptied by mounting scratch space over it.")
     } else {
         fail(
-            "tmpfs over the ROM",
+            N_ROM_TMPFS,
             format!("{} ROM path(s) emptied by a tmpfs: {}", hits.len(), hits.join(", ")),
             "stock never mounts tmpfs inside /system, /product or /vendor -- any app can read it from its own mountinfo",
         )
@@ -1235,10 +1409,10 @@ fn check_no_rom_tmpfs() -> Check {
 /// not match -- and a plain tmpfs (root "/", its own dev) is left to the check above.
 fn check_no_foreign_rom_mount() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
-        return unmeasured("foreign mount over the ROM", "cannot read /proc/self/mountinfo".into())
+        return unmeasured(N_FOREIGN_MOUNT, "cannot read /proc/self/mountinfo".into())
             .meaning("Could not read the mount table, so whether anything foreign is mounted over the ROM is unknown.");
     };
-    let roots = ["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
+    let roots = crate::absorb::ROM_ROOTS;
     let rows = crate::absorb::parse_mountinfo(&mi);
     // maj:min of /data, so a mount served off userdata is recognised by device
     // rather than by the source path (which mountinfo does not carry usefully here).
@@ -1269,11 +1443,11 @@ fn check_no_foreign_rom_mount() -> Check {
         }
     }
     if hits.is_empty() {
-        pass("foreign mount over the ROM", "no non-/data/adb bind or image mounted over a ROM partition".into())
+        pass(N_FOREIGN_MOUNT, "no non-/data/adb bind or image mounted over a ROM partition".into())
             .meaning("Nothing outside the module system is mounted over a read-only ROM partition.")
     } else {
         fail(
-            "foreign mount over the ROM",
+            N_FOREIGN_MOUNT,
             format!("{} foreign mount(s) over the ROM: {}", hits.len(), hits.join(", ")),
             "a bind from /data/local/tmp or /cache, or an image over the ROM, is visible in any app's mountinfo just like a module mount",
         )
@@ -1304,7 +1478,7 @@ fn check_no_foreign_rom_mount() -> Check {
 /// are not applied -- but it has to be able to make the summary non-clean,
 /// because "your setup is fine" is the question the summary is read as answering.
 fn check_engine_live() -> Check {
-    const NAME: &str = "engine responding";
+    const NAME: &str = N_ENGINE_LIVE;
     match Nm::new().version() {
         Ok(v) => pass(NAME, format!("Prism engine v{v} answered over netlink"))
             .meaning(format!(
@@ -1328,13 +1502,13 @@ fn check_engine_live() -> Check {
 /// Every check that reads the live rule list, by the exact name it reports
 /// under. When the dump fails these are the ones that cannot run.
 const RULE_DEPENDENT: [&str; 7] = [
-    "readdir cookie magic",
-    "readdir ino vs stat ino",
-    "injected inode band",
-    "overlay dir inode range",
-    "erofs directory shape",
-    "injected files in maps",
-    "PM-published files open for a hidden app",
+    N_DIRENT_COOKIE,
+    N_DINO_STAT,
+    N_INODE_BAND,
+    N_OVERLAY_DIR_INO,
+    N_EROFS_SHAPE,
+    N_MAPS_DELETED,
+    N_PM_OPEN,
 ];
 
 /// Every measured check, plus the two counts the report header carries.
@@ -1354,7 +1528,7 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
         if answered {
             checks.push(
                 fail(
-                    "engine rule dump",
+                    N_RULE_DUMP,
                     "the engine answered its version but refused to list its rules".into(),
                     "not an oracle -- this is the audit failing to read the device, not the \
                      device leaking",
@@ -1437,6 +1611,57 @@ mod tests {
         let _ = judged;
     }
 
+    /// A mapping's path is the LAST field and may contain spaces.
+    ///
+    /// `split_whitespace().nth(5)` truncated it at the first space, so the
+    /// truncated string matched no rule target and an injected file mapped
+    /// "(deleted)" went unreported -- a false PASS on the loudest oracle here.
+    #[test]
+    fn a_maps_pathname_survives_a_space_in_it() {
+        let plain = "7f8a00000-7f8a01000 r--p 00000000 fe:29 1234    /product/app/Foo/Foo.apk";
+        assert_eq!(maps_pathname(plain), Some("/product/app/Foo/Foo.apk"));
+
+        let spaced = "7f8a00000-7f8a01000 r--p 00000000 fe:29 1234    /product/app/My App/My App.apk";
+        assert_eq!(maps_pathname(spaced), Some("/product/app/My App/My App.apk"));
+
+        // An anonymous mapping has no sixth field at all.
+        assert_eq!(maps_pathname("7f8a00000-7f8a01000 rw-p 00000000 00:00 0 "), None);
+        assert_eq!(maps_pathname("short line"), None);
+    }
+
+    /// A directory that will not enumerate is UNMEASURED, never "nothing to test".
+    ///
+    /// `check_dirent_cookie` and `check_erofs_dir_shape` were given this
+    /// accounting and their three siblings were not, so an unreadable parent left
+    /// `eligible == 0` and returned n/a -- "no injected file on a non-overlay
+    /// filesystem to compare" -- which is a false statement rendered grey and
+    /// counted as nothing to see.
+    #[test]
+    fn an_unreadable_parent_is_unmeasured_not_not_applicable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("locked");
+        std::fs::create_dir(&dir).unwrap();
+        let f = dir.join("x");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Running as root (or on a filesystem that ignores the mode) can still
+        // read it, and then there is nothing to assert.
+        let blocked = getdents(&dir).is_none();
+        if blocked {
+            let c = check_dino_matches_stat(std::slice::from_ref(&f));
+            assert_eq!(
+                c.verdict.tag(),
+                "UNMEASURED",
+                "an unreadable directory must not read as \"nothing to compare\""
+            );
+            let b = check_inode_band(std::slice::from_ref(&f), &[]);
+            assert_eq!(b.verdict.tag(), "UNMEASURED");
+        }
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+
     /// Every shipped check name must yield its own id.
     ///
     /// The ids used to come from a hand-maintained `id_of` table whose fallback
@@ -1450,21 +1675,7 @@ mod tests {
     /// `check.rs`, which is where the one verdict enum lives.
     #[test]
     fn every_shipped_check_name_has_its_own_id() {
-        let names = [
-            "engine responding",
-            "zero-mount posture",
-            "kernel surfaces",
-            "readdir cookie magic",
-            "readdir ino vs stat ino",
-            "injected inode band",
-            "overlay dir inode range",
-            "erofs directory shape",
-            "injected files in maps",
-            "PM-published files open for a hidden app",
-            "tmpfs over the ROM",
-            "foreign mount over the ROM",
-            "engine rule dump",
-        ];
+        let names = ALL_CHECK_NAMES;
         let mut ids: Vec<String> = names.iter().map(|n| slug(n)).collect();
         assert!(ids.iter().all(|i| i != "unnamed-check"), "a check name lost its id: {ids:?}");
         let n = ids.len();
@@ -1472,7 +1683,7 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), n, "two checks share an id");
         // The one the report's sort keys on by name.
-        assert_eq!(slug("engine responding"), "engine-responding");
+        assert_eq!(slug(N_ENGINE_LIVE), "engine-responding");
     }
 
     /// Issue #14: a ReVanced module binds its APK from /data/adb/rvhc, not from
