@@ -57,6 +57,12 @@ on:
         description: "Branch holding lkm/ (this file lives on main; the code does not)"
         required: false
         default: 'LKM'
+      trim_to_kmi:
+        description: "Trim exports to the GKI KMI, as a released GKI kernel does"
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
 
 permissions:
   contents: read
@@ -166,6 +172,36 @@ jobs:
             grep -qx "$opt=y" .config || { echo "::error::$opt unset after olddefconfig"; exit 1; }
           done
 
+          # KMI TRIMMING.
+          #
+          # A released GKI kernel exports only the symbols named in
+          # android/abi_gki_aarch64*; everything else loses its export even
+          # though the source EXPORT_SYMBOLs it. That is applied by Google's
+          # Bazel build (trim_nonlisted_kmi), NOT by gki_defconfig -- so a plain
+          # `make gki_defconfig` here would NOT reproduce it, and a module that
+          # links against such a build tells you nothing about whether it would
+          # load on a phone.
+          #
+          # Reproduced explicitly: concatenate every abi list into one whitelist
+          # and turn trimming on. This is the build that answers "is this module
+          # KMI-portable".
+          if [ "${{ github.event.inputs.trim_to_kmi }}" = 'true' ]; then
+            if ! ls android/abi_gki_aarch64* >/dev/null 2>&1; then
+              echo "::error::no android/abi_gki_aarch64* lists here; no KMI to trim to"
+              exit 1
+            fi
+            cat android/abi_gki_aarch64* \
+              | grep -E '^[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*$' \
+              | tr -d ' \t' | sort -u > android/nm_kmi_union
+            echo "KMI whitelist: $(wc -l < android/nm_kmi_union) symbols"
+            ./scripts/config --enable CONFIG_TRIM_UNUSED_KSYMS \
+                             --set-str CONFIG_UNUSED_KSYMS_WHITELIST android/nm_kmi_union
+            make $M olddefconfig
+            grep -qx 'CONFIG_TRIM_UNUSED_KSYMS=y' .config || {
+              echo "::error::trimming did not stick"; exit 1; }
+            echo "TRIMMED=1" >> "$GITHUB_ENV"
+          fi
+
       - name: Build kernel (this is what produces a real Module.symvers)
         run: |
           set -eu
@@ -216,6 +252,17 @@ jobs:
             echo
             echo "**Loadable on:** a kernel whose vermagic matches the line above."
             echo "Compare with \`cat /proc/version\` on the device before insmod."
+            echo
+            if [ "${TRIMMED:-0}" = 1 ]; then
+              echo "Built against a **KMI-trimmed** kernel: exports were restricted to"
+              echo "the union of \`android/abi_gki_aarch64*\`, the way a released GKI"
+              echo "kernel is. Linking under those conditions is what shows the six"
+              echo "symbols GKI trims are genuinely handled by \`lkm/nm_oot_tramp.c\`."
+            else
+              echo "Built against an **untrimmed** kernel, so every EXPORT_SYMBOL in the"
+              echo "source was available. That is easier than a real GKI kernel -- rerun"
+              echo "with \`trim_to_kmi: true\` to test the case that matters."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           # NOT an error check. Every valid .ko carries undefined symbols -- that
           # is how module linking works: they are resolved against the kernel at
