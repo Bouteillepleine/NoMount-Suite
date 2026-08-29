@@ -29,9 +29,14 @@ ifndef KERNEL_DIR
     $(error KERNEL_DIR not set: configured kernel source for the TARGET KMI (<= 6.6))
 endif
 
-CC ?= $(TARGET_COMPILE)gcc
-LD ?= $(TARGET_COMPILE)ld
-NM ?= $(TARGET_COMPILE)nm
+# ':=' and not '?=' -- make PREDEFINES CC as 'cc', so '?=' never fires and the
+# whole build silently ran through the host x86 compiler against arm64 kernel
+# headers. That surfaces as "unsupported size for integer register" from the
+# assembler rather than as anything mentioning the wrong compiler. The old port's
+# Makefile carried the same latent bug. A command-line CC= still wins over this.
+CC := $(TARGET_COMPILE)gcc
+LD := $(TARGET_COMPILE)ld
+NM := $(TARGET_COMPILE)nm
 
 ENGINE_DIR := ../hookless/src
 
