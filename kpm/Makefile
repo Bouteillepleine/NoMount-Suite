@@ -29,13 +29,6 @@ ifndef KERNEL_DIR
     $(error KERNEL_DIR not set: the configured/built kernel tree for the TARGET KMI (<= 6.6))
 endif
 
-# A GKI build tree is SPLIT: generated headers (autoconf.h, the generated/
-# directories) live under the build dir KERNEL_DIR, while the static headers
-# (include/linux/*.h and the arch tree) live in the source tree. A normal
-# `make -C $KDIR M=...` bridges the two on its own; this hand-rolled compile has
-# to be told. The DDK exposes the source as $KDIR/source; a plain in-tree build
-# has KERNEL_DIR == KERNEL_SRC. Override KERNEL_SRC if your layout differs.
-KERNEL_SRC ?= $(firstword $(wildcard $(KERNEL_DIR)/source) $(KERNEL_DIR))
 
 # ':=' and not '?=' -- make PREDEFINES CC as 'cc', so '?=' never fires and the
 # whole build silently ran through the host x86 compiler against arm64 kernel
@@ -54,19 +47,6 @@ KP_FLAGS := $(foreach d,$(KP_INCLUDE_DIRS),-I$(KP_DIR)/kernel/$(d))
 
 CC_INCLUDE := $(shell $(CC) -print-file-name=include)
 
-# Search order matches kbuild's own: generated (build dir) BEFORE static
-# (source), so a generated header wins over any placeholder of the same name in
-# the source tree. arch generated headers likewise come from the build dir.
-K_FLAGS := -nostdinc -isystem $(CC_INCLUDE) \
-           -I$(KERNEL_DIR)/include/generated -I$(KERNEL_DIR)/include/generated/uapi \
-           -I$(KERNEL_SRC)/include -I$(KERNEL_SRC)/include/uapi \
-           -I$(KERNEL_DIR)/arch/arm64/include/generated \
-           -I$(KERNEL_DIR)/arch/arm64/include/generated/uapi \
-           -I$(KERNEL_SRC)/arch/arm64/include -I$(KERNEL_SRC)/arch/arm64/include/uapi \
-           -I$(ENGINE_DIR) \
-           -include $(KERNEL_SRC)/include/linux/kconfig.h \
-           -D__KERNEL__ -DMODULE -DKBUILD_MODNAME='"nomount"'
-
 COMMON := -O2 -fno-stack-protector -fno-pic -ffreestanding -Wall
 
 all: nomount.kpm
@@ -83,8 +63,17 @@ nm_kpm_entry.o: nm_kpm_entry.c nm_kpm_syms.h nm_kpm_table.h
 nm_kpm_tramp.o: nm_kpm_tramp.c nm_kpm_syms.h
 	$(CC) $(COMMON) -c -o $@ $<
 
-nm_engine.o: nm_engine.c nm_kpm_shim.h nm_kpm_syms.h $(ENGINE_DIR)/nomount.c $(ENGINE_DIR)/nomount.h
-	$(CC) $(COMMON) $(K_FLAGS) -c -o $@ $<
+# Built by kbuild, against the target kernel, with that kernel's own flags.
+# See kpm/Kbuild for why this is not a direct compiler invocation.
+#
+# `M=$(CURDIR)` makes kpm/ an external module directory; kbuild reads Kbuild
+# there in preference to this Makefile, so the two do not collide. Only the
+# object is wanted -- no modpost, no .ko -- which is why the target is the .o
+# and not `modules`.
+nm_engine.o: nm_engine.c nm_kpm_shim.h nm_kpm_syms.h Kbuild \
+             $(ENGINE_DIR)/nomount.c $(ENGINE_DIR)/nomount.h
+	$(MAKE) -C $(KERNEL_DIR) M=$(CURDIR) ARCH=arm64 \
+		CROSS_COMPILE=$(TARGET_COMPILE) $@
 
 # THE redirect list, and the reason this target exists.
 #
@@ -103,4 +92,5 @@ undefined: nm_engine.o
 
 .PHONY: clean
 clean:
-	rm -f *.o *.kpm
+	rm -f *.o *.kpm .*.cmd Module.symvers modules.order
+	rm -rf .tmp_versions

@@ -1,0 +1,28 @@
+# Kbuild fragment for the engine half of the .kpm.
+#
+# WHY THE ENGINE OBJECT IS BUILT BY KBUILD AND NOT BY OUR OWN COMPILER LINE
+#
+# It used to be compiled directly, with a hand-written K_FLAGS listing every
+# -I the kernel headers need. That works against a normal in-tree checkout and
+# breaks against a real GKI build tree, which is SPLIT: the generated headers
+# (autoconf.h, include/generated) live in the build directory, the static ones
+# (include/linux, the arch tree) live in a separate source tree, and the build
+# directory reaches them through a `source` symlink. Reproducing that by hand
+# means reproducing kbuild's include order, its -D flags, and its arch plumbing,
+# and getting any of it subtly wrong changes struct layouts rather than failing
+# the compile -- the worst possible failure for this particular object, which
+# exists to dereference struct inode and dentry correctly.
+#
+# So: kbuild builds it, exactly as it builds any external module object, and the
+# flags are whatever the target kernel actually uses.
+#
+# The ENTRY half is still compiled separately against the KernelPatch SDK
+# headers -- see kpm/Makefile. The two are joined with `ld -r`.
+
+obj-m += nm_engine.o
+
+ccflags-y += -I$(src)/../hookless/src
+
+# The engine is in-tree code being built somewhere it was not written for:
+#   unused-function  -- vfs_map_meta_override() has no caller here
+ccflags-y += -Wno-unused-function
