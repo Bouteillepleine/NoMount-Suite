@@ -14,8 +14,12 @@ metamodule can be active, so it refuses to install alongside another.
 ## Requirements
 
 - **arm64** device; the zip ships an `arm64-v8a` binary only.
-- A kernel with the **Prism** engine (`CONFIG_NOMOUNT=y`), from
-  [`kbuild@hookless`](https://github.com/Bouteillepleine/kbuild/tree/hookless).
+- A kernel with the **Prism** engine (`CONFIG_NOMOUNT=y`). Its source lives in
+  this repository under [`hookless/`](hookless/) — the driver, the integration
+  patch, and a matrix that compile-tests it against every supported kernel
+  version. The engine and this Suite are versioned together because they have to
+  be flashed together: the control plane is a private protocol between them, and
+  a mismatched pair reads as "engine not responding" with nothing to say why.
 - **KernelSU**, **SukiSU** or **APatch** (metamodule hook), or **Magisk**
   (`post-fs-data`). If neither path runs, the module says so loudly rather than
   doing nothing silently.
