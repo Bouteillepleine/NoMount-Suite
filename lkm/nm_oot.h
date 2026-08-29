@@ -15,24 +15,12 @@
  * verbatim, so there is one copy of it in this repository and this variant
  * cannot drift from the in-tree build without the drift being a compile error.
  *
- * WHAT NEEDS REDIRECTING, AND WHY IT IS NOT WHAT THE LINKER SAYS
- *
- * Against an untrimmed kernel the linker names nothing: every function the
- * engine calls is EXPORT_SYMBOL'd in source, which the ten-version compile gate
- * established. That answer is right for the kernel it was measured on and wrong
- * for the one people actually run.
- *
- * A released GKI kernel is built with CONFIG_TRIM_UNUSED_KSYMS against an
- * allow-list: only symbols named in android/abi_gki_aarch64* keep their exports.
- * Measured against the union of all 36 of those lists for android15-6.6 (9366
- * symbols), 89 of the engine's 98 are in the KMI; three of the remainder are not
- * kernel symbols at all, and six are genuinely trimmed. Those six are handled in
- * nm_oot_tramp.c, by trampoline rather than by NM_SYM -- see the note there for
- * why a signature-free redirect is worth having when three of the six changed
- * shape inside the supported range.
- *
- * NM_SYM below is kept for the case it was written for: a symbol that needs a
- * TYPED wrapper rather than a bare jump. Nothing uses it yet.
+ * THE REDIRECT LIST IS EMPTY ON PURPOSE, for now. Which symbols need one is a
+ * question for the linker, not for me: `make modules` names every undefined
+ * symbol, and that list is the specification. Guessing it from grep would
+ * produce redirects for symbols that are exported (harmless but noise) and miss
+ * ones that are not (a build failure at best). See NM_SYM below and the
+ * `undefined symbols` step in .github/workflows/build-lkm.yml.
  */
 #ifndef _NM_OOT_H
 #define _NM_OOT_H
@@ -69,21 +57,5 @@ int nm_oot_resolve_all(void);
     extern ret (*nm_p_##name) params;                         \
     static inline ret nm_s_##name params { return nm_p_##name args; } \
     /* redirect the engine's call sites at the real name */
-
-/*
- * The trimmed six. Order is load-bearing: nm_oot_tramp.c spells these indices
- * as literals in asm, and asserts each one against this enum.
- */
-enum nm_oot_sym {
-	NM_OOT_vfs_getxattr,
-	NM_OOT_vfs_setxattr,
-	NM_OOT_free_inode_nonrcu,
-	NM_OOT_netlink_rcv_skb,
-	NM_OOT_security_inode_getsecctx,
-	NM_OOT_security_inode_notifysecctx,
-	NM_OOT_SYM_COUNT
-};
-
-extern void *nm_oot_sym[NM_OOT_SYM_COUNT];
 
 #endif /* _NM_OOT_H */
