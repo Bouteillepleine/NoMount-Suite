@@ -316,7 +316,16 @@ def main():
     lists = read_per_version(a.per_version) if a.per_version else {}
     optional = optional_set(lists)
 
-    table_syms = [s for s in symbols if s not in LOCAL and s not in KP_PROVIDED]
+    # DATA and WEAK are added unconditionally, NOT taken from the measurement.
+    # They are reached through a macro rather than a call, so once that macro
+    # works they stop appearing in the undefined list -- init_net dropped out
+    # of it for exactly that reason once the shim was in place. Regenerating
+    # from the measurement alone would delete the enum entries the macros and
+    # nm_engine.c depend on, and the build would then break in a way that
+    # looks like the measurement was right.
+    measured = set(symbols) | DATA | WEAK
+    table_syms = [s for s in sorted(measured)
+                  if s not in LOCAL and s not in KP_PROVIDED]
     # Everything callable gets a trampoline. Data, the weak pair and anything
     # handled locally do not.
     tramp = [s for s in table_syms if s not in DATA and s not in WEAK]
