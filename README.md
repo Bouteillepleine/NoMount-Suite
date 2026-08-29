@@ -90,14 +90,21 @@ checks its variant branch out to build.
 
 | workflow | what it gives you |
 | :--- | :--- |
-| **NoMount LKM — out-of-tree build** | compile gate over all ten kernels, on every push to `lkm`. Fast, and proves only that the engine still builds as a module. |
-| **NoMount LKM — build a loadable module** | one kernel, ~40 min: builds it far enough for a real `Module.symvers`, then uploads a properly linked `nomount.ko`. |
+| **NoMount LKM — per-KMI modules** | the one to use. Builds `nomount-<kmi>.ko` for all seven GKI KMI generations in ~2 minutes, inside the Android DDK containers. |
+| **NoMount LKM — out-of-tree build** | compile gate over all ten kernels on every push. Proves only that the engine still builds as a module — it runs modpost under `KBUILD_MODPOST_WARN=1`, so it cannot tell you a module would link. |
+| **NoMount LKM — build a loadable module** | fallback, ~40 min: compiles a kernel from source for its `Module.symvers`. Only worth it to target a kernel the DDK has no container for, e.g. your own builder's tree via `kernel_repo`/`kernel_ref`. |
 | **NoMount KPM — build a KernelPatch module** | 5.4 → 6.6: uploads `nomount.kpm`, and fails if any symbol would be unresolvable at load. |
 
-A downloaded `nomount.ko` **will not load on an arbitrary device** — vermagic and
-symbol CRCs must match the kernel it was built against. Pass `kernel_repo`,
-`kernel_ref` and `defconfig` pointing at your own kernel source, then check
-`modinfo nomount.ko` against `cat /proc/version` on the phone.
+The per-KMI build uses `ghcr.io/ylarod/ddk:<kmi>`, whose `$KDIR` already holds a
+released GKI kernel's real `Module.symvers` — so it links against the same export
+table a phone has, without building a kernel.
+
+A module is portable across a **KMI generation**, not a kernel version:
+`android12-5.10` and `android13-5.10` are the same version and different KMIs.
+Vermagic must still match at load — it is `UTS_RELEASE` plus flags, and GKI keeps
+the git SHA out of it, which is what lets one `.ko` serve a generation. A custom
+kernel that sets its own `LOCALVERSION` breaks that, so check `modinfo
+nomount.ko` against `cat /proc/version` before assuming.
 
 ## Commands
 
