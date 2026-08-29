@@ -1,48 +1,70 @@
 #!/usr/bin/env python3
-"""Generate the KPM symbol table and redirect shim from a measured symbol list.
+"""Generate the KPM symbol table, trampolines and shim from a measured list.
 
-WHY THIS IS GENERATED
+WHY ANY OF THIS IS NEEDED
 
 A .kpm cannot call kernel functions directly. KernelPatch's loader resolves
 undefined symbols only against its own table (kernel/patch/module/module.c,
-simplify_symbols), and its kallsyms fallback is commented out with the reason:
+simplify_symbols), and the kallsyms fallback there is commented out with the
+reason:
 
     // kernel symbol cause overflow in relocation
 
 An AArch64 `bl` reaches +/-128 MB; a kallsyms address is far outside that from
-wherever the module was allocated. So every kernel call has to become an
-INDIRECT call through a pointer resolved at load time. That is what nm_kpm_sym[]
-is, and this script writes the plumbing.
+wherever the module was allocated. Every kernel call therefore has to become an
+indirect call through a pointer resolved at load time. nm_kpm_sym[] is that
+table, and this script writes the plumbing around it.
 
 The input is measured, never invented:
 
     make -C kpm undefined TARGET_COMPILE=... KP_DIR=... KERNEL_DIR=...
 
-Run this against the union of those lists across the supported kernels.
+run against each supported kernel, unioned.
 
-WHY typeof() RATHER THAN HAND-WRITTEN SIGNATURES
+TRAMPOLINES, NOT MACROS
 
-Each redirect needs the function's exact prototype for the target KMI, and
-several changed inside the supported range (vfs_getxattr and vfs_setxattr gained
-a user_namespace/mnt_idmap argument at 5.12 and again at 6.3). Writing ~100
-signatures five times over would be both laborious and a standing source of
-silent breakage.
+The obvious approach is a macro per symbol that calls through the table. It does
+not work, and the way it fails is worth recording so nobody tries it again.
 
-Instead each macro reads the prototype back out of the kernel's own header:
+A macro only rewrites calls written in nomount.c's own text. Much of what the
+engine calls it reaches through STATIC INLINES in the kernel headers -- kmalloc
+lands on __kmalloc and kmalloc_caches, spin_lock on _raw_spin_lock, nlmsg_put on
+__nlmsg_put. Those inline bodies are parsed with the headers, long before any
+shim macro exists, so their references survive untouched. A macro shim covering
+all 102 symbols was built and measured: it still left 27 undefined, all of them
+reached through header inlines.
 
-    #define kern_path(...) ((typeof(&kern_path))nm_kpm_sym[NMS_kern_path])(__VA_ARGS__)
+So instead each symbol gets a real definition under its own name -- a naked
+trampoline that tail-calls through the table:
 
-The preprocessor does not re-expand a macro inside its own expansion, so the
-`kern_path` inside `typeof(&kern_path)` is the real declaration from
-<linux/namei.h>. The signature is therefore correct by construction on every
-kernel, and a mismatch is a compile error rather than a runtime fault.
+        adrp x16, nm_kpm_sym
+        add  x16, x16, :lo12:nm_kpm_sym
+        ldr  x16, [x16, #(8*IDX)]
+        br   x16
 
-ORDERING CONSTRAINT
+That satisfies references from anywhere -- engine text, header inlines, function
+pointers stored in vtables -- because it is an ordinary symbol definition. It
+needs no prototype, so nothing has to track signatures across the supported
+range (vfs_getxattr and vfs_setxattr each gained an argument twice inside it).
+Arguments stay in their registers untouched; x16 is the designated
+intra-procedure-call scratch register, so clobbering it is safe. And `br` has no
+range limit, which is the constraint that defeated the direct call.
 
-These macros must be defined AFTER the kernel headers are parsed. A function-like
-`#define memcpy(...)` expands inside string.h's own declaration of memcpy and
-breaks it. nm_engine.c therefore includes the engine's headers first, then this
-shim, then the engine body.
+The relocations this needs -- ADR_PREL_PG_HI21, ADD_ABS_LO12_NC,
+LDST64_ABS_LO12_NC -- are all handled by KernelPatch's relocator in
+kernel/patch/module/relo.c.
+
+WHAT STILL NEEDS A MACRO
+
+Data, and the weak optional pair. Neither is a call, so no trampoline helps:
+
+  init_net        taken by address in the engine's own text, which a macro reaches
+  slab entries    kmalloc/kzalloc/kmalloc_array are inlines that index the
+                  kmalloc_caches ARRAY. A trampoline cannot stand in for an array
+                  object, so these are redirected to __kmalloc instead, which
+                  stops the inline being instantiated at all
+  ghost_ctl       the engine tests their ADDRESS as a feature probe, so a
+  ghost_get_rule  trampoline would be non-NULL and falsely advertise ghost support
 """
 
 import argparse
@@ -50,51 +72,45 @@ import io
 import os
 
 # ---------------------------------------------------------------- special cases
-#
-# Everything not listed here becomes a plain function redirect.
 
-# Data objects, not functions: the macro dereferences the table entry rather
-# than calling it, so `&sym` and `sym[i]` both still mean the real kernel object.
-#
-# typeof(&sym) carries the whole type, which matters more than it looks:
-# kmalloc_caches is a two-dimensional array whose extents are configuration
-# dependent (NR_KMALLOC_TYPES x KMALLOC_SHIFT_HIGH+1), and writing that cast out
-# by hand would be both unreadable and wrong on some configs.
-DATA = {'init_net', 'kmalloc_caches'}
+# Data objects. A trampoline is a function; these are not, so they keep a macro.
+# kmalloc_caches is handled by SLAB_REDIRECT below instead of appearing here:
+# it is only ever reached from slab.h's inlines, never from the engine's text,
+# so a macro on it would rewrite nothing.
+DATA = {'init_net'}
 
-# Declared __attribute__((weak)) in the engine and legitimately absent: the
-# engine tests `if (!ghost_ctl)` before calling. These resolve to NULL when the
-# ghost module is not loaded, which is exactly what that test wants.
-#
-# They matter here for a second reason: KernelPatch's loader does not special-
-# case weak undefined symbols, so leaving them undefined fails the whole load
-# with "unknown symbol" rather than resolving them to zero.
+# Reached only through kernel-header inlines that also touch kmalloc_caches.
+# Redirecting the entry points to __kmalloc (which does get a trampoline) stops
+# those inlines being instantiated, and takes kmalloc_caches, kmalloc_trace and
+# kmalloc_large out of the undefined set with them.
+SLAB_REDIRECT = {
+    'kmalloc': '__kmalloc((__VA_ARGS__))',
+    'kzalloc': None,          # spelled out below; needs __GFP_ZERO
+    'kmalloc_array': None,
+}
+
+# Declared __attribute__((weak)) by the engine, and legitimately absent: it
+# tests the address before calling, and that test is a feature probe. They also
+# matter because KernelPatch's loader does not special-case weak undefined
+# symbols -- leaving them undefined fails the whole load with "unknown symbol".
 WEAK = {'ghost_ctl', 'ghost_get_rule'}
 
-# Used as a VALUE in a static initializer (`.read = generic_read_dir`), where a
-# macro cannot help: a static initializer needs a constant, and a table lookup is
-# not one. nm_engine.c defines a real forwarding function under this name
-# instead, so the initializer keeps a genuine address and the forwarding happens
-# at call time.
-FORWARD = {'generic_read_dir'}
-
-# Provided locally by nm_engine.c rather than redirected.
-#
-#   mem*/str*     the compiler emits calls to these on its own -- a struct
-#                 assignment becomes memcpy -- and a macro cannot intercept what
-#                 the compiler generates. They need real definitions.
-#   __this_module the MODULE macros reference it; a KPM has no module struct.
+# Provided as real code by nm_engine.c rather than redirected: the compiler emits
+# calls to these on its own (a struct assignment becomes a memcpy), so nothing
+# that works at the source level can intercept them.
 LOCAL = {
     'memcpy', 'memset', 'memcmp',
     'strlen', 'strcmp', 'strncmp', 'strnlen', 'strrchr',
     '__this_module',
 }
 
-# Renamed across the supported range. Resolution tries the primary name, then the
-# alternate, so one table serves every KMI.
+# Supplied by KernelPatch to the entry half, not by the kernel. They appear
+# undefined in the linked .kpm and that is correct -- the loader resolves them.
+KP_PROVIDED = {'kallsyms_lookup_name', 'printk'}
+
+# Renamed across the supported range; resolution tries name then alt.
 ALT = {
-    '_printk': 'printk',            # renamed at 5.15
-    'printk': '_printk',
+    '_printk': 'printk',
     'kvfree_call_rcu': 'kfree_call_rcu',
     'kfree_call_rcu': 'kvfree_call_rcu',
     'kfree_skb_reason': 'kfree_skb',
@@ -104,66 +120,23 @@ ALT = {
     'kmem_cache_create': '__kmem_cache_create_args',
 }
 
-# The supported kernels, in order. Used both for optionality and for the version
-# guards around symbols that do not exist on every one of them.
 VERSIONS = ['5.4', '5.10', '5.15', '6.1', '6.6']
 
 
-def read_per_version(per_version_dir):
-    """{version: set(symbols)} from the measured lists."""
+def read_per_version(d):
     lists = {}
     for v in VERSIONS:
-        p = os.path.join(per_version_dir, v + '.txt')
-        if not os.path.exists(p):
-            continue
-        with io.open(p, encoding='utf-8') as fh:
-            lists[v] = {ln.strip() for ln in fh if ln.strip()}
+        p = os.path.join(d, v + '.txt')
+        if os.path.exists(p):
+            with io.open(p, encoding='utf-8') as fh:
+                lists[v] = {ln.strip() for ln in fh if ln.strip()}
     return lists
 
 
 def optional_set(lists):
-    """Symbols absent from at least one supported kernel."""
     if not lists:
         return set()
     return set.union(*lists.values()) - set.intersection(*lists.values())
-
-
-def kv(ver):
-    major, minor = ver.split('.')
-    return 'KERNEL_VERSION(%s, %s, 0)' % (major, minor)
-
-
-def version_guard(sym, lists):
-    """(#if line, #endif line) for a symbol that does not exist on every kernel.
-
-    A macro like
-
-        #define printk(...) ((typeof(&printk))...)
-
-    only compiles where printk is actually declared. printk became _printk at
-    5.15, so on 6.6 that macro is a hard error rather than dead code. The guard
-    is derived from where the symbol was MEASURED, not from memory of when it
-    was renamed.
-    """
-    if not lists:
-        return None, None
-    present = [v for v in VERSIONS if v in lists and sym in lists[v]]
-    if not present or len(present) == len(lists):
-        return None, None
-
-    idx = [VERSIONS.index(v) for v in present]
-    contiguous = idx == list(range(idx[0], idx[-1] + 1))
-
-    conds = []
-    if idx[0] > 0:
-        conds.append('LINUX_VERSION_CODE >= %s' % kv(VERSIONS[idx[0]]))
-    if idx[-1] < len(VERSIONS) - 1:
-        conds.append('LINUX_VERSION_CODE < %s' % kv(VERSIONS[idx[-1] + 1]))
-    if not conds:
-        return None, None
-
-    note = '' if contiguous else '  /* NOTE: measured presence is not contiguous */'
-    return '#if ' + ' && '.join(conds) + note, '#endif'
 
 
 def enum_name(sym):
@@ -176,17 +149,16 @@ def gen_syms_h(symbols):
         '/*',
         ' * GENERATED by kpm/gen-shim.py -- do not edit by hand.',
         ' *',
-        ' * Index space shared by nm_kpm_entry.c (which fills the table in) and',
-        ' * nm_kpm_shim.h (which calls through it). Both halves of the .kpm are',
-        ' * compiled against different headers and this is the one thing they share.',
+        ' * The index space shared by the two halves of the .kpm: nm_kpm_entry.c',
+        ' * fills the table in, nm_kpm_tramp.c jumps through it. They are compiled',
+        ' * against different headers and this is the one thing they share.',
         ' */',
         '#ifndef _NM_KPM_SYMS_H',
         '#define _NM_KPM_SYMS_H',
         '',
         'enum nm_kpm_sym {',
     ]
-    for s in symbols:
-        out.append('\t%s,' % enum_name(s))
+    out += ['\t%s,' % enum_name(s) for s in symbols]
     out += [
         '\tNM_KPM_SYM_COUNT',
         '};',
@@ -200,14 +172,60 @@ def gen_syms_h(symbols):
 
 
 def gen_table(symbols, optional):
-    """The nm_syms[] rows for nm_kpm_entry.c."""
     rows = []
     for s in symbols:
         alt = ALT.get(s)
-        alt_s = '"%s"' % alt if alt else '0'
-        opt = 1 if (s in optional or s in WEAK) else 0
-        rows.append('\t{ %s, "%s", %s, %d },' % (enum_name(s), s, alt_s, opt))
+        rows.append('\t{ %s, "%s", %s, %d },'
+                    % (enum_name(s), s, ('"%s"' % alt) if alt else '0',
+                       1 if (s in optional or s in WEAK) else 0))
     return '\n'.join(rows)
+
+
+def gen_tramp_c(symbols, tramp, lists):
+    """One naked trampoline per callable symbol."""
+    out = [
+        '// SPDX-License-Identifier: GPL-2.0',
+        '/*',
+        ' * GENERATED by kpm/gen-shim.py -- do not edit by hand.',
+        ' *',
+        ' * A definition for every kernel function the engine references, each one a',
+        ' * tail-call through nm_kpm_sym[]. See gen-shim.py for why these are',
+        ' * trampolines and not macros -- in short, a macro cannot reach the calls',
+        ' * that kernel-header inlines make on the engine\'s behalf.',
+        ' *',
+        ' * Compiled against the kernel headers only for the enum; it uses no kernel',
+        ' * types and no prototypes, which is the point.',
+        ' */',
+        '#include "nm_kpm_syms.h"',
+        '',
+        '/* x16 is the intra-procedure-call scratch register: free to clobber in a',
+        ' * trampoline, and argument registers are left exactly as the caller set',
+        ' * them. `br` is used rather than `bl` because it has no range limit -- the',
+        ' * +/-128 MB reach of a direct call is precisely what rules out calling the',
+        ' * kernel from a .kpm at all. */',
+        '#define NM_TRAMP(name, idx)\t\t\t\t\t\\',
+        '\tasm(".globl " #name "\\n"\t\t\t\t\\',
+        '\t    ".type " #name ", %function\\n"\t\t\t\\',
+        '\t    #name ":\\n"\t\t\t\t\t\\',
+        '\t    "  adrp x16, nm_kpm_sym\\n"\t\t\t\t\\',
+        '\t    "  add  x16, x16, :lo12:nm_kpm_sym\\n"\t\t\\',
+        '\t    "  ldr  x16, [x16, #(8*" #idx ")]\\n"\t\t\t\\',
+        '\t    "  br   x16\\n")',
+        '',
+        '/* The asm above cannot see the enum, so the index is written as a literal.',
+        ' * These assertions are what keep the two in step: change the symbol list',
+        ' * and regenerate, or the build stops here rather than dispatching through',
+        ' * the wrong table slot at runtime. */',
+    ]
+    for s in tramp:
+        idx = symbols.index(s)
+        out.append('_Static_assert(%s == %d, "table index drift: %s");'
+                   % (enum_name(s), idx, s))
+    out.append('')
+    for s in tramp:
+        out.append('NM_TRAMP(%s, %d);' % (s, symbols.index(s)))
+    out.append('')
+    return '\n'.join(out)
 
 
 def gen_shim_h(symbols, lists):
@@ -216,13 +234,12 @@ def gen_shim_h(symbols, lists):
         '/*',
         ' * GENERATED by kpm/gen-shim.py -- do not edit by hand.',
         ' *',
-        ' * Every kernel call in the engine becomes an indirect call through',
-        ' * nm_kpm_sym[]. See gen-shim.py for why a .kpm cannot call the kernel',
-        ' * directly, and why these signatures are read back out of the kernel',
-        ' * headers with typeof() instead of being written down.',
+        ' * The small residue that trampolines cannot cover: data taken by address,',
+        ' * the slab inlines, and the weak optional pair. Everything callable is',
+        ' * handled by nm_kpm_tramp.c instead.',
         ' *',
-        ' * MUST be included AFTER the kernel headers -- a function-like macro for',
-        ' * memcpy expands inside string.h\'s declaration of memcpy otherwise.',
+        ' * Include AFTER the kernel headers. A function-like macro named after a',
+        ' * kernel function expands inside that function\'s own declaration too.',
         ' */',
         '#ifndef _NM_KPM_SHIM_H',
         '#define _NM_KPM_SHIM_H',
@@ -237,58 +254,45 @@ def gen_shim_h(symbols, lists):
         '#error "KPM targets kernel 6.6 and older: KernelPatch does not boot on 6.12+."',
         '#endif',
         '',
+        '/* Data taken by address in the engine\'s own text. */',
     ]
+    for s in [x for x in symbols if x in DATA]:
+        out.append('#define %s (*(typeof(&%s))nm_kpm_sym[%s])' % (s, s, enum_name(s)))
 
-    data = [s for s in symbols if s in DATA]
-    weak = [s for s in symbols if s in WEAK]
-    funcs = [s for s in symbols
-             if s not in DATA and s not in WEAK and s not in LOCAL and s not in FORWARD]
-
-    if data:
-        out += ['/* Data objects: dereference the entry so &sym and sym[i] both still',
-                ' * denote the real kernel object. */']
-        for s in data:
-            pre, post = version_guard(s, lists)
-            if pre:
-                out.append(pre)
-            out.append('#define %s (*(typeof(&%s))nm_kpm_sym[%s])' % (s, s, enum_name(s)))
-            if post:
-                out.append(post)
-        out.append('')
-
-    if weak:
-        out += [
-            '/*',
-            ' * Optional, and legitimately NULL: the engine tests the address before',
-            ' * calling, and that test is a real feature probe -- a non-NULL stub would',
-            ' * advertise ghost support that is not there.',
-            ' *',
-            ' * These expand to a POINTER rather than a table lookup because the engine',
-            ' * DECLARES them as well as calling them:',
-            ' *',
-            ' *     extern int ghost_ctl(const char *, size_t) __attribute__((weak));',
-            ' *',
-            ' * and any macro whose name is followed by "(" expands inside that',
-            ' * declaration too. Expanding to (*nm_w_ghost_ctl) leaves the declaration',
-            ' * well-formed -- it becomes a weak function POINTER -- while calls and the',
-            ' * !ghost_ctl test both still mean what the engine intended. nm_engine.c',
-            ' * defines the pointers and binds them from the table at init.',
-            ' */',
-        ]
-        for s in weak:
-            out.append('#define %s (*nm_w_%s)' % (s, s))
-        out.append('')
-
-    out += ['/* Calls. typeof(&f) reads f\'s real prototype for this KMI: the',
-            ' * preprocessor does not re-expand f inside f\'s own expansion. */']
-    for s in funcs:
-        pre, post = version_guard(s, lists)
-        if pre:
-            out.append(pre)
-        out.append('#define %s(...) ((typeof(&%s))nm_kpm_sym[%s])(__VA_ARGS__)'
-                   % (s, s, enum_name(s)))
-        if post:
-            out.append(post)
+    out += [
+        '',
+        '/*',
+         ' * The slab entry points are static inlines that index the kmalloc_caches',
+         ' * ARRAY, which no trampoline can stand in for. Redirecting them to',
+         ' * __kmalloc -- which does have one -- stops those inlines being',
+         ' * instantiated, and takes kmalloc_caches, kmalloc_trace and kmalloc_large',
+         ' * out of the undefined set along with them.',
+         ' */',
+        '#undef kmalloc',
+        '#undef kzalloc',
+        '#undef kmalloc_array',
+        '#define kmalloc(sz, fl)\t\t__kmalloc((sz), (fl))',
+        '#define kzalloc(sz, fl)\t\t__kmalloc((sz), (fl) | __GFP_ZERO)',
+        '#define kmalloc_array(n, sz, fl)\t__kmalloc((n) * (sz), (fl))',
+        '',
+        '/*',
+        ' * Optional, and legitimately NULL: the engine tests the address before',
+        ' * calling and that test is a real feature probe, so a trampoline would be',
+        ' * non-NULL and falsely advertise ghost support.',
+        ' *',
+        ' * They expand to a POINTER rather than a lookup because the engine DECLARES',
+        ' * them as well as calling them:',
+        ' *',
+        ' *     extern int ghost_ctl(const char *, size_t) __attribute__((weak));',
+        ' *',
+        ' * and a macro whose name is followed by "(" expands inside that declaration',
+        ' * too. (*nm_w_ghost_ctl) leaves it well-formed -- it becomes a weak function',
+        ' * POINTER -- while calls and the !ghost_ctl test both still mean what the',
+        ' * engine intended. nm_engine.c defines them and binds them at init.',
+        ' */',
+    ]
+    for s in [x for x in symbols if x in WEAK]:
+        out.append('#define %s (*nm_w_%s)' % (s, s))
 
     out += ['', '#endif /* _NM_KPM_SHIM_H */', '']
     return '\n'.join(out)
@@ -296,34 +300,45 @@ def gen_shim_h(symbols, lists):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--syms', required=True, help='union symbol list, one per line')
-    ap.add_argument('--per-version', help='directory of per-version lists, for optionality')
+    ap.add_argument('--syms', required=True)
+    ap.add_argument('--per-version')
     ap.add_argument('--outdir', default=os.path.dirname(os.path.abspath(__file__)))
     a = ap.parse_args()
 
     with io.open(a.syms, encoding='utf-8') as fh:
-        symbols = sorted({ln.strip() for ln in fh if ln.strip() and not ln.startswith('#')})
+        symbols = sorted({ln.strip() for ln in fh
+                          if ln.strip() and not ln.startswith('#')})
 
     bad = [s for s in symbols if not s.replace('_', 'a').replace('.', 'a').isalnum()]
     if bad:
-        raise SystemExit('not identifiers, list is contaminated: %r' % bad[:5])
+        raise SystemExit('not identifiers, the list is contaminated: %r' % bad[:5])
 
     lists = read_per_version(a.per_version) if a.per_version else {}
     optional = optional_set(lists)
 
-    # Symbols provided locally are not table entries at all.
-    table_syms = [s for s in symbols if s not in LOCAL]
+    table_syms = [s for s in symbols if s not in LOCAL and s not in KP_PROVIDED]
+    # Everything callable gets a trampoline. Data, the weak pair and anything
+    # handled locally do not.
+    tramp = [s for s in table_syms if s not in DATA and s not in WEAK]
 
-    w = lambda n, t: io.open(os.path.join(a.outdir, n), 'w', encoding='utf-8', newline='\n').write(t)
+    def w(name, text):
+        with io.open(os.path.join(a.outdir, name), 'w',
+                     encoding='utf-8', newline='\n') as fh:
+            fh.write(text)
+
     w('nm_kpm_syms.h', gen_syms_h(table_syms))
     w('nm_kpm_shim.h', gen_shim_h(table_syms, lists))
+    w('nm_kpm_tramp.c', gen_tramp_c(table_syms, tramp, lists))
     w('nm_kpm_table.h', '/* GENERATED by kpm/gen-shim.py -- do not edit. */\n'
                         + gen_table(table_syms, optional) + '\n')
 
-    print('%d symbols: %d redirected, %d data, %d weak, %d local, %d optional'
-          % (len(symbols), len(table_syms), len([s for s in table_syms if s in DATA]),
+    print('%d measured: %d in table, %d trampolines, %d data, %d weak, '
+          '%d local, %d KernelPatch-provided, %d optional'
+          % (len(symbols), len(table_syms), len(tramp),
+             len([s for s in table_syms if s in DATA]),
              len([s for s in table_syms if s in WEAK]),
              len([s for s in symbols if s in LOCAL]),
+             len([s for s in symbols if s in KP_PROVIDED]),
              len([s for s in table_syms if s in optional or s in WEAK])))
 
 

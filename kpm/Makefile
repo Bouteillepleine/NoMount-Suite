@@ -59,11 +59,17 @@ COMMON := -O2 -fno-stack-protector -fno-pic -ffreestanding -Wall
 
 all: nomount.kpm
 
-nomount.kpm: nm_kpm_entry.o nm_engine.o
+nomount.kpm: nm_kpm_entry.o nm_engine.o nm_kpm_tramp.o
 	$(CC) -r -o $@ $^
 
 nm_kpm_entry.o: nm_kpm_entry.c nm_kpm_syms.h nm_kpm_table.h
 	$(CC) $(COMMON) $(KP_FLAGS) -c -o $@ $<
+
+# The trampolines. Compiled with no kernel headers at all -- the file uses only
+# the shared enum, which is the whole point of doing this in asm rather than as
+# typed C wrappers.
+nm_kpm_tramp.o: nm_kpm_tramp.c nm_kpm_syms.h
+	$(CC) $(COMMON) -c -o $@ $<
 
 nm_engine.o: nm_engine.c nm_kpm_shim.h nm_kpm_syms.h $(ENGINE_DIR)/nomount.c $(ENGINE_DIR)/nomount.h
 	$(CC) $(COMMON) $(K_FLAGS) -c -o $@ $<

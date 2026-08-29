@@ -45,23 +45,6 @@
  */
 struct module __this_module;
 
-/*
- * generic_read_dir is used as a VALUE in a static initializer:
- *
- *     .read = generic_read_dir,
- *
- * A redirect macro cannot serve that -- a static initializer needs a constant,
- * and a table lookup is not one. A real function under the same name can: the
- * initializer gets a genuine address, and the indirection happens when called.
- * Declared before the shim so the shim does not rewrite this definition.
- */
-static ssize_t (*nm_real_generic_read_dir)(struct file *, char __user *, size_t, loff_t *);
-
-ssize_t generic_read_dir(struct file *f, char __user *b, size_t n, loff_t *o)
-{
-	return nm_real_generic_read_dir(f, b, n, o);
-}
-
 #include "nm_kpm_shim.h"
 #include "../hookless/src/nomount.c"
 
@@ -178,10 +161,9 @@ int (*nm_w_ghost_get_rule)(int idx, char *out, size_t outsz);
 
 long nm_engine_init(void)
 {
-	/* Bind everything that is reached by address rather than by call, now
-	 * that nm_kpm_entry.c has populated the table. */
-	nm_real_generic_read_dir = (typeof(nm_real_generic_read_dir))
-				   nm_kpm_sym[NMS_generic_read_dir];
+	/* The weak pair is reached by address rather than by call, so it is bound
+	 * here rather than by a trampoline. Everything else the engine calls goes
+	 * through nm_kpm_tramp.c, which needs no wiring. */
 	nm_w_ghost_ctl = (typeof(nm_w_ghost_ctl))nm_kpm_sym[NMS_ghost_ctl];
 	nm_w_ghost_get_rule = (typeof(nm_w_ghost_get_rule))nm_kpm_sym[NMS_ghost_get_rule];
 

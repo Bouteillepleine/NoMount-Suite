@@ -72,7 +72,6 @@
 	{ NMS_path_put, "path_put", 0, 0 },
 	{ NMS_preempt_schedule, "preempt_schedule", 0, 0 },
 	{ NMS_prepare_creds, "prepare_creds", 0, 0 },
-	{ NMS_printk, "printk", "_printk", 1 },
 	{ NMS_radix_tree_tagged, "radix_tree_tagged", 0, 0 },
 	{ NMS_rcu_barrier, "rcu_barrier", 0, 0 },
 	{ NMS_revert_creds, "revert_creds", 0, 0 },
