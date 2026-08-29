@@ -112,7 +112,7 @@ is written as one.
 | 6.12 | **OnePlus 15** | ✅ Booted, `check` clean, 258/258 rules verified |
 | 6.1 | **OnePlus 13R** | ✅ Booted, 261/261 rules verified |
 | 5.15 | **OnePlus 11** | ✅ Booted, `check` clean, 118/118 rules verified |
-| 6.6 | Ace 5 Pro, Ace 5 Ultra, … (18 models) | 🧩 Compiled, not booted |
+| 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, … (18 models) | ✅ Booted, 261/261 rules verified |
 | 5.10 | Ace 2, Ace 2V, Nord 3, … (6 models) | 🧩 Compiled, not booted |
 | 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | — not used by any OnePlus | 🧩 Compiled, not tested |
 
@@ -138,8 +138,7 @@ This is a modified derivative of
 its GPL-3.0 licence. The Suite and the Prism engine it drives are a rewrite: the
 original `/dev/nomount` char device and its ioctl control plane are gone,
 replaced by a per-inode ops hijack with a netlink control plane, and RRO overlays
-are injected hooklessly rather than mounted. Changes were made through 2026 by
-XxxY.
+are injected hooklessly rather than mounted.
 
 ## Special thanks
 
