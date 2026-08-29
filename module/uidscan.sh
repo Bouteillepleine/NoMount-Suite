@@ -20,11 +20,29 @@ MODDIR="${0%/*}"
 mkdir -p /data/adb/nomount && chmod 0700 /data/adb/nomount
 
 ABI=$(getprop ro.product.cpu.abi)
+# The SAME fallback metamount.sh, post-fs-data.sh, post-mount.sh, service.sh and
+# uidwatch.sh all carry, and the one script that was missing it. An empty ABI
+# builds "$MODDIR/bin//nomount", which can never be executable -- and the only
+# consumer below swallows that with 2>/dev/null, so the detector inventory came
+# back EMPTY and the scan silently degraded to the manifest heuristics alone. A
+# scan that has quietly stopped checking the thing it is named for looks exactly
+# like a scan that found nothing.
+[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
+[ -n "$ABI" ] || ABI=arm64-v8a
 BIN="$MODDIR/bin/$ABI/nomount"
 
 # One source of truth for the inventory; empty if the binary is missing, in which
-# case the manifest signals below still stand on their own.
-INV=$("$BIN" uid preset --dry-run detectors 2>/dev/null | grep -v '^$' | grep -v 'entr(ies)')
+# case the manifest signals below still stand on their own -- but SAY SO, because
+# "no package matched the detector inventory" and "there was no inventory to
+# match against" are different answers and only one of them is a scan result.
+if [ -x "$BIN" ]; then
+    INV=$("$BIN" uid preset --dry-run detectors 2>/dev/null | grep -v '^$' | grep -v 'entr(ies)')
+else
+    INV=""
+fi
+if [ -z "$INV" ]; then
+    echo "nomount scan: no detector inventory (no executable at $BIN) -- name matching is OFF, manifest signals only" >&2
+fi
 
 # Manifest probe is I/O-bound -> ~2x cores, capped.
 J=$(( $(nproc 2>/dev/null || echo 4) * 2 ))
