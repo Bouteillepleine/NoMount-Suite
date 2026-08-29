@@ -84,20 +84,17 @@ says anything else.
 
 ### Building them in CI
 
-Three workflows, run from the Actions tab. They live on `main`, because GitHub
-only offers a `workflow_dispatch` file that sits on the default branch, and each
-checks its variant branch out to build.
+Both variants build from the Actions tab.
 
-| workflow | what it gives you |
-| :--- | :--- |
-| **NoMount LKM — per-KMI modules** | the one to use. Builds `nomount-<kmi>.ko` for all seven GKI KMI generations in ~2 minutes, inside the Android DDK containers. |
-| **NoMount LKM — out-of-tree build** | compile gate over all ten kernels on every push. Proves only that the engine still builds as a module — it runs modpost under `KBUILD_MODPOST_WARN=1`, so it cannot tell you a module would link. |
-| **NoMount LKM — build a loadable module** | fallback, ~40 min: compiles a kernel from source for its `Module.symvers`. Only worth it to target a kernel the DDK has no container for, e.g. your own builder's tree via `kernel_repo`/`kernel_ref`. |
-| **NoMount KPM — build a KernelPatch module** | 5.4 → 6.6: uploads `nomount.kpm`, and fails if any symbol would be unresolvable at load. |
+| workflow | branch | what it gives you |
+| :--- | :--- | :--- |
+| **Build** | `LKM` | the module zip, with one `nomount-<kmi>.ko` bundled per GKI KMI generation plus a loader. The `ko <kmi>` jobs take ~2 minutes each. |
+| **NoMount LKM — out-of-tree build** | `LKM` | compile gate over all ten kernel versions. It proves the engine still builds as a module and nothing more — it runs modpost under `KBUILD_MODPOST_WARN=1`, which suppresses undefined symbols and missing namespace imports alike, so it cannot tell you a module would link. |
+| **NoMount KPM — build a KernelPatch module** | `KPM` | `nomount.kpm` for 5.4 → 6.6, failing if any symbol would be unresolvable at load. |
 
-The per-KMI build uses `ghcr.io/ylarod/ddk:<kmi>`, whose `$KDIR` already holds a
-released GKI kernel's real `Module.symvers` — so it links against the same export
-table a phone has, without building a kernel.
+The per-KMI modules are built inside `ghcr.io/ylarod/ddk:<kmi>`, whose `$KDIR`
+already holds a released GKI kernel's real `Module.symvers` — so they link
+against the same export table a phone has, without compiling a kernel.
 
 A module is portable across a **KMI generation**, not a kernel version:
 `android12-5.10` and `android13-5.10` are the same version and different KMIs.
