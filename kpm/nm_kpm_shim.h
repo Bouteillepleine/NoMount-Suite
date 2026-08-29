@@ -23,9 +23,10 @@
 #error "KPM targets kernel 6.6 and older: KernelPatch does not boot on 6.12+."
 #endif
 
-/* Data objects: dereference the entry so &sym yields the real address. */
-#define init_net (*(struct net *)nm_kpm_sym[NMS_init_net])
-#define kmalloc_caches (*(struct kmem_cache ** *)nm_kpm_sym[NMS_kmalloc_caches])
+/* Data objects: dereference the entry so &sym and sym[i] both still
+ * denote the real kernel object. */
+#define init_net (*(typeof(&init_net))nm_kpm_sym[NMS_init_net])
+#define kmalloc_caches (*(typeof(&kmalloc_caches))nm_kpm_sym[NMS_kmalloc_caches])
 
 /* Optional, may legitimately be NULL; the engine tests before calling. */
 #define ghost_ctl ((typeof(&ghost_ctl))nm_kpm_sym[NMS_ghost_ctl])
@@ -42,7 +43,9 @@
 #define __put_cred(...) ((typeof(&__put_cred))nm_kpm_sym[NMS___put_cred])(__VA_ARGS__)
 #define __rcu_read_lock(...) ((typeof(&__rcu_read_lock))nm_kpm_sym[NMS___rcu_read_lock])(__VA_ARGS__)
 #define __rcu_read_unlock(...) ((typeof(&__rcu_read_unlock))nm_kpm_sym[NMS___rcu_read_unlock])(__VA_ARGS__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 #define _printk(...) ((typeof(&_printk))nm_kpm_sym[NMS__printk])(__VA_ARGS__)
+#endif
 #define _raw_spin_lock(...) ((typeof(&_raw_spin_lock))nm_kpm_sym[NMS__raw_spin_lock])(__VA_ARGS__)
 #define _raw_spin_unlock(...) ((typeof(&_raw_spin_unlock))nm_kpm_sym[NMS__raw_spin_unlock])(__VA_ARGS__)
 #define call_rcu(...) ((typeof(&call_rcu))nm_kpm_sym[NMS_call_rcu])(__VA_ARGS__)
@@ -52,7 +55,9 @@
 #define d_lookup(...) ((typeof(&d_lookup))nm_kpm_sym[NMS_d_lookup])(__VA_ARGS__)
 #define d_splice_alias(...) ((typeof(&d_splice_alias))nm_kpm_sym[NMS_d_splice_alias])(__VA_ARGS__)
 #define dentry_open(...) ((typeof(&dentry_open))nm_kpm_sym[NMS_dentry_open])(__VA_ARGS__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 #define do_trace_netlink_extack(...) ((typeof(&do_trace_netlink_extack))nm_kpm_sym[NMS_do_trace_netlink_extack])(__VA_ARGS__)
+#endif
 #define down_write(...) ((typeof(&down_write))nm_kpm_sym[NMS_down_write])(__VA_ARGS__)
 #define dput(...) ((typeof(&dput))nm_kpm_sym[NMS_dput])(__VA_ARGS__)
 #define fput(...) ((typeof(&fput))nm_kpm_sym[NMS_fput])(__VA_ARGS__)
@@ -73,19 +78,33 @@
 #define kasprintf(...) ((typeof(&kasprintf))nm_kpm_sym[NMS_kasprintf])(__VA_ARGS__)
 #define kern_path(...) ((typeof(&kern_path))nm_kpm_sym[NMS_kern_path])(__VA_ARGS__)
 #define kfree(...) ((typeof(&kfree))nm_kpm_sym[NMS_kfree])(__VA_ARGS__)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 #define kfree_call_rcu(...) ((typeof(&kfree_call_rcu))nm_kpm_sym[NMS_kfree_call_rcu])(__VA_ARGS__)
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 #define kfree_skb(...) ((typeof(&kfree_skb))nm_kpm_sym[NMS_kfree_skb])(__VA_ARGS__)
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 #define kfree_skb_reason(...) ((typeof(&kfree_skb_reason))nm_kpm_sym[NMS_kfree_skb_reason])(__VA_ARGS__)
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 #define kmalloc_large(...) ((typeof(&kmalloc_large))nm_kpm_sym[NMS_kmalloc_large])(__VA_ARGS__)
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 #define kmalloc_order(...) ((typeof(&kmalloc_order))nm_kpm_sym[NMS_kmalloc_order])(__VA_ARGS__)
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 #define kmalloc_trace(...) ((typeof(&kmalloc_trace))nm_kpm_sym[NMS_kmalloc_trace])(__VA_ARGS__)
+#endif
 #define kmem_cache_alloc(...) ((typeof(&kmem_cache_alloc))nm_kpm_sym[NMS_kmem_cache_alloc])(__VA_ARGS__)
 #define kmem_cache_create(...) ((typeof(&kmem_cache_create))nm_kpm_sym[NMS_kmem_cache_create])(__VA_ARGS__)
 #define kmem_cache_destroy(...) ((typeof(&kmem_cache_destroy))nm_kpm_sym[NMS_kmem_cache_destroy])(__VA_ARGS__)
 #define kmem_cache_free(...) ((typeof(&kmem_cache_free))nm_kpm_sym[NMS_kmem_cache_free])(__VA_ARGS__)
 #define kstrdup(...) ((typeof(&kstrdup))nm_kpm_sym[NMS_kstrdup])(__VA_ARGS__)
 #define kstrndup(...) ((typeof(&kstrndup))nm_kpm_sym[NMS_kstrndup])(__VA_ARGS__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #define kvfree_call_rcu(...) ((typeof(&kvfree_call_rcu))nm_kpm_sym[NMS_kvfree_call_rcu])(__VA_ARGS__)
+#endif
 #define lookup_one_len_unlocked(...) ((typeof(&lookup_one_len_unlocked))nm_kpm_sym[NMS_lookup_one_len_unlocked])(__VA_ARGS__)
 #define mutex_lock(...) ((typeof(&mutex_lock))nm_kpm_sym[NMS_mutex_lock])(__VA_ARGS__)
 #define mutex_unlock(...) ((typeof(&mutex_unlock))nm_kpm_sym[NMS_mutex_unlock])(__VA_ARGS__)
@@ -101,7 +120,9 @@
 #define path_put(...) ((typeof(&path_put))nm_kpm_sym[NMS_path_put])(__VA_ARGS__)
 #define preempt_schedule(...) ((typeof(&preempt_schedule))nm_kpm_sym[NMS_preempt_schedule])(__VA_ARGS__)
 #define prepare_creds(...) ((typeof(&prepare_creds))nm_kpm_sym[NMS_prepare_creds])(__VA_ARGS__)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 #define printk(...) ((typeof(&printk))nm_kpm_sym[NMS_printk])(__VA_ARGS__)
+#endif
 #define radix_tree_tagged(...) ((typeof(&radix_tree_tagged))nm_kpm_sym[NMS_radix_tree_tagged])(__VA_ARGS__)
 #define rcu_barrier(...) ((typeof(&rcu_barrier))nm_kpm_sym[NMS_rcu_barrier])(__VA_ARGS__)
 #define revert_creds(...) ((typeof(&revert_creds))nm_kpm_sym[NMS_revert_creds])(__VA_ARGS__)

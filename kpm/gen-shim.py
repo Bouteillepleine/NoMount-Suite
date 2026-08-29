@@ -53,14 +53,14 @@ import os
 #
 # Everything not listed here becomes a plain function redirect.
 
-# Data objects, not functions: taking a pointer to them has to yield the real
-# kernel object, so the macro dereferences the table entry instead of calling it.
-# The type cannot come from typeof() here -- typeof(init_net) is `struct net`,
-# and we need to cast a void* to `struct net *` -- so it is spelled out.
-DATA = {
-    'init_net': 'struct net',
-    'kmalloc_caches': 'struct kmem_cache **',
-}
+# Data objects, not functions: the macro dereferences the table entry rather
+# than calling it, so `&sym` and `sym[i]` both still mean the real kernel object.
+#
+# typeof(&sym) carries the whole type, which matters more than it looks:
+# kmalloc_caches is a two-dimensional array whose extents are configuration
+# dependent (NR_KMALLOC_TYPES x KMALLOC_SHIFT_HIGH+1), and writing that cast out
+# by hand would be both unreadable and wrong on some configs.
+DATA = {'init_net', 'kmalloc_caches'}
 
 # Declared __attribute__((weak)) in the engine and legitimately absent: the
 # engine tests `if (!ghost_ctl)` before calling. These resolve to NULL when the
@@ -104,21 +104,66 @@ ALT = {
     'kmem_cache_create': '__kmem_cache_create_args',
 }
 
-# Present on some kernels and not others, so a miss is not fatal. Derived from
-# the per-version lists: anything not common to all of them.
-def optional_set(per_version_dir):
-    """Symbols absent from at least one supported kernel."""
+# The supported kernels, in order. Used both for optionality and for the version
+# guards around symbols that do not exist on every one of them.
+VERSIONS = ['5.4', '5.10', '5.15', '6.1', '6.6']
+
+
+def read_per_version(per_version_dir):
+    """{version: set(symbols)} from the measured lists."""
     lists = {}
-    for name in sorted(os.listdir(per_version_dir)):
-        if not name.endswith('.txt') or name in ('union.txt', 'common.txt'):
+    for v in VERSIONS:
+        p = os.path.join(per_version_dir, v + '.txt')
+        if not os.path.exists(p):
             continue
-        with io.open(os.path.join(per_version_dir, name), encoding='utf-8') as fh:
-            lists[name] = {ln.strip() for ln in fh if ln.strip()}
+        with io.open(p, encoding='utf-8') as fh:
+            lists[v] = {ln.strip() for ln in fh if ln.strip()}
+    return lists
+
+
+def optional_set(lists):
+    """Symbols absent from at least one supported kernel."""
     if not lists:
         return set()
-    common = set.intersection(*lists.values())
-    everything = set.union(*lists.values())
-    return everything - common
+    return set.union(*lists.values()) - set.intersection(*lists.values())
+
+
+def kv(ver):
+    major, minor = ver.split('.')
+    return 'KERNEL_VERSION(%s, %s, 0)' % (major, minor)
+
+
+def version_guard(sym, lists):
+    """(#if line, #endif line) for a symbol that does not exist on every kernel.
+
+    A macro like
+
+        #define printk(...) ((typeof(&printk))...)
+
+    only compiles where printk is actually declared. printk became _printk at
+    5.15, so on 6.6 that macro is a hard error rather than dead code. The guard
+    is derived from where the symbol was MEASURED, not from memory of when it
+    was renamed.
+    """
+    if not lists:
+        return None, None
+    present = [v for v in VERSIONS if v in lists and sym in lists[v]]
+    if not present or len(present) == len(lists):
+        return None, None
+
+    idx = [VERSIONS.index(v) for v in present]
+    contiguous = idx == list(range(idx[0], idx[-1] + 1))
+
+    conds = []
+    if idx[0] > 0:
+        conds.append('LINUX_VERSION_CODE >= %s' % kv(VERSIONS[idx[0]]))
+    if idx[-1] < len(VERSIONS) - 1:
+        conds.append('LINUX_VERSION_CODE < %s' % kv(VERSIONS[idx[-1] + 1]))
+    if not conds:
+        return None, None
+
+    note = '' if contiguous else '  /* NOTE: measured presence is not contiguous */'
+    return '#if ' + ' && '.join(conds) + note, '#endif'
 
 
 def enum_name(sym):
@@ -165,7 +210,7 @@ def gen_table(symbols, optional):
     return '\n'.join(rows)
 
 
-def gen_shim_h(symbols):
+def gen_shim_h(symbols, lists):
     out = [
         '/* SPDX-License-Identifier: GPL-2.0 */',
         '/*',
@@ -200,22 +245,38 @@ def gen_shim_h(symbols):
              if s not in DATA and s not in WEAK and s not in LOCAL and s not in FORWARD]
 
     if data:
-        out += ['/* Data objects: dereference the entry so &sym yields the real address. */']
+        out += ['/* Data objects: dereference the entry so &sym and sym[i] both still',
+                ' * denote the real kernel object. */']
         for s in data:
-            out.append('#define %s (*(%s *)nm_kpm_sym[%s])' % (s, DATA[s], enum_name(s)))
+            pre, post = version_guard(s, lists)
+            if pre:
+                out.append(pre)
+            out.append('#define %s (*(typeof(&%s))nm_kpm_sym[%s])' % (s, s, enum_name(s)))
+            if post:
+                out.append(post)
         out.append('')
 
     if weak:
         out += ['/* Optional, may legitimately be NULL; the engine tests before calling. */']
         for s in weak:
+            pre, post = version_guard(s, lists)
+            if pre:
+                out.append(pre)
             out.append('#define %s ((typeof(&%s))nm_kpm_sym[%s])' % (s, s, enum_name(s)))
+            if post:
+                out.append(post)
         out.append('')
 
     out += ['/* Calls. typeof(&f) reads f\'s real prototype for this KMI: the',
             ' * preprocessor does not re-expand f inside f\'s own expansion. */']
     for s in funcs:
+        pre, post = version_guard(s, lists)
+        if pre:
+            out.append(pre)
         out.append('#define %s(...) ((typeof(&%s))nm_kpm_sym[%s])(__VA_ARGS__)'
                    % (s, s, enum_name(s)))
+        if post:
+            out.append(post)
 
     out += ['', '#endif /* _NM_KPM_SHIM_H */', '']
     return '\n'.join(out)
@@ -235,14 +296,15 @@ def main():
     if bad:
         raise SystemExit('not identifiers, list is contaminated: %r' % bad[:5])
 
-    optional = optional_set(a.per_version) if a.per_version else set()
+    lists = read_per_version(a.per_version) if a.per_version else {}
+    optional = optional_set(lists)
 
     # Symbols provided locally are not table entries at all.
     table_syms = [s for s in symbols if s not in LOCAL]
 
     w = lambda n, t: io.open(os.path.join(a.outdir, n), 'w', encoding='utf-8', newline='\n').write(t)
     w('nm_kpm_syms.h', gen_syms_h(table_syms))
-    w('nm_kpm_shim.h', gen_shim_h(table_syms))
+    w('nm_kpm_shim.h', gen_shim_h(table_syms, lists))
     w('nm_kpm_table.h', '/* GENERATED by kpm/gen-shim.py -- do not edit. */\n'
                         + gen_table(table_syms, optional) + '\n')
 

@@ -62,14 +62,24 @@ ssize_t generic_read_dir(struct file *f, char __user *b, size_t n, loff_t *o)
 	return nm_real_generic_read_dir(f, b, n, o);
 }
 
+/*
+ * The engine declares these weak and tests them before calling, so they may
+ * legitimately resolve to NULL. The shim reads their prototypes with typeof(),
+ * which needs them declared BEFORE it -- and the engine's own declarations come
+ * later, inside nomount.c. Repeated here for that reason; if they ever diverge
+ * the compiler says so when nomount.c redeclares them.
+ */
+extern int ghost_ctl(const char *buf, size_t count) __attribute__((weak));
+extern int ghost_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
+
 #include "nm_kpm_shim.h"
 #include "../hookless/src/nomount.c"
 
 /*
- * mem*/str* cannot be redirected by macro: the compiler emits calls to them on
- * its own -- a struct assignment becomes a memcpy that no macro ever sees -- so
- * they need real definitions in this object. Freestanding implementations,
- * deliberately simple; none of them is on a hot path in this engine.
+ * The string and memory routines cannot be redirected by macro: the compiler
+ * emits calls to them on its own -- a struct assignment becomes a memcpy that no
+ * macro ever sees -- so they need real definitions in this object. Freestanding
+ * implementations, deliberately simple; none is on a hot path in this engine.
  *
  * Defined after the engine so the shim's macros (which do not cover these) and
  * the kernel's declarations have both been seen.
