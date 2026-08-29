@@ -685,9 +685,31 @@ fn find_shipped_image(
 /// path(s) ...`). `owner_of` already reads exactly this token for the "From:"
 /// line; this reuses it as the discriminator rather than inventing a second
 /// convention.
+/// A COUNT is never the subject. Several details open with one -- "3 injected
+/// file(s) on /my_product", "12 of 16 hidden path(s) sampled" -- and keying on it
+/// produced `not-fd-allowlisted-for-zygote-83`: unique, and worthless for the one
+/// thing the id is for, because it moves the moment a module gains or loses a
+/// file. Measured on an OP11: two of the three repeatable plan findings took a
+/// count this way. Fall through to the first PATH in the detail, which for every
+/// one of them is the partition or target the finding is really about.
 fn subject_of(f: &Finding) -> Option<&str> {
-    let head = f.detail.split([' ', ':']).next().unwrap_or("").trim_end_matches(&[',', ':'][..]);
-    (!head.is_empty() && head.len() <= 128).then_some(head)
+    // A nested fn, not a closure: a closure's inferred argument lifetime cannot
+    // outlive the call, and these results are borrowed from `f.detail`.
+    fn trim(t: &str) -> &str {
+        t.trim_end_matches([',', ':', '.'])
+    }
+    fn numeric(t: &str) -> bool {
+        !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())
+    }
+    let head = trim(f.detail.split([' ', ':']).next().unwrap_or(""));
+    if !head.is_empty() && !numeric(head) && head.len() <= 128 {
+        return Some(head);
+    }
+    // No usable head: the first absolute path anywhere in the sentence.
+    f.detail
+        .split_whitespace()
+        .map(trim)
+        .find(|t| t.starts_with('/') && t.len() > 1 && t.len() <= 128)
 }
 
 /// Turn plan findings into checks, giving each one an id nothing else in the
@@ -1977,6 +1999,10 @@ mod tests {
             "id should carry its subject, got {}",
             checks[0].id
         );
+        // ...and a detail that opens with a COUNT keys on the partition, not the
+        // number, so the id survives the module gaining a file.
+        assert_eq!(checks[2].id, "not-fd-allowlisted-for-zygote-my-product");
+        assert_eq!(checks[3].id, "not-fd-allowlisted-for-zygote-my-stock");
         // ...and the display name is untouched by the disambiguation.
         assert_eq!(checks[0].name, "module mount left by design");
         assert_eq!(checks[1].name, "module mount left by design");
@@ -1989,7 +2015,15 @@ mod tests {
         let f = |d: &str| Finding { level: Level::Info, check: "c", detail: d.to_string() };
         assert_eq!(subject_of(&f("/product/app/X.apk <- /data/adb/m")), Some("/product/app/X.apk"));
         assert_eq!(subject_of(&f("OxygenCustomizer: 4 path(s) ...")), Some("OxygenCustomizer"));
-        assert_eq!(subject_of(&f("3 injected file(s) on /my_product")), Some("3"));
+        // A count is not a subject: the partition is. `not-fd-allowlisted-83`
+        // was unique and moved whenever the module gained a file.
+        assert_eq!(subject_of(&f("3 injected file(s) on /my_product")), Some("/my_product"));
+        assert_eq!(
+            subject_of(&f("9 injected file(s) on /my_stock -- zygote does not preload these")),
+            Some("/my_stock")
+        );
+        // Nothing usable at all -- the counter alone keeps it unique.
+        assert_eq!(subject_of(&f("12 of 16 sampled look absent to uid 10471")), None);
         assert_eq!(subject_of(&f("")), None);
     }
 
