@@ -49,6 +49,17 @@ CC_INCLUDE := $(shell $(CC) -print-file-name=include)
 
 COMMON := -O2 -fno-stack-protector -fno-pic -ffreestanding -Wall
 
+# How kbuild is invoked for the engine object. Defaults to clang because the GKI
+# kernels this targets are clang-built and their headers use clang-only
+# attributes; a gcc kbuild against them fails in ways that have nothing to do
+# with this module. Override for a gcc-built kernel:
+#
+#     make KBUILD_ARGS='ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-'
+#
+# The entry and trampoline objects stay on $(CC); an `ld -r` of clang- and
+# gcc-produced aarch64 objects is still just ELF.
+KBUILD_ARGS ?= ARCH=arm64 CC=clang
+
 all: nomount.kpm
 
 nomount.kpm: nm_kpm_entry.o nm_engine.o nm_kpm_tramp.o
@@ -72,8 +83,7 @@ nm_kpm_tramp.o: nm_kpm_tramp.c nm_kpm_syms.h
 # and not `modules`.
 nm_engine.o: nm_engine.c nm_kpm_shim.h nm_kpm_syms.h Kbuild \
              $(ENGINE_DIR)/nomount.c $(ENGINE_DIR)/nomount.h
-	$(MAKE) -C $(KERNEL_DIR) M=$(CURDIR) ARCH=arm64 \
-		CROSS_COMPILE=$(TARGET_COMPILE) $@
+	$(MAKE) -C $(KERNEL_DIR) M=$(CURDIR) $(KBUILD_ARGS) $@
 
 # THE redirect list, and the reason this target exists.
 #
