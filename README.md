@@ -65,6 +65,40 @@ clang builds it too, if you would rather not install zig.
 Every push runs the unit tests, clippy at `-D warnings`, shellcheck over the
 module scripts and the build script, and the ten-version kernel compile matrix.
 
+## Out-of-tree variants
+
+The supported build is in-tree: `CONFIG_NOMOUNT=y`, compiled into the kernel.
+Two other ways to load the same engine live on their own branches, for cases
+where you cannot rebuild the kernel. Both include `hookless/src/nomount.c`
+rather than copying it, so neither can drift from what the Suite ships.
+
+| | branch | `/proc/modules` | maps spoof | kernels |
+| :--- | :--- | :--- | :--- | :--- |
+| **in-tree** | `main` | absent | yes | 4.9 – 6.18 |
+| **KPM** (KernelPatch/APatch) | [`KPM`](../../tree/KPM) | absent | not yet — the inline hook is unwritten | 5.4 – 6.6 |
+| **LKM** (loadable module) | [`lkm`](../../tree/lkm) | **listed** | no | 4.9 – 6.18 |
+
+Neither has been loaded on a device. They compile, and CI proves that much and
+no more — read each branch's `README.md`, which says what it costs before it
+says anything else.
+
+### Building them in CI
+
+Three workflows, run from the Actions tab. They live on `main`, because GitHub
+only offers a `workflow_dispatch` file that sits on the default branch, and each
+checks its variant branch out to build.
+
+| workflow | what it gives you |
+| :--- | :--- |
+| **NoMount LKM — out-of-tree build** | compile gate over all ten kernels, on every push to `lkm`. Fast, and proves only that the engine still builds as a module. |
+| **NoMount LKM — build a loadable module** | one kernel, ~40 min: builds it far enough for a real `Module.symvers`, then uploads a properly linked `nomount.ko`. |
+| **NoMount KPM — build a KernelPatch module** | 5.4 → 6.6: uploads `nomount.kpm`, and fails if any symbol would be unresolvable at load. |
+
+A downloaded `nomount.ko` **will not load on an arbitrary device** — vermagic and
+symbol CRCs must match the kernel it was built against. Pass `kernel_repo`,
+`kernel_ref` and `defconfig` pointing at your own kernel source, then check
+`modinfo nomount.ko` against `cat /proc/version` on the phone.
+
 ## Commands
 
 | Command | Description |
