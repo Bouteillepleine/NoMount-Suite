@@ -171,9 +171,21 @@ jobs:
           set -eu
           cd ksrc
           export PATH="/usr/lib/ccache:$PATH"
-          # vmlinux + modules is the minimum that makes modpost authoritative.
-          # Without it there is no export table and every symbol looks missing.
-          make $MAKEOPTS -j"$(nproc)" vmlinux modules 2>&1 | tail -40
+          # `vmlinux` alone, NOT `vmlinux modules`. What this job actually needs
+          # is Module.symvers -- the kernel's export table, without which modpost
+          # calls every external reference undefined. modpost produces that while
+          # linking vmlinux. Adding `modules` also builds every module a GKI
+          # defconfig enables, which is hundreds of objects this job never looks
+          # at; the first version of this step did that and ran past 100 minutes.
+          make $MAKEOPTS -j"$(nproc)" vmlinux 2>&1 | tail -40
+
+          # Older kernels populate Module.symvers only once modpost has run over
+          # the module set, so fall back rather than assuming. Still far cheaper
+          # than doing it unconditionally.
+          if [ ! -s Module.symvers ]; then
+            echo "no Module.symvers from vmlinux alone; building modules for it"
+            make $MAKEOPTS -j"$(nproc)" modules 2>&1 | tail -20
+          fi
           test -s Module.symvers || { echo "::error::no Module.symvers after the build"; exit 1; }
           echo "Module.symvers: $(wc -l < Module.symvers) exported symbols"
 
