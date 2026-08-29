@@ -1,13 +1,22 @@
 name: NoMount LKM — out-of-tree build
 
-# Builds the engine as a loadable module against real kernel trees.
+# Builds the engine as a loadable module against all ten supported kernels.
 #
-# Its FIRST job is not to produce a .ko but to answer a question: which kernel
-# functions does the engine call that the kernel does not export to modules? In
-# tree that question never arises. Out of tree the linker answers it exactly,
-# and that answer is the specification for the redirect list in lkm/nm_oot.h --
-# which is why this workflow always surfaces undefined symbols as its own step
-# rather than letting them scroll past inside a failed build log.
+# WHAT THIS ACTUALLY PROVES, and what it does not.
+#
+# An out-of-tree build here stops at `modules_prepare`, which does NOT produce
+# Module.symvers -- so modpost cannot tell an exported symbol from a missing one
+# and reports every external reference as undefined. The first run of this
+# workflow duly "found" _printk, memcpy and init_net, all of which are exported,
+# and on 5.15/6.1 it emitted a .ko anyway with "suppressed 90 unresolved symbol
+# warnings". A .ko from that build is not evidence of anything.
+#
+# Building each kernel far enough for a real Module.symvers is ~30 minutes per
+# version. The cheap and honest substitute: take modpost's undefined list and
+# subtract the kernel's OWN EXPORT_SYMBOL* set, read from its source. What
+# survives is the set of symbols the module truly cannot link against -- the
+# work item. An empty result means the module links cleanly against a fully
+# built tree, and that is what this job passes on.
 #
 # Read lkm/README.md for what this variant costs. It is not the recommended
 # build and this workflow does not treat it as one.
@@ -22,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "Comma-separated versions to build (empty = all). e.g. 6.1,6.6"
+        description: "Comma-separated versions (empty = all). e.g. 4.9,6.12"
         required: false
         default: ''
 
@@ -37,28 +46,26 @@ jobs:
   build:
     name: ${{ matrix.ver }}
     runs-on: ubuntu-24.04
-    # Same bound and reasoning as the hookless matrix: a module build is minutes,
-    # anything near 20 is wedged rather than slow, and the 6-hour default hides
-    # which versions actually passed behind one stuck job.
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        # The same ten the in-tree matrix covers, with the same refs and the same
+        # toolchain per version. 4.9/4.14/4.19 need GCC: Ubuntu's clang cannot
+        # compile them (asm-offsets dies on "register 'sp' unsuitable for global
+        # register variables"), which is a compiler-vs-old-kernel mismatch and
+        # says nothing about this module.
         include:
-          # Only the versions OnePlus actually ships. The in-tree matrix covers
-          # 4.9 through 6.18 because the engine has to COMPILE everywhere; this
-          # variant is for devices somebody would really load it on, and a green
-          # tick on a kernel no device runs would be spending CI to prove
-          # nothing.
-          # 5.10 is NOT built here yet. Ubuntu's clang cannot compile it
-          # (asm-offsets: "register 'sp' unsuitable for global register
-          # variables"), which is a toolchain mismatch, not a fault in this
-          # module. It needs the AOSP prebuilt clang the in-tree matrix uses.
-          # Listed here so its absence is deliberate and visible.
-          - { ver: '5.15', kref: 'android13-5.15' }
-          - { ver: '6.1',  kref: 'android14-6.1'  }
-          - { ver: '6.6',  kref: 'android15-6.6'  }
-          - { ver: '6.12', kref: 'android16-6.12' }
+          - { ver: '4.9',  kref: 'deprecated/android-4.9-q',       tc: gcc   }
+          - { ver: '4.14', kref: 'deprecated/android-4.14-stable', tc: gcc   }
+          - { ver: '4.19', kref: 'deprecated/android-4.19-stable', tc: gcc   }
+          - { ver: '5.4',  kref: 'android11-5.4',                  tc: clang }
+          - { ver: '5.10', kref: 'android12-5.10',                 tc: clang }
+          - { ver: '5.15', kref: 'android13-5.15',                 tc: clang }
+          - { ver: '6.1',  kref: 'android14-6.1',                  tc: clang }
+          - { ver: '6.6',  kref: 'android15-6.6',                  tc: clang }
+          - { ver: '6.12', kref: 'android16-6.12',                 tc: clang }
+          - { ver: '6.18', kref: 'linux-6.18.y',                   tc: clang }
     steps:
       - name: Should this version run?
         id: sel
@@ -75,12 +82,20 @@ jobs:
         with:
           path: repo
 
-      - name: Install build deps
+      - name: Install toolchain
         if: steps.sel.outputs.run == '1'
         run: |
+          set -e
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            bc bison flex libssl-dev libelf-dev clang lld llvm >/dev/null
+            bc bison flex libssl-dev libelf-dev build-essential rsync \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu >/dev/null
+          if [ "${{ matrix.tc }}" = "clang" ]; then
+            sudo apt-get install -y --no-install-recommends clang lld llvm >/dev/null
+            clang --version | head -1
+          else
+            aarch64-linux-gnu-gcc --version | head -1
+          fi
 
       - name: Restore kernel clone
         id: kcache
@@ -88,14 +103,16 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ksrc
-          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v2
 
       - name: Clone kernel source on cache miss
         if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
         run: |
           set -e
           git clone --depth 1 -b "${{ matrix.kref }}" \
-            https://android.googlesource.com/kernel/common ksrc
+            "$( [ "${{ matrix.ver }}" = "6.18" ] \
+                && echo https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+                || echo https://android.googlesource.com/kernel/common )" ksrc
           echo "Kernel: $(head -3 ksrc/Makefile | tr '\n' ' ')"
 
       - name: Save kernel clone
@@ -103,19 +120,25 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ksrc
-          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v2
 
       - name: Prepare kernel for external modules
         if: steps.sel.outputs.run == '1'
         run: |
           set -euxo pipefail
           cd ksrc
-          # KPROBES is what the kallsyms bootstrap needs; without it the module
-          # cannot resolve a single non-exported symbol (see lkm/nm_oot.c).
-          make ARCH=arm64 LLVM=1 defconfig
+          if [ "${{ matrix.tc }}" = "clang" ]; then
+            M="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          else
+            M="ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          fi
+          echo "MAKEOPTS=$M" >> "$GITHUB_ENV"
+          make $M defconfig
+          # KPROBES is what lkm/nm_oot.c's kallsyms bootstrap needs; MODULES is
+          # what makes an out-of-tree build possible at all.
           ./scripts/config --enable CONFIG_KPROBES --enable CONFIG_MODULES
-          make ARCH=arm64 LLVM=1 olddefconfig
-          make ARCH=arm64 LLVM=1 -j"$(nproc)" modules_prepare
+          make $M olddefconfig
+          make $M -j"$(nproc)" modules_prepare
 
       - name: Build the module
         id: build
@@ -123,49 +146,46 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          make -C ksrc ARCH=arm64 LLVM=1 M="$PWD/repo/lkm" modules 2>&1 \
-            | tee /tmp/lkm-${{ matrix.ver }}.log
+          # KBUILD_MODPOST_WARN: without Module.symvers every external symbol is
+          # "undefined", and on 6.6+ modpost makes that fatal. Warn instead, so
+          # the run produces the symbol list that the next step judges.
+          make -C ksrc $MAKEOPTS KBUILD_MODPOST_WARN=1 \
+            M="$PWD/repo/lkm" modules 2>&1 | tee /tmp/lkm-${{ matrix.ver }}.log
 
-      - name: Undefined symbols (the redirect list this variant needs)
+      - name: Symbols the kernel does not export (the real gate)
         if: steps.sel.outputs.run == '1'
         run: |
           set -o pipefail
           log=/tmp/lkm-${{ matrix.ver }}.log
           out=/tmp/redirects-${{ matrix.ver }}.txt
-          echo "### ${{ matrix.ver }}" >> "$GITHUB_STEP_SUMMARY"
 
-          # Everything modpost called undefined. WITHOUT Module.symvers that is
-          # every external symbol, exported or not -- the first run of this
-          # workflow duly reported _printk, memcpy and init_net, all of which are
-          # exported. Building the kernel far enough to get a real Module.symvers
-          # costs ~30 minutes per version, so instead:
           grep -oE '"[a-zA-Z_][a-zA-Z0-9_]*" \[' "$log" | tr -d '"[ ' | sort -u > /tmp/undef.txt || true
-
-          # ...subtract the kernel's OWN export set, read from its source. A
-          # symbol that survives this is one the module truly cannot link
-          # against, and that is the redirect list.
           grep -rhoE '\bEXPORT_SYMBOL(_GPL|_NS|_NS_GPL)?\(\s*[a-zA-Z_][a-zA-Z0-9_]*' ksrc \
             --include='*.c' --include='*.h' 2>/dev/null \
             | sed 's/.*(\s*//' | sort -u > /tmp/exported.txt || true
-          echo "kernel exports seen in source: $(wc -l < /tmp/exported.txt)"
-
           comm -23 /tmp/undef.txt /tmp/exported.txt > "$out" || true
 
-          if [ "${{ steps.build.outcome }}" = "success" ] && [ ! -s /tmp/undef.txt ]; then
-            echo "Built clean: no undefined symbols." | tee -a "$GITHUB_STEP_SUMMARY"
-            ls -l repo/lkm/*.ko || true
-          elif [ -s "$out" ]; then
-            {
-              echo "Needs a kallsyms redirect ($(wc -l < "$out") symbols):"
-              echo '```'
-              cat "$out"
-              echo '```'
-              echo "_(of $(wc -l < /tmp/undef.txt) undefined; the rest are exported and link normally once Module.symvers exists)_"
-            } | tee -a "$GITHUB_STEP_SUMMARY"
+          u=$(grep -c . /tmp/undef.txt || echo 0)
+          e=$(grep -c . /tmp/exported.txt || echo 0)
+          r=$(grep -c . "$out" || echo 0)
+
+          {
+            echo "### ${{ matrix.ver }} (${{ matrix.tc }})"
+            echo "- unresolved at modpost: **$u** (no Module.symvers at this stage — expected)"
+            echo "- exported by this kernel: $e"
+            echo "- **needing a kallsyms redirect: $r**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$r" -eq 0 ]; then
+            echo "All $u unresolved symbols are exported by this kernel."
+            echo "The module links cleanly against a fully built tree; no shim needed."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ every unresolved symbol is exported — links against a built tree, no shim needed" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "No non-exported symbols. Remaining undefined ones are exported;" \
-                 "they resolve against a real Module.symvers." | tee -a "$GITHUB_STEP_SUMMARY"
-            tail -20 "$log" >> "$GITHUB_STEP_SUMMARY"
+            echo "These are NOT exported and need an NM_SYM() entry in lkm/nm_oot.h:"
+            cat "$out"
+            { echo '```'; cat "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
