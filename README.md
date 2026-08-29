@@ -20,10 +20,46 @@ metamodule can be active, so it refuses to install alongside another.
   version. The engine and this Suite are versioned together because they have to
   be flashed together: the control plane is a private protocol between them, and
   a mismatched pair reads as "engine not responding" with nothing to say why.
-- **KernelSU**, **SukiSU** or **APatch** (metamodule hook), or **Magisk**
+- **KernelSU**, **SukiSU** or **ReSukiSU** (metamodule hook), or **Magisk**
   (`post-fs-data`). If neither path runs, the module says so loudly rather than
   doing nothing silently.
-- SUSFS optional and unused; the two coexist.
+  **Magisk and APatch are untested.** Both code paths exist and are exercised by
+  the boot scripts, but nobody has reported back from either, so treat them as
+  unverified rather than supported — everything below was measured on ReSukiSU.
+- **SUSFS is not needed.** Nothing here is a mount, so there is no mount for it
+  to conceal and no gap for it to close. If you already run it, the two coexist
+  and neither interferes with the other.
+
+## Repository layout
+
+Both halves of the system live here, because they are flashed as a pair and a
+mismatched pair is the one failure neither half can explain (see Requirements).
+
+| Path | What it is |
+| :--- | :--- |
+| `src/` | The Rust metamodule and CLI (`nomount`) — the boot pass, the reconcile, the diagnostics. |
+| `hookless/` | The **Prism** kernel engine: `src/nomount.c`, the integration patch, and a matrix that compile-tests it against ten kernel versions. |
+| `userspace/` | `nm`, the freestanding netlink client the Suite shells out to. No libc; ~4 KB. |
+| `module/` | What ships in the zip: boot scripts, the installer, and the WebUI. |
+| `scripts/` | `package.sh`, which builds and assembles the zip. |
+
+## Building
+
+The zip is built by CI on every push and published on a `v*` tag, so you rarely
+need to. Locally:
+
+```
+cargo test && cargo clippy --all-targets -- -D warnings
+ANDROID_NDK_HOME=/path/to/ndk scripts/package.sh --build --version vX.Y.Z
+```
+
+You need the Android NDK for the Rust cross-compile. `nm` is built by `zig cc`
+if zig is on `PATH`; without it, `package.sh` refuses to ship a prebuilt older
+than its own source rather than quietly packaging a stale binary. The NDK's own
+clang builds it too, if you would rather not install zig.
+
+Every push runs the unit tests, clippy at `-D warnings`, shellcheck over the
+module scripts and the build script, and the ten-version kernel compile matrix.
 
 ## Commands
 
@@ -71,12 +107,16 @@ hiding.
 | 6.12 | OnePlus 15 | ✅ Boots, check clean, 258/258 rules verified |
 | 6.1 | OnePlus 13R | ✅ Boots, 261/261 rules verified |
 | 5.15 | OnePlus 11 | ✅ Boots, check clean, 118/118 rules verified |
-| 4.9 – 6.18 (others) | — | 🧩 Compiles; never booted |
+| 4.9 – 6.18 (others) | — | 🧩 Compile-tested in CI every push; never booted |
 
-Root managers: **KernelSU**, **SukiSU** and **APatch** via the metamodule hook;
-**Magisk** via `post-fs-data.sh`. The three tested devices above ran ReSukiSU.
+Root managers: **KernelSU**, **SukiSU** and **ReSukiSU** via the metamodule
+hook; **Magisk** via `post-fs-data.sh`, and **APatch** via the same metamodule
+hook. Every device in the table above ran ReSukiSU — Magisk and APatch have not
+been tested by anyone yet.
+
 Tested another combo? Open an issue — `nomount export` produces a bundle with the
-hide list already redacted, which is the most useful thing to attach.
+hide list already redacted, which is the most useful thing to attach. A report
+that one of the untested managers works is as useful as a bug.
 
 ## License and origin
 
