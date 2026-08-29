@@ -15,7 +15,7 @@ on:
     # failure it was built to prevent. The work-branch globs stay.
     branches: [suite, master, main, prerelease, 'fix/**', 'feature/**', 'update/**', 'audit/**']
     # Only rebuild when the patch/source or this workflow changes — NOT for docs
-    # (e.g. hookless/AUDIT.md), so documentation edits don't re-run all ten.
+    # (the .md files under hookless/), so documentation edits don't re-run all ten.
     paths:
       - 'hookless/src/**'
       - 'hookless/patches/**'
