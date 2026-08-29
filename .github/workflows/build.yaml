@@ -12,7 +12,10 @@ on:
     # `master` is this repository's default branch and was missing, so a push
     # there built nothing at all. `main` stays because the same file ships to the
     # NoMount-Suite mirror, whose default IS main -- one workflow, both repos.
-    branches: [master, main, suite, prerelease]
+    # LKM is this branch: the variant that ships the engine as a module.
+    # Without it here the zip job never ran on the branch whose whole
+    # purpose is producing that zip.
+    branches: [master, main, suite, prerelease, LKM]
     tags: ['v*']
 
 # Least privilege: this workflow only builds and uploads artifacts.
