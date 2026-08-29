@@ -257,14 +257,26 @@ def gen_shim_h(symbols, lists):
         out.append('')
 
     if weak:
-        out += ['/* Optional, may legitimately be NULL; the engine tests before calling. */']
+        out += [
+            '/*',
+            ' * Optional, and legitimately NULL: the engine tests the address before',
+            ' * calling, and that test is a real feature probe -- a non-NULL stub would',
+            ' * advertise ghost support that is not there.',
+            ' *',
+            ' * These expand to a POINTER rather than a table lookup because the engine',
+            ' * DECLARES them as well as calling them:',
+            ' *',
+            ' *     extern int ghost_ctl(const char *, size_t) __attribute__((weak));',
+            ' *',
+            ' * and any macro whose name is followed by "(" expands inside that',
+            ' * declaration too. Expanding to (*nm_w_ghost_ctl) leaves the declaration',
+            ' * well-formed -- it becomes a weak function POINTER -- while calls and the',
+            ' * !ghost_ctl test both still mean what the engine intended. nm_engine.c',
+            ' * defines the pointers and binds them from the table at init.',
+            ' */',
+        ]
         for s in weak:
-            pre, post = version_guard(s, lists)
-            if pre:
-                out.append(pre)
-            out.append('#define %s ((typeof(&%s))nm_kpm_sym[%s])' % (s, s, enum_name(s)))
-            if post:
-                out.append(post)
+            out.append('#define %s (*nm_w_%s)' % (s, s))
         out.append('')
 
     out += ['/* Calls. typeof(&f) reads f\'s real prototype for this KMI: the',

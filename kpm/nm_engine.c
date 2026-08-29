@@ -62,16 +62,6 @@ ssize_t generic_read_dir(struct file *f, char __user *b, size_t n, loff_t *o)
 	return nm_real_generic_read_dir(f, b, n, o);
 }
 
-/*
- * The engine declares these weak and tests them before calling, so they may
- * legitimately resolve to NULL. The shim reads their prototypes with typeof(),
- * which needs them declared BEFORE it -- and the engine's own declarations come
- * later, inside nomount.c. Repeated here for that reason; if they ever diverge
- * the compiler says so when nomount.c redeclares them.
- */
-extern int ghost_ctl(const char *buf, size_t count) __attribute__((weak));
-extern int ghost_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
-
 #include "nm_kpm_shim.h"
 #include "../hookless/src/nomount.c"
 
@@ -177,11 +167,24 @@ char *strrchr(const char *s, int c)
  * KernelPatch calls KPM_INIT directly. These two wrappers are the only glue,
  * giving the entry half (which cannot see kernel headers) a plain symbol.
  */
+/*
+ * The weak optional externs, as pointers. nomount.c's own declarations of
+ * ghost_ctl/ghost_get_rule expand through the shim into declarations of these,
+ * so the engine's `if (!ghost_ctl)` probe reads whatever they hold. They stay
+ * NULL when no ghost module is loaded, which is exactly what that probe means.
+ */
+int (*nm_w_ghost_ctl)(const char *buf, size_t count);
+int (*nm_w_ghost_get_rule)(int idx, char *out, size_t outsz);
+
 long nm_engine_init(void)
 {
-	/* Bind the forwarding stub now that the table is populated. */
+	/* Bind everything that is reached by address rather than by call, now
+	 * that nm_kpm_entry.c has populated the table. */
 	nm_real_generic_read_dir = (typeof(nm_real_generic_read_dir))
 				   nm_kpm_sym[NMS_generic_read_dir];
+	nm_w_ghost_ctl = (typeof(nm_w_ghost_ctl))nm_kpm_sym[NMS_ghost_ctl];
+	nm_w_ghost_get_rule = (typeof(nm_w_ghost_get_rule))nm_kpm_sym[NMS_ghost_get_rule];
+
 	return nomount_init();
 }
 

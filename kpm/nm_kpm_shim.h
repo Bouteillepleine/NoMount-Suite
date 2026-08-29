@@ -28,9 +28,24 @@
 #define init_net (*(typeof(&init_net))nm_kpm_sym[NMS_init_net])
 #define kmalloc_caches (*(typeof(&kmalloc_caches))nm_kpm_sym[NMS_kmalloc_caches])
 
-/* Optional, may legitimately be NULL; the engine tests before calling. */
-#define ghost_ctl ((typeof(&ghost_ctl))nm_kpm_sym[NMS_ghost_ctl])
-#define ghost_get_rule ((typeof(&ghost_get_rule))nm_kpm_sym[NMS_ghost_get_rule])
+/*
+ * Optional, and legitimately NULL: the engine tests the address before
+ * calling, and that test is a real feature probe -- a non-NULL stub would
+ * advertise ghost support that is not there.
+ *
+ * These expand to a POINTER rather than a table lookup because the engine
+ * DECLARES them as well as calling them:
+ *
+ *     extern int ghost_ctl(const char *, size_t) __attribute__((weak));
+ *
+ * and any macro whose name is followed by "(" expands inside that
+ * declaration too. Expanding to (*nm_w_ghost_ctl) leaves the declaration
+ * well-formed -- it becomes a weak function POINTER -- while calls and the
+ * !ghost_ctl test both still mean what the engine intended. nm_engine.c
+ * defines the pointers and binds them from the table at init.
+ */
+#define ghost_ctl (*nm_w_ghost_ctl)
+#define ghost_get_rule (*nm_w_ghost_get_rule)
 
 /* Calls. typeof(&f) reads f's real prototype for this KMI: the
  * preprocessor does not re-expand f inside f's own expansion. */
