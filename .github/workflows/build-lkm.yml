@@ -23,7 +23,7 @@ name: NoMount LKM — out-of-tree build
 
 on:
   push:
-    branches: [lkm]
+    branches: [LKM]
     paths:
       - 'lkm/**'
       - 'hookless/src/**'
@@ -39,7 +39,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: lkm-${{ github.ref }}
+  group: LKM-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
