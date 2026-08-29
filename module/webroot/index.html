@@ -2653,10 +2653,19 @@
     if (!matches.length) { d.innerHTML = '<div class="none">No matching installed app</div>'; d.classList.add("show"); return; }
     const head = '<div class="pkghead">' + matches.length + ' app' + (matches.length > 1 ? 's' : '') +
                  (q ? ' match' : '') + ' · type to filter</div>';
+    // esc(), like every other device-derived value on this page.
+    //
+    // This was the one interpolation in the file that skipped it: `data-nm` is a
+    // DOUBLE-quoted attribute and the only sanitising was stripping SINGLE quotes,
+    // and the visible name went in raw. PackageManager will not install a name
+    // containing `"` or `<`, so nothing reachable today gets through it -- but
+    // "unreachable because something else validates it" is the reasoning this file
+    // rejects everywhere else, in a comment two functions down that explains why a
+    // rule target is never interpolated into an onclick. One rule, no exceptions.
     d.innerHTML = head + matches.map(function (p) {
-      const nm = p.name.replace(/'/g, "");
-      return '<div class="opt" data-nm="' + nm + '" onmousedown="pkgPick(this)">' +
-             '<span class="pn">' + p.name + '</span><span class="pu">uid ' + p.uid + '</span></div>';
+      return '<div class="opt" data-nm="' + esc(p.name) + '" onmousedown="pkgPick(this)">' +
+             '<span class="pn">' + esc(p.name) + '</span>' +
+             '<span class="pu">uid ' + esc(p.uid) + '</span></div>';
     }).join("");
     d.classList.add("show");
   }
