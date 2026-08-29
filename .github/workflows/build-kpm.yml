@@ -216,6 +216,42 @@ jobs:
             2>&1 | tee -a /tmp/kpm-compile-${{ matrix.ver }}.log | tail -30
           test -f nomount.kpm && cp nomount.kpm "$GITHUB_WORKSPACE/nomount-${{ matrix.ver }}.kpm"
 
+      # THE gate that separates "it linked" from "it could load".
+      #
+      # KernelPatch resolves a .kpm's undefined symbols against its OWN symbol
+      # table only (kernel/patch/module/module.c, simplify_symbols); the kallsyms
+      # fallback there is commented out because a kernel address overflows the
+      # +/-128 MB range of an AArch64 branch. So any undefined symbol that is not
+      # part of the KernelPatch API fails the load outright with "unknown symbol",
+      # and the whole point of the redirect shim is that none should remain.
+      - name: Undefined symbols left in the .kpm
+        id: kpmundef
+        if: steps.sel.outputs.run == '1'
+        continue-on-error: true
+        run: |
+          set -eu
+          kpm="$GITHUB_WORKSPACE/nomount-${{ matrix.ver }}.kpm"
+          [ -f "$kpm" ] || { echo "no .kpm built; nothing to check"; exit 0; }
+          out=/tmp/kpm-undef-${{ matrix.ver }}.txt
+          aarch64-linux-gnu-nm -u "$kpm" | awk '{print $2}' | sort -u > "$out"
+
+          # What KernelPatch itself can supply: the symbols its own kernel-side
+          # object exports. Read from the SDK source rather than hardcoded, so
+          # this does not rot when the SDK changes.
+          grep -rhoE '^[a-zA-Z_][a-zA-Z0-9_]*' kp/kernel/base/*.c kp/kernel/include/*.h \
+            2>/dev/null | sort -u > /tmp/kp-syms.txt || true
+
+          left=$(comm -23 "$out" /tmp/kp-syms.txt || true)
+          {
+            echo "#### ${{ matrix.ver }} — undefined in the .kpm"
+            echo '```'
+            if [ -s "$out" ]; then cat "$out"; else echo "(none)"; fi
+            echo '```'
+            echo "_Anything here that KernelPatch does not itself provide will fail"
+            echo "the load with \"unknown symbol\"._"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "count=$(wc -l < "$out")" >> "$GITHUB_OUTPUT"
+
       - name: Report
         if: steps.sel.outputs.run == '1'
         run: |
@@ -251,5 +287,6 @@ jobs:
           path: |
             /tmp/kpm-syms-${{ matrix.ver }}.txt
             /tmp/kpm-compile-${{ matrix.ver }}.log
+            /tmp/kpm-undef-${{ matrix.ver }}.txt
             nomount-${{ matrix.ver }}.kpm
           if-no-files-found: warn
