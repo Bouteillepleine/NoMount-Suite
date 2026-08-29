@@ -23,5 +23,11 @@
 *.lock      text eol=lf
 *.yaml      text eol=lf
 *.yml       text eol=lf
-*.patch     -text
+# `text eol=lf`, not `-text`. The kernel side ships an integration patch that
+# `apply_nomount_stack.sh` feeds to `patch -p1`, so a stray CRLF in it is a
+# failed build on a machine nobody can reproduce. `-text` stores bytes
+# verbatim; `text eol=lf` also NORMALISES on the way in, so a Windows editor
+# cannot introduce one. The old `-text` came from a kernel_patches/ tree that
+# no longer exists and left no .patch behind.
+*.patch     text eol=lf
 module.prop text eol=lf

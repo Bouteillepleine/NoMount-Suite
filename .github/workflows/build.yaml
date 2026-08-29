@@ -93,6 +93,10 @@ jobs:
           # bash, not sh: it uses arrays and [[ ]] deliberately, and it runs on a
           # workstation rather than on the phone.
           shellcheck -s bash -S warning -f gcc scripts/package.sh
+          # ...and the kernel side, now that it lives here. One repo, one gate
+          # set: the engine's verify script is a root shell script on a device
+          # just like the module's are.
+          shellcheck -s sh -S warning -f gcc hookless/*.sh
 
   build:
     runs-on: ubuntu-latest
