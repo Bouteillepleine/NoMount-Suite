@@ -123,7 +123,7 @@ non-NULL and falsely advertise ghost support.
 An earlier draft of this file claimed the opposite, and it was wrong. The
 correction matters enough to state plainly.
 
-The `lkm` branch measured which kernel functions the engine calls that the
+The `LKM` branch measured which kernel functions the engine calls that the
 kernel does not **export**, and the answer across all ten versions is *none* —
 so the LKM needs no symbol shim at all. It is tempting to conclude the KPM
 inherits that.
