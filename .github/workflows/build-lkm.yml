@@ -167,8 +167,7 @@ jobs:
 
           # `|| true`, NOT `|| echo 0`. grep -c PRINTS 0 and EXITS 1 when it
           # matches nothing, so `|| echo 0` appends a second zero and the
-          # variable becomes "0
-0" -- which then fails `[ "$r" -eq 0 ]` with
+          # variable becomes a two-line "0 0" -- which then fails the -eq test with
           # "integer expression expected" and reports a clean result as a
           # failure. That is exactly what the first ten-version run did.
           u=$(grep -c . /tmp/undef.txt || true)
