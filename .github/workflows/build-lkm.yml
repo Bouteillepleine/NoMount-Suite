@@ -1,0 +1,153 @@
+name: NoMount LKM — out-of-tree build
+
+# Builds the engine as a loadable module against real kernel trees.
+#
+# Its FIRST job is not to produce a .ko but to answer a question: which kernel
+# functions does the engine call that the kernel does not export to modules? In
+# tree that question never arises. Out of tree the linker answers it exactly,
+# and that answer is the specification for the redirect list in lkm/nm_oot.h --
+# which is why this workflow always surfaces undefined symbols as its own step
+# rather than letting them scroll past inside a failed build log.
+#
+# Read lkm/README.md for what this variant costs. It is not the recommended
+# build and this workflow does not treat it as one.
+
+on:
+  push:
+    branches: [lkm]
+    paths:
+      - 'lkm/**'
+      - 'hookless/src/**'
+      - '.github/workflows/build-lkm.yml'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Comma-separated versions to build (empty = all). e.g. 6.1,6.6"
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lkm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.ver }}
+    runs-on: ubuntu-24.04
+    # Same bound and reasoning as the hookless matrix: a module build is minutes,
+    # anything near 20 is wedged rather than slow, and the 6-hour default hides
+    # which versions actually passed behind one stuck job.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Only the versions OnePlus actually ships. The in-tree matrix covers
+          # 4.9 through 6.18 because the engine has to COMPILE everywhere; this
+          # variant is for devices somebody would really load it on, and a green
+          # tick on a kernel no device runs would be spending CI to prove
+          # nothing.
+          - { ver: '5.10', kref: 'android12-5.10' }
+          - { ver: '5.15', kref: 'android13-5.15' }
+          - { ver: '6.1',  kref: 'android14-6.1'  }
+          - { ver: '6.6',  kref: 'android15-6.6'  }
+          - { ver: '6.12', kref: 'android16-6.12' }
+    steps:
+      - name: Should this version run?
+        id: sel
+        run: |
+          only="${{ github.event.inputs.only }}"
+          if [ -z "$only" ] || printf '%s' "$only" | tr ',' '\n' | grep -qx "${{ matrix.ver }}"; then
+            echo "run=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=0" >> "$GITHUB_OUTPUT"; echo "skipped ${{ matrix.ver }}"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.sel.outputs.run == '1'
+        with:
+          path: repo
+
+      - name: Install build deps
+        if: steps.sel.outputs.run == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev clang lld llvm >/dev/null
+
+      - name: Restore kernel clone
+        id: kcache
+        if: steps.sel.outputs.run == '1'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ksrc
+          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+
+      - name: Clone kernel source on cache miss
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          git clone --depth 1 -b "${{ matrix.kref }}" \
+            https://android.googlesource.com/kernel/common ksrc
+          echo "Kernel: $(head -3 ksrc/Makefile | tr '\n' ' ')"
+
+      - name: Save kernel clone
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ksrc
+          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+
+      - name: Prepare kernel for external modules
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -euxo pipefail
+          cd ksrc
+          # KPROBES is what the kallsyms bootstrap needs; without it the module
+          # cannot resolve a single non-exported symbol (see lkm/nm_oot.c).
+          make ARCH=arm64 LLVM=1 defconfig
+          ./scripts/config --enable CONFIG_KPROBES --enable CONFIG_MODULES
+          make ARCH=arm64 LLVM=1 olddefconfig
+          make ARCH=arm64 LLVM=1 -j"$(nproc)" modules_prepare
+
+      - name: Build the module
+        id: build
+        if: steps.sel.outputs.run == '1'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          make -C ksrc ARCH=arm64 LLVM=1 M="$PWD/repo/lkm" modules 2>&1 \
+            | tee /tmp/lkm-${{ matrix.ver }}.log
+
+      - name: Undefined symbols (the redirect list this variant needs)
+        if: steps.sel.outputs.run == '1'
+        run: |
+          log=/tmp/lkm-${{ matrix.ver }}.log
+          echo "### ${{ matrix.ver }}" >> "$GITHUB_STEP_SUMMARY"
+          # modpost reports one line per symbol the module references and the
+          # kernel does not export. That list IS the work item -- each name needs
+          # an NM_SYM() entry in lkm/nm_oot.h.
+          if grep -qE 'undefined!|undefined symbol' "$log"; then
+            echo "Symbols needing a kallsyms redirect:" | tee -a "$GITHUB_STEP_SUMMARY"
+            grep -oE '"[a-zA-Z_][a-zA-Z0-9_]*" \[' "$log" | tr -d '"[ ' | sort -u \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "Built clean: no undefined symbols." | tee -a "$GITHUB_STEP_SUMMARY"
+            ls -l repo/lkm/*.ko || true
+          else
+            echo "Build failed for a reason other than undefined symbols:" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            tail -40 "$log" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.sel.outputs.run == '1'
+        with:
+          name: lkm-${{ matrix.ver }}
+          path: |
+            /tmp/lkm-${{ matrix.ver }}.log
+            repo/lkm/*.ko
+          if-no-files-found: ignore
