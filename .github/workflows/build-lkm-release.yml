@@ -210,8 +210,8 @@ jobs:
           # insmod, not at build time. modpost is what decides whether they can
           # actually be satisfied, and with a real Module.symvers it has already
           # failed this job above if any could not be. Printed for information.
-          echo "external symbols this module expects the kernel to provide: \
-$(aarch64-linux-gnu-nm -u "$ko" | wc -l)" >> "$GITHUB_STEP_SUMMARY"
+          n=$(aarch64-linux-gnu-nm -u "$ko" | wc -l)
+          echo "external symbols this module expects the kernel to provide: $n" >> "$GITHUB_STEP_SUMMARY"
           sha256sum "$ko" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # always(): if the build got as far as producing a .ko, that .ko is worth
