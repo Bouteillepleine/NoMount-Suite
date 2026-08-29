@@ -26,8 +26,16 @@ ifndef KP_DIR
     $(error KP_DIR not set: checkout of KernelPatch / KPatch-Next-EXP)
 endif
 ifndef KERNEL_DIR
-    $(error KERNEL_DIR not set: configured kernel source for the TARGET KMI (<= 6.6))
+    $(error KERNEL_DIR not set: the configured/built kernel tree for the TARGET KMI (<= 6.6))
 endif
+
+# A GKI build tree is SPLIT: generated headers (autoconf.h, the generated/
+# directories) live under the build dir KERNEL_DIR, while the static headers
+# (include/linux/*.h and the arch tree) live in the source tree. A normal
+# `make -C $KDIR M=...` bridges the two on its own; this hand-rolled compile has
+# to be told. The DDK exposes the source as $KDIR/source; a plain in-tree build
+# has KERNEL_DIR == KERNEL_SRC. Override KERNEL_SRC if your layout differs.
+KERNEL_SRC ?= $(firstword $(wildcard $(KERNEL_DIR)/source) $(KERNEL_DIR))
 
 # ':=' and not '?=' -- make PREDEFINES CC as 'cc', so '?=' never fires and the
 # whole build silently ran through the host x86 compiler against arm64 kernel
@@ -46,13 +54,17 @@ KP_FLAGS := $(foreach d,$(KP_INCLUDE_DIRS),-I$(KP_DIR)/kernel/$(d))
 
 CC_INCLUDE := $(shell $(CC) -print-file-name=include)
 
-K_FLAGS := -nostdinc -isystem $(CC_INCLUDE) -I$(KERNEL_DIR)/include -I$(KERNEL_DIR)/include/uapi \
+# Search order matches kbuild's own: generated (build dir) BEFORE static
+# (source), so a generated header wins over any placeholder of the same name in
+# the source tree. arch generated headers likewise come from the build dir.
+K_FLAGS := -nostdinc -isystem $(CC_INCLUDE) \
            -I$(KERNEL_DIR)/include/generated -I$(KERNEL_DIR)/include/generated/uapi \
-           -I$(KERNEL_DIR)/arch/arm64/include -I$(KERNEL_DIR)/arch/arm64/include/uapi \
+           -I$(KERNEL_SRC)/include -I$(KERNEL_SRC)/include/uapi \
            -I$(KERNEL_DIR)/arch/arm64/include/generated \
            -I$(KERNEL_DIR)/arch/arm64/include/generated/uapi \
+           -I$(KERNEL_SRC)/arch/arm64/include -I$(KERNEL_SRC)/arch/arm64/include/uapi \
            -I$(ENGINE_DIR) \
-           -include $(KERNEL_DIR)/include/linux/kconfig.h \
+           -include $(KERNEL_SRC)/include/linux/kconfig.h \
            -D__KERNEL__ -DMODULE -DKBUILD_MODNAME='"nomount"'
 
 COMMON := -O2 -fno-stack-protector -fno-pic -ffreestanding -Wall
