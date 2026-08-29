@@ -125,6 +125,15 @@ jobs:
           test -f "$KDIR/include/generated/autoconf.h" || {
             echo "::error::no generated headers in \$KDIR"; exit 1; }
           echo "KMI ${{ matrix.kmi }}, KDIR=$KDIR"
+          # The DDK is a BUILD directory, not a source tree: the first
+          # attempt died on a missing include/linux/kconfig.h. Print the
+          # layout so the Makefile is pointed at whatever is really here
+          # rather than at what a source checkout would have.
+          echo "--- \$KDIR:"; ls "$KDIR" | head -30
+          echo "--- \$KDIR/include:"; ls "$KDIR/include" 2>/dev/null | head -20
+          echo "--- source link:"; ls -ld "$KDIR/source" 2>/dev/null || echo "(none)"
+          echo "--- kconfig.h anywhere under /opt:"
+          find /opt -name kconfig.h -path "*linux*" 2>/dev/null | head -5
 
       - name: Cross toolchain
         if: steps.sel.outputs.run == '1'
