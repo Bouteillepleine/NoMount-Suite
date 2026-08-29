@@ -102,12 +102,23 @@ hiding.
 
 ## Compatibility
 
-| Kernel | Device | Status |
+The engine compile-tests against ten kernel versions on every push. Five of
+those are versions OnePlus actually ships; three have been booted and measured on
+a real phone. The rest compile and nothing more — which is a weaker claim, so it
+is written as one.
+
+| Kernel | OnePlus | Status |
 | :--- | :--- | :--- |
-| 6.12 | OnePlus 15 | ✅ Boots, check clean, 258/258 rules verified |
-| 6.1 | OnePlus 13R | ✅ Boots, 261/261 rules verified |
-| 5.15 | OnePlus 11 | ✅ Boots, check clean, 118/118 rules verified |
-| 4.9 – 6.18 (others) | — | 🧩 Compile-tested in CI every push; never booted |
+| 6.12 | **OnePlus 15** | ✅ Booted, `check` clean, 258/258 rules verified |
+| 6.1 | **OnePlus 13R** | ✅ Booted, 261/261 rules verified |
+| 5.15 | **OnePlus 11** | ✅ Booted, `check` clean, 118/118 rules verified |
+| 6.6 | Ace 5 Pro, Ace 5 Ultra, … (18 models) | 🧩 Compiled, not booted |
+| 5.10 | Ace 2, Ace 2V, Nord 3, … (6 models) | 🧩 Compiled, not booted |
+| 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | — not used by any OnePlus | 🧩 Compiled, not tested |
+
+"Compiled" means `fs/nomount.o` builds against that version's canonical tree in
+CI — it says nothing about whether the device boots. A report either way is
+worth an issue.
 
 Root managers: **KernelSU**, **SukiSU** and **ReSukiSU** via the metamodule
 hook; **Magisk** via `post-fs-data.sh`, and **APatch** via the same metamodule
