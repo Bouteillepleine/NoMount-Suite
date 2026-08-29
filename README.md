@@ -76,7 +76,7 @@ rather than copying it, so neither can drift from what the Suite ships.
 | :--- | :--- | :--- | :--- | :--- |
 | **in-tree** | `main` | absent | yes | 4.9 – 6.18 |
 | **KPM** (KernelPatch/APatch) | [`KPM`](../../tree/KPM) | absent | not yet — the inline hook is unwritten | 5.4 – 6.6 |
-| **LKM** (loadable module) | [`lkm`](../../tree/lkm) | **listed** | no | 4.9 – 6.18 |
+| **LKM** (loadable module) | [`LKM`](../../tree/LKM) | **listed** | no | 4.9 – 6.18 |
 
 Neither has been loaded on a device. They compile, and CI proves that much and
 no more — read each branch's `README.md`, which says what it costs before it

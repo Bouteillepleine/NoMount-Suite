@@ -56,7 +56,7 @@ on:
       variant_ref:
         description: "Branch holding lkm/ (this file lives on main; the code does not)"
         required: false
-        default: 'lkm'
+        default: 'LKM'
 
 permissions:
   contents: read
@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: repo
-          ref: ${{ github.event.inputs.variant_ref || 'lkm' }}
+          ref: ${{ github.event.inputs.variant_ref || 'LKM' }}
 
       - name: Confirm the variant tree is actually here
         run: |
