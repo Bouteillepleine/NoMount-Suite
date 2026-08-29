@@ -24,6 +24,13 @@ const PENDING: &str = "/data/adb/nomount/pm-reboot.list";
 
 /// ROM partitions whose APKs PM parses at scan time. A /data APK is PM's own
 /// and is never served by a rule.
+/// DELIBERATELY a fixed list, unlike `mount.rs`, which discovers partitions from
+/// the device. This one is half of a contract with the kernel: the PUBLIC-strip
+/// exemption there applies the same scan-dir predicate, and the note below says
+/// this file is its single source of truth. Widening it here alone would hand
+/// `--public` to paths the engine still strips it from, so an OEM partition
+/// missing from this list is a change to make in `kbuild@hookless` and here in
+/// the same breath -- never here on its own.
 const ROM_ROOTS: &[&str] = &[
     "/system/", "/system_ext/", "/product/", "/vendor/", "/odm/", "/my_product/", "/my_region/",
     "/my_stock/", "/my_company/", "/my_carrier/", "/my_engineering/", "/my_heytap/", "/my_preload/",

@@ -1350,12 +1350,32 @@
     // Only asked when the count is zero, so the normal path costs nothing.
     let ships = -1;
     try {
+      // DISCOVERED, not enumerated. A hardcoded partition list is the same
+      // defect this file's Modules pane already avoids: it answers "no module
+      // ships files" for a device whose OEM partition nobody thought to name,
+      // and OnePlus alone ships my_bigball, my_carrier, my_company,
+      // my_engineering, my_heytap, my_manifest, my_preload, my_product,
+      // my_region, my_stock -- with more on each new ROM. src/mount.rs decides
+      // this dynamically (is "/<name>" a real directory that is not one of the
+      // non-injectable roots?), so ask the device the same question.
+      //
+      // The exclusion list is NON_PARTITION_ROOTS from src/mount.rs, verbatim,
+      // `d` included -- that is the debugfs symlink, and it resolves to a
+      // directory, so a module shipping a top-level `d/` would otherwise count.
+      // `-L` skips a layout-convergence symlink (system/product -> ../product)
+      // for the same reason the Modules pane does.
+      // `skip_mount` is checked too: mount.rs treats it as disabled and this
+      // did not, so a skipped module counted as content that should be served.
       const q = await exec(
         'n=0; for m in /data/adb/modules/*/; do ' +
         '[ -f "$m/disable" ] && continue; [ -f "$m/remove" ] && continue; ' +
-        'for d in system vendor product odm my_product my_stock my_region ' +
-        'my_heytap my_carrier my_preload my_bigball; do ' +
-        '[ -d "$m$d" ] && { n=$((n+1)); break; }; done; done; echo $n'
+        '[ -f "$m/skip_mount" ] && continue; ' +
+        'for pd in "$m"*/; do [ -d "$pd" ] || continue; ' +
+        '[ -L "${pd%/}" ] && continue; p=${pd%/}; p=${p##*/}; ' +
+        'case "$p" in data|data_mirror|mnt|dev|proc|sys|cache|metadata|config' +
+        '|storage|sdcard|apex|tmp|debug_ramdisk|linkerconfig|postinstall' +
+        '|second_stage_resources|bin|sbin|d) continue;; esac; ' +
+        '[ -d "/$p" ] || continue; n=$((n+1)); break; done; done; echo $n'
       );
       if (q.errno === 0) ships = parseInt((q.stdout || '').trim(), 10);
     } catch (e) { /* leave unknown */ }

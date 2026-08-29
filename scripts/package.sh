@@ -310,10 +310,12 @@ package_zip() {
     fi
     cp "$MODULE_DIR/module.prop" "$staging/module.prop"
 
-    # Sync the human-readable version string to the build version, but PRESERVE
-    # the committed versionCode (KSU's update key) verbatim. Deriving it from the
-    # semver (v1.0.0 -> 100) silently downgrades the intended value (10000) and
-    # can break update detection, so leave module.prop's versionCode untouched.
+    # Sync the human-readable version string. The versionCode is NOT touched
+    # here -- it was already written into module.prop at the top of this script,
+    # from the semver, as major*100000 + minor*1000 + patch. This comment used to
+    # say the committed value was "preserved verbatim", which stopped being true
+    # when that stamping was added 160 lines above and left the one field
+    # managers key updates on described by a comment that contradicted the code.
     sed -i "s/^version=.*/version=${VERSION}/" "$staging/module.prop"
 
     # Every ABI needs BOTH the Rust manager (nomount) and the freestanding
