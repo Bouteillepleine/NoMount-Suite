@@ -135,6 +135,56 @@ jobs:
           echo "--- kconfig.h anywhere under /opt:"
           find /opt -name kconfig.h -path "*linux*" 2>/dev/null | head -5
 
+      # Is the maps spoof reachable on this KMI?
+      #
+      # The in-tree build gets it by patching fs/proc/task_mmu.c: inside
+      # show_map_vma(), right after `dev = inode->i_sb->s_dev; ino =
+      # inode->i_ino;`, it calls vfs_map_meta_override(inode, &dev, &ino).
+      #
+      # A KPM cannot patch a mid-function statement -- KernelPatch hooks whole
+      # functions -- so the equivalent needs two hooks working together:
+      #
+      #   show_map_vma(m, vma)        gives the VMA, and through vm_file->f_inode
+      #                               the inode the override actually needs (it
+      #                               tests i_op against NoMount's vtables and
+      #                               reads i_private). A before-hook records the
+      #                               replacement dev/ino for this task.
+      #   show_vma_header_prefix(...) receives dev as arg 5 and ino as arg 6, and
+      #                               a before-hook rewrites them.
+      #
+      # Both are `static`, and show_vma_header_prefix is small and called twice,
+      # so either may be inlined away -- in which case there is no symbol to hook
+      # and this route is closed on that KMI. That is a fact about the kernel, not
+      # something the port can decide, so it is measured here rather than assumed.
+      #
+      # Reported only. Nothing depends on it yet: the hook is not written, and a
+      # .kpm without it is still the same engine minus the maps spoof.
+      - name: Is the maps-spoof hook point present?
+        if: steps.sel.outputs.run == '1'
+        continue-on-error: true
+        run: |
+          set -eu
+          map="$KDIR/System.map"
+          if [ ! -s "$map" ]; then
+            echo "no System.map in the DDK tree; cannot tell" ; exit 0
+          fi
+          {
+            echo "#### ${{ matrix.kmi }} — maps-spoof hook point"
+            echo '```'
+            for fn in show_map_vma show_vma_header_prefix; do
+              if awk -v f="$fn" '$3 == f {found=1} END {exit !found}' "$map"; then
+                printf '  %-24s present in System.map (hookable)\n' "$fn"
+              else
+                printf '  %-24s ABSENT -- inlined, nothing to hook\n' "$fn"
+              fi
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for fn in show_map_vma show_vma_header_prefix; do
+            awk -v f="$fn" '$3 == f {print "  " f " -> " $1}' "$map" || true
+            awk -v f="$fn" '$3 == f {found=1} END {if (!found) print "  " f " -> ABSENT"}' "$map"
+          done
+
       - name: Cross toolchain
         if: steps.sel.outputs.run == '1'
         run: |
