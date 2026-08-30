@@ -277,10 +277,22 @@ jobs:
           out=/tmp/kpm-undef-${{ matrix.kmi }}.txt
           aarch64-linux-gnu-nm -u "$kpm" | awk '{print $2}' | sort -u > "$out"
 
-          # What KernelPatch supplies to a module, per its own doc/en/module.md
-          # and KP_EXPORT_SYMBOL in kernel/base/symbol.c.
-          printf '%s\n' kallsyms_lookup_name printk symbol_lookup_name \
-            | sort -u > /tmp/kp-provided.txt
+          # What KernelPatch supplies to a module, read from the SDK we just
+          # cloned rather than hardcoded. The list used to be three names --
+          # kallsyms_lookup_name, printk, symbol_lookup_name -- and that was
+          # wrong the moment the maps spoof started calling hook_wrap():
+          # KernelPatch exports around a hundred symbols, and a gate that
+          # knows three of them fails builds that would have loaded fine.
+          #
+          # KP_EXPORT_SYMBOL(x) is the declaration that puts a symbol in the
+          # table its loader resolves against, so it is the authority here.
+          grep -rhoE 'KP_EXPORT_SYMBOL[(][a-zA-Z_0-9]+[)]' /tmp/kp/kernel \
+            | sed 's/.*(//; s/)//' | sort -u > /tmp/kp-provided.txt
+          echo "KernelPatch exports $(wc -l < /tmp/kp-provided.txt) symbols to modules"
+          if [ ! -s /tmp/kp-provided.txt ]; then
+            echo "::error::found no KP_EXPORT_SYMBOL in the SDK; cannot judge the gate"
+            exit 1
+          fi
 
           left=/tmp/kpm-unresolvable-${{ matrix.kmi }}.txt
           comm -23 "$out" /tmp/kp-provided.txt > "$left" || true
