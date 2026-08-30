@@ -38,13 +38,32 @@
 MODDIR=/data/adb/modules/meta-nomount
 NMDIR=/data/adb/nomount
 [ -f "$NMDIR/disabled" ] && exit 0
+
+# Does this list hold an actual ENTRY, or only its header?
+#
+# `[ -s FILE ]` is the wrong question for both files below, and for
+# absorbed.list it is wrong on every device: absorb::set_absorbed_pairs writes a
+# three-line comment header before it writes any pairs, so the file is 184 bytes
+# and non-empty the moment the mount pass has run once, whether or not anything
+# has ever been absorbed. Measured on an OP11: 184 bytes, 0 non-comment lines,
+# and boot.log showing `absorb` fired four times in the first 60s after boot,
+# each reporting "nothing to absorb" -- a full mountinfo survey, an `nm list`, a
+# /proc walk over ~1000 pids and the engine-wide pass lock, on the root-exec path
+# OOS's kevent heuristic watches, once per package change, forever. Floor cost
+# measured at 133 ms per run (`absorb --dry-run`; the real pass adds more).
+#
+# Same predicate the readers use (blocklist::parse_blocklist,
+# absorb::parse_absorbed_pairs): a line counts when its first non-blank
+# character is not `#`. Blank lines and comments do not.
+_has_entries() { [ -s "$1" ] && grep -qE '^[[:space:]]*[^[:space:]#]' "$1" 2>/dev/null; }
+
 # Two jobs ride this one watch, because PackageManager rewriting packages.list is
 # the trigger for both and a second inotifyd would cost another blocked process:
 #   * re-apply the per-app hide list (an appid only exists once installed);
 #   * re-point absorbed app-APK rules (an update regenerates the /data/app path,
 #     leaving the rule aimed at a file that no longer exists — issue #14).
 # Proceed when EITHER has something to do.
-[ -s "$NMDIR/uidhide" ] || [ -s "$NMDIR/absorbed.list" ] || exit 0
+_has_entries "$NMDIR/uidhide" || _has_entries "$NMDIR/absorbed.list" || exit 0
 
 ABI=$(getprop ro.product.cpu.abi)
 # Same fallback the boot entry points carry: an empty ABI builds
@@ -117,7 +136,7 @@ sleep 3
 # and the reaper's whole premise (age implies death) was still unsound.
 # 60s: comfortably past (25s pass-lock wait + the apply itself), comfortably
 # under 180.
-if [ -s "$NMDIR/uidhide" ]; then
+if _has_entries "$NMDIR/uidhide"; then
     _out=$(timeout 60 "$BIN" uid apply 2>&1)
     _urc=$?
     # 124 is not the only failure. A plain non-zero exit means the apply itself
@@ -137,7 +156,7 @@ fi
 # An absorbed APK rule survives the app it serves being updated only if it is
 # re-pointed at the new path; absorb refreshes those before it surveys, and is a
 # no-op when nothing moved.
-if [ -s "$NMDIR/absorbed.list" ]; then
+if _has_entries "$NMDIR/absorbed.list"; then
     # Capture the status BEFORE the pipe: `$?` after a command substitution that
     # contains a pipeline is `tail`'s, which always succeeds, so a timeout branch
     # written the obvious way is dead code (the same trap service.sh documents).
