@@ -1,0 +1,86 @@
+name: NoMount Suite — release
+
+# Publishes a GitHub release when a v* tag is pushed.
+#
+# WHY THIS IS A SEPARATE WORKFLOW
+#
+# The release used to be a job inside build.yaml, gated on `startsWith(github.ref,
+# 'refs/tags/v')`. That worked until build.yaml gained a `paths-ignore` filter to
+# stop documentation commits triggering builds -- and GitHub applies path filters
+# to TAG pushes as well. A `v*` tag landing on a commit that happened to touch
+# only documentation would have been filtered out, the workflow would never have
+# fired, and no release would have been published. Silently.
+#
+# Splitting it removes that interaction entirely: this file has no path filter,
+# so a tag always builds and always publishes.
+#
+# It does not duplicate the pipeline. build.yaml is called as a reusable
+# workflow, so the zip is produced by exactly the same jobs as every other build,
+# and the artifact it uploads is visible to the publish job below because a
+# called workflow shares the caller's run.
+
+on:
+  push:
+    tags: ['v*']
+  # Manual re-publish, for the case where a release needs rebuilding from an
+  # existing tag without moving it.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v* tag to publish"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The same build every push gets: tests, clippy, shellcheck, the binaries, the
+  # zip. Nothing release-specific happens here, which is the point -- what gets
+  # published is what CI already builds.
+  build:
+    uses: ./.github/workflows/build.yaml
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Elevated for THIS job only -- the workflow default stays contents: read.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nomount-release-zip
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          zip=$(ls dist/00_NoMount-Module-*.zip | head -1)
+          test -s "$zip"
+          # The zip is named from Cargo.toml; the release is named from the tag.
+          # Nothing asserted the two agreed, so tagging v1.4.0 on a tree whose
+          # Cargo.toml still said 1.3.88 published a release titled v1.4.0 whose
+          # asset was v1.3.88 -- and since managers key updates on versionCode,
+          # that "new release" is invisible as an update to every device.
+          zipver="${zip##*00_NoMount-Module-}"
+          zipver="${zipver%.zip}"
+          zipver="${zipver%-debug}"
+          if [ "$zipver" != "$TAG" ]; then
+            echo "FATAL: tag $TAG does not match the packaged version $zipver." >&2
+            echo "       Bump Cargo.toml and re-tag; do not publish a mismatch." >&2
+            exit 1
+          fi
+          echo "publishing $TAG <- $zip ($(stat -c %s "$zip") bytes)"
+          # The tag is authoritative for the name; the notes point at the commit
+          # log rather than restating it, so this never goes stale.
+          gh release create "$TAG" "$zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "NoMount Suite $TAG" \
+            --generate-notes
