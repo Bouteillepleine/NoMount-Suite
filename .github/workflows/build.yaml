@@ -14,6 +14,21 @@ on:
     # NoMount-Suite mirror, whose default IS main -- one workflow, both repos.
     branches: [master, main, suite, prerelease]
     tags: ['v*']
+    # A README edit is not a build. Without this, every documentation commit
+    # spent a couple of minutes producing a zip identical to the last one, and
+    # the run list read as a wall of "readme:" entries with the real builds
+    # buried among them.
+    #
+    # CAVEAT: GitHub applies path filters to TAG pushes too. If a `v*` tag ever
+    # lands on a commit that touched only documentation, this workflow will not
+    # fire and no release will be published. Release tags here follow a version
+    # bump in Cargo.toml and module.prop, so that case does not arise in
+    # practice -- but if it ever does, run the workflow manually.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitattributes'
 
 # Least privilege: this workflow only builds and uploads artifacts.
 permissions:
