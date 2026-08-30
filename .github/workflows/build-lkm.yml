@@ -35,6 +35,12 @@ on:
         required: false
         default: ''
 
+# NOTE: this workflow's entire run history was deleted once during an Actions
+# cleanup. The file survived, but GitHub delists a workflow that has no runs,
+# so it disappeared from the sidebar until the next push re-registered it.
+# Deleting runs is not the same as deleting a workflow -- but with no runs
+# left, the effect on the Actions page is indistinguishable.
+
 permissions:
   contents: read
 
