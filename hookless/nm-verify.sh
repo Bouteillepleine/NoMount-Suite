@@ -23,6 +23,10 @@ NM=/data/adb/modules/meta-nomount/bin/arm64-v8a/nm
 # pinning that here means this file goes stale on every capability bump, which is
 # how it came to be called nm-verify-v14.sh in the first place.
 MIN_VER=14
+# Whole WORDS: the client dropped first-character dispatch, so `a`/`d` are
+# "nm: unknown command" and every operation below silently did nothing while
+# both tests reported FAIL. Only add/del/block/unblock/clear/list/l/v/w/k are
+# accepted -- see the nm_cmds table in userspace/src/nm.c.
 VER=$("$NM" v 2>/dev/null)
 echo "engine version : ${VER:-<no answer>}"
 case "$VER" in
@@ -40,14 +44,14 @@ rm -rf "$T"; mkdir -p "$T/dirA" "$T/dirB" "$T/srcB"
 echo hi > "$T/srcA"; echo w > "$T/srcB/inner"
 
 # ---- A1 -------------------------------------------------------------------
-"$NM" a "$T/dirA/x" "$T/srcB" >/dev/null 2>&1
+"$NM" add "$T/dirA/x" "$T/srcB" >/dev/null 2>&1
 ctl=$(stat -c %h "$T/dirA")
-"$NM" d "$T/dirA/x" >/dev/null 2>&1
+"$NM" del "$T/dirA/x" >/dev/null 2>&1
 
-"$NM" a "$T/dirB/x" "$T/srcA" >/dev/null 2>&1
-"$NM" a "$T/dirB/x" "$T/srcB" >/dev/null 2>&1
+"$NM" add "$T/dirB/x" "$T/srcA" >/dev/null 2>&1
+"$NM" add "$T/dirB/x" "$T/srcB" >/dev/null 2>&1
 case_t=$(stat -c %F "$T/dirB/x"); case_n=$(stat -c %h "$T/dirB")
-"$NM" d "$T/dirB/x" >/dev/null 2>&1
+"$NM" del "$T/dirB/x" >/dev/null 2>&1
 
 mkdir -p "$T/real/sub"; real=$(stat -c %h "$T/real")
 
@@ -64,7 +68,7 @@ echo ""
 
 # ---- A3 -------------------------------------------------------------------
 mkdir -p "$T/g"
-"$NM" a "$T/g/ghost" "$T/DOES_NOT_EXIST" >/dev/null 2>&1
+"$NM" add "$T/g/ghost" "$T/DOES_NOT_EXIST" >/dev/null 2>&1
 rc=$?
 live=$("$NM" l | grep -c "$T/g/ghost")
 echo "A3  a rejected rule reaches the caller"
