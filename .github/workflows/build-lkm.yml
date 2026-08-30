@@ -196,9 +196,15 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.sel.outputs.run == '1'
         with:
-          name: lkm-${{ matrix.ver }}
+          name: lkm-gate-log-${{ matrix.ver }}
           path: |
             /tmp/lkm-${{ matrix.ver }}.log
             /tmp/redirects-${{ matrix.ver }}.txt
-            repo/lkm/*.ko
+          # The .ko this job produces is deliberately NOT uploaded. It comes from
+          # a modules_prepare build under KBUILD_MODPOST_WARN, so its symbols were
+          # never really resolved -- the header above says such a .ko is not
+          # evidence of anything, and offering it for download invites someone to
+          # try loading a module that cannot work. The loadable ones come from the
+          # per-KMI jobs in build.yaml.
+          retention-days: 7
           if-no-files-found: ignore
