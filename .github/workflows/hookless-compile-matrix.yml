@@ -32,52 +32,42 @@ jobs:
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'deprecated/android-4.9-q'
             tc: gcc
-            bootcfg: '0'
           - ver: '4.14'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'deprecated/android-4.14-stable'
             tc: gcc
-            bootcfg: '0'
           - ver: '4.19'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'deprecated/android-4.19-stable'
             tc: gcc
-            bootcfg: '0'
           - ver: '5.4'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'android11-5.4'
             tc: clang
-            bootcfg: '0'
           - ver: '5.10'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'android12-5.10'
             tc: clang
-            bootcfg: '1'
           - ver: '5.15'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'android13-5.15'
             tc: clang
-            bootcfg: '1'
           - ver: '6.1'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'android14-6.1'
             tc: clang
-            bootcfg: '1'
           - ver: '6.6'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'android15-6.6'
             tc: clang
-            bootcfg: '1'
           - ver: '6.12'
             krepo: 'https://android.googlesource.com/kernel/common'
             kref: 'android16-6.12'
             tc: clang
-            bootcfg: '1'
           - ver: '6.18'
             krepo: 'https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git'
             kref: 'linux-6.18.y'
             tc: clang
-            bootcfg: '1'
     env:
       # Toolchains are pinned via the pinned ubuntu-24.04 runner image
       # (clang/lld/llvm 18, gcc-13). NB: the versioned LLVM=-18 suffix is NOT
@@ -203,33 +193,28 @@ jobs:
             echo "FATAL: fs/Kconfig hunk did not apply for ${{ matrix.ver }}"; exit 1; }
 
           echo "== defconfig =="
-          # The generic arm64 defconfig leaves CONFIG_BOOT_CONFIG unset, which
-          # silently excluded every #ifdef CONFIG_BOOT_CONFIG block
-          # (nm_snapshot_bootconfig, nm_bootconfig_show, nm_set_bootconfig,
-          # nm_mk_bootconfig_pde and the NM_KNOB_BOOTCONFIG dispatch) from ALL ten
-          # versions -- the bootconfig half of the boot-identity cloak had zero
-          # compile coverage. Turn the symbol on explicitly rather than switching
-          # to gki_defconfig: that pulls in GKI's KMI machinery, and on
-          # android16-6.12 it enables gendwarfksyms, which needs <dwarf.h> from
-          # libdw-dev and failed the job for a reason unrelated to this driver.
-          # `defconfig -e BOOT_CONFIG` gives CONFIG_BOOT_CONFIG=y on its own
-          # (BLK_DEV_INITRD, its only dependency, is already set) and leaves the
-          # rest of the matrix's config baseline alone.
+          # Plain `defconfig`, not gki_defconfig: the latter pulls in GKI's KMI
+          # machinery, and on android16-6.12 it enables gendwarfksyms, which needs
+          # <dwarf.h> from libdw-dev and failed the job for a reason unrelated to
+          # this driver.
+          #
+          # CONFIG_BOOT_CONFIG used to be forced on here, and its absence was a
+          # FATAL, because the engine carried `#ifdef CONFIG_BOOT_CONFIG` blocks
+          # for the /proc/bootconfig takeover -- and the generic arm64 defconfig
+          # leaves that symbol unset, so those blocks had zero compile coverage on
+          # all ten versions. That cloak is gone: knob slots 0..3 are retired
+          # (nomount.h reserves them and says why), the driver names neither the
+          # symbol nor bootconfig anywhere, and the gate was asserting a config
+          # option no line of this engine reads. A gate over code that does not
+          # exist cannot fail usefully and can only fail spuriously -- on a tree
+          # where the symbol is unselectable it would abort a perfectly good
+          # compile. Removed with the feature, along with the per-version matrix
+          # column that drove it.
           make $MAKEOPTS defconfig 2>&1 | tail -5
           ./scripts/config --file out/.config -e NOMOUNT
-          # bootconfig only exists from 5.6; on older trees the #ifdef is
-          # correctly compiling out real absence, so only assert where it exists.
-          ./scripts/config --file out/.config -e BOOT_CONFIG || true
           make $MAKEOPTS olddefconfig 2>&1 | tail -5
           grep -q '^CONFIG_NOMOUNT=y' out/.config || {
             echo "FATAL: CONFIG_NOMOUNT did not stick in .config for ${{ matrix.ver }}"; exit 1; }
-          if [ "${{ matrix.bootcfg }}" = "1" ]; then
-            grep -q '^CONFIG_BOOT_CONFIG=y' out/.config || {
-              echo "FATAL: CONFIG_BOOT_CONFIG not enabled for ${{ matrix.ver }} -- the bootconfig spoof would go uncompiled"; exit 1; }
-            echo "CONFIG_BOOT_CONFIG=y (bootconfig paths covered)"
-          else
-            echo "::notice::${{ matrix.ver }} predates bootconfig (5.6) -- #ifdef CONFIG_BOOT_CONFIG correctly compiled out"
-          fi
           echo "== prepare =="
           make $MAKEOPTS prepare 2>&1 | tail -20
           echo "== compile fs/nomount.o =="
