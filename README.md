@@ -75,8 +75,13 @@ rather than copying it, so neither can drift from what the Suite ships.
 | | branch | `/proc/modules` | maps spoof | kernels |
 | :--- | :--- | :--- | :--- | :--- |
 | **in-tree** | `main` | absent | yes | 4.9 – 6.18 |
-| **KPM** (KernelPatch/APatch) | [`KPM`](../../tree/KPM) | absent | not yet — the inline hook is unwritten | 6 KMIs, 5.10 – 6.6 |
-| **LKM** (loadable module) | [`LKM`](../../tree/LKM) | **listed** | no | 4.9 – 6.18 |
+| **KPM** (KernelPatch/APatch) | [`KPM`](../../tree/KPM) | absent | yes — two KernelPatch hooks | 6 KMIs, 5.10 – 6.6 |
+| **LKM** (loadable module) | [`LKM`](../../tree/LKM) | **listed** | yes — two kprobes | 4.9 – 6.18 |
+
+Both now carry the `/proc/<pid>/maps` spoof, reaching the same
+`vfs_map_meta_override()` the in-tree call site does — through kprobes in the
+LKM and KernelPatch hooks in the KPM, two each, because the inode and the
+`dev`/`ino` pair live in different functions.
 
 Neither has been loaded on a device. They compile, and CI proves that much and
 no more — read each branch's `README.md`, which says what it costs before it
