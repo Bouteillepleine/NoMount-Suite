@@ -211,7 +211,10 @@ jobs:
         with:
           name: bin-${{ matrix.abi }}-${{ matrix.profile }}
           path: target/${{ matrix.target }}/${{ matrix.profile }}/nomount
-          retention-days: 7
+          # Intermediate: `package` downloads this in the same run and nothing
+          # else ever wants it. At 7 days these were the largest thing in the
+          # artifact store by a wide margin.
+          retention-days: 1
 
   package:
     needs: [build, test]
@@ -283,7 +286,9 @@ jobs:
         with:
           name: nomount-debug-zip
           path: release/debug/00_NoMount-Module-*.zip
-          retention-days: 30
+          # A diagnostic aid, not a deliverable: keep it long enough to attach to
+          # a bug report, not long enough to dominate the store.
+          retention-days: 7
 
   # Publish on a v* tag.
   #
