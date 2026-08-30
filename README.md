@@ -132,6 +132,15 @@ row means only that no OnePlus ships those versions; plenty of other devices do.
 CI — it says nothing about whether the device boots. A report either way is
 worth an issue.
 
+<p align="center">
+  <a href="docs/screenshots/duckdetector.jpg"><img src="docs/screenshots/duckdetector.jpg" width="250" alt="Duck Detector: 0 Danger, 0 Warning, 15 Ready"></a>
+</p>
+
+<p align="center"><sub><b>Duck Detector <code>2026.08.28</code> on a Suite kernel</b> — 0 Danger, 0 Warning, 15 Ready.<br>
+The engine is compiled into the kernel, so there is no mount to conceal, nothing in <code>lsmod</code>,<br>
+and nothing for the mount-layer, kernel-marker or root cards to find.</sub></p>
+
+
 Root managers: **KernelSU**, **SukiSU** and **ReSukiSU** via the metamodule
 hook; **Magisk** via `post-fs-data.sh`, and **APatch** via the same metamodule
 hook. Every device in the table above ran ReSukiSU — Magisk and APatch have not
