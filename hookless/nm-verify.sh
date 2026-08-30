@@ -1,20 +1,41 @@
 #!/system/bin/sh
-# NoMount v14 post-flash verifier.
-# Proves the two fixes that need a kernel to test: A1 (rule replacement leaves
-# the parent child node half-updated) and A3 (batch add swallows rejections).
+# NoMount post-flash verifier.
+#
+# Two invariants that can only be tested against a running kernel:
+#   A1  a rule REPLACEMENT refreshes the parent's child node (d_type, fake_ino),
+#       so a file rule shadowed by a dir rule leaves the parent's link count
+#       describing what the directory now holds.
+#   A3  a REJECTED rule reaches the caller, so a batch add cannot report success
+#       for work it did not do.
+#
+# Both were introduced at engine v14 and both still hold; this is a regression
+# smoke test for a freshly flashed kernel, not a test OF v14. It used to demand
+# `v == 14` and printed "NOTE: expected 14" on every engine since -- a spurious
+# warning on a device where nothing is wrong. The floor is what the invariants
+# actually need.
+#
 # Safe: rules live in kernel memory only and are rebuilt at boot, so anything
 # this adds is removed again below and would vanish on reboot regardless.
 NM=/data/adb/modules/meta-nomount/bin/arm64-v8a/nm
 [ -x "$NM" ] || { echo "FATAL: nm client not found at $NM"; exit 1; }
 
+# The version this pair of invariants was introduced at. Not the current engine:
+# pinning that here means this file goes stale on every capability bump, which is
+# how it came to be called nm-verify-v14.sh in the first place.
+MIN_VER=14
 VER=$("$NM" v 2>/dev/null)
 echo "engine version : ${VER:-<no answer>}"
-[ "$VER" = "14" ] || echo "  NOTE: expected 14. On 13 the two tests below SHOULD fail - that is the bug."
+case "$VER" in
+    ''|*[!0-9]*)
+        echo "FATAL: the engine did not answer a version - is this a CONFIG_NOMOUNT kernel?"
+        exit 1 ;;
+esac
+[ "$VER" -ge "$MIN_VER" ] || echo "  NOTE: engine is older than v$MIN_VER, so the two tests below SHOULD fail - that is the bug."
 B=$("$NM" l | wc -l); echo "rules before   : $B"
 echo ""
 
 fail=0
-T=/data/local/tmp/nmv14
+T=/data/local/tmp/nm-verify
 rm -rf "$T"; mkdir -p "$T/dirA" "$T/dirB" "$T/srcB"
 echo hi > "$T/srcA"; echo w > "$T/srcB/inner"
 
