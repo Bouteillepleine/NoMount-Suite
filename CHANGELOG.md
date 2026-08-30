@@ -2,6 +2,89 @@
 
 ## Unreleased
 
+Three defects from a full read-through of the tree, and four things that had
+outlived what they described.
+
+### Fixed
+
+- **The Magisk boot path could bootloop with the guard disarmed.** The
+  pre-zygote `absorb --early` block sat ABOVE the bootloop counter in
+  `post-fs-data.sh` — so a boot that died inside it never advanced `bootcount`,
+  `GUARD_MAX` was unreachable, and the device looped with no self-recovery. That
+  is not a hypothetical failure for that block: re-asserting a `my_*` rule has
+  rebooted a device (OP11, four rules in a burst, clean `sys.boot.reason`, no
+  tombstone), which is exactly why the pass exists there and only there.
+  `metamount.sh` states the rule both files have to obey — "Anything placed
+  above [the guard] is something `disabled` never suppresses and the counter
+  cannot protect against" — and the KSU path always obeyed it: the counter is
+  incremented in `metamount.sh` and the early absorb runs later, from
+  `post-mount.sh`. The block now lives in the guard's `else` arm.
+
+  Moving it also fixed an inverted ORDER that came with the old position. KSU
+  runs the mount pass first and absorbs second; Magisk ran absorb first, so the
+  `nm clear` that opens the mount pass dropped every rule absorb had just
+  created — and `run_mount` re-serves only the absorbed record's APK entries
+  (`is_app_apk`). A non-APK takeover was therefore recorded, wiped, and not
+  re-served until `service.sh`'s pass, by which time its mount was gone and
+  there was nothing left to absorb: that path served the stock file for the
+  whole boot. Both paths now run in the same order.
+
+- **`uidwatch.sh` ran a full `absorb` on every package change, on every
+  device.** The gate was `[ -s absorbed.list ]`, but `set_absorbed_pairs` writes
+  a three-line comment header before it writes any pairs, so the file is
+  non-empty from the first mount pass whether or not anything has ever been
+  absorbed. Measured on an OP11: 184 bytes, 0 non-comment lines, and `absorb`
+  firing four times in the first 60 s after boot, each reporting "nothing to
+  absorb" — a mountinfo survey, an `nm list`, a `/proc` walk over ~1000 pids and
+  the engine-wide pass lock, once per install/update/uninstall, forever. Floor
+  cost measured at 133 ms per run. Both gates in that file now ask whether the
+  list holds an entry, using the same "first non-blank character is not `#`"
+  predicate its readers use.
+
+- **Per-UID hiding leaked module bytes under a shadowing dir-target rule**
+  (engine, `nm_dir_child_lookup`). A passthrough child inherited
+  `NM_FLAG_SHADOWS_STOCK` from its parent without inheriting anything for it to
+  point at, so the two halves of the pair disagreed: `nm_hidden_from_caller()`
+  saw the flag and declined `-ENOENT`, while `nm_stock_for_caller()` found no
+  `s_path` and returned NULL — a blocked reader was served the MODULE's bytes
+  for every name under that directory, while its `nm_open()` of the PARENT
+  handed it the pinned stock directory. readdir listed stock names, lookup
+  resolved module content. The child now resolves its own name under the
+  parent's stock directory and pins the result; a name genuinely absent there
+  loses the flag and is hidden like any other added name; a name that cannot be
+  resolved leaves the flags alone, because "could not ask" is not "not there".
+
+  Narrow, and stated as such: no shipped configuration builds that rule shape.
+  `mount.rs::inject_would_mask_dir` refuses a target resolving to a live
+  directory and `cli::handle_vfs` refuses a directory source, so only a
+  hand-issued `nm add <existing-dir> <dir>` reaches it, and no measured device
+  carried one. **Engine floor rises to v27**; userspace can neither set nor
+  observe the difference, so the bump is there for `doctor` to tell a flashed
+  engine from the one it replaced.
+
+- `post-fs-data.sh`'s `disabled` arm was a bare `:`, so a Magisk user whose
+  guard had tripped got nothing in `boot.log` at the stage that made the
+  decision. It logs the same line `metamount.sh` does.
+
+### Removed
+
+- **The `CONFIG_BOOT_CONFIG` gate in the compile matrix**, and the per-version
+  `bootcfg` column that drove it. It forced the symbol on and FATAL'd when it
+  did not stick, for `#ifdef CONFIG_BOOT_CONFIG` blocks that retired with knob
+  slots 0..3 — the driver names neither the symbol nor bootconfig anywhere. A
+  gate over code that does not exist cannot fail usefully and can only fail
+  spuriously.
+
+### Changed
+
+- `hookless/nm-verify-v14.sh` → `hookless/nm-verify.sh`. Both invariants it
+  checks still hold; what was stale was demanding `engine == 14`, which printed
+  "NOTE: expected 14" on every engine since. It now takes v14 as the floor those
+  invariants arrived at and refuses outright if the engine answers no version at
+  all.
+
+## v1.3.95 – v1.3.117
+
 The kernel engine now lives in this repository under `hookless/`, merged from
 what was `kbuild@hookless`: it is versioned and flashed with the userspace that
 drives it, and CI can finally assert that the two agree on the one list they
