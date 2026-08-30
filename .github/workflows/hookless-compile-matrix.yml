@@ -4,43 +4,15 @@ name: NoMount hookless — compile-test matrix
 # canonical source tree for each of the 10 supported kernel versions.
 # Compile test (builds fs/nomount.o only), not a full device build
 
+# REUSABLE ONLY. This used to carry its own push/pull_request triggers, which
+# gave it a separate entry in the Actions sidebar alongside the three workflows
+# that actually produce something. It is called from build.yaml instead, so the
+# ten-version coverage is unchanged while the list shows only deliverables.
+#
+# A workflow with nothing but `workflow_call` is not listed on its own; its jobs
+# appear nested under the run that called it.
 on:
-  push:
-    # Work branches too, not just hookless: a change that only compiles on one
-    # version is exactly what this matrix exists to catch, and catching it after
-    # the merge means hookless is broken while someone bisects ten jobs.
-    # The engine lives in the Suite repo now, so the branch it lands on is
-    # `suite`, not `hookless`. Left unchanged this matrix would never fire
-    # again -- ten compile targets silently not running is exactly the
-    # failure it was built to prevent. The work-branch globs stay.
-    branches: [suite, master, main, prerelease, 'fix/**', 'feature/**', 'update/**', 'audit/**']
-    # Only rebuild when the patch/source or this workflow changes — NOT for docs
-    # (the .md files under hookless/), so documentation edits don't re-run all ten.
-    paths:
-      - 'hookless/src/**'
-      - 'hookless/patches/**'
-      - '.github/workflows/hookless-compile-matrix.yml'
-  pull_request:
-    branches: [suite, master, main, prerelease]
-    paths:
-      - 'hookless/src/**'
-      - 'hookless/patches/**'
-      - '.github/workflows/hookless-compile-matrix.yml'
-  workflow_dispatch:
-    inputs:
-      only:
-        description: 'Comma-separated versions to build (empty = all). e.g. 4.9,6.12'
-        required: false
-        default: ''
-
-permissions:
-  contents: read
-  actions: read
-
-# Supersede an in-flight matrix when a newer commit lands on the branch.
-concurrency:
-  group: hookless-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
 
 jobs:
   compile:
