@@ -103,45 +103,9 @@ export NM_BIN="$MODDIR/bin/$ABI/nm"
 # this; the Magisk path was a degraded twin that did not.
 chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 
-# --- pre-zygote absorb (my_* only, trial-gated) --------------------------------
-# MAGISK ONLY. KSU/APatch have already exited above and run this from
-# post-mount.sh instead, which is strictly better: it fires after EVERY module's
-# post-fs-data.sh. Magisk has no post-mount stage, so post-fs-data is the last
-# hook before zygote there, and a module whose own post-fs-data.sh runs after
-# ours will still be missed. Measured shape of that miss, on KSU before the
-# stage moved: "nothing mounted over the ROM (posture clean)" while 84 mounts
-# went up afterwards.
-# A module that binds its own content over a my_* path leaves that mount in every
-# app's mountinfo, naming /data/adb/modules -- the loudest root signal there is,
-# and the one thing the mountless posture exists to deny. The runtime pass in
-# service.sh cannot take those over: re-asserting a my_* rule on a live system has
-# rebooted a device (OP11, Suite v1.3.22, engine v14 -- four rules in a burst,
-# clean sys.boot.reason, no tombstone), so it defers them here and says so.
-#
-# Here there is no live system to lose. Module post-fs-data.sh scripts run in
-# module-id order, so this catches every module sorted before `meta-nomount` --
-# which is the common case, and NOT a claim to catch all of them. A module sorted
-# after us still binds after this runs and stays deferred; `nomount check` names
-# whatever is left either way.
-#
-# Gated on the my_hookless TRIAL marker, because taking these over means serving
-# my_* by injection, and a leaf my_* inject may trip zygote's FD allowlist at
-# forkSystemServer. Without the marker this block does nothing at all. With it,
-# the bootloop guard below (and metamount.sh's, on KSU) still writes `disabled`
-# after GUARD_MAX failed boots, and this block honours that file -- so a bad trial
-# self-recovers instead of needing a flash.
-if [ ! -f "$NMDIR/disabled" ] && [ -x "$BIN" ] \
-   && { [ -f "$NMDIR/my_hookless" ] || [ "$NM_MY_HOOKLESS" = 1 ]; }; then
-    _ea=$(nmto 60 "$BIN" absorb --early 2>&1)
-    _ea_rc=$?
-    if [ "$_ea_rc" -eq 124 ]; then
-        nmlog "⚠ early absorb TIMED OUT after 60s - continuing boot"
-    elif [ "$_ea_rc" -ne 0 ]; then
-        nmlog "⚠ early absorb FAILED (rc=$_ea_rc): $(printf '%s\n' "$_ea" | tail -1)"
-    else
-        nmlog "early absorb: $(printf '%s\n' "$_ea" | tail -1)"
-    fi
-fi
+# NB: the pre-zygote absorb pass used to sit HERE, above the guard. It is now in
+# the guard's else arm, after the mount pass -- see the block down there for both
+# reasons it had to move.
 
 # --- bootloop guard ---
 # Everything this script still does at post-fs-data runs INSIDE the guard
@@ -159,7 +123,12 @@ COUNT=$((COUNT + 1))
 echo "$COUNT" > "$NMDIR/bootcount"
 
 if [ -f "$NMDIR/disabled" ]; then
-    :
+    # Say so. metamount.sh logs this on the KSU path and this arm was a bare `:`,
+    # so a Magisk user whose guard had tripped got nothing at the one stage that
+    # knows why nothing is being injected -- and boot.log is the only record this
+    # path has. service.sh reports it later; that is not a reason to be silent
+    # here, where the decision is actually made.
+    nmlog "disabled, skipping the mount pass"
 elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
     nmlog "bootloop guard tripped (count=$COUNT) -> self-disabling"
     : > "$NMDIR/disabled"
@@ -239,6 +208,59 @@ else
             nmto 30 "$BIN" whiteout apply 2>/dev/null
             _wrc=$?
             [ "$_wrc" -ne 0 ] && nmlog "⚠ whiteout apply exited $_wrc — hidden paths are still VISIBLE this boot"
+        fi
+
+        # --- pre-zygote absorb (my_* only, trial-gated) ------------------------
+        # MAGISK ONLY. KSU/APatch have already exited above and run this from
+        # post-mount.sh instead, which is strictly better: it fires after EVERY
+        # module's post-fs-data.sh. Magisk has no post-mount stage, so
+        # post-fs-data is the last hook before zygote there, and a module whose
+        # own post-fs-data.sh runs after ours will still be missed. Measured shape
+        # of that miss, on KSU before the stage moved: "nothing mounted over the
+        # ROM (posture clean)" while 84 mounts went up afterwards.
+        #
+        # A module that binds its own content over a my_* path leaves that mount
+        # in every app's mountinfo, naming /data/adb/modules -- the loudest root
+        # signal there is, and the one thing the mountless posture exists to deny.
+        # The runtime pass in service.sh cannot take those over: re-asserting a
+        # my_* rule on a live system has rebooted a device (OP11, Suite v1.3.22,
+        # engine v14 -- four rules in a burst, clean sys.boot.reason, no
+        # tombstone), so it defers them here and says so. Here there is no live
+        # system to lose.
+        #
+        # Gated on the my_hookless TRIAL marker, because taking these over means
+        # serving my_* by injection, and a leaf my_* inject may trip zygote's FD
+        # allowlist at forkSystemServer. Without the marker this does nothing.
+        #
+        # IT LIVES HERE, INSIDE THE GUARD AND AFTER THE MOUNT PASS, for two
+        # reasons -- it used to sit above both:
+        #
+        #  1. The counter. metamount.sh states the rule this file has to obey
+        #     too: "Anything placed above [the guard] is something `disabled`
+        #     never suppresses and the counter cannot protect against." Above the
+        #     `echo "$COUNT" > bootcount` line, a boot that DIED inside this
+        #     absorb -- which is the exact documented failure of a my_* re-assert
+        #     -- never advanced the counter, so GUARD_MAX was unreachable and the
+        #     device looped with no self-recovery. The KSU path never had this:
+        #     metamount.sh increments first and post-mount.sh runs later.
+        #  2. The order. On KSU the sequence is mount pass (metamount.sh) THEN
+        #     early absorb (post-mount.sh). Running absorb FIRST here inverted it:
+        #     the `nm clear` that opens the mount pass dropped every rule absorb
+        #     had just created, and run_mount only re-serves the absorbed record's
+        #     APK entries (is_app_apk), so a non-APK takeover was recorded, wiped,
+        #     and not re-served until service.sh's pass -- by which time its mount
+        #     is gone and there is nothing left to absorb, leaving that path on the
+        #     stock file for the whole boot. Same order as KSU now.
+        if [ -f "$NMDIR/my_hookless" ] || [ "$NM_MY_HOOKLESS" = 1 ]; then
+            _ea=$(nmto 60 "$BIN" absorb --early 2>&1)
+            _ea_rc=$?
+            if [ "$_ea_rc" -eq 124 ]; then
+                nmlog "⚠ early absorb TIMED OUT after 60s - continuing boot"
+            elif [ "$_ea_rc" -ne 0 ]; then
+                nmlog "⚠ early absorb FAILED (rc=$_ea_rc): $(printf '%s\n' "$_ea" | tail -1)"
+            else
+                nmlog "early absorb: $(printf '%s\n' "$_ea" | tail -1)"
+            fi
         fi
     else
         # Never silent. See metamount.sh: with no else arm a missing binary meant
