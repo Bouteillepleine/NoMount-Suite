@@ -1,4 +1,4 @@
-name: Build
+name: NoMount Suite — module zip
 
 on:
   workflow_dispatch:
