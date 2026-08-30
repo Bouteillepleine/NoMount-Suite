@@ -165,18 +165,26 @@ hiding.
 ## Compatibility
 
 The engine compile-tests against ten kernel versions on every push. Five of
-those are versions OnePlus actually ships; three have been booted and measured on
+those are versions OnePlus actually ships; four have been booted and measured on
 a real phone. The rest compile and nothing more — which is a weaker claim, so it
 is written as one.
 
-| Kernel | OnePlus | Status |
+**None of this is OnePlus-specific.** The engine is ordinary VFS code: no vendor
+hooks, no SoC assumptions, nothing that reads a OnePlus tree. The table names
+OnePlus devices because those are the kernels that have been *built and booted* —
+the three kernel builders shipping it are OnePlus builders, so that is where the
+evidence comes from. Any device whose kernel you can rebuild with
+`CONFIG_NOMOUNT=y` works the same way, on any of the ten versions below. The last
+row means only that no OnePlus ships those versions; plenty of other devices do.
+
+| Kernel | Tested on | Status |
 | :--- | :--- | :--- |
 | 6.12 | **OnePlus 15** | ✅ Booted, `check` clean, 258/258 rules verified |
 | 6.1 | **OnePlus 13R** | ✅ Booted, 261/261 rules verified |
 | 5.15 | **OnePlus 11** | ✅ Booted, `check` clean, 118/118 rules verified |
 | 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, … (18 models) | ✅ Booted, 261/261 rules verified |
 | 5.10 | Ace 2, Ace 2V, Nord 3, … (6 models) | 🧩 Compiled, not tested |
-| 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | — not used by any OnePlus | 🧩 Compiled, not tested |
+| 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these — other vendors do | 🧩 Compiled, not tested |
 
 "Compiled" means `fs/nomount.o` builds against that version's canonical tree in
 CI — it says nothing about whether the device boots. A report either way is
