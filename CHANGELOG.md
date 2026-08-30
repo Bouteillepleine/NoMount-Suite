@@ -62,6 +62,28 @@ outlived what they described.
   observe the difference, so the bump is there for `doctor` to tell a flashed
   engine from the one it replaced.
 
+  The first build of this fix was inert, and only measuring it said so. It
+  wrapped the stock lookup in `override_creds(nm_root_cred)` — whose SID is the
+  KERNEL's, not root's — and `lookup_one_len_unlocked()` ends in
+  `inode_permission()`, which runs the LSM. Asked directly through
+  `/sys/fs/selinux/access` on an OP15: `kernel_t` may search `system_file` and
+  `system_data_file` directories and may **not** search `shell_data_file` or
+  `adb_data_file`. So the lookup returned `-EACCES` on any /data-labelled
+  target, took the error arm, pinned nothing and left v26 behaviour in place —
+  silently, because that denial is `dontaudit`'d and logs no AVC. Same rule
+  shape, blocked reader, two labels:
+
+  ```
+  shell_data_file        both.txt=MODULE  modonly=MODULE    (inert)
+  system_data_root_file  both.txt=STOCK   modonly=<ENOENT>  (works)
+  ```
+
+  The lookup uses the caller's creds now, matching the module-side lookup beside
+  it, which removes the LSM dependency rather than trading one label for
+  another. The first-toucher-wins case that motivated the override is covered by
+  the parent already having passed `nm_inode_permission()`, whose mode, owner and
+  context mirror the stock ancestor.
+
 - `post-fs-data.sh`'s `disabled` arm was a bare `:`, so a Magisk user whose
   guard had tripped got nothing in `boot.log` at the stage that made the
   decision. It logs the same line `metamount.sh` does.
