@@ -21,6 +21,11 @@
 
 obj-m += nm_engine.o
 
+# The maps spoof's kernel-side half. Separate object rather than part of
+# nm_engine.c because it is variant-specific: the in-tree build reaches
+# vfs_map_meta_override() from a patched call site and needs none of this.
+obj-m += nm_maps_spoof.o
+
 ccflags-y += -I$(src)/../hookless/src
 
 # The engine is in-tree code being built somewhere it was not written for:

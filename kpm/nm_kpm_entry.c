@@ -17,6 +17,7 @@
 #include <baselib.h>
 #include <kputils.h>
 #include <log.h>
+#include <hook.h>
 
 #include "nm_kpm_syms.h"
 
@@ -32,6 +33,11 @@ void *nm_kpm_sym[NM_KPM_SYM_COUNT];
  * plain types so this file never needs one. */
 extern long nm_engine_init(void);
 extern void nm_engine_exit(void);
+
+/* The maps spoof, in nm_maps_spoof.c -- same reason for the plain types. */
+extern void nm_maps_note_vma(void *vma);
+extern int nm_maps_apply(unsigned long *dev, unsigned long *ino);
+extern void nm_maps_reset(void);
 
 struct nm_sym_ent {
 	int idx;
@@ -69,9 +75,99 @@ static long nm_kpm_resolve(void)
 	return missing;
 }
 
+/*
+ * THE MAPS SPOOF.
+ *
+ * The in-tree build patches fs/proc/task_mmu.c to call vfs_map_meta_override()
+ * on two locals inside show_map_vma(). A .kpm cannot edit the middle of a
+ * function, and one hook is not enough either: show_map_vma has the VMA (and
+ * so the inode the override needs) but not dev/ino, while
+ * show_vma_header_prefix takes dev and ino as arguments 5 and 6 but has no
+ * inode. So the first records and the second consumes -- see
+ * nm_maps_spoof.c, which holds everything that needs kernel headers.
+ *
+ * Both functions are `static` in the kernel and could in principle be inlined
+ * away, in which case kallsyms has nothing to look up and the spoof simply does
+ * not arm. They are present on every supported KMI; the build workflow checks
+ * each System.map and prints the result, so this is measured rather than hoped.
+ */
+static void *nm_hook_map_vma;
+static void *nm_hook_hdr_prefix;
+
+/* show_map_vma(struct seq_file *m, struct vm_area_struct *vma) -- vma is arg1. */
+static void nm_before_map_vma(hook_fargs2_t *args, void *udata)
+{
+	nm_maps_note_vma((void *)args->arg1);
+}
+
+/*
+ * show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino)
+ * dev is arg5, ino is arg6. Written back only when the override changed them.
+ */
+static void nm_before_hdr_prefix(hook_fargs7_t *args, void *udata)
+{
+	unsigned long dev = (unsigned long)args->arg5;
+	unsigned long ino = (unsigned long)args->arg6;
+
+	if (nm_maps_apply(&dev, &ino)) {
+		args->arg5 = dev;
+		args->arg6 = ino;
+	}
+}
+
+/* Not fatal. Without it the engine still redirects paths; it just cannot rewrite
+ * what maps reports, which is the state this variant shipped in before. */
+static void nm_maps_hooks_install(void)
+{
+	hook_err_t err;
+
+	nm_hook_map_vma = (void *)kallsyms_lookup_name("show_map_vma");
+	nm_hook_hdr_prefix = (void *)kallsyms_lookup_name("show_vma_header_prefix");
+
+	if (!nm_hook_map_vma || !nm_hook_hdr_prefix) {
+		logkw("nomount: maps spoof off: show_map_vma=%llx show_vma_header_prefix=%llx "
+		      "(inlined on this kernel?)\n",
+		      (unsigned long long)nm_hook_map_vma,
+		      (unsigned long long)nm_hook_hdr_prefix);
+		nm_hook_map_vma = nm_hook_hdr_prefix = 0;
+		return;
+	}
+
+	err = hook_wrap2(nm_hook_map_vma, nm_before_map_vma, 0, 0);
+	if (err) {
+		logkw("nomount: maps spoof off: cannot wrap show_map_vma (%d)\n", err);
+		nm_hook_map_vma = nm_hook_hdr_prefix = 0;
+		return;
+	}
+
+	err = hook_wrap7(nm_hook_hdr_prefix, nm_before_hdr_prefix, 0, 0);
+	if (err) {
+		logkw("nomount: maps spoof off: cannot wrap show_vma_header_prefix (%d)\n", err);
+		hook_unwrap(nm_hook_map_vma, nm_before_map_vma, 0);
+		nm_hook_map_vma = nm_hook_hdr_prefix = 0;
+		return;
+	}
+
+	logki("nomount: maps spoof active\n");
+}
+
+/* Unwrapped before the engine tears down: these handlers call into it. */
+static void nm_maps_hooks_remove(void)
+{
+	if (nm_hook_hdr_prefix) {
+		hook_unwrap(nm_hook_hdr_prefix, nm_before_hdr_prefix, 0);
+		nm_hook_hdr_prefix = 0;
+	}
+	if (nm_hook_map_vma) {
+		hook_unwrap(nm_hook_map_vma, nm_before_map_vma, 0);
+		nm_hook_map_vma = 0;
+	}
+	nm_maps_reset();
+}
+
 static long nm_kpm_init(const char *args, const char *event, void *__user reserved)
 {
-	long missing;
+	long missing, rc;
 
 	missing = nm_kpm_resolve();
 	if (missing) {
@@ -80,11 +176,20 @@ static long nm_kpm_init(const char *args, const char *event, void *__user reserv
 	}
 
 	logki("nomount: kpm: %d symbols resolved\n", NM_KPM_SYM_COUNT);
-	return nm_engine_init();
+
+	rc = nm_engine_init();
+	if (rc)
+		return rc;
+
+	/* After the engine, so a hook firing immediately finds it initialised. */
+	nm_maps_hooks_install();
+	return 0;
 }
 
 static long nm_kpm_exit(void *__user reserved)
 {
+	/* Hooks first: their handlers call into the engine. */
+	nm_maps_hooks_remove();
 	nm_engine_exit();
 	return 0;
 }

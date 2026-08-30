@@ -62,7 +62,7 @@ KBUILD_ARGS ?= ARCH=arm64 CC=clang
 
 all: nomount.kpm
 
-nomount.kpm: nm_kpm_entry.o nm_engine.o nm_kpm_tramp.o
+nomount.kpm: nm_kpm_entry.o nm_engine.o nm_maps_spoof.o nm_kpm_tramp.o
 	$(CC) -r -o $@ $^
 
 nm_kpm_entry.o: nm_kpm_entry.c nm_kpm_syms.h nm_kpm_table.h
@@ -81,6 +81,12 @@ nm_kpm_tramp.o: nm_kpm_tramp.c nm_kpm_syms.h
 # there in preference to this Makefile, so the two do not collide. Only the
 # object is wanted -- no modpost, no .ko -- which is why the target is the .o
 # and not `modules`.
+# Same kbuild route as the engine object, for the same reason: it dereferences
+# struct vm_area_struct and struct file, so it needs the target kernel's own
+# layouts rather than a hand-rolled include path.
+nm_maps_spoof.o: nm_maps_spoof.c Kbuild
+	$(MAKE) -C $(KERNEL_DIR) M=$(CURDIR) $(KBUILD_ARGS) $@
+
 nm_engine.o: nm_engine.c nm_kpm_shim.h nm_kpm_syms.h Kbuild \
              $(ENGINE_DIR)/nomount.c $(ENGINE_DIR)/nomount.h
 	$(MAKE) -C $(KERNEL_DIR) M=$(CURDIR) $(KBUILD_ARGS) $@
