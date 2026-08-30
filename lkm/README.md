@@ -18,29 +18,39 @@ You can rename the module, and the name is the only thing renaming changes. A
 scanner that lists modules and compares against a known-good set for the device
 still sees one that should not be there.
 
-**2. The `/proc/<pid>/maps` spoof is gone.** The in-tree build patches one call
-into `fs/proc/task_mmu.c`:
+**2. The `/proc/<pid>/maps` spoof works, but by a different route.** The in-tree
+build patches one call into `fs/proc/task_mmu.c`:
 
 ```c
-vfs_map_meta_override(inode, &dev, &ino);   /* show_map_vma() */
+vfs_map_meta_override(inode, &dev, &ino);   /* inside show_map_vma() */
 ```
 
 That rewrites the device and inode a mapped file reports, so an injected file
 does not stand out in a process's own memory map. A module cannot patch a
-compiled-in call site, so this variant does not have it. `nomount check` reports
-the consequence under **injected files in maps**; it is not a bug in the build.
+compiled-in call site, so this variant reaches the same function with two
+kprobes instead — `nm_maps_spoof.c`:
 
-Working around it means hooking `show_map_vma` at runtime — a kprobe on a static
-function, on arm64, with BTI and CFI in the way. That is a different and much
-sharper tool, and it is not what this variant does.
+| probe | what it has | what it does |
+| :--- | :--- | :--- |
+| `show_map_vma(m, vma)` | the VMA, and through `vm_file->f_inode` the inode `vfs_map_meta_override()` needs — it tests `i_op` against NoMount's vtables and reads `i_private` | records the inode for this task |
+| `show_vma_header_prefix(…, dev, ino)` | `dev` in `x5`, `ino` in `x6` | consumes the record and rewrites both registers |
 
-**3. Non-exported symbols are resolved by address.** The engine calls kernel
-functions the kernel does not export to modules (`kern_path`, `d_drop`,
-`d_splice_alias` and friends). In-tree that is a direct call. Here each one is
-looked up through kallsyms at load time and called through a pointer. It works,
-and it means: the module is bound to the exact kernel it was built for, a
-lookup that fails takes the whole load down rather than half-working, and the
-lookup itself is a behaviour a monitoring LSM can notice.
+It takes two because neither function has both halves. The decision itself is
+not reimplemented: both variants call the same `vfs_map_meta_override()`.
+
+An earlier version of this file said the workaround meant "a kprobe on a static
+function, on arm64, with BTI and CFI in the way", and left it there. Having
+built it: BTI is handled by kprobes themselves, and CFI does not apply — a
+pre-handler rewriting registers is not an indirect call, so there is no target
+for CFI to check. What *is* real is that both functions are `static` and could
+be inlined away on some future kernel, leaving nothing to probe. They are
+present on every supported GKI KMI (checked against each `System.map`), and if
+registration ever fails the module logs it and carries on with paths redirected
+and maps un-spoofed, rather than failing to load.
+
+**None of this has been exercised on hardware.** It compiles on all ten kernel
+versions and links against all eight KMI export tables; whether the spoof
+produces the right bytes on a running phone is untested.
 
 ## When it is still the right choice
 
@@ -56,8 +66,8 @@ If you *can* build the kernel, build it in-tree. See the repository root README.
 | | surface it adds |
 | :--- | :--- |
 | **in-tree** (`CONFIG_NOMOUNT=y`) | none — this is the supported build |
-| **KPM** (`../kpm/`) | a KernelPatch module; no `lsmod` entry, and it can take the `task_mmu` hook. Capped at kernel 6.6 and older by KernelPatch itself |
-| **LKM** (here) | `/proc/modules`, and no maps spoof |
+| **KPM** (`../kpm/`) | a KernelPatch module; no `lsmod` entry, and it has the same maps spoof via KernelPatch hooks. Capped at kernel 6.6 and older by KernelPatch itself |
+| **LKM** (here) | `/proc/modules` — the maps spoof works, via kprobes |
 
 ## Building
 
