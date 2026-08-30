@@ -11,8 +11,6 @@
 
 enum nm_kpm_sym {
 	NMS___alloc_skb,
-	NMS___cfi_slowpath,
-	NMS___cfi_slowpath_diag,
 	NMS___kmalloc,
 	NMS___list_add_valid,
 	NMS___list_add_valid_or_report,
@@ -25,12 +23,12 @@ enum nm_kpm_sym {
 	NMS___put_cred,
 	NMS___rcu_read_lock,
 	NMS___rcu_read_unlock,
-	NMS___stack_chk_fail,
-	NMS___ubsan_handle_cfi_check_fail_abort,
 	NMS___warn_printk,
 	NMS__printk,
 	NMS__raw_spin_lock,
+	NMS__raw_spin_lock_irqsave,
 	NMS__raw_spin_unlock,
+	NMS__raw_spin_unlock_irqrestore,
 	NMS_bcmp,
 	NMS_call_rcu,
 	NMS_clear_inode,
