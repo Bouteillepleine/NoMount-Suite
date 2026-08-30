@@ -56,6 +56,33 @@ version number promises the structs agree.
 
 `android11-5.4` is absent because the DDK publishes no container for it.
 
+### The `/proc/<pid>/maps` spoof
+
+The in-tree build patches one call into `fs/proc/task_mmu.c`:
+
+```c
+vfs_map_meta_override(inode, &dev, &ino);   /* inside show_map_vma() */
+```
+
+A `.kpm` cannot edit the middle of a function — KernelPatch hooks whole ones —
+and a single hook is not enough either, because neither function has both halves:
+
+| hook | has | does |
+| :--- | :--- | :--- |
+| `show_map_vma(m, vma)` | the VMA, and through `vm_file->f_inode` the inode `vfs_map_meta_override()` requires: it tests `i_op` against NoMount's vtables and reads `i_private` | records the inode for this task |
+| `show_vma_header_prefix(…, dev, ino)` | `dev` as arg 5, `ino` as arg 6 | consumes the record and rewrites both args |
+
+`nm_maps_spoof.c` holds everything needing kernel headers; `nm_kpm_entry.c`
+registers the hooks with `hook_wrap2`/`hook_wrap7`. The decision is not
+reimplemented — both this and the LKM call the same `vfs_map_meta_override()`
+the in-tree call site does.
+
+Both kernel functions are `static` and could be inlined away, leaving nothing to
+hook. They are present on every supported KMI: the build workflow checks each
+`System.map` and prints the result, so that is measured rather than assumed. If
+a lookup or a wrap ever fails, the module logs it and runs on with paths
+redirected and maps un-spoofed rather than refusing to load.
+
 ### ⚠️ CFI is disabled in this build, and that may matter
 
 A `.kpm` must be a plain relocatable ELF object, so LTO has to be off — and on
@@ -76,11 +103,7 @@ and CFI included. That remains the supported way to run the engine.
 
 ### What is still not done
 
-1. **The inline hook** replacing the in-tree `vfs_map_meta_override()` call in
-   `fs/proc/task_mmu.c`. This is the thing a KPM can do and an LKM cannot, and
-   it is not written — so today this variant has the LKM's blind spot without
-   having been shown to have the KPM's advantage.
-2. **A load test on a real APatch device at 6.6 or below.** No OnePlus 15 can
+1. **A load test on a real APatch device at 6.6 or below.** No OnePlus 15 can
    serve: it runs 6.12, above KernelPatch's cap. Until someone loads it, this is
    `UNMEASURED` in the sense the rest of this project uses the word — it builds,
    which is a different claim from it working.
@@ -168,5 +191,5 @@ symbol warnings"*) and so under-reports.
 | | `/proc/modules` | maps spoof | kernel range |
 | :--- | :--- | :--- | :--- |
 | **in-tree** (`CONFIG_NOMOUNT=y`) | absent | yes | 4.9 – 6.18 |
-| **KPM** (here) | absent | possible, via inline hook | 5.4 – 6.6 |
-| **LKM** (`../lkm/`) | **listed** | no | 4.9 – 6.18 |
+| **KPM** (here) | absent | yes, via two KernelPatch hooks | 6 KMIs, 5.10 – 6.6 |
+| **LKM** (`../lkm/`) | **listed** | yes, via two kprobes | 4.9 – 6.18 |
