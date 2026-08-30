@@ -32,7 +32,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.27.0"
+#define NM_MODULE_VERSION "1.28.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -214,14 +214,34 @@
  *    bump exists so `doctor` can tell a flashed engine from the one it replaced --
  *    the same reason 19, 20, 22 and 25 have one.
  *
- *    MEASURED, and the first build of it did nothing. It wrapped the stock lookup
- *    in override_creds(nm_root_cred), whose SID is the KERNEL's, and
- *    inode_permission() then denied dir:search on every /data label -- silently,
- *    dontaudit'd, no AVC. On an OP15 the same rule shape gave MODULE bytes to a
- *    blocked reader under shell_data_file and STOCK bytes under
- *    system_data_root_file. The lookup uses the caller's creds now, like the
- *    module-side lookup beside it; see the note in nm_dir_child_lookup(). */
-#define NOMOUNT_VERSION    27
+ *    MEASURED, and the first build of it did nothing -- see 28.
+ *
+ * 28: 27's stock-child lookup ran under override_creds(nm_root_cred), whose SID
+ *    is the KERNEL's rather than root's (prepare_creds() at fs_initcall), and
+ *    lookup_one_len_unlocked() ends in inode_permission(), which runs the LSM.
+ *    Asked of the live policy through /sys/fs/selinux/access on an OP15:
+ *        kernel_t -> system_file       dir:search  ALLOWED (0x11140053)
+ *        kernel_t -> system_data_file  dir:search  ALLOWED
+ *        kernel_t -> shell_data_file   dir:search  DENIED  (0x0)
+ *        kernel_t -> adb_data_file     dir:search  DENIED  (0x0)
+ *    so on any /data-labelled target the lookup returned -EACCES, took the error
+ *    arm, pinned nothing, and left 26's behaviour in place -- silently, because
+ *    that denial is dontaudit'd and logs no AVC. Same rule shape, blocked reader,
+ *    two labels:
+ *        shell_data_file        both.txt = MODULE  modonly = MODULE   (inert)
+ *        system_data_root_file  both.txt = STOCK   modonly = <ENOENT> (works)
+ *    The other nm_root_cred users in this file never noticed because they only
+ *    ever scan ROM paths, where kernel_t is allowed -- which is also why 27 would
+ *    have worked on every case the Suite can actually produce.
+ *
+ *    It uses the CALLER's creds now, matching the module-side lookup beside it.
+ *
+ *    THE BUMP IS THE POINT, not the fix. Two builds answered `nm v` with 27 and
+ *    behaved differently: the one flashed from the first commit is inert on
+ *    /data labels, this one is not. A capability counter exists so `doctor` can
+ *    tell a flashed engine from the one it replaced, and 27 can no longer do
+ *    that for itself. */
+#define NOMOUNT_VERSION    28
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)

@@ -84,6 +84,14 @@ outlived what they described.
   the parent already having passed `nm_inode_permission()`, whose mode, owner and
   context mirror the stock ancestor.
 
+  **Engine floor is v28, not v27.** Two builds answered `nm v` with 27 and
+  behaved differently — the one flashed from the first commit is inert on /data
+  labels, the corrected one is not — and a capability counter exists precisely so
+  `doctor` can tell a flashed engine from the one it replaced. 27 could no longer
+  do that for itself. Nothing compares the number for equality (every gate in the
+  Suite is `>=`, `<` or a range), so raising it is safe; release tags become
+  `nm1.28.0`.
+
 - `post-fs-data.sh`'s `disabled` arm was a bare `:`, so a Magisk user whose
   guard had tripped got nothing in `boot.log` at the stage that made the
   decision. It logs the same line `metamount.sh` does.
