@@ -327,3 +327,7 @@ jobs:
             /tmp/kpm-syms-${{ matrix.kmi }}.txt
             /tmp/kpm-compile-${{ matrix.kmi }}.log
           if-no-files-found: warn
+          # The .kpm is the deliverable; the symbol survey and compile log ride
+          # along because they are what you need when it fails. 30 days is long
+          # enough to investigate, short enough not to accumulate.
+          retention-days: 30
