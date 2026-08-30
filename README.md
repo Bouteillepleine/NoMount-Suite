@@ -16,18 +16,16 @@ metamodule can be active, so it refuses to install alongside another.
 
 <table>
   <tr>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/status.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/status.jpg" width="155" alt="Status"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/modules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/modules.jpg" width="155" alt="Modules"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/rules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/rules.jpg" width="155" alt="Rules"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/check.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/check.jpg" width="155" alt="Check"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/duckdetector.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/duckdetector.jpg" width="155" alt="Duck Detector"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/status.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/status.jpg" width="185" alt="Status"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/modules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/modules.jpg" width="185" alt="Modules"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/rules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/rules.jpg" width="185" alt="Rules"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/check.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/check.jpg" width="185" alt="Check"></a></td>
   </tr>
   <tr>
     <td align="center"><sub><b>Status</b><br>zero mounts, live counts</sub></td>
     <td align="center"><sub><b>Modules</b><br>what is served, and how</sub></td>
     <td align="center"><sub><b>Rules</b><br>per-module rule breakdown</sub></td>
     <td align="center"><sub><b>Check</b><br>one diagnostic, plain verdicts</sub></td>
-    <td align="center"><sub><b>Duck Detector</b><br>0 danger, 0 warning</sub></td>
   </tr>
 </table>
 
@@ -166,18 +164,21 @@ hiding.
 
 ## Compatibility
 
-The engine compile-tests against ten kernel versions on every push. Five of
-those are versions OnePlus actually ships; four have been booted and measured on
-a real phone. The rest compile and nothing more — which is a weaker claim, so it
-is written as one.
+**All ten kernel versions compile on every push** — 4.9, 4.14, 4.19, 5.4, 5.10,
+5.15, 6.1, 6.6, 6.12 and 6.18, legacy and current alike. What differs between the
+rows below is not whether the engine builds, but whether anyone has booted it on
+a phone and measured the result. Four have; the rest have not, which is a weaker
+claim, so it is written as one.
 
 **None of this is OnePlus-specific.** The engine is ordinary VFS code: no vendor
 hooks, no SoC assumptions, nothing that reads a OnePlus tree. The table names
 OnePlus devices because those are the kernels that have been *built and booted* —
-the three kernel builders shipping it are OnePlus builders, so that is where the
-evidence comes from. Any device whose kernel you can rebuild with
-`CONFIG_NOMOUNT=y` works the same way, on any of the ten versions below. The last
-row means only that no OnePlus ships those versions; plenty of other devices do.
+the three kernel builders shipping it are OnePlus builders, so that is simply
+where the evidence comes from. Any device whose kernel you can rebuild with
+`CONFIG_NOMOUNT=y` works the same way, on any of the ten versions. The last row
+is not a gap in support: no OnePlus ships those versions, so no OnePlus builder
+boots them, but plenty of other devices run them and the engine builds for all of
+them.
 
 | Kernel | Tested on | Status |
 | :--- | :--- | :--- |
