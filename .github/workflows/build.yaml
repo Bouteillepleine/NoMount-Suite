@@ -17,6 +17,21 @@ on:
     # purpose is producing that zip.
     branches: [master, main, suite, prerelease, LKM]
     tags: ['v*']
+    # A README edit is not a build. Without this, every documentation commit
+    # spent a couple of minutes producing a zip identical to the last one, and
+    # the run list read as a wall of "readme:" entries with the real builds
+    # buried among them.
+    #
+    # CAVEAT: GitHub applies path filters to TAG pushes too. If a `v*` tag ever
+    # lands on a commit that touched only documentation, this workflow will not
+    # fire and no release will be published. Release tags here follow a version
+    # bump in Cargo.toml and module.prop, so that case does not arise in
+    # practice -- but if it ever does, run the workflow manually.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitattributes'
 
 # Least privilege: this workflow only builds and uploads artifacts.
 permissions:
@@ -380,6 +395,14 @@ jobs:
           name: nomount-release-zip
           path: release/release/00_NoMount-Module-*.zip
           retention-days: 30
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nomount-debug-zip
+          path: release/debug/00_NoMount-Module-*.zip
+          # Shorter than the release zip: useful to attach to a bug report,
+          # not something that should accumulate for a month.
+          retention-days: 7
 
 
   # Publish on a v* tag.
