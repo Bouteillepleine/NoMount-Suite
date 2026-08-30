@@ -3087,6 +3087,85 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     if (r_child && S_ISDIR(r_child->i_mode))
         ri.flags |= NM_FLAG_IS_DIR;
 
+    /* The child's OWN stock file, when the parent rule shadows a real directory.
+     *
+     * Inheriting NM_FLAG_SHADOWS_STOCK without inheriting an s_path was a hole in
+     * per-UID hiding, and both halves of the pair read wrong for a blocked reader:
+     * nm_hidden_from_caller() saw the flag and declined to answer -ENOENT, while
+     * nm_stock_for_caller() found no s_path and returned NULL -- so open/getattr/
+     * xattr/fiemap all served the MODULE's bytes to exactly the reader they are
+     * hidden from. The same reader's nm_open() of the PARENT is handed the pinned
+     * stock directory, so its readdir listed stock names while lookup resolved
+     * module content: two answers about one directory.
+     *
+     * So resolve the same name under the parent's pinned stock directory and pin
+     * THAT as the child's s_path. A hidden reader is then served the stock child,
+     * which is what "shadows stock" has meant everywhere else since v18.
+     *
+     * Three outcomes, deliberately distinct:
+     *   found     -> pin it; the flag now has the thing it promises.
+     *   negative  -> the module ADDED this name inside a shadowed directory, so
+     *                there is nothing underneath: strip the flag and let
+     *                nm_hidden_from_caller() answer -ENOENT, exactly as it does
+     *                for an added name at the top level.
+     *   error     -> we could not ask (the caller cannot search the stock dir).
+     *                Leave the flags alone: turning "unmeasured" into "hidden"
+     *                would ENOENT a name that may well exist in stock, and the
+     *                parent's own readdir would then list a name that cannot be
+     *                stat'd -- the shape this engine refuses to produce anywhere.
+     *                The "resolved to one of ours" arm below is the same answer
+     *                for the same reason: we did not obtain a stock file, so we
+     *                have measured nothing about whether one is there.
+     *
+     * Guarded against pinning one of OUR OWN inodes, the same trap nm_alloc_rule
+     * documents: a rule injecting into that stock directory makes this lookup
+     * resolve through our hijack, and treating an injection as "stock" would serve
+     * it to the reader it is hidden from.
+     *
+     * Costs nothing on any configuration the Suite builds: it produces no
+     * dir-target rule over a live directory at all (mount.rs's
+     * inject_would_mask_dir refuses the target, cli::handle_vfs refuses a
+     * directory source), so info->s_path.dentry is NULL here and this is one test.
+     * Only a hand-issued `nm add <existing-dir> <dir>` reaches the body.
+     *
+     * Pinned per INODE, not per caller, because the dentry and its inode are
+     * shared by every UID -- the same reason nm_alloc_rule resolves s_path once at
+     * rule creation rather than deciding at read time.
+     *
+     * And resolved under nm_root_cred for that same reason. The module-child
+     * lookup above deliberately uses the CALLER's creds, because that one decides
+     * what the caller is SERVED; this one only decides what gets pinned, and
+     * lookup_one_len_unlocked() checks MAY_EXEC on its base -- so with the
+     * caller's creds an unprivileged reader that cannot search the stock
+     * directory would get IS_ERR, leave the flags untouched, and bake the old
+     * behaviour into an inode every other UID then shares. First-toucher-wins is
+     * the exact class of bug the per-UID paths guard against elsewhere. Privileged
+     * and read-only, like every other backing-tree scan in this file
+     * (nm_dsnap_make says the same thing in the same words). It grants nothing:
+     * nm_open() still opens the pinned stock path with current_cred(). */
+    if (unlikely(info->s_path.dentry && (info->flags & NM_FLAG_SHADOWS_STOCK))) {
+        const struct cred *old = override_creds(nm_root_cred);
+        struct dentry *schild = nm_lookup_backing_child(dentry->d_name.name,
+                                                        info->s_path.dentry,
+                                                        dentry->d_name.len);
+
+        revert_creds(old);
+        if (!IS_ERR(schild)) {
+            if (d_is_negative(schild)) {
+                ri.flags &= ~NM_FLAG_SHADOWS_STOCK;   /* an ADDED name; hide it */
+            } else {
+                struct inode *si = d_backing_inode(schild);
+
+                if (si && si->i_op != &nm_file_iops && si->i_op != &nm_dir_iops) {
+                    ri.s_path.mnt = info->s_path.mnt;
+                    ri.s_path.dentry = schild;
+                    path_get(&ri.s_path);   /* ri owns its own ref; see nm_put_rule_info */
+                }
+            }
+            dput(schild);
+        }
+    }
+
     ri.v_ino   = nm_child_ino(info->v_ino, dentry->d_name.name, dentry->d_name.len, false);
     ri.v_dino  = (info->flags & NM_FLAG_OVL_INO)
                  ? nm_child_ino(info->v_ino, dentry->d_name.name, dentry->d_name.len, true) : 0;

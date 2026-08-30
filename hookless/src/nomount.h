@@ -32,7 +32,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.26.0"
+#define NM_MODULE_VERSION "1.27.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -190,8 +190,30 @@
  *    kernel built WITH _ghost still leaked all four oracles (O_PATH returned the
  *    path, getxattr the label, a trailing component ENOTDIR, link EXDEV) because
  *    nothing could reach ghost_ctl(). Below 26 a Suite cannot populate them and
- *    cannot tell that it cannot. */
-#define NOMOUNT_VERSION    26
+ *    cannot tell that it cannot.
+ *
+ * 27: a PASSTHROUGH child of a dir-target rule that shadows a real directory now
+ *    carries its OWN s_path. 26 and earlier inherited NM_FLAG_SHADOWS_STOCK down
+ *    to such a child without inheriting anything for it to point at, and the two
+ *    halves of the per-UID pair then disagreed: nm_hidden_from_caller() saw the
+ *    flag and declined to answer -ENOENT, while nm_stock_for_caller() found no
+ *    s_path and returned NULL -- so a blocked reader was served the MODULE's
+ *    bytes for every name under that directory, while its nm_open() of the
+ *    PARENT handed it the pinned stock directory. readdir listed stock names,
+ *    lookup resolved module content, and per-UID hiding leaked precisely what it
+ *    exists to hide. nm_dir_child_lookup() now resolves the same name under the
+ *    parent's stock directory: found -> pinned and served; genuinely absent ->
+ *    the flag is stripped so the child is hidden like any other added name;
+ *    unresolvable -> flags untouched, because "could not ask" is not "not there".
+ *
+ *    Reachable only through a hand-issued `nm add <existing-dir> <dir>`: the
+ *    Suite's own plan refuses a target that resolves to a live directory
+ *    (mount.rs::inject_would_mask_dir) and its CLI refuses a directory source, so
+ *    no shipped configuration builds that rule shape and no device measured here
+ *    carried one. Userspace can neither set nor observe the difference, so the
+ *    bump exists so `doctor` can tell a flashed engine from the one it replaced --
+ *    the same reason 19, 20, 22 and 25 have one. */
+#define NOMOUNT_VERSION    27
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
