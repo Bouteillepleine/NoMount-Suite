@@ -212,7 +212,15 @@
  *    no shipped configuration builds that rule shape and no device measured here
  *    carried one. Userspace can neither set nor observe the difference, so the
  *    bump exists so `doctor` can tell a flashed engine from the one it replaced --
- *    the same reason 19, 20, 22 and 25 have one. */
+ *    the same reason 19, 20, 22 and 25 have one.
+ *
+ *    MEASURED, and the first build of it did nothing. It wrapped the stock lookup
+ *    in override_creds(nm_root_cred), whose SID is the KERNEL's, and
+ *    inode_permission() then denied dir:search on every /data label -- silently,
+ *    dontaudit'd, no AVC. On an OP15 the same rule shape gave MODULE bytes to a
+ *    blocked reader under shell_data_file and STOCK bytes under
+ *    system_data_root_file. The lookup uses the caller's creds now, like the
+ *    module-side lookup beside it; see the note in nm_dir_child_lookup(). */
 #define NOMOUNT_VERSION    27
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)

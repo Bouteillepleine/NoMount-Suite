@@ -3132,24 +3132,40 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
      * shared by every UID -- the same reason nm_alloc_rule resolves s_path once at
      * rule creation rather than deciding at read time.
      *
-     * And resolved under nm_root_cred for that same reason. The module-child
-     * lookup above deliberately uses the CALLER's creds, because that one decides
-     * what the caller is SERVED; this one only decides what gets pinned, and
-     * lookup_one_len_unlocked() checks MAY_EXEC on its base -- so with the
-     * caller's creds an unprivileged reader that cannot search the stock
-     * directory would get IS_ERR, leave the flags untouched, and bake the old
-     * behaviour into an inode every other UID then shares. First-toucher-wins is
-     * the exact class of bug the per-UID paths guard against elsewhere. Privileged
-     * and read-only, like every other backing-tree scan in this file
-     * (nm_dsnap_make says the same thing in the same words). It grants nothing:
-     * nm_open() still opens the pinned stock path with current_cred(). */
+     * THE CALLER'S CREDS, exactly like the module-side lookup above it. A first
+     * cut wrapped this in override_creds(nm_root_cred), reasoning that a reader
+     * unable to search the stock directory would otherwise bake "no s_path" into
+     * an inode every other UID then shares. That reasoning was fine and the
+     * mechanism was not: lookup_one_len_unlocked() ends in inode_permission(),
+     * which runs the LSM against current_cred() -- and nm_root_cred comes from
+     * prepare_creds() at fs_initcall, so it carries the KERNEL SID, not root's.
+     *
+     * Measured on an OP15 (CPH2747, 6.12, engine v27), asking the live policy
+     * directly through /sys/fs/selinux/access:
+     *     kernel_t -> system_file       dir:search  ALLOWED (0x11140053)
+     *     kernel_t -> system_data_file  dir:search  ALLOWED
+     *     kernel_t -> shell_data_file   dir:search  DENIED  (0x0)
+     *     kernel_t -> adb_data_file     dir:search  DENIED  (0x0)
+     * so the lookup returned -EACCES on any /data-labelled target, took the
+     * error arm below, pinned nothing, and left the v26 behaviour in place --
+     * silently, because the denial is dontaudit'd and no AVC is logged. The same
+     * rule shape under two labels, blocked reader, root-warmed parent:
+     *     shell_data_file       both.txt = MODULE  modonly = MODULE   (inert)
+     *     system_data_root_file both.txt = STOCK   modonly = <ENOENT> (works)
+     * The other nm_root_cred users in this file never noticed because they only
+     * ever scan ROM paths, where kernel_t is allowed.
+     *
+     * The first-toucher worry it was guarding against is weaker than it looked: a
+     * caller that reaches here has already passed nm_inode_permission() on the
+     * PARENT, whose mode, owner and context mirror the stock ancestor -- so if it
+     * can traverse ours it can search the stock one. Using the caller's creds
+     * also removes the LSM dependency entirely rather than trading one label for
+     * another. */
     if (unlikely(info->s_path.dentry && (info->flags & NM_FLAG_SHADOWS_STOCK))) {
-        const struct cred *old = override_creds(nm_root_cred);
         struct dentry *schild = nm_lookup_backing_child(dentry->d_name.name,
                                                         info->s_path.dentry,
                                                         dentry->d_name.len);
 
-        revert_creds(old);
         if (!IS_ERR(schild)) {
             if (d_is_negative(schild)) {
                 ri.flags &= ~NM_FLAG_SHADOWS_STOCK;   /* an ADDED name; hide it */
