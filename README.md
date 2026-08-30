@@ -152,7 +152,7 @@ are injected hooklessly rather than mounted.
 - **[ZQZCC](https://github.com/ZQZCC)** — WebUI MD3-style design.
 - **[backslashxx](https://github.com/backslashxx)** — code optimization.
 - **[KernelSU](https://github.com/tiann/KernelSU)** & **SukiSU-Ultra** — root solution and metamodule framework.
-- **[SUSFS](https://gitlab.com/simonpunk/susfs4ksu)** — the stealth layer this one replaces the need for.
+- **[SUSFS](https://gitlab.com/simonpunk/susfs4ksu)** — the stealth layer.
 - **All testers** — thanks for making this project more stable!
 
 ## Disclaimer
