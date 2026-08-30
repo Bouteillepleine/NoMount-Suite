@@ -29,10 +29,10 @@ metamodule can be active, so it refuses to install alongside another.
   **Magisk and APatch are untested.** Both code paths exist and are exercised by
   the boot scripts, but nobody has reported back from either, so treat them as
   unverified rather than supported — everything below was measured on ReSukiSU.
-- **SUSFS is not needed** — the Suite already does that job. Nothing here is a
+- **SUSFS is not needed** — the Suite already does the job. Nothing here is a
   mount, so there is no mount for it to conceal and no gap for it to close. The
-  two *might* coexist, but nobody has run them together, so treat that as
-  untested rather than supported.
+  two can coexist, as some users have reported having built their kernels with
+  SUSFS.
 
 ## Repository layout
 
