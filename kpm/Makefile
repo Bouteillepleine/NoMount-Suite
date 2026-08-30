@@ -103,8 +103,13 @@ nm_engine.o: nm_engine.c nm_kpm_shim.h nm_kpm_syms.h Kbuild \
 # silently produces a module that resolves most of what it needs and faults on
 # the rest.
 .PHONY: undefined
-undefined: nm_engine.o
-	@$(NM) -u $< | awk '{print $$2}' | sort -u
+# BOTH kernel-side objects. Surveying only nm_engine.o was a real bug: adding
+# nm_maps_spoof.o introduced references the measurement never saw, so the
+# generated table came out short and the load gate failed on symbols nobody had
+# been told about. The rule is that everything compiled against kernel headers
+# gets surveyed.
+undefined: nm_engine.o nm_maps_spoof.o
+	@$(NM) -u $^ | awk '{print $$2}' | sort -u
 
 .PHONY: clean
 clean:
