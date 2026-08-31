@@ -845,15 +845,21 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
         );
         return 0;
     };
+    // One parse, one set. This walked `live.lines()` per pair with its own
+    // rsplit_once -- correct, but a fourth reader of a format `crate::nm::parse_list`
+    // owns, and O(pairs x lines). The parser also peels ` (public)` and the
+    // ` [UID: n]` identity, neither of which this could see.
+    let live_targets: HashSet<PathBuf> = crate::nm::parse_list(&live)
+        .into_iter()
+        .filter(|r| r.kind == crate::nm::LiveKind::Inject)
+        .map(|r| r.target)
+        .collect();
     let mut n = 0;
     for (target, source) in pairs {
         if !is_app_apk(target) || !source.exists() || !target.exists() {
             continue;
         }
-        // Match the target on the LEFT of the LAST arrow, like the other parsers
-        // (rsplit_once), so a source path containing " -> " cannot mis-match.
-        let tgt = target.to_string_lossy();
-        if live.lines().any(|l| l.rsplit_once(" -> ").is_some_and(|(t, _)| t.trim() == tgt)) {
+        if live_targets.contains(target) {
             continue;
         }
         // Decline rather than serve an unreadable label. The result was
@@ -1188,11 +1194,19 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     let (mut repointed, mut stale) = (0u32, 0u32);
     let Ok(list) = nm.list() else { return (0, 0) };
     let mut pm_failed = false;
-    for line in list.lines() {
-        let Some((target, source)) = line.split_once(" -> ") else { continue };
-        let target = Path::new(target.trim());
-        // A UID-scoped rule prints a trailing "[UID: n]"; the source ends there.
-        let source = PathBuf::from(source.split(" [").next().unwrap_or(source).trim());
+    // `crate::nm::parse_list`, not a fourth hand-rolled reader. This one split on
+    // the FIRST ` -> ` and peeled only the ` [UID: n]` suffix -- exactly the drift
+    // that parser's doc names as the reason it exists ("one split on the FIRST
+    // ` -> `, the others on the last; only one peeled ` (public)`"). The missing
+    // `(public)` peel was not cosmetic: it would have left `source` as
+    // "…/base.apk (public)", failed `source.exists()`, and dropped the rule
+    // through the "package is gone" arm below -- deleting a live rule and counting
+    // it as an uninstall. Unreachable only because `is_pm_published()` cannot grant
+    // the flag to a /data/app target, which is not a property this function should
+    // depend on.
+    for r in crate::nm::parse_list(&list) {
+        let Some(source) = r.source else { continue };
+        let target = r.target.as_path();
         if !is_app_apk(target) || target.exists() {
             continue;
         }
@@ -1234,6 +1248,71 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
 /// tmpfs -- stock keeps those at /dev, /mnt, /apex, /linkerconfig and /tmp.
 pub(crate) const ROM_ROOTS: &[&str] =
     &["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
+
+/// Is this device number a loop device? `mountinfo` field 3 is `maj:min`, and
+/// loop is major 7 on every Linux (`Documentation/admin-guide/devices.txt`).
+///
+/// This is what identifies a mounted IMAGE. An image is mounted whole, so its
+/// mount root is "/" and its device is its own -- neither of the two tests below
+/// can see it, which is why the check that claimed to cover "a loop image" could
+/// not. The alternative predicate ("its device differs from the partition it sits
+/// inside") would have flagged the stock OEM mounts the comment below lists, so
+/// the identity of the backing device is what makes this precise instead.
+pub(crate) fn is_loop_dev(dev: &str) -> bool {
+    dev.split(':').next() == Some("7")
+}
+
+/// The foreign-mount rows over the ROM, as (evidence string, is_image) pairs.
+///
+/// Pure, so the predicate can be tested without a /proc to read -- the same split
+/// `classify` uses. Two callers want two slices of the same walk: the check wants
+/// every hit, and `run_absorb` wants the images alone, because those are the ones
+/// its survey structurally cannot see.
+pub(crate) fn foreign_rom_rows(rows: &[MountRow]) -> Vec<(String, bool)> {
+    let roots = ROM_ROOTS;
+    // maj:min of /data, so a mount served off userdata is recognised by device
+    // rather than by the source path (which mountinfo does not carry usefully here).
+    let data_dev = rows.iter().find(|r| r.target == Path::new("/data")).map(|r| r.dev.clone());
+    let mut hits: Vec<(String, bool)> = Vec::new();
+    for r in rows {
+        let t = r.target.to_string_lossy();
+        if !roots.iter().any(|root| t.starts_with(root)) {
+            continue;
+        }
+        // A bind sourced from /data/adb/modules is a MODULE mount, which is the
+        // one thing this check is not about: its own text says "outside the module
+        // system" and its owner string says "a mount made outside /data/adb".
+        // Both were false for the 85 my_* binds the Suite itself makes, so a stock
+        // install reported them here AND in zero-mount posture -- two red rows for
+        // one cause, one of them describing the opposite of what happened.
+        // zero-mount posture owns module mounts; this owns everything else.
+        //
+        // mountinfo's root is relative to the source filesystem, so a bind off
+        // userdata reads as /adb/modules/... rather than /data/adb/modules/...
+        if r.root.starts_with("/adb/modules/") || r.root.starts_with("/data/adb/modules/") {
+            continue;
+        }
+        let subtree_bind = r.root != "/";
+        let off_userdata = data_dev.as_deref() == Some(r.dev.as_str());
+        let loop_image = is_loop_dev(&r.dev);
+        if subtree_bind || off_userdata || loop_image {
+            hits.push((format!("{} (root={}, dev={})", t, r.root, r.dev), loop_image));
+        }
+    }
+    hits
+}
+
+/// Every foreign-mount hit, evidence only.
+pub(crate) fn foreign_rom_mounts(rows: &[MountRow]) -> Vec<String> {
+    foreign_rom_rows(rows).into_iter().map(|(h, _)| h).collect()
+}
+
+/// Only the mounted IMAGES. `run_absorb` reports these itself: `source_of()`
+/// answers None for a whole-filesystem mount, so they never reach `classify()`
+/// and never appear in a survey.
+pub(crate) fn rom_image_mounts(rows: &[MountRow]) -> Vec<String> {
+    foreign_rom_rows(rows).into_iter().filter(|(_, img)| *img).map(|(h, _)| h).collect()
+}
 
 /// Is this mountinfo line a tmpfs laid over a ROM path?
 ///
@@ -1603,6 +1682,25 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     // modes there have already unmounted, so counting all of tmpfs.failed here can
     // at worst over-report a leak, which is the safe direction for this line.
     let (mut leaking, mut declined) = (tmpfs.leaked + tmpfs.failed, tmpfs.declined);
+    // ...and from the mount table directly, for the one shape the SURVEY cannot
+    // see at all. `source_of()` answers None for a whole-filesystem mount (root
+    // "/"), so an IMAGE mounted over a ROM path -- `mount -o loop x.img
+    // /product/app/Foo` -- never reaches `classify()` and never appears in
+    // `surveyed`. Absorb cannot take one over either: there is no per-file source
+    // under /data/adb to re-serve it from, which is why this only counts. But it
+    // is a mount over the ROM in every app's mountinfo, and the "posture clean"
+    // line below is a claim about mountinfo, not about how much absorb converted.
+    let imaged: Vec<String> = std::fs::read_to_string(MOUNTINFO)
+        .map(|b| rom_image_mounts(&parse_mountinfo(&b)))
+        .unwrap_or_default();
+    for h in &imaged {
+        leaking += 1;
+        eprintln!(
+            "nomount: LEAK {h} is an image mounted over a ROM partition: absorb cannot \
+             re-serve it (there is no file source to inject), so it stays visible in every \
+             app's mount table. Remove it from the owning module."
+        );
+    }
     for s in &surveyed {
         if matches!(s.disposition, Disposition::Declined(_)) {
             declined += 1;

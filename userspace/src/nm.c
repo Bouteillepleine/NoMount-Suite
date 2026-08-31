@@ -241,7 +241,7 @@ void c_main(long *sp) {
         }
 
     } else if (cmd == 'l') {
-        int is_json = 0, is_uids = 0, is_gh = 0;
+        int is_uids = 0, is_gh = 0;
         /* WHOLE-TOKEN, not first-character. `p_args[i][0] == 'x'` was the same
          * bug class already fixed for commands and for knobs: any word starting
          * with the right letter selected the mode, and any word that started
@@ -262,13 +262,24 @@ void c_main(long *sp) {
             print_str("nm: unknown list option\n");
             exit_code = 3; goto do_exit;
         }
-        if (is_uids) is_json = 1;
+        /* ONLY `l u` emits JSON, and what it emits is an array of INTEGERS -- the
+         * shape nm.rs harvests digits out of. The rule list and the ghost tables
+         * are plain lines, which is what every caller in the tree parses. There
+         * used to be a JSON writer for the rules as well, but the only thing that
+         * ever selected it was an `nm l j` the option loop above stopped
+         * accepting, so it and print_json() were unreachable text in a binary
+         * whose size is a design goal. Both are gone.
+         *
+         * The consequence for the truncated-dump contract below is unchanged: a
+         * short list still exits 4, and the caller (nm.rs's Nm::run) still bails
+         * on any non-zero status. */
 
         int target_cmd = is_gh ? 11 : is_uids ? 8 : 7;
         /* signed: a negative errno from do_nm_cmd()/read() must fail the while(len>0)
          * guard, not wrap to a huge unsigned length that walks rx_buf out of bounds. */
         int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
-        int offset = 2;
+        /* "have we emitted an element yet", for the uid array's comma. */
+        int first = 1;
         /* A dump that aborts mid-stream (kernel returns -EAGAIN when the rule
          * table mutated under the cursor) must NOT look like success: callers
          * feed this list straight into the reload delta, so a silently truncated
@@ -283,7 +294,7 @@ void c_main(long *sp) {
         if (nm_timed_out(len)) goto do_timeout;
         if (len < 0) { exit_code = 4; goto list_fail; }
         exit_code = 0;
-        if (is_json) print_str("[\n");
+        if (is_uids) print_str("[\n");
 
         while (len > 0) {
             /* `len >= 16` FIRST, and `nlmsg_len >= 16` rather than merely
@@ -310,23 +321,17 @@ void c_main(long *sp) {
 
                 if (is_gh) {
                     /* The needle rides in NOMOUNT_ATTR_VIRTUAL_PATH -- see the
-                     * kernel dump for why that attribute is reused. */
+                     * kernel dump for why that attribute is reused. Plain lines:
+                     * doctor.rs::parse_ghost_tables reads "p /abs/path" and
+                     * "u <uid>" straight off this. */
                     char *rule = get_attr(msg, 1);
-                    if (rule) {
-                        if (is_json) {
-                            print_str((const char *)",\n  \"" + offset); offset = 0;
-                            print_json(rule);
-                            print_str("\"");
-                        } else {
-                            print_str(rule); print_str("\n");
-                        }
-                    }
+                    if (rule) { print_str(rule); print_str("\n"); }
                 } else if (is_uids) {
                     unsigned int *uid = get_attr(msg, 4); /* NOMOUNT_ATTR_UID */
                     if (uid) {
-                        if (offset == 0) print_str(",\n");
+                        if (!first) print_str(",\n");
                         print_str("  "); print_uint(*uid);
-                        offset = 0;
+                        first = 0;
                     }
                 } else {
                     char *v = get_attr(msg, 1); 
@@ -343,24 +348,17 @@ void c_main(long *sp) {
                          * what was asked for is not always what is live. */
                         int is_public      = (flags && (*flags & 64));
 
-                        if (is_json) {
-                            print_str((const char *)",\n  {\n    \"virtual\": \"" + offset); offset = 0;
-                            print_json(v);
-                            if (is_whiteout) print_str("\",\n    \"whiteout\": true");
-                            else if (is_virtual_dir) print_str("\",\n    \"virtual_dir\": true");
-                            else { print_str("\",\n    \"real\": \""); print_json(r); print_str("\""); }
-                            if (is_public) print_str(",\n    \"public\": true");
-                            if (uid && *uid != 0) { print_str(",\n    \"uid\": "); print_uint(*uid); }
-                            print_str("\n  }");
-                        } else {
-                            print_str(v);
-                            if (is_whiteout) print_str(" (whiteout)");
-                            else if (is_virtual_dir) print_str(" (virtual dir)");
-                            else { print_str(" -> "); print_str(r); }
-                            if (is_public) print_str(" (public)");
-                            if (uid && *uid != 0) { print_str(" [UID: "); print_uint(*uid); print_str("]"); }
-                            print_str("\n");
-                        }
+                        /* The one format for a rule, and the one crate::nm::parse_list
+                         * reads: `<target> -> <source>`, with ` (whiteout)`,
+                         * ` (virtual dir)`, ` (public)` and ` [UID: n]` as
+                         * suffixes it peels in any order. */
+                        print_str(v);
+                        if (is_whiteout) print_str(" (whiteout)");
+                        else if (is_virtual_dir) print_str(" (virtual dir)");
+                        else { print_str(" -> "); print_str(r); }
+                        if (is_public) print_str(" (public)");
+                        if (uid && *uid != 0) { print_str(" [UID: "); print_uint(*uid); print_str("]"); }
+                        print_str("\n");
                     }
                 }
             }
@@ -375,15 +373,17 @@ void c_main(long *sp) {
          * cannot tell a prefix from the whole set. Fail. */
         exit_code = 4;
 list_fail:
-        /* Deliberately NOT closing the JSON array. Exit code 4 is the contract
-         * (nm.rs's Nm::run bails on any non-zero status, which is how every Rust
-         * caller sees this), but a truncated `nm l j` also has to be unparseable
-         * for anyone who forgets to check, and an unterminated array is. The
-         * diagnostic goes to stderr so it cannot be read back as a rule. */
+        /* Deliberately NOT closing the JSON array (`l u`). Exit code 4 is the
+         * contract -- nm.rs's Nm::run bails on any non-zero status, which is how
+         * every Rust caller sees this -- but a truncated uid list also has to be
+         * unparseable for anyone who forgets to check, and an unterminated array
+         * is. The plain-line dumps carry the same signal in the exit code alone,
+         * which is why the diagnostic goes to stderr: it can never be read back
+         * as a rule. */
         print_err("nm: rule dump ended early - list is incomplete\n");
         goto do_exit;
 list_done:
-        if (is_json) print_str("\n]\n");
+        if (is_uids) print_str("\n]\n");
     }
     goto do_exit;
 

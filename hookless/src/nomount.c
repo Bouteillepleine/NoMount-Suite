@@ -2159,7 +2159,31 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
             b.overflow = true;
         fput(dir);
     } else {
-        b.overflow = true;
+        /* COULD NOT ASK is not a verdict, and must not be cached as one.
+         *
+         * This is the one nm_root_cred user in the file that does NOT scan a ROM
+         * path: r_path is the rule's backing directory, i.e. /data. nm_root_cred
+         * comes from prepare_creds() at fs_initcall, so it carries the KERNEL SID,
+         * and dentry_open() ends in the LSM -- measured on OP15, kernel_t is
+         * allowed dir:search on system_file and system_data_file and DENIED on
+         * shell_data_file and adb_data_file, with the denial dontaudit'd. On such
+         * a label the open fails, and caching that as a snapshot froze the v25
+         * dir-target correction OFF for the rule with nothing said, until the
+         * backing directory's size or mtime happened to move.
+         *
+         * The caller's creds are not the answer either: an app that legitimately
+         * reads an injected ROM directory cannot search a module tree, so using
+         * them would disable the correction for exactly the readers it is for.
+         * So keep the privileged open, and simply do not publish a failure:
+         * return NULL, retry on the next qualifying stat. The cost is one failed
+         * dentry_open per stat on a directory we cannot read -- an error path, on
+         * a rule shape the Suite never builds. */
+        nm_warn_once("cannot open a dir-target's backing directory (relabel the module tree); serving it unmodified\n");
+        revert_creds(old);
+        kfree(b.ent);
+        kfree(b.names);
+        kfree(s);
+        return NULL;
     }
     revert_creds(old);
     if (b.overflow) goto out;
@@ -2551,14 +2575,61 @@ out:
     return res;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
-/* Pre-4.11 inode_operations->getattr signature: (vfsmount, dentry, kstat).
- * vfs_getattr_nosec()/generic_fillattr() are the 2-arg forms here. */
-static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
+/* The stock facts every injected inode mirrors onto a stat: the device and inode
+ * number a stock file at this path reports, the ROM build's timestamps, and the
+ * st_blksize / statx attributes / result_mask a stock sibling answers with.
+ *
+ * Both arms of the getattr below need exactly this set, and it used to be written
+ * out twice per arm and once per signature -- four copies of one paragraph, in a
+ * function edited in nearly every version bump from 19 to 28. */
+static void nm_mirror_stat(const struct nm_inode_info *info, struct inode *v_inode,
+                           struct kstat *stat)
 {
-    struct inode *v_inode = d_backing_inode(dentry);
+    stat->ino = info->v_ino;
+    stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
+    if (info->flags & NM_FLAG_HAVE_TIMES) {   /* mtime 0 is real (apex/erofs), so gate on the flag */
+        stat->atime = info->v_atime;
+        stat->mtime = info->v_mtime;
+        stat->ctime = info->v_ctime;
+    }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+    if (info->v_attr_mask) {      /* replay the stock/sibling statx attributes (guarded: 0 for virtual dirs) */
+        stat->attributes = info->v_attributes;
+        stat->attributes_mask = info->v_attr_mask;
+    }
+#endif
+    if (info->v_blksize) stat->blksize = info->v_blksize;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+    /* A stock erofs file reports atime UNSUPPORTED in statx's result_mask;
+     * forwarding getattr to the backing file on /data (which does track atime)
+     * sets that bit, so injected files answered statx with a mask no stock
+     * sibling produces. Narrow to the stock mask -- never widen. */
+    if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
+#endif
+}
+
+/* getattr for an injected inode. ONE body, two signatures.
+ *
+ * ->getattr changed shape twice in the supported range: 4.11 replaced
+ * (vfsmount, dentry, kstat) with (path, kstat, request_mask, query_flags), and
+ * 5.12/6.3 prefixed an idmap. That was carried as two whole copies of this
+ * function, 81 of 83 lines identical, differing only in the generic_fillattr
+ * arity and the vfs_getattr_nosec argument count -- both of which are #if-guarded
+ * inside this file anyway. The duplicated copy was the pre-4.11 one, i.e. the 4.9
+ * build, which the compile matrix builds and nobody boots: a fix landing on one
+ * arm and not the other could not be caught by CI and would not be caught on a
+ * phone either. request_mask/query_flags are simply unused on the older arm.
+ */
+static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat *stat,
+                                  u32 request_mask, unsigned int query_flags)
+{
     struct nm_inode_info *info = v_inode->i_private;
     int res;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+    (void)request_mask;
+    (void)query_flags;
+#endif
     if (unlikely(!info)) return -EIO;
     if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     /* Hidden reader of a shadowing rule: report the stock file it is entitled to,
@@ -2580,28 +2651,16 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
     }
 
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
+/* The request_mask argument arrived at 6.6, NOT with the mnt_idmap conversion at
+ * 6.3 -- see the note on the other generic_fillattr call site. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+        generic_fillattr(IDMAP_CALL request_mask, v_inode, stat);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        generic_fillattr(IDMAP_CALL v_inode, stat);
+#else
         generic_fillattr(v_inode, stat);
-        stat->ino = info->v_ino;
-        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->flags & NM_FLAG_HAVE_TIMES) {   /* mtime 0 is real (apex/erofs), so gate on the flag */
-            stat->atime = info->v_atime;
-            stat->mtime = info->v_mtime;
-            stat->ctime = info->v_ctime;
-        }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_attr_mask) {      /* replay the stock/sibling statx attributes (guarded: 0 for virtual dirs) */
-            stat->attributes = info->v_attributes;
-            stat->attributes_mask = info->v_attr_mask;
-        }
 #endif
-        if (info->v_blksize) stat->blksize = info->v_blksize;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        /* A stock erofs file reports atime UNSUPPORTED in statx's result_mask;
-         * forwarding getattr to the backing file on /data (which does track
-         * atime) sets that bit, so injected files answered statx with a mask no
-         * stock sibling produces. Narrow to the stock mask -- never widen. */
-        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
-#endif
+        nm_mirror_stat(info, v_inode, stat);
         stat->nlink = nm_vdir_nlink(info->dir_node);
         /* i_size stays at its 4096 placeholder otherwise; on erofs that is a
          * value no stock directory reports. Recount like nlink. */
@@ -2625,29 +2684,13 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
         return 0;
     }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+    res = vfs_getattr_nosec(&info->r_path, stat, request_mask, query_flags);
+#else
     res = vfs_getattr_nosec(&info->r_path, stat);
+#endif
     if (likely(res == 0)) {
-        stat->ino = info->v_ino;
-        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->flags & NM_FLAG_HAVE_TIMES) {   /* mtime 0 is real (apex/erofs), so gate on the flag */
-            stat->atime = info->v_atime;
-            stat->mtime = info->v_mtime;
-            stat->ctime = info->v_ctime;
-        }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_attr_mask) {      /* replay the stock/sibling statx attributes (guarded: 0 for virtual dirs) */
-            stat->attributes = info->v_attributes;
-            stat->attributes_mask = info->v_attr_mask;
-        }
-#endif
-        if (info->v_blksize) stat->blksize = info->v_blksize;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        /* A stock erofs file reports atime UNSUPPORTED in statx's result_mask;
-         * forwarding getattr to the backing file on /data (which does track
-         * atime) sets that bit, so injected files answered statx with a mask no
-         * stock sibling produces. Narrow to the stock mask -- never widen. */
-        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
-#endif
+        nm_mirror_stat(info, v_inode, stat);
         if (S_ISDIR(stat->mode)) {
             /* Fix 2 first: a dir-target directory's size comes from the
              * backing f2fs dir, which nm_dir_size_fix() cannot correct at
@@ -2662,119 +2705,19 @@ static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct k
     }
     return res;
 }
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+/* Pre-4.11 inode_operations->getattr signature: (vfsmount, dentry, kstat). */
+static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
+{
+    (void)mnt;
+    return nm_file_getattr_common(d_backing_inode(dentry), stat, 0, 0);
+}
 #else
 static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat, u32 request_mask, unsigned int query_flags)
 {
-    struct inode *v_inode = d_backing_inode(path->dentry);
-    struct nm_inode_info *info = v_inode->i_private;
-    int res;
-    if (unlikely(!info)) return -EIO;
-    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
-    /* Hidden reader of a shadowing rule: report the stock file it is entitled to,
-     * so stat() agrees with the open() and no dcache invalidation is needed. */
-    {
-        struct path *stock = nm_stock_for_caller(info);
-        if (unlikely(stock)) {
-            /* _nosec, like every other getattr in this file: the caller has
-             * already passed the security check for the path it named, and
-             * re-running the LSM hook against the pinned stock path returned
-             * -EPERM on OP15 (no AVC -- a non-SELinux hook), so a hidden reader
-             * could read the file but not stat it. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-            return vfs_getattr_nosec(stock, stat, request_mask, query_flags);
-#else
-            return vfs_getattr_nosec(stock, stat);
-#endif
-        }
-    }
-
-    if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
-/* 6.6, not 6.3 -- see the note on the other generic_fillattr call site. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-        generic_fillattr(IDMAP_CALL request_mask, v_inode, stat);
-#else
-        generic_fillattr(IDMAP_CALL v_inode, stat);
-#endif
-        stat->ino = info->v_ino;
-        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->flags & NM_FLAG_HAVE_TIMES) {   /* mtime 0 is real (apex/erofs), so gate on the flag */
-            stat->atime = info->v_atime;
-            stat->mtime = info->v_mtime;
-            stat->ctime = info->v_ctime;
-        }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_attr_mask) {      /* replay the stock/sibling statx attributes (guarded: 0 for virtual dirs) */
-            stat->attributes = info->v_attributes;
-            stat->attributes_mask = info->v_attr_mask;
-        }
-#endif
-        if (info->v_blksize) stat->blksize = info->v_blksize;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        /* A stock erofs file reports atime UNSUPPORTED in statx's result_mask;
-         * forwarding getattr to the backing file on /data (which does track
-         * atime) sets that bit, so injected files answered statx with a mask no
-         * stock sibling produces. Narrow to the stock mask -- never widen. */
-        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
-#endif
-        stat->nlink = nm_vdir_nlink(info->dir_node);
-        /* i_size stays at its 4096 placeholder otherwise; on erofs that is a
-         * value no stock directory reports. Recount like nlink. */
-        /* The sb here is the PARENT's -- overlayfs on an overlay-backed ROM path,
-         * which is why this guard alone left those dirs at 4096. The knob is
-         * userspace's measured answer for this device. */
-        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
-            unsigned long vbs = v_inode->i_sb->s_blocksize;
-
-            stat->size = nm_vdir_size(info->dir_node, vbs);
-            /* st_blocks has to follow st_size, or fixing one half just moves the
-             * tell. nomount_create_new_inode() stamps i_blocks = 8 (one 4K block)
-             * and nothing updated it, so a synthesized dir whose size is now the
-             * exact erofs closed form still reported 8 sectors -- correct only
-             * while that size fits in one block, and visibly wrong the moment it
-             * does not. erofs computes an uncompressed inode's blocks as the size
-             * rounded up to a block (fs/erofs/inode.c), so do the same. */
-            if (vbs)
-                stat->blocks = (blkcnt_t)((((u64)stat->size + vbs - 1) & ~((u64)vbs - 1)) >> 9);
-        }
-        return 0;
-    }
-
-    res = vfs_getattr_nosec(&info->r_path, stat, request_mask, query_flags);
-    if (likely(res == 0)) {
-        stat->ino = info->v_ino;
-        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->flags & NM_FLAG_HAVE_TIMES) {   /* mtime 0 is real (apex/erofs), so gate on the flag */
-            stat->atime = info->v_atime;
-            stat->mtime = info->v_mtime;
-            stat->ctime = info->v_ctime;
-        }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_attr_mask) {      /* replay the stock/sibling statx attributes (guarded: 0 for virtual dirs) */
-            stat->attributes = info->v_attributes;
-            stat->attributes_mask = info->v_attr_mask;
-        }
-#endif
-        if (info->v_blksize) stat->blksize = info->v_blksize;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        /* A stock erofs file reports atime UNSUPPORTED in statx's result_mask;
-         * forwarding getattr to the backing file on /data (which does track
-         * atime) sets that bit, so injected files answered statx with a mask no
-         * stock sibling produces. Narrow to the stock mask -- never widen. */
-        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
-#endif
-        if (S_ISDIR(stat->mode)) {
-            /* Fix 2 first: a dir-target directory's size comes from the
-             * backing f2fs dir, which nm_dir_size_fix() cannot correct at
-             * all. It falls through to the delta correction whenever the
-             * snapshot does not apply (merged listing, non-erofs shape,
-             * backing dir too large). */
-            if (!nm_dsnap_size_fix(info, v_inode, stat))
-                nm_dir_size_fix(info, stat);
-        } else {
-            nm_mirror_blocks(info, stat);   /* see nm_size_ratio() */
-        }
-    }
-    return res;
+    return nm_file_getattr_common(IDMAP_CALL d_backing_inode(path->dentry), stat,
+                                  request_mask, query_flags);
 }
 #endif
 
@@ -3802,14 +3745,32 @@ static void nomount_hijacked_put_super(struct super_block *sb)
     if (orig_put) orig_put(sb);
 }
 
-static inline void nomount_hijack_superblock(struct super_block *sb)
+/* Returns 0 when this superblock is ours (already hijacked, or hijacked here),
+ * -ENOMEM when it could not be.
+ *
+ * The result is NOT advisory, and this used to return void. Our ->destroy_inode
+ * is the only thing that frees an injected inode's nm_inode_info and the r_path /
+ * s_path / dir_node references it owns, and it is installed HERE -- while the
+ * directory inode has already been hijacked two lines earlier in the topology
+ * walk. Bailing silently therefore left every synthetic inode minted on this
+ * superblock afterwards leaking its payload to the backing filesystem's own
+ * teardown, for the life of the boot, with nothing said. The two allocations
+ * either side of the call in that walk are already hard failures for the same
+ * class of reason; this is the third.
+ *
+ * A missing sb / s_op is not a failure: there is nothing to hijack and nothing to
+ * free later either.
+ *
+ * NB the xattr proxy below is a separate, softer question -- see the note there. */
+static inline int nomount_hijack_superblock(struct super_block *sb)
 {
     struct nm_sop *nm_sop;
     int i, count = 0;
-    if (unlikely(!sb || !sb->s_op || __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode))) return;
+    if (unlikely(!sb || !sb->s_op)) return 0;
+    if (__get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode)) return 0;
 
     nm_sop = kzalloc(sizeof(*nm_sop), GFP_KERNEL);
-    if (unlikely(!nm_sop)) return;
+    if (unlikely(!nm_sop)) return -ENOMEM;
 
     nm_sop->fake_sop = *(sb->s_op);
     nm_sop->orig_sop = sb->s_op;
@@ -3827,11 +3788,19 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
         nm_sop->fake_sop.free_inode = free_inode_nonrcu;
 #endif
 
+    /* The xattr proxy is a DEGRADATION, not a failure, and stays best-effort on
+     * purpose: without it an injected inode answers getxattr through the
+     * filesystem's own handler, which reads a zero-initialised on-disk inode and
+     * returns -ENODATA. That is a missing label, not a wrong one -- while failing
+     * the whole hijack here would leave the caller with no ->destroy_inode at all,
+     * which is the leak this function's return value exists to prevent. */
     if (sb->s_xattr && !nm_sop->orig_xattr) {
         const struct xattr_handler **new_array;
         while (sb->s_xattr[count]) count++;
         new_array = kzalloc((count + 1) * sizeof(void *), GFP_KERNEL);
-        if (new_array) {
+        if (!new_array) {
+            nm_warn_once("xattr proxy allocation failed; injected inodes on this mount will report no security label\n");
+        } else {
             for (i = 0; i < count; i++) {
                 struct nm_xattr_proxy *proxy = kzalloc(sizeof(*proxy), GFP_KERNEL);
                 if (!proxy) break;
@@ -3861,6 +3830,7 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
     list_add_tail_rcu(&nm_sop->list, &nomount_sb_list);
     smp_store_release(&sb->s_op, &nm_sop->fake_sop);
     nm_debug("Superblock successfully hijacked for dev: 0x%x\n", sb->s_dev);
+    return 0;
 }
 
 static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_node, struct inode *inode)
@@ -4951,39 +4921,49 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
             } else {
                 nomount_hijack_virtual_parent(dir_node, v_inode);
                 nomount_hijack_dir_inode(dir_node, v_inode);
-                nomount_hijack_superblock(p_path.dentry->d_sb);
+                /* The third hard failure of the three, and the one that used to
+                 * be silent: our ->destroy_inode is installed here, and it is
+                 * what frees an injected inode's nm_inode_info and the path and
+                 * dir_node references it owns. Serving a rule on a superblock we
+                 * could not hijack leaks that payload for every inode the rule
+                 * ever mints, for the life of the boot. Refuse the add instead --
+                 * the unwind below then neuters the node this call armed. */
+                err = nomount_hijack_superblock(p_path.dentry->d_sb);
+                if (likely(!err)) {
 
-                qname.name = child_name;
-                qname.len = child_len;
-                qname.hash = full_name_hash(p_path.dentry, child_name, child_len);
-                if (p_path.dentry->d_flags & DCACHE_OP_HASH)
-                    p_path.dentry->d_op->d_hash(p_path.dentry, &qname);
+                    qname.name = child_name;
+                    qname.len = child_len;
+                    qname.hash = full_name_hash(p_path.dentry, child_name, child_len);
+                    if (p_path.dentry->d_flags & DCACHE_OP_HASH)
+                        p_path.dentry->d_op->d_hash(p_path.dentry, &qname);
 
-                dentry = d_lookup(p_path.dentry, &qname);
-                if (dentry) {
-                    /* Same test, same reason, as the one in
-                     * nm_drop_cached_vpath(): a re-add whose cached dentry
-                     * already describes the incoming rule has nothing to
-                     * invalidate, and unhashing it would only stamp
-                     * " (deleted)" onto every mapping of the file. A
-                     * synthesized ancestor (current_rule != target_rule) is not
-                     * stamped with its final identity yet, so it never matches
-                     * and is dropped exactly as before -- which costs nothing,
-                     * since d_path() only reads d_unlinked() of the LEAF and a
-                     * directory is never the leaf of a mapping. */
-                    if (!nm_dentry_matches_rule(dentry, current_rule))
-                        d_drop(dentry);
-                    dput(dentry);
+                    dentry = d_lookup(p_path.dentry, &qname);
+                    if (dentry) {
+                        /* Same test, same reason, as the one in
+                         * nm_drop_cached_vpath(): a re-add whose cached dentry
+                         * already describes the incoming rule has nothing to
+                         * invalidate, and unhashing it would only stamp
+                         * " (deleted)" onto every mapping of the file. A
+                         * synthesized ancestor (current_rule != target_rule) is not
+                         * stamped with its final identity yet, so it never matches
+                         * and is dropped exactly as before -- which costs nothing,
+                         * since d_path() only reads d_unlinked() of the LEAF and a
+                         * directory is never the leaf of a mapping. */
+                        if (!nm_dentry_matches_rule(dentry, current_rule))
+                            d_drop(dentry);
+                        dput(dentry);
+                    }
+                    err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
                 }
-                err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
-                /* Injection failing AFTER the hijack leaves a node this call
-                 * created armed on a REAL inode with no children and a permanent
-                 * igrab. The caller only unwinds pending_list, so nothing ever
-                 * reaches this node again: the inode stays pinned for the life of
-                 * the module and the vtable stays pointing at a dir_node no rule
-                 * owns. Undo exactly what we armed -- but only when the node was
-                 * ours AND is still empty, since an inherited node holds other
-                 * rules' children. Same neuter-in-place the delete path uses. */
+                /* Injection (or the superblock hijack above it) failing AFTER the
+                 * inode hijack leaves a node this call created armed on a REAL
+                 * inode with no children and a permanent igrab. The caller only
+                 * unwinds pending_list, so nothing ever reaches this node again:
+                 * the inode stays pinned for the life of the module and the vtable
+                 * stays pointing at a dir_node no rule owns. Undo exactly what we
+                 * armed -- but only when the node was ours AND is still empty,
+                 * since an inherited node holds other rules' children. Same
+                 * neuter-in-place the delete path uses. */
                 if (unlikely(err) && fresh_node &&
                     idr_is_empty(&dir_node->children_idr)) {
                     nomount_restore_dir_node(dir_node);

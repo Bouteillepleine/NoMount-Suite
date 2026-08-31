@@ -131,32 +131,37 @@ jobs:
       #
       # -s sh, because /system/bin/sh is mksh/ash, not bash.
       #
-      # WARNING level, not error, and NO rule exclusions. The gate was error-only
-      # at first because `local` is flagged as non-POSIX (SC3043) and spoof.sh
-      # used it ~25 times; that was then narrowed to `-e SC3043` so everything
-      # below "error" was checked again. spoof.sh is gone and no script left
-      # declares `local`, so the exclusion goes too -- a suppression kept past the
-      # file that needed it silently un-lints the next `local` somebody writes
-      # into a script that runs as root at boot.
+      # INFO level, and NO rule exclusions. It was `warning` at first, and that is
+      # one level ABOVE the check that matters most here: SC2086 (unquoted
+      # expansion) is info severity, so the gate could not see `find $_roots` in
+      # metamount.sh -- a find argument list built from third-party module
+      # DIRECTORY NAMES, where one space splits it in two. Everything the lower
+      # level newly reports is either fixed or carries an inline `disable` with
+      # its reason, which is the form that stays attached to the line it excuses;
+      # a bare -e list here would hide them from the file that needs them.
+      #
+      # -x, so a `. "$MODDIR/lib.sh"` is FOLLOWED. Without it every helper the
+      # entry points share reads as an undefined command and every variable
+      # lib.sh sets reads as unused -- i.e. the gate would punish the
+      # deduplication it exists to make safe.
       #
       # Honest about what this does NOT catch: shellcheck says nothing about
       # `for x in $list`, because splitting there is usually intended, so the
       # newline-IFS bug in the ghost populator would still have got through at
-      # any level. The three suppressions in the scripts each carry their reason
-      # inline; a bare -e list here would hide them from the file that needs them.
+      # any level.
       - name: Shellcheck module scripts
         run: |
           sudo apt-get install -y shellcheck >/dev/null 2>&1 || true
-          shellcheck -s sh -S warning -f gcc module/*.sh
+          shellcheck -x -s sh -S info -f gcc module/*.sh
           # ...and the build script, which was the one shell file CI did not read
           # -- while being the thing that assembles the zip everybody flashes.
           # bash, not sh: it uses arrays and [[ ]] deliberately, and it runs on a
           # workstation rather than on the phone.
-          shellcheck -s bash -S warning -f gcc scripts/package.sh
+          shellcheck -s bash -S info -f gcc scripts/package.sh
           # ...and the kernel side, now that it lives here. One repo, one gate
           # set: the engine's verify script is a root shell script on a device
           # just like the module's are.
-          shellcheck -s sh -S warning -f gcc hookless/*.sh
+          shellcheck -s sh -S info -f gcc hookless/*.sh
 
   build:
     runs-on: ubuntu-latest

@@ -2,6 +2,141 @@
 
 ## Unreleased
 
+An external audit read every tracked file and re-ran the project's own gates;
+this is all twelve of its findings. Two were reachable on a shipped build, three
+were latent, and the rest are the duplication that produced one of them.
+
+### Fixed
+
+- **`nomount export` published a hidden app's appid to shared storage.** The
+  same function withholds `uidhide*`, skips `uid_live.txt` entirely and strips
+  the ` [UID: n]` suffix out of `rules.txt` when the destination is shared
+  storage — all because an appid off the hide list names an app you are hiding
+  from, and `PackageManager.getNameForUid()` turns the number back into a name.
+  It then wrote `check.txt` containing `uid <appid> (hidden) opened all …` from
+  the device section's PM-open probe, and closed with a note claiming "the check
+  report's hide-list names were redacted". `NM_REDACT_HIDE_LIST` was honoured in
+  exactly one place, the plan section. The test now lives in
+  `blocklist::redact_hide_list()` with both readers on it, so a third cannot be
+  added without finding it.
+
+- **An image mounted over the ROM passed every mount check.**
+  `mount -o loop x.img /product/app/Foo` is mount root `/` on its own loop
+  device, so it matched neither of `check_no_foreign_rom_mount`'s two tests —
+  while that check's own comment promised to cover "a loop image" and its
+  failure text says "an image over the ROM". The other three miss it too:
+  `check_zero_mount` and absorb's survey both drop the row because
+  `absorb::source_of()` answers None for a whole-filesystem mount, and the tmpfs
+  check keys on the filesystem type. So the loudest mount there is read as
+  "posture clean" on every surface. The predicate gained the backing device
+  (loop is major 7 on every Linux, and nothing stock puts one inside a ROM
+  partition — Android's own loop mounts are the apexes, which land on `/apex`),
+  and `absorb` now reports the same rows itself, because its survey structurally
+  cannot see them and it cannot re-serve one either.
+
+- **`uidwatch.sh` — the one entry point without the house guards.** It runs on
+  every install, update and uninstall, and it was the script that never got a
+  copy of `nmto`: it called `timeout` bare, which on a device with no toybox
+  `timeout` does not run the command unbounded but does not run it at all, so
+  per-UID hiding silently stopped following installs. It was also missing the
+  failure arm its neighbours carry, so a non-zero, non-124 `absorb` was logged
+  in the voice of a success — the same asymmetry that had already been fixed for
+  `uid apply` twenty lines above it, and that `service.sh` documents at length
+  for this very command. Both fixed, and both now come from `lib.sh` rather than
+  from a copy somebody has to remember to make. `uidscan.sh` had the same bare
+  `timeout` around its manifest probe; it carries the bound as a command prefix,
+  because a shell function cannot follow into `xargs sh -c`.
+
+- **`nm_dsnap_make()` cached "could not ask" as a verdict** (engine, and the
+  reason for **v29**). v28 fixed a lookup that ran under `nm_root_cred` — whose
+  SID is the kernel's, not root's — and closed with "the other `nm_root_cred`
+  users in this file never noticed because they only ever scan ROM paths". Three
+  of the four do. `nm_dsnap_make()` opens the rule's BACKING directory, which is
+  `/data` by construction, so it lands on exactly the labels that note measured
+  `kernel_t` as denied on. The open failure was then published with `ok = false`
+  — the encoding for "walked it, does not qualify" — which froze the v25
+  dir-target correction off for that rule until the backing directory's size or
+  mtime happened to move, silently, because the denial is dontaudit'd. It
+  publishes nothing and retries now, and says so once. The caller's creds are
+  deliberately not used here, unlike v28's fix: an app reading an injected ROM
+  directory cannot search a module tree, so that would disable the correction
+  for precisely the readers it exists for.
+
+- **`nomount_hijack_superblock()` could not report failure** (engine). It was
+  the one of three consecutive hijack steps in the topology walk that returned
+  `void`, and it installs our `->destroy_inode` — the only thing that frees an
+  injected inode's `nm_inode_info` and the `r_path`/`s_path`/`dir_node`
+  references it owns. On a `kzalloc` failure it bailed silently with the
+  directory inode already hijacked, and every synthetic inode minted on that
+  superblock afterwards leaked its payload for the life of the boot. It returns
+  `-ENOMEM` now and the add is refused, like its two neighbours. The xattr proxy
+  below it stays best-effort on purpose, and says why.
+
+- **`absorb::refresh_app_apks()` re-implemented the one `nm list` parser.** It
+  split on the FIRST ` -> ` and peeled only ` [UID: n]` — the exact drift
+  `crate::nm::parse_list` was introduced to end, named in that function's own
+  doc. A rule carrying ` (public)` would have had its source read as
+  "…/base.apk (public)", failed `source.exists()`, and been DELETED through the
+  "package is gone" arm. Unreachable only because `is_pm_published()` cannot
+  grant the flag to a `/data/app` target, which is not a property this function
+  should depend on. `reapply_absorbed_pairs` was hand-parsing too, and now does
+  one parse into a set instead of a `lines()` scan per pair.
+
+- **The last unquoted expansions in the module scripts.** `find $_roots …` in
+  `metamount.sh` built its argument list from third-party module DIRECTORY
+  NAMES: one space split it in two, a leading `-` made it a find primary. It
+  carries positional parameters now. CI could not see it — SC2086 is info
+  severity and the gate ran at warning, which is fixed below.
+
+### Changed
+
+- **One `lib.sh`, sourced by all five entry points**, replacing helpers that had
+  been pasted into each: `nmto()` was byte-identical in four scripts, the
+  `/data/local/tmp` restore in three, the ksud de-link in two, `nmlog` and the
+  ABI fallback in five. 72 of `post-fs-data.sh`'s 130 code lines were
+  `metamount.sh`'s. That file argued against sourcing — "a `.` of a file that a
+  partial install did not extract would leave every nmlog call undefined for the
+  rest of the pass" — and the argument is answered rather than ignored: every
+  source is guarded, so a missing `lib.sh` is a kmsg line and a non-zero exit
+  instead of a shell full of undefined functions. With four copies the
+  partial-install case was covered and the DRIFT case was not, and drift is the
+  one that actually happened (see `uidwatch.sh` above). Roughly 150 lines gone,
+  and `package.sh` ships `lib.sh` first so a truncated list fails loudly.
+
+- **One `nm_file_getattr()` body behind two wrappers** (engine). The two
+  signature arms were 81 of 83 lines identical, differing only in the
+  `generic_fillattr` arity and the `vfs_getattr_nosec` argument count — both
+  already `#if`-guarded elsewhere in the file. The duplicated copy was the
+  pre-4.11 one, i.e. the 4.9 build, which CI compiles and nobody boots: a fix
+  landing on one arm and not the other could not have been caught anywhere. The
+  stock-fact mirroring inside it (`v_ino`, `v_dev`, the times, `v_blksize`, the
+  statx attributes and `result_mask`) was written out twice per arm and is now
+  `nm_mirror_stat()`.
+
+- **The `nm` client lost its unreachable JSON writer.** `is_json` was only ever
+  set by `l u`, so the rules-JSON branch could not be reached and `print_json()`
+  was reachable only through an accidental `nm l u g`; both its doc comment and
+  the truncated-dump note described an `nm l j` the option parser stopped
+  accepting. 4984 → 4696 stripped bytes, in the one binary whose size is a
+  design goal.
+
+- **shellcheck runs at `-S info` with `-x`.** Warning is one level above SC2086,
+  the check that would have caught the `find $_roots` above; `-x` makes it
+  follow `. "$MODDIR/lib.sh"` so the deduplication is checked rather than
+  punished. Still no rule exclusions: what the lower level newly reports is
+  either fixed or carries an inline `disable` with its reason, on the line it
+  excuses.
+
+- **A Content-Security-Policy on the WebUI.** The page holds `ksu.exec()`, which
+  is an arbitrary root shell, and every device-derived value already goes
+  through `esc()` and every shell interpolation through `shq()` — that is the
+  defence and it is not being relaxed. The CSP is the backstop for the one that
+  gets missed: no `src=` of any kind is permitted, so an injected `<script src>`
+  or `<img onerror>` fetching one is dead. Verified to leave the page working,
+  inline handlers included.
+
+### Earlier in this cycle
+
 Three defects from a full read-through of the tree, and four things that had
 outlived what they described.
 

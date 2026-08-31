@@ -8,21 +8,28 @@
 # for the user to report. Now this path says out loud that it is handing over, and
 # service.sh reports it when the handover led nowhere (see the mountpass.ts stamp).
 MODDIR="${0%/*}"
-NMDIR=/data/adb/nomount
-umask 077                     # see metamount.sh
+NMLOG_TAG=post-fs-data
+# nmlog / nmto / nm_set_bin / nm_fix_shell_tmp / nm_delink_ksud, and the umask.
+#
+# This block used to be pasted here rather than sourced, and said so: "a `.` of a
+# file that a partial install did not extract would leave every nmlog call
+# undefined for the rest of the pass". That hazard is real and is why the source
+# is GUARDED -- a missing lib.sh is a loud, recorded stop rather than a shell full
+# of undefined functions. What the duplication actually cost was drift: 72 of this
+# file's 130 code lines were metamount.sh's, and the one script that did NOT get a
+# copy of `nmto` was uidwatch.sh, which runs on every app install.
+# shellcheck source=module/lib.sh
+. "$MODDIR/lib.sh" 2>/dev/null || {
+    echo "nomount: lib.sh missing or unreadable at $MODDIR — NOTHING was injected this boot; re-flash the zip" > /dev/kmsg 2>/dev/null
+    exit 1
+}
 mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 
 # --- durable boot log ---------------------------------------------------------
 # Same reasoning as metamount.sh: /dev/kmsg alone is not recoverable on a device
-# whose ring buffer is flooded within minutes of boot, and this path had exactly
-# ONE diagnostic in it to begin with. Duplicated rather than sourced: this is the
-# Magisk post-fs-data stage, and a `.` of a file that a partial install did not
-# extract would leave every nmlog call undefined for the rest of the pass.
-BOOTLOG="$NMDIR/boot.log"
-[ -f "$BOOTLOG" ] && tail -n 400 "$BOOTLOG" > "$BOOTLOG.tmp" 2>/dev/null \
-    && mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
-: >> "$BOOTLOG" 2>/dev/null
-chmod 0600 "$BOOTLOG" 2>/dev/null
+# whose ring buffer is flooded within minutes of boot. $BOOTLOG is lib.sh's; the
+# rotation is here because this is the Magisk boot entry point and so runs once.
+nm_boot_log_rotate
 
 # Same two sweeps metamount.sh does, for the Magisk path -- this is that path's
 # boot entry point. Done BEFORE the KSU/APatch handover below, because on those
@@ -30,11 +37,6 @@ chmod 0600 "$BOOTLOG" 2>/dev/null
 # Magisk this is the only place either happens. See the notes in metamount.sh.
 rm -f "$NMDIR/.uidwatch.lock" 2>/dev/null
 rm -rf /data/adb/nomount.bak 2>/dev/null
-nmlog() {
-    echo "nomount: $*" > /dev/kmsg 2>/dev/null
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [post-fs-data] $*" >> "$BOOTLOG" 2>/dev/null
-}
-
 # The handover, now that there is somewhere to record it. metamount.sh is the
 # metamodule hook and does the whole pass on these managers -- but ONLY if the
 # manager supports metamodules. If it does not, nothing else runs and the stamp
@@ -54,50 +56,10 @@ fi
 # boot and immune to the clock.
 cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null
 
-# Bounded exec (see metamount.sh). On a device without toybox `timeout` a bare
-# `timeout 60 cmd` does not run the command unbounded, it does not run it at all
-# -- the silent no-op this file exists to remove. Prefer the bound, fall back to
-# running bare.
-if command -v timeout >/dev/null 2>&1; then
-    nmto() { timeout "$@"; }
-else
-    # No toybox `timeout`. Poll a backgrounded child rather than running it
-    # unbounded: every caller here has a 124 recovery path, and dropping the
-    # bound turns a hung engine call into a hung boot -- absorb, the whiteout
-    # re-apply, `uid apply`, uidwatch and `check` all run after these.
-    # Same contract as timeout(1): the command's status, or 124 if killed.
-    nmto() {
-        _nmto_s=$1
-        shift
-        "$@" &
-        _nmto_p=$!
-        _nmto_n=0
-        while [ "$_nmto_n" -lt "$_nmto_s" ]; do
-            kill -0 "$_nmto_p" 2>/dev/null || break
-            sleep 1
-            _nmto_n=$((_nmto_n + 1))
-        done
-        if kill -0 "$_nmto_p" 2>/dev/null; then
-            kill -TERM "$_nmto_p" 2>/dev/null
-            sleep 1
-            kill -KILL "$_nmto_p" 2>/dev/null
-            wait "$_nmto_p" 2>/dev/null
-            return 124
-        fi
-        wait "$_nmto_p"
-    }
-fi
+# nmto() is lib.sh's -- see the note there on what a missing `timeout` costs.
 
-ABI=$(getprop ro.product.cpu.abi)
-# Unchecked, an empty ABI builds "$MODDIR/bin//nomount" and the [ -x "$BIN" ]
-# test below then fails forever, silently (see metamount.sh).
-[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
-[ -n "$ABI" ] || ABI=arm64-v8a
-BIN="$MODDIR/bin/$ABI/nomount"
-# The Suite binary shells out to the hookless `nm` netlink client bundled beside
-# it. This path was missing entirely here, so on Magisk the engine fell back to
-# whatever `nm` it could find on PATH -- or to none at all.
-export NM_BIN="$MODDIR/bin/$ABI/nm"
+# ABI / BIN / NM_BIN, with the empty-getprop fallback -- see nm_set_bin in lib.sh.
+nm_set_bin
 # Self-heal executable bits: some installers don't preserve +x, and without it on
 # nm the whole pass aborts before it can inject. metamount.sh has always done
 # this; the Magisk path was a degraded twin that did not.
@@ -141,53 +103,13 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
         echo "kernel=$(uname -r)"
         echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
         echo "rules_at_trip=$(nmto 15 "$NM_BIN" list 2>/dev/null | wc -l)"
-        # shellcheck disable=SC2010  # `ls -t` is the point: we want the NEWEST
-        # tombstone and a glob cannot sort by mtime. The names here are
-        # generated by the platform (tombstone_NN), so the usual
-        # hostile-filename argument does not apply.
-        _t=$(ls -t /data/tombstones/tombstone_* 2>/dev/null | grep -v '\.pb$' | head -1)
-        if [ -n "$_t" ]; then
-            echo "tombstone=$_t"
-            echo "  $(grep -m1 '>>> ' "$_t" 2>/dev/null)"
-            echo "  $(grep -m1 'Abort message' "$_t" 2>/dev/null)"
-        fi
+        nm_incident_tombstone
     } > "$NMDIR/incident.log" 2>/dev/null
 else
-    # --- /data/local/tmp: restore the AOSP owner/mode/context ---
-    # Same stage and same block as the KSU/APatch metamount hook, but for the
-    # Magisk path; service.sh re-asserts it after boot and carries the long-form
-    # reasoning. ksud stages files there and commonly leaves it 0777 and/or
-    # root:root against the 0771 shell:shell u:object_r:shell_data_file:s0 AOSP
-    # ships, which is a detector probe any app can stat without root.
-    # Restorative only, so a clean device is a no-op. Guard-gated, and gated
-    # again by `fix_shell_tmp` in spoof.conf (default on) -- PARSED, never
-    # sourced, because this file is read as root.
-    _fst=$(grep "^[ 	]*fix_shell_tmp[ 	]*=" "$NMDIR/spoof.conf" 2>/dev/null \
-           | tail -n 1 | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
-    if [ "${_fst:-1}" = "1" ]; then
-        [ -d /data/local/tmp ] || mkdir -p /data/local/tmp 2>/dev/null
-        if [ ! -d /data/local/tmp ]; then
-            nmlog "shell-tmp: /data/local/tmp absent and not creatable"
-        else
-            # `stat -c %C` comes back as the bare letter "C" in this context
-            # rather than a label, so trust a reading only when it looks like a
-            # context and fall back to `ls -Zd`; empty means "could not read",
-            # which is not "wrong".
-            _stm=$(stat -c %a /data/local/tmp 2>/dev/null)
-            _sto=$(stat -c %u:%g /data/local/tmp 2>/dev/null)
-            _stc=$(stat -c %C /data/local/tmp 2>/dev/null)
-            case "$_stc" in *:*:*) ;; *) _stc=$(ls -Zd /data/local/tmp 2>/dev/null | awk '{print $1}') ;; esac
-            case "$_stc" in *:*:*) ;; *) _stc="" ;; esac
-            _stw=""
-            [ "$_stm" = "771" ] || { chmod 0771 /data/local/tmp 2>/dev/null && _stw="$_stw mode:${_stm:-?}->771"; }
-            [ "$_sto" = "2000:2000" ] || { chown 2000:2000 /data/local/tmp 2>/dev/null && _stw="$_stw owner:${_sto:-?}->2000:2000"; }
-            if [ -n "$_stc" ] && [ "$_stc" != "u:object_r:shell_data_file:s0" ]; then
-                chcon u:object_r:shell_data_file:s0 /data/local/tmp 2>/dev/null \
-                    && _stw="$_stw ctx:$_stc->shell_data_file"
-            fi
-            [ -n "$_stw" ] && nmlog "shell-tmp:$_stw"
-        fi
-    fi
+    # Restore /data/local/tmp's AOSP owner/mode/context -- see nm_fix_shell_tmp in
+    # lib.sh. Same stage and same call as the KSU/APatch metamount hook, for the
+    # Magisk path; service.sh re-asserts it after boot.
+    nm_fix_shell_tmp
     if [ -x "$BIN" ]; then
         # Bounded, like metamount.sh. A hung mount pass here is a HANG, not a
         # crash, so the bootloop counter never reaches GUARD_MAX and the device
@@ -270,6 +192,10 @@ else
             echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
             echo "reason=engine did not run: no executable at $BIN (magisk post-fs-data path)"
             echo "abi=$ABI (ro.product.cpu.abi=$(getprop ro.product.cpu.abi 2>/dev/null))"
+            # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
+            # name, for an incident report. The names are ours (arm64-v8a, x86_64...) and
+            # `find` cannot produce a one-line summary without more plumbing than the
+            # message is worth.
             echo "shipped_abis=$(ls "$MODDIR/bin" 2>/dev/null | tr '\n' ' ')"
             echo "kernel=$(uname -r)"
             echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"

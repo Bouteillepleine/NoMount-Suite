@@ -67,6 +67,22 @@ pub fn appid(uid: u32) -> u32 {
     uid % PER_USER_RANGE
 }
 
+/// Must this run withhold WHICH apps are hidden?
+///
+/// `health.rs::run_export` sets `NM_REDACT_HIDE_LIST` when the destination is
+/// shared storage, because a package name or an appid off the hide list is the
+/// same secret the file itself is: it names the apps you are hiding from, and
+/// `PackageManager.getNameForUid()` turns the number back into the name.
+///
+/// It lives here rather than at either reader because there are now two -- the
+/// plan section's stale-blocklist finding and the device section's PM-open probe
+/// -- and the export's closing note promises BOTH ("the check report's hide-list
+/// names were redacted"). One test, one home, so a third reader cannot be added
+/// without finding it.
+pub fn redact_hide_list() -> bool {
+    std::env::var_os("NM_REDACT_HIDE_LIST").is_some()
+}
+
 /// What an entry resolved to, for display in `uid list`.
 pub enum Resolved {
     /// Package (or bare UID) resolved to this live appid.

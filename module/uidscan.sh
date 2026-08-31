@@ -44,6 +44,16 @@ if [ -z "$INV" ]; then
     echo "nomount scan: no detector inventory (no executable at $BIN) -- name matching is OFF, manifest signals only" >&2
 fi
 
+# `timeout` is toybox's and is not guaranteed present, and without it a bare
+# `timeout 2 unzip ...` does not run the command unbounded -- it does not run it
+# at all, so every manifest signal silently disappears and the scan reports a
+# shorter candidate list than it found. The probe runs inside `xargs sh -c`, where
+# a shell FUNCTION cannot follow, so the bound travels as a command PREFIX in the
+# environment instead: bounded where timeout exists, unbounded on one zip entry
+# where it does not, never skipped.
+if command -v timeout >/dev/null 2>&1; then NM_TO="timeout 2"; else NM_TO=""; fi
+export NM_TO
+
 # Manifest probe is I/O-bound -> ~2x cores, capped.
 J=$(( $(nproc 2>/dev/null || echo 4) * 2 ))
 [ "$J" -gt 24 ] && J=24
@@ -70,6 +80,8 @@ fi
 # one. -0 disables splitting entirely. Latent rather than live: 0 of 306
 # third-party APK paths on an OP11 contain a space, quote or backslash, because
 # the installer builds them from the package name plus base64 hashes.
+# shellcheck disable=SC2016  # single quotes are the point: this is the BODY of
+# the `sh -c` xargs runs per package, and $1/$INV must expand THERE, not here.
 printf '%s\n' "$PKGS" | tr '\n' '\0' | xargs -0 -P "$J" -n1 sh -c '
     apk="${1%=*}"; pkg="${1##*=}"
     [ -n "$pkg" ] || exit 0
@@ -93,7 +105,10 @@ printf '%s\n' "$PKGS" | tr '\n' '\0' | xargs -0 -P "$J" -n1 sh -c '
     set +f
 
     if [ -f "$apk" ]; then
-        man=$(timeout 2 unzip -p "$apk" AndroidManifest.xml 2>/dev/null | tr -d "\000")
+        # shellcheck disable=SC2086  # $NM_TO is a COMMAND PREFIX ("timeout 2" or
+        # empty) and must word-split; quoting it would exec a program named
+        # "timeout 2", or an empty one.
+        man=$($NM_TO unzip -p "$apk" AndroidManifest.xml 2>/dev/null | tr -d "\000")
         case "$man" in
             *topjohnwu.magisk*|*me.weishu.kernelsu*|*eu.chainfire.supersu*|\
             *com.topjohnwu.*|*io.github.huskydg.magisk*|*me.bmax.apatch*|\

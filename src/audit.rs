@@ -1289,15 +1289,29 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     }
     let denied = u32::from_ne_bytes(buf[..4].try_into().unwrap_or_default());
     let mismatched = u32::from_ne_bytes(buf[4..].try_into().unwrap_or_default());
+    // Naming the probe uid names an app on the hide list, and this evidence ends
+    // up in `check.txt` -- which `nomount export` writes to shared storage, where
+    // the same function withholds `uid_live.txt` and strips the ` [UID: n]` suffix
+    // from `rules.txt` for exactly this reason. The appid is the same secret: any
+    // app with a storage permission can read the file, and
+    // `PackageManager.getNameForUid()` turns the number back into a package name.
+    // So print it for a private destination and withhold it for a shared one --
+    // the gate doctor.rs already applies to the package names, and the one the
+    // export's own closing note promises for "the check report's hide-list names".
+    let who = if crate::blocklist::redact_hide_list() {
+        "a hidden app".to_string()
+    } else {
+        format!("uid {appid} (hidden)")
+    };
     if denied == u32::MAX {
-        return unmeasured(NAME, format!("could not drop to uid {appid}"))
+        return unmeasured(NAME, "could not drop to the hidden app's uid".to_string())
             .meaning("The probe could not take on the hidden app's identity, so this was not tested.");
     }
     if denied == 0 && mismatched == 0 {
         return pass(
             NAME,
             format!(
-                "uid {appid} (hidden) opened all {} PM-published rule target(s), same bytes we serve",
+                "{who} opened all {} PM-published rule target(s), same bytes we serve",
                 readable.len()
             ),
         )
@@ -1310,7 +1324,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         return fail(
             NAME,
             format!(
-                "uid {appid} (hidden) opened all {} PM-published rule target(s) but {mismatched} \
+                "{who} opened all {} PM-published rule target(s) but {mismatched} \
                  differed in size from the copy we serve",
                 readable.len()
             ),
@@ -1330,7 +1344,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     fail(
         NAME,
         format!(
-            "uid {appid} (hidden) could not open {denied} of {} PM-published rule target(s)\
+            "{who} could not open {denied} of {} PM-published rule target(s)\
              {}",
             readable.len(),
             if mismatched > 0 { format!(", and {mismatched} more differed in size") } else { String::new() }
@@ -1401,47 +1415,39 @@ fn check_no_rom_tmpfs() -> Check {
 /// `check_zero_mount` flags a source under /data/adb; `check_no_rom_tmpfs` flags a
 /// tmpfs. Neither sees a bind over the ROM sourced from /data/local/tmp, /cache or
 /// a loop image -- yet those are every bit as visible in an app's mountinfo. Flag
-/// any row whose MOUNTPOINT is inside a ROM partition and whose mount root (field
-/// 4) is not "/" (a bind of a subtree, never how a whole partition is mounted) OR
-/// whose backing device is the /data device (content served off userdata over the
-/// read-only ROM). Stock OEM mounts inside a ROM partition (vfat firmware, ext4
-/// dsp, the OEM's overlayfs) have root "/" on their own block device, so they do
-/// not match -- and a plain tmpfs (root "/", its own dev) is left to the check above.
+/// any row whose MOUNTPOINT is inside a ROM partition and which is one of:
+///
+///   * mount root (field 4) is not "/" -- a bind of a subtree, never how a whole
+///     partition is mounted;
+///   * the backing device is the /data device -- content served off userdata over
+///     the read-only ROM;
+///   * the backing device is a LOOP device -- a mounted image.
+///
+/// The third was missing, and it was the case this check's own text promised to
+/// cover. `mount -o loop foo.img /product/app/Foo` is root "/" on its own `7:N`
+/// device, so it matched neither of the first two -- and the other three mount
+/// checks miss it as well: `check_zero_mount` and absorb's survey both drop the row
+/// because `absorb::source_of()` answers None for root "/", and the tmpfs check
+/// keys on the filesystem type. So the loudest possible mount over the ROM read as
+/// "posture clean" everywhere.
+///
+/// Stock OEM mounts inside a ROM partition (vfat firmware, ext4 dsp, the OEM's
+/// overlayfs) have root "/" on their own BLOCK device, so they still do not match;
+/// a plain tmpfs (root "/", its own dev) is still left to the check above. Loop is
+/// the one backing store nothing stock puts inside a ROM partition -- Android's own
+/// loop mounts are the apexes, and those land on /apex, which is not a ROM root
+/// here. If a device is ever found with a stock loop mount inside one, the fix is
+/// an allow-list for that path, not a narrower predicate.
+///
+/// Not absorbable, and deliberately not routed through absorb: there is no
+/// per-file source under /data/adb to re-serve an image from. This check reports
+/// it; removing it is the owning module's job.
 fn check_no_foreign_rom_mount() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
         return unmeasured(N_FOREIGN_MOUNT, "cannot read /proc/self/mountinfo".into())
             .meaning("Could not read the mount table, so whether anything foreign is mounted over the ROM is unknown.");
     };
-    let roots = crate::absorb::ROM_ROOTS;
-    let rows = crate::absorb::parse_mountinfo(&mi);
-    // maj:min of /data, so a mount served off userdata is recognised by device
-    // rather than by the source path (which mountinfo does not carry usefully here).
-    let data_dev = rows.iter().find(|r| r.target == Path::new("/data")).map(|r| r.dev.clone());
-    let mut hits: Vec<String> = Vec::new();
-    for r in &rows {
-        let t = r.target.to_string_lossy();
-        if !roots.iter().any(|root| t.starts_with(root)) {
-            continue;
-        }
-        // A bind sourced from /data/adb/modules is a MODULE mount, which is the
-        // one thing this check is not about: its own text says "outside the module
-        // system" and its owner string says "a mount made outside /data/adb".
-        // Both were false for the 85 my_* binds the Suite itself makes, so a stock
-        // install reported them here AND in zero-mount posture -- two red rows for
-        // one cause, one of them describing the opposite of what happened.
-        // zero-mount posture owns module mounts; this owns everything else.
-        //
-        // mountinfo's root is relative to the source filesystem, so a bind off
-        // userdata reads as /adb/modules/... rather than /data/adb/modules/...
-        if r.root.starts_with("/adb/modules/") || r.root.starts_with("/data/adb/modules/") {
-            continue;
-        }
-        let subtree_bind = r.root != "/";
-        let off_userdata = data_dev.as_deref() == Some(r.dev.as_str());
-        if subtree_bind || off_userdata {
-            hits.push(format!("{} (root={}, dev={})", t, r.root, r.dev));
-        }
-    }
+    let hits = crate::absorb::foreign_rom_mounts(&crate::absorb::parse_mountinfo(&mi));
     if hits.is_empty() {
         pass(N_FOREIGN_MOUNT, "no non-/data/adb bind or image mounted over a ROM partition".into())
             .meaning("Nothing outside the module system is mounted over a read-only ROM partition.")
@@ -1609,6 +1615,34 @@ mod tests {
         );
         // The point of the fix: knowing about the virtual dir changes the answer.
         let _ = judged;
+    }
+
+    /// An IMAGE mounted over a ROM path is the loudest mount there is, and it used
+    /// to pass every one of the four mount checks: it is root "/" on its own loop
+    /// device, so neither the subtree-bind test nor the off-userdata one saw it,
+    /// `absorb::source_of()` answers None for root "/" (so `check_zero_mount` and
+    /// the absorb survey both drop the row), and the tmpfs check keys on fstype.
+    /// The stock mounts that live inside a ROM partition must still not be flagged.
+    #[test]
+    fn an_image_mounted_over_the_rom_is_reported() {
+        // Real shapes: /data, a stock erofs partition, the OEM's own inner mounts,
+        // one Suite bind (owned by check_zero_mount, not this one), and the image.
+        let mi = "\
+205 1 254:78 / /data rw,nosuid,nodev,noatime shared:2 - f2fs /dev/block/dm-78 rw
+35 1 254:25 / /product ro,noatime - erofs /dev/block/dm-25 ro
+41 35 179:12 / /product/etc/firmware ro,noatime - vfat /dev/block/sde12 ro
+42 35 0:41 / /product/overlay ro,relatime - overlay overlay ro
+44 205 254:78 /adb/modules/foo/my_product/x /my_product/x rw,noatime - f2fs /dev/block/dm-78 rw
+88 35 7:12 / /product/app/Foo ro,relatime - ext4 /dev/block/loop12 ro";
+        let hits = crate::absorb::foreign_rom_mounts(&crate::absorb::parse_mountinfo(mi));
+        assert_eq!(hits.len(), 1, "expected only the image, got {hits:?}");
+        assert!(hits[0].starts_with("/product/app/Foo "), "got {}", hits[0]);
+        use crate::absorb::is_loop_dev;
+        assert!(is_loop_dev("7:12") && !is_loop_dev("254:78") && !is_loop_dev("179:12"));
+        // ...and absorb reports the same row itself, because its survey cannot:
+        // `source_of()` answers None for a whole-filesystem mount.
+        let imaged = crate::absorb::rom_image_mounts(&crate::absorb::parse_mountinfo(mi));
+        assert_eq!(imaged.len(), 1, "the image is what absorb must still name");
     }
 
     /// A mapping's path is the LAST field and may contain spaces.

@@ -164,6 +164,11 @@ fi
 
 SCRIPTS=(
     customize.sh
+    # Sourced by all five entry points below. NOT optional: each one stops with a
+    # kmsg line and a non-zero exit when it cannot read this, so a zip built
+    # without it installs and then does nothing at every stage. It is listed FIRST
+    # so a truncated list is a loud failure rather than a silent one.
+    lib.sh
     metamount.sh
     post-fs-data.sh
     post-mount.sh

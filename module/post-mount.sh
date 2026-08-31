@@ -24,54 +24,21 @@
 # Magisk has no post-mount stage; post-fs-data.sh keeps its own copy of this
 # block for that path, where it is the last hook before zygote available at all.
 MODDIR="${0%/*}"
-NMDIR=/data/adb/nomount
-umask 077                     # see metamount.sh
+NMLOG_TAG=post-mount
+# nmlog / nmto / nm_set_bin, and the umask. GUARDED for the reason
+# post-fs-data.sh spells out: a partial extraction must stop loudly rather than
+# run with every helper undefined.
+# shellcheck source=module/lib.sh
+. "$MODDIR/lib.sh" 2>/dev/null || {
+    echo "nomount: lib.sh missing or unreadable at $MODDIR — the pre-zygote absorb did not run; re-flash the zip" > /dev/kmsg 2>/dev/null
+    exit 1
+}
 mkdir -p "$NMDIR" && chmod 0700 "$NMDIR" 2>/dev/null
 
-BOOTLOG="$NMDIR/boot.log"
-nmlog() {
-    echo "nomount: $*" > /dev/kmsg 2>/dev/null
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [post-mount] $*" >> "$BOOTLOG" 2>/dev/null
-}
+# nmto() is lib.sh's -- see the note there on what a missing `timeout` costs.
 
-# Bounded exec (see metamount.sh): on a device without toybox `timeout`, a bare
-# `timeout 60 cmd` does not run the command unbounded — it does not run it at
-# all, which is the silent no-op this pattern exists to remove.
-if command -v timeout >/dev/null 2>&1; then
-    nmto() { timeout "$@"; }
-else
-    # No toybox `timeout`. Poll a backgrounded child rather than running it
-    # unbounded: every caller here has a 124 recovery path, and dropping the
-    # bound turns a hung engine call into a hung boot -- absorb, the whiteout
-    # re-apply, `uid apply`, uidwatch and `check` all run after these.
-    # Same contract as timeout(1): the command's status, or 124 if killed.
-    nmto() {
-        _nmto_s=$1
-        shift
-        "$@" &
-        _nmto_p=$!
-        _nmto_n=0
-        while [ "$_nmto_n" -lt "$_nmto_s" ]; do
-            kill -0 "$_nmto_p" 2>/dev/null || break
-            sleep 1
-            _nmto_n=$((_nmto_n + 1))
-        done
-        if kill -0 "$_nmto_p" 2>/dev/null; then
-            kill -TERM "$_nmto_p" 2>/dev/null
-            sleep 1
-            kill -KILL "$_nmto_p" 2>/dev/null
-            wait "$_nmto_p" 2>/dev/null
-            return 124
-        fi
-        wait "$_nmto_p"
-    }
-fi
-
-ABI=$(getprop ro.product.cpu.abi)
-[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
-[ -n "$ABI" ] || ABI=arm64-v8a
-BIN="$MODDIR/bin/$ABI/nomount"
-export NM_BIN="$MODDIR/bin/$ABI/nm"
+# ABI / BIN / NM_BIN, with the empty-getprop fallback -- see nm_set_bin in lib.sh.
+nm_set_bin
 
 # Gated on the my_hookless TRIAL marker: taking a my_* bind over means serving
 # that path by injection, and a leaf my_* inject may trip zygote's FD allowlist

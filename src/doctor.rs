@@ -1156,11 +1156,12 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             .collect();
         if !stale.is_empty() {
             // The names are hidden-app package names -- the same secret as the hide
-            // list. When `nomount export` runs doctor for shared storage it sets
+            // list. When `nomount export` runs the check for shared storage it sets
             // NM_REDACT_HIDE_LIST=1, so print the count only there (health.rs owns
-            // the destination decision; see M-S2).
-            let redact = std::env::var_os("NM_REDACT_HIDE_LIST").is_some();
-            let names = if redact {
+            // the destination decision; see M-S2). The test lives in blocklist.rs
+            // because the device section has a second reader of it (the PM-open
+            // probe's uid), and the export promises both.
+            let names = if crate::blocklist::redact_hide_list() {
                 "names redacted".to_string()
             } else {
                 stale.join(", ")

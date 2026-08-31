@@ -7,13 +7,17 @@
 # module's action button clobbering ksud.
 # Root/su is NOT managed here (sucompat handles it, mountlessly).
 MODDIR="${0%/*}"
-NMDIR=/data/adb/nomount
-# The boot umask is 0, so every state file created from here (and by the binaries
-# this script execs, which inherit it) landed 0666 -- observed on absorbed.list,
-# binds.lock, uidhide and uidhide.cache. The 0700 directory below is what actually
-# protects them, but uidhide IS the hiding policy and should not rely on its
-# parent alone. Set the umask once, at the top, so it covers the whole pass.
-umask 077
+NMLOG_TAG=metamount
+# nmlog / nmto / nm_set_bin / nm_fix_shell_tmp / nm_delink_ksud, and the umask.
+# GUARDED: a partial extraction that dropped lib.sh must not leave this pass
+# running with every helper undefined -- it says so on the one channel alive this
+# early and stops, which is the same treatment a missing engine binary gets below.
+# NMDIR is not set yet, so the incident line goes to kmsg alone.
+# shellcheck source=module/lib.sh
+. "$MODDIR/lib.sh" 2>/dev/null || {
+    echo "nomount: lib.sh missing or unreadable at $MODDIR — NOTHING was injected this boot; re-flash the zip" > /dev/kmsg 2>/dev/null
+    exit 1
+}
 # 0700: spoof.conf/blocklist/pathhide.conf are read as root at boot, so anything
 # able to write here gets root. The dir was being created under the boot umask (0777).
 mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
@@ -47,15 +51,12 @@ chcon -R u:object_r:adb_data_file:s0 "$NMDIR" 2>/dev/null
 # apply FAILED, absorb TIMED OUT) unrecoverable in practice. Tee the same lines
 # to a file; kmsg stays, because it is the only channel alive early enough to
 # survive a boot that never reaches /data.
-BOOTLOG="$NMDIR/boot.log"
-# Rotate here rather than in service.sh/uidwatch.sh: this is the boot entry point
-# for KSU/APatch, so it runs exactly once per boot. The chmod is for a file an
+# $BOOTLOG comes from lib.sh; the ROTATION is here rather than there because this
+# is the boot entry point for KSU/APatch and so runs exactly once per boot, while
+# service.sh and uidwatch.sh must not rotate at all. The chmod is for a file an
 # older build left wide: `tail > $BOOTLOG.tmp` creates the temp under whatever
 # umask is in force and `mv` carries that mode onto the log.
-[ -f "$BOOTLOG" ] && tail -n 400 "$BOOTLOG" > "$BOOTLOG.tmp" 2>/dev/null \
-    && mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
-: >> "$BOOTLOG" 2>/dev/null
-chmod 0600 "$BOOTLOG" 2>/dev/null
+nm_boot_log_rotate
 
 # uidwatch.sh's handler lock lives in the state directory now rather than in
 # /dev (see the note there). /dev is a tmpfs and cleared every boot, which the
@@ -90,45 +91,8 @@ rm -rf /data/adb/nomount.bak 2>/dev/null
 # boot and immune to the clock.
 cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null
 
-nmlog() {
-    echo "nomount: $*" > /dev/kmsg 2>/dev/null
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [metamount] $*" >> "$BOOTLOG" 2>/dev/null
-}
-
-# Bounded exec. Every engine call on this path already went through `timeout`,
-# but that hardcodes a binary this script does not otherwise require: on a device
-# without toybox `timeout` the command does not run UNBOUNDED, it does not run AT
-# ALL ("timeout: not found"), which is the silent no-op this file spends most of
-# its comments removing. Prefer the bound; fall back to running it bare.
-if command -v timeout >/dev/null 2>&1; then
-    nmto() { timeout "$@"; }
-else
-    # No toybox `timeout`. Poll a backgrounded child rather than running it
-    # unbounded: every caller here has a 124 recovery path, and dropping the
-    # bound turns a hung engine call into a hung boot -- absorb, the whiteout
-    # re-apply, `uid apply`, uidwatch and `check` all run after these.
-    # Same contract as timeout(1): the command's status, or 124 if killed.
-    nmto() {
-        _nmto_s=$1
-        shift
-        "$@" &
-        _nmto_p=$!
-        _nmto_n=0
-        while [ "$_nmto_n" -lt "$_nmto_s" ]; do
-            kill -0 "$_nmto_p" 2>/dev/null || break
-            sleep 1
-            _nmto_n=$((_nmto_n + 1))
-        done
-        if kill -0 "$_nmto_p" 2>/dev/null; then
-            kill -TERM "$_nmto_p" 2>/dev/null
-            sleep 1
-            kill -KILL "$_nmto_p" 2>/dev/null
-            wait "$_nmto_p" 2>/dev/null
-            return 124
-        fi
-        wait "$_nmto_p"
-    }
-fi
+# nmlog() and nmto() are lib.sh's -- see the note there on why they are shared
+# rather than pasted, and on what a missing `timeout` costs.
 
 # Single-run guard. Was a noclobber file in /dev: world-writable (boot umask),
 # named after the project, and "held" by mere existence -- so anything able to
@@ -171,18 +135,8 @@ else
     flock -n 9 || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
 fi
 
-ABI=$(getprop ro.product.cpu.abi)
-# An unchecked ABI is a silent no-op: empty gives "$MODDIR/bin//nomount", which
-# can never be executable, and the mount pass below is gated on [ -x "$BIN" ]
-# with nothing on the other side -- so the whole boot injected nothing and said
-# nothing about it. getprop CAN come back empty this early. Fall back to the
-# first entry of the abilist, then to the only ABI this module actually ships,
-# rather than building a path that cannot resolve.
-[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
-[ -n "$ABI" ] || ABI=arm64-v8a
-BIN="$MODDIR/bin/$ABI/nomount"
-# The Suite binary shells out to the hookless `nm` netlink client bundled beside it.
-export NM_BIN="$MODDIR/bin/$ABI/nm"
+# ABI / BIN / NM_BIN, with the empty-getprop fallback -- see nm_set_bin in lib.sh.
+nm_set_bin
 # Did the engine actually run this boot? The status card at the bottom is written
 # UNCONDITIONALLY, so a missing/non-executable binary used to leave it reading
 # "[NoMount ✅ 0 rules · 0 RRO · 0 modules] fully mountless" -- a green tick on a
@@ -194,40 +148,9 @@ _engine_ran=0
 # don't preserve +x. Without it on nm the whole pass aborts before it can inject.
 chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 
-# --- ksud multicall guard (susfs4ksu action-button clobber protection) ---
-# On this build ksud/ksu_susfs/resetprop are ONE hardlinked multicall binary. The
-# SUSFS module's action button runs `cp -f <standalone> /data/adb/ksu/bin/ksu_susfs`,
-# which follows the hardlink and overwrites the whole ksud daemon -> breaks su/ksud
-# until reflash (a reboot in that state can bootloop). Boot re-creates the hardlink
-# every time, so we de-link ksu_susfs into its OWN independent copy once per boot:
-# after this, action.sh's cp only hits the copy and the ksud daemon inode is untouched.
-# No chattr +i, so legitimate susfs updates still work. Only acts on a genuine (>1MB)
-# multicall that actually shares ksud's inode; a clobbered/small ksud is left alone.
-KSUD=/data/adb/ksud
-SUSFS_BIN=/data/adb/ksu/bin/ksu_susfs
-if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
-   && [ "$(stat -c %i "$KSUD" 2>/dev/null)" = "$(stat -c %i "$SUSFS_BIN" 2>/dev/null)" ] \
-   && [ "$(stat -c %s "$KSUD" 2>/dev/null)" -gt 1000000 ]; then
-    # RECORD the flag before clearing it, and put back only what was there.
-    # `chattr +i` unconditionally was not a restore: on a device where ksud was
-    # never immutable it ADDED immutability every boot, and the next legitimate
-    # ksud update then failed with EPERM. (The clear is genuinely needed, but not
-    # for the reason the old comment gave -- reading an immutable file is fine;
-    # what needs it is the `mv` below, which UNLINKS $SUSFS_BIN, and unlinking a
-    # hardlink to an immutable inode is refused.)
-    _ksud_imm=0
-    lsattr -d "$KSUD" 2>/dev/null | cut -d' ' -f1 | grep -q 'i' && _ksud_imm=1
-    chattr -i "$KSUD" 2>/dev/null
-    if cp "$KSUD" "$SUSFS_BIN.nm_new" 2>/dev/null; then
-        chmod 0755 "$SUSFS_BIN.nm_new" 2>/dev/null
-        chcon u:object_r:adb_data_file:s0 "$SUSFS_BIN.nm_new" 2>/dev/null
-        mv -f "$SUSFS_BIN.nm_new" "$SUSFS_BIN" 2>/dev/null \
-            && nmlog "de-linked ksu_susfs from ksud multicall (susfs-action guard)"
-    else
-        rm -f "$SUSFS_BIN.nm_new" 2>/dev/null
-    fi
-    [ "$_ksud_imm" = 1 ] && chattr +i "$KSUD" 2>/dev/null
-fi
+# The ksud multicall de-link; see nm_delink_ksud in lib.sh for what it protects
+# against and why it runs once per boot. service.sh re-asserts it after boot.
+nm_delink_ksud "susfs-action guard"
 
 # --- bootloop guard ---
 # NB: everything this script still does at post-fs-data runs INSIDE this guard
@@ -266,62 +189,14 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
                 [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ] && continue
                 basename "$m"
             done | tr '\n' ' ')"
-        # Newest native crash + its abort line: for an early-boot bootloop this is almost
-        # always zygote/system_server and names the offending path outright.
-        # shellcheck disable=SC2010  # `ls -t` is the point: we want the NEWEST
-        # tombstone and a glob cannot sort by mtime. The names here are
-        # generated by the platform (tombstone_NN), so the usual
-        # hostile-filename argument does not apply.
-        _t=$(ls -t /data/tombstones/tombstone_* 2>/dev/null | grep -v '\.pb$' | head -1)
-        if [ -n "$_t" ]; then
-            echo "tombstone=$_t"
-            echo "  $(grep -m1 '>>> ' "$_t" 2>/dev/null)"
-            echo "  $(grep -m1 'Abort message' "$_t" 2>/dev/null)"
-        fi
+        nm_incident_tombstone
     } > "$NMDIR/incident.log" 2>/dev/null
 else
-    # --- /data/local/tmp: restore the AOSP owner/mode/context ---
-    # ksud stages files there and commonly leaves it 0777 and/or root:root; AOSP
-    # ships 0771 shell:shell u:object_r:shell_data_file:s0, and the drift is a
-    # zero-false-positive detector probe any app can stat without root.
-    # Restorative only, so a clean device is a no-op. service.sh re-asserts the
-    # same pass after boot (ksud and adbd keep staging there all boot long) and
-    # carries the long-form reasoning; keep the two in step.
-    #
-    # Guard-gated, so a tripped counter or a manual `disabled` stops it like
-    # everything else. Unbounded on purpose now: this is four stat/chmod calls on
-    # one local directory, with none of the resetprop / uname / netlink surface
-    # that made the old add-on on this line worth a timeout.
-    #
-    # `fix_shell_tmp` in spoof.conf gates it (default on). PARSED, never sourced:
-    # the file is read as root here, and sourcing a writable config is root code
-    # execution. Only "1" or an absent/empty value runs.
-    _fst=$(grep "^[ 	]*fix_shell_tmp[ 	]*=" "$NMDIR/spoof.conf" 2>/dev/null \
-           | tail -n 1 | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
-    if [ "${_fst:-1}" = "1" ]; then
-        [ -d /data/local/tmp ] || mkdir -p /data/local/tmp 2>/dev/null
-        if [ ! -d /data/local/tmp ]; then
-            nmlog "shell-tmp: /data/local/tmp absent and not creatable"
-        else
-            # `stat -c %C` comes back as the bare letter "C" in this context
-            # rather than a label, so trust a reading only when it looks like a
-            # context and fall back to `ls -Zd`; empty means "could not read",
-            # which is not "wrong".
-            _stm=$(stat -c %a /data/local/tmp 2>/dev/null)
-            _sto=$(stat -c %u:%g /data/local/tmp 2>/dev/null)
-            _stc=$(stat -c %C /data/local/tmp 2>/dev/null)
-            case "$_stc" in *:*:*) ;; *) _stc=$(ls -Zd /data/local/tmp 2>/dev/null | awk '{print $1}') ;; esac
-            case "$_stc" in *:*:*) ;; *) _stc="" ;; esac
-            _stw=""
-            [ "$_stm" = "771" ] || { chmod 0771 /data/local/tmp 2>/dev/null && _stw="$_stw mode:${_stm:-?}->771"; }
-            [ "$_sto" = "2000:2000" ] || { chown 2000:2000 /data/local/tmp 2>/dev/null && _stw="$_stw owner:${_sto:-?}->2000:2000"; }
-            if [ -n "$_stc" ] && [ "$_stc" != "u:object_r:shell_data_file:s0" ]; then
-                chcon u:object_r:shell_data_file:s0 /data/local/tmp 2>/dev/null \
-                    && _stw="$_stw ctx:$_stc->shell_data_file"
-            fi
-            [ -n "$_stw" ] && nmlog "shell-tmp:$_stw"
-        fi
-    fi
+    # Restore /data/local/tmp's AOSP owner/mode/context -- see nm_fix_shell_tmp in
+    # lib.sh. Guard-gated, so a tripped counter or a manual `disabled` stops it
+    # like everything else; service.sh re-asserts it after boot, because ksud and
+    # adbd keep staging files there for the whole of boot.
+    nm_fix_shell_tmp
 
     if [ -x "$BIN" ]; then
         # Capture the status, NOT just the fact that we called it. `_engine_ran=1`
@@ -374,6 +249,10 @@ else
             echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
             echo "reason=engine did not run: no executable at $BIN"
             echo "abi=$ABI (ro.product.cpu.abi=$(getprop ro.product.cpu.abi 2>/dev/null))"
+            # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
+            # name, for an incident report. The names are ours (arm64-v8a, x86_64...) and
+            # `find` cannot produce a one-line summary without more plumbing than the
+            # message is worth.
             echo "shipped_abis=$(ls "$MODDIR/bin" 2>/dev/null | tr '\n' ' ')"
             echo "kernel=$(uname -r)"
             echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
@@ -427,7 +306,13 @@ if command -v ksud >/dev/null 2>&1; then
         # to a real partition, not just system/ (auto_mount modules ship product/ directly).
         # Plain `find` (no -L) is deliberate: a module's `system/product -> ../product`
         # layout-convergence symlink must not be followed, or its files count twice.
-        _roots=""
+        # POSITIONAL PARAMETERS, not a space-joined string. `$_roots` was the last
+        # unquoted expansion in the module scripts, and it is built from
+        # third-party module DIRECTORY NAMES: a name with a space in it became two
+        # find arguments, and one beginning with `-` became a find primary. It was
+        # invisible to CI because SC2086 is info severity and the gate ran at
+        # warning. `set --` is the POSIX way to carry a list of paths intact.
+        set --
         for _pd in "$d"*/; do
             [ -d "$_pd" ] || continue
             # Mirrors the injector's non-following file_type(): a top-level symlink (e.g.
@@ -441,9 +326,9 @@ if command -v ksud >/dev/null 2>&1; then
                 my_*) continue ;;
             esac
             [ -d "/$_n" ] || continue
-            _roots="$_roots $_pd"
+            set -- "$@" "$_pd"
         done
-        [ -z "$_roots" ] && continue
+        [ "$#" -eq 0 ] && continue
         _o=0; _v=0
         # BOUNDED, like every other call on this path. `-print -quit` stops at the
         # first hit, but the NEGATIVE answer costs a full walk of the module tree --
@@ -451,8 +336,8 @@ if command -v ksud >/dev/null 2>&1; then
         # post-fs-data. Unbounded it is a boot hang on the first bad module rather
         # than a badge missing from one card. 10s is far more than any real module
         # needs; a module that exceeds it simply goes untagged.
-        [ -n "$(nmto 10 find $_roots -path '*/overlay/*.apk' -print -quit 2>/dev/null)" ] && _o=1
-        [ -n "$(nmto 10 find $_roots -type f ! -path '*/overlay/*' -print -quit 2>/dev/null)" ] && _v=1
+        [ -n "$(nmto 10 find "$@" -path '*/overlay/*.apk' -print -quit 2>/dev/null)" ] && _o=1
+        [ -n "$(nmto 10 find "$@" -type f ! -path '*/overlay/*' -print -quit 2>/dev/null)" ] && _v=1
         [ "$_o" = 0 ] && [ "$_v" = 0 ] && continue
         if [ "$_o" = 1 ] && [ "$_v" = 1 ]; then _t="vfs + overlay"; _ov="$_ov $mid";
         elif [ "$_o" = 1 ]; then _t="overlay"; _ov="$_ov $mid";

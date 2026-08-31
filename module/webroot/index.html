@@ -3,6 +3,26 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<!-- This page holds ksu.exec(), which is an arbitrary ROOT shell, and it renders
+     values that come off the device: module ids and their `name=`, rule targets,
+     package names, check evidence. Every one of those goes through esc() and every
+     shell interpolation through shq() -- that is the actual defence and it is not
+     being relaxed here. This is the backstop for the one that gets missed.
+
+     Each source is exactly what the page already uses, and nothing more:
+       script-src 'unsafe-inline'  the single inline <script> and the onclick=
+                                   handlers; NO src= is permitted, so an injected
+                                   <script src> or <img onerror> fetching one is
+                                   dead. (CSP3: 'unsafe-inline' covers handlers.)
+       style-src  'unsafe-inline'  the inline <style> and the style="" attributes.
+       img-src    'self' data:     icon.png, and nothing off-device. `data:` is
+                                   listed because a WebUI scheme need not treat a
+                                   relative href as 'self'.
+       everything else 'none' via default-src, so there is no connect-src, no
+       font-src, no frame-src and no form-action to exfiltrate through. The page
+       makes no network request of any kind; it talks to the device through the
+       manager's JS bridge, which a CSP does not gate. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
 <title>NoMount Suite</title>
 <!-- WebUI shortcut icon is driven by webroot/config.json + icon.png (KernelSU/MMRL WebUI) -->
 <link rel="icon" type="image/png" href="icon.png" />

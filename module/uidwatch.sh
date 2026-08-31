@@ -36,7 +36,18 @@
 [ -n "$(printf %s "$1" | tr -d "ar0xo")" ] || exit 0
 
 MODDIR=/data/adb/modules/meta-nomount
-NMDIR=/data/adb/nomount
+NMLOG_TAG=uidwatch
+# nmlog / nmto / nm_set_bin, and the umask -- the same helpers every other entry
+# point uses. THIS SCRIPT WAS THE ONE WITHOUT THEM, and it is the one that runs on
+# every install, update and uninstall: it called `timeout` bare, which on a device
+# with no toybox `timeout` does not run the command unbounded but does not run it
+# AT ALL, so the hide list silently stopped following installs. Nobody decided
+# that; it was a copy that was never made. GUARDED, like the others.
+# shellcheck source=module/lib.sh
+. "$MODDIR/lib.sh" 2>/dev/null || {
+    echo "nomount: lib.sh missing or unreadable at $MODDIR — the package watcher cannot run; re-flash the zip" > /dev/kmsg 2>/dev/null
+    exit 1
+}
 [ -f "$NMDIR/disabled" ] && exit 0
 
 # Does this list hold an actual ENTRY, or only its header?
@@ -65,25 +76,12 @@ _has_entries() { [ -s "$1" ] && grep -qE '^[[:space:]]*[^[:space:]#]' "$1" 2>/de
 # Proceed when EITHER has something to do.
 _has_entries "$NMDIR/uidhide" || _has_entries "$NMDIR/absorbed.list" || exit 0
 
-ABI=$(getprop ro.product.cpu.abi)
-# Same fallback the boot entry points carry: an empty ABI builds
-# "$MODDIR/bin//nomount", which can never be executable, so the handler exits 0
-# and the hide list silently stops following installs.
-[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
-[ -n "$ABI" ] || ABI=arm64-v8a
-BIN="$MODDIR/bin/$ABI/nomount"
+# ABI / BIN / NM_BIN, with the empty-getprop fallback -- see nm_set_bin in lib.sh.
+nm_set_bin
 [ -x "$BIN" ] || exit 0
-export NM_BIN="$MODDIR/bin/$ABI/nm"
 
-# Tee to the durable boot log as well as kmsg (see metamount.sh): this handler
-# fires on package changes, long after boot, by which point the kernel ring on
-# this device has already been flushed by roam-stats spam. No rotation here --
-# the boot entry point does that once per boot, and this can run many times.
-BOOTLOG="$NMDIR/boot.log"
-nmlog() {
-    echo "nomount: $*" > /dev/kmsg 2>/dev/null
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [uidwatch] $*" >> "$BOOTLOG" 2>/dev/null
-}
+# nmlog() and $BOOTLOG are lib.sh's. No rotation here -- the boot entry point does
+# that once per boot, and this handler can run many times.
 
 # Serialised so a burst of events (an install touches the file several times)
 # collapses into one pass instead of a pile-up. The trap matters: without it a
@@ -137,7 +135,7 @@ sleep 3
 # 60s: comfortably past (25s pass-lock wait + the apply itself), comfortably
 # under 180.
 if _has_entries "$NMDIR/uidhide"; then
-    _out=$(timeout 60 "$BIN" uid apply 2>&1)
+    _out=$(nmto 60 "$BIN" uid apply 2>&1)
     _urc=$?
     # 124 is not the only failure. A plain non-zero exit means the apply itself
     # failed -- apps the user believes are hidden are not -- and the else arm
@@ -160,10 +158,19 @@ if _has_entries "$NMDIR/absorbed.list"; then
     # Capture the status BEFORE the pipe: `$?` after a command substitution that
     # contains a pipeline is `tail`'s, which always succeeds, so a timeout branch
     # written the obvious way is dead code (the same trap service.sh documents).
-    _abs_all=$(timeout 60 "$BIN" absorb 2>&1)
+    _abs_all=$(nmto 60 "$BIN" absorb 2>&1)
     _abs_rc=$?
+    # THREE outcomes, not two. A non-zero, non-124 exit is a FAILED absorb --
+    # every mount it could not take over stays in every app's mountinfo -- and it
+    # used to be logged in the voice of a success by the `else` arm. The same
+    # asymmetry was fixed for `uid apply` twenty lines up ("124 is not the only
+    # failure"), and service.sh states it for this very command: "a plain failure
+    # was logged with its own summary line ... in exactly the voice of a
+    # successful pass".
     if [ "$_abs_rc" -eq 124 ]; then
         nmlog "absorb after package change TIMED OUT after 60s"
+    elif [ "$_abs_rc" -ne 0 ]; then
+        nmlog "⚠ absorb after package change FAILED (exit $_abs_rc) — foreign mounts may still be visible: $(printf '%s\n' "$_abs_all" | tail -1)"
     else
         nmlog "absorb after package change ($(printf '%s\n' "$_abs_all" | tail -1))"
     fi

@@ -1,69 +1,27 @@
 #!/system/bin/sh
 # Bootloop-guard reset: once the system finishes booting, the last boot was
 # healthy, so clear the boot counter (re-arms the guard for next time).
-NMDIR=/data/adb/nomount
-umask 077                     # state files are 0600, not the boot umask 0666 (see metamount.sh)
-
-# Binary paths, hoisted to the top because the ghost block below needs `nm`.
-# $0 does not change, so these are the same values the later section used to
-# recompute.
 MODDIR="${0%/*}"
-ABI=$(getprop ro.product.cpu.abi)
-# The SAME fallback metamount.sh and post-fs-data.sh both carry, which this path
-# was missing. An empty ABI builds "$MODDIR/bin//nomount", which can never be
-# executable -- and EVERY block below is gated on [ -x "$BIN" ] with no else arm,
-# so absorb, the whiteout re-apply, the authoritative `uid apply`, the package
-# watcher, the check canary and the card refresh all silently did nothing.
-# The card then kept whatever metamount.sh wrote at post-fs-data, so the boot
-# looked complete.
-[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
-[ -n "$ABI" ] || ABI=arm64-v8a
-BIN="$MODDIR/bin/$ABI/nomount"
-export NM_BIN="$MODDIR/bin/$ABI/nm"
-
-# Bounded exec (see metamount.sh): prefer `timeout`, fall back to running bare
-# rather than not running the command at all where toybox timeout is absent.
-if command -v timeout >/dev/null 2>&1; then
-    nmto() { timeout "$@"; }
-else
-    # No toybox `timeout`. Poll a backgrounded child rather than running it
-    # unbounded: every caller here has a 124 recovery path, and dropping the
-    # bound turns a hung engine call into a hung boot -- absorb, the whiteout
-    # re-apply, `uid apply`, uidwatch and `check` all run after these.
-    # Same contract as timeout(1): the command's status, or 124 if killed.
-    nmto() {
-        _nmto_s=$1
-        shift
-        "$@" &
-        _nmto_p=$!
-        _nmto_n=0
-        while [ "$_nmto_n" -lt "$_nmto_s" ]; do
-            kill -0 "$_nmto_p" 2>/dev/null || break
-            sleep 1
-            _nmto_n=$((_nmto_n + 1))
-        done
-        if kill -0 "$_nmto_p" 2>/dev/null; then
-            kill -TERM "$_nmto_p" 2>/dev/null
-            sleep 1
-            kill -KILL "$_nmto_p" 2>/dev/null
-            wait "$_nmto_p" 2>/dev/null
-            return 124
-        fi
-        wait "$_nmto_p"
-    }
-fi
-
-# Tee every diagnostic to a durable log as well as /dev/kmsg. On this hardware
-# the kernel ring is flooded by WMI roam-stats spam within minutes of boot, so
-# `dmesg | grep -i nomount` comes back empty long before anyone looks -- and the
-# loudest lines this script has (absorb TIMED OUT, ⚠ hide list apply FAILED) were
-# therefore unrecoverable in practice. No rotation here: the boot entry point
-# (metamount.sh / post-fs-data.sh) already rotated once this boot.
-BOOTLOG="$NMDIR/boot.log"
-nmlog() {
-    echo "nomount: $*" > /dev/kmsg 2>/dev/null
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [service] $*" >> "$BOOTLOG" 2>/dev/null
+NMLOG_TAG=service
+# nmlog / nmto / nm_set_bin / nm_fix_shell_tmp / nm_delink_ksud, and the umask.
+# GUARDED for the reason post-fs-data.sh spells out: a partial extraction must
+# stop loudly rather than run with every helper undefined.
+# shellcheck source=module/lib.sh
+. "$MODDIR/lib.sh" 2>/dev/null || {
+    echo "nomount: lib.sh missing or unreadable at $MODDIR — the post-boot pass did not run; re-flash the zip" > /dev/kmsg 2>/dev/null
+    exit 1
 }
+# Binary paths, hoisted to the top because the ghost block below needs `nm`.
+# ABI / BIN / NM_BIN, with the empty-getprop fallback -- see nm_set_bin in lib.sh.
+# EVERY block below is gated on [ -x "$BIN" ], so an unresolved ABI made absorb,
+# the whiteout re-apply, the authoritative `uid apply`, the package watcher, the
+# check canary and the card refresh all silently do nothing.
+nm_set_bin
+
+# nmto() is lib.sh's -- see the note there on what a missing `timeout` costs.
+
+# nmlog() and $BOOTLOG are lib.sh's. No rotation here: the boot entry point
+# (metamount.sh / post-fs-data.sh) already rotated once this boot.
 
 # --- health.txt freshness -----------------------------------------------------
 # health.txt carries a `ts=` field (written by src/health.rs) that NOTHING read.
@@ -248,6 +206,9 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
         # Measured on OP15 v1.3.63: 0 of 260 rule paths answer EACCES to a hidden
         # uid, so this changes nothing there. It is the device where a rule sits
         # under a non-world-searchable directory that needs it.
+        # shellcheck disable=SC2016  # single quotes are the point: this is the
+        # BODY of a shell run as another uid, and $p/$d must expand THERE, not
+        # here.
         _ghlist=$(printf '%s\n' "$_ghcand" | su "$_ghprobe" -c \
             'while IFS= read -r p; do d=${p%/*}; [ -n "$d" ] || d=/; \
              [ -x "$d" ] || continue; \
@@ -334,78 +295,19 @@ if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
     fi
 fi
 
-# --- /data/local/tmp: restore the AOSP owner/mode/context ---
-# ksud (and anything else that stages files there) commonly leaves it 0777
-# and/or root:root; AOSP ships 0771 shell:shell u:object_r:shell_data_file:s0.
-# The drift is caused by having a root manager rather than by anything the Suite
-# hides, so it is a zero-false-positive probe for any app that can stat the path
-# without root, and no amount of mount-hiding answers it. Restorative only: each
-# field is touched solely when it already differs, so a clean device is a no-op.
-# The post-fs-data entry point (metamount.sh / post-fs-data.sh) runs the same
-# pass earlier; this one re-asserts it because ksud and adbd keep staging files
-# there for the whole of boot and can put the mode/owner back.
-#
-# `fix_shell_tmp` in spoof.conf still gates it (default on), so a device that
-# turned it off keeps that choice across this update. PARSED, never sourced: the
-# file is read as root here, and sourcing a writable config is root code
-# execution. Only "1" or an absent/empty value runs, matching the old default.
-_fst=$(grep "^[ 	]*fix_shell_tmp[ 	]*=" "$NMDIR/spoof.conf" 2>/dev/null \
-       | tail -n 1 | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
-if [ "${_fst:-1}" = "1" ]; then
-    [ -d /data/local/tmp ] || mkdir -p /data/local/tmp 2>/dev/null
-    if [ ! -d /data/local/tmp ]; then
-        nmlog "shell-tmp: /data/local/tmp absent and not creatable"
-    else
-        # `stat -c %C` answers correctly from an interactive root shell but comes
-        # back as the bare letter "C" in a service context, so the label always
-        # compared unequal and every boot re-ran chcon over a change that had not
-        # happened. Take the reading only when it looks like a context and fall
-        # back to `ls -Zd`; an empty answer means "could not read", not "wrong".
-        _stm=$(stat -c %a /data/local/tmp 2>/dev/null)
-        _sto=$(stat -c %u:%g /data/local/tmp 2>/dev/null)
-        _stc=$(stat -c %C /data/local/tmp 2>/dev/null)
-        case "$_stc" in *:*:*) ;; *) _stc=$(ls -Zd /data/local/tmp 2>/dev/null | awk '{print $1}') ;; esac
-        case "$_stc" in *:*:*) ;; *) _stc="" ;; esac
-        _stw=""
-        [ "$_stm" = "771" ] || { chmod 0771 /data/local/tmp 2>/dev/null && _stw="$_stw mode:${_stm:-?}->771"; }
-        [ "$_sto" = "2000:2000" ] || { chown 2000:2000 /data/local/tmp 2>/dev/null && _stw="$_stw owner:${_sto:-?}->2000:2000"; }
-        if [ -n "$_stc" ] && [ "$_stc" != "u:object_r:shell_data_file:s0" ]; then
-            chcon u:object_r:shell_data_file:s0 /data/local/tmp 2>/dev/null \
-                && _stw="$_stw ctx:$_stc->shell_data_file"
-        fi
-        [ -n "$_stw" ] && nmlog "shell-tmp:$_stw"
-    fi
-fi
+# Re-assert /data/local/tmp's AOSP owner/mode/context -- see nm_fix_shell_tmp in
+# lib.sh. The post-fs-data entry point runs the same pass earlier; this one
+# repeats it because ksud and adbd keep staging files there for the whole of
+# boot and can put the mode/owner back.
+nm_fix_shell_tmp
 
-# --- ksud de-link re-assertion (self-heal of the susfs-action guard) ---
-# metamount.sh de-links ksu_susfs from the ksud multicall at mount time; re-assert it
-# here post-boot as a belt-and-suspenders against any timing race (e.g. ksud finishing
-# its install stage after our mount pass). If ksud & ksu_susfs still share an inode,
-# split ksu_susfs into its own independent copy so the susfs action button can never
-# reach the ksud daemon. (A clobbered ksud can't be healed from a module service — if
-# ksud were broken this service wouldn't run — so we only re-assert the split here.)
-KSUD=/data/adb/ksud
-SUSFS_BIN=/data/adb/ksu/bin/ksu_susfs
-if [ -f "$KSUD" ] && [ -f "$SUSFS_BIN" ] \
-   && [ "$(stat -c %s "$KSUD" 2>/dev/null)" -gt 1000000 ] \
-   && [ "$(stat -c %i "$KSUD" 2>/dev/null)" = "$(stat -c %i "$SUSFS_BIN" 2>/dev/null)" ]; then
-    # Record-then-restore, same as metamount.sh: `chattr +i` unconditionally
-    # ADDED immutability on a device that never had it, breaking the next ksud
-    # update with EPERM. The clear is needed for the `mv` (which unlinks a
-    # hardlink to the inode), not to read it.
-    _ksud_imm=0
-    lsattr -d "$KSUD" 2>/dev/null | cut -d' ' -f1 | grep -q 'i' && _ksud_imm=1
-    chattr -i "$KSUD" 2>/dev/null
-    if cp "$KSUD" "$SUSFS_BIN.nm_new" 2>/dev/null; then
-        chmod 0755 "$SUSFS_BIN.nm_new" 2>/dev/null
-        chcon u:object_r:adb_data_file:s0 "$SUSFS_BIN.nm_new" 2>/dev/null
-        mv -f "$SUSFS_BIN.nm_new" "$SUSFS_BIN" 2>/dev/null \
-            && nmlog "re-asserted ksud de-link (service)"
-    else
-        rm -f "$SUSFS_BIN.nm_new" 2>/dev/null
-    fi
-    [ "$_ksud_imm" = 1 ] && chattr +i "$KSUD" 2>/dev/null
-fi
+# Re-assert the ksud multicall de-link after boot -- see nm_delink_ksud in lib.sh.
+# metamount.sh does it at mount time; this is the belt to that brace, against a
+# timing race where ksud finishes its install stage after the mount pass and
+# re-creates the hardlink. (A clobbered ksud cannot be healed from a module
+# service -- if ksud were broken this service would not run -- so only the split
+# is re-asserted here.)
+nm_delink_ksud service
 
 # --- refresh the manager card with the settled state ---
 # metamount.sh tags the card in post-fs-data, when the mount table is not final and

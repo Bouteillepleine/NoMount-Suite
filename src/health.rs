@@ -654,9 +654,15 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     let self_exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "nomount".to_string());
-    // The plan section's "stale legacy blocklist entries" finding prints hidden
-    // package names verbatim; NM_REDACT_HIDE_LIST tells it to withhold them for a
-    // shared destination (see M-S2 in doctor.rs).
+    // Two checks name something off the hide list, and NM_REDACT_HIDE_LIST tells
+    // both to withhold it for a shared destination: the plan section's "stale
+    // legacy blocklist entries" finding prints hidden package names (M-S2 in
+    // doctor.rs), and the device section's PM-open probe prints the appid it
+    // dropped to (audit.rs). The second one was NOT gated, so this function
+    // withheld `uid_live.txt` and stripped the ` [UID: n]` suffixes from
+    // rules.txt and then published the same secret in check.txt -- with the note
+    // below claiming otherwise. Both read `blocklist::redact_hide_list()` now, so
+    // a third reader cannot be added without finding the test.
     //
     // Re-EXECs rather than calling `check::build` in-process, and deliberately:
     // several device checks fork and drop privileges, and one of them has already

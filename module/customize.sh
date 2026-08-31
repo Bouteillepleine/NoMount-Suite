@@ -102,6 +102,10 @@ if [ ! -d "$MODPATH/bin/${_abi}" ]; then
     ui_print "*********************************************************"
     ui_print "! This zip has no binaries for this device's ABI."
     ui_print "!   device ABI: ${_abi}"
+    # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
+    # name, for an incident report. The names are ours (arm64-v8a, x86_64...) and
+    # `find` cannot produce a one-line summary without more plumbing than the
+    # message is worth.
     ui_print "!   shipped:    $(ls "$MODPATH/bin" 2>/dev/null | tr '\n' ' ')"
     ui_print "! The module will install and then inject NOTHING, on every"
     ui_print "! boot, silently. NoMount is arm64-v8a only."
@@ -202,6 +206,14 @@ CONF="$NMDIR/spoof.conf"
 # and the WebUI's unhide button could delete a module-skip entry. It has its own
 # file (uidhide) now; an existing shared file is split on first read.
 [ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
+
+# 0644, and READABLE is the whole requirement: lib.sh is sourced by every entry
+# point, never executed, and each of them stops with a kmsg line if it cannot read
+# it. `ksud module install` leaves files it does not know about at whatever the
+# zip carried, and the extraction has already been observed dropping bits, so say
+# the mode rather than inherit it. The 5th argument is not optional here either --
+# see the note on $NMDIR above.
+[ -f "$MODPATH/lib.sh" ] && set_perm "$MODPATH/lib.sh" 0 0 0644
 
 # Executable, not just readable. `ksud module install` leaves the scripts it
 # does not know about at 0644, and whether the manager runs this one as
