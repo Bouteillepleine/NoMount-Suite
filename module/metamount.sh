@@ -16,6 +16,12 @@ NMLOG_TAG=metamount
 # shellcheck source=module/lib.sh
 . "$MODDIR/lib.sh" 2>/dev/null || {
     echo "nomount: lib.sh missing or unreadable at $MODDIR — NOTHING was injected this boot; re-flash the zip" > /dev/kmsg 2>/dev/null
+    # SIGNAL READY ANYWAY, exactly as the flock back-off below does. This is the
+    # METAMODULE hook: ksud waits on it to say module mounting is finished, so an
+    # early exit that skips the notify turns a missing file into a stalled boot
+    # sequence -- a far worse failure than the one being reported. Serving nothing
+    # is recoverable; not answering may not be.
+    ksud kernel notify-module-mounted 2>/dev/null
     exit 1
 }
 # 0700: spoof.conf/blocklist/pathhide.conf are read as root at boot, so anything
