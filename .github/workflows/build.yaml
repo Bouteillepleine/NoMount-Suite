@@ -61,9 +61,22 @@ env:
   NDK_HOME: /opt/ndk
 
 jobs:
-  # Did this push touch the engine? The compile matrix is ten kernel clones and
-  # is only meaningful when hookless/ changed, so it is gated rather than run on
-  # every commit. This preserves the path filter the matrix used to carry itself.
+  # Did this PUSH touch the engine? The compile matrix is ten kernel clones and is
+  # only meaningful when hookless/ changed, so it is gated rather than run on every
+  # commit. This preserves the path filter the matrix used to carry itself.
+  #
+  # THE WHOLE PUSH RANGE, not HEAD^..HEAD. The old form asked only what the TIP
+  # commit touched, so a push of more than one commit tested only the last of them:
+  # a push whose engine change sat in any earlier commit skipped the matrix
+  # entirely and the run still went green. It did exactly that on the push that
+  # added this comment -- two commits, the kernel work in the first and a shell fix
+  # in the second, matrix "skipped", overall green. A gate that cannot see the
+  # change it exists to gate is worse than no gate, because it reports success.
+  #
+  # Fails OPEN in every case where the range cannot be established (a new branch,
+  # a force-push whose base is gone, a manual dispatch): running ten compiles that
+  # were not needed costs minutes, and skipping ten that were costs a broken
+  # engine on ten kernels.
   engine-changed:
     runs-on: ubuntu-latest
     outputs:
@@ -71,14 +84,31 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 2
+          # 0, not 2: the base of a multi-commit push is not in a depth-2 clone,
+          # and `git diff` against an object we do not have is the silent skip
+          # this job was just fixed for.
+          fetch-depth: 0
       - id: f
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -eu
-          if [ "$(git rev-list --count HEAD)" -lt 2 ]; then
+          # A manual dispatch is someone asking for the full run on purpose, and
+          # it is the only way to get matrix coverage for a commit already pushed.
+          if [ "$EVENT" != "push" ]; then
+            echo "not a push ($EVENT) -- running the matrix"
             echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if git diff --name-only HEAD^ HEAD \
+          base="${BEFORE:-}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "no usable push base ('$base') -- running the matrix"
+            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "range: $base..$GITHUB_SHA"
+          git diff --name-only "$base" "$GITHUB_SHA" | sed 's/^/  /'
+          if git diff --name-only "$base" "$GITHUB_SHA" \
                | grep -qE '^hookless/(src|patches)/|^\.github/workflows/hookless-compile-matrix\.yml$'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
