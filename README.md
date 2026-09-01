@@ -31,6 +31,49 @@ metamodule can be active, so it refuses to install alongside another.
   </tr>
 </table>
 
+## Install
+
+**The kernel comes first.** The Suite is the userspace half of a pair; the engine
+lives in the kernel. Flashing the zip on a kernel without it installs cleanly and
+then injects **nothing** — the installer says so in as many words rather than
+reporting success, but it is still the wrong order.
+
+**1. Get a kernel with the Prism engine.**
+
+| | |
+| :--- | :--- |
+| **OnePlus** | Prebuilt kernels from [`OnePlus-ReSukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases), [`OnePlus-KsuNext_NMS`](https://github.com/Bouteillepleine/OnePlus-KsuNext_NMS/releases) or [`OnePlus-SukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-SukiSu_NMS/releases) — pick the one matching the root manager you want. |
+| **Anything else** | Build your own with `CONFIG_NOMOUNT=y`. The driver and its integration patch are in [`hookless/`](hookless/); nothing in them is vendor- or SoC-specific. |
+| **Cannot rebuild?** | See [Out-of-tree variants](#out-of-tree-variants) — untested on hardware, and each branch says what that costs before it says anything else. |
+
+**2. Install the module.** Download
+[the latest release](https://github.com/Bouteillepleine/NoMount-Suite/releases/latest)
+and flash the zip from your manager (*Modules → Install from storage*), or:
+
+```sh
+ksud module install /sdcard/Download/00_NoMount-Module-vX.Y.Z.zip
+```
+
+The installer verifies the zip against a bundled `sha256` manifest, refuses to
+sit alongside another metamodule, and probes the engine so you find out *at
+install time* whether the kernel has it. From recovery that probe cannot answer,
+which it also says.
+
+**3. Reboot.** Module content is served from the first boot pass onwards.
+
+**4. Check it worked.** The WebUI opens on Status; the same answer from a shell:
+
+```sh
+nomount check      # one diagnostic — verdict, and what was measured
+nomount vfs list   # every rule the engine is serving
+```
+
+A clean result is `verdict: clean` with zero failures **and zero unmeasured** —
+an unmeasured check is not a pass, and the report says so rather than rounding up.
+
+Updating is the same flash: your hide list, whiteouts, absorbed rules and
+settings are preserved across an update, and restored if an install aborts.
+
 ## Requirements
 
 - **arm64** device; the zip ships an `arm64-v8a` binary only.
@@ -162,7 +205,7 @@ being served?). Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`,
 deliberately different, and neither is a pass.
 
 A WebUI covers the same ground on the phone: status, modules, rules, per-app
-hiding.
+hiding, and the durable hidden-paths list.
 
 ## Compatibility
 
@@ -184,7 +227,7 @@ them.
 
 | Kernel | Tested on | Status |
 | :--- | :--- | :--- |
-| 6.12 | **OnePlus 15** | ✅ Booted, `check` clean, 258/258 rules verified |
+| 6.12 | **OnePlus 15** | ✅ Booted, `check` clean — 15 passed, 0 failed, 0 unmeasured; 257 injections served, zero mounts of our own |
 | 6.1 | **OnePlus 13R** | ✅ Booted, 261/261 rules verified |
 | 5.15 | **OnePlus 11** | ✅ Booted, `check` clean, 118/118 rules verified |
 | 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, … (18 models) | ✅ Booted, 261/261 rules verified |
