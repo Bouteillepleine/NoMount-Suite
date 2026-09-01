@@ -201,6 +201,26 @@ fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     }
 }
 
+/// How a finding names a uid that came off the hide list.
+///
+/// `redact` is [`crate::blocklist::redact_hide_list`], passed in rather than read
+/// here so the decision is a pure function a test can pin: the env var is
+/// process-global and two tests toggling it would race.
+///
+/// The appid is what makes a report actionable, so a PRIVATE destination gets it.
+/// A shared one must not: `PackageManager.getNameForUid()` turns the number back
+/// into a package name, which is the same secret as the hide list itself.
+/// audit.rs's PM-open probe makes the same choice in its own words ("uid N
+/// (hidden)"); that wording is left alone deliberately, since it is a line that has
+/// been verified on-device.
+fn hidden_uid_label(uid: u32, redact: bool) -> String {
+    if redact {
+        "a hidden app".to_string()
+    } else {
+        format!("hidden uid {uid}")
+    }
+}
+
 /// Split `nm l g` output into its two tables.
 fn parse_ghost_tables(txt: &str) -> (Vec<PathBuf>, Vec<u32>) {
     let mut paths = Vec::new();
@@ -1516,12 +1536,27 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 let name = |v: &[&PathBuf]| -> String {
                     v.iter().take(3).map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
                 };
+                // `uid` here is the FIRST entry of the engine's _ghost uid table,
+                // which service.sh populates from the hide list -- so printing it
+                // names an app being hidden from, exactly like the PM-open probe's
+                // appid and the stale-blocklist finding's package names. All three
+                // land in `check.txt`, and `nomount export` writes that to shared
+                // storage, where the same function withholds `uid_live.txt`, strips
+                // the ` [UID: n]` suffix from `rules.txt` and drops `uidhide*`.
+                //
+                // This probe was added AFTER the gate and did not read it, so a
+                // shared export published `to uid 10422` while its own closing note
+                // promised "the check report's hide-list names were redacted" --
+                // measured on OP15, against a uid that resolves to a package in
+                // uidhide.cache. Third reader of `redact_hide_list()`; see the note
+                // on that function for why the test has one home.
+                let who = hidden_uid_label(uid, crate::blocklist::redact_hide_list());
                 if !visible.is_empty() {
                     f.push(Finding {
                         level: Level::Error,
                         check: "ghost cloak over-reaches",
                         detail: format!(
-                            "{} of {checked} sampled path(s) are still visible to hidden uid {uid} — they \
+                            "{} of {checked} sampled path(s) are still visible to {who} — they \
                  answer \"exists\" and \"does not exist\" at once, which is louder than the leak \
                  this closes. Re-run the mount pass: {}",
                             visible.len(),
@@ -1563,12 +1598,12 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         detail: if unknown > 0 {
                             format!(
                                 "{absent} of {attempted} sampled path(s) look exactly like a path that never \
-             existed, to uid {uid} — but {unknown} could not be probed, so this is not a complete answer"
+             existed, to {who} — but {unknown} could not be probed, so this is not a complete answer"
                             )
                         } else {
                             format!(
                                 "{absent} of {} hidden path(s) sampled: each looks exactly like a path that never \
-             existed, to uid {uid}. Measured here, not assumed from the build.",
+             existed, to {who}. Measured here, not assumed from the build.",
                                 gpaths.len()
                             )
                         },
@@ -2034,6 +2069,33 @@ mod tests {
         // Nothing usable at all -- the counter alone keeps it unique.
         assert_eq!(subject_of(&f("12 of 16 sampled look absent to uid 10471")), None);
         assert_eq!(subject_of(&f("")), None);
+    }
+
+    /// The ghost-cloak probe is the THIRD reader of the hide list in a report that
+    /// `nomount export` writes to shared storage, and it was the one that did not
+    /// read the gate: a shared export carried "to uid 10422" -- an appid that
+    /// resolves through `uidhide.cache` to an installed package -- while the
+    /// export's own closing note said the report's hide-list names were redacted.
+    /// Measured on OP15 before the fix.
+    ///
+    /// The point of the assertion is not the wording but that the NUMBER cannot
+    /// survive redaction, since that is the whole secret.
+    #[test]
+    fn redaction_covers_every_hide_list_reader() {
+        // Private destination: the appid, which is what makes the finding useful.
+        assert_eq!(hidden_uid_label(10422, false), "hidden uid 10422");
+        // Shared destination: nothing that identifies the app, and above all not
+        // the digits -- PackageManager.getNameForUid() reverses those.
+        let redacted = hidden_uid_label(10422, true);
+        assert_eq!(redacted, "a hidden app");
+        assert!(!redacted.contains("10422"), "the appid must not survive redaction");
+        // ...for any uid, not just the one that was measured leaking.
+        for uid in [10000u32, 10384, 10471, 1_010_471, 99_999] {
+            assert!(
+                !hidden_uid_label(uid, true).contains(&uid.to_string()),
+                "uid {uid} leaked through redaction"
+            );
+        }
     }
 
     #[test]

@@ -74,11 +74,16 @@ pub fn appid(uid: u32) -> u32 {
 /// same secret the file itself is: it names the apps you are hiding from, and
 /// `PackageManager.getNameForUid()` turns the number back into the name.
 ///
-/// It lives here rather than at either reader because there are now two -- the
-/// plan section's stale-blocklist finding and the device section's PM-open probe
-/// -- and the export's closing note promises BOTH ("the check report's hide-list
-/// names were redacted"). One test, one home, so a third reader cannot be added
-/// without finding it.
+/// It lives here rather than at any one reader because there are now THREE -- the
+/// plan section's stale-blocklist finding, the device section's PM-open probe, and
+/// the ghost-cloak probe's `hidden uid N` -- and the export's closing note promises
+/// all of them ("the check report's hide-list names were redacted").
+///
+/// One test, one home. That was supposed to stop a new reader being added without
+/// finding it, and it did not: the ghost-cloak probe landed afterwards, printed the
+/// appid straight into `check.txt`, and shipped that to shared storage for two
+/// releases while the note above it claimed otherwise. If you add a FOURTH reader,
+/// gate it here and extend `redaction_covers_every_hide_list_reader` in doctor.rs.
 pub fn redact_hide_list() -> bool {
     std::env::var_os("NM_REDACT_HIDE_LIST").is_some()
 }
