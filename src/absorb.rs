@@ -905,17 +905,16 @@ pub fn set_absorbed_pairs(pairs: &[(PathBuf, PathBuf)]) {
         body.push_str(&src.to_string_lossy());
         body.push('\n');
     }
-    // O_TRUNC does NOT reset an existing file's mode, and main.rs's umask only
-    // covers files this binary CREATES -- so absorbed.list stayed 0666 forever on
-    // any device that ran a pre-umask build (which is exactly where the 0666 was
-    // observed). It names which patched APK is injected over which package, i.e.
-    // the module fingerprint the hiding posture exists to deny, so state the mode
-    // instead of inheriting it.
-    if let Err(e) = fs::write(ABSORBED_LIST, &body) {
+    // ATOMIC, and 0600 by construction. This file is the only record of which
+    // patched APK is injected over which package -- the module fingerprint the
+    // hiding posture exists to deny, and the input the boot-time re-serve needs --
+    // so neither a half-written one nor an inherited 0666 is acceptable.
+    // `write_atomic` writes through a fresh temp, which makes the mode a property
+    // of the write rather than of the file's history; the `set_permissions` that
+    // used to follow (and only ran AFTER the wide window it was fixing) is gone.
+    if let Err(e) = crate::statefile::write_atomic(ABSORBED_LIST, &body) {
         eprintln!("nomount: could not record absorbed targets: {e:#}");
-        return;
     }
-    let _ = fs::set_permissions(ABSORBED_LIST, std::os::unix::fs::PermissionsExt::from_mode(0o600));
 }
 
 /// Is anything still mounted here? The authority on whether an unmount worked:
@@ -1497,7 +1496,9 @@ fn set_absorbed_tmpfs(entries: &[(PathBuf, String)]) {
         body.push_str(boot);
         body.push('\n');
     }
-    if let Err(e) = fs::write(ABSORBED_TMPFS_LIST, &body) {
+    // Atomic: this list is what re-applies the ROM-tmpfs whiteouts after the
+    // boot pass's `nm clear`, so a truncated one silently un-hides them.
+    if let Err(e) = crate::statefile::write_atomic(ABSORBED_TMPFS_LIST, &body) {
         eprintln!("nomount: could not record the ROM tmpfs takeovers: {e:#}");
     }
 }

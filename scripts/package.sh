@@ -86,6 +86,25 @@ sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$PROJECT
 # was 10388, is now 103088), so no device sees this change as a downgrade.
 vbase="${NEW_VERSION%%-*}"
 IFS=. read -r vmaj vmin vpat <<< "$vbase"
+# ...and ENFORCE the field widths the paragraph above reasons about, rather than
+# trusting them. The previous scheme was not wrong in principle, it was wrong
+# because minor and patch outgrew their fields and NOTHING SAID SO -- v1.3.101
+# quietly outranked v1.4.0 and shipped as a downgrade. Three digits of patch and
+# two of minor is a bound, and an unasserted bound is the same bug waiting on a
+# counter: at the current cadence v1.3.999 is reachable, and v1.3.1000 would
+# collide with v1.4.0 exactly as v1.3.100 once did.
+#
+# Refuse to package rather than emit a colliding code: a release published as a
+# downgrade is invisible until someone's manager silently declines the update.
+if [ "${vmin:-0}" -ge 100 ] || [ "${vpat:-0}" -ge 1000 ]; then
+    echo "FATAL: v${NEW_VERSION} does not fit the versionCode field widths." >&2
+    echo "       vcode = major*100000 + minor*1000 + patch needs minor < 100 and" >&2
+    echo "       patch < 1000; this version would collide with another release and" >&2
+    echo "       managers, which key updates on versionCode alone, would read it as" >&2
+    echo "       a downgrade. Widen the multipliers (and keep every new code above" >&2
+    echo "       the largest already published) before bumping further." >&2
+    exit 1
+fi
 vcode=$(( ${vmaj:-0} * 100000 + ${vmin:-0} * 1000 + ${vpat:-0} ))
 sed -i "s/^version=.*/version=v${NEW_VERSION}/" "$MODULE_DIR/module.prop"
 sed -i "s/^versionCode=.*/versionCode=${vcode}/" "$MODULE_DIR/module.prop"

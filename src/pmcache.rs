@@ -206,7 +206,7 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
         }
     }
 
-    let _ = fs::write(STATE, lines.join("\n"));
+    let _ = crate::statefile::write_atomic(STATE, lines.join("\n"));
     changed
 }
 
@@ -225,7 +225,7 @@ pub fn add_pending(targets: &[PathBuf]) {
         }
     }
     let body: Vec<String> = all.iter().map(|t| t.display().to_string()).collect();
-    let _ = fs::write(PENDING, body.join("\n"));
+    let _ = crate::statefile::write_atomic(PENDING, body.join("\n"));
 }
 
 pub fn pending() -> Vec<PathBuf> {

@@ -13,6 +13,7 @@ mod mount;
 mod nm;
 mod pmcache;
 mod presets;
+mod statefile;
 mod whiteout;
 
 use anyhow::Result;

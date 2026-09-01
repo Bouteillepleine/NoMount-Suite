@@ -530,8 +530,7 @@ pub fn gather() -> Fingerprint {
 /// write and diff is the same fingerprint the report carries.
 pub fn run_snapshot() -> Result<()> {
     let body = fingerprint_text()?;
-    fs::create_dir_all(NM_DIR).ok();
-    fs::write(SNAPSHOT, &body).context("write snapshot.txt")?;
+    crate::statefile::write_atomic(SNAPSHOT, &body).context("write snapshot.txt")?;
     print!("{body}");
     println!("snapshot saved to {SNAPSHOT}");
     Ok(())
@@ -629,6 +628,11 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // section reads as "the tool had nothing to say" rather than "the write
     // failed". Shared storage is exactly where writes DO fail (permissions,
     // full volume, a scanner deleting flagged files).
+    // Plain `fs::write`, deliberately -- the ONE writer in this crate that is not
+    // `statefile::write_atomic`. These files are a fresh timestamped dump, not
+    // state: nothing reads them back, there is no previous version a half-write
+    // could destroy, and the destination is usually the FUSE view of shared
+    // storage, where a temp-then-rename buys nothing and adds a second way to fail.
     let write = |name: &str, content: &str| {
         if let Err(e) = fs::write(format!("{out}/{name}"), content) {
             eprintln!("nomount: export: could not write {name}: {e} — this diagnostic is INCOMPLETE");

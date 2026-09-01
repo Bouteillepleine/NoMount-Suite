@@ -157,15 +157,15 @@ fn parse(raw: &str) -> Vec<String> {
 }
 
 fn write(entries: &[String]) -> Result<()> {
-    if let Some(dir) = Path::new(WHITEOUT_PATH).parent() {
-        fs::create_dir_all(dir).ok();
-    }
     let mut body = String::from("# NoMount whiteouts — one absolute path per line, re-applied at boot.\n");
     for e in entries {
         body.push_str(e);
         body.push('\n');
     }
-    fs::write(WHITEOUT_PATH, body).context("write whiteouts.txt")
+    // Atomic. The engine's copy of a whiteout is runtime-only, so THIS FILE is
+    // the durable state: losing it to a half-write un-hides every path at the
+    // next boot. See crate::statefile.
+    crate::statefile::write_atomic(WHITEOUT_PATH, body).context("write whiteouts.txt")
 }
 
 /// A path is only worth whiting out if it is absolute, currently exists, and is

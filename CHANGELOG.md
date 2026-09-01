@@ -1,5 +1,71 @@
 # Changelog
 
+## v1.3.120 — engine v30 (unchanged)
+
+A third audit read the tree at v1.3.119 / engine v30 and re-ran every gate. All
+twenty-three earlier findings are closed; this release carries one real leak found
+by it, plus three places where a rule the codebase already states was not being
+enforced. **The kernel engine is untouched at v30 — this is a Suite-only update.**
+
+### Fixed
+
+- **A shared `nomount export` published an appid off the hide list.** The
+  ghost-cloak probe prints the uid it measured against — `guids.first()`, the
+  first entry of the engine's `_ghost` uid table, which `service.sh` populates
+  *from the hide list*. It went into `check.txt` unredacted, and `nomount export`
+  writes `check.txt` to shared storage, where the very same function withholds
+  `uidhide*` and `spoof.conf`, drops `uid_live.txt`, strips the ` [UID: n]`
+  suffixes from `rules.txt`, and then prints a closing note promising that "the
+  check report's hide-list names were redacted". Measured on a real device: a
+  `/sdcard/Download` export carried `to uid 10422`, an appid that resolves through
+  `uidhide.cache` to an installed package and is in the live blocked set —
+  `PackageManager.getNameForUid()` turns the number back into the name, so this is
+  the same secret the hide list itself is. This was the **third** reader of
+  `blocklist::redact_hide_list()`, whose own note says it lives there so "a third
+  reader cannot be added without finding it"; the probe was added afterwards and
+  did not. The decision is now a pure `hidden_uid_label(uid, redact)` with a test
+  asserting the digits cannot survive redaction, and the note names all three
+  readers.
+
+- **Every state file except `binds.list` was a non-atomic `fs::write`.**
+  `fs::write` truncates and *then* writes, so the file is empty for the window
+  between the two — and `bind.rs` had already spelled out what that costs, shipping
+  a temp-then-rename for `binds.list` alone. Every word of that argument applies
+  harder to `uidhide`, which is the hiding **policy**: a truncated hide list is not
+  a corrupt file, it is a *legal empty* one, so the next boot's apply pass blocks
+  nobody and every hidden app is silently visible to every injection with nothing
+  logged. `uidhide`, `uidhide.cache`, `uidhide.conf`, `absorbed.list`,
+  `absorbed-tmpfs.list`, `whiteouts.txt`, `apkstate.list`, its pending list,
+  `audit.json`, `health.txt` and `snapshot.txt` now all go through one
+  `statefile::write_atomic`, which `bind.rs` calls too rather than keeping a second
+  copy — that duplication is how the `nm list` parsers drifted. The shared version
+  also fsyncs the parent directory after the rename, which the `binds.list` copy
+  did not: `sync_all` on the temp makes the *content* durable and says nothing
+  about the directory entry naming it. Writing through a fresh temp also makes
+  0600 a property of the write instead of of the file's history, which retires the
+  `set_permissions` calls that used to run *after* the window they were fixing.
+  The diagnostic dump in `nomount export` stays a plain write, deliberately, and
+  now says why.
+
+- **`service.sh` validated the boot epoch's two inputs concatenated.**
+  `case "$_now$_up"` on `date +%s` and `/proc/uptime` together means an empty
+  `$_up` beside a valid `$_now` yields an all-digit string, passes, and reaches
+  `$((_now - ))` — an arithmetic *syntax* error, which in both mksh and ash kills a
+  non-interactive shell outright. The rest of the post-boot pass (absorb, the
+  whiteout re-apply, the authoritative `uid apply`, the package watcher, the status
+  card) would not run, and nothing would be logged. `metamount.sh` sanitizes
+  `bootcount` per-value before `$((COUNT + 1))` against exactly this; this guard
+  now does the same. Unreachable in practice — but it only *looked* like it
+  covered the empty case.
+
+- **`package.sh` never enforced the versionCode field widths it reasons about.**
+  `vcode = major*100000 + minor*1000 + patch` was chosen after v1.3.100 and v1.4.0
+  collided under the older two-digit fields and v1.3.101 shipped as a downgrade.
+  Three digits of patch and two of minor is a bound, and an unasserted bound is the
+  same bug waiting on a counter. Packaging now refuses a version that would not
+  fit, rather than emitting a colliding code that managers — which key updates on
+  versionCode alone — read as a downgrade.
+
 ## v1.3.119 — engine v30
 
 A second audit read every tracked file at v1.3.118 / engine v29 and re-ran the

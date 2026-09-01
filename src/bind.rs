@@ -235,30 +235,14 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
 /// The same discipline `service.sh` uses for bindhosts' `mode_override.sh` and
 /// `lib.sh` for the ksud de-link, both for smaller stakes.
 ///
-/// 0600 explicitly: `fs::write` on an EXISTING file keeps its mode, so a list a
-/// pre-umask build created wide stayed wide forever.
+/// The implementation moved to [`crate::statefile`] rather than being kept here:
+/// every word above applies at least as strongly to `uidhide`, which is the hiding
+/// POLICY and was still a plain `fs::write`. Keeping one copy per file is how the
+/// `nm list` parsers drifted. The shared version also fsyncs the parent directory
+/// after the rename, which this one did not -- `sync_all` on the temp makes the
+/// CONTENT durable and says nothing about the directory entry naming it.
 fn write_binds_list(body: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let tmp = format!("{BINDS_LIST}.new");
-    let write = || -> std::io::Result<()> {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.sync_all()
-    };
-    if let Err(e) = write() {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = fs::rename(&tmp, BINDS_LIST) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
+    crate::statefile::write_atomic(BINDS_LIST, body)
 }
 
 /// Drop one (target, source) row from binds.list. Caller must hold the Lock. Used

@@ -41,7 +41,20 @@ _up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
 # precisely the false green the check exists to stop. "Cannot tell" has to mean
 # "not fresh", the same way an unparsable ts= already does.
 _epoch_known=1
-case "$_now$_up" in *[!0-9]*|"") _now=0; _up=0; _epoch_known=0 ;; esac
+# EACH value separately. This was `case "$_now$_up"`, which tests the two
+# CONCATENATED -- so an empty `$_up` beside a valid `$_now` yields a string that is
+# all digits, passes, and reaches `$((_now - ))`. That is an arithmetic SYNTAX
+# error, and in both mksh and ash it kills a non-interactive shell on the spot:
+# the rest of the post-boot pass (absorb, the whiteout re-apply, the authoritative
+# `uid apply`, the package watcher, the status card) simply would not run, with
+# nothing logged. It is the same class metamount.sh sanitizes `bootcount` against
+# before `$((COUNT + 1))`, and the guard there is per-value for this reason.
+#
+# Unreachable in practice -- /proc/uptime always has content, and both assignments
+# have an `|| echo 0` -- but the concatenated form only LOOKED like it covered the
+# empty case, and that is the property worth keeping true.
+case "$_now" in ''|*[!0-9]*) _now=0; _epoch_known=0 ;; esac
+case "$_up"  in ''|*[!0-9]*) _up=0;  _epoch_known=0 ;; esac
 _bootepoch=$((_now - _up))
 # ...and refuse an IMPLAUSIBLE epoch too, not just an unreadable one. On a device
 # that lost its RTC (or had the clock set backward across the reboot) _bootepoch

@@ -365,16 +365,17 @@ fn parse_blocklist(raw: &str) -> Vec<String> {
     out
 }
 
+/// ATOMIC. `uidhide` is the hiding policy, and `fs::write` leaves it EMPTY for the
+/// window between its truncate and its write -- an empty hide list is a legal hide
+/// list, so a crash there un-hides every app on the next boot with nothing logged.
+/// See [`crate::statefile`].
 fn write_lines(path: &str, entries: &[String]) -> Result<()> {
-    if let Some(dir) = Path::new(path).parent() {
-        fs::create_dir_all(dir).ok();
-    }
     let mut body = String::new();
     for e in entries {
         body.push_str(e);
         body.push('\n');
     }
-    fs::write(path, body).with_context(|| format!("write {path}"))
+    crate::statefile::write_atomic(path, body).with_context(|| format!("write {path}"))
 }
 
 /// Persist the list (LF-terminated, one entry per line).
@@ -450,9 +451,6 @@ pub fn cache_read() -> BTreeMap<String, u32> {
 }
 
 fn cache_write(map: &BTreeMap<String, u32>) {
-    if let Some(dir) = Path::new(CACHE_PATH).parent() {
-        fs::create_dir_all(dir).ok();
-    }
     let mut body = String::new();
     for (k, v) in map {
         body.push_str(k);
@@ -460,7 +458,10 @@ fn cache_write(map: &BTreeMap<String, u32>) {
         body.push_str(&v.to_string());
         body.push('\n');
     }
-    let _ = fs::write(CACHE_PATH, body);
+    // Atomic for the same reason as `uidhide` itself: this mirror is what lets the
+    // early-boot pass re-block before `packages.list` is meaningful, so a truncated
+    // one is a window with nothing hidden at exactly the point apps first start.
+    let _ = crate::statefile::write_atomic(CACHE_PATH, body);
 }
 
 /// Record `entry -> appid` for the next early-boot pass.
@@ -503,10 +504,7 @@ pub fn hide_isolated() -> u32 {
 /// Persist the isolated-pool policy so `apply` can re-assert it after a reboot
 /// or a `nm clear` (the kernel knob is runtime state like the block set itself).
 pub fn set_hide_isolated(mode: u32) -> Result<()> {
-    if let Some(dir) = Path::new(CONF_PATH).parent() {
-        fs::create_dir_all(dir).ok();
-    }
-    fs::write(
+    crate::statefile::write_atomic(
         CONF_PATH,
         format!("# NoMount per-UID hiding settings\nhide_isolated={mode}\n"),
     )

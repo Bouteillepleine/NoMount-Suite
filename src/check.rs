@@ -29,7 +29,6 @@
 //! is no second serialisation to drift from the first: `audit.json` is this
 //! report's JSON, and `health.txt` is its facts rendered as key=value.
 
-use std::fs;
 
 use anyhow::Result;
 
@@ -308,7 +307,6 @@ pub struct Report {
 
 pub const CACHE: &str = "/data/adb/nomount/audit.json";
 pub const HEALTH: &str = "/data/adb/nomount/health.txt";
-const NM_DIR: &str = "/data/adb/nomount";
 
 impl Report {
     pub fn tally(&self) -> Tally {
@@ -564,9 +562,10 @@ pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()
         // Best-effort, and deliberately so: a diagnostic that cannot cache its
         // result has still produced it on stdout, and failing the command would
         // turn a full disk into a boot-script error.
-        let _ = fs::create_dir_all(NM_DIR);
-        let _ = fs::write(CACHE, r.json());
-        let _ = fs::set_permissions(CACHE, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+        // Atomic, and 0600 by construction -- see crate::statefile. service.sh
+        // reads health.txt field by field and treats a missing key as a verdict,
+        // so a half-written record is worse than no record at all.
+        let _ = crate::statefile::write_atomic(CACHE, r.json());
         // health.txt carries the fingerprint, so only a run that MEASURED it may
         // write one. A --plan-only run has no facts about the running system, and
         // stamping a fresh `ts=` on an empty record is how `service.sh`'s
@@ -576,9 +575,7 @@ pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()
             let mut body = r.fingerprint_text();
             body.push_str(&format!("verdict={}\n", r.verdict()));
             body.push_str(&format!("ts={}\n", r.ts));
-            let _ = fs::write(HEALTH, body);
-            let _ =
-                fs::set_permissions(HEALTH, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+            let _ = crate::statefile::write_atomic(HEALTH, body);
         }
     }
 
