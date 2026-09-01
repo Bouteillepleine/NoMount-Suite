@@ -105,12 +105,32 @@ VERSION="v${NEW_VERSION}"
 # three are excluded, and anything else still-modified means the zip does not
 # match the commit it names. Better to say so than to stamp a SHA that lies.
 BUILD_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
-            | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$')" ]; then
+# NAME WHAT IS DIRTY. The suffix alone is not diagnosable, and that is how it came
+# to be meaningless: every CI zip is stamped `+dirty` -- v1.3.118 shipped as
+# `710cdcb+dirty` and v1.3.119 as `8fbb35d+dirty` -- so the one thing the marker
+# exists to say ("this zip does not match the commit it names") has been on
+# permanently and reads as noise. A suffix that is always present is a suffix
+# nobody reads, which is the same defect class as a green tick over a failed pass.
+#
+# The cause is NOT reproducible outside Actions: a pristine clone of the tagged
+# commit, plus `make -C userspace/tools/sstrip` and the workflow's own
+# `zig cc -o nm-arm64`, leaves `git status --porcelain` empty (measured, zig
+# 0.14.1 -- its local cache goes to ~/.cache/zig, not into the tree). `/artifacts/`
+# and `/nm-arm64` are already ignored and ignored files never appear in
+# --porcelain anyway. So whatever it is belongs to a step only the runner
+# performs, and the way to find out is to print it rather than guess again.
+_dirt="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
+          | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$')"
+if [ -n "$_dirt" ]; then
     BUILD_COMMIT="${BUILD_COMMIT}+dirty"
 fi
 export BUILD_COMMIT
 echo "==> Build commit: ${BUILD_COMMIT}"
+if [ -n "$_dirt" ]; then
+    echo "    +dirty because these paths are not clean:"
+    printf '%s\n' "$_dirt" | sed 's/^/      /'
+fi
+unset _dirt
 
 # --- nm: build it, or say plainly that a prebuilt is being shipped ------------
 # nm is freestanding C with no libc, so it needs a cross compiler rather than
