@@ -119,8 +119,16 @@ BUILD_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || ech
 # and `/nm-arm64` are already ignored and ignored files never appear in
 # --porcelain anyway. So whatever it is belongs to a step only the runner
 # performs, and the way to find out is to print it rather than guess again.
+#
+# `|| true` is load-bearing, and its absence broke the build the first time this
+# was written. This script runs under `set -euo pipefail`, and `grep -v` exits 1
+# when it filters EVERYTHING out -- which is precisely the healthy case, a clean
+# tree. So the assignment failed, `set -e` killed the pass, and the rollback trap
+# fired: the fix for "+dirty is always on" turned into "packaging dies the moment
+# it stops being on". The original survived only because the substitution sat
+# inside `[ -n "$(...)" ]`, where the test consumes the status.
 _dirt="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
-          | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$')"
+          | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$' || true)"
 if [ -n "$_dirt" ]; then
     BUILD_COMMIT="${BUILD_COMMIT}+dirty"
 fi
