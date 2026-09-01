@@ -13,6 +13,19 @@ name: NoMount hookless — compile-test matrix
 # appear nested under the run that called it.
 on:
   workflow_call:
+    # DECLARED, because the Select step below reads it. It used to read
+    # `github.event.inputs.only`, which is the DISPATCH payload of whatever event
+    # started the run -- and this workflow lost its own `workflow_dispatch` when it
+    # became reusable. Nothing has declared an `only` input since, so that
+    # expression was permanently empty, `run=1` was unconditional, and the filter
+    # was dead code that still cost a step on all ten legs. A `workflow_call` input
+    # is the only thing a reusable workflow can actually be handed.
+    inputs:
+      only:
+        description: 'Comma-separated kernel versions to compile (empty = all ten)'
+        type: string
+        required: false
+        default: ''
 
 jobs:
   compile:
@@ -76,16 +89,25 @@ jobs:
       CCACHE_MAXSIZE: '2G'
       CCACHE_DIR: /home/runner/.ccache
     steps:
+      # Through `env:`, never interpolated into the script body. This was the one
+      # place in the four workflows that dropped `${{ }}` straight into a `run:`
+      # line: the expression is substituted as TEXT before bash parses anything, so
+      # a value carrying a quote or `$(...)` becomes shell rather than data. It was
+      # not reachable while the input did not exist -- declaring it above is exactly
+      # what would have made it reachable, so it is fixed in the same commit.
+      # `env:` passes the value through the environment, where it is never parsed.
       - name: Select
         id: sel
+        env:
+          ONLY: ${{ inputs.only }}
+          VER: ${{ matrix.ver }}
         run: |
-          only="${{ github.event.inputs.only }}"
-          if [ -z "$only" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
-          for v in ${only//,/ }; do
-            if [ "$v" = "${{ matrix.ver }}" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ -z "$ONLY" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          for v in ${ONLY//,/ }; do
+            if [ "$v" = "$VER" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
           done
           echo "run=0" >> "$GITHUB_OUTPUT"
-          echo "::notice::Skipped ${{ matrix.ver }} (not in 'only' filter)"
+          echo "::notice::Skipped $VER (not in 'only' filter)"
 
       - name: Checkout hookless (src + patches)
         if: steps.sel.outputs.run == '1'

@@ -1,5 +1,74 @@
 # Changelog
 
+## v1.3.121 — engine v30 (unchanged)
+
+A fourth audit read the tree at v1.3.120 / engine v30, re-ran every gate and
+re-verified the previous rounds on hardware: the round-3 redaction fix holds live
+(appid-shaped tokens in a shared check report: **0**; private: 2), every state file
+is 0600 with no leftover temps, and the device reports 15 passed / 0 failed /
+verdict clean. It found no bug that changes an answer — the four items below are a
+latent crash, a dead CI filter, one piece of kernel hardening, and a test whose name
+promised more than it could deliver. **The kernel engine is untouched at v30 — this
+is a Suite-only update, and no kernel reflash is needed.** `NOMOUNT_VERSION` is a
+monotonic *capability* counter that userspace gates on, and none of this adds a
+capability, so it does not move.
+
+### Fixed
+
+- **`uidwatch.sh` could die on an arithmetic syntax error and silently skip a hide
+  pass.** `_now=$(date +%s)` carried neither the `|| echo 0` fallback nor the digit
+  guard that the identical computation in `service.sh` was given in the previous
+  release, and it feeds `$(( _now - $(stat -c %Y "$LOCK" || echo "$_now") ))` — so an
+  empty `_now` makes the fallback echo nothing too and the expression collapses to
+  `$(( _now - ))`. That is an arithmetic **syntax** error, which in both mksh and ash
+  kills a non-interactive shell outright; confirmed on-device, where nothing after the
+  line runs. The script would have died *before* taking its lock, so the handler for
+  the package that just changed — the `uid apply` that hides it — would not have run,
+  and a newly installed app would stay unhidden with nothing logged. The `stat` arm is
+  the genuinely reachable half: the lock can vanish between the `[ -f ]` and the `stat`
+  when another handler's EXIT trap unlinks it. Both values are now guarded separately
+  and before the arithmetic, and an unreadable clock yields age 0 — "not stale" — so a
+  lock that cannot be aged is never reaped.
+
+- **The kernel's `_ghost` dump trusted another repository for a NUL.**
+  `nomount_nl_dump_ghost()` fills an *uninitialised* stack buffer via the weak-extern
+  `ghost_get_rule()` and hands it to `nla_put_string()`, which calls `strlen()`.
+  `ghost.c` ships in a separate patch set, so that termination is a cross-repo
+  contract — and the comment on `NM_GHOST_RULE_MAX` already says the two sides can
+  drift. A fill that reached the end of the buffer would walk off the array into
+  whatever follows it on the stack. The loop now terminates the buffer itself; a
+  correct `_ghost` never notices.
+
+### Changed
+
+- **The compile matrix's `only` filter works now, and stopped being an injection
+  shape.** It read `github.event.inputs.only`, but the workflow lost its own
+  `workflow_dispatch` when it became reusable and nothing has declared an `only`
+  input since — so the expression was permanently empty, `run=1` was unconditional,
+  and the filter was dead code that still cost a step on all ten legs. It is a
+  declared `workflow_call` input, forwarded from `build.yaml` (which declares it on
+  both triggers), and empty everywhere it is not passed — so a push, and
+  `release.yml`, still get the full ten-version matrix. It was also the only place in
+  the four workflows that dropped `${{ }}` straight into a `run:` body, where a value
+  is substituted as text before bash parses it; it goes through `env:` now, which is
+  what the rest of the tree already does. Not reachable while the input did not
+  exist — declaring it is precisely what would have made it reachable, so both halves
+  land together.
+
+- **A redaction test stopped claiming coverage it could not have.**
+  `redaction_covers_every_hide_list_reader` exercised only `hidden_uid_label`, which
+  is *private to* `doctor.rs` — so despite the name it could never reach the second
+  reader, the PM-open probe in `audit.rs`, which carries its own copy of the decision.
+  That reader had no test at all. `blocklist.rs` compounded it by telling a future
+  fourth reader to "extend that one test", which is not actionable from another
+  module — the same shape that let the third reader ship unredacted in the first
+  place. The probe's choice is now a pure `hidden_uid_label(appid, redact)` pinned by
+  `redaction_covers_the_pm_open_probe`; the doctor test is renamed
+  `redaction_covers_the_doctor_readers` for what it actually covers; and the rule in
+  `blocklist.rs` is now per-reader — gate on the function, put the choice in a pure
+  label fn beside it, and pin it with a test asserting the **digits** cannot survive.
+  The wording may differ per reader; the digits may not.
+
 ## v1.3.120 — engine v30 (unchanged)
 
 A third audit read the tree at v1.3.119 / engine v30 and re-ran every gate. All

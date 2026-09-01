@@ -116,9 +116,29 @@ LOCK=$NMDIR/.uidwatch.lock
 # exclusion was gone for the rest of the session -- handlers piling up, each
 # waiting on the same pass lock. The threshold has to exceed the worst case of
 # (pass-lock wait + the apply itself), not the apply alone.
+# EACH value guarded separately, and BEFORE the arithmetic -- the same discipline
+# service.sh applies to `_now`/`_up` and metamount.sh to `bootcount`. This was
+# `_now=$(date +%s)` with no fallback and no digit test, feeding
+# `$(( _now - $(stat ... || echo "$_now") ))`: an empty `_now` makes the fallback
+# echo nothing too, so the expression became `$(( _now - ))` -- an arithmetic
+# SYNTAX error, which in both mksh and ash kills a non-interactive shell on the
+# spot. This script would then die HERE, before it takes the lock, so the whole
+# handler (`uid apply` for the package that just changed) silently would not run
+# and a newly installed app would stay unhidden with nothing logged.
+#
+# The stat arm is the reachable half: the lock can legitimately vanish between the
+# `[ -f ]` above and the `stat` below, when another handler's EXIT trap unlinks it.
+# `date` failing is what makes that fatal rather than harmless, so guard both.
+#
+# Falling back to 0 for BOTH on an unreadable clock yields _age=0, i.e. "not
+# stale" -- the conservative answer. Reaping a lock we cannot age would break the
+# mutual exclusion the reaper exists to protect.
 if [ -f "$LOCK" ]; then
-    _now=$(date +%s)
-    _age=$(( _now - $(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now") ))
+    _now=$(date +%s 2>/dev/null || echo 0)
+    case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+    _mt=$(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now")
+    case "$_mt" in ''|*[!0-9]*) _mt=$_now ;; esac
+    _age=$(( _now - _mt ))
     [ "$_age" -ge 180 ] && rm -f "$LOCK"
 fi
 ( set -o noclobber; : > "$LOCK" ) 2>/dev/null || exit 0

@@ -3,8 +3,25 @@ name: NoMount Suite — module zip
 on:
   # Called by release.yml on a v* tag, so the published zip is built by
   # exactly these jobs rather than a parallel pipeline.
+  #
+  # `only` is declared on BOTH triggers and forwarded to the compile matrix, which
+  # is the only thing that reads it. It exists so a kernel-side change can be
+  # re-checked against one version without paying for all ten; leaving it empty
+  # (every push, and release.yml, which does not pass it) keeps the full matrix.
   workflow_call:
+    inputs:
+      only:
+        description: 'Comma-separated kernel versions to compile (empty = all ten)'
+        type: string
+        required: false
+        default: ''
   workflow_dispatch:
+    inputs:
+      only:
+        description: 'Comma-separated kernel versions to compile (empty = all ten)'
+        type: string
+        required: false
+        default: ''
   push:
     # `prerelease` is where the audit work lands before it reaches `suite`, and it
     # was building nowhere: every commit on it was verified only on the three
@@ -121,6 +138,11 @@ jobs:
     needs: engine-changed
     if: needs.engine-changed.outputs.changed == 'true'
     uses: ./.github/workflows/hookless-compile-matrix.yml
+    # `inputs` is null on a `push`, and a property of null is null, so this is ''
+    # there -- i.e. the full ten-version matrix, which is what a push must always
+    # get. Only a dispatch (or a caller that passes one) can narrow it.
+    with:
+      only: ${{ inputs.only || '' }}
 
   # The unit tests are host tests (no NDK, no device), so they cost a minute and
   # gate the thing that actually ships: `package` needs them green. `build` is

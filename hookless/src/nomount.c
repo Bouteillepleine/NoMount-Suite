@@ -6579,6 +6579,16 @@ static int nomount_nl_dump_ghost(struct sk_buff *skb, struct netlink_callback *c
         return 0;
 
     while (ghost_get_rule(idx, rule, sizeof(rule)) > 0) {
+        /* TERMINATE IT OURSELVES. `rule` is uninitialised stack and ghost.c lives
+         * in a SEPARATE repository (the _ghost patch set), so its NUL is a
+         * cross-repo contract, not something this file can see -- and the comment
+         * on NM_GHOST_RULE_MAX above already says the two sides can drift.
+         * nla_put_string() calls strlen(), so a fill that reached the end of the
+         * buffer, or any future ghost_get_rule() that returns a length without
+         * terminating, walks off this array and copies whatever follows it on the
+         * stack into a netlink message. One store makes the loop depend on nothing
+         * but its own buffer; a correct _ghost never notices. */
+        rule[sizeof(rule) - 1] = '\0';
         hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
                         NM_CMD_TO_TYPE(NM_CMD_GET_GHOST), 0, NLM_F_MULTI);
         if (!hdr) break;

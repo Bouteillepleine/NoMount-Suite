@@ -2080,8 +2080,15 @@ mod tests {
     ///
     /// The point of the assertion is not the wording but that the NUMBER cannot
     /// survive redaction, since that is the whole secret.
+    /// Named for what it ACTUALLY covers. It was
+    /// `redaction_covers_every_hide_list_reader`, which it never did and could not:
+    /// `hidden_uid_label` is private to this module, so the third reader -- the
+    /// PM-open probe in audit.rs, with its own copy of the decision -- was outside
+    /// its reach the whole time. That reader is pinned by
+    /// `audit::tests::redaction_covers_the_pm_open_probe`; see
+    /// [`crate::blocklist::redact_hide_list`] for the per-reader rule.
     #[test]
-    fn redaction_covers_every_hide_list_reader() {
+    fn redaction_covers_the_doctor_readers() {
         // Private destination: the appid, which is what makes the finding useful.
         assert_eq!(hidden_uid_label(10422, false), "hidden uid 10422");
         // Shared destination: nothing that identifies the app, and above all not

@@ -1183,6 +1183,27 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
 /// the package list at startup, calls getResourcesForApplication() on each entry,
 /// and SIGSEGVs on the IOException from 139 unopenable /product/overlay APKs.
 ///
+/// How THIS reader names a uid that came off the hide list.
+///
+/// A pure function for the same reason [`crate::doctor`]'s namesake is one: the
+/// env var behind `redact` is process-global, so two tests toggling it would race,
+/// and the decision has to be pinnable without touching it.
+///
+/// The wording differs from doctor.rs's ("uid N (hidden)" vs "hidden uid N") and
+/// that is deliberate -- this line has been verified on-device and is not worth
+/// churning. The INVARIANT is what has to be shared, not the prose: the digits
+/// must not survive redaction, because `PackageManager.getNameForUid()` turns them
+/// back into a package name. Each reader pins that with its own test; see
+/// [`crate::blocklist::redact_hide_list`] for why a single test in one module
+/// could not cover the others.
+fn hidden_uid_label(appid: u32, redact: bool) -> String {
+    if redact {
+        "a hidden app".to_string()
+    } else {
+        format!("uid {appid} (hidden)")
+    }
+}
+
 /// The probe forks, drops to a blocked appid and opens each PM-published rule
 /// target. It changes UID only -- the SELinux domain stays ours -- which is exactly
 /// what the engine keys on (nomount_is_uid_blocked reads current_uid()), so it
@@ -1298,11 +1319,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     // So print it for a private destination and withhold it for a shared one --
     // the gate doctor.rs already applies to the package names, and the one the
     // export's own closing note promises for "the check report's hide-list names".
-    let who = if crate::blocklist::redact_hide_list() {
-        "a hidden app".to_string()
-    } else {
-        format!("uid {appid} (hidden)")
-    };
+    let who = hidden_uid_label(appid, crate::blocklist::redact_hide_list());
     if denied == u32::MAX {
         return unmeasured(NAME, "could not drop to the hidden app's uid".to_string())
             .meaning("The probe could not take on the hidden app's identity, so this was not tested.");
@@ -1581,6 +1598,33 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This file's half of the hide-list redaction invariant.
+    ///
+    /// The PM-open probe is the second of the three readers of
+    /// [`crate::blocklist::redact_hide_list`], and until now it was the only one
+    /// with no test at all: doctor.rs's `redaction_covers_every_hide_list_reader`
+    /// pins a function that is PRIVATE to doctor.rs, so despite its name it could
+    /// never have covered this site. A change here -- or a copy of this shape into
+    /// a fourth reader -- would have been caught by nothing.
+    ///
+    /// The assertion is the DIGITS, not the wording, because the digits are the
+    /// whole secret: `PackageManager.getNameForUid()` reverses them.
+    #[test]
+    fn redaction_covers_the_pm_open_probe() {
+        // Private destination: the appid, which is what makes the finding useful.
+        assert_eq!(hidden_uid_label(10422, false), "uid 10422 (hidden)");
+        // Shared destination: nothing that identifies the app, above all not the number.
+        assert_eq!(hidden_uid_label(10422, true), "a hidden app");
+        // ...for any uid, not just one that was measured leaking. 1_010_471 is a
+        // second-user uid, whose appid the engine stores modulo the per-user range.
+        for uid in [10000u32, 10384, 10422, 10471, 1_010_471, 99_999] {
+            assert!(
+                !hidden_uid_label(uid, true).contains(&uid.to_string()),
+                "uid {uid} leaked through redaction"
+            );
+        }
+    }
 
     /// A directory holding only OUR entries must not be judged for an inode band,
     /// even when one of those entries is a directory the engine synthesized.

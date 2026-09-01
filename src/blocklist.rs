@@ -82,8 +82,23 @@ pub fn appid(uid: u32) -> u32 {
 /// One test, one home. That was supposed to stop a new reader being added without
 /// finding it, and it did not: the ghost-cloak probe landed afterwards, printed the
 /// appid straight into `check.txt`, and shipped that to shared storage for two
-/// releases while the note above it claimed otherwise. If you add a FOURTH reader,
-/// gate it here and extend `redaction_covers_every_hide_list_reader` in doctor.rs.
+/// releases while the note above it claimed otherwise.
+///
+/// The repair for that was a pure `hidden_uid_label` in doctor.rs plus a test named
+/// `redaction_covers_every_hide_list_reader` -- and that name was a promise the test
+/// could not keep. `hidden_uid_label` is PRIVATE to doctor.rs, so the test pins the
+/// two readers in that file and is structurally incapable of reaching the PM-open
+/// probe in audit.rs, which carries its own copy of the decision. "Extend that one
+/// test" was therefore not actionable from any other module, which is exactly the
+/// shape that let the third reader ship unredacted.
+///
+/// So the invariant is per-reader, not per-test. If you add a FOURTH reader: gate it
+/// on this function, put the choice in a PURE `fn label(uid, redact) -> String` beside
+/// it (the env var is process-global, so tests must not toggle it), and pin it with a
+/// test asserting the DIGITS cannot survive redaction -- as
+/// `doctor::tests::redaction_covers_the_doctor_readers` and
+/// `audit::tests::redaction_covers_the_pm_open_probe` each do. The wording may differ
+/// per reader; the digits may not survive in any of them.
 pub fn redact_hide_list() -> bool {
     std::env::var_os("NM_REDACT_HIDE_LIST").is_some()
 }
