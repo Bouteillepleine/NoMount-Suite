@@ -24,30 +24,13 @@ NMLOG_TAG=metamount
     ksud kernel notify-module-mounted 2>/dev/null
     exit 1
 }
-# 0700: spoof.conf/blocklist/pathhide.conf are read as root at boot, so anything
-# able to write here gets root. The dir was being created under the boot umask (0777).
+# 0700: spoof.conf/blocklist are read as root at boot, so anything able to write
+# here gets root. The dir was being created under the boot umask (0777).
 mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
-# Tighten anything an earlier build already created wide. Cheap and idempotent.
-# -type f, because the glob also handed DIRECTORIES to chmod: `rollback-bin` was
-# observed on-device as drw------- , i.e. readable but not traversable, so
-# nothing inside it could be reached by anything -- including us.
-find "$NMDIR" -maxdepth 1 -type f -exec chmod 0600 {} + 2>/dev/null
-# ...and REPAIR the directories an earlier build already damaged. Restricting the
-# line above to -type f stops new breakage but cannot undo old: a device that ran
-# a build with the bug keeps its drw------- directory forever. Measured on OP15,
-# where rollback-bin sat unreadable for two days across several updates. 0700 to
-# match $NMDIR itself -- these hold root-read state, so no wider.
-find "$NMDIR" -maxdepth 1 -mindepth 1 -type d -exec chmod 0700 {} + 2>/dev/null
-# ...and the SELinux label, which had drifted the same way. Measured on OP15:
-# $NMDIR carried u:object_r:system_file:s0 while its parent /data/adb carries
-# adb_data_file. That matters because the live policy grants every app domain
-# read+search on system_file (dir 0x11140053, file 0x2044412) and NOTHING on
-# adb_data_file (0 for both) -- so the only thing keeping spoof.conf, uidhide,
-# pathhide.conf and blocklist away from an app was the parent refusing
-# traversal. Unreachable today, but the files name exactly which apps we hide,
-# so match the parent and stop relying on one directory up. Nothing in the
-# Suite ever set system_file here; it is drift, not intent.
-chcon -R u:object_r:adb_data_file:s0 "$NMDIR" 2>/dev/null
+# The mode/label repair every boot entry point owes the state directory -- see
+# nm_state_dir_repair in lib.sh, which is where it lives now so the Magisk path
+# gets it too.
+nm_state_dir_repair
 
 # --- durable boot log ---------------------------------------------------------
 # Every boot diagnostic below used to go ONLY to /dev/kmsg. On this hardware the
@@ -105,6 +88,32 @@ cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null
 # create that path pre-empted the whole mount pass. flock releases on exit and
 # lives in the 0700 state dir.
 LOCK="$NMDIR/.mount.lock"
+# PROBE THE FILE BEFORE `exec` TOUCHES IT.
+#
+# `exec` is a POSIX special built-in, so a redirection error on one EXITS a
+# non-interactive shell -- and the `2>/dev/null` below, which is there for a
+# different and good reason, throws the message away with it. So an unwritable
+# $NMDIR (a full or read-only /data, a label that refuses creation, the `mkdir -p`
+# above having failed) killed this script right here: no nmlog line, no
+# incident.log, and -- the part that matters -- no `ksud kernel
+# notify-module-mounted`. This is the METAMODULE hook; ksud waits on that call to
+# know module mounting is finished. Both the missing-lib.sh arm at the top and the
+# flock back-off below go out of their way to notify before leaving, for the
+# reason stated there: serving nothing is recoverable, not answering may not be.
+#
+# The subshell is what makes this testable at all: a redirection failure on a
+# special built-in exits the SUBSHELL, and `if !` reads its status. Same idiom
+# uidwatch.sh uses for its own handler lock. Append, never truncate -- the file
+# carries nothing but the flock.
+#
+# Refusing the boot pass, rather than running it unguarded, is deliberate: with
+# $NMDIR unwritable the bootcount cannot be written either, so the bootloop guard
+# is dead and a pass that wedges the device has no self-recovery.
+if ! ( : >> "$LOCK" ) 2>/dev/null; then
+    nmlog "⛔ cannot create $LOCK — $NMDIR is not writable, so the bootloop guard cannot arm; NOTHING was injected this boot"
+    ksud kernel notify-module-mounted 2>/dev/null
+    exit 1
+fi
 # Silence stderr for the redirection ONLY. Writing `exec 9>"$LOCK" 2>/dev/null`
 # applies BOTH redirections to the shell permanently, so every diagnostic any
 # later command wrote to stderr -- for the whole rest of the boot pass -- went to

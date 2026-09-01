@@ -261,7 +261,11 @@ fn my_hookless_enabled() -> bool {
 /// `nm_target_too_shallow` refuses it again), but a predicate named
 /// `is_partition_root` returning false for the filesystem root is a trap for the
 /// next caller. `<= 1` says what the name claims.
-fn is_partition_root(target: &Path) -> bool {
+/// `pub(crate)` because doctor.rs asked the same question with its own copy, and
+/// that copy was the `== 1` form this one was widened away from -- so the two
+/// predicates disagreed about `/` in the one file whose job is to lint for exactly
+/// this class of rule. One definition, two callers.
+pub(crate) fn is_partition_root(target: &Path) -> bool {
     target.components().skip(1).count() <= 1
 }
 
@@ -315,8 +319,22 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
     // nobody. Refuse, and let `doctor` tell the user to ship one layout or the
     // other. Measured on an OP15: a module shipping both produced
     // /product/product/etc/... and every rule involved looked healthy.
+    //
+    // The test is `second == root` and nothing else. It used to read
+    // `second == root && is_partition_root(Path::new(&format!("/{root}")))`, which
+    // looks like "...and /<root> really is a partition on this device" and is not:
+    // `root` comes from components().nth(1), so it is a single component, and
+    // is_partition_root of a one-component path is `count() <= 1` -- always true.
+    // A guard that always passes is worse than no guard, because it is read as one.
+    //
+    // Nor is a device test wanted here. `serve_mode` is a pure predicate the
+    // module-plan tests exercise on a host with no ROM at all, and no shipping
+    // partition layout repeats its own name in the first two components -- the
+    // shape only ever comes out of the installer nesting `system/<part>/` inside
+    // `<part>/`. If a ROM ever does ship one, this is the line to revisit, with a
+    // predicate the tests can also answer.
     if let Some(second) = target.components().nth(2).and_then(|c| c.as_os_str().to_str()) {
-        if second == root && is_partition_root(Path::new(&format!("/{root}"))) {
+        if second == root {
             return Serve::Refuse(
                 "the path repeats a partition name -- the module ships both `<part>/` and \
                  `system/<part>/`, and the installer nested one inside the other",

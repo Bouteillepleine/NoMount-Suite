@@ -56,6 +56,15 @@ fi
 # boot and immune to the clock.
 cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null
 
+# The state-directory mode/label repair -- see nm_state_dir_repair in lib.sh.
+# BELOW the KSU/APatch handover on purpose: metamount.sh is the boot entry point
+# on those managers and has already run it, so doing it again here would be a
+# second recursive chcon at post-fs-data for nothing. On Magisk this is the only
+# place it happens, and until it moved into lib.sh it did not happen at all --
+# $NMDIR kept whatever mode and label an older build had left, for the life of
+# the install.
+nm_state_dir_repair
+
 # nmto() is lib.sh's -- see the note there on what a missing `timeout` costs.
 
 # ABI / BIN / NM_BIN, with the empty-getprop fallback -- see nm_set_bin in lib.sh.
@@ -120,9 +129,24 @@ else
         # non-zero, or that `timeout` killed at 60s having injected part of the
         # rule set, used to leave no trace anywhere. On this path there is no
         # status card to contradict, which makes boot.log the only record there is.
-        nmto 60 "$BIN" mount 2>/dev/null
+        _mout="$(nmto 60 "$BIN" mount 2>/dev/null)"
         _mrc=$?
+        [ -n "$_mout" ] && printf '%s\n' "$_mout"
         [ "$_mrc" -ne 0 ] && nmlog "⚠ mount pass exited $_mrc — the injection set may be INCOMPLETE"
+        # An exit of 0 does NOT mean every rule landed: the pass deliberately
+        # survives individual failures rather than failing the boot over them, and
+        # prints `nomount: WARNING ...` when it does. mount.rs emits that marker
+        # for a boot script to grep -- its comment says so in as many words
+        # ("metamount.sh greps for this marker") -- and only metamount.sh was
+        # grepping it. On this path the pass's stdout was not even read, so a
+        # partial injection ended the boot with a zero exit and nothing in
+        # boot.log, which is the one channel this path has.
+        case "$_mout" in
+            *"nomount: WARNING"*)
+                nmlog "$(printf '%s\n' "$_mout" | grep "nomount: WARNING" | head -1)"
+                ;;
+        esac
+        unset _mout
         # Durable whiteouts in the same pass as the injections, for the same
         # reason as metamount.sh: a whiteout hides a stock path that is itself the
         # tell, and there is no service.sh re-apply early enough to cover boot.

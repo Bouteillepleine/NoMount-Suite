@@ -1,6 +1,168 @@
 # Changelog
 
-## Unreleased
+## v1.3.119 — engine v30
+
+A second audit read every tracked file at v1.3.118 / engine v29 and re-ran the
+project's own gates. It confirmed the twelve findings below as closed and raised
+eleven more: three reachable on the shipped build, six latent, and five places
+where two copies of one idea had drifted apart. All of them are fixed here.
+
+### Fixed
+
+- **An app update permanently killed the absorbed-APK record.**
+  `refresh_app_apks()` re-pointed the live rule when PackageManager moved a
+  package to a new `/data/app/…` path, and left `absorbed.list` naming the old
+  one. Every reader of that record gates on `target.exists()`, so from the next
+  boot the stale row was skipped — and there was no live rule left for a later
+  pass to find, because the boot `nm clear` had dropped it. The package silently
+  reverted to the stock APK, permanently, and dead rows accumulated. That defeats
+  the record's stated purpose in as many words ("the source lets the boot pass
+  re-serve it without waiting for the owning module to mount again"): it only
+  ever kept working for a module that re-binds every boot, which is the case the
+  record exists to make unnecessary. The re-point and the uninstall now both
+  carry into the record, in one write, with the same
+  leave-the-file-alone-on-a-read-error discipline the other two writers use.
+  The re-point also **adds before it deletes** now, and says so when it cannot:
+  it used to `del` then `add`, so a failed add left the package with no rule at
+  all — silently, since the status was discarded. The old target no longer exists
+  on disk by then, so it cannot be restored either; not destroying it until the
+  replacement is live is the only order that can fail safely.
+
+- **`nomount export`'s shared-storage guard was a raw prefix test on the
+  caller's argument.** The list had been patched by hand once already (adding
+  `/data/media`, after `nomount export /data/media/0/Download` published the hide
+  list on a real device), but the test itself was `String::starts_with` on the
+  unresolved string — so `//sdcard/Download`, `/data/local/../media/0/Download`
+  and any symlinked destination all read as PRIVATE and wrote `uidhide`,
+  `uidhide.cache`, `uidhide.conf` and `spoof.conf` into storage any app with a
+  storage permission can read, alongside an un-redacted `check.txt` and the
+  `[UID: n]` suffixes in `rules.txt`. In the other direction it called
+  `/data/media0` shared, because a raw prefix has no notion of a path boundary.
+  The destination is now resolved with `canonicalize` and matched with
+  `Path::starts_with`, which is component-wise and normalises a `//` root; both
+  the resolved and the literal form are tested and EITHER matching means shared,
+  so a canonicalize that fails falls to the withholding side.
+
+- **The Hidden paths card is back in the WebUI.** Durable whiteouts —
+  `whiteouts.txt`, the anchored scan for root-setup leftovers, the boot re-apply —
+  had no surface at all, so the feature existed only for someone with a root
+  shell, while `whiteout.rs` still explained its exit codes in terms of the card's
+  buttons and this changelog still advertised it. It is restored under **Rules**,
+  next to Active rules and Injected files, and NOT as it was: the earlier version
+  built `whiteout add ${v}` by concatenation behind a character blacklist and put
+  the path inside a generated `onclick` with `JSON.stringify` — both shapes this
+  page documents as forbidden, since `esc()` renders `'` as `&#39;` and an HTML
+  attribute decodes that before the JS in it is parsed. Every command goes through
+  `shq()`, rows carry data-attributes and one delegated listener, and the
+  validation is "absolute, no control characters" rather than a metacharacter
+  blacklist — a blacklist adds nothing against injection once `shq()` is doing the
+  work, and does take something away: it refused paths the engine accepts, which
+  for the delete button meant a saved row nothing in the UI could remove.
+
+- **`nm_dsnap_make()` cached its remaining failures as verdicts** (engine, and
+  the reason for **v30**). v29 split "could not ask" from "walked it and it does
+  not qualify" for the `dentry_open` arm and left the other three exits sharing
+  one `goto out`, which publishes `ok = false` — so a `GFP_NOFS` allocation
+  failure, or an `iterate_dir()` error, still cached a not-answer that
+  `nm_dsnap_fresh()` then kept until the backing directory's size or mtime moved.
+  Only `b.overflow` — more entries or name bytes than the model carries, a
+  property of the directory — leaves as a cacheable negative now; everything else
+  publishes nothing and retries.
+
+- **`metamount.sh` could exit without `ksud kernel notify-module-mounted`.**
+  `exec` is a POSIX special built-in, so a redirection error on one exits a
+  non-interactive shell — and the `2>/dev/null` on `exec 9>"$LOCK"`, which is
+  there for a different and good reason, threw the message away with it. An
+  unwritable `$NMDIR` (a full or read-only `/data`, a label that refuses creation,
+  the `mkdir -p` above it having failed) therefore killed the metamodule hook
+  right there: no log line, no incident, and no notify — the stalled-boot failure
+  the missing-`lib.sh` arm and the flock back-off both go out of their way to
+  prevent. The lock file is probed in a subshell first, where a special built-in's
+  redirection failure is catchable, and the failure arm notifies before leaving.
+  Refusing the pass rather than running it unguarded is deliberate: with `$NMDIR`
+  unwritable the bootcount cannot be written either, so the bootloop guard is dead.
+
+- **A genuine uninstall could leave `/data/adb/nomount.bak` behind forever.**
+  The `remove`-marker branch declined to CREATE a stash and did not delete one
+  already there — left by a flash whose `customize.sh` aborted before it could
+  consume one, which both the sha256 refusal and the metamodule-conflict refusal
+  do. The sweep that would collect it lives in the two BOOT entry points, neither
+  of which runs again once the module is gone, so the file sat there indefinitely,
+  named after the module the user had just deleted, holding `uidhide`. The comment
+  crediting `service.sh` with that sweep — which has never touched the file — is
+  corrected too; believing it is why the branch did not think it had to clean up.
+
+- **A guard that always passed, in both copies.** `mount::serve_mode` and
+  doctor's "partition name nested" check both read
+  `second == root && is_partition_root(Path::new(&format!("/{root}")))`, which
+  looks like "…and `/<root>` really is a partition on this device" and is a
+  tautology: `root` is one component, so that call is `count() <= 1` on a
+  one-component path. Behaviour is unchanged — `second == root` was always the
+  whole test — but a guard that is read as one and is not is worse than none, and
+  the comments now say what would be needed to make it real.
+
+- **doctor kept its own `is_partition_root`**, and it was the `count() == 1` form
+  mount.rs had already widened to `<= 1` because it answered FALSE for `/` —
+  "the one path where serving a rule is most catastrophic", and "a trap for the
+  next caller". The copy is gone; there is one definition and two callers.
+
+- **Two hand-rolled `nm list` parsers survived in `whiteout.rs`**, against
+  `crate::nm::parse_list`'s documented invariant that it is the one reader.
+  `live_whiteouts()` peeled ` (whiteout)` as a suffix and nothing else, so a rule
+  that also carried ` (public)` would not have matched — and `whiteout list` would
+  then report every saved entry as "not applied" while the engine served all of
+  them. Both go through the shared parser, and its test now covers the flag in the
+  order the client actually emits it.
+
+- **The Magisk boot path had drifted from the KSU one again.** `post-fs-data.sh`
+  did not read the mount pass's stdout, so the `nomount: WARNING` marker
+  `mount.rs` prints *for a boot script to grep* ("metamount.sh greps for this
+  marker") went unread there — a partial injection ended the boot with a zero exit
+  and nothing in `boot.log`, which is the only channel that path has. It also
+  never repaired `$NMDIR`'s modes and label, which `metamount.sh` has done at
+  every boot since that drift was measured. Both fixed, and the repair moved into
+  `lib.sh` as `nm_state_dir_repair` rather than pasted a second time.
+
+- **`uidscan.sh` was the last entry point not sourcing `lib.sh`.** It carried its
+  own copy of `nm_set_bin`'s ABI fallback, hardcoded `/data/adb/nomount` instead
+  of `$NMDIR`, had no `nmlog`, and ran under the boot umask — so `uidscan_cache`,
+  the list of installed apps it proposes hiding from, was created 0666 and stayed
+  that way until the next boot's `chmod` sweep. Its two diagnostics also went only
+  to stderr, which the WebUI discards; they reach `boot.log` now.
+
+- **`binds.list` is rewritten atomically.** Three sites used `fs::write`, which
+  truncates and then writes, on the file `teardown_all` calls "the ONLY record of
+  binds we made" — a short write (ENOSPC, or `metamount.sh` SIGKILLing the pass at
+  60s) leaves exactly what that function says losing the file costs: a live mount
+  over a `my_*` path whose backing file has already been relabelled back to
+  `adb_data_file`, that no later pass can see or unmount. Temp-then-rename, and
+  0600 stated rather than inherited (`fs::write` keeps an existing file's mode).
+
+- **The control plane now requires `CAP_SYS_ADMIN`** instead of `CAP_NET_ADMIN`
+  (engine, the other half of **v30**). `CAP_NET_ADMIN` was the faithful
+  translation of the `GENL_ADMIN_PERM` flag the generic-netlink family carried
+  before the move to a private protocol, and a bad fit for an interface whose one
+  `ADD_RULE` can serve a chosen file at any path on any ROM partition — that is
+  root-equivalent, and `CAP_NET_ADMIN` on Android is held by domains that are not
+  (netd, system_server). Nothing legitimate loses access: every caller in the tree
+  is uid 0 with a full capability set, and none of the privilege-dropping probes
+  in `nomount check` touch the socket. A kernel below 30 keeps the looser gate.
+
+- **`customize.sh` contradicted itself about `set_perm`'s 5th argument** — a
+  comment reading "the 5th argument is not optional here either" above a
+  four-argument call, so one of the two was wrong and a reader could not tell
+  which. The calls are right: these are files in the MODULE TREE, where
+  `set_perm`'s default is what ksud gives every other file under
+  `/data/adb/modules`. `$NMDIR` is the opposite case and keeps its explicit label.
+  The comments say so now.
+
+- **The WebUI's CSP is documented as containment, not XSS mitigation.** With
+  `script-src 'unsafe-inline'` — which a single-inline-script page cannot do
+  without — a CSP does not stop injected script from running; `default-src 'none'`
+  stops it reaching anywhere. The escaping is the defence, and the note now says
+  that plainly so the CSP's presence cannot excuse a missing `esc()`.
+
+## v1.3.118 — engine v29
 
 An external audit read every tracked file and re-ran the project's own gates;
 this is all twelve of its findings. Two were reachable on a shipped build, three

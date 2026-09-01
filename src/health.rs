@@ -21,7 +21,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -584,6 +584,37 @@ pub fn run_verify() -> Result<()> {
     Ok(())
 }
 
+/// Every root under which a destination is readable by any app holding a storage
+/// permission — i.e. every place the hide list must not be written.
+///
+/// One list, so the two tests in [`is_shared_storage`] cannot drift apart.
+const SHARED_ROOTS: &[&str] = &[
+    "/sdcard",
+    "/storage",
+    "/mnt/sdcard",
+    "/data/media",
+    "/mnt/user",
+    "/mnt/runtime",
+    "/mnt/androidwritable",
+    "/mnt/pass_through",
+    // Adopted storage and the raw sdcardfs/FUSE source view. Both are shared
+    // volumes reachable by any app holding a storage permission, and both are
+    // paths a root shell types by hand -- which is how /data/media/0 got onto
+    // this list in the first place.
+    "/mnt/media_rw",
+    "/mnt/expand",
+];
+
+/// Is `p` inside a shared volume?
+///
+/// `Path::starts_with`, never `str::starts_with`: it compares whole components,
+/// so `/data/media0` is not under `/data/media`, and it normalises a `//` root,
+/// so `//sdcard/Download` is under `/sdcard`. The caller resolves symlinks and
+/// `..` before asking, and asks about the literal path too.
+fn is_shared_storage(p: &Path) -> bool {
+    SHARED_ROOTS.iter().any(|r| p.starts_with(r))
+}
+
 /// `nomount export [dir]` — dump diagnostics to a timestamped, stealth-named
 /// folder (default under /sdcard/Download) for sharing. Best-effort per file.
 pub fn run_export(dir: Option<String>) -> Result<()> {
@@ -607,30 +638,31 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // The fingerprint, under its own name. The full report goes in check.txt
     // below; this file is the flat key=value form a bug report is skimmed for.
     write("fingerprint.txt", &fingerprint_text().unwrap_or_default());
-    // /data/media/0 is the REAL backing store of /sdcard on A11+, and it is the
-    // path a root shell naturally types -- so `nomount export /data/media/0/Download`
-    // failed this test, skipped the PRIVATE guard below, and wrote `uidhide`,
-    // `uidhide.cache` and `spoof.conf` -- files that name exactly which detectors
-    // are being hidden from -- into storage any app with a storage permission can
-    // read. The /mnt/user and /mnt/runtime views are the same store by other names.
-    let shared = [
-        "/sdcard",
-        "/storage",
-        "/mnt/sdcard",
-        "/data/media",
-        "/mnt/user",
-        "/mnt/runtime",
-        "/mnt/androidwritable",
-        "/mnt/pass_through",
-        // Adopted storage and the raw sdcardfs/FUSE source view. Both are shared
-        // volumes reachable by any app holding a storage permission, and both are
-        // paths a root shell types by hand -- which is how /data/media/0 got onto
-        // this list in the first place.
-        "/mnt/media_rw",
-        "/mnt/expand",
-    ]
-    .iter()
-    .any(|p| out.starts_with(p));
+    // RESOLVED, and matched on path COMPONENTS. Both halves were wrong, and the
+    // consequence of either is the whole secret this guard exists to keep.
+    //
+    // The list itself was patched by hand once already: /data/media/0 is the REAL
+    // backing store of /sdcard on A11+ and the path a root shell naturally types,
+    // so `nomount export /data/media/0/Download` read as PRIVATE and wrote
+    // `uidhide`, `uidhide.cache` and `spoof.conf` -- the files that name exactly
+    // which detectors are being hidden from -- into storage any app with a storage
+    // permission can read. Adding that one spelling did not close the hole,
+    // because the test was `String::starts_with` on the caller's raw argument:
+    //
+    //   `//sdcard/Download`                  -- "//s" vs "/sd", no match
+    //   `/data/local/../media/0/Download`    -- no match, and resolves to the store
+    //   a symlink pointing anywhere at all   -- no match
+    //
+    // and, in the other direction, `/data/media0/…` matched `/data/media` because
+    // a raw prefix has no notion of a path boundary.
+    //
+    // So resolve first (the directory exists by now -- create_dir_all is above),
+    // and compare with `Path::starts_with`, which is component-wise and normalises
+    // a `//` root. Both the resolved and the literal form are tested and EITHER
+    // matching means shared: canonicalize can fail, and "could not tell" has to
+    // fall to the private-withholding side, never away from it.
+    let resolved = fs::canonicalize(&out).unwrap_or_else(|_| PathBuf::from(&out));
+    let shared = is_shared_storage(&resolved) || is_shared_storage(Path::new(&out));
     // On shared storage the ` [UID: n]` suffix on a per-UID rule names an appid we
     // are hiding from -- the same secret as the hide list -- so strip it there.
     let rules = nm.list().unwrap_or_else(|e| format!("(nm list failed: {e})"));
@@ -762,6 +794,41 @@ mod tests {
             .unwrap_or_else(|| panic!("no check named {id}"))
             .verdict
             .tag()
+    }
+
+    /// The spellings a raw `String::starts_with` on the caller's argument could
+    /// not see. Each one publishes `uidhide` — the list of apps being hidden
+    /// from — to storage any app with a storage permission can read.
+    #[test]
+    fn every_spelling_of_shared_storage_is_recognised() {
+        for p in [
+            "/sdcard/Download/nm-diag-1",
+            "//sdcard/Download/nm-diag-1",          // "//s" vs "/sd" under str::starts_with
+            "/storage/emulated/0/Download/nm-diag-1", // what /sdcard resolves to
+            "/data/media/0/Download/nm-diag-1",
+            "/mnt/user/0/emulated/0/x",
+            "/mnt/media_rw/ABCD-1234/x",
+            "/mnt/expand/abcd/user/0/x",
+        ] {
+            assert!(is_shared_storage(Path::new(p)), "{p} is shared storage");
+        }
+    }
+
+    /// ...and the other direction: a raw prefix has no notion of a path boundary,
+    /// so it called `/data/media0` shared. Withholding the hide list from a
+    /// private destination is not harmless — it is the destination the export
+    /// tells you to pass when you want the full picture.
+    #[test]
+    fn private_destinations_are_not_mistaken_for_shared_ones() {
+        for p in [
+            "/data/adb/nomount/nm-diag-1",
+            "/data/local/tmp/nm-diag-1",
+            "/data/media0/x",   // NOT under /data/media
+            "/storagex/x",      // NOT under /storage
+            "/mnt/vendor/persist/x",
+        ] {
+            assert!(!is_shared_storage(Path::new(p)), "{p} is not shared storage");
+        }
     }
 
     /// "Nothing to test" is only honest while the engine is ANSWERING.

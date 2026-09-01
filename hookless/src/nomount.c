@@ -2129,6 +2129,22 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
     struct nm_dsnap *s;
     struct timespec64 mt;
     unsigned int i, off = 0;
+    /* "COULD NOT BUILD" IS NOT A VERDICT -- and `ok = false` is one.
+     *
+     * v29 split those apart for the dentry_open arm below and left every other
+     * exit sharing one `goto out`, which publishes a snapshot with ok = false --
+     * the encoding for "walked it, it does not qualify". nm_dsnap_get() caches
+     * that, and nm_dsnap_fresh() keeps it valid until the backing directory's
+     * SIZE or MTIME moves, so a single GFP_NOFS failure (or a walk that returned
+     * an error) froze the v25 dir-target size correction off for that rule
+     * indefinitely, and silently -- exactly the failure v29 was cut for, reached
+     * through the allocator instead of through SELinux.
+     *
+     * b.overflow is the one honest negative here: the actor sets it when the
+     * directory has more entries or name bytes than the model can carry, which is
+     * a property OF THAT DIRECTORY and will not change until its contents do --
+     * which is precisely when the freshness stamp expires the entry anyway. */
+    bool cannot_build = false;
 
     s = kzalloc(sizeof(*s), GFP_NOFS | __GFP_NOWARN);
     if (!s) return NULL;
@@ -2140,7 +2156,7 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
 
     b.ent = kmalloc_array(NM_DSNAP_MAX_ENTS, sizeof(*b.ent), GFP_NOFS | __GFP_NOWARN);
     b.names = kmalloc(NM_DSNAP_MAX_BYTES, GFP_NOFS | __GFP_NOWARN);
-    if (!b.ent || !b.names) goto out;
+    if (!b.ent || !b.names) { cannot_build = true; goto out; }
 
     /* iterate_dir(), not a hand dispatch: it takes the backing directory's
      * i_rwsem, runs the LSM hook and the IS_DEADDIR check. The backing dir lives
@@ -2154,9 +2170,15 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
         /* A failed or truncated walk must NOT become a snapshot: a listing that
          * is short by one name would move st_size, the cookie sequence and the
          * emitted set together, i.e. produce a self-consistent LIE about the
-         * directory. Fall back to the untouched proxy path instead. */
+         * directory. Fall back to the untouched proxy path instead.
+         *
+         * `cannot_build`, not `b.overflow`. An iterate_dir() ERROR is transient
+         * (-EIO, -ENOMEM from the filesystem) and describes this attempt, not the
+         * directory -- publishing it as ok = false cached a not-answer as an
+         * answer, which is the whole defect this function has now been cut for
+         * twice. Overflow stays a verdict; a failure does not. */
         if (iterate_dir(dir, &b.ctx) < 0)
-            b.overflow = true;
+            cannot_build = true;
         fput(dir);
     } else {
         /* COULD NOT ASK is not a verdict, and must not be cached as one.
@@ -2179,20 +2201,17 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
          * dentry_open per stat on a directory we cannot read -- an error path, on
          * a rule shape the Suite never builds. */
         nm_warn_once("cannot open a dir-target's backing directory (relabel the module tree); serving it unmodified\n");
-        revert_creds(old);
-        kfree(b.ent);
-        kfree(b.names);
-        kfree(s);
-        return NULL;
+        cannot_build = true;
     }
     revert_creds(old);
+    if (cannot_build) goto out;
     if (b.overflow) goto out;
 
     sort(b.ent, b.n, sizeof(*b.ent), nm_dsnap_cmp, NULL);
 
     s->ent = kmalloc_array(b.n + 1, sizeof(*s->ent), GFP_NOFS | __GFP_NOWARN);
     s->names = kmalloc(b.nbytes + 1, GFP_NOFS | __GFP_NOWARN);
-    if (!s->ent || !s->names) goto out;
+    if (!s->ent || !s->names) { cannot_build = true; goto out; }
 
     /* Copy the names down in SORTED order, so the resident copy is both smaller
      * than the scratch and walked sequentially by the emitter. */
@@ -2214,6 +2233,14 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
 out:
     kfree(b.ent);
     kfree(b.names);
+    /* Publish nothing rather than a not-answer: the caller treats NULL as "no
+     * snapshot applies THIS TIME" and re-asks on the next qualifying stat, which
+     * is what the failures above deserve. Only b.overflow leaves here as a
+     * cacheable ok = false. */
+    if (cannot_build) {
+        nm_dsnap_free(s);
+        return NULL;
+    }
     return s;
 }
 
@@ -6602,8 +6629,27 @@ static const struct nla_policy nomount_genl_policy[__NOMOUNT_ATTR_MAX] = {
 
 /*
  * Dispatch one control request. The command is carried in nlmsg_type; the two
- * GET_* commands are streamed via the standard dump machinery. CAP_NET_ADMIN
- * is required on every command (replaces the genl GENL_ADMIN_PERM flag).
+ * GET_* commands are streamed via the standard dump machinery.
+ *
+ * CAP_SYS_ADMIN on every command, dumps included.
+ *
+ * It was CAP_NET_ADMIN, which is the faithful translation of the GENL_ADMIN_PERM
+ * flag the generic-netlink family carried before the move to a private protocol
+ * -- and a bad fit for what this interface actually grants. One ADD_RULE
+ * redirects any path on any ROM partition at any file, which is root-equivalent:
+ * it can serve a chosen binary at /system/bin/<anything> that every domain on the
+ * device already executes. CAP_NET_ADMIN is not a root-equivalent capability on
+ * Android and is held by domains that are not (netd, system_server), so the gate
+ * was strictly weaker than the privilege behind it.
+ *
+ * Nothing legitimate loses access: every caller in the tree is uid 0 with a full
+ * capability set -- the module's five boot entry points under ksud, customize.sh
+ * during install, the WebUI through ksu.exec, and the Suite binary shelling out
+ * to `nm`. None of the privilege-dropping probes in `nomount check` touch the
+ * socket; they fork, drop, and then only stat/open.
+ *
+ * netlink_capable() still measures against init_user_ns, so a user namespace
+ * cannot manufacture either capability.
  */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh,
@@ -6616,7 +6662,7 @@ static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
     int cmd = NM_TYPE_TO_CMD(nlh->nlmsg_type);
     int ret;
 
-    if (!netlink_capable(skb, CAP_NET_ADMIN))
+    if (!netlink_capable(skb, CAP_SYS_ADMIN))
         return -EPERM;
 
     if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS || cmd == NM_CMD_GET_GHOST) {
@@ -6728,7 +6774,7 @@ static int __init nomount_init(void)
     /* Registering the protocol makes socket(AF_NETLINK, SOCK_RAW, NOMOUNT_NL_PROTO)
      * succeed here where a stock kernel answers EPROTONOSUPPORT -- an existence tell
      * for anything that can create the socket at all. Every command behind it is
-     * netlink_capable(CAP_NET_ADMIN)-gated, and for app domains SELinux denies
+     * netlink_capable(CAP_SYS_ADMIN)-gated, and for app domains SELinux denies
      * netlink_socket:create first (EACCES on stock and here alike), so the tell is
      * not reachable from an app; a domain that does hold netlink_socket would see it. */
     {

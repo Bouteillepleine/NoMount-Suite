@@ -249,10 +249,12 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     // Apply immediately so the effect does not wait for a reboot.
     // The message was right and the EXIT CODE was not: both arms returned Ok(()),
     // so `nomount whiteout add` exited 0 whether or not the engine took it. The
-    // WebUI gates purely on errno (index.html woAdd / woSuggest) — so a failed
-    // apply toasted "Hidden" and removed the row from the suggestion list, for a
-    // file every app can still read. The list entry IS saved, which is why this is
-    // a warning in the text and a failure in the status.
+    // WebUI's Hidden paths card reads errno first (index.html `woApply`, and the
+    // delegated row handler that calls it) — so a failed apply toasted "Hidden"
+    // and removed the row from the suggestion list, for a file every app can still
+    // read. The list entry IS saved, which is why this is a warning in the text
+    // and a failure in the status; the card prints the text on a non-zero exit for
+    // exactly that reason.
     match Nm::new().whiteout(Path::new(&t)) {
         Ok(()) => {
             println!("ok: {t} hidden (persists across reboots)");
@@ -296,13 +298,20 @@ pub fn remove(target: &str) -> Result<()> {
 }
 
 /// Targets the engine is currently whiting out, from `nm list`.
+///
+/// [`crate::nm::parse_list`], not a local split. This was one of the last two
+/// hand-rolled readers of that text, against the parser's own documented
+/// invariant that it is the ONE reader ("a change to the client's output format is
+/// one edit"). It peeled ` (whiteout)` as a SUFFIX and nothing else, so a rule
+/// carrying ` (public)` after it would not have matched -- and `whiteout list`
+/// would then report every saved entry as "not applied" while the engine was
+/// serving all of them. Unreachable only because `nm`'s whiteout path sends flag
+/// 4 and never 64, which is a property of the client, not of this function.
 fn live_whiteouts() -> std::collections::HashSet<String> {
-    Nm::new()
-        .list()
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| l.split(" [UID:").next().unwrap_or(l).trim().strip_suffix(" (whiteout)"))
-        .map(|t| t.trim().to_string())
+    crate::nm::parse_list(&Nm::new().list().unwrap_or_default())
+        .into_iter()
+        .filter(|r| r.kind == crate::nm::LiveKind::Whiteout)
+        .map(|r| r.target.to_string_lossy().into_owned())
         .collect()
 }
 
@@ -369,15 +378,13 @@ pub fn apply() -> Result<()> {
 /// A scanner that walks `/system/bin` will happily meet a file a MODULE put
 /// there, and proposing a whiteout for it would hide that module's own content.
 /// The old three-entry list never needed this check; a directory walk does.
+///
+/// Through the shared parser, for the reason [`live_whiteouts`] spells out.
 fn injected_targets() -> std::collections::HashSet<String> {
-    Nm::new()
-        .list()
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| {
-            let l = l.split(" [UID:").next().unwrap_or(l).trim();
-            Some(l.rsplit_once(" -> ")?.0.trim().to_string())
-        })
+    crate::nm::parse_list(&Nm::new().list().unwrap_or_default())
+        .into_iter()
+        .filter(|r| r.kind == crate::nm::LiveKind::Inject)
+        .map(|r| r.target.to_string_lossy().into_owned())
         .collect()
 }
 

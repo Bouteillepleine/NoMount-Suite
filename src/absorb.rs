@@ -1190,10 +1190,25 @@ fn current_apk_of(pkg: &str) -> Result<Option<PathBuf>> {
 ///
 /// Returns (repointed, stale) — stale being rules whose package is simply gone
 /// (uninstalled), which are dropped rather than re-pointed.
+///
+/// THE RECORD MOVES WITH THE RULE. Re-pointing the live rule and leaving
+/// `absorbed.list` naming the old `/data/app/…` path made this function a
+/// one-shot: every reader of the record gates on `target.exists()`
+/// (`reapply_absorbed_pairs`, and `run_mount` through it), so from the next boot
+/// the stale row was skipped forever and the package silently reverted to the
+/// stock APK — with no live rule left for a later pass to find, because the boot
+/// `nm clear` had dropped it. That defeats the record's stated purpose in as many
+/// words ("the source lets the boot pass re-serve it without waiting for the
+/// owning module to mount again"); it only ever kept working for a module that
+/// re-binds on every boot, which is the case the record exists to make
+/// unnecessary. Dead rows accumulated too, since nothing pruned them.
 pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     let (mut repointed, mut stale) = (0u32, 0u32);
     let Ok(list) = nm.list() else { return (0, 0) };
     let mut pm_failed = false;
+    // What the record has to be told, collected here and applied once at the end.
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut dropped: Vec<PathBuf> = Vec::new();
     // `crate::nm::parse_list`, not a fourth hand-rolled reader. This one split on
     // the FIRST ` -> ` and peeled only the ` [UID: n]` suffix -- exactly the drift
     // that parser's doc names as the reason it exists ("one split on the FIRST
@@ -1204,7 +1219,16 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     // it as an uninstall. Unreachable only because `is_pm_published()` cannot grant
     // the flag to a /data/app target, which is not a property this function should
     // depend on.
-    for r in crate::nm::parse_list(&list) {
+    // One parse, two uses: the walk below, and the live map `add_repointing`
+    // needs to know what the destination is currently served from. Building it
+    // from the same dump costs nothing and avoids a second `nm list`.
+    let rules = crate::nm::parse_list(&list);
+    let live: LiveMap = rules
+        .iter()
+        .filter(|r| r.uid == 0)
+        .filter_map(|r| r.source.clone().map(|s| (r.target.clone(), s)))
+        .collect();
+    for r in rules {
         let Some(source) = r.source else { continue };
         let target = r.target.as_path();
         if !is_app_apk(target) || target.exists() {
@@ -1225,9 +1249,30 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                 }
             }
             Ok(Some(now)) if now != *target && source.exists() => {
-                let _ = nm.del(target);
-                if nm.add(&now, &source).is_ok() {
+                // ADD FIRST, then drop the old rule -- and only if the add took.
+                //
+                // `del` then `add` is what `add_repointing` does for a target that
+                // already has a rule, and it is wrong here: the two targets are
+                // different paths, so there is nothing to re-point, and a failed
+                // add left the package with NO rule at all -- silently, since the
+                // status was discarded and `repointed` simply did not increment.
+                // `add_repointing`'s own note is the standard this was missing:
+                // "doing nothing here leaves the path on stock". The old target no
+                // longer exists on disk (that is the precondition for being in
+                // this branch), so it cannot be restored either; not destroying it
+                // until the replacement is live is the only order that can fail
+                // safely.
+                if add_repointing(nm, &now, &source, &live) {
+                    let _ = nm.del(target);
+                    moved.push((target.to_path_buf(), now));
                     repointed += 1;
+                } else {
+                    eprintln!(
+                        "nomount: could not re-point {pkg} at {} -- leaving the old rule and its \
+                         record alone; {} is served the stock APK until this succeeds",
+                        now.display(),
+                        pkg
+                    );
                 }
             }
             // pm answered: the package is gone, or the path is unchanged with no
@@ -1235,11 +1280,62 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
             // drop it.
             Ok(_) => {
                 let _ = nm.del(target);
+                dropped.push(target.to_path_buf());
                 stale += 1;
             }
         }
     }
+    if !moved.is_empty() || !dropped.is_empty() {
+        rewrite_absorbed_after_refresh(&moved, &dropped);
+    }
     (repointed, stale)
+}
+
+/// Carry a re-point (and an uninstall) into the absorbed record.
+///
+/// `read_absorbed_pairs`, not the infallible twin, and the file is LEFT ALONE on
+/// a read error -- the same discipline `run_mount` and `run_absorb` both apply by
+/// hand, and for the same reason: `set_absorbed_pairs` truncates before writing,
+/// so rewriting from an empty read destroys every patched-APK rule on the device.
+fn rewrite_absorbed_after_refresh(moved: &[(PathBuf, PathBuf)], dropped: &[PathBuf]) {
+    let all = match read_absorbed_pairs() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "nomount: could not read {ABSORBED_LIST} ({e}) -- NOT rewriting it, so the \
+                 re-pointed APK rule(s) are unrecorded until the next successful absorb"
+            );
+            return;
+        }
+    };
+    let (next, changed) = apply_apk_refresh(all, moved, dropped);
+    if changed {
+        set_absorbed_pairs(&next);
+    }
+}
+
+/// Pure half of [`rewrite_absorbed_after_refresh`]: re-aim the rows a re-point
+/// moved, drop the rows an uninstall retired, and say whether anything changed.
+///
+/// Deduplicated on the target, because a partially-completed earlier pass can
+/// leave the destination already recorded -- two rows for one target would make
+/// the boot pass serve it twice.
+fn apply_apk_refresh(
+    mut pairs: Vec<(PathBuf, PathBuf)>,
+    moved: &[(PathBuf, PathBuf)],
+    dropped: &[PathBuf],
+) -> (Vec<(PathBuf, PathBuf)>, bool) {
+    let before = pairs.clone();
+    for (t, _) in pairs.iter_mut() {
+        if let Some((_, now)) = moved.iter().find(|(old, _)| old == t) {
+            *t = now.clone();
+        }
+    }
+    pairs.retain(|(t, _)| !dropped.iter().any(|d| d == t));
+    pairs.sort();
+    pairs.dedup_by(|a, b| a.0 == b.0);
+    let changed = pairs != before;
+    (pairs, changed)
 }
 
 /// ROM partitions a module might try to empty. A tmpfs anywhere under one of
@@ -2044,6 +2140,59 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The record has to follow the rule. Leaving it on the old `/data/app/…`
+    /// path made every reader skip it forever (they all gate on `target.exists()`),
+    /// so the patched APK stopped being re-served at boot and the row could never
+    /// be repaired -- there was no live rule left for a later pass to find.
+    #[test]
+    fn a_repointed_apk_moves_its_row_and_an_uninstall_drops_it() {
+        let old = PathBuf::from("/data/app/~~a==/com.foo-a==/base.apk");
+        let now = PathBuf::from("/data/app/~~b==/com.foo-b==/base.apk");
+        let gone = PathBuf::from("/data/app/~~c==/com.bar-c==/base.apk");
+        let keep = PathBuf::from("/data/app/~~d==/com.baz-d==/base.apk");
+        let src = PathBuf::from("/data/adb/rvhc/patched.apk");
+
+        let pairs = vec![
+            (old.clone(), src.clone()),
+            (gone.clone(), src.clone()),
+            (keep.clone(), src.clone()),
+        ];
+        let (next, changed) =
+            apply_apk_refresh(pairs, &[(old.clone(), now.clone())], std::slice::from_ref(&gone));
+
+        assert!(changed);
+        assert!(next.iter().any(|(t, s)| *t == now && *s == src), "row follows the app");
+        assert!(!next.iter().any(|(t, _)| *t == old), "the dead path is gone");
+        assert!(!next.iter().any(|(t, _)| *t == gone), "an uninstall retires its row");
+        assert!(next.iter().any(|(t, _)| *t == keep), "an untouched row survives");
+    }
+
+    /// A partially-completed earlier pass can leave the destination already
+    /// recorded. Two rows for one target would have the boot pass serve it twice.
+    #[test]
+    fn a_repoint_onto_an_already_recorded_target_does_not_duplicate_it() {
+        let old = PathBuf::from("/data/app/~~a==/com.foo-a==/base.apk");
+        let now = PathBuf::from("/data/app/~~b==/com.foo-b==/base.apk");
+        let src = PathBuf::from("/data/adb/rvhc/patched.apk");
+        let (next, changed) = apply_apk_refresh(
+            vec![(old.clone(), src.clone()), (now.clone(), src.clone())],
+            &[(old, now.clone())],
+            &[],
+        );
+        assert!(changed);
+        assert_eq!(next.iter().filter(|(t, _)| *t == now).count(), 1);
+        assert_eq!(next.len(), 1);
+    }
+
+    /// Nothing to say means nothing is written: `set_absorbed_pairs` truncates
+    /// before it writes, so a needless rewrite is a needless window.
+    #[test]
+    fn a_refresh_that_moved_nothing_reports_no_change() {
+        let p = vec![(PathBuf::from("/data/app/~~a==/com.foo-a==/base.apk"), PathBuf::from("/x"))];
+        let (_, changed) = apply_apk_refresh(p, &[], &[]);
+        assert!(!changed);
+    }
 
     // The real row this was derived from, captured on-device from a file bind.
     const SAMPLE: &str = "\

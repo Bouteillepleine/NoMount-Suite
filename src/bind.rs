@@ -223,6 +223,44 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     Ok(BindOutcome::Bound)
 }
 
+/// Replace binds.list, atomically. Caller must hold the Lock.
+///
+/// Temp-then-rename, not `fs::write`. This file is the ONLY record of the binds
+/// we made -- `teardown_all` says so, and says what losing it costs: a live mount
+/// over a `my_*` path whose backing file has already been relabelled back to
+/// `adb_data_file`, which no later pass can see, let alone unmount. `fs::write`
+/// truncates and then writes, so a short write (ENOSPC, a killed pass -- and
+/// metamount.sh SIGKILLs this process at 60s) leaves exactly that. `rename` within
+/// one directory is atomic, so a reader sees either the old list or the new one.
+/// The same discipline `service.sh` uses for bindhosts' `mode_override.sh` and
+/// `lib.sh` for the ksud de-link, both for smaller stakes.
+///
+/// 0600 explicitly: `fs::write` on an EXISTING file keeps its mode, so a list a
+/// pre-umask build created wide stayed wide forever.
+fn write_binds_list(body: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = format!("{BINDS_LIST}.new");
+    let write = || -> std::io::Result<()> {
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()
+    };
+    if let Err(e) = write() {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp, BINDS_LIST) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Drop one (target, source) row from binds.list. Caller must hold the Lock. Used
 /// to undo a record written before a relabel/mount that then failed (L5).
 fn remove_record_locked(target: &str, source: &str) {
@@ -231,7 +269,7 @@ fn remove_record_locked(target: &str, source: &str) {
         .filter(|(t, s, _)| !(t.to_string_lossy() == target && s.to_string_lossy() == source))
         .map(|(t, s, l)| format!("{}\t{}\t{}\n", t.display(), s.display(), l))
         .collect();
-    if let Err(e) = fs::write(BINDS_LIST, &remaining) {
+    if let Err(e) = write_binds_list(&remaining) {
         eprintln!("nomount: could not roll back a failed bind record in {BINDS_LIST}: {e}");
     }
 }
@@ -340,7 +378,7 @@ pub fn umount_one(target: &Path) -> bool {
         .collect();
     // This list is the ONLY record of binds we made; if it cannot be rewritten
     // the dropped entry is leaked -- a real mount nothing will umount later.
-    if let Err(e) = fs::write(BINDS_LIST, &remaining) {
+    if let Err(e) = write_binds_list(&remaining) {
         eprintln!(
             "nomount: could not update {BINDS_LIST}: {e} — a bind may be left \
              recorded (or unrecorded) and will not be cleaned up on the next pass"
@@ -399,7 +437,7 @@ pub fn teardown_all() -> bool {
         }
     }
     if !kept.is_empty() {
-        if let Err(e) = fs::write(BINDS_LIST, &kept) {
+        if let Err(e) = write_binds_list(&kept) {
             eprintln!("nomount: could not rewrite {BINDS_LIST}: {e} — a bind that is still \
                        mounted has lost its only record");
         }

@@ -15,21 +15,32 @@
 # The inventory comes from `nomount uid preset --dry-run`, so the package list has
 # exactly one home (src/presets.rs) and the globs work verbatim as shell `case`
 # patterns. tr -d '\000' collapses the manifest's UTF-16 string pool so grep matches.
-CACHE=/data/adb/nomount/uidscan_cache
 MODDIR="${0%/*}"
-mkdir -p /data/adb/nomount && chmod 0700 /data/adb/nomount
+NMLOG_TAG=uidscan
+# nmlog / nm_set_bin / $NMDIR, and the umask -- the same helpers every other entry
+# point uses. THIS SCRIPT WAS THE LAST ONE WITHOUT THEM. It carried its own copy
+# of nm_set_bin's three-step ABI fallback, hardcoded /data/adb/nomount rather than
+# $NMDIR, and ran under the boot umask -- so `sort -u > "$CACHE.tmp"` created the
+# cache 0666 and `mv` carried that mode onto it. That file is the list of
+# installed apps this scan proposes hiding from, i.e. the same secret `uidhide`
+# is, and lib.sh's own umask note is the argument: the 0700 parent is what gates
+# access today, but a file that IS the hiding policy should not depend on its
+# parent alone. GUARDED, like the others.
+# shellcheck source=module/lib.sh
+. "$MODDIR/lib.sh" 2>/dev/null || {
+    echo "nomount: lib.sh missing or unreadable at $MODDIR — the hide-list scan cannot run; re-flash the zip" > /dev/kmsg 2>/dev/null
+    exit 1
+}
+CACHE="$NMDIR/uidscan_cache"
+mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 
-ABI=$(getprop ro.product.cpu.abi)
-# The SAME fallback metamount.sh, post-fs-data.sh, post-mount.sh, service.sh and
-# uidwatch.sh all carry, and the one script that was missing it. An empty ABI
-# builds "$MODDIR/bin//nomount", which can never be executable -- and the only
-# consumer below swallows that with 2>/dev/null, so the detector inventory came
-# back EMPTY and the scan silently degraded to the manifest heuristics alone. A
-# scan that has quietly stopped checking the thing it is named for looks exactly
-# like a scan that found nothing.
-[ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
-[ -n "$ABI" ] || ABI=arm64-v8a
-BIN="$MODDIR/bin/$ABI/nomount"
+# ABI / BIN / NM_BIN, with the empty-getprop fallback -- see nm_set_bin in lib.sh.
+# An empty ABI builds "$MODDIR/bin//nomount", which can never be executable -- and
+# the only consumer below swallows that with 2>/dev/null, so the detector
+# inventory came back EMPTY and the scan silently degraded to the manifest
+# heuristics alone. A scan that has quietly stopped checking the thing it is named
+# for looks exactly like a scan that found nothing.
+nm_set_bin
 
 # One source of truth for the inventory; empty if the binary is missing, in which
 # case the manifest signals below still stand on their own -- but SAY SO, because
@@ -41,7 +52,12 @@ else
     INV=""
 fi
 if [ -z "$INV" ]; then
+    # BOTH channels. The WebUI runs this with `2>/dev/null`, so the stderr line
+    # goes nowhere for the one caller that has a screen -- and a scan that has
+    # quietly stopped checking the thing it is named for is exactly what has to be
+    # recoverable afterwards.
     echo "nomount scan: no detector inventory (no executable at $BIN) -- name matching is OFF, manifest signals only" >&2
+    nmlog "⚠ scan ran with NO detector inventory (no executable at $BIN) — name matching was off"
 fi
 
 # `timeout` is toybox's and is not guaranteed present, and without it a bare
@@ -69,6 +85,7 @@ export INV
 PKGS=$(pm list packages -3 -f 2>/dev/null | sed 's/^package://')
 if [ -z "$PKGS" ]; then
     echo "nomount scan: pm listed no packages; keeping the previous cache" >&2
+    nmlog "scan: pm listed no packages — kept the previous cache rather than publishing an empty one"
     cat "$CACHE" 2>/dev/null
     exit 0
 fi

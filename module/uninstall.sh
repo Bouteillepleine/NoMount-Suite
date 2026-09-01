@@ -46,9 +46,12 @@ unset _ovr
 # The discriminator is the manager's own `remove` marker: KernelSU, APatch and
 # Magisk all write it into the module directory when the USER asks for removal
 # and run this script at the next boot, whereas an update extracts the new module
-# over the old one with no marker at all. Belt and braces -- service.sh also
-# sweeps a stash that outlived a boot, so a manager that does not use the marker
-# still cannot leave one lying around.
+# over the old one with no marker at all. Belt and braces -- both boot entry
+# points (metamount.sh and post-fs-data.sh) also sweep a stash that outlived a
+# boot, so a manager that does not use the marker still cannot leave one lying
+# around. NOT service.sh, which this comment used to name and which has never
+# touched the file; that mistake is also why the removal branch below did not
+# think it had to clean up after itself.
 MODDIR="${0%/*}"
 _bak=/data/adb/nomount.bak
 _nmlog() {
@@ -56,7 +59,16 @@ _nmlog() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [uninstall] $*" >> /data/adb/nomount/boot.log 2>/dev/null
 }
 if [ -f "$MODDIR/remove" ]; then
-    _nmlog "removal requested - dropping the state directory without stashing anything"
+    # ...and take any stash ALREADY on disk with us. Declining to CREATE one is
+    # only half the promise the header makes. A stash survives a flash whose
+    # customize.sh aborted before it could consume one -- the sha256 refusal and
+    # the metamodule-conflict refusal both exit before the restore loop -- and the
+    # sweep that would otherwise collect it lives in the two BOOT entry points,
+    # neither of which runs again once the module is gone. So it sat there
+    # forever, named after the module the user had just deleted, holding `uidhide`:
+    # the list of apps they were hiding from.
+    _nmlog "removal requested - dropping the state directory, and any stash left by an unfinished install, without saving anything"
+    rm -rf "$_bak"
 elif [ -d /data/adb/nomount ]; then
     # Everything the USER chose, and the operational records that cannot be
     # rebuilt from anywhere else:

@@ -9,6 +9,14 @@
      shell interpolation through shq() -- that is the actual defence and it is not
      being relaxed here. This is the backstop for the one that gets missed.
 
+     BE PRECISE ABOUT WHAT THAT BACKSTOP IS. With script-src 'unsafe-inline' --
+     which this page cannot do without, being a single inline <script> -- a CSP
+     does NOT stop injected script from RUNNING. What it stops is the injected
+     script reaching anything: default-src 'none' leaves no connect-src, no
+     img-src beyond 'self', no font-src and no form-action, so there is nowhere to
+     send what it read. Read this as containment, never as XSS mitigation, and do
+     not let its presence excuse a missing esc().
+
      Each source is exactly what the page already uses, and nothing more:
        script-src 'unsafe-inline'  the single inline <script> and the onclick=
                                    handlers; NO src= is permitted, so an injected
@@ -1028,6 +1036,31 @@
     </div>
     <div class="list" id="vfsdirs" style="display:none"></div>
     <div class="list" id="vfsfull" style="display:none"></div>
+  </div>
+
+  <!-- The third thing the engine does to the filesystem, next to the two above
+       it: redirect a path, materialise a directory, or make a name ABSENT.
+       `nomount whiteout add/remove/list/suggest` is durable, re-applied in the
+       same boot pass as the injections, and for a while it had no surface here at
+       all -- so the feature existed only for someone with a root shell, while
+       whiteout.rs still explained its exit codes in terms of the buttons below
+       and the changelog still advertised the card. -->
+  <div class="card">
+    <div class="card-h clp" onclick="toggleWhiteouts(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
+      <h2>Hidden paths</h2><span class="chip" id="wochip">—</span><span class="chev">›</span>
+    </div>
+    <div id="wobody" style="display:none">
+      <p class="note" style="margin-top:0">Make a <b>stock ROM file</b> disappear — for paths that are themselves the tell, like <code>install-recovery.sh</code>. The list is saved and re-applied on every boot, in the same pass as the injections. Nothing is installed and nothing is mounted. <b>Scan</b> walks the ROM for files only a root setup leaves behind; on a mountless install it usually finds nothing, which is the correct answer — nothing is written to <code>/system</code>, so there is nothing on it to hide.</p>
+      <div class="uidbar">
+        <input id="woPath" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+               placeholder="/system/bin/install-recovery.sh" />
+        <button class="act" onclick="woAdd(this)">Hide</button>
+        <button class="act" onclick="woScan(this)">Scan this device</button>
+      </div>
+      <div class="list" id="woFound" style="display:none"></div>
+      <div class="list" id="woList"></div>
+    </div>
   </div>
 
   </section>
@@ -2435,6 +2468,152 @@
     }).join("");
     if ($("vfsfull").style.display !== "none") renderFilesFull();
   }
+  // ---- Hidden paths (durable whiteouts) ----------------------------------
+  //
+  // Restored after a stretch with no surface at all, and NOT as it was. The
+  // earlier version built its commands by concatenation -- `whiteout add ${v}`,
+  // `whiteout remove ${path}` -- behind a character blacklist, and put the path
+  // inside a generated `onclick` with JSON.stringify. Both are the shapes the
+  // rest of this file spells out as forbidden: everything here runs through a
+  // ROOT shell, so every interpolated value goes through shq(); and esc() renders
+  // ' as &#39;, which an HTML attribute decodes BEFORE the JS in it is parsed, so
+  // a legal filename with a quote in it becomes script injection with root behind
+  // it. Rows carry data-attributes and one delegated listener, exactly as the
+  // hidden-apps list does.
+  //
+  // Absolute, and free of control characters. Deliberately NOT a metacharacter
+  // blacklist, which is what the earlier card had: shq() single-quotes and escapes
+  // `'` as `'\''`, which is airtight in POSIX sh, so a blacklist adds nothing
+  // against injection and does take something away -- it refuses paths the engine
+  // accepts, which for the DELETE button means a saved row nothing in the UI can
+  // remove. What is excluded here is what would break the shape of the plumbing
+  // rather than its safety: a newline splits one exec into two, and a TAB is the
+  // field separator `whiteout list` prints its state after. `nomount whiteout add`
+  // still refuses a relative path, a `..` and a non-ROM root on its own; this is
+  // the earlier, friendlier refusal, never the only one.
+  const WO_PATH_RE = /^\/[^\x00-\x1f\x7f]+$/;
+  function toggleWhiteouts(h) {
+    const on = h.classList.toggle("open");
+    $("wobody").style.display = on ? "" : "none";
+    if (on) refreshWhiteouts();
+  }
+  // The chip alone, off the SAVED list, for a refresh while the card is closed.
+  // `whiteout list` is the right answer for the rows -- it cross-references the
+  // engine, which is how "saved, not applied" and "applied, but still visible"
+  // are told apart -- and that is a round trip nobody is looking at while the
+  // card is shut. Same predicate the readers use: a line counts when its first
+  // non-blank character is not `#`.
+  async function woChipOnly() {
+    const r = await exec(
+      "grep -cvE '^[[:space:]]*(#|$)' /data/adb/nomount/whiteouts.txt 2>/dev/null");
+    const n = parseInt((r.stdout || "").trim(), 10);
+    $("wochip").textContent = Number.isFinite(n) ? String(n) : "0";
+  }
+  async function refreshWhiteouts() {
+    const r = await nm("whiteout list");
+    const box = $("woList");
+    const lines = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
+    if (r.errno !== 0) {
+      $("wochip").textContent = "?";
+      box.innerHTML = '<div class="empty">Unknown — the list could not be read.</div>';
+      return;
+    }
+    if (!lines.length || /^no whiteouts/.test(lines[0])) {
+      $("wochip").textContent = "0";
+      box.innerHTML = '<div class="empty">Nothing hidden.</div>';
+      return;
+    }
+    $("wochip").textContent = String(lines.length);
+    box.innerHTML = lines.map(l => {
+      const path = l.split("\t")[0];
+      const st = (l.split("\t")[1] || "").trim();
+      // Only "hidden" means the engine is actually serving it right now. The
+      // other three states are the ones `whiteout list` was taught to tell apart:
+      // saved-but-not-applied, applied-but-still-visible, and saved-for-a-path-
+      // this-ROM-does-not-have.
+      const cls = /^hidden/.test(st) ? "vfs"
+        : /^not applied \(and no such path/.test(st) ? "off" : "warn";
+      return `<div class="row"><span class="name mono" title="${esc(path)}">${esc(path)}</span>` +
+             `<span class="tag ${cls}" title="${esc(st)}">${esc(st.split(" - ")[0])}</span>` +
+             `<button class="bx" title="Stop hiding" data-act="wodel" data-nmp="${esc(path)}">✕</button></div>`;
+    }).join("");
+  }
+  async function woAdd(btn) {
+    const v = ($("woPath").value || "").trim();
+    if (!v) { toast("Enter an absolute path", "bad"); return; }
+    if (!WO_PATH_RE.test(v)) { toast("An absolute path, on one line", "bad"); return; }
+    const done = busy(btn, "Hiding…");
+    const r = await woApply(v);
+    if (r.errno === 0) $("woPath").value = "";
+    done(); refreshWhiteouts(); refreshStatus();
+  }
+  // One place the command is built, so the quoting cannot be right in one caller
+  // and missing in the next.
+  async function woApply(path) {
+    const r = await nm(`whiteout add ${shq(path)}`);
+    const txt = ((r.stdout || "") + (r.stderr || "")).trim();
+    // The CLI exits non-zero when the entry was SAVED but the engine refused to
+    // apply it now -- the path stays visible until the next boot -- so the text
+    // is the answer here, not just "failed".
+    toast(r.errno === 0 ? (txt.split("\n").pop() || "Hidden") : "Failed: " + (txt || "error"),
+          r.errno === 0 ? "ok" : "bad");
+    return r;
+  }
+  async function woRemove(path, btn) {
+    const done = busy(btn);
+    const r = await nm(`whiteout remove ${shq(path)}`);
+    const txt = ((r.stdout || "") + (r.stderr || "")).trim();
+    toast(r.errno === 0 ? "No longer hidden" : "Failed: " + (txt || "error"),
+          r.errno === 0 ? "ok" : "bad");
+    done(); refreshWhiteouts(); refreshStatus();
+  }
+  // Walks the ROM for files only a root setup leaves behind and lists what it
+  // found, each with its reason and its own Hide button. Nothing is applied:
+  // hiding a ROM path is a decision, and a scan button must not make it.
+  async function woScan(btn) {
+    const done = busy(btn, "Scanning…");
+    const r = await nm("whiteout suggest");
+    const out = (r.stdout || "") + (r.stderr || "");
+    const box = $("woFound");
+    const cands = out.split("\n").map(x => x.trim()).filter(l => l.indexOf("\t") > 0);
+    // The notes explain what was FILTERED -- candidates no app can see, and ones
+    // NoMount is already serving. An empty result with a reason is a real answer,
+    // not a failure, so show it rather than a bare "nothing found".
+    const notes = out.split("\n").map(x => x.trim())
+      .filter(l => /^\(|^nothing to suggest/.test(l)).join(" ");
+    box.style.display = "";
+    if (!cands.length) {
+      box.innerHTML = `<div class="empty">${esc(notes || "Nothing found.")}</div>`;
+      toast("Nothing to hide on this device", "ok");
+    } else {
+      box.innerHTML =
+        `<div class="blk-head">Found · ${cands.length}</div>` +
+        cands.map(l => {
+          const p = l.split("\t")[0], why = l.split("\t")[1] || "";
+          return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(p)}</span>` +
+                 `<span class="tag warn" title="${esc(why)}">${esc(why.split(";")[0])}</span>` +
+                 `<button class="bx" title="Hide this path" data-act="woadd" data-nmp="${esc(p)}">+</button></div>`;
+        }).join("") +
+        (notes ? `<div class="empty">${esc(notes)}</div>` : "");
+      toast(cands.length + " candidate(s) found", "ok");
+    }
+    done();
+  }
+  // Both lists, one listener. Every path is re-validated on the way out: these
+  // rows are built from a hand-editable file and from filenames read off the ROM,
+  // and neither is a reason to trust the string that reaches a root shell.
+  document.getElementById("wobody").addEventListener("click", async ev => {
+    const b = ev.target.closest("button[data-act]");
+    if (!b) return;
+    const p = b.getAttribute("data-nmp") || "";
+    if (!WO_PATH_RE.test(p)) { toast("That path has characters nomount won't take", "bad"); return; }
+    if (b.getAttribute("data-act") === "wodel") { woRemove(p, b); return; }
+    const done = busy(b);
+    const r = await woApply(p);
+    done(); refreshWhiteouts();
+    if (r.errno === 0) { const row = b.closest(".row"); if (row) row.remove(); }
+  });
+
   // Full per-file list: basename shown, full path in the title attribute, because
   // a phone cannot show /system/product/overlay/… and the name in one line.
   function renderFilesFull() {
@@ -2938,7 +3117,12 @@
       (staged ? " · " + pv + " staged — reboot to activate" : "");
     await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
                        refreshModules(), refreshFiles(), refreshRuleSummary(),
-                       refreshIncident(), refreshBlocked(), refreshIsolated()]);
+                       refreshIncident(), refreshBlocked(), refreshIsolated(),
+                       // Only when the card is open. The chip is the whole
+                       // summary while it is closed, and `whiteout list` asks the
+                       // engine -- not a cost to pay on every refresh for a
+                       // number nobody is looking at.
+                       $("wobody").style.display === "none" ? woChipOnly() : refreshWhiteouts()]);
     if (rulesShown) loadRules();
     loadPkgList();
     if (ic) ic.classList.remove("spin");

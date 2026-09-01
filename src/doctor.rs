@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::check::{slug, Check, Section, Verdict};
-use crate::mount::{collect_plan, PlanEntry, PlanKind};
+use crate::mount::{collect_plan, is_partition_root, PlanEntry, PlanKind};
 use crate::nm::{LiveRule, Nm};
 
 /// Partitions whose file descriptors zygote will accept across `forkSystemServer`.
@@ -226,9 +226,12 @@ fn partition_of(p: &Path) -> Option<String> {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
 }
 
-fn is_partition_root(p: &Path) -> bool {
-    p.components().skip(1).count() == 1
-}
+// `is_partition_root` is mount.rs's, imported above. This file used to keep its
+// own copy, and it was the `count() == 1` form -- the one mount.rs widened to
+// `<= 1` because it answered FALSE for `/`, "the one path where serving a rule is
+// most catastrophic", and called "a trap for the next caller". This file lints
+// the plan for exactly that class of rule, so it is the last place that should
+// have been asking the question with the older answer.
 
 /// Does the engine actually hold the rules the plan describes -- and nothing else?
 ///
@@ -869,8 +872,13 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let mut nested: Vec<(&Path, &str)> = Vec::new();
     for e in &plan {
         let mut segs = e.target.components().skip(1).filter_map(|c| c.as_os_str().to_str());
+        // `a == b` is the whole test. The second half used to be
+        // `is_partition_root(Path::new(&format!("/{a}")))`, which reads as a device
+        // check and is a tautology -- `a` is one component, so that call is
+        // `count() <= 1` on a one-component path. See the same note in
+        // `mount::serve_mode`, which carried the identical dead conjunct.
         if let (Some(a), Some(b)) = (segs.next(), segs.next()) {
-            if a == b && is_partition_root(Path::new(&format!("/{a}"))) {
+            if a == b {
                 nested.push((e.target.as_path(), e.module.as_str()));
             }
         }
@@ -2036,10 +2044,13 @@ mod tests {
         assert_eq!(partition_of(Path::new("/")), None);
     }
 
+    /// Kept after the local copy was deleted, because it is this file's callers
+    /// that depend on the answer -- and `/` is the case the local copy got wrong.
     #[test]
     fn is_partition_root_only_for_bare_roots() {
         assert!(is_partition_root(Path::new("/product")));
         assert!(is_partition_root(Path::new("/system")));
+        assert!(is_partition_root(Path::new("/")), "the filesystem root is one too");
         assert!(!is_partition_root(Path::new("/product/overlay")));
         assert!(!is_partition_root(Path::new("/product/overlay/x.apk")));
     }

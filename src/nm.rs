@@ -357,11 +357,18 @@ mod tests {
         // ...and the UID it was scoped to is kept, not dropped: it is part of the
         // rule's identity, and `nm del` only ever addresses uid 0.
         assert_eq!(v[0].uid, 10123);
-        // A whiteout that also carried a flag is still classified as a whiteout.
-        let w = parse_list("/system/y (public) (whiteout)\n");
-        assert_eq!(w.len(), 1);
-        assert_eq!(w[0].kind, LiveKind::Whiteout);
-        assert!(w[0].public);
+        // A whiteout that also carried a flag is still classified as a whiteout,
+        // in EITHER order -- the client emits the kind marker first and the flag
+        // after it (`nm.c`: is_whiteout, then is_public), and whiteout.rs's
+        // "is this applied?" set is built off `kind`, so a rule this dropped
+        // would report a live whiteout as "not applied".
+        for line in ["/system/y (public) (whiteout)\n", "/system/y (whiteout) (public)\n"] {
+            let w = parse_list(line);
+            assert_eq!(w.len(), 1, "{line:?}");
+            assert_eq!(w[0].kind, LiveKind::Whiteout, "{line:?}");
+            assert_eq!(w[0].target, PathBuf::from("/system/y"), "{line:?}");
+            assert!(w[0].public, "{line:?}");
+        }
         // A plain inject has no flag and is global.
         let p = parse_list("/product/z -> /data/adb/modules/M/z\n");
         assert!(!p[0].public);

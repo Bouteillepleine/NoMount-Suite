@@ -211,8 +211,17 @@ CONF="$NMDIR/spoof.conf"
 # point, never executed, and each of them stops with a kmsg line if it cannot read
 # it. `ksud module install` leaves files it does not know about at whatever the
 # zip carried, and the extraction has already been observed dropping bits, so say
-# the mode rather than inherit it. The 5th argument is not optional here either --
-# see the note on $NMDIR above.
+# the mode rather than inherit it.
+#
+# FOUR arguments, deliberately, and the comment here used to claim the opposite
+# ("the 5th argument is not optional here either") above a four-argument call --
+# so one of the two was wrong and a reader could not tell which. This is a file in
+# the MODULE TREE, where set_perm's default (u:object_r:system_file:s0) is what
+# ksud gives every other file under /data/adb/modules; naming a different context
+# for this one would make it the odd file out, and nothing here needs one. $NMDIR
+# is the opposite case and keeps its explicit label: it lives under /data/adb, not
+# in the module tree, its parent is adb_data_file, and its contents name which apps
+# are being hidden from. Same for uidwatch.sh and uninstall.sh below.
 [ -f "$MODPATH/lib.sh" ] && set_perm "$MODPATH/lib.sh" 0 0 0644
 
 # Executable, not just readable. `ksud module install` leaves the scripts it

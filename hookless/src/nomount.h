@@ -32,7 +32,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.29.0"
+#define NM_MODULE_VERSION "1.30.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -267,8 +267,28 @@
  *    applied to the 4.11+ arm and not the 4.9 one would previously have hidden.
  *
  *    Same reason 19, 20, 22, 25 and 27 have a bump: userspace cannot see any of
- *    it, so `doctor` needs a number to tell this engine from the one before it. */
-#define NOMOUNT_VERSION    29
+ *    it, so `doctor` needs a number to tell this engine from the one before it.
+ *
+ * 30: the control plane now demands CAP_SYS_ADMIN instead of CAP_NET_ADMIN, and
+ *    nm_dsnap_make() stops publishing its remaining failures as verdicts.
+ *
+ *    The capability is the one change here a user can be locked out by, so it
+ *    needs a number: CAP_NET_ADMIN was the faithful translation of the genl
+ *    GENL_ADMIN_PERM flag this protocol replaced, and a bad fit for an interface
+ *    whose ADD_RULE can serve a chosen file at any path on any ROM partition --
+ *    root-equivalent power behind a capability that netd and system_server hold
+ *    and root-equivalence does not follow from. Every caller in the tree is uid 0
+ *    with a full capability set, so nothing legitimate loses access; a kernel
+ *    below 30 simply keeps the looser gate.
+ *
+ *    The dsnap fix is 29's, finished. 29 split "could not ask" from "walked it
+ *    and it does not qualify" for the dentry_open arm and left the other three
+ *    exits sharing one `goto out`, which publishes ok = false -- so a GFP_NOFS
+ *    failure, or an iterate_dir() error, still cached a not-answer that
+ *    nm_dsnap_fresh() then kept until the backing directory's size or mtime
+ *    moved. Only b.overflow (more entries or name bytes than the model carries,
+ *    a property of the directory) leaves as a cacheable negative now. */
+#define NOMOUNT_VERSION    30
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -790,7 +810,7 @@ enum {
  * That kobject directory was world-traversable (0755), so both its name and its
  * attribute names were readable by any process that could search /sys/kernel --
  * a stock-baseline diff finds it regardless of what it is called. They ride the
- * netlink control plane instead, which is CAP_NET_ADMIN-gated and not
+ * netlink control plane instead, which is CAP_SYS_ADMIN-gated and not
  * enumerable. Payload layout: [u32 knob][value bytes], empty value = clear. */
 enum {
     /* 0..3: RETIRED boot-identity knobs -- uname release/version and the
