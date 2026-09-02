@@ -87,6 +87,7 @@ pub(crate) const N_PM_OPEN: &str = "PM-published files open for a hidden app";
 pub(crate) const N_ROM_TMPFS: &str = "tmpfs over the ROM";
 pub(crate) const N_FOREIGN_MOUNT: &str = "foreign mount over the ROM";
 pub(crate) const N_RULE_DUMP: &str = "engine rule dump";
+pub(crate) const N_XATTR_HIDDEN: &str = "xattr agrees with open for a hidden app";
 
 /// Every name above, so a test can assert over the shipped set rather than a
 /// transcription of it.
@@ -97,10 +98,10 @@ pub(crate) const N_RULE_DUMP: &str = "engine rule dump";
 /// them. Forgetting to add a new check here weakens that test; it can no longer
 /// let a check's name and its stand-in drift apart, which is what it used to.
 #[cfg(test)]
-pub(crate) const ALL_CHECK_NAMES: [&str; 13] = [
+pub(crate) const ALL_CHECK_NAMES: [&str; 14] = [
     N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DIRENT_COOKIE, N_DINO_STAT,
     N_INODE_BAND, N_OVERLAY_DIR_INO, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
-    N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP,
+    N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN,
 ];
 
 // ---------------------------------------------------------------- raw readdir
@@ -1524,7 +1525,7 @@ fn check_engine_live() -> Check {
 
 /// Every check that reads the live rule list, by the exact name it reports
 /// under. When the dump fails these are the ones that cannot run.
-const RULE_DEPENDENT: [&str; 7] = [
+const RULE_DEPENDENT: [&str; 8] = [
     N_DIRENT_COOKIE,
     N_DINO_STAT,
     N_INODE_BAND,
@@ -1532,7 +1533,157 @@ const RULE_DEPENDENT: [&str; 7] = [
     N_EROFS_SHAPE,
     N_MAPS_DELETED,
     N_PM_OPEN,
+    N_XATTR_HIDDEN,
 ];
+
+/// Does the xattr surface tell a hidden app the same thing `open()` does?
+///
+/// The driver gates it -- `nm_listxattr()` opens with
+/// `if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;` -- but NOTHING in
+/// this report measured that, so a regression there would have been silent. That
+/// is the exact shape of the round-3 leak: a decision correct in one reader and
+/// unpinned everywhere else. `getxattr` is asked alongside it because the two take
+/// different kernel routes (`nm_listxattr` forwards to `i_op->listxattr` directly,
+/// `nm_xattr_get` goes through `vfs_getxattr`), a divergence the driver documents
+/// as measured-not-assumed -- so it is worth continuing to measure.
+///
+/// The tell this guards against is an EXISTENCE oracle, and it is one-sided. An
+/// app that is denied `open()` but handed a live xattr answer -- a size, a
+/// `security.selinux` context -- has learned the file is there and that something
+/// is deciding it may not have it, which is strictly worse than the file simply
+/// not existing. The reverse (open succeeds, xattr denied) is noise rather than a
+/// leak, so it is reported separately and does not fail the check on its own.
+///
+/// Same probe shape as [`check_pm_apks_open_when_hidden`]: fork, drop to a blocked
+/// appid, uid only, SELinux domain untouched, because `nomount_is_uid_blocked()`
+/// reads `current_uid()`.
+fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
+    const NAME: &str = N_XATTR_HIDDEN;
+    let Ok(blocked) = Nm::new().uid_list_live() else {
+        return unmeasured(NAME, "the engine would not list the per-UID hide set".into())
+            .meaning("Not tested — the hide list could not be read.");
+    };
+    let Some(&appid) = blocked.first() else {
+        return na(NAME, "no app is hidden".into()).meaning(
+            "You have not hidden any apps yet, so there is nothing to test here. Hide one and \
+             this check starts running.",
+        );
+    };
+    let files: Vec<&PathBuf> =
+        targets.iter().filter(|t| fs::File::open(t).is_ok()).collect();
+    if files.is_empty() {
+        return unmeasured(NAME, "no rule target opens as root".into())
+            .meaning("None of the injected files could be opened even as root, so the question this check asks could not be put.");
+    }
+
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return unmeasured(NAME, "pipe() failed".into())
+            .meaning("The probe could not be set up, so this was not tested.");
+    }
+    let (rd, wr) = (fds[0], fds[1]);
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        unsafe { libc::close(rd); libc::close(wr) };
+        return unmeasured(NAME, "fork() failed".into())
+            .meaning("The probe could not be started, so this was not tested.");
+    }
+    if pid == 0 {
+        unsafe { libc::close(rd) };
+        // setgroups, setgid, setuid -- in that order and while still privileged,
+        // for the reason spelled out in check_pm_apks_open_when_hidden.
+        let dropped = unsafe {
+            libc::setgroups(0, std::ptr::null()) == 0
+                && libc::setgid(appid) == 0
+                && libc::setuid(appid) == 0
+        };
+        let (mut leaked, mut inverse) = (0u32, 0u32);
+        if dropped {
+            for p in &files {
+                let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else {
+                    continue;
+                };
+                let opened = fs::File::open(p.as_path()).is_ok();
+                // Size-only calls: ask whether the surface ANSWERS, without
+                // pulling the value into this process. A leak is the fact that it
+                // replied at all.
+                let lx = unsafe { libc::listxattr(c.as_ptr(), std::ptr::null_mut(), 0) };
+                let name = c"security.selinux";
+                let gx = unsafe {
+                    libc::getxattr(c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0)
+                };
+                let xattr_answered = lx >= 0 || gx >= 0;
+                if !opened && xattr_answered {
+                    leaked += 1;
+                } else if opened && !xattr_answered {
+                    inverse += 1;
+                }
+            }
+        } else {
+            leaked = u32::MAX;
+        }
+        let mut buf = [0u8; 8];
+        buf[..4].copy_from_slice(&leaked.to_ne_bytes());
+        buf[4..].copy_from_slice(&inverse.to_ne_bytes());
+        unsafe { libc::write(wr, buf.as_ptr() as *const libc::c_void, 8) };
+        unsafe { libc::_exit(0) };
+    }
+    unsafe { libc::close(wr) };
+    let mut buf = [0u8; 8];
+    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
+    unsafe { libc::close(rd) };
+    let mut status = 0i32;
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    if got != 8 {
+        return unmeasured(NAME, "probe child said nothing".into())
+            .meaning("The probe exited without answering, so this was not tested.");
+    }
+    let leaked = u32::from_ne_bytes(buf[..4].try_into().unwrap_or_default());
+    let inverse = u32::from_ne_bytes(buf[4..].try_into().unwrap_or_default());
+    // Redacted for a shared destination, for the reason given on
+    // `blocklist::redact_hide_list` -- this string reaches `check.txt`, and
+    // `nomount export` copies that to shared storage.
+    let who = hidden_uid_label(appid, crate::blocklist::redact_hide_list());
+    if leaked == u32::MAX {
+        return unmeasured(NAME, "could not drop to the hidden app's uid".to_string())
+            .meaning("The probe could not take on the hidden app's identity, so this was not tested.");
+    }
+    if leaked > 0 {
+        return fail(
+            NAME,
+            format!(
+                "{who} was denied open() on {leaked} of {} injected file(s) but still got an \
+                 xattr answer for them",
+                files.len()
+            ),
+            "the xattr surface is not applying the per-UID decision that open() is. \
+             nm_listxattr() and nm_xattr_get() must both return -ENOENT to a caller \
+             nm_hidden_from_caller() is true for",
+        )
+        .meaning(
+            "An app you hid cannot open these files, but the kernel still answers questions \
+             about them — so the app learns the file is there AND that something is keeping it \
+             away, which is louder than the file simply not existing.",
+        )
+        .owner("the kernel engine");
+    }
+    if inverse > 0 {
+        return pass(
+            NAME,
+            format!(
+                "{who}: no xattr answer without open() across {} injected file(s) \
+                 ({inverse} answered open() but not xattr)",
+                files.len()
+            ),
+        )
+        .meaning(
+            "No app you hid can learn about a file it cannot open. Some files answered open() \
+             without answering xattr, which leaks nothing.",
+        );
+    }
+    pass(NAME, format!("{who}: xattr and open() agreed on all {} injected file(s)", files.len()))
+        .meaning("Every injected file told an app you hid the same story through both surfaces.")
+}
 
 /// Every measured check, plus the two counts the report header carries.
 pub fn device_checks() -> (Vec<Check>, usize, usize) {
@@ -1589,6 +1740,7 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&targets),
         check_pm_apks_open_when_hidden(&targets),
+        check_xattr_agrees_when_hidden(&targets),
         check_no_rom_tmpfs(),
         check_no_foreign_rom_mount(),
     ];

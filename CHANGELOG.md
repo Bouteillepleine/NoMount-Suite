@@ -1,5 +1,56 @@
 # Changelog
 
+## v1.3.122 — engine v30 (unchanged)
+
+Two additions that both close the same kind of hole: a decision that is correct in
+the code but pinned by nothing, so a regression would be silent. Neither touches the
+engine. **Suite-only update, no kernel reflash.**
+
+Also recorded here because it is a result, not a change: the `/proc/<pid>/maps`
+**device-field oracle was measured and retired**. It had been carried as an open
+detection gap ("injected mappings show an anon device, stock shows erofs"). Across
+every readable `/proc/<pid>/maps` on OP15 — 7,288 unique dev+path pairs, 2,636 on ROM
+partitions — injected mappings were all on `00:1b`/`00:38`, but **so were 106 stock
+ROM files**, 37 of them ordinary `/product/priv-app/` apps. The two injected files
+outside an `overlay/` dir share device *and* path shape with those. A detector keying
+on it flags 106 stock files alongside 30 injected ones, so it is not a usable oracle
+and no fix is warranted. `check`'s maps probe deliberately continues to parse only
+the ` (deleted)` suffix and the path.
+
+### Added
+
+- **`check`: "xattr agrees with open for a hidden app"** — a 14th check. The driver
+  already gates the xattr surface (`nm_listxattr()` opens with
+  `if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;`), but nothing in the
+  report measured it, so a regression there would have been silent — the exact shape
+  of the v1.3.120 leak, where a decision was right in one reader and unpinned in the
+  others. The probe forks, drops to a blocked appid (uid only; the SELinux domain
+  stays ours, because `nomount_is_uid_blocked()` reads `current_uid()`), and asks
+  whether `listxattr`/`getxattr` ever answer for a file the same caller cannot
+  `open()`. That direction is an existence oracle and fails the check: an app denied
+  `open()` but handed a live `security.selinux` context has learned both that the
+  file is there and that something is keeping it away — louder than the file simply
+  not existing. The reverse (open succeeds, xattr does not) leaks nothing and is
+  reported without failing. Verified on OP15: for a hidden uid the injected-only path
+  answers `ENOENT` uniformly across stat/open/access/opath/rdlnk/gxatr/stfs, and a
+  shadowing path answers `OK` on both surfaces from the stock file.
+
+### Fixed
+
+- **`verify` could not see a field that disappeared, and had no test at all.** The
+  comparison lived inside `run_verify`, which reads a file and prints — so the only
+  part that can be wrong was untestable, and the verb shipped with nothing proving it
+  detects anything. It could only ever be observed agreeing with a snapshot taken
+  seconds earlier. Worse, it walked the LIVE fields and looked each one up in the
+  snapshot, so a field the snapshot had and live did **not** was never visited and
+  counted as no drift. Nothing on the device path reaches that today —
+  `Fingerprint::facts()` emits a fixed twelve-key array — but the case it misses is a
+  Suite upgrade that renames or drops a fingerprint field, i.e. precisely when a
+  stale baseline must speak up instead of reporting a clean bill. The comparison is
+  now a pure `drift_lines(saved, live)` that walks both directions, pinned by six
+  tests: a changed value, a live-only field, a snapshot-only field, `ts` correctly
+  ignored, key order irrelevant, and several fields moving at once.
+
 ## v1.3.121 — engine v30 (unchanged)
 
 A fourth audit read the tree at v1.3.120 / engine v30, re-ran every gate and

@@ -558,29 +558,62 @@ pub fn run_verify() -> Result<()> {
         }
     };
     let live = fingerprint_text()?;
+    let lines = drift_lines(&saved, &live);
+    for l in &lines {
+        println!("{l}");
+    }
+    if lines.is_empty() {
+        println!("verify: live matches snapshot (no drift)");
+    } else {
+        println!("verify: {} field(s) drifted from snapshot", lines.len());
+    }
+    Ok(())
+}
 
-    // Parse both into key->value and compare (ignore ts).
+/// Every field that moved between two fingerprints, as the lines `verify` prints.
+///
+/// Pure, and separated from [`run_verify`] for the reason the redaction labels in
+/// audit.rs/doctor.rs are: the verb around it does I/O and prints, so the
+/// COMPARISON -- the only part that can be wrong -- was untestable, and `verify`
+/// shipped with nothing proving it detects anything at all. It could only ever be
+/// observed agreeing with a snapshot taken seconds earlier.
+///
+/// Both directions, deliberately. The original walked the LIVE fields and looked
+/// each one up in the snapshot, so a field the snapshot had and live did NOT was
+/// never examined and silently counted as no drift. Nothing on the device path
+/// reaches that today -- `Fingerprint::facts()` emits a fixed twelve-key array, so
+/// the two sides always carry the same keys -- but the case it misses is exactly a
+/// Suite upgrade that renames or drops a fingerprint field, i.e. the moment a
+/// stale baseline most needs to say so rather than report a clean bill.
+///
+/// `ts` is excluded on both sides: it moves on every single call by construction,
+/// so including it would make every verify report drift.
+fn drift_lines(saved: &str, live: &str) -> Vec<String> {
     let kv = |txt: &str| -> Vec<(String, String)> {
         txt.lines()
             .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
             .filter(|(k, _)| k != "ts")
             .collect()
     };
-    let (sv, lv) = (kv(&saved), kv(&live));
-    let mut drift = 0;
+    let (sv, lv) = (kv(saved), kv(live));
+    let find = |set: &[(String, String)], key: &str| -> Option<String> {
+        set.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    };
+    let mut out = Vec::new();
+    // Live order first, so the common case reads in the order the report prints.
     for (k, lval) in &lv {
-        let sval = sv.iter().find(|(sk, _)| sk == k).map(|(_, v)| v.as_str()).unwrap_or("<absent>");
-        if sval != lval {
-            println!("DRIFT {k}: snapshot={sval} -> live={lval}");
-            drift += 1;
+        let sval = find(&sv, k).unwrap_or_else(|| "<absent>".to_string());
+        if &sval != lval {
+            out.push(format!("DRIFT {k}: snapshot={sval} -> live={lval}"));
         }
     }
-    if drift == 0 {
-        println!("verify: live matches snapshot (no drift)");
-    } else {
-        println!("verify: {drift} field(s) drifted from snapshot");
+    // Then anything the snapshot had that live no longer emits at all.
+    for (k, sval) in &sv {
+        if find(&lv, k).is_none() {
+            out.push(format!("DRIFT {k}: snapshot={sval} -> live=<absent>"));
+        }
     }
-    Ok(())
+    out
 }
 
 /// Every root under which a destination is readable by any app holding a storage
@@ -771,6 +804,76 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `verify` had NO test proving it detects anything: the comparison lived
+    /// inside a function that reads a file and prints, so the only observation
+    /// ever made of it was "agrees with a snapshot taken seconds ago". These pin
+    /// the four outcomes that matter.
+    ///
+    /// A changed VALUE is the everyday case -- a module installed, an app hidden,
+    /// the guard disarmed.
+    #[test]
+    fn drift_names_a_changed_field() {
+        let saved = "engine=v30\nrules=257\nblocked=19\nts=1\n";
+        let live = "engine=v30\nrules=260\nblocked=19\nts=2\n";
+        let d = drift_lines(saved, live);
+        assert_eq!(d, vec!["DRIFT rules: snapshot=257 -> live=260"]);
+    }
+
+    /// `ts` moves on every call by construction. If it counted, every verify on
+    /// an untouched device would report drift and the verb would be worthless.
+    #[test]
+    fn drift_ignores_the_timestamp() {
+        let saved = "engine=v30\nrules=257\nts=1788327280\n";
+        let live = "engine=v30\nrules=257\nts=1788399999\n";
+        assert!(drift_lines(saved, live).is_empty(), "ts must not count as drift");
+    }
+
+    /// A field the LIVE fingerprint gained. Already worked; pinned so it keeps
+    /// working alongside the fix below.
+    #[test]
+    fn drift_reports_a_field_only_live_has() {
+        let saved = "engine=v30\n";
+        let live = "engine=v30\nguard=armed\n";
+        assert_eq!(drift_lines(saved, live), vec!["DRIFT guard: snapshot=<absent> -> live=armed"]);
+    }
+
+    /// A field the SNAPSHOT has and live no longer emits. This is the one the
+    /// original missed entirely: it walked live's fields and looked each up in the
+    /// snapshot, so a key that vanished from live was never visited and `verify`
+    /// printed a clean bill. The scenario is a Suite upgrade that drops or renames
+    /// a fingerprint field, which is precisely when a stale baseline must speak up.
+    #[test]
+    fn drift_reports_a_field_the_snapshot_had_and_live_lost() {
+        let saved = "engine=v30\nmanager_umount=off\n";
+        let live = "engine=v30\n";
+        assert_eq!(
+            drift_lines(saved, live),
+            vec!["DRIFT manager_umount: snapshot=off -> live=<absent>"],
+            "a field disappearing from the fingerprint must not read as no-drift"
+        );
+    }
+
+    /// Identical inputs are the pass case, and it must survive key REORDERING --
+    /// the comparison is by key, not by line position.
+    #[test]
+    fn drift_is_empty_for_the_same_fingerprint_in_any_order() {
+        let saved = "engine=v30\nrules=257\nguard=armed\nts=1\n";
+        let live = "guard=armed\nts=9\nengine=v30\nrules=257\n";
+        assert!(drift_lines(saved, live).is_empty());
+    }
+
+    /// Several fields at once, both directions in one comparison.
+    #[test]
+    fn drift_reports_every_moved_field_not_just_the_first() {
+        let saved = "engine=v30\nrules=257\nmanager_umount=off\n";
+        let live = "engine=v31\nrules=260\nguard=armed\n";
+        let d = drift_lines(saved, live);
+        assert_eq!(d.len(), 4, "expected 2 changed + 1 gained + 1 lost, got {d:?}");
+        assert!(d.iter().any(|l| l.contains("engine") && l.contains("v30") && l.contains("v31")));
+        assert!(d.iter().any(|l| l.contains("manager_umount") && l.contains("<absent>")));
+        assert!(d.iter().any(|l| l.contains("guard") && l.contains("<absent>")));
+    }
 
     fn fp(engine: &str, rules: usize) -> Fingerprint {
         Fingerprint {
