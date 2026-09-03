@@ -547,10 +547,20 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
     // A capability PROBE is not a use.
     //
     // Reported from a OnePlus CPH2649 running v1.3.122: AutoSystemBoost was named
-    // an "image-backed or chroot module" on the strength of
+    // an "image-backed or chroot module" and the evidence quoted was
     // `if command -v nsenter >/dev/null 2>&1`, which ASKS WHETHER the tool exists
-    // and does not run it. The module keeps no mount and the warning was noise --
-    // the same over-matching this chain already learned twice, once for
+    // and does not run it.
+    //
+    // The VERDICT was right and only the EVIDENCE was wrong, which is worth being
+    // precise about: that probe is the first half of a two-line condition, and
+    // service.sh:503 continues `&& nsenter -t 1 -m -- mount --bind ...`. The module
+    // really does bind-mount inside PID 1's namespace -- the case absorb.rs calls
+    // one we "cannot see or unmount (replicated with nsenter)". Because only the
+    // FIRST match per module is reported, quoting the guard made a true finding
+    // read as a false one. After this fix the same module is still flagged, on
+    // line 503. Do not "fix" that warning away.
+    //
+    // Same over-matching this chain already learned twice, once for
     // `MIRROR=$MAGISKTMP/mirror` boilerplate (50 of 182 corpus matches) and once
     // for `rm ` inside `set_perm`. `chroot `, `proot ` and `unshare ` carry a
     // trailing space for the same reason; `nsenter` and `losetup` are matched bare

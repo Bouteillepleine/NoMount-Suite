@@ -4,20 +4,32 @@
 
 ### Fixed
 
-- **A capability probe was reported as an image-backed module.** Reported from a
-  OnePlus CPH2649 running v1.3.122: `AutoSystemBoost` was named an "image-backed or
-  chroot module" on the strength of `if command -v nsenter >/dev/null 2>&1`, a line
-  that asks **whether** the tool exists and never runs it. The module keeps no mount,
-  so the warning was noise sitting next to two correct ones (`OPlusHapticsEnhancer`
-  with `mount -o loop … so.img` and `fix-signal-oneplus13` with `losetup -sf`, both
-  genuinely unservable). The cause was a bare `t.contains("nsenter")`. This chain had
+- **An incompatibility was reported against the wrong line — a probe instead of the
+  use.** Reported from a OnePlus CPH2649 running v1.3.122: `AutoSystemBoost` was named
+  an "image-backed or chroot module" and the evidence quoted was
+  `if command -v nsenter >/dev/null 2>&1`, a line that asks **whether** the tool exists
+  and never runs it.
+
+  The verdict was right and only the evidence was wrong. Reading the module's actual
+  source (`service.sh:502-503`) shows the probe is the first half of a two-line
+  condition whose second half is
+  `&& nsenter -t 1 -m -- mount --bind "$_rb_p" "$_rb_t"` — the module really does enter
+  PID 1's mount namespace and bind-mount there, which is exactly the case
+  `absorb.rs` already describes as one the Suite "cannot see or unmount (replicated with
+  nsenter)". So the module IS correctly flagged; the report simply cited the guard
+  rather than the operation, which makes a true finding look like a false one.
+
+  The cause was a bare `t.contains("nsenter")` matching the probe line first, and the
+  scanner reporting only the first match per module. This chain had
   already learned that lesson twice — `chroot `, `proot ` and `unshare ` carry a
   trailing space precisely to avoid over-matching, and the arm above it documents
   `MIRROR=$MAGISKTMP/mirror` boilerplate accounting for 50 of 182 corpus matches —
   but `nsenter` and `losetup` were matched bare and had no defence. `command -v X`,
   `which X`, `type -p X` and `hash X` expressions are now **removed** from the line
   before matching, rather than the line being skipped, so a script that probes and
-  then uses the tool still counts as a use.
+  then uses the tool still counts as a use. Verified on an OP15 against
+  AutoSystemBoost's real scripts: v1.3.122 quoted line 502 (the probe), v1.3.123 quotes
+  line 503 (the `nsenter --mount --bind`), and the warning correctly **remains**.
 
   The classification also moved out of `scan_module_incompat()` into a pure
   `classify_incompat_line()`. That function walks `/data/adb/modules`, so every
