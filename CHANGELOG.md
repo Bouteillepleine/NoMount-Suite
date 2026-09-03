@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.3.124 — engine v30 (unchanged)
+
+### Changed
+
+- **An image-backed module is a note now, not a warning.** Reported from a OnePlus
+  CPH2649 whose three modules made the report permanently unhappy about a device that
+  was working correctly: "3 things need attention", on a setup where none of the three
+  had any action attached.
+
+  The axis for this is deliberately NOT "can the user fix it" — none of the three
+  incompatibilities is fixable in NoMount, and the only lever for any of them is to
+  remove the module. It is whether the finding **contradicts what the user believes
+  they have**. A `RomWrite` means the feature they installed the module FOR does not
+  work; a `MagiskMirror` means the module does nothing at all on KernelSU. Nothing else
+  on the device says so, so both stay loud. An `ImageBacked` module *works as intended*
+  — its only trace is a mount, and the device section's mount checks already report
+  that mount independently — so the finding explains a mount rather than breaking news.
+  That is `Verdict::Note`'s definition word for word: "worth printing, not worth acting
+  on, a standing observation about a working configuration."
+
+  It had been `Warn`, which put it on the "needs attention" axis and promised an action
+  that does not exist. A warning nobody can ever clear is what teaches people to stop
+  reading warnings.
+
+  Deliberately NOT extended to the other unfixable finding, "foreign mount in another
+  namespace": that one contradicts the zero-mount posture the same report otherwise
+  claims, so it has news to break and stays a warning. Nothing is hidden by this change
+  — the note prints in full, with the same evidence and explanation.
+
 ## v1.3.123 — engine v30 (unchanged)
 
 ### Fixed

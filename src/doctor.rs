@@ -494,6 +494,24 @@ enum Incompat {
 }
 
 impl Incompat {
+    /// How loud this kind is, and why they are not all the same.
+    ///
+    /// Not "can the user fix it" — none of the three is fixable in NoMount and the
+    /// only lever for any of them is to remove the module. The axis is whether the
+    /// finding CONTRADICTS what the user believes they have: a ROM write that goes
+    /// nowhere and a Magisk-mirror read that returns nothing both mean the module
+    /// silently is not doing its job, and nothing else on the device will say so.
+    /// An image-backed module does its job; it just keeps a mount, which the device
+    /// section reports on its own. Explaining that mount is a standing observation
+    /// about a working configuration, which is `Note`, not a hazard, which is
+    /// `Warn`.
+    fn level(self) -> Level {
+        match self {
+            Incompat::RomWrite | Incompat::MagiskMirror => Level::Warn,
+            Incompat::ImageBacked => Level::Info,
+        }
+    }
+
     fn check(self) -> &'static str {
         match self {
             Incompat::RomWrite => "writes into a ROM partition",
@@ -1175,14 +1193,39 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
 
     // Modules that cannot work here, named before the user goes hunting.
     //
-    // All three of these fail SILENTLY today: the write lands nowhere, the
-    // mirror read returns nothing, the image mount is simply a mount the engine
-    // never touches. Each is shipped as a loud finding well before any attempt
-    // to support it, because a wrong answer the user can see beats a wrong
-    // answer they cannot.
+    // All three fail SILENTLY today: the write lands nowhere, the mirror read
+    // returns nothing, the image mount is simply a mount the engine never touches.
+    // Each is shipped as a finding well before any attempt to support it, because
+    // a wrong answer the user can see beats a wrong answer they cannot.
+    //
+    // The LEVEL is per kind, and the axis is not "can the user fix it" -- none of
+    // the three is fixable in NoMount, and the only lever for any of them is to
+    // remove the module. It is "does this change what the user believes about
+    // their setup":
+    //
+    //   RomWrite     -- the feature they installed the module FOR does not work.
+    //   MagiskMirror -- the module does nothing at all on KernelSU.
+    //
+    // Both contradict what the user thinks they have, so both stay loud. An
+    // ImageBacked module, by contrast, works exactly as intended; the only trace
+    // is a mount, and the device section's mount checks ALREADY report that mount
+    // independently. So the finding explains a mount rather than breaking news --
+    // `Verdict::Note`'s definition word for word, "worth printing, not worth
+    // acting on, a standing observation about a working configuration".
+    //
+    // It was Warn, which put it on the "needs attention" axis (see check.rs) and
+    // so promised an action that does not exist. A warning nobody can ever clear
+    // is what teaches people to stop reading warnings. Reported from a CPH2649
+    // whose three modules made the report permanently unhappy about a device that
+    // was working correctly.
+    //
+    // Note this deliberately does NOT extend to the other unfixable finding,
+    // "foreign mount in another namespace": that one contradicts the zero-mount
+    // posture the same report otherwise claims, so it has news to break and stays
+    // a warning.
     for (module, script, kind, hit) in scan_module_incompat() {
         f.push(Finding {
-            level: Level::Warn,
+            level: kind.level(),
             check: kind.check(),
             detail: format!("{module} ({script}): `{hit}`. {}", kind.explain()),
         });
@@ -1890,6 +1933,26 @@ mod tests {
 
     use super::*;
     use crate::nm::LiveKind;
+
+    /// The three incompatibilities are not equally loud, and the axis is not
+    /// fixability -- none of them is fixable in NoMount.
+    ///
+    /// A CPH2649 carrying three such modules read "3 things need attention" on a
+    /// device that was working correctly, because ImageBacked sat on the attention
+    /// axis while offering no action. It works as intended and its only trace, a
+    /// mount, is reported independently by the device section.
+    #[test]
+    fn only_the_silently_broken_kinds_are_loud() {
+        // Contradict what the user believes they have: the module is not doing its job.
+        assert_eq!(Incompat::RomWrite.level(), Level::Warn);
+        assert_eq!(Incompat::MagiskMirror.level(), Level::Warn);
+        // Works as intended; the finding explains a mount rather than breaking news.
+        assert_eq!(Incompat::ImageBacked.level(), Level::Info);
+        // And Info must land off the "attention" axis, or the change is cosmetic:
+        // that axis is what the WebUI counts as "N things need attention".
+        assert_eq!(verdict_of(&Level::Info).severity(), "info");
+        assert_eq!(verdict_of(&Level::Warn).severity(), "attention");
+    }
 
     /// The exact line that produced a false "image-backed or chroot module" on a
     /// OnePlus CPH2649 running v1.3.122. `command -v` ASKS WHETHER nsenter exists.
