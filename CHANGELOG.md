@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.3.123 — engine v30 (unchanged)
+
+### Fixed
+
+- **A capability probe was reported as an image-backed module.** Reported from a
+  OnePlus CPH2649 running v1.3.122: `AutoSystemBoost` was named an "image-backed or
+  chroot module" on the strength of `if command -v nsenter >/dev/null 2>&1`, a line
+  that asks **whether** the tool exists and never runs it. The module keeps no mount,
+  so the warning was noise sitting next to two correct ones (`OPlusHapticsEnhancer`
+  with `mount -o loop … so.img` and `fix-signal-oneplus13` with `losetup -sf`, both
+  genuinely unservable). The cause was a bare `t.contains("nsenter")`. This chain had
+  already learned that lesson twice — `chroot `, `proot ` and `unshare ` carry a
+  trailing space precisely to avoid over-matching, and the arm above it documents
+  `MIRROR=$MAGISKTMP/mirror` boilerplate accounting for 50 of 182 corpus matches —
+  but `nsenter` and `losetup` were matched bare and had no defence. `command -v X`,
+  `which X`, `type -p X` and `hash X` expressions are now **removed** from the line
+  before matching, rather than the line being skipped, so a script that probes and
+  then uses the tool still counts as a use.
+
+  The classification also moved out of `scan_module_incompat()` into a pure
+  `classify_incompat_line()`. That function walks `/data/adb/modules`, so every
+  precision fix in the chain — and it is almost entirely precision fixes — could
+  previously only be checked by installing a module and reading the report. Four
+  tests now pin it, including the two older fixes (`rm ` inside `set_perm`, and
+  reading a stock file to seed a module copy) that were unreachable before.
+
 ## v1.3.122 — engine v30 (unchanged)
 
 Two additions that both close the same kind of hole: a decision that is correct in

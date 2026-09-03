@@ -472,7 +472,7 @@ fn expansion_level(count: usize) -> Option<Level> {
 /// that does nothing and no way to know why.
 ///
 /// Measured across 576 real module payloads to size each one.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Incompat {
     /// Writes into a ROM partition at runtime. 5.9% of the corpus.
     RomWrite,
@@ -536,8 +536,91 @@ impl Incompat {
 ///     component after it.
 ///
 /// One finding per (module, kind), not one per line.
-fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
+/// Which incompatibility, if any, ONE line of a module script announces.
+///
+/// Pure, and split out of [`scan_module_incompat`] so it can be tested: that
+/// function walks `/data/adb/modules`, so every precision fix in here -- and this
+/// chain is almost entirely precision fixes -- was previously only verifiable by
+/// installing a module and reading the report.
+fn classify_incompat_line(t: &str) -> Option<Incompat> {
     const PARTS: [&str; 5] = ["system", "vendor", "product", "system_ext", "odm"];
+    // A capability PROBE is not a use.
+    //
+    // Reported from a OnePlus CPH2649 running v1.3.122: AutoSystemBoost was named
+    // an "image-backed or chroot module" on the strength of
+    // `if command -v nsenter >/dev/null 2>&1`, which ASKS WHETHER the tool exists
+    // and does not run it. The module keeps no mount and the warning was noise --
+    // the same over-matching this chain already learned twice, once for
+    // `MIRROR=$MAGISKTMP/mirror` boilerplate (50 of 182 corpus matches) and once
+    // for `rm ` inside `set_perm`. `chroot `, `proot ` and `unshare ` carry a
+    // trailing space for the same reason; `nsenter` and `losetup` are matched bare
+    // and so had no defence.
+    //
+    // The probe expression is REMOVED rather than the line skipped, so a line that
+    // probes and then uses the tool still counts as a use.
+    let probeless = {
+        let mut acc = t.to_string();
+        for pfx in ["command -v ", "command -V ", "which ", "type -p ", "hash "] {
+            while let Some(at) = acc.find(pfx) {
+                let rest = &acc[at + pfx.len()..];
+                let cut = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                acc = format!("{}{}", &acc[..at], &rest[cut..]);
+            }
+        }
+        acc
+    };
+    // The ROM path must be the DESTINATION. `cp /system/etc/hosts
+    // $MODPATH/system/etc/hosts` reads a stock file to seed a module
+    // copy -- the standard opening move of every hosts module -- and
+    // reporting that as a write told the user their module would not
+    // work when nothing was wrong. Require that no `$MODPATH`/`$MODDIR`
+    // destination follows the ROM path on the line.
+    let rom_is_source = PARTS.iter().any(|p| {
+        t.find(&format!(" /{p}/")).is_some_and(|at| {
+            t[at..].contains("$MODPATH") || t[at..].contains("$MODDIR")
+        })
+    });
+    // " rm " with spaces, not "rm ": the latter is a substring of
+    // "perm ", so `set_perm /system/bin/foo 0 0 0755` matched.
+    if (["cp ", "mv ", "ln ", "touch ", " rm "]
+        .iter()
+        .any(|v| t.contains(v))
+        && !rom_is_source
+        && PARTS.iter().any(|p| t.contains(&format!(" /{p}/"))))
+        || (t.contains("remount")
+            && PARTS.iter().any(|p| {
+                t.contains(&format!(" /{p} ")) || t.ends_with(&format!(" /{p}"))
+            }))
+    {
+        Some(Incompat::RomWrite)
+    // A path component after /mirror, matching what the doc above
+    // claims. `MIRROR=$MAGISKTMP/mirror` on its own is boilerplate --
+    // 50 of 182 corpus matches were exactly that and never read
+    // through it.
+    } else if t.contains(".magisk/mirror/")
+        || (t.contains("MAGISKTMP") && t.contains("/mirror/"))
+        || t.contains("mirror/system")
+        || t.contains("mirror/vendor")
+    {
+        Some(Incompat::MagiskMirror)
+    // `probeless`, not `t`: see the note on it above. Every token here is matched
+    // against the line with any `command -v X` / `which X` / `type -p X` / `hash X`
+    // removed, so asking whether a tool exists no longer reads as using it.
+    } else if probeless.contains("losetup")
+        || probeless.contains("mount -o loop")
+        || probeless.contains("mkfs.ext4")
+        || probeless.contains("chroot ")
+        || probeless.contains("proot ")
+        || probeless.contains("nsenter")
+        || probeless.contains("unshare ")
+    {
+        Some(Incompat::ImageBacked)
+    } else {
+        None
+    }
+}
+
+fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
     const SCRIPTS: [&str; 5] = [
         "post-fs-data.sh", "service.sh", "boot-completed.sh", "post-mount.sh", "customize.sh",
     ];
@@ -562,52 +645,7 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
                 if t.starts_with('#') || t.is_empty() {
                     continue;
                 }
-                // The ROM path must be the DESTINATION. `cp /system/etc/hosts
-                // $MODPATH/system/etc/hosts` reads a stock file to seed a module
-                // copy -- the standard opening move of every hosts module -- and
-                // reporting that as a write told the user their module would not
-                // work when nothing was wrong. Require that no `$MODPATH`/`$MODDIR`
-                // destination follows the ROM path on the line.
-                let rom_is_source = PARTS.iter().any(|p| {
-                    t.find(&format!(" /{p}/")).is_some_and(|at| {
-                        t[at..].contains("$MODPATH") || t[at..].contains("$MODDIR")
-                    })
-                });
-                // " rm " with spaces, not "rm ": the latter is a substring of
-                // "perm ", so `set_perm /system/bin/foo 0 0 0755` matched.
-                let kind = if (["cp ", "mv ", "ln ", "touch ", " rm "]
-                    .iter()
-                    .any(|v| t.contains(v))
-                    && !rom_is_source
-                    && PARTS.iter().any(|p| t.contains(&format!(" /{p}/"))))
-                    || (t.contains("remount")
-                        && PARTS.iter().any(|p| {
-                            t.contains(&format!(" /{p} ")) || t.ends_with(&format!(" /{p}"))
-                        }))
-                {
-                    Some(Incompat::RomWrite)
-                // A path component after /mirror, matching what the doc above
-                // claims. `MIRROR=$MAGISKTMP/mirror` on its own is boilerplate --
-                // 50 of 182 corpus matches were exactly that and never read
-                // through it.
-                } else if t.contains(".magisk/mirror/")
-                    || (t.contains("MAGISKTMP") && t.contains("/mirror/"))
-                    || t.contains("mirror/system")
-                    || t.contains("mirror/vendor")
-                {
-                    Some(Incompat::MagiskMirror)
-                } else if t.contains("losetup")
-                    || t.contains("mount -o loop")
-                    || t.contains("mkfs.ext4")
-                    || t.contains("chroot ")
-                    || t.contains("proot ")
-                    || t.contains("nsenter")
-                    || t.contains("unshare ")
-                {
-                    Some(Incompat::ImageBacked)
-                } else {
-                    None
-                };
+                let kind = classify_incompat_line(t);
                 if let Some(k) = kind {
                     if !seen.contains(&k) {
                         seen.push(k);
@@ -1842,6 +1880,70 @@ mod tests {
 
     use super::*;
     use crate::nm::LiveKind;
+
+    /// The exact line that produced a false "image-backed or chroot module" on a
+    /// OnePlus CPH2649 running v1.3.122. `command -v` ASKS WHETHER nsenter exists.
+    #[test]
+    fn a_capability_probe_is_not_an_image_backed_module() {
+        assert_eq!(
+            classify_incompat_line("if command -v nsenter >/dev/null 2>&1 \\"),
+            None,
+            "probing for a tool must not be reported as using it"
+        );
+        for probe in [
+            "command -v losetup >/dev/null",
+            "which nsenter >/dev/null 2>&1",
+            "type -p unshare",
+            "hash chroot 2>/dev/null",
+            "if ! command -v losetup; then return; fi",
+        ] {
+            assert_eq!(classify_incompat_line(probe), None, "probe reported as use: {probe}");
+        }
+    }
+
+    /// The two genuine reports from that same device must still fire -- the fix
+    /// must not buy quiet by going blind.
+    #[test]
+    fn real_image_backed_modules_are_still_named() {
+        assert_eq!(
+            classify_incompat_line("mount -o loop $MODDIR/so.img /data/adb/tmp/so_mount"),
+            Some(Incompat::ImageBacked)
+        );
+        assert_eq!(
+            classify_incompat_line("LOOP_DEV=\"$(/system/bin/losetup -sf \"$MODFILEMOUNTED\")\""),
+            Some(Incompat::ImageBacked)
+        );
+        for real in ["chroot /data/local/tmp/rootfs sh", "nsenter --mount=/proc/1/ns/mnt sh", "mkfs.ext4 img"] {
+            assert_eq!(classify_incompat_line(real), Some(Incompat::ImageBacked), "missed: {real}");
+        }
+    }
+
+    /// Probe AND use on one line is still a use -- the probe expression is removed,
+    /// the line is not skipped.
+    #[test]
+    fn probing_then_using_on_one_line_still_counts() {
+        assert_eq!(
+            classify_incompat_line("command -v losetup >/dev/null && losetup -sf $IMG"),
+            Some(Incompat::ImageBacked)
+        );
+    }
+
+    /// The two precision fixes this chain already carried, pinned now that they are
+    /// reachable: `rm ` inside `set_perm`, and mirror boilerplate.
+    #[test]
+    fn the_older_precision_fixes_still_hold() {
+        assert_eq!(classify_incompat_line("set_perm /system/bin/foo 0 0 0755"), None);
+        // Reading a stock file to seed a module copy is not a ROM write.
+        assert_eq!(
+            classify_incompat_line("cp /system/etc/hosts $MODPATH/system/etc/hosts"),
+            None
+        );
+        // Writing INTO the ROM is.
+        assert_eq!(
+            classify_incompat_line("cp /data/x /system/etc/hosts"),
+            Some(Incompat::RomWrite)
+        );
+    }
 
     fn wo(module: &str, marker: &str, target: &str) -> PlanEntry {
         PlanEntry {
