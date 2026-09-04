@@ -1729,6 +1729,48 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         }
     }
 
+    // ---- isolated-process pools: the one DEFAULT that opens an oracle -------
+    //
+    // Once anything is hidden, nm_hide_isolated decides whether every app-zygote
+    // (90000-98999) and platform-isolated (99000-99999) process also sees the
+    // stock tree. The engine documents the trade in as many words:
+    //
+    //   "it is not free: while it is on, an UNBLOCKED app can compare its own
+    //    view against its own isolated child's view and find the injection that
+    //    way. (The blocked app itself sees no such divergence -- both of its
+    //    views are stock.)"
+    //
+    // The default is 3, both pools. So on every device with a non-empty hide
+    // list, ANY app that declares android:isolatedProcess="true" can prove
+    // injection with two reads of one path -- no root, no control path, and no
+    // knowledge of what is hidden. Nothing in this report said so, which made it
+    // the only setting whose DEFAULT creates a detector-visible differential and
+    // is invisible in the report meant to find exactly those.
+    //
+    // Info, not Warn: it is a policy choice with a real argument on both sides,
+    // and the opposite setting hands a hidden app a way to read through its own
+    // isolated helper. The reader needs to know it exists, not to be nagged.
+    {
+        let hidden_any = !crate::blocklist::cache_read().is_empty();
+        let mode = crate::blocklist::hide_isolated();
+        if hidden_any {
+            f.push(Finding {
+                level: if mode == 0 { Level::Warn } else { Level::Info },
+                check: "isolated-process pools",
+                detail: match mode {
+                    0 => "hiding covers NEITHER isolated pool. A hidden app can read through its own isolated child and see every injection, which is the leak the pools exist to close. `nomount uid isolated both` unless you specifically want the other side of this trade."
+                        .to_string(),
+                    3 => "hiding covers BOTH isolated pools (the default). That closes the leak where a hidden app reads through its own isolated helper, and opens the mirror image: any UNBLOCKED app can compare its own view of a path against its own isolated child's and see that they differ, which proves injection with two reads and no privilege. Both directions are real; this is the side the default takes, and `nomount uid isolated none` takes the other."
+                        .to_string(),
+                    m => format!(
+                        "hiding covers {} of the two isolated pools. Same trade as the default (both), applied to one pool: a hidden app cannot read through a covered pool, and an unblocked app can tell a covered pool's view apart from its own.",
+                        if m == 1 { "the app-zygote half" } else { "the platform half" }
+                    ),
+                },
+            });
+        }
+    }
+
     // ---- report ------------------------------------------------------------
     let injects = plan.iter().filter(|e| e.kind == PlanKind::Inject).count();
     let whiteouts = plan.iter().filter(|e| e.kind == PlanKind::Whiteout).count();
