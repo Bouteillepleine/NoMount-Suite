@@ -1,9 +1,6 @@
 # Changelog
 
-## Unreleased — audit follow-up
-
-Version is stamped by `scripts/package.sh` at build time (Cargo.toml is the
-source), so this section carries no number yet.
+## v1.3.125 — engine v30 (unchanged)
 
 ### Fixed
 
