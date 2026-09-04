@@ -1,5 +1,101 @@
 # Changelog
 
+## Unreleased — audit follow-up
+
+Version is stamped by `scripts/package.sh` at build time (Cargo.toml is the
+source), so this section carries no number yet.
+
+### Fixed
+
+- **The `_ghost` tables were populated once per boot and never re-synced.**
+  `service.sh` built them about ten seconds after `sys.boot_completed`; nothing
+  re-ran it. The WebUI's Reload button — whose own help text is "Install/remove a
+  module, tap Reload, no reboot" — and `nomount reload` / `nomount mount` all
+  rebuild the rule set underneath them, after which the tables describe the
+  PREVIOUS one.
+
+  Two consequences, both of which that shell block itself warned about: a newly
+  injected path is not in the table, so every existence oracle stays open for it;
+  and a path that went from injected-only to *shadowing* stays ghosted while the
+  engine correctly serves the hidden reader the stock file — so one path answers
+  `stat` = OK and `chmod`/`truncate`/`listxattr` = ENOENT at the same time, "a
+  self-contradiction no real file can produce, so a scanner does not even need a
+  control path to see it".
+
+  The forty lines of shell are now `src/ghost.rs` and a `nomount ghost sync`
+  subcommand, called at the end of `run_mount` and `run_reload` as well as once
+  from `service.sh`. The move also fixed three things in the logic itself:
+
+  * `[ -e "$p" ]` is false for ENOENT and EACCES alike, and conflating them
+    ghosts a merely-unreachable path — turning its EACCES into ENOENT while a
+    genuinely absent name under the same parent still answers EACCES, which is a
+    new tell of exactly the shape `_ghost` exists to remove. The probe now reads
+    `errno` and requires ENOENT.
+  * The candidate list was cut at the first `" ("` by `sed`, which also truncates
+    any target containing that substring — the same hazard the block below it
+    documented at length for a target containing a space. It now comes from
+    `nm::parse_list`, the one parser.
+  * One fork for the whole list instead of one `su` plus one `nm k g p+…` exec
+    per path, and one netlink command per table (`p=` / `u=` replace a table
+    under one kernel lock) instead of one per entry.
+
+- **The mount pass did one `fork`+`exec` of `nm` per rule.** `nm` has always
+  accepted up to 31 add-pairs per invocation; `Nm::add` passed exactly one, so a
+  measured 260-rule device paid 260 process spawns during post-fs-data. That is
+  both the boot cost and the root-exec burst OOS's kevent heuristic flags — the
+  very thing the ghost populate block explicitly avoided for its own writes while
+  the mount pass did it anyway. `Nm::add_many` batches by `--public` group and
+  falls back to one-at-a-time inside any chunk that fails, so per-rule failure
+  attribution is unchanged.
+
+- **Four different idioms for `Path` → `CString`, two of them lossy.**
+  `absorb::umount_detach`, `bind::umount_target`, `audit::getdents` and
+  `audit::fs_type` went through `to_string_lossy()`, which substitutes U+FFFD —
+  so on a non-UTF-8 path the syscall named a *different* path. For
+  `umount_detach` that means the unmount silently no-ops and the caller reads an
+  ordinary `false`, so the mount stays up while the posture report says it came
+  down. `bind::cstr` refused such paths outright, which is at least loud but
+  still a third behaviour. All five sites now use `as_encoded_bytes()`.
+
+- **`nm block <uid>` parsed the uid with no overflow bound.**
+  `uid = (uid << 3) + (uid << 1) + digit` wrapped silently, so
+  `nm block 4294967296` sent uid 0 — and uid 0 is the engine's own identity.
+  Bounded now, and checked against `strtoull` across the range boundary.
+
+- **Unaligned stores in `nm.c`'s batch encoder.** `*(unsigned int *)cursor`,
+  where `cursor` advances by `12 + v_len + r_len` for arbitrary path lengths, is
+  undefined behaviour however reliably it has worked. Replaced with `memcpy`,
+  which compiles to the same single store on every ABI this ships for.
+
+- **The zip was not reproducible.** `mkzip.py` stamped each entry with the
+  file's mtime, which git does not preserve, so two builds of one commit
+  produced different bytes and a published zip could not be compared against a
+  local rebuild. Fixed timestamp now, and `package.sh` prefers `mkzip.py` over
+  `zip -r9` for that reason and says which it used. `customize.sh` is right that
+  the bundled `nomount.sha256sums` cannot be an authenticity check; a
+  byte-identical rebuild is the cheapest thing that can be.
+
+### Added
+
+- **`nomount check` reports the isolated-process pool setting.** Once anything is
+  hidden, the default (`both`) means every app-zygote and platform-isolated
+  process sees the stock tree — so any *unblocked* app that declares
+  `android:isolatedProcess="true"` can compare its own view of a path against its
+  own isolated child's and prove injection with two reads and no privilege. The
+  engine documents that trade; nothing surfaced it, which made it the one setting
+  whose default creates a detector-visible differential and is invisible in the
+  report meant to find those. Reported as a note, with both directions stated,
+  because the opposite setting hands a hidden app a way to read through its own
+  isolated helper.
+
+- **`nomount ghost sync` and `nomount ghost list`.**
+
+### Notes
+
+- `pass_lock()`'s doc comment now names the one step that is not idempotent
+  (`run_mount`'s opening `nm.clear()`) rather than leaving it inside the word
+  "idempotent". The bounded-wait design is unchanged and still correct.
+
 ## v1.3.124 — engine v30 (unchanged)
 
 ### Changed
