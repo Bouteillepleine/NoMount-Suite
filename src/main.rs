@@ -6,6 +6,7 @@ mod blocklist;
 mod cli;
 mod dirshape;
 mod doctor;
+mod ghost;
 mod health;
 mod json;
 mod manager;
@@ -55,6 +56,13 @@ fn main() -> Result<()> {
         Commands::Snapshot => health::run_snapshot(),
         Commands::Verify => health::run_verify(),
         Commands::Export { dir } => health::run_export(dir),
+        Commands::Ghost { action } => match action {
+            cli::GhostAction::Sync => ghost::run_sync(true),
+            cli::GhostAction::List => {
+                print!("{}", nm::Nm::new().ghost_list()?);
+                Ok(())
+            }
+        },
         Commands::Version => {
             println!("nomount v{}", env!("CARGO_PKG_VERSION"));
             Ok(())

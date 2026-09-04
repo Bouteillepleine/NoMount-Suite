@@ -133,179 +133,45 @@ if [ "$_hookran" = 0 ]; then
 fi
 
 # --- Ghost: populate the existence cloak's two tables ------------------------
-# _ghost closes the four (now seven) "resolve a path, then act" oracles that no
-# hijacked filesystem op can answer -- O_PATH handing back the path, getxattr
-# handing back the SELinux label, a trailing component answering ENOTDIR, link()
-# answering EXDEV, and truncate/utimensat/chmod answering EROFS where an absent
-# path answers ENOENT.
+# _ghost closes the syscalls that resolve a path and then act without consulting
+# a hijacked filesystem op -- O_PATH handing back the path, getxattr handing back
+# the SELinux label, the whole LOOKUP_DIRECTORY/ENOTDIR family, link() answering
+# EXDEV, truncate/utimensat/chmod/chown answering EROFS, mkdirat answering
+# EEXIST, and access(W_OK)/open(O_WRONLY|O_CREAT) answering EROFS where an absent
+# path answers ENOENT. Its guards are DEAD CODE until both of its tables are
+# populated: measured on OP15, a kernel built WITH the _ghost patches but with
+# nothing feeding it leaked every one of them exactly as an unpatched kernel does.
 #
-# Its guards are DEAD CODE until both tables are populated: ghost_hidden_path()
-# short-circuits to false on an empty table. Measured on OP15 -- a kernel built
-# WITH the _ghost patches but with nothing feeding it leaked all four oracles
-# exactly as an unpatched kernel does. This block is what makes them live.
+# FORTY LINES OF SHELL USED TO LIVE HERE. They are now `nomount ghost sync` --
+# see src/ghost.rs for the three things the move fixed (ENOENT told apart from
+# EACCES, targets taken from the one rule parser instead of a sed that truncated
+# any path containing " (", and one fork instead of one exec per path) and for
+# the residual it does not fix.
 #
-# `nm k g` with no value is the presence probe: it exits 0 only when _ghost is
-# compiled in AND the engine is >= v26 (the knob does not exist below that), so
-# this stays inert on every other kernel.
-if [ -x "$NM_BIN" ] && "$NM_BIN" k g >/dev/null 2>&1; then
-    # Clear first: the tables describe OUR rule set, which the mount pass has
-    # just rebuilt, so a stale entry from a previous configuration is the thing
-    # to avoid. Both clears are separate commands, so a failure of one is still
-    # visible.
-    nmto 10 "$NM_BIN" k g "p-" >/dev/null 2>&1 || nmlog "⚠ ghost: path table clear FAILED"
-    nmto 10 "$NM_BIN" k g "u-" >/dev/null 2>&1 || nmlog "⚠ ghost: uid table clear FAILED"
-
-    # Paths: ONLY those a hidden caller is supposed to see NOTHING at.
-    #
-    # Feeding it every injection target was wrong, and measurably worse than not
-    # running _ghost at all. Where a rule SHADOWS a stock file the engine serves
-    # the hidden reader that stock file on purpose ("Hidden reader of a shadowing
-    # rule: report the stock file it is entitled to", nomount.c), and a PUBLIC
-    # rule stays visible on purpose too. Ghosting either makes ONE path answer
-    # stat=OK and chmod/truncate/utimensat/listxattr=ENOENT at the same time --
-    # a self-contradiction no real file can produce, so a scanner does not even
-    # need a control path to see it. Measured on OP15 at v1.3.57: of 260 rules
-    # 259 were of this kind, i.e. the cloak closed the oracle on ONE path and
-    # opened a louder one on the other 259.
-    #
-    # The predicate is the engine's own behaviour, asked rather than modelled:
-    # become a uid that IS hidden and test the path. Absent -> injected-only ->
-    # ghost it. Visible -> the engine intends it to be seen -> leave it alone.
-    # That covers shadowing, public and virtual-dir rules without this script
-    # having to know which is which. ONE `su` for the whole list: 260 separate
-    # ones is slow at boot and is exactly the root-exec burst OOS flags.
-    #
-    # Fail-safe by construction: if the hide pass has not taken effect, or `su`
-    # will not run, every path reads as visible, the table stays EMPTY and
-    # _ghost is inert. Inert is the honest state -- a half-populated table
-    # cloaks some paths and not others, which is a pattern of its own.
-    _ghn=0; _ghg=0; _ghf=0
-    _ghprobe=""
-    if [ -f "$NMDIR/uidhide.cache" ]; then
-        while IFS= read -r _ghl; do
-            _ghl=$(echo "$_ghl" | tr -d '\r')
-            case "$_ghl" in ''|\#*) continue ;; esac
-            _ghi=${_ghl##*[!0-9]}
-            case "$_ghi" in ''|*[!0-9]*) continue ;; esac
-            [ "$_ghi" = "0" ] && continue
-            _ghprobe="$_ghi"; break
-        done < "$NMDIR/uidhide.cache"
+# The important half is not the rewrite, it is WHO ELSE calls it: `nomount mount`
+# and `nomount reload` now re-sync at the end of every pass. This block ran once
+# per boot and nothing re-ran it, so tapping the WebUI's Reload button -- whose
+# own help text is "Install/remove a module, tap Reload, no reboot" -- left the
+# tables describing the PREVIOUS rule set. A path that went from injected-only to
+# shadowing then answered stat=OK and chmod/listxattr=ENOENT at the same time,
+# which is the self-contradiction this block always warned about producing.
+#
+# It still runs HERE, once, because this is the first point at which the hide
+# list has been applied and uidhide.cache is warm -- the boot mount pass runs
+# before either. It is inert and silent on a kernel without _ghost.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+    _gh=$(nmto 60 "$BIN" ghost sync 2>&1)
+    _gh_rc=$?
+    if [ "$_gh_rc" -eq 124 ]; then
+        nmlog "⚠ ghost sync TIMED OUT after 60s — the existence oracles stay OPEN this boot"
+    elif [ "$_gh_rc" -ne 0 ]; then
+        nmlog "⚠ ghost sync FAILED (rc=$_gh_rc): $(printf '%s
+' "$_gh" | tail -1)"
+    elif [ -n "$_gh" ]; then
+        nmlog "$(printf '%s
+' "$_gh" | tail -1)"
     fi
-    # `vfs list` appends " -> target", " (public)" and " (virtual dir)", so strip
-    # from the first space; a stray annotation would be sent as a path and
-    # rejected. Whiteouts are already excluded upstream -- a whiteout's whole job
-    # is to make a name absent, which is what a hidden reader sees anyway.
-    # Capture the dump ALONE, so $? is nm's rather than sort's. `nm` exits 4 on
-    # a truncated dump precisely so a caller can tell a prefix from the whole
-    # set (the contract is stated in userspace/src/nm.c). Piping it straight
-    # into sed discarded that, and a prefix here HALF-populates the path table
-    # -- the state the checks below call worse than an empty one, because a
-    # hidden reader then sees some paths ghosted and the rest not.
-    _ghraw=$(nmto 10 "$NM_BIN" l 2>/dev/null); _ghrc=$?
-    if [ "$_ghrc" -ne 0 ]; then
-        nmlog "⚠ ghost: rule dump FAILED (nm exit $_ghrc) — path table not populated"
-        _ghcand=
-    else
-        _ghcand=$(printf '%s\n' "$_ghraw" | sed 's/ ->.*//; s/ (.*//' | grep '^/' | sort -u)
-    fi
-    _ghn=$(printf '%s\n' "$_ghcand" | grep -c '^/')
-    if [ -n "$_ghprobe" ] && [ "$_ghn" -gt 0 ]; then
-        # `[ -e ]` is false for ENOENT and for EACCES alike, and the two must not
-        # be conflated: ghosting a path that is merely UNREACHABLE turns its EACCES
-        # into ENOENT, while a genuinely absent name under the same unsearchable
-        # parent still answers EACCES -- a new tell, of exactly the shape this
-        # cloak exists to remove. There is no errno in shell, so test the parent's
-        # searchability first and skip the path when we cannot tell the two apart.
-        # Measured on OP15 v1.3.63: 0 of 260 rule paths answer EACCES to a hidden
-        # uid, so this changes nothing there. It is the device where a rule sits
-        # under a non-world-searchable directory that needs it.
-        # shellcheck disable=SC2016  # single quotes are the point: this is the
-        # BODY of a shell run as another uid, and $p/$d must expand THERE, not
-        # here.
-        _ghlist=$(printf '%s\n' "$_ghcand" | su "$_ghprobe" -c \
-            'while IFS= read -r p; do d=${p%/*}; [ -n "$d" ] || d=/; \
-             [ -x "$d" ] || continue; \
-             [ -e "$p" ] || printf "%s\n" "$p"; done' 2>/dev/null)
-        _ghrej=""
-        # NEWLINE-ONLY IFS around the loop. Unquoted, the default IFS splits on
-        # spaces too, so a rule target containing one was torn in half: the
-        # fragment "/product/app/My" passed the /* test AND ghost_rule_sane() and
-        # was submitted as a rule, "App.apk" was dropped by the case guard, and
-        # _ghg counted the fragment -- so the summary below reported the cloak
-        # fully populated while that path's existence oracles stayed wide open.
-        # Silent, and only on a module that ships a filename with a space.
-        #
-        # A `while read` pipeline would be the idiomatic fix and is wrong here:
-        # it puts the loop in a subshell, so _ghg/_ghf/_ghrej would be discarded
-        # and the report would always read 0 of 0. Save and restore instead.
-        _oifs=$IFS
-        IFS='
-'
-        for _ghp in $_ghlist; do
-            IFS=$_oifs
-            case "$_ghp" in /*) ;; *) IFS='
-'; continue ;; esac
-            _ghg=$((_ghg + 1))
-            if ! nmto 10 "$NM_BIN" k g "p+$_ghp" >/dev/null 2>&1; then
-                _ghf=$((_ghf + 1))
-                # Keep the first few. A count alone is not diagnosable: working out
-                # WHICH of the rules an overflow dropped took a separate `nm l g`
-                # and an argument about sort order. The cap is the kernel's
-                # GH_MAX_RULES (512 since "size the ghost path table for a real
-                # rule set"); this message deliberately does not name a number,
-                # because the last one it named went stale at 256 and sent whoever
-                # read it looking for the wrong cause.
-                [ "$_ghf" -le 3 ] && _ghrej="$_ghrej $_ghp"
-            fi
-            IFS='
-'
-        done
-        IFS=$_oifs
-    else
-        nmlog "⚠ ghost: no hidden uid to probe with — path table left EMPTY (cloak inert)"
-    fi
-
-    # Uids: exactly the set per-UID hiding already uses, read from the cache the
-    # hide pass just wrote. Deriving it a second way is how the two would drift,
-    # and a uid in one table but not the other is a path that is hidden by the
-    # ops but not by the guards, or the reverse.
-    _ghu=0; _ghuf=0
-    if [ -f "$NMDIR/uidhide.cache" ]; then
-        while IFS= read -r _ghl; do
-            _ghl=$(echo "$_ghl" | tr -d '\r')
-            case "$_ghl" in ''|\#*) continue ;; esac
-            # cache lines are "<pkg>	<uid>" -- TAB separated, verified on device.
-            # Strip up to the last NON-DIGIT rather than up to the last space:
-            # "${_ghl##* }" silently matched nothing on a tab, skipped every uid,
-            # and left the table empty -- i.e. _ghost stays inert, which is the
-            # exact failure this block exists to fix. This form handles either
-            # separator, and a package name ending in a digit too.
-            _ghi=${_ghl##*[!0-9]}
-            case "$_ghi" in ''|*[!0-9]*) continue ;; esac
-            [ "$_ghi" = "0" ] && continue          # root is never hidden from
-            _ghu=$((_ghu + 1))
-            nmto 10 "$NM_BIN" k g "u+$_ghi" >/dev/null 2>&1 || _ghuf=$((_ghuf + 1))
-        done < "$NMDIR/uidhide.cache"
-    fi
-
-    # Report the truth. A partially populated table is WORSE than an empty one:
-    # empty is honestly inert, partial means some paths are cloaked and others
-    # are not, which is itself a pattern.
-    if [ "$_ghf" -gt 0 ] || [ "$_ghuf" -gt 0 ]; then
-        # The kernel refuses a path for exactly two reasons, and they need
-        # different responses: the table is full (GH_MAX_RULES), or the path is
-        # too long for GH_RULE_LEN. Measured on OP15: the longest rule is 68
-        # chars and the longest path on the whole ROM is 134, against a 191 cap,
-        # so full-table is the one to suspect first. Neither number is repeated
-        # in the message: the kernel owns them, they have already moved once
-        # (GH_MAX_RULES 256 -> 512), and a diagnostic that names a stale constant
-        # sends its reader after the wrong cause.
-        nmlog "⚠ ghost cloak: $_ghf/$_ghg path(s) and $_ghuf/$_ghu uid(s) REJECTED — the existence oracles stay OPEN for those; first:$_ghrej (table full, or a path over the kernel's rule-length cap)"
-    elif [ "$_ghg" = 0 ] || [ "$_ghu" = 0 ]; then
-        nmlog "⚠ ghost cloak inert: $_ghg of $_ghn path(s), $_ghu uid(s) — BOTH tables must be non-empty for any guard to fire"
-    else
-        nmlog "ghost cloak populated ($_ghg of $_ghn paths ghostable, $_ghu uids)"
-    fi
+    unset _gh _gh_rc
 fi
 
 # Re-assert /data/local/tmp's AOSP owner/mode/context -- see nm_fix_shell_tmp in

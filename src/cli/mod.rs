@@ -111,8 +111,27 @@ pub enum Commands {
         /// Destination directory (a nm-diag-<ts> subfolder is created inside)
         dir: Option<String>,
     },
+    /// Re-derive the kernel's `_ghost` tables from the live rule set.
+    ///
+    /// Run automatically at the end of `mount` and `reload`; exposed because
+    /// `service.sh` calls it once after boot (when the hide list has been
+    /// applied and the uid cache is warm) and because it is the one repair for
+    /// a table that has gone stale. Inert, and silent, on a kernel without the
+    /// _ghost patch set.
+    Ghost {
+        #[command(subcommand)]
+        action: GhostAction,
+    },
     /// Print version
     Version,
+}
+
+#[derive(Subcommand)]
+pub enum GhostAction {
+    /// Rebuild both tables (paths and uids) to match the live rule set.
+    Sync,
+    /// Print what the kernel currently holds, unchanged. Reads `nm l g`.
+    List,
 }
 
 #[derive(Subcommand)]

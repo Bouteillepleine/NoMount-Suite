@@ -104,6 +104,15 @@ pub(crate) const PASS_LOCK_WAIT: u64 = 25;
 /// Timing out and proceeding unserialised is the lesser evil: the passes are
 /// idempotent, and a missed serialisation is recoverable where a stalled boot is
 /// not. Say so on stderr so it is not silent.
+///
+/// ONE STEP IS NOT IDEMPOTENT, and it is worth naming rather than leaving inside
+/// the word "idempotent": `run_mount` opens with `nm.clear()`. Inside the window
+/// this timeout opens -- bounded at PASS_LOCK_WAIT seconds -- a concurrent pass
+/// can observe the engine empty, which is the one moment an app sees the stock
+/// tree. `run_reload` was built gap-free precisely to avoid that, so the exposure
+/// is a `mount` racing something else, i.e. a boot pass overlapping a WebUI
+/// action. Narrow, bounded, and still the reason this returns `None` rather than
+/// blocking: a stalled boot cannot be recovered from at all.
 pub(crate) fn pass_lock() -> Option<PassLock> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
@@ -1278,6 +1287,14 @@ pub fn run_reload() -> Result<()> {
              re-read at the next scan. Apps over these APKs can force-close until then."
         );
     }
+    // The rule set just changed, so the _ghost tables now describe the PREVIOUS
+    // one. Leaving them is not merely stale: a rule that went from injected-only
+    // to shadowing stays ghosted while the engine correctly serves the hidden
+    // reader the stock file, so one path answers stat=OK and chmod/listxattr =
+    // ENOENT at once -- the self-contradiction crate::ghost's header describes,
+    // and the reason this cannot wait for the next boot. The WebUI's Reload
+    // button is the common way in.
+    crate::ghost::sync_after_pass(&nm);
     Ok(())
 }
 
@@ -1441,6 +1458,12 @@ pub fn run_mount() -> Result<()> {
     // "Theme.AppCompat" force-close this module documents, made permanent:
     // nothing will ever mark that APK changed again.
     let mut applied_apks: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // Injections are gathered here and applied in ONE pass of batched `nm add`
+    // calls instead of one fork+exec per rule. On the measured 260-rule OP15
+    // that is ~9 processes rather than 260, during post-fs-data, which is both
+    // the boot-time cost and the root-exec burst OOS's kevent heuristic flags --
+    // the very thing the ghost populate block refuses to do for its own writes.
+    let mut injects: Vec<(&Path, &Path)> = Vec::new();
     // `mounted` was read before `clear()` -- see the note there.
     for e in &plan {
         served.insert(e.module.as_str());
@@ -1456,14 +1479,12 @@ pub fn run_mount() -> Result<()> {
                     Err(_) => st.failed += 1,
                 }
             }
+            // Collected and applied in ONE batch below rather than one exec
+            // per rule -- see nm::add_many. Order within the pass is unchanged:
+            // whiteouts and binds still run in plan order, and an inject cannot
+            // interact with either (the plan is deduped by target).
             PlanKind::Inject if !source_resolves(e) => st.failed += 1,
-            PlanKind::Inject => match nm.add(&e.target, &e.source) {
-                Ok(()) => {
-                    st.applied += 1;
-                    applied_apks.push((e.target.clone(), e.source.clone()));
-                }
-                Err(_) => st.failed += 1,
-            },
+            PlanKind::Inject => injects.push((e.target.as_path(), e.source.as_path())),
             PlanKind::Bind => match crate::bind::apply(&e.source, &e.target) {
                 Ok(crate::bind::BindOutcome::Bound) => {
                     binds += 1;
@@ -1474,6 +1495,21 @@ pub fn run_mount() -> Result<()> {
                 }
                 Err(_) => st.failed += 1,
             },
+        }
+    }
+    // One batched pass for every inject the loop collected. add_many falls back
+    // to one-at-a-time inside any chunk that fails, so per-rule attribution --
+    // which `st.failed` and `nomount check` both read -- is exactly what it was.
+    {
+        let failed: std::collections::HashSet<&Path> =
+            nm.add_many(&injects).into_iter().map(|(t, _)| t).collect();
+        for (t, r) in &injects {
+            if failed.contains(t) {
+                st.failed += 1;
+            } else {
+                st.applied += 1;
+                applied_apks.push(((*t).to_path_buf(), (*r).to_path_buf()));
+            }
         }
     }
     // Re-apply the ROM-tmpfs takeovers, AFTER the module plan for the same reason
@@ -1522,6 +1558,10 @@ pub fn run_mount() -> Result<()> {
     if !pm.is_empty() {
         println!("nomount: re-parsed {} changed system APK(s) (package cache)", pm.len());
     }
+    // Same reason as in run_reload(): the tables have to describe the rule set
+    // that is live NOW. On the boot path this also means service.sh no longer
+    // needs its own copy of the populate logic -- it calls `nomount ghost sync`.
+    crate::ghost::sync_after_pass(&nm);
     Ok(())
 }
 

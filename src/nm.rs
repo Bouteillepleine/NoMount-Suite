@@ -171,6 +171,105 @@ impl Nm {
     pub fn ghost_list(&self) -> Result<String> {
         self.run(&["l", "g"])
     }
+
+    /// `nm k g` with no value — the presence probe. Exits 0 only when the
+    /// _ghost patch set is compiled in AND the engine is >= v26 (below that the
+    /// knob does not exist and the kernel answers -EINVAL), so this is what
+    /// keeps the whole sync inert on every other kernel.
+    pub fn ghost_present(&self) -> bool {
+        self.run(&["k", "g"]).is_ok()
+    }
+
+    /// `nm k g <cmd>` — one _ghost control command. See ghost.h for the
+    /// vocabulary; `p=`/`u=` replace a whole table under one lock and are what
+    /// [`crate::ghost`] uses, so a reader never sees a half-built table.
+    pub fn ghost_ctl(&self, cmd: &str) -> Result<()> {
+        self.run(&["k", "g", cmd]).map(drop)
+    }
+
+    /// `nm add` for MANY rules in one process.
+    ///
+    /// `nm` has always accepted up to 32 add-pairs per invocation -- it batches
+    /// them into one netlink payload and refuses (rather than truncating) past
+    /// 64 argv words. `add()` passed exactly one, so a 260-rule device paid 260
+    /// fork+exec pairs during post-fs-data. That is not just slow: it is the
+    /// root-exec burst OOS's kevent heuristic flags, which `service.sh`'s own
+    /// ghost block explicitly avoids ("ONE `su` for the whole list: 260 separate
+    /// ones is slow at boot and is exactly the root-exec burst OOS flags") while
+    /// the mount pass did it anyway.
+    ///
+    /// `--public` is per-INVOCATION, not per-pair, so callers must group by it;
+    /// [`add_many`] does that and returns the pairs it could not confirm.
+    ///
+    /// Returns `Err` only if the whole batch failed. Because `nm` reports one
+    /// status for the batch, a partial failure is indistinguishable from a total
+    /// one -- so the caller must fall back to per-rule adds to find out which,
+    /// which is what [`add_many`] does.
+    fn add_batch(&self, public: bool, pairs: &[(&Path, &Path)]) -> Result<()> {
+        let mut args: Vec<&str> = Vec::with_capacity(1 + usize::from(public) + pairs.len() * 2);
+        args.push("add");
+        if public {
+            args.push("--public");
+        }
+        for (v, r) in pairs {
+            args.push(path_str(v)?);
+            args.push(path_str(r)?);
+        }
+        self.run(&args).map(drop)
+    }
+}
+
+/// `nm`'s argv cap is 64 non-option words; `add` consumes two per rule. Leave a
+/// word of headroom for `--public` so the option never pushes a batch over.
+const ADD_BATCH_PAIRS: usize = 31;
+
+impl Nm {
+    /// Apply many injections with as few processes as possible.
+    ///
+    /// Returns the subset of `pairs` that could NOT be applied. The happy path
+    /// costs one exec per 31 rules; only a batch that fails is re-tried one rule
+    /// at a time, so per-rule failure attribution -- which `mount.rs` reports and
+    /// `check` reads -- is preserved exactly.
+    pub fn add_many<'a>(&self, pairs: &[(&'a Path, &'a Path)]) -> Vec<(&'a Path, &'a Path)> {
+        let mut failed = Vec::new();
+        for (public, group) in batch_groups(pairs, crate::pmcache::is_pm_published) {
+            for chunk in group.chunks(ADD_BATCH_PAIRS) {
+                if self.add_batch(public, chunk).is_ok() {
+                    continue;
+                }
+                // The batch said no. Which rule? `nm` ORs its per-rule status
+                // into one exit code, so ask again, one at a time.
+                for (v, r) in chunk {
+                    if self.add_batch(public, std::slice::from_ref(&(*v, *r))).is_err() {
+                        failed.push((*v, *r));
+                    }
+                }
+            }
+        }
+        failed
+    }
+}
+
+/// Split `pairs` into the two `--public` groups, preserving order within each.
+///
+/// Pure, and split out so the grouping is testable: `--public` is an
+/// invocation-wide flag on `nm`, so a batch that mixes the two would either mark
+/// a private rule public (leaking module bytes to a hidden app -- the kernel
+/// refuses that on a shadowing rule, but not on an added one) or drop the flag
+/// from a PM-published APK, which is the IBM Trusteer SIGSEGV `Nm::add` documents.
+fn batch_groups<'a>(
+    pairs: &[(&'a Path, &'a Path)],
+    is_public: fn(&Path) -> bool,
+) -> Vec<(bool, Vec<(&'a Path, &'a Path)>)> {
+    let mut out = Vec::new();
+    for public in [false, true] {
+        let g: Vec<(&Path, &Path)> =
+            pairs.iter().copied().filter(|(v, _)| is_public(v) == public).collect();
+        if !g.is_empty() {
+            out.push((public, g));
+        }
+    }
+    out
 }
 
 /// The argv `add` hands to `nm`. Split out so the option spelling is pinned by a
@@ -380,6 +479,52 @@ mod tests {
         assert!(parse_list(" -> /data/x").is_empty());
         assert!(parse_list("/product/x -> ").is_empty());
         assert!(parse_list(" (whiteout)").is_empty());
+    }
+
+    /// `--public` is per-INVOCATION, so a batch may never mix the two kinds.
+    /// Getting this wrong is not cosmetic: dropping the flag from a
+    /// PM-published APK reintroduces the crash `Nm::add`'s doc comment
+    /// describes, and adding it to a private rule marks module bytes readable
+    /// by an app the engine is hiding from.
+    #[test]
+    fn batches_never_mix_public_and_private() {
+        fn fake_public(p: &Path) -> bool {
+            p.to_string_lossy().contains("/overlay/")
+        }
+        let a = Path::new("/system/lib64/a.so");
+        let b = Path::new("/product/overlay/B.apk");
+        let c = Path::new("/system/etc/c.conf");
+        let d = Path::new("/product/overlay/D.apk");
+        let src = Path::new("/data/adb/modules/M/x");
+        let pairs = [(a, src), (b, src), (c, src), (d, src)];
+        let groups = batch_groups(&pairs, fake_public);
+        assert_eq!(groups.len(), 2);
+        assert!(!groups[0].0, "the private group comes first");
+        assert_eq!(groups[0].1, vec![(a, src), (c, src)]);
+        assert!(groups[1].0, "the --public group comes second");
+        assert_eq!(groups[1].1, vec![(b, src), (d, src)]);
+    }
+
+    /// An empty side must not produce an empty invocation: `nm add` with no
+    /// operand is an error, and used to be reported as success.
+    #[test]
+    fn an_empty_group_is_dropped() {
+        fn none_public(_: &Path) -> bool { false }
+        let a = Path::new("/system/lib64/a.so");
+        let src = Path::new("/data/adb/modules/M/x");
+        let groups = batch_groups(&[(a, src)], none_public);
+        assert_eq!(groups.len(), 1, "only the private group survives");
+        assert!(!groups[0].0);
+        assert!(batch_groups(&[], none_public).is_empty());
+    }
+
+    /// The chunk size has to leave room for the `add` verb and `--public`
+    /// inside nm's 64-word argv cap, which it refuses to exceed rather than
+    /// silently truncating.
+    #[test]
+    fn a_batch_fits_nms_argv_cap() {
+        let words = 1 + 1 + ADD_BATCH_PAIRS * 2; // add + --public + two per pair
+        assert!(words <= 64, "{words} argv words would be refused by nm");
     }
 
     /// A source path containing ` -> ` must not move the split: the source is
