@@ -253,13 +253,30 @@ fn push(nm: &Nm, kind: char, items: &[String], out: &mut Summary) {
         if chunk.is_empty() {
             return;
         }
-        let cmd = format!("{}{}{}", kind, if *first { '=' } else { '+' }, chunk.join("\n"));
+        let replacing = *first;
+        let cmd = format!("{}{}{}", kind, if replacing { '=' } else { '+' }, chunk.join("\n"));
         if nm.ghost_ctl(&cmd).is_ok() {
             match kind {
                 'p' => out.paths += chunk.len(),
                 _ => out.uids += chunk.len(),
             }
         } else {
+            // CLEAR FIRST if this was the replace chunk. The likeliest reason a
+            // `p=` is refused is not a bad rule -- it is a kernel whose ghost.c
+            // predates the opcode and rejects the MODE. The builders choose
+            // `nomount_ref` and `patches_ref` independently, so a Suite newer
+            // than the kernel's _ghost is a supported pairing; falling straight
+            // through to `+` there would APPEND to the previous sync's table
+            // instead of replacing it, and a stale entry is exactly what this
+            // module exists to remove. Every ghost.c ever shipped understands
+            // `-`, so the clear is safe on both.
+            if replacing {
+                let _ = nm.ghost_ctl(&format!("{kind}-"));
+                match kind {
+                    'p' => out.paths = 0,
+                    _ => out.uids = 0,
+                }
+            }
             // The kernel reports the FIRST error and still applies the rest, so
             // a refused chunk is not a lost chunk -- but we cannot tell which
             // entry it refused from one status. Re-send one at a time: at this
