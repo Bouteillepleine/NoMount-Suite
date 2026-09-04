@@ -121,17 +121,35 @@ void c_main(long *sp) {
                 cursor = mem.payload;
             }
 
+            /* memcpy for the header words, not a cast-and-store.
+             *
+             * `cursor` advances by 12 + v_len + r_len for ARBITRARY path
+             * lengths, so it is unaligned for most records, and
+             * `*(unsigned int *)cursor = x` on an unaligned pointer is
+             * undefined behaviour -- the compiler is entitled to assume the
+             * alignment its type claims. It happens to work on every ABI this
+             * ships for (aarch64 with SCTLR.A clear, x86_64, ARMv7 with
+             * unaligned access enabled), which is exactly the kind of "works
+             * until -Oz picks a different instruction" this file cannot afford:
+             * a mis-encoded header is a rule applied to the wrong path.
+             *
+             * memcpy() of 2 and 4 bytes compiles to the same single store on
+             * every one of those targets, so this costs nothing. nm.h already
+             * defines memcpy for the freestanding build. */
             if (target_cmd == 2) { /* ADD / WHITEOUT */
-                *(unsigned int*)cursor = (cmd == 'w') ? 4 : add_flags;
-                *(unsigned int*)(cursor + 4) = target_uid;
-                *(unsigned short*)(cursor + 8) = v_len;
-                *(unsigned short*)(cursor + 10) = r_len;
+                unsigned int hdr_flags = (cmd == 'w') ? 4u : add_flags;
+                unsigned short hv = (unsigned short)v_len, hr = (unsigned short)r_len;
+                memcpy(cursor + 0, &hdr_flags, 4);
+                memcpy(cursor + 4, &target_uid, 4);
+                memcpy(cursor + 8, &hv, 2);
+                memcpy(cursor + 10, &hr, 2);
                 memcpy(cursor + 12, mem.v_resolved, v_len);
                 if (r_len > 0) memcpy(cursor + 12 + v_len, mem.r_resolved, r_len);
                 cursor += 12 + v_len + r_len;
             } else { /* DEL */
-                *(unsigned int*)cursor = target_uid;
-                *(unsigned short*)(cursor + 4) = v_len;
+                unsigned short hv = (unsigned short)v_len;
+                memcpy(cursor + 0, &target_uid, 4);
+                memcpy(cursor + 4, &hv, 2);
                 memcpy(cursor + 6, mem.v_resolved, v_len);
                 cursor += 6 + v_len;
             }
@@ -148,9 +166,26 @@ void c_main(long *sp) {
     } else if (cmd == 'b' || cmd == 'u') {
         if (p_count < 1) goto do_exit;
         unsigned int uid = 0; const char *s = p_args[0];
+        int ndig = 0;
         if (!*s) { exit_code = 3; goto do_exit; }
         while (*s) {
             if (*s < '0' || *s > '9') { exit_code = 3; goto do_exit; }
+            /* BOUND IT. This used to wrap silently, so `nm block 4294967296`
+             * sent uid 0 -- and uid 0 is the engine's own identity, so the
+             * kernel would have been asked to hide every injection from ksud,
+             * the nm client and every module script. Ten digits is the widest a
+             * u32 can be; past that, or past the u32 range on the tenth, refuse
+             * rather than truncate. The character-set test three lines up
+             * already refuses a typo; this refuses one that is all digits.
+             *
+             * Consequence worth stating: an 11-digit LEADING-ZERO form such as
+             * "00000010123" is refused too, where strtoull would take it. No
+             * caller in the tree produces one -- nm.rs sends
+             * blocklist::appid().to_string() -- and accepting arbitrary padding
+             * would mean carrying the digit count separately from the range
+             * check for no gain. */
+            if (++ndig > 10 || uid > 429496729u ||
+                (uid == 429496729u && *s > '5')) { exit_code = 3; goto do_exit; }
             uid = (uid << 3) + (uid << 1) + (*s++ - '0');
         }
         int rc = do_nm_cmd(fd,6 - (cmd == 'b'), 4, &uid, 4, 5, &mem);
