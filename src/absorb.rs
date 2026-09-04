@@ -982,7 +982,14 @@ pub(crate) fn runtime_droppable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -
 }
 
 pub(crate) fn umount_detach(p: &Path) -> bool {
-    let Ok(c) = CString::new(p.to_string_lossy().as_bytes()) else {
+    // as_encoded_bytes(), NOT to_string_lossy(): a module is free to ship a
+    // filename that is not UTF-8, and the lossy form substitutes U+FFFD -- so
+    // the syscall would name a DIFFERENT path, the unmount would no-op on
+    // ENOENT, and the caller would read an ordinary `false` rather than "this
+    // path cannot be represented". The mount stays up and the posture report
+    // says it came down. This file already tests paths with an emoji and a tab
+    // in them, so odd names are in scope for it.
+    let Ok(c) = CString::new(p.as_os_str().as_encoded_bytes()) else {
         return false;
     };
     unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) == 0 }

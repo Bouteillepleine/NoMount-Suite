@@ -73,8 +73,14 @@ impl Drop for Lock {
     }
 }
 
+/// One conversion, lossless. There were four idioms in this crate for turning a
+/// `Path` into a `CString` and two of them went through `to_string_lossy()`,
+/// which substitutes U+FFFD and so hands the kernel a path nobody asked about.
+/// This one used to be the third: it REFUSED a non-UTF-8 path outright, which is
+/// at least loud, but a module is free to ship one and a bind of it should work.
+/// `as_encoded_bytes()` is the byte sequence the filesystem actually holds.
 fn cstr(p: &Path) -> Result<CString> {
-    CString::new(p.to_str().context("non-utf8 path")?.as_bytes()).context("nul byte in path")
+    CString::new(p.as_os_str().as_encoded_bytes()).context("nul byte in path")
 }
 
 /// True if `target` is already a mount point (some other module bound it).
@@ -309,7 +315,11 @@ fn tracked_full() -> Vec<(PathBuf, PathBuf, String)> {
 /// ROM label: restoring `adb_data_file` under a live bind serving a `my_*` path
 /// is an avc denial on every read and a detection tell.
 fn umount_target(target: &Path) -> Result<(), String> {
-    let c = CString::new(target.to_string_lossy().as_bytes())
+    // as_encoded_bytes(), NOT to_string_lossy() -- see absorb::umount_detach for
+    // what the lossy form costs on a non-UTF-8 path. Here it is worse: the
+    // caller keeps or retires the binds.list row on this answer, so unmounting
+    // the wrong name reads as "still mounted" forever.
+    let c = CString::new(target.as_os_str().as_encoded_bytes())
         .map_err(|_| "nul byte in path".to_string())?;
     if unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) } == 0 {
         return Ok(());

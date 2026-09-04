@@ -123,7 +123,11 @@ pub struct Entry {
 /// getdents64 directly: `read_dir` exposes neither `d_off` nor `d_ino`, and both
 /// are oracles in their own right.
 pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
-    let c = std::ffi::CString::new(dir.as_os_str().to_string_lossy().as_bytes()).ok()?;
+    // as_encoded_bytes(), not to_string_lossy(): a lossy conversion opens a
+    // DIFFERENT directory (or, far more likely, none) and this function's None
+    // is read as "could not list", which is the same answer it gives for a real
+    // permission failure.
+    let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
     if fd < 0 {
         return None;
@@ -231,7 +235,10 @@ fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
 
 fn fs_type(p: &Path) -> String {
     // statfs f_type, rendered as the names the checks care about.
-    let Ok(c) = std::ffi::CString::new(p.as_os_str().to_string_lossy().as_bytes()) else {
+    // as_encoded_bytes(): see getdents() above. A lossy path statfs()es
+    // something else, and "?" would be reported as the filesystem type of a path
+    // that was never asked about.
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else {
         return "?".into();
     };
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
