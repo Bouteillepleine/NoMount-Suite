@@ -569,15 +569,40 @@ UPDATER
     echo "    Sums:    $(wc -l < "$staging/nomount.sha256sums") files hashed"
 
     rm -f "$out_path"
-    if command -v zip >/dev/null 2>&1; then
+    # mkzip.py FIRST, zip(1) as the fallback -- this order is deliberate and it
+    # is the reverse of what it used to be.
+    #
+    # mkzip.py stamps every entry with a fixed timestamp and walks the tree in
+    # sorted order, so the same staging tree produces byte-identical archive
+    # bytes every time. `zip -r9` uses each file's mtime, which git does not
+    # preserve, so two builds of one commit differ in every local header and a
+    # published zip cannot be compared against a local rebuild at all.
+    #
+    # That comparison is the only provenance check this project can actually
+    # offer: customize.sh is explicit that nomount.sha256sums "is deliberately
+    # not an authenticity check and cannot be one: the manifest ships inside the
+    # same zip". A reproducible archive is what turns "the hashes match
+    # themselves" into "these bytes came from this commit".
+    #
+    # zip(1) remains the fallback for a host with no python at all. It produces
+    # a correct, installable archive -- just not a comparable one -- so say which
+    # was used rather than leaving the reader to guess.
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path"
+        echo "    Archive: mkzip.py (reproducible)"
+    elif command -v python >/dev/null 2>&1; then
+        python "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path"
+        echo "    Archive: mkzip.py (reproducible)"
+    elif command -v zip >/dev/null 2>&1; then
+        # Do NOT reach for Compress-Archive as a substitute: it writes
+        # backslash-separated entry names, which the installer cannot resolve,
+        # and drops the unix mode so every binary lands non-executable.
         (cd "$staging" && zip -r9 "$out_path" .)
+        echo "    Archive: zip -r9 (NOT reproducible -- no python on this host)"
     else
-        # No zip on this host (Git Bash ships none). Do NOT reach for
-        # Compress-Archive as a substitute: it writes backslash-separated entry
-        # names, which the installer cannot resolve, and drops the unix mode so
-        # every binary lands non-executable. Build the archive explicitly.
-        python3 "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path" \
-            || python "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path"
+        echo "FATAL: neither python nor zip is available to build the archive." >&2
+        rm -rf "$staging"
+        exit 1
     fi
     rm -rf "$staging"
 
