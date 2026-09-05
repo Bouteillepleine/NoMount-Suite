@@ -174,12 +174,19 @@ jobs:
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" /tmp/mainwt
           cp /tmp/update.json /tmp/mainwt/update.json
           cd /tmp/mainwt
-          if git diff --quiet -- update.json; then
+          # `git add` FIRST, then diff the INDEX. `git diff --quiet -- <path>`
+          # compares the worktree against the index and is BLIND to an untracked
+          # file, so on the very first release -- when update.json does not exist
+          # in the repo yet -- it reported "no change" and skipped the very commit
+          # that creates it. Measured on v1.3.140: the JSON generated correctly,
+          # the clone succeeded, and the step exited 0 having done nothing.
+          git add update.json
+          if git diff --cached --quiet -- update.json; then
             echo "update.json already current -- nothing to commit."
             exit 0
           fi
           git -c user.name=Bouteillepleine -c user.email=steve0007.xda@gmail.com \
-            commit -q -m "update.json -> $TAG" -- update.json
+            commit -q -m "update.json -> $TAG"
           # The release is already live at this point; failing to move the
           # pointer must be LOUD, but it is not the release failing.
           git push origin main || {
