@@ -215,6 +215,17 @@
   .row:first-child { border-top: none; }
   .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .name.mono { font-family: var(--mono); font-size: 12.5px; }
+  /* Absorb rows carry a PATH and a REASON, and the single-line ellipsis above
+     ate both: on a phone "skipping /apex/com.android.…" is all that survived --
+     neither which path nor why. These wrap instead, reason on its own line. */
+  .abrow { align-items: flex-start; }
+  .abrow .ab-main { flex: 1; min-width: 0; }
+  .abrow .ab-path {
+    font-family: var(--mono); font-size: 12px; line-height: 1.45;
+    word-break: break-all; overflow-wrap: anywhere;
+  }
+  .abrow .ab-why { font-size: 11.5px; color: var(--muted); line-height: 1.4; margin-top: 3px; }
+  .abrow .tag { margin-top: 1px; }
   .tag {
     font-size: 10.5px; padding: 4px 10px; border-radius: 999px; font-weight: 680;
     letter-spacing: 0.2px; white-space: nowrap;
@@ -895,6 +906,27 @@
     </div>
   </div>
 
+
+  <!-- WHAT APPS CAN SEE -- the live evidence behind the hero's verdict.
+       It stays on Status, next to the claim it backs: the hero says "Nothing
+       detectable", this says how that was measured. Folded by default, because
+       on a mountless install every row is green and the two-line head is the
+       whole answer; `say()` opens it on its own when the verdict is NOT clean,
+       which is the one time the rows matter. -->
+  <div class="card collapsed" id="cardPosture">
+    <div class="stealth-head card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
+      <div class="shield clean" id="shield">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
+      </div>
+      <div>
+        <div class="t" id="stealthT">What apps can see</div>
+        <div class="d" id="stealthD">Checking what apps can see…</div>
+      </div>
+      <span class="chev">›</span>
+    </div>
+    <div class="list" id="posture"></div>
+    <p class="note" id="stealthNote"></p>
+  </div>
   <!-- DEVICE -->
   <div class="card">
     <div class="card-h">
@@ -909,8 +941,26 @@
     </div>
   </div>
 
+
+  <!-- BOOTGUARD -->
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
+      <h2>Bootloop guard</h2><span class="chip" id="gchip">—</span>
+    </div>
+    <div class="statusline">
+      <span class="dot ok" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Armed</span>
+      <span class="sub">trips at boot #3</span>
+    </div>
+    <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
+  </div>
+
+  </section>
+
+  <section class="tab" id="tab-hiding">
+
   <div class="card" id="cardPerUID">
-    <div class="card-h clp" onclick="toggleCard(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
       <h2>Per-UID hiding</h2><span class="chip" id="uidchip">—</span><span class="chev">›</span>
     </div>
@@ -962,51 +1012,61 @@
     </div>
   </div>
 
-  <!-- BOOTGUARD -->
+  <!-- The third thing the engine does to the filesystem, next to the two above
+       it: redirect a path, materialise a directory, or make a name ABSENT.
+       `nomount whiteout add/remove/list/suggest` is durable, re-applied in the
+       same boot pass as the injections, and for a while it had no surface here at
+       all -- so the feature existed only for someone with a root shell, while
+       whiteout.rs still explained its exit codes in terms of the buttons below
+       and the changelog still advertised the card. -->
   <div class="card">
-    <div class="card-h">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
-      <h2>Bootloop guard</h2><span class="chip" id="gchip">—</span>
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleWhiteouts(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
+      <h2>Hidden paths</h2><span class="chip" id="wochip">—</span><span class="chev">›</span>
     </div>
-    <div class="statusline">
-      <span class="dot ok" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Armed</span>
-      <span class="sub">trips at boot #3</span>
+    <div id="wobody" style="display:none">
+      <p class="note" style="margin-top:0">Make a <b>stock ROM file</b> disappear — for paths that are themselves the tell, like <code>install-recovery.sh</code>. The list is saved and re-applied on every boot, in the same pass as the injections. Nothing is installed and nothing is mounted. <b>Scan</b> walks the ROM for files only a root setup leaves behind; on a mountless install it usually finds nothing, which is the correct answer — nothing is written to <code>/system</code>, so there is nothing on it to hide.</p>
+      <div class="uidbar">
+        <input id="woPath" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+               placeholder="/system/bin/install-recovery.sh" />
+        <button class="act" onclick="woAdd(this)">Hide</button>
+        <button class="act" onclick="woScan(this)">Scan this device</button>
+      </div>
+      <div class="list" id="woFound" style="display:none"></div>
+      <div class="list" id="woList"></div>
     </div>
-    <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
+  </div>
+
+  <!-- The fourth thing that changes what an app sees, and the only one that acts
+       on somebody else's work: a module that bind-mounts its own content knows
+       nothing about NoMount, and its mount is as readable to a scanner as one of
+       ours would be. `absorb` re-serves each as a Prism injection and unmounts
+       the original, which is the ONE repair for the "Something is mounting over
+       the ROM" verdict on Status -- a verdict that, until this card, named the
+       offending module and then had nowhere to send you.
+       Hook-framework binds are deliberately NOT absorbed; see nm_absorb below. -->
+  <div class="card collapsed" id="cardAbsorb">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v4"/><path d="M2 12h20v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"/><path d="M12 3v6"/><path d="M9 6l3 3 3-3"/></svg>
+      <h2>Other modules' mounts</h2><span class="chip" id="abchip">—</span><span class="chev">›</span>
+    </div>
+    <div id="abbody">
+      <p class="note" style="margin-top:0">A module that <b>bind-mounts its own content</b> does not know about NoMount, and its mount is just as readable to a scanner as one of ours would be. Absorbing re-serves it as a Prism injection and unmounts the original — the content still reaches the app, the mount stops existing.</p>
+      <p class="note"><b>This already runs by itself</b>, four times per boot: twice before zygote, then again after every module's boot scripts have finished, and once more late for modules that mount last. The chip above is what is left over after all of that. These buttons are for a mount that appears <i>later</i> — a module you just installed, or one that mounts on a timer — so you do not have to reboot to clear it. <b>Scan</b> only reports; nothing changes until you press Absorb.</p>
+      <p class="note">Binds belonging to a Zygisk/Xposed hook framework are never taken over, automatically or by hand: breaking a hook does not fail at boot, it fails hours later during an app install.</p>
+      <div class="uidbar">
+        <button class="act" style="flex:1 1 0" onclick="abScan(this)">Scan</button>
+        <button class="act danger" style="flex:1 1 0" onclick="abAbsorb(this)">Absorb</button>
+      </div>
+      <div class="list" id="abDone"></div>
+      <div class="list" id="abFound" style="display:none"></div>
+    </div>
   </div>
 
   </section>
-
-  <section class="tab" id="tab-modules">
-
-  <!-- DETECTION POSTURE (moved from Status) -->
-  <div class="card">
-    <div class="stealth-head">
-      <div class="shield clean" id="shield">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
-      </div>
-      <div>
-        <div class="t" id="stealthT">Detection posture</div>
-        <div class="d" id="stealthD">Checking what apps can see…</div>
-      </div>
-    </div>
-    <div class="list" id="posture"></div>
-    <p class="note" id="stealthNote"></p>
-  </div>
-
-  <div class="card">
-    <div class="card-h clp" onclick="toggleModules(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-      <h2>Modules</h2><span class="chip" id="modcount">0</span><span class="chev">›</span>
-    </div>
-    <div class="list" id="modules" style="display:none"></div>
-  </div>
-
-  </section>
-
   <section class="tab" id="tab-rules">
   <div class="card">
-    <div class="card-h clp" onclick="toggleRules(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleRules(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <h2>Active rules</h2><span class="chip" id="rulechip">—</span><span class="chev">›</span>
     </div>
@@ -1027,7 +1087,7 @@
        the same rendering code. Which kind a row is belongs ON the row. The hero
        still counts them apart, because the counts are the part that differs. -->
   <div class="card">
-    <div class="card-h clp" onclick="toggleFiles(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleFiles(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
       <h2>Injected files</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
     </div>
@@ -1038,29 +1098,12 @@
     <div class="list" id="vfsfull" style="display:none"></div>
   </div>
 
-  <!-- The third thing the engine does to the filesystem, next to the two above
-       it: redirect a path, materialise a directory, or make a name ABSENT.
-       `nomount whiteout add/remove/list/suggest` is durable, re-applied in the
-       same boot pass as the injections, and for a while it had no surface here at
-       all -- so the feature existed only for someone with a root shell, while
-       whiteout.rs still explained its exit codes in terms of the buttons below
-       and the changelog still advertised the card. -->
   <div class="card">
-    <div class="card-h clp" onclick="toggleWhiteouts(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
-      <h2>Hidden paths</h2><span class="chip" id="wochip">—</span><span class="chev">›</span>
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleModules(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <h2>Modules</h2><span class="chip" id="modcount">0</span><span class="chev">›</span>
     </div>
-    <div id="wobody" style="display:none">
-      <p class="note" style="margin-top:0">Make a <b>stock ROM file</b> disappear — for paths that are themselves the tell, like <code>install-recovery.sh</code>. The list is saved and re-applied on every boot, in the same pass as the injections. Nothing is installed and nothing is mounted. <b>Scan</b> walks the ROM for files only a root setup leaves behind; on a mountless install it usually finds nothing, which is the correct answer — nothing is written to <code>/system</code>, so there is nothing on it to hide.</p>
-      <div class="uidbar">
-        <input id="woPath" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
-               placeholder="/system/bin/install-recovery.sh" />
-        <button class="act" onclick="woAdd(this)">Hide</button>
-        <button class="act" onclick="woScan(this)">Scan this device</button>
-      </div>
-      <div class="list" id="woFound" style="display:none"></div>
-      <div class="list" id="woList"></div>
-    </div>
+    <div class="list" id="modules" style="display:none"></div>
   </div>
 
   </section>
@@ -1108,7 +1151,7 @@
   </div>
 
   <div class="card collapsed" id="incidentcard" style="display:none">
-    <div class="card-h clp" onclick="toggleCard(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
       <h2>Last incident</h2><span class="chip bad">guard tripped</span><span class="chev">›</span>
     </div>
@@ -1139,9 +1182,9 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
       <span>Status</span>
     </button>
-    <button class="navb" id="nb-modules" role="tab" aria-selected="false" onclick="showTab('modules',this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-      <span>Modules</span>
+    <button class="navb" id="nb-hiding" role="tab" aria-selected="false" onclick="showTab('hiding',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 6.2A9.8 9.8 0 0 1 12 6c6 0 9 6 9 6a15 15 0 0 1-3 3.6"/><path d="M6.2 6.5A15 15 0 0 0 3 12s3 6 9 6a9.6 9.6 0 0 0 4.3-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/></svg>
+      <span>Hiding</span>
     </button>
     <button class="navb" id="nb-rules" role="tab" aria-selected="false" onclick="showTab('rules',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
@@ -1499,6 +1542,24 @@
     // mounts" and "nobody asked" are different answers, and the second must not
     // render green.
     const mrows = ["zero-mount-posture", "tmpfs-over-the-rom", "foreign-mount-over-the-rom"].map(checkById);
+
+    // Binds a hook framework (Zygisk/Xposed dex2oat shims) left behind are kept
+    // ON PURPOSE -- `absorb` refuses them, because breaking a hook does not fail
+    // at boot, it fails hours later during an app install. They are still real
+    // rows in /proc/*/mountinfo that a scanner reads, so "zero mounts — nothing
+    // to hide" overstated the case whenever one was present: true of what the
+    // SUITE adds, not of what an app sees. The row underneath already said so
+    // ("1 left by design (hook framework): /apex/.../dex2oat64") and the
+    // headline above it did not, which is the one disagreement this card is
+    // supposed to make impossible.
+    //
+    // The count lives only in that row's prose, so read it from there rather
+    // than counting mounts again and inventing a second source of truth.
+    const hookBinds = (function () {
+      const m = mrows[0] && mrows[0].evidence &&
+                mrows[0].evidence.match(/(\d+)\s+left by design/);
+      return m ? parseInt(m[1], 10) : 0;
+    })();
     const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
     const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
     const fmnt = measured ? bad.length : -1;
@@ -1570,6 +1631,22 @@
       $("stealthT").textContent = title;
       $("stealthD").textContent = desc;
       $("stealthNote").innerHTML = note;
+      // Quiet when it is fine, open when it is not. A clean verdict says
+      // everything it has to say in the two-line head, so the rows stay folded;
+      // any other verdict is one the reader has to act on, and the rows are the
+      // part that names WHICH surface is talking. Only ever auto-opens -- it
+      // will not fold a card back up under someone reading it -- and only while
+      // no preference is stored, so one tap of the chevron ends this forever.
+      if (kind !== "clean") {
+        let pref = null;
+        try { pref = localStorage.getItem("nmcol:cardPosture"); } catch (e) {}
+        const card = $("cardPosture");
+        if (pref === null && card && card.classList.contains("collapsed")) {
+          card.classList.remove("collapsed");
+          const ch = card.querySelector(".card-h");
+          if (ch) { ch.classList.add("open"); setExp(ch); }
+        }
+      }
     };
     if (engineDown(CHECK)) {
       // A DEAD ENGINE OUTRANKS THE MOUNT VERDICT. With it down there genuinely
@@ -1579,7 +1656,7 @@
       say("warn", "The engine isn’t running", "nothing is being injected",
         "There are no mounts because there is nothing being served. This card cannot say " +
         "anything about how you look to an app until the engine answers — open <b>Check</b> " +
-        "from the Status tab.");
+        "from the line above.");
     } else if (appNm > 0) {
       say("warn", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
         "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
@@ -1594,17 +1671,17 @@
       say("warn", "Something is mounting over the ROM",
         owner ? "from " + owner : fmnt + " finding(s) in the mount table",
         esc(bad.map(function (c) { return c.meaning || c.name; }).join(" ")) +
-        " Open <b>Check</b> from the Status tab — it names each one, who caused it, and what " +
+        " Open <b>Check</b> from the line above — it names each one, who caused it, and what " +
         "you can do about it.");
     } else if (fmnt < 0) {
       say("warn", "Mount posture not measured", "no check has read the mount table yet",
         "File injections and RRO are Prism and su is sucompat, so the Suite adds no mounts by " +
-        "construction — but nothing has measured that here yet. Run <b>Check my setup</b> from " +
-        "the Status tab.");
+        "construction — but nothing has measured that here yet. Open <b>Check</b> from the line " +
+        "above.");
     } else if (appNm < 0 && rootNm > 0) {
       // `su 2000` is exactly the call that stops answering once uid 2000 lands on
       // the hide list, so this is a real state, not a broken one.
-      say("warn", "Detection posture", "app-view check unavailable",
+      say("warn", "App view unavailable", "could not measure what a non-root reader sees",
         "Couldn’t drop to a non-root uid to verify here, and root sees " + rootNm +
         " <code>nomount_*</code> mount(s).");
     } else if (rootNm > 0) {
@@ -1622,11 +1699,22 @@
         "Mount surface is clean, but a scanner can still read: " + tells.map(esc).join(", ") +
         ". These are properties and boot state, not mounts — nothing on this page changes them.");
     } else {
-      say("clean", "Fully mountless", "zero mounts — nothing to hide",
+      const how =
         "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat " +
         "(kernel&nbsp;· mountless), and RRO overlays are Prism too — OverlayManager&nbsp;+ idmap2 " +
         "read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> " +
-        "mount table, so there is no mount-gap for a scanner to flag.");
+        "mount table, so there is no mount-gap for a scanner to flag.";
+      if (hookBinds > 0) {
+        say("clean", "Mountless · " + hookBinds + " hook bind" + (hookBinds > 1 ? "s" : "") + " by design",
+          "the Suite adds none — " + hookBinds + " left in place on purpose",
+          how + " What remains is not ours: " + hookBinds + " bind" + (hookBinds > 1 ? "s" : "") +
+          " from a Zygisk/Xposed hook framework, which <code>absorb</code> deliberately never takes " +
+          "over — breaking a hook does not fail at boot, it fails hours later during an app install. " +
+          "A scanner reading <code>mountinfo</code> can see " + (hookBinds > 1 ? "them" : "it") +
+          "; removing " + (hookBinds > 1 ? "them" : "it") + " means removing the hook framework.");
+      } else {
+        say("clean", "Fully mountless", "zero mounts — nothing to hide", how);
+      }
     }
   }
 
@@ -1795,10 +1883,27 @@
   // stderr, and one of those glued to the front of the object breaks the parse.
   let CHECK = null;
 
+  // `--json` is not a promise of a clean pipe. The engine prints operational
+  // warnings to STDOUT, ahead of the document -- on this OP15, a rule targeting
+  // a bare partition root emits
+  //
+  //   nomount: OxygenCustomizer: skipping /product — a bare partition root ...
+  //   {"kind":"check", ...}
+  //
+  // and a bare JSON.parse over the whole buffer throws on the first character.
+  // The report was then discarded WHOLE and the page rendered "Not checked yet"
+  // over a check that had just run and written a perfectly good audit.json --
+  // the worst of both answers, because the run really did happen. Measured on
+  // device: 9155 bytes of valid report thrown away by one leading line.
+  //
+  // So: parse the buffer, and if that fails, parse the document inside it.
   function parseJson(r) {
     const raw = (r.stdout || "").trim();
     if (!raw) return null;
-    try { return JSON.parse(raw); } catch (e) { return null; }
+    try { return JSON.parse(raw); } catch (e) {}
+    const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+    if (a < 0 || b <= a) return null;
+    try { return JSON.parse(raw.slice(a, b + 1)); } catch (e) { return null; }
   }
 
   // Did this run include that half? Read off `sections`, which the report carries
@@ -1937,14 +2042,52 @@
   }
 
   // The one entry point the card has. One command, one parse, one render.
+  let CHECK_RUNNING = false;
   async function runCheck(btn) {
     const done = busy(btn, "Checking…");
     $("findlist").innerHTML = '<div class="empty">Checking…</div>';
-    CHECK = parseJson(await nm("check --json --write"));
-    renderCheck(CHECK);
-    paintManagerBanner(CHECK);
-    refreshStealth();
+    CHECK_RUNNING = true;
+    try {
+      CHECK = parseJson(await nm("check --json --write"));
+      renderCheck(CHECK);
+      paintManagerBanner(CHECK);
+      refreshStealth();
+    } finally { CHECK_RUNNING = false; }
     done();
+  }
+
+  // The verdict runs itself.
+  //
+  // The hero line is this page's single answer to "am I detectable?", and a
+  // report cached at boot is not the same claim as a live one: the boot pass
+  // runs before any app has opened an injected file, so its process-dependent
+  // checks had nothing to look at, and the line has read "Not fully checked
+  // yet" ever since -- an amber that means "nobody asked", shown to someone who
+  // just did. Opening the page IS asking.
+  //
+  // Cache first, live second, both into the same line: the page paints instantly
+  // from audit.json and the real run replaces it in place, so the reader never
+  // waits on a spinner to learn where they stand.
+  //
+  // Guarded on freshness rather than run unconditionally -- reopening the WebUI
+  // twice in a minute is one question, not two, and `check --json --write` walks
+  // the whole rule set and drops to a non-root uid to do it. `r.ts` is unix
+  // SECONDS (see auAge), not millis.
+  const CHECK_FRESH_SECS = 60;
+  async function autoCheck() {
+    if (CHECK_RUNNING) return;
+    const ts = CHECK && typeof CHECK.ts === "number" ? CHECK.ts : 0;
+    const fresh = ts && (Math.floor(Date.now() / 1000) - ts) < CHECK_FRESH_SECS;
+    // A device section that never ran is never fresh, however recent the file is.
+    if (fresh && ranSection(CHECK, "device")) return;
+    CHECK_RUNNING = true;
+    try {
+      const r = parseJson(await nm("check --json --write"));
+      // Keep the cached verdict if the run produced nothing parseable rather
+      // than blanking a good line with a failure to re-measure.
+      if (r) { CHECK = r; renderCheck(CHECK); paintManagerBanner(CHECK); refreshStealth(); }
+    } catch (e) {
+    } finally { CHECK_RUNNING = false; }
   }
 
   // Opening the pane paints from the boot cache; the button re-runs everything.
@@ -1959,6 +2102,9 @@
   function renderCheck(r) {
     const list = $("findlist"), chip = $("fchip"), sub = $("fsub"), age = $("auage");
     paintHealthLine(r);
+    // Same report, same number: the absorb chip counts what `zero-mount-posture`
+    // counted, so it must be repainted wherever that report is.
+    refreshAbsorb();
     $("auCopy").style.display = r ? "" : "none";
 
     // Nothing ran at all is not "nothing wrong".
@@ -2174,7 +2320,7 @@
       el.hidden = false;
       el.innerHTML = "⚠️ Turn <b>Kernel umount</b> OFF in your root manager. Nothing here is " +
         "a mount, so it hides nothing the Suite serves — and it has broken root on real devices. " +
-        "To hide from one app, use <b>Per-UID hiding</b> on the Status tab instead.";
+        "To hide from one app, use <b>Per-UID hiding</b> on the Hiding tab instead.";
       return;
     }
     const unknown = checkById("check-a-setting-in-your-root-manager");
@@ -2494,6 +2640,7 @@
   const WO_PATH_RE = /^\/[^\x00-\x1f\x7f]+$/;
   function toggleWhiteouts(h) {
     const on = h.classList.toggle("open");
+    setExp(h);
     $("wobody").style.display = on ? "" : "none";
     if (on) refreshWhiteouts();
   }
@@ -2570,6 +2717,164 @@
   // Walks the ROM for files only a root setup leaves behind and lists what it
   // found, each with its reason and its own Hide button. Nothing is applied:
   // hiding a ROM path is a decision, and a scan button must not make it.
+  // ---- other modules' mounts (absorb) ----
+  //
+  // The chip is read off the report we ALREADY hold, not off a fresh walk of
+  // mountinfo: `zero-mount-posture` counts the same thing this card acts on, so
+  // asking twice would be a second source of truth that can disagree with the
+  // card on Status. Its evidence line reads
+  //   "0 unexpected module mounts; 1 left by design (hook framework): /apex/..."
+  // and only the FIRST number is absorbable -- the by-design ones are the hook
+  // binds absorb refuses on purpose.
+  function absorbable(r) {
+    const c = findCheck(r, "zero-mount-posture");
+    const m = c && c.evidence && c.evidence.match(/(\d+)\s+unexpected/);
+    return m ? parseInt(m[1], 10) : -1;
+  }
+  // What absorb ALREADY took over, which is the part that was invisible.
+  //
+  // Absorb runs four times a boot on its own, so by the time anyone opens this
+  // card the interesting work is done and the "what is left" count is zero --
+  // a card that only ever said "none" and listed nothing, describing a
+  // mechanism doing real work every boot. The engine records each takeover in
+  // absorbed.list precisely so the boot pass can re-serve it; the same file
+  // answers "what did it take".
+  //
+  // The list is NOT pruned when the owning module is uninstalled -- measured:
+  // it still named nmt06_selfmount after that module was removed -- so each row
+  // is checked against the source on disk and a dead one says so rather than
+  // implying the module is still there.
+  async function refreshAbsorbed() {
+    const box = $("abDone");
+    if (!box) return;
+    const r = await exec(
+      "while IFS= read -r l; do case \"$l\" in ''|'#'*) continue;; esac; " +
+      "t=${l%%\t*}; s=${l#*\t}; " +
+      "printf '%s\\t%s\\t%s\\n' \"$t\" \"$s\" \"$([ -e \"$s\" ] && echo live || echo gone)\"; " +
+      "done < /data/adb/nomount/absorbed.list 2>/dev/null"
+    );
+    const rows = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
+    if (!rows.length) { box.innerHTML = ""; return; }
+    const owner = (s) => {
+      const m = s.match(/\/data\/adb\/modules(?:_update)?\/([^/]+)/);
+      return m ? m[1] : s;
+    };
+    box.innerHTML = `<div class="blk-head">Already absorbed · ${rows.length}</div>` +
+      rows.map(function (l) {
+        const p = l.split("\t"), tgt = p[0] || "", src = p[1] || "", live = p[2] === "live";
+        return `<div class="row abrow"><span class="ab-main">` +
+               `<div class="ab-path">${esc(tgt)}</div>` +
+               `<div class="ab-why">from ${esc(owner(src))}` +
+               (live ? "" : " — module no longer installed") + `</div>` +
+               `</span><span class="tag ${live ? "vfs" : "off"}">` +
+               (live ? "absorbed" : "stale entry") + `</span></div>`;
+      }).join("");
+  }
+
+  function refreshAbsorb() {
+    refreshAbsorbed();
+    const chip = $("abchip");
+    if (!chip) return;
+    const n = absorbable(CHECK);
+    // -1 is "no report has counted them", which is not "none". Same rule as the
+    // posture card: an unknown never renders as the reassuring answer.
+    if (n < 0) { chip.textContent = "—"; chip.className = "chip"; return; }
+    chip.textContent = n === 0 ? "none" : String(n);
+    chip.className = n === 0 ? "chip ok" : "chip warn";
+  }
+
+  // Report only. `--dry-run` is the whole point of this button: it is the one
+  // way to see what Absorb would touch without touching it.
+  async function abScan(btn) {
+    const done = busy(btn, "Scanning…");
+    const r = await nm("absorb --dry-run");
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    const box = $("abFound");
+    box.style.display = "";
+    const lines = out.split("\n").map(x => x.trim()).filter(Boolean);
+    if (!lines.length) {
+      box.innerHTML = '<div class="empty">No answer from absorb.</div>';
+    } else {
+      // FOUR kinds of line, taken from absorb.rs's own println! set -- not two.
+      // The first cut here split them into "skipping" and everything-else, which
+      // mislabelled three real cases, measured on device:
+      //   would SKIP directory bind ...   -> tagged "would absorb". It is a SKIP.
+      //   redundant ... / would DROP ...  -> tagged "would absorb", TWICE, for one
+      //                                      mount that is only being unmounted
+      //                                      because the content is already served.
+      // Saying "would absorb" over a line absorb is declining is the same class of
+      // lie as the headline this card sits under, so classify explicitly and let
+      // anything unrecognised fall through as plain text rather than guess.
+      const KINDS = [
+        [/^skipping the tmpfs over /, "off",  "left alone"],
+        [/^skipping /,                "off",  "left alone"],
+        [/^would SKIP directory bind /, "off", "needs --include-dirs"],
+        [/^would DROP redundant mount /, "vfs", "already served"],
+        [/^redundant /,               "vfs",  "already served"],
+        [/^would absorb /,            "warn", "would absorb"],
+        [/^would empty /,             "warn", "would empty"],
+      ];
+      // Split a line into the PATH it is about and the REASON, so each gets its
+      // own line instead of being ellipsised out of existence together. The
+      // reason is absorb's own trailing (parenthesis); the source after " <- "
+      // is reduced to the owning module, which is the part a reader acts on --
+      // "/data/adb/modules/nmt06_selfmount/hosts" says nothing that
+      // "nmt06_selfmount" does not.
+      const owner = (s) => {
+        const m = s.match(/\/data\/adb\/modules(?:_update)?\/([^/]+)/);
+        return m ? m[1] : s;
+      };
+      box.innerHTML = lines.map(function (l) {
+        if (/^nomount absorb:/.test(l))
+          return `<div class="empty">${esc(l.replace(/^nomount absorb:\s*/, ""))}</div>`;
+        let kind = null;
+        for (var i = 0; i < KINDS.length && !kind; i++) if (KINDS[i][0].test(l)) kind = KINDS[i];
+        if (!kind) return `<div class="empty">${esc(l)}</div>`;
+
+        let rest = l.replace(kind[0], "");
+        let why = "";
+        const paren = rest.match(/\s*\(([^)]*)\)\s*$/);
+        if (paren) { why = paren[1]; rest = rest.slice(0, paren.index); }
+        const arrow = rest.split(" <- ");
+        const path = arrow[0].trim();
+        // The tag already carries the reason for some kinds ("needs
+        // --include-dirs"); printing it again underneath is noise, not detail.
+        if (why === kind[2]) why = "";
+        if (arrow[1]) why = (why ? why + " · " : "") + "from " + owner(arrow[1].trim());
+        return `<div class="row abrow"><span class="ab-main">` +
+               `<div class="ab-path">${esc(path)}</div>` +
+               (why ? `<div class="ab-why">${esc(why)}</div>` : "") +
+               `</span><span class="tag ${kind[1]}">${kind[2]}</span></div>`;
+      }).join("");
+    }
+    done();
+  }
+
+  async function abAbsorb(btn) {
+    const n = absorbable(CHECK);
+    if (n === 0) { toast("Nothing to absorb", "ok"); return; }
+    // Unmounts: it asks first, and the question says what happens, not which verb
+    // runs. Same rule as every other destructive control here.
+    if (!(await confirmAction(
+      "Absorb other modules' mounts?",
+      "Each bind another module made is re-served as a Prism injection and then unmounted. " +
+      "The files still reach apps; the mounts stop existing. Hook-framework binds are left alone. " +
+      "If something depended on the mount itself rather than its contents, reboot to restore it.",
+      "Absorb"))) return;
+    const done = busy(btn, "Absorbing…");
+    const r = await nm("absorb");
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    $("abFound").style.display = "";
+    $("abFound").innerHTML = `<div class="empty">${esc(out || "(no output)")}</div>`;
+    toast(r.errno === 0 ? "Absorb complete" : "Absorb failed", r.errno === 0 ? "ok" : "bad");
+    // The mount table just changed, so the verdict that sent the reader here is
+    // now stale. Re-measure rather than leaving a warning standing over a fixed
+    // device.
+    await runCheck(null);
+    refreshAbsorb();
+    done();
+  }
+
   async function woScan(btn) {
     const done = busy(btn, "Scanning…");
     const r = await nm("whiteout suggest");
@@ -2629,10 +2934,12 @@
   }
   function toggleModules(h) {
     const on = h.classList.toggle("open");
+    setExp(h);
     $("modules").style.display = on ? "" : "none";
   }
   function toggleFiles(h) {
     const on = h.classList.toggle("open");
+    setExp(h);
     $("vfsdirs").style.display = on ? "" : "none";
     $("vfsfull").style.display = on ? "" : "none";
     $("vfsfilterbar").style.display = on ? "" : "none";
@@ -2659,6 +2966,7 @@
   }
   async function toggleRules(h) {
     rulesShown = h.classList.toggle("open");
+    setExp(h);
     $("ruleslist").style.display = rulesShown ? "" : "none";
     $("rulefilterbar").style.display = rulesShown ? "" : "none";
     $("rulecount").style.display = rulesShown ? "" : "none";
@@ -3063,10 +3371,27 @@
   }
 
   // ---- collapsible cards, remembered per card ----
+  // The six collapsible headers are <div onclick>. Without this they are
+  // announced as plain text, cannot be reached by Tab, and never tell a screen
+  // reader whether the section is open -- so the chevron is the only disclosure
+  // cue on the page, and it is purely visual.
+  function setExp(h) {
+    if (h) h.setAttribute("aria-expanded", h.classList.contains("open") ? "true" : "false");
+  }
+  // Enter/Space on a role=button must do what a click does.
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    const h = e.target && e.target.closest && e.target.closest(".card-h.clp");
+    if (!h) return;
+    e.preventDefault();
+    h.click();
+  });
+
   function toggleCard(h) {
     const card = h.closest(".card");
     const on = card.classList.toggle("collapsed");
     h.classList.toggle("open", !on);
+    setExp(h);
     if (card.id) { try { localStorage.setItem("nmcol:" + card.id, on ? "1" : "0"); } catch (e) {} }
   }
   // The markup states each card's DEFAULT (the `collapsed` class or its absence);
@@ -3080,7 +3405,7 @@
       const collapsed = v === null ? card.classList.contains("collapsed") : v === "1";
       card.classList.toggle("collapsed", collapsed);
       const h = card.querySelector(".card-h");
-      if (h) h.classList.toggle("open", !collapsed);
+      if (h) { h.classList.toggle("open", !collapsed); setExp(h); }
     });
   }
 
@@ -3116,6 +3441,7 @@
     $("footver").textContent = "Suite " + suiteId + " · " + eng +
       (staged ? " · " + pv + " staged — reboot to activate" : "");
     await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
+                       refreshAbsorb(),
                        refreshModules(), refreshFiles(), refreshRuleSummary(),
                        refreshIncident(), refreshBlocked(), refreshIsolated(),
                        // Only when the card is open. The chip is the whole
@@ -3143,7 +3469,10 @@
   window.addEventListener("load", function () { movePill(false); });
 
   applyCardState();
-  refreshAll();
+  // Not awaited into refreshAll: the cache paint and every other card must land
+  // first, and the live check then repaints one line on top of a page that is
+  // already usable.
+  refreshAll().then(autoCheck);
 </script>
 </body>
 </html>
