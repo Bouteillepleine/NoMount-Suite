@@ -679,11 +679,34 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
     // reporting that as a write told the user their module would not
     // work when nothing was wrong. Require that no `$MODPATH`/`$MODDIR`
     // destination follows the ROM path on the line.
-    let rom_is_source = PARTS.iter().any(|p| {
-        t.find(&format!(" /{p}/")).is_some_and(|at| {
-            t[at..].contains("$MODPATH") || t[at..].contains("$MODDIR")
-        })
-    });
+    // `cp SRC DST`: the ROM path is a WRITE only when it is the DESTINATION.
+    //
+    // This used to ask "is `$MODPATH`/`$MODDIR` mentioned after the ROM path",
+    // which recognises `cp /system/etc/hosts $MODPATH/...` and nothing else. It
+    // misses every other place a module copies ROM content TO, and measured over
+    // the 116 most-starred modules that cost a false positive: HyperUnlocked runs
+    //
+    //     su -c "cp -r ${DEFAULT_XMLDIR}/* $RESDIR/bakxml/"
+    //
+    // with `DEFAULT_XMLDIR=/system/system/etc/device_features` and
+    // `RESDIR=/data/adb/HyperUnlocked` -- a BACKUP out of the ROM into /data,
+    // reported as a write into a ROM partition. (It only became visible at all
+    // once the classifier started resolving ROM-path variables; the blind spot
+    // predates that and the expansion widened it.)
+    //
+    // The destination of a copy is its LAST path-shaped argument, so ask that
+    // directly: if the final `/`- or `$`-leading token is not itself a ROM path,
+    // the ROM path on the line was being read.
+    let last_path_tok = t
+        .replace(['"', '\''], " ")
+        .split_whitespace()
+        .rfind(|w| w.starts_with('/') || w.starts_with('$'))
+        .map(str::to_string);
+    let rom_is_source = match &last_path_tok {
+        Some(dst) => !PARTS.iter().any(|p| dst.starts_with(&format!("/{p}/"))),
+        // No path-shaped token at all: nothing to call a destination.
+        None => false,
+    };
     // " rm " with spaces, not "rm ": the latter is a substring of
     // "perm ", so `set_perm /system/bin/foo 0 0 0755` matched.
     if (["cp ", "mv ", "ln ", "touch ", " rm "]
@@ -2418,6 +2441,34 @@ hosts_file=/system/etc/hosts.d/x
         // Writing INTO the ROM is.
         assert_eq!(
             classify_incompat_line("cp /data/x /system/etc/hosts"),
+            Some(Incompat::RomWrite)
+        );
+    }
+
+    /// A BACKUP out of the ROM is a read, whatever it copies into.
+    ///
+    /// Real line, HyperUnlocked utils.sh:311, found over the 116 most-starred
+    /// modules. The old guard only recognised `$MODPATH`/`$MODDIR` as a
+    /// destination, so copying ROM content anywhere ELSE -- here /data -- was
+    /// reported as writing INTO a ROM partition.
+    #[test]
+    fn copying_out_of_the_rom_is_not_a_rom_write() {
+        assert_eq!(
+            classify_incompat_line(
+                r#"su -c "cp -r /system/system/etc/device_features/* /data/adb/HyperUnlocked/bakxml/""#
+            ),
+            None
+        );
+        assert_eq!(classify_incompat_line("cp -r /product/etc/x /data/local/tmp/"), None);
+        // ...and the destination case still fires, including through a variable
+        // the caller resolved (AlwaysTrustUserCerts service.sh:79).
+        assert_eq!(
+            classify_incompat_line("cp $MODDIR/system/etc/security/cacerts/* /system/etc/security/cacerts/"),
+            Some(Incompat::RomWrite)
+        );
+        // The remount arm is independent of any destination test.
+        assert_eq!(
+            classify_incompat_line("mount -o rw,remount -t auto /system || mount /system;"),
             Some(Incompat::RomWrite)
         );
     }
