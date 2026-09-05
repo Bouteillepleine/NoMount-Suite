@@ -48,6 +48,10 @@ on:
       - 'docs/**'
       - 'LICENSE'
       - '.gitattributes'
+      # Written by release.yml's publish job, which commits it to main right
+      # after a release goes out. Building for it would rebuild the zip that was
+      # just published, from the same tree, to no purpose.
+      - 'update.json'
 
 # Least privilege: this workflow only builds and uploads artifacts.
 permissions:

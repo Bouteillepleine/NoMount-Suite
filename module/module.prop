@@ -1,7 +1,8 @@
 id=meta-nomount
 name=NoMount Suite
-version=v1.3.139
-versionCode=103139
+version=v1.3.140
+versionCode=103140
 author=XxxY
 description=Fully mountless module loading on the Prism engine: hookless VFS injection, RRO overlays included — no overlayfs, no binds, no tmpfs. su is external (sucompat). ⚠️ Leave the manager's "umount modules" switches OFF; nothing here is a mount, so they hide nothing — use `nomount uid block <pkg>` to hide from an app. 🫥
+updateJson=https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/update.json
 metamodule=1
