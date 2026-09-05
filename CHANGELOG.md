@@ -1,5 +1,163 @@
 # Changelog
 
+## v1.3.139 — engine v30 (unchanged)
+
+### Fixed
+
+- **A copy OUT of a ROM partition was reported as a write INTO one.** The
+  `rom_is_source` guard only recognised `$MODPATH`/`$MODDIR` as a destination, so
+  a module copying ROM content anywhere else read as a ROM write. Measured over
+  the 116 most-starred modules: HyperUnlocked runs
+  `su -c "cp -r ${DEFAULT_XMLDIR}/* $RESDIR/bakxml/"` with
+  `DEFAULT_XMLDIR=/system/system/etc/device_features` and
+  `RESDIR=/data/adb/HyperUnlocked` — a backup, flagged as a write. The
+  destination of a copy is its LAST path-shaped argument, so that is what is
+  asked now: the ROM path counts as a write only when that final token is itself
+  a ROM path. Precision over the corpus went 4/5 → 7/7 at n=204.
+
+  The blind spot predates v1.3.138; resolving ROM-path variables is what made the
+  line visible enough to hit it.
+
+## v1.3.138 — engine v30 (unchanged)
+
+### Fixed
+
+- **The incompatibility scanner never read the helper scripts its entry points
+  source.** It opens five fixed filenames, and modules put their mount logic in
+  helpers those five pull in — so all four lints were blind to them. Measured
+  across 434 scripts in the 204 most-starred modules: MoveCertificate (1947★)
+  runs `. $MODDIR/sh/compatible.sh` from `post-fs-data.sh` and every one of its
+  bind and `nsenter` lines lives in that file. Four modules were invisible to
+  every lint, two of them on boot paths (`systemapp_nuker`, `hifi-maximizer-mod`,
+  `MoveCertificate`, `drc-remover`).
+
+  `sourced_scripts()` now follows `.` / `source` / `sh` / `bash` of a `$MODDIR`
+  or `$MODPATH` path, one level, traversal-guarded, and the finding is reported
+  under the HELPER's own filename — naming the entry point would send the reader
+  to a file containing only the `.` directive. Reading every `*.sh` instead was
+  measured and rejected: 40 → 85 files in that corpus, and it pulls in
+  `uninstall.sh` and `action.sh`, neither of which runs at boot.
+
+- **The WebUI's absorbed-record list rendered legacy tab-less rows the engine
+  drops.** `parse_absorbed_pairs` requires a tab (`split_once` inside a
+  `filter_map`); the page's reader split the whole line into both halves, so a
+  legacy row displayed as absorbed "from" its own target path.
+
+## v1.3.137 — engine v30 (unchanged)
+
+### Added
+
+- **`bind-mounts its own content`, a fourth module-incompatibility finding.**
+  Bind-mounting a module's own payload over a ROM path is the single largest
+  mount-creating family in the corpus (28 bind-only + 22 mixed of 576) and the
+  one `absorb` exists for, yet nothing said so before the mount happened: `plan`
+  reads the LIVE mount table, and a module that has not run yet has no mount to
+  see. Reading its scripts is the only way to say it in advance.
+
+  It is `Info`, not `Warn` — alone among the four it resolves itself, because
+  absorb converts and unmounts it four times per boot. It is named so the reader
+  knows WHICH modules depend on absorb running: if absorb is ever disabled or
+  times out, these are the mounts that stay visible.
+
+  Ordered after the image-backed arm on purpose. `nsenter -t 1 -m -- mount
+  --bind` is both a bind and a namespace replication, and absorb says of that
+  shape that it "cannot see or unmount (replicated with nsenter)" — retagging it
+  as a self-mount would promise a takeover that cannot happen.
+
+- **The record of what absorb already took over is now visible.** Absorb runs by
+  itself four times a boot, so by the time anyone opens the WebUI the work is
+  done and the "what is left" count is zero — a card that only ever said "none"
+  while a real mechanism worked every boot. The engine already records each
+  takeover in `absorbed.list` so the boot pass can re-serve it; the same file
+  answers "what did it take".
+
+### Fixed
+
+- **Recorded rows from uninstalled modules were never retired.** A row survived
+  its module's uninstall and five reboots while the boot pass kept trying to
+  re-serve from a source that no longer existed — one dead line per self-mounting
+  module ever installed. A row is now dropped when its owning module directory is
+  gone from BOTH `/data/adb/modules` and `/data/adb/modules_update`.
+
+  The test is the module DIRECTORY, never the source FILE: 56% of the corpus
+  builds its payload at runtime, so at the moment absorb runs the recorded source
+  may legitimately not exist yet, and pruning on a missing file would delete live
+  modules' rows on every boot. Disabled is not uninstalled, a staged update is
+  not a removal, and a row not under any module tree is unattributable and never
+  pruned.
+
+  The prune runs at the TOP of every pass, including the one that absorbs
+  nothing. `run_absorb` returns early when there is nothing to absorb — i.e. on
+  every healthy device — and stale rows accumulate precisely where nothing is
+  ever absorbed again, so the tidy-up has to run on the do-nothing path.
+  `--dry-run` does not write.
+
+- **Absorb's record retirements were emitted on every boot and recorded on
+  none.** Every caller kept only `tail -1`, which is the summary line. They are
+  logged at all four capture sites now, not just `service.sh`: the prune fires on
+  the first pass to run, which is `post-fs-data`/`post-mount`'s `absorb --early`,
+  so a log line in `service.sh` alone would never have seen one.
+
+## v1.3.136 — engine v30 (unchanged)
+
+### Fixed
+
+- **`nomount check --json` writes operational warnings to STDOUT ahead of the
+  document, and the WebUI parsed the whole buffer.** On a device with a rule
+  targeting a bare partition root the engine prints
+  `nomount: <module>: skipping /product — a bare partition root …` before the
+  JSON; `JSON.parse` threw on the first character and the report was discarded
+  WHOLE, so the page rendered "Not checked yet" over a check that had just run
+  and written a perfectly good `audit.json`. Measured: 9155 bytes of valid report
+  thrown away by one leading line. The buffer is parsed first, then the document
+  inside it; junk and empty still yield nothing.
+
+## v1.3.135 — v1.3.126 — engine v30 (unchanged)
+
+### Changed
+
+- **The WebUI is organised by task instead of by data model.** `Modules` was a
+  tab because modules are a noun in the schema — it held a list and one status
+  line — while hiding, which is what the Suite is for, was split between two
+  other tabs. The tabs are now `Status` · `Hiding` · `Rules`: per-UID hiding,
+  hidden paths, detector globs and isolated processes are one place, the module
+  list folds into Rules, and the live "what apps can see" card sits on Status
+  directly under the verdict it backs.
+
+- **The hero verdict re-checks when the page opens.** The boot pass runs before
+  any app has opened an injected file, so its process-dependent checks had
+  nothing to look at and the line read "Not fully checked yet" for the rest of
+  the uptime — an amber meaning "nobody asked", shown to someone who just did.
+  The cached report still paints instantly; a live run replaces it in place,
+  guarded on freshness so reopening the page twice in a minute is one question.
+
+- **"What apps can see" folds to its verdict line**, and opens itself when the
+  verdict is not clean — the one time its rows matter. One tap of the chevron
+  stores a preference and ends that for good. Measured at 375×812: the Status
+  page went 1824 → 1494 px.
+
+- **The mountless headline matches the row underneath it.** "Zero mounts —
+  nothing to hide" is true of what the Suite adds and not of what an app sees:
+  a Zygisk/Xposed hook framework's `dex2oat` bind is left in place on purpose and
+  is a real row in `mountinfo`. With one present the headline now reads
+  "Mountless · 1 hook bind by design".
+
+### Added
+
+- **A card for the mounts other modules make.** `absorb` re-serves each as an
+  injection and unmounts the original, and it is the one repair for the
+  "Something is mounting over the ROM" verdict — which until now named the
+  offending module and had nowhere to send you. Scan reports without changing
+  anything; the four line kinds absorb can emit are tagged apart, so a bind it is
+  deliberately LEAVING is never labelled as one it is about to take.
+
+### Fixed
+
+- **The six collapsible card headers were `<div onclick>`** — unreachable by Tab,
+  announced as plain text, and never telling a screen reader whether the section
+  was open. They carry `role="button"`, `tabindex` and a synced `aria-expanded`
+  now, with Enter/Space doing what a click does.
+
 ## v1.3.125 — engine v30 (unchanged)
 
 ### Fixed
