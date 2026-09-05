@@ -324,6 +324,7 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     # `x=$(sh -c "exit 124" | tail -1)` leaves $? at 0; without the pipe, 124.
     _ab_all=$(nmto 90 "$BIN" absorb 2>&1)
     _ab_rc=$?
+    nmlog_absorb_notes "$_ab_all"
     _ab=$(printf '%s\n' "$_ab_all" | tail -1)
     if [ "$_ab_rc" -eq 124 ]; then
         nmlog "absorb TIMED OUT after 90s - continuing boot"
@@ -365,6 +366,7 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
         # its last line alone reads as a success. Status captured BEFORE any pipe.
         _ab2_all=$(nmto 90 "$BIN" absorb 2>&1)
         _ab2_rc=$?
+        nmlog_absorb_notes "$_ab2_all"
         _ab2=$(printf '%s
 ' "$_ab2_all" | tail -1)
         if [ "$_ab2_rc" -eq 124 ]; then

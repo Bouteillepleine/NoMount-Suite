@@ -778,6 +778,94 @@ fn parse_absorbed_pairs(body: &str) -> Vec<(PathBuf, PathBuf)> {
         .collect()
 }
 
+/// The module id a recorded source belongs to, if any.
+///
+/// `modules_update` counts as the same module: a staged update is mid-install,
+/// not gone. Anything not under a module directory yields `None` and is never
+/// pruned -- if the row cannot be attributed, it is not this function's to judge.
+fn owning_module(src: &Path) -> Option<String> {
+    let s = src.to_string_lossy();
+    for base in ["/data/adb/modules/", "/data/adb/modules_update/"] {
+        if let Some(rest) = s.strip_prefix(base) {
+            let id = rest.split('/').next().unwrap_or("");
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Drop rows whose owning module is GONE from disk. Returns (kept, pruned ids).
+///
+/// Measured 2026-09-05: a `nmt06_selfmount` row survived an uninstall and five
+/// reboots, and the boot pass kept trying to re-serve from a source that no
+/// longer existed. One dead line accrues per self-mounting module ever installed.
+///
+/// The test is the MODULE DIRECTORY, never the source file. 56% of the corpus
+/// builds its payload at runtime, so at the moment absorb runs the file may
+/// legitimately not exist yet -- pruning on a missing file would delete live
+/// modules' rows on every boot and is the one mistake that turns a tidy-up into
+/// data loss. A `disable`d module is also kept: disabled is not uninstalled, and
+/// the row has to survive being switched back on.
+///
+/// `module_live` is injected so this is testable without a filesystem, the same
+/// split `apply_apk_refresh` uses.
+fn prune_absorbed_pairs(
+    pairs: Vec<(PathBuf, PathBuf)>,
+    module_live: impl Fn(&str) -> bool,
+) -> (Vec<(PathBuf, PathBuf)>, Vec<String>) {
+    let mut gone: Vec<String> = Vec::new();
+    let kept = pairs
+        .into_iter()
+        .filter(|(_, src)| match owning_module(src) {
+            Some(id) if !module_live(&id) => {
+                if !gone.contains(&id) {
+                    gone.push(id);
+                }
+                false
+            }
+            _ => true,
+        })
+        .collect();
+    (kept, gone)
+}
+
+/// Drop recorded rows whose module has been uninstalled, and say so.
+///
+/// `read_absorbed_pairs`, not the infallible twin, and the file is LEFT ALONE on
+/// a read error -- `set_absorbed_pairs` truncates, so rewriting from an empty
+/// read would destroy every recorded rule. Same discipline as
+/// `rewrite_absorbed_after_refresh` and the record merge in `run_absorb`.
+///
+/// Called on EVERY pass, including the one that absorbs nothing. The first cut
+/// of this put the prune inside the record-merge at the end of `run_absorb` --
+/// which `return`s early when there is nothing to absorb, i.e. on every healthy
+/// device. Stale rows accumulate precisely where nothing is ever absorbed again,
+/// so the tidy-up has to run on the path that does no work.
+fn prune_absorbed_record() {
+    let Ok(all) = read_absorbed_pairs() else { return };
+    if all.is_empty() {
+        return;
+    }
+    let (kept, gone) = prune_absorbed_pairs(all, module_on_disk);
+    if gone.is_empty() {
+        return;
+    }
+    println!(
+        "dropped {} recorded row(s) from uninstalled module(s): {}",
+        gone.len(),
+        gone.join(", ")
+    );
+    set_absorbed_pairs(&kept);
+}
+
+/// Does this module still exist on disk, in either tree?
+fn module_on_disk(id: &str) -> bool {
+    Path::new("/data/adb/modules").join(id).is_dir()
+        || Path::new("/data/adb/modules_update").join(id).is_dir()
+}
+
 /// Label an APK the Suite serves so the app can actually read it.
 ///
 /// An app runs as untrusted_app and can read `apk_data_file`, not
@@ -1741,6 +1829,12 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     nm.version()
         .context("hookless NoMount engine not responding")?;
 
+    // Before anything else, and on every pass: retire rows whose module is gone.
+    // Not on a dry run -- `--dry-run` promises to change nothing, and this writes.
+    if !dry_run {
+        prune_absorbed_record();
+    }
+
     // Report the whole picture BEFORE acting, so a mount absorb cannot take is
     // never implied to be absent. "Nothing to absorb" and "nothing is mounted"
     // are different claims and only the second one is the posture.
@@ -2097,6 +2191,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     // the file is not recoverable at all.
     match read_absorbed_pairs() {
         Ok(mut all) => {
+            // No prune here: `prune_absorbed_record` already ran at the top of
+            // this pass, on the path that reaches this one AND on the early
+            // return that does not.
             for p in fresh_pairs {
                 if !all.iter().any(|(t, _)| *t == p.0) {
                     all.push(p);
@@ -2191,6 +2288,77 @@ mod tests {
         assert!(changed);
         assert_eq!(next.iter().filter(|(t, _)| *t == now).count(), 1);
         assert_eq!(next.len(), 1);
+    }
+
+    /// A row whose module was uninstalled is dropped; everything else survives.
+    ///
+    /// The `nmt06_selfmount` row is the real one: measured surviving an uninstall
+    /// and five reboots on an OP15, 2026-09-05.
+    #[test]
+    fn prune_drops_rows_from_uninstalled_modules() {
+        let pairs = vec![
+            (
+                PathBuf::from("/system/etc/hosts"),
+                PathBuf::from("/data/adb/modules/nmt06_selfmount/hosts"),
+            ),
+            (
+                PathBuf::from("/system/etc/other"),
+                PathBuf::from("/data/adb/modules/still_here/other"),
+            ),
+        ];
+        let (kept, gone) = prune_absorbed_pairs(pairs, |id| id == "still_here");
+        assert_eq!(gone, vec!["nmt06_selfmount".to_string()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].0, PathBuf::from("/system/etc/other"));
+    }
+
+    /// THE mistake that turns a tidy-up into data loss.
+    ///
+    /// 56% of the corpus builds its payload at runtime, so when absorb runs the
+    /// recorded SOURCE FILE may legitimately not exist yet. Pruning on the file
+    /// rather than on the module directory would delete live modules' rows on
+    /// every boot. This test exists to make that regression impossible to land:
+    /// the module is live, the file is not mentioned, and the row must survive.
+    #[test]
+    fn prune_keeps_a_live_module_whose_payload_is_not_built_yet() {
+        let pairs = vec![(
+            PathBuf::from("/system/etc/hosts"),
+            PathBuf::from("/data/adb/modules/runtime_built/system/etc/hosts"),
+        )];
+        let (kept, gone) = prune_absorbed_pairs(pairs, |_| true);
+        assert!(gone.is_empty());
+        assert_eq!(kept.len(), 1);
+    }
+
+    /// Disabled is not uninstalled, and a staged update is not a removal.
+    #[test]
+    fn prune_keeps_staged_and_unattributable_rows() {
+        let pairs = vec![
+            // mid-update: recorded against modules_update, same module id
+            (
+                PathBuf::from("/system/a"),
+                PathBuf::from("/data/adb/modules_update/upd/system/a"),
+            ),
+            // not under any module tree: cannot be attributed, so not ours to judge
+            (PathBuf::from("/system/b"), PathBuf::from("/data/local/tmp/b")),
+        ];
+        let (kept, gone) = prune_absorbed_pairs(pairs, |id| id == "upd");
+        assert!(gone.is_empty(), "staged or unattributable rows must survive");
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn owning_module_reads_both_trees() {
+        assert_eq!(
+            owning_module(Path::new("/data/adb/modules/foo/system/etc/x")).as_deref(),
+            Some("foo")
+        );
+        assert_eq!(
+            owning_module(Path::new("/data/adb/modules_update/foo/x")).as_deref(),
+            Some("foo")
+        );
+        assert_eq!(owning_module(Path::new("/data/local/tmp/x")), None);
+        assert_eq!(owning_module(Path::new("/data/adb/modules/")), None);
     }
 
     /// Nothing to say means nothing is written: `set_absorbed_pairs` truncates

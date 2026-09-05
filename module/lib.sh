@@ -50,6 +50,24 @@ nmlog() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [${NMLOG_TAG:-nomount}] $*" >> "$BOOTLOG" 2>/dev/null
 }
 
+# Log the lines absorb prints BEFORE its summary.
+#
+# Every caller keeps only `tail -1`, which is the summary -- so absorb's record
+# retirements ("dropped N recorded row(s) from uninstalled module(s): ...") were
+# emitted on every boot and recorded on none. They matter because that write is
+# the one thing absorb does to persistent state on a device where it absorbs
+# nothing at all.
+#
+# Called at ALL FOUR capture sites, not just service.sh: the prune runs at the
+# top of every pass, so it fires on the FIRST one to execute -- post-fs-data's
+# `absorb --early` -- and a log line in service.sh alone would never see it.
+nmlog_absorb_notes() {
+    printf '%s
+' "$1" | grep -i 'uninstalled module' | while IFS= read -r _l; do
+        [ -n "$_l" ] && nmlog "$_l"
+    done
+}
+
 # Bounded exec. Every engine call goes through this. `timeout` is toybox's and is
 # not guaranteed present: without it `timeout 60 cmd` does not run the command
 # unbounded, it does not run it AT ALL ("timeout: not found"), which is the silent
