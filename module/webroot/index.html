@@ -2750,6 +2750,11 @@
     const r = await exec(
       "while IFS= read -r l; do case \"$l\" in ''|'#'*) continue;; esac; " +
       "t=${l%%\t*}; s=${l#*\t}; " +
+      // A line with no tab is the LEGACY bare-target format, and the engine's own
+      // parser drops it (`split_once('\t')` inside a filter_map). Without this the
+      // card rendered a row the engine never acts on, attributed "from" the target
+      // path itself -- both halves of the split being the whole line.
+      "[ \"$t\" = \"$s\" ] && continue; " +
       "printf '%s\\t%s\\t%s\\n' \"$t\" \"$s\" \"$([ -e \"$s\" ] && echo live || echo gone)\"; " +
       "done < /data/adb/nomount/absorbed.list 2>/dev/null"
     );
