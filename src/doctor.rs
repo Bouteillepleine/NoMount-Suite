@@ -771,6 +771,69 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
     }
 }
 
+/// Module-local scripts an entry script pulls in, as relative paths.
+///
+/// The scanner reads five fixed filenames, and modules put their mount logic in
+/// helpers those five source. Measured 2026-09-05 over 93 scripts in the 14
+/// most-starred modules: MoveCertificate (1947 stars) runs
+/// `. $MODDIR/sh/compatible.sh` from post-fs-data.sh, and ALL FOUR of its bind
+/// and nsenter lines live in that file -- so the module was completely invisible
+/// to all four lints, on a boot path. Re-Malwack only escaped the same fate
+/// because its bind happens to be duplicated into service.sh.
+///
+/// Following the reference is the precise fix. Reading every `*.sh` in the module
+/// instead would more than double the scan (40 -> 85 files in that corpus) and
+/// pull in `uninstall.sh` and `action.sh` -- neither of which runs at boot, and
+/// the first of which legitimately unmounts things.
+///
+/// ONE level, not transitive: bounded work, and it covers the corpus. `$MODDIR`
+/// and `$MODPATH` are the two spellings modules use for their own directory;
+/// anything that is not a module-relative path is ignored, so a `. /system/...`
+/// cannot walk the scanner out of the module.
+fn sourced_scripts(body: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let t = line.trim();
+        if t.starts_with('#') {
+            continue;
+        }
+        for kw in [". ", "source ", "sh ", "bash "] {
+            let mut from = 0usize;
+            while let Some(at) = t[from..].find(kw) {
+                let abs = from + at;
+                // Must start a word: `. $MODDIR/x` yes, `wish $MODDIR/x` no.
+                if abs > 0 && !t.as_bytes()[abs - 1].is_ascii_whitespace() {
+                    from = abs + kw.len();
+                    continue;
+                }
+                // Strip the OPENING quote before reading the token, not after:
+                // `sh "$MODDIR/rmlwk.sh"` is the common spelling, and stopping at
+                // the first quote made the token empty and the reference invisible.
+                let rest = t[abs + kw.len()..].trim_start().trim_start_matches(['"', '\'']);
+                let tok: String = rest
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != ';' && *c != '"' && *c != '\'')
+                    .collect();
+                let tok = tok.as_str();
+                for var in ["$MODDIR/", "$MODPATH/", "${MODDIR}/", "${MODPATH}/"] {
+                    if let Some(rel) = tok.strip_prefix(var) {
+                        // No escaping the module directory.
+                        if !rel.is_empty()
+                            && !rel.contains("..")
+                            && !rel.starts_with('/')
+                            && !out.iter().any(|e| e == rel)
+                        {
+                            out.push(rel.to_string());
+                        }
+                    }
+                }
+                from = abs + kw.len();
+            }
+        }
+    }
+    out
+}
+
 fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
     const SCRIPTS: [&str; 5] = [
         "post-fs-data.sh", "service.sh", "boot-completed.sh", "post-mount.sh", "customize.sh",
@@ -804,7 +867,23 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
             continue;
         };
         let mut seen: Vec<Incompat> = Vec::new();
+        // The five entry scripts, plus whatever they pull in. Collected first so
+        // a helper sourced by two entry points is read once, and reported under
+        // its OWN filename -- "(sh/compatible.sh)" is where the reader has to go
+        // to see the line, and naming post-fs-data.sh there would send them to a
+        // file that only contains the `.` directive.
+        let mut todo: Vec<String> = SCRIPTS.iter().map(|s| (*s).to_string()).collect();
         for script in SCRIPTS {
+            if let Ok(body) = std::fs::read_to_string(mdir.join(script)) {
+                for rel in sourced_scripts(&body) {
+                    if !todo.iter().any(|e| *e == rel) && mdir.join(&rel).is_file() {
+                        todo.push(rel);
+                    }
+                }
+            }
+        }
+        for script in &todo {
+            let script = script.as_str();
             let Ok(body) = std::fs::read_to_string(mdir.join(script)) else { continue };
             // Per FILE, not per line: the assignment is at the top and the mount
             // that uses it is hundreds of lines below.
@@ -2157,6 +2236,39 @@ mod tests {
             "if ! command -v losetup; then return; fi",
         ] {
             assert_eq!(classify_incompat_line(probe), None, "probe reported as use: {probe}");
+        }
+    }
+
+    /// The five entry scripts are not where the mounts always are.
+    ///
+    /// MoveCertificate (1947 stars) sources its whole boot path out of
+    /// `sh/compatible.sh`, so every one of its bind and nsenter lines sat in a
+    /// file no lint ever opened. Real line, from post-fs-data.sh:11.
+    #[test]
+    fn a_sourced_helper_is_followed() {
+        assert_eq!(sourced_scripts(". $MODDIR/sh/compatible.sh"), vec!["sh/compatible.sh"]);
+        assert_eq!(sourced_scripts("source ${MODPATH}/util_functions.sh"), vec!["util_functions.sh"]);
+        assert_eq!(sourced_scripts(r#"sh "$MODDIR/rmlwk.sh" --update-hosts"#), vec!["rmlwk.sh"]);
+        // Same helper named by two entry points is one entry.
+        assert_eq!(
+            sourced_scripts(". $MODDIR/a.sh
+source $MODPATH/a.sh"),
+            vec!["a.sh"]
+        );
+    }
+
+    /// The reference must not be able to walk the scanner out of the module, and
+    /// must not fire on prose or on a word that merely ends in the keyword.
+    #[test]
+    fn sourced_scripts_stays_inside_the_module() {
+        for quiet in [
+            ". /system/etc/somewhere.sh",       // absolute, not module-relative
+            ". $MODDIR/../../etc/passwd",       // traversal
+            "# . $MODDIR/commented.sh",         // comment
+            "wish $MODDIR/notakeyword.sh",      // `sh ` inside another word
+            "echo 'nothing to source here'",
+        ] {
+            assert!(sourced_scripts(quiet).is_empty(), "should not follow: {quiet}");
         }
     }
 
