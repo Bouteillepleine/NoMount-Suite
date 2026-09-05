@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.3.140 — engine v30 (unchanged)
+
+### Added
+
+- **`updateJson`, so a manager can offer the update in-app.** It points at
+  `update.json` on `main`, and that file is written by the release workflow's
+  publish job and nowhere else — which is what makes the offer track RELEASES
+  rather than the prerelease branch. The job only runs on a `v*` tag, and tags
+  are only ever cut for releases, so a push to `prerelease` cannot move it.
+
+  Generated rather than hand-maintained, because the one field that must never
+  drift is `versionCode`: managers key the update offer on it, so a stale file
+  either hides a real release or offers one whose asset 404s. It is read out of
+  the `module.prop` INSIDE the published zip — the same byte the device compares
+  against, not a second source that can disagree — and emitted as a JSON number,
+  since a quoted one never compares greater than the installed version.
+
+  `update.json` is added to `build.yaml`'s `paths-ignore`: the publish job
+  commits it to `main` straight after a release, and building for that commit
+  would rebuild the zip just published, from the same tree, to no purpose.
+
 ## v1.3.139 — engine v30 (unchanged)
 
 ### Fixed
