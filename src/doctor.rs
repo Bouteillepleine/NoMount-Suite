@@ -491,6 +491,22 @@ enum Incompat {
     /// device section's mount checks report it honestly -- the point of naming it
     /// here is that the mount is then explained rather than anonymous.
     ImageBacked,
+    /// Bind-mounts its own content over a ROM path. 28 bind-only + 22 mixed of
+    /// the 576-payload corpus -- the single largest mount-creating family, and
+    /// the one absorb exists for.
+    ///
+    /// The ONLY kind here that resolves itself: absorb re-serves the content as
+    /// an injection and unmounts the original, four times a boot. So this is not
+    /// a hazard and not a silent failure -- it is the answer to "why did a mount
+    /// exist for part of my boot", and the list of modules that depend on absorb
+    /// working. If absorb is ever disabled or times out, these are exactly the
+    /// ones that leak a mount.
+    ///
+    /// Measured 2026-09-05: it is invisible at plan time by construction, because
+    /// `plan` reads the LIVE mount table and a module that has not run yet has
+    /// no mount to see. Reading the module's own scripts is the only way to say
+    /// it BEFORE the mount happens.
+    SelfMount,
 }
 
 impl Incompat {
@@ -508,7 +524,10 @@ impl Incompat {
     fn level(self) -> Level {
         match self {
             Incompat::RomWrite | Incompat::MagiskMirror => Level::Warn,
-            Incompat::ImageBacked => Level::Info,
+            // SelfMount is the mildest of the four: absorb undoes it every boot,
+            // so unlike ImageBacked the mount does not even persist. An
+            // observation about a working configuration.
+            Incompat::ImageBacked | Incompat::SelfMount => Level::Info,
         }
     }
 
@@ -517,6 +536,7 @@ impl Incompat {
             Incompat::RomWrite => "writes into a ROM partition",
             Incompat::MagiskMirror => "needs Magisk's mirror",
             Incompat::ImageBacked => "image-backed or chroot module",
+            Incompat::SelfMount => "bind-mounts its own content",
         }
     }
 
@@ -534,6 +554,8 @@ impl Incompat {
                 "no path redirection can make a block device appear, so the engine cannot \
                  serve this. The module keeps its own mount; the mount checks will report \
                  it, and that report is correct rather than a leak.",
+            Incompat::SelfMount =>
+                "this module mounts its own content over a ROM path instead of shipping a \n                 tree, so for part of every boot the mount is real and readable by any app. \n                 absorb re-serves it as an injection and unmounts it -- automatically, four \n                 times per boot -- so nothing needs doing. Named here because the module \n                 depends on absorb running: if absorb is disabled or times out, this is one \n                 of the mounts that stays visible.",
         }
     }
 }
@@ -554,6 +576,60 @@ impl Incompat {
 ///     component after it.
 ///
 /// One finding per (module, kind), not one per line.
+/// Variables a script assigns a ROM path to, so a bind THROUGH one is visible.
+///
+/// Measured 2026-09-05 on Re-Malwack (445 stars), the flagship self-mounter:
+///
+///     system_hosts="/system/etc/hosts"              (rmlwk.sh:17)
+///     mount --bind "$hosts_file" "$system_hosts"    (rmlwk.sh:562)
+///
+/// A line-only classifier sees no ROM path on the mount line and says nothing --
+/// which is exactly how the most common absorb-relevant module shape in the
+/// corpus stayed invisible. bindhosts writes the destination literally
+/// (`mount --bind "$MODDIR/system/etc/hosts" /system/etc/hosts`) and was already
+/// caught, so both shapes are real and the lint has to handle both.
+///
+/// Deliberately trivial, for the same reason every arm above is: the value must
+/// START with a ROM partition path and nested variables are not expanded. This is
+/// not a shell interpreter, and each previous attempt to be clever here
+/// over-counted.
+fn rom_path_vars(script: &str) -> std::collections::HashMap<String, String> {
+    const PARTS: [&str; 5] = ["system", "vendor", "product", "system_ext", "odm"];
+    let mut out = std::collections::HashMap::new();
+    for line in script.lines() {
+        let t = line.trim();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = t.find('=') else { continue };
+        let name = &t[..eq];
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let val = t[eq + 1..].trim().trim_matches(['"', '\'']);
+        if PARTS.iter().any(|p| val.starts_with(&format!("/{p}/"))) {
+            out.insert(name.to_string(), val.to_string());
+        }
+    }
+    out
+}
+
+/// Substitute `$NAME` / `${NAME}` for the ROM paths [`rom_path_vars`] found.
+///
+/// Longest name first: with `hosts` and `hosts_file` both known, replacing
+/// `$hosts` first would leave `_file` dangling and corrupt the path it is about
+/// to be matched on.
+fn expand_rom_vars(line: &str, vars: &std::collections::HashMap<String, String>) -> String {
+    let mut names: Vec<&String> = vars.keys().collect();
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    let mut acc = line.to_string();
+    for n in names {
+        let v = &vars[n];
+        acc = acc.replace(&format!("${{{n}}}"), v).replace(&format!("${n}"), v);
+    }
+    acc
+}
+
 /// Which incompatibility, if any, ONE line of a module script announces.
 ///
 /// Pure, and split out of [`scan_module_incompat`] so it can be tested: that
@@ -643,6 +719,53 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
         || probeless.contains("unshare ")
     {
         Some(Incompat::ImageBacked)
+    // AFTER ImageBacked, deliberately. `nsenter -t 1 -m -- mount --bind ...` is
+    // both a bind AND a namespace replication, and the namespace half is the
+    // worse news: absorb says it "cannot see or unmount (replicated with
+    // nsenter)". Testing bind first would have retagged AutoSystemBoost from
+    // image-backed to self-mounting and quietly promised absorb would handle a
+    // mount absorb has explicitly said it cannot. See the note above -- that
+    // finding is not to be softened.
+    //
+    // Narrow, on the same evidence the arms above were narrowed on:
+    //   * an explicit bind/overlay FLAG, not the word "mount". Re-Malwack's
+    //     scripts carry `echo "...mount hosts..."` and `ui_print` lines with
+    //     "mount" in them; matching the word alone flags prose.
+    //   * a ROM partition as the DESTINATION, with a trailing slash. A module
+    //     bind-mounting inside its own tree or into /data is not putting a mount
+    //     over the ROM and is not absorb's business.
+    //   * not `umount`: removing a mount is not making one, and every module
+    //     that binds also unbinds somewhere.
+    // The ROM path must start a TOKEN, not merely follow a space.
+    //
+    // The RomWrite arm above requires whitespace before the leading slash, to
+    // stop `$MODPATH/system/` reading as a ROM write. That is right for it and
+    // wrong here: a real bind quotes its destination, so after variable
+    // expansion the line reads `mount --bind "$hosts_file" "/system/etc/hosts"`
+    // and there is a QUOTE before the slash, not a space. Requiring a space
+    // missed Re-Malwack -- the exact module this arm was added for.
+    //
+    // So: allow start-of-line, whitespace, `"` or `'` before it, and nothing
+    // else. `$MODDIR/system/...` is still excluded, because the preceding char
+    // there is `R`.
+    } else if !probeless.contains("umount")
+        && (probeless.contains("--bind")
+            || probeless.contains("--rbind")
+            || probeless.contains("-o bind")
+            || probeless.contains("-o rbind")
+            || probeless.contains("-t overlay"))
+        && PARTS.iter().any(|p| {
+            let needle = format!("/{p}/");
+            probeless.match_indices(&needle).any(|(at, _)| {
+                at == 0
+                    || probeless[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_whitespace() || c == '"' || c == '\'')
+            })
+        })
+    {
+        Some(Incompat::SelfMount)
     } else {
         None
     }
@@ -659,7 +782,22 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
 
     for d in dirs {
         let mdir = d.path();
-        if !mdir.is_dir() || !crate::mount::module_enabled(&mdir) {
+        // NOT `module_enabled`, and the difference is the whole point of this
+        // scanner.
+        //
+        // `module_enabled` also excludes `skip_mount`, which is correct for the
+        // mount pass -- it means "do not serve my tree". It is wrong here,
+        // because a `skip_mount` module still RUNS EVERY ONE OF ITS SCRIPTS. And
+        // shipping `skip_mount` is precisely the convention for a module that
+        // mounts its own content, so this gate made the scanner blind to exactly
+        // the family SelfMount was added for: measured 2026-09-05, Re-Malwack and
+        // bindhosts both ship it, and both were reported clean while their
+        // service.sh ran `mount --bind ... /system/etc/hosts` at every boot.
+        //
+        // `disable` and `remove` still count: those scripts do not run at all.
+        let stood_down =
+            mdir.join("disable").exists() || mdir.join("remove").exists();
+        if !mdir.is_dir() || stood_down {
             continue;
         }
         let Some(id) = mdir.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
@@ -668,12 +806,18 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
         let mut seen: Vec<Incompat> = Vec::new();
         for script in SCRIPTS {
             let Ok(body) = std::fs::read_to_string(mdir.join(script)) else { continue };
+            // Per FILE, not per line: the assignment is at the top and the mount
+            // that uses it is hundreds of lines below.
+            let vars = rom_path_vars(&body);
             for line in body.lines() {
                 let t = line.trim();
                 if t.starts_with('#') || t.is_empty() {
                     continue;
                 }
-                let kind = classify_incompat_line(t);
+                // Classify the EXPANDED line, but report the line the user can
+                // actually find in the file. Quoting a rewritten line would send
+                // them looking for text that is not there.
+                let kind = classify_incompat_line(&expand_rom_vars(t, &vars));
                 if let Some(k) = kind {
                     if !seen.contains(&k) {
                         seen.push(k);
@@ -2014,6 +2158,112 @@ mod tests {
         ] {
             assert_eq!(classify_incompat_line(probe), None, "probe reported as use: {probe}");
         }
+    }
+
+    /// A module that bind-mounts its own content over the ROM is the family
+    /// absorb exists for, and it was completely silent at plan time: `plan` reads
+    /// the LIVE mount table, so a module that has not run yet has no mount to
+    /// see. Reading its scripts is the only way to say it in advance.
+    ///
+    /// Lines are real, taken off Re-Malwack (445 stars) and bindhosts (1390) as
+    /// staged on an OP15 on 2026-09-05.
+    #[test]
+    fn a_module_that_binds_over_the_rom_is_named() {
+        for real in [
+            // bindhosts: literal destination.
+            r#"mount --bind "$MODDIR/system/etc/hosts" /system/etc/hosts"#,
+            "mount -o bind $MODDIR/hosts /system/etc/hosts",
+            "mount -t overlay overlay -o lowerdir=/system/etc:$MODDIR/etc /system/etc",
+            "mount --rbind $MODDIR/fonts /system/fonts",
+        ] {
+            assert_eq!(
+                classify_incompat_line(real),
+                Some(Incompat::SelfMount),
+                "missed a real self-mount: {real}"
+            );
+        }
+    }
+
+    /// Re-Malwack binds THROUGH a variable, so the mount line alone carries no
+    /// ROM path. This is the shape that made the whole family invisible.
+    #[test]
+    fn a_bind_through_a_variable_is_resolved() {
+        let script = concat!(
+            "#!/system/bin/sh
+",
+            "system_hosts=\"/system/etc/hosts\"
+",
+            "hosts_file=\"$MODDIR/system/etc/hosts\"
+",
+            "mount --bind \"$hosts_file\" \"$system_hosts\" || {
+",
+        );
+        let vars = rom_path_vars(script);
+        assert_eq!(vars.get("system_hosts").map(String::as_str), Some("/system/etc/hosts"));
+        // $hosts_file starts with $MODDIR, not a ROM path, so it is NOT collected.
+        assert!(!vars.contains_key("hosts_file"), "a module-tree path must not be taken for a ROM path");
+
+        let line = r#"mount --bind "$hosts_file" "$system_hosts" || {"#;
+        assert_eq!(classify_incompat_line(line), None, "precondition: unresolved, it is invisible");
+        assert_eq!(
+            classify_incompat_line(&expand_rom_vars(line, &vars)),
+            Some(Incompat::SelfMount),
+            "resolved, Re-Malwack's real bind must be named"
+        );
+    }
+
+    /// Longest-name-first, or `$hosts` eats the front of `$hosts_file`.
+    #[test]
+    fn overlapping_variable_names_expand_longest_first() {
+        let vars = rom_path_vars("hosts=/system/etc/hosts
+hosts_file=/system/etc/hosts.d/x
+");
+        assert_eq!(
+            expand_rom_vars("mount --bind $hosts_file /tmp/x", &vars),
+            "mount --bind /system/etc/hosts.d/x /tmp/x"
+        );
+    }
+
+    /// Every way this arm could over-count, on the same evidence the arms above
+    /// were narrowed on.
+    #[test]
+    fn self_mount_does_not_over_count() {
+        for quiet in [
+            // Prose. Re-Malwack's own scripts are full of it.
+            r#"ui_print "- Setting up mount hosts...""#,
+            r#"echo "failed to mount $hosts_file to $system_hosts""#,
+            "# mount IDs start with 500k or 2b",
+            // Removing a mount is not making one.
+            "umount /system/etc/hosts",
+            "mount --bind /dev/null /system/etc/hosts && umount /system/etc/hosts",
+            // Not over the ROM: the module's own tree, or /data.
+            "mount --bind $MODDIR/a $MODDIR/b",
+            "mount -o bind /data/adb/foo /data/adb/bar",
+            // A bare partition name is not a path INTO the partition.
+            "mount --bind /data/x /systemfoo/y",
+        ] {
+            assert_eq!(classify_incompat_line(quiet), None, "over-counted: {quiet}");
+        }
+    }
+
+    /// ORDER: an nsenter-replicated bind stays ImageBacked.
+    ///
+    /// absorb says of that shape that it "cannot see or unmount (replicated with
+    /// nsenter)". Retagging it as a self-mount would promise absorb handles a
+    /// mount absorb has explicitly said it cannot -- the softening the note on
+    /// AutoSystemBoost says not to make.
+    #[test]
+    fn an_nsenter_replicated_bind_stays_image_backed() {
+        assert_eq!(
+            classify_incompat_line("nsenter -t 1 -m -- mount --bind $MODDIR/etc /system/etc"),
+            Some(Incompat::ImageBacked)
+        );
+        assert_eq!(
+            classify_incompat_line(
+                "/system/bin/nsenter --mount=/proc/$zp/ns/mnt -- /bin/mount --rbind $SYS_CERT /system/etc/security/cacerts"
+            ),
+            Some(Incompat::ImageBacked)
+        );
     }
 
     /// The two genuine reports from that same device must still fire -- the fix
