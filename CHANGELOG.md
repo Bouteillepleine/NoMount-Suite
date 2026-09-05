@@ -1,5 +1,16 @@
 # Changelog
 
+> **The Suite and the Prism engine update separately.**
+>
+> The engine is compiled into the kernel (`CONFIG_NOMOUNT=y`); the Suite is this
+> module. Installing a Suite update does **not** move the engine — for that you
+> flash a kernel built from the matching `hookless/` source.
+>
+> That is normal, not a fault: the Suite is built to run on an older engine.
+> Anything that needs a newer one is **named** by `nomount check` and by the
+> WebUI rather than silently doing nothing, so you can see exactly what a kernel
+> update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
+
 ## v1.3.140 — engine v30 (unchanged)
 
 ### Added

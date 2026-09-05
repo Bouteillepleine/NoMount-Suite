@@ -105,9 +105,33 @@ jobs:
           echo "publishing $TAG <- $zip ($(stat -c %s "$zip") bytes)"
           # The tag is authoritative for the name; the notes point at the commit
           # log rather than restating it, so this never goes stale.
+          # The engine ships in the KERNEL and the Suite ships as a zip, so an
+          # in-manager update moves one and not the other -- and this release page
+          # is where that update offer lands. Saying it here is what keeps "the
+          # new Suite did not enable X" reading as a kernel they have not flashed
+          # yet, rather than as a bug in the Suite.
+          #
+          # --notes-file sets the same body --notes does, which gh PREPENDS to the
+          # generated notes; a file avoids quoting a multi-line note through the
+          # workflow, the shell and gh all at once.
+          cat > /tmp/notes.md <<'NOTES'
+          > **The Suite and the Prism engine update separately.**
+          >
+          > The engine is compiled into the kernel (`CONFIG_NOMOUNT=y`); the Suite is this
+          > module. Installing this update does **not** move the engine — for that you flash
+          > a kernel built from the matching `hookless/` source.
+          >
+          > The Suite is built to run on an older engine, so this is normal rather than a
+          > fault. Anything that needs a newer one is **named** by `nomount check` and by the
+          > WebUI instead of silently doing nothing, so you can see what a kernel update would
+          > buy you. The footer shows both numbers — `Suite vX · engine vY`.
+          NOTES
+          sed -i 's/^          //' /tmp/notes.md
+
           gh release create "$TAG" "$zip" \
             --repo "$GITHUB_REPOSITORY" \
             --title "NoMount Suite $TAG" \
+            --notes-file /tmp/notes.md \
             --generate-notes
 
       # update.json is written HERE and nowhere else, which is what makes the
