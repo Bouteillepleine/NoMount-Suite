@@ -876,7 +876,7 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
         for script in SCRIPTS {
             if let Ok(body) = std::fs::read_to_string(mdir.join(script)) {
                 for rel in sourced_scripts(&body) {
-                    if !todo.iter().any(|e| *e == rel) && mdir.join(&rel).is_file() {
+                    if !todo.contains(&rel) && mdir.join(&rel).is_file() {
                         todo.push(rel);
                     }
                 }
