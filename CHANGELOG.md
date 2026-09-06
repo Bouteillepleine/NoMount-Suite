@@ -14,9 +14,48 @@
 ## v1.3.141 — engine v30 (unchanged)
 
 Closes the ten findings of the 2026-09-06 audit of v1.3.140, plus one found while
-verifying them on hardware.
+verifying them on hardware and three more from a live audit of an OP11 running the
+result.
 
 ### Fixed
+
+- **The incompatibility lint was blind to every `my_*` partition.** It carried its
+  own five-name list — `system vendor product system_ext odm` — matched as
+  `/{p}/`, and `/my_product/` does not contain `/product/`. So on the OnePlus/OPlus
+  ROM family this project targets, `SelfMount`, `RomWrite` and the `remount` arm
+  could not see eleven partitions at once. Measured on an OP11 (CPH2449):
+  `Bootanimation/post-fs-data.sh:5` is
+  `mount --bind $MODDIR/my_product/... /my_product/media/bootanimation/` — a
+  textbook self-mount, the only one on the device, and `check --plan` reported
+  nothing at all. The lint now shares `pmcache::ROM_PARTITIONS` with the rest of
+  the crate, a superset of the PM-scan roots that also names the three
+  (`my_bigball`, `my_manifest`, `my_reserve`) `ROM_ROOTS` documents as a known
+  gap — PM does not scan them, but a module can certainly write to them. A test
+  pins the two lists together and uses the real OP11 line as its vector.
+
+- **A module could be switched on, ship a whole ROM tree, and serve nothing — with
+  no check saying so.** New finding, `module content not served`. Measured on that
+  same OP11: `OnePlus_Dialer_Universal` had shipped **146 files across five
+  partitions and served zero of them since 2026-09-01**, because the module's OWN
+  bootloop guard had written a `skip_mount` and nothing ever clears one. Five days
+  of a dialer customisation quietly not applying while the manager listed the
+  module as enabled — the exact "installed and silently not applied" class this
+  report exists to end, one layer out. `disable` and `remove` are not findings
+  (content not being served is the point); `skip_mount` is not assumed to be
+  deliberate, because the marker is just a file and any root script can write one.
+
+- **`my_hookless` was read as intent whoever created it.** The marker switches
+  every `my_*` target from a bind to a hookless injection, which this build
+  documents as a trial with a named failure: a leaf my_* injection can trip
+  zygote's FD allowlist at forkSystemServer, i.e. a bootloop the guard recovers by
+  disabling the Suite. Nothing in the crate ever writes the file — so its presence
+  is evidence, and the report could not tell a user's opt-in from a third party's.
+  On the OP11 it was the latter: `OnePlus_Dialer_Universal/post-fs-data.sh` does
+  `touch /data/adb/nomount/my_hookless` whenever it detects NoMount, re-creating it
+  every boot, while shipping 84 files across `my_product`/`my_region`/`my_stock`.
+  Three boots failed on 2026-09-01 and both that module's guard and the Suite's
+  tripped. The new `my_* injection trial` check names the module that mentions the
+  marker and says what the combination costs.
 
 - **The bootloop guard bound the boot path and nothing else.** `disabled` means
   "this device could not finish booting three times in a row", and it was tested

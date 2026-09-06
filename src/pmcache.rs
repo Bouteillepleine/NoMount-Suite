@@ -56,6 +56,38 @@ const ROM_ROOTS: &[&str] = &[
     "/my_stock/", "/my_company/", "/my_carrier/", "/my_engineering/", "/my_heytap/", "/my_preload/",
 ];
 
+/// ROM partition NAMES, for anything that needs "is this path on the ROM" rather
+/// than "does PackageManager scan it".
+///
+/// A superset of [`ROM_ROOTS`], and deliberately so: that list grants
+/// `NM_FLAG_PUBLIC` and has to stay in lockstep with the kernel's
+/// `nm_vpath_in_pm_scandir()`, so widening it needs a matched engine. This list
+/// only ever answers a question, so it can name every partition an OPlus device
+/// actually has -- including the three `ROM_ROOTS` documents as a known gap
+/// (`my_bigball`, `my_manifest`, `my_reserve`), which PM does not scan but a
+/// module can certainly write to.
+///
+/// It exists because `doctor.rs`'s incompatibility lint had its OWN five-name
+/// list -- `["system", "vendor", "product", "system_ext", "odm"]` -- matched as
+/// `/{p}/`, and `/my_product/` does not contain `/product/`. So the lint was
+/// blind to every `my_*` partition on the ROM family this project targets.
+/// Measured on an OP11 (CPH2449, 11 `my_*` partitions), 2026-09-06:
+/// `Bootanimation/post-fs-data.sh:5` reads
+///
+///     mount --bind $MODDIR/my_product/media/bootanimation/ /my_product/media/bootanimation/
+///
+/// which is a textbook `SelfMount` -- explicit `--bind`, ROM partition as the
+/// destination, token-leading -- and `nomount check --plan` reported nothing at
+/// all. It was the only self-mounting module on the device, i.e. exactly the
+/// family that check was added for. `mount.rs` discovers partitions from the
+/// device, `ROM_ROOTS` names eight `my_*` roots, and `can_whiteout` permits
+/// them; that one list was out of step with all three.
+pub const ROM_PARTITIONS: &[&str] = &[
+    "system", "system_ext", "product", "vendor", "odm",
+    "my_product", "my_region", "my_stock", "my_company", "my_carrier", "my_engineering",
+    "my_heytap", "my_preload", "my_bigball", "my_manifest", "my_reserve",
+];
+
 /// The directory names PM actually scans for packages. A file anywhere else on a
 /// ROM partition is just a file: PM never parses it, so it has no cache entry to
 /// invalidate and -- far more importantly -- it is not advertised to any app.
@@ -250,6 +282,27 @@ mod tests {
     fn my_partition_apks_are_tracked() {
         assert!(is_rom_apk(Path::new("/my_product/app/Foo/Foo.apk")));
         assert!(is_rom_apk(Path::new("/my_stock/priv-app/Bar/Bar.apk")));
+    }
+
+    /// `ROM_PARTITIONS` must cover every root `ROM_ROOTS` names, or the lint that
+    /// asks "is this on the ROM" could answer no for a path the Suite is happy to
+    /// serve and grant `--public` to. Superset, not equality: `ROM_ROOTS` is
+    /// pinned to the kernel's PM-scan predicate and cannot be widened without a
+    /// matched engine, while this one only ever answers a question.
+    #[test]
+    fn rom_partitions_cover_every_pm_scan_root() {
+        for r in ROM_ROOTS {
+            let name = r.trim_matches('/');
+            assert!(
+                ROM_PARTITIONS.contains(&name),
+                "{name} is a PM scan root but not a known ROM partition"
+            );
+        }
+        // The three ROM_ROOTS documents as a known gap are named here, because a
+        // module can write to them even though PM does not scan them.
+        for extra in ["my_bigball", "my_manifest", "my_reserve"] {
+            assert!(ROM_PARTITIONS.contains(&extra));
+        }
     }
 
     #[test]

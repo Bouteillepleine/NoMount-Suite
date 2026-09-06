@@ -605,7 +605,11 @@ impl Incompat {
 /// not a shell interpreter, and each previous attempt to be clever here
 /// over-counted.
 fn rom_path_vars(script: &str) -> std::collections::HashMap<String, String> {
-    const PARTS: [&str; 5] = ["system", "vendor", "product", "system_ext", "odm"];
+    // The ONE list, shared with pmcache. It used to be five names here and five
+    // more in the caller, both matched as `/{p}/` -- and `/my_product/` does not
+    // contain `/product/`, so every `my_*` partition was invisible to this whole
+    // chain on the ROM family the project targets. See pmcache::ROM_PARTITIONS.
+    const PARTS: &[&str] = crate::pmcache::ROM_PARTITIONS;
     let mut out = std::collections::HashMap::new();
     for line in script.lines() {
         let t = line.trim();
@@ -648,7 +652,11 @@ fn expand_rom_vars(line: &str, vars: &std::collections::HashMap<String, String>)
 /// chain is almost entirely precision fixes -- was previously only verifiable by
 /// installing a module and reading the report.
 fn classify_incompat_line(t: &str) -> Option<Incompat> {
-    const PARTS: [&str; 5] = ["system", "vendor", "product", "system_ext", "odm"];
+    // The ONE list, shared with pmcache. It used to be five names here and five
+    // more in the caller, both matched as `/{p}/` -- and `/my_product/` does not
+    // contain `/product/`, so every `my_*` partition was invisible to this whole
+    // chain on the ROM family the project targets. See pmcache::ROM_PARTITIONS.
+    const PARTS: &[&str] = crate::pmcache::ROM_PARTITIONS;
     // A capability PROBE is not a use.
     //
     // Reported from a OnePlus CPH2649 running v1.3.122: AutoSystemBoost was named
@@ -878,6 +886,121 @@ fn sourced_scripts(body: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Installed modules whose scripts write the `my_hookless` marker.
+///
+/// The marker switches every `my_*` target from a real bind to a hookless
+/// injection, which `mount::my_hookless_enabled` documents as a TRIAL with a
+/// named failure mode: a leaf my_* inject can trip zygote's FD allowlist at
+/// forkSystemServer, i.e. a bootloop. The Suite never creates the file, so it is
+/// either the user's decision or somebody else's.
+///
+/// Measured on an OP11, 2026-09-06: it was somebody else's.
+/// `OnePlus_Dialer_Universal/post-fs-data.sh` does
+/// `touch /data/adb/nomount/my_hookless` whenever it detects NoMount is active,
+/// and re-creates it on every boot -- while that same module ships 84 files
+/// across `my_product`, `my_region` and `my_stock`. Three boots failed on
+/// 2026-09-01, both that module's guard and the Suite's tripped, and nothing in
+/// any report connected the marker to the module that wrote it.
+///
+/// Cheap by construction: only the module's own `*.sh` are read, and only their
+/// text is matched -- this names a candidate, it does not prove authorship.
+fn my_hookless_writers() -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/data/adb/modules") else { return out };
+    let mut dirs: Vec<_> = rd.flatten().collect();
+    dirs.sort_by_key(|d| d.file_name());
+    for d in dirs {
+        let mdir = d.path();
+        let Some(id) = mdir.file_name().and_then(|n| n.to_str()) else { continue };
+        if id == "meta-nomount" || !mdir.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&mdir) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("sh") {
+                continue;
+            }
+            if std::fs::read_to_string(&p).is_ok_and(|b| b.contains("my_hookless")) {
+                out.push(id.to_string());
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Why a module that ships ROM content is contributing nothing, or `None` if
+/// there is nothing to say.
+///
+/// Pure, so the judgement is testable without a module tree.
+///
+/// `disable` and `remove` are NOT findings: the user turned the module off, and
+/// content not being served is the whole point. Everything else is, because the
+/// module is switched ON and its files are not reaching the ROM -- which is
+/// precisely the "installed and silently not applied" state this report exists
+/// to end, and it is invisible everywhere else. The WebUI's module list says
+/// "skipped" in small grey text; nothing else mentions it at all.
+fn unserved_reason(markers: &[String], served: bool) -> Option<&'static str> {
+    if served || markers.iter().any(|m| m == "disable" || m == "remove") {
+        return None;
+    }
+    if markers.iter().any(|m| m == "skip_mount") {
+        Some("skip_mount")
+    } else {
+        Some("none")
+    }
+}
+
+/// Files a module ships under a real ROM partition, and which partitions.
+///
+/// Mirrors the injector: content lives under ANY top-level directory that names
+/// a partition, not just `system/`. Symlinks are not followed -- a module's
+/// `system/product -> ../product` convergence link would double-count.
+fn module_rom_files(mdir: &Path) -> (usize, Vec<String>) {
+    let mut n = 0usize;
+    let mut parts: Vec<String> = Vec::new();
+    let Ok(rd) = std::fs::read_dir(mdir) else { return (0, parts) };
+    for e in rd.flatten() {
+        let p = e.path();
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue };
+        if !crate::pmcache::ROM_PARTITIONS.contains(&name) {
+            continue;
+        }
+        if p.is_symlink() || !p.is_dir() || !Path::new("/").join(name).is_dir() {
+            continue;
+        }
+        let c = count_files(&p, 0);
+        if c > 0 {
+            n += c;
+            parts.push(format!("{name}({c})"));
+        }
+    }
+    (n, parts)
+}
+
+/// Bounded recursive file count. The depth cap is the same reflex as the plan
+/// walk's: a module is free to ship a pathological tree and this runs on the
+/// report path.
+fn count_files(dir: &Path, depth: usize) -> usize {
+    if depth > 12 {
+        return 0;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let mut n = 0;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_symlink() {
+            n += 1;
+        } else if p.is_dir() {
+            n += count_files(&p, depth + 1);
+        } else {
+            n += 1;
+        }
+    }
+    n
 }
 
 fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
@@ -1492,6 +1615,107 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // "foreign mount in another namespace": that one contradicts the zero-mount
     // posture the same report otherwise claims, so it has news to break and stays
     // a warning.
+    // The my_* injection trial, and WHO turned it on.
+    //
+    // The marker changes how every my_* target is served -- bind becomes hookless
+    // injection -- and the Suite never writes it, so it is evidence rather than
+    // configuration. A module writing it is a different situation from a user
+    // writing it, and until now the report could not tell them apart: it read the
+    // marker as intent whoever put it there.
+    if Path::new(crate::mount::MY_HOOKLESS_MARKER).exists() {
+        let writers = my_hookless_writers();
+        f.push(Finding {
+            level: if writers.is_empty() { Level::Info } else { Level::Warn },
+            check: "my_* injection trial",
+            detail: if writers.is_empty() {
+                "the my_hookless marker is set, so my_* partitions are served by injection \
+                 instead of a bind. That is the trial this build documents: a leaf my_* \
+                 injection can trip zygote's FD allowlist at forkSystemServer, and the \
+                 bootloop guard is what recovers it. No installed module mentions the \
+                 marker, so this reads as your own opt-in."
+                    .to_string()
+            } else {
+                format!(
+                    "the my_hookless marker is set and the Suite never writes it — {} \
+                     mention(s) it in its own scripts, so it is very likely not your choice. \
+                     It switches every my_* target from a bind to a hookless injection, and a \
+                     leaf my_* injection can trip zygote's FD allowlist at forkSystemServer: \
+                     that is a BOOTLOOP, recovered only by the guard disabling the Suite after \
+                     three failed boots. Check whether that module also ships my_* content — \
+                     the combination is the hazard. Remove {} to fall back to binds, and stop \
+                     the module re-creating it, or it returns on the next boot.",
+                    writers.join(", "),
+                    crate::mount::MY_HOOKLESS_MARKER
+                )
+            },
+        });
+    }
+
+    // A module that is switched ON, ships ROM content, and is served by nothing.
+    //
+    // This is the "installed and silently not applied" state, and it was
+    // invisible: the WebUI's module list says "skipped" in small grey text and
+    // no check mentioned it at all. Measured on an OP11, 2026-09-06 --
+    // `OnePlus_Dialer_Universal` had shipped 146 files across five partitions and
+    // served ZERO of them since 2026-09-01, because its OWN bootloop guard had
+    // written a `skip_mount` and nothing ever clears one. Five days of a dialer
+    // customisation quietly not applying, with the module listed as enabled.
+    //
+    // `skip_mount` is therefore NOT assumed to be deliberate. Plenty of modules
+    // ship one on purpose (a self-mounter opting out), and for those this is a
+    // one-line "yes, that is what you asked for" -- but the marker is a file, any
+    // root script can write one, and a module's own guard doing it is exactly the
+    // case nobody would look for. Naming who could have put it there is the whole
+    // value of the finding.
+    let served_modules: std::collections::HashSet<&str> =
+        plan.iter().map(|e| e.module.as_str()).collect();
+    if let Ok(rd) = std::fs::read_dir("/data/adb/modules") {
+        let mut dirs: Vec<_> = rd.flatten().collect();
+        dirs.sort_by_key(|d| d.file_name());
+        for d in dirs {
+            let mdir = d.path();
+            let Some(id) = mdir.file_name().and_then(|n| n.to_str()) else { continue };
+            if id == "meta-nomount" || !mdir.is_dir() {
+                continue;
+            }
+            let markers: Vec<String> = ["disable", "remove", "skip_mount"]
+                .iter()
+                .filter(|m| mdir.join(m).exists())
+                .map(|m| (*m).to_string())
+                .collect();
+            let Some(why) = unserved_reason(&markers, served_modules.contains(id)) else {
+                continue;
+            };
+            let (n, parts) = module_rom_files(&mdir);
+            if n == 0 {
+                continue;
+            }
+            f.push(Finding {
+                level: Level::Warn,
+                check: "module content not served",
+                detail: if why == "skip_mount" {
+                    format!(
+                        "{id} ships {n} file(s) under {} and is served by NOTHING: it carries a \
+                         `skip_mount` marker, so the Suite leaves its tree alone. If you did not \
+                         put that marker there, something else did -- a module's own bootloop \
+                         guard writes one and never clears it, and the module then stays enabled \
+                         and inert indefinitely. Delete /data/adb/modules/{id}/skip_mount to serve \
+                         it, unless the module mounts its own content on purpose.",
+                        parts.join(" ")
+                    )
+                } else {
+                    format!(
+                        "{id} ships {n} file(s) under {} and is served by NOTHING, with no \
+                         disable/remove/skip_mount marker to explain it. That is the Suite's \
+                         problem, not the module's: run `nomount plan` for the per-file refusal \
+                         reasons.",
+                        parts.join(" ")
+                    )
+                },
+            });
+        }
+    }
+
     for (module, script, kind, hit) in scan_module_incompat() {
         f.push(Finding {
             level: kind.level(),
@@ -2379,6 +2603,89 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(
             expand_rom_vars("mount --bind $hosts_file /tmp/x", &vars),
             "mount --bind /system/etc/hosts.d/x /tmp/x"
+        );
+    }
+
+    /// A module switched ON whose content reaches nothing.
+    ///
+    /// The `skip_mount` row is the OP11 case: `OnePlus_Dialer_Universal` shipped
+    /// 146 files and served zero for five days, because its OWN bootloop guard
+    /// had written a `skip_mount` that nothing ever clears — while the manager
+    /// still listed it as enabled.
+    #[test]
+    fn a_module_that_ships_content_and_serves_nothing_is_named() {
+        assert_eq!(unserved_reason(&["skip_mount".into()], false), Some("skip_mount"));
+        // No marker at all and still nothing served: that one is ours, not the
+        // module's, and must not read the same way.
+        assert_eq!(unserved_reason(&[], false), Some("none"));
+    }
+
+    /// The user turning a module OFF is not a finding — content not being served
+    /// is the entire point — and neither is a module that IS being served.
+    #[test]
+    fn a_disabled_or_served_module_is_not_a_finding() {
+        assert_eq!(unserved_reason(&["disable".into()], false), None);
+        assert_eq!(unserved_reason(&["remove".into()], false), None);
+        assert_eq!(unserved_reason(&[], true), None);
+        assert_eq!(unserved_reason(&["skip_mount".into()], true), None);
+        // remove wins even alongside skip_mount: it is on its way out.
+        assert_eq!(unserved_reason(&["skip_mount".into(), "remove".into()], false), None);
+    }
+
+    /// The `my_*` partitions, which this whole chain could not see.
+    ///
+    /// `PARTS` was five names matched as `/{p}/`, and `/my_product/` does not
+    /// contain `/product/` -- so on an OPlus ROM, the family this project
+    /// targets, every incompat arm was blind to eleven partitions at once.
+    ///
+    /// The first line is real, off an OP11 (CPH2449) on 2026-09-06:
+    /// `Bootanimation/post-fs-data.sh:5`. It was the ONLY self-mounting module on
+    /// that device, and `nomount check --plan` reported nothing at all.
+    #[test]
+    fn my_partitions_are_not_invisible() {
+        assert_eq!(
+            classify_incompat_line(
+                "mount --bind $MODDIR/my_product/media/bootanimation/ /my_product/media/bootanimation/"
+            ),
+            Some(Incompat::SelfMount),
+            "the real OP11 line that went unreported"
+        );
+        // The other arms were blind in the same way.
+        assert_eq!(
+            classify_incompat_line("cp /data/x /my_stock/etc/foo.xml"),
+            Some(Incompat::RomWrite)
+        );
+        assert_eq!(
+            classify_incompat_line("rm -rf /my_region/app/Bar"),
+            Some(Incompat::RomWrite)
+        );
+        assert_eq!(
+            classify_incompat_line("mount -o rw,remount /my_bigball"),
+            Some(Incompat::RomWrite)
+        );
+        // ...and through a variable, the Re-Malwack shape on a my_* path.
+        let vars = rom_path_vars("boot_dir=\"/my_product/media/bootanimation\"\n");
+        assert_eq!(vars.get("boot_dir").map(String::as_str), Some("/my_product/media/bootanimation"));
+    }
+
+    /// Widening the list must not make `/system_ext/` match `system`, or a
+    /// partition NAME inside a longer word match at all. The needle is `/{p}/`,
+    /// and these are the pairs where that matters now that `my_product` and
+    /// `product` are both in the list.
+    #[test]
+    fn a_wider_partition_list_does_not_over_match() {
+        for quiet in [
+            "mount --bind /data/x /systemfoo/y",
+            "mount --bind /data/x /my_productfoo/y",
+            "cp /data/x /notsystem/y",
+            "mount --bind $MODDIR/my_product/a $MODDIR/my_product/b",
+        ] {
+            assert_eq!(classify_incompat_line(quiet), None, "over-counted: {quiet}");
+        }
+        // `/system_ext/` is its own partition and matches as itself, not via `system`.
+        assert_eq!(
+            classify_incompat_line("mount --bind $MODDIR/x /system_ext/etc/y"),
+            Some(Incompat::SelfMount)
         );
     }
 

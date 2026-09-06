@@ -258,8 +258,16 @@ fn my_hookless_enabled() -> bool {
     std::env::var_os("NM_MY_HOOKLESS")
         .map(|v| v != "0" && !v.is_empty())
         .unwrap_or(false)
-        || Path::new("/data/adb/nomount/my_hookless").exists()
+        || Path::new(MY_HOOKLESS_MARKER).exists()
 }
+
+/// The `my_*` injection trial's opt-in marker.
+///
+/// **Nothing in this crate ever creates it.** That is what makes its presence
+/// evidence: the file was put there by a person or by a third-party module's
+/// root script, and the two mean very different things. See
+/// `doctor::my_hookless_writers`.
+pub const MY_HOOKLESS_MARKER: &str = "/data/adb/nomount/my_hookless";
 
 /// True if `target` is a partition ROOT (`/product`, `/system`, `/vendor`, …) rather than
 /// something inside one.
