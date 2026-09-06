@@ -101,6 +101,24 @@ pub(crate) const PASS_LOCK_WAIT: u64 = 25;
 ///   merely WAITING here is indistinguishable from a dead one, so it would be
 ///   reaped, and mutual exclusion is lost for the rest of the session.
 ///
+/// The bootloop guard's parking brake.
+///
+/// Written by `metamount.sh` / `post-fs-data.sh` when three boots in a row failed
+/// to reach `sys.boot_completed`, and by hand when someone wants the Suite to
+/// stand down. Its meaning is exactly one thing: DO NOT SERVE on this device.
+pub const DISABLED_MARKER: &str = "/data/adb/nomount/disabled";
+
+/// Has the bootloop guard parked the Suite?
+///
+/// Every boot entry point tests this in shell before it calls us. Nothing in the
+/// binary did, which meant the marker bound the BOOT path and nothing else: the
+/// WebUI's Reload button re-injected the whole rule set on a device that had just
+/// disabled itself, on the same screen that says "the Suite disabled itself",
+/// and said nothing about it. See `cli::serves_injections`.
+pub fn guard_tripped() -> bool {
+    Path::new(DISABLED_MARKER).exists()
+}
+
 /// Timing out and proceeding unserialised is the lesser evil: the passes are
 /// idempotent, and a missed serialisation is recoverable where a stalled boot is
 /// not. Say so on stderr so it is not silent.

@@ -1290,6 +1290,31 @@
     return exec(`NM_BIN=${shq(nmClient)} ${shq(b)} ${args}`);
   }
 
+  // How a refusal reads in a toast.
+  //
+  // The engine refuses a SERVING verb while the bootloop guard has parked the
+  // Suite (see cli::serves_injections). That refusal is a paragraph, because a
+  // CLI reader has no other context -- it names the marker, the log and the
+  // command that lifts it. A toast has this whole page around it, including the
+  // guard banner and the Last incident card, so shorten it here rather than
+  // dumping stderr into a five-line toast.
+  //
+  // Rendered from the ACTUAL refusal rather than pre-checked against the cached
+  // report: the binary is the authority on whether the marker exists, and a
+  // stale `guard tripped` in CHECK would otherwise block a Reload that is now
+  // perfectly legal. Anything the pattern does not match passes through as before.
+  // `fallback` is for the callers that already built a richer message than
+  // stderr alone -- `whiteout add` exits non-zero when the entry was SAVED and
+  // only the apply failed, and that distinction is in the text, not the code.
+  function failText(r, fallback) {
+    const e = ((r && r.stderr) || "").trim();
+    if (/bootloop guard has parked the Suite/.test(e)) {
+      return "Blocked — the bootloop guard disabled the Suite, so nothing is injected. " +
+             "Find out why below, then clear it and reboot.";
+    }
+    return "Failed: " + ((fallback || "").trim() || e || "error");
+  }
+
   // Shared busy state. Anything that shells out can take a noticeable moment --
   // a Cloak scan unzips every third-party APK's manifest, absorb walks mountinfo
   // and unmounts, doctor resolves the whole plan -- and with only a disabled
@@ -2702,7 +2727,7 @@
     // The CLI exits non-zero when the entry was SAVED but the engine refused to
     // apply it now -- the path stays visible until the next boot -- so the text
     // is the answer here, not just "failed".
-    toast(r.errno === 0 ? (txt.split("\n").pop() || "Hidden") : "Failed: " + (txt || "error"),
+    toast(r.errno === 0 ? (txt.split("\n").pop() || "Hidden") : failText(r, txt),
           r.errno === 0 ? "ok" : "bad");
     return r;
   }
@@ -2873,7 +2898,9 @@
     const out = ((r.stdout || "") + (r.stderr || "")).trim();
     $("abFound").style.display = "";
     $("abFound").innerHTML = `<div class="empty">${esc(out || "(no output)")}</div>`;
-    toast(r.errno === 0 ? "Absorb complete" : "Absorb failed", r.errno === 0 ? "ok" : "bad");
+    // "Absorb failed" said nothing about WHY, and the commonest why is now the
+    // guard refusing a serving verb outright.
+    toast(r.errno === 0 ? "Absorb complete" : failText(r), r.errno === 0 ? "ok" : "bad");
     // The mount table just changed, so the verdict that sent the reader here is
     // now stale. Re-measure rather than leaving a warning standing over a fixed
     // device.
@@ -2989,7 +3016,9 @@
     btn.disabled = true; if (svg) svg.classList.add("spin");
     const r = await nm("reload");
     if (r.errno === 0) toast(r.stdout.replace(/^nomount reload:\s*/, "").trim() || "Reloaded", "ok");
-    else toast("Failed: " + (r.stderr || "error"), "bad");
+    // `failText`, because THIS is the button that used to re-inject the whole
+    // rule set on a device the guard had just disabled, and say nothing at all.
+    else toast(failText(r), "bad");
     if (svg) svg.classList.remove("spin"); btn.disabled = false;
     refreshAll();
   }

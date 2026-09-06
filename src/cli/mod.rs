@@ -218,6 +218,52 @@ pub enum WhiteoutAction {
     Suggest,
 }
 
+/// Would this verb put injection state INTO the engine?
+///
+/// These are the verbs the bootloop guard exists to hold off. `disabled` means
+/// "this device could not finish booting three times in a row with these rules",
+/// and it was enforced by the five shell entry points and NOWHERE ELSE -- so it
+/// bound the boot path and nothing else. The WebUI's Reload button called
+/// `nomount reload` directly through `ksu.exec` and re-injected the whole rule
+/// set on a parked device, on the same screen that says "the bootloop guard
+/// tripped · the Suite disabled itself", without a word. Measured on an OP11:
+/// two rules live on a boot where the mount pass had correctly refused to run.
+///
+/// The cut is SERVING, not mutating, and the difference is what keeps the
+/// recovery path open:
+///
+///   * refused -- `mount`, `reload`, `absorb`, `vfs add`/`whiteout`,
+///     `whiteout add`/`apply`. Each of these ends with more being served than
+///     before, which is the one thing the marker denies.
+///   * allowed -- everything that DIAGNOSES (`check`, `plan`, `absorb --dry-run`,
+///     `export`, `snapshot`, `verify`), everything that REMOVES (`vfs del`,
+///     `vfs clear`, `whiteout remove`), the whole `uid` family (hiding is not
+///     serving, and a parked Suite still has a hide list worth managing), and
+///     `ghost` (on a parked device it clears two tables that describe nothing).
+///
+/// Refusing without a `--force` is deliberate. The marker IS the switch, and a
+/// per-verb override would be a second way past it that nothing else knows
+/// about -- so the refusal names the one command that lifts it, which is also
+/// the documented recovery (`health.rs`: "Delete /data/adb/nomount/disabled once
+/// you know why, and reboot").
+///
+/// No shell caller can hit this: all five entry points already test the marker
+/// before they invoke anything here, so the gate only ever fires on a manual or
+/// WebUI invocation -- which is precisely the hole it closes.
+pub fn serves_injections(cmd: &Commands) -> bool {
+    match cmd {
+        Commands::Mount | Commands::Reload => true,
+        Commands::Absorb { dry_run, .. } => !dry_run,
+        Commands::Vfs { action } => {
+            matches!(action, VfsAction::Add { .. } | VfsAction::Whiteout { .. })
+        }
+        Commands::Whiteout { action } => {
+            matches!(action, WhiteoutAction::Add { .. } | WhiteoutAction::Apply)
+        }
+        _ => false,
+    }
+}
+
 /// Does this verb change the state the kernel's `_ghost` tables are derived from?
 ///
 /// [`crate::ghost`] populates two tables: the injected-only PATHS a hidden reader
@@ -274,6 +320,59 @@ pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The verbs the bootloop guard has to hold off: each ends with more being
+    /// served than before, which is the one thing `disabled` denies.
+    #[test]
+    fn every_serving_verb_is_refused_while_the_guard_is_tripped() {
+        for c in [
+            Commands::Mount,
+            Commands::Reload,
+            Commands::Absorb { dry_run: false, include_dirs: false, early: false },
+            Commands::Vfs {
+                action: VfsAction::Add { virtual_path: "/a".into(), real_path: "/b".into() },
+            },
+            Commands::Vfs { action: VfsAction::Whiteout { path: "/a".into() } },
+            Commands::Whiteout { action: WhiteoutAction::Add { path: "/a".into(), force: false } },
+            Commands::Whiteout { action: WhiteoutAction::Apply },
+        ] {
+            assert!(serves_injections(&c), "a serving verb must be refused on a parked device");
+        }
+    }
+
+    /// ...and the guard must not block its own recovery. Diagnosis, removal and
+    /// the hide list all stay open: `check` is how you find out WHY it tripped,
+    /// `vfs clear` and `whiteout remove` take rules away rather than adding them,
+    /// and hiding from an app is not serving anything to it.
+    #[test]
+    fn the_guard_never_blocks_diagnosis_or_removal() {
+        for c in [
+            Commands::Check { plan: false, device: false, json: false, write: false },
+            Commands::Plan,
+            Commands::Absorb { dry_run: true, include_dirs: false, early: false },
+            Commands::Export { dir: None },
+            Commands::Snapshot,
+            Commands::Verify,
+            Commands::Vfs { action: VfsAction::Del { virtual_path: "/a".into() } },
+            Commands::Vfs { action: VfsAction::Clear },
+            Commands::Vfs { action: VfsAction::List },
+            Commands::Whiteout { action: WhiteoutAction::Remove { path: "/a".into() } },
+            Commands::Whiteout { action: WhiteoutAction::List },
+            Commands::Whiteout { action: WhiteoutAction::Suggest },
+            Commands::Uid { action: UidAction::Block { target: "com.a".into(), force: false } },
+            Commands::Uid { action: UidAction::Unblock { target: "com.a".into() } },
+            Commands::Uid { action: UidAction::Apply { early: false } },
+            Commands::Uid { action: UidAction::List },
+            Commands::Ghost { action: GhostAction::Sync },
+            Commands::Ghost { action: GhostAction::List },
+            Commands::Version,
+        ] {
+            assert!(
+                !serves_injections(&c),
+                "the guard must not block diagnosis, removal or the hide list"
+            );
+        }
+    }
 
     /// The verbs that move an input. Each of these was silently leaving the
     /// tables describing the previous state; `uid unblock` is the WebUI's un-hide

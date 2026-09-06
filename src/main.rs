@@ -54,6 +54,28 @@ fn main() -> Result<()> {
     // instead of a grep. `mount` and `reload` keep their own call, because theirs
     // runs while the pass lock is still held.
     let resync_ghost = cli::changes_ghost_inputs(&cli.command);
+    // The bootloop guard binds EVERY caller, not just the boot scripts.
+    //
+    // `disabled` was tested by the five shell entry points and nowhere else, so
+    // it parked the boot path and left every other route open: the WebUI's
+    // Reload button drives `nomount reload` straight through `ksu.exec`, which
+    // re-injected the whole rule set on a device that had just disabled itself
+    // -- on the same screen that reports "the Suite disabled itself". Measured on
+    // an OP11: two live rules on a boot whose mount pass had correctly refused.
+    //
+    // Only the SERVING verbs; diagnosis and removal stay open, or the guard would
+    // block its own recovery. See `cli::serves_injections`.
+    if cli::serves_injections(&cli.command) && mount::guard_tripped() {
+        anyhow::bail!(
+            "the bootloop guard has parked the Suite ({}), so nothing is being injected — \
+             this device failed to finish booting three times in a row. `nomount check` and \
+             {}/incident.log say what happened; once you know why, clear the marker and reboot: \
+             rm {}",
+            mount::DISABLED_MARKER,
+            "/data/adb/nomount",
+            mount::DISABLED_MARKER
+        );
+    }
     let r = match cli.command {
         Commands::Mount => mount::run_mount(),
         Commands::Vfs { action } => cli::handlers::handle_vfs(action),

@@ -13,9 +13,34 @@
 
 ## v1.3.141 — engine v30 (unchanged)
 
-Closes the ten findings of the 2026-09-06 audit of v1.3.140.
+Closes the ten findings of the 2026-09-06 audit of v1.3.140, plus one found while
+verifying them on hardware.
 
 ### Fixed
+
+- **The bootloop guard bound the boot path and nothing else.** `disabled` means
+  "this device could not finish booting three times in a row", and it was tested
+  by the five shell entry points and by no other caller — so the WebUI's Reload
+  button, which drives `nomount reload` straight through `ksu.exec`, re-injected
+  the whole rule set on a device that had just disabled itself. On the same
+  screen that reads *"the bootloop guard tripped · the Suite disabled itself"*,
+  with no warning and a green toast. Found on an OP11 parked since 2026-09-01:
+  two live injection rules on a boot whose mount pass had correctly refused to
+  run.
+
+  The gate is now in the binary, where every caller meets it, and the cut is
+  SERVING rather than mutating so the guard cannot block its own recovery:
+  `mount`, `reload`, `absorb`, `vfs add`/`whiteout` and `whiteout add`/`apply`
+  refuse; everything that diagnoses (`check`, `plan`, `absorb --dry-run`,
+  `export`), everything that removes (`vfs del`/`clear`, `whiteout remove`), the
+  whole `uid` family and `ghost` stay open. No `--force`: the marker is the
+  switch, and a per-verb override would be a second way past it that nothing else
+  knows about — so the refusal names the one command that lifts it. No shell
+  caller can reach the gate, since all five already test the marker first.
+
+  The WebUI renders that refusal as a sentence instead of dumping stderr, and
+  reads it from the ACTUAL refusal rather than from the cached report — a stale
+  `guard tripped` in `audit.json` must never block a Reload that is now legal.
 
 - **The `_ghost` cloak went stale on every verb except `mount` and `reload`.**
   That module exists to stop one path answering `stat` = OK and

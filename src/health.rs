@@ -495,11 +495,9 @@ pub fn gather() -> Fingerprint {
         .as_ref()
         .map(|v| v.iter().any(|u| crate::blocklist::appid(*u) == PROBE_UID))
         .unwrap_or(false);
-    let guard = if Path::new("/data/adb/nomount/disabled").exists() {
-        "tripped"
-    } else {
-        "armed"
-    };
+    // One reader of the marker, in mount.rs, so the fingerprint and the gate in
+    // `main` can never disagree about whether the Suite is parked.
+    let guard = if crate::mount::guard_tripped() { "tripped" } else { "armed" };
     let split = count_mounts_split();
     Fingerprint {
         version: env!("CARGO_PKG_VERSION").to_string(),
