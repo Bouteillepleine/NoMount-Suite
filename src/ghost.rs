@@ -29,6 +29,21 @@
 //! `doctor.rs` detects the second case after the fact (`ghost cloak
 //! over-reaches`); nothing repaired it until the next boot.
 //!
+//! WHO RE-DERIVES THEM
+//! -------------------
+//! `mount` and `reload` call [`sync_after_pass`] themselves, while the pass lock
+//! is still held. EVERY OTHER VERB THAT MOVES AN INPUT is listed once, in
+//! [`crate::cli::changes_ghost_inputs`], and re-synced by `main` after it runs.
+//!
+//! That second half was missing at first, and the gap was the same one this
+//! module was written to close, reached through the other table: `uid unblock`
+//! -- the WebUI's un-hide button -- took an appid out of the engine's blocked set
+//! and left it in the `u` table, so with one tap every ghosted path answered
+//! `stat` = OK and `chmod`/`listxattr` = ENOENT to that app. `uid block` had the
+//! mirror-image gap, leaving a newly hidden app out of the table so all eleven
+//! oracle families stayed open for the app it had just been asked to hide from.
+//! `absorb` and `whiteout apply` moved the PATH table's inputs the same way.
+//!
 //! THREE THINGS THIS DOES BETTER THAN THE SHELL DID
 //! ------------------------------------------------
 //! 1. **ENOENT, not "not -e".** `[ -e "$p" ]` in shell is false for ENOENT and
@@ -84,8 +99,9 @@ pub struct Summary {
     pub rejected: usize,
     /// The first few refusals, for a log line a human can act on.
     pub rejected_examples: Vec<String>,
-    /// `nm list` could not be read, so both tables were cleared rather than
-    /// rebuilt from a possibly-truncated view of the rule set.
+    /// The engine's live state could not be read -- either the rule set (`nm
+    /// list`) or the hidden-uid set (`nm l u`) -- so both tables were cleared
+    /// rather than rebuilt from a partial view of it.
     pub dump_failed: bool,
 }
 
@@ -124,6 +140,24 @@ pub(crate) fn candidates(list: &str) -> Vec<PathBuf> {
         .filter(|t| t.is_absolute())
         .collect();
     v.sort();
+    v.dedup();
+    v
+}
+
+/// Normalise the engine's blocked-uid dump into the `_ghost` `u` table.
+///
+/// Pure, so the three properties that matter are pinned without an engine:
+/// appids (the kernel stores and matches on `uid % 100000`, so a clone's uid and
+/// its base uid are one entry), never uid 0 (root is the identity that installs
+/// the rules; cloaking from it would hide the injections from the Suite itself),
+/// and sorted+deduped so the same live set always produces the same command.
+fn ghost_uids(live: &[u32]) -> Vec<u32> {
+    let mut v: Vec<u32> = live
+        .iter()
+        .map(|u| crate::blocklist::appid(*u))
+        .filter(|u| *u != 0)
+        .collect();
+    v.sort_unstable();
     v.dedup();
     v
 }
@@ -329,16 +363,33 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
     }
     let mut out = Summary::default();
 
-    // The uid table is exactly the set per-UID hiding already uses, read from
-    // the cache the hide pass writes. Deriving it a second way is how the two
-    // would drift, and a uid in one table but not the other is a path that is
-    // hidden by the engine and not cloaked by _ghost.
-    let mut uids: Vec<u32> = crate::blocklist::cache_read()
-        .values()
-        .map(|u| crate::blocklist::appid(*u))
-        .filter(|u| *u != 0) // root is never hidden from
-        .collect();
-    uids.sort_unstable();
+    // The uid table has to be the ENGINE's blocked set, so ask the engine.
+    //
+    // This used to read `uidhide.cache`, on the reasoning that "deriving it a
+    // second way is how the two would drift". But `nm l u` is not a second
+    // derivation -- it IS the set `nomount_is_uid_blocked()` matches against,
+    // which is the only thing these tables have to agree with. The cache is the
+    // mirror, and the mirror is allowed to be wrong in the one direction that
+    // matters: `reapply_blocklist` writes `cache_replace(&desired)` for every
+    // entry it WANTED hidden, including any whose `uid_block` the engine refused
+    // (counted as `rep.failed`). Such an appid then sat in the cache, hence in
+    // this table, hence cloaked by _ghost and not hidden by the engine -- one
+    // path answering stat=OK and chmod=ENOENT at once, with no user action
+    // involved. The reverse gap is just as real: `nm block` issued by anything
+    // other than the Suite is live and not in the cache, so its oracles stayed
+    // open.
+    let mut uids: Vec<u32> = match nm.uid_list_live() {
+        Ok(live) => ghost_uids(&live),
+        // Same fail-OPEN handling as an unreadable rule set below, and for the
+        // same reason: a table built on a guess about who is hidden is the
+        // half-populated state ghost.c calls worse than an empty one.
+        Err(_) => {
+            let _ = nm.ghost_ctl("p-");
+            let _ = nm.ghost_ctl("u-");
+            out.dump_failed = true;
+            return Ok(Some(out));
+        }
+    };
     uids.dedup();
 
     // A FAILED dump is not an empty rule set, and the difference decides whether
@@ -402,7 +453,7 @@ pub fn run_sync(verbose: bool) -> Result<()> {
         Some(s) => {
             if s.dump_failed {
                 println!(
-                    "nomount ghost: ⚠ could not read the live rule set -- both tables CLEARED, so the existence oracles are open until the next successful sync"
+                    "nomount ghost: ⚠ could not read the engine's live state -- both tables CLEARED, so the existence oracles are open until the next successful sync"
                 );
             } else if s.rejected > 0 {
                 println!(
@@ -428,13 +479,40 @@ pub fn run_sync(verbose: bool) -> Result<()> {
     }
 }
 
+/// Re-derive after a verb that changed an input, WITHOUT narrating it.
+///
+/// [`sync_after_pass`] prints its one-line summary because `mount` and `reload`
+/// are themselves a report, and one more line in it reads as part of the same
+/// story. The dispatch-layer re-sync is different: it rides on somebody else's
+/// verb, and that verb's stdout is its ANSWER, which callers parse.
+/// `whiteout add`'s WebUI handler takes `split("\n").pop()` as the toast text,
+/// so a line appended here would literally BECOME the toast; `vfs clear` and
+/// `uid preset` fold the whole of stdout into theirs; `uid apply`'s output is
+/// carried into one `nmlog` line by service.sh and uidwatch.sh.
+///
+/// So: silence on the happy path, and stderr -- not stdout -- for the two states
+/// that have to be loud anyway, because both of them mean the existence oracles
+/// are open right now.
+pub fn sync_quietly(nm: &Nm) {
+    match sync(nm) {
+        Ok(Some(s)) if s.dump_failed => eprintln!(
+            "nomount: ⚠ ghost cloak: could not read the engine's live state -- both tables cleared, so the existence oracles are open until the next sync"
+        ),
+        Ok(Some(s)) if s.rejected > 0 => eprintln!(
+            "nomount: ⚠ ghost cloak: {} of {} path(s) refused by the kernel -- the existence oracles stay open for those",
+            s.rejected, s.ghostable
+        ),
+        _ => {}
+    }
+}
+
 /// Called at the end of `mount` and `reload`. Never fails the pass: a rule set
 /// that is live but not yet cloaked is the state this whole module exists to
 /// improve on, and it is strictly better than a boot that aborted.
 pub fn sync_after_pass(nm: &Nm) {
     match sync(nm) {
         Ok(Some(s)) if s.dump_failed => println!(
-            "nomount: ⚠ ghost cloak: could not read the live rule set -- tables cleared, oracles open"
+            "nomount: ⚠ ghost cloak: could not read the engine's live state -- tables cleared, oracles open"
         ),
         Ok(Some(s)) if s.rejected > 0 => println!(
             "nomount: ⚠ ghost cloak: {} of {} path(s) refused -- existence oracles stay open for those",
@@ -531,5 +609,35 @@ not-a-path -> /q
     #[test]
     fn absent_to_on_an_empty_list_is_not_an_error() {
         assert_eq!(absent_to(unsafe { libc::getuid() }, &[]), Some(Vec::new()));
+    }
+
+    /// The `u` table is the ENGINE's blocked set, normalised the way the engine
+    /// matches it. A clone's uid and its base uid are one appid, so submitting
+    /// both would put a duplicate in a table with a fixed cap.
+    #[test]
+    fn ghost_uids_normalises_clones_to_one_appid() {
+        assert_eq!(ghost_uids(&[1_010_471, 10_471, 10_123]), vec![10_123, 10_471]);
+    }
+
+    /// Root must never enter the table. It is the identity that installs the
+    /// rules -- ghosting from it would hide the injections from the mount pass,
+    /// from `nm`, and from every module script.
+    #[test]
+    fn ghost_uids_never_cloaks_from_root() {
+        assert_eq!(ghost_uids(&[0, 10_123, 100_000]), vec![10_123]);
+        assert!(ghost_uids(&[0]).is_empty(), "a set of only root leaves the table empty");
+    }
+
+    /// Same live set -> same command, whatever order the kernel dumped it in.
+    /// The table is replaced under one lock, so a reordering would rewrite it for
+    /// nothing on every pass.
+    #[test]
+    fn ghost_uids_is_order_independent() {
+        assert_eq!(ghost_uids(&[10_009, 10_471, 10_123]), ghost_uids(&[10_123, 10_009, 10_471]));
+    }
+
+    #[test]
+    fn ghost_uids_on_an_empty_set_is_empty() {
+        assert!(ghost_uids(&[]).is_empty());
     }
 }

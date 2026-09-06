@@ -46,6 +46,21 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             # the file's mtime, which git does not preserve and every checkout
             # therefore invents afresh.
             zi = zipfile.ZipInfo(rel, date_time=(1980, 1, 1, 0, 0, 0))
+            # UNIX host, always. ZipInfo picks create_system from sys.platform --
+            # 0 (MS-DOS/FAT) on Windows, 3 (Unix) everywhere else -- and with the
+            # host byte saying FAT, extractors IGNORE the unix mode in the high
+            # half of external_attr and fall back to a default. So on a Windows
+            # build host the 0o755 computed below was written and then discarded,
+            # which is precisely the failure the block below says it is
+            # preventing. Measured: `create_system=0, extattr=0o755` for both
+            # `bin/arm64-v8a/nm` and `service.sh`.
+            #
+            # It also broke reproducibility outright, which is this script's
+            # reason for existing: CI (Linux) wrote 3 and a local rebuild wrote 0,
+            # so the two archives differed in every central-directory record and
+            # "reproduce it locally and compare" was never going to work from
+            # here. Pinning the field is what makes the platform stop mattering.
+            zi.create_system = 3
             # Mark everything the installer has to RUN as executable. Do not
             # trust the source file's mode alone: on a Windows filesystem
             # st_mode carries no usable exec bit, so the binaries under bin/

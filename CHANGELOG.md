@@ -11,6 +11,105 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.141 — engine v30 (unchanged)
+
+Closes the ten findings of the 2026-09-06 audit of v1.3.140.
+
+### Fixed
+
+- **The `_ghost` cloak went stale on every verb except `mount` and `reload`.**
+  That module exists to stop one path answering `stat` = OK and
+  `chmod`/`listxattr` = ENOENT at the same time — a contradiction no real file
+  can produce, and one its own header calls *worse* than leaving the oracle open.
+  It wired the re-derive into `mount` and `reload` and stopped there, so the
+  verbs that move the OTHER input did not have it:
+
+  * `uid unblock` — the WebUI's un-hide button — took an appid out of the
+    engine's blocked set and left it in the `u` table. One tap, and every ghosted
+    path produced exactly that contradiction for that app, until the next boot.
+  * `uid block` had the mirror-image gap: a newly hidden app was not in the
+    table, so all eleven oracle families stayed open for the app the user had
+    just asked to hide from.
+  * `absorb`, `whiteout add`/`remove`/`apply` and `vfs add`/`del`/`whiteout`/`clear`
+    moved the PATH table's inputs the same way.
+
+  Every verb that moves an input is now listed once, in
+  `cli::changes_ghost_inputs`, and re-derived by `main` after it runs —
+  regardless of the verb's exit status, because several of these change state and
+  then bail. Two tests pin the list in both directions; the read-only verbs
+  (`uid list`, `absorb --dry-run`, `check`, …) must stay out of it, since a
+  re-derive forks a probe child and rewrites two kernel tables.
+
+  It is deliberately SILENT on the happy path and speaks on stderr when it
+  cannot rebuild: it rides on another verb, and that verb's stdout is its answer.
+  `whiteout add`'s WebUI handler toasts `stdout.split("\n").pop()`, so a summary
+  line appended there would have become the toast.
+
+- **`service.sh` ran its one boot-time `ghost sync` before three passes that
+  invalidated it.** It sat near the top, "because this is the first point at
+  which the hide list has been applied" — true, and the wrong place: the
+  post-boot `reload`, `absorb`, `whiteout apply` and the authoritative
+  `uid apply` all run after it. Moved below them, where it is a backstop over
+  settled state rather than a snapshot of state about to change.
+
+- **The `_ghost` uid table was built from `uidhide.cache`, not from the engine.**
+  The cache is a mirror, and it is allowed to be wrong in the direction that
+  matters: `reapply_blocklist` records every entry it WANTED hidden, including
+  any whose `uid_block` the engine refused. That appid then sat in the table,
+  cloaked by `_ghost` and not hidden by the engine — the same contradiction,
+  reached with no user action at all. It now comes from `nm l u`, which is the
+  set the kernel actually matches against, with the same fail-open handling an
+  unreadable rule set already had.
+
+- **`nomount mount` applied every whiteout before every injection.** Batching the
+  `nm add` calls collected the injects and flushed them after the loop, which
+  inverted the one ordering rule this file states twice — "a whiteout d_drops the
+  dentry it names, so it has to land once the injections underneath are in".
+  `dedupe_by_target` does not cover it: a whiteout on `/system/etc/foo` and an
+  inject on `/system/etc/foo/bar` are different targets. Two explicit passes now,
+  injects first; `unmount_before_serving` still runs exactly once per target and
+  its refusal is carried across so both passes skip it.
+
+- **An update threw away `absorbed-tmpfs.list` and `apkstate.list`.**
+  `uninstall.sh` runs on updates too, and `rm -rf /data/adb/nomount` follows its
+  stash — so every Suite update un-hid the ROM directories a module had replaced
+  with a tmpfs, from post-fs-data until absorb rebuilt the record after
+  `boot_completed`, and put `pmcache` into its `seeding` branch so an update that
+  also changed a served APK skipped the PackageManager cache drop. Both files are
+  now stashed and restored, and a test parses BOTH shell lists and fails if they
+  ever disagree again — two prose comments could not hold two lists in step, and
+  did not.
+
+- **A module deleting ROM content was invisible if the line started with `rm`.**
+  The pattern was `" rm "` with a leading space, chosen so `set_perm` would not
+  match `rm ` inside `perm ` — but the classifier runs on a trimmed line.
+  Measured: `rm -rf /system/app/Foo` classified as nothing while the same command
+  behind `su -c` was correctly a ROM write.
+
+- **One finding printed as five ragged lines.** The `bind-mounts its own content`
+  explanation used literal `\n` escapes where its three siblings use `\`
+  continuations, so it carried five real newlines and seventeen spaces of indent
+  into `check.txt`. A test now pins the one-line property for every arm.
+
+- **`mkzip.py` stamped the wrong host on a Windows build.** `ZipInfo` picks
+  `create_system` from `sys.platform`, so a zip built there said MS-DOS/FAT and
+  every extractor discarded the `0o755` the script goes out of its way to
+  compute — the exact failure its own comment says it prevents. It also made the
+  archive unreproducible across platforms, which is the script's reason for
+  existing. Pinned to Unix.
+
+- **`uidwatch.sh` discarded absorb's record-prune line.** It was the fifth
+  `absorb` capture site and the only one without `nmlog_absorb_notes`, while
+  `lib.sh` said there were four — and it is the handler that runs on every
+  install, update and uninstall, i.e. exactly when a module's directory
+  disappears and the prune has something to say.
+
+- Comments that had stopped being true: the WebUI still said the absorbed list is
+  never pruned (it has been, since v1.3.137), `build.yaml` still carried the
+  description of the publish job that moved to `release.yml`, `statefile.rs`
+  named its temp `*.new.<pid>` when it is `<name>.<pid>.new`, and `release.yml`
+  ran a dedent `sed` over a heredoc that YAML had already dedented.
+
 ## v1.3.140 — engine v30 (unchanged)
 
 ### Added

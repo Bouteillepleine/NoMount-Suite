@@ -97,6 +97,22 @@ elif [ -d /data/adb/nomount ]; then
     #                         it and the next boot cannot tear those down or put
     #                         the labels back, so a module file keeps a partition
     #                         label under /data/adb indefinitely.
+    #   absorbed-tmpfs.list   the ROM directories absorb emptied in place of a
+    #                         module's tmpfs. run_mount re-APPLIES these after its
+    #                         `nm clear` and deliberately cannot re-derive them
+    #                         ("run_mount runs at post-fs-data, where a module's
+    #                         own script may not have re-mounted its tmpfs yet"),
+    #                         so losing the file un-hides every one of those
+    #                         directories from post-fs-data until absorb rebuilds
+    #                         the record after boot_completed. It was on neither
+    #                         list, with no note saying why -- the exact "saved and
+    #                         never returned" asymmetry this comment warns about.
+    #   apkstate.list         what we last served for each ROM APK. Without it
+    #                         pmcache::sync takes its `seeding` branch on the next
+    #                         pass and adopts whatever is there, so an update that
+    #                         ALSO changes a served APK skips the PackageManager
+    #                         cache drop -- the "Theme.AppCompat" force-close that
+    #                         module exists to prevent.
     _kept=0
     _lost=0
     rm -rf "$_bak"
@@ -107,7 +123,7 @@ elif [ -d /data/adb/nomount ]; then
         chcon u:object_r:adb_data_file:s0 "$_bak" 2>/dev/null
         for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
                   absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-                  absorbed.list binds.list; do
+                  absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
             [ -e "/data/adb/nomount/$_f" ] || continue
             if cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null; then
                 _kept=$((_kept + 1))

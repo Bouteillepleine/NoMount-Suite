@@ -166,7 +166,7 @@ if [ -d "$_bak" ]; then
     # saved and never returned, or returned and never saved -- both silent.
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-              absorbed.list binds.list; do
+              absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
         cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || continue

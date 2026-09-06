@@ -1464,37 +1464,41 @@ pub fn run_mount() -> Result<()> {
     // the boot-time cost and the root-exec burst OOS's kevent heuristic flags --
     // the very thing the ghost populate block refuses to do for its own writes.
     let mut injects: Vec<(&Path, &Path)> = Vec::new();
+    // TWO passes over the plan, and the split is load-bearing.
+    //
+    // Pass 1 collects the injects and applies them as one batch; pass 2 runs the
+    // whiteouts and the binds, in plan order, AFTER every injection is live.
+    //
+    // Batching first landed as a single pass with the batch flushed at the end,
+    // which quietly inverted the one ordering rule this file states twice -- "a
+    // whiteout there d_drops the directory and the module's own injects
+    // underneath it stop resolving" (expand_replacement) and "a whiteout d_drops
+    // the dentry it names, so it has to land once the injections underneath are
+    // in" (the ROM-tmpfs re-apply just below). `dedupe_by_target` does not cover
+    // it: a whiteout on `/system/etc/foo` and an inject on `/system/etc/foo/bar`
+    // are different targets, and a Magisk 0:0 whiteout marker may name a
+    // directory. Before batching the order was plan order -- alphabetical, so
+    // right about half the time; after it, every whiteout ran before every
+    // inject, i.e. wrong every time. Two passes make it right every time, and
+    // put the module plan in the same order the ROM-tmpfs re-apply already used.
+    //
+    // `unmount_before_serving` stays in pass 1 because it must run exactly ONCE
+    // per target (it unmounts), and its verdict is carried across in `blocked`:
+    // a target it refuses has to be skipped by BOTH passes. The plan is deduped
+    // by target above, so one target is one entry and the set is unambiguous.
+    let mut blocked: std::collections::HashSet<&Path> = std::collections::HashSet::new();
     // `mounted` was read before `clear()` -- see the note there.
     for e in &plan {
         served.insert(e.module.as_str());
         if !unmount_before_serving(&mounted, &e.target) {
             st.failed += 1;
+            blocked.insert(e.target.as_path());
             continue;
         }
         match e.kind {
-            PlanKind::Whiteout => {
-                warn_whiteout_hole(&e.target, &e.module);
-                match nm.whiteout(&e.target) {
-                    Ok(()) => st.whiteouts += 1,
-                    Err(_) => st.failed += 1,
-                }
-            }
-            // Collected and applied in ONE batch below rather than one exec
-            // per rule -- see nm::add_many. Order within the pass is unchanged:
-            // whiteouts and binds still run in plan order, and an inject cannot
-            // interact with either (the plan is deduped by target).
             PlanKind::Inject if !source_resolves(e) => st.failed += 1,
             PlanKind::Inject => injects.push((e.target.as_path(), e.source.as_path())),
-            PlanKind::Bind => match crate::bind::apply(&e.source, &e.target) {
-                Ok(crate::bind::BindOutcome::Bound) => {
-                    binds += 1;
-                    applied_apks.push((e.target.clone(), e.source.clone()));
-                }
-                Ok(crate::bind::BindOutcome::AlreadyMounted) => {
-                    applied_apks.push((e.target.clone(), e.source.clone()));
-                }
-                Err(_) => st.failed += 1,
-            },
+            PlanKind::Whiteout | PlanKind::Bind => {}
         }
     }
     // One batched pass for every inject the loop collected. add_many falls back
@@ -1510,6 +1514,33 @@ pub fn run_mount() -> Result<()> {
                 st.applied += 1;
                 applied_apks.push(((*t).to_path_buf(), (*r).to_path_buf()));
             }
+        }
+    }
+    // Pass 2: whiteouts and binds, in plan order, over a rule set that is now
+    // complete.
+    for e in &plan {
+        if blocked.contains(e.target.as_path()) {
+            continue;
+        }
+        match e.kind {
+            PlanKind::Whiteout => {
+                warn_whiteout_hole(&e.target, &e.module);
+                match nm.whiteout(&e.target) {
+                    Ok(()) => st.whiteouts += 1,
+                    Err(_) => st.failed += 1,
+                }
+            }
+            PlanKind::Bind => match crate::bind::apply(&e.source, &e.target) {
+                Ok(crate::bind::BindOutcome::Bound) => {
+                    binds += 1;
+                    applied_apks.push((e.target.clone(), e.source.clone()));
+                }
+                Ok(crate::bind::BindOutcome::AlreadyMounted) => {
+                    applied_apks.push((e.target.clone(), e.source.clone()));
+                }
+                Err(_) => st.failed += 1,
+            },
+            PlanKind::Inject => {}
         }
     }
     // Re-apply the ROM-tmpfs takeovers, AFTER the module plan for the same reason

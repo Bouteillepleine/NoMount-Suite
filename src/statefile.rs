@@ -47,8 +47,10 @@ use std::path::Path;
 /// The temp carries the pid: two writers of one file (the boot pass applying the
 /// hide list while the WebUI adds an entry, say) would otherwise share a `.new`
 /// and interleave into it. A process killed between create and rename leaves one
-/// small 0600 file behind; nothing reads `*.new.<pid>`, and the next write of that
-/// state file does not collide with it.
+/// small 0600 file behind; nothing reads `<name>.<pid>.new`, and the next write of
+/// that state file does not collide with it. (The name really is in that order --
+/// this said `*.new.<pid>`, which is the glob a cleanup would have been written
+/// against.)
 pub(crate) fn write_atomic(path: impl AsRef<Path>, body: impl AsRef<[u8]>) -> std::io::Result<()> {
     let path = path.as_ref();
     let dir = path.parent().unwrap_or_else(|| Path::new("/"));
@@ -144,6 +146,71 @@ mod tests {
         write_atomic(&p, b"com.a\n").unwrap();
         write_atomic(&p, b"").unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "");
+    }
+
+    /// The update stash: `uninstall.sh` saves, `customize.sh` restores, and the
+    /// two lists must name the same files.
+    ///
+    /// `uninstall.sh` runs on an UPDATE as well as a removal, and `rm -rf
+    /// /data/adb/nomount` follows the stash -- so a name on one list and not the
+    /// other is a setting that is saved and never returned, or returned and never
+    /// saved. Its own comment says exactly that, and the lists still drifted:
+    /// `absorbed-tmpfs.list` was on neither, so every Suite update un-hid the ROM
+    /// directories a module had replaced with a tmpfs, from post-fs-data until
+    /// absorb rebuilt the record after boot_completed.
+    ///
+    /// Two prose comments cannot hold two lists in step. This can.
+    #[test]
+    fn the_stash_and_restore_lists_name_the_same_files() {
+        let saved = stash_list(include_str!("../module/uninstall.sh"));
+        let restored = stash_list(include_str!("../module/customize.sh"));
+        assert!(!saved.is_empty(), "could not find uninstall.sh's stash list");
+        assert_eq!(saved, restored, "uninstall.sh stashes a different set than customize.sh restores");
+
+        // ...and the durable state that CANNOT be re-derived after the wipe has to
+        // be on it. Each of these is the only record of something: the hide list
+        // and its mirror, the my_* serving mode, the durable whiteouts, the
+        // absorbed rules and their ROM-tmpfs half, the bind record with its
+        // SELinux labels, and the served-APK identities pmcache compares against.
+        for must in [
+            "uidhide",
+            "uidhide.conf",
+            "uidhide.cache",
+            "my_hookless",
+            "whiteouts.txt",
+            "absorbed.list",
+            "absorbed-tmpfs.list",
+            "binds.list",
+            "apkstate.list",
+        ] {
+            assert!(saved.iter().any(|f| f == must), "{must} is not carried across an update");
+        }
+    }
+
+    /// Pull the `for _f in … ; do` list out of a stash block, backslash
+    /// continuations and all.
+    fn stash_list(script: &str) -> Vec<String> {
+        let mut acc = String::new();
+        let mut collecting = false;
+        for line in script.lines() {
+            let t = line.trim();
+            if !collecting {
+                let Some(rest) = t.strip_prefix("for _f in ") else { continue };
+                collecting = true;
+                acc.push_str(rest);
+            } else {
+                acc.push_str(t);
+            }
+            acc.push(' ');
+            if t.ends_with("; do") {
+                break;
+            }
+        }
+        acc.split_whitespace()
+            .map(|w| w.trim_end_matches([';', '\\']))
+            .filter(|w| !w.is_empty() && *w != "do")
+            .map(str::to_string)
+            .collect()
     }
 
     fn tempdir() -> std::path::PathBuf {

@@ -217,3 +217,119 @@ pub enum WhiteoutAction {
     /// Propose paths that exist on THIS device and are worth hiding
     Suggest,
 }
+
+/// Does this verb change the state the kernel's `_ghost` tables are derived from?
+///
+/// [`crate::ghost`] populates two tables: the injected-only PATHS a hidden reader
+/// must not be able to prove exist, and the hidden UIDS they are hidden from. Both
+/// are derived state, so anything that moves either input leaves the tables
+/// describing the previous one -- and that module's header is explicit that the
+/// stale state is WORSE than an empty one, because a path ghosted for a uid the
+/// engine no longer hides from answers `stat` = OK and `chmod`/`listxattr` =
+/// ENOENT at the same time, which no real file can do.
+///
+/// `mount` and `reload` are deliberately absent: they call
+/// [`crate::ghost::sync_after_pass`] themselves, while the pass lock is still
+/// held. Everything else that touches a rule or the hide list is listed here.
+///
+/// The read-only verbs must stay out of it -- `uid list`, `whiteout list`,
+/// `absorb --dry-run`, `check`, `plan`, `export` -- because a re-sync forks a
+/// probe child and issues netlink writes, and a verb that promises to change
+/// nothing must not.
+pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
+    match cmd {
+        // The hide list. `Isolated` is NOT here: it moves the isolated-pool knob,
+        // which is not an input to either table.
+        Commands::Uid { action } => matches!(
+            action,
+            UidAction::Block { .. }
+                | UidAction::Unblock { .. }
+                | UidAction::Apply { .. }
+                // A preset is `add_many` + an apply pass, i.e. the largest hide-list
+                // change this tool makes (~50 entries).
+                | UidAction::Preset { dry_run: false, .. }
+        ),
+        // The rule set, by hand.
+        Commands::Vfs { action } => matches!(
+            action,
+            VfsAction::Add { .. }
+                | VfsAction::Del { .. }
+                | VfsAction::Whiteout { .. }
+                // CLEAR_ALL drops the rules AND the kernel's hidden-uid set, so it
+                // moves both inputs at once.
+                | VfsAction::Clear
+        ),
+        // Durable whiteouts are applied live by add/remove/apply.
+        Commands::Whiteout { action } => matches!(
+            action,
+            WhiteoutAction::Add { .. } | WhiteoutAction::Remove { .. } | WhiteoutAction::Apply
+        ),
+        // absorb adds injections and drops the binds behind them -- the single
+        // biggest mid-session change to the rule set there is.
+        Commands::Absorb { dry_run, .. } => !dry_run,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The verbs that move an input. Each of these was silently leaving the
+    /// tables describing the previous state; `uid unblock` is the WebUI's un-hide
+    /// button and produced the stat=OK / chmod=ENOENT contradiction with one tap.
+    #[test]
+    fn every_mutating_verb_resyncs_the_cloak() {
+        for c in [
+            Commands::Uid { action: UidAction::Block { target: "com.a".into(), force: false } },
+            Commands::Uid { action: UidAction::Unblock { target: "com.a".into() } },
+            Commands::Uid { action: UidAction::Apply { early: false } },
+            Commands::Uid {
+                action: UidAction::Preset { name: None, dry_run: false, globs: false },
+            },
+            Commands::Vfs {
+                action: VfsAction::Add { virtual_path: "/a".into(), real_path: "/b".into() },
+            },
+            Commands::Vfs { action: VfsAction::Del { virtual_path: "/a".into() } },
+            Commands::Vfs { action: VfsAction::Whiteout { path: "/a".into() } },
+            Commands::Vfs { action: VfsAction::Clear },
+            Commands::Whiteout { action: WhiteoutAction::Add { path: "/a".into(), force: false } },
+            Commands::Whiteout { action: WhiteoutAction::Remove { path: "/a".into() } },
+            Commands::Whiteout { action: WhiteoutAction::Apply },
+            Commands::Absorb { dry_run: false, include_dirs: false, early: false },
+        ] {
+            assert!(changes_ghost_inputs(&c), "a mutating verb must re-derive the _ghost tables");
+        }
+    }
+
+    /// A verb that promises to change nothing must not fork a probe child and
+    /// rewrite two kernel tables. `mount` and `reload` are here because they do it
+    /// themselves, under the pass lock -- doing it twice would pay for a second
+    /// full probe during post-fs-data, which is the root-exec burst the batching
+    /// work exists to avoid.
+    #[test]
+    fn read_only_and_self_syncing_verbs_do_not() {
+        for c in [
+            Commands::Uid { action: UidAction::List },
+            Commands::Uid { action: UidAction::Isolated { mode: None } },
+            Commands::Uid {
+                action: UidAction::Preset { name: None, dry_run: true, globs: false },
+            },
+            Commands::Vfs { action: VfsAction::List },
+            Commands::Whiteout { action: WhiteoutAction::List },
+            Commands::Whiteout { action: WhiteoutAction::Suggest },
+            Commands::Absorb { dry_run: true, include_dirs: false, early: false },
+            Commands::Mount,
+            Commands::Reload,
+            Commands::Plan,
+            Commands::Check { plan: false, device: false, json: false, write: false },
+            Commands::Snapshot,
+            Commands::Verify,
+            Commands::Export { dir: None },
+            Commands::Ghost { action: GhostAction::List },
+            Commands::Version,
+        ] {
+            assert!(!changes_ghost_inputs(&c), "a read-only verb must not re-derive anything");
+        }
+    }
+}

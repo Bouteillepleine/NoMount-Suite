@@ -2740,10 +2740,12 @@
   // absorbed.list precisely so the boot pass can re-serve it; the same file
   // answers "what did it take".
   //
-  // The list is NOT pruned when the owning module is uninstalled -- measured:
-  // it still named nmt06_selfmount after that module was removed -- so each row
-  // is checked against the source on disk and a dead one says so rather than
-  // implying the module is still there.
+  // A row can OUTLIVE its module, so each one is checked against the source on
+  // disk and a dead one says so rather than implying the module is still there.
+  // absorb now prunes rows whose module directory is gone, on every pass
+  // including the one that absorbs nothing -- but it runs four times a boot, not
+  // continuously, so between an uninstall and the next pass this card is the only
+  // thing that can tell the reader which rows are already dead.
   async function refreshAbsorbed() {
     const box = $("abDone");
     if (!box) return;

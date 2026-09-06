@@ -400,12 +400,11 @@ jobs:
           retention-days: 7
 
 
-  # Publish on a v* tag.
-  #
-  # The tag already triggered a build, but the ZIP only ever became a 30-day
-  # ARTIFACT -- which needs a GitHub login to download, is not linkable, and is
-  # gone a month later. So "tagging a release" produced no release. This turns the
-  # tag into the thing people can actually install from.
-  #
-  # Release-only: `needs: package` means the tests gated it (package needs test),
-  # so nothing ships without them green.
+  # NO publish job lives here any more. It is `release.yml`, which calls this
+  # workflow as a reusable one and publishes the artifact `package` uploads
+  # above -- so the zip on a release page is built by exactly these jobs and not
+  # by a parallel pipeline. It had to move because this file gained a
+  # `paths-ignore` filter, and GitHub applies path filters to TAG pushes too: a
+  # `v*` tag landing on a documentation-only commit would have filtered the whole
+  # workflow out and published nothing, silently. This comment described the job
+  # that left; the description of what replaced it is at the top of release.yml.

@@ -180,6 +180,14 @@ if _has_entries "$NMDIR/absorbed.list"; then
     # written the obvious way is dead code (the same trap service.sh documents).
     _abs_all=$(nmto 60 "$BIN" absorb 2>&1)
     _abs_rc=$?
+    # The FIFTH capture site, and the one that was missing this call while lib.sh
+    # claimed there were only four. It matters most here: absorb's record prune
+    # fires when a module's directory is gone, everything below keeps only
+    # `tail -1`, and this handler is the one that runs on every package change --
+    # so the one line absorb writes about changing persistent state was emitted
+    # and discarded on the busiest path there is. Status is already captured
+    # above, so the pipeline inside this helper cannot clobber it.
+    nmlog_absorb_notes "$_abs_all"
     # THREE outcomes, not two. A non-zero, non-124 exit is a FAILED absorb --
     # every mount it could not take over stays in every app's mountinfo -- and it
     # used to be logged in the voice of a success by the `else` arm. The same

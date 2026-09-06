@@ -132,48 +132,6 @@ if [ "$_hookran" = 0 ]; then
     } > "$NMDIR/incident.log" 2>/dev/null
 fi
 
-# --- Ghost: populate the existence cloak's two tables ------------------------
-# _ghost closes the syscalls that resolve a path and then act without consulting
-# a hijacked filesystem op -- O_PATH handing back the path, getxattr handing back
-# the SELinux label, the whole LOOKUP_DIRECTORY/ENOTDIR family, link() answering
-# EXDEV, truncate/utimensat/chmod/chown answering EROFS, mkdirat answering
-# EEXIST, and access(W_OK)/open(O_WRONLY|O_CREAT) answering EROFS where an absent
-# path answers ENOENT. Its guards are DEAD CODE until both of its tables are
-# populated: measured on OP15, a kernel built WITH the _ghost patches but with
-# nothing feeding it leaked every one of them exactly as an unpatched kernel does.
-#
-# FORTY LINES OF SHELL USED TO LIVE HERE. They are now `nomount ghost sync` --
-# see src/ghost.rs for the three things the move fixed (ENOENT told apart from
-# EACCES, targets taken from the one rule parser instead of a sed that truncated
-# any path containing " (", and one fork instead of one exec per path) and for
-# the residual it does not fix.
-#
-# The important half is not the rewrite, it is WHO ELSE calls it: `nomount mount`
-# and `nomount reload` now re-sync at the end of every pass. This block ran once
-# per boot and nothing re-ran it, so tapping the WebUI's Reload button -- whose
-# own help text is "Install/remove a module, tap Reload, no reboot" -- left the
-# tables describing the PREVIOUS rule set. A path that went from injected-only to
-# shadowing then answered stat=OK and chmod/listxattr=ENOENT at the same time,
-# which is the self-contradiction this block always warned about producing.
-#
-# It still runs HERE, once, because this is the first point at which the hide
-# list has been applied and uidhide.cache is warm -- the boot mount pass runs
-# before either. It is inert and silent on a kernel without _ghost.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
-    _gh=$(nmto 60 "$BIN" ghost sync 2>&1)
-    _gh_rc=$?
-    if [ "$_gh_rc" -eq 124 ]; then
-        nmlog "⚠ ghost sync TIMED OUT after 60s — the existence oracles stay OPEN this boot"
-    elif [ "$_gh_rc" -ne 0 ]; then
-        nmlog "⚠ ghost sync FAILED (rc=$_gh_rc): $(printf '%s
-' "$_gh" | tail -1)"
-    elif [ -n "$_gh" ]; then
-        nmlog "$(printf '%s
-' "$_gh" | tail -1)"
-    fi
-    unset _gh _gh_rc
-fi
-
 # Re-assert /data/local/tmp's AOSP owner/mode/context -- see nm_fix_shell_tmp in
 # lib.sh. The post-fs-data entry point runs the same pass earlier; this one
 # repeats it because ksud and adbd keep staging files there for the whole of
@@ -416,6 +374,61 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
         # apps the user believes are hidden are not.
         nmlog "⚠ hide list apply FAILED ($_bl)"
     fi
+fi
+
+# --- Ghost: populate the existence cloak's two tables ------------------------
+# _ghost closes the syscalls that resolve a path and then act without consulting
+# a hijacked filesystem op -- O_PATH handing back the path, getxattr handing back
+# the SELinux label, the whole LOOKUP_DIRECTORY/ENOTDIR family, link() answering
+# EXDEV, truncate/utimensat/chmod/chown answering EROFS, mkdirat answering
+# EEXIST, and access(W_OK)/open(O_WRONLY|O_CREAT) answering EROFS where an absent
+# path answers ENOENT. Its guards are DEAD CODE until both of its tables are
+# populated: measured on OP15, a kernel built WITH the _ghost patches but with
+# nothing feeding it leaked every one of them exactly as an unpatched kernel does.
+#
+# FORTY LINES OF SHELL USED TO LIVE HERE. They are now `nomount ghost sync` --
+# see src/ghost.rs for the three things the move fixed (ENOENT told apart from
+# EACCES, targets taken from the one rule parser instead of a sed that truncated
+# any path containing " (", and one fork instead of one exec per path) and for
+# the residual it does not fix.
+#
+# The important half is not the rewrite, it is WHO ELSE calls it: `nomount mount`
+# and `nomount reload` re-sync at the end of every pass, and every other verb
+# that moves an input -- `uid block`/`unblock`/`apply`, `absorb`, `whiteout
+# add`/`remove`/`apply`, `vfs *` -- is re-synced by `main` (the list lives in
+# cli::changes_ghost_inputs). This block ran once per boot and nothing re-ran it,
+# so tapping the WebUI's Reload button -- whose own help text is "Install/remove
+# a module, tap Reload, no reboot" -- left the tables describing the PREVIOUS
+# rule set. A path that went from injected-only to shadowing then answered
+# stat=OK and chmod/listxattr=ENOENT at the same time, which is the
+# self-contradiction this block always warned about producing.
+#
+# IT MOVED DOWN HERE, and the position is the point.
+#
+# It used to sit near the top of this script, "because this is the first point at
+# which the hide list has been applied and uidhide.cache is warm". That was true
+# and it was the wrong place: the post-boot `reload`, `absorb`, `whiteout apply`
+# and the authoritative `uid apply` ALL run after it and ALL move an input, so
+# the one sync of the boot ran before three passes that invalidated it. Running
+# it last makes it a backstop over settled state instead of a snapshot of state
+# about to change. (Each of those verbs now re-syncs on its own too, so this is
+# genuinely a backstop -- kept because it is the one call that is unconditional,
+# where the others only fire if their pass had something to do.)
+#
+# Inert and silent on a kernel without _ghost.
+if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+    _gh=$(nmto 60 "$BIN" ghost sync 2>&1)
+    _gh_rc=$?
+    if [ "$_gh_rc" -eq 124 ]; then
+        nmlog "⚠ ghost sync TIMED OUT after 60s — the existence oracles stay OPEN this boot"
+    elif [ "$_gh_rc" -ne 0 ]; then
+        nmlog "⚠ ghost sync FAILED (rc=$_gh_rc): $(printf '%s
+' "$_gh" | tail -1)"
+    elif [ -n "$_gh" ]; then
+        nmlog "$(printf '%s
+' "$_gh" | tail -1)"
+    fi
+    unset _gh _gh_rc
 fi
 
 # --- watch the package map, so the hide list follows installs ---

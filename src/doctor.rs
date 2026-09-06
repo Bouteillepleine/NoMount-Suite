@@ -554,8 +554,19 @@ impl Incompat {
                 "no path redirection can make a block device appear, so the engine cannot \
                  serve this. The module keeps its own mount; the mount checks will report \
                  it, and that report is correct rather than a leak.",
+            // `\` continuations, NOT `\n` escapes. Every arm here is one LINE in
+            // the report -- check.rs renders it as `       measured: <detail>` --
+            // and this arm shipped with five literal `\n` in it, so it printed a
+            // five-line blob with seventeen spaces of indent on each continuation
+            // while every other finding stayed on one line. The other three arms
+            // above use the continuation form; a test now pins it for all of them.
             Incompat::SelfMount =>
-                "this module mounts its own content over a ROM path instead of shipping a \n                 tree, so for part of every boot the mount is real and readable by any app. \n                 absorb re-serves it as an injection and unmounts it -- automatically, four \n                 times per boot -- so nothing needs doing. Named here because the module \n                 depends on absorb running: if absorb is disabled or times out, this is one \n                 of the mounts that stays visible.",
+                "this module mounts its own content over a ROM path instead of shipping a \
+                 tree, so for part of every boot the mount is real and readable by any app. \
+                 absorb re-serves it as an injection and unmounts it -- automatically, four \
+                 times per boot -- so nothing needs doing. Named here because the module \
+                 depends on absorb running: if absorb is disabled or times out, this is one \
+                 of the mounts that stays visible.",
         }
     }
 }
@@ -707,11 +718,23 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
         // No path-shaped token at all: nothing to call a destination.
         None => false,
     };
-    // " rm " with spaces, not "rm ": the latter is a substring of
-    // "perm ", so `set_perm /system/bin/foo 0 0 0755` matched.
-    if (["cp ", "mv ", "ln ", "touch ", " rm "]
-        .iter()
-        .any(|v| t.contains(v))
+    // `rm` needs BOTH spellings, and only `rm` does.
+    //
+    // It was `" rm "` alone, with spaces rather than the bare `"rm "` the other
+    // four verbs use, because `"rm "` is a substring of `"perm "` and
+    // `set_perm /system/bin/foo 0 0 0755` matched it. That reasoning is right and
+    // is still pinned below -- but `t` is TRIMMED before it gets here, so a line
+    // that simply BEGINS with `rm` carries no leading space and was invisible.
+    // Measured: `rm -rf /system/app/Foo` classified as None, while the same
+    // command behind `su -c` was correctly a RomWrite. Deleting ROM content is
+    // the loudest thing in this arm, and the commonest way to write it is at the
+    // start of a line.
+    //
+    // `starts_with`, not a second `contains`: anchoring at the start cannot
+    // reintroduce the `perm ` match, since a line beginning with `perm ` is not
+    // one beginning with `rm `.
+    let removes = t.starts_with("rm ") || t.contains(" rm ");
+    if ((removes || ["cp ", "mv ", "ln ", "touch "].iter().any(|v| t.contains(v)))
         && !rom_is_source
         && PARTS.iter().any(|p| t.contains(&format!(" /{p}/"))))
         || (t.contains("remount")
@@ -2426,6 +2449,58 @@ hosts_file=/system/etc/hosts.d/x
             classify_incompat_line("command -v losetup >/dev/null && losetup -sf $IMG"),
             Some(Incompat::ImageBacked)
         );
+    }
+
+    /// Every `explain()` arm is ONE line, because check.rs renders it as one
+    /// (`       measured: <detail>`).
+    ///
+    /// `SelfMount` shipped with five literal `\n` escapes where its three
+    /// siblings use `\` continuations, so it printed a five-line blob with
+    /// seventeen spaces of indent on each continuation. The difference is one
+    /// character in the source and invisible on review, which is exactly what a
+    /// test is for.
+    #[test]
+    fn no_explanation_carries_a_raw_newline() {
+        for k in [
+            Incompat::RomWrite,
+            Incompat::MagiskMirror,
+            Incompat::ImageBacked,
+            Incompat::SelfMount,
+        ] {
+            assert!(
+                !k.explain().contains('\n'),
+                "{:?}.explain() carries a raw newline -- use a `\\` continuation, not `\\n`",
+                k
+            );
+            assert!(!k.check().contains('\n'), "{k:?}.check() carries a raw newline");
+            // ...and the continuation must not leave a run of padding behind
+            // either, which is the other half of what `\n` produced here.
+            assert!(!k.explain().contains("   "), "{k:?}.explain() carries collapsed indentation");
+        }
+    }
+
+    /// Deleting ROM content is the loudest thing the RomWrite arm reports, and the
+    /// commonest way to write it -- at the start of a line -- was invisible: the
+    /// classifier runs on a TRIMMED line and the pattern was `" rm "` with a
+    /// leading space. Both spellings, and the `set_perm` guard the spaces were
+    /// there for, in one test.
+    #[test]
+    fn rm_is_seen_at_the_start_of_a_line_and_after_a_word() {
+        assert_eq!(
+            classify_incompat_line("rm -rf /system/app/Foo"),
+            Some(Incompat::RomWrite),
+            "a line that BEGINS with rm was the miss"
+        );
+        assert_eq!(
+            classify_incompat_line("su -c rm -rf /system/app/Foo"),
+            Some(Incompat::RomWrite)
+        );
+        // The reason the spaces were there in the first place: `rm ` is a
+        // substring of `perm `, and anchoring at the start cannot revive that.
+        assert_eq!(classify_incompat_line("set_perm /system/bin/foo 0 0 0755"), None);
+        assert_eq!(classify_incompat_line("perm /system/bin/foo"), None);
+        // Removing something that is not in the ROM is still not a ROM write.
+        assert_eq!(classify_incompat_line("rm -rf /data/adb/foo"), None);
     }
 
     /// The two precision fixes this chain already carried, pinned now that they are

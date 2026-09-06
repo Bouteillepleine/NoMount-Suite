@@ -34,7 +34,27 @@ fn main() -> Result<()> {
     unsafe { libc::umask(0o077) };
 
     let cli = Cli::parse();
-    match cli.command {
+    // Does this verb change what the `_ghost` tables describe? Decided ONCE, in
+    // `cli::changes_ghost_inputs`, and acted on below rather than at each verb.
+    //
+    // `crate::ghost`'s header is explicit that a table describing the PREVIOUS
+    // state is worse than an empty one -- a path ghosted for a uid the engine no
+    // longer hides from answers stat=OK and chmod/listxattr=ENOENT at once. It
+    // then wired the re-sync into `mount` and `reload` and stopped there, so the
+    // verbs that change the OTHER input -- the hidden-uid set -- did not have it:
+    // `nomount uid unblock`, i.e. the WebUI's un-hide button, left the appid in
+    // the `u` table and produced exactly that contradiction with one tap, and
+    // `uid block` left a newly hidden app out of it, so every oracle stayed open
+    // for the app it was just asked to hide from.
+    //
+    // Here rather than inside each handler for two reasons: `handle_uid` returns
+    // early from four arms and bails from three more (after the state has already
+    // changed), so a per-arm call is seven calls and a standing invitation to miss
+    // the eighth; and a reader asking "what re-derives the cloak?" gets one list
+    // instead of a grep. `mount` and `reload` keep their own call, because theirs
+    // runs while the pass lock is still held.
+    let resync_ghost = cli::changes_ghost_inputs(&cli.command);
+    let r = match cli.command {
         Commands::Mount => mount::run_mount(),
         Commands::Vfs { action } => cli::handlers::handle_vfs(action),
         Commands::Uid { action } => cli::handlers::handle_uid(action),
@@ -67,5 +87,19 @@ fn main() -> Result<()> {
             println!("nomount v{}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+    };
+    // AFTER the verb, and regardless of its status. Several of these change state
+    // and then bail (`uid apply` reports a partial failure that way, and so does
+    // `whiteout add` when the list write succeeded and the engine refused), so
+    // gating the re-sync on success would skip it in precisely the runs where the
+    // two tables and the engine have most likely diverged.
+    // `sync_quietly`, not `sync_after_pass`: this rides on another verb, whose
+    // stdout is that verb's answer and IS parsed -- `whiteout add`'s WebUI
+    // handler toasts `stdout.split("\n").pop()`, so a summary line appended here
+    // would become the toast. Nothing on the happy path; stderr when the cloak
+    // could not be rebuilt.
+    if resync_ghost {
+        ghost::sync_quietly(&nm::Nm::new());
     }
+    r
 }

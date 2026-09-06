@@ -126,7 +126,15 @@ jobs:
           > WebUI instead of silently doing nothing, so you can see what a kernel update would
           > buy you. The footer shows both numbers — `Suite vX · engine vY`.
           NOTES
-          sed -i 's/^          //' /tmp/notes.md
+          # No dedent step. There was a `sed -i 's/^          //'` here, on the
+          # assumption that the heredoc body arrives with this file's ten spaces
+          # of YAML indentation still on it. It does not: `run: |` is a block
+          # scalar, so YAML strips the block's own indentation before the shell
+          # ever sees a byte, and both the body and the `NOTES` terminator reach
+          # bash at column 0 -- which is also why an unquoted terminator works
+          # here at all. The sed therefore matched nothing on every run, and the
+          # only thing it could ever have done is silently eat ten characters off
+          # every line if this block were re-indented.
 
           gh release create "$TAG" "$zip" \
             --repo "$GITHUB_REPOSITORY" \

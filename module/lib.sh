@@ -58,9 +58,16 @@ nmlog() {
 # the one thing absorb does to persistent state on a device where it absorbs
 # nothing at all.
 #
-# Called at ALL FOUR capture sites, not just service.sh: the prune runs at the
+# Called at ALL FIVE capture sites, not just service.sh: the prune runs at the
 # top of every pass, so it fires on the FIRST one to execute -- post-fs-data's
 # `absorb --early` -- and a log line in service.sh alone would never see it.
+#
+# The five, so a sixth cannot be added without noticing this list:
+# post-fs-data.sh (early), post-mount.sh (early), service.sh foreground,
+# service.sh late background, uidwatch.sh. The count said FOUR while there were
+# five, and uidwatch.sh was the one without the call -- the handler that runs on
+# every install, update and uninstall, i.e. exactly when a module's directory
+# disappears and the prune has something to say.
 nmlog_absorb_notes() {
     printf '%s
 ' "$1" | grep -i 'uninstalled module' | while IFS= read -r _l; do
