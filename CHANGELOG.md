@@ -35,7 +35,7 @@ result.
 
 - **A module could be switched on, ship a whole ROM tree, and serve nothing — with
   no check saying so.** New finding, `module content not served`. Measured on that
-  same OP11: `OnePlus_Dialer_Universal` had shipped **146 files across five
+  same OP11: `OnePlus_Dialer_Universal` had shipped **116 files across four
   partitions and served zero of them since 2026-09-01**, because the module's OWN
   bootloop guard had written a `skip_mount` and nothing ever clears one. Five days
   of a dialer customisation quietly not applying while the manager listed the
