@@ -295,4 +295,17 @@ if [ -e "$NMDIR/disabled" ]; then
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
 fi
 
-ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
+# GATED. This was unconditional, and it is the LAST LINE ON SCREEN — printed
+# immediately after the block that says "this kernel has no NoMount support: the
+# module installs but injects NOTHING", and again after the one that says the
+# Suite is DISABLED. Users read the last line. Promising the thing you have just
+# warned will not happen is the worst shape an installer message can take.
+#
+# `$_ev` is set only when the engine probe answered, so it is exactly the right
+# discriminator, and it is already in scope.
+if [ -n "$_ev" ] && [ ! -e "$NMDIR/disabled" ]; then
+    ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
+elif [ -z "$_ev" ]; then
+    ui_print "- NEXT STEP: flash a kernel built with CONFIG_NOMOUNT, then reboot."
+    ui_print "  Until you do, this module is installed and doing nothing."
+fi

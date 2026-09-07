@@ -839,7 +839,7 @@
     </div>
     <div class="brand">
       <h1>NoMount Suite</h1>
-      <p>Prism VFS · RRO overlays · sucompat root</p>
+      <p>Your modules, served with no mounts to find</p>
     </div>
     <div class="hbtns">
       <span class="ver" id="ver">v…</span>
@@ -894,6 +894,13 @@
         Reload
       </button>
     </div>
+    <!-- VISIBLE, not a `title=`. This button had neither a tooltip nor a caption,
+         and its only explanation anywhere in the app was inside the confirmation
+         dialog of the DESTRUCTIVE button below it — so the only way to learn what
+         Reload does was to first tap the red one you should not tap. A `title=`
+         would not have fixed it either: there is no hover on a phone, which is
+         the same reason the Modules rows' explanations are unreachable. -->
+    <p class="note" style="margin:8px 2px 0">Installed or removed a module? Tap Reload — no reboot needed.</p>
     <!-- Clear rules is not a sibling of Reload. Side by side and the same size,
          they read as a pair of equals and are nothing of the sort: one re-applies
          what you already have, the other takes every injected file away. It is
@@ -1438,8 +1445,14 @@
     const d = await ruleDump();
     const dot = $("dot");
     if (!d.ok) {
-      $("state").textContent = "Engine offline";
-      $("substate").textContent = "kernel driver not responding";
+      // NAME THE CAUSE AND THE ACTION. "Engine offline / kernel driver not
+      // responding" was the first thing a new user with the wrong kernel saw, and
+      // it offered no next step -- on a page with no external link anywhere. The
+      // commonest way to arrive here is flashing this module without the kernel
+      // half, and that is one sentence to say.
+      $("state").textContent = "No kernel driver";
+      $("substate").textContent =
+        "this kernel was not built with NoMount — flash one that was, then reboot. Nothing is being injected.";
       dot.className = "dot bad";
       // Both counters, not just one. Leaving the overlay count at whatever it
       // last said pins a stale number beside an "Engine offline" that says the

@@ -1947,10 +1947,32 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         f.push(Finding {
             level: Level::Info,
             check: "manager kernel umount ON",
-            detail: "your manager's \"Kernel umount\" is ON. It does nothing here — injections \
-                     are not mounts, so there is nothing to unmount. Hide per app with \
+            // CONDITIONAL, because the flat claim was FALSE. `serve_mode` returns
+            // `Serve::Bind` for every my_* target unless the `my_hookless` marker
+            // is set, and it is OFF BY DEFAULT -- so on a stock OnePlus setup with
+            // any module shipping my_* content the Suite makes REAL BIND MOUNTS,
+            // visible in every app's mountinfo naming /data/adb/modules, and the
+            // manager's kernel-umount switch is exactly what would strip them from
+            // an app's namespace. Telling that user the switch "does nothing here"
+            // pointed them away from the one control that closes the loudest
+            // oracle on their device.
+            detail: {
+                let binds = crate::bind::tracked().len();
+                if binds == 0 {
+                    "your manager's \"Kernel umount\" is ON. Nothing the Suite serves on this \
+                     device is a mount, so it has nothing to unmount. Hide per app with \
                      `nomount uid block <pkg>`."
-                .to_string(),
+                        .to_string()
+                } else {
+                    format!(
+                        "your manager's \"Kernel umount\" is ON, and this device has {binds} \
+                         bind mount(s) of ours — my_* is served by a real bind unless the \
+                         my_hookless trial is on. The switch DOES hide those from an app's \
+                         mount table, and it is the only thing that does; it cannot touch the \
+                         injections, which are not mounts."
+                    )
+                }
+            },
         });
     }
 
@@ -2913,6 +2935,36 @@ hosts_file=/system/etc/hosts.d/x
                 "{helper} is only reached through a `.`, and the report has to say so"
             );
         }
+    }
+
+    /// The kernel-umount note must depend on whether we actually made binds.
+    ///
+    /// It said flatly "It does nothing here — injections are not mounts, so there
+    /// is nothing to unmount", and that is false on the hardware this project
+    /// targets: `serve_mode` returns `Serve::Bind` for every `my_*` target unless
+    /// the `my_hookless` marker is set, and the marker is OFF BY DEFAULT. A stock
+    /// OnePlus setup with any module shipping `my_*` content therefore carries
+    /// real bind mounts naming `/data/adb/modules` in every app's mountinfo — and
+    /// the manager's kernel-umount switch is the ONE control that removes them
+    /// from an app's namespace. The Suite was pointing users away from it.
+    ///
+    /// Pinned on the branch, not the wording: what matters is that zero binds and
+    /// some binds do not produce the same sentence.
+    #[test]
+    fn the_kernel_umount_note_depends_on_whether_binds_exist() {
+        let src = include_str!("doctor.rs");
+        let at = src
+            .find("check: \"manager kernel umount ON\",")
+            .expect("finding gone or renamed");
+        let block = &src[at..at + 1600.min(src.len() - at)];
+        assert!(
+            block.contains("crate::bind::tracked()"),
+            "the note must read the live bind record, not assert that there are none"
+        );
+        assert!(
+            block.contains("hide those") || block.contains("DOES hide"),
+            "with binds present it must say the switch would hide them"
+        );
     }
 
     /// THE RULE: the Suite warns about what a detector can see, or about the

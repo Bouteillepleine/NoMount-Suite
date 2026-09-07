@@ -693,8 +693,18 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         # getting; said as a fact, not an alarm.
         # shellcheck disable=SC1111  # typographic quotes on purpose: this names
         # the manager's own label inside a sentence shown to the user.
-        _muc=" · “kernel umount” ON (does nothing here)"
-        _mul=", manager kernel_umount is ON (inert here)"
+        # Conditional on whether we ACTUALLY made binds. `serve_mode` returns Bind
+        # for every my_* target unless the my_hookless marker is set, and it is off
+        # by default -- so "inert here" was false on any OnePlus device with a my_*
+        # module, where the switch is precisely what hides those binds from an
+        # app's mount table. `_mnt` is the live count, already read above.
+        if [ "${_mnt:-0}" -gt 0 ]; then
+            _muc=" · “kernel umount” ON (it hides our $_mnt bind(s))"
+            _mul=", manager kernel_umount is ON (hides our $_mnt bind(s))"
+        else
+            _muc=" · “kernel umount” ON (nothing here to unmount)"
+            _mul=", manager kernel_umount is ON (nothing here to unmount)"
+        fi
     else
         _muc=""
         _mul=""

@@ -11,6 +11,85 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.150 — engine v30 (unchanged)
+
+The round-7 audit's first-run tier, plus the claims cluster it turned up.
+
+**The theme:** the commonest new-user mistake — flashing this module on a kernel
+without `CONFIG_NOMOUNT` — was the one path where every surface either mislabelled
+the cause or threw the reason away.
+
+### Fixed — the wrong-kernel path
+
+- **The boot path deleted the one sentence that explains it.** `mount.rs` writes
+  *"hookless NoMount engine not responding — is the CONFIG_NOMOUNT kernel
+  loaded?"* to **stderr**, and both entry points ran the pass with `2>/dev/null`.
+  What survived was a generic "mount pass exited 1 (failed)", no `incident.log`
+  (only written for a guard trip or a missing binary), and a card saying the
+  opposite of the truth. Both now capture stderr and log the reason. `pass_lock`'s
+  "continuing unserialised" warning — which `mount.rs` is explicit must not be
+  silent, because it names the window where an app sees the stock tree — was being
+  deleted the same way, as was the whiteout-apply failure reason.
+
+- **A SUCCESSFUL mount pass left no durable record.** Its summary went to stdout,
+  i.e. ksud's log or nowhere; `boot.log` never learned that 257 rules had been
+  applied. The user asking "did it work?" had only the card.
+
+- **The card said "engine ran but injected nothing" when the kernel had no
+  driver.** "Engine" means the kernel half everywhere a user can read it, but
+  `_engine_ran` only ever meant "our binary was executable and we invoked it", so
+  the wrong-kernel case reported the opposite of the truth and sent the reader
+  hunting for a module problem. The variable is `_pass_ran` now, and the missing
+  driver has its own branch: *"your kernel has no NoMount driver — flash a
+  NoMount kernel, then reboot"*.
+
+- **The installer's LAST LINE promised what it had just warned would not
+  happen.** `- Modules under /data/adb/modules are injected mountlessly at boot.`
+  was printed unconditionally, immediately after the block saying "this kernel has
+  no NoMount support: the module installs but injects NOTHING", and again after
+  the "Suite is DISABLED" warning. Users read the last line. It is gated now, and
+  the wrong-kernel case closes with the next step instead.
+
+- **The WebUI's dead end.** *"Engine offline / kernel driver not responding"* was
+  the first thing such a user saw, with no next step and no external link anywhere
+  in the app. It now reads *"No kernel driver — this kernel was not built with
+  NoMount; flash one that was, then reboot. Nothing is being injected."*
+
+- **The README never mentioned `CONFIG_NOMOUNT` on the first screen.** The hard
+  prerequisite was forty lines down, below a screenshot table, and the opening
+  callout told the reader to run a command they cannot run yet. There is now a
+  *Before you download* box with a one-line check
+  (`zcat /proc/config.gz | grep NOMOUNT`), and the Beta note moved to the bottom
+  where it is advice for people already running it.
+
+### Fixed — claims that outran the code
+
+`serve_mode` returns `Serve::Bind` for every `my_*` target unless the
+`my_hookless` marker is set, and **the marker is off by default** — so a stock
+OnePlus setup with any module shipping `my_*` content carries real bind mounts
+naming `/data/adb/modules` in every app's mountinfo. That is the loudest oracle on
+such a device, and four places said otherwise:
+
+- `module.prop` said "no overlayfs, binds or tmpfs … nothing here is a mount".
+- The manager card said kernel umount is *"inert here"*.
+- `doctor.rs` said *"It does nothing here — injections are not mounts"*.
+- The README said "No `overlayfs`, no `tmpfs`, no bind mounts".
+
+All four now state the `my_*` exception, and the two kernel-umount messages are
+conditional on the live bind record: with binds present they say the switch **does**
+hide them, and that it is the only thing that does. The Suite was pointing users
+away from the one control that closes its loudest tell. A test pins the branch.
+
+### Also
+
+The Reload button had no caption and no tooltip; its only explanation anywhere was
+inside the confirmation dialog of the destructive Clear-rules button beside it, so
+the only way to learn what Reload does was to first tap the red one. It has a
+visible one-line caption now — visible rather than a `title=`, because a phone has
+no hover. And the header subtitle, `Prism VFS · RRO overlays · sucompat root`,
+was three pieces of jargon that wrapped to three lines on a phone before the
+status; it now says what the product does.
+
 ## v1.3.149 — engine v30 (unchanged)
 
 ### Fixed

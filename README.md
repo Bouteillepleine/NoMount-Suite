@@ -1,14 +1,33 @@
 # 🫥 NoMount Suite
 
-> **Beta.** It works at the kernel VFS layer, and the whole point of this stage
-> is getting it to stable. What moves it there is reports from setups outside
-> the tested set — a different device, a different root manager, a module that
-> behaves oddly. `nomount export` produces the bundle for that, hide list
-> already redacted.
-
 Loads root modules **without touching the mount table** — RRO theming overlays
-included. No `overlayfs`, no `tmpfs`, no bind mounts: `/proc/mounts` stays 100%
-stock, so there is no mount gap for a scanner to find.
+included. No `overlayfs`, no `tmpfs`: files are served by redirecting VFS lookups
+in the kernel, so `/proc/mounts` shows the stock set and there is no mount gap
+for a scanner to find.
+
+**One exception, stated plainly:** OnePlus/Oppo `my_*` partitions are served by a
+real bind mount, because a hookless injection there trips zygote's FD allowlist
+and bootloops the device. If a module of yours ships `my_*` content, those binds
+are in the mount table and an app can read them. `nomount check` counts them and
+the WebUI names them; the `my_hookless` trial removes them at the risk the
+bootloop guard exists to catch.
+
+### Before you download
+
+**This needs a custom kernel.** NoMount is two halves: a kernel driver and this
+module. **The module on its own does nothing** — it installs, it reports, and it
+injects not one file.
+
+- **Already running a NoMount kernel?** Check it:
+  `zcat /proc/config.gz | grep NOMOUNT` — you want `CONFIG_NOMOUNT=y`.
+- **OnePlus?** Prebuilt kernels are linked under [Install](#install); flash one
+  first.
+- **Anything else?** You need to build your kernel with `CONFIG_NOMOUNT=y` from
+  the `hookless/` source here. If that is not something you do, this project is
+  not ready for you yet.
+
+If you flash the module on a stock kernel it will tell you so — on the install
+screen, on the module card, and in the WebUI — but it is a wasted reboot.
 
 It is a metamodule: at boot it scans `/data/adb/modules/`, classifies every file
 and programs the kernel engine over netlink. No per-module setup. Only one
@@ -274,3 +293,11 @@ are injected hooklessly rather than mounted.
 A kernel modification tool for research and development. Modifying kernel
 behaviour carries real risk, including instability and data loss. The developers
 are not responsible for bricked devices or thermonuclear war.
+
+---
+
+> **Beta.** It works at the kernel VFS layer, and the whole point of this stage
+> is getting it to stable. What moves it there is reports from setups outside
+> the tested set — a different device, a different root manager, a module that
+> behaves oddly. `nomount export` produces the bundle for that, hide list
+> already redacted.

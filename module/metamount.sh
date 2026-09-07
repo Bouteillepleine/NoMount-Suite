@@ -157,7 +157,14 @@ nm_set_bin
 # "[NoMount ✅ 0 rules · 0 RRO · 0 modules] fully mountless" -- a green tick on a
 # boot that injected nothing. Worse: boot then completes, service.sh clears
 # bootcount, and the bootloop guard is re-armed by a pass that never happened.
-_engine_ran=0
+_pass_ran=0
+# ...and whether the KERNEL DRIVER answered. These are two different things and
+# the card conflated them: "engine" means the kernel half everywhere the user can
+# read it -- the README, the WebUI, customize.sh -- while `_engine_ran` only ever
+# meant "our binary was executable and we invoked it". So on a kernel with no
+# NoMount driver the card said "engine ran but injected nothing", which is the
+# opposite of the truth and sends the reader hunting for a module problem.
+_driver_ok=1
 
 # Self-heal executable bits: some installers (and non-recovery ksud extraction)
 # don't preserve +x. Without it on nm the whole pass aborts before it can inject.
@@ -249,11 +256,41 @@ else
         # of 260 rules, ended the boot on "[NoMount ✅ 200 rules] fully mountless".
         # A partial injection reported as a complete one is the same false green
         # the rest of this file removes, one layer down.
-        _mout="$(nmto 60 "$BIN" mount 2>/dev/null)"
+        # `2>&1`, NOT `2>/dev/null`.
+        #
+        # The pass writes exactly one sentence that explains the commonest
+        # new-user failure -- flashing this module on a kernel without
+        # CONFIG_NOMOUNT -- and it writes it to STDERR:
+        #
+        #   "hookless NoMount engine not responding -- is the CONFIG_NOMOUNT
+        #    kernel loaded?"   (mount.rs)
+        #
+        # Both boot paths then deleted it. What survived was a generic "mount pass
+        # exited 1 (failed)", no incident.log (that is written only for a guard
+        # trip or a missing binary), and a card saying the opposite of the truth.
+        # The product wrote the right words and threw them away.
+        #
+        # `pass_lock` writes here too ("continuing unserialised rather than
+        # stalling the boot"), and mount.rs is explicit that it must not be
+        # silent: it names the one window in which an app sees the stock tree.
+        _mout="$(nmto 60 "$BIN" mount 2>&1)"
         _mrc=$?
         [ -n "$_mout" ] && printf '%s\n' "$_mout"
         if [ "$_mrc" -ne 0 ]; then
             nmlog "⚠ mount pass exited $_mrc ($([ "$_mrc" -eq 124 ] && echo "TIMED OUT after 60s" || echo "failed")) — the injection set may be INCOMPLETE"
+            # ...and the REASON, which is now in hand. One line, the engine's own
+            # words, on the durable channel.
+            _mwhy=$(printf '%s\n' "$_mout" | grep -m1 -i 'not responding\|Caused by\|^Error')
+            [ -n "$_mwhy" ] && nmlog "  reason: $_mwhy"
+            unset _mwhy
+        else
+            # A SUCCESSFUL pass left no durable record at all: `$_mout` went to
+            # stdout (ksud's log, or nowhere) and boot.log never learned that 257
+            # rules had been applied. The user asking "did it work?" had only the
+            # card.
+            _msum=$(printf '%s\n' "$_mout" | grep -m1 '^nomount(suite):')
+            [ -n "$_msum" ] && nmlog "$_msum"
+            unset _msum
         fi
         # An exit of 0 does NOT mean every rule landed: the pass deliberately
         # survives individual failures rather than failing the boot over them.
@@ -279,7 +316,10 @@ else
             # the whole boot. Never silent.
             [ "$_wrc" -ne 0 ] && nmlog "⚠ whiteout apply exited $_wrc — hidden paths are still VISIBLE this boot"
         fi
-        _engine_ran=1
+        _pass_ran=1
+        # The pass bails with "engine not responding" when the kernel has no
+        # driver; that is the one failure worth its own card.
+        case "$_mout" in *"engine not responding"*) _driver_ok=0 ;; esac
     else
         # The missing `else`. Without it a binary that is absent, not executable,
         # or sitting under an ABI directory this device does not have produced a
@@ -457,17 +497,22 @@ if command -v ksud >/dev/null 2>&1; then
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ -e "$NMDIR/disabled" ]; then
         _desc="⛔ disabled — bootloop guard tripped, open the WebUI"
-    elif [ "$_engine_ran" = 0 ]; then
+    elif [ "${_driver_ok:-1}" = 0 ]; then
+        # The commonest new-user mistake, named as itself. Everything else on this
+        # card would describe a device that is serving nothing, and "0 rules" is a
+        # symptom, not the cause.
+        _desc="⛔ your kernel has no NoMount driver — flash a NoMount kernel, then reboot"
+    elif [ "$_pass_ran" = 0 ]; then
         # This block is NOT gated on [ -x "$BIN" ], so it used to render the green
         # card even on the boot where the engine never ran. It is the only surface
         # most users ever read; it must not claim a posture nothing established.
-        _desc="⛔ engine did not run this boot — open the WebUI"
+        _desc="⛔ the Suite could not start this boot — open the WebUI"
     elif [ "${_rules:-0}" = 0 ]; then
         # ✅ next to "0 rules" is a contradiction the reader has to catch for
         # themselves. The engine ran, so this is not ⛔ — but it served nothing,
         # and a green tick on a boot that injected nothing is the same false
         # green, one branch further down.
-        _desc="⚠️ engine ran but injected nothing — open the WebUI"
+        _desc="⚠️ ran, but no module had files to serve — open the WebUI"
     else
         _desc="✅ $_rules rules · $_rro RRO$_wof · $_mods modules · mountless"
     fi

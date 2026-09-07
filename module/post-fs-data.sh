@@ -167,7 +167,10 @@ else
         # non-zero, or that `timeout` killed at 60s having injected part of the
         # rule set, used to leave no trace anywhere. On this path there is no
         # status card to contradict, which makes boot.log the only record there is.
-        _mout="$(nmto 60 "$BIN" mount 2>/dev/null)"
+        # `2>&1`: see the note in metamount.sh. The engine's one sentence about a
+        # missing CONFIG_NOMOUNT kernel goes to stderr, and this path deleted it —
+        # while boot.log is the ONLY record this path has.
+        _mout="$(nmto 60 "$BIN" mount 2>&1)"
         _mrc=$?
         [ -n "$_mout" ] && printf '%s\n' "$_mout"
         # 124 named, like metamount.sh does it. A hang and a refusal are different
@@ -177,6 +180,13 @@ else
         # here indistinguishable from a bad rule set.
         if [ "$_mrc" -ne 0 ]; then
             nmlog "⚠ mount pass exited $_mrc ($([ "$_mrc" -eq 124 ] && echo "TIMED OUT after 60s" || echo "failed")) — the injection set may be INCOMPLETE"
+            _mwhy=$(printf '%s\n' "$_mout" | grep -m1 -i 'not responding\|Caused by\|^Error')
+            [ -n "$_mwhy" ] && nmlog "  reason: $_mwhy"
+            unset _mwhy
+        else
+            _msum=$(printf '%s\n' "$_mout" | grep -m1 '^nomount(suite):')
+            [ -n "$_msum" ] && nmlog "$_msum"
+            unset _msum
         fi
         # An exit of 0 does NOT mean every rule landed: the pass deliberately
         # survives individual failures rather than failing the boot over them, and
