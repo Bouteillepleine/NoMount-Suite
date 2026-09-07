@@ -664,10 +664,15 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # record is exactly the "say nothing rather than accuse" case above.
     _mu=$(_health_get manager_umount | head -1)
     if [ "$_mu" = "on" ]; then
+        # No ⚠️. The switch cannot hide anything here and no app can read it, so
+        # it does not get to make a healthy card look unhealthy -- the same rule
+        # that turned the plan section's two findings about it into notes. Still
+        # said, because a user who turned it on expects hiding they are not
+        # getting; said as a fact, not an alarm.
         # shellcheck disable=SC1111  # typographic quotes on purpose: this names
         # the manager's own label inside a sentence shown to the user.
-        _muc=" · ⚠️ turn OFF “kernel umount”"
-        _mul=", ⚠ manager kernel_umount is ON — turn it off"
+        _muc=" · “kernel umount” ON (does nothing here)"
+        _mul=", manager kernel_umount is ON (inert here)"
     else
         _muc=""
         _mul=""

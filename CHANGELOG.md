@@ -11,6 +11,34 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.145 — engine v30 (unchanged)
+
+### Changed
+
+- **The rest of the plan section, audited against the same rule.** All ~20
+  Warn/Error findings were re-read asking one question: *what does an app read to
+  see this?* Two failed it, and both were about the same thing — the root
+  manager's **Kernel umount** switch. No app can read a manager's settings, and
+  the switch's effect here is nothing at all: the Suite serves no mounts, so there
+  is nothing for it to unmount. `manager kernel umount ON` and the unknown-state
+  finding beside it (renamed `manager kernel umount unknown`) are now NOTES, and
+  the WebUI banner and the manager card dropped their ⚠️ with them. The claim
+  that the switch "has broken root on real devices" went too: that was true when
+  su arrived as a module overlay and anything stripping module content stripped su
+  with it — su is kernel sucompat now and outside the Suite entirely.
+
+  Everything else stays loud, and the test says why: a planned rule that is not
+  live, a module switched on and serving nothing, a target claimed twice, a
+  partition-root rule, a PM-published path answering ENOENT to a hidden app, the
+  ghost cloak over-reaching or leaking a label, a foreign mount over the ROM.
+  Each is either read by a detector or is the user's own content silently not
+  working.
+
+  The device section already worked this way and did not change: `soft()` exists
+  precisely so "a real, measured inconsistency that nothing shipping actually
+  probes" is amber rather than red, and `fail()` is type-forced to name the oracle
+  that reads it.
+
 ## v1.3.144 — engine v30 (unchanged)
 
 ### Changed

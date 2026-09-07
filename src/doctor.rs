@@ -1932,13 +1932,22 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // would rot to "unknown" on any ksud change and be believed until someone
     // noticed. The manager's own UI is where those two live and where they are
     // changed.
+    //
+    // A NOTE, not a warning, by the same rule that demoted the my_* marker: no
+    // app can read a root manager's settings, and this one's effect here is
+    // NOTHING -- the Suite serves no mounts, so there is nothing for the switch
+    // to unmount. A finding that describes a setting doing nothing does not get
+    // to put "1 thing needs attention" on the card. Worth saying once, because a
+    // user who turned it on is expecting hiding they are not getting; not worth
+    // an alarm.
     let kernel_umount = crate::manager::kernel_umount_enabled();
     if kernel_umount == Some(true) {
         f.push(Finding {
-            level: Level::Warn,
+            level: Level::Info,
             check: "manager kernel umount ON",
-            detail: "manager \"Kernel umount\" is ON — it hides nothing here (injections are \
-                     not mounts). Turn it OFF; use `nomount uid block <uid>` per app."
+            detail: "your manager's \"Kernel umount\" is ON. It does nothing here — injections \
+                     are not mounts, so there is nothing to unmount. Hide per app with \
+                     `nomount uid block <pkg>`."
                 .to_string(),
         });
     }
@@ -1953,13 +1962,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     //
     // Only when a KernelSU-family manager is actually installed: a manager with
     // no state directory has nothing to fail at reading.
+    // ...and a NOTE for the same reason, one step weaker again: this is the
+    // UNKNOWN state of a switch that does nothing here. It was a warning, which
+    // made "we could not read an inert setting" as loud as a live rule serving
+    // the wrong bytes.
+    //
+    // The old text also said the switch "has broken root". That was true when su
+    // arrived as a module overlay and anything stripping module content stripped
+    // su with it; su is kernel sucompat now and entirely outside the Suite, so
+    // the sentence outlived its cause. Say what is still true.
     if kernel_umount.is_none() && crate::manager::ksu_manager_present() {
         f.push(Finding {
-            level: Level::Warn,
-            check: "check a setting in your root manager",
-            detail: "Could not read your root manager's \"Kernel umount\" — so it is UNKNOWN, \
-                     not off. That switch strips module files from apps and has broken root. \
-                     NoMount never needs it: check it once, in the manager."
+            level: Level::Info,
+            check: "manager kernel umount unknown",
+            detail: "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN \
+                     rather than off. It does nothing here either way; NoMount never needs it."
                 .to_string(),
         });
     }
@@ -2838,34 +2855,51 @@ hosts_file=/system/etc/hosts.d/x
         }
     }
 
-    /// A marker file is not an oracle, so it does not get a warning.
+    /// THE RULE: the Suite warns about what a detector can see, or about the
+    /// user's own modules not working. Nothing else gets to be amber.
     ///
-    /// THE RULE: the Suite reports what a detector can see. Nothing that reads
-    /// this device -- the Duck Detector, Holmes, the RASP families -- can see a
-    /// file under /data/adb, and the marker's effect is FEWER mounts (my_* served
-    /// by injection instead of a real bind), i.e. it moves the posture the quiet
-    /// way. Raising it as a warning put "1 thing needs attention" on the WebUI of
-    /// a device whose attention nothing needed.
+    /// Nothing that reads this device -- the Duck Detector, Holmes, the RASP
+    /// families -- can see a file under `/data/adb` or a root manager's settings.
+    /// Both subjects below are exactly that, and both are ALSO inert or quieting
+    /// here: `my_hookless` removes 85 mounts by serving my_* through injection,
+    /// and the manager's kernel-umount switch has nothing to unmount because the
+    /// Suite serves no mounts. Warning about either put "1 thing needs attention"
+    /// on the card of a device that needed none, which is how a reader learns to
+    /// skip the badge -- and the badge is the only thing carrying the findings
+    /// that DO matter.
     ///
-    /// The trial's real hazard -- a leaf my_* injection tripping zygote's FD
-    /// allowlist -- is handled by the bootloop guard, which is a mechanism, not
-    /// something a user acts on.
+    /// Hazards handled by a mechanism are not alerts either: the bootloop guard
+    /// recovers a bad my_* trial on its own and writes `incident.log`. That
+    /// belongs in a doc comment at `mount::my_hookless_enabled`, not in the
+    /// user's face.
     ///
-    /// Pinned by reading this file, because the level is decided at the
-    /// construction site and there is no smaller unit to test. If someone
-    /// re-promotes it, this fails and they read the paragraph above.
+    /// Deliberately NOT extended to the rest: a rule that is planned and not
+    /// live, a module serving nothing, a target claimed twice, a PM-published
+    /// path answering ENOENT to a hidden app, the ghost cloak over-reaching, a
+    /// foreign mount over the ROM -- each is either read by a detector or is the
+    /// user's own content silently not working. Those stay loud.
+    ///
+    /// Pinned by reading this file, because the level is chosen at the
+    /// construction site and there is no smaller unit to test. Re-promote one and
+    /// this fails, with the paragraphs above as the reason.
     #[test]
-    fn how_my_partitions_are_served_is_a_note_not_a_warning() {
+    fn findings_no_detector_can_see_are_notes() {
         let src = include_str!("doctor.rs");
-        let at = src
-            .find("check: \"my_* served by injection\",")
-            .expect("the finding is gone or was renamed -- keep the rule with it");
-        let before = &src[at.saturating_sub(200)..at];
-        assert!(
-            before.contains("level: Level::Info,"),
-            "a marker under /data/adb is invisible to every detector and REMOVES mounts; \
-             it must not be a warning"
-        );
+        for name in [
+            "my_* served by injection",
+            "manager kernel umount ON",
+            "manager kernel umount unknown",
+        ] {
+            let at = src
+                .find(&format!("check: \"{name}\","))
+                .unwrap_or_else(|| panic!("{name}: finding gone or renamed -- keep the rule with it"));
+            let before = &src[at.saturating_sub(200)..at];
+            assert!(
+                before.contains("level: Level::Info,"),
+                "{name} is invisible to every detector and changes nothing an app can \
+                 observe; it must not be a warning"
+            );
+        }
     }
 
     /// "Delete the marker" is only actionable if the report says when it comes

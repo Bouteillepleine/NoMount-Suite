@@ -2341,17 +2341,26 @@
         "switch hides nothing the Suite serves either way.";
       return;
     }
+    // No ⚠️ on either arm any more, and the reason is the rule the plan section
+    // now follows: nothing an app can read sees a root manager's settings, and
+    // this switch's effect HERE is nothing at all -- there are no mounts for it
+    // to unmount. A standing amber banner about an inert setting is how people
+    // learn to skip banners, which costs the one banner that matters.
+    //
+    // "it has broken root on real devices" is gone with it. That was true when su
+    // arrived as a module overlay and anything stripping module content stripped
+    // su too; su is kernel sucompat now and outside the Suite entirely.
     if (checkById("manager-kernel-umount-on")) {
       el.hidden = false;
-      el.innerHTML = "⚠️ Turn <b>Kernel umount</b> OFF in your root manager. Nothing here is " +
-        "a mount, so it hides nothing the Suite serves — and it has broken root on real devices. " +
-        "To hide from one app, use <b>Per-UID hiding</b> on the Hiding tab instead.";
+      el.innerHTML = "Your root manager’s <b>Kernel umount</b> is ON. It does nothing here — " +
+        "nothing the Suite serves is a mount. To hide from one app, use <b>Per-UID hiding</b> " +
+        "on the Hiding tab.";
       return;
     }
-    const unknown = checkById("check-a-setting-in-your-root-manager");
+    const unknown = checkById("manager-kernel-umount-unknown");
     if (unknown) {
       el.hidden = false;
-      el.innerHTML = "⚠️ " + esc(unknown.meaning || unknown.evidence);
+      el.innerHTML = esc(unknown.meaning || unknown.evidence);
       return;
     }
     el.hidden = true;
