@@ -266,7 +266,7 @@ fn ino_of(p: &Path) -> Option<u64> {
 /// within its filesystem) -- matching on a path never matched anything, which is
 /// how the old counter reported zero regardless of reality.
 fn check_zero_mount() -> Check {
-    let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
+    let Ok(mi) = fs::read("/proc/self/mountinfo") else {
         // UNMEASURED, not n/a: every device has a mount table, so failing to read
         // it means the check did not run -- exactly the state that must stay amber.
         return unmeasured(N_ZERO_MOUNT, "cannot read /proc/self/mountinfo".into())
@@ -278,7 +278,7 @@ fn check_zero_mount() -> Check {
     // this check called clean while Duck reported it as a critical root mount.
     // Resolve the source properly (mountinfo field 4 is fs-relative) rather than
     // matching the raw field, so the same row also yields the owning module.
-    let rows = crate::absorb::parse_mountinfo(&mi);
+    let rows = crate::absorb::parse_mountinfo_bytes(&mi);
     let roots = crate::absorb::fs_roots(&rows);
     let hits: Vec<(&crate::absorb::MountRow, std::path::PathBuf)> = rows
         .iter()
@@ -1396,7 +1396,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
 /// inside a ROM partition was the module's; stock keeps them at /dev, /mnt, /apex,
 /// /linkerconfig and /tmp. Visible to any app in its own mountinfo.
 fn check_no_rom_tmpfs() -> Check {
-    let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
+    let Ok(mi) = fs::read("/proc/self/mountinfo") else {
         return unmeasured(N_ROM_TMPFS, "cannot read /proc/self/mountinfo".into())
             .meaning("Could not read the mount table, so whether a module emptied a ROM folder this way is unknown.");
     };
@@ -1407,7 +1407,10 @@ fn check_no_rom_tmpfs() -> Check {
     // `serve_mode` into one predicate with two callers.
     let roots = crate::absorb::ROM_ROOTS;
     let mut hits: Vec<String> = Vec::new();
-    for line in mi.lines() {
+    // Per-line decode: this arm needs the fstype after ` - `, which the row parser
+    // does not keep, but one undecodable path elsewhere in the file must not make
+    // the whole check unmeasured.
+    for line in mi.split(|b| *b == b'\n').filter_map(|l| std::str::from_utf8(l).ok()) {
         let Some((pre, post)) = line.split_once(" - ") else { continue };
         if post.split_whitespace().next() != Some("tmpfs") {
             continue;
@@ -1468,11 +1471,11 @@ fn check_no_rom_tmpfs() -> Check {
 /// per-file source under /data/adb to re-serve an image from. This check reports
 /// it; removing it is the owning module's job.
 fn check_no_foreign_rom_mount() -> Check {
-    let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
+    let Ok(mi) = fs::read("/proc/self/mountinfo") else {
         return unmeasured(N_FOREIGN_MOUNT, "cannot read /proc/self/mountinfo".into())
             .meaning("Could not read the mount table, so whether anything foreign is mounted over the ROM is unknown.");
     };
-    let hits = crate::absorb::foreign_rom_mounts(&crate::absorb::parse_mountinfo(&mi));
+    let hits = crate::absorb::foreign_rom_mounts(&crate::absorb::parse_mountinfo_bytes(&mi));
     if hits.is_empty() {
         pass(N_FOREIGN_MOUNT, "no non-/data/adb bind or image mounted over a ROM partition".into())
             .meaning("Nothing outside the module system is mounted over a read-only ROM partition.")

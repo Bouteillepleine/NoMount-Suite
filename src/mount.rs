@@ -440,6 +440,89 @@ fn inject_would_mask_dir(target: &Path) -> bool {
     target.is_dir()
 }
 
+/// Must this target be unmounted before we serve it?
+///
+/// INJECTS and WHITEOUTS only. Both go through the engine and d_drop the cached
+/// dentry, and a mount hangs off a specific (vfsmount, dentry) pair — so serving
+/// over a live mount detaches it from path resolution and `umount2` then fails
+/// with EINVAL forever, stranding it in mountinfo until reboot.
+///
+/// A BIND does not: binding over a live mount strands nothing. Running the
+/// unmount for every kind meant the boot pass tore down ANOTHER module's my_*
+/// bind — `mounted` is the whole mount table — and then bound its own over the
+/// freed target, making `bind::apply`'s `AlreadyMounted` arm unreachable and
+/// destroying a mount the Suite never recorded and cannot restore. `run_reload`
+/// never did this, so the two passes disagreed: mount stole, reload deferred.
+pub(crate) fn needs_unmount_before_serving(kind: PlanKind) -> bool {
+    matches!(kind, PlanKind::Inject | PlanKind::Whiteout)
+}
+
+/// The order the engine must be fed: every inject, then every whiteout, each in
+/// plan order.
+///
+/// A whiteout d_drops the dentry it names, so anything injected UNDERNEATH one
+/// stops resolving — `expand_replacement` and the ROM-tmpfs re-apply both say so.
+/// `dedupe_by_target` does not cover it: a whiteout on `/system/etc/foo` and an
+/// inject on `/system/etc/foo/bar` are different targets.
+///
+/// It is a function, and both apply paths use it, because they had already
+/// drifted: `run_mount` split into two explicit passes and documented the split
+/// as load-bearing, while `run_reload` applied both kinds from one pass over a
+/// HashMap — so its order was not merely wrong, it was randomised per process
+/// and differed between two reloads of an unchanged device.
+///
+/// Binds are absent: they are reconciled separately, after the rule set.
+pub(crate) fn apply_order(plan: &[PlanEntry]) -> Vec<&PlanEntry> {
+    plan.iter()
+        .filter(|e| e.kind == PlanKind::Inject)
+        .chain(plan.iter().filter(|e| e.kind == PlanKind::Whiteout))
+        .collect()
+}
+
+/// Is this path REPRESENTABLE in the engine's wire format?
+///
+/// `nm list` is line-oriented and uses ` -> ` between target and source, so a
+/// path carrying either is not a path the rule set can describe — and every
+/// reader parses something else out of it.
+///
+/// This is not cosmetic. A module ships a directory whose name ends in a
+/// NEWLINE, with a victim path underneath:
+///
+///     <mod>/system/etc/A\n/data/app/~~AA==/com.victim-BB==/base.apk
+///
+/// Nothing rejected it: not this walk, not the `nm` client, not the kernel
+/// (`nm_target_too_shallow` counts components, and a newline is just a byte).
+/// The rule was accepted, and the dump then contained a line whose target was
+/// the victim's APK. `nm::parse_list` returned it as a real rule;
+/// `absorb::refresh_app_apks` read it as "this package moved", and
+/// `add_repointing` — which is DELIBERATELY not gated by `serve_mode`, because
+/// it exists for the `/data/app` patched-APK case — injected the module's file
+/// over an installed app's `base.apk`. As root.
+///
+/// The weaker spellings cost less and are still permanent: a name containing
+/// ` -> `, ` (whiteout)` or ` [UID:` mis-parses into a phantom rule that no
+/// prune can delete, so `reload` re-adds the real one and fails to delete the
+/// ghost on EVERY run, forever.
+///
+/// Refuse at the ONE place a path enters the plan. The engine should refuse it
+/// too — a client cannot be the only thing standing between a filename and the
+/// rule table — but that is a kernel change and this is the gate we own.
+fn path_is_representable(p: &Path) -> Result<(), &'static str> {
+    let Some(s) = p.to_str() else {
+        return Err("its name is not valid UTF-8, which the rule format cannot carry");
+    };
+    if s.contains('\n') || s.contains('\r') {
+        return Err("its name contains a newline, which would forge a second rule in `nm list`");
+    }
+    if s.contains('\t') {
+        return Err("its name contains a tab, which is the separator in binds.list");
+    }
+    if s.contains(" -> ") {
+        return Err("its name contains ` -> `, the separator between target and source");
+    }
+    Ok(())
+}
+
 /// Can this entry actually produce a rule?
 ///
 /// Injection serves a symlink's TARGET, so a link whose target does not exist
@@ -478,7 +561,7 @@ struct Stats {
 }
 
 /// What the Suite intends to do for one module entry.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PlanKind {
     /// Redirect `target` at `source` (hookless, mountless).
     Inject,
@@ -693,9 +776,31 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             Ok(r) => r,
             Err(_) => continue,
         };
+        // Both refusals below print. Every other skip in this walk names its
+        // reason, and these two used to be bare `continue`s -- so a module file
+        // (or, at `collect_plan`, a whole module) vanished from the plan in
+        // silence, which is the failure this project keeps re-fixing.
         let Some(target) = resolve_target_path(rel) else {
+            eprintln!(
+                "nomount: {module}: skipping {} — its name is not valid UTF-8",
+                source.display()
+            );
             continue;
         };
+        // A path the wire format cannot carry must never reach the engine: see
+        // `path_is_representable`. Checked on BOTH sides -- the source is what a
+        // rule points at, and `binds.list` records it tab-separated.
+        let unrepresentable = path_is_representable(&target)
+            .err()
+            .map(|w| ("target", w))
+            .or_else(|| path_is_representable(&source).err().map(|w| ("source", w)));
+        if let Some((what, why)) = unrepresentable {
+            eprintln!(
+                "nomount: {module}: skipping {} — {what} {why}",
+                source.display()
+            );
+            continue;
+        }
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
@@ -933,9 +1038,25 @@ pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
         if !mdir.is_dir() || !module_enabled(&mdir) {
             continue;
         }
+        // Say so. This was a bare `continue`, and it drops a WHOLE MODULE -- one
+        // non-UTF-8 byte in a directory name and every file it ships silently
+        // never appears, on a project whose stated worst outcome is "installed
+        // and silently not applied".
         let Some(id) = mdir.file_name().and_then(|n| n.to_str()) else {
+            eprintln!(
+                "nomount: skipping the module at {} — its directory name is not valid UTF-8",
+                mdir.display()
+            );
             continue;
         };
+        // A dot-prefixed id is served by `read_dir` here and invisible to every
+        // shell and JS surface, all of which glob `/data/adb/modules/*/`: the
+        // files would be injected and the module would appear in no badge, no
+        // module list and no count. Neither manager accepts such an id anyway.
+        if id.starts_with('.') {
+            eprintln!("nomount: skipping {id} — a dot-prefixed module id is not a valid module");
+            continue;
+        }
         if blocklist.contains(id) {
             skipped += 1;
             continue;
@@ -1143,7 +1264,15 @@ pub fn run_reload() -> Result<()> {
     // The ROM-tmpfs takeovers are absorb's rules too (M-S8): whiteouts on paths no
     // module plan names, so the prune below would drop them and the emptied
     // directory would fill back in on the first reload after a takeover.
-    absorbed.extend(crate::absorb::absorbed_tmpfs_targets());
+    //
+    // `?`, like its two neighbours above and for the identical reason. This was
+    // the one input to the prune guard still read with `unwrap_or_default()`, so
+    // an I/O error on `absorbed-tmpfs.list` made every takeover prunable while
+    // the two lines above refused the whole pass for exactly that.
+    absorbed.extend(
+        crate::absorb::read_absorbed_tmpfs_targets()
+            .context("cannot read the ROM-tmpfs takeover record -- refusing to reload, because an empty record here would PRUNE every takeover whiteout")?,
+    );
 
     let (mut added, mut changed, mut removed, mut failed) = (0u32, 0u32, 0u32, 0u32);
     // Add new rules, and re-apply a live rule whose SOURCE or KIND changed (not
@@ -1152,8 +1281,36 @@ pub fn run_reload() -> Result<()> {
     let mounted = crate::absorb::mounted_targets().context(
         "cannot read /proc/self/mountinfo -- refusing to serve, because assuming \"nothing is mounted\" injects over live mounts and strands each one in mountinfo until reboot",
     )?;
-    for (t, e) in &desired_hookless {
-        let up_to_date = match live.get(&((*t).to_path_buf(), 0)) {
+    // TWO PASSES, IN PLAN ORDER — the same split `run_mount` calls load-bearing,
+    // and for the same reason. This loop used to run over `desired_hookless`, a
+    // HashMap, applying injects and whiteouts as it met them. Two consequences,
+    // and the second is worse than the first:
+    //
+    //   * a whiteout could land before an inject underneath it. `nm w` d_drops
+    //     the dentry it names, so every path below stops resolving and the
+    //     injects there serve nothing -- exactly what `expand_replacement` and
+    //     the ROM-tmpfs re-apply both warn about. `dedupe_by_target` does not
+    //     cover it: a whiteout on `/system/etc/foo` and an inject on
+    //     `/system/etc/foo/bar` are different targets.
+    //   * HashMap iteration order is randomised per process, so the answer
+    //     differed between two reloads of an UNCHANGED device -- the same
+    //     non-determinism `plan_tree`'s sort exists to remove, reintroduced one
+    //     layer up.
+    //
+    // Iterating `&plan` restores plan order for free, and `dedupe_by_target` has
+    // already collapsed it to one entry per target, so `desired_hookless` is only
+    // a lookup table now.
+    //
+    // `applied_apks` is the other half of the fix: `pmcache::sync` records "PM has
+    // now parsed these bytes", and this pass used to hand it the RAW plan while
+    // `run_mount` was fixed to hand it what actually applied. A rule that failed
+    // here was recorded as served, so when it later succeeded `identity(source)`
+    // was unchanged, the entry was not stale, the cache was never dropped, and
+    // PackageManager kept serving its parse of the STOCK apk -- permanently.
+    let mut applied_apks: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for e in apply_order(&plan) {
+        let t = e.target.as_path();
+        let up_to_date = match live.get(&(t.to_path_buf(), 0)) {
             Some(LiveRule::Inject(src)) => {
                 e.kind == PlanKind::Inject && src.as_path() == e.source.as_path()
             }
@@ -1161,6 +1318,9 @@ pub fn run_reload() -> Result<()> {
             None => false,
         };
         if up_to_date {
+            // Already correct, so still served: pmcache must hear about it, or the
+            // next change to this APK looks like the first one.
+            applied_apks.push((e.target.clone(), e.source.clone()));
             continue;
         }
         // No point issuing an add that cannot produce a rule; counting it as
@@ -1176,7 +1336,7 @@ pub fn run_reload() -> Result<()> {
             failed += 1;
             continue;
         }
-        let existed = live.contains_key(&((*t).to_path_buf(), 0));
+        let existed = live.contains_key(&(t.to_path_buf(), 0));
         if existed {
             let _ = nm.del(&e.target); // drop the stale rule before re-adding
         }
@@ -1186,6 +1346,7 @@ pub fn run_reload() -> Result<()> {
                 warn_whiteout_hole(&e.target, &e.module);
                 nm.whiteout(&e.target)
             }
+            // `apply_order` yields no binds.
             PlanKind::Bind => unreachable!(),
         };
         match r {
@@ -1194,6 +1355,9 @@ pub fn run_reload() -> Result<()> {
                     changed += 1;
                 } else {
                     added += 1;
+                }
+                if e.kind == PlanKind::Inject {
+                    applied_apks.push((e.target.clone(), e.source.clone()));
                 }
             }
             Err(_) => failed += 1,
@@ -1280,19 +1444,38 @@ pub fn run_reload() -> Result<()> {
         .map(|(t, _)| t.as_path())
         .collect();
     for e in plan.iter().filter(|e| e.kind == PlanKind::Bind) {
-        if !live_ok.contains(e.target.as_path()) {
-            match crate::bind::apply(&e.source, &e.target) {
-                // AlreadyMounted made no new bind, so it must not inflate the count.
-                Ok(crate::bind::BindOutcome::Bound) => bind_added += 1,
-                Ok(crate::bind::BindOutcome::AlreadyMounted) => {}
-                Err(_) => failed += 1,
+        // A bind swaps the bytes PM parsed just as an inject does, so a my_* APK
+        // belongs in `applied_apks` on BOTH arms -- the one already mounted is
+        // being served right now.
+        if live_ok.contains(e.target.as_path()) {
+            applied_apks.push((e.target.clone(), e.source.clone()));
+            continue;
+        }
+        match crate::bind::apply(&e.source, &e.target) {
+            // AlreadyMounted made no new bind, so it must not inflate the count.
+            Ok(crate::bind::BindOutcome::Bound) => {
+                bind_added += 1;
+                applied_apks.push((e.target.clone(), e.source.clone()));
             }
+            Ok(crate::bind::BindOutcome::AlreadyMounted) => {
+                applied_apks.push((e.target.clone(), e.source.clone()));
+            }
+            Err(_) => failed += 1,
         }
     }
 
     // PM has already parsed every ROM APK by the time a reload runs, so dropping
     // its cache entry here only takes effect at the next scan.
-    let pm = crate::pmcache::sync(&served_apks(&plan, &crate::absorb::absorbed_pairs()));
+    //
+    // `served_apks_applied`, NOT `served_apks`. See the note on `applied_apks`
+    // above: handing this the raw plan records a rule that FAILED as served, and
+    // that mistake is permanent -- the next pass finds `identity(source)`
+    // unchanged, calls it not-stale, and PackageManager keeps its parse of the
+    // stock APK for good. `run_mount` was fixed for this; reload was not.
+    let pm = crate::pmcache::sync(&served_apks_applied(
+        &applied_apks,
+        &crate::absorb::absorbed_pairs(),
+    ));
     crate::pmcache::add_pending(&pm);
 
     println!(
@@ -1516,7 +1699,22 @@ pub fn run_mount() -> Result<()> {
     // `mounted` was read before `clear()` -- see the note there.
     for e in &plan {
         served.insert(e.module.as_str());
-        if !unmount_before_serving(&mounted, &e.target) {
+        // NOT for a Bind. `unmount_before_serving` exists for ONE hazard, and its
+        // own doc names it: injecting d_drops the cached dentry, a mount hangs off
+        // a specific (vfsmount, dentry) pair, so an inject over a live mount
+        // strands it in mountinfo forever. Binding over a live mount strands
+        // nothing.
+        //
+        // Running it for every kind meant the boot pass tore down ANOTHER
+        // module's my_* bind -- `mounted` is the whole mount table, snapshotted
+        // before `teardown_all`, so it holds theirs as well as ours -- and then
+        // pass 2 bound ours over the freed target. That made `bind::apply`'s
+        // `AlreadyMounted` arm ("another module already bound this target; leave
+        // it to them") unreachable, and destroyed a mount the Suite never
+        // recorded and can never restore. `run_reload` never did this: its loop
+        // covers `desired_hookless` only. Mount stole, reload deferred; now
+        // neither does.
+        if needs_unmount_before_serving(e.kind) && !unmount_before_serving(&mounted, &e.target) {
             st.failed += 1;
             blocked.insert(e.target.as_path());
             continue;
@@ -1622,19 +1820,6 @@ pub fn run_mount() -> Result<()> {
     Ok(())
 }
 
-/// Every ROM APK a rule serves, as (target, source), from the module plan plus
-/// the absorbed record. Binds count: a my_* APK is bind-served (hookless there
-/// bootloops zygote) and a bind swaps the bytes PM parsed just as an inject
-/// does. Only whiteouts are excluded -- removing a file leaves PM nothing to
-/// have cached under that path.
-fn served_apks(plan: &[PlanEntry], absorbed: &[(PathBuf, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
-    plan.iter()
-        .filter(|e| matches!(e.kind, PlanKind::Inject | PlanKind::Bind))
-        .map(|e| (e.target.clone(), e.source.clone()))
-        .chain(absorbed.iter().cloned())
-        .filter(|(t, _)| crate::pmcache::is_rom_apk(t))
-        .collect()
-}
 
 /// Same filter, but over pairs that were actually applied rather than planned.
 /// Recording a FAILED rule as served is what makes a stale PackageManager parse
@@ -1654,6 +1839,94 @@ fn served_apks_applied(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A path the wire format cannot carry must never reach the engine.
+    ///
+    /// The newline vector is the one that matters: a module ships a directory
+    /// whose name ends in `\n` with a victim path under it, `nm list` is
+    /// line-oriented, and the dump then contains a line whose target is an
+    /// installed app's `base.apk`. `parse_list` returns it as a real rule and
+    /// `absorb::refresh_app_apks` re-points it through `add_repointing` — which
+    /// is deliberately NOT gated by `serve_mode`. Root then serves the module's
+    /// file as that app's APK.
+    #[test]
+    fn a_path_the_wire_format_cannot_carry_is_refused() {
+        let forge = Path::new("/system/etc/A\n/data/app/~~AA==/com.victim-BB==/base.apk");
+        assert!(path_is_representable(forge).is_err(), "the rule-forgery vector");
+
+        for bad in [
+            "/system/etc/a\rb",
+            "/system/etc/a\tb",
+            "/system/etc/x -> /data/adb/modules/evil/x",
+            "/system/etc/x (whiteout)\n/system/bin/su",
+        ] {
+            assert!(
+                path_is_representable(Path::new(bad)).is_err(),
+                "must refuse: {bad}"
+            );
+        }
+        // ...and nothing ordinary. A space, a quote, an emoji and a bracket are
+        // all legal in a filename and all representable.
+        for ok in [
+            "/system/etc/a b/c.conf",
+            "/system/etc/it's.conf",
+            "/product/app/Foo \u{1F600}/Foo.apk",
+            "/system/etc/x [UID] y",
+            "/system/etc/x (whiteout) y",
+        ] {
+            assert!(
+                path_is_representable(Path::new(ok)).is_ok(),
+                "must accept: {ok}"
+            );
+        }
+    }
+
+    /// Only injects and whiteouts get unmounted first; a bind does not.
+    ///
+    /// `run_mount` ran it for every kind, so it tore down another module's my_*
+    /// bind and bound its own over the freed target — making `bind::apply`'s
+    /// "leave it to them" arm unreachable. `run_reload` never did, so the two
+    /// passes disagreed about third-party binds.
+    #[test]
+    fn only_engine_served_kinds_are_unmounted_first() {
+        assert!(needs_unmount_before_serving(PlanKind::Inject));
+        assert!(needs_unmount_before_serving(PlanKind::Whiteout));
+        assert!(
+            !needs_unmount_before_serving(PlanKind::Bind),
+            "binding over a live mount strands nothing; stealing another module's bind does"
+        );
+    }
+
+    /// Every inject before every whiteout, plan order preserved within each.
+    ///
+    /// A whiteout d_drops the dentry it names, so an inject underneath one that
+    /// lands afterwards serves nothing. `run_reload` applied both kinds from a
+    /// HashMap, so its order was randomised per process — two reloads of an
+    /// unchanged device could disagree.
+    #[test]
+    fn injects_are_applied_before_whiteouts_in_plan_order() {
+        let mut plan = vec![
+            entry("a_mod", "/system/etc/foo", "/data/adb/modules/a_mod/system/etc/foo"),
+            entry("b_mod", "/system/etc/foo/bar", "/data/adb/modules/b_mod/system/etc/foo/bar"),
+            entry("c_mod", "/system/etc/baz", "/data/adb/modules/c_mod/system/etc/baz"),
+        ];
+        // The first is the debloat whiteout that would d_drop the parent.
+        plan[0].kind = PlanKind::Whiteout;
+        plan[2].kind = PlanKind::Bind;
+
+        let order: Vec<_> = apply_order(&plan)
+            .into_iter()
+            .map(|e| (e.kind, e.target.clone()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (PlanKind::Inject, PathBuf::from("/system/etc/foo/bar")),
+                (PlanKind::Whiteout, PathBuf::from("/system/etc/foo")),
+            ],
+            "the inject under the whiteout must land first, and binds are not in this order at all"
+        );
+    }
 
     /// The two shell/JS surfaces that re-implement this file's content walk.
     ///

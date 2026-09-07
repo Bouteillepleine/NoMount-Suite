@@ -502,7 +502,28 @@ set_perm() {
     return 0
 }
 
-MODPATH="${MODPATH:-/data/adb/modules/meta-nomount}"
+# STAGE, never the live install.
+#
+# `MODPATH` is set by ksud and by the Magisk app when THEY drive the install, and
+# it points at /data/adb/modules_update/<id> -- a staging directory the manager
+# promotes at the next boot. It is UNSET on the two paths that run this script
+# directly (recovery, and the Magisk app's own zip handler), and the fallback was
+# the LIVE module directory. Two consequences, both bad:
+#
+#   * `abort()` above is `rm -rf "$MODPATH"`. So customize.sh's integrity refusal
+#     and its metamodule-conflict refusal did not FAIL an install -- they
+#     UNINSTALLED the working Suite the user already had. A corrupted download
+#     took out a good install.
+#   * `unzip -o` MERGES over the existing tree, so a file dropped in a later
+#     version was never removed and `nomount.sha256sums` cannot see it (it only
+#     checks that listed files match).
+#
+# Staging fixes both: abort's `rm -rf` then throws away a scratch directory, and
+# the manager replaces the live tree wholesale instead of merging into it.
+MODPATH="${MODPATH:-/data/adb/modules_update/meta-nomount}"
+# A stale staging directory from an install that aborted must not merge into this
+# one, for the same reason `unzip -o` must not merge into the live tree.
+rm -rf "$MODPATH"
 mkdir -p "$MODPATH" || { ui_print "! cannot create $MODPATH"; exit 1; }
 
 # -x META-INF: this installer is not module content, and unzipping it into the

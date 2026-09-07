@@ -128,6 +128,12 @@ elif [ -d /data/adb/nomount ]; then
             if cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null; then
                 _kept=$((_kept + 1))
             else
+                # A `cp -p` that dies part-way (ENOSPC) leaves a TRUNCATED file,
+                # and customize.sh restores on `[ -e ]` alone -- so a half-copied
+                # `uidhide` comes back as a legal hide list that hides nobody,
+                # which is precisely the silent state statefile.rs exists to
+                # prevent. A file we could not copy whole must not be there.
+                rm -f "$_bak/$_f" 2>/dev/null
                 _lost=$((_lost + 1))
             fi
         done
@@ -139,6 +145,7 @@ elif [ -d /data/adb/nomount ]; then
         # path at all, which made a total loss indistinguishable from a clean
         # update.
         _lost=-1
+        _wipe_ok=0
     fi
     if [ "$_lost" = "-1" ]; then
         _nmlog "could not create $_bak - the hide list, whiteouts and settings will be LOST by this update"
@@ -149,6 +156,21 @@ elif [ -d /data/adb/nomount ]; then
     fi
     unset _kept _lost
 fi
-unset _bak
 
-rm -rf /data/adb/nomount
+# ...and DO NOT WIPE when there is nothing to restore from.
+#
+# The block above logs "the hide list, whiteouts and settings will be LOST by
+# this update" and then the `rm -rf` below made that true. The wipe exists for
+# exactly one thing -- clearing `disabled` so a re-flash is not parked by the
+# previous install's guard trip -- and that is one file. Everything else it
+# removes is either regenerated or is the user's configuration.
+#
+# So when the stash could not be created, take the one file the wipe is for and
+# leave the rest. customize.sh copes: its restore never overwrites a file that is
+# already present.
+if [ "${_wipe_ok:-1}" = 0 ]; then
+    _nmlog "keeping $NMDIR: the stash failed, so wiping it would destroy the only copy"
+    rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount 2>/dev/null
+else
+    rm -rf /data/adb/nomount
+fi

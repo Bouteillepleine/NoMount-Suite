@@ -249,7 +249,7 @@ unset _bh_dir _bh_ovr _bh_rc
 # reload is a gap-free delta (it applies only what changed, never a clear), so
 # on the common case of nothing new it is a cheap no-op. It runs BEFORE absorb
 # so absorb sees the finished rule set.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     _rl_all=$(nmto 60 "$BIN" reload 2>&1)
     _rl_rc=$?
     _rl=$(printf '%s\n' "$_rl_all" | tail -1)
@@ -267,7 +267,7 @@ fi
 # content is visible in every app's mountinfo, which defeats the zero-mount
 # posture no matter how mountless the Suite itself is. Re-serve each as an
 # injection and drop the mount. No-op when nothing mounted anything.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     # Bounded. This is FOREGROUND and everything below it -- the whiteout
     # re-apply, the authoritative `uid apply`, the package watcher, the
     # check canary -- only runs once it returns. absorb now takes the
@@ -340,7 +340,7 @@ fi
 # --- re-apply persistent whiteouts ---
 # Whiteouts live in kernel memory and are empty after every reboot; the list on
 # disk is the durable record.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/whiteouts.txt" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ -s "$NMDIR/whiteouts.txt" ]; then
     # Status BEFORE the pipe. `$(cmd | tail -1)` leaves $? as tail's, which always
     # succeeds -- the same trap documented for absorb above, still live here. A
     # failed whiteout apply means the stock paths the user asked to hide are
@@ -365,7 +365,7 @@ fi
 # pass is the authoritative one: packages.list is now populated and app UIDs are
 # stable, so it re-resolves, refreshes the mirror, and retires any appid an entry
 # no longer maps to (appids get reused after an uninstall). Guard-gated.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
     _bl=$(nmto 60 "$BIN" uid apply 2>&1)
     if [ $? -eq 0 ]; then
         nmlog "hide list re-applied ($_bl)"
@@ -416,7 +416,7 @@ fi
 # where the others only fire if their pass had something to do.)
 #
 # Inert and silent on a kernel without _ghost.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     _gh=$(nmto 60 "$BIN" ghost sync 2>&1)
     _gh_rc=$?
     if [ "$_gh_rc" -eq 124 ]; then
@@ -444,7 +444,7 @@ fi
 # process. No event mask either: the mask letters differ between the busybox and
 # toybox inotifyd, and an unknown letter makes inotifyd exit at startup, which
 # would disable the watcher silently.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ] \
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
     inotifyd "$MODDIR/uidwatch.sh" /data/system >/dev/null 2>&1 &
     nmlog "hide-list package watcher started"
@@ -487,7 +487,7 @@ fi
 # disagrees. Bounded per call, like every other engine call on this path: a hung
 # engine must not hold the rest of the boot pass (card refresh included) hostage,
 # nor leave a stale health.txt to be read as if it were this boot's.
-if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     _try=0
     _arc=0
     while [ "$_try" -lt 6 ]; do
@@ -544,7 +544,7 @@ if [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
     unset _arc
 fi
 
-if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" ]; then
+if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     # One dump, both counts (see metamount.sh): two `nm list` runs returning the
     # same answer is two full netlink dumps of the whole rule table.
     _NMLIST=$(nmto 15 "$NM_BIN" list 2>/dev/null)

@@ -11,6 +11,119 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.147 — engine v30 (unchanged)
+
+The ten Tier-1 findings of the round-7 audit — twelve parallel reviewers plus a
+device pass, report in `NOMOUNT-SUITE-AUDIT-2026-09-07-ROUND7.md`. **None of these
+was caught by the gates**, which were green on the audited tree.
+
+### Fixed — could destroy state or brick a device
+
+- **A corrupted download uninstalled the Suite you already had.** The bundled
+  `update-binary` defaulted `MODPATH` to the LIVE `/data/adb/modules/meta-nomount`
+  — it is unset on the recovery and Magisk-app paths — and `abort()` is
+  `rm -rf "$MODPATH"`. So `customize.sh`'s integrity refusal and its
+  metamodule-conflict refusal did not fail an install, they removed the working
+  one. `unzip -o` also merged rather than replaced, so a file dropped in a later
+  version was never removed. It stages into `modules_update` now and lets the
+  manager promote it.
+
+- **An aborted install destroyed your settings, and the next boot deleted the
+  backup.** `uninstall.sh` stashes twelve files and wipes the state directory;
+  two aborts sit above `customize.sh`'s restore loop; and both boot entry points
+  then ran a bare `rm -rf /data/adb/nomount.bak`. The sweep's motive was right —
+  a stash holding `uidhide` must not rot — but the remedy was deletion. It is now
+  `nm_consume_stash` in `lib.sh`: restore, then delete. Two riders fixed with it:
+  the wipe no longer runs when the stash could not be created (it takes only
+  `disabled`, which is the one file the wipe exists for), and a `cp -p` that dies
+  part-way no longer leaves a TRUNCATED file for `customize.sh` to restore on
+  `[ -e ]` alone. `statefile.rs`'s test now pins all **three** lists.
+
+- **`nomount whiteout add /system/vendor` was accepted and bootlooped the
+  device.** `validate()` refused `..` but not a symlink. Verified on an OP15:
+  `/system/vendor -> /vendor`, `/system/product -> /product`,
+  `/system/system_ext -> /system_ext` — each three components, so
+  `is_partition_root` says no, and the engine then resolves with `LOOKUP_FOLLOW`
+  and lands a whiteout on a bare partition root. Durable and re-applied every
+  boot, so rebooting did not recover it; reachable from the WebUI text field. The
+  gate now re-checks the RESOLVED path (the list still stores what you typed).
+
+- **One `mkdir` permanently disarmed the bootloop guard.** `mkdir
+  /data/adb/nomount/bootcount` → `cat` prints nothing, `echo >` fails, and `echo`
+  is not a special builtin, so COUNT sat at 1 forever and GUARD_MAX was
+  unreachable. Measured on an OP15's own mksh: boots 1–5, COUNT=1, trips=no, with
+  the shell's complaint going to a stderr the boot path sends to `/dev/null`.
+  `mkdir …/disabled` split the product three ways — shell `-f` said not tripped,
+  `guard_tripped()`'s `exists()` said tripped, and the WebUI's `rm -f` could not
+  clear it. Both entry points now repair the file type before the guard, the
+  shell tests are `-e` to agree with the Rust, and the WebUI re-arm is `rm -rf`.
+  The two guard writes are also `sync`ed — they were the only durable state going
+  through neither `write_atomic` nor a sync, and the only ones where "the next
+  boot repairs it" is false by construction.
+
+### Fixed — integrity
+
+- **A newline in a module filename forged a rule that `absorb` acted on.**
+  Nothing validated path characters: not the plan walk, not the client, not the
+  kernel. `nm list` is line-oriented, so a module shipping
+  `system/etc/A
+/data/app/~~AA==/com.victim-BB==/base.apk` produced a line whose
+  target was an installed app's APK; `parse_list` returned it as a real rule and
+  `refresh_app_apks` re-pointed it through `add_repointing`, which is deliberately
+  NOT gated by `serve_mode`. Root then served the module's file as that app's
+  APK. Weaker spellings — a name containing ` -> `, ` (whiteout)` or ` [UID:` —
+  produced a phantom rule no prune could delete, so reload failed on it forever.
+  `path_is_representable` refuses all of them at the one place a path enters the
+  plan, with a printed reason. Verified on hardware with a real hostile tree: the
+  refusal fires and no `/data/app` rule appears.
+
+- **One non-UTF-8 byte anywhere in the mount table stopped all injection.** Every
+  mountinfo read was `read_to_string`, which fails on invalid UTF-8, and the
+  kernel escapes only space, tab, newline and backslash — so one Latin-1 filename
+  in any mount meant **no injections at all, every boot**, because `mount.rs`
+  treats an unreadable mount table as fatal. It also made the byte-exact
+  `unescape`/`umount_detach` work unreachable, and the tests pinning that property
+  fed the parser a `&str`. Now `read_mountinfo` reads bytes: a row that cannot be
+  decoded costs that row, `target` is carried through byte-exact (it is what
+  `umount2` and `still_mounted` compare), and `root` degrades lossily rather than
+  dropping the row — because dropping it would take the target with it, which is
+  the stranding hazard itself.
+
+### Fixed — correctness
+
+- **`absorb` injected over live mounts and stranded them forever.**
+  `reapply_absorbed_pairs` was the one rule-adding path with no mounted-target
+  guard. Injecting over a live mount detaches it from path resolution and
+  `umount2` then returns EINVAL permanently.
+
+- **`run_reload` applied whiteouts in random order, and recorded failed rules as
+  served.** Both kinds were applied from one loop over a `HashMap`, so a whiteout
+  could d_drop a dentry with injects underneath it — and the order differed
+  between two reloads of an unchanged device. `apply_order` is now one tested
+  function used by both apply paths. Separately, reload fed `pmcache::sync` the
+  raw plan where `run_mount` was fixed to use what actually applied; a rule that
+  failed was recorded as served, and when it later succeeded the cache was never
+  dropped, so PackageManager kept its parse of the stock APK permanently.
+
+- **`run_mount` stole other modules' `my_*` binds.** `unmount_before_serving` ran
+  for every plan entry, `Bind` included, so the boot pass tore down a third-party
+  bind and bound its own over the freed target — making `bind::apply`'s
+  `AlreadyMounted` arm unreachable. `run_reload` never did this. Now neither does.
+
+- **Three "only copy" records could be lost.** `absorbed_tmpfs()` was the last one
+  read as an empty list on error, while the line directly above it in `run_reload`
+  refuses the pass for exactly that; `bind.rs`'s `append_locked` was the only
+  non-atomic writer of an only-copy record and now truncates back on a short
+  write; and `whiteouts.txt`'s read-modify-write was unlocked while `absorb`'s
+  M-S8 migration writes it under the pass lock.
+
+### Also
+
+A module file, or a whole module, whose name is not UTF-8 is now skipped with a
+printed reason rather than a bare `continue`. A dot-prefixed module id is refused:
+`read_dir` served it while every shell and JS surface globs `*/`, so it was
+injected and invisible everywhere.
+
 ## v1.3.146 — engine v30 (unchanged)
 
 ### Changed

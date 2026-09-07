@@ -62,7 +62,7 @@ rm -f "$NMDIR/.uidwatch.lock" 2>/dev/null
 # holds `uidhide` -- the list of apps being hidden from -- so leaving it to rot
 # under a name derived from ours is exactly what uninstall.sh's own header says
 # must not happen.
-rm -rf /data/adb/nomount.bak 2>/dev/null
+nm_consume_stash
 
 # --- "a boot entry point ran this boot" stamp ---------------------------------
 # On a KernelSU build WITHOUT metamodule support this file is never invoked, and
@@ -173,6 +173,27 @@ nm_delink_ksud "susfs-action guard"
 # suppresses and the counter cannot protect against -- it would keep running
 # every boot after the guard had already tripped, leaving a user bootlooping
 # with no self-recovery path.
+# The guard's own state must be a plain FILE, and a directory there disarms it
+# completely. `cat` on a directory prints nothing and exits 1, so COUNT is 0;
+# `echo >` on a directory fails, but `echo` is not a POSIX special builtin so the
+# shell carries on -- leaving COUNT at 1 on EVERY boot, GUARD_MAX unreachable,
+# and the one mechanism that recovers a wedged device dead. Measured on an OP15's
+# own mksh, 2026-09-07: boots 1 through 5, COUNT=1, trips=no, every time, with
+# the shell's complaint going to a stderr this path sends to /dev/null.
+#
+# `disabled` as a directory is worse than useless: the five shell entry points
+# test `-f` (false -> serve normally) while `mount::guard_tripped` tests
+# `Path::exists()` (true -> every WebUI serving verb refuses), and the WebUI's
+# re-arm is `rm -f`, which fails on a directory -- so the user cannot clear it.
+# All three verified on device.
+#
+# Any root script can `mkdir` these, and so can a fat-fingered shell. Two lines.
+for _f in bootcount disabled; do
+    if [ -e "$NMDIR/$_f" ] && [ ! -f "$NMDIR/$_f" ]; then
+        rm -rf "${NMDIR:?}/$_f" 2>/dev/null
+        nmlog "⚠ $NMDIR/$_f was not a regular file (the guard cannot use it) - removed"
+    fi
+done
 GUARD_MAX=3
 COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
 # Sanitize before the arithmetic. A bootcount corrupted to something like "3 3"
@@ -184,12 +205,19 @@ COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
 case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
 COUNT=$((COUNT + 1))
 echo "$COUNT" > "$NMDIR/bootcount"
+# SYNC. This is the most crash-adjacent write in the project and the only one
+# where "the next boot repairs it" is false by construction: a boot that wedges
+# and is watchdog-reset inside the ext4 commit interval loses the counter, the
+# sanitizer above reads the empty file as 0, and GUARD_MAX is never reached.
+# Every other durable file goes through statefile::write_atomic, which syncs.
+sync 2>/dev/null
 
-if [ -f "$NMDIR/disabled" ]; then
+if [ -e "$NMDIR/disabled" ]; then
     nmlog "disabled, skipping the mount pass"
 elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
     nmlog "bootloop guard tripped (count=$COUNT) -> self-disabling"
     : > "$NMDIR/disabled"
+    sync 2>/dev/null
     # Record WHY, while the evidence is still fresh. Without this a trip leaves only an
     # empty `disabled` file and the user has to dig through tombstones by hand to find out
     # what crashed (that is exactly how the /my_product FD-allowlist bootloop was found).
@@ -309,7 +337,7 @@ if command -v ksud >/dev/null 2>&1; then
     # anyway -- skip it entirely and go straight to the Suite's own card, which is
     # cheap (the bounded `nm list` above, plus sed/awk) and is the surface that
     # actually has to say what happened.
-    if [ -f "$NMDIR/disabled" ]; then
+    if [ -e "$NMDIR/disabled" ]; then
         nmlog "guard is tripped - skipping per-module tagging (nothing is served)"
     else
     for d in /data/adb/modules/*/; do
@@ -427,7 +455,7 @@ if command -v ksud >/dev/null 2>&1; then
     _mods=0
     for _x in $_vf $_ov; do _mods=$((_mods + 1)); done
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
-    if [ -f "$NMDIR/disabled" ]; then
+    if [ -e "$NMDIR/disabled" ]; then
         _desc="⛔ disabled — bootloop guard tripped, open the WebUI"
     elif [ "$_engine_ran" = 0 ]; then
         # This block is NOT gated on [ -x "$BIN" ], so it used to render the green

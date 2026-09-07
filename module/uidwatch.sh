@@ -48,7 +48,7 @@ NMLOG_TAG=uidwatch
     echo "nomount: lib.sh missing or unreadable at $MODDIR — the package watcher cannot run; re-flash the zip" > /dev/kmsg 2>/dev/null
     exit 1
 }
-[ -f "$NMDIR/disabled" ] && exit 0
+[ -e "$NMDIR/disabled" ] && exit 0
 
 # Does this list hold an actual ENTRY, or only its header?
 #

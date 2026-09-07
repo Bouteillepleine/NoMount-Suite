@@ -47,7 +47,7 @@ nm_set_bin
 # `disabled` is honoured so the bootloop guard in metamount.sh still recovers a
 # bad trial on its own: three failed boots write that file, and the next boot
 # skips this entirely rather than needing a flash.
-if [ ! -f "$NMDIR/disabled" ] && [ -x "$BIN" ] \
+if [ ! -e "$NMDIR/disabled" ] && [ -x "$BIN" ] \
    && { [ -f "$NMDIR/my_hookless" ] || [ "$NM_MY_HOOKLESS" = 1 ]; }; then
     _ea=$(nmto 60 "$BIN" absorb --early 2>&1)
     # Status FIRST, then log: nmlog_absorb_notes runs a pipeline, and $? after

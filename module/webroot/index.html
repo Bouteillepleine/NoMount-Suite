@@ -3083,7 +3083,12 @@
     btn.disabled = true;
     // Also drop the incident record: re-arming means acknowledging the trip, so the
     // saved card should not linger past the fix (it only made sense while disabled).
-    await exec("rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
+    // `rm -rf`, not `rm -f`: a `disabled` that is a DIRECTORY splits the product
+    // -- the shell entry points would serve normally while `mount::guard_tripped`
+    // (Path::exists) refuses every serving verb -- and `rm -f` cannot clear it, so
+    // this button silently failed and the user had no way back. The boot paths
+    // repair the type now; this is the mid-session door.
+    await exec("rm -rf /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
     toast("Guard re-armed — reboot to re-enable", "ok");
     btn.disabled = false; refreshGuard(); refreshIncident();
   }

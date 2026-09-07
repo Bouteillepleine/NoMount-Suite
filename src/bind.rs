@@ -268,11 +268,36 @@ fn remove_record_locked(target: &str, source: &str) {
 /// Storing the source lets a reload detect a changed backing (re-bind), not just
 /// an added/removed target.
 fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
+        // 0600 as a property of the WRITE, not of whoever created the file first.
+        // A WebUI-driven bind created this under ksud's umask; every later rewrite
+        // goes through `write_atomic` and repairs it, which is exactly why nobody
+        // noticed.
+        .mode(0o600)
         .open(BINDS_LIST)?;
-    writeln!(f, "{target}\t{source}\t{orig_label}")
+    // TRUNCATE BACK on a short write. This is the one non-atomic writer of an
+    // only-copy record, in a file whose own header argues at length that it must
+    // never be left half-written -- and `writeln!` short-writes on ENOSPC.
+    //
+    // What the leftover costs: the partial line has no newline, so the NEXT
+    // append concatenates onto it and `parse_line` reads a corrupted target. Then
+    // `teardown_all` calls `umount_target` on a path that does not exist, which
+    // returns Ok through its `!is_mounted` arm, drops the row as retired, and
+    // NEVER RESTORES THE SOURCE'S LABEL. The real bind survives with no record --
+    // "a live mount that no later pass can see, let alone unmount", which this
+    // file says the design exists to prevent -- and the module's backing file
+    // keeps a ROM partition label under /data/adb indefinitely.
+    //
+    // Three lines, inside the lock the caller already holds, no new machinery.
+    let orig = f.metadata()?.len();
+    if let Err(e) = writeln!(f, "{target}\t{source}\t{orig_label}") {
+        let _ = f.set_len(orig);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Parse one binds.list line into (target, source). Tolerates the legacy

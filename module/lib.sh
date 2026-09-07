@@ -138,6 +138,46 @@ nm_state_dir_repair() {
     return 0
 }
 
+# Consume an update stash left behind by an install that never finished.
+#
+# `uninstall.sh` stashes the user's settings to /data/adb/nomount.bak and then
+# removes the state directory; `customize.sh` is the only thing that puts them
+# back, and TWO aborts sit above its restore loop (the sha256 refusal and the
+# metamodule-conflict refusal). After either -- or after any kill of the
+# installer, a reboot mid-flash, ksud OOM-killed -- $NMDIR is gone and the stash
+# is the ONLY copy of the hide list, the durable whiteouts, binds.list with the
+# ROM SELinux labels needed to tear those binds down, and both absorb records.
+#
+# Both boot entry points then ran a bare `rm -rf /data/adb/nomount.bak`. The
+# motive was right and is kept below -- a stash named after this module, holding
+# `uidhide`, must not rot on disk -- but the remedy was deletion. It is now
+# RESTORE, then delete: the stash still does not survive the boot, and the
+# settings do.
+#
+# `[ -e ]` before each copy, never overwrite: a file already in $NMDIR is the
+# newer truth, exactly as customize.sh reasons. The list is the one both
+# uninstall.sh and customize.sh carry, and `statefile.rs`'s test pins all three
+# together.
+nm_consume_stash() {
+    _bak=/data/adb/nomount.bak
+    [ -d "$_bak" ] || { unset _bak; return 0; }
+    _rn=0
+    for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
+              absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
+              absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
+        [ -e "$_bak/$_f" ] || continue
+        [ -e "$NMDIR/$_f" ] && continue
+        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || continue
+        chmod 0600 "$NMDIR/$_f" 2>/dev/null
+        chcon u:object_r:adb_data_file:s0 "$NMDIR/$_f" 2>/dev/null
+        _rn=$((_rn + 1))
+    done
+    [ "$_rn" -gt 0 ] && nmlog "restored $_rn setting(s) from a stash left by an unfinished install"
+    rm -rf "$_bak" 2>/dev/null
+    unset _bak _rn _f
+    return 0
+}
+
 # Rotate the durable boot log. ONLY a boot entry point may call this, and only
 # once per boot -- service.sh and uidwatch.sh run many times and must not.
 #

@@ -210,10 +210,66 @@ pub(crate) fn validate(p: &str) -> Result<()> {
     // clears its partition-root test and then resolves to one), and on a
     // relative path its `components().nth(1)` reads the second component as the
     // partition, which accepts `system/bin/x`.
-    crate::mount::can_whiteout(path).map_err(|why| anyhow::anyhow!("refusing {p}: {why}"))
+    crate::mount::can_whiteout(path).map_err(|why| anyhow::anyhow!("refusing {p}: {why}"))?;
+    // ...and again on the RESOLVED path, because the engine resolves the vpath
+    // with `kern_path(LOOKUP_FOLLOW)` and `can_whiteout` is a pure string test.
+    //
+    // Refusing `..` closed one half of that hazard and left the other wide open:
+    // `/system/vendor`, `/system/product` and `/system/system_ext` are SYMLINKS to
+    // the corresponding partition roots on every modern Android — verified on an
+    // OP15 (CPH2747), 2026-09-07 — and each is three components, so
+    // `is_partition_root` says no and `system` is not a non-ROM root. So
+    // `nomount whiteout add /system/vendor` was accepted, written to
+    // `whiteouts.txt`, applied immediately, and re-applied at every boot by
+    // `whiteout::apply` — landing a whiteout on `/vendor`, the bare-partition-root
+    // shape this project records as masking every stock entry and aborting
+    // forkSystemServer. Durable, so a reboot does not recover it. Reachable from
+    // the CLI and from the WebUI's text field.
+    //
+    // The RESOLVED path is only the gate. What gets persisted is still the string
+    // the user typed — the argument for that stands, and a whiteout list is read
+    // back by humans.
+    //
+    // A path that does not exist cannot be resolved and is left to the string
+    // test alone: `add` deliberately accepts an absent target ("recorded anyway"),
+    // and a name that is not there yet cannot be a symlink to anything.
+    if let Ok(real) = fs::canonicalize(path) {
+        resolved_is_allowed(path, &real).map_err(|why| anyhow::anyhow!("refusing {p}: {why}"))?;
+    }
+    Ok(())
+}
+
+/// The gate applied to the RESOLVED path, kept pure so it can be tested without a
+/// ROM to point at.
+///
+/// `Ok` when the link goes nowhere interesting or resolves to something
+/// `can_whiteout` still permits; `Err` naming both paths when resolution turns an
+/// acceptable-looking string into one the plan refuses.
+fn resolved_is_allowed(literal: &Path, resolved: &Path) -> std::result::Result<(), String> {
+    if resolved == literal {
+        return Ok(());
+    }
+    crate::mount::can_whiteout(resolved)
+        .map_err(|why| format!("it resolves to {} — {why}", resolved.display()))
 }
 
 pub fn add(target: &str, force: bool) -> Result<()> {
+    // Serialise the read-modify-write against the OTHER writer of this file.
+    //
+    // `read()` -> mutate -> `write()` is not atomic just because `write()` is:
+    // `absorb`'s M-S8 migration calls `whiteout::remove` while holding this same
+    // lock, from a pass service.sh fires 45s after boot and uidwatch fires on
+    // every package change. Interleaved, either the user's new hide is lost with
+    // a green toast, or the migration's removal is undone and the target ends up
+    // in BOTH `whiteouts.txt` and `absorbed-tmpfs.list` — "uninstall the module
+    // and the ROM directory stays hidden forever", the exact failure M-S8 exists
+    // to end, curable only by a manual `whiteout remove` on a path the user never
+    // added.
+    //
+    // `pass_lock` is the right lock rather than a new one: it already serialises
+    // the only other writer, it is bounded, and its "proceed unserialised rather
+    // than stall" fallback is the correct trade for a user-initiated verb.
+    let _pass = crate::mount::pass_lock();
     let t = target.trim().to_string();
     validate(&t)?;
     let p = Path::new(&t);
@@ -268,6 +324,14 @@ pub fn add(target: &str, force: bool) -> Result<()> {
 }
 
 pub fn remove(target: &str) -> Result<()> {
+    // Same lock, same reason as `add`. NB `absorb` calls this while already
+    // holding the pass lock -- `pass_lock` is a plain flock on one path and this
+    // process would deadlock against itself if it blocked, which is precisely why
+    // it is a BOUNDED try-lock that proceeds unserialised on timeout rather than
+    // a blocking one. The absorb path therefore pays the 25s wait once and then
+    // carries on correctly; a future refactor that makes the lock blocking or
+    // re-entrant must revisit this line.
+    let _pass = crate::mount::pass_lock();
     let t = target.trim();
     let mut list = read()?;
     let before = list.len();
@@ -592,6 +656,51 @@ mod tests {
     /// vpath with kern_path(LOOKUP_FOLLOW), which does resolve it. That is the
     /// exact rule shape recorded as bootlooping zygote by masking a partition
     /// root, arrived at through the check meant to prevent it.
+    /// A SYMLINK to a partition root is the other half of the same hazard, and it
+    /// needs no `..` at all.
+    ///
+    /// `/system/vendor -> /vendor`, `/system/product -> /product` and
+    /// `/system/system_ext -> /system_ext` exist on every modern Android —
+    /// verified on an OP15 (CPH2747), 2026-09-07. Each is three components, so
+    /// `is_partition_root` says no; `system` is not a non-ROM root; and the engine
+    /// then resolves the vpath with `kern_path(LOOKUP_FOLLOW)` and lands the
+    /// whiteout on the bare partition root. Durable and re-applied at boot, so
+    /// rebooting does not recover the device. Reachable from the CLI and from the
+    /// WebUI's text field.
+    ///
+    /// Tested on the PURE half: the resolution itself is one `canonicalize` and
+    /// needs a real ROM, but the decision it feeds does not.
+    #[test]
+    fn a_symlink_that_resolves_to_a_partition_root_is_refused() {
+        // The three real ones.
+        for (lit, real) in [
+            ("/system/vendor", "/vendor"),
+            ("/system/product", "/product"),
+            ("/system/system_ext", "/system_ext"),
+        ] {
+            let e = resolved_is_allowed(Path::new(lit), Path::new(real))
+                .expect_err("a link onto a partition root must be refused");
+            assert!(e.contains(real), "the message must name where it lands: {e}");
+        }
+        // A link that lands somewhere still legal is fine -- most of /system's
+        // links do, and refusing them all would be the over-correction.
+        assert!(resolved_is_allowed(
+            Path::new("/system/etc/hosts"),
+            Path::new("/product/etc/hosts")
+        )
+        .is_ok());
+        // Not a link at all: canonicalize returns the same path and there is
+        // nothing to re-check.
+        assert!(
+            resolved_is_allowed(Path::new("/product/app/Foo"), Path::new("/product/app/Foo"))
+                .is_ok()
+        );
+        // ...and the trap this closes: the literal string passes the plan's own
+        // predicate, which is why the resolved check has to exist at all.
+        assert!(crate::mount::can_whiteout(Path::new("/system/vendor")).is_ok());
+        assert!(crate::mount::can_whiteout(Path::new("/vendor")).is_err());
+    }
+
     #[test]
     fn rejects_dotdot_escapes_to_a_partition_root() {
         for p in [

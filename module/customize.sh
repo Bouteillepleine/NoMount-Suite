@@ -290,7 +290,7 @@ rm -f "$NMDIR/bootcount"
 # it by hand to park the Suite, and silently undoing that on every upgrade would
 # be its own surprise. Say so instead -- loudly, because an install that reports
 # success and then injects nothing, with no explanation, is the worse outcome.
-if [ -f "$NMDIR/disabled" ]; then
+if [ -e "$NMDIR/disabled" ]; then
     ui_print "- ⚠️  The Suite is DISABLED on this device — it will inject nothing at boot."
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
 fi

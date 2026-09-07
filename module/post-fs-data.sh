@@ -36,7 +36,7 @@ nm_boot_log_rotate
 # managers metamount.sh has already run and both calls are then no-ops, while on
 # Magisk this is the only place either happens. See the notes in metamount.sh.
 rm -f "$NMDIR/.uidwatch.lock" 2>/dev/null
-rm -rf /data/adb/nomount.bak 2>/dev/null
+nm_consume_stash
 # The handover, now that there is somewhere to record it. metamount.sh is the
 # metamodule hook and does the whole pass on these managers -- but ONLY if the
 # manager supports metamodules. If it does not, nothing else runs and the stamp
@@ -83,6 +83,27 @@ chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 # (below), not before it -- same reasoning as metamount.sh: `disabled` has to
 # suppress all of it, or the counter cannot protect against whatever wedged the
 # boot.
+# The guard's own state must be a plain FILE, and a directory there disarms it
+# completely. `cat` on a directory prints nothing and exits 1, so COUNT is 0;
+# `echo >` on a directory fails, but `echo` is not a POSIX special builtin so the
+# shell carries on -- leaving COUNT at 1 on EVERY boot, GUARD_MAX unreachable,
+# and the one mechanism that recovers a wedged device dead. Measured on an OP15's
+# own mksh, 2026-09-07: boots 1 through 5, COUNT=1, trips=no, every time, with
+# the shell's complaint going to a stderr this path sends to /dev/null.
+#
+# `disabled` as a directory is worse than useless: the five shell entry points
+# test `-f` (false -> serve normally) while `mount::guard_tripped` tests
+# `Path::exists()` (true -> every WebUI serving verb refuses), and the WebUI's
+# re-arm is `rm -f`, which fails on a directory -- so the user cannot clear it.
+# All three verified on device.
+#
+# Any root script can `mkdir` these, and so can a fat-fingered shell. Two lines.
+for _f in bootcount disabled; do
+    if [ -e "$NMDIR/$_f" ] && [ ! -f "$NMDIR/$_f" ]; then
+        rm -rf "${NMDIR:?}/$_f" 2>/dev/null
+        nmlog "⚠ $NMDIR/$_f was not a regular file (the guard cannot use it) - removed"
+    fi
+done
 GUARD_MAX=3
 COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
 # Sanitize before the arithmetic (see metamount.sh): a bootcount corrupted to
@@ -92,8 +113,14 @@ COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
 case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
 COUNT=$((COUNT + 1))
 echo "$COUNT" > "$NMDIR/bootcount"
+# SYNC. This is the most crash-adjacent write in the project and the only one
+# where "the next boot repairs it" is false by construction: a boot that wedges
+# and is watchdog-reset inside the ext4 commit interval loses the counter, the
+# sanitizer above reads the empty file as 0, and GUARD_MAX is never reached.
+# Every other durable file goes through statefile::write_atomic, which syncs.
+sync 2>/dev/null
 
-if [ -f "$NMDIR/disabled" ]; then
+if [ -e "$NMDIR/disabled" ]; then
     # Say so. metamount.sh logs this on the KSU path and this arm was a bare `:`,
     # so a Magisk user whose guard had tripped got nothing at the one stage that
     # knows why nothing is being injected -- and boot.log is the only record this
@@ -103,6 +130,7 @@ if [ -f "$NMDIR/disabled" ]; then
 elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
     nmlog "bootloop guard tripped (count=$COUNT) -> self-disabling"
     : > "$NMDIR/disabled"
+    sync 2>/dev/null
     # Record WHY, like metamount.sh does. A trip on this path used to leave only
     # an empty `disabled` file, so a Magisk user got the self-recovery but none
     # of the evidence -- and the WebUI's incident card stayed blank.

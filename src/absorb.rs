@@ -275,29 +275,74 @@ pub(crate) struct MountRow {
     pub target: PathBuf,
 }
 
+/// Read and parse `/proc/self/mountinfo` — as BYTES.
+///
+/// It used to be `read_to_string`, which returns `Err` on any invalid UTF-8 in
+/// the file, and the kernel escapes only space, tab, newline and backslash: a
+/// raw high byte in any mounted path is passed through verbatim. So ONE Latin-1
+/// filename in ONE mount, anywhere on the device -- an OTG volume label, another
+/// module's tree, an app's own mount -- failed the read, and `mount.rs` treats an
+/// unreadable mount table as fatal ("refusing to serve"). The result was **no
+/// injections at all, on every boot**, from a cause nothing on the device could
+/// report.
+///
+/// It also made the careful work below it unreachable: `unescape` assembles bytes
+/// specifically so a non-UTF-8 path survives, and `umount_detach` uses
+/// `as_encoded_bytes()` "because a module is free to ship a filename that is not
+/// UTF-8". Neither could ever be exercised, because the read failed first -- and
+/// the two tests pinning that property hand `parse_mountinfo` a `&str`, so they
+/// bypass the read entirely.
+///
+/// Now a row that cannot be decoded is skipped ALONE, the same graceful
+/// degradation the rest of this file uses, and `target` is carried through as raw
+/// bytes so `umount2` and `still_mounted` compare the path the kernel wrote.
+pub(crate) fn read_mountinfo(path: &str) -> std::io::Result<Vec<MountRow>> {
+    Ok(parse_mountinfo_bytes(&std::fs::read(path)?))
+}
+
 /// Parse mountinfo. Format: `id parent maj:min root mountpoint opts... - fstype source super`.
-pub(crate) fn parse_mountinfo(body: &str) -> Vec<MountRow> {
+pub(crate) fn parse_mountinfo_bytes(body: &[u8]) -> Vec<MountRow> {
+    use std::os::unix::ffi::OsStringExt;
     let mut out = Vec::new();
-    for line in body.lines() {
-        let f: Vec<&str> = line.split(' ').collect();
+    for line in body.split(|b| *b == b'\n') {
+        let f: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
         if f.len() < 5 {
             continue;
         }
+        // `dev` is maj:min — ASCII by the kernel's own format, so a row that
+        // fails here is malformed rather than merely non-UTF-8.
+        let Ok(dev) = std::str::from_utf8(f[2]) else { continue };
+        // `root` is prefix-matched against the fs-root table, so it has to be
+        // text — but LOSSILY, never by dropping the row. Dropping it would take
+        // the TARGET with it, and the target is what `mounted_targets` and
+        // `still_mounted` answer from: a mount missing from that set reads as
+        // "nothing is mounted here", so `unmount_before_serving` serves the path
+        // and strands the mount in mountinfo until reboot. That is the exact
+        // damage this whole change exists to prevent, so the one field that must
+        // survive intact is the one that does.
+        //
+        // A lossy `root` costs that row its source resolution — `source_of`
+        // returns None and it is simply not classified as absorbable — which is
+        // the safe direction.
         out.push(MountRow {
-            dev: f[2].to_string(),
-            root: unescape(f[3]),
-            target: PathBuf::from(unescape(f[4])),
+            dev: dev.to_string(),
+            root: String::from_utf8_lossy(&unescape_bytes(f[3])).into_owned(),
+            target: PathBuf::from(std::ffi::OsString::from_vec(unescape_bytes(f[4]))),
         });
     }
     out
 }
 
+/// The `&str` door, kept for the tests that feed literals.
+pub(crate) fn parse_mountinfo(body: &str) -> Vec<MountRow> {
+    parse_mountinfo_bytes(body.as_bytes())
+}
+
 /// mountinfo octal-escapes space, tab, newline and backslash.
-fn unescape(s: &str) -> String {
-    if !s.contains('\\') {
-        return s.to_string();
+fn unescape_bytes(b: &[u8]) -> Vec<u8> {
+    if !b.contains(&b'\\') {
+        return b.to_vec();
     }
-    let b = s.as_bytes();
     // Collect BYTES, not chars. `out.push(b[i] as char)` is Latin-1: every byte
     // >= 0x80 became U+0080..U+00FF and was then re-encoded as two UTF-8 bytes,
     // so any non-ASCII path that also contained an escape came out corrupted --
@@ -305,7 +350,7 @@ fn unescape(s: &str) -> String {
     // needed both to bite (the no-backslash fast path above returns early), which
     // is why it survived: a module directory with an accent AND a space in its
     // name. Assembling bytes and decoding once keeps such a path exact.
-    let mut out: Vec<u8> = Vec::with_capacity(s.len());
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'\\' && i + 3 < b.len() {
@@ -321,6 +366,12 @@ fn unescape(s: &str) -> String {
         out.push(b[i]);
         i += 1;
     }
+    out
+}
+
+/// The text door. Only callers that must have a `String` decode.
+fn unescape(s: &str) -> String {
+    let out = unescape_bytes(s.as_bytes());
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
@@ -663,8 +714,7 @@ pub fn survey() -> Result<Vec<Surveyed>> {
 /// The same survey against any process's mountinfo, so another mount namespace
 /// can be inspected the same way our own is.
 pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
-    let body = std::fs::read_to_string(mountinfo).context("read mountinfo")?;
-    let rows = parse_mountinfo(&body);
+    let rows = read_mountinfo(mountinfo).context("read mountinfo")?;
     let roots = fs_roots(&rows);
     let (skips, skip_src) = skip_list();
     let hookers = hooking_modules(&rows, &roots, &skips);
@@ -735,8 +785,7 @@ pub struct Candidate {
 /// pass inject over every live mount and strand each one in mountinfo until
 /// reboot while reporting `0 failed`.
 pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
-    let body = std::fs::read_to_string(MOUNTINFO).ok()?;
-    Some(parse_mountinfo(&body).into_iter().map(|r| r.target).collect())
+    Some(read_mountinfo(MOUNTINFO).ok()?.into_iter().map(|r| r.target).collect())
 }
 
 /// Targets absorb is currently serving. Read by `reload` so they survive a
@@ -950,6 +999,39 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
         if live_targets.contains(target) {
             continue;
         }
+        // NEVER inject over a live mount. This was the one rule-adding path in the
+        // tree with no such guard, while `mount::unmount_before_serving` and both
+        // absorb loops state the hazard five times between them: injecting d_drops
+        // the cached dentry, a mount hangs off a specific (vfsmount, dentry) pair,
+        // so the mount is detached from path resolution and `umount2` then returns
+        // EINVAL FOREVER. The mount is stranded in mountinfo until reboot, absorb
+        // reports "cannot unmount redundant ..." on every pass from then on, and
+        // `check_zero_mount` fails permanently on something nothing can remove.
+        //
+        // Reachable through the ordinary shape this function exists for: a
+        // patched-APK module binds its APK from its own `service.sh`, and if the
+        // boot-time re-serve did not take (record unreadable that pass, or the
+        // source not built yet at post-fs-data) the bind is live by the time
+        // `run_absorb` calls this -- which it did BEFORE its unmount loop.
+        //
+        // SKIP, and skipping is complete — not a deferral. This record exists for
+        // a target whose mount is GONE (the module stopped binding, or was
+        // uninstalled). If something IS mounted there, the survey loop below is
+        // about to absorb that bind, which re-serves the same path from the same
+        // module by the ordinary route. So the guard costs nothing: the only case
+        // it declines is the one another loop handles better.
+        //
+        // `still_mounted` fails CLOSED on an unreadable mount table, which is the
+        // right direction here — declining to re-serve leaves the path on stock
+        // bytes for one pass; injecting over a live mount is forever.
+        if still_mounted(target) {
+            eprintln!(
+                "nomount: not re-serving {} — something is mounted on it; injecting over a live \
+                 mount strands it in mountinfo until reboot",
+                target.display()
+            );
+            continue;
+        }
         // Decline rather than serve an unreadable label. The result was
         // discarded, so a failed relabel still went on to add the rule and count
         // it -- and the documented consequence is the app force-closing, or the
@@ -1009,8 +1091,8 @@ pub fn set_absorbed_pairs(pairs: &[(PathBuf, PathBuf)]) {
 /// umount2 reports EINVAL both for "never a mountpoint" and for "a peer already
 /// took it away", and only the second is fine.
 pub(crate) fn still_mounted(p: &Path) -> bool {
-    std::fs::read_to_string(MOUNTINFO)
-        .map(|b| parse_mountinfo(&b).iter().any(|r| r.target == p))
+    read_mountinfo(MOUNTINFO)
+        .map(|rows| rows.iter().any(|r| r.target == p))
         // FAIL CLOSED. `unwrap_or(false)` said "nothing is mounted here" when the
         // question could not be asked at all -- and every caller reads a `false`
         // as permission to proceed: `unmount_before_serving` serves the target
@@ -1537,7 +1619,41 @@ fn dir_is_empty(p: &Path) -> Option<bool> {
 /// The ROM-tmpfs takeovers on record: target -> the boot in which its tmpfs was
 /// last SEEN mounted (empty string when the boot id was unreadable then).
 pub(crate) fn absorbed_tmpfs() -> Vec<(PathBuf, String)> {
-    fs::read_to_string(ABSORBED_TMPFS_LIST).map(|s| parse_tmpfs_record(&s)).unwrap_or_default()
+    read_absorbed_tmpfs().unwrap_or_default()
+}
+
+/// The fallible door, for the callers that must not treat a read error as "the
+/// record is empty".
+///
+/// This was `unwrap_or_default()` with no alternative, and it is the ONE
+/// only-copy record that still collapsed an I/O error into an empty list — the
+/// mistake `absorbed.list` is refused at all four of its write sites for, and
+/// which `run_reload` states in the line directly above its use:
+///
+///   > "cannot read the absorbed-rule record -- refusing to reload, because an
+///   >  empty record here would PRUNE every absorbed rule"
+///
+/// …and then extended that set from this function. An unreadable
+/// `absorbed-tmpfs.list` therefore made every ROM-tmpfs whiteout `prunable`: no
+/// module plan names them and they are not durable whiteouts, so one Reload
+/// deleted them all and the ROM directories a debloat module had emptied filled
+/// straight back in. Unlike the durable whiteouts, reload has no convergence
+/// loop for these and `reapply_tmpfs_whiteouts` runs only in `run_mount`, so
+/// nothing put them back until a reboot.
+///
+/// A MISSING file is `Ok(empty)` — that is the normal state on a device that has
+/// never absorbed a tmpfs — exactly as `read_absorbed_pairs` treats it.
+pub(crate) fn read_absorbed_tmpfs() -> std::io::Result<Vec<(PathBuf, String)>> {
+    match fs::read_to_string(ABSORBED_TMPFS_LIST) {
+        Ok(s) => Ok(parse_tmpfs_record(&s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Targets only, fallibly. `run_reload` uses this.
+pub(crate) fn read_absorbed_tmpfs_targets() -> std::io::Result<HashSet<PathBuf>> {
+    Ok(read_absorbed_tmpfs()?.into_iter().map(|(t, _)| t).collect())
 }
 
 /// Pure: one `<target>\t<boot id>` per line. A line without a tab is read as a
@@ -1654,14 +1770,23 @@ struct TmpfsPass {
 /// `run_mount` re-applies it in between so nothing regresses to stock mid-session.
 fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
     let mut st = TmpfsPass::default();
-    let Ok(body) = fs::read_to_string(MOUNTINFO) else { return st };
+    // Raw bytes, and a per-LINE decode. `rom_tmpfs_target` needs the whole line
+    // (the fstype lives after the ` - ` separator, which `MountRow` does not
+    // keep), so this one cannot go through `read_mountinfo` -- but it must not go
+    // back to `read_to_string` either: one undecodable path anywhere in the file
+    // would take the whole ROM-tmpfs pass with it. Skip the line, keep the file.
+    let Ok(raw) = fs::read(MOUNTINFO) else { return st };
     let (skips, _) = skip_list();
     let nm = Nm::new();
     let boot = boot_id().unwrap_or_default();
     let mut record = absorbed_tmpfs();
     let durable = crate::whiteout::read().unwrap_or_default();
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    for target in body.lines().filter_map(rom_tmpfs_target) {
+    for target in raw
+        .split(|b| *b == b'\n')
+        .filter_map(|l| std::str::from_utf8(l).ok())
+        .filter_map(rom_tmpfs_target)
+    {
         // The opt-out list applies here too. Converting a tmpfs to a whiteout
         // swaps "directory empty" for "directory absent"; measured on OP15 across
         // several boots those behave the same even for a system app that a
@@ -1865,8 +1990,8 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     let surveyed = survey()?;
     // Same mountinfo the survey classified from, so a redundant target resolves
     // to the same servable twin here as it did there.
-    let aliases = std::fs::read_to_string(MOUNTINFO)
-        .map(|b| mount_aliases(&parse_mountinfo(&b)))
+    let aliases = read_mountinfo(MOUNTINFO)
+        .map(|rows| mount_aliases(&rows))
         .unwrap_or_default();
     // Seeded from the tmpfs pass: a tmpfs absorb would not convert is still a
     // mount over the ROM, and the "posture clean" line below must not be reachable
@@ -1888,8 +2013,8 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     // under /data/adb to re-serve it from, which is why this only counts. But it
     // is a mount over the ROM in every app's mountinfo, and the "posture clean"
     // line below is a claim about mountinfo, not about how much absorb converted.
-    let imaged: Vec<String> = std::fs::read_to_string(MOUNTINFO)
-        .map(|b| rom_image_mounts(&parse_mountinfo(&b)))
+    let imaged: Vec<String> = read_mountinfo(MOUNTINFO)
+        .map(|rows| rom_image_mounts(&rows))
         .unwrap_or_default();
     for h in &imaged {
         leaking += 1;
@@ -2977,5 +3102,41 @@ mod tests {
         let rows = parse_mountinfo("1 1 0:1 /a\\011b /c\\012d rw - t s rw");
         assert_eq!(rows[0].root, "/a\tb");
         assert_eq!(rows[0].target, PathBuf::from("/c\nd"));
+    }
+
+    /// A non-UTF-8 path must cost ONE ROW, not the whole mount table.
+    ///
+    /// This is the test the previous one could not be: it goes through the byte
+    /// path production uses. `read_to_string` returned `Err` on any invalid UTF-8
+    /// anywhere in the file, and the kernel escapes only space, tab, newline and
+    /// backslash — so one Latin-1 filename in any mount on the device failed the
+    /// read, and `mount.rs` treats an unreadable mount table as fatal. The result
+    /// was no injections at all, every boot.
+    ///
+    /// The old tests fed `parse_mountinfo` a `&str`, which cannot even express
+    /// the input that broke it.
+    #[test]
+    fn one_undecodable_path_costs_one_row_not_the_table() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(b"1 1 0:1 /before /data/before rw - t s rw\n");
+        // 0xE9 alone is not valid UTF-8: a Latin-1 'e-acute' in a path, which the
+        // kernel passes through verbatim.
+        body.extend_from_slice(b"2 1 0:1 /caf\xe9 /data/caf\xe9 rw - t s rw\n");
+        body.extend_from_slice(b"3 1 0:1 /after /data/after rw - t s rw\n");
+
+        let rows = parse_mountinfo_bytes(&body);
+        assert_eq!(rows.len(), 3, "the undecodable row must not take its neighbours");
+
+        // ...and its TARGET is byte-exact, because that is what umount2 and
+        // `still_mounted` compare. `root` must be text (it is prefix-matched), so
+        // this row's is lossy — the target is the one that has to survive.
+        assert_eq!(rows[0].target, PathBuf::from("/data/before"));
+        assert_eq!(rows[2].target, PathBuf::from("/data/after"));
+        assert_eq!(
+            rows[1].target.as_os_str().as_bytes(),
+            b"/data/caf\xe9",
+            "the non-UTF-8 target must survive byte for byte"
+        );
     }
 }

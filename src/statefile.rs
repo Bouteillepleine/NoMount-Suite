@@ -164,8 +164,19 @@ mod tests {
     fn the_stash_and_restore_lists_name_the_same_files() {
         let saved = stash_list(include_str!("../module/uninstall.sh"));
         let restored = stash_list(include_str!("../module/customize.sh"));
+        // THREE readers now, not two. `lib.sh::nm_consume_stash` is the third:
+        // both boot entry points used to `rm -rf` the stash outright, which
+        // destroyed the only copy of the user's settings after an install that
+        // aborted between the wipe and the restore. It restores first now — and a
+        // restorer that names a different set is the same silent loss one door
+        // along, so it is pinned with the other two.
+        let swept = stash_list(include_str!("../module/lib.sh"));
         assert!(!saved.is_empty(), "could not find uninstall.sh's stash list");
         assert_eq!(saved, restored, "uninstall.sh stashes a different set than customize.sh restores");
+        assert_eq!(
+            saved, swept,
+            "lib.sh's boot-time stash consumer names a different set than uninstall.sh saves"
+        );
 
         // ...and the durable state that CANNOT be re-derived after the wipe has to
         // be on it. Each of these is the only record of something: the hide list
