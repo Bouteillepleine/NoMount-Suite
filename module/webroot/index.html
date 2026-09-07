@@ -2899,12 +2899,40 @@
       box.innerHTML = '<div class="empty">Unknown — the list could not be read.</div>';
       return;
     }
+    // WHITEOUTS THE SUITE MADE ITSELF, not just the ones you saved.
+    //
+    // `whiteout list` reports the DURABLE list (whiteouts.txt). absorb creates
+    // whiteouts too, when it takes over a module's "empty this ROM directory"
+    // tmpfs -- they live in absorbed-tmpfs.list, are re-derived every boot, and
+    // are deliberately not in the editable list because removing the module is
+    // what removes them.
+    //
+    // They were invisible here. Measured on an OP15 with two ReVanced-class
+    // modules installed: /product/app/Photos and /product/app/YouTube were both
+    // hidden by live whiteout rules while this card read "0" and "Nothing
+    // hidden." The one screen a reader opens to ask "what is hidden?" answered
+    // with a number that excluded everything the Suite had hidden on its own.
+    const live = await ruleDump();
+    const auto = live.ok
+      ? live.lines.filter((l) => l.includes("(whiteout)"))
+          .map((l) => (l.split(" (whiteout)")[0] || "").trim())
+          .filter((p) => p && !lines.some((x) => x.split("	")[0] === p))
+      : [];
+    const autoHtml = auto.map((p) =>
+      `<div class="row"><span class="name mono" title="${esc(p)}">${esc(p)}</span>` +
+      `<span class="tag vfs" title="Taken over from a module's tmpfs. Managed automatically: ` +
+      `it goes when the module that asked for it goes.">from a module</span></div>`).join("");
+
     if (!lines.length || /^no whiteouts/.test(lines[0])) {
-      $("wochip").textContent = "0";
-      box.innerHTML = '<div class="empty">Nothing hidden.</div>';
+      $("wochip").textContent = String(auto.length);
+      box.innerHTML = auto.length
+        ? '<div class="empty">Nothing saved by you. The Suite hid ' + auto.length +
+          ' ROM path' + (auto.length > 1 ? 's' : '') +
+          " in place of a module's tmpfs:</div>" + autoHtml
+        : '<div class="empty">Nothing hidden.</div>';
       return;
     }
-    $("wochip").textContent = String(lines.length);
+    $("wochip").textContent = String(lines.length + auto.length);
     box.innerHTML = lines.map(l => {
       const path = l.split("\t")[0];
       const st = (l.split("\t")[1] || "").trim();
@@ -2917,7 +2945,7 @@
       return `<div class="row"><span class="name mono" title="${esc(path)}">${esc(path)}</span>` +
              `<span class="tag ${cls}" title="${esc(st)}">${esc(st.split(" - ")[0])}</span>` +
              `<button class="bx" title="Stop hiding" data-act="wodel" data-nmp="${esc(path)}">✕</button></div>`;
-    }).join("");
+    }).join("") + autoHtml;
   }
   async function woAdd(btn) {
     const v = ($("woPath").value || "").trim();

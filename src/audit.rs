@@ -991,6 +991,18 @@ fn check_dir_ino_collision(targets: &[PathBuf]) -> Check {
     let mut ours: HashMap<(u64, u64), PathBuf> = HashMap::new();
     let mut roots: Vec<PathBuf> = Vec::new();
     for parent in parents_of(targets) {
+        // ROM PARTITIONS ONLY. The engine synthesizes directories on the ROM;
+        // a target under /data has real, system-owned parents that cannot be
+        // ours and cannot collide with anything of ours.
+        //
+        // Absorbing a ReVanced-class module puts /data/app/<pkg>/base.apk in the
+        // rule set, whose partition root is /data -- so this walked the whole of
+        // /data, hit the 20,000-directory cap, and reported the check UNMEASURED.
+        // Measured on an OP15 the moment two absorbed app APKs appeared: a check
+        // that had been answering in milliseconds stopped answering at all.
+        if !crate::absorb::ROM_ROOTS.iter().any(|r| parent.starts_with(r)) {
+            continue;
+        }
         let mut p = parent.as_path();
         while let Some(up) = p.parent() {
             if up.parent().is_none() {

@@ -11,6 +11,57 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.167 — engine v30 (unchanged)
+
+Both findings below came from installing two real ReVanced-class modules
+(`youtube-morphe-jhc`, `googlephotos-jhc` from `j-hc/revanced-magisk-module`) —
+the first real-world modules of that class to run against the Suite.
+
+### "Hidden paths: 0 — Nothing hidden", with two ROM directories hidden
+
+`whiteout list` reports the DURABLE list (`whiteouts.txt`). `absorb` creates
+whiteouts too, when it takes over a module's "empty this ROM directory" tmpfs —
+those live in `absorbed-tmpfs.list`, are re-derived every boot, and are
+deliberately absent from the editable list because uninstalling the module is
+what removes them.
+
+They were invisible on the one screen a reader opens to ask *what is hidden?*
+Measured on an OP15: `/product/app/Photos` and `/product/app/YouTube` were both
+hidden by live whiteout rules while the card read **0** and **"Nothing hidden."**
+
+The count now includes them and they are listed, tagged `from a module`, with no
+delete button — they are not the user's to remove.
+
+### The inode-collision check went UNMEASURED once a module was absorbed
+
+`check_dir_ino_collision` derived its walk root from each target's partition
+root. Absorbing a ReVanced-class module puts `/data/app/<pkg>/base.apk` into the
+rule set, whose partition root is `/data` — so it walked the whole of `/data`,
+hit the 20,000-directory cap, and reported **unmeasured**. A check that had been
+answering in milliseconds stopped answering the moment two absorbed app APKs
+appeared.
+
+Restricted to ROM partitions, which is the only place the engine synthesizes
+directories: back to PASS, in **1,774** directories instead of 20,000+.
+
+### What the modules exercised, for the record
+
+Three mechanisms, all of which behaved:
+
+- **ROM tmpfs.** Their installer writes a `post-fs-data.d` script that runs
+  `mount -t tmpfs none /product/app/<App>` to blank the stock app. `absorb`
+  dropped both tmpfs mounts and installed whiteouts instead, recording them
+  against the boot id. The directories read as ABSENT rather than empty-with-a-
+  tmpfs-row, and `tmpfs over the ROM` reports PASS.
+- **Module content: nothing to inject, correctly.** Both ship `base.apk` at the
+  module root, not under a partition directory, so the plan is empty and neither
+  appears in `modules.tsv`. There is genuinely nothing to serve.
+- **The runtime binds (issue #14).** They bind `/data/adb/rvhc/*.apk` over
+  `/data/app/…/base.apk`. `check` caught both as a FAIL attributed to "a bind
+  from outside /data/adb/modules", and absorb took them over: **2 mount(s)
+  absorbed as 2 rule(s)**. Zero `rvhc` rows left in the mount table, and the
+  served bytes still identical to the patched APKs — verified across a reboot.
+
 ## v1.3.166 — engine v30 (unchanged)
 
 ### `lseek(SEEK_DATA)` on a synthesized directory — fixed and boot-verified
