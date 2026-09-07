@@ -4323,6 +4323,8 @@ struct nm_ino_pop {
     u64 mine[NM_INO_MINE];
     int nmine;
     u64 hw;                    /* highest we placed, for the overflow path */
+    u64 dmax;                  /* highest DIRECTORY ino on this device, 0 = unknown */
+    bool dmax_valid;           /* the subtree walk completed; dmax may be trusted */
 };
 
 /* Is there already a live rule for this exact path? Callers hold
@@ -4510,6 +4512,10 @@ struct nm_range_slot {
 static struct nm_range_slot nm_range_cache[NM_RANGE_SLOTS];
 static int nm_range_cache_next;
 
+/* Defined below, beside the commentary explaining what it costs and when it
+ * refuses to answer. */
+static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max);
+
 static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_dir)
 {
     size_t len = strlen(dirpath);
@@ -4528,11 +4534,262 @@ static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_d
     sl->valid = false;
     if (nm_dir_ino_pop(dirpath, want_dir, &sl->pop) != 0)
         return NULL;
+    /* Directory populations only: this is what synthesized DIRECTORIES are
+     * placed against, and it is the one case that collides. The file path keeps
+     * nm_place_ino()'s interleaving untouched, and does not pay for the walk.
+     * Cached with the population, so the walk happens once per directory per
+     * boot rather than once per rule. */
+    sl->pop.dmax = 0;
+    sl->pop.dmax_valid = false;
+    if (want_dir) {
+        struct path rp;
+
+        if (kern_path(dirpath, LOOKUP_FOLLOW, &rp) == 0) {
+            struct kstat rk;
+            int r = nm_path_stat(&rp, &rk);
+
+            path_put(&rp);
+            if (r == 0) {
+                u64 m = 0;
+
+                if (nm_subtree_dir_ino_max(dirpath, rk.dev, &m) == 0) {
+                    sl->pop.dmax = m;
+                    sl->pop.dmax_valid = true;
+                }
+            }
+        }
+    }
     sl->hash = h;
     sl->len = (u16)len;
     sl->want_dir = want_dir;
     sl->valid = true;
     return &sl->pop;
+}
+
+/* ---- device-wide directory inode ceiling ---------------------------------
+ *
+ * WHY. nm_place_ino() looks for a free number between the target's SIBLINGS,
+ * and nm_ino_taken() consults only those plus its own handouts. It never sees
+ * the rest of the filesystem. Measured on an OP15: /product/priv-app is an
+ * overlay mount holding 188 directories numbered 2..186 -- 185 available values,
+ * so by pigeonhole at least three must collide -- and the three excess were
+ * exactly the three synthesized dirs, each landing on a number a NESTED stock
+ * directory two or three levels down already held:
+ *
+ *   /product/priv-app/Mms           == .../OplusScreenRecorder/oat/arm64  (ino 101)
+ *   /product/priv-app/Mms/lib       == .../GmsCore/m/independent/oat      (ino 77)
+ *   /product/priv-app/Mms/lib/arm64 == .../Wallpapers/oat/arm64           (ino 89)
+ *
+ * Two directories cannot share (st_dev, st_ino) on a real filesystem -- they
+ * cannot be hardlinked -- so grouping a partition's directories by that pair
+ * finds every directory this engine invented, with one stat per entry and no
+ * root. On the measured device that is perfect precision and perfect recall.
+ *
+ * DIRECTORIES ONLY. Injected FILES do not collide: 139 APKs under
+ * /product/overlay produced none, because the gap search has room there. The
+ * interleaving nm_place_ino() does for files is what keeps them from forming one
+ * consecutive run, and it is deliberately left alone.
+ *
+ * FAIL SAFE. If the walk cannot finish -- allocation failure, a directory with
+ * more subdirectories than we hold, a filesystem that answers DT_UNKNOWN, or the
+ * visit cap -- the caller keeps exactly the behaviour that shipped. This patch
+ * can leave the collision unfixed; it cannot make anything worse.
+ *
+ * Only directory inodes are collected, and only on the target's own st_dev: a
+ * directory can only collide with another directory, and /product alone mounts
+ * 24 filesystems on this hardware, each numbering from 2.
+ */
+#define NM_DMAX_NAMES 128      /* child directories held per level */
+#define NM_DMAX_DIRS  2048     /* directories visited before we give up */
+
+struct nm_dmax_scan {
+    struct dir_context ctx;
+    char (*names)[NAME_MAX + 1];
+    int n_names;
+    bool overflow;             /* more children than we can hold, or DT_UNKNOWN */
+};
+
+static NM_ACTOR_RET nm_dmax_actor(struct dir_context *ctx, const char *name,
+                                  int namelen, loff_t off, u64 ino, unsigned int dt)
+{
+    struct nm_dmax_scan *s = container_of(ctx, struct nm_dmax_scan, ctx);
+
+    if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
+        return NM_ACTOR_CONTINUE;
+    /* DT_UNKNOWN means the dirent stream cannot tell us what is a directory, so
+     * a subtree could be skipped and the ceiling come out too low. Refuse the
+     * whole answer rather than return one that is quietly incomplete. */
+    if (dt == DT_UNKNOWN) {
+        s->overflow = true;
+        return NM_ACTOR_CONTINUE;
+    }
+    if (dt != DT_DIR)
+        return NM_ACTOR_CONTINUE;
+    if (s->n_names >= NM_DMAX_NAMES) {
+        s->overflow = true;
+        return NM_ACTOR_CONTINUE;
+    }
+    memcpy(s->names[s->n_names], name, namelen);
+    s->names[s->n_names][namelen] = '\0';
+    s->n_names++;
+    return NM_ACTOR_CONTINUE;
+}
+
+/* Highest inode held by any directory at or under @root on device @dev.
+ *
+ * Breadth-first over an explicit queue: iterate_dir() runs under the
+ * directory's lock, so a child cannot be opened from inside the actor. Returns
+ * 0 and sets *out_max on a COMPLETE walk; anything else means "do not rely on
+ * this" and the caller keeps its old behaviour.
+ */
+static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max)
+{
+    char **queue;
+    struct nm_dmax_scan *sc;
+    u64 max = 0;
+    int qhead = 0, qtail = 0, visited = 0, ret = 0, i;
+
+    queue = kcalloc(NM_DMAX_DIRS, sizeof(*queue), GFP_KERNEL);
+    if (!queue)
+        return -ENOMEM;
+    sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+    if (!sc) {
+        kfree(queue);
+        return -ENOMEM;
+    }
+    /* One names buffer for the whole walk, not one per directory: 128 entries
+     * is 32 KB, and allocating that per directory would mean 188 of them on the
+     * measured device. */
+    sc->names = kzalloc(NM_DMAX_NAMES * (NAME_MAX + 1), GFP_KERNEL);
+    if (!sc->names) {
+        kfree(sc);
+        kfree(queue);
+        return -ENOMEM;
+    }
+    /* Start from the top of the DEVICE, not from @root.
+     *
+     * The ceiling has to cover every directory that could collide, and that is
+     * the whole filesystem -- not the subtree the caller happened to hand us. A
+     * synthesized dir under /product/priv-app/Foo would otherwise be placed
+     * above Foo's little subtree while the rest of the mount sits far higher,
+     * and the collision would survive the fix. Climb while st_dev holds, which
+     * lands on the mount root, then walk down from there.
+     *
+     * Bounded by the path itself: each step removes a component. */
+    queue[qtail] = kstrdup(root, GFP_KERNEL);
+    if (!queue[qtail]) {
+        ret = -ENOMEM;
+        goto out;
+    }
+    for (;;) {
+        char *up = kstrdup(queue[qtail], GFP_KERNEL);
+        char *slash;
+        struct path pp;
+        struct kstat pk;
+
+        if (!up)
+            break;
+        slash = strrchr(up, '/');
+        if (!slash || slash == up) {    /* "/x" -- no higher to go */
+            kfree(up);
+            break;
+        }
+        *slash = '\0';
+        if (kern_path(up, LOOKUP_FOLLOW, &pp) != 0) {
+            kfree(up);
+            break;
+        }
+        if (nm_path_stat(&pp, &pk) != 0 || pk.dev != dev) {
+            path_put(&pp);
+            kfree(up);
+            break;                      /* crossed the mount, or unreadable */
+        }
+        path_put(&pp);
+        kfree(queue[qtail]);
+        queue[qtail] = up;
+    }
+    qtail++;
+
+    while (qhead < qtail && ret == 0) {
+        char *dirpath = queue[qhead++];
+        const struct cred *old;
+        struct path dp;
+        struct file *dir;
+
+        if (++visited > NM_DMAX_DIRS) {
+            ret = -E2BIG;
+            break;
+        }
+        if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
+            continue;               /* vanished under us; not fatal */
+
+        sc->n_names = 0;
+        sc->overflow = false;
+        sc->ctx.pos = 0;
+        *((filldir_t *)&sc->ctx.actor) = nm_dmax_actor;
+        old = override_creds(nm_root_cred);
+        dir = dentry_open(&dp, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+        path_put(&dp);
+        if (!IS_ERR(dir)) {
+            iterate_dir(dir, &sc->ctx);
+            fput(dir);
+        }
+        revert_creds(old);
+        if (sc->overflow) {
+            ret = -E2BIG;
+            break;
+        }
+
+        /* Resolve outside iterate_dir. stat(), not the dirent -- d_ino lies on
+         * overlayfs, which is the filesystem this defect was measured on. */
+        for (i = 0; i < sc->n_names; i++) {
+            char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->names[i]);
+            struct path fp;
+            struct kstat fk;
+
+            if (!cp) {
+                ret = -ENOMEM;
+                break;
+            }
+            /* Never sample a directory we invented: its inode is the thing
+             * being placed, and feeding it back would ratchet the ceiling up on
+             * every boot. */
+            if (nm_path_is_injected(cp, strlen(cp))) {
+                kfree(cp);
+                continue;
+            }
+            if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
+                int r = nm_path_stat(&fp, &fk);
+
+                path_put(&fp);
+                if (r == 0 && S_ISDIR(fk.mode) && fk.dev == dev) {
+                    if (fk.ino > max)
+                        max = fk.ino;
+                    if (qtail < NM_DMAX_DIRS) {
+                        queue[qtail] = cp;
+                        qtail++;
+                        continue;   /* the queue owns the string now */
+                    }
+                    ret = -E2BIG;
+                }
+            }
+            kfree(cp);
+            if (ret)
+                break;
+        }
+    }
+
+out:
+    for (i = 0; i < qtail; i++)
+        kfree(queue[i]);
+    kfree(queue);
+    kfree(sc->names);
+    kfree(sc);
+    if (ret == 0 && !max)
+        ret = -ENOENT;          /* nothing sampled: no ceiling to stand on */
+    if (ret == 0)
+        *out_max = max;
+    return ret;
 }
 
 static bool nm_ino_taken(const struct nm_ino_pop *pop, u64 c)
@@ -4608,6 +4865,37 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
     }
 }
 
+
+/* Place a SYNTHESIZED DIRECTORY's inode.
+ *
+ * Above every directory inode on the device rather than between the target's
+ * siblings. On the measured device that is 187+ against a stock 2..186: free by
+ * construction, and adjacent to the top, so it carries the same digit count as
+ * its neighbours -- which is the property the sibling search was buying and the
+ * only one it actually delivered.
+ *
+ * `pop->hw` is folded in so consecutive synthesized dirs step past each other,
+ * and `nm_ino_taken` still runs so a number handed out earlier in this directory
+ * is never repeated.
+ *
+ * Without a trusted ceiling this is the old behaviour, unchanged. See
+ * nm_subtree_dir_ino_max() for what "trusted" costs and when it is refused.
+ */
+static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
+{
+    u64 c;
+
+    if (!pop->dmax_valid)
+        return nm_place_ino(pop, spread);
+
+    c = pop->dmax;
+    if (pop->hw > c)
+        c = pop->hw;
+    c++;
+    while (nm_ino_taken(pop, c))
+        c++;
+    return nm_ino_take(pop, c);
+}
 
 /* The nearest REAL directory at or above vpath, and its subdir population.
  *
@@ -5067,7 +5355,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 if (!anc_dpop)      /* ancestor was an existing virtual rule */
                     anc_dpop = nm_real_ancestor_pop(nm_get_vpath(irule));
                 if (anc_dpop && anc_dpop->n)
-                    irule->v_ino = nm_place_ino(anc_dpop, (u64)irule->v_hash);
+                    irule->v_ino = nm_place_dir_ino(anc_dpop, (u64)irule->v_hash);
                 else if (anc_ino)
                     irule->v_ino = (anc_ino & ~0xFFFFUL) | (irule->v_hash & 0xFFFF) | 1UL;
                 /* Split stat's ino from readdir's when the tree is overlay-backed,

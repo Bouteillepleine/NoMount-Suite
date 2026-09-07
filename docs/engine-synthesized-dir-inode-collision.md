@@ -1,8 +1,13 @@
 # Engine: synthesized directories collide with real ones
 
 **Status:** measured and reproduced on an OP15 (engine v30). Detection shipped in
-Suite v1.3.164 as the `synthesized dir inode collision` check. **The engine fix is
-not written** — see *Why this is not a small patch* below.
+Suite v1.3.164 as the `synthesized dir inode collision` check.
+
+**The fix is written and COMPILE-VERIFIED ONLY** — clean at `W=1` on all ten
+pinned kernels (4.9, 4.14, 4.19, 5.4, 5.10, 5.15, 6.1, 6.6, 6.12, 6.18), which is
+the same result as the unpatched baseline. **It has never been booted.**
+Validating it needs a builder run and a kernel flash. Until then treat it as
+unproven: it sets `i_ino` on live inodes.
 
 ---
 
@@ -83,7 +88,7 @@ range that means colliding. Dropping (3) is the only escape: the allocator has t
 know the used set, or at least the true maximum, for the whole device — not for
 one directory level.
 
-## The fix, and why it is not a small patch
+## The fix as written
 
 The shape is clear:
 
@@ -94,7 +99,7 @@ The shape is clear:
 - **fail safe** — if the walk cannot establish that maximum, fall back to today's
   behaviour unchanged, so the patch is never worse than the current code.
 
-What makes it non-trivial is establishing `device_subtree_max` in kernel space:
+`nm_subtree_dir_ino_max()` establishes the ceiling. What it has to get right:
 
 - it needs a **bounded recursive** directory walk (the collisions here are three
   levels down), not the single-level `nm_dir_ino_pop` scan;
@@ -110,11 +115,19 @@ What makes it non-trivial is establishing `device_subtree_max` in kernel space:
 - the value becomes a live inode's `i_ino`, so an error here is not a leak, it is
   a VFS-visible defect.
 
-That is roughly 150 lines of new kernel code touching inode identity. It is
-compile-checkable here — `~/nm-matrix-run.sh` copies `hookless/src/nomount.{c,h}`
-into ten pinned trees and builds `fs/nomount.o` at `W=1`; the current source is
-clean on all ten — but compiling is not booting, and validating it needs a
-builder run plus flashing a custom kernel.
+Two details worth knowing about the implementation:
+
+- **It climbs to the mount root before walking down.** Walking only the caller's
+  ancestor would place a dir under `/product/priv-app/Foo` above Foo's little
+  subtree while the rest of the mount sits far higher — and the collision would
+  survive the fix. It climbs while `st_dev` holds, which lands on the mount root.
+- **Directories are never sampled if we invented them.** Feeding a synthesized
+  inode back into the ceiling would ratchet it upward on every boot.
+
+Refusal cases, all of which fall back to the shipped behaviour: allocation
+failure, a directory with more than 128 subdirectories, a filesystem answering
+`DT_UNKNOWN` (the walk could then skip a subtree and return a ceiling that is too
+low), and a 2048-directory visit cap.
 
 ## How to verify a fix
 
