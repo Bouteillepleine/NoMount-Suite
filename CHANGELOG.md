@@ -11,6 +11,55 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.158 — engine v30 (unchanged)
+
+### A nested RRO was badged as a plain file redirect
+
+Android installs a runtime overlay two ways: flat
+(`/product/overlay/Foo.apk`) or one directory per package
+(`/product/overlay/Foo/Foo.apk`). Both are live on real devices.
+
+v1.3.151 replaced three shell/JS content walks with one classifier, and the new
+classifier required the APK to sit DIRECTLY in `overlay/` — so the nested layout
+came out as `vfs`, in the manager badge and in the WebUI's Modules pane, while
+the WebUI's own Rules pane (whose expression has always been `[^\s]*`, which
+crosses directories) counted the same rule as an overlay. Two panes disagreeing
+about one module is precisely the defect v1.3.151 set out to remove; I
+reintroduced it in the fix.
+
+It survived because this device ships only the flat form. All three definitions
+are the same rule now — an APK anywhere under an `overlay/` directory, which is
+what the shell walk it replaced meant by `-path "*/overlay/*.apk"` — and a test
+pins both layouts.
+
+### Found by the category harness, which is the point of it
+
+The NMT suite builds one module per mechanism rather than flashing popular
+modules, and `nmt03_rro` ships the nested layout. Full run on this device, over
+three reboots:
+
+| | |
+| --- | --- |
+| Batch A (static, apk, rro, bin/lib, multipart, SAR alias, webui) | 60 pass, 0 fail |
+| Batch A+B (adds prop, self-mount, dynamic, whiteout, my_*, conflict pair) | 90 pass, **2 fail** |
+| After this fix | **92 pass, 0 fail, 0 skip** |
+
+The two failures were this bug and one stale assertion in the harness itself: it
+pinned the verdict string `"1 plan warning(s)"`, which v1.3.150 deliberately
+changed to `"1 warning(s)"` because `t.warn` counts device tells as well as plan
+hazards. Here the warning genuinely is a plan one — the `nmt12` pair claiming the
+same target — so the assertion was right by accident and the wording it pinned
+was wrong in general.
+
+Two harness changes went with it, in that repo: a new `c3_05_badged_as_overlay`
+check reading `modules.tsv` (nothing tested the file this session introduced —
+the bug was found by reading it by hand), and a teardown that fails loudly. Its
+`ksud module uninstall` loop was a multi-line string inside `adb shell "su -c
+..."`, the newlines did not survive the nesting, and it marked **nothing** while
+printing its success lines — the third distinct way that one teardown has failed
+silently, each documented in a comment above the next one. It checks its own
+count now and exits non-zero.
+
 ## v1.3.157 — engine v30 (unchanged)
 
 ### The card now says when a module is installed but not served

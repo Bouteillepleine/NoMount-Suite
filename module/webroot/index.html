@@ -1327,7 +1327,13 @@
       total++;
       // An RRO overlay APK is served as an overlay; everything else is a file
       // redirect. Same split the Rules pane shows.
-      if (/\/overlay\/[^/]+\.apk$/.test(target)) e.overlay = true;
+      // `[^\s]*`, not `[^/]+`: an RRO is installed either flat
+      // (/product/overlay/Foo.apk) or as a directory per package
+      // (/product/overlay/Foo/Foo.apk). The narrow form matched only the first,
+      // so this pane called a nested RRO `vfs` while the Rules pane three
+      // hundred lines down — which has always used this expression — counted it
+      // as an overlay. Same rule in both places, and in mount.rs.
+      if (/\/overlay\/[^\s]*\.apk$/.test(target)) e.overlay = true;
       else e.vfs = true;
     });
     PLAN_BY_MODULE = { total, expectLive, modules };

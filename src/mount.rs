@@ -1572,11 +1572,19 @@ fn write_module_summary(plan: &[PlanEntry]) -> std::io::Result<()> {
 
 /// Is this target served as an RRO overlay rather than a file redirect?
 ///
-/// One definition, used by the summary above and by nothing else that has to
-/// guess: an APK directly inside an `overlay/` directory.
+/// An APK ANYWHERE under an `overlay/` directory, which is the same rule the
+/// shell walk this replaced used (`-path "*/overlay/*.apk"`) and the same one
+/// the WebUI's rule dump uses.
+///
+/// It said "directly inside `overlay/`" for one release, and that is wrong:
+/// Android installs an RRO either flat (`/product/overlay/Foo.apk`) or as a
+/// directory per package (`/product/overlay/Foo/Foo.apk`), and both are live on
+/// real devices. The flat form is what this device happened to ship, so the
+/// narrow rule looked correct until the NMT harness flashed the nested one and
+/// the manager badge called an RRO module `vfs`.
 fn is_rro_apk(target: &std::path::Path) -> bool {
     target.extension().is_some_and(|e| e == "apk")
-        && target.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "overlay")
+        && target.components().any(|c| c.as_os_str() == "overlay")
 }
 
 pub fn run_mount() -> Result<()> {
@@ -2366,5 +2374,31 @@ mod tests {
         assert!(m.contains_key(&(PathBuf::from("/a"), 0)));
         assert!(m.contains_key(&(PathBuf::from("/a"), 1000)));
         assert!(m.contains_key(&(PathBuf::from("/d"), 0)));
+    }
+
+    /// Both RRO layouts count as an overlay.
+    ///
+    /// Android installs a runtime overlay either flat
+    /// (`/product/overlay/Foo.apk`) or as a directory per package
+    /// (`/product/overlay/Foo/Foo.apk`). `is_rro_apk` required the APK to sit
+    /// DIRECTLY in `overlay/`, so the nested form was reported as a plain file
+    /// redirect — in the manager badge and in the WebUI's Modules pane, while the
+    /// Rules pane counted it as an overlay. The device this was written on ships
+    /// only the flat form, so nothing here noticed until the NMT harness flashed
+    /// `/product/overlay/NmtOverlay/NmtOverlay.apk`.
+    #[test]
+    fn both_rro_layouts_are_overlays() {
+        assert!(is_rro_apk(Path::new("/product/overlay/Foo.apk")), "flat");
+        assert!(is_rro_apk(Path::new("/product/overlay/Foo/Foo.apk")), "one directory per package");
+        assert!(
+            is_rro_apk(Path::new("/system/product/overlay/A/B/C.apk")),
+            "depth under overlay/ is not the question"
+        );
+        // Not overlays.
+        assert!(!is_rro_apk(Path::new("/product/app/Foo/Foo.apk")), "an ordinary app APK");
+        assert!(
+            !is_rro_apk(Path::new("/product/overlay/Foo/lib/libx.so")),
+            "a non-APK under overlay/ is still a file redirect"
+        );
     }
 }
