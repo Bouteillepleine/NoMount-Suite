@@ -1,4 +1,4 @@
-# Engine: synthesized directories collide with real ones
+# Engine: two ways a synthesized directory gives itself away
 
 **Status:** measured and reproduced on an OP15 (engine v30). Detection shipped in
 Suite v1.3.164 as the `synthesized dir inode collision` check.
@@ -151,3 +151,55 @@ After the fix that row must read `PASS`, with the evidence naming how many
 synthesized directories were checked against how many on the partition. The
 check walks up to 20,000 directories and reports `unmeasured` rather than a pass
 if it hits that cap.
+
+
+---
+
+# 2. `lseek(SEEK_DATA)` on a synthesized directory returns EINVAL
+
+**Status:** measured, fixed, compile-verified on all ten kernels. **Not yet
+boot-verified.**
+
+A real directory answers `SEEK_DATA` and `SEEK_HOLE`: erofs uses
+`generic_file_llseek`, which returns the offset itself for `SEEK_DATA` and EOF
+for `SEEK_HOLE`, and `-ENXIO` at or past the end. `nm_llseek` handled
+`SEEK_SET`/`CUR`/`END` for synthesized directories -- the `SEEK_END` arm exists
+because `stat().st_size` and `lseek(fd,0,SEEK_END)` used to disagree on the same
+fd, which is its own one-syscall-pair tell -- and sent everything else to
+`default: return -EINVAL`.
+
+So two `lseek` calls, no root, separated a synthesized directory from a stock
+one. Measured on an OP15 across `/product/priv-app`:
+
+| | answers | EINVAL |
+|---|---|---|
+| stock subdirectories | **67** | 0 |
+| synthesized | 0 | **1** |
+
+Perfect precision and perfect recall, on the same filesystem, with no reference
+image needed.
+
+The fix mirrors `generic_file_llseek_size()` and computes the size the way the
+`SEEK_END` arm does -- from what `nm_file_getattr` REPORTS, not the raw 4096
+placeholder, since answering from the placeholder would just move the divergence
+that arm was written to remove.
+
+## Oracles measured and found CLOSED
+
+Worth recording so they are not re-opened from a code reading:
+
+- **`getxattr("security.selinux")` returning the `/data` copy's label.** Injected
+  files and synthesized directories both report `u:object_r:system_file:s0`, the
+  same as their stock siblings.
+- **`d_ino` vs `st_ino` on a synthesized directory.** They agree.
+- **readdir ordering for pure additions.** All 87 erofs parents holding
+  injections come back byte-sorted, and no injected name is out of order — the
+  engine inserts at the correct sort position. (Note that "is the listing sorted"
+  is not a reference-free oracle anyway: stock multi-block erofs directories are
+  not globally sorted.)
+- **The post-reload `s_path` loss.** A shadowing rule re-added over a live one
+  still serves the hidden reader the STOCK bytes while root gets the module's.
+- **Multi-block erofs `st_size` after a whiteout.** Real, but already known,
+  already surfaced at plan time, and not fixable in the engine: erofs pads each
+  block by an amount that depends on where the names fall, so there is no closed
+  form to correct. `whiteout::measurable_hole` declines these and says so.

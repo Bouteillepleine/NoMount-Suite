@@ -1161,6 +1161,40 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
         }
         case SEEK_CUR: offset += file->f_pos; break;
         case SEEK_SET: break;
+        /* SEEK_DATA / SEEK_HOLE, for the same reason as the SEEK_END arm above.
+         *
+         * `default: -EINVAL` used to swallow both, and a real directory answers
+         * them: erofs uses generic_file_llseek, which returns the offset itself
+         * for SEEK_DATA and EOF for SEEK_HOLE, and -ENXIO past the end. So two
+         * lseek calls separated a synthesized directory from a stock one with no
+         * root and no ambiguity. Measured on an OP15 over /product/priv-app:
+         * 67 of 67 stock subdirectories answered, the one synthesized directory
+         * returned EINVAL for both -- perfect precision and perfect recall.
+         *
+         * Mirrors generic_file_llseek_size(): SEEK_DATA leaves the offset where
+         * it is (all of a directory is data), SEEK_HOLE reports the hole that
+         * starts at EOF, and both fail with ENXIO at or past the end. The size
+         * is the one nm_file_getattr REPORTS, exactly as SEEK_END computes it --
+         * answering these from the raw 4096 placeholder would just move the
+         * divergence the SEEK_END arm was written to remove. */
+        case SEEK_DATA:
+        case SEEK_HOLE: {
+            struct nm_inode_info *vi = file_inode(file)->i_private;
+            struct super_block *sb = file_inode(file)->i_sb;
+            loff_t sz = i_size_read(file_inode(file));
+
+            if (vi && vi->dir_node &&
+                (sb->s_magic == EROFS_SUPER_MAGIC_V1 || nm_vdir_erofs_size))
+                sz = nm_vdir_size(vi->dir_node, sb->s_blocksize);
+            if (offset < 0)
+                return -EINVAL;
+            if (offset >= sz)
+                return -ENXIO;
+            if (whence == SEEK_HOLE)
+                offset = sz;
+            file->f_pos = offset;
+            return offset;
+        }
         default:       return -EINVAL;
         }
         if (offset < 0) return -EINVAL;
