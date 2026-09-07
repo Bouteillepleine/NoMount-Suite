@@ -11,6 +11,43 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.159 — engine v30 (unchanged)
+
+`nomount mount --help` now says it is a BOOT verb, and points at `reload`.
+
+Running the mount pass mid-session clears the rule table and rebuilds it, so an
+app that already has an injected file mapped keeps the OLD inode and shows it as
+`(deleted)` in its own `/proc/self/maps`. That is one of the oracles `check`
+reports — and nothing said so anywhere a user would look. Measured while testing
+the Magisk entry point on this device: one hand-run pass turned a clean verdict
+into `1 check(s) FAILED — 26 injected file(s) show as deleted in a running app's
+own memory map`, cleared by a reboot. `reload` reaches the same state as a delta
+with nothing to see, which is why the WebUI's button calls it.
+
+### Verified: the Magisk entry point
+
+Every shared helper this session extracted — `nm_guard_bump`, `nm_early_absorb`,
+`nm_incident_missing_binary` — is used by BOTH boot entry points, and only the
+KernelSU one runs on this device: `post-fs-data.sh` detects `$KSU` and hands the
+boot to `metamount.sh`. So the path was refactored and never executed.
+
+Run from a plain root shell, `$KSU` is unset and the script takes the Magisk
+branch. Both halves check out:
+
+- **Guard tripped** — logs `[post-fs-data] disabled, skipping the mount pass`,
+  and the rule count is unchanged across the call, so the `if nm_guard_bump …;
+  then` restructuring skips the body it is supposed to skip.
+- **Guard armed** — the pass runs, re-serves all 257 rules, and writes
+  `[post-fs-data] nomount(suite): 4 modules | 257 rules …`, so v1.3.150's durable
+  success record works on this path too. `nm_early_absorb` logs its own line.
+
+The guard itself was then exercised against a sandbox state directory, which
+reaches two states a reboot cannot: a bootcount corrupted to `"3 3"` re-arms at 1
+instead of killing the shell mid-boot, and a `bootcount` that is a DIRECTORY is
+repaired and named in the log. Four consecutive bumps return 0, 0, 2, 1 — the
+exact contract both callers branch on — and the trip writes a complete incident
+record carrying the caller's own name for its path.
+
 ## v1.3.158 — engine v30 (unchanged)
 
 ### A nested RRO was badged as a plain file redirect

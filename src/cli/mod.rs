@@ -17,6 +17,12 @@ pub struct Cli {
 pub enum Commands {
     /// Metamodule mount pass: classify enabled modules and route them
     /// (Prism inject / RRO overlay). su is external (sucompat).
+    ///
+    /// BOOT VERB. It clears the rule table and rebuilds it, so an app that
+    /// already has an injected file mapped keeps the OLD inode and shows it as
+    /// `(deleted)` in its own /proc/self/maps -- which is one of the oracles
+    /// `check` reports. Use `reload` mid-session: same result, applied as a
+    /// delta, nothing to see.
     Mount,
     /// Direct VFS-engine operations via the Prism `nm` client
     Vfs {
