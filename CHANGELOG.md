@@ -11,6 +11,24 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.143 — engine v30 (unchanged)
+
+### Fixed
+
+- **"Delete the marker" told you the wrong thing about when it comes back.** The
+  `my_* injection trial` finding ended with a fixed sentence — *"stop the module
+  re-creating it, or it returns on the next boot"* — and whether that is true
+  depends entirely on WHICH script writes it. Measured on an OP15, 2026-09-07:
+  the only writer there is `OnePlus_Dialer_Universal/stage_overrides.sh`, whose
+  sole caller is that module's `action.sh`, i.e. the ▶ button — so deleting the
+  marker holds until the user taps it, and the one fact the reader needs in order
+  to act was wrong. (On an OP11 the same module writes it from `post-fs-data.sh`,
+  where the sentence was right; the two devices run different builds of it, which
+  is why this cannot be a fixed sentence.) The finding now names the FILE as well
+  as the module — `OnePlus_Dialer_Universal (stage_overrides.sh)` — and decides
+  the clause from `ENTRY_SCRIPTS`, the same list that decides whether an
+  incompatibility hit is conditional.
+
 ## v1.3.142 — engine v30 (unchanged)
 
 Closes the nine findings of the 2026-09-07 audit of v1.3.141, which was the first

@@ -906,7 +906,10 @@ fn sourced_scripts(body: &str) -> Vec<String> {
 ///
 /// Cheap by construction: only the module's own `*.sh` are read, and only their
 /// text is matched -- this names a candidate, it does not prove authorship.
-fn my_hookless_writers() -> Vec<String> {
+/// Returns `(module id, the script that mentions it)`. The FILE is half the
+/// answer: whether the marker comes back depends entirely on whether that script
+/// is one a manager runs at boot. See [`marker_returns_when`].
+fn my_hookless_writers() -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir("/data/adb/modules") else { return out };
     let mut dirs: Vec<_> = rd.flatten().collect();
@@ -918,18 +921,47 @@ fn my_hookless_writers() -> Vec<String> {
             continue;
         }
         let Ok(files) = std::fs::read_dir(&mdir) else { continue };
-        for f in files.flatten() {
-            let p = f.path();
+        let mut names: Vec<_> = files.flatten().map(|f| f.path()).collect();
+        names.sort();
+        for p in names {
             if p.extension().and_then(|e| e.to_str()) != Some("sh") {
                 continue;
             }
             if std::fs::read_to_string(&p).is_ok_and(|b| b.contains("my_hookless")) {
-                out.push(id.to_string());
+                let file = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                out.push((id.to_string(), file));
                 break;
             }
         }
     }
     out
+}
+
+/// When a deleted `my_hookless` marker would come back.
+///
+/// The report used to say, flatly, "or it returns on the next boot". That is
+/// true only when the script that writes it is one a MANAGER runs. Measured on
+/// an OP15, 2026-09-07: the only writer there is
+/// `OnePlus_Dialer_Universal/stage_overrides.sh`, whose sole caller is that
+/// module's `action.sh` — the ▶ button — so deleting the marker holds until the
+/// user taps it, and the advice as written was wrong about the one thing the
+/// reader needs in order to act. (On an OP11 the same module writes it from
+/// `post-fs-data.sh`, where the original wording was right; the two devices ran
+/// different builds of it, which is exactly why this cannot be a fixed sentence.)
+///
+/// Pure, and keyed on [`ENTRY_SCRIPTS`], the same list that decides whether an
+/// incompatibility hit is conditional.
+fn marker_returns_when(files: &[String]) -> &'static str {
+    if files.iter().any(|f| ENTRY_SCRIPTS.contains(&f.as_str())) {
+        "it is written from a boot script, so it returns on the next boot"
+    } else {
+        "that is not a boot script, so it returns the next time the module runs it \
+         (an action button, an update, its WebUI)"
+    }
 }
 
 /// Why a module that ships ROM content is contributing nothing, or `None` if
@@ -1709,15 +1741,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             } else {
                 format!(
                     "the my_hookless marker is set and the Suite never writes it — {} \
-                     mention(s) it in its own scripts, so it is very likely not your choice. \
+                     mention(s) it, so it is very likely not your choice. \
                      It switches every my_* target from a bind to a hookless injection, and a \
                      leaf my_* injection can trip zygote's FD allowlist at forkSystemServer: \
                      that is a BOOTLOOP, recovered only by the guard disabling the Suite after \
                      three failed boots. Check whether that module also ships my_* content — \
-                     the combination is the hazard. Remove {} to fall back to binds, and stop \
-                     the module re-creating it, or it returns on the next boot.",
-                    writers.join(", "),
-                    crate::mount::MY_HOOKLESS_MARKER
+                     the combination is the hazard. Remove {} to fall back to binds; {}.",
+                    writers
+                        .iter()
+                        .map(|(id, file)| format!("{id} ({file})"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    crate::mount::MY_HOOKLESS_MARKER,
+                    marker_returns_when(
+                        &writers.iter().map(|(_, f)| f.clone()).collect::<Vec<_>>()
+                    )
                 )
             },
         });
@@ -2789,6 +2827,38 @@ hosts_file=/system/etc/hosts.d/x
                 "{helper} is only reached through a `.`, and the report has to say so"
             );
         }
+    }
+
+    /// "Delete the marker" is only actionable if the report says when it comes
+    /// back, and that depends on WHICH script writes it.
+    ///
+    /// The text was a fixed sentence -- "or it returns on the next boot" --
+    /// which is true on an OP11, where `OnePlus_Dialer_Universal` writes the
+    /// marker from `post-fs-data.sh`, and false on an OP15 running a different
+    /// build of the same module, where the only writer is `stage_overrides.sh`
+    /// and its only caller is that module's `action.sh`. There, deleting the
+    /// marker holds until the user taps ▶, and the advice was wrong about the
+    /// one fact the reader needs in order to act on it.
+    #[test]
+    fn when_the_my_hookless_marker_comes_back_depends_on_the_writer() {
+        assert!(
+            marker_returns_when(&["post-fs-data.sh".into()]).contains("next boot"),
+            "a boot script really does re-create it every boot"
+        );
+        assert!(
+            marker_returns_when(&["service.sh".into(), "stage_overrides.sh".into()])
+                .contains("next boot"),
+            "ANY boot script among the writers means it comes back at boot"
+        );
+        let helper = marker_returns_when(&["stage_overrides.sh".into()]);
+        assert!(
+            !helper.contains("next boot"),
+            "an action helper must not be described as a boot script: {helper}"
+        );
+        assert!(
+            helper.contains("action button"),
+            "say what does bring it back instead: {helper}"
+        );
     }
 
     /// A module switched ON whose content reaches nothing.
