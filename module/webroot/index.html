@@ -1757,9 +1757,17 @@
               : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " — VISIBLE", t: "warn" }
               : { k: "Real mounts", v: "root " + rootNm + " · app-view n/a", t: "off" });
     } else {
+      // `fmnt` counts only mounts graded fail/reboot, so on a device whose only
+      // remaining mount is one absorb declines ON PURPOSE it is 0 -- and this row,
+      // labelled "Real mounts", then read "none — pure Prism" directly under a
+      // headline saying "1 mount by design", about a mount the prose two lines
+      // below says a scanner can read. True under a narrower definition than its
+      // own label, which is the shape of every false green fixed this release.
       rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " visible to apps", t: "warn" }
               : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
-              : { k: "Real mounts", v: "none — pure Prism", t: "vfs" });
+              : byDesign > 0
+                ? { k: "Real mounts", v: "none of ours · " + byDesign + " left by design", t: "vfs" }
+                : { k: "Real mounts", v: "none — pure Prism", t: "vfs" });
     }
     // No "Verified boot" row. An unlocked bootloader reports orange, every user
     // of a custom kernel has one, and nothing the Suite does can change it -- so

@@ -11,6 +11,31 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.163 — engine v30 (unchanged)
+
+### "Real mounts: none" sat directly under "1 mount by design"
+
+`fmnt` counts mount findings graded **fail** or **reboot**. `audit.rs`
+deliberately grades the zero-mount posture a **note** when the only mount left is
+one `absorb` declines on purpose — a Zygisk/Xposed hook bind, or a `my_*` bind of
+ours. So on this device `fmnt` is 0, and the posture card's row, labelled **Real
+mounts**, read *"none — pure Prism"*.
+
+Directly above it the same card's headline said **"Mountless · 1 mount by
+design"**, and two lines below, the card's own prose said that mount "is left on
+purpose … A scanner reading mountinfo can see it." One card, three statements,
+one of them false under its own label.
+
+It reads *"none of ours · 1 left by design"* now. A device with genuinely nothing
+mounted still reads *"none — pure Prism"* under a *"Fully mountless"* headline —
+checked both ways.
+
+This is the same shape as every false green fixed this week: a summary word that
+is true only under a narrower definition than its label implies. The narrower
+definition was even the right one for `fmnt`'s purpose — it feeds the "something
+is mounting over the ROM" alarm, which a by-design bind must not trip. It was the
+label that overclaimed.
+
 ## v1.3.162 — engine v30 (unchanged)
 
 ### The Rules tab counted 260 while every other surface said 257
