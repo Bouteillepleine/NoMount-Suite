@@ -11,6 +11,37 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.170 — engine v30 (unchanged)
+
+### Absorbed rows survived their module's uninstall forever
+
+`prune_absorbed_record` drops a recorded row when its OWNING MODULE is no longer
+on disk, and it finds that owner by reading the id out of
+`/data/adb/modules/<id>/...`. A row whose source sits anywhere else has no id to
+look up, so it fell through the keep-everything arm on every pass, for good.
+
+That is not a corner case. A ReVanced-class module keeps its payload in
+`/data/adb/rvhc/` and binds it over `/data/app/<pkg>/base.apk`, so absorbing one
+records a source the pruner can never attribute. Measured on an OP15 after
+uninstalling `youtube-morphe-jhc` and `googlephotos-jhc`: both modules gone,
+`/data/adb/rvhc/` gone, the live rules correctly dropped, both apps back on their
+real APKs — and the card still read **"Already absorbed · 2"**, both rows tagged
+`stale entry`, with nothing absorbed at all.
+
+A row is now also dropped when its SOURCE FILE is gone, which is the thing the
+record exists to re-serve from — its absence makes the row dead whoever owned it.
+Deliberately narrow: a row whose module IS still on disk is left alone even if
+the file is momentarily missing, because that is the update window rather than an
+uninstall.
+
+On device, the first boot after this:
+
+    [post-mount] dropped 2 recorded row(s) from uninstalled module(s):
+      /data/adb/rvhc/googlephotos-jhc.apk (source gone),
+      /data/adb/rvhc/youtube-morphe-jhc.apk (source gone)
+
+`absorbed.list` is empty again and the card is clean.
+
 ## v1.3.169 — engine v30 (unchanged)
 
 ### "Other modules' mounts: none", directly above "Already absorbed · 2"

@@ -863,6 +863,7 @@ fn owning_module(src: &Path) -> Option<String> {
 fn prune_absorbed_pairs(
     pairs: Vec<(PathBuf, PathBuf)>,
     module_live: impl Fn(&str) -> bool,
+    src_exists: impl Fn(&Path) -> bool,
 ) -> (Vec<(PathBuf, PathBuf)>, Vec<String>) {
     let mut gone: Vec<String> = Vec::new();
     let kept = pairs
@@ -872,6 +873,28 @@ fn prune_absorbed_pairs(
                 if !gone.contains(&id) {
                     gone.push(id);
                 }
+                false
+            }
+            // A SOURCE THAT NO LONGER EXISTS, whoever owned it.
+            //
+            // `owning_module` reads the id out of `/data/adb/modules/<id>/...`,
+            // so a row whose source sits anywhere else has no id to look up and
+            // took the `_ => true` arm forever. That is not a corner case: a
+            // ReVanced-class module keeps its payload in `/data/adb/rvhc/` and
+            // binds it over `/data/app/.../base.apk`, so absorbing one records a
+            // source the prune could never attribute. Measured on an OP15 after
+            // uninstalling `youtube-morphe-jhc` and `googlephotos-jhc`: both
+            // rows survived with their sources deleted and the rules already
+            // dropped -- the card listed "Already absorbed - 2" where nothing
+            // was absorbed at all.
+            //
+            // The source file is the thing the record exists to re-serve from,
+            // so its absence makes the row dead regardless of ownership. Kept
+            // narrow deliberately: a row whose module IS still on disk is left
+            // alone even if the file is momentarily missing, because that is the
+            // update window rather than an uninstall.
+            None if !src_exists(src) => {
+                gone.push(format!("{} (source gone)", src.display()));
                 false
             }
             _ => true,
@@ -897,7 +920,7 @@ fn prune_absorbed_record() {
     if all.is_empty() {
         return;
     }
-    let (kept, gone) = prune_absorbed_pairs(all, module_on_disk);
+    let (kept, gone) = prune_absorbed_pairs(all, module_on_disk, |p| p.exists());
     if gone.is_empty() {
         return;
     }
@@ -2448,7 +2471,7 @@ mod tests {
                 PathBuf::from("/data/adb/modules/still_here/other"),
             ),
         ];
-        let (kept, gone) = prune_absorbed_pairs(pairs, |id| id == "still_here");
+        let (kept, gone) = prune_absorbed_pairs(pairs, |id| id == "still_here", |_| true);
         assert_eq!(gone, vec!["nmt06_selfmount".to_string()]);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].0, PathBuf::from("/system/etc/other"));
@@ -2467,7 +2490,7 @@ mod tests {
             PathBuf::from("/system/etc/hosts"),
             PathBuf::from("/data/adb/modules/runtime_built/system/etc/hosts"),
         )];
-        let (kept, gone) = prune_absorbed_pairs(pairs, |_| true);
+        let (kept, gone) = prune_absorbed_pairs(pairs, |_| true, |_| true);
         assert!(gone.is_empty());
         assert_eq!(kept.len(), 1);
     }
@@ -2484,7 +2507,7 @@ mod tests {
             // not under any module tree: cannot be attributed, so not ours to judge
             (PathBuf::from("/system/b"), PathBuf::from("/data/local/tmp/b")),
         ];
-        let (kept, gone) = prune_absorbed_pairs(pairs, |id| id == "upd");
+        let (kept, gone) = prune_absorbed_pairs(pairs, |id| id == "upd", |_| true);
         assert!(gone.is_empty(), "staged or unattributable rows must survive");
         assert_eq!(kept.len(), 2);
     }
@@ -3186,5 +3209,40 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].1, new_src);
         assert_eq!(all[1], (other, other_src));
+    }
+
+    /// A row whose SOURCE is gone is dropped even when no module owns it.
+    ///
+    /// `owning_module` reads the id out of `/data/adb/modules/<id>/...`, so a
+    /// ReVanced-class row -- payload in `/data/adb/rvhc/`, bound over
+    /// `/data/app/.../base.apk` -- has no id and took the keep-everything arm
+    /// forever. Measured on an OP15 after uninstalling both such modules: the
+    /// sources were deleted, the rules were already gone, and the record still
+    /// claimed two absorptions.
+    #[test]
+    fn a_row_whose_source_vanished_is_dropped_even_with_no_owning_module() {
+        let rvhc = (
+            PathBuf::from("/data/app/~~x==/com.example-y==/base.apk"),
+            PathBuf::from("/data/adb/rvhc/example-jhc.apk"),
+        );
+        let owned = (
+            PathBuf::from("/product/app/A/A.apk"),
+            PathBuf::from("/data/adb/modules/still_here/product/app/A/A.apk"),
+        );
+
+        // Source gone, no owning module -> dropped.
+        let (kept, gone) = prune_absorbed_pairs(
+            vec![rvhc.clone(), owned.clone()],
+            |id| id == "still_here",
+            |p| !p.starts_with("/data/adb/rvhc"),
+        );
+        assert_eq!(kept, vec![owned.clone()], "the unattributable dead row must go");
+        assert_eq!(gone.len(), 1);
+        assert!(gone[0].contains("rvhc"), "{gone:?}");
+
+        // Source still there -> kept, however unattributable.
+        let (kept, gone) = prune_absorbed_pairs(vec![rvhc.clone()], |_| true, |_| true);
+        assert_eq!(kept, vec![rvhc], "a live source is not ours to drop");
+        assert!(gone.is_empty());
     }
 }
