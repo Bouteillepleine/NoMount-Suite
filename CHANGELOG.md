@@ -11,6 +11,87 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.151 — engine v30 (unchanged)
+
+Deletions. No behaviour was meant to change; where it did, it is named below.
+
+The round-7 audit's counterweight was a simplification reviewer's thesis about
+this codebase, aimed at the same morning's work:
+
+> *"the dominant failure mode this codebase has is duplicating a rule and then
+> adding a test to pin the copies instead of removing them"*
+
+Correct. This release removes copies instead of pinning them.
+
+### One content walk, not four
+
+`src/mount.rs` decides what a module contributes: which of its top-level
+directories are partitions (`NON_PARTITION_ROOTS`), which files are servable,
+which targets are RRO overlays. **Three surfaces re-implemented that in shell and
+JavaScript** — `metamount.sh`'s manager badges, and the WebUI's "nothing to
+inject" probe and Modules pane — each with its own transcription of the partition
+list. On 2026-09-07 all four disagreed: two copies were missing `data_mirror` and
+`d` (the debugfs symlink the list exists for), and every copy still excluded
+`my_*`, long after the Suite began serving it — so a module shipping one
+`my_product` file was labelled *"script only … nothing for the Suite to inject"*
+next to a live rule serving it.
+
+The previous release's fix was three tests holding the copies in step. The copies
+are gone now:
+
+- The pass publishes what each module contributed to
+  `/data/adb/nomount/modules.tsv` (`write_module_summary`), from the plan it has
+  just built — so this costs no extra walk. `metamount.sh` reads that instead of
+  running **two bounded `find`s per enabled module, per boot, at post-fs-data
+  under the OPlus watchdog**.
+- The WebUI parses `nomount plan` once (`planByModule`) for both the Modules pane
+  and the "nothing to inject" probe. The pane can no longer disagree with the
+  Rules pane about a module: both count the same entries.
+- The three drift tests went with them.
+
+The live rule list could NOT have replaced the walk: a whiteout rule names no
+module, so a debloat module — which is nothing but whiteouts — would go unbadged,
+which is the bug that walk was last fixed for.
+
+**Visible change:** the Modules pane had two labels for one outcome — `script
+only` ("ships no partition directory at all") and `0 files` ("has a partition
+directory but no files in it"). Telling them apart was the entire reason for the
+walk, and the reader's next step is the same either way. They are now one label,
+`nothing to inject`.
+
+### One probe harness, not three
+
+Two checks in `audit.rs` and one in `doctor.rs` each forked, dropped to an app
+uid, and brought back a fixed-width answer — with their own pipe, their own
+`setgroups`/`setgid`/`setuid` ordering, their own payload width, and their own
+paragraph explaining why the group list has to go first.
+
+That duplication shipped a bug three releases ago: v1.3.148 widened one probe's
+payload from 8 bytes to 12 and the edit landed on the wrong copy, leaving a parent
+demanding 12 from a child writing 8 and a parent reading 8 from a child writing
+12. Both then reported a counter that could not move — one of them as a clean
+PASS — and it took a flash to hardware to find. `probe_as_uid` derives the width
+from `size_of` on both ends of one pipe, so the two cannot disagree again.
+
+### Also removed
+
+- **`check_dirent_cookie`** — it tested readdir cookies for `0x6e6d` in the top
+  16 bits of `d_off`. That was the OLD engine's scheme (v12, and maxsteeel's dev
+  fork); the shipped v30 packs `real_eof + 1 + id`, a small integer. The Warn arm
+  could not fire. Measured before deleting: *"0 of 566 dirents carry the magic"*
+  on an OP15 running engine v30. `Entry.d_off` went with it — nothing read it any
+  more.
+- **A second definition of the erofs dirent formula**, in `audit.rs`. Every size
+  claim the Suite makes rests on `12*(n+2) + names + 3`, and it had two
+  definitions and one test. `dirshape` owns it now, with the test that pins it
+  against measured directories.
+- **A second `statfs` decode and a second `0xE0F5E1E2`.** One `dirshape::fs_magic`.
+- **Two of the three renderers of `ghost::Summary`.** Three call sites rendered
+  the same two states — the tables were cleared, or the kernel refused paths — in
+  three different wordings, and both mean one thing to the reader: the existence
+  oracles are open right now. The wording lives on `Summary::warning()`; the
+  callers choose only the stream.
+
 ## v1.3.150 — engine v30 (unchanged)
 
 The round-7 audit's first-run tier, plus the claims cluster it turned up.

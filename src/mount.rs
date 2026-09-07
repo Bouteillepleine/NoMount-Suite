@@ -1218,6 +1218,13 @@ pub fn run_reload() -> Result<()> {
         );
     }
 
+    // Same publication as `run_mount`: a reload changes what each module
+    // contributes, and a badge describing the previous module set is worse than
+    // none.
+    if let Err(e) = write_module_summary(&plan) {
+        eprintln!("nomount: could not write {MODULE_SUMMARY}: {e} — per-module badges will be stale");
+    }
+
     // Desired, split by handling: hookless leaf rules vs my_* binds.
     let mut desired_hookless: HashMap<&Path, &PlanEntry> = HashMap::new();
     let mut desired_bind_src: HashMap<&Path, &Path> = HashMap::new();
@@ -1512,6 +1519,62 @@ pub fn run_reload() -> Result<()> {
 /// touch root/su: su is provided independently by the kernel's sucompat,
 /// mountlessly. Keeping su out of the Suite means a Suite bug can never break
 /// root, and there is no su mount for a scanner to flag.
+/// Where the pass publishes what each module contributed.
+///
+/// One line per module that produced at least one entry:
+/// `id<TAB>entries<TAB>overlay<TAB>vfs`, the last two `0`/`1`.
+pub(crate) const MODULE_SUMMARY: &str = "/data/adb/nomount/modules.tsv";
+
+/// Publish the per-module breakdown of a plan.
+///
+/// metamount.sh badges every module in the root manager with what it
+/// contributes, and it used to work that out for itself: walk each module's
+/// top-level directories, test each against a VERBATIM COPY of
+/// `NON_PARTITION_ROOTS`, then two bounded `find`s per module to decide overlay
+/// vs vfs. Two `find`s per module per boot, at post-fs-data, under the OPlus
+/// watchdog -- and a third copy of a list that had already drifted twice.
+///
+/// The pass has just decided all of it. Writing it down costs nothing and leaves
+/// exactly one content walk in the product.
+///
+/// Failure is not fatal and not silent: a missing file costs a badge, and the
+/// caller logs it. The pass has already served the modules by this point.
+fn write_module_summary(plan: &[PlanEntry]) -> std::io::Result<()> {
+    use std::collections::BTreeMap;
+    // (entries, overlay, vfs) per module, ordered so the file does not churn.
+    let mut per: BTreeMap<&str, (usize, bool, bool)> = BTreeMap::new();
+    for e in plan {
+        let row = per.entry(e.module.as_str()).or_insert((0, false, false));
+        row.0 += 1;
+        if is_rro_apk(&e.target) {
+            row.1 = true;
+        } else {
+            row.2 = true;
+        }
+    }
+    let mut body = String::new();
+    for (id, (n, ov, vfs)) in per {
+        // A module id with a tab or a newline in it would forge a row. Module ids
+        // are directory names under /data/adb/modules and nothing stops one
+        // containing either, which is the same forgery `path_is_representable`
+        // refuses for rule paths.
+        if id.contains('\t') || id.contains('\n') || id.contains('\r') {
+            continue;
+        }
+        body.push_str(&format!("{id}\t{n}\t{}\t{}\n", u8::from(ov), u8::from(vfs)));
+    }
+    crate::statefile::write_atomic(std::path::Path::new(MODULE_SUMMARY), &body)
+}
+
+/// Is this target served as an RRO overlay rather than a file redirect?
+///
+/// One definition, used by the summary above and by nothing else that has to
+/// guess: an APK directly inside an `overlay/` directory.
+fn is_rro_apk(target: &std::path::Path) -> bool {
+    target.extension().is_some_and(|e| e == "apk")
+        && target.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "overlay")
+}
+
 pub fn run_mount() -> Result<()> {
     let _pass = pass_lock(); // serialise against a concurrent reload/absorb (M-S9)
     let nm = Nm::new();
@@ -1535,6 +1598,12 @@ pub fn run_mount() -> Result<()> {
             c.winner,
             c.losers.join(", ")
         );
+    }
+
+    // Publish what each module contributed, so the manager badges do not have to
+    // work it out again with their own copy of the partition list.
+    if let Err(e) = write_module_summary(&plan) {
+        eprintln!("nomount: could not write {MODULE_SUMMARY}: {e} — per-module badges will be stale");
     }
 
     // Measure the ROM's directory shape and tell the engine, BEFORE any rule
@@ -1928,126 +1997,23 @@ mod tests {
         );
     }
 
-    /// The two shell/JS surfaces that re-implement this file's content walk.
+    /// The shell entry points, read by the drift tests below.
     ///
-    /// `metamount.sh` badges each module in the root manager; `index.html` has
-    /// TWO copies -- the "nothing to inject" probe and the Modules pane -- and on
-    /// 2026-09-07 all four disagreed with each other about which top-level
-    /// directories are partitions. Every test below reads these, so a copy that
-    /// drifts fails the build instead of being found on a phone.
+    /// There used to be three more tests here, pinning the content walks in
+    /// `metamount.sh` and `index.html` against `NON_PARTITION_ROOTS`: one for the
+    /// partition list itself, one forbidding a `my_*` exclusion, one requiring
+    /// `-type c` beside every `-type f`. All three existed because this file's
+    /// content walk had been re-implemented three times in shell and JS, and all
+    /// three copies had drifted from it and from each other.
+    ///
+    /// Pinning copies was the wrong fix. The copies are gone: the pass publishes
+    /// what each module contributed (`write_module_summary`), metamount.sh reads
+    /// that, and the WebUI parses `nomount plan`. There is one content walk now,
+    /// in this file, and it is the one the tests above already cover. index.html
+    /// is no longer read here at all.
     const METAMOUNT: &str = include_str!("../module/metamount.sh");
     const SERVICE: &str = include_str!("../module/service.sh");
     const POST_FS_DATA: &str = include_str!("../module/post-fs-data.sh");
-    const WEBROOT: &str = include_str!("../module/webroot/index.html");
-
-    /// Pull every `case … in data|…) continue` pattern list out of a shell or JS
-    /// source, whatever quoting, line-continuation or string-concatenation it is
-    /// wrapped in.
-    ///
-    /// Anchored on the list's own first two entries, not on `case `: the files
-    /// contain other `case` statements, and a looser anchor spanned from one of
-    /// those to the next `) continue` and returned a list nobody wrote. It cannot
-    /// anchor on ` in data` either -- metamount.sh puts the `in` at the end of one
-    /// line and the patterns on the next.
-    fn partition_root_lists(src: &str) -> Vec<Vec<String>> {
-        let anchor = format!("{}|{}", NON_PARTITION_ROOTS[0], NON_PARTITION_ROOTS[1]);
-        let mut out = Vec::new();
-        for (start, _) in src.match_indices(anchor.as_str()) {
-            let Some(end) = src[start..].find(") continue") else { continue };
-            // Everything that is not a pattern character is quoting, whitespace,
-            // a backslash continuation or a JS `+`: drop it and keep the `|`s.
-            let pats: String = src[start..start + end]
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '|')
-                .collect();
-            out.push(pats.split('|').filter(|s| !s.is_empty()).map(str::to_string).collect());
-        }
-        out
-    }
-
-    /// Every copy of `NON_PARTITION_ROOTS` must BE `NON_PARTITION_ROOTS`.
-    ///
-    /// They had drifted three ways at once. `metamount.sh` and the Modules pane
-    /// were both missing `data_mirror` and `d` -- and `d` is the debugfs symlink
-    /// this list exists for, added after a module shipping a top-level `d/` tree
-    /// was injected into debugfs on an OP15. The "nothing to inject" probe in the
-    /// same HTML file had the complete list, so one page could call a module
-    /// "script only" in one pane while counting it as injectable in another.
-    #[test]
-    fn every_shell_copy_of_the_partition_root_list_matches_this_one() {
-        assert_eq!(
-            (NON_PARTITION_ROOTS[0], NON_PARTITION_ROOTS[1]),
-            ("data", "data_mirror"),
-            "the extractor anchors on the first two entries; reorder them and fix it too"
-        );
-        let want: Vec<String> = NON_PARTITION_ROOTS.iter().map(|s| (*s).to_string()).collect();
-        let mut found = 0;
-        for (name, src) in [("metamount.sh", METAMOUNT), ("webroot/index.html", WEBROOT)] {
-            let lists = partition_root_lists(src);
-            assert!(!lists.is_empty(), "{name}: no partition-root case list found");
-            for (i, got) in lists.iter().enumerate() {
-                assert_eq!(
-                    got, &want,
-                    "{name}: copy #{i} of NON_PARTITION_ROOTS has drifted from src/mount.rs"
-                );
-                found += 1;
-            }
-        }
-        assert_eq!(found, 3, "expected three copies: metamount.sh + two in index.html");
-    }
-
-    /// No copy may exclude `my_*`.
-    ///
-    /// They all did, from before my_* was served at all. The Suite serves it now
-    /// -- by bind, or by injection under the `my_hookless` marker -- so the
-    /// exclusion made a module shipping ONLY my_* content look like a module
-    /// shipping nothing. Measured on an OP15, 2026-09-07: `op15_3d_lockscreen_wp`
-    /// ships one file under `my_product`, had one live rule serving it, got no
-    /// badge in the manager at all, and the WebUI called it "script only — Ships
-    /// no partition directory at all".
-    #[test]
-    fn no_copy_of_the_content_walk_skips_my_partitions() {
-        for (name, src) in [("metamount.sh", METAMOUNT), ("webroot/index.html", WEBROOT)] {
-            assert!(
-                !src.contains("my_*) continue"),
-                "{name}: still excludes my_* from the content walk, which the injector serves"
-            );
-        }
-    }
-
-    /// A module's content walk has to see a whiteout.
-    ///
-    /// `is_whiteout_marker` accepts a 0:0 CHAR DEVICE, the plan serves it, and a
-    /// debloat module -- ~14% of the ecosystem -- ships nothing else. Both shell
-    /// copies tested `-type f`, so such a module read as empty: measured on an
-    /// OP15, 2026-09-07, SAN (systemapp_nuker) had two whiteouts live and got no
-    /// manager badge and a "0 files … contributes nothing" row in the WebUI.
-    ///
-    /// Written as "every `-type f` is part of a `-type f -o -type c` group" so a
-    /// new walk cannot be added with the old test.
-    #[test]
-    fn every_content_walk_counts_char_devices() {
-        for (name, src) in [("metamount.sh", METAMOUNT), ("webroot/index.html", WEBROOT)] {
-            // CODE only. Both files explain the pairing in a comment, and a
-            // comment quoting `-type f` is not a walk that misses a whiteout.
-            let code: String = src
-                .lines()
-                .filter(|l| {
-                    let t = l.trim_start();
-                    !t.starts_with('#') && !t.starts_with("//")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let plain = code.matches("-type f").count();
-            let paired = code.matches("-type f -o -type c").count();
-            assert!(plain > 0, "{name}: no content walk found");
-            assert_eq!(
-                plain, paired,
-                "{name}: a `-type f` test is not paired with `-type c`, so it cannot see a \
-                 whiteout marker and a debloat module reads as empty"
-            );
-        }
-    }
 
     /// The manager card must count rules the way every other surface does.
     ///

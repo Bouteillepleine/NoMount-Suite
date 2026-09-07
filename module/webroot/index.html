@@ -1290,6 +1290,44 @@
     return /^\d+$/.test(v) ? v : "";
   }
 
+
+  // The plan, grouped by the module that owns each entry.
+  //
+  // ONE parse of `nomount plan`, which is the only thing on the device that
+  // decides what a module contributes — it resolves the enabled module set with
+  // the same code the mount pass runs, so nothing here has to know what a
+  // partition is called. Two panes used to answer that question for themselves
+  // in shell, each with its own copy of the partition list, and they had already
+  // drifted apart from each other and from src/mount.rs.
+  //
+  // Returns `{ total, modules }`, or null when the plan could not be read:
+  // "unknown" and "contributes nothing" must not render the same.
+  let PLAN_BY_MODULE = null;
+  async function planByModule(force) {
+    if (PLAN_BY_MODULE && !force) return PLAN_BY_MODULE;
+    const r = await exec(shq(await bin()) + " plan 2>/dev/null");
+    if (r.errno !== 0) return null;
+    const modules = {};
+    let total = 0;
+    (r.stdout || "").split("\n").forEach((l) => {
+      // `{kind:8} {target} <- {source} [{module}]{note}` — see mount::run_plan.
+      // Paths may contain spaces, so anchor on " <- " and on the LAST bracket
+      // pair before an optional "  << …" note.
+      const m = /^(inject|whiteout|bind)\s+(.*) <- (.*) \[([^\]]*)\]/.exec(l);
+      if (!m) return;
+      const target = m[2], id = m[4];
+      const e = modules[id] || (modules[id] = { files: 0, overlay: false, vfs: false });
+      e.files++;
+      total++;
+      // An RRO overlay APK is served as an overlay; everything else is a file
+      // redirect. Same split the Rules pane shows.
+      if (/\/overlay\/[^/]+\.apk$/.test(target)) e.overlay = true;
+      else e.vfs = true;
+    });
+    PLAN_BY_MODULE = { total, modules };
+    return PLAN_BY_MODULE;
+  }
+
   // The Suite binary shells to the `nm` netlink client beside it.
   async function nm(args) {
     const b = await bin();
@@ -1484,34 +1522,19 @@
     // Only asked when the count is zero, so the normal path costs nothing.
     let ships = -1;
     try {
-      // DISCOVERED, not enumerated. A hardcoded partition list is the same
-      // defect this file's Modules pane already avoids: it answers "no module
-      // ships files" for a device whose OEM partition nobody thought to name,
-      // and OnePlus alone ships my_bigball, my_carrier, my_company,
-      // my_engineering, my_heytap, my_manifest, my_preload, my_product,
-      // my_region, my_stock -- with more on each new ROM. src/mount.rs decides
-      // this dynamically (is "/<name>" a real directory that is not one of the
-      // non-injectable roots?), so ask the device the same question.
+      // ASK THE ONE THING THAT DECIDES IT. `nomount plan` resolves the enabled
+      // module set with the same code the mount pass runs, and the Modules pane
+      // already parses it — so this is the same answer, not a second one.
       //
-      // The exclusion list is NON_PARTITION_ROOTS from src/mount.rs, verbatim,
-      // `d` included -- that is the debugfs symlink, and it resolves to a
-      // directory, so a module shipping a top-level `d/` would otherwise count.
-      // `-L` skips a layout-convergence symlink (system/product -> ../product)
-      // for the same reason the Modules pane does.
-      // `skip_mount` is checked too: mount.rs treats it as disabled and this
-      // did not, so a skipped module counted as content that should be served.
-      const q = await exec(
-        'n=0; for m in /data/adb/modules/*/; do ' +
-        '[ -f "$m/disable" ] && continue; [ -f "$m/remove" ] && continue; ' +
-        '[ -f "$m/skip_mount" ] && continue; ' +
-        'for pd in "$m"*/; do [ -d "$pd" ] || continue; ' +
-        '[ -L "${pd%/}" ] && continue; p=${pd%/}; p=${p##*/}; ' +
-        'case "$p" in data|data_mirror|mnt|dev|proc|sys|cache|metadata|config' +
-        '|storage|sdcard|apex|tmp|debug_ramdisk|linkerconfig|postinstall' +
-        '|second_stage_resources|bin|sbin|d) continue;; esac; ' +
-        '[ -d "/$p" ] || continue; n=$((n+1)); break; done; done; echo $n'
-      );
-      if (q.errno === 0) ships = parseInt((q.stdout || '').trim(), 10);
+      // This used to be fifteen lines of shell walking /data/adb/modules and
+      // testing each top-level directory against a VERBATIM COPY of
+      // NON_PARTITION_ROOTS from src/mount.rs -- a fourth copy of a list that
+      // had already drifted once, in the one file that cannot be unit-tested.
+      // A missing OEM partition name there answered "no module ships files" on a
+      // device where several do; OnePlus alone ships ten my_* partitions and
+      // adds more each ROM.
+      const p = await planByModule(true);
+      if (p) ships = p.total;
     } catch (e) { /* leave unknown */ }
     if (ships === 0) {
       // Correct and final. Not a warning: nothing is wrong and nothing to do.
@@ -2547,55 +2570,10 @@
       // reported its own visibility as unreadable, forever, and the one row a reader
       // checks first was the one row that never answered.
       'mnt=$(awk -v m="$id" \'$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); ' +
-      '[ "$id" = meta-nomount ] && { echo "$id|suite|||$mnt"; continue; }; ' +
-      '[ "$id" = kernelnosu ] && { echo "$id|su|||$mnt"; continue; }; ' +
+      '[ "$id" = meta-nomount ] && { echo "$id|suite|$mnt"; continue; }; ' +
+      '[ "$id" = kernelnosu ] && { echo "$id|su|$mnt"; continue; }; ' +
       'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && st=off; ' +
-      // Mirror the injector (src/mount.rs): content lives under ANY top-level dir that maps to
-      // a real partition, not just system/. auto_mount modules ship product/ etc. directly.
-      // Plain `find` (no -L) is deliberate: a module's `system/product -> ../product`
-      // layout-convergence symlink must not be followed, or its files count twice.
-      // `[ -L ]` mirrors the injector's non-following file_type(): a top-level symlink
-      // (e.g. OnePlus_Dialer_Universal's `product -> ./system/product`) is NOT a partition
-      // root to walk — counting it would double-count the files it points at.
-      // NON_PARTITION_ROOTS from src/mount.rs, VERBATIM -- the same list the
-      // "nothing to inject" probe above uses, which is the point: this copy was
-      // missing `data_mirror` and `d`, so the two panes of this page could
-      // classify one module differently. A test in `mount::tests` pins both
-      // against the Rust list now.
-      //
-      // `my_*` is NOT excluded. It was, from before my_* was served at all, and
-      // the Suite serves it now -- so a module shipping ONLY my_* content got
-      // `roots=""` and was labelled "script only — Ships no partition directory
-      // at all … nothing for the Suite to inject", which is a flat contradiction
-      // of the rule the engine was serving for it. Measured on an OP15,
-      // 2026-09-07: `op15_3d_lockscreen_wp`, one my_product file, one live rule.
-      //
-      // `set --` rather than a space-joined `$roots`: these are third-party
-      // module DIRECTORY NAMES going into an unquoted expansion, so a name with a
-      // space became two find arguments and one beginning with `-` became a find
-      // primary. metamount.sh was fixed for exactly this and this copy was not.
-      'set --; for pd in "$d"*/; do [ -d "$pd" ] || continue; [ -L "${pd%/}" ] && continue; n=$(basename "$pd"); ' +
-      'case "$n" in data|data_mirror|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp' +
-      '|debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin|d) continue;; ' +
-      'esac; [ -d "/$n" ] || continue; set -- "$@" "$pd"; done; ' +
-      '[ "$#" -eq 0 ] && [ "$st" = on ] && st=nopart; ' +
-      'mech=""; cnt=0; ' +
-      // `-type c` as well as `-type f`: a Magisk 0:0 char device is a WHITEOUT,
-      // the plan serves it, and a debloat module ships nothing else. Without it
-      // SAN (systemapp_nuker) -- two whiteouts, both live -- rendered as
-      // "0 files — Has a partition directory … but no files inside it, so it
-      // contributes nothing". Measured on an OP15, 2026-09-07.
-      //
-      // Symlinks stay out: a `system/product -> ../product` convergence link is
-      // one level inside a walked root, and `serve_mode` refuses its target as a
-      // bare partition root, so counting it would count something never served.
-      'if [ "$st" = on ]; then ov=0; vf=0; ' +
-      'cnt=$(find "$@" \\( -type f -o -type c \\) 2>/dev/null | wc -l); ' +
-      '[ -n "$(find "$@" -path "*/overlay/*.apk" -print -quit 2>/dev/null)" ] && ov=1; ' +
-      '[ -n "$(find "$@" \\( -type f -o -type c \\) ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
-      'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
-      'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
-      'echo "$id|$st|$mech|$cnt|$mnt"; done'
+      'echo "$id|$st|$mnt"; done'
     ));
     // errno was ignored, so a call that never ran rendered as the reassuring
     // empty state -- telling the user there is nothing there when we simply do
@@ -2607,31 +2585,49 @@
     }
     const out = r.stdout.trim();
     if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
+    // WHAT EACH MODULE CONTRIBUTES COMES FROM THE PLAN, not from a second walk.
+    //
+    // This pane used to answer that itself, in shell: walk each module's
+    // top-level directories, drop the ones that are not partitions against a
+    // VERBATIM COPY of NON_PARTITION_ROOTS from src/mount.rs, then `find` the
+    // survivors and count files and overlay APKs. That copy was this page's
+    // second, it had already drifted from the first (missing `data_mirror` and
+    // `d`), and its `my_*` exclusion outlived the release that started serving
+    // my_* -- so a module with one my_product file was labelled "script only …
+    // nothing for the Suite to inject" beside a live rule serving it.
+    //
+    // `nomount plan` decides all of that in the code that does the injecting and
+    // prints the owning module on every line, so ask that instead. This pane can
+    // no longer disagree with the Rules pane about a module: both count the same
+    // entries.
+    const byModule = await planByModule();
     const rows = out.split("\n").filter(Boolean);
     $("modcount").textContent = rows.length;
     let served = 0;
     box.innerHTML = rows.map((l) => {
       const p = l.split("|");
       const id = p[0];
-      const cnt = parseInt(p[3] || "0", 10);
+      const plan = byModule ? (byModule.modules[id] || { files: 0, overlay: false, vfs: false }) : null;
+      const cnt = plan ? plan.files : 0;
       // Defaulting a MISSING field to 0 made "could not read /proc/self/mountinfo"
       // indistinguishable from "owns no mount", and the green `mountless` badge
       // then went on every row — the single most reassuring thing this list says,
       // handed out on no evidence. -1 is "unknown" and gets a neutral badge.
-      const mntRaw = (p[4] || "").trim();
+      const mntRaw = (p[2] || "").trim();
       const mnt = /^\d+$/.test(mntRaw) ? parseInt(mntRaw, 10) : -1;
       let label, cls, showCnt = false, tip = "";
       if (p[1] === "suite") { label = "suite"; cls = "suite"; tip = "The NoMount Suite metamodule itself."; }
       else if (p[1] === "su") { label = "su backend"; cls = "su"; served++; tip = "Provides su; not injected by the Suite."; }
-      else {
-        const st = p[1], mech = p[2];
-        if (st === "nopart") { label = "script only"; cls = "off"; tip = "Ships no partition directory at all (scripts, zygisk, binaries) — nothing for the Suite to inject."; }
-        else if (st === "off") { label = "skipped"; cls = "off"; tip = "Has a disable / remove / skip_mount marker, so the Suite leaves it alone."; }
-        else if (mech === "overlay") { label = "overlay"; cls = "ov"; served++; showCnt = true; }
-        else if (mech === "vfs+overlay") { label = "vfs + overlay"; cls = "ov"; served++; showCnt = true; }
-        else if (mech === "vfs") { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
-        else { label = "0 files"; cls = "off"; tip = "Has a partition directory (product/, system/, …) but no files inside it, so it contributes nothing."; }
-      }
+      else if (p[1] === "off") { label = "skipped"; cls = "off"; tip = "Has a disable / remove / skip_mount marker, so the Suite leaves it alone."; }
+      else if (!plan) { label = "?"; cls = "off"; tip = "The plan could not be read, so what this module contributes is unknown."; }
+      else if (plan.overlay && plan.vfs) { label = "vfs + overlay"; cls = "ov"; served++; showCnt = true; }
+      else if (plan.overlay) { label = "overlay"; cls = "ov"; served++; showCnt = true; }
+      else if (plan.vfs) { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
+      // "script only" and "0 files" were two labels for one outcome — this module
+      // contributes nothing to inject — and telling them apart was the whole
+      // reason for the partition walk. The reader's next step is the same either
+      // way, and there is no next step.
+      else { label = "nothing to inject"; cls = "off"; tip = "This module ships no files the Suite can serve — scripts, zygisk, binaries, or an empty partition directory."; }
       const files = (showCnt && cnt > 0) ? `<span class="files">${cnt} file${cnt > 1 ? "s" : ""}</span>` : `<span class="files"></span>`;
       // Visibility: a module is only "hidden" if nothing it owns appears in the mount
       // table. NoMount-served modules are mountless by construction; a module that
@@ -2809,6 +2805,7 @@
     // cached promise, so without this the "refresh" repainted the pre-change
     // counters -- a no-op that looked like a refresh.
     RULES = null;
+    PLAN_BY_MODULE = null;
     done(); refreshWhiteouts(); refreshStatus();
   }
   // One place the command is built, so the quoting cannot be right in one caller
@@ -2833,6 +2830,7 @@
     // cached promise, so without this the "refresh" repainted the pre-change
     // counters -- a no-op that looked like a refresh.
     RULES = null;
+    PLAN_BY_MODULE = null;
     done(); refreshWhiteouts(); refreshStatus();
   }
   // Walks the ROM for files only a root setup leaves behind and lists what it
@@ -3016,6 +3014,7 @@
     // absorb changes the rule set more than anything else on this page; the
     // cached dump must not survive it.
     RULES = null;
+    PLAN_BY_MODULE = null;
     refreshStatus();
     refreshAbsorb();
     done();
@@ -3160,6 +3159,7 @@
     if (r.errno === 0) toast((r.stdout || "").trim().replace(/^ok\b\s*/, "Rules cleared ") || "Rules cleared", "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
     RULES = null;
+    PLAN_BY_MODULE = null;
     // The whole page, not three cards. Clearing rules leaves the Rules tab's
     // count, breakdown, per-module bar, file list and absorb card all showing the
     // pre-clear state -- which reads as "the clear did not work" right after the
@@ -3608,6 +3608,7 @@
     // five times, not to survive across refreshes -- a refresh is the user asking
     // again, usually right after changing something.
     RULES = null;
+    PLAN_BY_MODULE = null;
     // `nm version` returns the ENGINE's capability counter -- a bare integer
     // (26), not a release. The footer printed it as "Suite 26", which is the one
     // number on the page a reader is most likely to quote back, and it named the

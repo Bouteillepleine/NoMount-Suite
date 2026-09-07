@@ -111,6 +111,36 @@ impl Summary {
     pub fn effective(&self) -> bool {
         self.paths > 0 && self.uids > 0
     }
+
+    /// The warning this sync earns, if any.
+    ///
+    /// Two states are worth interrupting a user over, and both mean the same
+    /// thing to them: the existence oracles are open RIGHT NOW. All three
+    /// callers below rendered those two states themselves, in three different
+    /// wordings, and the only thing they actually disagree about is which
+    /// stream the line goes to and whether the happy path says anything.
+    fn warning(&self) -> Option<String> {
+        if self.dump_failed {
+            return Some(
+                "⚠ ghost cloak: could not read the engine's live state — both tables CLEARED, \
+                 so the existence oracles are open until the next successful sync"
+                    .into(),
+            );
+        }
+        if self.rejected > 0 {
+            let first = if self.rejected_examples.is_empty() {
+                String::new()
+            } else {
+                format!("; first: {}", self.rejected_examples.join(" "))
+            };
+            return Some(format!(
+                "⚠ ghost cloak: {} of {} path(s) REFUSED by the kernel — the existence oracles \
+                 stay open for those{first}",
+                self.rejected, self.ghostable
+            ));
+        }
+        None
+    }
 }
 
 /// `nm k g` payloads ride in one netlink attribute. The client caps the whole
@@ -451,18 +481,8 @@ pub fn run_sync(verbose: bool) -> Result<()> {
             Ok(())
         }
         Some(s) => {
-            if s.dump_failed {
-                println!(
-                    "nomount ghost: ⚠ could not read the engine's live state -- both tables CLEARED, so the existence oracles are open until the next successful sync"
-                );
-            } else if s.rejected > 0 {
-                println!(
-                    "nomount ghost: ⚠ {} of {} path(s) REFUSED by the kernel -- the existence oracles stay open for those{}{}",
-                    s.rejected,
-                    s.ghostable,
-                    if s.rejected_examples.is_empty() { "" } else { "; first: " },
-                    s.rejected_examples.join(" ")
-                );
+            if let Some(w) = s.warning() {
+                println!("nomount ghost: {w}");
             } else if !s.effective() {
                 println!(
                     "nomount ghost: inert -- {} path(s), {} uid(s) (BOTH tables must be non-empty for any guard to fire)",
@@ -494,15 +514,10 @@ pub fn run_sync(verbose: bool) -> Result<()> {
 /// that have to be loud anyway, because both of them mean the existence oracles
 /// are open right now.
 pub fn sync_quietly(nm: &Nm) {
-    match sync(nm) {
-        Ok(Some(s)) if s.dump_failed => eprintln!(
-            "nomount: ⚠ ghost cloak: could not read the engine's live state -- both tables cleared, so the existence oracles are open until the next sync"
-        ),
-        Ok(Some(s)) if s.rejected > 0 => eprintln!(
-            "nomount: ⚠ ghost cloak: {} of {} path(s) refused by the kernel -- the existence oracles stay open for those",
-            s.rejected, s.ghostable
-        ),
-        _ => {}
+    if let Ok(Some(s)) = sync(nm) {
+        if let Some(w) = s.warning() {
+            eprintln!("nomount: {w}");
+        }
     }
 }
 
@@ -510,18 +525,11 @@ pub fn sync_quietly(nm: &Nm) {
 /// that is live but not yet cloaked is the state this whole module exists to
 /// improve on, and it is strictly better than a boot that aborted.
 pub fn sync_after_pass(nm: &Nm) {
-    match sync(nm) {
-        Ok(Some(s)) if s.dump_failed => println!(
-            "nomount: ⚠ ghost cloak: could not read the engine's live state -- tables cleared, oracles open"
-        ),
-        Ok(Some(s)) if s.rejected > 0 => println!(
-            "nomount: ⚠ ghost cloak: {} of {} path(s) refused -- existence oracles stay open for those",
-            s.rejected, s.ghostable
-        ),
-        Ok(Some(s)) if s.paths > 0 => {
-            println!("nomount: ghost cloak re-synced ({} paths, {} uids)", s.paths, s.uids)
-        }
-        _ => {}
+    let Ok(Some(s)) = sync(nm) else { return };
+    if let Some(w) = s.warning() {
+        println!("nomount: {w}");
+    } else if s.paths > 0 {
+        println!("nomount: ghost cloak re-synced ({} paths, {} uids)", s.paths, s.uids);
     }
 }
 

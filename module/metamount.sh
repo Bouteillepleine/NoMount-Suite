@@ -368,15 +368,9 @@ if command -v ksud >/dev/null 2>&1; then
     # grep -c on an empty stream prints 0 and exits 1, so guard the empty case.
     _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
     _vf=""; _ov=""
-    # The per-module tagging loop below runs a `find` over EVERY enabled module's
-    # tree, and this whole block sits OUTSIDE the bootloop guard. That combination
-    # is the one failure a boot cannot recover from on its own: a device that has
-    # already written `disabled` to save itself still walked every module tree
-    # here, at post-fs-data, under the OPlus boot watchdog. Nothing is being served
-    # in that state, so every badge the loop computes would read "0 served"
-    # anyway -- skip it entirely and go straight to the Suite's own card, which is
-    # cheap (the bounded `nm list` above, plus sed/awk) and is the surface that
-    # actually has to say what happened.
+    # Skipped when the guard has tripped. Nothing is being served in that state,
+    # so every badge below would read "0 served" -- go straight to the Suite's own
+    # card, which is the surface that has to say what happened.
     if [ -e "$NMDIR/disabled" ]; then
         nmlog "guard is tripped - skipping per-module tagging (nothing is served)"
     else
@@ -385,69 +379,24 @@ if command -v ksud >/dev/null 2>&1; then
         mid=$(basename "$d")
         { [ "$mid" = "meta-nomount" ] || [ "$mid" = "kernelnosu" ]; } && continue
         { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && continue
-        # Mirror the injector (src/mount.rs): content lives under ANY top-level dir that maps
-        # to a real partition, not just system/ (auto_mount modules ship product/ directly).
-        # Plain `find` (no -L) is deliberate: a module's `system/product -> ../product`
-        # layout-convergence symlink must not be followed, or its files count twice.
-        # POSITIONAL PARAMETERS, not a space-joined string. `$_roots` was the last
-        # unquoted expansion in the module scripts, and it is built from
-        # third-party module DIRECTORY NAMES: a name with a space in it became two
-        # find arguments, and one beginning with `-` became a find primary. It was
-        # invisible to CI because SC2086 is info severity and the gate ran at
-        # warning. `set --` is the POSIX way to carry a list of paths intact.
-        set --
-        for _pd in "$d"*/; do
-            [ -d "$_pd" ] || continue
-            # Mirrors the injector's non-following file_type(): a top-level symlink (e.g.
-            # OnePlus_Dialer_Universal's `product -> ./system/product`) is not a root to walk;
-            # counting it would double-count the files it points at.
-            [ -L "${_pd%/}" ] && continue
-            _n=$(basename "$_pd")
-            # NON_PARTITION_ROOTS from src/mount.rs, VERBATIM. Two names were
-            # missing -- `data_mirror` and `d` -- and `d` is the one that matters:
-            # it is the debugfs symlink, it resolves to a directory, and mount.rs
-            # lists it because a module shipping a top-level `d/` tree was walked
-            # and injected into debugfs (measured on an OP15). The list is pinned
-            # against mount.rs by a test now (`mount::tests`), because this is the
-            # third copy of it and the copies had already drifted.
-            #
-            # `my_*` is NOT excluded any more. It was, from before my_* was served
-            # at all -- and the Suite serves it now (by bind, or by injection under
-            # the my_hookless marker), so the exclusion made a module that ships
-            # ONLY my_* content look like a module that ships nothing. Measured on
-            # an OP15, 2026-09-07: `op15_3d_lockscreen_wp` ships one file under
-            # my_product, had one live rule serving it, and got no badge at all.
-            case "$_n" in
-                data|data_mirror|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp|\
-                debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin|d) continue ;;
-            esac
-            [ -d "/$_n" ] || continue
-            set -- "$@" "$_pd"
-        done
-        [ "$#" -eq 0 ] && continue
-        _o=0; _v=0
-        # BOUNDED, like every other call on this path. `-print -quit` stops at the
-        # first hit, but the NEGATIVE answer costs a full walk of the module tree --
-        # and a module shipping a large asset tree pays that twice, per boot, at
-        # post-fs-data. Unbounded it is a boot hang on the first bad module rather
-        # than a badge missing from one card. 10s is far more than any real module
-        # needs; a module that exceeds it simply goes untagged.
-        # `-type c` as well as `-type f`: a Magisk 0:0 char device IS content --
-        # it is a whiteout, the plan serves it, and a DEBLOAT module consists of
-        # nothing else. `-type f` alone made every such module look empty, so it
-        # got no badge at all: measured on an OP15, 2026-09-07, with SAN
-        # (systemapp_nuker) v2.2.2 shipping two whiteouts that the engine was
-        # serving, and no `[NoMount · …]` line in the manager to say so.
+        # WHAT THIS MODULE CONTRIBUTES, FROM THE PASS THAT DECIDED IT.
         #
-        # Symlinks stay OUT, deliberately. A module's layout-convergence link
-        # (`system/product -> ../product`) is a symlink one level inside a walked
-        # root, so `-type l` would count it -- and `serve_mode` refuses its target
-        # as a bare partition root, so it is never served. Counting unserved
-        # entries in a predicate that means "is this module being served" is the
-        # bug next door.
-        [ -n "$(nmto 10 find "$@" -path '*/overlay/*.apk' -print -quit 2>/dev/null)" ] && _o=1
-        [ -n "$(nmto 10 find "$@" \( -type f -o -type c \) ! -path '*/overlay/*' -print -quit 2>/dev/null)" ] && _v=1
-        [ "$_o" = 0 ] && [ "$_v" = 0 ] && continue
+        # This used to walk every enabled module's tree here: each top-level
+        # directory tested against a VERBATIM COPY of NON_PARTITION_ROOTS from
+        # src/mount.rs, then two bounded `find`s to tell overlay from vfs. Two
+        # finds per module per boot, at post-fs-data, under the OPlus watchdog --
+        # and the third copy of a list that had already drifted twice (this one
+        # was missing `data_mirror` and `d`, and excluded `my_*` for a year after
+        # the Suite started serving it).
+        #
+        # The mount pass above already resolved all of it and wrote it down. The
+        # live rule list cannot substitute: a whiteout rule names no module, so a
+        # DEBLOAT module -- which is nothing but whiteouts -- would go unbadged,
+        # which is the bug this loop was fixed for in the first place.
+        _sum=$(grep -F "$(printf '%s\t' "$mid")" "$NMDIR/modules.tsv" 2>/dev/null | head -1)
+        [ -z "$_sum" ] && continue
+        _o=$(printf '%s' "$_sum" | cut -f3)
+        _v=$(printf '%s' "$_sum" | cut -f4)
         if [ "$_o" = 1 ] && [ "$_v" = 1 ]; then _t="vfs + overlay"; _ov="$_ov $mid";
         elif [ "$_o" = 1 ]; then _t="overlay"; _ov="$_ov $mid";
         else _t="vfs"; _vf="$_vf $mid"; fi
