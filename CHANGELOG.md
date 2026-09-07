@@ -11,6 +11,27 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.168 — engine v30 (unchanged)
+
+### The same fix, in the copy that mattered
+
+v1.3.167 taught the Hidden paths card to count the whiteouts `absorb` creates.
+It fixed the EXPANDED list and missed `woChipOnly()` — the path that runs while
+the card is collapsed, which is what a reader actually sees. So on device the
+card still read **0** with two ROM directories hidden, and the fix looked like it
+had not worked at all.
+
+Two definitions of "what is hidden" is what caused the original bug; shipping a
+fix that left one of them in place was the same mistake one layer down. There is
+now one `whiteoutSets()` — durable list plus every live whiteout rule not in it —
+and both the chip and the list read it.
+
+It also renders a failed read as **?** rather than **0**. While the card is
+collapsed that chip is the entire answer, and a read that did not happen must not
+look like "nothing hidden".
+
+Verified both paths against the live rule set: collapsed **2**, expanded **2**.
+
 ## v1.3.167 — engine v30 (unchanged)
 
 Both findings below came from installing two real ReVanced-class modules

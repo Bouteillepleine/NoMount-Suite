@@ -2884,21 +2884,49 @@
   // are told apart -- and that is a round trip nobody is looking at while the
   // card is shut. Same predicate the readers use: a line counts when its first
   // non-blank character is not `#`.
+  // What is hidden right now, from ONE definition.
+  //
+  // There were two. This card's collapsed chip counted lines in
+  // whiteouts.txt while the expanded list read `whiteout list`, and neither
+  // saw the whiteouts `absorb` creates when it takes over a module's tmpfs --
+  // so with two ReVanced-class modules installed the chip read 0 while
+  // /product/app/Photos and /product/app/YouTube were both hidden. Fixing the
+  // expanded view alone left the collapsed chip -- the one a reader actually
+  // sees -- still wrong.
+  //
+  // `durable` is the editable list; `auto` is every live whiteout rule that is
+  // not in it. The rule dump is cached, so the second half costs nothing.
+  async function whiteoutSets() {
+    const r = await nm("whiteout list");
+    if (r.errno !== 0) return { ok: false, durable: [], auto: [] };
+    const durable = (r.stdout || "").split("\n").map(x => x.trim())
+      .filter(Boolean).filter(l => !/^no whiteouts/.test(l));
+    const live = await ruleDump();
+    const auto = live.ok
+      ? live.lines.filter(l => l.includes("(whiteout)"))
+          .map(l => (l.split(" (whiteout)")[0] || "").trim())
+          .filter(p => p && !durable.some(x => x.split("	")[0] === p))
+      : [];
+    return { ok: true, durable, auto };
+  }
+
   async function woChipOnly() {
-    const r = await exec(
-      "grep -cvE '^[[:space:]]*(#|$)' /data/adb/nomount/whiteouts.txt 2>/dev/null");
-    const n = parseInt((r.stdout || "").trim(), 10);
-    $("wochip").textContent = Number.isFinite(n) ? String(n) : "0";
+    const w = await whiteoutSets();
+    // "?" not "0" on a failed read: this chip is the whole answer while the
+    // card is collapsed, and a read that did not happen must not render as
+    // "nothing hidden".
+    $("wochip").textContent = w.ok ? String(w.durable.length + w.auto.length) : "?";
   }
   async function refreshWhiteouts() {
-    const r = await nm("whiteout list");
     const box = $("woList");
-    const lines = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
-    if (r.errno !== 0) {
+    const w = await whiteoutSets();
+    if (!w.ok) {
       $("wochip").textContent = "?";
       box.innerHTML = '<div class="empty">Unknown — the list could not be read.</div>';
       return;
     }
+    const lines = w.durable;
+    const auto = w.auto;
     // WHITEOUTS THE SUITE MADE ITSELF, not just the ones you saved.
     //
     // `whiteout list` reports the DURABLE list (whiteouts.txt). absorb creates
@@ -2912,12 +2940,6 @@
     // hidden by live whiteout rules while this card read "0" and "Nothing
     // hidden." The one screen a reader opens to ask "what is hidden?" answered
     // with a number that excluded everything the Suite had hidden on its own.
-    const live = await ruleDump();
-    const auto = live.ok
-      ? live.lines.filter((l) => l.includes("(whiteout)"))
-          .map((l) => (l.split(" (whiteout)")[0] || "").trim())
-          .filter((p) => p && !lines.some((x) => x.split("	")[0] === p))
-      : [];
     const autoHtml = auto.map((p) =>
       `<div class="row"><span class="name mono" title="${esc(p)}">${esc(p)}</span>` +
       `<span class="tag vfs" title="Taken over from a module's tmpfs. Managed automatically: ` +
