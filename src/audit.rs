@@ -61,6 +61,131 @@ fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Reboot, evidence).oracle(oracle)
 }
 
+/// Ask a question as an app uid, in a forked child, and bring back the answer.
+///
+/// Three copies of this existed: two here and one in `doctor.rs`. Each got the
+/// same five things right independently -- a pipe, a fork, setgroups/setgid/
+/// setuid IN THAT ORDER while still privileged, a fixed-width answer, a
+/// waitpid -- and each carried its own paragraph explaining the ordering.
+///
+/// The duplication was not theoretical. v1.3.148 widened one probe's payload
+/// from 8 bytes to 12 and the edit landed on the wrong copy, leaving a parent
+/// demanding 12 from a child writing 8 and a parent reading 8 from a child
+/// writing 12. Both halves then reported a counter that could not move, one of
+/// them as a clean PASS. No test could see it -- the sizes were literals in two
+/// functions -- and it took a flash to hardware to find. Here the width is
+/// `size_of::<[u32; N]>()` on both sides of the same pipe, so the two cannot
+/// disagree.
+///
+/// `probe` runs in the child with the target identity and returns `N` counters.
+/// It must not allocate before it has to: this is post-fork.
+///
+/// Slot 0 comes back as `u32::MAX` when the child could not take on the
+/// identity, which is the sentinel both original copies already used. Callers
+/// must treat that as unmeasured, never as zero.
+pub(crate) fn probe_as_uid<const N: usize>(
+    uid: u32,
+    probe: impl FnOnce() -> [u32; N],
+) -> Result<[u32; N], ProbeFail> {
+    let width = std::mem::size_of::<[u32; N]>();
+    let mut fds = [0i32; 2];
+    // SAFETY: fds is the 2-element array pipe(2) writes into.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(ProbeFail::Setup);
+    }
+    let (rd, wr) = (fds[0], fds[1]);
+    // SAFETY: fork in a single-threaded process; the child _exit()s.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        unsafe {
+            libc::close(rd);
+            libc::close(wr);
+        }
+        return Err(ProbeFail::Start);
+    }
+    if pid == 0 {
+        // SAFETY: child side. rd belongs to the parent.
+        unsafe { libc::close(rd) };
+        // Supplementary groups FIRST, then gid, then uid -- each step needs the
+        // privilege the next one drops. Dropping uid and gid alone leaves root's
+        // SUPPLEMENTARY groups on the child, so the probe would ask "can uid N
+        // do this" while carrying group memberships the real app does not have.
+        // On a target whose group bits grant more than its other bits that
+        // answers "yes" where the app is denied -- a PASS on something an app
+        // cannot actually do.
+        //
+        // Skipped when we already ARE the target: there is nothing to drop, and
+        // setgroups() needs CAP_SETGID, so attempting it unprivileged would fail
+        // a probe already running with exactly the identity it wanted.
+        // SAFETY: all async-signal-safe; the child _exit()s on every path.
+        let dropped = unsafe {
+            libc::getuid() == uid
+                || (libc::setgroups(0, std::ptr::null()) == 0
+                    && libc::setresgid(uid, uid, uid) == 0
+                    && libc::setresuid(uid, uid, uid) == 0)
+        };
+        let mut out = if dropped { probe() } else { [0u32; N] };
+        if !dropped {
+            // N >= 1 for every caller; an empty answer has nothing to report.
+            if let Some(first) = out.first_mut() {
+                *first = u32::MAX;
+            }
+        }
+        // SAFETY: `out` is N u32s and `width` is its size; well under PIPE_BUF,
+        // so the write is atomic. Native byte order on both ends of one pipe in
+        // one process family -- no encoding step to get wrong.
+        unsafe {
+            libc::write(wr, out.as_ptr().cast(), width);
+            libc::_exit(0)
+        }
+    }
+    // SAFETY: parent side; wr belongs to the child.
+    unsafe { libc::close(wr) };
+    let mut out = [0u32; N];
+    // SAFETY: reading `width` bytes into an N-u32 array; same width the child wrote.
+    let got = unsafe { libc::read(rd, out.as_mut_ptr().cast(), width) };
+    unsafe { libc::close(rd) };
+    let mut status = 0i32;
+    // SAFETY: pid came from the fork above and has not been waited on.
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    if got != width as isize {
+        return Err(ProbeFail::Silent);
+    }
+    if out.first().copied() == Some(u32::MAX) {
+        return Err(ProbeFail::NotDropped);
+    }
+    Ok(out)
+}
+
+/// Why a probe produced no answer. Each variant is `Unmeasured`, never a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeFail {
+    Setup,
+    Start,
+    Silent,
+    NotDropped,
+}
+
+impl ProbeFail {
+    /// The row this failure becomes. One place, so a fourth probe cannot invent
+    /// a fifth wording for "the probe did not run".
+    fn into_check(self, name: &'static str) -> Check {
+        let (evidence, meaning) = match self {
+            Self::Setup => ("pipe() failed", "The probe could not be set up, so this was not tested."),
+            Self::Start => ("fork() failed", "The probe could not be started, so this was not tested."),
+            Self::Silent => (
+                "probe child said nothing",
+                "The probe exited without answering, so this was not tested.",
+            ),
+            Self::NotDropped => (
+                "could not drop to the hidden app's uid",
+                "The probe could not take on the hidden app's identity, so this was not tested.",
+            ),
+        };
+        unmeasured(name, evidence.into()).meaning(meaning)
+    }
+}
+
 
 /// The name of every check this file emits, in one place.
 ///
@@ -77,7 +202,6 @@ fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
 pub(crate) const N_ENGINE_LIVE: &str = "engine responding";
 pub(crate) const N_ZERO_MOUNT: &str = "zero-mount posture";
 pub(crate) const N_SURFACES: &str = "kernel surfaces";
-pub(crate) const N_DIRENT_COOKIE: &str = "readdir cookie magic";
 pub(crate) const N_DINO_STAT: &str = "readdir ino vs stat ino";
 pub(crate) const N_INODE_BAND: &str = "injected inode band";
 pub(crate) const N_OVERLAY_DIR_INO: &str = "overlay dir inode range";
@@ -98,8 +222,8 @@ pub(crate) const N_XATTR_HIDDEN: &str = "xattr agrees with open for a hidden app
 /// them. Forgetting to add a new check here weakens that test; it can no longer
 /// let a check's name and its stand-in drift apart, which is what it used to.
 #[cfg(test)]
-pub(crate) const ALL_CHECK_NAMES: [&str; 14] = [
-    N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DIRENT_COOKIE, N_DINO_STAT,
+pub(crate) const ALL_CHECK_NAMES: [&str; 13] = [
+    N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DINO_STAT,
     N_INODE_BAND, N_OVERLAY_DIR_INO, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
     N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN,
 ];
@@ -117,11 +241,11 @@ struct Dirent64Hdr {
 pub struct Entry {
     pub name: String,
     pub d_ino: u64,
-    pub d_off: i64,
 }
 
-/// getdents64 directly: `read_dir` exposes neither `d_off` nor `d_ino`, and both
-/// are oracles in their own right.
+/// getdents64 directly: `read_dir` exposes `d_ino`, which is an oracle in its
+/// own right — an injected name whose listed inode disagrees with its stat is a
+/// tell no mount table can hide.
 pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
     // as_encoded_bytes(), not to_string_lossy(): a lossy conversion opens a
     // DIFFERENT directory (or, far more likely, none) and this function's None
@@ -169,7 +293,7 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
             let nend = buf[nstart..off + reclen].iter().position(|&c| c == 0).unwrap_or(0) + nstart;
             if let Ok(name) = std::str::from_utf8(&buf[nstart..nend]) {
                 if name != "." && name != ".." {
-                    out.push(Entry { name: name.to_string(), d_ino: h.d_ino, d_off: h.d_off });
+                    out.push(Entry { name: name.to_string(), d_ino: h.d_ino });
                 }
             }
             off += reclen;
@@ -233,23 +357,15 @@ fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
     v
 }
 
+/// The statfs magic, rendered as the names the checks care about. The syscall
+/// itself lives in `dirshape`, which owns the one erofs constant.
 fn fs_type(p: &Path) -> String {
-    // statfs f_type, rendered as the names the checks care about.
-    // as_encoded_bytes(): see getdents() above. A lossy path statfs()es
-    // something else, and "?" would be reported as the filesystem type of a path
-    // that was never asked about.
-    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else {
-        return "?".into();
-    };
-    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
-        return "?".into();
-    }
-    match s.f_type as i64 {
-        0xE0F5E1E2 => "erofs".into(),
-        0x794C7630 => "overlay".into(),
-        0xF2F52010 => "f2fs".into(),
-        other => format!("0x{other:x}"),
+    match crate::dirshape::fs_magic(p) {
+        None => "?".into(),
+        Some(crate::dirshape::EROFS_MAGIC) => "erofs".into(),
+        Some(0x794C7630) => "overlay".into(),
+        Some(0xF2F52010) => "f2fs".into(),
+        Some(other) => format!("0x{other:x}"),
     }
 }
 
@@ -531,78 +647,6 @@ fn check_surfaces() -> Check {
     }
 }
 
-/// readdir cookies must not carry the engine's magic.
-fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
-    const NM_MAGIC: i64 = 0x6e6d; // "nm"
-    let (mut scanned, mut hits) = (0usize, 0usize);
-    // Directories that would not enumerate. This used to be a bare `continue`,
-    // so a run where 90 of 93 parents failed to open reported
-    // "0 of 12 dirents carry the magic" and PASSED -- a clean verdict over 13% of
-    // the evidence, with nothing on screen saying so. `check_surfaces` had this
-    // exact defect and it was fixed there; the fix was never carried across to
-    // its siblings.
-    let mut unread = 0usize;
-    for p in parents {
-        let Some(entries) = getdents(p) else {
-            unread += 1;
-            continue;
-        };
-        for e in entries {
-            scanned += 1;
-            if (e.d_off >> 48) == NM_MAGIC {
-                hits += 1;
-            }
-        }
-    }
-    if scanned == 0 {
-        // The two reasons a directory scan finds nothing are different answers.
-        // With no rules live there is nothing to inject into and never was:
-        // n/a. With rules live but no parent readable, the check that would have
-        // run did not: unmeasured.
-        return if parents.is_empty() {
-            na(N_DIRENT_COOKIE, "no injection rules are live, so no directory to read".into())
-                .meaning("Nothing is being injected yet, so there are no listings to check.")
-        } else {
-            unmeasured(
-                N_DIRENT_COOKIE,
-                format!("{} injected directory(ies), none could be read", parents.len()),
-            )
-            .meaning("The injected directories could not be listed, so this was not tested.")
-        };
-    }
-    if hits == 0 {
-        // A hit is a hit however partial the scan was, so a FAIL below stands
-        // regardless. Only a CLEAN result depends on having looked everywhere.
-        if unread > 0 {
-            return unmeasured(
-                N_DIRENT_COOKIE,
-                format!(
-                    "{scanned} dirent(s) carried no magic, but {unread} of {} injected \
-                     directory(ies) could not be listed and were NOT checked",
-                    parents.len()
-                ),
-            )
-            .meaning(format!(
-                "{unread} injected folder(s) would not open, so they were not checked. What was read \
-             looks fine."
-            ));
-        }
-        pass(N_DIRENT_COOKIE, format!("0 of {scanned} dirents carry the magic"))
-            .meaning("Directory listings of injected folders look the same as the ROM's own.")
-    } else {
-        soft(
-            N_DIRENT_COOKIE,
-            format!("{hits} of {scanned} dirents have 0x6e6d in the top 16 bits of d_off"),
-            "one getdents64 on an injected directory identifies the engine, no root needed",
-        )
-        .meaning(
-            "Injected folders return entries carrying the engine's marker. One ordinary folder \
-             listing gives you away.",
-        )
-        .owner("the kernel engine")
-    }
-}
-
 /// An injected file's readdir d_ino must equal its stat st_ino.
 fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     // `eligible` is every injected file on a readable non-overlay parent, counted
@@ -613,7 +657,7 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     // those are now FAIL rows, and the evidence carries checked/eligible.
     let mut eligible = 0usize;
     let mut checked = 0usize;
-    // Parents that would not enumerate. Same accounting `check_dirent_cookie` and
+    // Parents that would not enumerate. Same accounting `check_erofs_dir_shape`
     // `check_erofs_dir_shape` were given and this sibling was not: a bare
     // `continue` here dropped the whole directory from BOTH counters, so a device
     // where none of them opened fell out with `eligible == 0` and returned n/a --
@@ -909,7 +953,7 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
 /// so an injected or hidden name must be reflected in the parent's size.
 fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     let (mut ok, mut bad) = (0usize, Vec::new());
-    // Same accounting as `check_dirent_cookie`: an erofs parent that would not
+    // Same accounting as its siblings: an erofs parent that would not
     // stat or list is evidence that was not gathered, not evidence of health.
     // Note the two `continue`s ABOVE this counter are different in kind -- a
     // non-erofs parent and a multi-block one are genuinely out of scope for this
@@ -927,16 +971,12 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
         if size == 0 || size >= 4096 {
             continue; // multi-block padding has no closed form
         }
-        let Ok(rd) = fs::read_dir(&parent) else {
+        // One definition of the formula, in `dirshape`, which owns it and holds
+        // the test that pins it against measured erofs directories.
+        let Some(model) = crate::dirshape::erofs_model(&parent) else {
             unread += 1;
             continue;
         };
-        let (mut n, mut bytes) = (0u64, 0u64);
-        for e in rd.flatten() {
-            n += 1;
-            bytes += e.file_name().as_encoded_bytes().len() as u64;
-        }
-        let model = 12 * (n + 2) + bytes + 3;
         if model == size {
             ok += 1;
         } else {
@@ -1259,65 +1299,21 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     let ours: Vec<u64> =
         readable.iter().map(|p| fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(0)).collect();
 
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return unmeasured(NAME, "pipe() failed".into())
-            .meaning("The probe could not be set up, so this was not tested.");
-    }
-    let (rd, wr) = (fds[0], fds[1]);
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        unsafe { libc::close(rd); libc::close(wr) };
-        return unmeasured(NAME, "fork() failed".into())
-            .meaning("The probe could not be started, so this was not tested.");
-    }
-    if pid == 0 {
-        unsafe { libc::close(rd) };
-        let mut denied = 0u32;
-        // setgroups FIRST, then setgid, then setuid.
-        //
-        // Dropping the uid and gid alone leaves root's SUPPLEMENTARY groups on the
-        // child -- so the probe asks "can uid N open this" while still carrying
-        // group memberships the real app does not have. On a target whose group
-        // bits grant more than its other bits, that answers "opened" where the app
-        // is denied, i.e. this check reports PASS on a path an app cannot actually
-        // read. Clearing them is only possible while still privileged, hence
-        // first; setgid before setuid for the same reason.
-        let dropped = unsafe {
-            libc::setgroups(0, std::ptr::null()) == 0
-                && libc::setgid(appid) == 0
-                && libc::setuid(appid) == 0
-        };
-        let mut mismatched = 0u32;
-        if dropped {
-            for (p, &our_len) in readable.iter().zip(ours.iter()) {
-                if fs::File::open(p.as_path()).is_err() {
-                    denied += 1;
-                } else if fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(our_len) != our_len {
-                    mismatched += 1;
-                }
+    let counts = probe_as_uid(appid, || {
+        let (mut denied, mut mismatched) = (0u32, 0u32);
+        for (p, &our_len) in readable.iter().zip(ours.iter()) {
+            if fs::File::open(p.as_path()).is_err() {
+                denied += 1;
+            } else if fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(our_len) != our_len {
+                mismatched += 1;
             }
-        } else {
-            denied = u32::MAX;
         }
-        let mut buf = [0u8; 8];
-        buf[..4].copy_from_slice(&denied.to_ne_bytes());
-        buf[4..].copy_from_slice(&mismatched.to_ne_bytes());
-        unsafe { libc::write(wr, buf.as_ptr() as *const libc::c_void, 8) };
-        unsafe { libc::_exit(0) };
-    }
-    unsafe { libc::close(wr) };
-    let mut buf = [0u8; 8];
-    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
-    unsafe { libc::close(rd) };
-    let mut status = 0i32;
-    unsafe { libc::waitpid(pid, &mut status, 0) };
-    if got != 8 {
-        return unmeasured(NAME, "probe child said nothing".into())
-            .meaning("The probe exited without answering, so this was not tested.");
-    }
-    let denied = u32::from_ne_bytes(buf[..4].try_into().unwrap_or_default());
-    let mismatched = u32::from_ne_bytes(buf[4..].try_into().unwrap_or_default());
+        [denied, mismatched]
+    });
+    let [denied, mismatched] = match counts {
+        Ok(c) => c,
+        Err(e) => return e.into_check(NAME),
+    };
     // Naming the probe uid names an app on the hide list, and this evidence ends
     // up in `check.txt` -- which `nomount export` writes to shared storage, where
     // the same function withholds `uid_live.txt` and strips the ` [UID: n]` suffix
@@ -1328,10 +1324,6 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     // the gate doctor.rs already applies to the package names, and the one the
     // export's own closing note promises for "the check report's hide-list names".
     let who = hidden_uid_label(appid, crate::blocklist::redact_hide_list());
-    if denied == u32::MAX {
-        return unmeasured(NAME, "could not drop to the hidden app's uid".to_string())
-            .meaning("The probe could not take on the hidden app's identity, so this was not tested.");
-    }
     if denied == 0 && mismatched == 0 {
         return pass(
             NAME,
@@ -1535,8 +1527,7 @@ fn check_engine_live() -> Check {
 
 /// Every check that reads the live rule list, by the exact name it reports
 /// under. When the dump fails these are the ones that cannot run.
-const RULE_DEPENDENT: [&str; 8] = [
-    N_DIRENT_COOKIE,
+const RULE_DEPENDENT: [&str; 7] = [
     N_DINO_STAT,
     N_INODE_BAND,
     N_OVERLAY_DIR_INO,
@@ -1586,98 +1577,55 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
             .meaning("None of the injected files could be opened even as root, so the question this check asks could not be put.");
     }
 
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return unmeasured(NAME, "pipe() failed".into())
-            .meaning("The probe could not be set up, so this was not tested.");
-    }
-    let (rd, wr) = (fds[0], fds[1]);
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        unsafe { libc::close(rd); libc::close(wr) };
-        return unmeasured(NAME, "fork() failed".into())
-            .meaning("The probe could not be started, so this was not tested.");
-    }
-    if pid == 0 {
-        unsafe { libc::close(rd) };
-        // setgroups, setgid, setuid -- in that order and while still privileged,
-        // for the reason spelled out in check_pm_apks_open_when_hidden.
-        let dropped = unsafe {
-            libc::setgroups(0, std::ptr::null()) == 0
-                && libc::setgid(appid) == 0
-                && libc::setuid(appid) == 0
-        };
+    let counts = probe_as_uid(appid, || {
         let (mut leaked, mut inverse, mut denied) = (0u32, 0u32, 0u32);
-        if dropped {
-            for p in &files {
-                let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else {
-                    continue;
-                };
-                let opened = fs::File::open(p.as_path()).is_ok();
-                // Size-only calls: ask whether the surface ANSWERS, without
-                // pulling the value into this process. A leak is the fact that it
-                // replied at all.
-                let lx = unsafe { libc::listxattr(c.as_ptr(), std::ptr::null_mut(), 0) };
-                let name = c"security.selinux";
-                let gx = unsafe {
-                    libc::getxattr(c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0)
-                };
-                let xattr_answered = lx >= 0 || gx >= 0;
-                if !opened {
-                    // ENOENT SPECIFICALLY. `opened` was a bare `is_ok()`, so an
-                    // injected file that is simply root-owned 0600 gave the app
-                    // EACCES on open() while `listxattr` still answered (it needs
-                    // search on the path, not read on the file) -- and that was
-                    // counted as a leak and reported as a FAIL whose text asserts
-                    // "the xattr surface is not applying the per-UID decision that
-                    // open() is". A stock file behaves identically there; the
-                    // per-UID decision was never consulted at all. ENOENT is
-                    // hiding's signature, and it is the only denial this check is
-                    // about.
-                    let hidden = std::io::Error::last_os_error().raw_os_error()
-                        == Some(libc::ENOENT);
-                    if hidden {
-                        denied += 1;
-                        if xattr_answered {
-                            leaked += 1;
-                        }
+        for p in &files {
+            let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else {
+                continue;
+            };
+            let opened = fs::File::open(p.as_path()).is_ok();
+            // Size-only calls: ask whether the surface ANSWERS, without
+            // pulling the value into this process. A leak is the fact that it
+            // replied at all.
+            let lx = unsafe { libc::listxattr(c.as_ptr(), std::ptr::null_mut(), 0) };
+            let name = c"security.selinux";
+            let gx = unsafe {
+                libc::getxattr(c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0)
+            };
+            let xattr_answered = lx >= 0 || gx >= 0;
+            if !opened {
+                // ENOENT SPECIFICALLY. `opened` was a bare `is_ok()`, so an
+                // injected file that is simply root-owned 0600 gave the app
+                // EACCES on open() while `listxattr` still answered (it needs
+                // search on the path, not read on the file) -- and that was
+                // counted as a leak and reported as a FAIL whose text asserts
+                // "the xattr surface is not applying the per-UID decision that
+                // open() is". A stock file behaves identically there; the
+                // per-UID decision was never consulted at all. ENOENT is
+                // hiding's signature, and it is the only denial this check is
+                // about.
+                let hidden = std::io::Error::last_os_error().raw_os_error()
+                    == Some(libc::ENOENT);
+                if hidden {
+                    denied += 1;
+                    if xattr_answered {
+                        leaked += 1;
                     }
-                } else if !xattr_answered {
-                    inverse += 1;
                 }
+            } else if !xattr_answered {
+                inverse += 1;
             }
-        } else {
-            leaked = u32::MAX;
         }
-        let mut buf = [0u8; 12];
-        buf[..4].copy_from_slice(&leaked.to_ne_bytes());
-        buf[4..8].copy_from_slice(&inverse.to_ne_bytes());
-        buf[8..].copy_from_slice(&denied.to_ne_bytes());
-        // 12 bytes is still far under PIPE_BUF, so the write stays atomic.
-        unsafe { libc::write(wr, buf.as_ptr() as *const libc::c_void, 12) };
-        unsafe { libc::_exit(0) };
-    }
-    unsafe { libc::close(wr) };
-    let mut buf = [0u8; 12];
-    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 12) };
-    unsafe { libc::close(rd) };
-    let mut status = 0i32;
-    unsafe { libc::waitpid(pid, &mut status, 0) };
-    if got != 12 {
-        return unmeasured(NAME, "probe child said nothing".into())
-            .meaning("The probe exited without answering, so this was not tested.");
-    }
-    let leaked = u32::from_ne_bytes(buf[..4].try_into().unwrap_or_default());
-    let inverse = u32::from_ne_bytes(buf[4..8].try_into().unwrap_or_default());
-    let denied = u32::from_ne_bytes(buf[8..].try_into().unwrap_or_default());
+        [leaked, inverse, denied]
+    });
+    let [leaked, inverse, denied] = match counts {
+        Ok(c) => c,
+        Err(e) => return e.into_check(NAME),
+    };
     // Redacted for a shared destination, for the reason given on
     // `blocklist::redact_hide_list` -- this string reaches `check.txt`, and
     // `nomount export` copies that to shared storage.
     let who = hidden_uid_label(appid, crate::blocklist::redact_hide_list());
-    if leaked == u32::MAX {
-        return unmeasured(NAME, "could not drop to the hidden app's uid".to_string())
-            .meaning("The probe could not take on the hidden app's identity, so this was not tested.");
-    }
     if leaked > 0 {
         return fail(
             NAME,
@@ -1794,7 +1742,6 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
         check_engine_live(),
         check_zero_mount(),
         check_surfaces(),
-        check_dirent_cookie(&parents),
         check_dino_matches_stat(&targets),
         check_inode_band(&targets, &engine_dirs),
         check_overlay_dir_ino(&targets),
@@ -1811,6 +1758,25 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The probe harness carries an answer of any width back from the child.
+    ///
+    /// Three hand-written copies of this existed, each with the payload width as
+    /// a literal on both sides of its own pipe. v1.3.148 widened one and edited
+    /// the wrong one, leaving a parent demanding 12 bytes from a child writing 8
+    /// and a parent reading 8 from a child writing 12: both probes then reported
+    /// a counter that could not move, one of them as a clean PASS, and it took a
+    /// flash to hardware to notice. Nothing in this test would have caught that;
+    /// only having ONE `size_of` for both ends does. What this pins is that the
+    /// surviving harness round-trips at more than one width, and that the
+    /// same-uid path (nothing to drop) is not the failing one.
+    #[test]
+    fn the_probe_harness_brings_back_what_the_child_counted() {
+        // SAFETY: getuid() is always safe.
+        let me = unsafe { libc::getuid() };
+        assert_eq!(probe_as_uid(me, || [7u32]), Ok([7]));
+        assert_eq!(probe_as_uid(me, || [1u32, 2, 3]), Ok([1, 2, 3]));
+    }
 
     /// This file's half of the hide-list redaction invariant.
     ///
@@ -1922,7 +1888,7 @@ mod tests {
 
     /// A directory that will not enumerate is UNMEASURED, never "nothing to test".
     ///
-    /// `check_dirent_cookie` and `check_erofs_dir_shape` were given this
+    /// `check_erofs_dir_shape` was given this
     /// accounting and their three siblings were not, so an unreadable parent left
     /// `eligible == 0` and returned n/a -- "no injected file on a non-overlay
     /// filesystem to compare" -- which is a false statement rendered grey and

@@ -23,9 +23,34 @@
 use std::fs;
 use std::path::Path;
 
+/// erofs's `statfs` magic. Written out twice before this — `0xE0F5E1E2` in
+/// audit.rs and `0xE0F5_E1E2` in whiteout.rs — for the one number that decides
+/// whether a directory's size means anything.
+pub(crate) const EROFS_MAGIC: i64 = 0xE0F5_E1E2;
+
+/// `statfs(2)`'s `f_type` for `p`, or `None` if it would not statfs.
+///
+/// `as_bytes()`, not `to_string_lossy()`: a lossy path statfs()es something
+/// else, and the answer would be reported as the filesystem type of a path that
+/// was never asked about.
+pub(crate) fn fs_magic(p: &Path) -> Option<i64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+    let mut sf: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a NUL-terminated path and `sf` is a zeroed statfs.
+    if unsafe { libc::statfs(c.as_ptr(), &mut sf) } != 0 {
+        return None;
+    }
+    Some(sf.f_type as i64)
+}
+
 /// `12*(n+2) + sum(namelen) + 3` — the `+2`/`+3` are `.` and `..`, which the
 /// listing does not return but the on-disk directory always contains.
-fn erofs_model(dir: &Path) -> Option<u64> {
+///
+/// `None` when the directory would not list, or is empty. `audit.rs` carried
+/// a second copy of this arithmetic, so the formula every size claim in the
+/// Suite rests on had two definitions and one test.
+pub(crate) fn erofs_model(dir: &Path) -> Option<u64> {
     let mut n: u64 = 0;
     let mut names: u64 = 0;
     for e in fs::read_dir(dir).ok()? {

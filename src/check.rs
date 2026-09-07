@@ -365,11 +365,11 @@ impl Report {
                 if t.warn > 0 { format!(", plus {} warning(s)", t.warn) } else { String::new() }
             )
         // NOT "plan warning(s)". `t.warn` counts EVERY Warn in the report, and
-        // `audit.rs` emits four of them through `soft()` -- readdir cookie magic,
-        // injected inode band, overlay dir inode range, erofs directory shape --
-        // which are measured DEVICE tells, not plan hazards. On a device where the
-        // inode band goes soft the verdict read "1 plan warning(s)" and pointed
-        // the user at their module set.
+        // `audit.rs` emits three of them through `soft()` -- injected inode band,
+        // overlay dir inode range, erofs directory shape -- which are measured
+        // DEVICE tells, not plan hazards. On a device where the inode band goes
+        // soft the verdict read "1 plan warning(s)" and pointed the user at their
+        // module set.
         } else if t.warn > 0 {
             format!("{} warning(s)", t.warn)
         } else {

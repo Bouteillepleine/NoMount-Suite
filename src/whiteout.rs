@@ -23,15 +23,7 @@ pub const WHITEOUT_PATH: &str = "/data/adb/nomount/whiteouts.txt";
 
 /// Statfs magic of the directory holding `target`.
 fn parent_fs_magic(target: &Path) -> Option<i64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let dir = target.parent().unwrap_or(Path::new("/"));
-    let c = CString::new(dir.as_os_str().as_bytes()).ok()?;
-    let mut sf: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c.as_ptr(), &mut sf) } != 0 {
-        return None;
-    }
-    Some(sf.f_type as i64)
+    crate::dirshape::fs_magic(target.parent().unwrap_or(Path::new("/")))
 }
 
 /// Does hiding `target` leave evidence in its PARENT's metadata?
@@ -51,8 +43,7 @@ fn parent_fs_magic(target: &Path) -> Option<i64> {
 ///     These were previously reported as holes by a plain "not overlayfs" test,
 ///     which was wrong: there is no invariant to contradict.
 pub(crate) fn measurable_hole(target: &Path) -> bool {
-    const EROFS_MAGIC: i64 = 0xE0F5_E1E2;
-    if parent_fs_magic(target) != Some(EROFS_MAGIC) {
+    if parent_fs_magic(target) != Some(crate::dirshape::EROFS_MAGIC) {
         return false;
     }
     let dir = target.parent().unwrap_or(Path::new("/"));

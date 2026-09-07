@@ -153,51 +153,31 @@ fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     let Ok(attr) = std::ffi::CString::new("security.selinux") else {
         return GhostSeen::Unknown;
     };
-    // Exit statuses, because the answer has to cross a fork.
-    const ABSENT: i32 = 0;
-    const VISIBLE: i32 = 1;
-    const XLEAK: i32 = 2;
-    unsafe {
-        let pid = libc::fork();
-        if pid < 0 {
-            return GhostSeen::Unknown;
+    const ABSENT: u32 = 0;
+    const VISIBLE: u32 = 1;
+    const XLEAK: u32 = 2;
+    // The fork, the setgroups/setgid/setuid ordering and the waitpid live in
+    // `audit::probe_as_uid`. This used to carry its own copy, exit statuses and
+    // all, plus its own paragraph on why the group list has to go first.
+    let seen = crate::audit::probe_as_uid(uid, || unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::stat(cpath.as_ptr(), &mut st) == 0 {
+            return [VISIBLE];
         }
-        if pid == 0 {
-            // Supplementary groups FIRST, then gid, then uid. Each step needs
-            // the privilege the next one drops. Without setgroups the child keeps
-            // root's group list, so a path readable through one of those groups
-            // stats OK here and not for a real app -- reported as an over-reach
-            // that is not one. The error is in the safe direction (a false alarm,
-            // never a false pass), which is exactly why it would have survived.
-            if libc::setgroups(0, std::ptr::null()) != 0
-                || libc::setresgid(uid, uid, uid) != 0
-                || libc::setresuid(uid, uid, uid) != 0
-            {
-                libc::_exit(3);
-            }
-            let mut st: libc::stat = std::mem::zeroed();
-            if libc::stat(cpath.as_ptr(), &mut st) == 0 {
-                libc::_exit(VISIBLE);
-            }
-            let mut buf = [0u8; 256];
-            let n = libc::lgetxattr(
-                cpath.as_ptr(),
-                attr.as_ptr(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-            );
-            libc::_exit(if n >= 0 { XLEAK } else { ABSENT });
-        }
-        let mut status: i32 = 0;
-        if libc::waitpid(pid, &mut status, 0) < 0 || !libc::WIFEXITED(status) {
-            return GhostSeen::Unknown;
-        }
-        match libc::WEXITSTATUS(status) {
-            ABSENT => GhostSeen::Absent,
-            VISIBLE => GhostSeen::Visible,
-            XLEAK => GhostSeen::XattrLeak,
-            _ => GhostSeen::Unknown,
-        }
+        let mut buf = [0u8; 256];
+        let n = libc::lgetxattr(
+            cpath.as_ptr(),
+            attr.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        );
+        [if n >= 0 { XLEAK } else { ABSENT }]
+    });
+    match seen {
+        Ok([ABSENT]) => GhostSeen::Absent,
+        Ok([VISIBLE]) => GhostSeen::Visible,
+        Ok([XLEAK]) => GhostSeen::XattrLeak,
+        _ => GhostSeen::Unknown,
     }
 }
 
