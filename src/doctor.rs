@@ -1056,19 +1056,21 @@ fn count_files(dir: &Path, depth: usize) -> usize {
     n
 }
 
-/// Does a live rule of this kind belong in the per-partition
-/// "not FD-allowlisted for zygote" tally?
+/// Can a live rule of this kind reach zygote's FD-allowlist trap at all?
 ///
-/// Only an INJECT does. The note counts rules that put a FILE on a partition
-/// zygote's `FileDescriptorInfo::CreateFromFd` does not allowlist, and both other
-/// kinds are structurally incapable of that: a whiteout makes a name ABSENT (no
-/// fd to validate, and the stock file it hides was already there), and a virtual
-/// dir is a directory the engine materialised, which nothing preloads.
+/// Only an INJECT. The trap fires on an open FD whose path
+/// `FileDescriptorInfo::CreateFromFd` does not allowlist, and both other kinds
+/// are structurally incapable of producing one: a whiteout makes a name ABSENT,
+/// so there is no fd, and a virtual dir is a directory the engine materialised,
+/// which nothing preloads.
 ///
 /// Pure and separate so the one un-gated consumer of `parse_list`'s kind cannot
 /// come back. Every other arm of that loop already tests `r.kind`; this one did
-/// not, and its message -- "N injected file(s) on /<part>" -- asserted the kind
-/// in prose while counting all three.
+/// not, and the per-partition tally it fed said "N injected file(s)" while
+/// counting all three. That tally is gone now (a row ending in "fine" is not a
+/// finding), but the gate still guards the Error arm below it, where a whiteout
+/// on an `/overlay/*.apk` path would otherwise be reported as a boot hazard --
+/// hiding a file zygote would have preloaded is the opposite of one.
 fn fd_note_applies(kind: crate::nm::LiveKind) -> bool {
     kind == crate::nm::LiveKind::Inject
 }
@@ -1303,7 +1305,7 @@ fn subject_of(f: &Finding) -> Option<&str> {
 /// `slug(check)` ALONE is not unique here, and that is structural rather than
 /// accidental: a plan check is emitted once per offending entity, so
 /// "module mount left by design" appears once per declined mount and
-/// "not FD-allowlisted for zygote" once per partition. Measured on an OP11
+/// "whiteout leaves a measurable hole" once per module. Measured on an OP11
 /// running a clean setup: six plan checks, three distinct ids.
 ///
 /// That matters because `Check::id` is documented as "what an acceptance would be
@@ -1360,7 +1362,6 @@ fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
 /// [`reconcile_plan_and_live`], which is what that meeting should have been).
 pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // partition -> count of non-overlay entries not in zygote's FD allowlist
-    let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut f: Vec<Finding> = Vec::new();
     let (plan, skipped) = collect_plan()?;
 
@@ -1674,15 +1675,16 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         f.push(Finding {
             level: Level::Info,
             check: "directory holds only injected files",
+            // Two sentences. The oracle is what the reader needs -- a directory
+            // of only-injected inodes clusters into a band the ROM never
+            // allocates from -- and the caveats (how it compares against the
+            // whole partition, which directories are excluded) are in the
+            // comment above, where the next maintainer will look for them.
             detail: format!(
-                "{list}. Injected files carry inode numbers from a band the ROM never \
-                 allocates from, so a directory holding several of them and no stock file \
-                 groups into one bucket that is entirely yours. Shipping into a directory \
-                 that already has stock content removes it. Whether those inodes also \
-                 stand out against the WHOLE partition depends on how tightly the ROM \
-                 packs them -- measured on one device, most did not. Single-file \
-                 directories and app/priv-app/overlay containers are excluded — one inode \
-                 is not a bucket, and an APK cannot share a directory."
+                "{list}. Injected files take inode numbers from a band the ROM never \
+                 allocates, so a directory holding several of them and no stock file is \
+                 one cluster that is entirely yours. Ship into a directory that already \
+                 has stock content and it disappears."
             ),
         });
     }
@@ -2117,13 +2119,9 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                                     target.display()
                                 ),
                             });
-                        } else {
-                            // Everything else on such a partition is the same observation
-                            // repeated once per file. Emitting one warning per entry buried
-                            // real findings under ~85 identical lines on a device that boots
-                            // fine, so count them and report once per partition below.
-                            *fd_note.entry(part).or_insert(0usize) += 1;
                         }
+                        // Everything else on such a partition is NOT reported. See
+                        // the block that used to render it, below.
                     }
                 }
                 // NO size-mismatch finding here any more.
@@ -2406,11 +2404,16 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 detail: match mode {
                     0 => "hiding covers NEITHER isolated pool. A hidden app can read through its own isolated child and see every injection, which is the leak the pools exist to close. `nomount uid isolated both` unless you specifically want the other side of this trade."
                         .to_string(),
-                    3 => "hiding covers BOTH isolated pools (the default). That closes the leak where a hidden app reads through its own isolated helper, and opens the mirror image: any UNBLOCKED app can compare its own view of a path against its own isolated child's and see that they differ, which proves injection with two reads and no privilege. Both directions are real; this is the side the default takes, and `nomount uid isolated none` takes the other."
+                    // Short on purpose. This fires on every device with a hide
+                    // list, on every run, and the trade does not change between
+                    // boots -- so the note has to state the oracle and stop. The
+                    // full argument lives in the comment above and in the WebUI's
+                    // Hiding tab, where the switch is.
+                    3 => "hiding covers both isolated pools (the default): a hidden app cannot read through its own isolated child, but an UNBLOCKED app can tell its own view apart from its isolated child's and prove injection that way. `nomount uid isolated none` takes the other side of the trade."
                         .to_string(),
                     m => format!(
-                        "hiding covers {} of the two isolated pools. Same trade as the default (both), applied to one pool: a hidden app cannot read through a covered pool, and an unblocked app can tell a covered pool's view apart from its own.",
-                        if m == 1 { "the app-zygote half" } else { "the platform half" }
+                        "hiding covers {} only. Same trade as the default, on one pool.",
+                        if m == 1 { "the app-zygote pool" } else { "the platform pool" }
                     ),
                 },
             });
@@ -2553,15 +2556,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         });
     }
 
-    for (part, n) in &fd_note {
-        f.push(Finding {
-            level: Level::Info,
-            check: "not FD-allowlisted for zygote",
-            detail: format!(
-                "{n} injected file(s) on /{part} — zygote does not preload these; fine"
-            ),
-        });
-    }
+    // NOT REPORTED. The per-partition tally ended in the word "fine", and a row
+    // that says "fine" is not a finding.
+    //
+    // Its history is a warning about itself: it began as one Warn per file, which
+    // buried real findings under ~85 identical lines, so it was rolled up to one
+    // Info per partition -- three rows on any OnePlus, on every run, forever,
+    // saying nothing happened. The rollup treated the symptom. Nothing reads this:
+    // it is a boot-safety property, no detector sees it, and there is no action
+    // behind it.
+    //
+    // The DANGEROUS case is untouched and stays an Error, per file: an overlay APK
+    // on a partition zygote's FD allowlist does not cover aborts forkSystemServer.
+    // That one names a file, predicts a bootloop, and the fix is the reader's. The
+    // tally is still computed because the Error arm shares its walk; if the count
+    // is ever wanted, `nomount plan` lists every target with its partition.
     let mut holes: Vec<(&str, Vec<&Path>)> = holes.into_iter().collect();
     holes.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(b.0)));
     for (module, targets) in &holes {
@@ -3350,13 +3359,23 @@ hosts_file=/system/etc/hosts.d/x
             },
             Finding {
                 level: Level::Info,
-                check: "not FD-allowlisted for zygote",
-                detail: "3 injected file(s) on /my_product — zygote does not preload these".into(),
+                check: "whiteout leaves a measurable hole",
+                detail: "mod_a: 3 path(s) the engine cannot fully mask".into(),
             },
             Finding {
                 level: Level::Info,
-                check: "not FD-allowlisted for zygote",
-                detail: "9 injected file(s) on /my_stock — zygote does not preload these".into(),
+                check: "whiteout leaves a measurable hole",
+                detail: "mod_b: 9 path(s) the engine cannot fully mask".into(),
+            },
+            // A detail that OPENS WITH A COUNT. No shipping plan check does
+            // today -- the one that did was the per-partition FD tally, dropped
+            // because a row ending in "fine" is not a finding -- but the skip is
+            // a property of `subject_of`, not of that check, and an id keyed on a
+            // number would change every time the count did.
+            Finding {
+                level: Level::Info,
+                check: "no such partition",
+                detail: "7 rule(s) target /mi_ext which does not exist".into(),
             },
             // Same check AND same subject: the counter is the backstop.
             Finding {
@@ -3383,10 +3402,12 @@ hosts_file=/system/etc/hosts.d/x
             "id should carry its subject, got {}",
             checks[0].id
         );
-        // ...and a detail that opens with a COUNT keys on the partition, not the
-        // number, so the id survives the module gaining a file.
-        assert_eq!(checks[2].id, "not-fd-allowlisted-for-zygote-my-product");
-        assert_eq!(checks[3].id, "not-fd-allowlisted-for-zygote-my-stock");
+        // Two findings of the same check are told apart by their subject.
+        assert_eq!(checks[2].id, "whiteout-leaves-a-measurable-hole-mod-a");
+        assert_eq!(checks[3].id, "whiteout-leaves-a-measurable-hole-mod-b");
+        // ...and a detail that opens with a COUNT keys on the first PATH, never
+        // on the number, so the id survives the count changing.
+        assert_eq!(checks[4].id, "no-such-partition-mi-ext");
         // ...and the display name is untouched by the disambiguation.
         assert_eq!(checks[0].name, "module mount left by design");
         assert_eq!(checks[1].name, "module mount left by design");

@@ -11,6 +11,37 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.146 — engine v30 (unchanged)
+
+### Changed
+
+- **The notes, held to the same rule.** All eleven NOTE-level plan findings were
+  re-read asking what the reader does with them.
+
+  **Dropped: `not FD-allowlisted for zygote`.** Its text ended in the word
+  *"fine"*, and a row that says "fine" is not a finding. Its history is a warning
+  about itself: it started as one Warn per file, buried real findings under ~85
+  identical lines, and was rolled up to one note per partition — three rows on any
+  OnePlus, on every run, forever, reporting that nothing had happened. The rollup
+  treated the symptom. Nothing reads it: it is a boot-safety property, no detector
+  sees it, and there is no action behind it. The DANGEROUS case is untouched and
+  stays an Error, per file — an overlay APK on a partition zygote's FD allowlist
+  does not cover aborts forkSystemServer, and that one names a file, predicts a
+  bootloop, and the fix is the reader's.
+
+  **Shortened: `isolated-process pools` and `directory holds only injected
+  files`.** Both are genuine oracles and both stay, but each was a paragraph that
+  restated an unchanging trade-off on every run. They now state the oracle and
+  stop; the argument lives in the code comment beside them, where a maintainer
+  looks for it.
+
+  **Kept as they are:** `whiteout leaves a measurable hole` and `module mount left
+  by design` (a detector reads both), `ghost cloak verified on this kernel` (a
+  measurement of this device, not an assumption from the build), `live rules not
+  fully accounted for` (an honest "I could not measure"), `stale legacy blocklist
+  entries` (the user's own config, and it fires only when there is something to
+  remove), and the two manager-umount notes from v1.3.145.
+
 ## v1.3.145 — engine v30 (unchanged)
 
 ### Changed
