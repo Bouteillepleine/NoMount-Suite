@@ -1015,7 +1015,7 @@ fn check_dir_ino_collision(targets: &[PathBuf]) -> Check {
         }
     }
     if ours.is_empty() {
-        return na(N_DIR_INO_COLLIDE, "no synthesized directory to check".into())
+        return na(N_DIR_INO_COLLIDE, "no directory holds an injection".into())
             .meaning("Nothing here creates a folder that the ROM does not already have.");
     }
 
@@ -1059,7 +1059,7 @@ fn check_dir_ino_collision(targets: &[PathBuf]) -> Check {
         hits.dedup();
         return soft(
             N_DIR_INO_COLLIDE,
-            format!("{} synthesized directory(ies) share an inode with a stock one: {}",
+            format!("{} directory(ies) the engine created share an inode with a real one: {}",
                     hits.len(), hits.join("; ")),
             "two directories on one filesystem cannot share (st_dev, st_ino) -- an app groups \
              a ROM partition's directories by that pair and every group larger than one is a \
@@ -1082,8 +1082,8 @@ fn check_dir_ino_collision(targets: &[PathBuf]) -> Check {
     }
     pass(
         N_DIR_INO_COLLIDE,
-        format!("{} synthesized director(ies) checked against {seen} on the same partition(s); \
-                 no shared inode",
+        format!("{} director(ies) holding injections checked against {seen} on the same \
+                 partition(s); no shared inode",
                 ours.len()),
     )
     .meaning(

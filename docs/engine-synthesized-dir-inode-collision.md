@@ -3,11 +3,20 @@
 **Status:** measured and reproduced on an OP15 (engine v30). Detection shipped in
 Suite v1.3.164 as the `synthesized dir inode collision` check.
 
-**The fix is written and COMPILE-VERIFIED ONLY** — clean at `W=1` on all ten
-pinned kernels (4.9, 4.14, 4.19, 5.4, 5.10, 5.15, 6.1, 6.6, 6.12, 6.18), which is
-the same result as the unpatched baseline. **It has never been booted.**
-Validating it needs a builder run and a kernel flash. Until then treat it as
-unproven: it sets `i_ino` on live inodes.
+**The fix is written, compile-verified and BOOT-VERIFIED.** Clean at `W=1` on all
+ten pinned kernels (4.9 … 6.18), same as the unpatched baseline; then built for
+OP15 by `OnePlus-ReSukiSu_NMS` with `nomount_ref=prerelease` and flashed
+(2026-09-07).
+
+Result on the device that showed all three collisions:
+
+    before   Mms=101  Mms/lib=77   Mms/lib/arm64=89    -- 3 collisions
+    after    Mms=187  Mms/lib=188  Mms/lib/arm64=189   -- 0 collisions
+
+Stock maximum on that filesystem is 186, so the three land immediately above it:
+free by construction, and the same digit count as their neighbours. An
+independent scan (188 directories, inodes 2..189) reports no duplicated inode at
+all, and `nomount check` goes from WARN to PASS with the whole report clean.
 
 ---
 

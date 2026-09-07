@@ -11,6 +11,36 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.165 — engine v30 (unchanged)
+
+### The engine fix is boot-verified
+
+`hookless/src/nomount.c` now places a synthesized directory's inode above the
+device-wide ceiling instead of in a gap between the target's siblings. Built for
+OP15 by `OnePlus-ReSukiSu_NMS` with `nomount_ref=prerelease` and flashed:
+
+    before   Mms=101  Mms/lib=77   Mms/lib/arm64=89    -- 3 collisions
+    after    Mms=187  Mms/lib=188  Mms/lib/arm64=189   -- 0 collisions
+
+The stock maximum on that filesystem is 186, so all three land immediately above
+it — free by construction, and carrying the same digit count as their neighbours,
+which is the property the sibling search was buying and never delivered. An
+independent scan (188 directories, inodes 2..189) finds no duplicated inode
+anywhere, and the whole report is `clean`: 0 failed, 0 warnings, 16 passed.
+
+### …and this check now says what it measured
+
+The PASS line read *"108 synthesized director(ies) checked"*. It counts every
+directory that HOLDS an injection — `/product/overlay` among them — and only
+three of the 108 were ones the engine invented.
+
+The wide set is deliberate and stays: a synthesized directory is always in it so
+no collision can be missed, and a real directory cannot collide with anything
+anyway (measured: zero stock-on-stock collisions across all 24 filesystems under
+`/product`). What it must not do is call them all synthesized. It now reads
+*"director(ies) holding injections"*, and the failure arm says *"directory(ies)
+the engine created"* rather than implying every one of them was.
+
 ## v1.3.164 — engine v30 (unchanged)
 
 ### New check: every synthesized directory shares an inode with a real one
