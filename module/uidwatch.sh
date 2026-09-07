@@ -133,15 +133,40 @@ LOCK=$NMDIR/.uidwatch.lock
 # Falling back to 0 for BOTH on an unreadable clock yields _age=0, i.e. "not
 # stale" -- the conservative answer. Reaping a lock we cannot age would break the
 # mutual exclusion the reaper exists to protect.
+#
+# AGE IS THE BACKSTOP, NOT THE TEST. The reaper's premise was "old enough implies
+# dead", and it acted on that alone -- so a handler that was merely SLOW (waiting
+# on the engine-wide pass lock behind a mount, which is legitimate and bounded at
+# 25s, after a `uid apply` that can itself take a while) had its lock deleted by
+# the next handler along, which then ran concurrently. That is the same lost
+# exclusion the 180s threshold was raised to prevent, reached by waiting longer
+# rather than by dying.
+#
+# So ask whether the owner is actually gone. The lock carries the holder's pid
+# now; a live pid is never reaped, whatever its age. The age test stays as the
+# backstop for the two cases a pid cannot answer: a lock written by an older
+# build (empty, so `_lp` is 0) and a pid the kernel has since recycled onto some
+# unrelated process.
+#
+# This narrows the race rather than closing it -- the owner can still exit
+# between `kill -0` and `rm -f` -- but shell has no compare-and-delete, and the
+# residue is bounded: two handlers both serialise on the engine-wide pass lock
+# and end up applying the same list twice.
 if [ -f "$LOCK" ]; then
-    _now=$(date +%s 2>/dev/null || echo 0)
-    case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
-    _mt=$(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now")
-    case "$_mt" in ''|*[!0-9]*) _mt=$_now ;; esac
-    _age=$(( _now - _mt ))
-    [ "$_age" -ge 180 ] && rm -f "$LOCK"
+    _lp=$(cat "$LOCK" 2>/dev/null)
+    case "$_lp" in ''|*[!0-9]*) _lp=0 ;; esac
+    if [ "$_lp" = 0 ] || ! kill -0 "$_lp" 2>/dev/null; then
+        _now=$(date +%s 2>/dev/null || echo 0)
+        case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+        _mt=$(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now")
+        case "$_mt" in ''|*[!0-9]*) _mt=$_now ;; esac
+        _age=$(( _now - _mt ))
+        [ "$_age" -ge 180 ] && rm -f "$LOCK"
+    fi
 fi
-( set -o noclobber; : > "$LOCK" ) 2>/dev/null || exit 0
+# `echo $$`, not `:` -- the pid is what the liveness test above reads. noclobber
+# still makes the create atomic; the write only happens if we won it.
+( set -o noclobber; echo $$ > "$LOCK" ) 2>/dev/null || exit 0
 trap 'rm -f "$LOCK"' EXIT INT TERM
 
 # PackageManager writes the file in a couple of steps (temp file, then rename);

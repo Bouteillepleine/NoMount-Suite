@@ -11,6 +11,54 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.155 — engine v30 (unchanged)
+
+Two boot-path guarantees that only held on the paths anyone had thought of.
+
+### ksud is answered from every exit, not four of them
+
+`ksud kernel notify-module-mounted` is the metamodule hook ksud **waits on** to
+learn that module mounting has finished. `metamount.sh` called it at four exits —
+the missing-`lib.sh` arm, the unwritable-state-directory arm, the flock back-off
+and the end — each with a comment saying why leaving without it is worse than
+serving nothing: *"serving nothing is recoverable, not answering may not be."*
+
+The exits nobody had thought of were uncovered. An arithmetic syntax error kills
+a non-interactive shell on the spot in both mksh and ash — the exact class the
+bootcount sanitiser exists for — and so does a kill or an abort, and every one of
+those left ksud waiting. It is an `EXIT` trap now, defined before `lib.sh` is
+sourced so the first arm can use it, and idempotent so a trap firing after an
+explicit call costs nothing. The four explicit calls are one function.
+
+Verified against the device's own `/system/bin/sh`: a normal exit, an explicit
+early call, falling off the end, and a deliberate `$(( "3 3" + 1 ))` abort all
+notify exactly once — the last one being the case that used to notify never. Then
+verified where it counts, by rebooting: boot completes and the pass runs.
+
+### the uidwatch reaper tests death, not age
+
+The stale-lock reaper's premise was "old enough implies dead", and it acted on
+that alone. So a handler that was merely SLOW — waiting on the engine-wide pass
+lock behind a mount pass, which is legitimate and bounded at 25s, after a
+`uid apply` that takes its own time — had its lock deleted by the next handler
+along, which then ran concurrently. That is the same lost mutual exclusion the
+180s threshold was raised to prevent, reached by waiting longer instead of by
+dying.
+
+The lock carries its holder's pid now, and a live pid is never reaped whatever
+its age. The age test stays as the backstop for the two cases a pid cannot
+answer: a lock written by an older build (empty, so no pid) and a pid the kernel
+has since recycled. This narrows the race rather than closing it — the owner can
+still exit between `kill -0` and `rm -f`, and shell has no compare-and-delete —
+but the residue is bounded: two handlers both serialise on the pass lock and
+apply the same list twice.
+
+Verified on device across all four states: free, held by a live pid with a 1970
+mtime (**not** reaped, second instance backs off — the case that used to lose
+exclusion), held by a dead pid (reaped), and an empty legacy lock (age backstop
+reaps it, so an in-flight upgrade is not stranded). Then exercised for real with
+two concurrent handlers: one ran, one backed off, one `hide list re-applied` line.
+
 ## v1.3.154 — engine v30 (unchanged)
 
 Three findings from the round-7 audit that had not shipped yet.

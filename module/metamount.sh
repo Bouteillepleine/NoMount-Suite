@@ -8,6 +8,31 @@
 # Root/su is NOT managed here (sucompat handles it, mountlessly).
 MODDIR="${0%/*}"
 NMLOG_TAG=metamount
+
+# ONE notify, and it happens whatever else does.
+#
+# `ksud kernel notify-module-mounted` is the metamodule hook ksud WAITS on to
+# learn that module mounting is finished, so a path that leaves without calling
+# it turns whatever went wrong into a stalled boot sequence -- as the arms below
+# put it, serving nothing is recoverable, not answering may not be.
+#
+# There were four explicit calls, one at each exit this script knows about. The
+# exits it does NOT know about were uncovered: an arithmetic syntax error kills a
+# non-interactive shell on the spot in both mksh and ash -- the exact class the
+# bootcount sanitiser exists for -- and so does a `set -e`-style abort or a kill,
+# and every one of those left ksud waiting. A trap covers all of them.
+#
+# Defined here rather than in lib.sh because the very first caller is the arm
+# that runs when lib.sh could not be sourced. Idempotent, so the trap firing
+# after an explicit call costs nothing.
+_nm_notified=0
+nm_notify_mounted() {
+    [ "$_nm_notified" = 1 ] && return 0
+    _nm_notified=1
+    ksud kernel notify-module-mounted 2>/dev/null
+    return 0
+}
+trap nm_notify_mounted EXIT
 # nmlog / nmto / nm_set_bin / nm_fix_shell_tmp / nm_delink_ksud, and the umask.
 # GUARDED: a partial extraction that dropped lib.sh must not leave this pass
 # running with every helper undefined -- it says so on the one channel alive this
@@ -21,7 +46,7 @@ NMLOG_TAG=metamount
     # early exit that skips the notify turns a missing file into a stalled boot
     # sequence -- a far worse failure than the one being reported. Serving nothing
     # is recoverable; not answering may not be.
-    ksud kernel notify-module-mounted 2>/dev/null
+    nm_notify_mounted
     exit 1
 }
 # 0700: spoof.conf/blocklist are read as root at boot, so anything able to write
@@ -96,10 +121,8 @@ LOCK="$NMDIR/.mount.lock"
 # $NMDIR (a full or read-only /data, a label that refuses creation, the `mkdir -p`
 # above having failed) killed this script right here: no nmlog line, no
 # incident.log, and -- the part that matters -- no `ksud kernel
-# notify-module-mounted`. This is the METAMODULE hook; ksud waits on that call to
-# know module mounting is finished. Both the missing-lib.sh arm at the top and the
-# flock back-off below go out of their way to notify before leaving, for the
-# reason stated there: serving nothing is recoverable, not answering may not be.
+# notify-module-mounted`. That call is the EXIT trap's now (see the top of this
+# file), so every exit answers ksud, including the ones no arm here anticipates.
 #
 # The subshell is what makes this testable at all: a redirection failure on a
 # special built-in exits the SUBSHELL, and `if !` reads its status. Same idiom
@@ -111,7 +134,6 @@ LOCK="$NMDIR/.mount.lock"
 # is dead and a pass that wedges the device has no self-recovery.
 if ! ( : >> "$LOCK" ) 2>/dev/null; then
     nmlog "⛔ cannot create $LOCK — $NMDIR is not writable, so the bootloop guard cannot arm; NOTHING was injected this boot"
-    ksud kernel notify-module-mounted 2>/dev/null
     exit 1
 fi
 # Silence stderr for the redirection ONLY. Writing `exec 9>"$LOCK" 2>/dev/null`
@@ -147,7 +169,7 @@ if ! command -v flock >/dev/null 2>&1; then
 elif ! ls /proc/self/fd/9 >/dev/null 2>&1; then
     nmlog "fd 9 is close-on-exec in this shell, so flock cannot use it — mount pass running WITHOUT a single-run guard"
 else
-    flock -n 9 || { ksud kernel notify-module-mounted 2>/dev/null; exit 0; }
+    flock -n 9 || exit 0
 fi
 
 # ABI / BIN / NM_BIN, with the empty-getprop fallback -- see nm_set_bin in lib.sh.
@@ -396,5 +418,4 @@ if command -v ksud >/dev/null 2>&1; then
     KSU_MODULE=meta-nomount ksud module config set --temp override.description "$_desc" >/dev/null 2>&1
 fi
 
-ksud kernel notify-module-mounted 2>/dev/null
 exit 0
