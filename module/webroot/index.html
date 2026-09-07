@@ -1461,6 +1461,18 @@
   let RULES = null;
   // Did the engine answer JUST NOW? null = nobody has asked yet. See `engineDown`.
   let ENGINE_LIVE = null;
+  // Is the `disabled` marker present RIGHT NOW? null = nobody has asked yet.
+  // Read by `refreshGuard`, which is the one place that reads the live file.
+  let GUARD_TRIPPED = null;
+  // Which `refreshStatus` is allowed to paint.
+  //
+  // The function awaits twice, so two overlapping calls interleave -- and the
+  // OLDER one can resume last and overwrite the newer one's answer. That is not
+  // hypothetical: `refreshGuard` re-runs it on learning the guard has tripped,
+  // and the original call, still parked on `planByModule()`, woke up afterwards
+  // and painted "no rules — re-apply" in green over "Disabled". A stale paint
+  // now stops at the next checkpoint instead.
+  let STATUS_GEN = 0;
   function ruleDump() {
     if (RULES) return RULES;
     RULES = nm("vfs list").then(function (r) {
@@ -1494,7 +1506,9 @@
 
   // ---- status ----
   async function refreshStatus() {
+    const gen = ++STATUS_GEN;
     const d = await ruleDump();
+    if (gen !== STATUS_GEN) return d.rules;
     const dot = $("dot");
     // Record it for `engineDown`, which otherwise only knows what the cached
     // report said. Set BEFORE either branch renders anything.
@@ -1523,6 +1537,24 @@
     }
     $("mRules").textContent = d.rules;
     $("mOv").textContent = d.rro.length;
+    // THE GUARD OUTRANKS EVERY STATE BELOW. When it trips, the boot pass is
+    // skipped, so the engine holds no rules -- and the zero-rules branch further
+    // down then told the user "no rules — re-apply", in GREEN, with an "Active"
+    // headline. Re-apply means press Reload, and `mount::guard_tripped` makes
+    // every serving verb REFUSE while `disabled` exists: the one card a reader
+    // checks first pointed them at a button that cannot work, on a device that
+    // had switched itself off. The incident banner and the health line both got
+    // this right; this card did not.
+    //
+    // Worded to hold either way, because `disabled` can also be created by hand
+    // mid-session, when rules from the last good boot are still live.
+    if (GUARD_TRIPPED === true) {
+      $("state").textContent = "Disabled";
+      $("substate").textContent =
+        "the bootloop guard tripped — re-arm it under Details, then reboot";
+      dot.className = "dot bad";
+      return d.rules;
+    }
     // The engine answered, so the Suite IS active -- that is what this word says,
     // and it never varies while the driver is up. "Idle" read as "switched off" to
     // people whose setup was working perfectly, and it was doing that job badly
@@ -1548,6 +1580,7 @@
         const p = await planByModule();
         if (p) pending = Math.max(0, p.expectLive - d.rules);
       } catch (e) { /* leave it at 0: never invent a warning out of a failed read */ }
+      if (gen !== STATUS_GEN) return d.rules;
       $("substate").textContent = pending > 0
         ? `modules injected · ${pending} planned file${pending > 1 ? "s" : ""} not served yet — press Reload`
         : "modules injected";
@@ -1576,6 +1609,7 @@
       const p = await planByModule(true);
       if (p) ships = p.total;
     } catch (e) { /* leave unknown */ }
+    if (gen !== STATUS_GEN) return d.rules;
     if (ships === 0) {
       // Correct and final. Not a warning: nothing is wrong and nothing to do.
       $("substate").textContent = "nothing to inject — no module provides files";
@@ -1877,6 +1911,14 @@
     }
     const c = cr.errno === 0 ? cr.stdout.trim() : "";
     const disabled = dr.stdout.trim() === "1";
+    // Publish it, and repaint the status card if the answer changed. `refreshAll`
+    // fires its readers in PARALLEL, so that card was almost certainly painted
+    // before this function read the marker -- the same race the health line has
+    // with the engine. The repaint costs no exec: both the rule dump and the plan
+    // are cached by then.
+    const wasTripped = GUARD_TRIPPED;
+    GUARD_TRIPPED = disabled;
+    if (wasTripped !== disabled) refreshStatus();
     $("gchip").textContent = "boot " + (cr.errno !== 0 ? "?" : c === "" ? "0" : c) + "/3";
     if (disabled) {
       $("gstate").textContent = "Tripped — disabled"; $("gdot").className = "dot bad"; $("rearm").style.display = "";

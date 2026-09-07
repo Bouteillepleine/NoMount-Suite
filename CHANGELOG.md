@@ -11,6 +11,62 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.161 — engine v30 (unchanged)
+
+### A device that had switched itself off said "Active", in green
+
+When the bootloop guard trips, `disabled` is written and the boot pass is
+skipped — so the engine holds no rules at all. The status card's zero-rules
+branch then read:
+
+> **Active** · no rules — re-apply
+
+in green. "Re-apply" means press Reload, and `mount::guard_tripped` makes every
+serving verb REFUSE while `disabled` exists. The one card a reader checks first
+pointed them at a button that cannot work, on a device that had disabled itself
+— while the health line, the guard card and the incident banner directly around
+it all said so correctly, in red.
+
+Same shape as v1.3.160's engine fix, so the same remedy: the live `disabled`
+marker (read by `refreshGuard`, the one place that reads the file) is published,
+and the status card branches on it before anything else. It reads **Disabled ·
+the bootloop guard tripped — re-arm it under Details, then reboot**, in red. The
+wording holds for the other way in too, since `disabled` can be created by hand
+while rules from the last good boot are still live.
+
+### …and a stale paint could overwrite the fix
+
+`refreshStatus` awaits twice, so two overlapping calls interleave and the OLDER
+one can resume last. That is not hypothetical: the first fix above was defeated
+by it on the first try. `refreshGuard` re-ran the status paint on learning the
+guard had tripped, and the original call — still parked on `planByModule()` —
+woke up afterwards and painted "no rules — re-apply" in green over "Disabled".
+
+A generation counter now stops a superseded paint at its next checkpoint. Worth
+noting it was invisible until the second call existed: every earlier version of
+this function had exactly one caller.
+
+### How both were found
+
+The harness added in v1.3.160, driving the real page through states no amount of
+rebooting a working phone will produce. Seven checked; all now agree across the
+status card, the health line, the guard card and the incident banner:
+
+| state | reads |
+| --- | --- |
+| first run, no `audit.json` | *Not checked yet — tap to run a check* (never green) |
+| guard tripped | **Disabled** · re-arm, then reboot — red on all four surfaces |
+| a real FAIL row | *1 thing needs attention*, amber |
+| plan-only run | *Only your plan was checked — tap to check the device too* |
+| some checks unmeasured | *Not fully checked yet — 1 check had nothing to look at* |
+| no module ships content | *nothing to inject — no module provides files* |
+| content ships, nothing served | *no rules — re-apply* |
+
+Zero JS errors throughout. Two rows that looked wrong on the way — a FAIL
+carrying a passing `meaning`, and a row with no `oracle` line — were artefacts of
+flipping a verdict in the fixture, not defects: `checkRow` renders `owner` and
+`oracle` correctly when a check actually carries them.
+
 ## v1.3.160 — engine v30 (unchanged)
 
 ### The two halves of the front page can no longer disagree about the engine
