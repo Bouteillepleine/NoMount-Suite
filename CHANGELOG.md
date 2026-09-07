@@ -11,6 +11,53 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.164 — engine v30 (unchanged)
+
+### New check: every synthesized directory shares an inode with a real one
+
+`(st_dev, st_ino)` identifies a file uniquely, and directories cannot be
+hardlinked — so two directory paths reporting the same pair is **impossible on a
+real filesystem**. It is also free to look for: walk a ROM partition, group its
+directories by that pair, and every group larger than one is a directory the
+engine invented. No root, no permissions, one `stat` per entry.
+
+Measured on an OP15, every synthesized directory on the device collides:
+
+    /product/priv-app/Mms           == /product/priv-app/OplusScreenRecorder/oat/arm64   (dev 56 ino 101)
+    /product/priv-app/Mms/lib       == /product/priv-app/GmsCore/m/independent/oat       (dev 56 ino 77)
+    /product/priv-app/Mms/lib/arm64 == /product/priv-app/Wallpapers/oat/arm64            (dev 56 ino 89)
+
+Three synthesized directories, three collisions, and **no stock-on-stock
+collision anywhere on the device**. So the oracle has perfect precision and
+perfect recall here.
+
+It is not bad luck, it is arithmetic. `/product/priv-app` is an overlay mount
+holding **188 directories in inode range 2..186** — 185 available values. By
+pigeonhole at least three must collide, and the three excess are exactly the
+three the engine added. Adding N synthesized directories to a saturated inode
+space guarantees N collisions.
+
+That is also why `nm_place_ino` cannot win as written: it searches for a free gap
+between the target's SIBLINGS (here 3..71) and tracks its own handouts so two
+synthesized dirs never collide with each other — but it never sees the rest of
+the filesystem, and every value it can reach below the device-wide maximum of 186
+is already held by a nested stock directory two or three levels down.
+
+**`overlay dir inode range` does not cover this.** That check asks whether the
+inode is of a plausible MAGNITUDE, and 101 against a sibling maximum of 71 is
+well inside its 8x threshold. The number is plausible and impossible at the same
+time, which is exactly why it passed.
+
+Amber, not red, by this file's standing rule: a real measured inconsistency that
+nothing shipping is known to probe for. The oracle string carries the recipe, so
+it stays a regression canary for the engine — and it is the check that will prove
+an engine-side fix works.
+
+The walk is bounded at 20,000 directories (measured: 188 under `/product/priv-app`,
+~2.4k under `/system`) and reports `unmeasured` rather than a pass if it ever hits
+that cap. It uses `symlink_metadata`, so a symlink is never followed out of the
+partition nor counted as its target.
+
 ## v1.3.163 — engine v30 (unchanged)
 
 ### "Real mounts: none" sat directly under "1 mount by design"

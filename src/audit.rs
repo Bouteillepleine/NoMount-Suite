@@ -205,6 +205,7 @@ pub(crate) const N_SURFACES: &str = "kernel surfaces";
 pub(crate) const N_DINO_STAT: &str = "readdir ino vs stat ino";
 pub(crate) const N_INODE_BAND: &str = "injected inode band";
 pub(crate) const N_OVERLAY_DIR_INO: &str = "overlay dir inode range";
+pub(crate) const N_DIR_INO_COLLIDE: &str = "synthesized dir inode collision";
 pub(crate) const N_EROFS_SHAPE: &str = "erofs directory shape";
 pub(crate) const N_MAPS_DELETED: &str = "injected files in maps";
 pub(crate) const N_PM_OPEN: &str = "PM-published files open for a hidden app";
@@ -222,9 +223,9 @@ pub(crate) const N_XATTR_HIDDEN: &str = "xattr agrees with open for a hidden app
 /// them. Forgetting to add a new check here weakens that test; it can no longer
 /// let a check's name and its stand-in drift apart, which is what it used to.
 #[cfg(test)]
-pub(crate) const ALL_CHECK_NAMES: [&str; 13] = [
+pub(crate) const ALL_CHECK_NAMES: [&str; 14] = [
     N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DINO_STAT,
-    N_INODE_BAND, N_OVERLAY_DIR_INO, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
+    N_INODE_BAND, N_OVERLAY_DIR_INO, N_DIR_INO_COLLIDE, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
     N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN,
 ];
 
@@ -949,6 +950,147 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
     }
 }
 
+/// `(st_dev, st_ino)` for a path, which together identify a file uniquely on a
+/// real filesystem. `ino_of` alone cannot: `/product` mounts several
+/// filesystems on this hardware and each starts its inode numbering at 2.
+fn dev_ino_of(p: &Path) -> Option<(u64, u64)> {
+    fs::symlink_metadata(p).ok().map(|m| {
+        use std::os::unix::fs::MetadataExt;
+        (m.dev(), m.ino())
+    })
+}
+
+/// Two directories on one filesystem must never share an inode.
+///
+/// `(st_dev, st_ino)` identifies a file uniquely, and directories cannot be
+/// hardlinked — so two directory paths reporting the same pair is impossible on
+/// any real filesystem. It is also free to look for: walk a ROM partition, group
+/// by the pair, and every group larger than one is a synthesized directory. No
+/// root, no permissions, one stat per entry.
+///
+/// The engine mints an inode for a synthesized directory by placing it in a gap
+/// between its SIBLINGS' inodes (`nm_place_ino`), tracking its own handouts so
+/// two synthesized dirs cannot collide with each other. What it never sees is
+/// the rest of the filesystem: measured on an OP15, `/product/priv-app` is an
+/// overlay mount holding 188 directories numbered 2..186 — saturated — so the
+/// three synthesized dirs landed on 77, 89 and 101, every one of them already
+/// held by a nested stock directory two or three levels down that was never
+/// sampled. Three synthesized dirs, three collisions, and no stock-on-stock
+/// collision anywhere on the device.
+///
+/// [`N_OVERLAY_DIR_INO`] does not cover this: it asks whether the inode is of a
+/// plausible MAGNITUDE, and 101 against a sibling maximum of 71 is well inside
+/// its 8x threshold. Plausible and impossible at the same time.
+///
+/// Amber rather than red, by this file's rule: it is a real measured
+/// inconsistency, but nothing shipping is known to probe for it. The oracle
+/// string carries the recipe so it stays a regression canary for the engine.
+fn check_dir_ino_collision(targets: &[PathBuf]) -> Check {
+    // Directories the engine synthesized, identified the way
+    // `check_overlay_dir_ino` does it: a directory some rule target lives under.
+    let mut ours: HashMap<(u64, u64), PathBuf> = HashMap::new();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for parent in parents_of(targets) {
+        let mut p = parent.as_path();
+        while let Some(up) = p.parent() {
+            if up.parent().is_none() {
+                break; // `up` is "/" -- `p` is the partition root
+            }
+            p = up;
+        }
+        if !roots.iter().any(|r| r == Path::new(p)) {
+            roots.push(p.to_path_buf());
+        }
+        for anc in parent.ancestors() {
+            if anc.parent().is_none() || !anc.is_dir() {
+                continue;
+            }
+            // Only directories that exist because we serve something under them.
+            if !targets.iter().any(|t| t.starts_with(anc)) {
+                continue;
+            }
+            if let Some(k) = dev_ino_of(anc) {
+                ours.entry(k).or_insert_with(|| anc.to_path_buf());
+            }
+        }
+    }
+    if ours.is_empty() {
+        return na(N_DIR_INO_COLLIDE, "no synthesized directory to check".into())
+            .meaning("Nothing here creates a folder that the ROM does not already have.");
+    }
+
+    // Bounded walk of each partition root. 20k directories is far past any ROM
+    // partition's real population (measured: 188 under /product/priv-app, ~2.4k
+    // under /system) and keeps a pathological tree from stalling the check.
+    const MAX_DIRS: usize = 20_000;
+    let mut seen = 0usize;
+    let mut hits: Vec<String> = Vec::new();
+    let mut stack: Vec<PathBuf> = roots;
+    while let Some(dir) = stack.pop() {
+        if seen >= MAX_DIRS {
+            break;
+        }
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            // `symlink_metadata`, so a symlink is never followed out of the
+            // partition and never counted as the directory it points at.
+            let Ok(md) = fs::symlink_metadata(&p) else { continue };
+            if !md.is_dir() {
+                continue;
+            }
+            seen += 1;
+            if let Some(k) = dev_ino_of(&p) {
+                if let Some(mine) = ours.get(&k) {
+                    if *mine != p {
+                        hits.push(format!("{} == {} (dev {} ino {})", mine.display(), p.display(), k.0, k.1));
+                    }
+                }
+            }
+            stack.push(p);
+            if seen >= MAX_DIRS {
+                break;
+            }
+        }
+    }
+
+    if !hits.is_empty() {
+        hits.sort();
+        hits.dedup();
+        return soft(
+            N_DIR_INO_COLLIDE,
+            format!("{} synthesized directory(ies) share an inode with a stock one: {}",
+                    hits.len(), hits.join("; ")),
+            "two directories on one filesystem cannot share (st_dev, st_ino) -- an app groups \
+             a ROM partition's directories by that pair and every group larger than one is a \
+             directory this engine invented. nm_place_ino() samples only the target's siblings, \
+             so it cannot see an inode a nested stock directory already holds",
+        )
+        .meaning(
+            "A folder the Suite created reports the same identity number as a real ROM folder. \
+             Nothing on a real device does that, so one scan of the partition finds every folder \
+             the Suite invented.",
+        )
+        .owner("the kernel engine")
+    }
+    if seen >= MAX_DIRS {
+        return unmeasured(
+            N_DIR_INO_COLLIDE,
+            format!("walked {seen} directory(ies) and stopped at the cap without a conclusion"),
+        )
+        .meaning("The partition was too large to scan fully, so this was not settled.");
+    }
+    pass(
+        N_DIR_INO_COLLIDE,
+        format!("{} synthesized director(ies) checked against {seen} on the same partition(s); \
+                 no shared inode",
+                ours.len()),
+    )
+    .meaning(
+        "Every folder the Suite created has an identity number of its own, like a real one.",
+    )
+}
+
 /// On erofs a single-block directory's size is a closed form over its entries,
 /// so an injected or hidden name must be reflected in the parent's size.
 fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
@@ -1527,8 +1669,9 @@ fn check_engine_live() -> Check {
 
 /// Every check that reads the live rule list, by the exact name it reports
 /// under. When the dump fails these are the ones that cannot run.
-const RULE_DEPENDENT: [&str; 7] = [
+const RULE_DEPENDENT: [&str; 8] = [
     N_DINO_STAT,
+    N_DIR_INO_COLLIDE,
     N_INODE_BAND,
     N_OVERLAY_DIR_INO,
     N_EROFS_SHAPE,
@@ -1745,6 +1888,7 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
         check_dino_matches_stat(&targets),
         check_inode_band(&targets, &engine_dirs),
         check_overlay_dir_ino(&targets),
+        check_dir_ino_collision(&targets),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&targets),
         check_pm_apks_open_when_hidden(&targets),
