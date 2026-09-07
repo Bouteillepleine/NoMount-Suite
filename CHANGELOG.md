@@ -11,6 +11,31 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.149 — engine v30 (unchanged)
+
+### Fixed
+
+- **Repairs a defect introduced in v1.3.148: the two hidden-app probes had their
+  pipe sizes crossed.** Widening the xattr probe's payload from 8 to 12 bytes (to
+  carry the new `denied` count) was applied to the FIRST matching block in the
+  file, which belongs to `check_pm_apks_open_when_hidden`. The result:
+  - the PM probe's parent demanded 12 bytes from a child still writing 8, so it
+    always reported `probe child said nothing` — an UNMEASURED where it had been
+    passing;
+  - the xattr probe's parent read 8 bytes from a child writing 12, so `denied`
+    was read off an empty slice and defaulted to 0 — making the new "its
+    discriminating case could not arise" arm fire unconditionally.
+
+  Caught by flashing to hardware, not by the test suite: both probes fork, drop
+  privilege and talk over a pipe, so nothing in `cargo test` exercises them.
+  Measured on an OP15 after the repair: the PM probe opens all 167 PM-published
+  targets, and the xattr probe reports `1 of 257 injected file(s) were hidden, and
+  none of them answered xattr either` — the one ghosted injected-only path, which
+  is the case the check exists for.
+
+- Stray whitespace inside four user-facing strings, where line continuations were
+  collapsed rather than honoured.
+
 ## v1.3.148 — engine v30 (unchanged)
 
 The round-7 audit's second tier: **every place the report told you it was fine

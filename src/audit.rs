@@ -1307,12 +1307,12 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         unsafe { libc::_exit(0) };
     }
     unsafe { libc::close(wr) };
-    let mut buf = [0u8; 12];
-    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 12) };
+    let mut buf = [0u8; 8];
+    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
     unsafe { libc::close(rd) };
     let mut status = 0i32;
     unsafe { libc::waitpid(pid, &mut status, 0) };
-    if got != 12 {
+    if got != 8 {
         return unmeasured(NAME, "probe child said nothing".into())
             .meaning("The probe exited without answering, so this was not tested.");
     }
@@ -1658,12 +1658,12 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         unsafe { libc::_exit(0) };
     }
     unsafe { libc::close(wr) };
-    let mut buf = [0u8; 8];
-    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
+    let mut buf = [0u8; 12];
+    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 12) };
     unsafe { libc::close(rd) };
     let mut status = 0i32;
     unsafe { libc::waitpid(pid, &mut status, 0) };
-    if got != 8 {
+    if got != 12 {
         return unmeasured(NAME, "probe child said nothing".into())
             .meaning("The probe exited without answering, so this was not tested.");
     }
@@ -1728,18 +1728,18 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         return unmeasured(
             NAME,
             format!(
-                "{who}: no injected file was hidden from this app across {} sampled — nothing                  for the open()-vs-xattr disagreement to appear on",
+                "{who}: no injected file was hidden from this app across {} sampled — nothing for the open()-vs-xattr disagreement to appear on",
                 files.len()
             ),
         )
         .meaning(
-            "Every injected file opened for the app you hid, so the inconsistency this looks              for could not have shown up. Not tested.",
+            "Every injected file opened for the app you hid, so the inconsistency this looks for could not have shown up. Not tested.",
         );
     }
     pass(
         NAME,
         format!(
-            "{who}: {denied} of {} injected file(s) were hidden, and none of them answered              xattr either",
+            "{who}: {denied} of {} injected file(s) were hidden, and none of them answered xattr either",
             files.len()
         ),
     )

@@ -1999,7 +1999,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 level: Level::Unmeasured,
                 check: "hide list not readable",
                 detail: format!(
-                    "the per-app hide list could not be read ({e:#}), so the checks that ask                      whether a hidden app is served consistently did not run."
+                    "the per-app hide list could not be read ({e:#}), so the checks that ask whether a hidden app is served consistently did not run."
                 ),
             });
             Vec::new()
@@ -2268,7 +2268,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 level: Level::Unmeasured,
                 check: "ghost cloak could not be read",
                 detail: format!(
-                    "the engine would not list its hidden paths ({e:#}), so the existence cloak                      was not tested on this kernel. This is not a pass."
+                    "the engine would not list its hidden paths ({e:#}), so the existence cloak was not tested on this kernel. This is not a pass."
                 ),
             });
         }
@@ -2491,7 +2491,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Unmeasured,
             check: "mount table not readable",
             detail: format!(
-                "the mount table could not be read ({e:#}), so NO mount check ran. This is not                  \"no mounts\": a module mount left standing is visible to any app that reads                  its own /proc/self/mountinfo."
+                "the mount table could not be read ({e:#}), so NO mount check ran. This is not \"no mounts\": a module mount left standing is visible to any app that reads its own /proc/self/mountinfo."
             ),
         });
     }
