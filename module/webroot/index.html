@@ -1767,9 +1767,12 @@
         "you can do about it.");
     } else if (fmnt < 0) {
       say("warn", "Mount posture not measured", "no check has read the mount table yet",
-        "File injections and RRO are Prism and su is sucompat, so the Suite adds no mounts by " +
-        "construction — but nothing has measured that here yet. Open <b>Check</b> from the line " +
-        "above.");
+        // NOT "the Suite adds no mounts by construction". This is the arm that
+        // fires when nothing has measured the mount table, and it was asserting
+        // the answer anyway — an answer that is false on any device serving my_*
+        // by bind, which is the default. Say what is actually known here: nothing.
+        "Nothing has read the mount table here yet, so this says nothing either " +
+        "way. Open <b>Check</b> from the line above.");
     } else if (appNm < 0 && rootNm > 0) {
       // `su 2000` is exactly the call that stops answering once uid 2000 lands on
       // the hide list, so this is a real state, not a broken one.
