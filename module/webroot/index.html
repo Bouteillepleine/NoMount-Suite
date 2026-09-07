@@ -1459,6 +1459,8 @@
   // of them race past a null and shell out anyway -- the exact burst this exists
   // to stop, measured as four `vfs list` calls per page open.
   let RULES = null;
+  // Did the engine answer JUST NOW? null = nobody has asked yet. See `engineDown`.
+  let ENGINE_LIVE = null;
   function ruleDump() {
     if (RULES) return RULES;
     RULES = nm("vfs list").then(function (r) {
@@ -1494,6 +1496,14 @@
   async function refreshStatus() {
     const d = await ruleDump();
     const dot = $("dot");
+    // Record it for `engineDown`, which otherwise only knows what the cached
+    // report said. Set BEFORE either branch renders anything.
+    ENGINE_LIVE = d.ok;
+    // ...and repaint the health line, because `refreshAll` fires its readers in
+    // PARALLEL: `loadCheckCache` had usually already painted it from the cached
+    // report before this function learned the engine was gone. Whichever of the
+    // two finishes last now paints the same answer.
+    if (!d.ok) paintHealthLine(CHECK);
     if (!d.ok) {
       // NAME THE CAUSE AND THE ACTION. "Engine offline / kernel driver not
       // responding" was the first thing a new user with the wrong kernel saw, and
@@ -2058,7 +2068,20 @@
   // `engine: null` without anything being wrong. Reading that as "the engine is
   // down" would paint the loudest state on the page over a run that never put the
   // question.
+  // Did the engine answer JUST NOW? `refreshStatus` asks it on every refresh;
+  // null means nobody has asked yet.
+  //
+  // This exists because `engineDown` reads the CACHED report while the status
+  // card reads the live engine, and the two can disagree: replace a NoMount
+  // kernel with a plain one and `audit.json` still says `engine: 30` until a
+  // boot check overwrites it. In that window the card said "No kernel driver" in
+  // red while the health line under it said "Nothing detectable" in green, off
+  // the stale report -- the two halves of this page contradicting each other,
+  // which is the exact failure the comment on `paintHealthLine` says the shared
+  // report exists to prevent. The LIVE answer wins. Declared beside `RULES`,
+  // which it sits next to in meaning and which is assigned in the same function.
   function engineDown(r) {
+    if (ENGINE_LIVE === false) return true;
     return !!r && ranSection(r, "device") && r.engine === null;
   }
   function guardTripped(r) {

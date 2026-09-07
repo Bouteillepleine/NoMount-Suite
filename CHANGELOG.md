@@ -11,6 +11,54 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.160 — engine v30 (unchanged)
+
+### The two halves of the front page can no longer disagree about the engine
+
+The status card asks the engine directly on every refresh. The health line under
+it reads the CACHED `audit.json`. Replace a NoMount kernel with a plain one and
+that file still says `engine: 30` until a boot check overwrites it — so in that
+window the card said **No kernel driver** in red while the line directly beneath
+it said **Nothing detectable** in green, off a stale report.
+
+`paintHealthLine`'s own comment says the shared report exists precisely so "the
+front page and the detail view cannot disagree, which is the whole failure mode
+that started this work". It handled the cached engine being absent; it had no way
+to know the LIVE one was. It does now, and the live answer wins.
+
+It also has to be REPAINTED: `refreshAll` fires its readers in parallel, so the
+health line had usually already been painted from the cache before the status
+card learned the engine was gone. Whichever finishes last now paints the same
+answer.
+
+### `scripts/webui-harness.py` — the WebUI can be run outside a phone
+
+The WebUI needs `ksu.exec`, which exists only inside a root manager's WebView, so
+nothing in CI or on a desktop could execute a line of it. Every change to it this
+session was verified by reading. That is how the nested-RRO classification bug
+shipped, and how the false-green above survived being looked at directly.
+
+The script captures what each command really returns on a device, stubs
+`ksu.exec` to replay it, and writes a page any browser can open. `index.html` is
+untouched — the stub is prepended. `build --no-driver` produces the wrong-kernel
+device, which is the state a new user hits and which no amount of rebooting a
+working phone will show you.
+
+Running the page against this device's own output: **no JS errors**, 257 rules,
+139 RRO overlays, 4 modules served, and every Modules-pane row matching
+`modules.tsv` exactly. The seven commands the harness has no fixture for return
+empty and the page still renders — which is its own result.
+
+It also reached two states the device could not produce. Feeding the plan a
+`bind` entry and an `<< UNSERVABLE` entry alongside a real one confirms the
+"planned file not served yet" count excludes both: 260 planned, 258 expected
+live, 257 live, **1** pending.
+
+**The captured fixtures include `pm list packages -3 -U`** — the device's
+third-party packages and their uids, the same secret `nomount export` withholds
+from shared storage. They are written under `target/` (gitignored) and the script
+says so; do not commit them or attach them to a bug report.
+
 ## v1.3.159 — engine v30 (unchanged)
 
 `nomount mount --help` now says it is a BOOT verb, and points at `reload`.
