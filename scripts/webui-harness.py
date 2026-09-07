@@ -88,6 +88,7 @@ window.ksu = {
     else if (has('snapshot.txt')) key = 'snapshot';
     else if (has('uid list')) key = 'uidlist';
     else if (has('pm list packages')) key = 'pkgs';
+    else if (has('absorbed.list')) key = 'absorbedlist';
     else if (has(' plan ')) key = 'plan';
     else if (has('/nm') && has(' v ')) key = 'engver';
     if (!key) window.__UNMATCHED.push(cmd.slice(0, 120));

@@ -11,6 +11,23 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.169 — engine v30 (unchanged)
+
+### "Other modules' mounts: none", directly above "Already absorbed · 2"
+
+The chip counts what is still OUTSTANDING; the list beneath it records what has
+already been taken over. Both numbers were right, and the pair read as a
+contradiction — the card said **none** with two entries visible under it.
+
+The card's own prose does explain it — *"the chip above is what is left over
+after all of that"* — three paragraphs down, which is three paragraphs too late
+for a one-word chip. It now reads **"none left"** when there is a list under it,
+and plain **"none"** on a device that never absorbed anything. Both checked.
+
+Not a false green: nothing was being hidden or misreported, and the chip was
+never wrong. It just made the reader reconcile two numbers that looked like they
+disagreed.
+
 ## v1.3.168 — engine v30 (unchanged)
 
 ### The same fix, in the copy that mattered

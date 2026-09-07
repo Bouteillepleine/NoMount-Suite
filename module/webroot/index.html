@@ -3067,6 +3067,7 @@
       "done < /data/adb/nomount/absorbed.list 2>/dev/null"
     );
     const rows = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
+    ABSORBED_N = rows.length;
     if (!rows.length) { box.innerHTML = ""; return; }
     const owner = (s) => {
       const m = s.match(/\/data\/adb\/modules(?:_update)?\/([^/]+)/);
@@ -3084,15 +3085,26 @@
       }).join("");
   }
 
-  function refreshAbsorb() {
-    refreshAbsorbed();
+  // How many mounts this card has ALREADY taken over. -1 until counted.
+  let ABSORBED_N = -1;
+
+  async function refreshAbsorb() {
+    await refreshAbsorbed();
     const chip = $("abchip");
     if (!chip) return;
     const n = absorbable(CHECK);
     // -1 is "no report has counted them", which is not "none". Same rule as the
     // posture card: an unknown never renders as the reassuring answer.
     if (n < 0) { chip.textContent = "—"; chip.className = "chip"; return; }
-    chip.textContent = n === 0 ? "none" : String(n);
+    // "none LEFT" when this card is also showing a list of ones it took over.
+    //
+    // The chip counts what is still OUTSTANDING; the list under it records what
+    // has been absorbed. Both were right and the pair read as a contradiction:
+    // with two ReVanced-class modules absorbed the card said "none" directly
+    // above "Already absorbed - 2". The prose explains it three paragraphs down
+    // ("the chip above is what is left over after all of that"), which is three
+    // paragraphs too late for a one-word chip.
+    chip.textContent = n === 0 ? (ABSORBED_N > 0 ? "none left" : "none") : String(n);
     chip.className = n === 0 ? "chip ok" : "chip warn";
   }
 
