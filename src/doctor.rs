@@ -1719,34 +1719,43 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // "foreign mount in another namespace": that one contradicts the zero-mount
     // posture the same report otherwise claims, so it has news to break and stays
     // a warning.
-    // The my_* injection trial, and WHO turned it on.
+    // How my_* is being served, and who chose it. A NOTE, not a warning.
     //
-    // The marker changes how every my_* target is served -- bind becomes hookless
-    // injection -- and the Suite never writes it, so it is evidence rather than
-    // configuration. A module writing it is a different situation from a user
-    // writing it, and until now the report could not tell them apart: it read the
-    // marker as intent whoever put it there.
+    // THE RULE THIS OBEYS: the Suite does not raise alarms about things a
+    // detector cannot see. A marker under /data/adb is not an oracle; the Duck
+    // Detector, Holmes and the rest read mounts, paths, xattrs and process
+    // state, and this file is none of those. And the marker's EFFECT is fewer
+    // mounts -- my_* served by injection instead of a real bind -- so it moves
+    // the posture in the quiet direction. Warning about it made the WebUI say
+    // "1 thing needs attention" on a device whose attention nothing needed.
+    //
+    // It was a Warn because the trial has a named failure (a leaf my_* injection
+    // can trip zygote's FD allowlist at forkSystemServer). That is real, and it
+    // is not the user's job: the bootloop guard disables the Suite after three
+    // failed boots and writes incident.log, which is a MECHANISM, not an alert.
+    // The place to read about the hazard is `mount::my_hookless_enabled`.
+    //
+    // What stays worth saying is plain fact: my_* adds no mounts here, and the
+    // Suite did not write the marker -- so if the user did not either, a module
+    // did, and it is the only way to find out which.
     if Path::new(crate::mount::MY_HOOKLESS_MARKER).exists() {
         let writers = my_hookless_writers();
         f.push(Finding {
-            level: if writers.is_empty() { Level::Info } else { Level::Warn },
-            check: "my_* injection trial",
+            level: Level::Info,
+            check: "my_* served by injection",
             detail: if writers.is_empty() {
-                "the my_hookless marker is set, so my_* partitions are served by injection \
-                 instead of a bind. That is the trial this build documents: a leaf my_* \
-                 injection can trip zygote's FD allowlist at forkSystemServer, and the \
-                 bootloop guard is what recovers it. No installed module mentions the \
-                 marker, so this reads as your own opt-in."
-                    .to_string()
+                format!(
+                    "my_* partitions are served by injection instead of a real bind, so they \
+                     add no mounts. No installed module mentions the marker, so this is your \
+                     own opt-in; remove {} to go back to binds.",
+                    crate::mount::MY_HOOKLESS_MARKER
+                )
             } else {
                 format!(
-                    "the my_hookless marker is set and the Suite never writes it — {} \
-                     mention(s) it, so it is very likely not your choice. \
-                     It switches every my_* target from a bind to a hookless injection, and a \
-                     leaf my_* injection can trip zygote's FD allowlist at forkSystemServer: \
-                     that is a BOOTLOOP, recovered only by the guard disabling the Suite after \
-                     three failed boots. Check whether that module also ships my_* content — \
-                     the combination is the hazard. Remove {} to fall back to binds; {}.",
+                    "my_* partitions are served by injection instead of a real bind, so they \
+                     add no mounts. The Suite never writes the marker — {} did, which is how a \
+                     module keeps its own my_* content off the mount table. Remove {} to go \
+                     back to binds; {}.",
                     writers
                         .iter()
                         .map(|(id, file)| format!("{id} ({file})"))
@@ -2827,6 +2836,36 @@ hosts_file=/system/etc/hosts.d/x
                 "{helper} is only reached through a `.`, and the report has to say so"
             );
         }
+    }
+
+    /// A marker file is not an oracle, so it does not get a warning.
+    ///
+    /// THE RULE: the Suite reports what a detector can see. Nothing that reads
+    /// this device -- the Duck Detector, Holmes, the RASP families -- can see a
+    /// file under /data/adb, and the marker's effect is FEWER mounts (my_* served
+    /// by injection instead of a real bind), i.e. it moves the posture the quiet
+    /// way. Raising it as a warning put "1 thing needs attention" on the WebUI of
+    /// a device whose attention nothing needed.
+    ///
+    /// The trial's real hazard -- a leaf my_* injection tripping zygote's FD
+    /// allowlist -- is handled by the bootloop guard, which is a mechanism, not
+    /// something a user acts on.
+    ///
+    /// Pinned by reading this file, because the level is decided at the
+    /// construction site and there is no smaller unit to test. If someone
+    /// re-promotes it, this fails and they read the paragraph above.
+    #[test]
+    fn how_my_partitions_are_served_is_a_note_not_a_warning() {
+        let src = include_str!("doctor.rs");
+        let at = src
+            .find("check: \"my_* served by injection\",")
+            .expect("the finding is gone or was renamed -- keep the rule with it");
+        let before = &src[at.saturating_sub(200)..at];
+        assert!(
+            before.contains("level: Level::Info,"),
+            "a marker under /data/adb is invisible to every detector and REMOVES mounts; \
+             it must not be a warning"
+        );
     }
 
     /// "Delete the marker" is only actionable if the report says when it comes

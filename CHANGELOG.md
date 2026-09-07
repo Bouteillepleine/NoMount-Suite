@@ -11,6 +11,24 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.144 — engine v30 (unchanged)
+
+### Changed
+
+- **The Suite reports what a detector can see, and stops there.** The
+  `my_* injection trial` WARN is now a NOTE, renamed `my_* served by injection`,
+  and cut from a paragraph to two sentences. Nothing that reads this device — the
+  Duck Detector, Holmes, the RASP families — can see a file under `/data/adb`, and
+  the marker's effect is FEWER mounts: `my_*` served by injection instead of a
+  real bind. It moves the posture the quiet way, and it was putting
+  *"1 thing needs attention"* on the WebUI of a device whose attention nothing
+  needed. The trial's real hazard — a leaf `my_*` injection tripping zygote's FD
+  allowlist — is handled by the bootloop guard, which is a mechanism, not
+  something a user acts on; it is documented at `mount::my_hookless_enabled`,
+  where it belongs. What the note still says is plain fact: `my_*` adds no mounts
+  here, the Suite did not write the marker, and which module did. A test pins the
+  level so it cannot be re-promoted without reading why.
+
 ## v1.3.143 — engine v30 (unchanged)
 
 ### Fixed
