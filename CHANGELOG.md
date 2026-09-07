@@ -11,6 +11,32 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.166 — engine v30 (unchanged)
+
+### `lseek(SEEK_DATA)` on a synthesized directory — fixed and boot-verified
+
+A real directory answers `SEEK_DATA` and `SEEK_HOLE`; erofs uses
+`generic_file_llseek`, which returns the offset itself for `SEEK_DATA` and EOF
+for `SEEK_HOLE`. `nm_llseek` handled `SEEK_SET`/`CUR`/`END` for synthesized
+directories and sent everything else to `default: return -EINVAL` — so two
+`lseek` calls, with no root and no reference image, separated a directory the
+engine invented from a real one.
+
+Measured across `/product/priv-app` before the fix: **67 of 67 stock
+subdirectories answered, the synthesized one returned EINVAL for both.** After
+flashing a kernel built from this branch: **68 of 68 answer, 0 EINVAL**, and
+`HOLE` equals the size `stat` reports, exactly as it does for every real
+directory there.
+
+The fix mirrors `generic_file_llseek_size()` and takes the size from what
+`nm_file_getattr` reports rather than the raw 4096 placeholder — answering from
+the placeholder would have relocated the `stat`-vs-`SEEK_END` divergence the
+neighbouring arm was written to remove, not removed it.
+
+The inode-ceiling fix from v1.3.165 is unaffected: the independent scan still
+finds 188 directories over inodes 2..189 with no duplicate, and the report is
+`clean` — 0 failed, 0 warnings, 16 passed.
+
 ## v1.3.165 — engine v30 (unchanged)
 
 ### The engine fix is boot-verified

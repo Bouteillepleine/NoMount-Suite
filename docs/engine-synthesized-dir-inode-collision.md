@@ -157,8 +157,16 @@ if it hits that cap.
 
 # 2. `lseek(SEEK_DATA)` on a synthesized directory returns EINVAL
 
-**Status:** measured, fixed, compile-verified on all ten kernels. **Not yet
-boot-verified.**
+**Status:** measured, fixed, compile-verified on all ten kernels, and
+BOOT-VERIFIED on an OP15 (2026-09-07).
+
+    before   Mms  DATA=-1 EINVAL  HOLE=-1 EINVAL     stock 67/67 answered
+    after    Mms  DATA=0  HOLE=61 (== st_size)       stock 67/67 answered
+
+Re-running the separation test after the flash: **68 of 68 directories answer,
+0 EINVAL** — the synthesized one is no longer distinguishable from its stock
+siblings, and `HOLE` equals the size `stat` reports, as it does for every real
+directory on that filesystem.
 
 A real directory answers `SEEK_DATA` and `SEEK_HOLE`: erofs uses
 `generic_file_llseek`, which returns the offset itself for `SEEK_DATA` and EOF
