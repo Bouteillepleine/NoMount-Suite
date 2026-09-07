@@ -314,3 +314,146 @@ nm_delink_ksud() {
     [ "$_kimm" = 1 ] && chattr +i "$_kd" 2>/dev/null
     return 0
 }
+
+# The early absorb pass, in one place.
+#
+# Run from post-mount.sh under KernelSU/APatch, and from post-fs-data.sh on
+# Magisk (which has no post-mount stage). The two bodies were byte-identical.
+#
+# Only under the `my_hookless` marker: without it my_* targets are served by a
+# REAL BIND, and absorbing at this point would take over a bind the pass is about
+# to make.
+#
+# The `NM_MY_HOOKLESS=1` half of the gate is gone. Nothing in the module ever set
+# that variable -- and a boot script inherits no environment from a person's
+# shell, so it could not have arrived here anyway -- while `my_hookless_enabled()`
+# in src/mount.rs accepts ANY non-empty value that is not "0". So the one case
+# where the variable did something (a hand-run `NM_MY_HOOKLESS=yes nomount
+# mount`) took the injection path in Rust while these scripts stayed on the bind
+# path. The marker file is the durable state both sides agree on.
+nm_early_absorb() {
+    [ -e "$NMDIR/disabled" ] && return 0
+    [ -x "$BIN" ] || return 0
+    [ -f "$NMDIR/my_hookless" ] || return 0
+    _ea=$(nmto 60 "$BIN" absorb --early 2>&1)
+    # Status FIRST, then log: nmlog_absorb_notes runs a pipeline, and $? after
+    # one is the pipeline's -- the exact footgun the comment on _ab_rc
+    # in service.sh documents.
+    _ea_rc=$?
+    nmlog_absorb_notes "$_ea"
+    if [ "$_ea_rc" -eq 124 ]; then
+        nmlog "⚠ early absorb TIMED OUT after 60s - continuing boot"
+    elif [ "$_ea_rc" -ne 0 ]; then
+        nmlog "⚠ early absorb FAILED (rc=$_ea_rc): $(printf '%s\n' "$_ea" | tail -1)"
+    else
+        nmlog "early absorb: $(printf '%s\n' "$_ea" | tail -1)"
+    fi
+}
+
+# The bootloop guard, in one place.
+#
+# Counts this boot, trips at GUARD_MAX, and records why. `$1` names the entry
+# point for incident.log -- the only thing the two callers ever disagreed about.
+#
+# Returns 0 to proceed, 1 when the Suite is already disabled, 2 when this call
+# tripped the guard. Both callers used to carry their own copy of the whole
+# thing, ~55 lines each, and the copies had already drifted: the Magisk one was
+# silent on the "already disabled" arm and its incident report was missing
+# `modules_enabled` -- the single most useful line in the file, since a guard trip
+# is almost always "which module did I install just before this" and the answer is
+# gone by the time the user reads the report.
+#
+# This is the mechanism that recovers a device that will not boot. It is the last
+# place that should have had two implementations.
+nm_guard_bump() {
+    # The guard's own state must be a plain FILE, and a directory there disarms
+    # it completely. `cat` on a directory prints nothing and exits 1, so COUNT is
+    # 0; `echo >` on a directory fails, but `echo` is not a POSIX special builtin
+    # so the shell carries on -- leaving COUNT at 1 on EVERY boot, GUARD_MAX
+    # unreachable, and the one mechanism that recovers a wedged device dead.
+    # Measured on an OP15's own mksh, 2026-09-07: boots 1 through 5, COUNT=1,
+    # trips=no, every time, with the shell's complaint going to a stderr this
+    # path sends to /dev/null.
+    #
+    # `disabled` as a directory is worse than useless: the five shell entry
+    # points test `-f` (false -> serve normally) while `mount::guard_tripped`
+    # tests `Path::exists()` (true -> every WebUI serving verb refuses), and the
+    # WebUI's re-arm is `rm -f`, which fails on a directory -- so the user cannot
+    # clear it. All three verified on device.
+    #
+    # Any root script can `mkdir` these, and so can a fat-fingered shell.
+    for _f in bootcount disabled; do
+        if [ -e "$NMDIR/$_f" ] && [ ! -f "$NMDIR/$_f" ]; then
+            rm -rf "${NMDIR:?}/$_f" 2>/dev/null
+            nmlog "⚠ $NMDIR/$_f was not a regular file (the guard cannot use it) - removed"
+        fi
+    done
+    GUARD_MAX=3
+    COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
+    # Sanitize before the arithmetic. A bootcount corrupted to something like
+    # "3 3" (power loss mid-write, or a stray editor) makes $((COUNT + 1)) a FATAL
+    # arithmetic-syntax error in both mksh and ash -- the shell exits on the spot,
+    # so the counter is never rewritten, nothing is injected, nothing is logged,
+    # and the module stays a silent no-op on every boot from then on. Unparsable
+    # means "start over", which re-arms the guard rather than wedging it.
+    case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
+    COUNT=$((COUNT + 1))
+    echo "$COUNT" > "$NMDIR/bootcount"
+    # SYNC. This is the most crash-adjacent write in the project and the only one
+    # where "the next boot repairs it" is false by construction: a boot that
+    # wedges and is watchdog-reset inside the ext4 commit interval loses the
+    # counter, the sanitizer above reads the empty file as 0, and GUARD_MAX is
+    # never reached. Every other durable file goes through
+    # statefile::write_atomic, which syncs.
+    sync 2>/dev/null
+
+    if [ -e "$NMDIR/disabled" ]; then
+        nmlog "disabled, skipping the mount pass"
+        return 1
+    fi
+    [ "$COUNT" -lt "$GUARD_MAX" ] && return 0
+
+    nmlog "bootloop guard tripped (count=$COUNT) -> self-disabling"
+    : > "$NMDIR/disabled"
+    sync 2>/dev/null
+    # Record WHY, while the evidence is still fresh. Without this a trip leaves
+    # only an empty `disabled` file and the user has to dig through tombstones by
+    # hand to find out what crashed -- that is exactly how the /my_product
+    # FD-allowlist bootloop was found. Everything here is best-effort and must
+    # never fail the boot.
+    {
+        echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
+        echo "bootcount=$COUNT guard_max=$GUARD_MAX ($1)"
+        echo "kernel=$(uname -r)"
+        echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
+        echo "rules_at_trip=$(nmto 15 "$NM_BIN" list 2>/dev/null | wc -l)"
+        echo "modules_enabled=$(for m in /data/adb/modules/*/; do
+                [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ] && continue
+                basename "$m"
+            done | tr '\n' ' ')"
+        nm_incident_tombstone
+    } > "$NMDIR/incident.log" 2>/dev/null
+    return 2
+}
+
+# "The engine binary is not there", recorded once.
+#
+# Never silent: with no else arm on the `[ -x "$BIN" ]` test, a missing binary
+# meant a boot that injected nothing and reported nothing. `$1` names the entry
+# point, which is all the two copies of this ever differed by.
+nm_incident_missing_binary() {
+    nmlog "⛔ engine binary is missing or not executable ($BIN) — NOTHING was injected this boot"
+    {
+        echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
+        echo "reason=engine did not run: no executable at $BIN ($1)"
+        echo "abi=$ABI (ro.product.cpu.abi=$(getprop ro.product.cpu.abi 2>/dev/null))"
+        # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
+        # name, for an incident report. The names are ours (arm64-v8a, x86_64...) and
+        # `find` cannot produce a one-line summary without more plumbing than the
+        # message is worth.
+        echo "shipped_abis=$(ls "$MODDIR/bin" 2>/dev/null | tr '\n' ' ')"
+        echo "kernel=$(uname -r)"
+        echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
+        echo "note=reinstall the module zip; a partial/permission-stripped extraction is the usual cause"
+    } > "$NMDIR/incident.log" 2>/dev/null
+}

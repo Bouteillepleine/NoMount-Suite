@@ -11,6 +11,49 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.152 — engine v30 (unchanged)
+
+Deletions, part two: the boot scripts. No behaviour change intended; the one
+change that is visible is named below.
+
+### One bootloop guard, not two
+
+`metamount.sh` (KernelSU/APatch) and `post-fs-data.sh` (Magisk) each carried
+their own ~55-line copy of the guard: the not-a-regular-file repair, the
+bootcount sanitiser, the `sync`, the trip, and the incident record. This is the
+mechanism that recovers a device that will not boot, and it is the last place
+that should have had two implementations — the copies had already drifted, which
+is why the previous release shipped a test comparing their incident keys rather
+than removing one of them.
+
+`nm_guard_bump` in `lib.sh` is the only copy now. Its one argument is the entry
+point's name, which is all the two ever differed by. The drift test went with it.
+
+The same treatment for two more verbatim pairs:
+
+- **`nm_early_absorb`** — byte-identical in `post-mount.sh` (KSU/APatch) and
+  `post-fs-data.sh` (Magisk, which has no post-mount stage).
+- **`nm_incident_missing_binary`** — the "engine binary is not there" record,
+  written the same way by both entry points.
+
+Verified on an OP15 by inducing each state: a `bootcount` directory is repaired
+and named in `boot.log`, a bootcount of 2 trips the guard on the next boot and
+writes a full incident record (entry point, kernel, Suite version, rules at trip,
+the enabled module list, the newest tombstone), the boot after that logs
+*"disabled, skipping the mount pass"*, and clearing the markers restores a clean
+boot with a `clean` verdict.
+
+### `NM_MY_HOOKLESS` is gone
+
+The `my_*`-by-injection trial was gated on either a `/data/adb/nomount/my_hookless`
+marker or an `NM_MY_HOOKLESS` environment variable. **Nothing in the module ever
+set that variable**, and a boot script inherits no environment from a person's
+shell, so it could not arrive there — while the two sides disagreed about what it
+meant: `mount.rs` accepted any non-empty value that was not `0`, and the two shell
+scripts tested `= 1`. So the single case where it did anything, a hand-run
+`NM_MY_HOOKLESS=yes nomount mount`, took the injection path in Rust while the
+early-absorb pass stayed on the bind path. One durable marker, one answer.
+
 ## v1.3.151 — engine v30 (unchanged)
 
 Deletions. No behaviour was meant to change; where it did, it is named below.

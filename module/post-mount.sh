@@ -47,19 +47,4 @@ nm_set_bin
 # `disabled` is honoured so the bootloop guard in metamount.sh still recovers a
 # bad trial on its own: three failed boots write that file, and the next boot
 # skips this entirely rather than needing a flash.
-if [ ! -e "$NMDIR/disabled" ] && [ -x "$BIN" ] \
-   && { [ -f "$NMDIR/my_hookless" ] || [ "$NM_MY_HOOKLESS" = 1 ]; }; then
-    _ea=$(nmto 60 "$BIN" absorb --early 2>&1)
-    # Status FIRST, then log: nmlog_absorb_notes runs a pipeline, and $? after
-    # one is the pipeline's -- the exact footgun the comment on _ab_rc
-    # in service.sh documents.
-    _ea_rc=$?
-    nmlog_absorb_notes "$_ea"
-    if [ "$_ea_rc" -eq 124 ]; then
-        nmlog "⚠ early absorb TIMED OUT after 60s - continuing boot"
-    elif [ "$_ea_rc" -ne 0 ]; then
-        nmlog "⚠ early absorb FAILED (rc=$_ea_rc): $(printf '%s\n' "$_ea" | tail -1)"
-    else
-        nmlog "early absorb: $(printf '%s\n' "$_ea" | tail -1)"
-    fi
-fi
+nm_early_absorb

@@ -180,68 +180,9 @@ nm_delink_ksud "susfs-action guard"
 # suppresses and the counter cannot protect against -- it would keep running
 # every boot after the guard had already tripped, leaving a user bootlooping
 # with no self-recovery path.
-# The guard's own state must be a plain FILE, and a directory there disarms it
-# completely. `cat` on a directory prints nothing and exits 1, so COUNT is 0;
-# `echo >` on a directory fails, but `echo` is not a POSIX special builtin so the
-# shell carries on -- leaving COUNT at 1 on EVERY boot, GUARD_MAX unreachable,
-# and the one mechanism that recovers a wedged device dead. Measured on an OP15's
-# own mksh, 2026-09-07: boots 1 through 5, COUNT=1, trips=no, every time, with
-# the shell's complaint going to a stderr this path sends to /dev/null.
-#
-# `disabled` as a directory is worse than useless: the five shell entry points
-# test `-f` (false -> serve normally) while `mount::guard_tripped` tests
-# `Path::exists()` (true -> every WebUI serving verb refuses), and the WebUI's
-# re-arm is `rm -f`, which fails on a directory -- so the user cannot clear it.
-# All three verified on device.
-#
-# Any root script can `mkdir` these, and so can a fat-fingered shell. Two lines.
-for _f in bootcount disabled; do
-    if [ -e "$NMDIR/$_f" ] && [ ! -f "$NMDIR/$_f" ]; then
-        rm -rf "${NMDIR:?}/$_f" 2>/dev/null
-        nmlog "⚠ $NMDIR/$_f was not a regular file (the guard cannot use it) - removed"
-    fi
-done
-GUARD_MAX=3
-COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
-# Sanitize before the arithmetic. A bootcount corrupted to something like "3 3"
-# (power loss mid-write, or a stray editor) makes $((COUNT + 1)) a FATAL
-# arithmetic-syntax error in both mksh and ash -- the shell exits on the spot, so
-# the counter is never rewritten, nothing is injected, nothing is logged, and the
-# module stays a silent no-op on every boot from then on. Unparsable means
-# "start over", which re-arms the guard rather than wedging it.
-case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
-COUNT=$((COUNT + 1))
-echo "$COUNT" > "$NMDIR/bootcount"
-# SYNC. This is the most crash-adjacent write in the project and the only one
-# where "the next boot repairs it" is false by construction: a boot that wedges
-# and is watchdog-reset inside the ext4 commit interval loses the counter, the
-# sanitizer above reads the empty file as 0, and GUARD_MAX is never reached.
-# Every other durable file goes through statefile::write_atomic, which syncs.
-sync 2>/dev/null
-
-if [ -e "$NMDIR/disabled" ]; then
-    nmlog "disabled, skipping the mount pass"
-elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
-    nmlog "bootloop guard tripped (count=$COUNT) -> self-disabling"
-    : > "$NMDIR/disabled"
-    sync 2>/dev/null
-    # Record WHY, while the evidence is still fresh. Without this a trip leaves only an
-    # empty `disabled` file and the user has to dig through tombstones by hand to find out
-    # what crashed (that is exactly how the /my_product FD-allowlist bootloop was found).
-    # Everything here is best-effort and must never fail the boot.
-    {
-        echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
-        echo "bootcount=$COUNT guard_max=$GUARD_MAX"
-        echo "kernel=$(uname -r)"
-        echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
-        echo "rules_at_trip=$(nmto 15 "$NM_BIN" list 2>/dev/null | wc -l)"
-        echo "modules_enabled=$(for m in /data/adb/modules/*/; do
-                [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ] && continue
-                basename "$m"
-            done | tr '\n' ' ')"
-        nm_incident_tombstone
-    } > "$NMDIR/incident.log" 2>/dev/null
-else
+# One implementation of the bootloop guard, in lib.sh. This entry point and
+# post-fs-data.sh each used to carry their own ~55-line copy.
+if nm_guard_bump "ksu/apatch metamount path"; then
     # Restore /data/local/tmp's AOSP owner/mode/context -- see nm_fix_shell_tmp in
     # lib.sh. Guard-gated, so a tripped counter or a manual `disabled` stops it
     # like everything else; service.sh re-asserts it after boot, because ksud and
@@ -327,20 +268,7 @@ else
         # card. Record it the same way a guard trip is recorded, because from the
         # user's side the symptom is identical -- their modules stopped working --
         # and incident.log is where the WebUI already looks for the reason.
-        nmlog "⛔ engine binary is missing or not executable ($BIN) — NOTHING was injected this boot"
-        {
-            echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
-            echo "reason=engine did not run: no executable at $BIN"
-            echo "abi=$ABI (ro.product.cpu.abi=$(getprop ro.product.cpu.abi 2>/dev/null))"
-            # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
-            # name, for an incident report. The names are ours (arm64-v8a, x86_64...) and
-            # `find` cannot produce a one-line summary without more plumbing than the
-            # message is worth.
-            echo "shipped_abis=$(ls "$MODDIR/bin" 2>/dev/null | tr '\n' ' ')"
-            echo "kernel=$(uname -r)"
-            echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
-            echo "note=reinstall the module zip; a partial/permission-stripped extraction is the usual cause"
-        } > "$NMDIR/incident.log" 2>/dev/null
+        nm_incident_missing_binary "ksu/apatch metamount path"
     fi
 fi
 

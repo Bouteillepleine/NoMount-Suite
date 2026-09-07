@@ -248,17 +248,21 @@ fn is_my_partition(target: &Path) -> bool {
 }
 
 /// EXPERIMENTAL: route `my_*` targets through hookless inject instead of a real
-/// bind. Off by default (bind). Enabled by `NM_MY_HOOKLESS=1` in the metamount
-/// env or a `/data/adb/nomount/my_hookless` marker. Safe to trial because the
-/// GUARD_MAX=3 self-disable recovers a bootloop and records incident.log: if a
-/// leaf my_* inject really trips zygote's FD allowlist at forkSystemServer, boot
-/// fails <=3x and the Suite disables itself. If it boots clean, the bind fallback
-/// was unnecessary and my_* can be served mountlessly like every other partition.
+/// bind. Off by default (bind). Enabled by a `/data/adb/nomount/my_hookless`
+/// marker. Safe to trial because the GUARD_MAX=3 self-disable recovers a
+/// bootloop and records incident.log: if a leaf my_* inject really trips
+/// zygote's FD allowlist at forkSystemServer, boot fails <=3x and the Suite
+/// disables itself. If it boots clean, the bind fallback was unnecessary and
+/// my_* can be served mountlessly like every other partition.
+///
+/// There was an `NM_MY_HOOKLESS` environment override too. Nothing in the module
+/// ever set it, and a boot script inherits no environment from a person's shell,
+/// so the only way to use it was a hand-run `NM_MY_HOOKLESS=1 nomount mount` --
+/// which took the injection path HERE while post-mount.sh and post-fs-data.sh,
+/// testing `= 1` against this function's "any non-empty value that is not 0",
+/// stayed on the bind path. One durable marker, one answer.
 fn my_hookless_enabled() -> bool {
-    std::env::var_os("NM_MY_HOOKLESS")
-        .map(|v| v != "0" && !v.is_empty())
-        .unwrap_or(false)
-        || Path::new(MY_HOOKLESS_MARKER).exists()
+    Path::new(MY_HOOKLESS_MARKER).exists()
 }
 
 /// The `my_*` injection trial's opt-in marker.
@@ -887,7 +891,7 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                 }
                 Serve::Bind => {
                     // my_* is served by a real bind: hookless there trips zygote's FD
-                    // allowlist. Whether the experimental NM_MY_HOOKLESS override is on
+                    // allowlist. Whether the experimental my_hookless marker is set
                     // is `serve_mode`'s business now, not this walk's.
                     //
                     // Always served. This used to be skipped when a text heuristic decided
@@ -2009,11 +2013,15 @@ mod tests {
     /// Pinning copies was the wrong fix. The copies are gone: the pass publishes
     /// what each module contributed (`write_module_summary`), metamount.sh reads
     /// that, and the WebUI parses `nomount plan`. There is one content walk now,
-    /// in this file, and it is the one the tests above already cover. index.html
-    /// is no longer read here at all.
+    /// in this file, and it is the one the tests above already cover.
+    ///
+    /// A fourth test went the same way: `both_boot_entry_points_record_the_same
+    /// _incident_keys` compared the guard-trip incident writers in metamount.sh
+    /// and post-fs-data.sh, because the Magisk copy had been missing
+    /// `modules_enabled`. There is one writer now (`nm_guard_bump` in lib.sh),
+    /// so neither that test nor `post-fs-data.sh` is read here any more.
     const METAMOUNT: &str = include_str!("../module/metamount.sh");
     const SERVICE: &str = include_str!("../module/service.sh");
-    const POST_FS_DATA: &str = include_str!("../module/post-fs-data.sh");
 
     /// The manager card must count rules the way every other surface does.
     ///
@@ -2064,45 +2072,6 @@ mod tests {
         assert!(
             SERVICE.contains("_sum_get unmeasured"),
             "the card must read the plan's unmeasured count"
-        );
-    }
-
-    /// Keys an incident writer records for a bootloop-guard trip.
-    fn incident_keys(script: &str) -> Vec<String> {
-        let Some(a) = script.find("bootloop guard tripped") else { return Vec::new() };
-        let tail = &script[a..];
-        let Some(b) = tail.find("incident.log") else { return Vec::new() };
-        let mut keys: Vec<String> = Vec::new();
-        for line in tail[..b].lines() {
-            let Some(rest) = line.trim().strip_prefix("echo \"") else { continue };
-            for tok in rest.split_whitespace() {
-                let Some((k, _)) = tok.split_once('=') else { continue };
-                if !k.is_empty() && k.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
-                    keys.push(k.to_string());
-                }
-            }
-        }
-        keys.sort();
-        keys.dedup();
-        keys
-    }
-
-    /// Both boot entry points write the same incident record.
-    ///
-    /// `metamount.sh` (KSU/APatch) and `post-fs-data.sh` (Magisk) each write
-    /// `incident.log` on a guard trip, and the Magisk one was missing
-    /// `modules_enabled` -- which is the most useful line in the file, because a
-    /// trip is nearly always "what did I install just before this" and the answer
-    /// is gone by the time anyone reads the report.
-    #[test]
-    fn both_boot_entry_points_record_the_same_incident_keys() {
-        let ksu = incident_keys(METAMOUNT);
-        let magisk = incident_keys(POST_FS_DATA);
-        assert!(!ksu.is_empty(), "metamount.sh: no incident block found");
-        assert_eq!(
-            ksu, magisk,
-            "the two guard-trip incident writers record different keys, so a report says \
-             less on one manager than on the other"
         );
     }
 

@@ -83,76 +83,9 @@ chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 # (below), not before it -- same reasoning as metamount.sh: `disabled` has to
 # suppress all of it, or the counter cannot protect against whatever wedged the
 # boot.
-# The guard's own state must be a plain FILE, and a directory there disarms it
-# completely. `cat` on a directory prints nothing and exits 1, so COUNT is 0;
-# `echo >` on a directory fails, but `echo` is not a POSIX special builtin so the
-# shell carries on -- leaving COUNT at 1 on EVERY boot, GUARD_MAX unreachable,
-# and the one mechanism that recovers a wedged device dead. Measured on an OP15's
-# own mksh, 2026-09-07: boots 1 through 5, COUNT=1, trips=no, every time, with
-# the shell's complaint going to a stderr this path sends to /dev/null.
-#
-# `disabled` as a directory is worse than useless: the five shell entry points
-# test `-f` (false -> serve normally) while `mount::guard_tripped` tests
-# `Path::exists()` (true -> every WebUI serving verb refuses), and the WebUI's
-# re-arm is `rm -f`, which fails on a directory -- so the user cannot clear it.
-# All three verified on device.
-#
-# Any root script can `mkdir` these, and so can a fat-fingered shell. Two lines.
-for _f in bootcount disabled; do
-    if [ -e "$NMDIR/$_f" ] && [ ! -f "$NMDIR/$_f" ]; then
-        rm -rf "${NMDIR:?}/$_f" 2>/dev/null
-        nmlog "⚠ $NMDIR/$_f was not a regular file (the guard cannot use it) - removed"
-    fi
-done
-GUARD_MAX=3
-COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
-# Sanitize before the arithmetic (see metamount.sh): a bootcount corrupted to
-# something like "3 3" makes $((COUNT + 1)) a FATAL arithmetic-syntax error in
-# both mksh and ash, so the shell exits on the spot, the counter is never
-# rewritten, and the module is a silent no-op on every boot from then on.
-case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
-COUNT=$((COUNT + 1))
-echo "$COUNT" > "$NMDIR/bootcount"
-# SYNC. This is the most crash-adjacent write in the project and the only one
-# where "the next boot repairs it" is false by construction: a boot that wedges
-# and is watchdog-reset inside the ext4 commit interval loses the counter, the
-# sanitizer above reads the empty file as 0, and GUARD_MAX is never reached.
-# Every other durable file goes through statefile::write_atomic, which syncs.
-sync 2>/dev/null
-
-if [ -e "$NMDIR/disabled" ]; then
-    # Say so. metamount.sh logs this on the KSU path and this arm was a bare `:`,
-    # so a Magisk user whose guard had tripped got nothing at the one stage that
-    # knows why nothing is being injected -- and boot.log is the only record this
-    # path has. service.sh reports it later; that is not a reason to be silent
-    # here, where the decision is actually made.
-    nmlog "disabled, skipping the mount pass"
-elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
-    nmlog "bootloop guard tripped (count=$COUNT) -> self-disabling"
-    : > "$NMDIR/disabled"
-    sync 2>/dev/null
-    # Record WHY, like metamount.sh does. A trip on this path used to leave only
-    # an empty `disabled` file, so a Magisk user got the self-recovery but none
-    # of the evidence -- and the WebUI's incident card stayed blank.
-    {
-        echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
-        echo "bootcount=$COUNT guard_max=$GUARD_MAX (magisk post-fs-data path)"
-        echo "kernel=$(uname -r)"
-        echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
-        echo "rules_at_trip=$(nmto 15 "$NM_BIN" list 2>/dev/null | wc -l)"
-        # The module list, like metamount.sh writes. It was missing here, and it
-        # is the single most useful line in the file: a guard trip is almost
-        # always "which module did I install just before this", and the answer is
-        # not recoverable afterwards -- the user has usually already removed
-        # something by the time they read the report. Two incident writers, one
-        # set of keys.
-        echo "modules_enabled=$(for m in /data/adb/modules/*/; do
-                [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ] && continue
-                basename "$m"
-            done | tr '\n' ' ')"
-        nm_incident_tombstone
-    } > "$NMDIR/incident.log" 2>/dev/null
-else
+# One implementation of the bootloop guard, in lib.sh. This entry point and
+# metamount.sh each used to carry their own ~55-line copy.
+if nm_guard_bump "magisk post-fs-data path"; then
     # Restore /data/local/tmp's AOSP owner/mode/context -- see nm_fix_shell_tmp in
     # lib.sh. Same stage and same call as the KSU/APatch metamount hook, for the
     # Magisk path; service.sh re-asserts it after boot.
@@ -252,38 +185,11 @@ else
         #     and not re-served until service.sh's pass -- by which time its mount
         #     is gone and there is nothing left to absorb, leaving that path on the
         #     stock file for the whole boot. Same order as KSU now.
-        if [ -f "$NMDIR/my_hookless" ] || [ "$NM_MY_HOOKLESS" = 1 ]; then
-            _ea=$(nmto 60 "$BIN" absorb --early 2>&1)
-            # Status FIRST, then log: nmlog_absorb_notes runs a pipeline, and $? after
-            # one is the pipeline's -- the exact footgun the comment on _ab_rc
-            # in service.sh documents.
-            _ea_rc=$?
-            nmlog_absorb_notes "$_ea"
-            if [ "$_ea_rc" -eq 124 ]; then
-                nmlog "⚠ early absorb TIMED OUT after 60s - continuing boot"
-            elif [ "$_ea_rc" -ne 0 ]; then
-                nmlog "⚠ early absorb FAILED (rc=$_ea_rc): $(printf '%s\n' "$_ea" | tail -1)"
-            else
-                nmlog "early absorb: $(printf '%s\n' "$_ea" | tail -1)"
-            fi
-        fi
+        nm_early_absorb
     else
         # Never silent. See metamount.sh: with no else arm a missing binary meant
         # a boot that injected nothing and reported nothing.
-        nmlog "⛔ engine binary is missing or not executable ($BIN) — NOTHING was injected this boot"
-        {
-            echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
-            echo "reason=engine did not run: no executable at $BIN (magisk post-fs-data path)"
-            echo "abi=$ABI (ro.product.cpu.abi=$(getprop ro.product.cpu.abi 2>/dev/null))"
-            # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
-            # name, for an incident report. The names are ours (arm64-v8a, x86_64...) and
-            # `find` cannot produce a one-line summary without more plumbing than the
-            # message is worth.
-            echo "shipped_abis=$(ls "$MODDIR/bin" 2>/dev/null | tr '\n' ' ')"
-            echo "kernel=$(uname -r)"
-            echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
-            echo "note=reinstall the module zip; a partial/permission-stripped extraction is the usual cause"
-        } > "$NMDIR/incident.log" 2>/dev/null
+        nm_incident_missing_binary "magisk post-fs-data path"
     fi
 fi
 exit 0
