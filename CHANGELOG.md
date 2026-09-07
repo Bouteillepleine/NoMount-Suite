@@ -11,6 +11,41 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.157 — engine v30 (unchanged)
+
+### The card now says when a module is installed but not served
+
+Install a module and the engine keeps serving the previous set until something
+runs the pass. Nothing said so: the status card read *"modules injected"* either
+way, so the commonest sequence a user performs — install a module, open this
+page, see green — looked like it had worked.
+
+Measured rather than guessed, from two numbers the page already holds: the plan
+is what SHOULD be live, `vfs list` is what is. Only the deficit is reported,
+because the surplus direction is normal — durable whiteouts and absorbed rules
+are live and named nowhere in the module plan, which `run_reload` says in as many
+words. Binds are excluded (a my_* bind is a real mount and never appears in
+`vfs list`), and so is anything the plan has already marked `<< UNSERVABLE`.
+
+    modules injected · 1 planned file not served yet — press Reload
+
+Verified on device: 0 at rest, 1 after adding a file to a module tree, 0 again
+after Reload.
+
+### `mounts ?` → `mounts unknown`
+
+Its only explanation was a `title=` tooltip, and a phone has no hover — so the
+one tag on the page that means "we could not tell" was indistinguishable from
+one meaning "nothing found". The word is the fix; the tooltip stays for desktop.
+
+### Measured, not changed
+
+**Check-pane rows are not tooltip-only.** The audit listed "row explanations live
+only in `title=` tooltips, unreachable on a touch WebView" as a first-run defect.
+Every finding's `meaning` is rendered as visible text under its row
+(`index.html`'s `fmean` div). The Modules pane's three visibility tags were the
+only real instance, and the one that needed words now has them.
+
 ## v1.3.156 — engine v30 (unchanged)
 
 Two records that could describe something other than what is live.

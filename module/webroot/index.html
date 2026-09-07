@@ -1309,13 +1309,19 @@
     if (r.errno !== 0) return null;
     const modules = {};
     let total = 0;
+    // Entries that SHOULD have a live rule: not a my_* bind (that is a real
+    // mount, and never appears in `vfs list`), and not one the plan has already
+    // marked unservable. The difference between this and the live rule count is
+    // "you changed your modules and have not reloaded".
+    let expectLive = 0;
     (r.stdout || "").split("\n").forEach((l) => {
       // `{kind:8} {target} <- {source} [{module}]{note}` — see mount::run_plan.
       // Paths may contain spaces, so anchor on " <- " and on the LAST bracket
       // pair before an optional "  << …" note.
       const m = /^(inject|whiteout|bind)\s+(.*) <- (.*) \[([^\]]*)\]/.exec(l);
       if (!m) return;
-      const target = m[2], id = m[4];
+      const kind = m[1], target = m[2], id = m[4];
+      if (kind !== "bind" && l.indexOf("<< UNSERVABLE") < 0) expectLive++;
       const e = modules[id] || (modules[id] = { files: 0, overlay: false, vfs: false });
       e.files++;
       total++;
@@ -1324,7 +1330,7 @@
       if (/\/overlay\/[^/]+\.apk$/.test(target)) e.overlay = true;
       else e.vfs = true;
     });
-    PLAN_BY_MODULE = { total, modules };
+    PLAN_BY_MODULE = { total, expectLive, modules };
     return PLAN_BY_MODULE;
   }
 
@@ -1510,7 +1516,25 @@
     // headline this card has.
     $("state").textContent = "Active";
     if (d.rules > 0) {
-      $("substate").textContent = "modules injected";
+      // NOTHING USED TO SAY A NEW MODULE NEEDS A RELOAD.
+      //
+      // Install a module and the engine keeps serving the previous set until
+      // something runs the pass. The card said "modules injected" either way, so
+      // the commonest thing a user does next -- install a module, open this page,
+      // see green -- looked like it had worked.
+      //
+      // Measured, not guessed: the plan is what SHOULD be live and `vfs list` is
+      // what is. Only the deficit is reported, because the surplus direction is
+      // normal -- durable whiteouts and absorbed rules are live and named nowhere
+      // in the module plan, which `run_reload` says in as many words.
+      let pending = 0;
+      try {
+        const p = await planByModule();
+        if (p) pending = Math.max(0, p.expectLive - d.rules);
+      } catch (e) { /* leave it at 0: never invent a warning out of a failed read */ }
+      $("substate").textContent = pending > 0
+        ? `modules injected · ${pending} planned file${pending > 1 ? "s" : ""} not served yet — press Reload`
+        : "modules injected";
       dot.className = "dot ok";
       return d.rules;
     }
@@ -2639,7 +2663,7 @@
       // table. NoMount-served modules are mountless by construction; a module that
       // mounts on its own is visible to any scanner reading /proc/*/mountinfo.
       const vis = mnt < 0
-        ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown — it is not a claim that it owns no mount">mounts ?</span>`
+        ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown — it is not a claim that it owns no mount">mounts unknown</span>`
         : mnt > 0
         ? `<span class="tag warn" title="This module has ${mnt} mount(s) of its own in the mount table — visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
         : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
