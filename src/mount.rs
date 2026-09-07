@@ -1655,6 +1655,188 @@ fn served_apks_applied(
 mod tests {
     use super::*;
 
+    /// The two shell/JS surfaces that re-implement this file's content walk.
+    ///
+    /// `metamount.sh` badges each module in the root manager; `index.html` has
+    /// TWO copies -- the "nothing to inject" probe and the Modules pane -- and on
+    /// 2026-09-07 all four disagreed with each other about which top-level
+    /// directories are partitions. Every test below reads these, so a copy that
+    /// drifts fails the build instead of being found on a phone.
+    const METAMOUNT: &str = include_str!("../module/metamount.sh");
+    const SERVICE: &str = include_str!("../module/service.sh");
+    const POST_FS_DATA: &str = include_str!("../module/post-fs-data.sh");
+    const WEBROOT: &str = include_str!("../module/webroot/index.html");
+
+    /// Pull every `case … in data|…) continue` pattern list out of a shell or JS
+    /// source, whatever quoting, line-continuation or string-concatenation it is
+    /// wrapped in.
+    ///
+    /// Anchored on the list's own first two entries, not on `case `: the files
+    /// contain other `case` statements, and a looser anchor spanned from one of
+    /// those to the next `) continue` and returned a list nobody wrote. It cannot
+    /// anchor on ` in data` either -- metamount.sh puts the `in` at the end of one
+    /// line and the patterns on the next.
+    fn partition_root_lists(src: &str) -> Vec<Vec<String>> {
+        let anchor = format!("{}|{}", NON_PARTITION_ROOTS[0], NON_PARTITION_ROOTS[1]);
+        let mut out = Vec::new();
+        for (start, _) in src.match_indices(anchor.as_str()) {
+            let Some(end) = src[start..].find(") continue") else { continue };
+            // Everything that is not a pattern character is quoting, whitespace,
+            // a backslash continuation or a JS `+`: drop it and keep the `|`s.
+            let pats: String = src[start..start + end]
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '|')
+                .collect();
+            out.push(pats.split('|').filter(|s| !s.is_empty()).map(str::to_string).collect());
+        }
+        out
+    }
+
+    /// Every copy of `NON_PARTITION_ROOTS` must BE `NON_PARTITION_ROOTS`.
+    ///
+    /// They had drifted three ways at once. `metamount.sh` and the Modules pane
+    /// were both missing `data_mirror` and `d` -- and `d` is the debugfs symlink
+    /// this list exists for, added after a module shipping a top-level `d/` tree
+    /// was injected into debugfs on an OP15. The "nothing to inject" probe in the
+    /// same HTML file had the complete list, so one page could call a module
+    /// "script only" in one pane while counting it as injectable in another.
+    #[test]
+    fn every_shell_copy_of_the_partition_root_list_matches_this_one() {
+        assert_eq!(
+            (NON_PARTITION_ROOTS[0], NON_PARTITION_ROOTS[1]),
+            ("data", "data_mirror"),
+            "the extractor anchors on the first two entries; reorder them and fix it too"
+        );
+        let want: Vec<String> = NON_PARTITION_ROOTS.iter().map(|s| (*s).to_string()).collect();
+        let mut found = 0;
+        for (name, src) in [("metamount.sh", METAMOUNT), ("webroot/index.html", WEBROOT)] {
+            let lists = partition_root_lists(src);
+            assert!(!lists.is_empty(), "{name}: no partition-root case list found");
+            for (i, got) in lists.iter().enumerate() {
+                assert_eq!(
+                    got, &want,
+                    "{name}: copy #{i} of NON_PARTITION_ROOTS has drifted from src/mount.rs"
+                );
+                found += 1;
+            }
+        }
+        assert_eq!(found, 3, "expected three copies: metamount.sh + two in index.html");
+    }
+
+    /// No copy may exclude `my_*`.
+    ///
+    /// They all did, from before my_* was served at all. The Suite serves it now
+    /// -- by bind, or by injection under the `my_hookless` marker -- so the
+    /// exclusion made a module shipping ONLY my_* content look like a module
+    /// shipping nothing. Measured on an OP15, 2026-09-07: `op15_3d_lockscreen_wp`
+    /// ships one file under `my_product`, had one live rule serving it, got no
+    /// badge in the manager at all, and the WebUI called it "script only — Ships
+    /// no partition directory at all".
+    #[test]
+    fn no_copy_of_the_content_walk_skips_my_partitions() {
+        for (name, src) in [("metamount.sh", METAMOUNT), ("webroot/index.html", WEBROOT)] {
+            assert!(
+                !src.contains("my_*) continue"),
+                "{name}: still excludes my_* from the content walk, which the injector serves"
+            );
+        }
+    }
+
+    /// A module's content walk has to see a whiteout.
+    ///
+    /// `is_whiteout_marker` accepts a 0:0 CHAR DEVICE, the plan serves it, and a
+    /// debloat module -- ~14% of the ecosystem -- ships nothing else. Both shell
+    /// copies tested `-type f`, so such a module read as empty: measured on an
+    /// OP15, 2026-09-07, SAN (systemapp_nuker) had two whiteouts live and got no
+    /// manager badge and a "0 files … contributes nothing" row in the WebUI.
+    ///
+    /// Written as "every `-type f` is part of a `-type f -o -type c` group" so a
+    /// new walk cannot be added with the old test.
+    #[test]
+    fn every_content_walk_counts_char_devices() {
+        for (name, src) in [("metamount.sh", METAMOUNT), ("webroot/index.html", WEBROOT)] {
+            // CODE only. Both files explain the pairing in a comment, and a
+            // comment quoting `-type f` is not a walk that misses a whiteout.
+            let code: String = src
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with('#') && !t.starts_with("//")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let plain = code.matches("-type f").count();
+            let paired = code.matches("-type f -o -type c").count();
+            assert!(plain > 0, "{name}: no content walk found");
+            assert_eq!(
+                plain, paired,
+                "{name}: a `-type f` test is not paired with `-type c`, so it cannot see a \
+                 whiteout marker and a debloat module reads as empty"
+            );
+        }
+    }
+
+    /// The manager card must count rules the way every other surface does.
+    ///
+    /// `health.rs` reports `rules` as INJECTS and `whiteouts` as its own field.
+    /// The card counted every non-virtual-dir row, so with a debloat module
+    /// installed it said 259 while `check`, `check --json` and `health.txt` all
+    /// said 257 -- measured on an OP15, 2026-09-07. That is the discrepancy the
+    /// virtual-dir exclusion was added to remove, reached through the other kind.
+    #[test]
+    fn the_manager_card_excludes_whiteouts_from_its_rule_count() {
+        for (name, src) in [("metamount.sh", METAMOUNT), ("service.sh", SERVICE)] {
+            let line = src
+                .lines()
+                .find(|l| l.trim_start().starts_with("_rules=$("))
+                .unwrap_or_else(|| panic!("{name}: no _rules= line"));
+            assert!(
+                line.contains("virtual dir") && line.contains("whiteout"),
+                "{name}: the card's rule count must exclude BOTH virtual dirs and whiteouts, \
+                 or it disagrees with health.txt: {line}"
+            );
+        }
+    }
+
+    /// Keys an incident writer records for a bootloop-guard trip.
+    fn incident_keys(script: &str) -> Vec<String> {
+        let Some(a) = script.find("bootloop guard tripped") else { return Vec::new() };
+        let tail = &script[a..];
+        let Some(b) = tail.find("incident.log") else { return Vec::new() };
+        let mut keys: Vec<String> = Vec::new();
+        for line in tail[..b].lines() {
+            let Some(rest) = line.trim().strip_prefix("echo \"") else { continue };
+            for tok in rest.split_whitespace() {
+                let Some((k, _)) = tok.split_once('=') else { continue };
+                if !k.is_empty() && k.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                    keys.push(k.to_string());
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Both boot entry points write the same incident record.
+    ///
+    /// `metamount.sh` (KSU/APatch) and `post-fs-data.sh` (Magisk) each write
+    /// `incident.log` on a guard trip, and the Magisk one was missing
+    /// `modules_enabled` -- which is the most useful line in the file, because a
+    /// trip is nearly always "what did I install just before this" and the answer
+    /// is gone by the time anyone reads the report.
+    #[test]
+    fn both_boot_entry_points_record_the_same_incident_keys() {
+        let ksu = incident_keys(METAMOUNT);
+        let magisk = incident_keys(POST_FS_DATA);
+        assert!(!ksu.is_empty(), "metamount.sh: no incident block found");
+        assert_eq!(
+            ksu, magisk,
+            "the two guard-trip incident writers record different keys, so a report says \
+             less on one manager than on the other"
+        );
+    }
+
     fn entry(module: &str, target: &str, source: &str) -> PlanEntry {
         PlanEntry {
             module: module.to_string(),

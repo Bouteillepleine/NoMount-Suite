@@ -2495,16 +2495,42 @@
       // `[ -L ]` mirrors the injector's non-following file_type(): a top-level symlink
       // (e.g. OnePlus_Dialer_Universal's `product -> ./system/product`) is NOT a partition
       // root to walk — counting it would double-count the files it points at.
-      'roots=""; for pd in "$d"*/; do [ -d "$pd" ] || continue; [ -L "${pd%/}" ] && continue; n=$(basename "$pd"); ' +
-      'case "$n" in data|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp' +
-      '|debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin) continue;; ' +
-      'my_*) continue;; esac; [ -d "/$n" ] || continue; roots="$roots $pd"; done; ' +
-      '[ -z "$roots" ] && [ "$st" = on ] && st=nopart; ' +
+      // NON_PARTITION_ROOTS from src/mount.rs, VERBATIM -- the same list the
+      // "nothing to inject" probe above uses, which is the point: this copy was
+      // missing `data_mirror` and `d`, so the two panes of this page could
+      // classify one module differently. A test in `mount::tests` pins both
+      // against the Rust list now.
+      //
+      // `my_*` is NOT excluded. It was, from before my_* was served at all, and
+      // the Suite serves it now -- so a module shipping ONLY my_* content got
+      // `roots=""` and was labelled "script only — Ships no partition directory
+      // at all … nothing for the Suite to inject", which is a flat contradiction
+      // of the rule the engine was serving for it. Measured on an OP15,
+      // 2026-09-07: `op15_3d_lockscreen_wp`, one my_product file, one live rule.
+      //
+      // `set --` rather than a space-joined `$roots`: these are third-party
+      // module DIRECTORY NAMES going into an unquoted expansion, so a name with a
+      // space became two find arguments and one beginning with `-` became a find
+      // primary. metamount.sh was fixed for exactly this and this copy was not.
+      'set --; for pd in "$d"*/; do [ -d "$pd" ] || continue; [ -L "${pd%/}" ] && continue; n=$(basename "$pd"); ' +
+      'case "$n" in data|data_mirror|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp' +
+      '|debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin|d) continue;; ' +
+      'esac; [ -d "/$n" ] || continue; set -- "$@" "$pd"; done; ' +
+      '[ "$#" -eq 0 ] && [ "$st" = on ] && st=nopart; ' +
       'mech=""; cnt=0; ' +
+      // `-type c` as well as `-type f`: a Magisk 0:0 char device is a WHITEOUT,
+      // the plan serves it, and a debloat module ships nothing else. Without it
+      // SAN (systemapp_nuker) -- two whiteouts, both live -- rendered as
+      // "0 files — Has a partition directory … but no files inside it, so it
+      // contributes nothing". Measured on an OP15, 2026-09-07.
+      //
+      // Symlinks stay out: a `system/product -> ../product` convergence link is
+      // one level inside a walked root, and `serve_mode` refuses its target as a
+      // bare partition root, so counting it would count something never served.
       'if [ "$st" = on ]; then ov=0; vf=0; ' +
-      'cnt=$(find $roots -type f 2>/dev/null | wc -l); ' +
-      '[ -n "$(find $roots -path "*/overlay/*.apk" -print -quit 2>/dev/null)" ] && ov=1; ' +
-      '[ -n "$(find $roots -type f ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
+      'cnt=$(find "$@" \\( -type f -o -type c \\) 2>/dev/null | wc -l); ' +
+      '[ -n "$(find "$@" -path "*/overlay/*.apk" -print -quit 2>/dev/null)" ] && ov=1; ' +
+      '[ -n "$(find "$@" \\( -type f -o -type c \\) ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
       'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
       'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
       'echo "$id|$st|$mech|$cnt|$mnt"; done'

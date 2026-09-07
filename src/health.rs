@@ -645,12 +645,79 @@ fn is_shared_storage(p: &Path) -> bool {
     SHARED_ROOTS.iter().any(|r| p.starts_with(r))
 }
 
+/// Why the export destination's PARENT cannot hold a new directory, or `None`
+/// when nothing is in the way (including when it simply does not exist yet --
+/// `create_dir_all` makes that case).
+///
+/// This exists because `create_dir_all` reports the wrong thing for the DEFAULT
+/// destination. Measured on an OP15, 2026-09-07, from `adb shell su`:
+///
+///     $ nomount export /sdcard/Download
+///     Error: create /sdcard/Download/nm-diag-20260907-074812
+///     Caused by: File exists (os error 17)
+///
+/// `/sdcard` is a symlink to `/storage/self/primary`, which does not resolve in
+/// the mount namespace an adb-launched `su` gets. `create_dir_all` fails on the
+/// leaf with ENOENT, walks up, reaches `mkdir("/sdcard")` -- which answers
+/// EEXIST, because the SYMLINK is there -- then asks `/sdcard`.is_dir(), which
+/// follows the link into nothing and says false, so it surfaces EEXIST and
+/// attributes it to the leaf. The reader is told a directory that has never
+/// existed already does, and goes looking for a stale export to delete.
+///
+/// That is the commonest way anyone runs this command: `/sdcard/Download` is the
+/// default, and collecting a bug report from `adb shell su` is what the command
+/// is for. The WebUI is unaffected -- it runs where the namespace is right.
+fn base_unusable(base: &Path) -> Option<String> {
+    // Walk UP, the way create_dir_all does. The obstacle is almost never the path
+    // that was typed: the user passes `/sdcard/Download` and it is `/sdcard`, one
+    // level above, that does not resolve. A first version of this checked only the
+    // base itself and the device answered it immediately -- exporting to
+    // `/data/local/tmp/danglingbase/Download` still produced the bare
+    // "File exists" this function exists to replace.
+    for p in base.ancestors() {
+        if p.as_os_str().is_empty() {
+            continue;
+        }
+        // The first real directory on the way up ends it: everything below is
+        // absent, which is exactly what create_dir_all is for.
+        if p.is_dir() {
+            return None;
+        }
+        // read_link BEFORE exists(): `exists()` follows symlinks, so a dangling
+        // one answers false there and would be misread as "not created yet".
+        if let Ok(t) = fs::read_link(p) {
+            return Some(format!(
+                "{} is a symlink to {}, and that path does not resolve here. On Android \
+                 /sdcard points into the per-user storage namespace, which a root shell \
+                 started by `su` from adb does not always share -- mkdir then answers \
+                 EEXIST for the symlink itself, which reads as \"File exists\" for a \
+                 directory that does not exist. Pass a real path instead: \
+                 nomount export /data/local/tmp",
+                p.display(),
+                t.display()
+            ));
+        }
+        if p.exists() {
+            return Some(format!("{} exists and is not a directory", p.display()));
+        }
+        // Absent, and not a dangling link: keep walking up.
+    }
+    None
+}
+
 /// `nomount export [dir]` — dump diagnostics to a timestamped, stealth-named
 /// folder (default under /sdcard/Download) for sharing. Best-effort per file.
 pub fn run_export(dir: Option<String>) -> Result<()> {
     let ts = read_cmd("date", &["+%Y%m%d-%H%M%S"]);
     let base = dir.unwrap_or_else(|| "/sdcard/Download".to_string());
     let out = format!("{base}/nm-diag-{ts}");
+    // Ask about the BASE before creating the leaf, so the error names the real
+    // obstacle. See `base_unusable`: without this, the default destination
+    // produced "create /sdcard/Download/nm-diag-… Caused by: File exists" for a
+    // directory that does not exist and never did.
+    if let Some(why) = base_unusable(Path::new(&base)) {
+        anyhow::bail!("cannot export to {base}: {why}");
+    }
     fs::create_dir_all(&out).with_context(|| format!("create {out}"))?;
 
     let nm = Nm::new();
@@ -802,6 +869,59 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The export destination's parent, judged in the three states that matter.
+    ///
+    /// The dangling-symlink row is the DEFAULT destination on the commonest
+    /// invocation. Measured on an OP15, 2026-09-07, from `adb shell su`:
+    /// `/sdcard` is a symlink to `/storage/self/primary`, which does not resolve
+    /// in that shell's mount namespace, so `create_dir_all` walked up to
+    /// `mkdir("/sdcard")`, got EEXIST for the symlink, found `is_dir()` false and
+    /// surfaced "create /sdcard/Download/nm-diag-… Caused by: File exists" -- for
+    /// a directory that has never existed. The reader goes looking for a stale
+    /// export to delete.
+    #[test]
+    fn an_unresolvable_export_base_is_named_instead_of_reported_as_existing() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+
+        // A real directory: nothing in the way.
+        assert_eq!(base_unusable(d.path()), None);
+
+        // Absent, and not a link: create_dir_all builds the whole chain.
+        assert_eq!(base_unusable(&d.path().join("not/here/yet")), None);
+
+        // The /sdcard case -- and it has to be caught through the path the user
+        // actually types, which names the link's CHILD. Checking only the base was
+        // the first attempt, and the phone refused it on the spot: exporting to
+        // `<dangling>/Download` still produced the bare "File exists".
+        let dangling = d.path().join("sdcard");
+        symlink("/storage/self/primary", &dangling).unwrap();
+        let why = base_unusable(&dangling.join("Download"))
+            .expect("a dangling ANCESTOR must be refused, not just a dangling base");
+        assert!(why.contains("symlink"), "must name the symlink: {why}");
+        assert!(
+            why.contains("/storage/self/primary"),
+            "must name where it points: {why}"
+        );
+        assert!(
+            why.contains("sdcard") && !why.contains("Download"),
+            "must name the ancestor that is the obstacle, not the path typed: {why}"
+        );
+        // Same link, asked about directly.
+        assert!(base_unusable(&dangling).is_some());
+        // It may quote the misleading errno -- it SHOULD, that is the string the
+        // reader arrived with -- but only while explaining it away.
+        assert!(
+            why.contains("does not resolve") && why.contains("does not exist"),
+            "must explain the EEXIST rather than restate it: {why}"
+        );
+
+        // Something that is not a directory at all.
+        let f = d.path().join("afile");
+        fs::write(&f, b"x").unwrap();
+        assert!(base_unusable(&f).is_some_and(|w| w.contains("not a directory")));
+    }
 
     /// `verify` had NO test proving it detects anything: the comparison lived
     /// inside a function that reads a file and prints, so the only observation

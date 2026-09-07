@@ -555,7 +555,15 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # are not rules. The card is the surface most users read, so having it
     # disagree with every other number the Suite prints made a real discrepancy
     # indistinguishable from a bug. Measured on OP15: 260 lines, 3 virtual dirs.
-    _rules=$(_nmcount -vc '(virtual dir)')
+    #
+    # ...and the (whiteout) rows, for the same reason and found the same way, one
+    # kind later: health.rs counts `rules` as INJECTS and reports `whiteouts` as
+    # its own field, so on a device with a debloat module installed the card said
+    # 259 while `check`, `check --json` and health.txt all said 257 (measured on
+    # an OP15, 2026-09-07, with SAN installed and two whiteouts live). Hidden
+    # paths are reported as their own field below, which is what health.txt does.
+    _rules=$(_nmcount -v -c -E '\(virtual dir\)|\(whiteout\)')
+    _wo=$(_nmcount -c '(whiteout)')
     _rro=$(_nmcount '/overlay/[^ ]*\.apk')
     # Match on mountinfo FIELD 4, the mount's root within its own filesystem. A bind
     # out of a module reads "/adb/modules/<id>/..." there, because /data is its own
@@ -604,19 +612,19 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
         # number on this card describes a device that is serving nothing, and
         # naming a symptom ("0 rules") instead of the cause sends the reader
         # looking in the wrong place.
-        _health="⛔ the mount pass never ran — see the Last incident card"
+        _health="⛔ mount pass never ran — see the WebUI"
     elif [ "$_consbad" = 1 ]; then
-        _health="⚠️ per-UID inconsistency — see the NoMount WebUI"
+        _health="⚠️ per-UID inconsistency — see the WebUI"
     elif [ "${_err:-0}" -gt 0 ]; then
-        _health="⚠️ $_err error(s) — see the NoMount WebUI"
+        _health="⚠️ $_err error(s) — see the WebUI"
     elif [ "${_wrn:-0}" -gt 0 ]; then
         _health="$_wrn warning(s)"
     elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
         _health="healthy"
     elif [ "${_docok:-0}" = 1 ]; then
-        _health="health unknown — no health record this boot"
+        _health="health unknown — no record this boot"
     else
-        _health="health unknown — the plan check did not finish"
+        _health="health unknown — plan check did not finish"
     fi
     # Distinguish a LEAK from a mount absorb leaves on purpose (a Zygisk/Xposed
     # hook bind). Counting them the same made the card read
@@ -631,20 +639,20 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     # non-numeric here means "the record does not know", which is the same case as
     # a stale/absent record: fall back to the count we just took live.
     case "$_fgn" in ''|*[!0-9]*) _fgn=$_mnt ;; esac
+    # `_tail` is gone. It restated the architecture -- "Prism VFS + RRO, su via
+    # sucompat" -- on every refresh, which is what module.prop already says and
+    # does not change between boots, and it was the half the manager TRUNCATED:
+    # measured on an OP15, the card ended "...or a my_* bind of ou…". The state
+    # word below carries the whole meaning; the explanation is in the WebUI.
     if [ "${_fgn:-0}" -gt 0 ]; then
-        _mstate="⚠ $_fgn module mount(s)"
-        _tail="Prism VFS + RRO injection is mountless; $_fgn foreign mount(s) present"
+        _mstate="⚠ $_fgn foreign mount(s)"
     elif [ "${_mnt:-0}" -gt 0 ]; then
-        _mstate="$_mnt by design"
-        # Two causes now, not one. `mounts_foreign` excludes a hook framework's
-        # bind (absorb never takes those over) AND a my_* bind the Suite makes
-        # itself (that is how my_* is served unless `my_hookless` is set), so
-        # naming only the first described the wrong thing on any device with a
-        # module shipping my_* content -- which is most OnePlus devices.
-        _tail="mountless where it can be: Prism VFS + RRO, su via sucompat ($_mnt mount(s) left alone by design -- a hook framework's, or a my_* bind of ours)"
+        # `by design` covers two causes: a hook framework's bind (absorb never
+        # takes those over) and a my_* bind of ours (how my_* is served unless
+        # `my_hookless` is set).
+        _mstate="$_mnt mount by design"
     else
         _mstate="0 mounts"
-        _tail="fully mountless: Prism VFS + RRO, su via sucompat"
     fi
     # The manager's kernel_umount rides along on the card. It can hide nothing
     # the Suite serves -- injections are VFS redirects, so the kernel umount list
@@ -658,7 +666,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     if [ "$_mu" = "on" ]; then
         # shellcheck disable=SC1111  # typographic quotes on purpose: this names
         # the manager's own label inside a sentence shown to the user.
-        _muc=" · ⚠️ turn OFF “kernel umount” in your root manager (it hides nothing here)"
+        _muc=" · ⚠️ turn OFF “kernel umount”"
         _mul=", ⚠ manager kernel_umount is ON — turn it off"
     else
         _muc=""
@@ -671,8 +679,19 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -f "$NMDIR/disabled" 
     if [ "${_hookran:-1}" = 0 ]; then _mark="⛔"
     elif [ "${_rules:-0}" = 0 ]; then _mark="⚠️"
     else _mark="✅"; fi
+    # Hidden paths only when there are any: an extra " · 0 hidden" on every device
+    # that has no debloat module is exactly the noise this card was shortened to
+    # remove.
+    [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
+    # ONE SHORT LINE. The manager truncates, and it truncated the old one: 200+
+    # characters ending "...or a my_* bind of ou…", so the reader never saw the
+    # end. The `[NoMount …]` bracket is gone too -- the card sits directly under
+    # the module's own name, so prefixing it with the project name spent nine
+    # characters saying what the line above already said. (The PER-MODULE badges
+    # keep theirs: those go on somebody else's module, where the marker is the
+    # only thing identifying who wrote the text.)
     KSU_MODULE=meta-nomount ksud module config set --temp override.description \
-        "[NoMount $_mark $_rules rules · $_rro RRO · $_mstate] $_health$_muc — $_tail" \
+        "$_mark $_rules rules · $_rro RRO$_wof · $_mstate — $_health$_muc" \
         >/dev/null 2>&1
     nmlog "card refreshed ($_rules rules, $_mstate, $_health$_mul)"
 fi

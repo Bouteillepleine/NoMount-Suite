@@ -11,6 +11,118 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.142 — engine v30 (unchanged)
+
+Closes the nine findings of the 2026-09-07 audit of v1.3.141, which was the first
+audit run with a **debloat module installed**: SAN (`chisewaguri/systemapp_nuker`)
+v2.2.2 on an OP15 (CPH2747). Every finding below except the last two was invisible
+until a device planned a whiteout, and until then no device in the fleet ever had
+(`plan_whiteouts=0` on both phones, recorded in the v1.3.141 audit as an
+unexercised path).
+
+The Suite served SAN correctly throughout — 2 whiteouts across `/product` and
+`/my_stock`, zero mounts added, hot load/unload via `reload` clean, and the erofs
+parent measured `size=1043 nlink=44` against a model of `12*44 + 515 = 1043`, i.e.
+the engine's size/nlink recompute leaves **no arithmetic trace**. What broke was
+everything that DESCRIBES that work.
+
+### Fixed
+
+- **The manager card counted whiteouts as rules; nothing else did.** `health.rs`
+  reports `rules` as injects and `whiteouts` as its own field, and `check`,
+  `check --json` and `health.txt` all agree — but the card counted every row that
+  was not a `(virtual dir)`. Measured on an OP15 with SAN installed: the card said
+  **259 rules** while every other surface said **257**. That is precisely the
+  discrepancy the virtual-dir exclusion was added to remove, reached through the
+  other kind. Both writers now exclude whiteouts and report hidden paths as their
+  own `· N hidden` field. Pinned by a test that reads the shell.
+
+- **A whiteout-only module was reported as contributing nothing.** `metamount.sh`
+  and the WebUI's Modules pane both detect content with `find … -type f`, which
+  never matches a Magisk 0:0 char device — so a debloat module, which ships
+  nothing else, read as empty. Measured: SAN had two live, serving rules and got
+  **no `[NoMount · …]` badge at all** in the manager, and a row in the WebUI
+  reading *"0 files — Has a partition directory … but no files inside it, so it
+  contributes nothing."* Both walks now match `-type c` as well. Symlinks stay
+  out deliberately: a `system/product -> ../product` convergence link resolves to
+  a bare partition root, which `serve_mode` refuses, so counting it would count
+  something never served.
+
+- **A `my_*`-only module was reported as shipping no partition at all.** All three
+  shell/JS copies of the content walk carried `my_*) continue`, from before my_*
+  was served at all — and the Suite serves it now, by bind or by injection under
+  the `my_hookless` marker. Measured on an OP15: `op15_3d_lockscreen_wp` ships one
+  file under `my_product`, had **one live rule serving it**, got no badge, and the
+  WebUI labelled it *"script only — Ships no partition directory at all …
+  nothing for the Suite to inject."* The same walk under-counted
+  `OnePlus_Dialer_Universal` at 32 files against 115 live rules.
+
+- **Two copies of `NON_PARTITION_ROOTS` in one HTML file disagreed with each
+  other.** The "nothing to inject" probe carries the complete list and says so
+  (*"verbatim, `d` included"*); the Modules pane and `metamount.sh` were both
+  missing `data_mirror` and `d` — and `d` is the debugfs symlink the list exists
+  for, added after a module shipping a top-level `d/` tree was injected into
+  debugfs on an OP15. One page could therefore classify one module two ways. A
+  test now extracts all three copies and compares them to `mount::NON_PARTITION_ROOTS`,
+  so a fourth cannot drift. The Modules pane also picked up `set --` in place of
+  the unquoted `$roots`, which `metamount.sh` was fixed for and this copy was not:
+  the words in it are third-party module directory names.
+
+- **`not FD-allowlisted for zygote` counted whiteouts and virtual dirs as
+  "injected file(s)".** `doctor.rs` gates every other arm of that loop on
+  `r.kind` — the `pm_rules` arm has a paragraph about exactly this — and this one
+  did not, while asserting the kind in its own prose. Measured: installing SAN
+  added exactly one `/my_stock` entry, a whiteout, and the note went from
+  *"1 injected file(s)"* to *"2"*. A whiteout has no fd for zygote to validate and
+  a virtual dir is a directory nothing preloads; neither can reach that trap.
+
+- **`module content not served` double-counted convergence symlinks.**
+  `module_rom_files`' own doc says a `system/product -> ../product` link "would
+  double-count" — it is not followed, but it WAS counted, and `serve_mode`
+  refuses its target so nothing behind it is ever served. Measured: SAN's two
+  whiteouts were reported as *"ships 4 file(s) under system(2) my_stock(1)
+  product(1)"* — twice the real number, naming a partition the module ships
+  nothing on. A symlink to a FILE still counts (the plan injects those), and so
+  does a dangling one, which is content the module meant to ship.
+
+- **The incompatibility lint stated a conditional branch as fact.** `sourced_scripts`
+  follows one `.` level so a module cannot hide its mount logic in a helper, which
+  is right — and it means the scanner now quotes lines that may sit in a branch the
+  entry script never takes. Measured: SAN installs at `mounting_mode=2`, where the
+  metamodule serves it and `post-fs-data.sh` never reaches the
+  `. $MODDIR/mountify.sh` in its `mounting_mode=1` arm, and the report said flatly
+  that the module *"mounts its own content over a ROM path"* and that absorb
+  *"unmounts it, four times per boot"*. The device measured zero foreign mounts
+  throughout. A hit in a sourced helper now says so; deciding whether the branch
+  runs would need the module's own config, which is the kind of clever this
+  classifier has been narrowed away from twice.
+
+- **`nomount export` reported "File exists" for a directory that does not exist.**
+  On the DEFAULT destination, from the commonest invocation. `/sdcard` is a symlink
+  to `/storage/self/primary`, which does not resolve in the mount namespace an
+  adb-launched `su` gets, so `create_dir_all` failed on the leaf with ENOENT, walked
+  up to `mkdir("/sdcard")`, got EEXIST for the symlink, found `is_dir()` false, and
+  surfaced EEXIST attributed to the leaf: `create /sdcard/Download/nm-diag-… Caused
+  by: File exists`. The reader goes looking for a stale export to delete. The base
+  is now checked first and the refusal names the real obstacle.
+
+- **The Magisk boot path wrote a poorer incident record than the KSU one.**
+  `post-fs-data.sh` omitted `modules_enabled` — the most useful line in the file,
+  because a guard trip is nearly always "what did I install just before this" and
+  the answer is gone by the time anyone reads the report — and did not distinguish
+  a mount pass that TIMED OUT from one that failed. A test now compares the keys
+  both writers record.
+
+### Changed
+
+- **The manager card is one short line.** It was 200+ characters and the manager
+  truncated it: measured on an OP15, the card ended `…or a my_* bind of ou…`, so
+  the last thing it said was cut off mid-word. Everything restated there — the
+  architecture tagline, the per-mechanism module lists, the `[NoMount …]` bracket
+  under a row already titled "NoMount Suite" — is in `module.prop`, on the
+  per-module badges, or in the WebUI, and none of it changes between boots. It now
+  reads e.g. `✅ 257 rules · 139 RRO · 1 mount by design — healthy`.
+
 ## v1.3.141 — engine v30 (unchanged)
 
 Closes the ten findings of the 2026-09-06 audit of v1.3.140, plus one found while

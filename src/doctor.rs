@@ -993,7 +993,28 @@ fn count_files(dir: &Path, depth: usize) -> usize {
     for e in rd.flatten() {
         let p = e.path();
         if p.is_symlink() {
-            n += 1;
+            // A symlink to a DIRECTORY is not shipped content, it is the
+            // layout-convergence link (`system/product -> ../product`) every
+            // OPlus-shaped module carries -- and `serve_mode` refuses its target
+            // as a bare partition root, so nothing behind it is ever served.
+            // Counting it both inflates the total and, worse, attributes the
+            // count to the wrong partition.
+            //
+            // Measured on an OP15, 2026-09-07, with SAN (systemapp_nuker) v2.2.2
+            // installed: two whiteouts under `my_stock/` and `product/`, plus the
+            // two links `system/my_stock` and `system/product` that its installer
+            // creates, were reported as "ships 4 file(s) under system(2)
+            // my_stock(1) product(1)" -- twice the real number, and naming
+            // /system, where the module ships nothing at all.
+            //
+            // A symlink to a FILE still counts: `plan_tree` treats it as a leaf
+            // and injects it like any other entry. `is_dir()` follows the link,
+            // which is exactly the question being asked; a DANGLING link answers
+            // false and counts, which is right -- it is content the module meant
+            // to ship, and `source_resolves` is what reports it as unservable.
+            if !p.is_dir() {
+                n += 1;
+            }
         } else if p.is_dir() {
             n += count_files(&p, depth + 1);
         } else {
@@ -1003,10 +1024,61 @@ fn count_files(dir: &Path, depth: usize) -> usize {
     n
 }
 
+/// Does a live rule of this kind belong in the per-partition
+/// "not FD-allowlisted for zygote" tally?
+///
+/// Only an INJECT does. The note counts rules that put a FILE on a partition
+/// zygote's `FileDescriptorInfo::CreateFromFd` does not allowlist, and both other
+/// kinds are structurally incapable of that: a whiteout makes a name ABSENT (no
+/// fd to validate, and the stock file it hides was already there), and a virtual
+/// dir is a directory the engine materialised, which nothing preloads.
+///
+/// Pure and separate so the one un-gated consumer of `parse_list`'s kind cannot
+/// come back. Every other arm of that loop already tests `r.kind`; this one did
+/// not, and its message -- "N injected file(s) on /<part>" -- asserted the kind
+/// in prose while counting all three.
+fn fd_note_applies(kind: crate::nm::LiveKind) -> bool {
+    kind == crate::nm::LiveKind::Inject
+}
+
+/// The five scripts a manager runs directly. Anything else the scanner reads got
+/// there through a `.` from one of them.
+const ENTRY_SCRIPTS: [&str; 5] = [
+    "post-fs-data.sh", "service.sh", "boot-completed.sh", "post-mount.sh", "customize.sh",
+];
+
+/// The sentence to append when the evidence line lives in a SOURCED helper rather
+/// than in a script the manager runs.
+///
+/// `sourced_scripts` follows one `.` level so a module cannot hide its mount
+/// logic in a helper -- which is right, and which also means the scanner now
+/// quotes lines that may sit inside a branch the entry script never takes. It
+/// cannot know: deciding that needs the module's persisted config, and reading a
+/// third-party config to evaluate its own conditionals is exactly the kind of
+/// clever this classifier has been narrowed away from twice.
+///
+/// What it CAN do is stop asserting the branch was taken. Measured on an OP15,
+/// 2026-09-07: SAN (systemapp_nuker) v2.2.2 installs at `mounting_mode=2`, where
+/// the metamodule serves it and `post-fs-data.sh` never reaches the
+/// `. $MODDIR/mountify.sh` in its `mounting_mode=1` arm -- and the report said
+/// flatly that the module "mounts its own content over a ROM path" and that
+/// "absorb re-serves it as an injection and unmounts it, four times per boot".
+/// Neither happened, and the device measured zero foreign mounts throughout.
+///
+/// Pure, and keyed on the FILENAME rather than on how it was found, because that
+/// is the whole distinction: the five names below are what a manager executes.
+fn reached_only_if_sourced(script: &str) -> &'static str {
+    if ENTRY_SCRIPTS.contains(&script) {
+        return "";
+    }
+    " NB: this line is in a helper the module SOURCES, not in a script the manager \
+     runs, so it only takes effect if the entry script reaches the `.` that pulls \
+     it in -- a mode switch or a capability test can leave it dead. Check the \
+     module's own config before acting on this."
+}
+
 fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
-    const SCRIPTS: [&str; 5] = [
-        "post-fs-data.sh", "service.sh", "boot-completed.sh", "post-mount.sh", "customize.sh",
-    ];
+    const SCRIPTS: [&str; 5] = ENTRY_SCRIPTS;
     let mut out: Vec<(String, String, Incompat, String)> = Vec::new();
     let Ok(dirs) = std::fs::read_dir(crate::mount::MODULES_DIR) else { return out };
     let mut dirs: Vec<_> = dirs.flatten().collect();
@@ -1720,7 +1792,11 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         f.push(Finding {
             level: kind.level(),
             check: kind.check(),
-            detail: format!("{module} ({script}): `{hit}`. {}", kind.explain()),
+            detail: format!(
+                "{module} ({script}): `{hit}`. {}{}",
+                kind.explain(),
+                reached_only_if_sourced(&script)
+            ),
         });
     }
 
@@ -1949,7 +2025,20 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 }
                 // The zygote FD-allowlist trap. Overlay APKs are the dangerous case because
                 // zygote preloads them; flag anything else on such a partition as a warning.
-                if let Some(part) = partition_of(target) {
+                //
+                // INJECT rules only, for the same reason the `pm_rules` arm above is
+                // gated: zygote's `FileDescriptorInfo::CreateFromFd` validates the
+                // path behind an OPEN FD, and a whiteout has no file to open while a
+                // virtual dir is a directory nobody preloads. Neither can reach the
+                // trap this counts.
+                //
+                // It counted every kind, and said "injected file(s)" about the total.
+                // Measured on an OP15, 2026-09-07: installing SAN (systemapp_nuker)
+                // added exactly one my_stock entry -- a whiteout -- and the note went
+                // from "1 injected file(s) on /my_stock" to "2". Two errors in one
+                // line: a number that is not the number of injected files, and a
+                // deletion described as a file.
+                if let Some(part) = partition_of(target).filter(|_| fd_note_applies(r.kind)) {
                     if !ZYGOTE_FD_ALLOWLISTED.contains(&part.as_str()) {
                         let is_overlay_apk = target.extension().and_then(|x| x.to_str()) == Some("apk")
                             && target.components().any(|c| c.as_os_str() == "overlay");
@@ -2604,6 +2693,102 @@ hosts_file=/system/etc/hosts.d/x
             expand_rom_vars("mount --bind $hosts_file /tmp/x", &vars),
             "mount --bind /system/etc/hosts.d/x /tmp/x"
         );
+    }
+
+    /// The FD-allowlist tally counts injected FILES, and says so in its own text.
+    ///
+    /// It counted every live row, whatever its kind. Measured on an OP15,
+    /// 2026-09-07: installing SAN (systemapp_nuker) added exactly one `/my_stock`
+    /// entry -- a WHITEOUT -- and the note went from "1 injected file(s) on
+    /// /my_stock" to "2". A whiteout has no fd for zygote to validate and a
+    /// virtual dir is a directory nothing preloads; neither can reach the trap.
+    #[test]
+    fn the_fd_allowlist_tally_counts_only_injects() {
+        assert!(fd_note_applies(crate::nm::LiveKind::Inject));
+        assert!(
+            !fd_note_applies(crate::nm::LiveKind::Whiteout),
+            "a whiteout is a deletion, not an injected file"
+        );
+        assert!(
+            !fd_note_applies(crate::nm::LiveKind::VirtualDir),
+            "a virtual dir is a directory the engine made, not an injected file"
+        );
+    }
+
+    /// A layout-convergence symlink is not shipped content.
+    ///
+    /// `system/product -> ../product` is what every OPlus-shaped module carries so
+    /// the classic and auto_mount layouts converge, and `serve_mode` refuses its
+    /// target as a bare partition root -- so it is never served. Counting it both
+    /// doubled the total and attributed it to a partition the module ships
+    /// nothing on. Measured on an OP15, 2026-09-07: SAN's two whiteouts were
+    /// reported as "ships 4 file(s) under system(2) my_stock(1) product(1)".
+    ///
+    /// A symlink to a FILE still counts: `plan_tree` treats it as a leaf and
+    /// injects it like any other entry.
+    #[test]
+    fn a_convergence_symlink_is_not_counted_as_shipped_content() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        // The real content: <mod>/product/app/Foo, one entry.
+        std::fs::create_dir_all(root.join("product/app")).unwrap();
+        std::fs::write(root.join("product/app/Foo"), b"x").unwrap();
+        // The convergence link the installer leaves behind, and a leaf symlink,
+        // which IS content.
+        std::fs::create_dir_all(root.join("system")).unwrap();
+        symlink("../product", root.join("system/product")).unwrap();
+        symlink("Foo", root.join("product/app/Bar")).unwrap();
+
+        assert_eq!(
+            count_files(&root.join("product"), 0),
+            2,
+            "one file plus one leaf symlink"
+        );
+        assert_eq!(
+            count_files(&root.join("system"), 0),
+            0,
+            "a symlink to a directory is the convergence link, not shipped content"
+        );
+    }
+
+    /// A dangling link is content the module meant to ship, so it still counts --
+    /// `source_resolves` is what reports it as unservable, and silently dropping
+    /// it here would hide the module from the "content not served" check
+    /// entirely.
+    #[test]
+    fn a_dangling_symlink_still_counts_as_shipped_content() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("product")).unwrap();
+        symlink("nowhere", d.path().join("product/Gone")).unwrap();
+        assert_eq!(count_files(&d.path().join("product"), 0), 1);
+    }
+
+    /// Evidence found in a SOURCED helper is conditional, and must not be stated
+    /// as fact.
+    ///
+    /// Measured on an OP15, 2026-09-07: SAN (systemapp_nuker) v2.2.2 installs at
+    /// `mounting_mode=2`, where its `post-fs-data.sh` never reaches the
+    /// `. $MODDIR/mountify.sh` in the `mounting_mode=1` arm -- and the report said
+    /// flatly that the module "mounts its own content over a ROM path" and that
+    /// absorb "unmounts it, four times per boot". The device measured zero
+    /// foreign mounts the whole time.
+    #[test]
+    fn a_hit_inside_a_sourced_helper_is_marked_conditional() {
+        for entry in ENTRY_SCRIPTS {
+            assert_eq!(
+                reached_only_if_sourced(entry),
+                "",
+                "{entry} is run by the manager; nothing is conditional about it"
+            );
+        }
+        for helper in ["mountify.sh", "sh/compatible.sh", "lib/mount.sh"] {
+            assert!(
+                reached_only_if_sourced(helper).contains("SOURCES"),
+                "{helper} is only reached through a `.`, and the report has to say so"
+            );
+        }
     }
 
     /// A module switched ON whose content reaches nothing.

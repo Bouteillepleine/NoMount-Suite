@@ -335,10 +335,23 @@ if command -v ksud >/dev/null 2>&1; then
             # counting it would double-count the files it points at.
             [ -L "${_pd%/}" ] && continue
             _n=$(basename "$_pd")
+            # NON_PARTITION_ROOTS from src/mount.rs, VERBATIM. Two names were
+            # missing -- `data_mirror` and `d` -- and `d` is the one that matters:
+            # it is the debugfs symlink, it resolves to a directory, and mount.rs
+            # lists it because a module shipping a top-level `d/` tree was walked
+            # and injected into debugfs (measured on an OP15). The list is pinned
+            # against mount.rs by a test now (`mount::tests`), because this is the
+            # third copy of it and the copies had already drifted.
+            #
+            # `my_*` is NOT excluded any more. It was, from before my_* was served
+            # at all -- and the Suite serves it now (by bind, or by injection under
+            # the my_hookless marker), so the exclusion made a module that ships
+            # ONLY my_* content look like a module that ships nothing. Measured on
+            # an OP15, 2026-09-07: `op15_3d_lockscreen_wp` ships one file under
+            # my_product, had one live rule serving it, and got no badge at all.
             case "$_n" in
-                data|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp|\
-                debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin) continue ;;
-                my_*) continue ;;
+                data|data_mirror|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp|\
+                debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin|d) continue ;;
             esac
             [ -d "/$_n" ] || continue
             set -- "$@" "$_pd"
@@ -351,8 +364,21 @@ if command -v ksud >/dev/null 2>&1; then
         # post-fs-data. Unbounded it is a boot hang on the first bad module rather
         # than a badge missing from one card. 10s is far more than any real module
         # needs; a module that exceeds it simply goes untagged.
+        # `-type c` as well as `-type f`: a Magisk 0:0 char device IS content --
+        # it is a whiteout, the plan serves it, and a DEBLOAT module consists of
+        # nothing else. `-type f` alone made every such module look empty, so it
+        # got no badge at all: measured on an OP15, 2026-09-07, with SAN
+        # (systemapp_nuker) v2.2.2 shipping two whiteouts that the engine was
+        # serving, and no `[NoMount · …]` line in the manager to say so.
+        #
+        # Symlinks stay OUT, deliberately. A module's layout-convergence link
+        # (`system/product -> ../product`) is a symlink one level inside a walked
+        # root, so `-type l` would count it -- and `serve_mode` refuses its target
+        # as a bare partition root, so it is never served. Counting unserved
+        # entries in a predicate that means "is this module being served" is the
+        # bug next door.
         [ -n "$(nmto 10 find "$@" -path '*/overlay/*.apk' -print -quit 2>/dev/null)" ] && _o=1
-        [ -n "$(nmto 10 find "$@" -type f ! -path '*/overlay/*' -print -quit 2>/dev/null)" ] && _v=1
+        [ -n "$(nmto 10 find "$@" \( -type f -o -type c \) ! -path '*/overlay/*' -print -quit 2>/dev/null)" ] && _v=1
         [ "$_o" = 0 ] && [ "$_v" = 0 ] && continue
         if [ "$_o" = 1 ] && [ "$_v" = 1 ]; then _t="vfs + overlay"; _ov="$_ov $mid";
         elif [ "$_o" = 1 ]; then _t="overlay"; _ov="$_ov $mid";
@@ -377,34 +403,45 @@ if command -v ksud >/dev/null 2>&1; then
 
     # The Suite's own card doubles as the at-a-glance status readout, so put the live
     # numbers there rather than restating the tagline the module.prop already carries.
-    # EXCLUDE the (virtual dir) rows. `grep -c .` counts every line of the dump,
-    # which on this device is 260 while `nomount check` and health.txt both
-    # say 257 -- the difference being 3 directories the engine materialises, which
-    # are not rules. The card is the surface most users read, so having it
-    # disagree with every other number the Suite prints made a real discrepancy
-    # indistinguishable from a bug. Measured on OP15: 260 lines, 3 virtual dirs.
-    _rules=$(_nmcount -vc '(virtual dir)')
+    #
+    # ONE LINE, and short enough to be read whole. The manager truncates: measured
+    # on an OP15, the old text ran 200+ characters and the card ended
+    # "...or a my_* bind of ou…", so the last thing it said was cut off mid-word.
+    # A status readout nobody can finish reading is not one. Everything that used
+    # to be restated here -- the architecture tagline, the per-mechanism module
+    # lists -- is already in module.prop, on the per-module badges, or in the
+    # WebUI, and none of it changes between boots.
+    #
+    # EXCLUDE the (virtual dir) AND the (whiteout) rows. `grep -c .` counts every
+    # line of the dump, which on this device is 260 while `nomount check` and
+    # health.txt both say 257 -- 3 of them being directories the engine
+    # materialises, which are not rules. Whiteouts are the same mistake found
+    # later: health.rs counts `rules` as INJECTS and reports `whiteouts`
+    # separately, so a device with a debloat module installed had a card saying
+    # 259 while every other surface said 257 (measured on an OP15, 2026-09-07,
+    # with SAN installed). The card is what most users read; it must not be the
+    # one number that disagrees. Hidden paths get their own field instead.
+    _rules=$(_nmcount -v -c -E '\(virtual dir\)|\(whiteout\)')
+    _wo=$(_nmcount -c '(whiteout)')
     _rro=$(_nmcount '/overlay/[^ ]*\.apk')
     _mods=0
     for _x in $_vf $_ov; do _mods=$((_mods + 1)); done
-    _list=""
-    [ -n "$_vf" ] && _list="vfs:$_vf"
-    [ -n "$_ov" ] && _list="$_list${_list:+ | }overlay:$_ov"
+    [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ -f "$NMDIR/disabled" ]; then
-        _desc="[NoMount ⛔ disabled] bootloop guard tripped — open the NoMount WebUI"
+        _desc="⛔ disabled — bootloop guard tripped, open the WebUI"
     elif [ "$_engine_ran" = 0 ]; then
         # This block is NOT gated on [ -x "$BIN" ], so it used to render the green
         # card even on the boot where the engine never ran. It is the only surface
         # most users ever read; it must not claim a posture nothing established.
-        _desc="[NoMount ⛔ engine did not run] the mount pass never executed this boot — open the NoMount WebUI"
+        _desc="⛔ engine did not run this boot — open the WebUI"
     elif [ "${_rules:-0}" = 0 ]; then
         # ✅ next to "0 rules" is a contradiction the reader has to catch for
         # themselves. The engine ran, so this is not ⛔ — but it served nothing,
         # and a green tick on a boot that injected nothing is the same false
         # green, one branch further down.
-        _desc="[NoMount ⚠️ 0 rules] engine ran but injected nothing — open the NoMount WebUI"
+        _desc="⚠️ engine ran but injected nothing — open the WebUI"
     else
-        _desc="[NoMount ✅ $_rules rules · $_rro RRO · $_mods modules] fully mountless — hookless VFS + RRO, no overlayfs, su via sucompat${_list:+. $_list}"
+        _desc="✅ $_rules rules · $_rro RRO$_wof · $_mods modules · mountless"
     fi
     KSU_MODULE=meta-nomount ksud module config set --temp override.description "$_desc" >/dev/null 2>&1
 fi

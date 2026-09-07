@@ -112,6 +112,16 @@ elif [ "$COUNT" -ge "$GUARD_MAX" ]; then
         echo "kernel=$(uname -r)"
         echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"
         echo "rules_at_trip=$(nmto 15 "$NM_BIN" list 2>/dev/null | wc -l)"
+        # The module list, like metamount.sh writes. It was missing here, and it
+        # is the single most useful line in the file: a guard trip is almost
+        # always "which module did I install just before this", and the answer is
+        # not recoverable afterwards -- the user has usually already removed
+        # something by the time they read the report. Two incident writers, one
+        # set of keys.
+        echo "modules_enabled=$(for m in /data/adb/modules/*/; do
+                [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ] && continue
+                basename "$m"
+            done | tr '\n' ' ')"
         nm_incident_tombstone
     } > "$NMDIR/incident.log" 2>/dev/null
 else
@@ -132,7 +142,14 @@ else
         _mout="$(nmto 60 "$BIN" mount 2>/dev/null)"
         _mrc=$?
         [ -n "$_mout" ] && printf '%s\n' "$_mout"
-        [ "$_mrc" -ne 0 ] && nmlog "⚠ mount pass exited $_mrc — the injection set may be INCOMPLETE"
+        # 124 named, like metamount.sh does it. A hang and a refusal are different
+        # problems -- one is the engine not answering, the other is the pass
+        # deciding it cannot run -- and this path's boot.log is the only record it
+        # has, so collapsing them into "exited 124" made the commonest failure
+        # here indistinguishable from a bad rule set.
+        if [ "$_mrc" -ne 0 ]; then
+            nmlog "⚠ mount pass exited $_mrc ($([ "$_mrc" -eq 124 ] && echo "TIMED OUT after 60s" || echo "failed")) — the injection set may be INCOMPLETE"
+        fi
         # An exit of 0 does NOT mean every rule landed: the pass deliberately
         # survives individual failures rather than failing the boot over them, and
         # prints `nomount: WARNING ...` when it does. mount.rs emits that marker
