@@ -2754,12 +2754,28 @@
       $("rulebreak").textContent = "Unknown \u2014 the engine did not answer.";
       return;
     }
-    const rro = d.rro.length, vfs = d.lines.length - rro;
-    $("rulechip").textContent = d.lines.length;
-    $("rulebreak").textContent = d.lines.length
+    // `d.rules`, NOT `d.lines.length`. The difference is the engine-materialised
+    // "(virtual dir)" entries, which are structure rather than rules -- and
+    // `ruleDump` says in as many words that counting them "gave 260 on a device
+    // where `nomount check`, health.txt and the manager card all said 257, so the
+    // one number on the front page disagreed with every other number the Suite
+    // prints". That fix reached the hero counter and stopped there: this pane,
+    // whose entire job is to break the same number down, went on showing 260 and
+    // "121 file redirects" beside a hero reading 257. Measured on an OP15,
+    // 2026-09-07, with three virtual dirs live.
+    //
+    // The RRO count was never affected -- a virtual dir's target is a directory,
+    // so it cannot end in `.apk` -- which is what made the totals disagree by
+    // exactly the virtual-dir count and nothing else.
+    const rro = d.rro.length, vfs = d.rules - rro;
+    $("rulechip").textContent = d.rules;
+    $("rulebreak").textContent = d.rules
       ? `${vfs} file redirect${vfs === 1 ? "" : "s"} · ${rro} RRO overlay APK${rro === 1 ? "" : "s"} — all Prism, no mounts`
       : "No rules active.";
-    _paintRuleModuleBar(d.lines);
+    // The bar is per-MODULE and reads the source path off each line, so a virtual
+    // dir (which names no module) would land in "other". Same set as the count
+    // above, for the same reason.
+    _paintRuleModuleBar(d.lines.filter((l) => !l.includes("(virtual dir)")));
   }
 
   // Rules-by-module breakdown: a stacked bar + legend over the owning module of

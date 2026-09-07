@@ -11,6 +11,54 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.162 — engine v30 (unchanged)
+
+### The Rules tab counted 260 while every other surface said 257
+
+`ruleDump` already draws the distinction, and says why in a comment: the engine
+materialises "(virtual dir)" entries which are structure, not rules, and
+"counting them gave 260 on a device where `nomount check`, health.txt and the
+manager card all said 257 — so the one number on the front page disagreed with
+every other number the Suite prints, which makes a real discrepancy
+indistinguishable from a bug."
+
+That fix reached the hero counter and stopped there. `refreshRuleSummary` — the
+pane whose entire job is to break the same number down — went on reading
+`d.lines.length`, so the Rules tab showed **260**, and "121 file redirects", next
+to a hero reading **257**. The RRO half was never affected, because a virtual
+dir's target is a directory and cannot end in `.apk`; the two totals therefore
+disagreed by exactly the virtual-dir count and nothing else, which is what made
+it survive being looked at.
+
+Now 257, and 118 + 139 = 257. The per-module bar was reading the same set, so it
+carried a phantom **"(other) 3"** segment — the virtual dirs, which name no
+module and could never be attributed to one. It is gone, and the legend now sums
+to the total.
+
+Measured on an OP15 with three virtual dirs live: `vfs list` returns 260 lines,
+the Suite reports 257 rules everywhere.
+
+### The panes the harness had not walked
+
+Hiding and Rules, both driven through their states. No further defects:
+
+- All four hide-list states render distinctly — `live`, `saved, not applied`,
+  `not installed`, and `live, not saved`, the last correctly carrying a 💾 button,
+  since persisting it is the fix. Glob-matched entries name the pattern that
+  caught them.
+- An unreadable hide list reads *"Unknown — the hide list could not be read"*
+  with a `?` chip, never an empty list.
+- An engine that does not answer gives the Rules pane *"Unknown — the engine did
+  not answer"*, also `?`.
+- With no fixture for the isolated-pool knob, that card says *"State unknown —
+  the engine did not answer"* rather than assuming a default.
+
+One thing deliberately NOT changed: with the engine down, the Modules pane still
+reports what each module contributes (`115 files · vfs`), because `nomount plan`
+is a userspace walk and answers fine without a driver. It is a different question
+from "is anything being served", which the card above it answers in red, and
+adding a second warning there would be noise.
+
 ## v1.3.161 — engine v30 (unchanged)
 
 ### A device that had switched itself off said "Active", in green
