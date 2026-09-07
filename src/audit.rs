@@ -1307,12 +1307,12 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         unsafe { libc::_exit(0) };
     }
     unsafe { libc::close(wr) };
-    let mut buf = [0u8; 8];
-    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
+    let mut buf = [0u8; 12];
+    let got = unsafe { libc::read(rd, buf.as_mut_ptr() as *mut libc::c_void, 12) };
     unsafe { libc::close(rd) };
     let mut status = 0i32;
     unsafe { libc::waitpid(pid, &mut status, 0) };
-    if got != 8 {
+    if got != 12 {
         return unmeasured(NAME, "probe child said nothing".into())
             .meaning("The probe exited without answering, so this was not tested.");
     }
@@ -1607,7 +1607,7 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
                 && libc::setgid(appid) == 0
                 && libc::setuid(appid) == 0
         };
-        let (mut leaked, mut inverse) = (0u32, 0u32);
+        let (mut leaked, mut inverse, mut denied) = (0u32, 0u32, 0u32);
         if dropped {
             for p in &files {
                 let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else {
@@ -1623,19 +1623,38 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
                     libc::getxattr(c.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0)
                 };
                 let xattr_answered = lx >= 0 || gx >= 0;
-                if !opened && xattr_answered {
-                    leaked += 1;
-                } else if opened && !xattr_answered {
+                if !opened {
+                    // ENOENT SPECIFICALLY. `opened` was a bare `is_ok()`, so an
+                    // injected file that is simply root-owned 0600 gave the app
+                    // EACCES on open() while `listxattr` still answered (it needs
+                    // search on the path, not read on the file) -- and that was
+                    // counted as a leak and reported as a FAIL whose text asserts
+                    // "the xattr surface is not applying the per-UID decision that
+                    // open() is". A stock file behaves identically there; the
+                    // per-UID decision was never consulted at all. ENOENT is
+                    // hiding's signature, and it is the only denial this check is
+                    // about.
+                    let hidden = std::io::Error::last_os_error().raw_os_error()
+                        == Some(libc::ENOENT);
+                    if hidden {
+                        denied += 1;
+                        if xattr_answered {
+                            leaked += 1;
+                        }
+                    }
+                } else if !xattr_answered {
                     inverse += 1;
                 }
             }
         } else {
             leaked = u32::MAX;
         }
-        let mut buf = [0u8; 8];
+        let mut buf = [0u8; 12];
         buf[..4].copy_from_slice(&leaked.to_ne_bytes());
-        buf[4..].copy_from_slice(&inverse.to_ne_bytes());
-        unsafe { libc::write(wr, buf.as_ptr() as *const libc::c_void, 8) };
+        buf[4..8].copy_from_slice(&inverse.to_ne_bytes());
+        buf[8..].copy_from_slice(&denied.to_ne_bytes());
+        // 12 bytes is still far under PIPE_BUF, so the write stays atomic.
+        unsafe { libc::write(wr, buf.as_ptr() as *const libc::c_void, 12) };
         unsafe { libc::_exit(0) };
     }
     unsafe { libc::close(wr) };
@@ -1649,7 +1668,8 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
             .meaning("The probe exited without answering, so this was not tested.");
     }
     let leaked = u32::from_ne_bytes(buf[..4].try_into().unwrap_or_default());
-    let inverse = u32::from_ne_bytes(buf[4..].try_into().unwrap_or_default());
+    let inverse = u32::from_ne_bytes(buf[4..8].try_into().unwrap_or_default());
+    let denied = u32::from_ne_bytes(buf[8..].try_into().unwrap_or_default());
     // Redacted for a shared destination, for the reason given on
     // `blocklist::redact_hide_list` -- this string reaches `check.txt`, and
     // `nomount export` copies that to shared storage.
@@ -1691,8 +1711,39 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
              without answering xattr, which leaks nothing.",
         );
     }
-    pass(NAME, format!("{who}: xattr and open() agreed on all {} injected file(s)", files.len()))
-        .meaning("Every injected file told an app you hid the same story through both surfaces.")
+    // NOT A PASS when the discriminating case could not arise.
+    //
+    // This check looks for ONE thing: a file the hidden app was DENIED (ENOENT)
+    // that still answered xattr. If the app opened every file -- which is the
+    // normal case, because a SHADOWING rule serves a blocked reader the stock
+    // file and most module rules shadow -- then `leaked` and `inverse` are both
+    // zero for want of anything to measure, and this returned green with the words
+    // "told an app you hid the same story through both surfaces".
+    //
+    // `check_maps_not_deleted` was fixed for exactly this shape (`mappers == 0` ->
+    // Unmeasured, with a note that the old verdict "was cached to audit.json");
+    // its sibling never got the same treatment. The child already computed the
+    // number, it just never reported it.
+    if denied == 0 {
+        return unmeasured(
+            NAME,
+            format!(
+                "{who}: no injected file was hidden from this app across {} sampled — nothing                  for the open()-vs-xattr disagreement to appear on",
+                files.len()
+            ),
+        )
+        .meaning(
+            "Every injected file opened for the app you hid, so the inconsistency this looks              for could not have shown up. Not tested.",
+        );
+    }
+    pass(
+        NAME,
+        format!(
+            "{who}: {denied} of {} injected file(s) were hidden, and none of them answered              xattr either",
+            files.len()
+        ),
+    )
+    .meaning("Every file hidden from an app you hid stayed hidden on the xattr surface too.")
 }
 
 /// Every measured check, plus the two counts the report header carries.

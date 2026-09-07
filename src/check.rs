@@ -72,7 +72,12 @@ pub enum Verdict {
     /// fork that failed, no process yet holding an injected file. Amber, never
     /// green: reporting an unrun check as clean is how a hole survives.
     Unmeasured,
-    /// A hazard in the plan. Nothing has gone wrong yet; something will.
+    /// Something worth knowing that is not a failure. Two kinds reach it: a
+    /// hazard in the plan (nothing has gone wrong yet; something will), and
+    /// `audit::soft` -- a real, measured inconsistency that nothing shipping
+    /// actually probes. It said "a hazard in the plan" and had not been only that
+    /// since `soft()` was added, which is how the verdict line came to call a
+    /// measured device tell a plan warning.
     Warn,
     /// Measured, and it holds.
     Pass,
@@ -342,10 +347,31 @@ impl Report {
             format!("{} check(s) FAILED", t.fail)
         } else if t.reboot > 0 {
             format!("{} check(s) need a reboot to finish", t.reboot)
-        } else if t.warn > 0 {
-            format!("{} plan warning(s)", t.warn)
+        // UNMEASURED OUTRANKS WARN, because both enums say it does.
+        //
+        // `Verdict`'s declaration order is Fail, Reboot, Unmeasured, Warn, and
+        // `doctor::Level` mirrors it with a comment insisting the two must agree
+        // "or the report and the plan disagree about which line matters more".
+        // `Report::sort` honours it — Unmeasured rows print above Warn rows — and
+        // this function did not, so a run with four unmeasured checks and one
+        // warning rendered `1 plan warning(s)` and the incompleteness vanished
+        // from the ONE string `health.txt` carries and `service.sh` logs onto the
+        // card. The full `summary:` line said INCOMPLETE; the card reader never
+        // sees that line.
         } else if !t.complete() {
-            format!("not fully measured ({} check(s) had nothing to look at)", t.unmeasured)
+            format!(
+                "not fully measured ({} check(s) had nothing to look at{})",
+                t.unmeasured,
+                if t.warn > 0 { format!(", plus {} warning(s)", t.warn) } else { String::new() }
+            )
+        // NOT "plan warning(s)". `t.warn` counts EVERY Warn in the report, and
+        // `audit.rs` emits four of them through `soft()` -- readdir cookie magic,
+        // injected inode band, overlay dir inode range, erofs directory shape --
+        // which are measured DEVICE tells, not plan hazards. On a device where the
+        // inode band goes soft the verdict read "1 plan warning(s)" and pointed
+        // the user at their module set.
+        } else if t.warn > 0 {
+            format!("{} warning(s)", t.warn)
         } else {
             "clean".to_string()
         }
@@ -591,6 +617,45 @@ mod tests {
 
     fn c(id: &str, v: Verdict) -> Check {
         Check::new(Section::Device, id, id, v, "evidence")
+    }
+
+    /// The one-line verdict is the ONLY string `health.txt` carries and
+    /// `service.sh` puts on the manager card, so what it ranks and what it calls
+    /// things both matter.
+    ///
+    /// Two defects, one line apart. It tested `warn` before `complete()`, so four
+    /// unmeasured checks beside one warning rendered as a warning and the
+    /// incompleteness vanished — while `Verdict`'s own declaration order, the
+    /// `doctor::Level` that mirrors it, and `Report::sort` all rank Unmeasured
+    /// ABOVE Warn. And it called every Warn a "plan warning", though `audit::soft`
+    /// emits four measured DEVICE tells through that verdict.
+    #[test]
+    fn the_verdict_line_ranks_and_names_what_it_counts() {
+        let r = |v: Vec<Check>| Report {
+            ts: 0,
+            engine: None,
+            rules: 0,
+            directories: 0,
+            facts: Vec::new(),
+            checks: v,
+        };
+
+        // Unmeasured outranks warn, and says so without hiding the warning.
+        let v = r(vec![c("a", Verdict::Warn), c("b", Verdict::Unmeasured)]).verdict();
+        assert!(v.starts_with("not fully measured"), "unmeasured must outrank warn: {v}");
+        assert!(v.contains("1 warning(s)"), "and must not hide the warning: {v}");
+
+        // A warning alone is a warning -- not a PLAN warning. `soft()` rows are
+        // measured device tells and they land in this same count.
+        let v = r(vec![c("a", Verdict::Warn), c("b", Verdict::Pass)]).verdict();
+        assert_eq!(v, "1 warning(s)");
+        assert!(!v.contains("plan"), "a device tell is not a plan warning");
+
+        // Fail still outranks everything, and clean still means clean.
+        assert!(r(vec![c("a", Verdict::Fail), c("b", Verdict::Unmeasured)])
+            .verdict()
+            .contains("FAILED"));
+        assert_eq!(r(vec![c("a", Verdict::Pass)]).verdict(), "clean");
     }
 
     /// The distinction the whole `Unmeasured` state exists for, now on the ONE

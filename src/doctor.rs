@@ -1989,7 +1989,22 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let live_ok = engine.is_some();
     // Apps hidden from the injections, and the live rules the PackageManager
     // advertises regardless -- the pair the opt-out check below is about.
-    let hidden_apps = crate::blocklist::read().unwrap_or_default();
+    // An unreadable hide list is not an empty one. All three PM-published-opt-out
+    // checks below are gated on `!hidden_apps.is_empty()`, so a read error
+    // silently skipped every one of them and the report looked clean.
+    let hidden_apps = match crate::blocklist::read() {
+        Ok(v) => v,
+        Err(e) => {
+            f.push(Finding {
+                level: Level::Unmeasured,
+                check: "hide list not readable",
+                detail: format!(
+                    "the per-app hide list could not be read ({e:#}), so the checks that ask                      whether a hidden app is served consistently did not run."
+                ),
+            });
+            Vec::new()
+        }
+    };
     let mut pm_rules = 0usize;
     // PM-published rules live WITHOUT the `(public)` flag, i.e. still subject to
     // per-UID hiding despite the PackageManager advertising them. Only meaningful
@@ -2242,6 +2257,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // one predicate, so a systematic error shows up in the first few. The count
     // is reported so a clean verdict cannot be mistaken for a full sweep.
     if live_ok && engine_v >= 26 {
+        // ...and an `Err` gets a row, exactly as the sibling `nm.list()` failure
+        // twelve lines above does ("`live: 0 rules` means 'could not enumerate',
+        // not 'none'"). This was a bare `if let Ok`, so an engine that answered
+        // `v` but would not dump its ghost tables produced NO row at all -- while
+        // the block below works hard to tell "both tables empty" apart from "not
+        // compiled in", and then the outer match threw away the third state.
+        if let Err(e) = nm.ghost_list() {
+            f.push(Finding {
+                level: Level::Unmeasured,
+                check: "ghost cloak could not be read",
+                detail: format!(
+                    "the engine would not list its hidden paths ({e:#}), so the existence cloak                      was not tested on this kernel. This is not a pass."
+                ),
+            });
+        }
         if let Ok(txt) = nm.ghost_list() {
             let (gpaths, guids) = parse_ghost_tables(&txt);
             if let (Some(&uid), false) = (guids.first(), gpaths.is_empty()) {
@@ -2444,7 +2474,28 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // never going to take it, so there is nothing to act on. Only a mount that
     // nothing declined is worth flagging — that one means absorb has not run or
     // could not do its job.
-    for s in crate::absorb::survey().unwrap_or_default() {
+    // An UNREADABLE mount table is not "no module mounts", and this is the one
+    // place in the report that could not tell the difference.
+    //
+    // `survey()` returns Err when /proc/self/mountinfo cannot be read, and
+    // `unwrap_or_default()` turned that into an empty vec -- so EVERY mount
+    // finding below (foreign mount absorb cannot take, module mount not absorbed
+    // x3, module mount left by design x4) silently disappeared and the plan half
+    // rendered exactly like a device with nothing mounted. `health.rs`'s
+    // `count_mounts_split` was rewritten to avoid precisely this, with a comment
+    // that says "(0, 0) said 'there are no module mounts' for a question that was
+    // never asked" -- and the same substitution was still live here.
+    let surveyed = crate::absorb::survey();
+    if let Err(e) = &surveyed {
+        f.push(Finding {
+            level: Level::Unmeasured,
+            check: "mount table not readable",
+            detail: format!(
+                "the mount table could not be read ({e:#}), so NO mount check ran. This is not                  \"no mounts\": a module mount left standing is visible to any app that reads                  its own /proc/self/mountinfo."
+            ),
+        });
+    }
+    for s in surveyed.unwrap_or_default() {
         let (level, check, detail) = match &s.disposition {
             crate::absorb::Disposition::Declined(crate::absorb::Declined::Framework(id)) => (
                 Level::Info,

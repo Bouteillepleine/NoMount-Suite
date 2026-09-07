@@ -589,6 +589,13 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     _doc=$(nmto 30 "$BIN" check --plan --json 2>/dev/null)
     _err=$(_sum_get fail "$_doc")
     _wrn=$(_sum_get warn "$_doc")
+    # ...and the UNMEASURED count. `check.rs` says of this field, naming this very
+    # reader: "a summary rendering '12 passed, 0 failed' for a run with an
+    # unmeasured check is telling its reader something was verified that was not".
+    # Two live producers on the plan side: the engine did not answer, and the cloak
+    # could not be probed.
+    _unm=$(_sum_get unmeasured "$_doc")
+    case "$_unm" in ''|*[!0-9]*) _unm=0 ;; esac
     case "$_err$_wrn" in
         ''|*[!0-9]*) _docok=0; _err=0; _wrn=0 ;;
         *) _docok=1 ;;
@@ -617,8 +624,23 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         _health="⚠️ per-UID inconsistency — see the WebUI"
     elif [ "${_err:-0}" -gt 0 ]; then
         _health="⚠️ $_err error(s) — see the WebUI"
+    # THE DEVICE HALF'S OWN VERDICT. `_hv` was assigned, logged one line below,
+    # and then never consulted again -- grep showed exactly two occurrences. So
+    # `check --write`, which runs the WHOLE device section, could report FAILED
+    # checks (detection findings, served-bytes drift, engine liveness) while this
+    # ladder printed "healthy", because the only device input it read was the
+    # per-UID canary. The same boot.log said "one or more findings are open" and
+    # health.txt carried `verdict=2 check(s) FAILED`, and the card -- the surface
+    # most users read -- disagreed with both.
+    #
+    # `verdict()`'s strings are a closed set, so testing for "not clean" is enough
+    # and needs no parsing.
+    elif [ -n "$_hv" ] && [ "$_hv" != "clean" ]; then
+        _health="⚠️ $_hv — see the WebUI"
     elif [ "${_wrn:-0}" -gt 0 ]; then
         _health="$_wrn warning(s)"
+    elif [ "${_unm:-0}" -gt 0 ]; then
+        _health="not fully measured — see the WebUI"
     elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
         _health="healthy"
     elif [ "${_docok:-0}" = 1 ]; then

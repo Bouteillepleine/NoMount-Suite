@@ -915,7 +915,7 @@
        which is the one time the rows matter. -->
   <div class="card collapsed" id="cardPosture">
     <div class="stealth-head card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
-      <div class="shield clean" id="shield">
+      <div class="shield" id="shield">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
       </div>
       <div>
@@ -949,7 +949,7 @@
       <h2>Bootloop guard</h2><span class="chip" id="gchip">—</span>
     </div>
     <div class="statusline">
-      <span class="dot ok" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Armed</span>
+      <span class="dot" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Checking…</span>
       <span class="sub">trips at boot #3</span>
     </div>
     <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
@@ -1580,12 +1580,40 @@
     //
     // The count lives only in that row's prose, so read it from there rather
     // than counting mounts again and inventing a second source of truth.
-    const hookBinds = (function () {
-      const m = mrows[0] && mrows[0].evidence &&
-                mrows[0].evidence.match(/(\d+)\s+left by design/);
-      return m ? parseInt(m[1], 10) : 0;
+    // Mounts that are LEFT ON PURPOSE, whichever way audit.rs words it.
+    //
+    // This matched only "N left by design", which `audit.rs` emits when the sole
+    // remaining mounts are a hook framework's. A my_* bind of OURS -- the DEFAULT
+    // on this hardware, since `serve_mode` returns Bind for my_* unless the
+    // my_hookless marker is set -- lands in the other arm, "N module mount(s)
+    // visible", graded `note`. That matched nothing, so hookBinds was 0 and the
+    // card fell through to "Fully mountless · zero mounts — nothing to hide"
+    // about a mount the engine's own oracle string says any app can read in
+    // /proc/self/mountinfo.
+    //
+    // Counting it here rather than adding `note` to `bad` is deliberate: these
+    // mounts are not a fault, and headlining them "Something is mounting over the
+    // ROM" would be the opposite over-claim. They are ours, on purpose, and
+    // visible — so the card says exactly that.
+    const byDesign = (function () {
+      const c = mrows[0];
+      if (!c || !c.evidence) return 0;
+      const d = c.evidence.match(/(\d+)\s+left by design/);
+      if (d) return parseInt(d[1], 10);
+      if (c.verdict !== "note") return 0;
+      const v = c.evidence.match(/(\d+)\s+module mount\(s\) visible/);
+      return v ? parseInt(v[1], 10) : 0;
     })();
     const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
+    // `note` counts as a visible mount here, and that is the whole point of this
+    // line. `audit.rs` deliberately grades zero-mount-posture a NOTE when every
+    // mount left is one absorb declines on purpose -- including a my_* bind of
+    // OURS, which is the DEFAULT on this hardware -- and attaches an oracle to it
+    // saying "any app can read /proc/self/mountinfo and see a module mounted over
+    // the ROM". `note` was not in `bad`, so the card fell through to
+    // "Fully mountless · zero mounts — nothing to hide" about a mount the engine
+    // itself calls readable. The card's own contract, three cards down, is that
+    // "the shield and the report cannot describe the same mount differently".
     const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
     const fmnt = measured ? bad.length : -1;
 
@@ -1729,14 +1757,15 @@
         "(kernel&nbsp;· mountless), and RRO overlays are Prism too — OverlayManager&nbsp;+ idmap2 " +
         "read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> " +
         "mount table, so there is no mount-gap for a scanner to flag.";
-      if (hookBinds > 0) {
-        say("clean", "Mountless · " + hookBinds + " hook bind" + (hookBinds > 1 ? "s" : "") + " by design",
-          "the Suite adds none — " + hookBinds + " left in place on purpose",
-          how + " What remains is not ours: " + hookBinds + " bind" + (hookBinds > 1 ? "s" : "") +
-          " from a Zygisk/Xposed hook framework, which <code>absorb</code> deliberately never takes " +
-          "over — breaking a hook does not fail at boot, it fails hours later during an app install. " +
-          "A scanner reading <code>mountinfo</code> can see " + (hookBinds > 1 ? "them" : "it") +
-          "; removing " + (hookBinds > 1 ? "them" : "it") + " means removing the hook framework.");
+      if (byDesign > 0) {
+        say("clean", "Mountless · " + byDesign + " mount" + (byDesign > 1 ? "s" : "") + " by design",
+          "the Suite adds none it can avoid — " + byDesign + " left in place on purpose",
+          how + " What remains is left on purpose: a Zygisk/Xposed hook framework's bind, which " +
+          "<code>absorb</code> deliberately never takes over (breaking a hook does not fail at " +
+          "boot, it fails hours later during an app install), or a <code>my_*</code> bind of ours " +
+          "— that partition is served by a real bind unless the <code>my_hookless</code> trial is " +
+          "on. A scanner reading <code>mountinfo</code> can see " +
+          (byDesign > 1 ? "them" : "it") + ".");
       } else {
         say("clean", "Fully mountless", "zero mounts — nothing to hide", how);
       }
@@ -2440,7 +2469,18 @@
     const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
-    if (!txt) { card.style.display = "none"; return; }
+    // Clear the BANNER too. This early-returned without touching `#incwarn`, so
+    // after tapping Re-arm (which deletes incident.log and calls this) the banner
+    // kept saying "the bootloop guard tripped ... Nothing is being injected" on
+    // every tab, on a device the user had just fixed, until a full page reload.
+    // The comment below blamed a race with `paintManagerBanner` -- that function
+    // owns `#mgrwarn`, a different element, so there was never a race to avoid.
+    if (!txt) {
+      card.style.display = "none";
+      const w = $("incwarn");
+      if (w) w.hidden = true;
+      return;
+    }
     card.style.display = "";
     $("incidentout").textContent = txt;
     const el = $("incwarn");
@@ -2752,6 +2792,10 @@
     const done = busy(btn, "Hiding…");
     const r = await woApply(v);
     if (r.errno === 0) $("woPath").value = "";
+    // RULES = null first: `refreshStatus` awaits `ruleDump()`, which returns the
+    // cached promise, so without this the "refresh" repainted the pre-change
+    // counters -- a no-op that looked like a refresh.
+    RULES = null;
     done(); refreshWhiteouts(); refreshStatus();
   }
   // One place the command is built, so the quoting cannot be right in one caller
@@ -2772,6 +2816,10 @@
     const txt = ((r.stdout || "") + (r.stderr || "")).trim();
     toast(r.errno === 0 ? "No longer hidden" : "Failed: " + (txt || "error"),
           r.errno === 0 ? "ok" : "bad");
+    // RULES = null first: `refreshStatus` awaits `ruleDump()`, which returns the
+    // cached promise, so without this the "refresh" repainted the pre-change
+    // counters -- a no-op that looked like a refresh.
+    RULES = null;
     done(); refreshWhiteouts(); refreshStatus();
   }
   // Walks the ROM for files only a root setup leaves behind and lists what it
@@ -2787,9 +2835,21 @@
   // and only the FIRST number is absorbable -- the by-design ones are the hook
   // binds absorb refuses on purpose.
   function absorbable(r) {
+    // Classify off the VERDICT, not off a word. This grepped for "unexpected",
+    // which `audit.rs` emits in exactly ONE of its three evidence strings -- the
+    // arm that always begins "0 unexpected". The other two are "0 module mounts in
+    // this namespace" (a perfectly clean device) and "N module mount(s) visible"
+    // (a device that actually HAS absorbable mounts), and neither matched, so the
+    // chip rendered a grey dash in both. It only ever showed a number on a device
+    // that happens to carry a hook-framework bind, which is why nobody noticed.
     const c = findCheck(r, "zero-mount-posture");
-    const m = c && c.evidence && c.evidence.match(/(\d+)\s+unexpected/);
-    return m ? parseInt(m[1], 10) : -1;
+    if (!c) return -1;
+    if (c.verdict === "pass") return 0;
+    if (c.verdict === "unmeasured") return -1;
+    const m = c.evidence && c.evidence.match(/(\d+)\s+module mount\(s\) visible/);
+    if (m) return parseInt(m[1], 10);
+    // A `note` means every mount left is one absorb declines on purpose.
+    return c.verdict === "note" ? 0 : -1;
   }
   // What absorb ALREADY took over, which is the part that was invisible.
   //
@@ -2940,6 +3000,10 @@
     // now stale. Re-measure rather than leaving a warning standing over a fixed
     // device.
     await runCheck(null);
+    // absorb changes the rule set more than anything else on this page; the
+    // cached dump must not survive it.
+    RULES = null;
+    refreshStatus();
     refreshAbsorb();
     done();
   }
@@ -2947,6 +3011,18 @@
   async function woScan(btn) {
     const done = busy(btn, "Scanning…");
     const r = await nm("whiteout suggest");
+    // errno FIRST. This ignored it entirely, so a scan that never ran produced an
+    // empty candidate list and toasted a green "Nothing to hide on this device" --
+    // a clean bill of health from a command that failed. Same rule the whiteout
+    // and module lists already follow: show it as unknown, never as clean.
+    if (r.errno !== 0) {
+      $("woFound").style.display = "";
+      $("woFound").innerHTML = '<div class="empty">Scan did not run — ' +
+        esc((r.stderr || "").trim() || "the command failed") + "</div>";
+      toast("Scan did not run", "bad");
+      done();
+      return;
+    }
     const out = (r.stdout || "") + (r.stderr || "");
     const box = $("woFound");
     const cands = out.split("\n").map(x => x.trim()).filter(l => l.indexOf("\t") > 0);
@@ -3071,7 +3147,12 @@
     if (r.errno === 0) toast((r.stdout || "").trim().replace(/^ok\b\s*/, "Rules cleared ") || "Rules cleared", "ok");
     else toast("Failed: " + (r.stderr || "error"), "bad");
     RULES = null;
-    done(); refreshStatus(); refreshBlocked(); if (rulesShown) loadRules();
+    // The whole page, not three cards. Clearing rules leaves the Rules tab's
+    // count, breakdown, per-module bar, file list and absorb card all showing the
+    // pre-clear state -- which reads as "the clear did not work" right after the
+    // most destructive action on the page.
+    done();
+    refreshAll();
   }
   async function rearm(btn) {
     if (!(await confirmAction(
@@ -3158,7 +3239,14 @@
       const [name, stateRaw] = l.split("\t");
       const s = (stateRaw || "").trim();
       let cls = "live";
-      if (/not installed/.test(s) || /unreachable/.test(s) || /no match/.test(s)) cls = "gone";
+      // `unreadable`, not `unreachable`. The CLI prints
+      // "glob · package map unreadable" (handlers.rs) and "invalid glob: ..." --
+      // neither matched, so BOTH fell through to the default `live` class: a green
+      // dot, and counted into the "Hidden apps · N" header. "We could not evaluate
+      // this rule" and "this rule is malformed" were rendered as "this app is
+      // hidden", in the one card whose job is saying which apps are hidden.
+      if (/not installed/.test(s) || /unread/.test(s) || /unreachable/.test(s) ||
+          /no match/.test(s) || /invalid glob/.test(s)) cls = "gone";
       else if (/not applied/.test(s)) cls = "pending";
       else if (/not saved/.test(s)) cls = "drift";
       // Target for actions: for a glob-matched row the row names a package but the
@@ -3341,7 +3429,18 @@
   }
   async function uidScan(btn) {
     const done = busy(btn, "Scanning…");
-    const r = await exec("sh /data/adb/modules/meta-nomount/uidscan.sh 2>/dev/null");
+    // stderr is KEPT, not discarded. `uidscan.sh` writes "no detector inventory ...
+    // name matching is OFF, manifest signals only" there -- a scan running with
+    // its most valuable reason class disabled, presented until now as identical to
+    // a full one. And errno is checked, because a scan that never ran used to
+    // toast a green "Nothing worth hiding found".
+    const r = await exec("sh /data/adb/modules/meta-nomount/uidscan.sh");
+    if (r.errno !== 0) {
+      done();
+      toast("Scan did not run — " + esc((r.stderr || "").trim() || "the script failed"), "bad");
+      return;
+    }
+    const degraded = /no detector inventory/i.test(r.stderr || "");
     usParse(r.stdout);
     // Drop what is already hidden — re-offering it, pre-picked, would invite a
     // pointless second `uid block` and make the count meaningless.
@@ -3353,7 +3452,11 @@
     done();
     if (!usShown) usToggle($("usShow"));
     usRender();
-    toast(US.size ? `${US.size} candidate(s)` : "Nothing worth hiding found", US.size ? "ok" : "");
+    const note = degraded ? " (by manifest only — the detector name list was unavailable)" : "";
+    toast(
+      US.size ? `${US.size} candidate(s)${note}` : `Nothing worth hiding found${note}`,
+      US.size ? "ok" : ""
+    );
   }
   function usToggle(btn) {
     usShown = !usShown;

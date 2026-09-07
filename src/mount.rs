@@ -2071,6 +2071,36 @@ mod tests {
         }
     }
 
+    /// The manager card must consult the verdict, not just log it.
+    ///
+    /// `_hv` held `check`'s own one-line verdict — the device half's answer — and
+    /// appeared on exactly two lines: assigned, then logged. The card ladder never
+    /// read it, so its only device input was the per-UID canary, and a run with
+    /// FAILED detection checks still printed **healthy** while the same boot.log
+    /// said "one or more findings are open" and `health.txt` carried
+    /// `verdict=N check(s) FAILED`.
+    ///
+    /// Pinned by reading the script, because the ladder is shell and the value it
+    /// must not drop is a shell variable.
+    #[test]
+    fn the_manager_card_consults_the_check_verdict() {
+        let uses: Vec<&str> = SERVICE
+            .lines()
+            .filter(|l| l.contains("$_hv") || l.contains("_hv="))
+            .collect();
+        assert!(
+            uses.iter().any(|l| l.contains("_health=")),
+            "the card ladder must branch on the verdict, not only log it: {uses:?}"
+        );
+        // ...and the plan half must not ignore `unmeasured` either — a summary
+        // that renders "0 failed" for a run with an unmeasured check tells the
+        // reader something was verified that was not.
+        assert!(
+            SERVICE.contains("_sum_get unmeasured"),
+            "the card must read the plan's unmeasured count"
+        );
+    }
+
     /// Keys an incident writer records for a bootloop-guard trip.
     fn incident_keys(script: &str) -> Vec<String> {
         let Some(a) = script.find("bootloop guard tripped") else { return Vec::new() };

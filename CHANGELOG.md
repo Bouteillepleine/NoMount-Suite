@@ -11,6 +11,91 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.148 — engine v30 (unchanged)
+
+The round-7 audit's second tier: **every place the report told you it was fine
+when it did not know.** Each of these renders "could not measure" identically to
+"measured and clean", which is this project's recurring bug and the reason
+`Verdict::Unmeasured` exists at all.
+
+### Fixed
+
+- **The manager card said `healthy` while `check` reported FAILED.** `_hv` held
+  the device half's own verdict and appeared on exactly two lines — assigned, then
+  logged — so the card ladder's only device input was the per-UID canary. A run
+  with failed detection checks printed **healthy** while the same `boot.log` said
+  "one or more findings are open" and `health.txt` carried
+  `verdict=N check(s) FAILED`. The ladder now branches on it, and reads the plan's
+  `unmeasured` count as well, which it also ignored. Pinned by a test.
+
+- **An unreadable mount table rendered as a clean mount posture.**
+  `doctor.rs`'s `survey().unwrap_or_default()` turned a read failure into an empty
+  vec, so every mount finding — foreign mount, module mount not absorbed ×3, left
+  by design ×4 — silently disappeared. `health.rs::count_mounts_split` was
+  rewritten to avoid exactly this ("(0, 0) said 'there are no module mounts' for a
+  question that was never asked"); the same substitution was still live here. Two
+  siblings fixed with it: a failed `ghost_list()` produced no row at all, while
+  the neighbouring `nm.list()` failure gets an explicit "could not enumerate, not
+  none"; and an unreadable hide list silently skipped all three
+  PM-published-opt-out checks.
+
+- **`check_xattr_agrees_when_hidden` passed when its own case could not arise.**
+  It looks for a file the hidden app was DENIED that still answered xattr. If the
+  app opened everything — the normal case, since a shadowing rule serves a blocked
+  reader the stock file — both counters were zero for want of anything to measure
+  and it returned green saying "told an app you hid the same story through both
+  surfaces". It now reports Unmeasured, the way `check_maps_not_deleted` was fixed
+  to. It also counted **EACCES** as a leak, so an injected file that is merely
+  root-owned 0600 could FAIL a check asserting the xattr surface ignores per-UID
+  hiding — on a file where hiding was never consulted and a stock file behaves
+  identically. ENOENT is hiding's signature and is now the only denial it counts.
+
+- **The verdict line ranked and named the wrong things.** It tested `warn` before
+  `complete()`, so unmeasured checks vanished from the one string `health.txt`
+  carries — while `Verdict`'s declaration order, `doctor::Level` and
+  `Report::sort` all rank Unmeasured above Warn. And it called every Warn a "plan
+  warning", though `audit::soft` emits four measured DEVICE tells through it.
+
+### WebUI
+
+- **The "other modules' mounts" chip was dead.** It grepped for the word
+  `unexpected`, which `audit.rs` emits in exactly one of three evidence strings —
+  the arm that always begins `0 unexpected`. A clean device and a device with real
+  absorbable mounts both rendered a grey dash. It only ever showed a number on a
+  device carrying a hook-framework bind, which is why nobody noticed. It
+  classifies off the verdict now.
+- **Two hide-list states rendered as green, counted, hidden apps.** The ladder
+  tested `/unreachable/`; the CLI prints `unreadable`, and `invalid glob:` had no
+  arm at all. "We could not evaluate this rule" and "this rule is malformed" both
+  read as "this app is hidden".
+- **The posture card claimed "zero mounts — nothing to hide" over a visible
+  mount.** `audit.rs` grades zero-mount-posture a `note` when the only mounts left
+  are ones absorb declines on purpose — *including a `my_*` bind of ours, which is
+  the default, since `serve_mode` returns Bind for `my_*` unless `my_hookless` is
+  set* — and attaches an oracle saying any app can read it in `mountinfo`. The
+  card's by-design counter matched only the hook-framework wording, so that case
+  fell through to the all-clear. It now counts either wording and says what the
+  mount is. Deliberately NOT promoted to a warning: the mounts are ours, on
+  purpose, and "Something is mounting over the ROM" would be the opposite
+  over-claim.
+- **Two scans reported a green "nothing found" when they had not run.**
+  `woScan` and `uidScan` ignored `errno`. `uidScan` also discarded stderr, where
+  `uidscan.sh` writes "no detector inventory … name matching is OFF" — a scan
+  running with its most valuable reason class disabled, presented identically to a
+  full one. It now says so in the toast.
+- **Re-arming the guard left "Nothing is being injected" on screen.**
+  `refreshIncident` early-returned without clearing `#incwarn`, so the banner
+  stayed on every tab until a page reload. Its comment blamed a race with
+  `paintManagerBanner`, which owns a different element.
+- **Two placeholders shipped green before anything was measured** — the shield's
+  `clean` class beside a caption reading "Checking what apps can see…", and a
+  green dot with the word **Armed** hardcoded in the static HTML.
+- **Refreshes that were no-ops.** `woAdd`, `woRemove` and `abAbsorb` called
+  `refreshStatus()` against the cached rule dump, so the counters repainted the
+  pre-change state; and "Clear rules" left the Rules tab showing the pre-clear
+  count, breakdown, module bar and file list — which reads as "the clear did not
+  work" right after the most destructive action on the page.
+
 ## v1.3.147 — engine v30 (unchanged)
 
 The ten Tier-1 findings of the round-7 audit — twelve parallel reviewers plus a
