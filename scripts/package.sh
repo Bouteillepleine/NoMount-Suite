@@ -605,26 +605,20 @@ UPDATER
     # same zip". A reproducible archive is what turns "the hashes match
     # themselves" into "these bytes came from this commit".
     #
-    # zip(1) remains the fallback for a host with no python at all. It produces
-    # a correct, installable archive -- just not a comparable one -- so say which
-    # was used rather than leaving the reader to guess.
-    if command -v python3 >/dev/null 2>&1; then
-        python3 "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path"
-        echo "    Archive: mkzip.py (reproducible)"
-    elif command -v python >/dev/null 2>&1; then
-        python "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path"
-        echo "    Archive: mkzip.py (reproducible)"
-    elif command -v zip >/dev/null 2>&1; then
-        # Do NOT reach for Compress-Archive as a substitute: it writes
-        # backslash-separated entry names, which the installer cannot resolve,
-        # and drops the unix mode so every binary lands non-executable.
-        (cd "$staging" && zip -r9 "$out_path" .)
-        echo "    Archive: zip -r9 (NOT reproducible -- no python on this host)"
-    else
-        echo "FATAL: neither python nor zip is available to build the archive." >&2
+    # There used to be a `zip -r9` fallback here for a host with no python, and a
+    # second one for `python` before `python3`. Both are gone. The zip(1) path
+    # produced an archive that is NOT reproducible -- silently giving up the one
+    # property the paragraph above says this block exists to protect -- and it did
+    # so on a host that has to have python anyway, since mkzip.py is the only
+    # thing that can write an installable archive on Windows. A missing python3 is
+    # now an error that names its own fix, rather than a quiet downgrade.
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "FATAL: python3 is required to build the archive (scripts/mkzip.py)." >&2
         rm -rf "$staging"
         exit 1
     fi
+    python3 "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path"
+    echo "    Archive: mkzip.py (reproducible)"
     rm -rf "$staging"
 
     echo "    Output:  $out_path"

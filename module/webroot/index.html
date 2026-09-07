@@ -1671,8 +1671,11 @@
       : sucompat ? 'sucompat <small>kernel · mountless</small>'
       : 'external <small>unmanaged</small>';
 
+    // "File injections: mountless" used to head this list, hardcoded — a green
+    // row that said the same thing on every device, measured on none, and false
+    // on any device serving my_* by bind. The "Real mounts" row below is the
+    // measured answer to the same question, and it is the row that can disagree.
     const rows = [
-      { k: "File injections", v: "mountless", t: "vfs" },
       { k: "Root · su", v: sucompat ? "sucompat · mountless" : "external", t: sucompat ? "vfs" : "off" },
     ];
     if (rootNm > 0) {
