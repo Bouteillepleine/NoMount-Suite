@@ -839,9 +839,17 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // is now only module ids to skip injecting, so it is ordinary diagnostic data
     // -- but the secret moved with the content, and the guard has to move with it.
     const PRIVATE: &[&str] = &["uidhide", "uidhide.cache", "uidhide.conf", "spoof.conf"];
+    // `boot.log` is in this list because the bug-report template asks for it by
+    // name -- "the last 40 lines of /data/adb/nomount/boot.log" -- and nothing in
+    // the app could produce it. The WebUI has no file viewer and `export` is the
+    // one button that hands someone a bundle, so the answer to the template's own
+    // question was "open a root shell". It is rotated to 400 lines at every boot
+    // (~40 KB measured), so it is bounded, and it carries counts and paths, never
+    // package names -- the same standard `incident.log`, which is already here and
+    // does list enabled module ids, is held to.
     for f in [
         "uidhide", "uidhide.cache", "uidhide.conf", "blocklist", "spoof.conf",
-        "incident.log", "health.txt", "snapshot.txt",
+        "incident.log", "health.txt", "snapshot.txt", "boot.log",
     ] {
         if shared && PRIVATE.contains(&f) {
             continue;

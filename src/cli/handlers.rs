@@ -11,6 +11,47 @@ use super::{UidAction, VfsAction};
 use crate::blocklist::{self, appid, Resolved};
 use crate::nm::Nm;
 
+/// What `uid unblock` actually did, in words.
+///
+/// Two facts, independently true or false, and the verb reported neither: the
+/// entry was in the hide list (`existed`), and the kernel was hiding an appid
+/// for it (`unhid`). The plain branch threw `blocklist::remove`'s answer away and
+/// printed "removed from list" unconditionally — so `nomount uid unblock
+/// com.nothing.here` reported success for a name that was never there, and the
+/// WebUI's un-hide button, which paints its toast off errno alone, showed green.
+/// The glob branch a few lines up has always said "was not in the hide list".
+///
+/// List membership is not the whole answer either: `uid list` documents a real
+/// "live, not saved" state — the kernel hiding an appid that is not in the file —
+/// and there the unblock does do something. Hence both flags.
+///
+/// `uid` is `None` when the package is not installed now.
+fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -> String {
+    match (uid, existed, unhid) {
+        (Some(uid), true, true) => format!("ok: {target} (uid {uid}) unhidden"),
+        (Some(_), true, false) => {
+            format!("ok: {target} removed from the hide list — it was not being hidden")
+        }
+        (Some(uid), false, true) => format!(
+            "ok: {target} (uid {uid}) unhidden — it was not in the hide list, so nothing was saved"
+        ),
+        (Some(_), false, false) => {
+            format!("ok: {target} was not hidden, and was not in the hide list")
+        }
+        (None, true, true) => format!(
+            "ok: {target} removed from the hide list, and its last known uid unhidden — it is \
+             not installed now"
+        ),
+        (None, true, false) => format!("ok: {target} removed from the hide list (not installed)"),
+        (None, false, true) => {
+            format!("ok: {target} unhidden — not installed, and it was not in the hide list")
+        }
+        (None, false, false) => {
+            format!("ok: {target} is not installed, and was not in the hide list")
+        }
+    }
+}
+
 pub fn handle_vfs(action: VfsAction) -> Result<()> {
     let nm = Nm::new();
     match action {
@@ -432,29 +473,37 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 return Ok(());
             }
             let cached = blocklist::cache_read().get(target.trim()).copied();
-            blocklist::remove(&target)?;
+            // Kept, not discarded: see `unblock_message` for what this branch
+            // used to report and why both halves are needed.
+            let existed = blocklist::remove(&target)?;
             match blocklist::resolve(&target)? {
                 Resolved::Uid(uid) => {
                     let live = nm.uid_list_live().unwrap_or_default();
-                    if live.iter().any(|u| appid(*u) == appid(uid)) {
+                    let was_live = live.iter().any(|u| appid(*u) == appid(uid));
+                    if was_live {
                         nm.uid_unblock(uid)?;
                     }
                     // The app may have been reinstalled under a different appid
                     // since it was hidden; retire the one actually in force too.
+                    let mut retired_old = false;
                     if let Some(old) = cached {
                         if old != uid && live.iter().any(|u| appid(*u) == old) {
                             let _ = nm.uid_unblock(old);
+                            retired_old = true;
                         }
                     }
-                    println!("ok: {target} (uid {uid}) unhidden");
+                    let unhid = was_live || retired_old;
+                    println!("{}", unblock_message(&target, Some(uid), existed, unhid));
                 }
                 Resolved::NotInstalled => {
+                    let mut unhid = false;
                     if let Some(old) = cached {
                         if nm.uid_list_live().unwrap_or_default().iter().any(|u| appid(*u) == old) {
                             let _ = nm.uid_unblock(old);
+                            unhid = true;
                         }
                     }
-                    println!("ok: {target} removed from list");
+                    println!("{}", unblock_message(&target, None, existed, unhid));
                 }
             }
         }
@@ -620,5 +669,61 @@ mod tests {
         assert_eq!(parse_isolated_mode(" off "), Some(0));
         assert_eq!(parse_isolated_mode("2"), Some(2));
         assert_eq!(parse_isolated_mode("sometimes"), None);
+    }
+
+
+    /// `uid unblock` must not report a removal it did not make.
+    ///
+    /// The plain branch -- the one the WebUI's un-hide button calls -- discarded
+    /// `blocklist::remove`'s answer and printed "removed from list" for a name
+    /// that was never in the list, behind a toast the WebUI paints off errno
+    /// alone. Both flags matter independently: the kernel can be hiding an appid
+    /// that is not in the file ("live, not saved" in `uid list`).
+    #[test]
+    fn unblock_reports_both_halves_of_what_it_did() {
+        // The two facts, and the four answers each installation state gives.
+        let listed_and_hiding = unblock_message("com.a", Some(10123), true, true);
+        let listed_only = unblock_message("com.a", Some(10123), true, false);
+        let hiding_only = unblock_message("com.a", Some(10123), false, true);
+        let neither = unblock_message("com.a", Some(10123), false, false);
+
+        assert!(listed_and_hiding.contains("unhidden"));
+        assert!(
+            !listed_only.contains("unhidden"),
+            "nothing was unhidden here: {listed_only}"
+        );
+        assert!(listed_only.contains("removed"));
+        assert!(
+            hiding_only.contains("not in the hide list"),
+            "an appid hidden but never listed must say so: {hiding_only}"
+        );
+        // The one that used to lie.
+        assert!(
+            !neither.contains("removed") && !neither.contains("unhidden"),
+            "unblocking something that was neither listed nor hidden must not \
+             claim either: {neither}"
+        );
+
+        // Not installed: same rule, and still not a claim of removal.
+        let gone_unlisted = unblock_message("com.a", None, false, false);
+        assert!(
+            !gone_unlisted.contains("removed") && !gone_unlisted.contains("unhidden"),
+            "{gone_unlisted}"
+        );
+        assert!(unblock_message("com.a", None, true, false).contains("removed"));
+
+        // Every combination says something different, so no two states can be
+        // confused by reading the output.
+        let all = [
+            listed_and_hiding, listed_only, hiding_only, neither, gone_unlisted,
+            unblock_message("com.a", None, true, false),
+            unblock_message("com.a", None, true, true),
+            unblock_message("com.a", None, false, true),
+        ];
+        let mut seen: Vec<&str> = all.iter().map(String::as_str).collect();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "two states produce the same sentence");
     }
 }

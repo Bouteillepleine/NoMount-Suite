@@ -11,6 +11,41 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.154 — engine v30 (unchanged)
+
+Three findings from the round-7 audit that had not shipped yet.
+
+- **`uid unblock` reported a removal it had not made.** The glob branch has
+  always distinguished the two cases ("was not in the hide list"); the plain
+  branch — the one the WebUI's un-hide button calls — discarded
+  `blocklist::remove`'s answer and printed *"removed from list"* for a name that
+  was never there, behind a toast the WebUI paints off `errno` alone.
+
+  List membership is not the whole answer either: `uid list` documents a real
+  *"live, not saved"* state, the kernel hiding an appid that is not in the file,
+  and there the unblock does do something. Both facts are now reported, through
+  one `unblock_message` covering all eight states, with a test asserting no two
+  of them produce the same sentence. On device, unblocking a name that was never
+  listed now says *"is not installed, and was not in the hide list"*.
+
+- **`nomount uid preset` with no name re-derived both kernel cloak tables.** With
+  no name the verb prints the list of available presets and changes nothing —
+  but `changes_ghost_inputs` matched `Preset { dry_run: false, .. }`, so listing
+  the presets forked the probe child and rewrote both `_ghost` tables on the way
+  out. That is exactly the cost `read_only_and_self_syncing_verbs_do_not` exists
+  to keep off read-only verbs; the pattern is `name: Some(_)` now, and the
+  no-name form is in that test.
+
+- **`boot.log` was unreachable from the app.** The bug-report template asks for
+  it by name — "the last 40 lines of `/data/adb/nomount/boot.log`" — and nothing
+  in the WebUI could produce it: there is no file viewer, and `export` is the one
+  button that hands someone a bundle. It is in the export now. It is rotated to
+  400 lines at every boot (~40 KB measured), and before shipping it to shared
+  storage its contents were checked for the secret the export protects: no
+  package names and no appids, the same standard `incident.log` — already
+  exported, and it does list enabled module ids — is held to. The private set
+  (`uidhide*`, `spoof.conf`) is still withheld from shared storage.
+
 ## v1.3.153 — engine v30 (unchanged)
 
 Two last deletions, and the claim one of them was hiding.

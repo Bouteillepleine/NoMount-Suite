@@ -293,7 +293,13 @@ pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
                 | UidAction::Apply { .. }
                 // A preset is `add_many` + an apply pass, i.e. the largest hide-list
                 // change this tool makes (~50 entries).
-                | UidAction::Preset { dry_run: false, .. }
+                //
+                // `name: Some(_)`, not `..`. With no name the verb PRINTS THE LIST
+                // of available presets and changes nothing -- and it was still
+                // forking the probe child and rewriting both kernel tables on the
+                // way out, which is the exact cost `read_only_and_self_syncing
+                // _verbs_do_not` exists to keep off read-only verbs.
+                | UidAction::Preset { name: Some(_), dry_run: false, .. }
         ),
         // The rule set, by hand.
         Commands::Vfs { action } => matches!(
@@ -384,7 +390,11 @@ mod tests {
             Commands::Uid { action: UidAction::Unblock { target: "com.a".into() } },
             Commands::Uid { action: UidAction::Apply { early: false } },
             Commands::Uid {
-                action: UidAction::Preset { name: None, dry_run: false, globs: false },
+                action: UidAction::Preset {
+                    name: Some("detectors".into()),
+                    dry_run: false,
+                    globs: false,
+                },
             },
             Commands::Vfs {
                 action: VfsAction::Add { virtual_path: "/a".into(), real_path: "/b".into() },
@@ -413,6 +423,10 @@ mod tests {
             Commands::Uid { action: UidAction::Isolated { mode: None } },
             Commands::Uid {
                 action: UidAction::Preset { name: None, dry_run: true, globs: false },
+            },
+            // No name: this prints the list of presets and changes nothing.
+            Commands::Uid {
+                action: UidAction::Preset { name: None, dry_run: false, globs: false },
             },
             Commands::Vfs { action: VfsAction::List },
             Commands::Whiteout { action: WhiteoutAction::List },
