@@ -11,6 +11,29 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.153 — engine v30 (unchanged)
+
+Two last deletions, and the claim one of them was hiding.
+
+- **`File injections: mountless`** headed the stealth card's row list, hardcoded.
+  It said the same thing on every device, measured on none, and it is false on
+  any device serving `my_*` by bind — which is the default. The `Real mounts` row
+  directly beneath it is the measured answer to the same question, and it is the
+  one that can disagree. Removed.
+
+- **The unmeasured arm asserted the answer.** With no check yet run, the mount
+  posture line read *"File injections and RRO are Prism and su is sucompat, so
+  the Suite adds no mounts by construction — but nothing has measured that here
+  yet."* The first half is the claim; the second half is the state. It now says
+  only what is known, which is nothing.
+
+- **Two packaging fallbacks** in `scripts/package.sh`: `python` before `python3`,
+  and `zip -r9` for a host with no python at all. The zip(1) path silently gave up
+  reproducibility — the one provenance property the surrounding comment says the
+  block exists to protect — on a host that must have python anyway, since
+  `mkzip.py` is the only thing that writes an installable archive on Windows. A
+  missing `python3` is now an error naming its own fix.
+
 ## v1.3.152 — engine v30 (unchanged)
 
 Deletions, part two: the boot scripts. No behaviour change intended; the one
