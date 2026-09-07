@@ -191,14 +191,23 @@ fn drop_entry(target: &Path) -> usize {
 }
 
 /// What we last served for a target, as recorded by [`sync`].
-fn read_state() -> HashMap<PathBuf, String> {
-    let Ok(txt) = fs::read_to_string(STATE) else { return HashMap::new() };
-    txt.lines()
-        .filter_map(|l| {
-            let (t, id) = l.split_once('\t')?;
-            Some((PathBuf::from(t), id.to_string()))
-        })
-        .collect()
+///
+/// `None` means the file is THERE and could not be read, which is a different
+/// answer from "there is no record yet" and has to stay different: see [`sync`].
+fn read_state() -> Option<HashMap<PathBuf, String>> {
+    let txt = match fs::read_to_string(STATE) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    };
+    Some(
+        txt.lines()
+            .filter_map(|l| {
+                let (t, id) = l.split_once('\t')?;
+                Some((PathBuf::from(t), id.to_string()))
+            })
+            .collect(),
+    )
 }
 
 /// mtime+size of the file actually being served. Absent source -> None, which
@@ -215,8 +224,29 @@ fn identity(source: &Path) -> Option<String> {
 pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     // No state yet (first run after an upgrade): adopt what is served instead of
     // calling every APK changed and dropping the whole cache for nothing.
-    let seeding = !Path::new(STATE).exists();
-    let previous = read_state();
+    // AN UNREADABLE RECORD IS THE SAME CASE, and it used not to be. `seeding`
+    // asked whether the file EXISTS while `read_state` returned an empty map on
+    // any read error at all -- so a state file that was present but unreadable
+    // (a bad label, an I/O error, a truncated write) gave seeding=false over an
+    // empty `previous`, and every served ROM APK then looked changed. That is a
+    // mass `drop_entry` across the whole injected set, every one reported as
+    // swapped, caused by a failure to READ. Evidence that could not be gathered
+    // is not evidence that everything changed.
+    //
+    // Seeding is the recovery, not an early return: it drops nothing and
+    // rewrites the record from what is served now, so the NEXT pass is correct
+    // again. The cost is one missed invalidation, for an APK whose bytes changed
+    // during the same pass in which the record became unreadable.
+    let (previous, seeding) = match read_state() {
+        Some(p) => (p, !Path::new(STATE).exists()),
+        None => {
+            eprintln!(
+                "nomount: pmcache: {STATE} exists but could not be read - adopting what is \
+                 served now instead of treating every injected APK as changed"
+            );
+            (HashMap::new(), true)
+        }
+    };
     let mut changed = Vec::new();
     let mut lines = Vec::new();
 

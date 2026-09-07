@@ -1936,6 +1936,27 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
     st
 }
 
+/// Fold this pass's (target, source) pairs into the recorded set.
+///
+/// THE FRESH SOURCE WINS. This was `if !all.iter().any(|(t, _)| *t == p.0)`, i.e.
+/// a target already in the record kept whatever source it was FIRST absorbed
+/// from, and the pair just absorbed was thrown away. The record is supposed to
+/// describe the LIVE rule, and the live rule is the one this pass created -- so
+/// after a module update moved its APK, or after a different module took the
+/// same target over, the record went on naming the old path.
+///
+/// What reads it is why that matters: `reapply_absorbed_pairs` re-serves each
+/// recorded pair after a `clear`, and a pair naming a source that no longer
+/// exists re-serves nothing while the record still claims it does.
+fn merge_absorbed(all: &mut Vec<(PathBuf, PathBuf)>, fresh: Vec<(PathBuf, PathBuf)>) {
+    for p in fresh {
+        match all.iter_mut().find(|(t, _)| *t == p.0) {
+            Some(slot) => slot.1 = p.1,
+            None => all.push(p),
+        }
+    }
+}
+
 /// `nomount absorb [--dry-run]`.
 ///
 /// `early` is the post-fs-data pass. See `Commands::Absorb::early`: it exists
@@ -2319,11 +2340,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             // No prune here: `prune_absorbed_record` already ran at the top of
             // this pass, on the path that reaches this one AND on the early
             // return that does not.
-            for p in fresh_pairs {
-                if !all.iter().any(|(t, _)| *t == p.0) {
-                    all.push(p);
-                }
-            }
+            merge_absorbed(&mut all, fresh_pairs);
             all.sort();
             set_absorbed_pairs(&all);
         }
@@ -3138,5 +3155,36 @@ mod tests {
             b"/data/caf\xe9",
             "the non-UTF-8 target must survive byte for byte"
         );
+    }
+
+    /// A re-absorbed target records the source it is being served from NOW.
+    ///
+    /// The merge skipped any target already in the record, so the pair this pass
+    /// had just injected was discarded and the FIRST source it was ever absorbed
+    /// from stayed. `reapply_absorbed_pairs` re-serves from the record after a
+    /// `clear`, so once a module update moved its APK the record pointed at a
+    /// path that no longer exists — and went on claiming the rule was live.
+    #[test]
+    fn re_absorbing_a_target_records_the_new_source() {
+        let t = PathBuf::from("/product/app/A/A.apk");
+        let old_src = PathBuf::from("/data/app/~~aaa==/pkg-1/base.apk");
+        let new_src = PathBuf::from("/data/app/~~bbb==/pkg-2/base.apk");
+
+        let mut all = vec![(t.clone(), old_src.clone())];
+        merge_absorbed(&mut all, vec![(t.clone(), new_src.clone())]);
+
+        assert_eq!(all.len(), 1, "the target must not be recorded twice");
+        assert_eq!(
+            all[0].1, new_src,
+            "the record must name the source this pass served, not the first one ever absorbed"
+        );
+
+        // An unrelated target is still appended, and an untouched one is untouched.
+        let other = PathBuf::from("/product/app/B/B.apk");
+        let other_src = PathBuf::from("/data/adb/modules/m/product/app/B/B.apk");
+        merge_absorbed(&mut all, vec![(other.clone(), other_src.clone())]);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].1, new_src);
+        assert_eq!(all[1], (other, other_src));
     }
 }

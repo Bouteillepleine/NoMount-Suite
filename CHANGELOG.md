@@ -11,6 +11,51 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.156 — engine v30 (unchanged)
+
+Two records that could describe something other than what is live.
+
+- **An unreadable `apkstate.list` invalidated PM's parse of every injected APK.**
+  `seeding` asked whether the file EXISTS, while `read_state` returned an empty
+  map on *any* read error — so a record that was present but unreadable (a bad
+  label, an I/O error, a truncated write) gave `seeding = false` over an empty
+  previous set, and every served ROM APK then looked changed. That is a
+  `drop_entry` across the whole injected set, each one reported as swapped,
+  caused by a failure to READ. The two answers are distinct now, and an
+  unreadable record seeds instead: it drops nothing and rewrites itself from what
+  is served, so the next pass is correct again. Verified on device by making the
+  record a directory — the pass says so and completes; before, it would have
+  called all 141 recorded APKs changed.
+
+- **A re-absorbed target kept the source it was FIRST absorbed from.** The record
+  merge skipped any target already present, discarding the pair the pass had just
+  injected. `reapply_absorbed_pairs` re-serves from that record after a `clear`,
+  so once a module update moved its APK the record named a path that no longer
+  exists — and went on claiming the rule was live. The fresh source wins now, in
+  one `merge_absorbed` with a test.
+
+### Measured, not changed
+
+Three things the audit flagged turned out to be sound when put to the device, and
+are recorded here so the question is not reopened from a code reading:
+
+- **The `_ghost` cloak does cover the isolated pools.** Its `u` table is built
+  from the engine's blocked-appid dump, which does not list uids 90000–98999 or
+  99000–99999 — so on a reading of the source the cloak looks absent there. It is
+  not: `nomount_is_uid_blocked()` matches those pools by RANGE, before the table
+  is consulted. Measured on an OP15 against a ghosted path: uid 10384 (hidden),
+  90001 (app-zygote) and 99001 (platform-isolated) all answer *No such file or
+  directory* on both `stat` and `chmod`, while an unhidden app sees the file.
+- **`MIN_PATTERN_LITERAL` counts bytes, not characters** — and it cannot matter.
+  The dangerous glob it is supposed to stop, `*com.*`, carries four literal
+  characters and passes it, then is refused by the platform-appid guard instead:
+  61 installed packages containing `com.` run as appid 1000, and one match below
+  the app range fails the whole entry before it is persisted.
+- **`metamount`'s flock and `is_hook_framework`** were both on the deletion list.
+  `boot.log` carries zero "running WITHOUT a single-run guard" lines, so the lock
+  works here; and `is_hook_framework` fires for 5 of the 14 modules installed on
+  this device, including the LSPosed bind that `absorb` declines because of it.
+
 ## v1.3.155 — engine v30 (unchanged)
 
 Two boot-path guarantees that only held on the paths anyone had thought of.
