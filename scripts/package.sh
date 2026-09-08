@@ -74,6 +74,25 @@ trap _unstamp EXIT
 # that lies about itself is the one thing a release must never do.
 sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$PROJECT_ROOT/Cargo.toml"
 
+# ...and bring Cargo.lock with it, or every build below fails.
+#
+# The lock records this package's own version, so stamping Cargo.toml alone
+# leaves the two disagreeing -- and the builds are `--locked`, which exists to
+# stop a shipped binary resolving a different dependency set from the one the
+# tests were green against. `--locked` then refuses to update the lock and the
+# whole run dies on the FIRST cross-compile:
+#
+#   error: cannot update the lock file ... because --locked was passed
+#
+# Measured: v1.3.171 built only because its lock already happened to name
+# 1.3.171; `--version v1.3.172` failed outright. --offline touches no network
+# and rewrites nothing but this package's own version line.
+if [ -f "$PROJECT_ROOT/Cargo.lock" ]; then
+    (cd "$PROJECT_ROOT" && cargo update --offline --quiet -p nomount 2>/dev/null) \
+        || (cd "$PROJECT_ROOT" && cargo metadata --offline --format-version 1 >/dev/null 2>&1) \
+        || echo "    !! could not refresh Cargo.lock for $NEW_VERSION; --locked builds may fail" >&2
+fi
+
 # major*100000 + minor*1000 + patch. Plain dot-stripping regressed the code
 # (1.2.0 -> "120" < 10102 for v1.1.2), which a manager reads as a downgrade.
 #
