@@ -15,9 +15,13 @@
 //!
 //! What is NOT collapsed is the distinction that earns its keep:
 //!
-//!   PLAN    — will the module set produce a bad rule? Static, resolved off the
-//!             module tree and the live rule list. Cheap, and safe to run at
-//!             post-fs-data before anything else exists.
+//!   PLAN    — will the module set produce a bad rule? Resolved off the module
+//!             tree and the live rule list. Cheap (128 ms against 1217 ms for
+//!             `--device`, measured on an OP15) and safe to run at post-fs-data
+//!             before anything else exists — because it runs no `su` probe and
+//!             does not walk the ROM, NOT because it touches nothing live. A
+//!             handful of its rows do ask the engine and the kernel; see
+//!             [`Section::Plan`].
 //!   DEVICE  — is what we serve actually detectable, and is it being served? Every
 //!             answer here is MEASURED on this device, and several need running
 //!             processes, so the result depends on WHEN it is asked.
@@ -37,8 +41,19 @@ use crate::json::J;
 /// Where a check comes from, and therefore what its answer depends on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    /// Resolved from the module tree and the rule list. No running process is
-    /// involved, so the answer does not change with the time of day.
+    /// Resolved from the module tree and the rule list, so the answer is stable
+    /// as far as the module set goes.
+    ///
+    /// It is NOT "no running process is involved", which is what this said and
+    /// what `Report::text`'s header repeated. `doctor::plan_checks` asks the live
+    /// engine for its version, its rule list and its ghost list, execs `ksud` to
+    /// read the kernel-umount setting, reads `/proc/self/mountinfo`, walks other
+    /// processes' mount namespaces, and forks up to sixteen times dropping to a
+    /// hidden appid to `stat` the device. One of those rows prints "Measured
+    /// here, not assumed from the build" one line under the header, which is how
+    /// the contradiction was found. What makes `--plan` cheap (128 ms against
+    /// 1217 ms for `--device`, measured on an OP15) is that it runs no `su`
+    /// probe and does not walk the ROM -- not that it touches nothing live.
     Plan,
     /// Measured on this device, now. Some of these need a process to have opened
     /// an injected file, which is why they can honestly report `Unmeasured`.
@@ -72,14 +87,18 @@ pub enum Verdict {
     /// fork that failed, no process yet holding an injected file. Amber, never
     /// green: reporting an unrun check as clean is how a hole survives.
     Unmeasured,
-    /// Something worth knowing that is not a failure. Two kinds reach it: a
-    /// hazard in the plan (nothing has gone wrong yet; something will), and a
-    /// measured DEVICE state a shipping detector can see today but that is not
-    /// broken -- the Suite's own `my_*` binds, and a hook framework's binds,
-    /// which are visible in every app's mountinfo and are staying. It said "a
-    /// hazard in the plan" and had not been only that since `audit::soft` was
-    /// added; `soft` is a Note now, and what took its place here is the one thing
-    /// amber is for. The line is: WARN = a shipping detector can see this.
+    /// Something worth knowing that is not a failure, and that the reader should
+    /// do something about. In practice that is a hazard in the plan: nothing has
+    /// gone wrong yet, something will, and the module set is the reader's to
+    /// change.
+    ///
+    /// The line is: WARN = a shipping detector can see this today AND there is
+    /// something the reader should change. Both halves. Stated as the first half
+    /// alone, the rule pulls `audit::check_zero_mount`'s two by-design bind arms
+    /// back up here -- a hook framework's binds and the Suite's own `my_*` binds,
+    /// which ARE visible in every app's mountinfo and are staying, on purpose, on
+    /// the default configuration. Both are Notes, deliberately; see `audit::soft`
+    /// for the measurement.
     Warn,
     /// Measured, and it holds.
     Pass,
@@ -92,7 +111,12 @@ pub enum Verdict {
     /// inconsistency that NOTHING SHIPPING PROBES. It keeps its oracle string and
     /// stays in `audit.json` and in `nomount check`'s text output as an engine
     /// regression canary; it is not put in front of a user as something to fix.
-    /// The line is: NOTE = we measured a tell nothing looks at.
+    ///
+    /// The line is: NOTE = either nothing looks at it, or nothing about it should
+    /// be changed. The second clause is what `audit::check_zero_mount`'s two
+    /// by-design bind arms land on -- real mounts a detector can see, that the
+    /// Suite declines to remove on purpose. The WebUI renders notes in a
+    /// collapsed "Good to know" disclosure, so this is quiet, not silent.
     Note,
 }
 
@@ -383,12 +407,12 @@ impl Report {
                 if t.warn > 0 { format!(", plus {} warning(s)", t.warn) } else { String::new() }
             )
         // NOT "plan warning(s)". `t.warn` counts EVERY Warn in the report, and
-        // `audit.rs` emits measured DEVICE tells through it -- the Suite's own
-        // `my_*` binds and a hook framework's binds, both visible in every app's
-        // mountinfo -- not just plan hazards. On a device where one of those fires
-        // the verdict read "1 plan warning(s)" and pointed the user at their
-        // module set. (The four `soft()` engine canaries used to land here too;
-        // they are Notes now, because nothing shipping probes them.)
+        // nothing in the type says a Warn came from the plan; a device row that
+        // reached amber made the verdict read "1 plan warning(s)" and pointed the
+        // user at a module set that was not the cause. Today `audit.rs` emits no
+        // Warn at all -- the four `soft()` engine canaries and both of
+        // `check_zero_mount`'s by-design bind arms are Notes -- but the wording
+        // must not depend on that staying true.
         } else if t.warn > 0 {
             format!("{} warning(s)", t.warn)
         } else {
@@ -496,7 +520,16 @@ impl Report {
                 _ => writeln!(s, "nomount check: rule list unreadable | engine {engine}\n"),
             };
         } else {
-            let _ = writeln!(s, "nomount check: plan only, nothing on the device was measured\n");
+            // "nothing on the device was measured" was false, and visibly so: the
+            // very next line on a healthy OP15 is a ghost row ending "Measured
+            // here, not assumed from the build". The plan section does ask the
+            // live engine and the kernel a handful of questions -- see
+            // `Section::Plan`. What it did NOT do is run the device section, and
+            // that is the thing a reader needs to know from the header.
+            let _ = writeln!(
+                s,
+                "nomount check: plan section only — the device's own checks were not run\n"
+            );
         }
         for c in &self.checks {
             let _ = writeln!(s, "[{}] {} ({})", c.verdict.tag(), c.name, c.section.slug());
@@ -748,9 +781,10 @@ mod tests {
     ///
     /// `audit::soft` used to emit `Warn` for four tells nothing shipping probes,
     /// so they were labelled "attention"/"will bite later" beside real failures
-    /// and put "N warning(s)" on the manager card -- while the genuinely
-    /// app-visible module mount sat at `Note`, the one verdict the WebUI's
-    /// `isShown` drops entirely. Both ends moved.
+    /// and put "N warning(s)" on the manager card. Those are Notes now. `Note` is
+    /// no longer dropped by the WebUI either -- it renders in a collapsed
+    /// "Good to know" disclosure -- so the ladder is about what the reader should
+    /// ACT on, not about which verdict is visible.
     #[test]
     fn a_note_is_information_and_a_warning_is_attention() {
         assert_eq!(Verdict::Note.severity(), "info");
@@ -765,8 +799,7 @@ mod tests {
         };
         // An engine canary nothing probes does not stop the run reading clean...
         assert_eq!(r(vec![c("a", Verdict::Note), c("b", Verdict::Pass)]).verdict(), "clean");
-        // ...but a mount a detector can see today does, which is the point of
-        // promoting the zero-mount row off `Note`.
+        // ...but a plan hazard the reader can fix does.
         assert_eq!(r(vec![c("a", Verdict::Warn), c("b", Verdict::Pass)]).verdict(), "1 warning(s)");
         // A note is still measured and still complete -- it is not an excuse.
         assert!(Tally::of(&[c("a", Verdict::Note)]).complete());

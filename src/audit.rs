@@ -56,12 +56,27 @@ fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
 /// needs a purpose-built detector." One rule now runs the ladder, and it is the
 /// one the Suite's posture already implies:
 ///
-///   WARN = a shipping detector can see this on this device, today.
-///   NOTE = we measured a tell nothing probes; it stays an engine canary.
+///   WARN = a shipping detector can see this on this device today AND there is
+///          something the reader should change.
+///   NOTE = either nothing probes it, or nothing about it should be changed: an
+///          engine canary, or a mount the Suite declines to absorb on purpose.
 ///
-/// The cost is real and accepted: `isShown` in the WebUI excludes `note`, so
-/// these survive in `audit.json` and in `nomount check`'s text output but not in
-/// the WebUI list. That is the right trade for a row nobody can act on.
+/// The second clause of the WARN rule is load-bearing, not decoration. Stated as
+/// "a detector can see it" alone -- which is how it read for two rounds -- the
+/// rule re-promotes both by-design arms of `check_zero_mount`, whose own oracle
+/// string says any app can read the mount in `/proc/self/mountinfo`. Both were
+/// demoted on measurement: amber that is permanently on, on the DEFAULT
+/// configuration, for a state working as designed, is amber nobody reads, and it
+/// made the WebUI's health line ("1 thing needs attention") contradict the
+/// Modules shield beside it ("Mountless · N by design"). Duck Detector is the
+/// reference adversary and it is not sophisticated; a warning the reader cannot
+/// act on costs more than the row is worth.
+///
+/// Nothing is lost by landing at NOTE. Notes survive in `audit.json` and in
+/// `nomount check`'s text, and the WebUI renders them in its own collapsed
+/// "Good to know" disclosure -- see the longer note in `check_zero_mount`, which
+/// records the release where dropping them entirely made a real, app-visible
+/// mount invisible.
 fn soft(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Note, evidence).oracle(oracle)
 }
@@ -613,12 +628,22 @@ fn check_zero_mount() -> Check {
                 crate::bind::BINDS_LIST
             )
         } else if mine == leaked.len() {
+            // Lead with "nothing is wrong", the same way the hook-framework arm
+            // above does, because this is the DEFAULT state of a OnePlus device
+            // with any my_* module installed -- `my_hookless` is the opt-in. The
+            // honest content is all still here: these are real mounts, any app
+            // reading its own mountinfo sees them, and the per-app remedy that
+            // actually works is named. What is gone is the implication that the
+            // reader is in a broken state.
             format!(
-                "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
-                 The SUITE made these itself: a my_* target is served by a real bind unless the \
-                 `my_hookless` opt-in is set, because a leaf my_* injection can trip zygote's FD \
-                 allowlist. They serve content from {owner}. Set /data/adb/nomount/my_hookless \
-                 and reboot to serve them by injection instead, with no mount at all.",
+                "Nothing is wrong here. All {} of these mount(s) are the Suite's own: a my_* \
+                 target is served by a real bind unless the `my_hookless` opt-in is set, because \
+                 a leaf my_* injection can trip zygote's FD allowlist. They serve content from \
+                 {owner}. They are real mounts, so an app that reads /proc/self/mountinfo sees \
+                 them — worth knowing only if you are hiding from one specific app, and there \
+                 your manager's \"umount modules\" for that app does take them out of its view. \
+                 To have no mount at all, set /data/adb/nomount/my_hookless and reboot; the same \
+                 files are then served by injection.",
                 leaked.len()
             )
         } else if mine > 0 {
@@ -665,34 +690,38 @@ fn check_zero_mount() -> Check {
             ));
         }
 
-        // WARN, not FAIL, when every one of them is ours.
+        // NOTE, not amber, when every one of them is ours -- the same landing as
+        // the hook-framework arm above, for the same reason.
         //
-        // A my_* bind is the Suite's DEFAULT way to serve that content -- the
+        // A my_* bind is the Suite's DEFAULT way to serve that content: the
         // `my_hookless` opt-in is what switches it to injection, not the other way
-        // round. Calling the default a failure means a stock install opens red on a
-        // device whose only crime is having a module with my_* content, and the
-        // posture cost is real but accepted and already stated in the text.
+        // round. So this arm fires on a healthy, stock install of any module with
+        // my_* content, permanently, and there is nothing here the reader has to
+        // do -- which is precisely the shape the hook-framework arm was demoted
+        // for ("a warning that is always on is a warning nobody reads").
         //
-        // It was `Verdict::Note`, and that was one step too far down. Note is the
-        // one verdict the WebUI does not render at all: `isShown` excludes it, so
-        // the row never appeared in "Needs your attention", never reached the
-        // copy-for-bug-report, and counted toward the "all clear" chip -- while
-        // `Report::verdict()` printed the literal string "clean" onto the manager
-        // card. On the DEFAULT configuration (`my_hookless` is opt-in) a device
-        // with real binds over /my_product, visible in every app's mountinfo, read
-        // all-clear, and the `meaning` below -- which is the only place the fix is
-        // written down -- was unreachable from every surface a user looks at.
+        // It was amber for one release. The single argument for that promotion was
+        // that `Note` was invisible: `isShown` dropped it, so the row never
+        // appeared anywhere a user looks. The SAME round removed that objection --
+        // notes now render in the WebUI's collapsed "Good to know" disclosure --
+        // and the cost of leaving it amber was measured: the health line read
+        // "1 thing needs attention" while the Modules shield beside it read
+        // "Mountless · N mount(s) by design" and the row itself said the mounts
+        // were ours by design. Two surfaces of one report contradicting each
+        // other, on the default configuration, is worse than a quiet row.
         //
-        // Warn is exactly the state described: real, measured, app-visible, and
-        // accepted-by-default rather than broken. This is the other end of the
-        // ladder rule on `soft()`: a shipping detector can see this one, so it is
-        // amber; the four engine canaries nothing probes are notes.
+        // Leaving one by-design bind amber and the other a note was the real
+        // incoherence: both are mounts the Suite declines to remove on purpose.
+        // Duck Detector, the reference adversary, can see either; neither is
+        // something the reader should change. The `meaning` above carries the
+        // honest content -- real mounts, visible in mountinfo, per-app umount is
+        // the lever -- without the alarm.
         //
         // Mixed stays FAIL: a bind we did not make is still someone else's mount
         // over the ROM, and that is the case this check exists for.
         let evidence = format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked));
         let c = if mine == leaked.len() {
-            chk(N_ZERO_MOUNT, Verdict::Warn, evidence).oracle(oracle)
+            chk(N_ZERO_MOUNT, Verdict::Note, evidence).oracle(oracle)
         } else {
             fail(N_ZERO_MOUNT, evidence, oracle)
         };
@@ -2039,28 +2068,25 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .owner("the kernel engine");
     }
-    if inverse > 0 {
-        return pass(
-            NAME,
-            format!(
-                "{who}: no xattr answer without open() across {} injected file(s) \
-                 ({inverse} answered open() but not xattr)",
-                files.len()
-            ),
-        )
-        .meaning(
-            "No app you hid can learn about a file it cannot open. Some files answered open() \
-             without answering xattr, which leaks nothing.",
-        );
-    }
-    // NOT A PASS when the discriminating case could not arise.
+    // NOT A PASS when the discriminating case could not arise. THIS GUARD RUNS
+    // FIRST, and the order is the whole fix.
     //
     // This check looks for ONE thing: a file the hidden app was DENIED (ENOENT)
     // that still answered xattr. If the app opened every file -- which is the
     // normal case, because a SHADOWING rule serves a blocked reader the stock
-    // file and most module rules shadow -- then `leaked` and `inverse` are both
-    // zero for want of anything to measure, and this returned green with the words
-    // "told an app you hid the same story through both surfaces".
+    // file and most module rules shadow -- then `denied` is zero and there was
+    // nothing to measure.
+    //
+    // `inverse` does NOT stand in for that. Read the probe body above: it is
+    // incremented only on the `opened` branch, so it counts files that OPENED and
+    // is entirely independent of `denied`. The guard was added below the
+    // `inverse > 0` arm, which meant a run where the hidden app opened everything
+    // (`denied == 0`) but one file's listxattr and getxattr both failed
+    // (`inverse > 0`) returned a green PASS reading "No app you hid can learn
+    // about a file it cannot open" -- over a run in which no file was hidden from
+    // it at all. That is the exact false green this guard exists to close,
+    // reached round the front, and the verdict is cached to audit.json and shown
+    // on the module card for the whole uptime.
     //
     // `check_maps_not_deleted` was fixed for exactly this shape (`mappers == 0` ->
     // Unmeasured, with a note that the old verdict "was cached to audit.json");
@@ -2076,6 +2102,20 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .meaning(
             "Every injected file opened for the app you hid, so the inconsistency this looks for could not have shown up. Not tested.",
+        );
+    }
+    if inverse > 0 {
+        return pass(
+            NAME,
+            format!(
+                "{who}: no xattr answer without open() across {} injected file(s) \
+                 ({inverse} answered open() but not xattr)",
+                files.len()
+            ),
+        )
+        .meaning(
+            "No app you hid can learn about a file it cannot open. Some files answered open() \
+             without answering xattr, which leaks nothing.",
         );
     }
     pass(
@@ -2111,6 +2151,17 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         let answered = live.verdict != Verdict::Fail;
         let mut checks = vec![live];
         if answered {
+            // THIS is the one row that reports the refused dump, and it says so.
+            //
+            // `doctor::plan_checks` hits the same condition and used to raise its
+            // own `Level::Error` for it, so one engine refusing one dump produced
+            // TWO top-of-list FAILs, `verdict: 2 check(s) FAILED`, exit 1, and
+            // "⚠️ 2 check(s) FAILED" on the manager card -- for one cause the
+            // reader then had to work out was one cause. That is the same shape
+            // that was already fixed sixty lines above it for the DEAD-engine
+            // case. The plan side now reports only what it lost (its live
+            // cross-checks did not run) and leaves the failure itself here,
+            // because this is the section whose job is "is the engine answering".
             checks.push(
                 fail(
                     N_RULE_DUMP,
@@ -2119,8 +2170,10 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
                      device leaking",
                 )
                 .meaning(
-                    "The checks below that need the rule list could not run. Nothing here is \
-                     a clean result.",
+                    "The checks below that need the rule list could not run, and neither could \
+                     the plan section's cross-checks against the live rules. Nothing in this \
+                     report is a clean result. This row is the whole of the problem — the other \
+                     'did not run' rows are its consequences, not separate faults.",
                 ),
             );
         }
@@ -2377,9 +2430,8 @@ mod tests {
     /// the `soft()` doc-comment was written to prevent, and it also put
     /// "N warning(s)" on the manager card for them.
     ///
-    /// The other end of the same ladder is `check_zero_mount`, which had a real,
-    /// app-visible mount over the ROM at `Verdict::Note` -- the one verdict the
-    /// WebUI does not render at all.
+    /// A note is not a dropped row: the WebUI renders these in its collapsed
+    /// "Good to know" disclosure, which is what made this landing safe.
     #[test]
     fn an_unprobed_tell_is_a_note_and_keeps_its_oracle() {
         let s = soft(N_INODE_BAND, "evidence".into(), "the recipe");
@@ -2387,10 +2439,73 @@ mod tests {
         assert_eq!(s.verdict.severity(), "info");
         // Still a regression canary: the oracle is what makes it worth keeping.
         assert_eq!(s.oracle.as_deref(), Some("the recipe"));
-        // ...and the promoted end is amber, not grey. `soft` and the zero-mount
-        // row must never share a verdict again -- one is seen by a detector today
-        // and the other is not.
         assert_ne!(s.verdict.tag(), Verdict::Warn.tag());
+    }
+
+    /// A by-design bind is a NOTE, and this pins it so a future round cannot
+    /// quietly promote it back.
+    ///
+    /// Both of `check_zero_mount`'s by-design arms -- a hook framework's binds and
+    /// the Suite's own `my_*` binds -- describe real, app-visible mounts that the
+    /// Suite declines to remove ON PURPOSE. Reading the ladder rule as "a detector
+    /// can see it, so it is amber" promotes them, and that was tried: the health
+    /// line then read "1 thing needs attention" while the Modules shield beside it
+    /// read "Mountless · N mount(s) by design", on the DEFAULT configuration
+    /// (`my_hookless` is opt-in), with nothing for the reader to do about it. The
+    /// rule has a second clause for that reason -- see `soft()`.
+    ///
+    /// This test guards the CONSEQUENCES rather than the arm itself, because the
+    /// arm needs a device with a live my_* bind to reach: at `Warn` the report
+    /// stops reading clean and `severity()` puts the row in the same bucket as a
+    /// FAIL, and both of those are what the demotion was for.
+    #[test]
+    fn a_by_design_bind_is_a_note_not_a_warning() {
+        // The construction sites themselves, read out of this file the way
+        // `doctor::findings_no_detector_can_see_are_notes` does: the verdict is
+        // chosen at the call and there is no smaller unit to test. Both arms of
+        // `check_zero_mount` that describe a mount the Suite leaves alone ON
+        // PURPOSE -- a hook framework's binds, and our own my_* binds -- must
+        // build with `Verdict::Note`. Re-promote either and this fails.
+        let src = include_str!("audit.rs");
+        let mut sites = 0;
+        for (at, _) in src.match_indices("N_ZERO_MOUNT,") {
+            let after = &src[at..(at + 60).min(src.len())];
+            if !after.contains("Verdict::") {
+                continue; // the RULE_DEPENDENT-style name lists, not a call
+            }
+            assert!(
+                after.contains("Verdict::Note"),
+                "a by-design zero-mount arm was graded something other than Note; \
+                 read the ladder rule on `soft()` before changing this: {after}"
+            );
+            sites += 1;
+        }
+        assert_eq!(sites, 2, "expected exactly the two by-design arms of check_zero_mount");
+
+        // ...and what that verdict costs the reader, which is the reason for it.
+        // (Built without the literal `N_ZERO_MOUNT,` so the scan above still
+        // counts two sites and not three.)
+        let name = N_ZERO_MOUNT;
+        let by_design = chk(name, Verdict::Note, "1 module mount(s) visible: /my_product/x".into())
+            .oracle("any app can read /proc/self/mountinfo");
+        assert_eq!(by_design.verdict.tag(), "NOTE");
+        // Not "attention": the WebUI's chip, the health line and the manager card
+        // all key off this, and amber here is what contradicted the shield.
+        assert_eq!(by_design.verdict.severity(), "info");
+        // A run carrying only this row still reads clean...
+        let r = crate::check::Report {
+            ts: 0,
+            engine: Some(31),
+            rules: Some(257),
+            directories: Some(40),
+            facts: Vec::new(),
+            checks: vec![by_design, pass(N_SURFACES, "none".into())],
+        };
+        assert_eq!(r.verdict(), "clean", "a by-design bind must not put a warning on the card");
+        // ...and the row is still THERE, with its oracle, in the report the WebUI
+        // renders. Quiet, not dropped.
+        assert!(r.text().contains("[NOTE] zero-mount posture"), "{}", r.text());
+        assert!(r.json().contains("\"verdict\":\"note\""), "{}", r.json());
     }
 
     /// `/my_*` is a ROM_ROOTS prefix, and `Path::starts_with` cannot see it.
