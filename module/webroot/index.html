@@ -522,13 +522,22 @@
   .blk-head { font-size: 11px; font-weight: 640; letter-spacing: .04em; text-transform: uppercase;
               color: var(--dim); margin: 2px 2px 1px; }
   .blk {
+    flex-wrap: wrap;
     display: flex; align-items: center; gap: 9px;
     background: rgba(0,0,0,0.22); border: 1px solid var(--brd2);
     border-radius: 11px; padding: 8px 10px 8px 12px;
   }
   .blk .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
   .blk .bn { flex: 1 1 auto; min-width: 0; font-size: 13px; word-break: break-all; }
-  .blk .bs { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  /* .bs must be able to SHRINK. As `flex: 0 0 auto` it took whatever width its
+     text wanted and `.bn` (min-width:0, break-all) absorbed the loss -- so the
+     moment a row carried a long tail, the package name collapsed to one
+     character per line. Seen on an OP15 the day the coverage note landed. */
+  .blk .bs { flex: 0 1 auto; min-width: 0; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  /* The coverage note is supplementary, so it gets its own full-width line
+     under the row rather than competing with the name for the same one. */
+  .blk .bcov { flex: 1 0 100%; font-size: 11px; line-height: 1.4; color: var(--dim);
+               padding-left: 16px; }
   .blk.live    .bs  { color: var(--acc2, #57e6c3); }
   .blk.pending .dot, .blk.drift .dot { background: var(--warn, #d9a441); }
   .blk.live .dot { background: var(--ok); }
@@ -3863,6 +3872,13 @@
       // line rather than an entry -- was drawn with a ✕ that dead-ends in
       // "That entry has characters nomount won't take".
       const actionable = UID_TARGET_RE.test(target);
+      // Split the coverage tail onto its own line. `handlers.rs` appends
+      // " \u00b7 also covered by <glob>" so a reader can see why removing the
+      // exact entry will not un-hide the app -- useful, but it is a second
+      // sentence, and keeping it in `.bs` squeezed the name column to nothing.
+      const covIdx = s.indexOf(" \u00b7 also covered by ");
+      const sHead = covIdx === -1 ? s : s.slice(0, covIdx);
+      const sCov  = covIdx === -1 ? "" : s.slice(covIdx + 3);
       const save = cls === "drift" && actionable
         ? `<button class="bx save" title="Save so it survives reboot" data-act="save" data-nmt="${esc(target)}">💾</button>` : "";
       // `hiding` is narrower than `active`: a `pending` row is SAVED but not
@@ -3883,7 +3899,8 @@
                html: `<div class="blk ${cls}">
         <span class="dot"></span>
         <span class="bn">${esc(name)}</span>
-        <span class="bs">${esc(s)}</span>
+        <span class="bs">${esc(sHead)}</span>
+        ${sCov ? `<span class="bcov">${esc(sCov)}</span>` : ""}
         ${save}
         ${actionable ? `<button class="bx" title="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>` : ""}
       </div>` };
