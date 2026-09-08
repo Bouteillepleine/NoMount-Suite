@@ -58,7 +58,7 @@ nmlog() {
 # the one thing absorb does to persistent state on a device where it absorbs
 # nothing at all.
 #
-# Called at ALL FIVE capture sites, not just service.sh: the prune runs at the
+# Called at EVERY capture site, not just service.sh: the prune runs at the
 # top of every pass, so it fires on the FIRST one to execute -- post-fs-data's
 # `absorb --early` -- and a log line in service.sh alone would never see it.
 #
@@ -186,6 +186,23 @@ nm_consume_stash() {
     return 0
 }
 
+# Does this list hold an actual ENTRY, or only its header?
+#
+# `[ -s FILE ]` is the wrong question for every state list we write, because the
+# writers emit a comment header unconditionally: whiteout.rs writes 72 bytes of
+# header, so removing the LAST whiteout leaves a non-empty, zero-entry file --
+# the state of the reference OP15 right now -- and absorb::set_absorbed_pairs
+# writes 184. So `[ -s ]` bought a full `whiteout apply` at post-fs-data, under
+# the OPlus boot watchdog, on every boot of a device that hides nothing, plus a
+# second one from service.sh: `applied 0, failed 0` in boot.log, forever.
+#
+# Same predicate the readers use (blocklist::parse_blocklist,
+# whiteout::parse, absorb::parse_absorbed_pairs): a line counts when its first
+# non-blank character is not `#`. Blank lines and comments do not. It lives here
+# rather than in uidwatch.sh -- which is where it was written -- because all
+# three callers now ask the same question of the same shape of file.
+_has_entries() { [ -s "$1" ] && grep -qE '^[[:space:]]*[^[:space:]#]' "$1" 2>/dev/null; }
+
 # Rotate the durable boot log. ONLY a boot entry point may call this -- service.sh
 # and uidwatch.sh run many times and must not. On KSU it runs TWICE per boot
 # (metamount.sh, then post-fs-data.sh before it hands over); that is harmless,
@@ -195,6 +212,16 @@ nm_consume_stash() {
 # The chmod is for a file an older build left wide: `tail > $BOOTLOG.tmp` creates
 # the temp under whatever umask is in force and `mv` carries that mode onto the log.
 nm_boot_log_rotate() {
+    # A NON-REGULAR boot.log has to be removed here, because `touch` cannot tell
+    # us about it: touch on a DIRECTORY SUCCEEDS (it updates mtime), so the
+    # `|| return 0` below never fired and the chmod then left the directory
+    # drw------- -- unreadable, untraversable, and every later nmlog append
+    # silently lost. Measured this session under BOTH dash and mksh: rc=0,
+    # drw-------. That is the same pathology nm_state_dir_repair was written to
+    # undo for `rollback-bin`, and on KSU the two fought every boot (the -type d
+    # repair puts 0700 back, the chmod strips it again). Same repair the guard
+    # does for bootcount/disabled at nm_guard_bump.
+    [ -e "$BOOTLOG" ] && [ ! -f "$BOOTLOG" ] && rm -rf "$BOOTLOG" 2>/dev/null
     [ -f "$BOOTLOG" ] && tail -n 400 "$BOOTLOG" > "$BOOTLOG.tmp" 2>/dev/null \
         && mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
     # `touch`, NOT `: >> "$BOOTLOG"`. `:` is a POSIX SPECIAL BUILT-IN, so a
@@ -207,7 +234,9 @@ nm_boot_log_rotate() {
     # a DIRECTORY -- the caller died HERE, 62 lines above metamount.sh's
     # deliberate "$NMDIR is not writable, so the bootloop guard cannot arm"
     # refusal, which is written for exactly this case and was unreachable.
-    # `touch` is an ordinary command, so its failure is a status.
+    # `touch` is an ordinary command, so its failure is a status -- and the
+    # directory case above is now gone before it, so what reaches here is the
+    # read-only/full /data one, which touch really does report.
     touch "$BOOTLOG" 2>/dev/null || return 0
     chmod 0600 "$BOOTLOG" 2>/dev/null
     return 0
@@ -432,7 +461,11 @@ nm_mount_pass() {
     # visible for the whole of boot, to anything that looked early. Nothing here
     # needs packages.list, so it belongs in the same pass as the injections.
     # service.sh still re-applies, which is idempotent and catches a late failure.
-    if [ -s "$NMDIR/whiteouts.txt" ]; then
+    # `_has_entries`, NOT `[ -s ]`: whiteout.rs always writes the comment header,
+    # so a device that has removed its last whiteout keeps a 72-byte file and was
+    # paying a whole `whiteout apply` here, at post-fs-data, under the watchdog,
+    # every boot, to hide nothing. See the helper for the measurement.
+    if _has_entries "$NMDIR/whiteouts.txt"; then
         # `2>&1` and KEEP the line, exactly as service.sh's re-apply does. Both
         # boot paths threw the engine's own diagnosis away and logged a bare exit
         # number -- the same `2>/dev/null`-eats-the-reason pattern that was
@@ -455,11 +488,12 @@ nm_mount_pass() {
 # Sets: _NMLIST (the raw dump), _nmlrc (its exit status), _rules, _wo, _rro, and
 # defines _nmcount() for callers that want their own slice of the same dump.
 #
-# BOUNDED. In metamount.sh this runs OUTSIDE the bootloop guard -- it is not
-# gated on `disabled` -- so an unbounded call can hang post-fs-data on exactly
-# the device that has already self-disabled to recover. `nm`'s netlink recv has
-# no SO_RCVTIMEO, so "the engine accepted the message and never replied" is a
-# permanent block, not a slow one.
+# BOUNDED, and both callers now gate it on `disabled` as well. `nm`'s netlink
+# recv has no SO_RCVTIMEO, so "the engine accepted the message and never replied"
+# is a permanent block, not a slow one, and the 15s bound is what stops it
+# hanging post-fs-data under the OPlus boot watchdog. metamount.sh used to call
+# it ABOVE its `disabled` test, so a device that had already self-disabled to
+# recover spent that budget producing counts its card ladder never reads.
 #
 # EXCLUDE the (virtual dir) AND the (whiteout) rows. `grep -c .` counts every
 # line of the dump, which on this device is 260 while `nomount check` and

@@ -366,21 +366,32 @@ fi
 # --- re-apply persistent whiteouts ---
 # Whiteouts live in kernel memory and are empty after every reboot; the list on
 # disk is the durable record.
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ -s "$NMDIR/whiteouts.txt" ]; then
+# `_has_entries` (lib.sh), not `[ -s ]`: the file always carries a comment
+# header, so `[ -s ]` was true on a device with zero whiteouts and every boot
+# logged `applied 0, failed 0`. Same guard the early pass uses.
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts.txt"; then
     # Status BEFORE the pipe. `$(cmd | tail -1)` leaves $? as tail's, which always
     # succeeds -- the same trap documented for absorb above, still live here. A
     # failed whiteout apply means the stock paths the user asked to hide are
     # VISIBLE for the whole session, which is the one result that must not be
     # logged in the same voice as a success.
+    #
+    # `_wo_last`, not `_wo`: `_wo` is part of nm_rule_counts' published contract
+    # in lib.sh, where it is the whiteout rule COUNT the card renders as
+    # "· N hidden". This held a LINE OF PROSE, and only ordering kept them apart
+    # (nm_rule_counts overwrites it before the card reads it). Move the counts
+    # earlier or add a reader in between and the card gains
+    # "· nomount whiteout: applied 0, failed 0 hidden".
     _wo_all=$(nmto 30 "$BIN" whiteout apply 2>&1)
     _wo_rc=$?
-    _wo=$(printf '%s
+    _wo_last=$(printf '%s
 ' "$_wo_all" | tail -1)
     if [ "$_wo_rc" -ne 0 ]; then
-        nmlog "⚠ whiteout apply FAILED (exit $_wo_rc) — hidden paths are still VISIBLE: $_wo"
+        nmlog "⚠ whiteout apply FAILED (exit $_wo_rc) — hidden paths are still VISIBLE: $_wo_last"
     else
-        nmlog "$_wo"
+        nmlog "$_wo_last"
     fi
+    unset _wo_all _wo_rc _wo_last
 fi
 
 # --- re-apply the persistent per-app hide list (authoritative pass) ---
@@ -599,8 +610,10 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     # `check --plan --json`, not the prose: the old sed matched a summary line
     # ("summary: N errors, M warnings") that no longer exists, so it captured
     # nothing on every boot and the card silently sat in the unknown arm. The
-    # plan half reads no running process, which is what makes re-asking it here
-    # cheap enough to do after the device pass above.
+    # plan half needs no engine round-trip and no settle wait, which is what makes
+    # re-asking it here cheap enough to do after the device pass above. (It is not
+    # process-free -- it forks and drops privileges to probe -- and audit.rs no
+    # longer claims otherwise; the cheapness is the point, not the purity.)
     _sum_get() {
         printf '%s' "$2" | sed -n 's/.*"summary":{\([^}]*\)}.*/\1/p' \
             | tr ',' '\n' | sed -n "s/^\"$1\"://p" | head -1
@@ -649,6 +662,21 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         # already carries the answer (`engine=vN` or `engine=down`, src/health.rs),
         # read through _health_get so a stale record cannot supply it.
         _health="⛔ your kernel has no NoMount driver — flash a NoMount kernel, then reboot"
+    elif [ "${_rl_rc:-0}" -ne 0 ]; then
+        # metamount.sh's `_mrc` arm restated with the signal THIS script owns.
+        # metamount.sh:348 paints "the mount pass FAILED" at post-fs-data and
+        # this block overwrote it a minute later -- the same defect the engine
+        # arm above documents, re-created by the fix for it.
+        #
+        # `_mrc` deliberately does NOT survive into this card, and must not be
+        # given a state file to make it: `nomount reload` at :253 is a gap-free
+        # delta that repairs a partial injection, so a reload that SUCCEEDED
+        # genuinely supersedes metamount's verdict and the missing arm is
+        # correct, not an oversight. What is worth a card is the pass failing and
+        # the repair failing too -- that will not fix itself. Same gate as the
+        # reload (`-x $BIN`, no `disabled`) plus ksud, so `_rl_rc` is always set
+        # here; `:-0` is belt and braces.
+        _health="⚠️ late module content may not be served — tap Reload in the WebUI"
     elif [ "$_consbad" = 1 ]; then
         _health="⚠️ per-UID inconsistency — see the WebUI"
     elif [ "${_err:-0}" -gt 0 ]; then
@@ -670,6 +698,18 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         _health="$_wrn warning(s)"
     elif [ "${_unm:-0}" -gt 0 ]; then
         _health="not fully measured — see the WebUI"
+    elif [ "${_nmlrc:-0}" -ne 0 ]; then
+        # WITH THE OTHER MEASUREMENT GAPS, not above the real findings: nothing
+        # is wrong with serving here, only with reading the table back.
+        # `nm_rule_counts` is re-run at the top of this block, and if the netlink
+        # dump is still blocked (bounded at 15s; the recv has no SO_RCVTIMEO, so
+        # a permanent block is the anticipated case) `_NMLIST` comes back empty
+        # and `_rules` is 0 BY DESIGN -- the absence of a measurement, not a
+        # measurement of zero. metamount.sh grew an arm for this at its :358 and
+        # this block then overwrote it, so the card the user actually reads said
+        # "⚠️ 0 rules · 0 RRO · 0 mounts — healthy" on a device serving 257.
+        # `_rphr` below drops the fake zeros; this says why, without alarm.
+        _health="serving normally — the rule count just could not be read"
     elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
         _health="healthy"
     elif [ "${_docok:-0}" = 1 ]; then
@@ -744,13 +784,27 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     # metamount.sh refused to give it one.
     # The engine-down arm gets ⛔ too, for the same reason: metamount.sh gives a
     # no-driver boot a ⛔ and this card overwrote it with ⚠️.
+    # The `_rules=0 → ⚠️` arm is skipped when the DUMP failed, because then
+    # `_rules` is not a zero, it is a blank -- and warning a user whose device is
+    # serving 257 rules teaches them to ignore the tick that matters.
     if [ "${_hookran:-1}" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
+    elif [ "${_nmlrc:-0}" -ne 0 ]; then _mark="✅"
     elif [ "${_rules:-0}" = 0 ]; then _mark="⚠️"
     else _mark="✅"; fi
     # Hidden paths only when there are any: an extra " · 0 hidden" on every device
     # that has no debloat module is exactly the noise this card was shortened to
     # remove.
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
+    # THE COUNTS, or the honest absence of them. Everything else on this card is
+    # measured live; these three come out of the one dump that can time out, and
+    # printing "0 rules · 0 RRO" for a dump that never answered is the exact
+    # defect this file already fixes for `_docok`, `_unm` and `mounts_foreign`.
+    # The headline number was the one that never got the treatment.
+    if [ "${_nmlrc:-0}" -ne 0 ]; then
+        _rphr="rule count unavailable"
+    else
+        _rphr="$_rules rules · $_rro RRO$_wof"
+    fi
     # ONE SHORT LINE. The manager truncates, and it truncated the old one: 200+
     # characters ending "...or a my_* bind of ou…", so the reader never saw the
     # end. The `[NoMount …]` bracket is gone too -- the card sits directly under
@@ -759,8 +813,8 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     # keep theirs: those go on somebody else's module, where the marker is the
     # only thing identifying who wrote the text.)
     KSU_MODULE=meta-nomount ksud module config set --temp override.description \
-        "$_mark $_rules rules · $_rro RRO$_wof · $_mstate — $_health$_muc" \
+        "$_mark $_rphr · $_mstate — $_health$_muc" \
         >/dev/null 2>&1
-    nmlog "card refreshed ($_rules rules, $_mstate, $_health$_mul)"
+    nmlog "card refreshed ($_rphr, $_mstate, $_health$_mul)"
 fi
 exit 0

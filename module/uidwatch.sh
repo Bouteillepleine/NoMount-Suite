@@ -50,23 +50,17 @@ NMLOG_TAG=uidwatch
 }
 [ -e "$NMDIR/disabled" ] && exit 0
 
-# Does this list hold an actual ENTRY, or only its header?
-#
-# `[ -s FILE ]` is the wrong question for both files below, and for
-# absorbed.list it is wrong on every device: absorb::set_absorbed_pairs writes a
-# three-line comment header before it writes any pairs, so the file is 184 bytes
-# and non-empty the moment the mount pass has run once, whether or not anything
-# has ever been absorbed. Measured on an OP11: 184 bytes, 0 non-comment lines,
-# and boot.log showing `absorb` fired four times in the first 60s after boot,
-# each reporting "nothing to absorb" -- a full mountinfo survey, an `nm list`, a
+# `_has_entries` is in lib.sh now (sourced above). It was written here, for the
+# measurement this script motivated: absorb::set_absorbed_pairs writes a
+# three-line comment header before any pairs, so absorbed.list is 184 bytes and
+# non-empty the moment the mount pass has run once, whether or not anything has
+# ever been absorbed. Measured on an OP11: 184 bytes, 0 non-comment lines, and
+# boot.log showing `absorb` fired four times in the first 60s after boot, each
+# reporting "nothing to absorb" -- a full mountinfo survey, an `nm list`, a
 # /proc walk over ~1000 pids and the engine-wide pass lock, on the root-exec path
 # OOS's kevent heuristic watches, once per package change, forever. Floor cost
 # measured at 133 ms per run (`absorb --dry-run`; the real pass adds more).
-#
-# Same predicate the readers use (blocklist::parse_blocklist,
-# absorb::parse_absorbed_pairs): a line counts when its first non-blank
-# character is not `#`. Blank lines and comments do not.
-_has_entries() { [ -s "$1" ] && grep -qE '^[[:space:]]*[^[:space:]#]' "$1" 2>/dev/null; }
+# whiteouts.txt turned out to have the same shape, which is why it moved.
 
 # Two jobs ride this one watch, because PackageManager rewriting packages.list is
 # the trigger for both and a second inotifyd would cost another blocked process:
@@ -205,9 +199,11 @@ if _has_entries "$NMDIR/absorbed.list"; then
     # written the obvious way is dead code (the same trap service.sh documents).
     _abs_all=$(nmto 60 "$BIN" absorb 2>&1)
     _abs_rc=$?
-    # The FIFTH capture site, and the one that was missing this call while lib.sh
-    # claimed there were only four. It matters most here: absorb's record prune
-    # fires when a module's directory is gone, everything below keeps only
+    # The fourth capture site, and the one that was missing this call. (lib.sh's
+    # list is the authority: nm_early_absorb -- which is BOTH early passes since
+    # they were unified -- plus service.sh's two and this one.) It matters most
+    # here: absorb's record prune fires when a module's directory is gone,
+    # everything below keeps only
     # `tail -1`, and this handler is the one that runs on every package change --
     # so the one line absorb writes about changing persistent state was emitted
     # and discarded on the busiest path there is. Status is already captured

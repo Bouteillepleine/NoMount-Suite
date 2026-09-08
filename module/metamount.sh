@@ -252,17 +252,32 @@ if command -v ksud >/dev/null 2>&1; then
     # The dump, its status and the three counts are nm_rule_counts in lib.sh --
     # service.sh carried the identical five lines and the identical prose about
     # which rows are excluded. Sets _NMLIST/_nmlrc/_rules/_wo/_rro and _nmcount().
-    nm_rule_counts
     _vf=""; _ov=""
     # Skipped when the guard has tripped. Nothing is being served in that state,
     # so every badge below would read "0 served" -- go straight to the Suite's own
     # card, which is the surface that has to say what happened.
+    #
+    # THE DUMP IS INSIDE THIS ARM TOO. `nm_rule_counts` is bounded at 15s and its
+    # netlink recv has no SO_RCVTIMEO, so it can spend the whole budget; the card
+    # ladder's first arm is `disabled` and reads none of _rules/_wo/_rro/_nmcount,
+    # so on a tripped device that was up to 15s of post-fs-data, under the OPlus
+    # boot watchdog, on the one device that has already self-disabled to recover.
     if [ -e "$NMDIR/disabled" ]; then
         nmlog "guard is tripped - skipping per-module tagging (nothing is served)"
     else
+    nm_rule_counts
     for d in /data/adb/modules/*/; do
         [ -d "$d" ] || continue
-        mid=$(basename "$d")
+        # BY EXPANSION, never `$(basename "$d")`. Command substitution strips ALL
+        # trailing newlines, so a module directory named "victim<LF>" collapsed to
+        # "victim" -- and every boot the loop then read VICTIM's modules.tsv row,
+        # counted victim's rules, and wrote `KSU_MODULE=victim ... "[NoMount · …]
+        # $_orig"` with the ATTACKER's description=. Glob order decides which text
+        # survives. mount.rs already refuses to write a modules.tsv row for an id
+        # containing \n ("would forge a row"); the collapse is exactly what routed
+        # the attacker onto the victim's row instead. Verified in dash and mksh:
+        # $( ) gives "victim", ${d##*/} keeps the newline (and so matches nothing).
+        d=${d%/}; mid=${d##*/}
         { [ "$mid" = "meta-nomount" ] || [ "$mid" = "kernelnosu" ]; } && continue
         { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && continue
         # WHAT THIS MODULE CONTRIBUTES, FROM THE PASS THAT DECIDED IT.
@@ -284,7 +299,13 @@ if command -v ksud >/dev/null 2>&1; then
         # whichever sorted first -- badging one module with another's mechanism
         # and counting it in the wrong _vf/_ov bucket. The file is
         # id<TAB>entries<TAB>overlay<TAB>vfs (src/mount.rs), so compare the field.
-        _sum=$(awk -F'\t' -v m="$mid" '$1==m{print;exit}' "$NMDIR/modules.tsv" 2>/dev/null)
+        # THROUGH THE ENVIRONMENT, not `-v`. POSIX requires `awk -v var=value` to
+        # process ESCAPE SEQUENCES in value, and write_module_summary rejects only
+        # \t \r \n -- a backslash goes through verbatim. So a module directory
+        # named `fo\o` was compared as `foo` and matched victim foo's row (awk
+        # even warns: "escape sequence `\o' treated as plain `o'"). Verified this
+        # session, both ways. ENVIRON does no escape processing.
+        _sum=$(NM_MID="$mid" awk -F'\t' '$1==ENVIRON["NM_MID"]{print;exit}' "$NMDIR/modules.tsv" 2>/dev/null)
         [ -z "$_sum" ] && continue
         _o=$(printf '%s' "$_sum" | cut -f3)
         _v=$(printf '%s' "$_sum" | cut -f4)
@@ -301,7 +322,8 @@ if command -v ksud >/dev/null 2>&1; then
         # matched nothing, so every module was badged "mountless" regardless.
         # A STRING compare, not a regex: the id was interpolated into the pattern,
         # so a `.` in a module id matched any character and over-counted.
-        _m=$(awk -v p="/adb/modules/$mid" '$4==p || index($4, p "/")==1 {n++} END{print n+0}' \
+        # ENVIRON, not `-v`, for the escape-processing reason spelled out above.
+        _m=$(NM_P="/adb/modules/$mid" awk '$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}' \
              /proc/self/mountinfo 2>/dev/null); _m=${_m:-0}
         _badge="$_t · $_n served"
         [ "${_m:-0}" -gt 0 ] && _badge="$_badge · ⚠ $_m mount(s)"

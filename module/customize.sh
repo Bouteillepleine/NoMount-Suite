@@ -307,11 +307,19 @@ fi
 #
 #  1. `$_nm` was never executable -- an unsupported ABI (the box above says so)
 #     or a partial extraction that dropped +x. The probe never RAN, so the engine
-#     state is UNKNOWN and a kernel flash cannot fix either cause.
+#     state is UNKNOWN and a kernel flash cannot fix either cause. The two get
+#     SEPARATE arms: only the extraction one can be fixed by re-flashing, and
+#     telling a 32-bit user to re-flash an arm64-only zip is the same dead end
+#     one door along.
 #  2. Flashed from recovery, where the box at the probe has just said "From
 #     recovery this is normal — it will work after boot" -- and the next line
 #     used to contradict it and send a user with a perfectly good kernel off to
-#     flash a kernel.
+#     flash a kernel. GATED ON `-z "$_ev"`, because this arm is reachable with the
+#     engine RESPONDING: on a device whose recovery lives in boot.img (OP15 /
+#     OrangeFox) the recovery kernel IS the NoMount kernel and `nm v` answers
+#     there, so "the engine cannot answer" printed six lines under "Prism engine:
+#     v31 (responding)". `_ev` set + `disabled` present now falls to the last arm,
+#     which is the one that names the actual next step.
 #  3. Running system, no engine: the message is right, and now names somewhere
 #     to GET one. Three surfaces state this problem and none named a solution.
 #  4. `$_ev` set but the Suite is disabled: neither arm fired and the install
@@ -325,10 +333,18 @@ _booted=$(getprop sys.boot_completed 2>/dev/null)
 if [ -n "$_ev" ] && [ ! -e "$NMDIR/disabled" ]; then
     ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
     ui_print "- NEXT STEP: reboot. Nothing is served until you do."
+elif [ ! -d "$MODPATH/bin/${_abi}" ]; then
+    # SPLIT OUT of the arm below, because the two causes the comment names have
+    # different answers and only one of them had a remedy written. Re-flashing an
+    # arm64-only zip onto a 32-bit device is the same dead end one door along, and
+    # the box above has just said the zip is arm64-v8a only. Say so once, plainly,
+    # and do not send them round the loop again.
+    ui_print "- NEXT STEP: none — this zip is arm64-v8a only and this device is ${_abi}."
+    ui_print "  Re-flashing cannot help. Remove it from your manager."
 elif [ ! -x "$_nm" ]; then
     ui_print "- NEXT STEP: re-flash this zip. The engine could not be probed (see above),"
     ui_print "  so we cannot tell you whether your kernel has NoMount."
-elif [ "$_booted" != "1" ]; then
+elif [ -z "$_ev" ] && [ "$_booted" != "1" ]; then
     ui_print "- Installed from recovery, where the engine cannot answer."
     ui_print "- NEXT STEP: reboot, then open the WebUI — it says whether your kernel has it."
 elif [ -z "$_ev" ]; then

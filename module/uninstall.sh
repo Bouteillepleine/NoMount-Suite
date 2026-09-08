@@ -52,7 +52,19 @@ unset _ovr
 # around. NOT service.sh, which this comment used to name and which has never
 # touched the file; that mistake is also why the removal branch below did not
 # think it had to clean up after itself.
-MODDIR="${0%/*}"
+# `${0%/*}` on a SLASH-LESS `$0` expands to `$0` itself, so `sh uninstall.sh`
+# from inside the module directory makes MODDIR="uninstall.sh", the `remove`
+# marker test below is false, and a GENUINE REMOVAL takes the update branch --
+# creating /data/adb/nomount.bak holding `uidhide` and leaving it there forever,
+# the one outcome the header says must not happen. Both managers pass an absolute
+# path today (ksud joins it, Magisk builds MODULEROOT/<id>/uninstall.sh), so this
+# is insurance, not an observed bug; it is cheap and this is the one script whose
+# wrong branch leaks the hide list. Same shape uidwatch.sh uses, which just hard-
+# codes the path because inotifyd gives it no useful $0 at all.
+case "$0" in
+    */*) MODDIR="${0%/*}" ;;
+    *)   MODDIR=/data/adb/modules/meta-nomount ;;
+esac
 _bak=/data/adb/nomount.bak
 _nmlog() {
     echo "nomount: $*" > /dev/kmsg 2>/dev/null
