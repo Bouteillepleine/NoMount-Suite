@@ -11,6 +11,110 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.174 — engine v32
+
+The audit before a release tag. Nine reviewers over the whole tree, on the build
+the phone was actually running, with a red team and a device pass. The target was
+round 8 itself: it had fixed ~150 things in one parallel pass — 4,406 insertions
+across 41 files, written by ten agents who could not see each other's work — and
+three defects had already escaped it and been caught by accident.
+
+**Seven of the nine findings below are round-8 fixes that landed on one side of an
+interface.** None of the gates can see that class: 210 tests, clippy, shellcheck,
+`mksh -n`, `dash -n` and `node --check` were green on every one of them.
+
+### The hide list was still reaching shared storage, one file over
+
+Round 8 withheld `boot.log` from a shared export because it captures `uid apply`'s
+stderr, which prints hide-list globs and package names. But `nmlog` tees the same
+line to `/dev/kmsg`, prefixed literally `nomount: ` — and the bundle also carried
+`dmesg | grep -i nomount`, ungated. **Every line the fix withheld was republished
+in the same folder**, under a dialog promising the opposite. Measured on the
+reference device: three such lines in the ring, `dmesg_restrict=0`.
+
+Separately, `redact_app_paths` existed and was wired into exactly one place. A
+`/data/app/<pkg>/base.apk` path names which app on the phone has a patched APK —
+the same class of secret — and four files in the bundle carry it: `rules.txt`
+(the whole rule dump; an absorbed APK is a rule whose *target* is that path),
+`check.txt`, `mountinfo.txt` (a ReVanced-class module binds its payload over it,
+so it is a mount point) and `incident.log`. Redaction is now the default for a
+shared destination rather than a list of filenames, so the next file added to the
+bundle is covered by construction.
+
+### The status card said "clean" while the engine was down
+
+On a device with no NoMount kernel — the commonest way to arrive here — the hero
+read red "No kernel driver" and forty pixels below it the shield read
+`clean · Mountless · 1 mount by design`, with a green "all clear" chip and a body
+saying "20 checks ran and found nothing to act on". `refreshStatus` lost a
+microtask race and the repaint hook only ever re-painted the health line.
+
+Fixed at the source, and measured old-versus-new by running the page's own script
+against the device's real data. The repaint costs no extra shell call.
+
+### An unexpected value blanked the whole app
+
+One check without an `id` threw inside `refreshAll`, which had no `.catch`, so the
+user lost the version, the hero and every card and had to restart the WebUI. The
+crash site is gone — deleted along with the manager banner it existed to serve —
+and any throw now costs one card instead of the page. `node --check` passes on
+code that throws at runtime; this was the third defect of that shape in this file.
+
+### Warnings you cannot act on are no longer warnings
+
+The Suite's own `my_*` bind mounts were amber. That is the default state on a
+OnePlus device, there is nothing wrong with it, and the reader cannot act on it —
+so it made the health line say "1 thing needs attention" while the card beside it
+said "Mountless · 2 mounts by design". It is a note now, which renders in the
+collapsed **Good to know** section, exactly like the hook framework's own mounts.
+
+`audit.rs` emits no amber at all any more. The rule is written down in three
+places so the next reader cannot undo it: **warn means a detector can see it *and*
+there is something you should change.** Every remaining red row was re-checked
+against it; none fires on a healthy setup, and each names an owner or a remedy.
+
+### The rest
+
+`verify` reported `DRIFT version` and `DRIFT engine` after any update — a red
+"Drift from snapshot" for two deliberate actions of your own. It now says, once
+and calmly, that the snapshot predates the update, and reports no drift.
+
+The manager card could read `⚠️ 0 rules · 0 RRO · 0 mounts — healthy` on a device
+serving 257: a blocked rule dump leaves the count at zero by design, and
+`service.sh` overwrote the boot-time card that knew better. It says
+`rule count unavailable` now, and the two arms round 8 added to the boot card are
+no longer erased a minute later.
+
+Hidden apps said 22 where every other surface said 19 — an app matched by both a
+glob and an exact entry got two rows and two ✕ buttons. Deduped on appid, and the
+exact entry wins, so every ✕ changes something visible.
+
+`touch` on a *directory* returns 0, so round 8's replacement for the boot-log
+redirection could not report the failure it was written for; the file-type repair
+the bootloop guard already uses is now applied to `boot.log` too. A module
+directory named with a trailing newline or a backslash could write another
+module's manager card. A path with leading or trailing whitespace produced a
+phantom rule that every reload re-added and failed to delete, forever. A bind
+rollback could delete the only copy of a file's original SELinux label. `absorb`
+now records before the irreversible unmount, not after.
+
+And `package.sh` shipped a stale `nm` for eight days without saying so — the
+staleness check guarded one of the two candidate paths. It guards both now, fails
+loudly when every candidate is stale, and can build `nm` with the NDK toolchain
+instead of only zig.
+
+### Engine v32
+
+`nm add` on a path whose parent is a file was accepted, listed and graded clean
+while serving nothing; it returns `-ENOTDIR`, like the sibling arm always has.
+`SEEK_DATA`/`SEEK_HOLE` on a NoMount directory answered a negative offset with
+`-EINVAL` where every real directory answers `-ENXIO` — both arms now use the same
+unsigned comparison the kernel itself does, so the answer is identical for every
+offset a caller would use in earnest.
+
+Needs a kernel rebuild to take effect. The wire protocol is unchanged and no KMI
+symbol moves.
+
 ## v1.3.173 — engine v31 (unchanged)
 
 ### A hook framework's own mounts are information, not a warning
