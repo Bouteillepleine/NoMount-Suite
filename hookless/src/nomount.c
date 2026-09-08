@@ -1208,8 +1208,17 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
      * recreate, one arm over, exactly the stat-vs-lseek divergence the
      * synthesized-dir arm above exists to remove. Gated on real_file being the
      * backing dir, like every other dir-target decision: a hidden reader holding
-     * the pinned STOCK directory seeks in the stock file's own space. */
-    if (whence == SEEK_END && S_ISDIR(file_inode(file)->i_mode)) {
+     * the pinned STOCK directory seeks in the stock file's own space.
+     *
+     * SEEK_DATA/SEEK_HOLE for the same reason, one rule shape over: forwarding
+     * them lands on the f2fs backing DIRECTORY, whose generic_file_llseek
+     * answers SEEK_HOLE with the f2fs i_size (3452 in the v25 notes) while
+     * stat(), SEEK_END and the terminal readdir cookie all report the erofs
+     * closed form. One lseek pair against one stat, on the same fd, separates
+     * them. The synthesized-dir arm above already answers both from its own
+     * size; this is the same five lines so both directory kinds agree. */
+    if ((whence == SEEK_END || whence == SEEK_DATA || whence == SEEK_HOLE) &&
+        S_ISDIR(file_inode(file)->i_mode)) {
         struct nm_inode_info *di = file_inode(file)->i_private;
 
         if (di && di->r_path.dentry &&
@@ -1217,6 +1226,13 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
             loff_t sz = nm_dsnap_dir_size(file_inode(file), di);
 
             if (sz > 0) {
+                if (whence != SEEK_END) {
+                    if (offset < 0) return -EINVAL;
+                    if (offset >= sz) return -ENXIO;
+                    if (whence == SEEK_HOLE) offset = sz;
+                    file->f_pos = offset;
+                    return offset;
+                }
                 offset += sz;
                 if (offset < 0) return -EINVAL;
                 file->f_pos = offset;
@@ -3894,16 +3910,23 @@ static inline int nomount_hijack_superblock(struct super_block *sb)
     return 0;
 }
 
-static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_node, struct inode *inode)
+/* 0 on success AND on every deliberate refusal below (the rule is then simply
+ * inert, which is the documented choice); -ENOMEM only when the allocation
+ * failed. The distinction matters at the call site: a swallowed -ENOMEM here
+ * leaves the inode with our ->lookup but the filesystem's ->iterate*, so the
+ * injected name stats and opens while never appearing in getdents -- the exact
+ * defect nomount.h records as measured (90 of 260 rules on OP15) -- and
+ * __nomount_add_rule would still return 0 for it. */
+static inline int nomount_hijack_virtual_parent(struct nomount_dir_node *dir_node, struct inode *inode)
 {
     struct nm_fop *nm_fop;
 
-    if (unlikely(!inode->i_fop)) return;
+    if (unlikely(!inode->i_fop)) return 0;
     /* Already ours? RE-ARM -- see the matching note in nomount_hijack_dir_inode. */
     nm_fop = nm_get_fop(smp_load_acquire(&inode->i_fop));
     if (nm_fop) {
         smp_store_release(&nm_fop->dir_node, dir_node);
-        return;
+        return 0;
     }
     /* A vtable with no readdir op to hook would carry no marker, so nm_get_fop()
      * could never recover it: the inode would be left pointing at a heap
@@ -3913,38 +3936,44 @@ static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_no
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
                  && !inode->i_fop->iterate
 #endif
-        )) return;
+        )) return 0;
 
     nm_fop = kmem_cache_zalloc(nm_fop_cachep, GFP_KERNEL);
-    if (likely(nm_fop)) {
-        nm_fop->fake_fop = *(inode->i_fop);
-        nm_fop->orig_fop = inode->i_fop;
-        nm_fop->dir_node = dir_node;
+    if (unlikely(!nm_fop))
+        return -ENOMEM;
 
-        /* Mirror the ops the filesystem actually implements. Installing
-         * ->iterate_shared unconditionally made the pre-6.6 VFS take the SHARED
-         * inode lock for a filesystem that only implements ->iterate, i.e. one
-         * that declared it needs exclusion -- concurrent readdirs would then race
-         * whatever per-directory state it keeps. From 6.6 ->iterate is gone and
-         * every directory implements ->iterate_shared, so this is a no-op there.
-         * nm_get_fop() probes both, so the hijack is still recognisable. */
-        if (nm_fop->orig_fop->iterate_shared)
-            nm_fop->fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
+    nm_fop->fake_fop = *(inode->i_fop);
+    nm_fop->orig_fop = inode->i_fop;
+    nm_fop->dir_node = dir_node;
+
+    /* Mirror the ops the filesystem actually implements. Installing
+     * ->iterate_shared unconditionally made the pre-6.6 VFS take the SHARED
+     * inode lock for a filesystem that only implements ->iterate, i.e. one
+     * that declared it needs exclusion -- concurrent readdirs would then race
+     * whatever per-directory state it keeps. From 6.6 ->iterate is gone and
+     * every directory implements ->iterate_shared, so this is a no-op there.
+     * nm_get_fop() probes both, so the hijack is still recognisable. */
+    if (nm_fop->orig_fop->iterate_shared)
+        nm_fop->fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
-        if (nm_fop->orig_fop->iterate)
-            nm_fop->fake_fop.iterate = nomount_hijacked_iterate_dir;
+    if (nm_fop->orig_fop->iterate)
+        nm_fop->fake_fop.iterate = nomount_hijacked_iterate_dir;
 #endif
 
-        smp_store_release(&inode->i_fop, &nm_fop->fake_fop);
-        nm_debug("i_fop successfully hijacked for virtual parent dir (ino: %lu)\n", inode->i_ino);
-    }
+    smp_store_release(&inode->i_fop, &nm_fop->fake_fop);
+    nm_debug("i_fop successfully hijacked for virtual parent dir (ino: %lu)\n", inode->i_ino);
+    return 0;
 }
 
-static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, struct inode *inode)
+/* Same contract as nomount_hijack_virtual_parent(): 0 for success and for the
+ * deliberate refusal below, -ENOMEM only on the allocation. The mirror-image
+ * failure this closes is readdir listing a name that stat answers -ENOENT for,
+ * which nm_alloc_rule calls a one-syscall-pair probe and rejects at add time. */
+static inline int nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, struct inode *inode)
 {
     struct nm_iop *nm_iop;
 
-    if (unlikely(!inode->i_op)) return;
+    if (unlikely(!inode->i_op)) return 0;
     /* Already ours? RE-ARM it. Teardown neuters (dir_node = NULL) and leaves the
      * vtable installed, so a plain "already hijacked, skip" would hand this
      * directory back with a NULL dir_node -- every handler would fall through to
@@ -3952,7 +3981,7 @@ static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, s
     nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
     if (nm_iop) {
         smp_store_release(&nm_iop->dir_node, dir_node);
-        return;
+        return 0;
     }
     /* An inode_operations with no ->lookup carries no marker once copied, so
      * __get_nm() could never recover the nm_iop again: the inode would be left
@@ -3964,21 +3993,23 @@ static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, s
      * resolves that parent to a REGULAR FILE. Refuse what we cannot identify,
      * exactly as nomount_hijack_virtual_parent() does for a missing readdir op.
      * The rule is simply inert then; its dir_node is reclaimed on delete. */
-    if (unlikely(!inode->i_op->lookup)) return;
+    if (unlikely(!inode->i_op->lookup)) return 0;
 
     nm_iop = kmem_cache_zalloc(nm_iop_cachep, GFP_KERNEL);
-    if (likely(nm_iop)) {
-        nm_iop->fake_iop = *(inode->i_op);
-        nm_iop->orig_iop = inode->i_op;
-        nm_iop->dir_node = dir_node;
+    if (unlikely(!nm_iop))
+        return -ENOMEM;
 
-        if (nm_iop->orig_iop->lookup) nm_iop->fake_iop.lookup = nomount_hijacked_lookup;
-        /* THE missing half: without this the stock fs answers getattr directly and
-         * every correction below is dead code. */
-        nm_iop->fake_iop.getattr = nomount_hijacked_getattr;
-        smp_store_release(&inode->i_op, &nm_iop->fake_iop);
-        nm_debug("i_op successfully hijacked for parent dir (ino: %lu)\n", inode->i_ino);
-    }
+    nm_iop->fake_iop = *(inode->i_op);
+    nm_iop->orig_iop = inode->i_op;
+    nm_iop->dir_node = dir_node;
+
+    if (nm_iop->orig_iop->lookup) nm_iop->fake_iop.lookup = nomount_hijacked_lookup;
+    /* THE missing half: without this the stock fs answers getattr directly and
+     * every correction below is dead code. */
+    nm_iop->fake_iop.getattr = nomount_hijacked_getattr;
+    smp_store_release(&inode->i_op, &nm_iop->fake_iop);
+    nm_debug("i_op successfully hijacked for parent dir (ino: %lu)\n", inode->i_ino);
+    return 0;
 }
 
 /* (Hijack vtables are neutered rather than freed -- see struct nm_iop.) */
@@ -4476,7 +4507,11 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     pop->hw = 0;
     if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
         return -ENOENT;
-    sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+    /* __GFP_NOWARN on the scan buffers, for the reason the nm_dsnap block
+     * gives for its own: a failure splat in dmesg would itself be a tell. This
+     * one is ~4 KB (it carries a PATH_MAX pathbuf); the subtree walk below
+     * allocates order-2 and order-3. */
+    sc = kzalloc(sizeof(*sc), GFP_KERNEL | __GFP_NOWARN);
     if (!sc) { path_put(&dp); return -ENOMEM; }
 
     sc->want_dir = want_dir;
@@ -4490,7 +4525,7 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
 #endif
     /* Only the overlay path needs names kept for a second, stat-ing pass. */
     if (sc->overlay) {
-        sc->names = kzalloc(NM_INO_SAMPLES * (NAME_MAX + 1), GFP_KERNEL);
+        sc->names = kzalloc(NM_INO_SAMPLES * (NAME_MAX + 1), GFP_KERNEL | __GFP_NOWARN);
         if (!sc->names) { kfree(sc); path_put(&dp); return -ENOMEM; }
     }
 
@@ -4683,10 +4718,10 @@ static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max)
     u64 max = 0;
     int qhead = 0, qtail = 0, visited = 0, ret = 0, i;
 
-    queue = kcalloc(NM_DMAX_DIRS, sizeof(*queue), GFP_KERNEL);
+    queue = kcalloc(NM_DMAX_DIRS, sizeof(*queue), GFP_KERNEL | __GFP_NOWARN);
     if (!queue)
         return -ENOMEM;
-    sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+    sc = kzalloc(sizeof(*sc), GFP_KERNEL | __GFP_NOWARN);
     if (!sc) {
         kfree(queue);
         return -ENOMEM;
@@ -4694,7 +4729,7 @@ static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max)
     /* One names buffer for the whole walk, not one per directory: 128 entries
      * is 32 KB, and allocating that per directory would mean 188 of them on the
      * measured device. */
-    sc->names = kzalloc(NM_DMAX_NAMES * (NAME_MAX + 1), GFP_KERNEL);
+    sc->names = kzalloc(NM_DMAX_NAMES * (NAME_MAX + 1), GFP_KERNEL | __GFP_NOWARN);
     if (!sc->names) {
         kfree(sc);
         kfree(queue);
@@ -5246,13 +5281,40 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 #endif
                 /* Sample the sibling DIRS while their directory is resolved
                  * here; a virtual dir has to land among them, and on overlay
-                 * they are numbered from a different sequence than the files. */
-                anc_dpop = nm_dir_ino_pop_cached(lookup_path, true);
+                 * they are numbered from a different sequence than the files.
+                 *
+                 * Only when there is one to place. This branch ENDS the walk (it
+                 * breaks below), so pending_list already holds every irule this
+                 * call minted; empty means the target's parent already existed,
+                 * which is nearly every rule in a real plan. anc_dpop and
+                 * anc_dino are read at exactly one place each, both inside the
+                 * hlist_for_each_entry_safe(pending_list) below, so an empty list
+                 * makes both scans pure cost: nm_dir_ino_pop_cached(..., true) is
+                 * the only caller of nm_subtree_dir_ino_max(), which climbs to
+                 * the mount root and BFSes up to NM_DMAX_DIRS directories -- and
+                 * on a system-as-root partition that climb reaches / and always
+                 * burns the whole budget before returning -E2BIG, i.e. it is not
+                 * merely unread there, it never had an answer to give.
+                 *
+                 * It cannot be deferred to the lazy nm_real_ancestor_pop() below
+                 * instead. By the time that runs, the hijack and the inject a few
+                 * lines down have linked the synthesized child into THIS
+                 * directory, while its irule does not reach nomount_rules_ht until
+                 * the end of the pending loop -- so nm_path_is_injected() would
+                 * not recognise it and the scan would take our own raw-hash ino as
+                 * population, which is the cascade nm_real_ancestor_pop's own
+                 * comment records (1102213485 where every real nested dir sits at
+                 * 34..105). Sampling HERE, before the hijack, is what keeps the
+                 * directory pristine. */
+                if (!hlist_empty(&pending_list))
+                    anc_dpop = nm_dir_ino_pop_cached(lookup_path, true);
                 /* What ".." looks like one level down. Copy it from a real
                  * child of this directory: every stock sibling reports the same
-                 * lowerdir ino, so anything else is an outlier among them. */
+                 * lowerdir ino, so anything else is an outlier among them.
+                 * Gated on the same test, and for the same reason: prev_dino is
+                 * seeded from anc_dino and read only inside that same loop. */
                 anc_dino = anc_ino;
-                if (anc_ovl) {
+                if (anc_ovl && !hlist_empty(&pending_list)) {
                     anc_dino = nm_child_dotdot_of(lookup_path);
                     if (!anc_dino)
                         anc_dino = ((u64)h_parent & 0x03FFFFFFULL) | 0x02000000ULL | 1ULL;
@@ -5268,16 +5330,28 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
             if (unlikely(!dir_node)) {
                 err = -ENOMEM;
             } else {
-                nomount_hijack_virtual_parent(dir_node, v_inode);
-                nomount_hijack_dir_inode(dir_node, v_inode);
-                /* The third hard failure of the three, and the one that used to
-                 * be silent: our ->destroy_inode is installed here, and it is
+                /* Hard failures, both of them. The only non-deliberate way
+                 * either returns non-zero is the kmem_cache_zalloc; the refusals
+                 * inside them (no ->lookup, no ->iterate*) return 0 on purpose
+                 * and leave the rule inert, which is the documented choice.
+                 * Swallowing -ENOMEM produced one of the two half-hijacked
+                 * shapes the engine refuses to build anywhere else -- resolvable
+                 * but absent from readdir, or listed but -ENOENT to stat -- and
+                 * still returned 0, so nm_list printed the rule and `nomount
+                 * check` called the plan clean. See each helper's comment. */
+                err = nomount_hijack_virtual_parent(dir_node, v_inode);
+                if (!err)
+                    err = nomount_hijack_dir_inode(dir_node, v_inode);
+                /* The third of the three. It was given a return value in v29 for
+                 * exactly this class, and the two above only get theirs here --
+                 * closing the gap: our ->destroy_inode is installed here, and it is
                  * what frees an injected inode's nm_inode_info and the path and
                  * dir_node references it owns. Serving a rule on a superblock we
                  * could not hijack leaks that payload for every inode the rule
                  * ever mints, for the life of the boot. Refuse the add instead --
                  * the unwind below then neuters the node this call armed. */
-                err = nomount_hijack_superblock(p_path.dentry->d_sb);
+                if (!err)
+                    err = nomount_hijack_superblock(p_path.dentry->d_sb);
                 if (likely(!err)) {
 
                     qname.name = child_name;
@@ -5676,12 +5750,39 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
             struct kstat fk;
 
             if (!cp) continue;
+            /* Never sample ourselves. This scan reads the directory through the
+             * HIJACKED ops, so nm_sib_actor sees injected names too -- and
+             * nm_file_fops always carries .fsync, so nm_stock_caps() on one of
+             * ours comes back with NM_CAP_FSYNC and nm_fsync goes back to
+             * forwarding to the f2fs backing file: 0 where every erofs sibling
+             * answers -EINVAL. That is the one-syscall, baseline-free oracle v20
+             * was cut to close, and it would reopen here. Same test, same reason,
+             * as nm_dir_ino_pop's actor and nm_subtree_dir_ino_max's child loop;
+             * the caller holds nomount_write_mutex, which is what the helper
+             * requires. Checked BEFORE kern_path so resolving does not
+             * instantiate one of our inodes on the way past. */
+            if (nm_path_is_injected(cp, strlen(cp))) {
+                kfree(cp);
+                continue;
+            }
             if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
                 int r = nm_path_stat(&fp, &fk);
+                struct inode *ci = d_backing_inode(fp.dentry);
                 char fctx[NM_CTX_MAX];
                 u16 fctxlen = 0;
                 dev_t fmapdev = 0;
                 u8 fcap = 0;
+
+                /* The path test above misses one shape: a passthrough child
+                 * inside a dir-target rule's directory has no rule of its own,
+                 * so it is invisible to nm_path_is_injected while still
+                 * resolving to one of our inodes. The vtable identity does not
+                 * miss it -- the same test the ancestor and shadowing samples
+                 * use. On < 6.8 this also protects nm_stock_map_dev(), whose
+                 * d_real_inode() arm has no .d_real on nm_dops and would answer
+                 * with our own sb's dev rather than the erofs lower. */
+                if (ci && (ci->i_op == &nm_file_iops || ci->i_op == &nm_dir_iops))
+                    r = -EINVAL;
 
                 /* Read the label and the lower dev BEFORE dropping the
                  * reference; a pure injection has no stock file of its own to
@@ -5721,6 +5822,15 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
         char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->subdirs[i]);
 
         if (!cp) continue;
+        /* Same guard one level down: a synthesized directory is listed by the
+         * hijacked parent, and descending into it would find nothing but our own
+         * files to sample. (A dir-target directory has a rule too, so this
+         * catches both; its passthrough children are caught by the vtable test
+         * in the file loop above.) */
+        if (nm_path_is_injected(cp, strlen(cp))) {
+            kfree(cp);
+            continue;
+        }
         if (nm_scan_dir_for_file(cp, out, octx, octxlen, omapdev, ocap, depth + 1) == 0) { kfree(cp); ret = 0; goto done; }
         kfree(cp);
     }

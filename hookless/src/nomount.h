@@ -32,7 +32,7 @@
  * match it. That counter is monotonic capability, not marketing: the Suite gates
  * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
  * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.30.0"
+#define NM_MODULE_VERSION "1.31.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -287,8 +287,26 @@
  *    failure, or an iterate_dir() error, still cached a not-answer that
  *    nm_dsnap_fresh() then kept until the backing directory's size or mtime
  *    moved. Only b.overflow (more entries or name bytes than the model carries,
- *    a property of the directory) leaves as a cacheable negative now. */
-#define NOMOUNT_VERSION    30
+ *    a property of the directory) leaves as a cacheable negative now.
+ *
+ * 31: nomount_hijack_virtual_parent() and nomount_hijack_dir_inode() report an
+ *    allocation failure instead of returning void, and nm_scan_dir_for_file()
+ *    stops sampling our own inodes.
+ *
+ *    Neither is userspace-observable and no Suite gate changes -- every version
+ *    comparison in the Suite is `<` or `>=`, none an equality test, and the wire
+ *    ABI is untouched (NOMOUNT_NL_PROTO stays 29). The number is here for the
+ *    same reason 19, 20, 22, 25, 27 and 29 have one: `doctor` has to be able to
+ *    tell a flashed engine from the one before it, and both changes alter what a
+ *    flashed engine DOES. The first is 29's class exactly -- a silent
+ *    kmem_cache_zalloc failure left a rule resolvable-but-unlistable while
+ *    `nm add` exited 0 and `check` called it applied. The second is 20's: the
+ *    sibling scan read the directory THROUGH the hijack, so nm_stock_caps() could
+ *    land on nm_file_fops, which always has .fsync -- handing back NM_CAP_FSYNC
+ *    and an fsync() that returns 0 where every erofs sibling returns -EINVAL.
+ *    Eight other samplers already carried the guard; this was the one that did
+ *    not. */
+#define NOMOUNT_VERSION    31
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)

@@ -132,6 +132,33 @@ Two details worth knowing about the implementation:
   survive the fix. It climbs while `st_dev` holds, which lands on the mount root.
 - **Directories are never sampled if we invented them.** Feeding a synthesized
   inode back into the ceiling would ratchet it upward on every boot.
+- **It only runs when there is a synthesized directory to place.** The walk is
+  the expensive half of this fix — up to 2048 directories, each with a
+  `dentry_open` + `iterate_dir`, plus a `kasprintf` + `kern_path` +
+  `vfs_getattr_nosec` per subdirectory child — and its only consumer is
+  `nm_place_dir_ino`. The sample sits in `nomount_generate_virtual_topology`'s
+  "nearest real ancestor" branch, which is reached by **every** rule, while the
+  overwhelmingly common rule (a file into a ROM directory that already exists)
+  synthesizes nothing and never reads the answer. On a system-as-root partition
+  it is worse than unread: the climb reaches `/`, the BFS spends the whole
+  2048-directory budget and returns `-E2BIG`, so there was never an answer to
+  give. That branch *ends* the walk, so `pending_list` already holds every
+  directory this call invented — `!hlist_empty(&pending_list)` is therefore an
+  exact test for "am I about to place one", and the sample is gated on it.
+
+  It cannot instead be deferred to the lazy `nm_real_ancestor_pop()` in the
+  stamping loop below, even though that climbs to the same directory: by then
+  the hijack and the child injection have linked the synthesized directory into
+  that parent, while its rule does not reach `nomount_rules_ht` until the end of
+  the loop — so `nm_path_is_injected()` would not recognise it and the scan would
+  take our own raw-hash inode as population. Sampling before the hijack is what
+  keeps the directory pristine.
+
+  This is a redundancy fix, not a latency one. Measured on the OP15 with the walk
+  running on every rule, the whole mount pass is ~2 s for 257 rules across 93
+  directories over four consecutive boots, against a 60 s bound — nowhere near
+  the 250 s OPlus watchdog that the per-child `kern_path()+stat()` pass in
+  `nm_ino_actor` once tripped.
 
 Refusal cases, all of which fall back to the shipped behaviour: allocation
 failure, a directory with more than 128 subdirectories, a filesystem answering
@@ -191,6 +218,51 @@ The fix mirrors `generic_file_llseek_size()` and computes the size the way the
 `SEEK_END` arm does -- from what `nm_file_getattr` REPORTS, not the raw 4096
 placeholder, since answering from the placeholder would just move the divergence
 that arm was written to remove.
+
+---
+
+# 3. Two further arms of the same two fixes
+
+**Status: written and compile-verified on all ten pinned kernels (4.9 … 6.18) at
+`W=1` with zero diagnostics — but NOT boot-verified.** Both still need a builder
+run (`OnePlus-ReSukiSu_NMS` with `nomount_ref` pointed at the branch) and a flash
+before the measurements below the line can be claimed on a device.
+
+**`nm_scan_dir_for_file()` could sample our own injections.** It was the only
+sampler in the engine without the "never sample ourselves" guard that eight other
+sites carry. It reads the directory through the **hijacked** ops, so its actor
+sees injected names, and `nm_stock_caps()` on one of our inodes returns
+`NM_CAP_FSYNC` — `nm_file_fops` always carries `.fsync` — which puts `nm_fsync`
+back to forwarding to the f2fs backing file and answering 0 where every erofs
+sibling answers `-EINVAL`. That is exactly the one-syscall, baseline-free oracle
+v20 was cut to close, reopened through the sampler. The worked case is the 25
+`.so` files under a synthesized `.../Mms/lib/arm64`: rule 1 synthesizes the chain
+and samples a real ancestor, but from rule 2 on that directory resolves, and a
+miss on the one-entry sibling cache makes the scan list it and sample one of
+ours. On kernels < 6.8 it also mis-answered `nm_stock_map_dev()`, since our
+dentries carry `nm_dops`, which has no `.d_real`.
+
+The guard is the same pair the other sites use — `nm_path_is_injected()` before
+`kern_path` (so resolving does not instantiate one of our inodes) and the vtable
+identity test after it (which also catches a passthrough child of a dir-target
+rule, which has no rule of its own). Skipping a candidate makes
+`nm_find_sibling_meta()` ascend to the next real parent, which is where rule 1
+already sampled — so the 25 libs become consistent with each other rather than
+diverging.
+
+**`SEEK_DATA`/`SEEK_HOLE` on a dir-target directory.** Section 2 above fixed the
+*synthesized* directory. The dir-target branch intercepted only `SEEK_END`, so
+everything else forwarded to `vfs_llseek` on the f2fs backing **directory**,
+whose `generic_file_llseek` answers `SEEK_HOLE` with the f2fs `i_size` while
+`stat()`, `SEEK_END` and the terminal readdir cookie all report the erofs closed
+form. One `lseek` pair against one `stat`, on the same fd. It now answers from
+`nm_dsnap_dir_size()` with the identical five lines the synthesized-dir arm uses,
+so both directory kinds agree.
+
+Narrower than the sampler defect, and recorded as an unfinished arm of a shipped
+feature rather than new capability: the Suite builds no dir-target rule
+(`mount.rs::inject_would_mask_dir` refuses the target), so it is reachable only
+through a hand-issued `nm add <dir> <dir>`.
 
 ## Oracles measured and found CLOSED
 
