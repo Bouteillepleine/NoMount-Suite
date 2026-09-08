@@ -100,11 +100,24 @@ fn verdict_of(level: &Level) -> Verdict {
 /// show "from: <module>" the same way an audit finding does.
 fn owner_of(f: &Finding) -> Option<String> {
     // These checks are emitted per module and start with the module id.
+    //
+    // The last five were added after this list and were missing from it, so every
+    // plan row about one module's own content rendered with no `from:` line while
+    // every device row on the same report had one -- the id was there, buried
+    // mid-sentence. `module content not served` opens `{id} ships ...` and the
+    // four `Incompat` checks open `{module} ({script}): ...`; the head-token
+    // split below handles both, because it splits on a space OR a colon.
     const PER_MODULE: &[&str] = &[
         "partition-root target",
         "no such partition",
         "whiteout leaves a measurable hole",
         "wide replacement expansion",
+        "module content not served",
+        // Incompat::check() -- keep in step with it.
+        "writes into a ROM partition",
+        "needs Magisk's mirror",
+        "image-backed or chroot module",
+        "bind-mounts its own content",
     ];
     if !PER_MODULE.contains(&f.check) {
         return None;
@@ -501,7 +514,7 @@ enum Incompat {
 impl Incompat {
     /// How loud this kind is, and why they are not all the same.
     ///
-    /// Not "can the user fix it" — none of the three is fixable in NoMount and the
+    /// Not "can the user fix it" — none of the four is fixable in NoMount and the
     /// only lever for any of them is to remove the module. The axis is whether the
     /// finding CONTRADICTS what the user believes they have: a ROM write that goes
     /// nowhere and a Magisk-mirror read that returns nothing both mean the module
@@ -1973,14 +1986,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             // an app's namespace. Telling that user the switch "does nothing here"
             // pointed them away from the one control that closes the loudest
             // oracle on their device.
-            detail: {
-                let binds = crate::bind::tracked().len();
-                if binds == 0 {
-                    "your manager's \"Kernel umount\" is ON. Nothing the Suite serves on this \
-                     device is a mount, so it has nothing to unmount. Hide per app with \
-                     `nomount uid block <pkg>`."
-                        .to_string()
-                } else {
+            // ...and read through `tracked_result`, because an unreadable record
+            // is not an empty one. The infallible `tracked()` sent a read error
+            // into the zero arm, so one EIO made this row assert "Nothing the
+            // Suite serves on this device is a mount" on precisely the stock
+            // my_*-bind setup where that is false,
+            // about precisely the switch that would hide them. audit.rs:600 and
+            // health.rs:351 were moved off `tracked()` for this; this was the
+            // third copy.
+            detail: match crate::bind::tracked_result() {
+                Ok(v) if v.is_empty() => "your manager's \"Kernel umount\" is ON. Nothing the \
+                     Suite serves on this device is a mount, so it has nothing to unmount. Hide \
+                     per app with `nomount uid block <pkg>`."
+                    .to_string(),
+                Ok(v) => {
+                    let binds = v.len();
                     format!(
                         "your manager's \"Kernel umount\" is ON, and this device has {binds} \
                          bind mount(s) of ours — my_* is served by a real bind unless the \
@@ -1989,6 +2009,13 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                          injections, which are not mounts."
                     )
                 }
+                Err(e) => format!(
+                    "your manager's \"Kernel umount\" is ON. Whether this device carries bind \
+                     mounts of ours could not be read ({} — {e}), so it is unknown whether the \
+                     switch has anything to unmount here. Either way it cannot touch the \
+                     injections, which are not mounts.",
+                    crate::bind::BINDS_LIST
+                ),
             },
         });
     }
@@ -2020,24 +2047,36 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // unless the `my_hookless` marker is set, and it is off by default, so on a
     // stock OnePlus with any my_* module this told the reader an inert switch was
     // inert while it was the only control that hides their real binds.
+    //
+    // ...and `tracked_result`, not `tracked`, for the reason spelled out on the
+    // ON arm: an unreadable binds.list is not an empty one, and this string is
+    // the manager banner's whole text.
     if kernel_umount.is_none() && crate::manager::ksu_manager_present() {
-        let binds = crate::bind::tracked().len();
         f.push(Finding {
             level: Level::Info,
             check: "manager kernel umount unknown",
-            detail: if binds == 0 {
-                "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN rather \
-                 than off. Nothing the Suite serves on this device is a mount, so it has \
-                 nothing to unmount either way."
-                    .to_string()
-            } else {
-                format!(
-                    "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN \
-                     rather than off — and this device has {binds} bind mount(s) of ours \
-                     (my_* is served by a real bind unless the my_hookless trial is on). That \
-                     switch is the only thing that hides those from an app's mount table, so \
-                     it is worth checking in your manager."
-                )
+            detail: match crate::bind::tracked_result() {
+                Ok(v) if v.is_empty() => "your manager's \"Kernel umount\" could not be read, so \
+                     it is UNKNOWN rather than off. Nothing the Suite serves on this device is a \
+                     mount, so it has nothing to unmount either way."
+                    .to_string(),
+                Ok(v) => {
+                    let binds = v.len();
+                    format!(
+                        "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN \
+                         rather than off — and this device has {binds} bind mount(s) of ours \
+                         (my_* is served by a real bind unless the my_hookless trial is on). \
+                         That switch is the only thing that hides those from an app's mount \
+                         table, so it is worth checking in your manager."
+                    )
+                }
+                Err(e) => format!(
+                    "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN rather \
+                     than off, and neither could this device's bind record ({} — {e}), so \
+                     whether there is anything for it to unmount is unknown too. The injections \
+                     are unaffected either way; they are not mounts.",
+                    crate::bind::BINDS_LIST
+                ),
             },
         });
     }
@@ -2093,17 +2132,27 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     }
     if live_ok {
         // `if let Ok(..)` with no else: an engine that answered `v` but would not
-        // ENUMERATE left the live rule count at 0, printed `live: 0 rules`, and skipped the
-        // partition-root, FD-allowlist, size-mismatch and all three PM-published
-        // checks -- rendering identically to "the engine has zero rules".
+        // ENUMERATE left the live rule count at 0 and skipped the partition-root,
+        // FD-allowlist, size-mismatch and all three PM-published checks --
+        // rendering identically to "the engine has zero rules".
+        //
+        // Unmeasured, and named for the plan section's own cross-checks, exactly
+        // like the dead-engine sibling twenty lines above. `audit::device_checks`
+        // already FAILS the dump refusal itself (N_RULE_DUMP), so an Error here
+        // made ONE fact print as two top-of-list failures and put "2 check(s)
+        // FAILED" on the card. Unmeasured still keeps the report non-clean
+        // (`Report::verdict` -> "not fully measured", and service.sh reads
+        // summary.unmeasured), so nothing is lost by not shouting twice.
         let listed = nm.list();
         if let Err(e) = &listed {
             f.push(Finding {
-                level: Level::Error,
-                check: "engine rule dump failed",
+                level: Level::Unmeasured,
+                check: "plan live-rule checks did not run",
                 detail: format!(
-                    "the engine answered, but listing its rules failed ({e:#}). The live rule checks did \
-             not run: `live: 0 rules` means \"could not enumerate\", not \"none\"."
+                    "the engine answered its version but would not list its rules ({e:#}), so \
+                     the checks that compare the plan against the live rules were skipped. The \
+                     device section reports the dump failure itself; run `nomount check --device` \
+                     if you only ran the plan."
                 ),
             });
         }
@@ -2317,8 +2366,9 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // is reported so a clean verdict cannot be mistaken for a full sweep.
     if live_ok && engine_v >= 26 {
         // ...and an `Err` gets a row, exactly as the sibling `nm.list()` failure
-        // twelve lines above does ("`live: 0 rules` means 'could not enumerate',
-        // not 'none'"). This was a bare `if let Ok`, so an engine that answered
+        // above does -- same level, same shape: an empty result for a reason that
+        // is not "there is nothing there" is Unmeasured, not silence and not a
+        // second Error over the device section's. This was a bare `if let Ok`, so an engine that answered
         // `v` but would not dump its ghost tables produced NO row at all -- while
         // the block below works hard to tell "both tables empty" apart from "not
         // compiled in", and then the outer match threw away the third state.
@@ -3029,21 +3079,45 @@ hosts_file=/system/etc/hosts.d/x
     /// the manager's kernel-umount switch is the ONE control that removes them
     /// from an app's namespace. The Suite was pointing users away from it.
     ///
-    /// Pinned on the branch, not the wording: what matters is that zero binds and
-    /// some binds do not produce the same sentence.
+    /// Pinned on the branch, not the wording: what matters is that zero binds,
+    /// some binds and an UNREADABLE record do not produce the same sentence. The
+    /// third one was the round-8 gap -- `tracked()` is infallible, so an EIO on
+    /// `binds.list` landed in the zero arm and the banner asserted "Nothing the
+    /// Suite serves on this device is a mount" for a device that could not be
+    /// asked.
     #[test]
     fn the_kernel_umount_note_depends_on_whether_binds_exist() {
         let src = include_str!("doctor.rs");
         let at = src
             .find("check: \"manager kernel umount ON\",")
             .expect("finding gone or renamed");
-        let block = &src[at..at + 1600.min(src.len() - at)];
+        let unknown_at = src
+            .find("check: \"manager kernel umount unknown\",")
+            .expect("finding gone or renamed");
+        // Bounded by the next landmark, not by a byte count: a fixed window was
+        // one added sentence away from cutting the last arm off and passing
+        // anyway, and an unbounded tail would match these assertions' own
+        // literals further down this file.
+        let end = unknown_at
+            + src[unknown_at..]
+                .find("---- live checks")
+                .expect("the live-checks divider moved; re-bound this test");
+        for (what, block) in [("ON", &src[at..unknown_at]), ("unknown", &src[unknown_at..end])] {
+            assert!(
+                block.contains("crate::bind::tracked_result()"),
+                "{what}: the note must read the live bind record, not assert that there are \
+                 none -- and through the FALLIBLE reader, so an unreadable binds.list is not \
+                 rendered as zero binds"
+            );
+            assert!(
+                block.contains("Err(e) =>"),
+                "{what}: an unreadable binds.list needs its own arm. This string is the WebUI \
+                 manager banner's whole text, and a read error must not print as \"Nothing the \
+                 Suite serves on this device is a mount\""
+            );
+        }
         assert!(
-            block.contains("crate::bind::tracked()"),
-            "the note must read the live bind record, not assert that there are none"
-        );
-        assert!(
-            block.contains("hide those") || block.contains("DOES hide"),
+            src[at..unknown_at].contains("hide those") || src[at..unknown_at].contains("DOES hide"),
             "with binds present it must say the switch would hide them"
         );
     }

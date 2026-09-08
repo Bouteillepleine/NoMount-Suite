@@ -370,7 +370,22 @@ pub fn add_pending(targets: &[PathBuf]) {
     if targets.is_empty() {
         return;
     }
-    let mut all = pending();
+    // REFUSE, do not clobber. Round 8 named this regression in `pending()`'s doc
+    // and then only printed it: the read still degraded to an empty Vec, and the
+    // `write_atomic` below rewrote the file with the newest targets alone, losing
+    // every earlier REBOOT REQUIRED APK -- which `audit.rs:1527` then reports as a
+    // live `fail` ("injected file mapped as deleted") with no remedy instead of a
+    // `reboot` row. Keeping the file we could not read is strictly better: the
+    // worst case is one target missing from a list that is resolved by the very
+    // reboot it asks for, instead of all of them.
+    let Ok(mut all) = pending_result() else {
+        eprintln!(
+            "nomount: pmcache: {PENDING} could not be read - NOT rewriting it, so the {} APK(s) \
+             recorded now are not added and the existing list is kept",
+            targets.len()
+        );
+        return;
+    };
     for t in targets {
         if !all.contains(t) {
             all.push(t.clone());
@@ -386,26 +401,37 @@ pub fn add_pending(targets: &[PathBuf]) {
     }
 }
 
-/// The accumulated reboot-required set.
+/// The accumulated reboot-required set, error-preserving.
 ///
 /// `unwrap_or_default()` stood here and could not tell "not there yet" -- the
 /// normal case, correctly empty -- from "there and unreadable". In the second
 /// case `add_pending` rewrote the file with only the newest targets, and every
 /// earlier REBOOT REQUIRED APK was forgotten: exactly the regression the
 /// "Accumulates" contract above forbids. `read_state`, thirty lines up, has
-/// modelled this correctly all along.
-pub fn pending() -> Vec<PathBuf> {
+/// modelled this correctly all along. Absent is `Ok(vec![])`: no pending APK is
+/// the normal state, and it is the state `clear_pending` leaves behind.
+fn pending_result() -> std::io::Result<Vec<PathBuf>> {
     match fs::read_to_string(PENDING) {
-        Ok(t) => t.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => {
-            eprintln!(
-                "nomount: pmcache: {PENDING} exists but could not be read ({e}) - the \
-                 reboot-required list may be incomplete"
-            );
-            Vec::new()
-        }
+        Ok(t) => Ok(t.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
     }
+}
+
+/// The accumulated reboot-required set, best effort.
+///
+/// Lossy on purpose for the one reader that wants a list and not an answer:
+/// `audit::check_maps_not_deleted` uses it to soften a `fail` into a `reboot`,
+/// so an unreadable file there costs a harsher row, not a wrong one. The
+/// *writer* must not use this -- see [`add_pending`].
+pub fn pending() -> Vec<PathBuf> {
+    pending_result().unwrap_or_else(|e| {
+        eprintln!(
+            "nomount: pmcache: {PENDING} exists but could not be read ({e}) - the \
+             reboot-required list may be incomplete"
+        );
+        Vec::new()
+    })
 }
 
 /// Called from the boot pass: PM re-parses this boot, so anything recorded by
