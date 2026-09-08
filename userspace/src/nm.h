@@ -152,9 +152,10 @@
 #define NM_ERR_TIMEOUT (-4096)
 
 /* Exit status reserved for "the kernel never answered", distinct from the generic
- * failure (1), socket creation (2), argument errors (3) and the truncated-dump
- * failure (4): a caller deciding whether to retry needs to tell "the kernel
- * refused" from "the kernel went silent". */
+ * failure (1), socket creation (2), argument errors (3) and the dump failure
+ * (4 -- the dump was refused outright, or ended mid-stream; the stderr line says
+ * which): a caller deciding whether to retry needs to tell "the kernel refused"
+ * from "the kernel went silent". */
 #define NM_EXIT_TIMEOUT 5
 
 /* struct __kernel_old_timeval -- two __kernel_long_t, i.e. two `long`. */

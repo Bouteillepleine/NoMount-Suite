@@ -62,17 +62,27 @@ pub enum Commands {
         #[command(subcommand)]
         action: WhiteoutAction,
     },
+    // History, deliberately NOT a doc comment: clap renders every `///` line as
+    // `--help`, and seven lines about four verbs that no longer exist are
+    // addressed to a maintainer, not to someone asking what `check` does.
+    //
+    // Replaces `doctor`, `audit`, `posture` and `selfcheck`. Those were four
+    // verbs over two verdict enums, three JSON shapes and a fourth key=value
+    // one, and the WebUI merged all of it back into one list in JavaScript --
+    // which is what one list means. `posture` ran a strict SUBSET of the device
+    // checks, so it is gone for good. `plan` went with them and came BACK: it
+    // had no caller inside this repo, which is not the same as no caller, and
+    // the module test harness parses it to lint a staged module before it is
+    // ever applied -- something nothing else can do.
     /// Is this setup sound, and is what it serves detectable? One report, one
     /// shape, two sections.
     ///
-    /// Replaces `doctor`, `audit`, `posture` and `selfcheck`. Those were four
-    /// verbs over two verdict enums, three JSON shapes and a fourth key=value
-    /// one, and the WebUI merged all of it back into one list in JavaScript --
-    /// which is what one list means. `posture` ran a strict SUBSET of the device
-    /// checks, so it is gone for good. `plan` went with them and came BACK: it
-    /// had no caller inside this repo, which is not the same as no caller, and
-    /// the module test harness parses it to lint a staged module before it is
-    /// ever applied -- something nothing else can do.
+    /// The PLAN section is static: it resolves the enabled module set into the
+    /// rules a mount pass would build and names the ones that are a bad idea.
+    /// It reads no running process, so it answers before anything is served.
+    /// The DEVICE section is measured: it asks this running system whether what
+    /// is already served can be told apart from stock. With no flag you get
+    /// both, and both is what you want unless you know why not.
     ///
     /// Verdicts are FAIL, REBOOT, UNMEASURED, WARN, PASS, N/A and NOTE. UNMEASURED
     /// and N/A are deliberately distinct: "nothing here to test" is not a warning,

@@ -56,11 +56,29 @@ impl Nm {
             .output()
             .with_context(|| format!("exec {} {:?}", self.bin, args))?;
         if !out.status.success() {
+            // `{:?}` on argv and on `Option<i32>` put Rust debug formatting in
+            // front of every user: `nm ["l", "g"] failed (code Some(4)):`, with
+            // an empty reason, is what a device without the _ghost patch set
+            // printed. Say the command as it would be typed, and the status as a
+            // number.
+            //
+            // stdout is the FALLBACK, not the source. `nm` puts its diagnostics
+            // on fd 2 -- but only since the build that carries this comment, and
+            // NM_BIN can name a client from an older install, whose argument
+            // errors ("unknown command", "missing operand") all went to fd 1 and
+            // so surfaced here as no reason at all. First line only: a truncated
+            // dump also exits non-zero with the whole partial list on stdout.
+            let err = String::from_utf8_lossy(&out.stderr);
+            let mut msg = err.trim().to_string();
+            if msg.is_empty() {
+                let out_s = String::from_utf8_lossy(&out.stdout);
+                msg = out_s.lines().next().unwrap_or_default().trim().to_string();
+            }
             bail!(
-                "nm {:?} failed (code {:?}): {}",
-                args,
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
+                "nm {} failed (exit {}): {}",
+                args.join(" "),
+                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+                msg
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())

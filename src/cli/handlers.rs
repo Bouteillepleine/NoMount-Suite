@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use super::{UidAction, VfsAction};
 // Android packs (user_id, appid) into a uid, and the kernel's blocked set stores
@@ -67,7 +67,41 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             // then separates every child of that rule from every stock file in one
             // stat. Refuse it here too rather than let the CLI build by hand the
             // shape the mount pass will not.
+            let virt = Path::new(&virtual_path);
             let real = Path::new(&real_path);
+            // The VIRTUAL path was passed through unexamined, so this one verb
+            // built by hand the two rule shapes every other entry point in the
+            // product refuses:
+            //
+            //  * a bare partition root. `nomount vfs add /product <file>` masks
+            //    every stock entry under /product; this project's own notes
+            //    record the measured outcome -- the overlays vanished and zygote
+            //    SIGABRT'ed. `mount::serve_mode`, `mount::can_whiteout` and
+            //    `doctor`'s "partition-root target" finding all say no; the CLI
+            //    said ok.
+            //  * an unrepresentable path. A `\n` or a ` -> ` in either side
+            //    forges a second line in `nm list`, which `nm::parse_list`
+            //    returns as a real rule and `absorb` then acts on -- the
+            //    forgery `mount::path_is_representable` exists to stop.
+            //
+            // Deliberately NOT the whole of `serve_mode`/`can_whiteout` here:
+            // those refuse every non-ROM root, and `vfs add` is the low-level
+            // verb, the one that can repoint a `/data/app` APK the way
+            // `mount::add_repointing` does. Taking that away would remove the
+            // reason the verb exists. The partition root is the shape that has
+            // actually bricked a boot, and it is not a shape anyone means.
+            if crate::mount::is_partition_root(virt) {
+                anyhow::bail!(
+                    "refusing {}: a rule on a bare partition root masks every stock entry \
+                     under it, which aborts forkSystemServer. Name a file inside it.",
+                    virt.display()
+                );
+            }
+            for (side, p) in [("target", virt), ("source", real)] {
+                if let Err(why) = crate::mount::path_is_representable(p) {
+                    anyhow::bail!("refusing {} {}: {why}", side, p.display());
+                }
+            }
             if real.is_dir() {
                 anyhow::bail!(
                     concat!(
@@ -90,7 +124,24 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             println!("ok");
         }
         VfsAction::Whiteout { path } => {
-            nm.whiteout(Path::new(&path))?;
+            // `vfs whiteout` and `whiteout add` issue the SAME engine command;
+            // they differ only in whether the path is also written to
+            // whiteouts.txt. So they get the same gate, rather than this one
+            // having none: `whiteout::validate` refuses a relative path, `..`
+            // (which the engine resolves with LOOKUP_FOLLOW), everything
+            // `can_whiteout` refuses -- a bare partition root, a non-ROM root --
+            // and re-checks the RESOLVED path, because `/system/vendor` is a
+            // symlink to `/vendor` on every modern Android. Without it
+            // `nomount vfs whiteout /product` was accepted.
+            crate::whiteout::validate(&path)?;
+            let p = Path::new(&path);
+            // ...and the wire-format test `validate` does not make. A path
+            // ending in ` (whiteout)`, or containing ` [UID:`, mis-parses into a
+            // phantom rule no prune can ever delete.
+            if let Err(why) = crate::mount::path_is_representable(p) {
+                anyhow::bail!("refusing {}: {why}", p.display());
+            }
+            nm.whiteout(p)?;
             println!("ok");
         }
         VfsAction::Clear => {
@@ -143,6 +194,15 @@ pub struct ApplyReport {
     pub skipped: u32,
     pub failed: u32,
     pub retired: u32,
+    /// Entries that named an app this device does not have installed.
+    ///
+    /// Separate from `skipped` because it is not a problem and the other three
+    /// kinds are. The `detectors` preset ships ~50 names on purpose; nobody has
+    /// them all, so folding them into `skipped` logged "skipped 46" on every boot
+    /// of a perfectly healthy device and trained the reader to ignore the number
+    /// that also carries "a glob matched below the app range" and "malformed
+    /// entry".
+    pub not_installed: u32,
 }
 
 impl ApplyReport {
@@ -161,7 +221,7 @@ impl ApplyReport {
 /// resolves elsewhere has its stale appid unblocked rather than left hiding
 /// injections from whatever inherited it.
 pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
-    let mut rep = ApplyReport { hidden: 0, skipped: 0, failed: 0, retired: 0 };
+    let mut rep = ApplyReport { hidden: 0, skipped: 0, failed: 0, retired: 0, not_installed: 0 };
 
     // Knob state is as volatile as the blocked set; re-assert it every pass.
     let mode = blocklist::hide_isolated();
@@ -179,7 +239,21 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             return rep;
         }
     };
-    if entries.is_empty() {
+    // BOTH, not just `entries`. The whole retire/reconcile half of this function
+    // lives below, and an empty hide list is exactly when it has the most to do:
+    // removing the LAST entry -- and every `uid unblock <glob>`, which does no
+    // unblock of its own and delegates entirely to the reconcile because the
+    // mirror is keyed by package and `cache_forget("*duck*")` removes nothing --
+    // returned here before `desired` was built. The kernel went on hiding every
+    // matched appid, `uidhide.cache` went on naming them, every later `apply`
+    // returned here too, and the command printed "0 package(s) un-hidden" and
+    // exited 0. Nothing recovered it short of a reboot or `nm clear`.
+    //
+    // The rest of the function is already correct for an empty `entries`:
+    // `desired` stays empty, the apply loop does nothing, the reconcile retires
+    // everything the mirror still names, and `cache_replace` writes it empty.
+    // It also makes the early-boot re-block loop below reachable again.
+    if entries.is_empty() && cache.is_empty() {
         return rep;
     }
     // One dump for the whole pass: this runs in the boot path, and asking the
@@ -255,7 +329,7 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             Ok(Resolved::Uid(uid)) => {
                 desired.insert(e.clone(), uid);
             }
-            Ok(Resolved::NotInstalled) => rep.skipped += 1,
+            Ok(Resolved::NotInstalled) => rep.not_installed += 1,
             Err(err) => {
                 eprintln!("nomount: skipping hide-list entry {e:?}: {err:#}");
                 rep.skipped += 1;
@@ -380,6 +454,31 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
         // A package that isn't installed yet is still recorded so `apply` picks it
         // up when it appears — the block "sticks" the moment the app exists.
         UidAction::Block { target, force } => {
+            // Can this string survive being written to `uidhide` and read back?
+            // The file is `\n`-separated, `#`-commented and `trim()`-ed, and the
+            // appid mirror beside it is `entry\tappid`, so its own syntax is the
+            // whole answer:
+            //   * a newline writes ONE entry and parses back as TWO, neither of
+            //     which `uid unblock <what you typed>` can ever match again --
+            //     the pair is stuck, editable only by hand;
+            //   * a leading `#` is written, then dropped as a comment, so
+            //     `uid block '#com.foo'` printed ok and hid nothing, forever;
+            //   * a tab makes `cache_read`'s `split_once('\t')` yield a
+            //     non-numeric appid, so the mirror entry is silently dropped and
+            //     the early-boot pass never re-blocks it.
+            // Same class as `mount::path_is_representable`, which gates
+            // MODULE-supplied paths; this is the user-supplied one.
+            let t = target.trim();
+            if t.is_empty() {
+                bail!("nothing to hide: give a package name, a uid, or a glob");
+            }
+            if target.contains(['\n', '\r', '\t']) || t.starts_with('#') {
+                bail!(
+                    "{target:?} cannot be stored: a newline, a tab and a leading '#' are the \
+                     hide list's own syntax, so the entry would not survive being written and \
+                     read back"
+                );
+            }
             // A glob covers however many packages match now *and later*, so it is
             // validated, persisted, then applied through the normal pass.
             if blocklist::is_pattern(&target) {
@@ -476,9 +575,25 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             // Kept, not discarded: see `unblock_message` for what this branch
             // used to report and why both halves are needed.
             let existed = blocklist::remove(&target)?;
+            // Both arms below take the RESULT of every engine call, and neither
+            // reads "could not ask the engine" as "the kernel is hiding nobody".
+            // That matters more here than anywhere else in the file, because
+            // `blocklist::remove` above has ALREADY dropped the entry from
+            // `uidhide` and, via `cache_forget`, from the appid mirror -- so a
+            // refused or unasked un-hide leaves the appid in the kernel's hidden
+            // set with nothing on disk still naming it. Appids are reused after
+            // an uninstall, no later `apply` can find it, and the only cure is
+            // `nm clear`. This is the failure `reapply_blocklist` documents at
+            // length two hundred lines up; it was still live in both arms here,
+            // behind a printed "ok:" and exit 0 that the WebUI toasts green.
             match blocklist::resolve(&target)? {
                 Resolved::Uid(uid) => {
-                    let live = nm.uid_list_live().unwrap_or_default();
+                    let live = nm.uid_list_live().with_context(|| {
+                        format!(
+                            "{target} was removed from the hide list, but the engine could not \
+                             be asked which appids it is hiding — it may still be hidden"
+                        )
+                    })?;
                     let was_live = live.iter().any(|u| appid(*u) == appid(uid));
                     if was_live {
                         nm.uid_unblock(uid)?;
@@ -488,7 +603,14 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     let mut retired_old = false;
                     if let Some(old) = cached {
                         if old != uid && live.iter().any(|u| appid(*u) == old) {
-                            let _ = nm.uid_unblock(old);
+                            nm.uid_unblock(old).with_context(|| {
+                                format!(
+                                    "{target}: appid {old} is still hidden and nothing on disk \
+                                     names it any more — re-add it with `nomount uid block \
+                                     {target}` and retry, or clear the engine with \
+                                     `nomount vfs clear`"
+                                )
+                            })?;
                             retired_old = true;
                         }
                     }
@@ -498,8 +620,24 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 Resolved::NotInstalled => {
                     let mut unhid = false;
                     if let Some(old) = cached {
-                        if nm.uid_list_live().unwrap_or_default().iter().any(|u| appid(*u) == old) {
-                            let _ = nm.uid_unblock(old);
+                        // Only asked when there IS a stale appid to retire, so a
+                        // plain "remove a name that is not installed" still works
+                        // on a device whose engine is down.
+                        let live = nm.uid_list_live().with_context(|| {
+                            format!(
+                                "{target} was removed from the hide list, but the engine could \
+                                 not be asked whether appid {old} is still hidden"
+                            )
+                        })?;
+                        if live.iter().any(|u| appid(*u) == old) {
+                            nm.uid_unblock(old).with_context(|| {
+                                format!(
+                                    "{target}: appid {old} is still hidden and nothing on disk \
+                                     names it any more — re-add it with `nomount uid block \
+                                     {target}` and retry, or clear the engine with \
+                                     `nomount vfs clear`"
+                                )
+                            })?;
                             unhid = true;
                         }
                     }
@@ -514,9 +652,35 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
         //   not installed              — saved package with no current UID
         //   uid N · live, not saved    — kernel is hiding it but it's NOT in the file
         //                                (won't survive a reboot)
+        //   uid N · engine unreadable  — saved, and the engine could not be asked
+        //                                whether it is in force. Not "not applied".
         UidAction::List => {
             let persisted = blocklist::read()?;
-            let live = nm.uid_list_live().unwrap_or_default();
+            // Bound, not `unwrap_or_default()`. `uid_list_live` fails whenever
+            // `nm` cannot be executed or the dump is refused or truncated, and
+            // defaulting to an empty set turned all of that into "the kernel is
+            // hiding nobody": every saved entry then rendered "saved, not
+            // applied", which the WebUI classes `pending` and STILL counts as
+            // active. That card's own comment states the rule this broke --
+            // never fall back to the answer the user wants to hear, show it as
+            // unknown -- and it guards `r.errno`, which is 0 because the CLI had
+            // already swallowed the error. `reapply_blocklist` is honest about
+            // the same failure, so this was an inconsistency inside one file.
+            //
+            // "unreadable" is load-bearing: the WebUI routes /unread/ to the
+            // grey `gone` class, so a third state needs no UI change.
+            let live_res = nm.uid_list_live();
+            let engine_unknown = live_res.is_err();
+            let live = live_res.unwrap_or_default();
+            let state_of = |uid: u32| -> &'static str {
+                if engine_unknown {
+                    "engine unreadable"
+                } else if live.iter().any(|u| appid(*u) == appid(uid)) {
+                    "live"
+                } else {
+                    "saved, not applied"
+                }
+            };
             let mut covered: Vec<u32> = Vec::new();
 
             // Unreadable package map: globs cannot be expanded, and saying "no
@@ -539,12 +703,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                             // follows as provenance, and is what removing it acts on.
                             for (pkg, uid) in hits {
                                 covered.push(uid);
-                                let state = if live.iter().any(|u| appid(*u) == appid(uid)) {
-                                    "live"
-                                } else {
-                                    "saved, not applied"
-                                };
-                                println!("{pkg}\tvia {e} · uid {uid} · {state}");
+                                println!("{pkg}\tvia {e} · uid {uid} · {}", state_of(uid));
                             }
                         }
                         Err(err) => println!("{e}\tinvalid glob: {err:#}"),
@@ -561,12 +720,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 match resolved {
                     Resolved::Uid(uid) => {
                         covered.push(uid);
-                        let state = if live.iter().any(|u| appid(*u) == appid(uid)) {
-                            "live"
-                        } else {
-                            "saved, not applied"
-                        };
-                        println!("{e}\tuid {uid} · {state}");
+                        println!("{e}\tuid {uid} · {}", state_of(uid));
                     }
                     Resolved::NotInstalled => println!("{e}\tnot installed"),
                 }
@@ -581,7 +735,19 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             }
 
             if persisted.is_empty() && live.is_empty() {
-                println!("no blocked apps");
+                // "no blocked apps" is the WebUI's exact test for the empty
+                // state, so an unreadable engine must NOT print it -- it is the
+                // reassuring answer for a question that was never asked. A
+                // tab-separated row instead, because a line without a tab lands
+                // in the default `live` class and would be counted as an app
+                // being hidden.
+                if engine_unknown {
+                    println!(
+                        "hide list empty\tengine unreadable — cannot say what the kernel is hiding"
+                    );
+                } else {
+                    println!("no blocked apps");
+                }
             }
         }
         // Apply: re-assert the whole list. The kernel's set is empty at boot and
@@ -590,8 +756,8 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
         UidAction::Apply { early } => {
             let rep = reapply_blocklist(&nm, early);
             println!(
-                "hidden {}, skipped {}, retired {}, failed {}",
-                rep.hidden, rep.skipped, rep.retired, rep.failed
+                "hidden {}, not installed {}, skipped {}, retired {}, failed {}",
+                rep.hidden, rep.not_installed, rep.skipped, rep.retired, rep.failed
             );
             if rep.failed > 0 {
                 bail!("{} entr(ies) could not be applied", rep.failed);

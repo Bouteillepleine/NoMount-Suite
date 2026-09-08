@@ -12,12 +12,25 @@ void c_main(long *sp) {
     int exit_code = 1;
 
     if (argc < 2) {
-        print_str("nm <command>\n");
+        print_err("nm <command>\n");
         goto do_exit;
     }
 
     int fd = sys3(SYS_SOCKET, AF_NETLINK, SOCK_RAW, NOMOUNT_NL_PROTO);
-    if (fd < 0) { exit_code = 2; goto do_exit; }
+    if (fd < 0) {
+        /* The wrong-kernel first run -- the single most likely failure this
+         * product has, and it said NOTHING on either stream. Nm::run quotes
+         * stderr, so every Suite caller rendered it as an argv, a code, and an
+         * empty reason, which reads as "engine not responding" and sends the
+         * user looking at the engine. The two causes are indistinguishable from
+         * here, so name both: nm.h documents randomising NOMOUNT_NL_PROTO per
+         * build, and a kernel built with a different number simply never
+         * answers. */
+        print_err("nm: cannot open the NoMount netlink socket - this kernel has no NoMount "
+                  "engine (CONFIG_NOMOUNT), or nm and the kernel were built with different "
+                  "NOMOUNT_NL_PROTO values\n");
+        exit_code = 2; goto do_exit;
+    }
     /* Before the FIRST read, and covering every later one: a kernel that takes
      * the message and never replies must not hang us, because nm runs during
      * post-fs-data and a hang there hangs boot. See NM_RECV_TIMEOUT_SEC. */
@@ -49,7 +62,13 @@ void c_main(long *sp) {
         if (strcmp(argv[1], nm_cmds[ci].name) == 0) { cmd = nm_cmds[ci].op; break; }
     }
     if (!cmd) {
-        print_str("nm: unknown command\n");
+        /* Every argument error in this file goes to fd 2, not fd 1. nm.h states
+         * the rule ("Diagnostics ... go to fd 2") for the reason a diagnostic
+         * must never be read back as a rule; the reason it must be SEEN AT ALL
+         * is the same one. Nm::run quotes stderr and the WebUI toasts
+         * `r.stderr`, so each of these used to reach the user as
+         * `nm [...] failed (exit 3):` with nothing after the colon. */
+        print_err("nm: unknown command\n");
         exit_code = 3; goto do_exit;
     }
     /* Wire field only. Per-UID RULES would need `--uid`, which no caller in the
@@ -73,7 +92,7 @@ void c_main(long *sp) {
              * a PATH is the worst way to handle one: a typo ("--publik") would be
              * accepted as the virtual path of the very rule it was meant to flag,
              * applying a wrong rule and exiting 0. */
-            print_str("nm: unknown option\n");
+            print_err("nm: unknown option\n");
             exit_code = 3; goto do_exit;
         } else if (p_count < 64) {
             p_args[p_count++] = argv[i];
@@ -81,7 +100,7 @@ void c_main(long *sp) {
             /* Silently dropping the tail meant a batch `nm add` past 64 arguments
              * applied part of its work and still exited 0, so the caller recorded
              * every pair as applied. Refuse the whole command instead. */
-            print_str("nm: too many arguments (max 64)\n");
+            print_err("nm: too many arguments (max 64)\n");
             exit_code = 3; goto do_exit;
         }
     }
@@ -90,7 +109,12 @@ void c_main(long *sp) {
         int step = 1 + (cmd == 'a');
         /* Was exit 0: `nm add` with no operands reported success and did nothing,
          * so a caller that built an empty argument list saw its work "applied". */
-        if (p_count < step) { print_str("nm: missing operand\n"); exit_code = 3; goto do_exit; }
+        if (p_count < step) { print_err("nm: missing operand\n"); exit_code = 3; goto do_exit; }
+        /* An ODD tail is the same class this file already refuses twice above:
+         * `nm add /a /b /c` processed (/a,/b), dropped /c and exited 0, so a
+         * caller recorded every pair as applied. `step` is 1 for del/w, where
+         * this can never fire. */
+        if (p_count % step) { print_err("nm: odd number of add operands\n"); exit_code = 3; goto do_exit; }
 
         const char *cwd = (sys3(SYS_GETCWD, (long)mem.cwd_buf, PATH_MAX, 0) > 0) ? mem.cwd_buf : "/";
         char *cursor = mem.payload;
@@ -164,7 +188,9 @@ void c_main(long *sp) {
         goto do_exit;
 
     } else if (cmd == 'b' || cmd == 'u') {
-        if (p_count < 1) goto do_exit;
+        /* Was a bare `goto do_exit`: exit 1, nothing printed on either stream,
+         * so the caller had an exit code and no reason at all. */
+        if (p_count < 1) { print_err("nm: missing uid\n"); exit_code = 3; goto do_exit; }
         unsigned int uid = 0; const char *s = p_args[0];
         int ndig = 0;
         if (!*s) { exit_code = 3; goto do_exit; }
@@ -222,9 +248,18 @@ void c_main(long *sp) {
          *   i <0..3> -- which isolated-process pools per-UID hiding covers:
          *     1 = app-zygote, 2 = platform, 3 = both (default), 0 = neither.
          *     See NM_KNOB_HIDE_ISOLATED for the trade this expresses.
-         *   g <cmd> -- one _ghost control command: "p+/abs/path" / "p~/abs/path"
-         *     / "p-" for the hidden-path table, "u+<uid>" / "u~<uid>" / "u-" for
-         *     the hidden-uid table. `nm k g` with
+         *   g <cmd> -- one _ghost control command, forwarded verbatim to its
+         *     parser. For the hidden-path table: "p=<path>\n<path>..." replaces
+         *     the WHOLE table under one acquisition of the kernel's lock,
+         *     "p+<path>\n<path>..." appends, "p-" clears. "u=" / "u+" / "u-"
+         *     are the same three for the hidden-uid table. `=` is what
+         *     crate::ghost sends for the first chunk of every sync -- i.e. it
+         *     carries essentially all real traffic -- so a reader never sees a
+         *     half-built table; this comment used to name a "p~" spelling that
+         *     appears nowhere else in the tree and omit "=" entirely, which is
+         *     the wrong way round for the only two places a kernel-side reader
+         *     looks. Do not use "~": nothing sends it and nothing tests it.
+         *     `nm k g` with
          *     NO value exits 0 only when _ghost is compiled in AND the engine is
          *     >= v26 (below that the knob does not exist and the kernel answers
          *     -EINVAL). _ghost's guards are dead code until BOTH tables are
@@ -232,12 +267,15 @@ void c_main(long *sp) {
         static const struct { const char *name; int knob; } nm_knobs[] = {
             { "d", 4 }, { "i", 5 }, { "g", 7 },
         };
-        if (p_count < 1) goto do_exit;
+        /* Same as the uid path above: `nm k` alone exited 1 in silence. Note
+         * this is the KNOB NAME, not its value -- `nm k g` with no value is the
+         * _ghost presence probe and has p_count 1. */
+        if (p_count < 1) { print_err("nm: missing knob\n"); exit_code = 3; goto do_exit; }
         for (unsigned int ki = 0; ki < sizeof(nm_knobs) / sizeof(nm_knobs[0]); ki++) {
             if (strcmp(p_args[0], nm_knobs[ki].name) == 0) { knob = nm_knobs[ki].knob; break; }
         }
         if (knob < 0) {
-            print_str("nm: unknown knob\n");
+            print_err("nm: unknown knob\n");
             exit_code = 3; goto do_exit;
         }
         val = (p_count > 1) ? p_args[1] : "";
@@ -294,7 +332,7 @@ void c_main(long *sp) {
                  * paths and not others, which is its own pattern. */
                 if (a[0] == 'g') { is_gh = 1; continue; }
             }
-            print_str("nm: unknown list option\n");
+            print_err("nm: unknown list option\n");
             exit_code = 3; goto do_exit;
         }
         /* ONLY `l u` emits JSON, and what it emits is an array of INTEGERS -- the
@@ -327,7 +365,15 @@ void c_main(long *sp) {
          * exit_code still 0. The Suite then pruned every rule the dump had not
          * reached yet. See the loop's tail. */
         if (nm_timed_out(len)) goto do_timeout;
-        if (len < 0) { exit_code = 4; goto list_fail; }
+        /* A FIRST-read failure is a REFUSAL, not a truncation: nothing was ever
+         * streamed. `nm l g` on a kernel without the _ghost patch set lands
+         * here -- NM_CMD_GET_GHOST is command 11 and only exists from engine
+         * v26, so nm_nl_rcv_msg's dump test does not match, the switch falls to
+         * -EINVAL, and the kernel ACKs with the error. Sending that to the
+         * truncated-dump message told a perfectly healthy device that its rule
+         * table was incomplete. Same exit code (4 is "the dump failed"), a
+         * different sentence. */
+        if (len < 0) goto list_refused;
         exit_code = 0;
         if (is_uids) print_str("[\n");
 
@@ -407,7 +453,6 @@ void c_main(long *sp) {
          * Whatever was printed is a PREFIX of the rule set, and the reload delta
          * cannot tell a prefix from the whole set. Fail. */
         exit_code = 4;
-list_fail:
         /* Deliberately NOT closing the JSON array (`l u`). Exit code 4 is the
          * contract -- nm.rs's Nm::run bails on any non-zero status, which is how
          * every Rust caller sees this -- but a truncated uid list also has to be
@@ -416,6 +461,11 @@ list_fail:
          * which is why the diagnostic goes to stderr: it can never be read back
          * as a rule. */
         print_err("nm: rule dump ended early - list is incomplete\n");
+        goto do_exit;
+list_refused:
+        exit_code = 4;
+        print_err("nm: the kernel refused this dump - unsupported command, or an engine "
+                  "too old to have it\n");
         goto do_exit;
 list_done:
         if (is_uids) print_str("\n]\n");
