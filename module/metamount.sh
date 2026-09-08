@@ -103,7 +103,12 @@ nm_consume_stash
 # value that no later epoch comparison can ever accept -- which made this check
 # accuse a perfectly working manager on every single boot. boot_id is unique per
 # boot and immune to the clock.
-cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null
+# CHECKED. An unwritable $NMDIR makes this a no-op, and the only reader --
+# service.sh's _hookran test -- reads a missing stamp as "no boot entry point
+# ran", writes an incident report accusing a perfectly good manager ("Update the
+# manager.") and paints "⛔ mount pass never ran" on the card. Say which it was.
+cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null \
+    || nmlog "⚠ could not stamp mountpass.ts — service.sh will report that no boot entry point ran"
 
 # nmlog() and nmto() are lib.sh's -- see the note there on why they are shared
 # rather than pasted, and on what a missing `timeout` costs.
@@ -212,77 +217,12 @@ if nm_guard_bump "ksu/apatch metamount path"; then
     nm_fix_shell_tmp
 
     if [ -x "$BIN" ]; then
-        # Capture the status, NOT just the fact that we called it. `_engine_ran=1`
-        # below means "the binary was executable and we invoked it", and the status
-        # card then renders the green tick as long as SOME rules exist -- so a pass
-        # that exited non-zero, or that `timeout` killed at 60s having injected 200
-        # of 260 rules, ended the boot on "[NoMount ✅ 200 rules] fully mountless".
-        # A partial injection reported as a complete one is the same false green
-        # the rest of this file removes, one layer down.
-        # `2>&1`, NOT `2>/dev/null`.
-        #
-        # The pass writes exactly one sentence that explains the commonest
-        # new-user failure -- flashing this module on a kernel without
-        # CONFIG_NOMOUNT -- and it writes it to STDERR:
-        #
-        #   "hookless NoMount engine not responding -- is the CONFIG_NOMOUNT
-        #    kernel loaded?"   (mount.rs)
-        #
-        # Both boot paths then deleted it. What survived was a generic "mount pass
-        # exited 1 (failed)", no incident.log (that is written only for a guard
-        # trip or a missing binary), and a card saying the opposite of the truth.
-        # The product wrote the right words and threw them away.
-        #
-        # `pass_lock` writes here too ("continuing unserialised rather than
-        # stalling the boot"), and mount.rs is explicit that it must not be
-        # silent: it names the one window in which an app sees the stock tree.
-        _mout="$(nmto 60 "$BIN" mount 2>&1)"
-        _mrc=$?
-        [ -n "$_mout" ] && printf '%s\n' "$_mout"
-        if [ "$_mrc" -ne 0 ]; then
-            nmlog "⚠ mount pass exited $_mrc ($([ "$_mrc" -eq 124 ] && echo "TIMED OUT after 60s" || echo "failed")) — the injection set may be INCOMPLETE"
-            # ...and the REASON, which is now in hand. One line, the engine's own
-            # words, on the durable channel.
-            _mwhy=$(printf '%s\n' "$_mout" | grep -m1 -i 'not responding\|Caused by\|^Error')
-            [ -n "$_mwhy" ] && nmlog "  reason: $_mwhy"
-            unset _mwhy
-        else
-            # A SUCCESSFUL pass left no durable record at all: `$_mout` went to
-            # stdout (ksud's log, or nowhere) and boot.log never learned that 257
-            # rules had been applied. The user asking "did it work?" had only the
-            # card.
-            _msum=$(printf '%s\n' "$_mout" | grep -m1 '^nomount(suite):')
-            [ -n "$_msum" ] && nmlog "$_msum"
-            unset _msum
-        fi
-        # An exit of 0 does NOT mean every rule landed: the pass deliberately
-        # survives individual failures rather than failing the boot over them.
-        # Without this, those were invisible -- no log line, and the status card
-        # still green because SOME rules exist.
-        case "$_mout" in
-            *"nomount: WARNING"*)
-                nmlog "$(printf '%s\n' "$_mout" | grep "nomount: WARNING" | head -1)"
-                ;;
-        esac
-        unset _mout
-        # Durable whiteouts, HERE rather than only in service.sh. A whiteout hides a
-        # stock path that is itself the tell, and service.sh does not run it until
-        # after sys.boot_completed plus a 10s settle -- so every such path was plainly
-        # visible for the whole of boot, to anything that looked early. Nothing here
-        # needs packages.list, so it belongs in the same pass as the injections.
-        # service.sh still re-applies, which is idempotent and catches a late failure.
-        if [ -s "$NMDIR/whiteouts.txt" ]; then
-            nmto 30 "$BIN" whiteout apply 2>/dev/null
-            _wrc=$?
-            # Same reasoning as the mount pass: a whiteout hides a stock path that
-            # is itself the tell, so a failed apply means that path is VISIBLE for
-            # the whole boot. Never silent.
-            [ "$_wrc" -ne 0 ] && nmlog "⚠ whiteout apply exited $_wrc — hidden paths are still VISIBLE this boot"
-        fi
-        _pass_ran=1
-        # The pass bails with "engine not responding" when the kernel has no
-        # driver; that is the one failure worth its own card.
-        case "$_mout" in *"engine not responding"*) _driver_ok=0 ;; esac
+        # The bounded pass, its status ladder, the `nomount: WARNING` grep and the
+        # durable-whiteout re-apply are all nm_mount_pass in lib.sh now. This
+        # block and post-fs-data.sh's were byte-identical for 24 code lines and
+        # had already drifted once; see the note on the function for what it sets.
+        # It gives us _mrc, _pass_ran and _driver_ok, all read by the card below.
+        nm_mount_pass
     else
         # The missing `else`. Without it a binary that is absent, not executable,
         # or sitting under an ABI directory this device does not have produced a
@@ -309,14 +249,10 @@ if command -v ksud >/dev/null 2>&1; then
     # post-fs-data on a 14-module device, all returning the same answer. The
     # engine's own directory scan was optimised precisely because this stage sits
     # under the OPlus boot watchdog; spending it again here made no sense.
-    # BOUNDED. This runs OUTSIDE the bootloop guard -- it is not gated on
-    # `disabled` -- so an unbounded call here can hang post-fs-data on exactly the
-    # device that has already self-disabled to recover. `nm`'s netlink recv has no
-    # SO_RCVTIMEO, so "the engine accepted the message and never replied" is a
-    # permanent block, not a slow one.
-    _NMLIST=$(nmto 15 "$NM_BIN" list 2>/dev/null)
-    # grep -c on an empty stream prints 0 and exits 1, so guard the empty case.
-    _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
+    # The dump, its status and the three counts are nm_rule_counts in lib.sh --
+    # service.sh carried the identical five lines and the identical prose about
+    # which rows are excluded. Sets _NMLIST/_nmlrc/_rules/_wo/_rro and _nmcount().
+    nm_rule_counts
     _vf=""; _ov=""
     # Skipped when the guard has tripped. Nothing is being served in that state,
     # so every badge below would read "0 served" -- go straight to the Suite's own
@@ -343,7 +279,12 @@ if command -v ksud >/dev/null 2>&1; then
         # live rule list cannot substitute: a whiteout rule names no module, so a
         # DEBLOAT module -- which is nothing but whiteouts -- would go unbadged,
         # which is the bug this loop was fixed for in the first place.
-        _sum=$(grep -F "$(printf '%s\t' "$mid")" "$NMDIR/modules.tsv" 2>/dev/null | head -1)
+        # ANCHORED on field 1. `grep -F "$mid<TAB>"` matches anywhere in the line,
+        # so module id `bar` matched the row of `foo-bar` and `head -1` picked
+        # whichever sorted first -- badging one module with another's mechanism
+        # and counting it in the wrong _vf/_ov bucket. The file is
+        # id<TAB>entries<TAB>overlay<TAB>vfs (src/mount.rs), so compare the field.
+        _sum=$(awk -F'\t' -v m="$mid" '$1==m{print;exit}' "$NMDIR/modules.tsv" 2>/dev/null)
         [ -z "$_sum" ] && continue
         _o=$(printf '%s' "$_sum" | cut -f3)
         _v=$(printf '%s' "$_sum" | cut -f4)
@@ -358,7 +299,9 @@ if command -v ksud >/dev/null 2>&1; then
         # Field 4 = the mount's root within its filesystem, so a module bind reads
         # "/adb/modules/<id>/...", never "/data/adb/modules/...". The old pattern
         # matched nothing, so every module was badged "mountless" regardless.
-        _m=$(awk -v m="$mid" '$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}' \
+        # A STRING compare, not a regex: the id was interpolated into the pattern,
+        # so a `.` in a module id matched any character and over-counted.
+        _m=$(awk -v p="/adb/modules/$mid" '$4==p || index($4, p "/")==1 {n++} END{print n+0}' \
              /proc/self/mountinfo 2>/dev/null); _m=${_m:-0}
         _badge="$_t · $_n served"
         [ "${_m:-0}" -gt 0 ] && _badge="$_badge · ⚠ $_m mount(s)"
@@ -379,20 +322,16 @@ if command -v ksud >/dev/null 2>&1; then
     # lists -- is already in module.prop, on the per-module badges, or in the
     # WebUI, and none of it changes between boots.
     #
-    # EXCLUDE the (virtual dir) AND the (whiteout) rows. `grep -c .` counts every
-    # line of the dump, which on this device is 260 while `nomount check` and
-    # health.txt both say 257 -- 3 of them being directories the engine
-    # materialises, which are not rules. Whiteouts are the same mistake found
-    # later: health.rs counts `rules` as INJECTS and reports `whiteouts`
-    # separately, so a device with a debloat module installed had a card saying
-    # 259 while every other surface said 257 (measured on an OP15, 2026-09-07,
-    # with SAN installed). The card is what most users read; it must not be the
-    # one number that disagrees. Hidden paths get their own field instead.
-    _rules=$(_nmcount -v -c -E '\(virtual dir\)|\(whiteout\)')
-    _wo=$(_nmcount -c '(whiteout)')
-    _rro=$(_nmcount '/overlay/[^ ]*\.apk')
+    # _rules / _wo / _rro came from nm_rule_counts above, which also documents
+    # why the (virtual dir) and (whiteout) rows are excluded. Hidden paths get
+    # their own field below.
     _mods=0
+    # `set -f` around the split: $_vf/$_ov are space-joined module ids, and
+    # without it a module literally named `*` would glob-expand against the cwd
+    # and be counted many times. Same idiom uidscan.sh uses for $INV.
+    set -f
     for _x in $_vf $_ov; do _mods=$((_mods + 1)); done
+    set +f
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ -e "$NMDIR/disabled" ]; then
         _desc="⛔ disabled — bootloop guard tripped, open the WebUI"
@@ -406,6 +345,23 @@ if command -v ksud >/dev/null 2>&1; then
         # card even on the boot where the engine never ran. It is the only surface
         # most users ever read; it must not claim a posture nothing established.
         _desc="⛔ the Suite could not start this boot — open the WebUI"
+    elif [ "${_mrc:-0}" -ne 0 ]; then
+        # THE PASS ITSELF FAILED. `_pass_ran=1` is set the moment the pass is
+        # invoked, so the ladder had no arm between "could not start" and
+        # "0 rules": a pass that exited non-zero, or that `timeout` killed at 60s
+        # having injected 200 of 260 rules, still ended the boot on
+        # "✅ 200 rules · mountless". Two live producers, both reachable -- a zip
+        # that lost bin/<abi>/nm (nomount shells out to it), and a partial
+        # injection. `_mrc` is unset when the guard tripped or the binary was
+        # missing, and both of those arms fire above this one, so :-0 is safe.
+        _desc="⚠️ the mount pass FAILED (exit $_mrc) — open the WebUI"
+    elif [ "${_nmlrc:-0}" -ne 0 ]; then
+        # The pass worked and the DUMP did not. `nm list` is bounded at 15s and
+        # its netlink recv has no SO_RCVTIMEO, so a permanent block is the
+        # anticipated case -- and it leaves _NMLIST empty, i.e. _rules=0, i.e.
+        # the "no module had files to serve" sentence on a boot that injected 257
+        # rules. Say which of the two we actually failed to do.
+        _desc="✅ served, but the rule table could not be read this boot"
     elif [ "${_rules:-0}" = 0 ]; then
         # ✅ next to "0 rules" is a contradiction the reader has to catch for
         # themselves. The engine ran, so this is not ⛔ — but it served nothing,

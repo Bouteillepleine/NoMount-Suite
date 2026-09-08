@@ -150,7 +150,16 @@ elif [ -d /data/adb/nomount ]; then
     if [ "$_lost" = "-1" ]; then
         _nmlog "could not create $_bak - the hide list, whiteouts and settings will be LOST by this update"
     elif [ "$_lost" -gt 0 ]; then
-        _nmlog "stashed $_kept setting(s) to $_bak, but $_lost could NOT be copied and will be lost"
+        # ...and KEEP the state directory, for the same reason the mkdir-failure
+        # arm does. This branch logged "will be lost" and then the `rm -rf` below
+        # made it true -- destroying the ORIGINALS of the very files the stash
+        # could not copy. The reasoning below ("the wipe exists for exactly one
+        # thing -- clearing `disabled` ... and that is one file") applies verbatim
+        # and was simply not extended to a PARTIAL stash. customize.sh's restore
+        # never overwrites a file already present, so the stashed copies and the
+        # live originals reconcile correctly.
+        _wipe_ok=0
+        _nmlog "stashed $_kept setting(s) to $_bak, but $_lost could NOT be copied - keeping the live state directory so those survive"
     else
         _nmlog "stashed $_kept setting(s) to $_bak for the incoming install"
     fi
@@ -169,7 +178,11 @@ fi
 # leave the rest. customize.sh copes: its restore never overwrites a file that is
 # already present.
 if [ "${_wipe_ok:-1}" = 0 ]; then
-    _nmlog "keeping $NMDIR: the stash failed, so wiping it would destroy the only copy"
+    # The LITERAL path. $NMDIR is lib.sh's and this script does not source lib.sh
+    # (it defines its own _nmlog); the identifier appeared exactly once in the
+    # file, here, so the one message that fires when the user's hide list is at
+    # risk rendered as "keeping : the stash failed...".
+    _nmlog "keeping /data/adb/nomount: the stash failed, so wiping it would destroy the only copy"
     rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount 2>/dev/null
 else
     rm -rf /data/adb/nomount

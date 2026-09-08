@@ -169,7 +169,12 @@ if [ -d "$_bak" ]; then
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
-        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || continue
+        # REMOVE what a failed copy left, exactly as uninstall.sh does on the
+        # stash side ("A file we could not copy whole must not be there"). Here it
+        # matters more: a `cp -p` that dies part-way (ENOSPC) leaves a TRUNCATED
+        # file in the LIVE state directory, where the `[ -e ]` guard above and
+        # every later pass treat it as the newer truth and nothing repairs it.
+        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || { rm -f "$NMDIR/$_f" 2>/dev/null; continue; }
         # Explicit label: omitting arg 5 defaults to system_file, which is
         # app-readable. Match the parent, as every other state file does.
         set_perm "$NMDIR/$_f" 0 0 0600 u:object_r:adb_data_file:s0
@@ -295,17 +300,45 @@ if [ -e "$NMDIR/disabled" ]; then
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
 fi
 
-# GATED. This was unconditional, and it is the LAST LINE ON SCREEN — printed
-# immediately after the block that says "this kernel has no NoMount support: the
-# module installs but injects NOTHING", and again after the one that says the
-# Suite is DISABLED. Users read the last line. Promising the thing you have just
-# warned will not happen is the worst shape an installer message can take.
+# THE LAST LINE ON SCREEN. Users read it, so it has to be the right next step
+# for the state this install actually ended in. Gating the POSITIVE line was
+# half the fix: `$_ev` is empty in FOUR distinct states and the old `elif [ -z
+# "$_ev" ]` collapsed them all into "flash a kernel", which is wrong for three.
 #
-# `$_ev` is set only when the engine probe answered, so it is exactly the right
-# discriminator, and it is already in scope.
+#  1. `$_nm` was never executable -- an unsupported ABI (the box above says so)
+#     or a partial extraction that dropped +x. The probe never RAN, so the engine
+#     state is UNKNOWN and a kernel flash cannot fix either cause.
+#  2. Flashed from recovery, where the box at the probe has just said "From
+#     recovery this is normal — it will work after boot" -- and the next line
+#     used to contradict it and send a user with a perfectly good kernel off to
+#     flash a kernel.
+#  3. Running system, no engine: the message is right, and now names somewhere
+#     to GET one. Three surfaces state this problem and none named a solution.
+#  4. `$_ev` set but the Suite is disabled: neither arm fired and the install
+#     ended with no next step at all, 12 lines below the DISABLED warning.
+#
+# ...and the success arm now says REBOOT. "Modules are injected mountlessly at
+# boot" reads as a statement of current fact; nothing is served until the reboot
+# (ksud stages to modules_update and promotes at boot, and the pass runs at
+# post-fs-data). The failure branch got a NEXT STEP and the success branch did not.
+_booted=$(getprop sys.boot_completed 2>/dev/null)
 if [ -n "$_ev" ] && [ ! -e "$NMDIR/disabled" ]; then
     ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
+    ui_print "- NEXT STEP: reboot. Nothing is served until you do."
+elif [ ! -x "$_nm" ]; then
+    ui_print "- NEXT STEP: re-flash this zip. The engine could not be probed (see above),"
+    ui_print "  so we cannot tell you whether your kernel has NoMount."
+elif [ "$_booted" != "1" ]; then
+    ui_print "- Installed from recovery, where the engine cannot answer."
+    ui_print "- NEXT STEP: reboot, then open the WebUI — it says whether your kernel has it."
 elif [ -z "$_ev" ]; then
+    # Ahead of the `disabled` arm on purpose: with no driver, clearing the flag
+    # changes nothing. The missing kernel is the more fundamental of the two.
     ui_print "- NEXT STEP: flash a kernel built with CONFIG_NOMOUNT, then reboot."
+    ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases"
     ui_print "  Until you do, this module is installed and doing nothing."
+else
+    # The one remaining state: the engine answered and `disabled` is present.
+    ui_print "- NEXT STEP: clear the disable flag (see above), then reboot."
 fi
+unset _booted

@@ -71,7 +71,15 @@ if command -v timeout >/dev/null 2>&1; then NM_TO="timeout 2"; else NM_TO=""; fi
 export NM_TO
 
 # Manifest probe is I/O-bound -> ~2x cores, capped.
-J=$(( $(nproc 2>/dev/null || echo 4) * 2 ))
+# Sanitize BEFORE the arithmetic, the way every other file-or-command-derived
+# number in these scripts is (lib.sh's bootcount, service.sh's _now/_up). An
+# `nproc` that exits 0 with no output -- or with anything non-numeric -- makes
+# this `$(( * 2 ))`, an arithmetic SYNTAX error, which kills a non-interactive
+# shell on the spot in both mksh and ash: the whole scan would vanish silently.
+_J=$(nproc 2>/dev/null)
+case "$_J" in ''|*[!0-9]*) _J=4 ;; esac
+J=$((_J * 2))
+unset _J
 [ "$J" -gt 24 ] && J=24
 [ "$J" -lt 4 ] && J=4
 

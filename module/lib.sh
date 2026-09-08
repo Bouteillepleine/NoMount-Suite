@@ -62,12 +62,13 @@ nmlog() {
 # top of every pass, so it fires on the FIRST one to execute -- post-fs-data's
 # `absorb --early` -- and a log line in service.sh alone would never see it.
 #
-# The five, so a sixth cannot be added without noticing this list:
-# post-fs-data.sh (early), post-mount.sh (early), service.sh foreground,
-# service.sh late background, uidwatch.sh. The count said FOUR while there were
-# five, and uidwatch.sh was the one without the call -- the handler that runs on
-# every install, update and uninstall, i.e. exactly when a module's directory
-# disappears and the prune has something to say.
+# FOUR call sites, so a fifth cannot be added without noticing this list:
+# nm_early_absorb (which is BOTH early passes -- post-fs-data.sh on Magisk and
+# post-mount.sh on KSU/APatch), service.sh foreground, service.sh late
+# background, uidwatch.sh. It said five while the two early passes were still
+# separate copies; uidwatch.sh -- the handler that runs on every install, update
+# and uninstall, i.e. exactly when a module's directory disappears and the prune
+# has something to say -- was the one the list was written for.
 nmlog_absorb_notes() {
     printf '%s
 ' "$1" | grep -i 'uninstalled module' | while IFS= read -r _l; do
@@ -167,7 +168,14 @@ nm_consume_stash() {
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
-        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || continue
+        # REMOVE what a failed copy left. uninstall.sh states the rule for the
+        # stash side ("A file we could not copy whole must not be there") and
+        # this is the same hazard pointing the other way, and worse: a `cp -p`
+        # that dies part-way (ENOSPC) leaves a TRUNCATED file in the LIVE state
+        # directory, where every later `[ -e ]` guard -- this loop's included --
+        # treats it as the newer truth, so nothing ever repairs it. A half-copied
+        # `uidhide` is a legal hide list that hides nobody.
+        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || { rm -f "$NMDIR/$_f" 2>/dev/null; continue; }
         chmod 0600 "$NMDIR/$_f" 2>/dev/null
         chcon u:object_r:adb_data_file:s0 "$NMDIR/$_f" 2>/dev/null
         _rn=$((_rn + 1))
@@ -178,15 +186,29 @@ nm_consume_stash() {
     return 0
 }
 
-# Rotate the durable boot log. ONLY a boot entry point may call this, and only
-# once per boot -- service.sh and uidwatch.sh run many times and must not.
+# Rotate the durable boot log. ONLY a boot entry point may call this -- service.sh
+# and uidwatch.sh run many times and must not. On KSU it runs TWICE per boot
+# (metamount.sh, then post-fs-data.sh before it hands over); that is harmless,
+# because `tail -n 400` of a file already at or under 400 lines is a no-op, and
+# it is cheaper than teaching the second caller to detect the first.
 #
 # The chmod is for a file an older build left wide: `tail > $BOOTLOG.tmp` creates
 # the temp under whatever umask is in force and `mv` carries that mode onto the log.
 nm_boot_log_rotate() {
     [ -f "$BOOTLOG" ] && tail -n 400 "$BOOTLOG" > "$BOOTLOG.tmp" 2>/dev/null \
         && mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
-    : >> "$BOOTLOG" 2>/dev/null
+    # `touch`, NOT `: >> "$BOOTLOG"`. `:` is a POSIX SPECIAL BUILT-IN, so a
+    # redirection error on it aborts a non-interactive shell -- and ksud runs
+    # module scripts under its bundled busybox ash with ASH_STANDALONE, where
+    # that abort kills the WHOLE script, not just this function (measured, this
+    # session: dash exits 2 in both positions; mksh exits 1 at top level and
+    # survives inside a function). With $BOOTLOG unwritable -- a read-only /data
+    # after an ext4 error, a full /data, or a `boot.log` some root script left as
+    # a DIRECTORY -- the caller died HERE, 62 lines above metamount.sh's
+    # deliberate "$NMDIR is not writable, so the bootloop guard cannot arm"
+    # refusal, which is written for exactly this case and was unreachable.
+    # `touch` is an ordinary command, so its failure is a status.
+    touch "$BOOTLOG" 2>/dev/null || return 0
     chmod 0600 "$BOOTLOG" 2>/dev/null
     return 0
 }
@@ -315,6 +337,149 @@ nm_delink_ksud() {
     return 0
 }
 
+# THE MOUNT PASS ITSELF, in one place.
+#
+# metamount.sh and post-fs-data.sh carried this twice, and stripped of comments
+# and indentation the two ranges were byte-identical -- 24 code lines, verified
+# by diff: the bounded `mount` call, the status capture, the _mwhy/_msum greps,
+# the `nomount: WARNING` case and the whole whiteout block. This file exists to
+# end exactly that, and this was the LARGEST copy of all and the one that runs
+# the pass. It had already drifted once, in the documented direction: the Magisk
+# copy was missing the `2>&1`, the `reason:` line, the 124 naming and the WARNING
+# grep, and each was back-ported separately over three rounds. The `_driver_ok`
+# case below still existed in only one of the two.
+#
+# The caller owns the `[ -x "$BIN" ]` test: its else arm is an incident report
+# that has to name which entry point wrote it.
+#
+# Sets three globals for the caller's status card, and returns the pass's status:
+#   _mrc       the mount pass's exit status (124 = `timeout` killed it)
+#   _pass_ran  1 once the pass has been invoked at all
+#   _driver_ok 0 when the engine did not answer -- i.e. no CONFIG_NOMOUNT kernel
+nm_mount_pass() {
+    # Capture the STATUS, not just the fact that we called it. `_pass_ran` alone
+    # means "the binary was executable and we invoked it", and the status card
+    # then renders the green tick as long as SOME rules exist -- so a pass that
+    # exited non-zero, or that `timeout` killed at 60s having injected 200 of 260
+    # rules, ended the boot on "[NoMount ✅ 200 rules] fully mountless". A partial
+    # injection reported as a complete one is the same false green.
+    #
+    # The bound matters MORE on the Magisk path, not less: a hung mount pass
+    # there is a HANG, not a crash, so the bootloop counter never reaches
+    # GUARD_MAX and the device never self-recovers.
+    #
+    # `2>&1`, NOT `2>/dev/null`. The pass writes exactly one sentence that
+    # explains the commonest new-user failure -- flashing this module on a kernel
+    # without CONFIG_NOMOUNT -- and it writes it to STDERR:
+    #
+    #   "hookless NoMount engine not responding -- is the CONFIG_NOMOUNT
+    #    kernel loaded?"   (mount.rs)
+    #
+    # Both boot paths used to delete it. What survived was a generic "mount pass
+    # exited 1 (failed)", no incident.log (that is written only for a guard trip
+    # or a missing binary), and a card saying the opposite of the truth. The
+    # product wrote the right words and threw them away. `pass_lock` writes here
+    # too ("continuing unserialised rather than stalling the boot"), and mount.rs
+    # is explicit that it must not be silent: it names the one window in which an
+    # app sees the stock tree.
+    _mout="$(nmto 60 "$BIN" mount 2>&1)"
+    _mrc=$?
+    _pass_ran=1
+    [ -n "$_mout" ] && printf '%s\n' "$_mout"
+    # 124 named. A hang and a refusal are different problems -- one is the engine
+    # not answering, the other is the pass deciding it cannot run -- and on the
+    # Magisk path boot.log is the only record there is, so collapsing them made
+    # the commonest failure indistinguishable from a bad rule set.
+    if [ "$_mrc" -ne 0 ]; then
+        nmlog "⚠ mount pass exited $_mrc ($([ "$_mrc" -eq 124 ] && echo "TIMED OUT after 60s" || echo "failed")) — the injection set may be INCOMPLETE"
+        # ...and the REASON, which is now in hand. One line, the engine's own
+        # words, on the durable channel.
+        _mwhy=$(printf '%s\n' "$_mout" | grep -m1 -i 'not responding\|Caused by\|^Error')
+        [ -n "$_mwhy" ] && nmlog "  reason: $_mwhy"
+        unset _mwhy
+    else
+        # A SUCCESSFUL pass left no durable record at all: `$_mout` went to stdout
+        # (ksud's log, or nowhere) and boot.log never learned that 257 rules had
+        # been applied. The user asking "did it work?" had only the card.
+        _msum=$(printf '%s\n' "$_mout" | grep -m1 '^nomount(suite):')
+        [ -n "$_msum" ] && nmlog "$_msum"
+        unset _msum
+    fi
+    # An exit of 0 does NOT mean every rule landed: the pass deliberately
+    # survives individual failures rather than failing the boot over them, and
+    # prints `nomount: WARNING ...` when it does -- mount.rs emits that marker for
+    # a boot script to grep and its comment says so in as many words. Without
+    # this those were invisible: no log line, and the card still green because
+    # SOME rules exist.
+    case "$_mout" in
+        *"nomount: WARNING"*)
+            nmlog "$(printf '%s\n' "$_mout" | grep "nomount: WARNING" | head -1)"
+            ;;
+    esac
+    # BEFORE the unset, which is where this used to sit AFTER it. `unset _mout`
+    # ran 18 lines above the `case` that reads it, so `$_mout` was empty here,
+    # the case never matched, and `_driver_ok` was permanently 1 -- making the
+    # "your kernel has no NoMount driver" card, the one written for the single
+    # commonest new-user failure, unreachable. It fell through to "ran, but no
+    # module had files to serve", which sends the reader to look at their modules
+    # instead of at their kernel. Replayed under the device's own busybox ash and
+    # under mksh, this session: _driver_ok stayed 1 in both.
+    case "$_mout" in *"engine not responding"*) _driver_ok=0 ;; esac
+    unset _mout
+    # Durable whiteouts, HERE rather than only in service.sh. A whiteout hides a
+    # stock path that is itself the tell, and service.sh does not run it until
+    # after sys.boot_completed plus a 10s settle -- so every such path was plainly
+    # visible for the whole of boot, to anything that looked early. Nothing here
+    # needs packages.list, so it belongs in the same pass as the injections.
+    # service.sh still re-applies, which is idempotent and catches a late failure.
+    if [ -s "$NMDIR/whiteouts.txt" ]; then
+        # `2>&1` and KEEP the line, exactly as service.sh's re-apply does. Both
+        # boot paths threw the engine's own diagnosis away and logged a bare exit
+        # number -- the same `2>/dev/null`-eats-the-reason pattern that was
+        # removed from the mount call above and not from this one, for a failure
+        # whose meaning is "that path is VISIBLE for the whole boot".
+        _wout=$(nmto 30 "$BIN" whiteout apply 2>&1)
+        _wrc=$?
+        [ "$_wrc" -ne 0 ] && nmlog "⚠ whiteout apply exited $_wrc — hidden paths are still VISIBLE this boot: $(printf '%s\n' "$_wout" | tail -1)"
+        unset _wout _wrc
+    fi
+    return "$_mrc"
+}
+
+# The live rule table, dumped ONCE, with the counts every card derives from it.
+#
+# metamount.sh and service.sh each carried this dump, the `_nmcount` helper and
+# the same three counts, plus ~12 lines apiece of the identical prose explaining
+# the two exclusions. Only a comment differed.
+#
+# Sets: _NMLIST (the raw dump), _nmlrc (its exit status), _rules, _wo, _rro, and
+# defines _nmcount() for callers that want their own slice of the same dump.
+#
+# BOUNDED. In metamount.sh this runs OUTSIDE the bootloop guard -- it is not
+# gated on `disabled` -- so an unbounded call can hang post-fs-data on exactly
+# the device that has already self-disabled to recover. `nm`'s netlink recv has
+# no SO_RCVTIMEO, so "the engine accepted the message and never replied" is a
+# permanent block, not a slow one.
+#
+# EXCLUDE the (virtual dir) AND the (whiteout) rows. `grep -c .` counts every
+# line of the dump, which on this device is 260 while `nomount check` and
+# health.txt both say 257 -- 3 of them being directories the engine materialises,
+# which are not rules. Whiteouts are the same mistake found one kind later:
+# health.rs counts `rules` as INJECTS and reports `whiteouts` separately, so a
+# device with a debloat module installed had a card saying 259 while every other
+# surface said 257 (measured on an OP15, 2026-09-07, with SAN installed). The
+# card is what most users read; it must not be the one number that disagrees.
+nm_rule_counts() {
+    _NMLIST=$(nmto 15 "$NM_BIN" list 2>/dev/null)
+    _nmlrc=$?
+    # grep -c on an empty stream prints 0 and exits 1, so guard the empty case.
+    _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
+    _rules=$(_nmcount -v -c -E '\(virtual dir\)|\(whiteout\)')
+    _wo=$(_nmcount -c '(whiteout)')
+    _rro=$(_nmcount '/overlay/[^ ]*\.apk')
+    return 0
+}
+
 # The early absorb pass, in one place.
 #
 # Run from post-mount.sh under KernelSU/APatch, and from post-fs-data.sh on
@@ -399,6 +564,16 @@ nm_guard_bump() {
     case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
     COUNT=$((COUNT + 1))
     echo "$COUNT" > "$NMDIR/bootcount"
+    # ...and CHECK it landed. `echo` is not a special builtin, so a failed write
+    # leaves the counter at its previous value and the shell carries on. On a full
+    # /data the file is created and truncated to 0 bytes, the sanitiser above then
+    # reads '' -> COUNT=0 -> COUNT=1 on EVERY boot, GUARD_MAX is unreachable, and
+    # the one mechanism that recovers a wedged device is dead precisely on the
+    # disk-full condition that is a plausible cause of the wedge. metamount.sh
+    # refuses the pass outright when $NMDIR is unwritable; post-fs-data.sh (the
+    # Magisk entry point) has no such refusal, so this is the only notice there is.
+    [ "$(cat "$NMDIR/bootcount" 2>/dev/null)" = "$COUNT" ] \
+        || nmlog "⚠ cannot write $NMDIR/bootcount — the bootloop guard is NOT arming this boot"
     # SYNC. This is the most crash-adjacent write in the project and the only one
     # where "the next boot repairs it" is false by construction: a boot that
     # wedges and is watchdog-reset inside the ext4 commit interval loses the
@@ -414,7 +589,14 @@ nm_guard_bump() {
     [ "$COUNT" -lt "$GUARD_MAX" ] && return 0
 
     nmlog "bootloop guard tripped (count=$COUNT) -> self-disabling"
-    : > "$NMDIR/disabled"
+    # `touch`, not `: > ...`, for the reason nm_boot_log_rotate spells out -- and
+    # this is the worst possible moment for it: under busybox ash a redirection
+    # failure on the special builtin `:` kills the script HERE, so incident.log
+    # (the whole point of this arm) is never written; under mksh-in-a-function it
+    # survives, `disabled` is never created, and the guard "trips" silently on
+    # every boot forever while the WebUI still shows Armed.
+    touch "$NMDIR/disabled" 2>/dev/null \
+        || nmlog "⚠ could not create $NMDIR/disabled — the guard tripped but CANNOT self-disable"
     sync 2>/dev/null
     # Record WHY, while the evidence is still fresh. Without this a trip leaves
     # only an empty `disabled` file and the user has to dig through tombstones by

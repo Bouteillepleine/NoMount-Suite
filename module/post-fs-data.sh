@@ -54,7 +54,10 @@ fi
 # value that no later epoch comparison can ever accept -- which made this check
 # accuse a perfectly working manager on every single boot. boot_id is unique per
 # boot and immune to the clock.
-cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null
+# CHECKED, for the reason metamount.sh gives at the same call: a failed stamp
+# makes service.sh accuse a working manager and paint "⛔ mount pass never ran".
+cat /proc/sys/kernel/random/boot_id > "$NMDIR/mountpass.ts" 2>/dev/null \
+    || nmlog "⚠ could not stamp mountpass.ts — service.sh will report that no boot entry point ran"
 
 # The state-directory mode/label repair -- see nm_state_dir_repair in lib.sh.
 # BELOW the KSU/APatch handover on purpose: metamount.sh is the boot entry point
@@ -91,58 +94,15 @@ if nm_guard_bump "magisk post-fs-data path"; then
     # Magisk path; service.sh re-asserts it after boot.
     nm_fix_shell_tmp
     if [ -x "$BIN" ]; then
-        # Bounded, like metamount.sh. A hung mount pass here is a HANG, not a
-        # crash, so the bootloop counter never reaches GUARD_MAX and the device
-        # never self-recovers -- which makes the timeout matter more on this path
-        # than on the KSU one, not less.
-        #
-        # And the STATUS, not just the fact that we called it: a pass that exited
-        # non-zero, or that `timeout` killed at 60s having injected part of the
-        # rule set, used to leave no trace anywhere. On this path there is no
-        # status card to contradict, which makes boot.log the only record there is.
-        # `2>&1`: see the note in metamount.sh. The engine's one sentence about a
-        # missing CONFIG_NOMOUNT kernel goes to stderr, and this path deleted it —
-        # while boot.log is the ONLY record this path has.
-        _mout="$(nmto 60 "$BIN" mount 2>&1)"
-        _mrc=$?
-        [ -n "$_mout" ] && printf '%s\n' "$_mout"
-        # 124 named, like metamount.sh does it. A hang and a refusal are different
-        # problems -- one is the engine not answering, the other is the pass
-        # deciding it cannot run -- and this path's boot.log is the only record it
-        # has, so collapsing them into "exited 124" made the commonest failure
-        # here indistinguishable from a bad rule set.
-        if [ "$_mrc" -ne 0 ]; then
-            nmlog "⚠ mount pass exited $_mrc ($([ "$_mrc" -eq 124 ] && echo "TIMED OUT after 60s" || echo "failed")) — the injection set may be INCOMPLETE"
-            _mwhy=$(printf '%s\n' "$_mout" | grep -m1 -i 'not responding\|Caused by\|^Error')
-            [ -n "$_mwhy" ] && nmlog "  reason: $_mwhy"
-            unset _mwhy
-        else
-            _msum=$(printf '%s\n' "$_mout" | grep -m1 '^nomount(suite):')
-            [ -n "$_msum" ] && nmlog "$_msum"
-            unset _msum
-        fi
-        # An exit of 0 does NOT mean every rule landed: the pass deliberately
-        # survives individual failures rather than failing the boot over them, and
-        # prints `nomount: WARNING ...` when it does. mount.rs emits that marker
-        # for a boot script to grep -- its comment says so in as many words
-        # ("metamount.sh greps for this marker") -- and only metamount.sh was
-        # grepping it. On this path the pass's stdout was not even read, so a
-        # partial injection ended the boot with a zero exit and nothing in
-        # boot.log, which is the one channel this path has.
-        case "$_mout" in
-            *"nomount: WARNING"*)
-                nmlog "$(printf '%s\n' "$_mout" | grep "nomount: WARNING" | head -1)"
-                ;;
-        esac
-        unset _mout
-        # Durable whiteouts in the same pass as the injections, for the same
-        # reason as metamount.sh: a whiteout hides a stock path that is itself the
-        # tell, and there is no service.sh re-apply early enough to cover boot.
-        if [ -s "$NMDIR/whiteouts.txt" ]; then
-            nmto 30 "$BIN" whiteout apply 2>/dev/null
-            _wrc=$?
-            [ "$_wrc" -ne 0 ] && nmlog "⚠ whiteout apply exited $_wrc — hidden paths are still VISIBLE this boot"
-        fi
+        # The bounded pass, its 124-aware status ladder, the `nomount: WARNING`
+        # grep and the durable-whiteout re-apply are nm_mount_pass in lib.sh now.
+        # This block and metamount.sh's were byte-identical for 24 code lines and
+        # THIS is the copy that had drifted: it was missing the `2>&1`, the
+        # `reason:` line, the 124 naming and the WARNING grep, each back-ported
+        # separately over three rounds. There is no status card on the Magisk
+        # path, so boot.log is the only record it has -- which is why the drift
+        # cost more here than on the KSU one.
+        nm_mount_pass
 
         # --- pre-zygote absorb (my_* only, trial-gated) ------------------------
         # MAGISK ONLY. KSU/APatch have already exited above and run this from

@@ -90,15 +90,9 @@ done
 # mounts is handled by the manager's per-app-profile default-umount instead.
 
 sleep 10
-# Only re-arm when the boot really finished. Clearing the counter after the wait
-# merely TIMED OUT disarms the bootloop guard on exactly the hanging boots it
-# exists to catch, so it could never reach GUARD_MAX.
-if [ "$booted" = "1" ]; then
-    rm -f "$NMDIR/bootcount"
-    nmlog "boot completed, guard counter reset"
-else
-    nmlog "boot_completed never set - leaving guard counter armed"
-fi
+
+# NB: the bootloop-counter reset used to be HERE. It is now below the foreground
+# absorb pass -- see the note where it lives.
 
 # --- did ANY boot entry point run this boot? ----------------------------------
 # metamount.sh (KSU/APatch metamodule hook) and post-fs-data.sh (Magisk) each
@@ -214,10 +208,16 @@ if [ -d "$_bh_dir" ] && [ -d /data/adb/modules/bindhosts ] &&
 # Conditional on OUR metamodule being live, not merely on one existing: the
 # sha256sums manifest is ours. Without that test a leftover copy of this file
 # would force mode 0 under a different metamodule after NoMount was removed.
+#
+# `-e`, not `-f`, on the disable flag: mount::guard_tripped tests Path::exists(),
+# so a `disabled` that is a DIRECTORY makes every serving verb refuse while `-f`
+# reads false -- bindhosts would then pick mode 0 ("the metamodule serves my
+# hosts file") on a device where nothing is being served, and adblocking is
+# silently off with no mount to replace it. Every read in module/*.sh is `-e`.
 _nm=$(readlink -f /data/adb/metamodule 2>/dev/null)
 if [ -n "$_nm" ] && [ -d "$_nm" ] && [ -f "$_nm/nomount.sha256sums" ] &&
    [ ! -f "$_nm/disable" ] && [ ! -f "$_nm/remove" ] &&
-   [ ! -f /data/adb/nomount/disabled ]; then
+   [ ! -e /data/adb/nomount/disabled ]; then
     mode=0
 fi
 unset _nm
@@ -337,6 +337,32 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     ) &
 fi
 
+# --- re-arm the bootloop guard, AFTER the work that can reboot the device ------
+# Only re-arm when the boot really finished. Clearing the counter after the wait
+# merely TIMED OUT disarms the bootloop guard on exactly the hanging boots it
+# exists to catch, so it could never reach GUARD_MAX.
+#
+# AND ONLY AFTER THE FOREGROUND ABSORB. This sat at t≈+10s, above the reload and
+# absorb passes -- and post-mount.sh and post-fs-data.sh both record that this
+# exact work has rebooted a device: "re-asserting a my_* rule on a live system
+# has rebooted a device (OP11, Suite v1.3.22, engine v14 — four rules in a burst,
+# clean sys.boot.reason, no tombstone)". A device that reaches sys.boot_completed
+# and is then rebooted by the absorb pass looped forever: each cycle zeroed the
+# counter, GUARD_MAX was never reached, `disabled` was never written, and the
+# only way out was a flash. The guard's premise ("failed to reach
+# boot_completed") did not cover the window in which the Suite does its most
+# dangerous work.
+#
+# The BACKGROUNDED late pass (sleep 45, above) stays uncovered, deliberately:
+# delaying the reset past ~a minute starts colliding with a user rebooting by
+# hand, which would trip the guard on a healthy device.
+if [ "$booted" = "1" ]; then
+    rm -f "$NMDIR/bootcount"
+    nmlog "boot completed, guard counter reset"
+else
+    nmlog "boot_completed never set - leaving guard counter armed"
+fi
+
 # --- re-apply persistent whiteouts ---
 # Whiteouts live in kernel memory and are empty after every reboot; the list on
 # disk is the durable record.
@@ -367,13 +393,21 @@ fi
 # no longer maps to (appids get reused after an uninstall). Guard-gated.
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
     _bl=$(nmto 60 "$BIN" uid apply 2>&1)
-    if [ $? -eq 0 ]; then
+    # Status into a variable, and 124 named. This was the one `uid apply` site
+    # that tested `$?` directly and did not separate a timeout from a plain
+    # failure; uidwatch.sh's copy does both, and its comment ("124 is not the
+    # only failure") was written about this call.
+    _bl_rc=$?
+    if [ "$_bl_rc" -eq 0 ]; then
         nmlog "hide list re-applied ($_bl)"
+    elif [ "$_bl_rc" -eq 124 ]; then
+        nmlog "⚠ hide list apply TIMED OUT after 60s — apps you believe are hidden are NOT"
     else
         # A failed apply is the one thing here that must not pass quietly: it means
         # apps the user believes are hidden are not.
-        nmlog "⚠ hide list apply FAILED ($_bl)"
+        nmlog "⚠ hide list apply FAILED (exit $_bl_rc): $_bl"
     fi
+    unset _bl _bl_rc
 fi
 
 # --- Ghost: populate the existence cloak's two tables ------------------------
@@ -545,26 +579,11 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
 fi
 
 if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
-    # One dump, both counts (see metamount.sh): two `nm list` runs returning the
-    # same answer is two full netlink dumps of the whole rule table.
-    _NMLIST=$(nmto 15 "$NM_BIN" list 2>/dev/null)
-    _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
-    # EXCLUDE the (virtual dir) rows. `grep -c .` counts every line of the dump,
-    # which on this device is 260 while `nomount check` and health.txt both
-    # say 257 -- the difference being 3 directories the engine materialises, which
-    # are not rules. The card is the surface most users read, so having it
-    # disagree with every other number the Suite prints made a real discrepancy
-    # indistinguishable from a bug. Measured on OP15: 260 lines, 3 virtual dirs.
-    #
-    # ...and the (whiteout) rows, for the same reason and found the same way, one
-    # kind later: health.rs counts `rules` as INJECTS and reports `whiteouts` as
-    # its own field, so on a device with a debloat module installed the card said
-    # 259 while `check`, `check --json` and health.txt all said 257 (measured on
-    # an OP15, 2026-09-07, with SAN installed and two whiteouts live). Hidden
-    # paths are reported as their own field below, which is what health.txt does.
-    _rules=$(_nmcount -v -c -E '\(virtual dir\)|\(whiteout\)')
-    _wo=$(_nmcount -c '(whiteout)')
-    _rro=$(_nmcount '/overlay/[^ ]*\.apk')
+    # One bounded dump, all three counts -- nm_rule_counts in lib.sh, which is
+    # also where the reasoning about the excluded (virtual dir) and (whiteout)
+    # rows lives. metamount.sh carried the identical five lines and a near-
+    # identical twelve lines of that prose.
+    nm_rule_counts
     # Match on mountinfo FIELD 4, the mount's root within its own filesystem. A bind
     # out of a module reads "/adb/modules/<id>/..." there, because /data is its own
     # filesystem -- so the old `grep -c '/data/adb/modules'` matched nothing on any
@@ -620,6 +639,16 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         # naming a symptom ("0 rules") instead of the cause sends the reader
         # looking in the wrong place.
         _health="⛔ mount pass never ran — see the WebUI"
+    elif [ "$(_health_get engine)" = "down" ]; then
+        # THE WRONG-KERNEL CARD, restated. metamount.sh paints "your kernel has no
+        # NoMount driver" at post-fs-data and THIS block overwrites it a minute
+        # later -- `_driver_ok` is a metamount.sh local and nothing here replaced
+        # it, so on a no-driver device the card the user actually reads became
+        # "⚠️ 0 rules · 0 mounts — ⚠️ <verdict>": the symptom metamount.sh
+        # explicitly refused to lead with, with the cause destroyed. health.txt
+        # already carries the answer (`engine=vN` or `engine=down`, src/health.rs),
+        # read through _health_get so a stale record cannot supply it.
+        _health="⛔ your kernel has no NoMount driver — flash a NoMount kernel, then reboot"
     elif [ "$_consbad" = 1 ]; then
         _health="⚠️ per-UID inconsistency — see the WebUI"
     elif [ "${_err:-0}" -gt 0 ]; then
@@ -713,7 +742,9 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     # the boot -- it overwrites whatever metamount.sh wrote. Mirror the same
     # guard, so a boot that served nothing cannot end on a green tick here after
     # metamount.sh refused to give it one.
-    if [ "${_hookran:-1}" = 0 ]; then _mark="⛔"
+    # The engine-down arm gets ⛔ too, for the same reason: metamount.sh gives a
+    # no-driver boot a ⛔ and this card overwrote it with ⚠️.
+    if [ "${_hookran:-1}" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
     elif [ "${_rules:-0}" = 0 ]; then _mark="⚠️"
     else _mark="✅"; fi
     # Hidden paths only when there are any: an extra " · 0 hidden" on every device
