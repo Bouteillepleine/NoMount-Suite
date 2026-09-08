@@ -85,10 +85,34 @@ jobs:
             echo "       Bump Cargo.toml and re-tag; do not publish a mismatch." >&2
             exit 1
           fi
+          # ...and the tag must point at the COMMIT this zip was built from, not
+          # merely carry the same version string.
+          #
+          # `build:` above is `uses: ./.github/workflows/build.yaml`, and a
+          # reusable workflow always runs at the CALLER's ref. On a tag push that
+          # is the tag, so that path is sound. On the documented manual
+          # re-publish, the caller's ref is whatever branch the UI had selected --
+          # so when main has moved past the tag WITHOUT a version bump (which has
+          # happened here: five commits landed on top of release v1.3.80 without
+          # one), the check above passes and a zip built from main is published
+          # under the tag. The asset and the tag then disagree and the only place
+          # it shows is the SUITE_COMMIT stamp inside the zip.
+          #
+          # `repos/.../commits/<tag>`, not `git/ref/tags/<tag>`: the latter gives
+          # the TAG OBJECT's sha for an annotated tag, which never equals a commit
+          # sha, so it would fail every annotated release. This endpoint
+          # dereferences either kind to the commit.
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq '.sha')
+          if [ "$tag_sha" != "$GITHUB_SHA" ]; then
+            echo "FATAL: $TAG points at $tag_sha but this build is $GITHUB_SHA." >&2
+            echo "       Re-run this workflow with the TAG selected as the ref." >&2
+            exit 1
+          fi
+
           # DRY RUN stops here: everything above has already run for real -- the
-          # build, the artifact download across the workflow_call boundary, and
-          # the tag-vs-zip version check -- which is the whole of what could go
-          # wrong. Only the irreversible step is skipped.
+          # build, the artifact download across the workflow_call boundary, the
+          # tag-vs-zip version check and the tag-vs-commit check -- which is the
+          # whole of what could go wrong. Only the irreversible step is skipped.
           if [ "${DRY_RUN:-}" = 'true' ]; then
             echo "DRY RUN — nothing published."
             echo "  tag        : $TAG"

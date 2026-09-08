@@ -10,21 +10,26 @@ labels: bug
 
 ## Diagnostics
 
-Run this and attach the folder it names:
+**Easiest, no PC needed: open the module's WebUI, go to *Check* → *Developer
+tools* → *Export*.** Attach the folder it names.
+
+It writes a timestamped bundle to `/sdcard/Download`, already containing
+`boot.log`, `check.txt` and the mount table. **The per-app hide list is redacted
+automatically** when the destination is shared storage — package names and
+appids are withheld. Export to a private path instead if you are willing to
+include them and can share the bundle privately.
+
+From a root shell instead — note `nomount` is **not on `PATH`**, it ships inside
+the module:
 
 ```
-nomount export
+/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount export
 ```
-
-It writes a timestamped bundle to `/sdcard/Download`. **The per-app hide list is
-redacted automatically** when the destination is shared storage — package names
-and appids are withheld. Pass a private path (`nomount export /data/adb/nomount`)
-if you are willing to include them and can share the bundle privately.
 
 If the module is not running at all and `export` will not work, paste instead:
 
 ```
-nomount check
+/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount check
 uname -r
 ```
 
@@ -36,7 +41,7 @@ uname -r
 - Android version:
 - Kernel (`uname -r`):
 - Root manager and version (KernelSU / SukiSU / APatch / Magisk):
-- Suite version (`nomount version`):
+- Suite version (the WebUI footer, or `... /nomount version`):
 - Which builder the kernel came from, if you built it:
 
 ## Anything already tried

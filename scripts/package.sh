@@ -263,11 +263,11 @@ setup_toolchain() {
     # per-target env var (which outranks it) points at the wrapper here --
     # so the host detection above actually produces a build on the host it
     # just detected, instead of getting as far as the link step and dying.
+    # arm64 only, like ABI_TARGET above: the three other overrides named targets
+    # nothing in this repo has ever built, so they were three more strings to keep
+    # in step with an NDK version for no effect. Add them back with the ABI.
     if [ "$hostdir" = "windows-x86_64" ]; then
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android26-clang.cmd"
-        export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_BIN/armv7a-linux-androideabi26-clang.cmd"
-        export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_BIN/x86_64-linux-android26-clang.cmd"
-        export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$NDK_BIN/i686-linux-android26-clang.cmd"
     fi
     if [ -z "$ndk" ] || [ ! -d "$NDK_BIN" ]; then
         echo "FATAL: Android NDK not found. Set ANDROID_NDK_HOME." >&2
@@ -295,7 +295,11 @@ build_rust() {
     for abi in "${!ABI_TARGET[@]}"; do
         target="${ABI_TARGET[$abi]}"
         echo "==> [$profile] Building $abi ($target)"
-        "$CARGO" build --manifest-path "$PROJECT_ROOT/Cargo.toml" \
+        # --locked: the three direct deps are `=`-pinned in Cargo.toml, their
+        # transitives are not. Without this the binary that SHIPS can resolve a
+        # dependency graph the tests were never green against, and a resolution
+        # failure is not reproducible from the committed lockfile.
+        "$CARGO" build --locked --manifest-path "$PROJECT_ROOT/Cargo.toml" \
             --target "$target" $cargo_flag 2>&1
     done
     echo "==> [$profile] All Rust targets built"
@@ -433,34 +437,41 @@ package_zip() {
     fi
 
 
-    # WebUI
-    local webroot_src=""
-    if [ -d "$MODULE_DIR/webroot" ]; then
-        webroot_src="$MODULE_DIR/webroot"
-    elif [ -d "$PROJECT_ROOT/staging/webroot" ]; then
-        webroot_src="$PROJECT_ROOT/staging/webroot"
+    # WebUI. There used to be a `$PROJECT_ROOT/staging/webroot` fallback here; no
+    # step in this repo or in CI has ever produced that directory, so it was a
+    # branch that could only ever be not-taken.
+    #
+    # And the whole block used to be conditional -- missing webroot, or a webroot
+    # without index.html, simply skipped it, while the summary at the bottom of
+    # this function printed "WebUI: present" unconditionally. That is the one line
+    # in the summary not backed by a check, and it hid the case where BOTH stamping
+    # asserts below are unreachable. The WebUI is a headline feature and
+    # nomount.sha256sums is built from whatever happens to be staged, so its
+    # absence is fatal, not silent.
+    if [ ! -f "$MODULE_DIR/webroot/index.html" ]; then
+        echo "FATAL: no module/webroot/index.html - the zip would ship no WebUI." >&2
+        rm -rf "$staging"
+        exit 1
     fi
-    if [ -n "$webroot_src" ]; then
-        cp -r "$webroot_src" "$staging/webroot"
-        # Bake the release into the page. Stamped on the STAGING copy only: the
-        # tree's webroot keeps saying "dev", which is what it is.
-        if [ -f "$staging/webroot/index.html" ]; then
-            sed -i "s/const SUITE_VERSION = \"[^\"]*\"/const SUITE_VERSION = \"${VERSION}\"/" \
-                "$staging/webroot/index.html"
-            sed -i "s/const SUITE_COMMIT = \"[^\"]*\"/const SUITE_COMMIT = \"${BUILD_COMMIT}\"/" \
-                "$staging/webroot/index.html"
-            # ASSERT. A sed that matches nothing is silent, and the failure mode
-            # here is a shipped WebUI that calls itself "dev" and then reports
-            # every real release as a staged update forever.
-            if ! grep -q "const SUITE_VERSION = \"${VERSION}\"" "$staging/webroot/index.html"; then
-                echo "FATAL: could not stamp SUITE_VERSION into webroot/index.html" >&2
-                exit 1
-            fi
-            if ! grep -q "const SUITE_COMMIT = \"${BUILD_COMMIT}\"" "$staging/webroot/index.html"; then
-                echo "FATAL: could not stamp SUITE_COMMIT into webroot/index.html" >&2
-                exit 1
-            fi
-        fi
+    cp -r "$MODULE_DIR/webroot" "$staging/webroot"
+    # Bake the release into the page. Stamped on the STAGING copy only: the
+    # tree's webroot keeps saying "dev", which is what it is.
+    sed -i "s/const SUITE_VERSION = \"[^\"]*\"/const SUITE_VERSION = \"${VERSION}\"/" \
+        "$staging/webroot/index.html"
+    sed -i "s/const SUITE_COMMIT = \"[^\"]*\"/const SUITE_COMMIT = \"${BUILD_COMMIT}\"/" \
+        "$staging/webroot/index.html"
+    # ASSERT. A sed that matches nothing is silent, and the failure mode
+    # here is a shipped WebUI that calls itself "dev" and then reports
+    # every real release as a staged update forever.
+    if ! grep -q "const SUITE_VERSION = \"${VERSION}\"" "$staging/webroot/index.html"; then
+        echo "FATAL: could not stamp SUITE_VERSION into webroot/index.html" >&2
+        rm -rf "$staging"
+        exit 1
+    fi
+    if ! grep -q "const SUITE_COMMIT = \"${BUILD_COMMIT}\"" "$staging/webroot/index.html"; then
+        echo "FATAL: could not stamp SUITE_COMMIT into webroot/index.html" >&2
+        rm -rf "$staging"
+        exit 1
     fi
 
     # META-INF
@@ -665,10 +676,30 @@ if [ "$DEPLOY" = true ]; then
     REMOTE="/data/local/tmp/nomount-deploy.zip"
     echo "==> Deploying $ZIP to device"
     adb push "$ZIP" "$REMOTE"
-    adb shell "/data/adb/ksu/bin/ksud module install $REMOTE" 2>/dev/null \
-        || adb shell "/data/adb/ap/bin/apd module install $REMOTE" 2>/dev/null \
-        || adb shell "su -c 'magisk --install-module $REMOTE'" 2>/dev/null \
-        || { echo "FATAL: module install failed" >&2; exit 1; }
+    # PROBE for the manager, then run ONE installer with its output visible.
+    #
+    # This used to be a `||` chain with `2>/dev/null` on all three arms, which
+    # discarded exactly the messages the installer exists to print: customize.sh's
+    # integrity refusal, its metamodule-conflict refusal, and the "this kernel has
+    # no NoMount support" banner. The maintainer saw `Module installed` and nothing
+    # else -- an error turned into a clean result, in the tool used to test every
+    # build. The probes stay quiet; the install does not.
+    #
+    # The probes need the same privilege the install does -- /data/adb is 0700
+    # root -- so on a device where adb is not root they all read false and the
+    # last arm reports the failure. That is what the old chain did too (every arm
+    # died on EACCES and the FATAL fired); the difference is that the reason is
+    # now printed instead of discarded.
+    if adb shell '[ -x /data/adb/ksu/bin/ksud ]' 2>/dev/null; then
+        adb shell "/data/adb/ksu/bin/ksud module install $REMOTE" \
+            || { echo "FATAL: ksud module install failed" >&2; exit 1; }
+    elif adb shell '[ -x /data/adb/ap/bin/apd ]' 2>/dev/null; then
+        adb shell "/data/adb/ap/bin/apd module install $REMOTE" \
+            || { echo "FATAL: apd module install failed" >&2; exit 1; }
+    else
+        adb shell "su -c 'magisk --install-module $REMOTE'" \
+            || { echo "FATAL: magisk --install-module failed (no ksud/apd either)" >&2; exit 1; }
+    fi
     adb shell "rm -f $REMOTE"
     echo "==> Module installed"
 

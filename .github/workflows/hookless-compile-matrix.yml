@@ -267,10 +267,22 @@ jobs:
       - name: W=1 gate + sparse (advisory)
         if: steps.sel.outputs.run == '1' && steps.build.outcome == 'success'
         run: |
+          # pipefail, like the "Configure + compile" step above. Without it the
+          # exit status of `make ... | tee` is tee's, so a failed W=1 build could
+          # not be seen even if it were checked.
+          set -o pipefail
           cd ksrc
-          echo "== W=1 (advisory) =="
+          echo "== W=1 =="
           rm -f out/fs/nomount.o
-          make $MAKEOPTS W=1 fs/nomount.o 2>&1 | tee /tmp/nm_w1.log || true
+          # NOT `|| true`. The bare `|| true` here reintroduced half of the defect
+          # the comment below describes: if the W=1 build ERRORS OUT rather than
+          # warning, nm_w1.log holds `error:` lines and no `warning:` lines, the
+          # count is 0 and the gate passes green. Only `warning:` is ever counted,
+          # so the build failing has to fail the step itself.
+          if ! make $MAKEOPTS W=1 fs/nomount.o 2>&1 | tee /tmp/nm_w1.log; then
+            echo "FATAL: the W=1 build of fs/nomount.o failed for ${{ matrix.ver }}"
+            exit 1
+          fi
           echo "== sparse C=2 (advisory) =="
           rm -f out/fs/nomount.o
           make $MAKEOPTS C=2 CHECK="sparse" fs/nomount.o 2>&1 | tee /tmp/nm_sparse.log || true

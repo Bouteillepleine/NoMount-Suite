@@ -176,8 +176,11 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # --locked, like Test above. `test` was the only job pinned to Cargo.lock,
+      # so clippy and the cross-compile were free to resolve a different
+      # transitive set from the one the tests were green against.
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       # The Rust is linted on every push; the SHELL was not, and the module is
       # eight scripts that run as root at boot. Every bug found in the 2026-08-25
@@ -283,14 +286,16 @@ jobs:
           if [ "$PROFILE" = "release" ]; then
             FLAGS="--release"
           fi
-          cargo build $FLAGS --target "$TARGET"
+          # --locked: this is the build that PRODUCES THE SHIPPED BINARY, and it
+          # was the one leg free to resolve a different transitive dependency set
+          # from the one `test` was green against.
+          cargo build --locked $FLAGS --target "$TARGET"
         env:
           PROFILE: ${{ matrix.profile }}
           TARGET: ${{ matrix.target }}
+          # arm64 only, like the matrix above. The armv7/x86_64/i686 linkers named
+          # targets this workflow has never built.
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
-          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi26-clang
-          CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang
-          CARGO_TARGET_I686_LINUX_ANDROID_LINKER: /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android26-clang
 
       - name: Assert debug info preserved
         if: matrix.profile == 'debug'

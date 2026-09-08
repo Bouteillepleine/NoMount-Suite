@@ -1,8 +1,8 @@
 id=meta-nomount
 name=NoMount Suite
-version=v1.3.170
-versionCode=103170
+version=v1.3.171
+versionCode=103171
 author=XxxY
-description=Mountless module loading on the Prism engine — hookless VFS + RRO, no overlayfs or tmpfs; su via sucompat. my_* partitions use a real bind (zygote requires it). ⚠️ "umount modules" hides nothing the engine serves. 🫥
+description=Mountless module loading on the Prism engine — hookless VFS + RRO, no overlayfs or tmpfs; su via sucompat. my_* partitions use a real bind (zygote requires it), and your manager's "umount modules" is what hides those. 🫥
 updateJson=https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/update.json
 metamodule=1

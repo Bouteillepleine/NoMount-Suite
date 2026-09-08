@@ -23,12 +23,6 @@ import stat
 import sys
 import zipfile
 
-# `zip -r9` is preferred by package.sh when it is on PATH, and it does NOT
-# produce the same bytes as this script (different compressor tuning and
-# timestamps). Reproducibility is therefore a property of the mkzip.py path;
-# package.sh notes which one it used.
-
-
 staging, out = sys.argv[1], sys.argv[2]
 
 if os.path.exists(out):
@@ -77,7 +71,14 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
                 or rel.endswith("/update-binary")
                 or bool(st.st_mode & stat.S_IXUSR)
             )
-            mode = 0o755 if executable else 0o644
+            # S_IFREG included, as Python's own ZipFile.write() does (it stores
+            # st.st_mode, i.e. 0o100755). Without the file-type bits S_ISREG() is
+            # false for every entry, and an extractor that branches on S_IFMT
+            # before applying the mode falls through to a default -- which is the
+            # one thing this script exists not to depend on. Shipped zips do
+            # install with the right bits today; this is one character away from
+            # being conventional.
+            mode = 0o100755 if executable else 0o100644
             zi.external_attr = (mode & 0xFFFF) << 16
             zi.compress_type = zipfile.ZIP_DEFLATED
             with open(full, "rb") as f:
