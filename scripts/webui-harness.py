@@ -40,13 +40,18 @@ COMMANDS = {
     "plan": "%s/nomount plan" % BIN,
     "vfslist": "NM_BIN=%s/nm %s/nomount vfs list" % (BIN, BIN),
     "audit": "cat /data/adb/nomount/audit.json",
+    # VERBATIM from index.html's `refreshModules` (search it for
+    # `for d in /data/adb/modules`). It used to be a hand-copy that had already
+    # drifted -- `for m in` / `"$m"` against the page's `for d in` / `"$d"` --
+    # which is the whole failure mode a harness is supposed to catch, reproduced
+    # inside the harness. Keep the two byte-identical when either changes.
     "modules": (
-        'for m in /data/adb/modules/*/; do [ -d "$m" ] || continue; id=$(basename "$m"); '
+        'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; id=$(basename "$d"); '
         'mnt=$(awk -v m="$id" \'$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}\' '
         "/proc/self/mountinfo 2>/dev/null); "
         '[ "$id" = meta-nomount ] && { echo "$id|suite|$mnt"; continue; }; '
         '[ "$id" = kernelnosu ] && { echo "$id|su|$mnt"; continue; }; '
-        'st=on; { [ -f "$m/disable" ] || [ -f "$m/remove" ] || [ -f "$m/skip_mount" ]; } '
+        'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } '
         '&& st=off; echo "$id|$st|$mnt"; done'
     ),
     "dev": 'echo "$(getprop ro.product.marketname)|$(getprop ro.product.manufacturer)|'
@@ -58,11 +63,28 @@ COMMANDS = {
                'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; '
                'echo "se=$(getenforce 2>/dev/null)"',
     "appnm": 'su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"',
-    "disabled": "[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0",
+    # `-e`, matching the page and `mount::guard_tripped` (Path::exists): a
+    # `disabled` DIRECTORY parks the Suite exactly as a file does.
+    "disabled": "[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0",
     "incident": "cat /data/adb/nomount/incident.log 2>/dev/null",
     "snapshot": "[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0",
     "uidlist": "NM_BIN=%s/nm %s/nomount uid list" % (BIN, BIN),
     "pkgs": "pm list packages -3 -U 2>/dev/null | sort",
+    # The stub already had an `absorbedlist` branch and COMMANDS had no such key,
+    # so `f['absorbedlist']` was always undefined and ABSORBED_N always 0 -- which
+    # is exactly the state neither of the two most recent absorb-card commits can
+    # be reproduced in. The one thing the harness exists to test was the one thing
+    # it could not show.
+    "absorbedlist": (
+        "while IFS= read -r l; do case \"$l\" in ''|'#'*) continue;; esac; "
+        "t=${l%%\t*}; s=${l#*\t}; [ \"$t\" = \"$s\" ] && continue; "
+        "printf '%s\\t%s\\t%s\\n' \"$t\" \"$s\" "
+        "\"$([ -e \"$s\" ] && echo live || echo gone)\"; "
+        "done < /data/adb/nomount/absorbed.list 2>/dev/null"
+    ),
+    "whiteoutlist": "NM_BIN=%s/nm %s/nomount whiteout list" % (BIN, BIN),
+    "isolated": "NM_BIN=%s/nm %s/nomount uid isolated" % (BIN, BIN),
+    "bootcount": "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi",
 }
 
 # Substring tests, in order. NO regex escapes: a `\b` that does not survive a
@@ -87,12 +109,20 @@ window.ksu = {
     else if (has('incident.log')) key = 'incident';
     else if (has('snapshot.txt')) key = 'snapshot';
     else if (has('uid list')) key = 'uidlist';
+    else if (has('uid isolated')) key = 'isolated';
+    else if (has('whiteout list')) key = 'whiteoutlist';
+    else if (has('nomount/bootcount')) key = 'bootcount';
     else if (has('pm list packages')) key = 'pkgs';
     else if (has('absorbed.list')) key = 'absorbedlist';
     else if (has(' plan ')) key = 'plan';
     else if (has('/nm') && has(' v ')) key = 'engver';
     if (!key) window.__UNMATCHED.push(cmd.slice(0, 120));
-    var r = key && f[key] ? f[key] : { out: '', rc: 0 };
+    // rc 1, NOT 0, for a command nothing captured. An unstubbed command is an
+    // UNKNOWN, and the page's whole contract is that an unknown must not render
+    // as the clean answer -- with rc 0 an uncaptured `whiteout list` produced
+    // {ok:true, durable:[], auto:[]} and the Hidden-paths chip read "0 · Nothing
+    // hidden." A harness written to catch false greens was manufacturing one.
+    var r = key && f[key] ? f[key] : { out: '', rc: 1 };
     setTimeout(function () {
       try { window[cbName](r.rc, r.out, ''); } catch (e) { console.error('cb', e); }
     }, 0);

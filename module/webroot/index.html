@@ -180,14 +180,27 @@
     content: ""; position: absolute; inset: 0; pointer-events: none;
     background: radial-gradient(420px 180px at 88% -30%, rgba(124,156,255,0.18), transparent 70%);
   }
-  .statusline { display: flex; align-items: center; gap: 12px; }
+  /* WRAPS. Every substate that says something actionable is long -- "this kernel
+     was not built with NoMount — flash one that was, then reboot. Nothing is
+     being injected." is 103 characters, and it is the FIRST thing a wrong-kernel
+     user sees. With no `flex-wrap` the 19px headline took ~150px of a 360dp
+     screen and the rest was squeezed into eight lines of ragged right-aligned
+     12px beside it: the layout was comfortable exactly in the one state
+     ("modules injected") nobody needs to read. */
+  .statusline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--muted); transition: .3s; }
   .dot.ok   { background: var(--ok);   box-shadow: 0 0 13px var(--ok),   0 0 0 5px rgba(53,210,154,0.14); }
   .dot.warn { background: var(--warn); box-shadow: 0 0 13px var(--warn), 0 0 0 5px rgba(251,191,36,0.14); }
   .dot.bad  { background: var(--bad);  box-shadow: 0 0 13px var(--bad),  0 0 0 5px rgba(248,113,122,0.14); }
   .dot.off  { background: var(--muted); }
   .statusline .st { font-size: 19px; font-weight: 720; letter-spacing: -0.2px; }
-  .statusline .sub { margin-left: auto; font-size: 12px; color: var(--muted); text-align: right; }
+  .statusline .sub { margin-left: auto; min-width: 0; font-size: 12px; color: var(--muted); text-align: right; line-height: 1.45; }
+  /* Once it has to wrap it gets the full width and reads left-to-right: ragged
+     right-aligned prose is the hardest shape to read and the longest strings
+     here are the ones that matter most. */
+  @media (max-width: 430px) {
+    .statusline .sub { flex: 1 0 100%; margin-left: 0; margin-top: 6px; text-align: left; }
+  }
 
   .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 17px; }
   .metric { background: var(--card2); border: 1px solid var(--brd2); border-radius: 13px; padding: 12px 13px; }
@@ -225,6 +238,10 @@
     word-break: break-all; overflow-wrap: anywhere;
   }
   .abrow .ab-why { font-size: 11.5px; color: var(--muted); line-height: 1.4; margin-top: 3px; }
+  /* When the reason IS the row -- absorb's LEAK lines, which have no separate
+     path and no action in the tag -- it reads at full strength, not as a caption
+     under nothing. */
+  .abrow .ab-why:first-child { margin-top: 0; font-size: 12px; color: var(--txt); }
   .abrow .tag { margin-top: 1px; }
   .tag {
     font-size: 10.5px; padding: 4px 10px; border-radius: 999px; font-weight: 680;
@@ -1080,7 +1097,8 @@
     <p class="note" id="rulebreak" style="margin-top:0">—</p>
     <div id="ruleModuleBar" style="display:none"></div>
     <div class="uidbar" id="rulefilterbar" style="display:none">
-      <input id="rulefilter" type="text" placeholder="Filter by path or module…" oninput="filterRules()" />
+      <input id="rulefilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+             placeholder="Filter by path or module…" oninput="filterRules()" />
       <button class="act" id="rulegroupBtn" style="flex:1 1 0" onclick="toggleRuleGroup(this)">Group by module</button>
       <button class="act" style="flex:1 1 0" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
     </div>
@@ -1099,7 +1117,8 @@
       <h2>Injected files</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
     </div>
     <div class="uidbar" id="vfsfilterbar" style="display:none;margin-bottom:11px">
-      <input id="vfsfilter" type="text" placeholder="Filter files…" oninput="renderFilesFull()" />
+      <input id="vfsfilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+             placeholder="Filter files…" oninput="renderFilesFull()" />
     </div>
     <div class="list" id="vfsdirs" style="display:none"></div>
     <div class="list" id="vfsfull" style="display:none"></div>
@@ -1143,7 +1162,7 @@
 
     <details class="ndet" id="devtools">
       <summary>Developer tools</summary>
-      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today’s fingerprint as the baseline, replacing any earlier one. <b>Verify</b> diffs the live system against it. <b>Export</b> writes <code>check.txt</code>, <code>fingerprint.txt</code> and the mount table to <code>/sdcard/Download</code> — your hide list and the apps it names are deliberately left out of a shared destination.</p>
+      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today’s fingerprint as the baseline, replacing any earlier one. <b>Verify</b> diffs the live system against it. <b>Export</b> writes a folder under <code>/sdcard/Download</code> with the check report, the fingerprint, the live rules and the mount table — attach the whole folder to a bug report. Anything naming the apps you hide is left out of a shared destination, the boot log included; the folder says so and tells you how to get the full set privately.</p>
       <div class="btns" style="flex-wrap:wrap">
         <button class="act" onclick="runSnapshot(this)">Snapshot</button>
         <button class="act" onclick="runVerify(this)">Verify</button>
@@ -1322,7 +1341,7 @@
       if (!m) return;
       const kind = m[1], target = m[2], id = m[4];
       if (kind !== "bind" && l.indexOf("<< UNSERVABLE") < 0) expectLive++;
-      const e = modules[id] || (modules[id] = { files: 0, overlay: false, vfs: false });
+      const e = modules[id] || (modules[id] = { files: 0, overlay: false, vfs: false, bind: false });
       e.files++;
       total++;
       // An RRO overlay APK is served as an overlay; everything else is a file
@@ -1333,7 +1352,12 @@
       // so this pane called a nested RRO `vfs` while the Rules pane three
       // hundred lines down — which has always used this expression — counted it
       // as an overlay. Same rule in both places, and in mount.rs.
-      if (/\/overlay\/[^\s]*\.apk$/.test(target)) e.overlay = true;
+      //
+      // KIND FIRST. A `bind` entry is a real mount, not a file redirect, and
+      // typing it off the target pattern alone gave a bind-only module the green
+      // `vfs` tag -- "file redirect" -- for content the Suite serves by mounting.
+      if (kind === "bind") e.bind = true;
+      else if (/\/overlay\/[^\s]*\.apk$/.test(target)) e.overlay = true;
       else e.vfs = true;
     });
     PLAN_BY_MODULE = { total, expectLive, modules };
@@ -1366,8 +1390,10 @@
   function failText(r, fallback) {
     const e = ((r && r.stderr) || "").trim();
     if (/bootloop guard has parked the Suite/.test(e)) {
+      // "below" was wrong for two of the three callers: `woAdd`/`woApply` and
+      // `abAbsorb` toast this from the Hiding tab, where there is nothing below.
       return "Blocked — the bootloop guard disabled the Suite, so nothing is injected. " +
-             "Find out why below, then clear it and reboot.";
+             "Open Status to find out why, then clear it and reboot.";
     }
     return "Failed: " + ((fallback || "").trim() || e || "error");
   }
@@ -1473,6 +1499,28 @@
   // and painted "no rules — re-apply" in green over "Disabled". A stale paint
   // now stops at the next checkpoint instead.
   let STATUS_GEN = 0;
+  // The VIRTUAL path a `nm vfs list` line is about.
+  //
+  // The wire format is `<virtual>[ (whiteout) | (virtual dir) | -> <real>]
+  // [ (public)][ [UID: n]]` (userspace/src/nm.c:387-395), and
+  // `mount::path_is_representable` refuses any path that could forge one of those
+  // markers, so peeling them off in that order is exact rather than a guess.
+  //
+  // Two bugs lived in the one-liner this replaces. It split on the FIRST " ->",
+  // where `src/nm.rs:334` deliberately splits on the LAST "so a target path
+  // containing one is not mis-split"; and its "(virtual dir)" strip was
+  // $-anchored, so a virtual dir carrying the (public) flag -- which the kernel
+  // sets on every ancestor of a public rule -- kept BOTH markers in the target.
+  function vpath(l) {
+    let s = String(l).trim();
+    s = s.replace(/\s\[UID:\s*\d+\]$/, "");
+    if (s.endsWith(" (public)")) s = s.slice(0, -9);
+    const i = s.lastIndexOf(" -> ");
+    if (i >= 0) return s.slice(0, i).trim();
+    if (s.endsWith(" (whiteout)")) s = s.slice(0, -11);
+    else if (s.endsWith(" (virtual dir)")) s = s.slice(0, -14);
+    return s.trim();
+  }
   function ruleDump() {
     if (RULES) return RULES;
     RULES = nm("vfs list").then(function (r) {
@@ -1487,18 +1535,28 @@
         ok: r.errno === 0,
         raw: (r.stdout || "").trim(),
         lines: lines,
-        // The virtual path of each rule, without the "(virtual dir)" marker.
-        targets: lines.map(l => (l.split(" ->")[0] || "").trim().replace(/\s*\(virtual dir\)$/, "")),
         // Structural entries are directories the engine materialises, not rules.
         // Counting them gave 260 on a device where `nomount check`, health.txt and
         // the manager card all said 257 -- so the one number on the front page
         // disagreed with every other number the Suite prints, which makes a real
         // discrepancy indistinguishable from a bug.
         rules: lines.filter(l => !l.includes("(virtual dir)")).length,
+        // The rules that are an INJECTED FILE, typed rather than guessed from
+        // the shape of the line. A whiteout has no " -> ", so the old target
+        // split kept the whole line and the Injected-files card listed
+        // "/system/bin/install-recovery.sh (whiteout)" as a file, with a green
+        // Prism tag, for a rule whose entire job is to make a path ABSENT --
+        // and it is already listed correctly on the Hiding tab. Virtual dirs
+        // are engine structure and are listed nowhere by design.
+        injects: lines.filter(l => !l.includes("(virtual dir)") && !l.includes("(whiteout)"))
+                      .map(vpath),
       };
       // RRO overlays are hookless rules now (a virtual path under */overlay/
       // ending .apk), not overlayfs mounts, so they come out of the same dump.
-      d.rro = d.targets.filter(t => /\/overlay\/[^\s]*\.apk$/.test(t));
+      // `injects`, not `targets`: a whiteout OVER an overlay APK makes that APK
+      // absent, and counting it as an RRO the Suite serves is the opposite of
+      // what it does.
+      d.rro = d.injects.filter(t => /\/overlay\/[^\s]*\.apk$/.test(t));
       return d;
     });
     return RULES;
@@ -1517,7 +1575,11 @@
     // PARALLEL: `loadCheckCache` had usually already painted it from the cached
     // report before this function learned the engine was gone. Whichever of the
     // two finishes last now paints the same answer.
-    if (!d.ok) paintHealthLine(CHECK);
+    //
+    // On BOTH paths, not just the `!d.ok` one: gated on the failure, a red line
+    // survived the refresh in which ENGINE_LIVE flipped back to true, so a device
+    // that had just come back kept "The engine isn't running" until a fresh check.
+    paintHealthLine(CHECK);
     if (!d.ok) {
       // NAME THE CAUSE AND THE ACTION. "Engine offline / kernel driver not
       // responding" was the first thing a new user with the wrong kernel saw, and
@@ -1525,8 +1587,14 @@
       // commonest way to arrive here is flashing this module without the kernel
       // half, and that is one sentence to say.
       $("state").textContent = "No kernel driver";
+      // Say WHERE, not just what. This page has no external link anywhere -- it
+      // is a KSU WebView, and a live <a> is awkward there -- so the address is
+      // plain selectable text. Without it the one sentence a stuck new user
+      // reads ends in "flash one that was" with nowhere to go.
       $("substate").textContent =
-        "this kernel was not built with NoMount — flash one that was, then reboot. Nothing is being injected.";
+        "this kernel was not built with NoMount — flash one that was, then reboot. " +
+        "Nothing is being injected. Prebuilt kernels and the source are at " +
+        "github.com/Bouteillepleine/NoMount-Suite";
       dot.className = "dot bad";
       // Both counters, not just one. Leaving the overlay count at whatever it
       // last said pins a stale number beside an "Engine offline" that says the
@@ -1550,8 +1618,12 @@
     // mid-session, when rules from the last good boot are still live.
     if (GUARD_TRIPPED === true) {
       $("state").textContent = "Disabled";
+      // NAME A PLACE THAT EXISTS. There is no "Details" anywhere in this app --
+      // the word survives only in two comments about the removed Diagnostics tab
+      // -- and this is the loudest state the card has. The Re-arm button is in the
+      // Bootloop guard card, two cards down the same tab.
       $("substate").textContent =
-        "the bootloop guard tripped — re-arm it under Details, then reboot";
+        "the bootloop guard tripped — re-arm it in Bootloop guard below, then reboot";
       dot.className = "dot bad";
       return d.rules;
     }
@@ -1593,7 +1665,7 @@
     // apply, and the card can never reach Active. Reported from an OP15 with
     // five script-only modules, where 0 rules is the correct answer.
     // Only asked when the count is zero, so the normal path costs nothing.
-    let ships = -1;
+    let ships = -1, planned = -1;
     try {
       // ASK THE ONE THING THAT DECIDES IT. `nomount plan` resolves the enabled
       // module set with the same code the mount pass runs, and the Modules pane
@@ -1607,12 +1679,23 @@
       // device where several do; OnePlus alone ships ten my_* partitions and
       // adds more each ROM.
       const p = await planByModule(true);
-      if (p) ships = p.total;
+      // `expectLive`, NOT `total`. `total` counts every plan line, including the
+      // `bind` ones (my_* content is routed to PlanKind::Bind because hookless
+      // bootloops on it) and the ones already marked `<< UNSERVABLE`. Neither can
+      // ever produce a rule in `vfs list`, so on the DEFAULT OnePlus setup -- a
+      // module shipping only my_* content, `my_hookless` unset -- 0 rules is the
+      // right answer and this told the user "no rules — re-apply" forever, about a
+      // Reload that cannot change it.
+      if (p) { ships = p.expectLive; planned = p.total; }
     } catch (e) { /* leave unknown */ }
     if (gen !== STATUS_GEN) return d.rules;
     if (ships === 0) {
       // Correct and final. Not a warning: nothing is wrong and nothing to do.
-      $("substate").textContent = "nothing to inject — no module provides files";
+      // Two reasons to be here, and "no module provides files" is false for the
+      // second: the content may exist and be served by a real bind.
+      $("substate").textContent = planned > 0
+        ? "nothing to inject — this device's module content is served by real binds"
+        : "nothing to inject — no module provides files";
       dot.className = "dot ok";
     } else if (ships > 0) {
       // Content exists and no rule serves it -- the one case here that wants the
@@ -1654,24 +1737,50 @@
   // non-root process sees a different mount table than root, and the residual
   // tells a scanner reads straight out of properties whatever the mount table
   // says.
+  // The DEVICE half of this card, cached like `RULES` and for the same reason.
+  //
+  // Nothing it reads moves while the page is open, but `refreshStealth` is fired
+  // by `runCheck`, `autoCheck` AND `refreshAll` -- so opening the page ran these
+  // execs two or three times over to repaint a card whose only moving part is the
+  // cached report. `refreshAll` drops it: a refresh is the user asking again.
+  let STEALTH_PROBE = null;
+  function stealthProbe() {
+    if (STEALTH_PROBE) return STEALTH_PROBE;
+    STEALTH_PROBE = (async function () {
+      const r = await exec(
+        'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
+        'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
+        'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
+        'echo "se=$(getenforce 2>/dev/null)";'
+      );
+      const kv = {};
+      r.stdout.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1).trim(); });
+      const rootNm = parseInt(kv.root_nm || "0", 10);
+      // App view: drop to a non-root uid and count nomount_* mounts. If the kernel
+      // mount-hide hook is active, non-root readers get them filtered out (-> 0).
+      // NB: grep -c exits 1 when the count is 0 (the hidden case!), so don't gate on
+      // errno — parse stdout as a number instead.
+      //
+      // ONLY when root sees one. This engine is hookless and mounts nothing named
+      // `nomount_*` (b2aee0f deleted the last overlay-era surface), so root_nm is
+      // 0 on every current build and this second exec -- a `su 2000` drop, the
+      // most conspicuous call the page makes -- was answering a question the
+      // first one had already closed. The legacy tripwire stays; its expensive
+      // half now only runs when the tripwire fires.
+      let appNm = 0;
+      if (rootNm > 0) {
+        const appOut = ((await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"')).stdout || "").trim();
+        appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
+      }
+      return { ok: r.errno === 0, kv: kv, rootNm: rootNm, appNm: appNm };
+    })();
+    return STEALTH_PROBE;
+  }
   async function refreshStealth() {
-    const r = await exec(
-      'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
-      'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
-      'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
-      'echo "se=$(getenforce 2>/dev/null)";'
-    );
-    const kv = {};
-    r.stdout.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1).trim(); });
+    const probe = await stealthProbe();
+    const kv = probe.kv;
     const sucompat = kv.sucompat === "1";
-    const rootNm = parseInt(kv.root_nm || "0", 10);
-
-    // App view: drop to a non-root uid and count nomount_* mounts. If the kernel
-    // mount-hide hook is active, non-root readers get them filtered out (-> 0).
-    // NB: grep -c exits 1 when the count is 0 (the hidden case!), so don't gate on
-    // errno — parse stdout as a number instead.
-    const appOut = ((await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"')).stdout || "").trim();
-    const appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
+    const rootNm = probe.rootNm, appNm = probe.appNm;
 
     // -1, not 0, when the rows are missing or unmeasured: "there are no foreign
     // mounts" and "nobody asked" are different answers, and the second must not
@@ -1710,7 +1819,12 @@
       if (!c || !c.evidence) return 0;
       const d = c.evidence.match(/(\d+)\s+left by design/);
       if (d) return parseInt(d[1], 10);
-      if (c.verdict !== "note") return 0;
+      // `note` OR `warn`. Both come out of the SAME arm of audit.rs -- the one
+      // that fires when every leaked mount is one the Suite made itself -- and
+      // that arm's verdict was raised so the row renders at all. `bad` below is
+      // deliberately still fail/reboot only: headlining our own my_* bind
+      // "Something is mounting over the ROM" is the opposite over-claim.
+      if (c.verdict !== "note" && c.verdict !== "warn") return 0;
       const v = c.evidence.match(/(\d+)\s+module mount\(s\) visible/);
       return v ? parseInt(v[1], 10) : 0;
     })();
@@ -1741,7 +1855,7 @@
     // "external · unmanaged" is a claim, and a probe that did not run has not
     // earned it any more than it earns the reassuring one. Same rule, other
     // direction: absent must say absent.
-    $("mSu").innerHTML = r.errno !== 0 ? 'not measured <small>probe did not run</small>'
+    $("mSu").innerHTML = !probe.ok ? 'not measured <small>probe did not run</small>'
       : sucompat ? 'sucompat <small>kernel · mountless</small>'
       : 'external <small>unmanaged</small>';
 
@@ -1763,7 +1877,13 @@
       // headline saying "1 mount by design", about a mount the prose two lines
       // below says a scanner can read. True under a narrower definition than its
       // own label, which is the shape of every false green fixed this release.
-      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " visible to apps", t: "warn" }
+      // "N visible to apps" under a key that names MOUNTS was a count of
+      // FINDINGS: `mrows` is three checks, so this could never exceed 3 and had
+      // nothing to do with how many mounts exist -- a device with six leaked
+      // module mounts and two ROM tmpfs rendered "2". The `say()` arm below gets
+      // the same number right ("N finding(s) in the mount table"), so the card
+      // contradicted itself.
+      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " finding" + (fmnt > 1 ? "s" : "") + " — open Check", t: "warn" }
               : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
               : byDesign > 0
                 ? { k: "Real mounts", v: "none of ours · " + byDesign + " left by design", t: "vfs" }
@@ -1906,7 +2026,13 @@
     const cr = await exec(
       "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi"
     );
-    const dr = await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0");
+    // `-e`, not `-f`. `mount::guard_tripped` is `Path::exists()`, which is TRUE
+    // for a directory, and all nine shell entry points test `-e` too. Only this
+    // read used `-f`: with `disabled` as a DIRECTORY it answered 0, so the card
+    // said "Armed" in green, hid the Re-arm button -- the only recovery control
+    // on the page -- and left GUARD_TRIPPED false, while every serving verb in
+    // the binary refused. `rearm()`'s own comment describes this exact split.
+    const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
     // The worst false green in the file: with errno dropped, a failed read gave
     // disabled === false, so a Suite that had TRIPPED and was injecting nothing
     // rendered as "Armed" with a green dot and "boot 0/3".
@@ -1926,7 +2052,11 @@
     // are cached by then.
     const wasTripped = GUARD_TRIPPED;
     GUARD_TRIPPED = disabled;
-    if (wasTripped !== disabled) refreshStatus();
+    // ...and the health line with it: `guardTripped` reads GUARD_TRIPPED first
+    // now, so the line that was painted from the cached report before this
+    // function read the marker has to be repainted with the live answer. Costs no
+    // exec -- it paints from CHECK, which is already in hand.
+    if (wasTripped !== disabled) { refreshStatus(); paintHealthLine(CHECK); }
     $("gchip").textContent = "boot " + (cr.errno !== 0 ? "?" : c === "" ? "0" : c) + "/3";
     if (disabled) {
       $("gstate").textContent = "Tripped — disabled"; $("gdot").className = "dot bad"; $("rearm").style.display = "";
@@ -2042,9 +2172,16 @@
       $("ruleslist").textContent = keep.join("\n");
     }
     $("rulecount").style.display = "";
+    // `_rulesRaw` is the FULL stdout, so `lines.length` counts the engine-made
+    // "(virtual dir)" entries too -- and this footer sits INSIDE the card whose
+    // own chip and breakdown note both count `d.rules`. One card, three numbers:
+    // header 257, breakdown 121 + 136, footer 260. Name the structure instead of
+    // folding it into the rule count.
+    const vd = lines.filter(function (l) { return l.includes("(virtual dir)"); }).length;
     $("rulecount").textContent = q
-      ? keep.length + " of " + lines.length + " rules match"
-      : lines.length + " rules";
+      ? keep.length + " of " + lines.length + " lines match"
+      : (lines.length - vd) + " rules" +
+        (vd ? " · " + vd + " engine-made director" + (vd === 1 ? "y" : "ies") : "");
   }
 
   // ---- the one check ------------------------------------------------------
@@ -2108,6 +2245,23 @@
     return null;
   }
   function checkById(id) { return findCheck(CHECK, id); }
+  // PLAN check ids are not the bare slug. `doctor::to_checks` appends the
+  // finding's SUBJECT ("manager-kernel-umount-on" -> "manager-kernel-umount-on-
+  // your"), because a plan check is emitted once per offending entity and the ids
+  // have to differ; a repeat adds a counter on top of that. So an exact-id lookup
+  // for a plan check matches nothing -- which is how the manager banner below
+  // spent 53 releases as dead code, since `subject_of` landed in v1.3.117 and the
+  // lookups predate it. The two device ids this page asks for (`boot-guard-armed`,
+  // `zero-mount-posture`) are built by `Check::new` with no suffix and are fine.
+  // Match the check, ignore the subject.
+  function planCheckById(base) {
+    const cs = (CHECK && CHECK.checks) || [];
+    for (var i = 0; i < cs.length; i++) {
+      const id = cs[i].id;
+      if (id === base || id.indexOf(base + "-") === 0) return cs[i];
+    }
+    return null;
+  }
 
   // The two states that mean NOTHING IS BEING INJECTED, as opposed to "you might
   // be detectable". They are the only things on this page that get red, and they
@@ -2134,7 +2288,18 @@
     if (ENGINE_LIVE === false) return true;
     return !!r && ranSection(r, "device") && r.engine === null;
   }
+  // Same rule as `engineDown`: the LIVE answer wins over the cached report.
+  //
+  // `GUARD_TRIPPED` is the marker as it is RIGHT NOW (`refreshGuard` is the one
+  // place that reads it) and `refreshStatus` already outranks everything with it.
+  // This did not consult it, and broke in both directions: a guard that trips
+  // mid-session -- or a `disabled` written by hand, which the status card says in
+  // as many words is a supported state -- left the hero red "Disabled" 40px above
+  // a green "Nothing detectable" off the stale audit.json; and after tapping
+  // Re-arm the cached report still said `boot-guard-armed: fail`, so the health
+  // line stayed red on the recovery path until a fresh check.
   function guardTripped(r) {
+    if (GUARD_TRIPPED !== null) return GUARD_TRIPPED;
     const g = findCheck(r, "boot-guard-armed");
     return !!g && g.verdict === "fail";
   }
@@ -2247,7 +2412,17 @@
     $("findlist").innerHTML = '<div class="empty">Checking…</div>';
     CHECK_RUNNING = true;
     try {
-      CHECK = parseJson(await nm("check --json --write"));
+      // KEEP THE CACHED REPORT when the run produces nothing parseable -- the
+      // same rule `autoCheck` already follows. Blanking CHECK reset the card to
+      // "Not checked yet — press Check my setup" directly under the button just
+      // pressed, hid the copy control and dropped the absorb chip to "—", with
+      // stderr discarded and no error shown anywhere. `openDetail` and `abAbsorb`
+      // call this too, so a failed absorb-then-recheck wiped the report silently.
+      const r0 = await nm("check --json --write");
+      const rep = parseJson(r0);
+      if (rep) CHECK = rep;
+      else toast("Check did not run — " +
+                 (((r0.stderr || "").trim().split("\n")[0]) || "no output"), "bad");
       renderCheck(CHECK);
       paintManagerBanner(CHECK);
       refreshStealth();
@@ -2302,8 +2477,12 @@
     const list = $("findlist"), chip = $("fchip"), sub = $("fsub"), age = $("auage");
     paintHealthLine(r);
     // Same report, same number: the absorb chip counts what `zero-mount-posture`
-    // counted, so it must be repainted wherever that report is.
-    refreshAbsorb();
+    // counted, so it must be repainted wherever that report is. The CHIP only --
+    // `refreshAbsorb` also re-reads absorbed.list over a root shell, and this
+    // function is called from `loadCheckCache`, `runCheck` and `autoCheck` while
+    // `refreshAll` reads that file anyway, so one page open ran it three times
+    // for a list no report can change.
+    paintAbsorbChip();
     $("auCopy").style.display = r ? "" : "none";
 
     // Nothing ran at all is not "nothing wrong".
@@ -2440,7 +2619,13 @@
       "kernel: " + (p[3] || "?"),
       "engine: " + (CHECK.engine === null || CHECK.engine === undefined ? "not responding" : "v" + CHECK.engine),
       "sections: " + ((CHECK.sections || []).join(", ") || "?"),
-      "rules: " + (CHECK.rules || 0) + " across " + (CHECK.directories || 0) + " directories",
+      // `rules` and `directories` are null when the engine would not enumerate,
+      // which is NOT the same as none -- `|| 0` printed "0 rules" for a dump that
+      // failed, the exact confusion check.rs was changed to stop telling.
+      "rules: " + (CHECK.rules === null || CHECK.rules === undefined
+        ? "could not enumerate"
+        : CHECK.rules + " across " + (CHECK.directories === null || CHECK.directories === undefined
+            ? "?" : CHECK.directories) + " directories"),
       "summary: " + (s.fail || 0) + " failed, " + (s.reboot || 0) + " pending reboot, " +
         (s.unmeasured || 0) + " unmeasured, " + (s.warn || 0) + " warnings, " +
         (s.pass || 0) + " passed, " + (s.not_applicable || 0) + " n/a, " + (s.note || 0) + " notes",
@@ -2499,22 +2684,17 @@
   function paintManagerBanner(r) {
     const el = $("mgrwarn");
     if (!el) return;
-    // A plan section that did not run is not "the switch is off". Absent must say
-    // absent, or this silently asserts the clean state for a switch that has
-    // broken root on real devices.
-    if (!ranSection(r, "plan")) {
-      el.hidden = false;
-      // Not checked is not the same as wrong, and it must not LOOK the same. This
-      // arm fires on a fresh install and whenever the cached report is missing,
-      // so a warning here puts a standing amber banner on every tab about a
-      // setting nothing has measured -- which is how people learn to skip
-      // banners. State it plainly; the arm below, where the switch is measured
-      // and ON, is the one that gets to be loud.
-      el.innerHTML = "Your root manager’s <b>Kernel umount</b> switch has not been checked yet " +
-        "(<code>nomount check --plan</code> has not run). Nothing here is a mount, so that " +
-        "switch hides nothing the Suite serves either way.";
-      return;
-    }
+    // SAY NOTHING when nothing has been measured.
+    //
+    // `.banner` has exactly one style -- amber background, amber border -- so the
+    // "we haven't looked yet" arm rendered identically to the "it is ON" one, on
+    // every tab, whenever CHECK is null: first run, missing audit.json, and any
+    // failed check. Against the standing rule, nothing an app can run observes a
+    // root manager's umount switch, and that text's own last clause said the
+    // switch hides nothing here either way -- so it was a permanent, page-global
+    // amber about an unmeasured, inert setting, which is how people learn to skip
+    // banners and lose the one that matters.
+    if (!ranSection(r, "plan")) { el.hidden = true; return; }
     // No ⚠️ on either arm any more, and the reason is the rule the plan section
     // now follows: nothing an app can read sees a root manager's settings, and
     // this switch's effect HERE is nothing at all -- there are no mounts for it
@@ -2524,14 +2704,20 @@
     // "it has broken root on real devices" is gone with it. That was true when su
     // arrived as a module overlay and anything stripping module content stripped
     // su too; su is kernel sucompat now and outside the Suite entirely.
-    if (checkById("manager-kernel-umount-on")) {
+    //
+    // THE FINDING'S OWN TEXT, not a copy of it, and looked up the way plan ids
+    // are actually built. `doctor.rs` writes two different sentences here
+    // depending on whether `bind::tracked()` is empty -- with a my_* bind live,
+    // the switch is the ONLY thing that hides it from an app's mount table -- and
+    // the hardcoded string asserted the empty one on every device, including the
+    // default OnePlus setup where it is false.
+    const on = planCheckById("manager-kernel-umount-on");
+    if (on) {
       el.hidden = false;
-      el.innerHTML = "Your root manager’s <b>Kernel umount</b> is ON. It does nothing here — " +
-        "nothing the Suite serves is a mount. To hide from one app, use <b>Per-UID hiding</b> " +
-        "on the Hiding tab.";
+      el.innerHTML = esc(on.meaning || on.evidence);
       return;
     }
-    const unknown = checkById("manager-kernel-umount-unknown");
+    const unknown = planCheckById("manager-kernel-umount-unknown");
     if (unknown) {
       el.hidden = false;
       el.innerHTML = esc(unknown.meaning || unknown.evidence);
@@ -2636,7 +2822,9 @@
       // on screen directly above a card reporting 258 live rules and four modules
       // served. Ask the device what is true NOW, and only make the strong claim
       // when it holds.
-      const dr = await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0");
+      // `-e`: `guard_tripped` is Path::exists, so a `disabled` DIRECTORY parks
+      // the Suite just as hard as a file, and `-f` here answered "running fine".
+      const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
       const off = ((dr && dr.stdout) || "").trim() === "1";
       const btn = '<button class="act" style="flex:none;min-width:0;padding:11px 15px;' +
         'font-size:12px;margin-left:8px" onclick="openDetail()">See what happened</button>';
@@ -2732,6 +2920,10 @@
       else if (plan.overlay && plan.vfs) { label = "vfs + overlay"; cls = "ov"; served++; showCnt = true; }
       else if (plan.overlay) { label = "overlay"; cls = "ov"; served++; showCnt = true; }
       else if (plan.vfs) { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
+      // Served, but by a real MOUNT. The "N mounts" badge beside it already says
+      // so; this stops the tag claiming the mountless mechanism for it.
+      else if (plan.bind) { label = "bind"; cls = "off"; served++; showCnt = true;
+                            tip = "Served by a real bind mount, not an injection — a my_* target is bound unless the my_hookless trial is on."; }
       // "script only" and "0 files" were two labels for one outcome — this module
       // contributes nothing to inject — and telling them apart was the whole
       // reason for the partition walk. The reader's next step is the same either
@@ -2830,7 +3022,12 @@
     }
     const isOv = (p) => /\/overlay\/[^\s]*\.apk$/.test(p);
     const dirs = {};
-    _files = d.targets.filter(Boolean).sort();
+    // `injects`, not `targets`. This chip is headed "Injected files" and it was
+    // counting rules + engine-made virtual directories, so it read 260 where the
+    // hero's "Injection rules" and the Rules card both read 257 -- the exact
+    // discrepancy 7bb55ff fixed for the Rules chip and stopped one card short of.
+    // It also listed each whiteout as a file, marker text and all.
+    _files = d.injects.filter(Boolean).sort();
     for (const vp of _files) {
       const dir = vp.replace(/\/[^/]*$/, "") || "/";
       const e = dirs[dir] || (dirs[dir] = { n: 0, ov: 0 });
@@ -2940,12 +3137,17 @@
     // hidden by live whiteout rules while this card read "0" and "Nothing
     // hidden." The one screen a reader opens to ask "what is hidden?" answered
     // with a number that excluded everything the Suite had hidden on its own.
+    // The explanation on the row, not in a `title=` a touch screen cannot open:
+    // these have no ✕ and a reader's first question is why not.
     const autoHtml = auto.map((p) =>
-      `<div class="row"><span class="name mono" title="${esc(p)}">${esc(p)}</span>` +
-      `<span class="tag vfs" title="Taken over from a module's tmpfs. Managed automatically: ` +
-      `it goes when the module that asked for it goes.">from a module</span></div>`).join("");
+      `<div class="row abrow"><span class="ab-main">` +
+      `<div class="ab-path">${esc(p)}</div>` +
+      `<div class="ab-why">managed automatically — it goes when the module that asked for it goes</div>` +
+      `</span><span class="tag vfs">from a module</span></div>`).join("");
 
-    if (!lines.length || /^no whiteouts/.test(lines[0])) {
+    // No second test for "no whiteouts configured": `whiteoutSets` already
+    // filters that sentence out, so an empty list is the only way to get here.
+    if (!lines.length) {
       $("wochip").textContent = String(auto.length);
       box.innerHTML = auto.length
         ? '<div class="empty">Nothing saved by you. The Suite hid ' + auto.length +
@@ -2964,8 +3166,22 @@
       // this-ROM-does-not-have.
       const cls = /^hidden/.test(st) ? "vfs"
         : /^not applied \(and no such path/.test(st) ? "off" : "warn";
-      return `<div class="row"><span class="name mono" title="${esc(path)}">${esc(path)}</span>` +
-             `<span class="tag ${cls}" title="${esc(st)}">${esc(st.split(" - ")[0])}</span>` +
+      // THE NEXT STEP, ON THE PAGE. Two of `whiteout list`'s four states carry
+      // the fix in the half after " - ", and that half went into a `title=`,
+      // which does not exist on a touch screen. Worse, what it told the user was
+      // "run `nomount whiteout apply`" -- there is no whiteout Apply button
+      // anywhere here, so the only route was a root shell for a job the Reload
+      // button on Status already does (`run_reload` re-applies any durable
+      // whiteout the engine is not serving, so a reload CONVERGES on the list).
+      const hint = /^not applied - run/.test(st) ? "saved, not live yet — tap Reload on Status"
+                 : /^applied, but still visible/.test(st) ? "the engine is not serving it — tap Reload on Status"
+                 : /^not applied \(and no such path/.test(st) ? "this ROM has no such path — nothing to hide"
+                 : "";
+      const tag = /^not applied \(/.test(st) ? "not applied" : st.split(" - ")[0];
+      return `<div class="row abrow"><span class="ab-main">` +
+             `<div class="ab-path">${esc(path)}</div>` +
+             (hint ? `<div class="ab-why">${esc(hint)}</div>` : "") + `</span>` +
+             `<span class="tag ${cls}">${esc(tag)}</span>` +
              `<button class="bx" title="Stop hiding" data-act="wodel" data-nmp="${esc(path)}">✕</button></div>`;
     }).join("") + autoHtml;
   }
@@ -3032,10 +3248,19 @@
     if (!c) return -1;
     if (c.verdict === "pass") return 0;
     if (c.verdict === "unmeasured") return -1;
+    // VERDICT BEFORE EVIDENCE. `audit.rs:555` builds the evidence string BEFORE
+    // it picks the verdict and both arms use the same one, so the regex below
+    // matched the all-ours case too and this returned N > 0 for mounts absorb
+    // refuses by design: the chip went amber "N left to absorb" beside a green
+    // "Mountless · N mounts by design" off the same check, and tapping Absorb ran
+    // a command that deferred every one of them and toasted success. `audit.rs`
+    // states that exact failure as a design requirement -- "a button that cannot
+    // work is worse than no button". `warn` and `note` are the same arm (the
+    // verdict was raised so the row renders); `fail` is the mixed/foreign case,
+    // which absorb really can act on.
+    if (c.verdict === "note" || c.verdict === "warn") return 0;
     const m = c.evidence && c.evidence.match(/(\d+)\s+module mount\(s\) visible/);
-    if (m) return parseInt(m[1], 10);
-    // A `note` means every mount left is one absorb declines on purpose.
-    return c.verdict === "note" ? 0 : -1;
+    return m ? parseInt(m[1], 10) : -1;
   }
   // What absorb ALREADY took over, which is the part that was invisible.
   //
@@ -3090,6 +3315,11 @@
 
   async function refreshAbsorb() {
     await refreshAbsorbed();
+    paintAbsorbChip();
+  }
+  // Just the chip. Split out because it is the only part that depends on the
+  // report, and `renderCheck` runs on every report paint -- three per page open.
+  function paintAbsorbChip() {
     const chip = $("abchip");
     if (!chip) return;
     const n = absorbable(CHECK);
@@ -3138,6 +3368,14 @@
         [/^redundant /,               "vfs",  "already served"],
         [/^would absorb /,            "warn", "would absorb"],
         [/^would empty /,             "warn", "would empty"],
+        // The lines absorb CANNOT fix, and the only ones with nothing behind
+        // them: an image mounted over a ROM partition, a redundant my_* bind that
+        // stays, a mount in another namespace. Unmatched, they fell through to
+        // `.empty` -- muted 13px, no tag, the same style as "No answer from
+        // absorb." The scariest output of the scan was painted as the
+        // nothing-to-see style.
+        [/^nomount: LEAK /,           "warn", "absorb cannot fix"],
+        [/^nomount absorb: \d+ my_\* mount\(s\) deferred/, "warn", "deferred to next boot"],
       ];
       // Split a line into the PATH it is about and the REASON, so each gets its
       // own line instead of being ellipsised out of existence together. The
@@ -3150,11 +3388,25 @@
         return m ? m[1] : s;
       };
       box.innerHTML = lines.map(function (l) {
-        if (/^nomount absorb:/.test(l))
-          return `<div class="empty">${esc(l.replace(/^nomount absorb:\s*/, ""))}</div>`;
         let kind = null;
         for (var i = 0; i < KINDS.length && !kind; i++) if (KINDS[i][0].test(l)) kind = KINDS[i];
-        if (!kind) return `<div class="empty">${esc(l)}</div>`;
+        // The summary line, and anything absorb prints that this does not know.
+        // Tested AFTER the kinds, because the "N my_* mount(s) deferred" line is
+        // one of them and this arm used to swallow it into the muted style.
+        if (!kind) {
+          if (/^nomount absorb:/.test(l))
+            return `<div class="empty">${esc(l.replace(/^nomount absorb:\s*/, ""))}</div>`;
+          return `<div class="empty">${esc(l)}</div>`;
+        }
+        // Two kinds are whole SENTENCES, not "<verb> <path> <- <src> (why)"
+        // lines, and their tag carries no next step -- absorb's own wording IS
+        // the explanation -- so they are printed intact rather than reduced to a
+        // path and an owning module like the others.
+        if (kind[2] === "absorb cannot fix" || kind[2] === "deferred to next boot")
+          return `<div class="row abrow"><span class="ab-main">` +
+                 `<div class="ab-why">` +
+                 esc(l.replace(/^nomount: LEAK /, "").replace(/^nomount absorb: /, "")) +
+                 `</div></span><span class="tag ${kind[1]}">${kind[2]}</span></div>`;
 
         let rest = l.replace(kind[0], "");
         let why = "";
@@ -3192,8 +3444,15 @@
     $("abFound").style.display = "";
     $("abFound").innerHTML = `<div class="empty">${esc(out || "(no output)")}</div>`;
     // "Absorb failed" said nothing about WHY, and the commonest why is now the
-    // guard refusing a serving verb outright.
-    toast(r.errno === 0 ? "Absorb complete" : failText(r), r.errno === 0 ? "ok" : "bad");
+    // guard refusing a serving verb outright. "Absorb complete" was the other
+    // half of the same problem: absorb exits 0 having DEFERRED every my_* mount
+    // to the pre-zygote pass, and a green "complete" over an unchanged verdict is
+    // exactly the "the actions are decorative" lesson audit.rs warns about.
+    toast(r.errno !== 0 ? failText(r)
+          : /deferred to the pre-zygote pass/.test(out)
+            ? "Deferred to the next boot — nothing could be absorbed while Android is running"
+            : "Absorb complete",
+          r.errno === 0 ? "ok" : "bad");
     // The mount table just changed, so the verdict that sent the reader here is
     // now stale. Re-measure rather than leaving a warning standing over a fixed
     // device.
@@ -3325,12 +3584,32 @@
     const svg = btn.querySelector("svg");
     btn.disabled = true; if (svg) svg.classList.add("spin");
     const r = await nm("reload");
-    if (r.errno === 0) toast(r.stdout.replace(/^nomount reload:\s*/, "").trim() || "Reloaded", "ok");
+    const out = (r.stdout || "").trim();
+    if (r.errno === 0) {
+      // THE FIRST LINE ONLY. `run_reload` prints up to four: the counts, then a
+      // "N system APK(s) changed -- REBOOT REQUIRED" notice and two lines saying
+      // apps over those APKs can force-close until then. The whole blob went into
+      // a 2.4-second centred pill (the `^` has no `m` flag, so only line 1 even
+      // lost its prefix), which made the one message the user must act on
+      // unreadable and then gone, recorded nowhere.
+      toast((out.split("\n")[0] || "").replace(/^nomount reload:\s*/, "") || "Reloaded", "ok");
+    }
     // `failText`, because THIS is the button that used to re-inject the whole
     // rule set on a device the guard had just disabled, and say nothing at all.
     else toast(failText(r), "bad");
     if (svg) svg.classList.remove("spin"); btn.disabled = false;
-    refreshAll();
+    await refreshAll();
+    // Park the reboot notice where it survives, AFTER the refresh: `#incwarn` is
+    // the page-global banner, `refreshIncident` owns it and clears it when there
+    // is no incident, so painting before refreshAll would have wiped this. It
+    // lasts until the next refresh, which is the right lifetime for a notice
+    // about the reload just run.
+    const w = $("incwarn");
+    if (w && r.errno === 0 && /REBOOT REQUIRED/.test(out)) {
+      w.hidden = false;
+      w.innerHTML = "⚠️ A system APK changed — <b>reboot to finish</b>. " +
+        "Until then, apps over those APKs can force-close.";
+    }
   }
   async function clearRules(btn) {
     if (!(await confirmAction(
@@ -3343,8 +3622,16 @@
     // A clear drops the kernel's hidden-app set along with the rules, so nomount
     // re-hides the saved list straight after; the toast reports what it re-hid.
     const r = await nm("vfs clear");
-    if (r.errno === 0) toast((r.stdout || "").trim().replace(/^ok\b\s*/, "Rules cleared ") || "Rules cleared", "ok");
-    else toast("Failed: " + (r.stderr || "error"), "bad");
+    // `.trim()` LAST: on the bare "ok" the replace leaves a trailing space, and
+    // the `|| "Rules cleared"` fallback can never fire because the result is
+    // always truthy.
+    if (r.errno === 0) toast((r.stdout || "").replace(/^ok\b\s*/, "Rules cleared ").trim() || "Rules cleared", "ok");
+    // `failText`, not a bare "Failed:". `vfs clear` DOES clear and then exits
+    // non-zero when the saved hide list could not be re-applied -- so this said
+    // "Failed" for an operation that succeeded, and buried the half that matters.
+    else toast(/could not be re-applied/.test(r.stderr || "")
+                 ? "Rules cleared — but the hide list could not be re-applied: those apps are NOT hidden"
+                 : failText(r), "bad");
     RULES = null;
     PLAN_BY_MODULE = null;
     // The whole page, not three cards. Clearing rules leaves the Rules tab's
@@ -3459,7 +3746,12 @@
       const xTitle = viaM ? `Remove ${viaM[1]} — un-hides every app it matches` : "Unhide";
       const save = cls === "drift"
         ? `<button class="bx save" title="Save so it survives reboot" data-act="save" data-nmt="${esc(target)}">💾</button>` : "";
-      return { active: cls !== "gone", html: `<div class="blk ${cls}">
+      // `hiding` is narrower than `active`: a `pending` row is SAVED but not
+      // applied, so the kernel is not hiding that app right now, and counting it
+      // into "Hidden apps · N" said it was. `drift` counts -- the kernel IS
+      // hiding it, it just will not survive a reboot.
+      return { active: cls !== "gone", hiding: cls !== "gone" && cls !== "pending",
+               html: `<div class="blk ${cls}">
         <span class="dot"></span>
         <span class="bn">${esc(name)}</span>
         <span class="bs">${esc(s)}</span>
@@ -3469,10 +3761,11 @@
     });
     const active = rows.filter(function (x) { return x.active; });
     const waiting = rows.filter(function (x) { return !x.active; });
+    const hiding = rows.filter(function (x) { return x.hiding; }).length;
     const htmlOf = function (a) { return a.map(function (x) { return x.html; }).join(""); };
-    if (uc) uc.textContent = String(active.length);
+    if (uc) uc.textContent = String(hiding);
     box.innerHTML =
-      (active.length ? `<div class="blk-head">Hidden apps · ${active.length}</div>` + htmlOf(active) : "") +
+      (active.length ? `<div class="blk-head">Hidden apps · ${hiding}</div>` + htmlOf(active) : "") +
       (waiting.length ? `<div class="blk-head">Waiting · ${waiting.length}</div>` +
         `<div class="blk-sub">Nothing installed matches these yet. A glob keeps watching, so a
           detector installed later is hidden the moment it appears.</div>` + htmlOf(waiting) : "");
@@ -3575,13 +3868,28 @@
     st.classList.toggle("bad", !!bad);
   }
   async function refreshIsolated() {
+    // `uid isolated` WITH NO ARGUMENT NEVER ASKS THE ENGINE. It prints
+    // `blocklist::hide_isolated()`, which reads the config file and returns the
+    // DEFAULT for a missing or unreadable one -- exiting 0 either way. So the
+    // "the engine did not answer" arm was effectively dead, and on a device with
+    // no kernel driver this control showed `All` selected and stated "Hiding
+    // covers every isolated process" about a kernel that is not there. Gate on
+    // the live engine the page already tracks, and word the read for what it is:
+    // the SAVED POLICY, not a measurement. (`setIsolated` is fine -- it goes
+    // through `nm.set_hide_isolated` and errors properly.)
+    //
+    // `ruleDump()`, not `ENGINE_LIVE`: `refreshAll` fires its readers in
+    // PARALLEL, so ENGINE_LIVE is usually still null when this runs. The dump is
+    // a cached promise, so asking it costs no exec and gives the live answer
+    // whichever reader gets there first.
+    if (!(await ruleDump()).ok) {
+      isoPaint(null, "Engine not responding — this is the saved policy, not what the kernel is doing.", true);
+      return;
+    }
     const r = await nm("uid isolated");
     const m = (r.stdout || "").trim().match(/^(both|appzygote|platform|off)/);
-    // Never fall back to showing the default: if the engine did not answer, the
-    // control would claim "covers every isolated process" whatever the kernel is
-    // actually doing. Show it as unknown instead.
     if (r.errno === 0 && m) isoPaint(m[1]);
-    else isoPaint(null, "State unknown — the engine did not answer.", true);
+    else isoPaint(null, "Could not read the saved policy.", true);
   }
   async function setIsolated(mode) {
     const seg = $("isoSeg");
@@ -3637,7 +3945,12 @@
     const r = await exec("sh /data/adb/modules/meta-nomount/uidscan.sh");
     if (r.errno !== 0) {
       done();
-      toast("Scan did not run — " + esc((r.stderr || "").trim() || "the script failed"), "bad");
+      // No `esc()`: `toast` sets textContent, so escaping renders the entities
+      // literally -- a real error read `sh: can&#39;t open &#39;…&#39;`. It was
+      // the only esc() inside a toast in the file. First line only: uidscan.sh
+      // stderr can be several lines and this is a 2.4s centred pill.
+      toast("Scan did not run — " +
+            (((r.stderr || "").trim().split("\n")[0]) || "the script failed"), "bad");
       return;
     }
     const degraded = /no detector inventory/i.test(r.stderr || "");
@@ -3705,11 +4018,27 @@
     const picks = [...US.entries()].filter(function ([, e]) { return e.pick; }).map(function ([p]) { return p; });
     if (!picks.length) return;
     const done = busy(btn, "Hiding…");
+    // ONE root exec, not one per pick. Ten candidates meant ten `ksu.exec` calls
+    // in a burst -- the pattern `ruleDump` was rewritten to avoid, because on
+    // OxygenOS a burst of root exec is the heuristic that flags root WebUI apps
+    // as malicious. Each target is already `shq()`-quoted and validated against
+    // UID_TARGET_RE before it gets here.
+    const b = await bin();
+    const nmClient = b.replace(/nomount$/, "nm");
+    await exec(`NM_BIN=${shq(nmClient)} ` +
+               picks.map(function (p) { return `${shq(b)} uid block ${shq(p)}`; }).join("; "));
+    // The outcome comes from the LIST, not from an exit code: a `;` chain reports
+    // only the last command's, and `uid list` is the authority on what is hidden.
+    const after = await nm("uid list");
+    const listed = {};
+    (after.stdout || "").split("\n").forEach(function (l) {
+      const n = (l.split("\t")[0] || "").trim();
+      if (n) listed[n] = 1;
+    });
     let ok = 0, bad = 0;
-    for (const p of picks) {
-      const r = await nm(`uid block ${shq(p)}`);
-      if (r.errno === 0) { ok++; US.delete(p); } else bad++;
-    }
+    picks.forEach(function (p) {
+      if (listed[p]) { ok++; US.delete(p); } else bad++;
+    });
     done();
     usRender();
     refreshBlocked();
@@ -3796,6 +4125,7 @@
     // again, usually right after changing something.
     RULES = null;
     PLAN_BY_MODULE = null;
+    STEALTH_PROBE = null;
     // `nm version` returns the ENGINE's capability counter -- a bare integer
     // (26), not a release. The footer printed it as "Suite 26", which is the one
     // number on the page a reader is most likely to quote back, and it named the
