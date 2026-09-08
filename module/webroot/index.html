@@ -2331,6 +2331,10 @@
     // hook-framework bind sitting in every app's mount table while you read it.
     warn: "a detector can see this",
     unmeasured: "not measured",
+    // Notes are shown now (see renderCheck), so they need a label -- and it
+    // must not read like a demand. A note is a standing fact about a working
+    // setup: worth finding if you go looking, never worth acting on.
+    note: "for information",
   };
   function isAttention(v) { return v === "fail" || v === "reboot" || v === "warn"; }
   function isShown(v) { return isAttention(v) || v === "unmeasured"; }
@@ -2511,6 +2515,13 @@
     const rows = r.checks.filter(function (c) { return isShown(c.verdict); });
     const attention = rows.filter(function (c) { return isAttention(c.verdict); });
     const unmeasured = rows.filter(function (c) { return c.verdict === "unmeasured"; });
+    // Notes are NOT in `rows` -- `isShown` excludes them, and that stays true so
+    // the chip, the verdict line and the bug-report paste all keep ignoring them
+    // (the paste deliberately so: a note can carry hidden package names).
+    // They are still worth SHOWING, though. Dropping them entirely is what made
+    // a real app-visible mount invisible for a release; rendering them in their
+    // own section, below everything actionable, is the honest middle.
+    const notes = (r.checks || []).filter(function (c) { return c.verdict === "note"; });
     const down = engineDown(r);
 
     if (down) { chip.textContent = "engine down"; chip.className = "chip bad"; }
@@ -2523,23 +2534,37 @@
     const s = r.summary || {};
     const clean = (s.pass || 0) + (s.not_applicable || 0) + (s.note || 0);
 
-    if (!rows.length && ranSection(r, "device")) {
-      sub.textContent = "Nothing needs your attention.";
-      list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
-        '<div class="fmean">' + clean + " check" + (clean === 1 ? "" : "s") +
-        " ran across " + (r.sections || []).join(" and ") +
-        ", and found nothing to act on.</div>" +
-        '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>';
-      return;
-    }
-
-    sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
     const group = function (title, gr) {
       return gr.length
         ? '<div class="fgroup">' + title + ' <span class="cnt">' + gr.length + "</span></div>" +
           gr.map(checkRow).join("")
         : "";
     };
+
+    if (!rows.length && ranSection(r, "device")) {
+      // ...and the notes still render UNDER it. This is the arm a healthy device
+      // takes, so returning here without them is exactly how a note becomes
+      // invisible -- the defect that made amber look like the only honest option
+      // in the first place. "Nothing to act on" and "here is what was observed"
+      // are both true and both worth saying.
+      // Count it, do not guess it. "A couple" was written when this section held
+      // one row and read as a plain untruth beside a heading saying 5.
+      sub.textContent = notes.length
+        ? "Nothing needs your attention. " + notes.length +
+          (notes.length === 1 ? " thing is" : " things are") + " worth knowing."
+        : "Nothing needs your attention.";
+      list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
+        '<div class="fmean">' + clean + " check" + (clean === 1 ? "" : "s") +
+        " ran across " + (r.sections || []).join(" and ") +
+        ", and found nothing to act on.</div>" +
+        '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>' +
+        group("Good to know", notes);
+      return;
+    }
+
+    sub.textContent = notes.length
+      ? "Sorted by what needs you first. Passes are left out; notes are at the bottom."
+      : "Sorted by what needs you first. Everything that passed is left out.";
     // A run that was never asked about the device says nothing about
     // detectability, so it goes at the very top: everything below it is about the
     // module set, not about what an app can see.
@@ -2580,7 +2605,8 @@
       group("Needs your attention", attention) +
       (unmeasured.length ? '<div class="fgroup">Not measured <span class="cnt">' +
         unmeasured.length + "</span></div>" + unmHead + unmeasured.map(checkRow).join("")
-        : unmHead);
+        : unmHead) +
+      group("Good to know", notes);
   }
 
   // One row. The order is deliberate: name and state, then the sentence a reader
@@ -2598,7 +2624,9 @@
     b.push('<div class="fname">' + esc(c.name) + "</div>");
     if (c.meaning) b.push('<div class="fmean">' + esc(c.meaning) + "</div>");
     if (c.owner) b.push('<div class="fowner">From: <b>' + esc(c.owner) + "</b></div>");
-    b.push('<div class="fmeta"><span class="tag warn">' +
+    // `tag warn` is amber. A note rendered amber is the thing this section was
+    // added to avoid, so it gets the muted tag instead.
+    b.push('<div class="fmeta"><span class="tag ' + (c.verdict === "note" ? "off" : "warn") + '">' +
            esc(VERDICT_LABEL[c.verdict] || c.verdict) + "</span>" +
            '<span class="tag off">' + esc(c.section || "") + "</span></div>");
     b.push('<details><summary>What was measured</summary><div class="ev">' +

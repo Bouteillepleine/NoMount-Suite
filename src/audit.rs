@@ -498,25 +498,31 @@ fn check_zero_mount() -> Check {
                  not appear here — the plan section reports those.)",
             );
         }
-        // WARN, not PASS, when a hook framework's binds are still up.
+        // NOTE, not warn, when the only mounts left are a hook framework's.
         //
-        // The by-design split is OUR taxonomy, and `is_hook_framework` grants it
-        // to any module dir holding a `zygisk/` directory -- an EMPTY one is
-        // enough, zero bytes of payload. So a module shipping `mkdir zygisk` in
-        // its zip turned every mount it holds "by design" and the check the whole
-        // product is named after reported PASS with "0 unexpected module mounts".
+        // This was amber for one release and it was the wrong call. The mount is
+        // real and app-visible -- that part of the reasoning stands, and is why
+        // it is not a silent PASS either -- but NOTHING THE USER CAN DO ABOUT IT
+        // IS SOMETHING THEY SHOULD DO: the Suite refuses to absorb a Zygisk/Xposed
+        // bind on purpose, because breaking a hook surfaces hours later during an
+        // app install rather than at boot. So amber fired on every device running
+        // LSPosed -- which is most of them -- permanently, for a state that is
+        // working as designed. A warning that is always on is a warning nobody
+        // reads, and it drowns the ones that mean something.
         //
-        // A detector does not know about the split: `/adb/modules/<id>/…` is in
-        // field 4 of every process's mountinfo either way, which is the entire
-        // signal this posture exists to deny. The same marker is recorded in
-        // `absorb` as having lost the arms race in the other direction (0-for-3
-        // against current releases), so it is unreliable in both.
+        // Note keeps it honest without keeping it loud: the row is still built,
+        // still carries its oracle and its remedy, and `Report::verdict()` no
+        // longer counts it, so the card reads clean on a healthy device. The
+        // WebUI renders notes in their own calm section rather than dropping them
+        // -- that was the half that made `note` unsafe here before.
         //
-        // Amber says exactly what is true: these are visible, and the Suite will
-        // not remove them. Green said nothing was visible, which was not.
+        // `is_hook_framework` is deliberately generous (an empty `zygisk/` dir is
+        // enough), which mattered when this was the difference between amber and
+        // green. At note it costs nothing: a module that fakes the marker gets a
+        // quieter row about a mount that is still named in full.
         return chk(
             N_ZERO_MOUNT,
-            Verdict::Warn,
+            Verdict::Note,
             format!(
                 "0 unexpected module mounts; {} left by design (hook framework): {}",
                 by_design.len(),
@@ -524,21 +530,20 @@ fn check_zero_mount() -> Check {
             ),
         )
         .oracle(oracle)
-        // ...and say what to DO about it. This arm fires on any device running a
-        // hook framework, which is most of them, and it ended on "nothing will
-        // remove them" -- a permanent amber with no remedy, which is how a reader
-        // learns to ignore the verdict line. There IS a remedy and round 7 named
-        // it: the manager's own per-app umount is exactly the control that takes
-        // a bind out of an app's namespace, and it is the one thing this product
-        // used to steer people away from. The Suite will not remove these itself;
-        // the manager can hide them from the apps that matter.
+        // Lead with "nothing is wrong", not with the oracle. The row exists so a
+        // reader who goes looking for their remaining mount finds it explained,
+        // not so they feel they have a problem: the Suite declines to absorb this
+        // one on purpose. The remedy is still named -- the manager's per-app
+        // umount is what takes a bind out of an app's view, and round 7 recorded
+        // that this product used to steer people away from it -- but it is framed
+        // as the one case where it matters, not as an instruction.
         .meaning(format!(
-            "{} hook-framework bind(s) are readable by any app in its own mount table. Absorb \
-             never takes those over — breaking a Zygisk/Xposed hook surfaces hours later during \
-             app install, not at boot — so the Suite leaves them alone. A detector does not know \
-             they are on purpose. To hide them from a chosen app, turn ON your manager's \
-             \"umount modules\" for it: unlike anything the engine serves, these ARE mounts, so \
-             that switch does work on them.",
+            "Your hook framework keeps {} bind mount(s) of its own, and the Suite leaves them \
+             alone on purpose — absorbing one would break Zygisk/Xposed hooking, and that shows \
+             up hours later during an app install rather than at boot. Nothing is wrong here and \
+             nothing needs fixing. Worth knowing only if you are hiding from one specific app: \
+             these are real mounts, so unlike anything the engine serves, your manager's \"umount \
+             modules\" for that app does take them out of its view.",
             by_design.len()
         ))
         .owner({
