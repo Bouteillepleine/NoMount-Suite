@@ -11,6 +11,28 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.173 — engine v31 (unchanged)
+
+### A hook framework's own mounts are information, not a warning
+
+v1.3.172 made the leftover Zygisk/Xposed bind amber. It is real and an app can
+see it — that part was right — but the Suite declines to absorb it *on purpose*,
+because breaking a hook surfaces hours later during an app install rather than
+at boot. So the warning fired on every device running LSPosed, permanently, for
+a state that is working as designed. A warning that is always on is one nobody
+reads, and it drowns the ones that mean something.
+
+It is a note now, so the verdict line and the manager card read clean again. The
+row did not disappear with it: notes render in their own **Good to know** section
+at the bottom of Check, in the muted tag rather than amber, on the all-clear
+screen as well as the sorted one. Dropping them entirely is what made a real
+app-visible mount invisible for a release, and that is not the fix either.
+
+The text leads with "nothing is wrong here and nothing needs fixing". It still
+names the one case where it matters — hiding from a specific app, where your
+manager's per-app "umount modules" does remove a real mount, unlike anything the
+engine serves.
+
 ## v1.3.172 — engine v31 (unchanged)
 
 Three things v1.3.171 got wrong, two of them visible on the Check tab.
