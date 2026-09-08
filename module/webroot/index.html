@@ -522,12 +522,18 @@
   .blk-head { font-size: 11px; font-weight: 640; letter-spacing: .04em; text-transform: uppercase;
               color: var(--dim); margin: 2px 2px 1px; }
   .blk {
-    flex-wrap: wrap;
+    /* NOT wrap. Wrapping put the row's own buttons on a line of their own as soon
+       as the name was long, so the crosses marched down the card instead of
+       lining up on the right. The middle column wraps INTERNALLY instead. */
     display: flex; align-items: center; gap: 9px;
     background: rgba(0,0,0,0.22); border: 1px solid var(--brd2);
     border-radius: 11px; padding: 8px 10px 8px 12px;
   }
   .blk .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  /* One growing column for everything textual, so the buttons beside it keep a
+     fixed place on every row whatever the text does. */
+  .blk .bmid { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .blk .btop { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
   .blk .bn { flex: 1 1 auto; min-width: 0; font-size: 13px; word-break: break-all; }
   /* .bs must be able to SHRINK. As `flex: 0 0 auto` it took whatever width its
      text wanted and `.bn` (min-width:0, break-all) absorbed the loss -- so the
@@ -536,8 +542,7 @@
   .blk .bs { flex: 0 1 auto; min-width: 0; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
   /* The coverage note is supplementary, so it gets its own full-width line
      under the row rather than competing with the name for the same one. */
-  .blk .bcov { flex: 1 0 100%; font-size: 11px; line-height: 1.4; color: var(--dim);
-               padding-left: 16px; }
+  .blk .bcov { font-size: 11px; line-height: 1.4; color: var(--dim); }
   .blk.live    .bs  { color: var(--acc2, #57e6c3); }
   .blk.pending .dot, .blk.drift .dot { background: var(--warn, #d9a441); }
   .blk.live .dot { background: var(--ok); }
@@ -3898,9 +3903,10 @@
                key: uidM ? uidM[1] : name,
                html: `<div class="blk ${cls}">
         <span class="dot"></span>
-        <span class="bn">${esc(name)}</span>
-        <span class="bs">${esc(sHead)}</span>
-        ${sCov ? `<span class="bcov">${esc(sCov)}</span>` : ""}
+        <span class="bmid">
+          <span class="btop"><span class="bn">${esc(name)}</span><span class="bs">${esc(sHead)}</span></span>
+          ${sCov ? `<span class="bcov">${esc(sCov)}</span>` : ""}
+        </span>
         ${save}
         ${actionable ? `<button class="bx" title="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>` : ""}
       </div>` };
