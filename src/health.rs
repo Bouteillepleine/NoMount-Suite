@@ -38,8 +38,15 @@ pub struct Fingerprint {
     version: String,
     uname: String,
     engine: String, // "vN" or "down"
-    rules: usize,
-    whiteouts: usize,
+    /// `None` = the engine answered `version` and then refused the rule dump.
+    /// Rendered `unknown`, never 0 -- the same rule `mounts` and `blocked` below
+    /// already follow, and the same one `check::Report::rules` follows for the
+    /// identical number (`check.rs:433` emits `null`, and `:491` prints "rule
+    /// list unreadable"). Rendering it 0 here put `rules=0` in a bundle beside
+    /// `"rules":null` in its own audit.json, and made `verify` print
+    /// `DRIFT rules: snapshot=257 -> live=0` for a number nobody took.
+    rules: Option<usize>,
+    whiteouts: Option<usize>,
     /// `None` = the mount table could not be read. Rendered `unknown`, never 0.
     mounts: Option<usize>,
     blocked: String, // count, or "unknown" when the engine could not be asked
@@ -81,8 +88,8 @@ impl Fingerprint {
             ("version", self.version.clone()),
             ("uname", self.uname.clone()),
             ("engine", self.engine.clone()),
-            ("rules", self.rules.to_string()),
-            ("whiteouts", self.whiteouts.to_string()),
+            ("rules", unk(self.rules)),
+            ("whiteouts", unk(self.whiteouts)),
             ("mounts", unk(self.mounts)),
             ("mounts_foreign", unk(self.mounts_foreign)),
             ("blocked", self.blocked.clone()),
@@ -125,7 +132,11 @@ impl Fingerprint {
         // That is the one substitution this file exists to prevent, made in the
         // reassuring direction. `engine` is "vN" when the driver replied and
         // "down" when it did not.
-        let nothing_to_serve = self.rules == 0 && self.engine != "down";
+        // `Some(0)`, not 0: `None` is a rule dump that failed, which is the same
+        // substitution in a different spelling. The probes' own
+        // `unchecked:engine-list-failed` string already catches that case in the
+        // matches below, and this keeps the two from ever disagreeing.
+        let nothing_to_serve = self.rules == Some(0) && self.engine != "down";
 
         // The Narcissus canary. "unchecked:probe-uid-hidden" is a legitimate
         // can't-check BY DESIGN -- shell is on the hide list, so the divergence
@@ -577,8 +588,15 @@ pub fn gather() -> Fingerprint {
     // the source path -- every `fs::metadata(source)` in the probes below then
     // failed silently and skipped exactly the PM-published and per-UID rules.
     let live_rules = crate::nm::parse_list(&list);
-    let rules = live_rules.iter().filter(|r| r.kind == crate::nm::LiveKind::Inject).count();
-    let whiteouts = live_rules.iter().filter(|r| r.kind == crate::nm::LiveKind::Whiteout).count();
+    // `None` when the dump failed. Counting an empty string gives 0, and the two
+    // probes below already refuse that substitution for themselves
+    // (`unchecked:engine-list-failed`) -- these two counts were the last readers
+    // of `list` that still made it.
+    let counted = |k: crate::nm::LiveKind| -> Option<usize> {
+        listed.as_ref().ok().map(|_| live_rules.iter().filter(|r| r.kind == k).count())
+    };
+    let rules = counted(crate::nm::LiveKind::Inject);
+    let whiteouts = counted(crate::nm::LiveKind::Whiteout);
     // Distinguish "nothing hidden" from "couldn't ask": `nm l u` fails loudly on
     // EPERM / engine-down, and reporting that as 0 hidden reads as a working
     // feature with an empty list.
@@ -667,6 +685,12 @@ pub fn run_verify() -> Result<()> {
         }
     };
     let live = fingerprint_text()?;
+    // Context first, and in prose: the two fields below move because the user
+    // updated something, so they are the frame the rest of the comparison is read
+    // in, not a finding. See `drift_lines`.
+    if let Some(note) = version_context(&saved, &live) {
+        println!("{note}");
+    }
     let lines = drift_lines(&saved, &live);
     for l in &lines {
         println!("{l}");
@@ -697,6 +721,17 @@ pub fn run_verify() -> Result<()> {
 ///
 /// `ts` is excluded on both sides: it moves on every single call by construction,
 /// so including it would make every verify report drift.
+///
+/// `version` and `engine` are excluded too, for a different reason: they move
+/// because the USER did something deliberate -- updated the Suite, flashed a
+/// newer engine -- and neither is a change to what this device is serving.
+/// Reproduced on an OP15 on 2026-09-08, on a device that was otherwise clean:
+/// `DRIFT version: snapshot=1.3.163 -> live=1.3.173` and
+/// `DRIFT engine: snapshot=v30 -> live=v31`, which `index.html:2806` (`/DRIFT/`)
+/// paints as a red "Drift from snapshot". Every user who has ever taken a
+/// snapshot got that alarm the first time they updated. They are still worth
+/// SAYING, once, because everything else here is being compared across those two
+/// versions -- [`version_context`] is that sentence.
 fn drift_lines(saved: &str, live: &str) -> Vec<String> {
     let kv = |txt: &str| -> Vec<(String, String)> {
         txt.lines()
@@ -712,17 +747,72 @@ fn drift_lines(saved: &str, live: &str) -> Vec<String> {
     // Live order first, so the common case reads in the order the report prints.
     for (k, lval) in &lv {
         let sval = find(&sv, k).unwrap_or_else(|| "<absent>".to_string());
-        if &sval != lval {
+        if &sval != lval && !is_version_context(k, &sval, lval) {
             out.push(format!("DRIFT {k}: snapshot={sval} -> live={lval}"));
         }
     }
     // Then anything the snapshot had that live no longer emits at all.
     for (k, sval) in &sv {
-        if find(&lv, k).is_none() {
+        if find(&lv, k).is_none() && !is_version_context(k, sval, "<absent>") {
             out.push(format!("DRIFT {k}: snapshot={sval} -> live=<absent>"));
         }
     }
     out
+}
+
+/// Is this pair the user's own version move rather than drift?
+///
+/// `version` always is -- the Suite updating itself is an action the user took,
+/// and it is reported as context instead.
+///
+/// `engine` only when BOTH sides name a version. `engine=down` is the driver not
+/// answering at all, which is the single loudest thing this fingerprint can say;
+/// it stays a DRIFT line whichever side it is on, including a baseline that was
+/// taken while the engine was down.
+fn is_version_context(key: &str, sval: &str, lval: &str) -> bool {
+    let version_shaped = |v: &str| {
+        v.strip_prefix('v').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    };
+    match key {
+        "version" => true,
+        "engine" => version_shaped(sval) && version_shaped(lval),
+        _ => false,
+    }
+}
+
+/// The one sentence that says the comparison spans two versions, or `None` when
+/// it does not.
+///
+/// Deliberately not a warning and deliberately not a DRIFT line: the WebUI greps
+/// the output for `DRIFT` and turns any hit red, and an update the user chose to
+/// install is not a finding. It leads with the fact and says outright that it is
+/// expected, so the reader is not left wondering what they broke.
+fn version_context(saved: &str, live: &str) -> Option<String> {
+    let get = |txt: &str, key: &str| -> Option<String> {
+        txt.lines()
+            .filter_map(|l| l.split_once('='))
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.to_string())
+    };
+    let moved = |key: &str| -> Option<(String, String)> {
+        let (s, l) = (get(saved, key)?, get(live, key)?);
+        (s != l && is_version_context(key, &s, &l)).then_some((s, l))
+    };
+    let mut parts = Vec::new();
+    if let Some((s, l)) = moved("version") {
+        parts.push(format!("Suite {s} (now {l})"));
+    }
+    if let Some((s, l)) = moved("engine") {
+        parts.push(format!("engine {s} (now {l})"));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "note: this snapshot was taken on {} — that is just an update you made, nothing is \
+         wrong with it. Everything else was compared across it.",
+        parts.join(" and ")
+    ))
 }
 
 /// Every root under which a destination is readable by any app holding a storage
@@ -904,16 +994,16 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     write("fingerprint.txt", &fingerprint);
     // On shared storage the ` [UID: n]` suffix on a per-UID rule names an appid we
     // are hiding from -- the same secret as the hide list -- so strip it there.
+    //
+    // ...and the TARGET of a rule can be the other secret. An absorbed app APK is
+    // a rule whose target is `/data/app/~~x/com.pkg-y/base.apk` (`absorb.rs:1202`:
+    // "source = the module's payload. That row is re-served"), so the whole rule
+    // dump published, verbatim, the same package name `fingerprint.txt` blanks
+    // four lines above. Not reproducible on an OP15 with nothing absorbed --
+    // which is how it survived -- and live on any device that has absorbed a
+    // ReVanced-class module, i.e. the case absorb exists for.
     let rules = nm.list().unwrap_or_else(|e| format!("(nm list failed: {e})"));
-    let rules = if shared {
-        rules
-            .lines()
-            .map(|l| l.split(" [UID:").next().unwrap_or(l).trim_end())
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        rules
-    };
+    let rules = if shared { redact_rules_for_shared(&rules) } else { rules };
     write("rules.txt", &rules);
     // The live hidden set is the same secret as the hide list itself -- it names
     // the appids you are hiding from -- so it obeys the same rule. It used to be
@@ -971,6 +1061,14 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
             t
         })
         .unwrap_or_else(|e| format!("could not run {self_exe} check: {e}"));
+    // NM_REDACT_HIDE_LIST covers the appid printers and nothing else, and the
+    // report names rule TARGETS in half a dozen places -- `check_dino_matches_stat`
+    // and `check_maps_not_deleted` (audit.rs), doctor's "module mount not absorbed"
+    // and "foreign mount absorb cannot take" (`s.target.display()`), and
+    // `reconcile_plan_and_live`'s extras. For an absorbed APK that target is
+    // /data/app/~~x/com.pkg-y/base.apk. Same blanking as the fingerprint, which is
+    // a strictly weaker case than this one.
+    let check_out = if shared { redact_app_paths_doc(&check_out) } else { check_out };
     write("check.txt", &check_out);
     // `2>/dev/null || true` collapsed "the engine logged nothing" and "dmesg is
     // restricted" into the same empty file. kernel.dmesg_restrict=1 is the default
@@ -978,22 +1076,35 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // so the commonest cause of that empty file is a permission -- and the reader
     // concludes the kernel driver printed nothing at all, which is the most
     // alarming reading available. Keep the grep, drop the swallow, and say both.
+    //
+    // SHARED STORAGE GETS NOTHING OUT OF THE RING. `nmlog` (module/lib.sh:48-51)
+    // tees every line to /dev/kmsg AND to boot.log, prefixed literally
+    // `nomount: ` -- so this grep is guaranteed to match, and republish, every
+    // line the PRIVATE list below withholds with boot.log. That includes
+    // `nomount uid apply`'s stderr, captured `2>&1` by service.sh and uidwatch.sh
+    // and printed by cli/handlers.rs as "<glob> matches <pkg> (appid N, below the
+    // app range)" -- the glob and the package name. The reason boot.log is
+    // withheld rather than filtered applies here word for word: the leak surface
+    // is unbounded prose, not a field.
     let dmesg = read_cmd("sh", &["-c", "dmesg 2>&1 | grep -i nomount"]);
-    write(
-        "dmesg-nomount.txt",
-        if dmesg.is_empty() {
-            "(no nomount lines — or dmesg is restricted on this device; check `sysctl kernel.dmesg_restrict`)\n"
-        } else {
-            &dmesg
-        },
-    );
+    let mut withheld: Vec<&str> = Vec::new();
+    let (dmesg_body, dmesg_withheld) = dmesg_section(shared, &dmesg);
+    write("dmesg-nomount.txt", &dmesg_body);
+    if dmesg_withheld {
+        withheld.push("dmesg-nomount.txt");
+    }
     // Same rule: an empty mountinfo.txt in a bundle whose whole subject is often
     // the mount table reads as "there are no mounts".
-    write(
-        "mountinfo.txt",
-        &fs::read_to_string("/proc/self/mountinfo")
-            .unwrap_or_else(|e| format!("(could not read /proc/self/mountinfo: {e})\n")),
-    );
+    //
+    // The `/data/app` blanking reaches here too: a ReVanced-class module keeps its
+    // payload in /data/adb/rvhc and binds it over `/data/app/.../base.apk`
+    // (absorb.rs:900, measured on an OP15), so until absorb takes that bind over
+    // it is a MOUNT POINT in this table and names the patched app outright. No-op
+    // on a device without one.
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .unwrap_or_else(|e| format!("(could not read /proc/self/mountinfo: {e})\n"));
+    let mountinfo = if shared { redact_app_paths_doc(&mountinfo) } else { mountinfo };
+    write("mountinfo.txt", &mountinfo);
     write("uname.txt", &read_cmd("uname", &["-a"]));
 
     // Shared storage is readable by any app holding a storage permission, and the
@@ -1027,7 +1138,9 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // redacted report. What is left after the filter -- ids of modules that are
     // actually installed -- is the file's only remaining meaning, so it is worth
     // keeping rather than withholding wholesale.
-    let mut withheld: Vec<&str> = Vec::new();
+    //
+    // `withheld` is declared with the dmesg grep above, which is the first thing
+    // this function keeps back.
     for f in [
         "uidhide", "uidhide.cache", "uidhide.conf", "blocklist", "spoof.conf",
         "incident.log", "health.txt", "snapshot.txt", "boot.log",
@@ -1059,17 +1172,71 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         let left_out = if withheld.is_empty() {
             String::new()
         } else {
-            format!("{} left out — they name the apps you are hiding from. ", withheld.join(", "))
+            // "can name": `dmesg-nomount.txt` is withheld whenever the ring holds
+            // ANY nomount line, and some of those are the engine's own prints. The
+            // file cannot be filtered line by line (unbounded prose), so the
+            // sentence is the thing that has to stay honest.
+            format!(
+                "{} left out — they can name the apps you are hiding from. ",
+                withheld.join(", ")
+            )
         };
         println!(
             "note: {left_out}{out} is shared storage, readable by any app with a storage \
              permission, so the hide list was kept out of it: rules.txt UID suffixes, the \
              check report's hide-list names, any package name left in blocklist and any \
-             /data/app path in the fingerprint were redacted in place. Pass a private path \
-             for the unredacted bundle: nomount export /data/adb/nomount"
+             /data/app path in the fingerprint, the rule list, the check report and \
+             mountinfo were redacted in place. Pass a private path for the unredacted \
+             bundle: nomount export /data/adb/nomount"
         );
     }
     Ok(())
+}
+
+/// What `dmesg-nomount.txt` carries, and whether the bundle's closing note must
+/// name it as left out.
+///
+/// Pure, and separate from [`run_export`] for the reason [`drift_lines`] is: the
+/// verb around it writes files and prints, so the only part that can be WRONG --
+/// the decision -- had no test, and the bundle's file set has never had one at
+/// all. See the call site for why the ring is a hide-list leak.
+fn dmesg_section(shared: bool, dmesg: &str) -> (String, bool) {
+    if shared && !dmesg.is_empty() {
+        return (
+            "(left out — the kernel ring carries the Suite's own boot log, which can name the \
+             apps you are hiding from. For this file, re-run to a private path: \
+             nomount export /data/adb/nomount)\n"
+                .to_string(),
+            // Named as withheld only when the ring actually held something, for
+            // the same reason the PRIVATE loop names only files that exist:
+            // telling a reader something was left out, when re-running privately
+            // would hand them an empty file, is its own small lie.
+            true,
+        );
+    }
+    if dmesg.is_empty() {
+        return (
+            "(no nomount lines — or dmesg is restricted on this device; check `sysctl \
+             kernel.dmesg_restrict`)\n"
+                .to_string(),
+            false,
+        );
+    }
+    (dmesg.to_string(), false)
+}
+
+/// The rule dump, filtered for a SHARED destination. Pure for the same reason.
+///
+/// Two secrets, one per line: the ` [UID: n]` suffix names an appid we are hiding
+/// from, and the TARGET of an absorbed app APK names which app on this phone is
+/// patched.
+fn redact_rules_for_shared(rules: &str) -> String {
+    rules
+        .lines()
+        .map(|l| l.split(" [UID:").next().unwrap_or(l).trim_end())
+        .map(redact_app_paths)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One exported state file, filtered for a SHARED destination.
@@ -1109,13 +1276,29 @@ fn redact_for_shared(name: &str, body: &str) -> String {
         "blocklist" => {
             rejoin(body.lines().filter(keep_installed).map(str::to_string).collect())
         }
-        // Untouched byte-for-byte when there is nothing to take out, which is the
-        // healthy device: `served_matches_rule=ok` carries no path at all.
-        "health.txt" | "snapshot.txt" if body.contains("/data/app/") => {
-            rejoin(body.lines().map(redact_app_paths).collect())
-        }
-        _ => body.to_string(),
+        // Every other state file, by default rather than by name: `health.txt` and
+        // `snapshot.txt` were listed here and nothing else was, and the same path
+        // can reach `incident.log` through a tombstone's abort message. Untouched
+        // byte-for-byte when there is nothing to take out, which is the healthy
+        // device: `served_matches_rule=ok` carries no path at all.
+        _ => redact_app_paths_doc(body),
     }
+}
+
+/// [`redact_app_paths`] over a whole document, trailing newline kept.
+///
+/// Four things in the bundle can carry an absorbed APK's path -- the fingerprint,
+/// the rule list, the check report and the mount table -- and until round 9 the
+/// blanking was wired to the one of them that carries it least often.
+fn redact_app_paths_doc(body: &str) -> String {
+    if !body.contains("/data/app/") {
+        return body.to_string();
+    }
+    let mut s = body.lines().map(redact_app_paths).collect::<Vec<_>>().join("\n");
+    if body.ends_with('\n') {
+        s.push('\n');
+    }
+    s
 }
 
 /// One `key=value` fingerprint line with any `/data/app/…` path blanked.
@@ -1258,15 +1441,75 @@ mod tests {
     }
 
     /// Several fields at once, both directions in one comparison.
+    ///
+    /// UPDATED IN ROUND 9: this used to assert four lines, the fourth being
+    /// `engine v30 -> v31`. An engine version move is now context, not drift --
+    /// see `drift_says_nothing_about_the_users_own_update` below -- so the same
+    /// input produces three. The rest of the assertion is unchanged.
     #[test]
     fn drift_reports_every_moved_field_not_just_the_first() {
         let saved = "engine=v30\nrules=257\nmanager_umount=off\n";
         let live = "engine=v31\nrules=260\nguard=armed\n";
         let d = drift_lines(saved, live);
-        assert_eq!(d.len(), 4, "expected 2 changed + 1 gained + 1 lost, got {d:?}");
-        assert!(d.iter().any(|l| l.contains("engine") && l.contains("v30") && l.contains("v31")));
+        assert_eq!(d.len(), 3, "expected 1 changed + 1 gained + 1 lost, got {d:?}");
+        assert!(d.iter().any(|l| l.contains("rules") && l.contains("257") && l.contains("260")));
         assert!(d.iter().any(|l| l.contains("manager_umount") && l.contains("<absent>")));
         assert!(d.iter().any(|l| l.contains("guard") && l.contains("<absent>")));
+    }
+
+    /// A Suite update and an engine update are the two things a user does ON
+    /// PURPOSE, and `verify` called both DRIFT. Reproduced on an OP15 on
+    /// 2026-09-08 on a device that was otherwise perfectly clean:
+    ///
+    /// ```text
+    /// DRIFT version: snapshot=1.3.163 -> live=1.3.173
+    /// DRIFT engine:  snapshot=v30 -> live=v31
+    /// verify: 2 field(s) drifted from snapshot
+    /// ```
+    ///
+    /// `index.html:2806` greps the output for `DRIFT` and paints any hit as a red
+    /// "Drift from snapshot", so every user who has ever taken a snapshot got an
+    /// alarm the first time they updated.
+    #[test]
+    fn drift_says_nothing_about_the_users_own_update() {
+        let saved = "version=1.3.163\nengine=v30\nrules=257\nguard=armed\nts=1\n";
+        let live = "version=1.3.173\nengine=v31\nrules=257\nguard=armed\nts=2\n";
+        assert!(
+            drift_lines(saved, live).is_empty(),
+            "updating the Suite and the engine is not drift: {:?}",
+            drift_lines(saved, live)
+        );
+
+        // Said once, in prose, because everything else IS being compared across
+        // those two versions -- and never in a spelling the WebUI turns red.
+        let note = version_context(saved, live).expect("the version move must still be stated");
+        assert!(note.contains("1.3.163") && note.contains("1.3.173"), "{note}");
+        assert!(note.contains("v30") && note.contains("v31"), "{note}");
+        assert!(!note.contains("DRIFT"), "the WebUI greps for DRIFT and reddens: {note}");
+        assert!(note.contains("nothing is wrong"), "it must not read as an alarm: {note}");
+
+        // Nothing moved -> nothing said. The everyday verify is silent.
+        assert!(version_context(saved, saved).is_none());
+
+        // And genuine drift is exactly as loud as it was, across a version move.
+        let moved = "version=1.3.173\nengine=v31\nrules=260\nguard=tripped\nts=2\n";
+        let d = drift_lines(saved, moved);
+        assert_eq!(d.len(), 2, "rules and guard must still drift: {d:?}");
+        assert!(d.iter().any(|l| l.starts_with("DRIFT guard:")));
+    }
+
+    /// ...but `engine=down` is not a version move. The driver not answering is
+    /// the loudest thing this fingerprint can say, and it stays a DRIFT line
+    /// whichever side of the comparison it is on.
+    #[test]
+    fn an_engine_that_stopped_answering_is_still_drift() {
+        let saved = "version=1.3.163\nengine=v30\n";
+        let live = "version=1.3.173\nengine=down\n";
+        let d = drift_lines(saved, live);
+        assert_eq!(d, vec!["DRIFT engine: snapshot=v30 -> live=down"], "{d:?}");
+        // The Suite half is still context, so the note stands on its own.
+        let note = version_context(saved, live).expect("the Suite update is still context");
+        assert!(note.contains("1.3.173") && !note.contains("down"), "{note}");
     }
 
     fn fp(engine: &str, rules: usize) -> Fingerprint {
@@ -1274,8 +1517,8 @@ mod tests {
             version: "test".into(),
             uname: "test".into(),
             engine: engine.into(),
-            rules,
-            whiteouts: 0,
+            rules: Some(rules),
+            whiteouts: Some(0),
             mounts: Some(0),
             blocked: "0".into(),
             consistency: "unchecked".into(),
@@ -1359,10 +1602,22 @@ mod tests {
         // module here provides files to inject" / "There are no rules" about a
         // module set nobody managed to look at.
         let mut mute = fp("v30", 0);
+        mute.rules = None; // what `gather` now records for a refused dump
+        mute.whiteouts = None;
         mute.consistency = "unchecked:engine-list-failed".into();
         mute.served_matches_rule = "unchecked:engine-list-failed".into();
         assert_eq!(verdict_of(&mute, "per-UID consistency canary"), "UNMEASURED");
         assert_eq!(verdict_of(&mute, "served bytes match the rule"), "UNMEASURED");
+        // ...and the FACTS say so too, rather than asserting a count nobody took.
+        // `fingerprint.txt: rules=0` used to sit in one bundle beside
+        // `audit.json: "rules":null`, and it is what made `verify` print
+        // `DRIFT rules: snapshot=257 -> live=0` off a failed dump.
+        let facts = mute.facts();
+        let fact = |k: &str| facts.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(fact("rules"), "unknown", "an unread rule dump is not zero rules");
+        assert_eq!(fact("whiteouts"), "unknown");
+        // A measured zero still reads as zero -- the whole point of the distinction.
+        assert_eq!(fp("v30", 0).facts().iter().find(|(n, _)| n == "rules").unwrap().1, "0");
 
         // The probe harness failing is not the device failing. `su`/`stat`
         // unavailable used to render `mismatch:…(app=ENOENT)` -> FAIL, owned by
@@ -1430,6 +1685,85 @@ mod tests {
         let doc = "rules=257\nserved_matches_rule=drift:/data/app/com.x-1/base.apk (bytes differ)\n";
         assert!(!redact_for_shared("health.txt", doc).contains("com.x-1"));
         assert!(redact_for_shared("health.txt", doc).contains("rules=257"));
+    }
+
+    /// The kernel ring republishes, verbatim, the file `boot.log` is withheld to
+    /// keep private.
+    ///
+    /// `nmlog` (module/lib.sh:48-51) tees every line to /dev/kmsg AND to boot.log
+    /// prefixed literally `nomount: `, so `dmesg | grep -i nomount` is guaranteed
+    /// to match all of it -- including `uid apply`'s stderr, which prints the glob
+    /// and the package name it matched (cli/handlers.rs). Round 8 put boot.log on
+    /// PRIVATE and left the grep of the same text three hunks above it.
+    #[test]
+    fn a_shared_export_keeps_the_kernel_ring_out_of_the_bundle() {
+        let ring = "[1.0] nomount: *.bank matches com.mybank.app (appid 10231, below the app \
+                    range)\n";
+
+        let (body, withheld) = dmesg_section(true, ring);
+        assert!(withheld, "dmesg-nomount.txt must be named in the closing note");
+        assert!(!body.contains("com.mybank.app"), "the package must not survive: {body}");
+        assert!(!body.contains("*.bank"), "nor the hide-list glob: {body}");
+        assert!(body.contains("left out"), "and the file must say why it is empty: {body}");
+
+        // A private destination is the one that gets the full picture -- that is
+        // what the note tells the reader to pass.
+        assert_eq!(dmesg_section(false, ring), (ring.to_string(), false));
+
+        // Nothing in the ring: still the "or dmesg is restricted" sentence, and
+        // NOT announced as withheld -- re-running privately would hand the reader
+        // an empty file.
+        for shared in [true, false] {
+            let (body, withheld) = dmesg_section(shared, "");
+            assert!(!withheld, "nothing was kept back, so do not say it was");
+            assert!(body.contains("dmesg_restrict"), "{body}");
+        }
+    }
+
+    /// The rule dump and the check report both name an absorbed APK's path, and
+    /// the round-8 redaction was wired to `fingerprint.txt` alone -- the file that
+    /// carries it LEAST often (only on an already-drifting device).
+    ///
+    /// An absorbed app APK is a rule whose target is
+    /// `/data/app/~~x/com.pkg-y/base.apk` (absorb.rs:1202), so `rules.txt`
+    /// published the package name outright on every shared export of a device
+    /// that has absorbed a ReVanced-class module.
+    #[test]
+    fn a_shared_export_keeps_data_app_paths_out_of_the_rule_list_and_the_report() {
+        let dump = "/system/etc/hosts -> /data/adb/modules/M/system/etc/hosts\n\
+                    /data/app/~~aB1/com.mybank.app-x9/base.apk -> /data/adb/rvhc/patched.apk \
+                    [UID: 10231]\n";
+        let got = redact_rules_for_shared(dump);
+        assert!(!got.contains("com.mybank.app"), "the package must not survive: {got}");
+        assert!(!got.contains("~~aB1"), "nor the install directory: {got}");
+        assert!(!got.contains("[UID:"), "the appid strip still applies: {got}");
+        // The row is still readable as a row, and the module source is not a secret.
+        assert!(got.contains("/data/app/<redacted> -> /data/adb/rvhc/patched.apk"), "{got}");
+        assert!(got.contains("/system/etc/hosts -> /data/adb/modules/M/system/etc/hosts"), "{got}");
+
+        // The check report reaches the same path through half a dozen printers --
+        // `check_dino_matches_stat`, `check_maps_not_deleted`, doctor's mount rows
+        // and `reconcile_plan_and_live`'s extras -- none of which NM_REDACT_HIDE_LIST
+        // covers, because that flag is about appids.
+        let report = "[FAIL] served bytes match the rule\n       measured: \
+                      drift:/data/app/~~aB1/com.mybank.app-x9/base.apk (bytes differ)\n";
+        let got = redact_app_paths_doc(report);
+        assert!(!got.contains("com.mybank.app"), "{got}");
+        assert!(got.ends_with('\n'), "a text file someone will cat keeps its newline: {got:?}");
+        assert!(got.contains("(bytes differ)"), "the finding survives redaction: {got}");
+
+        // Byte-identical on the healthy device, which is every export that is not
+        // about an absorbed app.
+        let clean = "/system/etc/hosts -> /data/adb/modules/M/system/etc/hosts\n";
+        assert_eq!(redact_app_paths_doc(clean), clean);
+        assert_eq!(redact_rules_for_shared(clean), clean.trim_end());
+
+        // ...and the same blanking now reaches every state file rather than the
+        // two that were listed by name: a tombstone's abort line in incident.log
+        // can carry the path too.
+        let inc = "tombstone=/data/tombstones/tombstone_00\n  Abort message: \
+                   could not open /data/app/~~aB1/com.mybank.app-x9/base.apk\n";
+        assert!(!redact_for_shared("incident.log", inc).contains("com.mybank.app"));
     }
 
     /// The three shapes this module's own parser got wrong before it was deleted.
