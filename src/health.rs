@@ -147,6 +147,49 @@ impl Fingerprint {
                 "The probe uid (shell) is itself on your hide list, so a divergence here would \
                  be the hiding working. Nothing to test.",
             ),
+            // ...and when the hide list itself could not be read. `gather` used to
+            // default that to "shell is not hidden", so a genuinely hidden shell
+            // got ENOENT at every sampled path and the canary rendered a red
+            // d_drop-class FAIL for a question it never established the answer to.
+            "unchecked:probe-uid-unknown" => mk(
+                "per-UID consistency canary",
+                Verdict::Unmeasured,
+                self.consistency.clone(),
+            )
+            .meaning(
+                "The engine would not say which uids are hidden, so it is not known whether the \
+                 probe uid (shell) is itself on the hide list — a divergence would be \
+                 unreadable either way, so this was not tested.",
+            ),
+            // The probe HARNESS, not the device. `app_size` returns an empty
+            // string both when the app really cannot see the file and when `su`
+            // cannot be spawned, `stat` is not on the child's PATH, or SELinux
+            // denies the domain `su <uid> -c` lands in -- and an empty string
+            // compared against a real size is a mismatch, which rendered a red
+            // "kernel regression" row and pointed the reader at a kernel rebuild
+            // for a shell problem.
+            "unchecked:probe-unavailable" => mk(
+                "per-UID consistency canary",
+                Verdict::Unmeasured,
+                self.consistency.clone(),
+            )
+            .meaning(
+                "The unprivileged probe could not run at all (`su 2000 -c stat` returned nothing \
+                 for a stock ROM file), so nothing was compared and this was not tested.",
+            ),
+            // The engine ANSWERED `version` but would not dump its rules, so the
+            // rule set below is empty for a reason that has nothing to do with the
+            // module set. doctor.rs says the same thing about the same failure:
+            // "`live: 0 rules` means could not enumerate, not none".
+            "unchecked:engine-list-failed" => mk(
+                "per-UID consistency canary",
+                Verdict::Unmeasured,
+                self.consistency.clone(),
+            )
+            .meaning(
+                "The engine would not list its rules, so no injected path could be sampled. \
+                 This was not tested — it is not \"nothing to test\".",
+            ),
             "unchecked" if nothing_to_serve => mk(
                 "per-UID consistency canary",
                 Verdict::NotApplicable,
@@ -176,6 +219,19 @@ impl Fingerprint {
         out.push(match self.served_matches_rule.as_str() {
             "ok" => mk("served bytes match the rule", Verdict::Pass, self.served_matches_rule.clone())
                 .meaning("Every injected path serves the bytes its own rule names."),
+            // Same distinction as the canary above: an engine that answered
+            // `version` and then refused the rule dump leaves `rules == 0`, which
+            // is indistinguishable from a device with nothing to inject unless
+            // `gather` says which it was.
+            "unchecked:engine-list-failed" => mk(
+                "served bytes match the rule",
+                Verdict::Unmeasured,
+                self.served_matches_rule.clone(),
+            )
+            .meaning(
+                "The engine would not list its rules, so there was nothing to compare against. \
+                 This was not tested — it is not \"there are no rules\".",
+            ),
             "unchecked" if nothing_to_serve => mk(
                 "served bytes match the rule",
                 Verdict::NotApplicable,
@@ -287,8 +343,14 @@ fn count_mounts_split() -> Option<(usize, usize)> {
     // which left the two surfaces of one report disagreeing about the same mounts:
     // the findings list said "the SUITE made these itself" while the card said
     // "N foreign mount(s) present". Same source of truth for both.
+    // ...and an UNREADABLE record is not an empty one. `tracked()` is infallible,
+    // so a read error made `ours` empty, every bind the Suite made itself counted
+    // as foreign, and the card read "⚠ N foreign mount(s)" -- blaming a module
+    // that did nothing, with advice that cannot help. `None` is the honest answer
+    // and this function already means "could not measure" by it.
+    let Ok(tracked) = crate::bind::tracked_result() else { return None };
     let ours: std::collections::HashSet<std::path::PathBuf> =
-        crate::bind::tracked().into_iter().map(|(t, _)| t).collect();
+        tracked.into_iter().map(|(t, _)| t).collect();
     let (mut total, mut by_design) = (0usize, 0usize);
     for r in &rows {
         let Some(src) = crate::absorb::source_of(r, &roots) else { continue };
@@ -324,9 +386,16 @@ const PROBE_UID: u32 = 2000;
 /// If shell itself is on the hide list the probe is meaningless: the divergence it
 /// would report is the feature doing exactly what was asked. Say so, rather than
 /// stamping a permanent "per-UID inconsistency" on the manager card.
-fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: bool) -> String {
-    if probe_uid_hidden {
-        return "unchecked:probe-uid-hidden".to_string();
+///
+/// `probe_uid_hidden` is `None` when the engine would not say. That is a third
+/// state, not a `false`: defaulting it to "shell is not hidden" ran the canary
+/// against a shell that may well be hidden, got ENOENT for every sampled path,
+/// and reported the d_drop-class FAIL this exists to catch.
+fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<bool>) -> String {
+    match probe_uid_hidden {
+        Some(true) => return "unchecked:probe-uid-hidden".to_string(),
+        None => return "unchecked:probe-uid-unknown".to_string(),
+        Some(false) => {}
     }
     // Sampling first-6-in-hash-order could sit entirely on one partition served by
     // one module, and a d_drop-class regression can be confined to a single
@@ -365,6 +434,24 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: bool) -> S
         if !progressed {
             break;
         }
+    }
+
+    if sample.is_empty() {
+        return "unchecked".to_string();
+    }
+    // CONTROL, before anything is believed. `app_size` returns an empty string for
+    // two entirely different events -- the app really got ENOENT at an injected
+    // path (the regression) and the probe harness could not run at all (`su` not
+    // spawnable, `stat` off the child's PATH, an SELinux denial in the domain
+    // `su <uid> -c` lands in). The loop below compares that empty string against a
+    // real size, calls it `app=ENOENT`, and `checks()` renders Verdict::Fail with
+    // `.owner("the kernel engine")` -- a kernel rebuild proposed for a shell
+    // problem. `ghost.rs` records the same class of wrong answer from the same
+    // mechanism. /system/build.prop is stock, never injected, and readable by
+    // shell on every device this ships to, so an empty answer for IT is the
+    // harness, not the device.
+    if app_size(PROBE_UID, "/system/build.prop").is_empty() {
+        return "unchecked:probe-unavailable".to_string();
     }
 
     // Injected regular files only (skip virtual dirs / whiteouts which have no size).
@@ -473,7 +560,16 @@ fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
 pub fn gather() -> Fingerprint {
     let nm = Nm::new();
     let engine = nm.version().map(|v| format!("v{v}")).unwrap_or_else(|_| "down".into());
-    let list = nm.list().unwrap_or_default();
+    // Keep the Result. `unwrap_or_default()` here made an engine that answers
+    // `version` but refuses the rule dump (EPERM, ENOBUFS on a 260-rule device, a
+    // client/ABI mismatch) indistinguishable from a device with nothing to inject:
+    // `rules == 0` with `engine == "vN"`, and both device probes then rendered N/A
+    // with the sentences "No module here provides files to inject" and "There are
+    // no rules" -- statements of fact about the module set, produced by a question
+    // that could not be asked. `blocked`, twenty lines below, already refuses the
+    // same substitution.
+    let listed = nm.list();
+    let list = listed.as_deref().unwrap_or("").to_string();
     // [`crate::nm::parse_list`], not a local split. The copy that used to live
     // here was the FOURTH reader of this text and the last one still wrong: it
     // split on the FIRST ` -> `, so a target containing one was truncated, and it
@@ -491,10 +587,15 @@ pub fn gather() -> Fingerprint {
         Ok(v) => v.len().to_string(),
         Err(_) => "unknown".to_string(),
     };
+    // `None` when the engine would not answer -- NOT `false`. Defaulting to "shell
+    // is not hidden" ran the canary against a shell that may well be hidden, which
+    // yields ENOENT at every sampled path and renders the red d_drop FAIL. Same
+    // reasoning as `blocked` three lines above, and as `whiteout.rs`'s
+    // `.unwrap_or(true) // cannot ask -> do not silently drop the candidate`.
     let probe_hidden = live
         .as_ref()
         .map(|v| v.iter().any(|u| crate::blocklist::appid(*u) == PROBE_UID))
-        .unwrap_or(false);
+        .ok();
     // One reader of the marker, in mount.rs, so the fingerprint and the gate in
     // `main` can never disagree about whether the Suite is parked.
     let guard = if crate::mount::guard_tripped() { "tripped" } else { "armed" };
@@ -508,8 +609,18 @@ pub fn gather() -> Fingerprint {
         mounts: split.map(|(t, _)| t),
         mounts_foreign: split.map(|(t, d)| t - d),
         blocked,
-        consistency: consistency_probe(&live_rules, probe_hidden),
-        served_matches_rule: drift_probe(&live_rules),
+        // Both probes read `live_rules`, so an unreadable rule dump has to reach
+        // them as its own state rather than as an empty rule set.
+        consistency: if listed.is_err() {
+            "unchecked:engine-list-failed".to_string()
+        } else {
+            consistency_probe(&live_rules, probe_hidden)
+        },
+        served_matches_rule: if listed.is_err() {
+            "unchecked:engine-list-failed".to_string()
+        } else {
+            drift_probe(&live_rules)
+        },
         guard: guard.to_string(),
         manager_umount: match crate::manager::kernel_umount_enabled() {
             Some(true) => "on".to_string(),
@@ -709,6 +820,20 @@ fn base_unusable(base: &Path) -> Option<String> {
 /// folder (default under /sdcard/Download) for sharing. Best-effort per file.
 pub fn run_export(dir: Option<String>) -> Result<()> {
     let ts = read_cmd("date", &["+%Y%m%d-%H%M%S"]);
+    // `read_cmd` answers "" on any spawn failure, and an empty stamp collapses
+    // every export into the single directory `<base>/nm-diag-` -- which
+    // create_dir_all then happily reuses, so the second run overwrites the first
+    // file-for-file with no warning. Epoch seconds are not pretty but they are
+    // unique, which is the only property the name has to have.
+    let ts = if ts.is_empty() {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .to_string()
+    } else {
+        ts
+    };
     let base = dir.unwrap_or_else(|| "/sdcard/Download".to_string());
     let out = format!("{base}/nm-diag-{ts}");
     // Ask about the BASE before creating the leaf, so the error names the real
@@ -737,9 +862,6 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         }
     };
 
-    // The fingerprint, under its own name. The full report goes in check.txt
-    // below; this file is the flat key=value form a bug report is skimmed for.
-    write("fingerprint.txt", &fingerprint_text().unwrap_or_default());
     // RESOLVED, and matched on path COMPONENTS. Both halves were wrong, and the
     // consequence of either is the whole secret this guard exists to keep.
     //
@@ -765,6 +887,21 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // fall to the private-withholding side, never away from it.
     let resolved = fs::canonicalize(&out).unwrap_or_else(|_| PathBuf::from(&out));
     let shared = is_shared_storage(&resolved) || is_shared_storage(Path::new(&out));
+
+    // The fingerprint, under its own name. The full report goes in check.txt
+    // below; this file is the flat key=value form a bug report is skimmed for.
+    // ...and a FAILED build says so. `unwrap_or_default()` wrote a zero-byte
+    // fingerprint.txt, which is exactly the silence the `write` closure above
+    // refuses: a missing section reads as "the tool had nothing to say".
+    //
+    // Written AFTER `shared` is known, because it carries `served_matches_rule=`,
+    // which on a drifting device names the served path -- and for an absorbed
+    // patched APK that is /data/app/~~x/com.pkg-y/base.apk, i.e. which app on this
+    // phone has a patched APK. Same filter as the on-disk health.txt below.
+    let fingerprint = fingerprint_text().unwrap_or_else(|e| format!("(fingerprint failed: {e:#})\n"));
+    let fingerprint =
+        if shared { redact_for_shared("health.txt", &fingerprint) } else { fingerprint };
+    write("fingerprint.txt", &fingerprint);
     // On shared storage the ` [UID: n]` suffix on a per-UID rule names an appid we
     // are hiding from -- the same secret as the hide list -- so strip it there.
     let rules = nm.list().unwrap_or_else(|e| format!("(nm list failed: {e})"));
@@ -783,7 +920,18 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // written unconditionally, which handed exactly that to shared storage on
     // every WebUI export (the default destination is /sdcard/Download).
     if !shared {
-        write("uid_live.txt", &format!("{:?}", nm.uid_list_live().unwrap_or_default()));
+        // Name the failure. `unwrap_or_default()` wrote the literal `[]`, which on
+        // the destination the tool tells you to use for the full picture reads as
+        // "nothing is hidden right now" -- the single most misleading line a bug
+        // report titled "hiding is not working" could carry. `rules.txt` sixteen
+        // lines above already does it this way.
+        write(
+            "uid_live.txt",
+            &match nm.uid_list_live() {
+                Ok(v) => format!("{v:?}"),
+                Err(e) => format!("(nm uid list failed: {e:#})"),
+            },
+        );
     }
     let self_exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
@@ -824,8 +972,28 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         })
         .unwrap_or_else(|e| format!("could not run {self_exe} check: {e}"));
     write("check.txt", &check_out);
-    write("dmesg-nomount.txt", &read_cmd("sh", &["-c", "dmesg | grep -i nomount 2>/dev/null || true"]));
-    write("mountinfo.txt", &fs::read_to_string("/proc/self/mountinfo").unwrap_or_default());
+    // `2>/dev/null || true` collapsed "the engine logged nothing" and "dmesg is
+    // restricted" into the same empty file. kernel.dmesg_restrict=1 is the default
+    // on production Android and SELinux denies syslog_read in plenty of contexts,
+    // so the commonest cause of that empty file is a permission -- and the reader
+    // concludes the kernel driver printed nothing at all, which is the most
+    // alarming reading available. Keep the grep, drop the swallow, and say both.
+    let dmesg = read_cmd("sh", &["-c", "dmesg 2>&1 | grep -i nomount"]);
+    write(
+        "dmesg-nomount.txt",
+        if dmesg.is_empty() {
+            "(no nomount lines — or dmesg is restricted on this device; check `sysctl kernel.dmesg_restrict`)\n"
+        } else {
+            &dmesg
+        },
+    );
+    // Same rule: an empty mountinfo.txt in a bundle whose whole subject is often
+    // the mount table reads as "there are no mounts".
+    write(
+        "mountinfo.txt",
+        &fs::read_to_string("/proc/self/mountinfo")
+            .unwrap_or_else(|e| format!("(could not read /proc/self/mountinfo: {e})\n")),
+    );
     write("uname.txt", &read_cmd("uname", &["-a"]));
 
     // Shared storage is readable by any app holding a storage permission, and the
@@ -835,43 +1003,143 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     // what is being spoofed. They go only to a destination that is not shared
     // storage; the diagnostics that matter for a bug report do not include any.
     //
-    // NB: `blocklist` is no longer one of them. It used to hold the hide list and
-    // is now only module ids to skip injecting, so it is ordinary diagnostic data
-    // -- but the secret moved with the content, and the guard has to move with it.
-    const PRIVATE: &[&str] = &["uidhide", "uidhide.cache", "uidhide.conf", "spoof.conf"];
-    // `boot.log` is in this list because the bug-report template asks for it by
-    // name -- "the last 40 lines of /data/adb/nomount/boot.log" -- and nothing in
-    // the app could produce it. The WebUI has no file viewer and `export` is the
-    // one button that hands someone a bundle, so the answer to the template's own
-    // question was "open a root shell". It is rotated to 400 lines at every boot
-    // (~40 KB measured), so it is bounded, and it carries counts and paths, never
-    // package names -- the same standard `incident.log`, which is already here and
-    // does list enabled module ids, is held to.
+    // `boot.log` is on this list, and it used NOT to be. It was added to the
+    // bundle because the bug-report template asks for it by name, on the
+    // justification that it "carries counts and paths, never package names". The
+    // code disproves that: `module/service.sh` and `module/uidwatch.sh` both
+    // capture `nomount uid apply`'s STDERR (`_bl=$(… 2>&1)`) into `nmlog`, and
+    // `cli/handlers.rs` prints hide-list entries there --
+    // "nomount: *.settings matches com.android.settings (appid 1000, below the app
+    // range) …" was reproduced on an OP15 on 2026-09-08 with one glob in the hide
+    // list. The project already treats the file as a secret on-device
+    // (`module/lib.sh` chmods it 0600); copying it to /sdcard/Download downgrades
+    // a deliberately root-only file to any-app-readable. Line-by-line filtering is
+    // not an option here -- the leak surface is unbounded prose.
+    const PRIVATE: &[&str] =
+        &["uidhide", "uidhide.cache", "uidhide.conf", "spoof.conf", "boot.log"];
+    // `blocklist` is NOT on it, and is filtered instead. `blocklist::migrate_legacy`
+    // COPIES hide-list entries out of it into `uidhide` by explicit design (deleting
+    // an entry that really is a module id would let a self-mounting module inject
+    // and break boot), and nothing ever prunes the original -- so on any device
+    // upgraded from a pre-split Suite the file still holds hidden-app package names.
+    // doctor.rs knows this and redacts them ("Measured on OP15 2026-08-21: four
+    // package names still there"); this loop published the raw file next to the
+    // redacted report. What is left after the filter -- ids of modules that are
+    // actually installed -- is the file's only remaining meaning, so it is worth
+    // keeping rather than withholding wholesale.
+    let mut withheld: Vec<&str> = Vec::new();
     for f in [
         "uidhide", "uidhide.cache", "uidhide.conf", "blocklist", "spoof.conf",
         "incident.log", "health.txt", "snapshot.txt", "boot.log",
     ] {
+        let src = format!("{NM_DIR}/{f}");
         if shared && PRIVATE.contains(&f) {
+            // Name only what was actually there. `PRIVATE` is a constant, and
+            // printing it whole announced four withheld files on a device that has
+            // never hidden an app -- then told the reader to re-run to a private
+            // path "to include them in full", where they would get nothing.
+            if Path::new(&src).exists() {
+                withheld.push(f);
+            }
             continue;
         }
-        if let Ok(c) = fs::read_to_string(format!("{NM_DIR}/{f}")) {
+        if let Ok(c) = fs::read_to_string(&src) {
+            let c = if shared { redact_for_shared(f, &c) } else { c };
             write(f, &c);
         }
     }
     println!("exported to {out}");
     if shared {
-        // Name what was ACTUALLY withheld: the PRIVATE set (uidhide*, spoof.conf) --
-        // NOT blocklist, which is now only module ids to skip and is included. The
-        // rules.txt UID suffixes and the check report's hide-list names were redacted in place.
+        // Name only files that were actually there. `PRIVATE.join(", ")` was
+        // printed unconditionally, so a device that has never hidden an app was
+        // told four files had been withheld and to re-run to a private path "to
+        // include them in full" -- where it would get nothing. The rest of the
+        // sentence is true on every shared destination: the UID-suffix strip, the
+        // NM_REDACT_HIDE_LIST run and the filters below are unconditional there.
+        let left_out = if withheld.is_empty() {
+            String::new()
+        } else {
+            format!("{} left out — they name the apps you are hiding from. ", withheld.join(", "))
+        };
         println!(
-            "note: {} were left out — {out} is shared storage, readable by any app with a \
-             storage permission, and they name the apps you are hiding from (rules.txt UID \
-             suffixes and the check report's hide-list names were redacted). Pass a private path to \
-             include them in full: nomount export /data/adb/nomount",
-            PRIVATE.join(", ")
+            "note: {left_out}{out} is shared storage, readable by any app with a storage \
+             permission, so the hide list was kept out of it: rules.txt UID suffixes, the \
+             check report's hide-list names, any package name left in blocklist and any \
+             /data/app path in the fingerprint were redacted in place. Pass a private path \
+             for the unredacted bundle: nomount export /data/adb/nomount"
         );
     }
     Ok(())
+}
+
+/// One exported state file, filtered for a SHARED destination.
+///
+/// The `PRIVATE` list withholds whole files; this handles the two that are worth
+/// keeping once the secret is taken out of them.
+///
+/// `blocklist` keeps only the lines that name an INSTALLED module -- everything
+/// else in that file is a copied hide-list entry (see `blocklist::migrate_legacy`,
+/// which copies and never prunes). Over-dropping is the safe direction here: a
+/// stale id for a module that has since been uninstalled is worth less than the
+/// certainty that no package name survives.
+///
+/// `health.txt`/`snapshot.txt` keep everything except an absorbed APK's path.
+/// `drift_probe` renders a failing rule as `drift:/data/app/~~x/com.pkg-y/base.apk(…)`,
+/// so the `served_matches_rule=` and `consistency=` lines can name which app on
+/// this phone has a patched APK -- the same class of secret as the hide list, and
+/// it only appears on an already-unhealthy device, i.e. exactly when an export is
+/// being collected.
+fn redact_for_shared(name: &str, body: &str) -> String {
+    let keep_installed = |l: &&str| -> bool {
+        let t = l.trim();
+        t.is_empty()
+            || t.starts_with('#')
+            || Path::new(crate::mount::MODULES_DIR).join(t).is_dir()
+    };
+    // A rebuilt document keeps its trailing newline: these are text files someone
+    // will `cat`, and `lines().join("\n")` silently eats it.
+    let rejoin = |v: Vec<String>| -> String {
+        let mut s = v.join("\n");
+        if body.ends_with('\n') && !s.is_empty() {
+            s.push('\n');
+        }
+        s
+    };
+    match name {
+        "blocklist" => {
+            rejoin(body.lines().filter(keep_installed).map(str::to_string).collect())
+        }
+        // Untouched byte-for-byte when there is nothing to take out, which is the
+        // healthy device: `served_matches_rule=ok` carries no path at all.
+        "health.txt" | "snapshot.txt" if body.contains("/data/app/") => {
+            rejoin(body.lines().map(redact_app_paths).collect())
+        }
+        _ => body.to_string(),
+    }
+}
+
+/// One `key=value` fingerprint line with any `/data/app/…` path blanked.
+///
+/// Pure and separate so the digits-must-not-survive rule can be tested without a
+/// device. Kept deliberately blunt: it does not try to parse the drift string, it
+/// replaces every whitespace-delimited token that starts with `/data/app/`.
+fn redact_app_paths(line: &str) -> String {
+    if !line.contains("/data/app/") {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(i) = rest.find("/data/app/") {
+        out.push_str(&rest[..i]);
+        out.push_str("/data/app/<redacted>");
+        // To the end of this token: the path is embedded in `drift:<t>(rule=<s> …)`,
+        // so stop at the first character that cannot be inside a path here.
+        let tail = &rest[i..];
+        let end = tail.find([' ', '(', ')', ',']).unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -1083,6 +1351,85 @@ mod tests {
         // With rules live, an unchecked probe is unmeasured either way.
         let serving = fp("v26", 12);
         assert_eq!(verdict_of(&serving, "per-UID consistency canary"), "UNMEASURED");
+
+        // ...and the third state the test did not have: the engine ANSWERED
+        // `version` and then refused the rule dump. `rules` is 0 and `engine` is a
+        // version, which is exactly the shape of a device with nothing to inject --
+        // so without its own probe string both rows rendered N/A and asserted "No
+        // module here provides files to inject" / "There are no rules" about a
+        // module set nobody managed to look at.
+        let mut mute = fp("v30", 0);
+        mute.consistency = "unchecked:engine-list-failed".into();
+        mute.served_matches_rule = "unchecked:engine-list-failed".into();
+        assert_eq!(verdict_of(&mute, "per-UID consistency canary"), "UNMEASURED");
+        assert_eq!(verdict_of(&mute, "served bytes match the rule"), "UNMEASURED");
+
+        // The probe harness failing is not the device failing. `su`/`stat`
+        // unavailable used to render `mismatch:…(app=ENOENT)` -> FAIL, owned by
+        // "the kernel engine", i.e. a kernel rebuild proposed for a shell problem.
+        let mut noprobe = fp("v30", 12);
+        noprobe.consistency = "unchecked:probe-unavailable".into();
+        assert_eq!(verdict_of(&noprobe, "per-UID consistency canary"), "UNMEASURED");
+        noprobe.consistency = "unchecked:probe-uid-unknown".into();
+        assert_eq!(verdict_of(&noprobe, "per-UID consistency canary"), "UNMEASURED");
+
+        // And a real divergence still fails, loudly. The four can't-tell states
+        // above must not have swallowed the one thing this canary exists for.
+        let mut bad = fp("v30", 12);
+        bad.consistency = "mismatch:/system/etc/x(root=12 app=ENOENT)".into();
+        assert_eq!(verdict_of(&bad, "per-UID consistency canary"), "FAIL");
+    }
+
+    /// The export's shared-storage filter, on the two files that keep their place
+    /// in the bundle once the secret is taken out of them.
+    ///
+    /// `blocklist` is the one measured on a device: `blocklist::migrate_legacy`
+    /// COPIES hide-list entries into `uidhide` and nothing ever prunes the
+    /// original, so on an upgraded device it still holds package names -- which
+    /// doctor.rs redacts in `check.txt` while this loop published the raw file
+    /// beside it.
+    #[test]
+    fn a_shared_export_filters_the_files_it_still_includes() {
+        // No module directory exists under /data/adb/modules in a test, so every
+        // bare name is dropped -- which is the safe direction and what the
+        // upgraded-device case looks like.
+        let body = "# a comment\n\ncom.example.bank\nsome_module_id\n";
+        let got = redact_for_shared("blocklist", body);
+        assert!(!got.contains("com.example.bank"), "a package name must not survive: {got:?}");
+        assert!(got.contains("# a comment"), "comments are diagnostic, keep them: {got:?}");
+        // A private destination is not filtered at all -- the caller does not call
+        // this there, which is the whole point of passing a private path.
+
+        // Files with no rule of their own pass through byte-for-byte.
+        assert_eq!(redact_for_shared("incident.log", body), body);
+    }
+
+    /// An absorbed patched APK's path names which app on this phone is patched.
+    /// It reaches `health.txt` (and `fingerprint.txt`) through
+    /// `served_matches_rule=drift:<target>(rule=<source> …)`, and only on an
+    /// already-unhealthy device -- i.e. exactly when an export is collected.
+    #[test]
+    fn a_shared_export_keeps_data_app_paths_out_of_the_fingerprint() {
+        let line = "served_matches_rule=drift:/data/app/~~aB1/com.mybank.app-x9/base.apk\
+                    (rule=/data/adb/modules/M/x size 10 vs 12)";
+        let got = redact_app_paths(line);
+        assert!(!got.contains("com.mybank.app"), "the package must not survive: {got}");
+        assert!(!got.contains("~~aB1"), "nor the install directory: {got}");
+        // The finding is still readable: the key, the verb and the rule source stay.
+        assert!(got.starts_with("served_matches_rule=drift:/data/app/<redacted>"), "{got}");
+        assert!(got.contains("/data/adb/modules/M/x"), "the module source is not a secret: {got}");
+        assert!(got.contains("size 10 vs 12"), "{got}");
+
+        // Untouched when there is nothing to redact -- including the ordinary
+        // healthy value, which must survive verbatim or `verify` would report
+        // drift on every export.
+        assert_eq!(redact_app_paths("served_matches_rule=ok"), "served_matches_rule=ok");
+        assert_eq!(redact_app_paths("rules=257"), "rules=257");
+
+        // ...and it is applied through the file filter, not only by hand.
+        let doc = "rules=257\nserved_matches_rule=drift:/data/app/com.x-1/base.apk (bytes differ)\n";
+        assert!(!redact_for_shared("health.txt", doc).contains("com.x-1"));
+        assert!(redact_for_shared("health.txt", doc).contains("rules=257"));
     }
 
     /// The three shapes this module's own parser got wrong before it was deleted.

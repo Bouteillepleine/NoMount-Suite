@@ -435,11 +435,20 @@ fn expansions_by_marker(plan: &[PlanEntry]) -> Vec<(&Path, &str, usize)> {
 /// directory is the pathological case -- `/system/fonts` is 224 and
 /// `/product/overlay` 217, either of which would roughly double the rule count
 /// from a single marker.
+///
+/// Never a Warn, at any size. The row's own text opens with the word "Correct",
+/// no detector can see a rule COUNT, and the action it suggests ("narrow it if it
+/// was meant to cover less") is conditional on a mistake this check cannot detect
+/// -- so a `.replace` on /system/fonts, i.e. an ordinary font module doing exactly
+/// what it was installed to do, put "1 thing needs attention" on the card
+/// permanently. Same rule that already demoted `Incompat::ImageBacked`, the my_*
+/// marker and the manager's kernel-umount switch; see
+/// `findings_no_detector_can_see_are_notes`. The escalation from None to Info at
+/// 50 stays: a marker that doubles the rule count is worth SAYING, once.
 fn expansion_level(count: usize) -> Option<Level> {
     match count {
         0..=49 => None,
-        50..=199 => Some(Level::Info),
-        _ => Some(Level::Warn),
+        _ => Some(Level::Info),
     }
 }
 
@@ -1391,15 +1400,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             if !e.source.exists() {
                 let detail = match fs::symlink_metadata(&e.source) {
                     Ok(m) if m.file_type().is_symlink() => {
-                        let dest = fs::read_link(&e.source).unwrap_or_default();
+                        // `unwrap_or_default()` here rendered "is a symlink to ,
+                        // which does not exist" -- a malformed sentence in the
+                        // loudest bucket the plan section has -- whenever
+                        // `symlink_metadata` said symlink and `read_link` then
+                        // failed (EACCES, or the link replaced under us).
+                        let dest = fs::read_link(&e.source)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|err| format!("(unreadable link: {err})"));
                         format!(
-                            "{} -> {} is a symlink to {}, which does not exist. Injection \
+                            "{} -> {} is a symlink to {dest}, which does not exist. Injection \
                              serves a link's TARGET, so this produces no rule and the path \
                              never appears — an installer that symlinks before its target \
                              lands hits this",
                             e.target.display(),
                             e.source.display(),
-                            dest.display()
                         )
                     }
                     _ => format!("{} -> {} (source missing)", e.target.display(), e.source.display()),
@@ -1726,10 +1741,23 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Info,
             check: "my_* served by injection",
             detail: if writers.is_empty() {
+                // "No installed module mentions the marker" was asserted from a
+                // scan of each module's TOP-LEVEL *.sh only (`my_hookless_writers`
+                // does one non-recursive read_dir). The same file records, 800
+                // lines above, why that is not enough: measured over 93 scripts in
+                // the 14 most-starred modules, MoveCertificate sources
+                // `sh/compatible.sh` from post-fs-data.sh and every one of its bind
+                // lines lives in that file. A module writing the marker from a
+                // helper, a .mk or its WebUI still gets counted as "no module".
+                // Deliberately NOT fixed with a recursive walk -- say what was
+                // measured instead. Knowing WHICH module wrote it was the whole
+                // answer to the OP11 dialer bootloop, so the claim has to be one
+                // the reader can trust.
                 format!(
                     "my_* partitions are served by injection instead of a real bind, so they \
-                     add no mounts. No installed module mentions the marker, so this is your \
-                     own opt-in; remove {} to go back to binds.",
+                     add no mounts. Nothing in any installed module's top-level scripts \
+                     mentions the marker, so it is probably your own opt-in — a module could \
+                     still be writing it from a helper script. Remove {} to go back to binds.",
                     crate::mount::MY_HOOKLESS_MARKER
                 )
             } else {
@@ -1860,9 +1888,18 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // list, so a module whose id happens to match a hidden package would be
     // silently skipped, and nothing would say so. Report them instead of
     // deleting them. Measured on OP15 2026-08-21: four package names still there.
-    if let Ok(raw) = std::fs::read_to_string("/data/adb/nomount/blocklist") {
-        let hidden: std::collections::HashSet<String> =
-            crate::blocklist::read().unwrap_or_default().into_iter().collect();
+    //
+    // ...and only when the hide list itself could be READ. `unwrap_or_default()`
+    // on that read made an unreadable hide list an empty one, so `stale` came out
+    // empty and the finding never fired: "could not tell" rendered as "nothing
+    // found". Skipped rather than guessed, because the read failure already gets
+    // its own Unmeasured row where `hidden_apps` is bound below -- one report of
+    // one failure.
+    if let (Ok(raw), Ok(hide)) = (
+        std::fs::read_to_string("/data/adb/nomount/blocklist"),
+        crate::blocklist::read(),
+    ) {
+        let hidden: std::collections::HashSet<String> = hide.into_iter().collect();
         let stale: Vec<String> = raw
             .lines()
             .map(str::trim)
@@ -1975,13 +2012,33 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // arrived as a module overlay and anything stripping module content stripped
     // su with it; su is kernel sucompat now and entirely outside the Suite, so
     // the sentence outlived its cause. Say what is still true.
+    //
+    // CONDITIONAL for the same reason the ON arm above is. "It does nothing here
+    // either way" is the flat claim `0573d1c` disproved and removed from the ON
+    // arm and from `service.sh` — and left standing here, where the WebUI's
+    // manager banner renders it verbatim. `serve_mode` binds every my_* target
+    // unless the `my_hookless` marker is set, and it is off by default, so on a
+    // stock OnePlus with any my_* module this told the reader an inert switch was
+    // inert while it was the only control that hides their real binds.
     if kernel_umount.is_none() && crate::manager::ksu_manager_present() {
+        let binds = crate::bind::tracked().len();
         f.push(Finding {
             level: Level::Info,
             check: "manager kernel umount unknown",
-            detail: "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN \
-                     rather than off. It does nothing here either way; NoMount never needs it."
-                .to_string(),
+            detail: if binds == 0 {
+                "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN rather \
+                 than off. Nothing the Suite serves on this device is a mount, so it has \
+                 nothing to unmount either way."
+                    .to_string()
+            } else {
+                format!(
+                    "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN \
+                     rather than off — and this device has {binds} bind mount(s) of ours \
+                     (my_* is served by a real bind unless the my_hookless trial is on). That \
+                     switch is the only thing that hides those from an app's mount table, so \
+                     it is worth checking in your manager."
+                )
+            },
         });
     }
 
@@ -2265,7 +2322,15 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         // `v` but would not dump its ghost tables produced NO row at all -- while
         // the block below works hard to tell "both tables empty" apart from "not
         // compiled in", and then the outer match threw away the third state.
-        if let Err(e) = nm.ghost_list() {
+        //
+        // ONE round trip, bound once -- the two arms used to call `ghost_list()`
+        // separately. A dump fails transiently (EAGAIN/ENOBUFS is exactly how a
+        // netlink dump fails), so the first call could fail and the second succeed,
+        // and the report then carried "the engine would not list its hidden paths …
+        // This is not a pass" and "ghost cloak verified on this kernel" in one
+        // list, with opposite verdicts. Same shape as `nm.list()` sixty lines above.
+        let listed = nm.ghost_list();
+        if let Err(e) = &listed {
             f.push(Finding {
                 level: Level::Unmeasured,
                 check: "ghost cloak could not be read",
@@ -2274,8 +2339,8 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 ),
             });
         }
-        if let Ok(txt) = nm.ghost_list() {
-            let (gpaths, guids) = parse_ghost_tables(&txt);
+        if let Ok(txt) = &listed {
+            let (gpaths, guids) = parse_ghost_tables(txt);
             if let (Some(&uid), false) = (guids.first(), gpaths.is_empty()) {
                 const SAMPLE: usize = 16;
                 // ATTEMPTED, not answered. `_ => {}` used to swallow Absent and
@@ -2356,7 +2421,15 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     });
                 } else if visible.is_empty() && leaked.is_empty() {
                     f.push(Finding {
-                        level: if unknown > 0 { Level::Warn } else { Level::Info },
+                        // UNMEASURED, not Warn. 15 of 16 probes correct and one
+                        // fork/waitpid failure is not a hazard: nothing on the
+                        // device is wrong and there is no action, which the row's
+                        // own words already say ("this is not a complete answer").
+                        // `Unmeasured` is the bucket for exactly that -- see the
+                        // Level doc at the top of this file -- and it keeps the
+                        // honesty while dropping a claim ("needs attention") the
+                        // evidence does not support.
+                        level: if unknown > 0 { Level::Unmeasured } else { Level::Info },
                         check: if unknown > 0 {
                             "ghost cloak only partly verified"
                         } else {
@@ -2383,23 +2456,39 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 // not to exist, so both cases produced no Finding at all and the
                 // silence was indistinguishable from a pass -- while service.sh
                 // logged the cloak as inert on the very same boot.
+                // Nothing injected anywhere means nothing for the cloak to guard,
+                // which is n/a -- and so does NOTHING HIDDEN, which this arm used
+                // to miss. The _ghost UID table is populated from the hide list
+                // (`ghost::ghost_uids`, and the probe above says so itself: "the
+                // FIRST entry of the engine's _ghost uid table, which service.sh
+                // populates from the hide list"), so an empty hide list gives an
+                // empty uid table BY CONSTRUCTION, the `guids.first()` guard fails
+                // and this row fires. That is the ordinary configuration --
+                // modules serving files, no apps hidden -- and `Unmeasured` there
+                // made `service.sh` render "not fully measured — see the WebUI"
+                // forever, for a feature the device is not using.
+                let nothing_hidden = hidden_apps.is_empty();
+                let nothing_injected = !plan.iter().any(|e| e.kind == PlanKind::Inject);
                 f.push(Finding {
-                    // Nothing injected anywhere means nothing for the cloak to
-                    // guard, which is n/a. With rules live and the tables still
-                    // empty, the cloak really is off and that stays amber.
-                    level: if plan.iter().any(|e| e.kind == PlanKind::Inject) {
-                        Level::Unmeasured
-                    } else {
+                    level: if nothing_hidden || nothing_injected {
                         Level::NotApplicable
+                    } else {
+                        Level::Unmeasured
                     },
                     check: "ghost cloak not populated",
-                    detail: format!(
-                        "the engine returned {} hidden path(s) and {} hidden uid(s); both tables must be \
+                    detail: if nothing_hidden {
+                        "nothing is hidden on this device, so the existence cloak has nothing \
+                         to guard — it is only armed for apps on the hide list. Nothing to test."
+                            .to_string()
+                    } else {
+                        format!(
+                            "the engine returned {} hidden path(s) and {} hidden uid(s); both tables must be \
              non-empty for any guard to fire, so nothing was tested — a kernel built without _ghost \
              answers exactly the same way",
-                        gpaths.len(),
-                        guids.len()
-                    ),
+                            gpaths.len(),
+                            guids.len()
+                        )
+                    },
                 });
             }
         }
@@ -2427,7 +2516,14 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     // and the opposite setting hands a hidden app a way to read through its own
     // isolated helper. The reader needs to know it exists, not to be nagged.
     {
-        let hidden_any = !crate::blocklist::cache_read().is_empty();
+        // `hidden_apps`, not `cache_read()`. The cache is documented as an
+        // OPTIMISATION mirror -- "Absent/garbled = empty (never an error:
+        // packages.list is the truth)" -- so a missing `uidhide.cache`, or a hide
+        // list whose entries have not been resolved into it yet, silently dropped
+        // this whole block INCLUDING the `mode == 0` Warn about hiding covering
+        // neither isolated pool. `hidden_apps` is the authoritative read, is
+        // already in scope, and already pushed its own Unmeasured row if it failed.
+        let hidden_any = !hidden_apps.is_empty();
         let mode = crate::blocklist::hide_isolated();
         if hidden_any {
             f.push(Finding {
@@ -2632,10 +2728,15 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         f.push(Finding {
             level: Level::Info,
             check: "whiteout leaves a measurable hole",
+            // Plain words, and an answer to the only question the reader has.
+            // "Applied anyway; declining would silently neuter the module" is an
+            // argument this file had with itself; the reader needs to know whether
+            // to worry (no) and what to do (nothing).
             detail: format!(
                 "{module}: {} path(s) the engine cannot fully mask — their folder spans several \
-                 blocks, so its size still counts the hidden entry. Applied anyway; declining \
-                 would silently neuter the module. {}{}",
+                 blocks, so its size still counts the hidden entry. An app that checks the \
+                 folder's size can tell something was removed from it. There is nothing to \
+                 fix: the module works, and refusing to hide these would break it. {}{}",
                 targets.len(),
                 shown.join(", "),
                 if more > 0 { format!(", and {more} more") } else { String::new() }
@@ -3390,9 +3491,14 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(f[0].level, Level::Info);
     }
 
-    /// A report, never a cap: the levels escalate but nothing is ever withheld.
-    /// Calibrated on a stock OP15 (~258 live rules): /system/app is 15 entries,
-    /// /product/app 75, /system/fonts 224.
+    /// A report, never a cap and never an alarm: nothing is ever withheld, and no
+    /// count makes this demand attention. Calibrated on a stock OP15 (~258 live
+    /// rules): /system/app is 15 entries, /product/app 75, /system/fonts 224.
+    ///
+    /// 224 used to be a Warn. A `.replace` on /system/fonts is an ordinary font
+    /// module, the row's own sentence opens with "Correct", and no detector can
+    /// see a rule count -- so the card said "1 thing needs attention" about a
+    /// device where nothing did, forever.
     #[test]
     fn expansion_levels_escalate_but_never_refuse() {
         assert_eq!(expansion_level(1), None);
@@ -3400,7 +3506,8 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(expansion_level(49), None);
         assert_eq!(expansion_level(75), Some(Level::Info)); // /product/app
         assert_eq!(expansion_level(199), Some(Level::Info));
-        assert_eq!(expansion_level(224), Some(Level::Warn)); // /system/fonts
+        assert_eq!(expansion_level(224), Some(Level::Info)); // /system/fonts
+        assert_eq!(expansion_level(20_000), Some(Level::Info), "no count is an alarm");
     }
 
     /// A shipped image is reported MODULE-RELATIVE, as its doc promises.
