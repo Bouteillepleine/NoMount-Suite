@@ -125,13 +125,18 @@ void c_main(long *sp) {
         for (int i = 0; i + step - 1 < p_count; i += step) {
             char *v_end = resolve_path(mem.v_resolved, cwd, p_args[i]);
             int v_len = v_end ? (int)(v_end - mem.v_resolved) : 0; /* NULL = overran PATH_MAX */
-            if (!v_len) { exit_code = 3; continue; }
+            /* Was a bare `continue`: the operand was dropped, the rest of the
+             * batch applied, and the caller got exit 3 with nothing said. Name the
+             * path -- with a batch of 31 pairs the exit code alone cannot. */
+            if (!v_len) { print_err("nm: path too long: "); print_err(p_args[i]); print_err("\n");
+                          exit_code = 3; continue; }
 
             int r_len = 0;
             if (cmd == 'a') {
                 char *r_end = resolve_path(mem.r_resolved, cwd, p_args[i+1]);
                 r_len = r_end ? (int)(r_end - mem.r_resolved) : 0;
-                if (!r_len) { exit_code = 3; continue; }
+                if (!r_len) { print_err("nm: path too long: "); print_err(p_args[i+1]); print_err("\n");
+                              exit_code = 3; continue; }
             }
 
             int header_size = (target_cmd == 2) ? 12 : 6;
@@ -141,6 +146,7 @@ void c_main(long *sp) {
                  * grinding through the rest of a large `nm add` at five seconds
                  * a batch is the boot-time stall this bound exists to prevent. */
                 if (nm_timed_out(rc)) goto do_timeout;
+                if (rc < 0) print_refused("this batch", rc);
                 exit_code |= (rc < 0);
                 cursor = mem.payload;
             }
@@ -182,6 +188,7 @@ void c_main(long *sp) {
         if (cursor > mem.payload) {
             int rc = do_nm_cmd(fd,target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem);
             if (nm_timed_out(rc)) goto do_timeout;
+            if (rc < 0) print_refused("this batch", rc);
             exit_code |= (rc < 0);
         }
 
@@ -193,9 +200,13 @@ void c_main(long *sp) {
         if (p_count < 1) { print_err("nm: missing uid\n"); exit_code = 3; goto do_exit; }
         unsigned int uid = 0; const char *s = p_args[0];
         int ndig = 0;
-        if (!*s) { exit_code = 3; goto do_exit; }
+        /* All three refusals below jump to one sentence at `bad_uid`. They were
+         * silent exits: an empty string, a non-digit and an out-of-range value
+         * each exited 3 with nothing on either stream, so the WebUI's hide button
+         * on a malformed target toasted an empty reason. */
+        if (!*s) goto bad_uid;
         while (*s) {
-            if (*s < '0' || *s > '9') { exit_code = 3; goto do_exit; }
+            if (*s < '0' || *s > '9') goto bad_uid;
             /* BOUND IT. This used to wrap silently, so `nm block 4294967296`
              * sent uid 0 -- and uid 0 is the engine's own identity, so the
              * kernel would have been asked to hide every injection from ksud,
@@ -211,11 +222,12 @@ void c_main(long *sp) {
              * would mean carrying the digit count separately from the range
              * check for no gain. */
             if (++ndig > 10 || uid > 429496729u ||
-                (uid == 429496729u && *s > '5')) { exit_code = 3; goto do_exit; }
+                (uid == 429496729u && *s > '5')) goto bad_uid;
             uid = (uid << 3) + (uid << 1) + (*s++ - '0');
         }
         int rc = do_nm_cmd(fd,6 - (cmd == 'b'), 4, &uid, 4, 5, &mem);
         if (nm_timed_out(rc)) goto do_timeout;
+        if (rc < 0) print_refused((cmd == 'b') ? "block" : "unblock", rc);
         exit_code = (rc < 0);
         goto do_exit;
 
@@ -280,17 +292,25 @@ void c_main(long *sp) {
         }
         val = (p_count > 1) ? p_args[1] : "";
         while (val[vlen]) vlen++;
-        if (4 + vlen > MAX_PAYLOAD) { exit_code = 3; goto do_exit; }
+        /* Was silent. `nm k g` carries a whole _ghost table in one value, so this
+         * is the refusal crate::ghost's chunking exists to avoid -- it has to say
+         * which limit it hit. */
+        if (4 + vlen > MAX_PAYLOAD) { print_err("nm: knob value too long\n"); exit_code = 3; goto do_exit; }
         *(unsigned int *)mem.payload = (unsigned int)knob;
         if (vlen) memcpy(mem.payload + 4, val, vlen);
         int rc = do_nm_cmd(fd, 9, 6, mem.payload, 4 + vlen, 5, &mem);
         if (nm_timed_out(rc)) goto do_timeout;
+        /* The `nm k g` presence probe lands here on an engine below v26, where
+         * the knob does not exist and the kernel answers -EINVAL. That is a
+         * legitimate "no", and it now says so instead of exiting 1 in silence. */
+        if (rc < 0) print_refused("this knob", rc);
         exit_code = (rc < 0);
         goto do_exit;
 
     } else if (cmd == 'c') {
         int rc = do_nm_cmd(fd,4, 0, (void *)0, 0, 5, &mem);
         if (nm_timed_out(rc)) goto do_timeout;
+        if (rc < 0) print_refused("clear", rc);
         exit_code = (rc < 0);
         goto do_exit;
 
@@ -303,7 +323,7 @@ void c_main(long *sp) {
          * message; this one trusted nlmsg_len outright, so a short or malformed
          * reply sent get_attr walking past rx_buf. */
         if (vlen_rx >= 16 && vh->nlmsg_len <= (unsigned int)vlen_rx) {
-            unsigned int *ver = get_attr(mem.rx_buf, 5);
+            unsigned int *ver = get_attr(mem.rx_buf, 5, 4);
             if (ver) {
                 /* print_uint handles any width; the old two-digit routine printed
                  * "02" for 2 and garbage for >= 100. */
@@ -312,6 +332,19 @@ void c_main(long *sp) {
                 exit_code = 0; goto do_exit;
             }
         }
+        /* Every other way out of this block fell through the whole else-if chain
+         * to do_exit with exit_code still at its initial 1 and NOTHING printed:
+         * a negative errno from the command (an engine present but refusing
+         * NM_CMD_GET_VERSION is not a timeout, so it neither times out nor
+         * prints), a reply shorter than a header, or a missing version
+         * attribute. Nm::version() then reported `nm v failed (exit 1): ` with
+         * an empty reason -- on the one command every liveness path in the Suite
+         * starts with, which is why an empty reason there sends the reader
+         * looking in the wrong place. */
+        if (vlen_rx < 0) print_refused("the version query", vlen_rx);
+        else print_err("nm: the engine did not answer with a version - it may be too old, or "
+                       "built with a different NOMOUNT_NL_PROTO\n");
+        exit_code = 1; goto do_exit;
 
     } else if (cmd == 'l') {
         int is_uids = 0, is_gh = 0;
@@ -396,7 +429,17 @@ void c_main(long *sp) {
                      * FAILURE rather than reading past the message and calling
                      * whatever is there a plain ACK: a truncated error reply is
                      * not an acknowledgement. */
-                    if (msg->nlmsg_len < 20 || *(int *)((char *)msg + 16)) exit_code = 4;
+                    if (msg->nlmsg_len < 20) {
+                        print_err("nm: the kernel ended this dump with a truncated error reply\n");
+                        exit_code = 4;
+                    } else if (*(int *)((char *)msg + 16)) {
+                        /* Was a silent exit 4 mid-dump, with a PREFIX of the rule
+                         * set already on stdout -- the one failure shape where the
+                         * caller most needs to be told the list it just read is
+                         * incomplete rather than short. */
+                        print_refused("this dump partway through", *(int *)((char *)msg + 16));
+                        exit_code = 4;
+                    }
                     goto list_done;                                /* err 0 == plain ACK */
                 }
 
@@ -405,20 +448,20 @@ void c_main(long *sp) {
                      * kernel dump for why that attribute is reused. Plain lines:
                      * doctor.rs::parse_ghost_tables reads "p /abs/path" and
                      * "u <uid>" straight off this. */
-                    char *rule = get_attr(msg, 1);
+                    char *rule = get_attr_str(msg, 1);
                     if (rule) { print_str(rule); print_str("\n"); }
                 } else if (is_uids) {
-                    unsigned int *uid = get_attr(msg, 4); /* NOMOUNT_ATTR_UID */
+                    unsigned int *uid = get_attr(msg, 4, 4); /* NOMOUNT_ATTR_UID */
                     if (uid) {
                         if (!first) print_str(",\n");
                         print_str("  "); print_uint(*uid);
                         first = 0;
                     }
                 } else {
-                    char *v = get_attr(msg, 1); 
-                    char *r = get_attr(msg, 2); 
-                    unsigned int *flags = get_attr(msg, 3);
-                    unsigned int *uid = get_attr(msg, 4);
+                    char *v = get_attr_str(msg, 1);
+                    char *r = get_attr_str(msg, 2);
+                    unsigned int *flags = get_attr(msg, 3, 4);
+                    unsigned int *uid = get_attr(msg, 4, 4);
 
                     if (v && r) {
                         int is_whiteout    = (flags && (*flags & 4));
@@ -470,6 +513,13 @@ list_refused:
 list_done:
         if (is_uids) print_str("\n]\n");
     }
+    goto do_exit;
+
+bad_uid:
+    /* One sentence for the three refusals in the block/unblock parser. Placed
+     * after the chain's `goto do_exit` so it is only ever reached by that goto. */
+    print_err("nm: uid must be 1-10 digits and fit in 32 bits\n");
+    exit_code = 3;
     goto do_exit;
 
 do_timeout:

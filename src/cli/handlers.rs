@@ -52,6 +52,48 @@ fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -
     }
 }
 
+/// Serialise a verb's KERNEL mutation against the mount pass.
+///
+/// Round 8 locked the hide-list FILE (`blocklist::add`/`add_many`/`remove` each
+/// take `mount::pass_lock`) and left the kernel half of the same verbs open --
+/// `grep -n pass_lock src/cli/handlers.rs` came back empty. The file edit is the
+/// cheap half; the kernel's hidden-UID set is the half with a persistent
+/// consequence, and `mount::run_mount` mutates it under the lock at
+/// `mount.rs:1849` (`nm.clear()`, which drops the whole set) and again at
+/// `:1872` (`reapply_blocklist`). A concrete interleaving, with the glob
+/// `*.duckdetector` on the list and the app installed but not yet in
+/// `uidhide.cache`:
+///
+/// 1. `uidwatch.sh` fires `uid apply`; it expands the glob and calls
+///    `nm.uid_block(10500)`. Kernel = `{10500}`.
+/// 2. Before it reaches `cache_replace`, the user taps Re-apply. `run_mount`
+///    takes the pass lock and calls `nm.clear()`. Kernel = `{}`.
+/// 3. `run_mount`'s own `reapply_blocklist(early = true)` skips every glob and
+///    sweeps the cache, which still does not name the package. Kernel stays `{}`.
+/// 4. Step 1 writes the cache and prints `hidden 1`.
+///
+/// Both passes exit 0 and the detector is unhidden for the whole session. Taking
+/// the lock here removes the window.
+///
+/// CONTRACT: `mount::pass_lock` is a plain flock, and flock attaches to the OPEN
+/// FILE DESCRIPTION -- a second acquisition in the SAME process conflicts with
+/// the first, spins the full `PASS_LOCK_WAIT` and then proceeds unserialised
+/// anyway (this is why `whiteout::remove_locked` exists). So this must never be
+/// held across a call that takes the lock itself: `blocklist::add`,
+/// `add_many` and `remove`. The arms below that edit the file therefore acquire
+/// AFTER it, which still serialises every kernel call, because the reapply that
+/// follows re-derives the desired set from the file under the lock -- whichever
+/// order the two locked sections land in, the last one to run leaves the kernel
+/// agreeing with the file.
+///
+/// Nothing here is reachable from inside a pass: `handle_vfs`/`handle_uid` are
+/// only ever called from `main`'s top-level dispatch, and `mount.rs` calls
+/// `reapply_blocklist` directly rather than through a verb. `bind::Lock` is a
+/// different file and is never taken on any path below.
+fn pass_guard() -> Option<crate::mount::PassLock> {
+    crate::mount::pass_lock()
+}
+
 pub fn handle_vfs(action: VfsAction) -> Result<()> {
     let nm = Nm::new();
     match action {
@@ -145,6 +187,11 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             println!("ok");
         }
         VfsAction::Clear => {
+            // See `pass_guard`. This arm is the worse half of the race it
+            // describes: `nm.clear()` drops the kernel's whole hidden-UID set, and
+            // a `uid apply` already past its own block calls then writes a cache
+            // claiming apps are hidden that this clear has just un-hidden.
+            let _pass = pass_guard();
             nm.clear()?;
             // CLEAR_ALL drops the kernel's hidden-UID set along with the rules, so
             // a bare clear silently unhides every app on the list. Put the hiding
@@ -438,6 +485,31 @@ fn parse_isolated_mode(s: &str) -> Option<u32> {
     }
 }
 
+/// Which `uid list` row speaks for each appid: the first EXACT row if there is
+/// one, else the first row. `rows` is `(appid, is_glob)` in file order; the
+/// answer maps an appid to the winning index, and its KEY SET is every appid the
+/// list named, which is also what the live-only sweep tests against.
+///
+/// Pure and separate because it is the whole of the double-count fix: see the
+/// note at `UidAction::List` for why an exact entry has to beat a glob.
+fn list_winners(rows: &[(Option<u32>, bool)]) -> BTreeMap<u32, usize> {
+    let mut winner: BTreeMap<u32, usize> = BTreeMap::new();
+    for (i, (appid, glob)) in rows.iter().enumerate() {
+        let Some(a) = *appid else { continue };
+        match winner.get(&a) {
+            None => {
+                winner.insert(a, i);
+            }
+            // An exact row displaces a glob one; nothing displaces an exact row.
+            Some(&w) if rows[w].1 && !*glob => {
+                winner.insert(a, i);
+            }
+            _ => {}
+        }
+    }
+    winner
+}
+
 fn isolated_mode_name(mode: u32) -> &'static str {
     match mode {
         0 => "off — neither pool is hidden from",
@@ -499,6 +571,9 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     );
                 }
                 blocklist::add(&target)?;
+                // AFTER the file edit, never around it: `blocklist::add` takes
+                // this same lock. See `pass_guard`.
+                let _pass = pass_guard();
                 let rep = reapply_blocklist(&nm, false);
                 println!(
                     "ok: {target} saved — matches {} installed package(s), now hiding {}{}",
@@ -524,6 +599,11 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 }
             }
             blocklist::add(&target)?;
+            // AFTER the file edit, never around it: `blocklist::add` takes this
+            // same lock. See `pass_guard`. It covers the cache write and the
+            // block call together, which is what the mount pass reads and
+            // rewrites under the lock it already holds.
+            let _pass = pass_guard();
             match resolved {
                 Resolved::Uid(uid) => {
                     blocklist::cache_put(&target, uid);
@@ -551,6 +631,9 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             // them; the reconcile in `apply` is what does that, so run it.
             if blocklist::is_pattern(&target) {
                 let existed = blocklist::remove(&target)?;
+                // AFTER the file edit, never around it: `blocklist::remove` takes
+                // this same lock. See `pass_guard`.
+                let _pass = pass_guard();
                 let rep = reapply_blocklist(&nm, false);
                 if existed {
                     println!(
@@ -575,6 +658,13 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             // Kept, not discarded: see `unblock_message` for what this branch
             // used to report and why both halves are needed.
             let existed = blocklist::remove(&target)?;
+            // AFTER the file edit, never around it: `blocklist::remove` takes this
+            // same lock. See `pass_guard`. It matters most on THIS arm: `remove`
+            // has already dropped the entry and its mirror line, so between here
+            // and the un-hide below there is an appid the kernel is hiding that
+            // nothing on disk names -- a concurrent pass must not be reading that
+            // state, and this un-hide must not be racing its `clear`.
+            let _pass = pass_guard();
             // Both arms below take the RESULT of every engine call, and neither
             // reads "could not ask the engine" as "the kernel is hiding nobody".
             // That matters more here than anywhere else in the file, because
@@ -667,8 +757,14 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             // already swallowed the error. `reapply_blocklist` is honest about
             // the same failure, so this was an inconsistency inside one file.
             //
-            // "unreadable" is load-bearing: the WebUI routes /unread/ to the
-            // grey `gone` class, so a third state needs no UI change.
+            // The word "unreadable" is the WebUI's only handle on this state, so
+            // keep it -- but the claim that used to stand here, that routing
+            // /unread/ to the grey `gone` class meant "a third state needs no UI
+            // change", was WRONG and was measured wrong this round: `gone` is the
+            // "Waiting · N — Nothing installed matches these yet" bucket, so two
+            // saved-and-almost-certainly-hidden apps rendered under a sentence
+            // asserting the opposite, with the chip reading 0. The producer side
+            // is right; the bucketing is index.html's to fix.
             let live_res = nm.uid_list_live();
             let engine_unknown = live_res.is_err();
             let live = live_res.unwrap_or_default();
@@ -681,7 +777,45 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     "saved, not applied"
                 }
             };
-            let mut covered: Vec<u32> = Vec::new();
+            // ONE ROW PER APPID, not one per hide-list entry.
+            //
+            // The dedup set was filled and then used only for the live-only sweep
+            // at the foot of this arm, so an app named by BOTH a glob and an exact
+            // entry printed twice. Measured on an OP15 whose `uidhide` holds three
+            // globs and nineteen exact entries: 22 rows for 19 distinct appids. The
+            // WebUI counts rows (index.html's `hiding`), so its chip and its
+            // "Hidden apps · N" header said 22 while `nomount check`, health.txt,
+            // the export bundle and the module card -- all of which take `blocked`
+            // from `nm l u` -- said 19. Two numbers for one fact, three apart. The
+            // kernel hides by APPID and `nm l u` returns appids, so the appid is
+            // the unit; deduping here makes every one of those numbers agree with
+            // no change on the WebUI side.
+            //
+            // An EXACT entry wins over a glob covering the same appid, which is not
+            // arbitrary. The row's ✕ acts on whatever the row names, and removing
+            // the glob while an exact entry still wants the app hidden un-hides
+            // nothing (`reapply_blocklist` keeps it, correctly) -- the row returns
+            // looking identical and the button reads as broken. Removing the exact
+            // entry always changes something visible: the row comes back as
+            // `via <glob>`, which says a second rule still covers it and one more
+            // tap finishes the job. It also makes the WebUI's glob tooltip true
+            // again, since a surviving `via` row is now one no exact entry
+            // duplicates.
+            struct Line {
+                /// `Some(appid)` for a row naming a real app. `None` for one that
+                /// names no uid (not installed, no match, unreadable, invalid) --
+                /// those are rules waiting, never duplicates, and always print.
+                appid: Option<u32>,
+                /// A glob row loses to an exact entry covering the same appid.
+                glob: bool,
+                /// The hide-list entry behind the row: what the ✕ acts on.
+                entry: String,
+                /// The package the row names, which is the entry itself for an
+                /// exact entry and the matched package for a glob hit.
+                name: String,
+                text: String,
+            }
+            let mut lines: Vec<Line> = Vec::new();
 
             // Unreadable package map: globs cannot be expanded, and saying "no
             // match" would read as "nothing is hidden by this rule".
@@ -692,21 +826,42 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 // print each one so the list shows what is actually hidden, not
                 // just the rule that put it there.
                 if blocklist::is_pattern(e) {
+                    // A glob row that names no app: printed as-is, never deduped.
+                    let mut note: Option<String> = None;
                     if installed_opt.is_none() {
-                        println!("{e}\tglob · package map unreadable");
-                        continue;
-                    }
-                    match blocklist::expand(e, &installed) {
-                        Ok(hits) if hits.is_empty() => println!("{e}\tglob · no match"),
-                        Ok(hits) => {
-                            // Package first so a reader sees what is hidden; the glob
-                            // follows as provenance, and is what removing it acts on.
-                            for (pkg, uid) in hits {
-                                covered.push(uid);
-                                println!("{pkg}\tvia {e} · uid {uid} · {}", state_of(uid));
+                        note = Some(format!("{e}\tglob · package map unreadable"));
+                    } else {
+                        match blocklist::expand(e, &installed) {
+                            Ok(hits) if hits.is_empty() => {
+                                note = Some(format!("{e}\tglob · no match"));
                             }
+                            Ok(hits) => {
+                                // Package first so a reader sees what is hidden; the
+                                // glob follows as provenance, and is what removing
+                                // it acts on.
+                                for (pkg, uid) in hits {
+                                    let text =
+                                        format!("{pkg}\tvia {e} · uid {uid} · {}", state_of(uid));
+                                    lines.push(Line {
+                                        appid: Some(appid(uid)),
+                                        glob: true,
+                                        entry: e.clone(),
+                                        name: pkg,
+                                        text,
+                                    });
+                                }
+                            }
+                            Err(err) => note = Some(format!("{e}\tinvalid glob: {err:#}")),
                         }
-                        Err(err) => println!("{e}\tinvalid glob: {err:#}"),
+                    }
+                    if let Some(text) = note {
+                        lines.push(Line {
+                            appid: None,
+                            glob: true,
+                            entry: e.clone(),
+                            name: e.clone(),
+                            text,
+                        });
                     }
                     continue;
                 }
@@ -717,17 +872,58 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                         continue;
                     }
                 };
-                match resolved {
+                let (row_appid, text) = match resolved {
                     Resolved::Uid(uid) => {
-                        covered.push(uid);
-                        println!("{e}\tuid {uid} · {}", state_of(uid));
+                        (Some(appid(uid)), format!("{e}\tuid {uid} · {}", state_of(uid)))
                     }
-                    Resolved::NotInstalled => println!("{e}\tnot installed"),
+                    Resolved::NotInstalled => (None, format!("{e}\tnot installed")),
+                };
+                lines.push(Line {
+                    appid: row_appid,
+                    glob: false,
+                    entry: e.clone(),
+                    name: e.clone(),
+                    text,
+                });
+            }
+            let winner =
+                list_winners(&lines.iter().map(|l| (l.appid, l.glob)).collect::<Vec<_>>());
+            for (i, l) in lines.iter().enumerate() {
+                let Some(a) = l.appid else {
+                    println!("{}", l.text);
+                    continue;
+                };
+                if winner[&a] != i {
+                    continue;
+                }
+                // Name what else covers this app, so removing this row's entry is
+                // not mistaken for the whole job. A label is another hide-list
+                // entry, or -- when two packages share one appid, which the kernel
+                // cannot separate either -- the other package's name.
+                let mut also: Vec<&str> = Vec::new();
+                for o in lines.iter().filter(|o| o.appid == Some(a)) {
+                    let label = if o.entry != l.entry {
+                        o.entry.as_str()
+                    } else if o.name != l.name {
+                        o.name.as_str()
+                    } else {
+                        continue;
+                    };
+                    if !also.contains(&label) {
+                        also.push(label);
+                    }
+                }
+                if also.is_empty() {
+                    println!("{}", l.text);
+                } else {
+                    println!("{} · also covered by {}", l.text, also.join(", "));
                 }
             }
-            // Live-only: enforced by the kernel but absent from the file.
+            // Live-only: enforced by the kernel but absent from the file. Every
+            // appid any row above named is a key in `winner`, suppressed
+            // duplicates included, so this is the same test it always was.
             for uid in &live {
-                if !covered.iter().any(|c| appid(*c) == appid(*uid)) {
+                if !winner.contains_key(&appid(*uid)) {
                     let name =
                         blocklist::package_for_uid(*uid).unwrap_or_else(|| format!("uid {uid}"));
                     println!("{name}\tuid {uid} · live, not saved");
@@ -754,6 +950,10 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
         // after every `clear`, so the first pass genuinely hides each; re-runs are
         // idempotent.
         UidAction::Apply { early } => {
+            // The arm `pass_guard` is written about: this is the pass `uidwatch.sh`
+            // fires on every package change, and it edits no file of its own, so
+            // there is no inner lock to nest with -- take it for the whole verb.
+            let _pass = pass_guard();
             let rep = reapply_blocklist(&nm, early);
             println!(
                 "hidden {}, not installed {}, skipped {}, retired {}, failed {}",
@@ -789,6 +989,9 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 return Ok(());
             }
             let added = blocklist::add_many(&entries)?;
+            // AFTER the file edit, never around it: `blocklist::add_many` takes
+            // this same lock. See `pass_guard`.
+            let _pass = pass_guard();
             let rep = reapply_blocklist(&nm, false);
             println!(
                 "preset {name}: {added} new, {} already present · now hiding {}{}",
@@ -809,6 +1012,12 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 let Some(v) = parse_isolated_mode(&m) else {
                     bail!("unknown mode '{m}' — use both | appzygote | platform | off");
                 };
+                // Same lock, same reason as the arms above, and no inner one to
+                // nest with (`blocklist::set_hide_isolated` is a bare atomic
+                // write): every `reapply_blocklist` re-asserts this knob from the
+                // file at its first line, so a pass interleaved between the two
+                // statements below reads the old value and puts it straight back.
+                let _pass = pass_guard();
                 // Knob first, persist second. Persisting a policy the engine has
                 // just refused leaves the file claiming a setting that is not in
                 // force, and every later apply re-tries and re-reports the failure.
@@ -837,6 +1046,31 @@ mod tests {
         assert_eq!(parse_isolated_mode("sometimes"), None);
     }
 
+
+    /// One row per appid, and the exact entry is the one that speaks.
+    ///
+    /// The device this was measured on had three globs and nineteen exact
+    /// entries covering nineteen distinct appids, and `uid list` printed 22
+    /// rows -- so the WebUI chip said 22 where `nm l u`, `nomount check`,
+    /// health.txt and the module card all said 19.
+    #[test]
+    fn a_uid_list_row_is_per_appid_and_the_exact_entry_wins() {
+        // glob hit, then the exact entry for the same app, then an unrelated one.
+        let rows = [(Some(10438), true), (Some(10438), false), (Some(10471), false)];
+        let w = list_winners(&rows);
+        assert_eq!(w.len(), 2, "one row per appid, not one per hide-list entry");
+        assert_eq!(w[&10438], 1, "the exact entry speaks, so its ✕ changes something");
+        assert_eq!(w[&10471], 2);
+
+        // Order the other way round: still the exact entry.
+        assert_eq!(list_winners(&[(Some(1), false), (Some(1), true)])[&1], 0);
+        // Two globs and nothing exact: first wins.
+        assert_eq!(list_winners(&[(Some(1), true), (Some(1), true)])[&1], 0);
+        // A row naming no app (not installed, no match, invalid glob) is never a
+        // key, so it can neither dedup another row away nor suppress the
+        // live-only sweep that tests this map.
+        assert!(list_winners(&[(None, true), (None, false)]).is_empty());
+    }
 
     /// `uid unblock` must not report a removal it did not make.
     ///

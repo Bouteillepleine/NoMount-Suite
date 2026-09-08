@@ -11,8 +11,11 @@
 //! answer from a raw-netlink kernel, and nothing about the version number warns
 //! you — it reads as "engine not responding".
 //!
-//! CLI verbs (first-char dispatch in `nm`): `add <virtual> <real>`, `w <path>`
-//! (whiteout), `block`/`unblock <uid>`, `clear`, `list`, `v` (version).
+//! CLI verbs (whole-word dispatch in `nm`, since `a55f5bb` -- it used to match
+//! the first character, which is why `nm check` ran CLEAR and why `nm l g` did
+//! nothing): `add <virtual> <real>`, `w <path>` (whiteout), `block`/`unblock
+//! <uid>`, `clear`, `list` / `l` (`l u` uids, `l g` the ghost tables), `k`
+//! (knob), `v` (version).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -237,8 +240,11 @@ impl Nm {
     }
 }
 
-/// `nm`'s argv cap is 64 non-option words; `add` consumes two per rule. Leave a
-/// word of headroom for `--public` so the option never pushes a batch over.
+/// `nm`'s cap is 64 words in its PATH array (`p_args`), and `add` puts two paths
+/// in it per rule -- so the true ceiling is 32 pairs. Neither `add` (that is
+/// `argv[1]`, which never reaches `p_args`) nor `--public` (consumed as an
+/// option) is counted, contrary to what this note used to say. 31 leaves a pair
+/// of headroom rather than the single word the old arithmetic thought it needed.
 const ADD_BATCH_PAIRS: usize = 31;
 
 impl Nm {
@@ -536,13 +542,15 @@ mod tests {
         assert!(batch_groups(&[], none_public).is_empty());
     }
 
-    /// The chunk size has to leave room for the `add` verb and `--public`
-    /// inside nm's 64-word argv cap, which it refuses to exceed rather than
-    /// silently truncating.
+    /// The chunk has to fit nm's 64-slot PATH array, which nm refuses to exceed
+    /// rather than silently truncating. PATHS only: the `add` verb is `argv[1]`
+    /// and `--public` is consumed as an option, so neither is counted -- the old
+    /// version of this test added both in and still reached the right answer,
+    /// which is the kind of agreement that stops being one when the cap moves.
     #[test]
     fn a_batch_fits_nms_argv_cap() {
-        let words = 1 + 1 + ADD_BATCH_PAIRS * 2; // add + --public + two per pair
-        assert!(words <= 64, "{words} argv words would be refused by nm");
+        let paths = ADD_BATCH_PAIRS * 2; // two per pair, and nothing else
+        assert!(paths <= 64, "{paths} paths would be refused by nm");
     }
 
     /// A source path containing ` -> ` must not move the split: the source is

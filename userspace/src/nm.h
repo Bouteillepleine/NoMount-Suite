@@ -219,7 +219,10 @@ static noinline void print_err(const char *s) {
     sys3(SYS_WRITE, 2, (long)s, len);
 }
 
-static noinline void print_uint(unsigned int n) {
+/* Parametrised on the fd because a diagnostic's NUMBER has to land on the same
+ * stream as its sentence: print_uint writes to fd 1, where -- during `nm l` --
+ * it would be read back as part of the dump it is complaining about. */
+static noinline void print_num(int fd, unsigned int n) {
     char buf[12];
     int i = 11;
     buf[i] = '\0';
@@ -227,8 +230,33 @@ static noinline void print_uint(unsigned int n) {
     do {
         buf[--i] = (n % 10) + '0';
         n /= 10;
-    } while (n > 0);    
-    print_str(&buf[i]);
+    } while (n > 0);
+    long len = 0;
+    while (buf[i + len]) len++;
+    sys3(SYS_WRITE, fd, (long)&buf[i], len);
+}
+
+static noinline void print_uint(unsigned int n) { print_num(1, n); }
+
+/* The kernel took the command and answered with an error.
+ *
+ * This was the last silent exit in the file. Round 8 moved every ARGUMENT error
+ * to fd 2; the engine-refusal exits (`exit_code = (rc < 0)`, five of them) were
+ * left printing nothing at all, and they are the commoner failure. Nm::run then
+ * rendered `nm add /x /y failed (exit 1): ` -- an argv, a code, and an empty
+ * reason -- which is exactly the shape the argument fixes existed to end, and
+ * exactly what the WebUI toasts and what mount.rs attributes to a rule.
+ *
+ * `what` names the command rather than the errno alone, because the caller
+ * already has the argv and what it lacks is which half of a batch failed. */
+static noinline void print_refused(const char *what, int rc) {
+    print_err("nm: the kernel refused ");
+    print_err(what);
+    print_err(" (errno ");
+    /* Negated in UNSIGNED, so the most negative int has no undefined behaviour
+     * to hit on the one path whose whole job is reporting a failure. */
+    print_num(2, rc < 0 ? -(unsigned int)rc : (unsigned int)rc);
+    print_err(")\n");
 }
 
 /* path resolution */
@@ -245,7 +273,18 @@ static noinline char* resolve_path(char *p, const char *cwd, const char *rel) {
     return p; /* Points exactly to '\0' */
 }
 
-static noinline void *get_attr(const void *nh, int type) {
+/* `min_payload` is what the CALLER is about to read out of the attribute: 4 for
+ * the u32 readers (version, uid, flags), 1 for a string.
+ *
+ * Without it this required only `alen >= 4`, i.e. that the attribute HEADER fit.
+ * An attribute with an empty payload therefore returned `attr + 4`, which is the
+ * next attribute's header -- so `*(unsigned int *)` read that header as a version
+ * or a uid or a flags word, and for a message ending exactly at the end of rx_buf
+ * it read four bytes of tx_buf. Kernel-controlled input, so theoretical; the
+ * check is one comparison. A matched-but-too-short attribute answers ABSENT
+ * rather than aborting the walk, because a short attribute of the wrong type is
+ * no reason to stop looking for the right one. */
+static noinline void *get_attr(const void *nh, int type, unsigned int min_payload) {
     unsigned int max_len = ((struct nlmsghdr *)nh)->nlmsg_len;
     /* attrs sit directly after the nlmsghdr (16B) — no genlmsghdr (was +20) */
     char *attr = (char *)nh + 16;
@@ -254,10 +293,26 @@ static noinline void *get_attr(const void *nh, int type) {
         /* The payload must also FIT: without this a truncated attribute yields a
          * pointer running past the message, which print_str() then walks to a NUL. */
         if (alen < 4 || (attr - (char *)nh) + alen > max_len) break;
-        if (*(unsigned short *)(attr + 2) == type) return attr + 4;
+        if (*(unsigned short *)(attr + 2) == type)
+            return (alen >= 4 + min_payload) ? attr + 4 : (void *)0;
         attr += (alen + 3) & -4;
     }
     return (void *)0;
+}
+
+/* A string attribute, verified NUL-terminated INSIDE its own payload.
+ *
+ * print_str() walks to a NUL, so an attribute the kernel did not terminate ran
+ * on into the next attribute's header and printed it as part of a rule path --
+ * straight into `nm list` output that crate::nm::parse_list turns back into
+ * rules. The length is right there in the header we already validated. */
+static noinline char *get_attr_str(const void *nh, int type) {
+    char *s = get_attr(nh, type, 1);
+    if (!s) return (char *)0;
+    unsigned int alen = *(unsigned short *)(s - 4);
+    for (unsigned int p = 0; 4 + p < alen; p++)
+        if (!s[p]) return s;
+    return (char *)0;
 }
 
 /* Bound every read on this socket. Called once, right after socket(), so it
