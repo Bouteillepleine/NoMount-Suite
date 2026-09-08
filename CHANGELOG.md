@@ -11,6 +11,158 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.171 — engine v31
+
+Round 8: twelve reviewers over the whole tree, then a device pass on an OP15
+running exactly the audited build. ~150 findings, all of them fixed here.
+None was caught by the gates — 195 tests, clippy, shellcheck, mksh and
+`node --check` were all green on the tree that had every one of them.
+
+### The wrong-kernel card could never fire
+
+`metamount.sh` unset `_mout` eighteen lines before the `case` that reads it, so
+`_driver_ok` was permanently 1 and the `⛔ your kernel has no NoMount driver`
+arm was unreachable. Verified on the OP15 by replaying the three statements
+with the real "engine not responding" string under both busybox ash and mksh:
+`_driver_ok=1` in both.
+
+So the single commonest new-user mistake — flashing the module without the
+kernel half — fell through to `⚠️ ran, but no module had files to serve`, which
+sends the reader to look at their modules instead of at their kernel. The
+engine's own sentence was captured and went only to `boot.log`.
+
+Two more arms exist now: the mount pass failing, and the rule table not being
+readable. `_pass_ran=1` used to be set regardless of the pass's exit status, so
+a pass killed at 60s having injected 200 of 260 rules still ended the boot on
+`✅ N rules · mountless`. The comment above it claimed that was fixed; only the
+log line was. And `service.sh` no longer overwrites the wrong-kernel card after
+boot with a generic `0 rules` line — it reads `engine=down` out of `health.txt`.
+
+### One `:` could kill the boot script
+
+`: >> "$BOOTLOG"` is a redirection on a POSIX **special builtin**, so a failure
+aborts the shell — and `2>/dev/null` swallows the reason. `ksud` runs module
+scripts under `/data/adb/ksu/bin/busybox` with `ASH_STANDALONE` (confirmed by
+`strings` on the device), and under busybox ash the abort takes the **whole
+script**, not just the enclosing function.
+
+It sat 62 lines above the deliberate read-only-`/data` refusal written for
+exactly that case, making that refusal unreachable: no kmsg line, no `boot.log`,
+no `incident.log`, no bootcount, no card. The same shape at the moment the
+bootloop guard trips meant `disabled` was never created and the guard "tripped"
+silently on every boot while the WebUI showed **Armed**. Both are `touch` now,
+and the three writes that arm the guard are checked rather than assumed.
+
+The guard counter is also no longer cleared before the post-boot reload and
+absorb — the work this project's own notes record as having rebooted an OP11.
+A device rebooted by that pass used to loop forever with the counter zeroed on
+every cycle.
+
+### `nomount export` shipped the hide list
+
+The bundle carefully redacts hidden-app names out of `check.txt`, strips
+`[UID: n]` from `rules.txt` and withholds `uid_live.txt` — and then wrote
+`boot.log` and the legacy `blocklist` file next to them, into `/sdcard/Download`,
+readable by any app holding a storage permission.
+
+`boot.log` carries them because `service.sh` and `uidwatch.sh` capture
+`uid apply 2>&1`, and `uid apply` prints hide-list patterns and matched package
+names to stderr. Demonstrated on the OP15: `*.settings matches
+com.android.settings (appid 1000, below the app range)`, straight into the log
+line. The project treats that file as a secret on-device — `chmod 0600`.
+
+`blocklist` still holds them because the hide-list split **copies** rather than
+moves, by design. It is now filtered on a shared destination to the module ids
+that are its remaining purpose, and `boot.log` is withheld there entirely. A
+private export still carries both, which is what the bug-report template wanted.
+
+### A module could still forge a rule
+
+Round 7 closed the newline-forgery at the plan door and called it "the ONE place
+a path enters the plan". It was not the only door into the **rule table** or the
+only-copy records. `absorb` reaches `nm add` and writes `absorbed.list` and
+`absorbed-tmpfs.list` from mountinfo — which it octal-unescapes, so `\012` in a
+module's bind target arrives as a real newline — and `whiteout::validate` gated
+four callers of `nm.whiteout()` without ever asking. Both do now, and so do
+`vfs add` and `vfs whiteout`, which bypassed every gate the other paths enforce.
+
+The gate itself grew the two spellings its own doc named and never tested:
+` [UID:` anywhere in a path (it splits the rule line wherever it appears), and a
+path *ending* in ` (whiteout)`, ` (public)` or ` (virtual dir)` (those are
+stripped as suffixes, in a loop). Mid-path they stay legal — over-refusing would
+have cost real filenames.
+
+### A stacked mount was stranded forever
+
+`umount2(MNT_DETACH)` removes **one** mount from the stack, and absorb read a
+successful return as "the target is clear" — `&&` short-circuited before it
+asked mountinfo. Two modules binding the same path, or one binding it from both
+its own scripts, left a second mount that the inject then d_dropped: detached
+from path resolution, `umount2` returning EINVAL forever, and an entry naming
+`/data/adb/modules` in every app's mount table until reboot. Reproduced on the
+OP15 — two binds, one detach, rc 0, still mounted, still serving the first bind.
+
+The unmount result is no longer consulted at all; the mount table is.
+
+### mount and reload disagreed a fourth time
+
+`run_mount` unmounted a live target **before** checking whether the rule's source
+resolves, so a module shipping a dangling symlink destroyed a third party's mount
+and then created no rule. `run_reload` had the safe order. Also: reload's prune
+treated a bind target as wanted, leaving a stale inject rule that the next boot's
+`clear()` d_dropped out from under the bind; teardown now runs before the clear.
+And reload recorded whiteouts as changed APKs, producing a false REBOOT REQUIRED
+that flip-flopped every boot on any debloat module.
+
+### The report says what it measured
+
+The signature bug of this codebase, in about twenty new places: an error turned
+into a clean result. An engine that answered `version` but not `list` rendered
+both device probes as "Nothing to test". A broken `su` probe became a red FAIL
+blaming a kernel regression. `uid_live.txt` wrote `[]`, `fingerprint.txt` wrote
+empty, `dmesg-nomount.txt` swallowed a restricted dmesg — each in a bug-report
+bundle, each with the correct pattern a few lines away. `pmcache` lost an APK
+invalidation silently, leaving PackageManager on a stale parse and the app
+force-closing with nothing printed.
+
+The verdict ladder now means something: **warn** is what a shipping detector can
+see today, **note** is a measured tell nothing probes. Four rows whose own text
+said nothing probed them came down to note; the Suite's own bind mounts, which
+any app can read out of `/proc/self/mountinfo`, went up to warn — the WebUI hides
+notes, so that row and its fix instructions had never rendered at all.
+
+The manager banner about the umount switch had rendered nothing since v1.3.117:
+plan check ids carry a subject suffix and the WebUI looked up the bare string.
+
+### `nomount` is not a command
+
+The binary lives only inside the module and nothing puts it on `PATH`, so every
+shell line in the README and the issue template was `command not found`. There
+is an alias line now, and the issue template leads with the WebUI's Export
+button. The installer also stopped telling a wrong-ABI user to flash a kernel,
+the success path says **reboot**, and the WebUI finally says *where* to get a
+kernel — it had no external reference of any kind.
+
+### Engine v31
+
+Two hijack allocations reported failure instead of returning `void` — a silent
+one left a rule resolvable-but-unlistable while `nm add` exited 0 — and the
+sibling scan stopped sampling our own inodes, which could hand back `NM_CAP_FSYNC`
+and an `fsync()` returning 0 where every erofs sibling returns `-EINVAL`. Eight
+other samplers already had that guard. The redundant device-wide directory walk
+on the rule-add path is gone; the lazy path that already existed does it only
+when a synthesized directory is actually placed.
+
+All ten kernel versions compile clean at `W=1`. No KMI CRC moves.
+
+### Less of it
+
+The mount-pass block was 24 byte-identical lines in both boot entry points, and
+the rule-count preamble was two more copies; both are single functions in
+`lib.sh` now. The test that held the rule-count copies in step went with them —
+it now pins that there is exactly one. Also gone: the arm64-only build leftovers,
+a `staging/webroot` branch with no producer, and a banner about an inert setting.
+
 ## v1.3.170 — engine v30 (unchanged)
 
 ### Absorbed rows survived their module's uninstall forever
