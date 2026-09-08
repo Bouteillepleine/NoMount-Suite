@@ -146,8 +146,13 @@ fn restore_source_label(source: &Path, lbl: &str) {
     if source.as_os_str().is_empty() {
         return;
     }
-    let l = if lbl.is_empty() { "u:object_r:adb_data_file:s0" } else { lbl };
-    restore_selinux(source, format!("{l}\0").as_bytes());
+    restore_selinux(source, format!("{}\0", label_to_restore(lbl)).as_bytes());
+}
+
+/// What to write back when the row's label field is empty. Split out only so the
+/// fallback can be pinned by a test without an xattr-capable filesystem.
+fn label_to_restore(lbl: &str) -> &str {
+    if lbl.is_empty() { "u:object_r:adb_data_file:s0" } else { lbl }
 }
 
 /// Copy `target`'s SELinux label onto `source`, so the bound file reports the
@@ -231,13 +236,27 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     // harmless (teardown umounts a non-mount as a no-op and restores the label),
     // and the two failure paths below remove it so a failed bind never lingers as
     // a phantom row reload would treat as already-bound.
-    if let Err(e) = append_locked(&t, &s, &lbl) {
-        if let Some(l) = &orig_label { restore_selinux(source, l); }
-        bail!("bind of {t} could not be recorded ({e}); not bound");
-    }
+    //
+    // Keep the ANSWER, not just the success: `append_locked` is idempotent, so
+    // `Ok(false)` means a row for this pair was ALREADY there — written by a pass
+    // that was killed in the L5 window, and holding the only copy of the source's
+    // true original label. Rolling that row back below would delete it, and the
+    // `restore_selinux` on the same line would then re-assert the label this
+    // process just read, which on such a retry is the ROM label the killed pass
+    // already mirrored on. Net: no row, and a module file permanently carrying
+    // `system_file` under /data/adb — the self-perpetuating state
+    // `restore_source_label`'s doc exists to end, reached one door along. So roll
+    // back only what THIS call wrote; a kept row heals at the next teardown.
+    let newly_recorded = match append_locked(&t, &s, &lbl) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(l) = &orig_label { restore_selinux(source, l); }
+            bail!("bind of {t} could not be recorded ({e}); not bound");
+        }
+    };
     // Relabel; abort the whole bind on failure (never expose a mislabeled file).
     if let Err(e) = mirror_selinux(source, target).with_context(|| format!("relabel for bind of {t}")) {
-        remove_record_locked(&t, &s);
+        if newly_recorded { remove_record_locked(&t, &s); }
         if let Some(l) = &orig_label { restore_selinux(source, l); }
         return Err(e);
     }
@@ -247,7 +266,7 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
         libc::mount(sc.as_ptr(), tc.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null())
     };
     if r != 0 {
-        remove_record_locked(&t, &s);
+        if newly_recorded { remove_record_locked(&t, &s); }
         if let Some(l) = &orig_label { restore_selinux(source, l); }
         bail!("bind {} -> {t}: {}", source.display(), std::io::Error::last_os_error());
     }
@@ -276,12 +295,23 @@ fn write_binds_list(body: &str) -> std::io::Result<()> {
     crate::statefile::write_atomic(BINDS_LIST, body)
 }
 
+/// Does this row name exactly this (target, source) pair?
+///
+/// ONE copy, because the idempotency guard in [`append_locked`] and the rollback
+/// filter in [`remove_record_locked`] must agree by construction: "did I write a
+/// row?" and "which rows does my rollback delete?" answering differently is how a
+/// rollback came to throw away a row a killed pass had written — the only copy of
+/// the source's true original label.
+fn row_is(t: &Path, s: &Path, target: &str, source: &str) -> bool {
+    t.to_string_lossy() == target && s.to_string_lossy() == source
+}
+
 /// Drop one (target, source) row from binds.list. Caller must hold the Lock. Used
 /// to undo a record written before a relabel/mount that then failed (L5).
 fn remove_record_locked(target: &str, source: &str) {
     let remaining: String = tracked_full()
         .into_iter()
-        .filter(|(t, s, _)| !(t.to_string_lossy() == target && s.to_string_lossy() == source))
+        .filter(|(t, s, _)| !row_is(t, s, target, source))
         .map(|(t, s, l)| format!("{}\t{}\t{}\n", t.display(), s.display(), l))
         .collect();
     if let Err(e) = write_binds_list(&remaining) {
@@ -292,7 +322,12 @@ fn remove_record_locked(target: &str, source: &str) {
 /// Append a "target\tsource" record to binds.list. Caller must hold the Lock.
 /// Storing the source lets a reload detect a changed backing (re-bind), not just
 /// an added/removed target.
-fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Result<()> {
+///
+/// `Ok(true)` means a row was written by THIS call; `Ok(false)` means one was
+/// already there. The caller needs the difference: its rollback deletes every
+/// row matching the pair, so rolling back a row it did not write throws away the
+/// only copy of the source's true original label. See [`apply`].
+fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Result<bool> {
     use std::os::unix::fs::OpenOptionsExt;
     // IDEMPOTENT. `apply` records BEFORE it mounts (L5), so a pass SIGKILLed in
     // that window leaves a row with no mount -- and `reload` now re-applies such a
@@ -302,11 +337,8 @@ fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Resul
     // label is the one read on the RE-apply, i.e. the ROM label already mirrored
     // onto the source by the killed pass. Keeping the first row keeps the only
     // copy of the source's true original label.
-    if tracked_full()
-        .iter()
-        .any(|(t, s, _)| t.to_string_lossy() == target && s.to_string_lossy() == source)
-    {
-        return Ok(());
+    if tracked_full().iter().any(|(t, s, _)| row_is(t, s, target, source)) {
+        return Ok(false);
     }
     let mut f = fs::OpenOptions::new()
         .create(true)
@@ -336,7 +368,7 @@ fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Resul
         let _ = f.set_len(orig);
         return Err(e);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Parse one binds.list line into (target, source). Tolerates the legacy
@@ -522,4 +554,66 @@ pub fn teardown_all() -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `binds.list` is the only record of the binds we made, and `parse_line` is
+    /// the only reader. Pin the three shapes on disk right now: the current
+    /// 3-field row, and the two legacy ones an upgrade-in-place still meets.
+    #[test]
+    fn a_binds_list_row_round_trips_through_parse_line() {
+        let row = "/my_product/etc/x\t/data/adb/modules/m/my_product/etc/x\tu:object_r:adb_data_file:s0";
+        let (t, s, l) = parse_line(row).expect("a full row parses");
+        assert_eq!(t, PathBuf::from("/my_product/etc/x"));
+        assert_eq!(s, PathBuf::from("/data/adb/modules/m/my_product/etc/x"));
+        assert_eq!(l, "u:object_r:adb_data_file:s0");
+        assert_eq!(format!("{}\t{}\t{}", t.display(), s.display(), l), row);
+
+        // Legacy target+source, no label: the label reads back empty, which is
+        // exactly the case `label_to_restore` answers for.
+        let (t, s, l) = parse_line("/my_product/etc/x\t/data/adb/modules/m/x").unwrap();
+        assert_eq!((t, s, l.as_str()), (PathBuf::from("/my_product/etc/x"),
+                                        PathBuf::from("/data/adb/modules/m/x"), ""));
+        // Legacy target-only: no source, which `restore_source_label` guards on.
+        let (_, s, _) = parse_line("/my_product/etc/x").unwrap();
+        assert!(s.as_os_str().is_empty());
+        assert!(parse_line("   ").is_none(), "a blank line is not a row");
+    }
+
+    /// The idempotency guard and the rollback filter must answer the SAME
+    /// question, or a rollback deletes a row this call did not write.
+    ///
+    /// `append_locked` returns `Ok(false)` when `row_is` already matches, and
+    /// `apply` then skips `remove_record_locked` — whose filter drops EVERY row
+    /// `row_is` matches, including the one a pass killed in the L5 window left
+    /// behind holding the only copy of the source's true original label.
+    #[test]
+    fn the_rollback_matches_exactly_what_the_append_guard_skips() {
+        let (t, s) = ("/my_product/etc/x", "/data/adb/modules/m/my_product/etc/x");
+        assert!(row_is(Path::new(t), Path::new(s), t, s));
+        // A different label on the row does not make it a different row: that is
+        // the whole point — the killed pass's row and this pass's would-be row
+        // name the same pair and only the FIRST holds the true label.
+        assert!(row_is(Path::new(t), Path::new(s), t, s));
+        // Neither half alone matches.
+        assert!(!row_is(Path::new(t), Path::new("/data/adb/modules/other/x"), t, s));
+        assert!(!row_is(Path::new("/my_product/etc/y"), Path::new(s), t, s));
+        // Prefixes are not matches (the rollback must not eat a sibling row).
+        assert!(!row_is(Path::new("/my_product/etc/xy"), Path::new(s), t, s));
+    }
+
+    /// An empty label field means the row cannot say what the source carried, and
+    /// skipping the restore leaves a ROM label on a file under /data/adb which the
+    /// next `apply` then records AS the original — self-perpetuating. Everything
+    /// under /data/adb carries `adb_data_file`, so that is what to write.
+    #[test]
+    fn an_unrecorded_label_falls_back_to_adb_data_file() {
+        assert_eq!(label_to_restore(""), "u:object_r:adb_data_file:s0");
+        assert_eq!(label_to_restore("u:object_r:system_file:s0"), "u:object_r:system_file:s0");
+        // And a row with no source at all is a no-op, not a relabel of "".
+        restore_source_label(Path::new(""), "");
+    }
 }

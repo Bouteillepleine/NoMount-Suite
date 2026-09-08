@@ -545,6 +545,25 @@ pub(crate) fn path_is_representable(p: &Path) -> Result<(), &'static str> {
     if s.contains('\t') {
         return Err("its name contains a tab, which is the separator in binds.list");
     }
+    // Every reader TRIMS before it parses: `nm::parse_list` trims the line and
+    // each field (nm.rs:360, :372, :392) and `absorb::parse_absorbed_pairs`
+    // trims the whole line before `split_once('\t')` (absorb.rs:837). So a name
+    // with an edge space reads back as a DIFFERENT path: the add lands on the
+    // real one, every later lookup and `nm del` addresses the trimmed one, and
+    // neither the re-add nor the prune ever converges — `+1 added, +1 failed`
+    // on every reload, forever, re-d_dropping the live dentry each time
+    // (absorb.rs:1358 measures that cost). Worse, the trim happens BEFORE the
+    // marker `strip_suffix` loop below, so `x (whiteout) ` walks straight past
+    // it and the module gets to choose the rule's KIND; ` (public) ` truncates
+    // the source and forces `public` on a rule nobody asked to be public.
+    // Same shape as the trailing-slash entry whiteout.rs:885 pins, from the
+    // other side. Use `str::trim` — the exact function the parsers use — so the
+    // gate and the parser agree by construction, not by a second list of
+    // spellings (it is Unicode-aware, so NBSP is covered too).
+    if s != s.trim() {
+        return Err("its name begins or ends with whitespace, which `nm list` trims off -- \
+                    the rule would read back as a different path that no prune could delete");
+    }
     if s.contains(" -> ") {
         return Err("its name contains ` -> `, the separator between target and source");
     }
@@ -1942,8 +1961,26 @@ pub fn run_mount() -> Result<()> {
     // per target (it unmounts), and its verdict is carried across in `blocked`:
     // a target it refuses has to be skipped by BOTH passes. The plan is deduped
     // by target above, so one target is one entry and the set is unambiguous.
+    // ...and REFRESH it, non-fatally, now that the teardown and the clear are
+    // done.
+    //
+    // The read above must stay where it is -- it is the fallible refusal, and
+    // moving it past `clear()` reintroduces the hazard its own comment records.
+    // But it is a SNAPSHOT, and it is consumed ~40 lines and several operations
+    // later. `unmount_before_serving` short-circuits to "safe to serve" for any
+    // target the snapshot does not name, so a mount that appeared during that
+    // window is injected over and stranded in mountinfo until reboot -- the very
+    // outcome the early read refuses the pass to avoid. KernelSU runs module
+    // service.sh scripts concurrently, so "a mount appeared mid-pass" is a real
+    // schedule, not a theoretical one.
+    //
+    // `unwrap_or` and not `?`: the refusal already ran and passed. If the second
+    // read fails we are no worse off than before this line existed, and failing
+    // the pass here would strand the device with the engine already cleared.
+    let mounted = crate::absorb::mounted_targets().unwrap_or(mounted);
+
     let mut blocked: std::collections::HashSet<&Path> = std::collections::HashSet::new();
-    // `mounted` was read before `clear()` -- see the note there.
+    // `mounted` was read before `clear()` and refreshed just above.
     for e in &plan {
         served.insert(e.module.as_str());
         // NOT for a Bind. `unmount_before_serving` exists for ONE hazard, and its
@@ -2127,6 +2164,14 @@ mod tests {
             "/system/etc/x (whiteout)",
             "/system/etc/x (public)",
             "/system/etc/x (virtual dir)",
+            // Edge whitespace: every reader trims first, so these evade the
+            // suffix loop above and let the module pick the rule's KIND — a
+            // phantom whiteout, or a truncated source with `public` forced on.
+            "/system/etc/x (whiteout) ",
+            "/system/etc/x (public) ",
+            "/system/etc/x ",
+            // `trim()` is Unicode-aware, so NBSP evades exactly the same way.
+            "/system/etc/x\u{a0}",
         ] {
             assert!(
                 path_is_representable(Path::new(bad)).is_err(),

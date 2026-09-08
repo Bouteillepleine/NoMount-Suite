@@ -1657,6 +1657,18 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                 // until the replacement is live is the only order that can fail
                 // safely.
                 if add_repointing(nm, &now, &source, &live) {
+                    // RECORD BEFORE THE DEL, one re-point at a time. This loop is
+                    // inside a pass every caller kills on a hard deadline, and
+                    // accumulating into `moved` for a single write at the end meant
+                    // a kill here left the new rule live and unrecorded while the
+                    // record still named the old path: the next reload's prune
+                    // deletes the rule nothing claims, and the app is back on the
+                    // stock APK with no record able to rebuild it. Recording first
+                    // is also the safe half-state -- the record names the live
+                    // rule, and a stale rule at a path that no longer exists is
+                    // what the prune is for. Re-points are rare (an app update),
+                    // so the extra read+write costs nothing on a normal pass.
+                    rewrite_absorbed_after_refresh(&[(target.to_path_buf(), now.clone())], &[]);
                     let _ = nm.del(target);
                     moved.push((target.to_path_buf(), now));
                     repointed += 1;
@@ -2283,6 +2295,15 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
                     Some(e) => e.1 = boot.clone(),
                     None => record.push((target.clone(), boot.clone())),
                 }
+                // CHECKPOINT, for the same reason as the main loop's: the tmpfs is
+                // already unmounted and the whiteout already live, and this pass
+                // runs under a hard `nmto` kill. Deferring the only write to after
+                // the loop meant a kill on candidate k+1 left k paths whiteouted
+                // with no record -- and the expiry below is what un-hides them, so
+                // an unrecorded whiteout is a ROM directory hidden with nothing
+                // left that knows to restore it. One write per converted tmpfs;
+                // there are at most a handful on any device.
+                set_absorbed_tmpfs(&record);
                 st.done += 1;
             }
             Err(e) => {
@@ -2592,6 +2613,21 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     // module plan, and the reconcile drops whatever the plan does not name. Held
     // as (target, source) pairs so a directory bind's children are recorded too.
     let mut fresh: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // READ THE RECORD BEFORE THE FIRST IRREVERSIBLE STEP, and check-point into it
+    // per candidate (below). Every entry point kills this pass on a hard deadline
+    // -- `nmto 90 absorb` (service.sh:283), `nmto 60` from the late pass, from
+    // `uidwatch.sh` on EVERY package change, and from `lib.sh`'s --early -- and
+    // the loop's first act per candidate is an `umount_detach` that cannot be
+    // undone. With one write after the whole loop, a kill after candidate k left
+    // k mounts consumed and k rule sets live with NOTHING recorded; the next
+    // reload's prune (mount.rs:1305) then deletes every one of those rules
+    // because no record protects them, the content reverts to stock, and the bind
+    // absorb already ate cannot be re-derived -- `survey()` sees no mount, so no
+    // later absorb can rebuild it. Reboot-only recovery. One atomic write per
+    // CONVERTED mount (a rare event) buys a resumable loop.
+    //
+    // Read here, not at the top: `refresh_app_apks` above writes this same file.
+    let mut record = read_absorbed_pairs();
     for c in &cands {
         // Apply the same directory rule the real run uses, so a dry run can never
         // promise an action the real run would decline.
@@ -2731,6 +2767,20 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         let before = fresh.len();
         let fails = inject(&nm, &c.source, &c.target, &mut fresh, &live_map);
         let served = fresh.len() - before;
+        // CHECKPOINT. The mount is gone and these rules are live; if the pass is
+        // killed on the next candidate they must already be protected from the
+        // next reload's prune. Written even when `fails > 0`: a partially-failed
+        // inject still created rules, which is the same reason the final write
+        // below is unconditional. On a read error there is nothing to merge into
+        // and the file is left alone -- `set_absorbed_pairs` truncates, so a
+        // rewrite from an empty read would destroy every patched-APK rule.
+        if let Ok(all) = record.as_mut() {
+            if served > 0 {
+                merge_absorbed(all, fresh[before..].to_vec());
+                all.sort();
+                set_absorbed_pairs(all);
+            }
+        }
         if fails == 0 {
             done += 1;
         } else {
@@ -2764,7 +2814,12 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     // rules go unrecorded until the next successful one, so a `reload` in between
     // may prune them -- recoverable, and the next absorb re-creates them. Losing
     // the file is not recoverable at all.
-    match read_absorbed_pairs() {
+    //
+    // `record` is the read hoisted above the loop, so this is now the final
+    // reconciliation of a set the per-candidate check-points have already been
+    // writing -- byte-identical to the last check-point when every candidate
+    // served something, and the only write when none did.
+    match record {
         Ok(mut all) => {
             // No prune here: `prune_absorbed_record` already ran at the top of
             // this pass, on the path that reaches this one AND on the early
