@@ -146,10 +146,12 @@ cargo test && cargo clippy --all-targets -- -D warnings
 ANDROID_NDK_HOME=/path/to/ndk scripts/package.sh --build --version vX.Y.Z
 ```
 
-You need the Android NDK for the Rust cross-compile. `nm` is built by `zig cc`
-if zig is on `PATH`; without it, `package.sh` refuses to ship a prebuilt older
-than its own source rather than quietly packaging a stale binary. The NDK's own
-clang builds it too, if you would rather not install zig.
+You need the Android NDK for the Rust cross-compile. `nm` is built from source
+too: by `zig cc` if zig is on `PATH` (what CI uses), otherwise by the NDK's own
+clang, so you do not have to install zig. If neither is available, `package.sh`
+falls back to a prebuilt — but only one that is newer than
+`userspace/src/nm.[ch]`, and it stops with an error rather than quietly
+packaging a stale binary.
 
 Every push runs the unit tests, clippy at `-D warnings`, and shellcheck over the
 module scripts and the build script; a push that touches `hookless/` also runs

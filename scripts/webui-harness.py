@@ -24,6 +24,7 @@ attached to a bug report.
 """
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -69,6 +70,13 @@ COMMANDS = {
     "incident": "cat /data/adb/nomount/incident.log 2>/dev/null",
     "snapshot": "[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0",
     "uidlist": "NM_BIN=%s/nm %s/nomount uid list" % (BIN, BIN),
+    # WITHOUT --write, unlike the page, so `capture` stays read-only. The stub
+    # matches on `check --json`, which the page's `check --json --write` contains.
+    # Missing entirely until now, so `runCheck`/`autoCheck`/`renderCheck`-off-a-
+    # live-run fell through to the unmatched `{out:'', rc:1}` branch -- i.e. the
+    # one code path that cannot be driven at all was the path carrying three of
+    # round 9's Tier-1 findings.
+    "check": "NM_BIN=%s/nm %s/nomount check --json" % (BIN, BIN),
     "pkgs": "pm list packages -3 -U 2>/dev/null | sort",
     # The stub already had an `absorbedlist` branch and COMMANDS had no such key,
     # so `f['absorbedlist']` was always undefined and ABSORBED_N always 0 -- which
@@ -114,6 +122,7 @@ window.ksu = {
     else if (has('nomount/bootcount')) key = 'bootcount';
     else if (has('pm list packages')) key = 'pkgs';
     else if (has('absorbed.list')) key = 'absorbedlist';
+    else if (has('check --json')) key = 'check';
     else if (has(' plan ')) key = 'plan';
     else if (has('/nm') && has(' v ')) key = 'engver';
     if (!key) window.__UNMATCHED.push(cmd.slice(0, 120));
@@ -137,15 +146,32 @@ window.addEventListener('error', function (e) {
 
 def capture():
     os.makedirs(OUT, exist_ok=True)
+    env = dict(os.environ, MSYS_NO_PATHCONV="1")
+    # One warm-up, output discarded. A cold or version-mismatched daemon writes
+    # "adb server is out of date.  killing... / * daemon started successfully *"
+    # to STDOUT, and every fixture then carries that banner as if the device had
+    # said it -- measured: all 18 captured that way, rc=0 throughout, so nothing
+    # complained and the page was fed adb's chatter as getprop/getenforce output.
+    subprocess.run(["adb", "start-server"], capture_output=True, env=env)
     fx = {}
     for key, cmd in COMMANDS.items():
-        env = dict(os.environ, MSYS_NO_PATHCONV="1")
+        # shlex.quote, NOT json.dumps. json.dumps produces a DOUBLE-quoted string,
+        # and `adb shell` hands the whole line to the device's shell, which
+        # expands $d/$id/$mnt/$(basename ...) before `su -c` ever sees them. The
+        # `modules` fixture -- the only one with variables -- therefore captured
+        # EMPTY on every run, so the Modules pane, the mountless/N-mounts badge
+        # and the served count could not be exercised at all. Measured on an OP15,
+        # same command both ways: json.dumps rc=0 len=0, shlex.quote rc=0 len=318.
         p = subprocess.run(
-            ["adb", "shell", "su -c " + json.dumps(cmd)],
+            ["adb", "shell", "su -c " + shlex.quote(cmd)],
             capture_output=True, text=True, env=env,
         )
-        fx[key] = {"out": p.stdout.rstrip("\n"), "rc": p.returncode}
-        print("  %-9s rc=%d %d bytes" % (key, p.returncode, len(p.stdout)))
+        out = p.stdout.rstrip("\n")
+        # A harness that poisons its own inputs is worse than no harness.
+        if "daemon started successfully" in out or "adb server is out of date" in out:
+            sys.exit("FATAL: adb wrote its own banner into %r -- re-run capture" % key)
+        fx[key] = {"out": out, "rc": p.returncode}
+        print("  %-9s rc=%d %d bytes" % (key, p.returncode, len(out)))
     with open(FIXTURES, "w", encoding="utf-8") as f:
         json.dump(fx, f)
     print("wrote %s -- contains package names and uids, do NOT commit" % FIXTURES)
@@ -155,10 +181,14 @@ def build(no_driver=False):
     with open(FIXTURES, encoding="utf-8") as f:
         fx = json.load(f)
     if no_driver:
-        # A kernel built without CONFIG_NOMOUNT. `audit.json` is deliberately
-        # LEFT as captured: a stale report from when the engine worked is the
-        # case where the page's two halves can disagree.
-        for k in ("vfslist", "engver", "plan"):
+        # A kernel built without CONFIG_NOMOUNT. `audit.json` and `check` are
+        # deliberately LEFT as captured: a stale clean report from when the
+        # engine worked is precisely the case where the page's two halves can
+        # disagree, and the one the "false green" findings live in.
+        # uidlist/whiteoutlist/isolated go through `nm` too, so a no-driver
+        # kernel fails them exactly as it fails `vfs list`; blanking only the
+        # first three made the no-driver page healthier than the real thing.
+        for k in ("vfslist", "engver", "plan", "uidlist", "whiteoutlist", "isolated"):
             fx[k] = {"out": "", "rc": 1}
     with open(os.path.join(ROOT, "module", "webroot", "index.html"), encoding="utf-8") as f:
         page = f.read()

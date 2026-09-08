@@ -82,7 +82,13 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             zi.external_attr = (mode & 0xFFFF) << 16
             zi.compress_type = zipfile.ZIP_DEFLATED
             with open(full, "rb") as f:
-                z.writestr(zi, f.read())
+                # compresslevel HERE, not only on the ZipFile: the constructor's
+                # value is copied into the ZipInfo that writestr BUILDS for you,
+                # and a hand-built ZipInfo keeps _compresslevel = None, so every
+                # entry fell back to zlib's default 6. Deterministic either way
+                # (so reproducibility was never at risk), just not the level the
+                # ZipFile line above asks for.
+                z.writestr(zi, f.read(), compresslevel=9)
             count += 1
 
 print("entries: %d -> %s" % (count, out))

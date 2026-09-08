@@ -87,9 +87,20 @@ sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$PROJECT
 # Measured: v1.3.171 built only because its lock already happened to name
 # 1.3.171; `--version v1.3.172` failed outright. --offline touches no network
 # and rewrites nothing but this package's own version line.
-if [ -f "$PROJECT_ROOT/Cargo.lock" ]; then
-    (cd "$PROJECT_ROOT" && cargo update --offline --quiet -p nomount 2>/dev/null) \
-        || (cd "$PROJECT_ROOT" && cargo metadata --offline --format-version 1 >/dev/null 2>&1) \
+#
+# Gated on the version ACTUALLY MOVING, and on "${CARGO:-cargo}" rather than a
+# bare `cargo`. Both were measured against CI run 34229966498: the `package` job
+# has no toolchain step and no registry cache, so with --offline both the update
+# and the `cargo metadata` fallback fail and every single build printed
+#   !! could not refresh Cargo.lock for 1.3.173; --locked builds may fail
+# for a lock that already said 1.3.173 and a job that runs nothing --locked. A
+# warning that is permanently on is a warning nobody reads. `${CARGO:-cargo}`
+# closes the real local case: CARGO is only assigned in setup_toolchain(), far
+# below this and only under --build, so a maintainer whose cargo is not on PATH
+# got this warning here and then a hard --locked failure in build_rust.
+if [ -f "$PROJECT_ROOT/Cargo.lock" ] && [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
+    (cd "$PROJECT_ROOT" && "${CARGO:-cargo}" update --offline --quiet -p nomount 2>/dev/null) \
+        || (cd "$PROJECT_ROOT" && "${CARGO:-cargo}" metadata --offline --format-version 1 >/dev/null 2>&1) \
         || echo "    !! could not refresh Cargo.lock for $NEW_VERSION; --locked builds may fail" >&2
 fi
 
@@ -182,22 +193,42 @@ unset _dirt
 # nm is freestanding C with no libc, so it needs a cross compiler rather than
 # cargo. Only CI ever built it, and packaging silently fell back to the gitignored
 # prebuilt under module/bin/ -- so a local build shipped a STALE nm whenever
-# userspace/src/nm.c had changed, with nothing in the output saying so. Build it
-# here when zig is around, and refuse to ship a prebuilt older than its source.
-# 1 = no zig (fall back to a prebuilt, which the staleness check then polices)
-# 2 = zig IS here and the compile FAILED. Collapsing both into `return 1` made a
-#     genuine compile error print "no zig on PATH", which sends the reader looking
-#     for a toolchain they already have instead of at the error they just caused.
+# userspace/src/nm.c had changed, with nothing in the output saying so.
+#
+# TWO compilers, because the one-compiler version left this machine with none.
+# CI uses zig (pinned 0.14.1 in build.yaml, and that is what a release ships), but
+# no zig means no local nm at all, and the staleness guard below now REFUSES to
+# package a prebuilt older than nm.c -- so "install zig" became the only way to
+# build anything here. The NDK is already a hard requirement for the Rust
+# cross-compile, and its clang builds this file with no warnings at -Wall -Wextra
+# (measured, NDK r29: 6120 bytes, 4449 after sstrip, against zig's ~4 KB). README
+# has claimed this worked since it was written; now it does.
+# 1 = neither compiler here (fall back to a prebuilt, which the staleness check
+#     then polices -- and refuses, if the prebuilt is older than the source)
+# 2 = a compiler IS here and the compile FAILED. Collapsing both into `return 1`
+#     made a genuine compile error print "no zig on PATH", which sends the reader
+#     looking for a toolchain they already have instead of at the error they just
+#     caused.
 build_nm() {
-    local zig
+    local zig cc
     zig="$(command -v zig || true)"
-    if [ -z "$zig" ]; then
+    # api 26 to match the CARGO_TARGET_..._LINKER a few lines below; for a
+    # -nostdlib freestanding link the level selects nothing, but two different
+    # numbers in one file invite the question.
+    cc="${NDK_BIN:-/nonexistent}/aarch64-linux-android26-clang"
+    if [ -n "$zig" ]; then
+        "$zig" cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
+            -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
+            "$PROJECT_ROOT/userspace/src/nm.c" -o "$PROJECT_ROOT/nm-arm64" || return 2
+    elif [ -x "$cc" ]; then
+        echo "==> nm: no zig on PATH, building with the NDK's clang instead"
+        "$cc" -Oz -static -nostdlib -ffreestanding \
+            -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
+            "$PROJECT_ROOT/userspace/src/nm.c" -o "$PROJECT_ROOT/nm-arm64" || return 2
+    else
         return 1
     fi
     make -s -C "$PROJECT_ROOT/userspace/tools/sstrip" >/dev/null 2>&1 || true
-    "$zig" cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
-        -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
-        "$PROJECT_ROOT/userspace/src/nm.c" -o "$PROJECT_ROOT/nm-arm64" || return 2
     "$PROJECT_ROOT/userspace/tools/sstrip/sstrip" -z "$PROJECT_ROOT/nm-arm64" >/dev/null 2>&1 || true
     local profile
     for profile in debug release; do
@@ -208,18 +239,6 @@ build_nm() {
     echo "==> nm built from source ($(wc -c < "$PROJECT_ROOT/target/aarch64-linux-android/release/nm") bytes)"
     return 0
 }
-
-if $BUILD; then
-    build_nm || _nmrc=$?
-    case "${_nmrc:-0}" in
-        0) ;;
-        2) echo "FATAL: zig is on PATH but compiling userspace/src/nm.c FAILED." >&2
-           echo "       Fix the compile error; shipping the previous prebuilt would" >&2
-           echo "       package a binary that does not match the source in this zip." >&2
-           exit 1 ;;
-        *) echo "==> nm: no zig on PATH, will fall back to a prebuilt" ;;
-    esac
-fi
 
 mkdir -p "$RELEASE_DIR/debug" "$RELEASE_DIR/release"
 
@@ -432,20 +451,42 @@ package_zip() {
 
         # nm is arch-shared C, built by build_nm() above (or by CI) into the target
         # dir next to nomount; a committed prebuilt is the last resort.
-        local nm_src="$PROJECT_ROOT/target/$target/$target_subdir/nm"
-        if [ -f "$nm_src" ]; then
-            cp "$nm_src" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
-        elif [ -f "$MODULE_DIR/bin/$abi/nm" ]; then
-            # A prebuilt older than nm.c is a stale binary the zip would present as
-            # current -- the failure this whole check exists to make impossible.
-            if [ "$PROJECT_ROOT/userspace/src/nm.c" -nt "$MODULE_DIR/bin/$abi/nm" ] \
-               || [ "$PROJECT_ROOT/userspace/src/nm.h" -nt "$MODULE_DIR/bin/$abi/nm" ]; then
-                echo "FATAL: $MODULE_DIR/bin/$abi/nm predates userspace/src/nm.[ch]." >&2
-                echo "       Install zig (0.14.x) and re-run, or let CI build it." >&2
-                rm -rf "$staging"
-                exit 1
+        #
+        # BOTH candidates get the SAME staleness test, and that is the fix. The
+        # -nt guard used to sit on the module/bin/ arm ONLY, while the target/ arm
+        # -- the one a local run actually takes -- copied whatever was there, no
+        # questions asked. build_nm() runs only under --build and returned 1 with
+        # no zig, and the message then said "will fall back to a prebuilt": the
+        # prebuilt it landed on was target/, the unpoliced one. Measured on this
+        # tree: target/aarch64-linux-android/*/nm was 3d277a39, dated 2026-08-31,
+        # and nm.c had changed on 2026-09-04 and 2026-09-08. Every local zip built
+        # all week shipped it, and the OP15 the audits stood on was running it,
+        # so no round-8 nm.c fix was ever in force on the device being measured.
+        #
+        # Stale candidates are SKIPPED rather than silently used; if a candidate
+        # existed and every one of them is stale, packaging STOPS. Shipping an old
+        # nm quietly is the one outcome that must be impossible -- the zip would
+        # present it as current and nothing downstream could tell.
+        local nm_cand nm_stale=""
+        for nm_cand in "$PROJECT_ROOT/target/$target/$target_subdir/nm" \
+                       "$MODULE_DIR/bin/$abi/nm"; do
+            [ -f "$nm_cand" ] || continue
+            if [ "$PROJECT_ROOT/userspace/src/nm.c" -nt "$nm_cand" ] \
+               || [ "$PROJECT_ROOT/userspace/src/nm.h" -nt "$nm_cand" ]; then
+                nm_stale="${nm_stale}${nm_stale:+, }$nm_cand"
+                continue
             fi
-            cp "$MODULE_DIR/bin/$abi/nm" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
+            cp "$nm_cand" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
+            break
+        done
+        if [ ! -f "$staging/bin/$abi/nm" ] && [ -n "$nm_stale" ]; then
+            echo "FATAL: every nm candidate for $abi predates userspace/src/nm.[ch]:" >&2
+            echo "         $nm_stale" >&2
+            echo "       Re-run with --build (zig 0.14.x, or the NDK's clang), or take" >&2
+            echo "       the binary from CI. Packaging the old one would ship an nm that" >&2
+            echo "       does not match the source in this zip." >&2
+            rm -rf "$staging"
+            exit 1
         fi
     done
 
@@ -571,6 +612,15 @@ fi
 
 chmod 755 "$MODPATH"/*.sh "$MODPATH"/bin/*/nomount "$MODPATH"/bin/*/nm 2>/dev/null
 
+# ABOVE the source, deliberately. customize.sh spends forty lines choosing THE
+# LAST LINE ON SCREEN -- the right next step for the state this install actually
+# ended in, including "your kernel has no NoMount support, the module installs
+# but injects NOTHING". Printing an unqualified "- NoMount installed" after that
+# stapled a success line under every failure box. Only an abort() escaped it,
+# because abort exits. So say the narrow true thing first, and let customize.sh
+# have the last word.
+ui_print "- Unpacked via recovery"
+
 # Sourced, not exec'd, so customize.sh's abort() is this script's abort().
 if [ -f "$MODPATH/customize.sh" ]; then
     . "$MODPATH/customize.sh"
@@ -578,7 +628,6 @@ else
     ui_print "! customize.sh is missing from this zip - install NOT verified."
 fi
 
-ui_print "- NoMount installed via recovery"
 exit 0
 UPDATER
     # 0755: some recoveries EXEC update-binary rather than handing it to sh. The
@@ -662,7 +711,21 @@ echo "==> NoMount $VERSION build pipeline"
 echo ""
 
 if [ "$BUILD" = true ]; then
+    # setup_toolchain FIRST: build_nm's fallback compiler is $NDK_BIN's clang, and
+    # this is what finds the NDK. (The call used to sit ~440 lines up, before any
+    # of that existed, so build_nm could only ever see zig.)
     setup_toolchain
+
+    build_nm || _nmrc=$?
+    case "${_nmrc:-0}" in
+        0) ;;
+        2) echo "FATAL: a cross compiler is on PATH but compiling userspace/src/nm.c FAILED." >&2
+           echo "       Fix the compile error; shipping the previous prebuilt would" >&2
+           echo "       package a binary that does not match the source in this zip." >&2
+           exit 1 ;;
+        *) echo "==> nm: no zig and no NDK clang; a prebuilt will be used ONLY if it is" >&2
+           echo "    newer than userspace/src/nm.[ch] -- otherwise packaging stops below." >&2 ;;
+    esac
 
     build_rust "debug"
     build_rust "release"
