@@ -15,7 +15,7 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
-const BINDS_LIST: &str = "/data/adb/nomount/binds.list";
+pub(crate) const BINDS_LIST: &str = "/data/adb/nomount/binds.list";
 const LOCK_FILE: &str = "/data/adb/nomount/binds.lock";
 const SELINUX_XATTR: &[u8] = b"security.selinux\0";
 
@@ -123,6 +123,31 @@ fn restore_selinux(p: &Path, label: &[u8]) {
                             label.as_ptr() as *const libc::c_void, label.len(), 0);
         }
     }
+}
+
+/// Put the source file's own label back, now that nothing is bound over it.
+///
+/// The recorded label is EMPTY for a legacy two-field row (`parse_line` tolerates
+/// one) and whenever `read_selinux` failed at bind time -- no label, or a label
+/// longer than the 256-byte buffer. Both restore sites used to skip the restore
+/// entirely in that case, leaving the ROM label (`system_file`) on a module file
+/// under /data/adb. That mistake is SELF-PERPETUATING: the next `apply` reads the
+/// leftover ROM label and records IT as the original, so from then on every
+/// teardown faithfully "restores" a partition label onto a file in the module
+/// tree, and it never heals.
+///
+/// Scope, honestly: /data/adb is 0700 root-only, so no app can reach the file and
+/// no detector can see this. It is not a tell. It is a state file recording a
+/// value that is known to be wrong, and `adb_data_file` is what every file under
+/// /data/adb carries -- so that is the right thing to write when the row cannot
+/// say.
+fn restore_source_label(source: &Path, lbl: &str) {
+    // A legacy TARGET-ONLY row has no source at all; there is nothing to relabel.
+    if source.as_os_str().is_empty() {
+        return;
+    }
+    let l = if lbl.is_empty() { "u:object_r:adb_data_file:s0" } else { lbl };
+    restore_selinux(source, format!("{l}\0").as_bytes());
 }
 
 /// Copy `target`'s SELinux label onto `source`, so the bound file reports the
@@ -269,6 +294,20 @@ fn remove_record_locked(target: &str, source: &str) {
 /// an added/removed target.
 fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
+    // IDEMPOTENT. `apply` records BEFORE it mounts (L5), so a pass SIGKILLed in
+    // that window leaves a row with no mount -- and `reload` now re-applies such a
+    // bind instead of trusting the file, which would otherwise append a second row
+    // for the same pair. Two rows are not merely untidy: the label restore in
+    // `umount_one`/`teardown_all` runs per matching ROW, and the second row's
+    // label is the one read on the RE-apply, i.e. the ROM label already mirrored
+    // onto the source by the killed pass. Keeping the first row keeps the only
+    // copy of the source's true original label.
+    if tracked_full()
+        .iter()
+        .any(|(t, s, _)| t.to_string_lossy() == target && s.to_string_lossy() == source)
+    {
+        return Ok(());
+    }
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -318,8 +357,24 @@ fn parse_line(l: &str) -> Option<(PathBuf, PathBuf, String)> {
 }
 
 /// (target, source) pairs we currently have bound (from binds.list). Read-only.
+///
+/// Infallible on purpose for the callers that only ever ask "how many", but an
+/// unreadable record is NOT an empty one: reporting surfaces that render the
+/// answer to a user must use [`tracked_result`] instead, or a read error becomes
+/// "no binds" and, next to a mount count that came from the kernel, "⚠ N foreign
+/// mount(s)" blaming a module that did nothing.
 pub fn tracked() -> Vec<(PathBuf, PathBuf)> {
     tracked_full().into_iter().map(|(t, s, _)| (t, s)).collect()
+}
+
+/// As [`tracked`], but an unreadable `binds.list` is an error rather than an
+/// empty list. Absent is still `Ok(vec![])` — no binds is a normal state.
+pub fn tracked_result() -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+    match fs::read_to_string(BINDS_LIST) {
+        Ok(s) => Ok(s.lines().filter_map(parse_line).map(|(t, s, _)| (t, s)).collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
 }
 
 /// As [`tracked`], plus each row's recorded original source label.
@@ -386,9 +441,7 @@ pub fn umount_one(target: &Path) -> bool {
     // Put the source file's own label back now that nothing is bound over it.
     for (t, s, lbl) in rows.iter().filter(|(t, _, _)| t == target) {
         let _ = t;
-        if !lbl.is_empty() {
-            restore_selinux(s, format!("{lbl}\0").as_bytes());
-        }
+        restore_source_label(s, lbl);
     }
     let remaining: String = rows
         .into_iter()
@@ -451,9 +504,7 @@ pub fn teardown_all() -> bool {
             continue;
         }
         // Only now is nothing bound over the source, so the label can go back.
-        if !lbl.is_empty() {
-            restore_selinux(&s, format!("{lbl}\0").as_bytes());
-        }
+        restore_source_label(&s, &lbl);
     }
     if !kept.is_empty() {
         if let Err(e) = write_binds_list(&kept) {
