@@ -1,7 +1,8 @@
 # Engine: two ways a synthesized directory gives itself away
 
-**Status:** measured and reproduced on an OP15 (engine v30). Detection shipped in
-Suite v1.3.164 as the `synthesized dir inode collision` check.
+**Status:** measured and reproduced on an OP15 running engine v30; fixed in v31,
+which is what that device runs now. Detection shipped in Suite v1.3.164 as the
+`synthesized dir inode collision` check.
 
 **The fix is written, compile-verified and BOOT-VERIFIED.** Clean at `W=1` on all
 ten pinned kernels (4.9 … 6.18), same as the unpatched baseline; then built for
@@ -17,6 +18,9 @@ Stock maximum on that filesystem is 186, so the three land immediately above it:
 free by construction, and the same digit count as their neighbours. An
 independent scan (188 directories, inodes 2..189) reports no duplicated inode at
 all, and `nomount check` goes from WARN to PASS with the whole report clean.
+Re-read on the live v31 device (2026-09-08): `[PASS] synthesized dir inode
+collision ... 3 director(ies) the engine synthesized checked against 429 on the
+same partition(s); no shared inode`.
 
 ---
 
@@ -219,14 +223,58 @@ The fix mirrors `generic_file_llseek_size()` and computes the size the way the
 placeholder, since answering from the placeholder would just move the divergence
 that arm was written to remove.
 
+### The same oracle, one argument over (found in round 9, NOT yet on a device)
+
+The v31 fix added `if (offset < 0) return -EINVAL;` ahead of the ENXIO test, on
+both directory kinds. That is the one line that does not mirror generic.
+`must_set_pos()` compares `(unsigned long long)*offset >= eof`, and the cast is
+deliberate: a negative offset becomes a huge unsigned value and takes the ENXIO
+arm. `ksys_lseek()` validates only `whence` (and `SEEK_HOLE` is `SEEK_MAX`), so a
+negative offset reaches `->llseek` unfiltered, and erofs and f2fs both route it
+through `generic_file_llseek`. So on v31:
+
+| | `lseek(fd, 0, SEEK_DATA)` | `lseek(fd, -1, SEEK_DATA)` |
+|---|---|---|
+| stock dir | `0` | `ENXIO` |
+| NoMount dir (both kinds) | `0` (fixed in v31) | **`EINVAL`** |
+
+Both arms now use the unsigned compare instead. Written, **not compiled and not
+flashed** -- it needs the next builder run. The negative-offset column was never
+measured on the device: no probe there passes a negative offset, and pushing one
+is a device mutation. Narrow -- it needs a detector that thinks to pass a
+negative offset -- but the project cut a release for this oracle at offset 0, and
+the variant is a one-character change for whoever wrote that probe.
+
+The `SEEK_END` arms keep their `offset < 0` check. Those are correct: there the
+test guards the computed RESULT, which `vfs_setpos()` does reject with `EINVAL`.
+
 ---
 
 # 3. Two further arms of the same two fixes
 
-**Status: written and compile-verified on all ten pinned kernels (4.9 … 6.18) at
-`W=1` with zero diagnostics — but NOT boot-verified.** Both still need a builder
-run (`OnePlus-ReSukiSu_NMS` with `nomount_ref` pointed at the branch) and a flash
-before the measurements below the line can be claimed on a device.
+**Status: shipped.** Both arms are in engine v31, built for OP15 by
+`OnePlus-ReSukiSu_NMS` (run 34225323493) and flashed; the device is running them.
+Compile-verified at `W=1` on all ten pinned kernels (4.9 … 6.18) with zero
+diagnostics.
+
+What is *measured* differs by arm, and the two are not equal:
+
+* **`nm_scan_dir_for_file()` self-sampling** — flashed and serving, but the
+  fsync-consistency measurement has not been re-run, and nothing in
+  `nomount check` probes it. What was re-read on the device (read-only,
+  2026-09-08): `fprobe` over all 25 `/product/priv-app/Mms/lib/arm64/*.so` and
+  over stock `/product/priv-app/AIUnit/lib/arm64/libaiunit_framework.so` agrees
+  on `fsync ok(0)`, `fdatasync ok(0)`, `fadvise ok(0)`, `readahead ok(0)`,
+  `fallocate Bad file descriptor` and `open O_DIRECT Invalid argument` — no
+  divergence. On *this* directory stock answers `fsync` `0` too, so that run
+  confirms consistency, not the erofs-`EINVAL` mechanism the oracle was about.
+* **`SEEK_DATA`/`SEEK_HOLE` on a dir-target directory** — unmeasured **by
+  construction**, not unverified: the Suite builds no dir-target rule, so there
+  is nothing on the device to probe (see the last paragraph of this section).
+  The synthesized half of the same five lines is measured: `oprobe` on
+  `/product/priv-app/Mms` gives `SEEK_DATA(0)=0 SEEK_HOLE(0)=61` against
+  `st_size=61`, and stock `/product/priv-app/AIUnit` gives `0`/`79` against
+  `st_size=79`.
 
 **`nm_scan_dir_for_file()` could sample our own injections.** It was the only
 sampler in the engine without the "never sample ourselves" guard that eight other

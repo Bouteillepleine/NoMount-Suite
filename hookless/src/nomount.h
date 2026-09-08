@@ -30,9 +30,10 @@
  *
  * Do NOT collapse this to a bare "1.0", and do NOT renumber NOMOUNT_VERSION to
  * match it. That counter is monotonic capability, not marketing: the Suite gates
- * on `< 13`, `< 15`, `15..18` and `>= 17`, and an older kernel reporting a HIGHER
- * number than a newer one inverts every one of those silently. */
-#define NM_MODULE_VERSION "1.31.0"
+ * on `< 13` (whiteout.rs) and on `< 15`, `15..18`, `>= 17` and `>= 26`
+ * (doctor.rs), and an older kernel reporting a HIGHER number than a newer one
+ * inverts every one of those silently. */
+#define NM_MODULE_VERSION "1.32.0"
 /* Bumped for the directory-size correction: userspace has no other way to tell
  * whether the running engine keeps a managed erofs directory's i_size in step
  * with the listing. The Suite refuses whiteouts on non-overlayfs precisely
@@ -305,8 +306,32 @@
  *    land on nm_file_fops, which always has .fsync -- handing back NM_CAP_FSYNC
  *    and an fsync() that returns 0 where every erofs sibling returns -EINVAL.
  *    Eight other samplers already carried the guard; this was the one that did
- *    not. */
-#define NOMOUNT_VERSION    31
+ *    not.
+ *
+ * 32: nm_add_rule() refuses a virtual parent that is not a directory, and the
+ *    SEEK_DATA/SEEK_HOLE arms answer a negative offset the way generic does.
+ *
+ *    The first is why this has a number. `nm add /system/etc/hosts/x y` used to
+ *    be accepted, listed and graded clean while serving nothing, because the
+ *    kern_path branch hijacked whatever the parent resolved to without an
+ *    S_ISDIR test -- the found_virtual arm has always refused the identical
+ *    topology with -ENOTDIR. It now returns -ENOTDIR too. That is the same
+ *    false-success class as 29 and 31, and userspace cannot tell the two
+ *    engines apart except by this number: on 31 the caller gets exit 0 and a
+ *    rule, on 32 it gets a refusal it can report.
+ *
+ *    The lseek arms are a detection fix, and small: v31 answered -EINVAL for a
+ *    negative offset where every real directory answers -ENXIO, because the
+ *    sign check was the one line that did not mirror must_set_pos(). Both arms
+ *    now use the same unsigned compare the kernel does, so the answer is
+ *    identical for every offset a caller would use in earnest and the
+ *    divergence is gone for the one it would not.
+ *
+ *    NOMOUNT_NL_PROTO stays 29: no command, attribute, knob or record layout
+ *    moved, and the Suite has no equality test on the engine version -- every
+ *    gate is `<` or `>=`, so a 32 satisfies all of them. */
+
+#define NOMOUNT_VERSION    32
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)

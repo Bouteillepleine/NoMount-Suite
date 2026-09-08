@@ -1176,7 +1176,17 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
          * starts at EOF, and both fail with ENXIO at or past the end. The size
          * is the one nm_file_getattr REPORTS, exactly as SEEK_END computes it --
          * answering these from the raw 4096 placeholder would just move the
-         * divergence the SEEK_END arm was written to remove. */
+         * divergence the SEEK_END arm was written to remove.
+         *
+         * The compare is UNSIGNED on purpose, exactly as must_set_pos() writes
+         * it ((unsigned long long)*offset >= eof): a NEGATIVE offset becomes a
+         * huge unsigned value and takes the ENXIO arm too. There is deliberately
+         * no `offset < 0 -> -EINVAL` here -- ksys_lseek() validates only whence
+         * (SEEK_HOLE is SEEK_MAX), so a negative offset reaches ->llseek
+         * unfiltered, and erofs and f2fs both route it through
+         * generic_file_llseek to ENXIO. Answering EINVAL reopened this same
+         * oracle one argument over. The SEEK_END arm keeps its `offset < 0`
+         * check: there it guards the RESULT, which vfs_setpos() does reject. */
         case SEEK_DATA:
         case SEEK_HOLE: {
             struct nm_inode_info *vi = file_inode(file)->i_private;
@@ -1186,9 +1196,7 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
             if (vi && vi->dir_node &&
                 (sb->s_magic == EROFS_SUPER_MAGIC_V1 || nm_vdir_erofs_size))
                 sz = nm_vdir_size(vi->dir_node, sb->s_blocksize);
-            if (offset < 0)
-                return -EINVAL;
-            if (offset >= sz)
+            if ((unsigned long long)offset >= (unsigned long long)sz)
                 return -ENXIO;
             if (whence == SEEK_HOLE)
                 offset = sz;
@@ -1216,7 +1224,9 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
      * stat(), SEEK_END and the terminal readdir cookie all report the erofs
      * closed form. One lseek pair against one stat, on the same fd, separates
      * them. The synthesized-dir arm above already answers both from its own
-     * size; this is the same five lines so both directory kinds agree. */
+     * size; this is the same five lines so both directory kinds agree --
+     * including the unsigned compare, which sends a negative offset to ENXIO
+     * the way must_set_pos() does. See that arm for why EINVAL is wrong here. */
     if ((whence == SEEK_END || whence == SEEK_DATA || whence == SEEK_HOLE) &&
         S_ISDIR(file_inode(file)->i_mode)) {
         struct nm_inode_info *di = file_inode(file)->i_private;
@@ -1227,8 +1237,7 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
 
             if (sz > 0) {
                 if (whence != SEEK_END) {
-                    if (offset < 0) return -EINVAL;
-                    if (offset >= sz) return -ENXIO;
+                    if ((unsigned long long)offset >= (unsigned long long)sz) return -ENXIO;
                     if (whence == SEEK_HOLE) offset = sz;
                     file->f_pos = offset;
                     return offset;
@@ -5321,6 +5330,23 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 }
                 have_anc = true;
             }
+            /* Everything below this point treats v_inode as a directory, and
+             * nothing above it checked. `nm add /system/etc/hosts/x y` resolves
+             * the parent to a REGULAR FILE: both hijack helpers then hit their
+             * deliberate refusals (no ->iterate*, no ->lookup) and return 0, the
+             * superblock hijack and the inject both succeed, and the add reports
+             * success for a path that can never be served -- nm_list prints the
+             * rule and `nomount check` counts it applied. The found_virtual arm
+             * above already refuses the identical topology with -ENOTDIR when the
+             * parent is a file RULE; a real file has to answer the same way.
+             * Reachable from nm/WebUI/module scripts, not from the Suite, whose
+             * plans come from real module trees. */
+            if (unlikely(!S_ISDIR(v_inode->i_mode))) {
+                err = -ENOTDIR;
+                path_put(&p_path);
+                if (i > 0) v_path[i] = orig_v_path;
+                break;
+            }
             dir_node = nomount_get_dir_node(v_inode);
             fresh_node = !dir_node;
             if (!dir_node) dir_node = __nomount_alloc_dir_node(v_inode);
@@ -5331,14 +5357,24 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 err = -ENOMEM;
             } else {
                 /* Hard failures, both of them. The only non-deliberate way
-                 * either returns non-zero is the kmem_cache_zalloc; the refusals
-                 * inside them (no ->lookup, no ->iterate*) return 0 on purpose
-                 * and leave the rule inert, which is the documented choice.
-                 * Swallowing -ENOMEM produced one of the two half-hijacked
-                 * shapes the engine refuses to build anywhere else -- resolvable
-                 * but absent from readdir, or listed but -ENOENT to stat -- and
-                 * still returned 0, so nm_list printed the rule and `nomount
-                 * check` called the plan clean. See each helper's comment. */
+                 * either returns non-zero is the kmem_cache_zalloc: swallowing
+                 * that -ENOMEM produced one of the two half-hijacked shapes the
+                 * engine refuses to build anywhere else -- resolvable but absent
+                 * from readdir, or listed but -ENOENT to stat -- and still
+                 * returned 0, so nm_list printed the rule and `nomount check`
+                 * called the plan clean.
+                 *
+                 * The refusals inside them (no ->iterate*, no ->lookup) also
+                 * return 0, and that is NOT inert, whatever the earlier wording
+                 * here said: virtual_parent refusing still lets dir_inode
+                 * install ->lookup below it, which IS the first of those two
+                 * shapes. It is tolerated only because it is unreachable -- a
+                 * directory inode missing either op does not exist on erofs,
+                 * f2fs, overlayfs or tmpfs on any supported version, and the
+                 * S_ISDIR gate above is what keeps a non-directory from reaching
+                 * the refusals at all. If a filesystem ever turns up without one,
+                 * make the refusals return -EOPNOTSUPP; the unwind below already
+                 * copes with a non-zero err here. See each helper's comment. */
                 err = nomount_hijack_virtual_parent(dir_node, v_inode);
                 if (!err)
                     err = nomount_hijack_dir_inode(dir_node, v_inode);
@@ -5780,8 +5816,11 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                  * miss it -- the same test the ancestor and shadowing samples
                  * use. On < 6.8 this also protects nm_stock_map_dev(), whose
                  * d_real_inode() arm has no .d_real on nm_dops and would answer
-                 * with our own sb's dev rather than the erofs lower. */
-                if (ci && (ci->i_op == &nm_file_iops || ci->i_op == &nm_dir_iops))
+                 * with our own sb's dev rather than the erofs lower. A NULL
+                 * inode poisons as well, so the sample below is never taken on
+                 * one -- kern_path() cannot hand back a negative dentry, but the
+                 * eight sibling guards all skip on NULL and this one must too. */
+                if (!ci || ci->i_op == &nm_file_iops || ci->i_op == &nm_dir_iops)
                     r = -EINVAL;
 
                 /* Read the label and the lower dev BEFORE dropping the
