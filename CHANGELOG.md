@@ -11,6 +11,28 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.176 — engine v32 (unchanged)
+
+Two layout fixes to the Hidden apps list, both introduced by v1.3.174's own
+change and both caught on the phone rather than in review.
+
+Deduplicating that list added a note to the rows an explicit entry and a glob
+both cover — *"also covered by `*.duckdetector`"* — which is worth saying, since
+it is why removing one of them will not un-hide the app. But the status column
+was `flex: 0 0 auto`, so it never shrank, and the package name (`min-width: 0`,
+`word-break: break-all`) absorbed every pixel it took. On the rows carrying that
+note the name collapsed to **one character per line**.
+
+The note now sits on its own line under the row, where a second sentence belongs,
+and the status column can shrink so it can never crush the name again whatever
+text lands in it.
+
+Fixing that by letting the row wrap then moved the ✕ onto a line of its own
+whenever the name was long, so the buttons marched down the card instead of
+lining up. The row no longer wraps at all: the name, status and note share one
+growing column that wraps internally, and the buttons keep the same place on
+every row.
+
 ## v1.3.174 — engine v32
 
 The audit before a release tag. Nine reviewers over the whole tree, on the build
