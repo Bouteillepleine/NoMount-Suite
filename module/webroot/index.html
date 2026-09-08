@@ -649,7 +649,11 @@
      Visual language mirrors the ReSukiSU manager's liquid-glass capsule:
      24px radius, hairline white gradient border, soft elevation, and a
      backdrop blur where the WebView supports it. */
-  .wrap { padding-bottom: 108px; }
+  /* The capsule is fixed and its own padding adds env(safe-area-inset-bottom),
+     so a flat 108px here is short by exactly the gesture-bar inset on every
+     device that has one -- and the last block of the last card scrolls under
+     the bar with no way to reach it. Reserve the same inset the bar reserves. */
+  .wrap { padding-bottom: calc(108px + env(safe-area-inset-bottom)); }
   .tab { display: none; }
   .tab.on { display: block; animation: tabin .18s ease both; }
   @keyframes tabin { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
@@ -2320,7 +2324,12 @@
   const VERDICT_LABEL = {
     fail: "needs attention",
     reboot: "reboot to finish",
-    warn: "will bite later",
+    // NOT "will bite later". That wording predates the ladder round 8 settled:
+    // warn now means A SHIPPING DETECTOR CAN SEE THIS TODAY, and note means a
+    // measured tell nothing probes. "Later" describes the old meaning and reads
+    // as "not yet a problem" on the one row that is a problem right now -- the
+    // hook-framework bind sitting in every app's mount table while you read it.
+    warn: "a detector can see this",
     unmeasured: "not measured",
   };
   function isAttention(v) { return v === "fail" || v === "reboot" || v === "warn"; }
