@@ -11,6 +11,41 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
 
+## v1.3.172 — engine v31 (unchanged)
+
+Three things v1.3.171 got wrong, two of them visible on the Check tab.
+
+### A version bump could not be built
+
+`package.sh` stamps the new version into `Cargo.toml` and left `Cargo.lock`
+naming the old one. The builds are `--locked` — which exists so the shipped
+binary cannot resolve a different dependency set from the one the tests were
+green against — so cargo refused to reconcile them and the run died on the
+first cross-compile:
+
+    error: cannot update the lock file ... because --locked was passed
+
+v1.3.171 built only because its lock already happened to say `1.3.171`. Every
+bump after it would have failed. The lock is refreshed offline, in the same
+place the stamp is written, so the two cannot drift again.
+
+### "will bite later" was the old ladder talking
+
+v1.3.171 settled what the two amber verdicts mean: **warn** is something a
+shipping detector can see *today*, **note** is a measured tell nothing probes.
+The badge still read *will bite later* — the previous meaning — so the one row
+that is a live, app-readable fact was labelled as a future concern. It reads
+`a detector can see this`.
+
+### The nav bar covered the last thing you were reading
+
+`.wrap` reserved a flat 108px for the floating capsule, but the capsule's own
+padding adds `env(safe-area-inset-bottom)` on top of that. On any device with a
+gesture bar the sum is larger than 108px, so the bottom of the last card — in
+practice the *What was measured* block, the evidence behind the finding — sat
+under the bar with no way to scroll it clear. Reserve the same inset the bar
+reserves.
+
 ## v1.3.171 — engine v31
 
 Round 8: twelve reviewers over the whole tree, then a device pass on an OP15
