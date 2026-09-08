@@ -95,7 +95,15 @@ pub fn rom_dirs_are_dirent_packed() -> bool {
         "/system/app", "/system/priv-app", "/system/etc", "/product/app",
         "/product/priv-app", "/product/etc", "/vendor/etc", "/system_ext/app",
     ];
-    let mut checked = 0usize;
+    // No cross-root counter. `take(12)` per root is already the bound (8 roots,
+    // <= 96 stats, all of them cheap), and a `checked > 60` cap ACCUMULATED
+    // across roots -- so from roughly the sixth root on, each remaining root got
+    // one child sampled and then bailed, leaving `/system_ext/app` and
+    // `/vendor/etc` effectively unsampled. Failing to prove the shape is not
+    // neutral: `mount.rs` then never calls `set_dir_shape(true)`, the engine
+    // keeps the 4096 placeholder for synthesized directories, and
+    // `whiteout::measurable_hole` warns about holes the engine would have
+    // corrected.
     for root in ROOTS {
         let root = Path::new(root);
         if !root.is_dir() {
@@ -110,10 +118,6 @@ pub fn rom_dirs_are_dirent_packed() -> bool {
             let p = e.path();
             if p.is_dir() && fits_erofs_shape(&p) {
                 return true;
-            }
-            checked += 1;
-            if checked > 60 {
-                break;
             }
         }
     }

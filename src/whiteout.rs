@@ -132,7 +132,42 @@ pub fn read() -> Result<Vec<String>> {
     Ok(parse(&raw))
 }
 
-/// Pure: trimmed, comment/blank-stripped, order-preserving, deduplicated.
+/// Mirror the engine's `nm_norm_vpath`: collapse runs of `/`, drop a trailing
+/// one. `nm_alloc_rule` does `while (v_len > 1 && v_path[v_len-1] == '/') v_len--;`
+/// and then normalises, and `nm list` prints the NORMALISED spelling — so a rule
+/// filed from `/product/app/AIMemory/` comes back as `/product/app/AIMemory`.
+///
+/// We persisted the raw string and compared it against that, which broke both
+/// readers at once: `whiteout list` reported "not applied (and no such path on
+/// this ROM)" forever for a path that was hidden right then, and
+/// `run_reload`'s `prunable()` — `!durable_whiteouts.contains(target)` against
+/// the kernel's spelling — DELETED the whiteout on every reload while the
+/// convergence loop re-added it and inflated the `+N rules` count. A shell tab
+/// completing a directory name is all it takes to produce the entry.
+///
+/// This is the one normalisation `validate` refuses to do to `..` and to
+/// symlinks, and deliberately so: those change WHICH FILE is named, so the
+/// string a human reads back must stay the string they typed. A trailing or
+/// doubled `/` names the same file either way, so normalising it costs the
+/// reader nothing and is the only thing that makes our record and the engine's
+/// agree. Collapse-then-trim is equivalent to the engine's trim-then-collapse.
+fn norm(p: &str) -> String {
+    let mut out = String::with_capacity(p.len());
+    for c in p.chars() {
+        if c == '/' && out.ends_with('/') {
+            continue;
+        }
+        out.push(c);
+    }
+    while out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    out
+}
+
+/// Pure: trimmed, normalised, comment/blank-stripped, order-preserving,
+/// deduplicated. Normalising HERE also heals a file already on disk, and the
+/// dedup below then collapses the two spellings of one entry into one.
 fn parse(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -140,8 +175,9 @@ fn parse(raw: &str) -> Vec<String> {
         if e.is_empty() || e.starts_with('#') {
             continue;
         }
-        if !out.iter().any(|x| x == e) {
-            out.push(e.to_string());
+        let e = norm(e);
+        if !out.contains(&e) {
+            out.push(e);
         }
     }
     out
@@ -180,6 +216,21 @@ pub(crate) fn validate(p: &str) -> Result<()> {
     if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         anyhow::bail!("refusing {p}: '..' is not allowed in a whiteout path (pass the resolved path)");
     }
+    // A whiteout target is the SECOND door into the rule table, and it did not
+    // ask the question the first one asks. `mount::path_is_representable` (see
+    // its doc for the escalation) is not a cosmetic check: `nm::parse_list` is
+    // line-oriented, so a target carrying a newline comes back out of `nm list`
+    // as an extra rule that `absorb::refresh_app_apks` and `add_repointing` will
+    // act on — injecting a module's file over an installed app's base.apk, as
+    // root. Reachable with no user action at all: `absorb::rom_tmpfs_target`
+    // takes field 4 of a mountinfo line and OCTAL-UNESCAPES it, so a module that
+    // mounts a tmpfs on a path containing `\012` hands us a real newline here,
+    // and this function is the only gate between it and `nm.whiteout()`.
+    // The CLI reaches the same hole more cheaply: a persisted entry with a
+    // newline in it splits into two on the next `parse()`, and `apply()` then
+    // fails — non-zero, from a boot script — on every boot thereafter.
+    crate::mount::path_is_representable(path)
+        .map_err(|why| anyhow::anyhow!("refusing {p}: {why}"))?;
     // DELEGATE the rest to the predicate the module plan uses, rather than
     // re-deriving a weaker subset of it.
     //
@@ -202,24 +253,42 @@ pub(crate) fn validate(p: &str) -> Result<()> {
     // relative path its `components().nth(1)` reads the second component as the
     // partition, which accepts `system/bin/x`.
     crate::mount::can_whiteout(path).map_err(|why| anyhow::anyhow!("refusing {p}: {why}"))?;
-    // ...and again on the RESOLVED path, because the engine resolves the vpath
-    // with `kern_path(LOOKUP_FOLLOW)` and `can_whiteout` is a pure string test.
+    // ...and again on the RESOLVED path.
     //
-    // Refusing `..` closed one half of that hazard and left the other wide open:
-    // `/system/vendor`, `/system/product` and `/system/system_ext` are SYMLINKS to
-    // the corresponding partition roots on every modern Android — verified on an
-    // OP15 (CPH2747), 2026-09-07 — and each is three components, so
-    // `is_partition_root` says no and `system` is not a non-ROM root. So
-    // `nomount whiteout add /system/vendor` was accepted, written to
-    // `whiteouts.txt`, applied immediately, and re-applied at every boot by
-    // `whiteout::apply` — landing a whiteout on `/vendor`, the bare-partition-root
-    // shape this project records as masking every stock entry and aborting
-    // forkSystemServer. Durable, so a reboot does not recover it. Reachable from
-    // the CLI and from the WebUI's text field.
+    // CORRECTED (round 8). The round-7 rationale here claimed that
+    // `whiteout add /system/vendor` "lands a whiteout on /vendor, the
+    // bare-partition-root shape that masks every stock entry and aborts
+    // forkSystemServer". Re-read against `hookless/src/nomount.c`, that is not
+    // what the engine does, and the difference matters to anyone reasoning from
+    // this comment later:
+    //
+    //   * `nomount_generate_virtual_topology()` walks the vpath STRING back to
+    //     its last `/`, resolves only the PARENT prefix with `kern_path`, and
+    //     files the rule as a child node named by the last component.
+    //     Enforcement is that child: `nomount_hijacked_lookup()` matches the
+    //     name inside the parent's `dir_node` and, for NM_FLAG_WHITEOUT,
+    //     `d_add(dentry, NULL)`.
+    //   * `nm_alloc_rule()`'s `kern_path` on the FULL vpath only samples stock
+    //     metadata for NM_FLAG_SHADOWS_STOCK / NM_FLAG_IS_DIR. It never
+    //     relocates the rule.
+    //   * A bare partition root is refused by the engine independently:
+    //     `nm_target_too_shallow()` returns -EINVAL below two components.
+    //
+    // So `/system/vendor` hides the NAME `vendor` INSIDE `/system` — every
+    // legacy `/system/vendor/...` lookup breaks — and no rule on `/vendor` is
+    // ever created. Smaller blast radius than the old comment claimed, still a
+    // bad idea, and the gate is kept because it is one `canonicalize` and
+    // refusing it costs nothing. `/system/vendor`, `/system/product` and
+    // `/system/system_ext` really are symlinks to the partition roots on every
+    // modern Android (verified on an OP15/CPH2747, 2026-09-07), each is three
+    // components so `is_partition_root` says no, and `system` is not a non-ROM
+    // root — which is why the literal string sails through `can_whiteout` and
+    // only the resolved form catches it.
     //
     // The RESOLVED path is only the gate. What gets persisted is still the string
     // the user typed — the argument for that stands, and a whiteout list is read
-    // back by humans.
+    // back by humans. (`norm` above is not an exception to it: collapsing a
+    // trailing `/` does not change which file is named.)
     //
     // A path that does not exist cannot be resolved and is left to the string
     // test alone: `add` deliberately accepts an absent target ("recorded anyway"),
@@ -261,7 +330,10 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     // the only other writer, it is bounded, and its "proceed unserialised rather
     // than stall" fallback is the correct trade for a user-initiated verb.
     let _pass = crate::mount::pass_lock();
-    let t = target.trim().to_string();
+    // Normalised to the spelling the engine will file the rule under -- see
+    // `norm`. Without it the entry we persist and the target `nm list` reports
+    // are different strings, and every reader that compares them is wrong.
+    let t = norm(target.trim());
     validate(&t)?;
     let p = Path::new(&t);
     // Warn, do not refuse. Module whiteouts are applied off overlayfs (see
@@ -314,16 +386,34 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     }
 }
 
+/// Take the pass lock and remove. For a caller that already holds it, use
+/// [`remove_locked`] — see the note there.
 pub fn remove(target: &str) -> Result<()> {
-    // Same lock, same reason as `add`. NB `absorb` calls this while already
-    // holding the pass lock -- `pass_lock` is a plain flock on one path and this
-    // process would deadlock against itself if it blocked, which is precisely why
-    // it is a BOUNDED try-lock that proceeds unserialised on timeout rather than
-    // a blocking one. The absorb path therefore pays the 25s wait once and then
-    // carries on correctly; a future refactor that makes the lock blocking or
-    // re-entrant must revisit this line.
+    // Same lock, same reason as `add`.
     let _pass = crate::mount::pass_lock();
-    let t = target.trim();
+    remove_locked(target)
+}
+
+/// `remove`, for a caller that ALREADY HOLDS `mount::pass_lock()`.
+///
+/// CONTRACT: only call this from inside a pass that took the lock. It does not
+/// take it, so calling it from anywhere else re-opens the unserialised
+/// read-modify-write `add`'s comment describes.
+///
+/// It exists because `pass_lock` is a plain flock on one path, and flock locks
+/// attach to the open file description: a second `pass_lock()` in the SAME
+/// process conflicts with the first. `absorb::run_absorb` holds the lock and the
+/// tmpfs takeover called `whiteout::remove` per entry, so each of those paid the
+/// full PASS_LOCK_WAIT spin (25s) and then proceeded unserialised anyway, with a
+/// "another pass still holds ..." line on stderr for a pass that was holding it
+/// itself. A migration touching a handful of entries stalled the boot for
+/// minutes for nothing.
+pub(crate) fn remove_locked(target: &str) -> Result<()> {
+    // Normalised for the same reason `add` normalises: the durable list holds the
+    // engine's spelling, so `whiteout remove /product/app/Foo/` must match the
+    // `/product/app/Foo` we wrote.
+    let normalised = norm(target.trim());
+    let t = normalised.as_str();
     let mut list = read()?;
     let before = list.len();
     list.retain(|x| x != t);
@@ -352,22 +442,36 @@ pub fn remove(target: &str) -> Result<()> {
     }
 }
 
-/// Targets the engine is currently whiting out, from `nm list`.
+/// The engine's live rule set, or an error saying we could not read it.
 ///
-/// [`crate::nm::parse_list`], not a local split. This was one of the last two
-/// hand-rolled readers of that text, against the parser's own documented
-/// invariant that it is the ONE reader ("a change to the client's output format is
-/// one edit"). It peeled ` (whiteout)` as a SUFFIX and nothing else, so a rule
-/// carrying ` (public)` after it would not have matched -- and `whiteout list`
-/// would then report every saved entry as "not applied" while the engine was
-/// serving all of them. Unreachable only because `nm`'s whiteout path sends flag
-/// 4 and never 64, which is a property of the client, not of this function.
-fn live_whiteouts() -> std::collections::HashSet<String> {
-    crate::nm::parse_list(&Nm::new().list().unwrap_or_default())
+/// `unwrap_or_default()` used to stand here and in [`injected_targets`], and it
+/// turned "cannot ask the engine" into "the engine holds nothing". `Nm::list`
+/// fails on a dead engine, a missing or relocated `nm`, a netlink timeout, and
+/// -- BY CONTRACT -- on a TRUNCATED dump (`userspace/src/nm.c` exits 4 there
+/// precisely so "a prefix" and "the whole set" stay distinguishable). Every one
+/// of those became an empty set, and the two callers then asserted something
+/// they had not measured: `list()` printed "not applied (and no such path on this
+/// ROM)" -- the exact hidden-vs-absent conflation it exists to end -- for every
+/// saved entry, and `scan()` lost the `injected` guard entirely and started
+/// proposing whiteouts over a module's OWN content.
+///
+/// [`crate::nm::parse_list`], not a local split, for the reason that parser
+/// documents: it is the ONE reader of the client's output. The hand-rolled
+/// version here peeled ` (whiteout)` as a suffix and nothing else, so a rule
+/// carrying ` (public)` after it would not have matched.
+fn live_rules() -> Result<Vec<crate::nm::LiveRule>> {
+    Ok(crate::nm::parse_list(&Nm::new().list().context(
+        "cannot read the engine's rule set, so nothing can be said about which entries are applied",
+    )?))
+}
+
+/// Targets the engine is currently whiting out, from `nm list`.
+fn live_whiteouts() -> Result<std::collections::HashSet<String>> {
+    Ok(live_rules()?
         .into_iter()
         .filter(|r| r.kind == crate::nm::LiveKind::Whiteout)
         .map(|r| r.target.to_string_lossy().into_owned())
-        .collect()
+        .collect())
 }
 
 pub fn list() -> Result<()> {
@@ -379,7 +483,7 @@ pub fn list() -> Result<()> {
     // Path-absence alone cannot tell "hidden" from "was never there": an entry for a
     // path this ROM does not ship reported `hidden`, which reads as working. Ask the
     // engine which targets it is actually serving, and use absence only to confirm.
-    let live = live_whiteouts();
+    let live = live_whiteouts()?;
     for e in &entries {
         let applied = live.contains(e);
         let present = Path::new(e).exists();
@@ -434,13 +538,15 @@ pub fn apply() -> Result<()> {
 /// there, and proposing a whiteout for it would hide that module's own content.
 /// The old three-entry list never needed this check; a directory walk does.
 ///
-/// Through the shared parser, for the reason [`live_whiteouts`] spells out.
-fn injected_targets() -> std::collections::HashSet<String> {
-    crate::nm::parse_list(&Nm::new().list().unwrap_or_default())
+/// Through [`live_rules`], which is also why the failure PROPAGATES: with the
+/// dump unreadable this set is empty, and an empty set here means the guard is
+/// gone and the scan proposes hiding module content.
+fn injected_targets() -> Result<std::collections::HashSet<String>> {
+    Ok(live_rules()?
         .into_iter()
         .filter(|r| r.kind == crate::nm::LiveKind::Inject)
         .map(|r| r.target.to_string_lossy().into_owned())
-        .collect()
+        .collect())
 }
 
 /// Can an ordinary, non-root-granted app see this path at all?
@@ -451,7 +557,7 @@ fn injected_targets() -> std::collections::HashSet<String> {
 /// interfere with how root is invoked. uid 9999 (`nobody`) is never on the allow
 /// list, and was verified on OP15 to see stock AND injected files while getting
 /// ENOENT for `su`.
-fn app_can_see(path: &str) -> bool {
+fn app_can_see_raw(path: &str) -> bool {
     // Single-quoted: `path` is a FILENAME READ OFF THE FILESYSTEM, and this string
     // is handed to a shell. A ROM (or a module writing into one) carrying a name
     // like `x; id` would otherwise run it. uid 9999 is unprivileged, but a shell
@@ -462,6 +568,27 @@ fn app_can_see(path: &str) -> bool {
         .output()
         .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(true) // cannot ask -> do not silently drop the candidate
+}
+
+/// Does the visibility probe work AT ALL on this device?
+///
+/// `unwrap_or(true)` above honours "cannot ask -> do not drop the candidate" for
+/// exactly one of the two ways of not being able to ask: `su` failing to SPAWN.
+/// If `su` exists but refuses the `su <uid> -c` form, is denied by the manager
+/// for this context, or is one of the cloaked/renamed shapes this project ships
+/// against, `.output()` returns `Ok` with a non-zero status -- so every candidate
+/// read as invisible, every one was dropped, and `suggest` then printed "no
+/// ordinary app can see them, so hiding them would be a no-op", an assertion the
+/// code had not measured. On the only devices where `suggest` has anything to say
+/// (a real `install-recovery.sh` or `magiskinit` on the ROM) the answer was
+/// "nothing to suggest" plus a confident explanation.
+///
+/// `/system/bin/sh` is on every device and visible to every app, so a `false`
+/// here means the probe itself does not work. Cached: `scan` would otherwise
+/// re-run it per candidate for an answer that cannot change within a run.
+fn probe_works() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *P.get_or_init(|| app_can_see_raw("/system/bin/sh"))
 }
 
 /// One thing the scan found worth hiding.
@@ -477,9 +604,15 @@ pub struct Candidate {
 ///
 /// Returns (candidates, skipped_invisible, skipped_injected) so the caller can
 /// say what was filtered rather than just showing a short list.
-pub fn scan() -> (Vec<Candidate>, usize, usize) {
+///
+/// `Err` when the engine's rule set could not be read: without it the
+/// "NoMount is already serving this" guard below is silently absent, and the
+/// scan would propose whiteouts over a module's own content.
+pub fn scan() -> Result<(Vec<Candidate>, usize, usize)> {
     let have = read().unwrap_or_default();
-    let injected = injected_targets();
+    let injected = injected_targets()?;
+    // One control probe for the whole sweep, not one answer per candidate.
+    let can_probe = probe_works();
     let (mut out, mut invisible, mut ours) = (Vec::new(), 0usize, 0usize);
 
     // Depth 2, not 1. `/system/app` and `/system/priv-app` hold one DIRECTORY per
@@ -517,7 +650,7 @@ pub fn scan() -> (Vec<Candidate>, usize, usize) {
                 ours += 1;
                 continue;
             }
-            if !app_can_see(&ps) {
+            if can_probe && !app_can_see_raw(&ps) {
                 invisible += 1;
                 continue;
             }
@@ -531,12 +664,12 @@ pub fn scan() -> (Vec<Candidate>, usize, usize) {
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
-    (out, invisible, ours)
+    Ok((out, invisible, ours))
 }
 
 /// `nomount whiteout suggest` — scan THIS device and propose what it finds.
 pub fn suggest() -> Result<()> {
-    let (found, invisible, ours) = scan();
+    let (found, invisible, ours) = scan()?;
     for c in &found {
         let note = if c.hole { " (hiding it leaves a measurable hole in the parent)" } else { "" };
         println!("{}\t{}{note}", c.path, c.why);
@@ -550,7 +683,14 @@ pub fn suggest() -> Result<()> {
     } else {
         println!("\n{} candidate(s); add with: nomount whiteout add <path>", found.len());
     }
-    if invisible > 0 {
+    if !probe_works() {
+        // Say what was NOT measured, instead of the claim this used to make on
+        // the same evidence. See `probe_works`.
+        println!(
+            "(visibility filter unavailable: `su 9999` did not answer for /system/bin/sh, so \
+             nothing was skipped on the ground that no ordinary app can see it)"
+        );
+    } else if invisible > 0 {
         println!(
             "({invisible} match(es) skipped: no ordinary app can see them, so hiding them \
              would be a no-op)"
@@ -653,11 +793,14 @@ mod tests {
     /// `/system/vendor -> /vendor`, `/system/product -> /product` and
     /// `/system/system_ext -> /system_ext` exist on every modern Android —
     /// verified on an OP15 (CPH2747), 2026-09-07. Each is three components, so
-    /// `is_partition_root` says no; `system` is not a non-ROM root; and the engine
-    /// then resolves the vpath with `kern_path(LOOKUP_FOLLOW)` and lands the
-    /// whiteout on the bare partition root. Durable and re-applied at boot, so
-    /// rebooting does not recover the device. Reachable from the CLI and from the
-    /// WebUI's text field.
+    /// `is_partition_root` says no and `system` is not a non-ROM root, which is
+    /// how the literal string clears `can_whiteout`. What the engine then does
+    /// with it is NOT "a whiteout on /vendor" — see the corrected note in
+    /// `validate`: the rule is filed under the vpath string's parent, so it hides
+    /// the name `vendor` inside `/system` and breaks every legacy
+    /// `/system/vendor/...` lookup, while `/vendor` itself is untouched and the
+    /// bare root is refused by `nm_target_too_shallow` anyway. Still worth
+    /// refusing, and one `canonicalize` to do it.
     ///
     /// Tested on the PURE half: the resolution itself is one `canonicalize` and
     /// needs a real ROM, but the decision it feeds does not.
@@ -708,5 +851,63 @@ mod tests {
         // ...while the ordinary paths keep working.
         assert!(validate("/product/overlay/Foo.apk").is_ok());
         assert!(validate("/system/bin/install-recovery.sh").is_ok());
+    }
+
+    /// A whiteout target is the SECOND door into the rule table, and it did not
+    /// ask the question the first one asks. A newline in a target is a forged
+    /// rule in `nm list` that `absorb` acts on as root, and it arrives with no
+    /// user action: `absorb::rom_tmpfs_target` octal-unescapes a mountinfo field
+    /// and hands the result straight to `validate`.
+    #[test]
+    fn a_whiteout_target_the_wire_format_cannot_carry_is_refused() {
+        for bad in [
+            "/system/etc/A\n/data/app/~~a==/com.bank-1==/base.apk",
+            "/system/etc/A\r/x",
+            "/system/etc/A\tB",
+            "/system/etc/A -> /data/adb/modules/evil/p",
+            "/system/etc/A [UID: 10123]",
+            "/system/etc/A (whiteout)",
+            "/system/etc/A (public)",
+            "/system/etc/A (virtual dir)",
+        ] {
+            assert!(validate(bad).is_err(), "{bad:?} must be refused");
+            assert!(
+                crate::mount::path_is_representable(Path::new(bad)).is_err(),
+                "{bad:?}: the two gates must agree"
+            );
+        }
+        // ...and the spellings that are only a hazard as a SUFFIX stay legal
+        // mid-path, exactly as the plan's gate has it.
+        assert!(validate("/system/etc/A (whiteout) B/c.conf").is_ok());
+        assert!(validate("/system/etc/A [UID] B").is_ok());
+    }
+
+    /// The engine normalises the vpath and `nm list` prints the normalised
+    /// spelling, so the string we persist has to be that one. It was not: a
+    /// trailing `/` — which shell tab-completion appends to any directory —
+    /// made `whiteout list` say "not applied (and no such path on this ROM)"
+    /// forever, and made `run_reload`'s prune DELETE the whiteout on every run.
+    #[test]
+    fn norm_mirrors_the_engines_vpath_normalisation() {
+        assert_eq!(norm("/product/app/AIMemory/"), "/product/app/AIMemory");
+        assert_eq!(norm("/product/app/AIMemory//"), "/product/app/AIMemory");
+        assert_eq!(norm("/product//app///AIMemory/"), "/product/app/AIMemory");
+        assert_eq!(norm("//"), "/", "the root survives as itself");
+        assert_eq!(norm("/"), "/");
+        assert_eq!(norm(""), "");
+        // A name with a space or a bracket is untouched -- only separators move.
+        assert_eq!(norm("/product/app/Foo (2)/x.apk"), "/product/app/Foo (2)/x.apk");
+    }
+
+    /// ...and the durable file is healed on read, so an entry an older Suite
+    /// already wrote with a trailing slash starts matching. The dedup then
+    /// collapses the two spellings into one row.
+    #[test]
+    fn parse_normalises_and_collapses_the_two_spellings() {
+        let raw = "/product/app/Foo/\n/product/app/Foo\n/system//bin//x\n";
+        assert_eq!(
+            parse(raw),
+            vec!["/product/app/Foo".to_string(), "/system/bin/x".to_string()]
+        );
     }
 }

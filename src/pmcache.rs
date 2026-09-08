@@ -17,7 +17,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const CACHE_DIR: &str = "/data/system/package_cache";
-/// Last-served identity per ROM APK: target \t source \t mtime \t size.
+/// Last-served identity per ROM APK: `target \t mtime \t size`.
+///
+/// NOT the source: `identity()` returns `"{mtime}\t{size}"` and `read_state`
+/// splits on the FIRST tab, so the value is the mtime/size pair alone. The doc
+/// claimed a source field for as long as the record has existed. The consequence
+/// of the real format is worth stating rather than papering over: a target whose
+/// serving module changes to a DIFFERENT file with the same mtime and size is
+/// not invalidated. Putting the source in the identity would fix that and
+/// re-invalidate the whole served set once, on every device, at the upgrade that
+/// changed the format -- so it is a deliberate non-change, not an oversight.
 const STATE: &str = "/data/adb/nomount/apkstate.list";
 /// APKs invalidated after PM had already parsed them -- cured by a reboot.
 const PENDING: &str = "/data/adb/nomount/pm-reboot.list";
@@ -169,25 +178,51 @@ fn cache_keys(target: &Path) -> Vec<String> {
     keys
 }
 
-/// Drop every cached parse for `target`. Returns how many entries were removed.
-fn drop_entry(target: &Path) -> usize {
+/// Every file in the cache, flattened, read ONCE per pass.
+///
+/// `drop_entry` used to re-walk `/data/system/package_cache` for each target,
+/// which is O(targets × cache dirs) on a device with hundreds of injections and
+/// -- worse -- gave the caller no way to tell "the cache could not be read" from
+/// "nothing in it matched". `Err` here means exactly the first thing.
+fn cache_files() -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for d in fs::read_dir(CACHE_DIR)? {
+        let Ok(d) = d else { continue };
+        // A single unreadable SUBdirectory is not an unreadable cache; skipping
+        // it can only make us match less, which the caller treats as "matched
+        // but not removed" only when we did match.
+        let Ok(entries) = fs::read_dir(d.path()) else { continue };
+        out.extend(entries.filter_map(|e| e.ok()).map(|e| e.path()));
+    }
+    Ok(out)
+}
+
+/// Drop every cached parse for `target` out of `cache`.
+///
+/// Returns `(matched, removed)`. The split is the whole point: a bare count
+/// collapsed "nothing matched" and "matched but `remove_file` failed" into `0`,
+/// and [`sync`] then recorded the new identity anyway -- so the next pass saw
+/// the target as fresh, never retried, and PM went on serving its parse of the
+/// previous APK for good. That is this module's opening case (a dialer that
+/// force-closed with "You need to use a Theme.AppCompat theme"), reached
+/// silently, with no REBOOT REQUIRED line because `changed` stayed empty.
+fn drop_entry(target: &Path, cache: &[PathBuf]) -> (usize, usize) {
     let keys = cache_keys(target);
     if keys.is_empty() {
-        return 0;
+        return (0, 0);
     }
-    let Ok(dirs) = fs::read_dir(CACHE_DIR) else { return 0 };
-    let mut n = 0;
-    for d in dirs.filter_map(Result::ok) {
-        let Ok(entries) = fs::read_dir(d.path()) else { continue };
-        for e in entries.filter_map(Result::ok) {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if keys.iter().any(|k| name.starts_with(k.as_str())) && fs::remove_file(e.path()).is_ok()
-            {
-                n += 1;
-            }
+    let (mut matched, mut removed) = (0usize, 0usize);
+    for p in cache {
+        let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+        if !keys.iter().any(|k| name.starts_with(k.as_str())) {
+            continue;
+        }
+        matched += 1;
+        if fs::remove_file(p).is_ok() {
+            removed += 1;
         }
     }
-    n
+    (matched, removed)
 }
 
 /// What we last served for a target, as recorded by [`sync`].
@@ -247,14 +282,51 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
             (HashMap::new(), true)
         }
     };
+    // ONE listing for the whole pass, and the same distinction one field up: a
+    // cache we could not LOOK AT is not a cache with nothing in it. Recording
+    // what is served on that evidence would mark every target fresh and lose the
+    // invalidation permanently, so record nothing and let the next pass re-check.
+    // NotFound is a real answer, though -- no cache directory means no cached
+    // parse to invalidate -- so it proceeds with an empty listing.
+    let cache = match cache_files() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            eprintln!(
+                "nomount: pmcache: {CACHE_DIR} could not be read ({e}) - not recording what is \
+                 served, so the next pass re-checks instead of adopting a parse it could not \
+                 invalidate"
+            );
+            return Vec::new();
+        }
+    };
+
     let mut changed = Vec::new();
     let mut lines = Vec::new();
 
     for (target, source) in served.iter().filter(|(t, _)| is_rom_apk(t)) {
         let Some(id) = identity(source) else { continue };
         let stale = previous.get(target).map(String::as_str) != Some(id.as_str());
-        if !seeding && stale && drop_entry(target) > 0 {
+        let (matched, removed) =
+            if !seeding && stale { drop_entry(target, &cache) } else { (0, 0) };
+        if removed > 0 {
             changed.push(target.clone());
+        }
+        if matched > removed {
+            // The entry is there and would not delete. Keep the OLD identity so
+            // the next pass still sees this target as stale and tries again;
+            // adopting the new one would end the retries on a swap PM has not
+            // been told about.
+            eprintln!(
+                "nomount: pmcache: {} cached parse(s) for {} would not delete - PM keeps \
+                 serving its parse of the previous APK; retrying next pass",
+                matched - removed,
+                target.display()
+            );
+            if let Some(old) = previous.get(target) {
+                lines.push(format!("{}\t{}", target.display(), old));
+            }
+            continue;
         }
         lines.push(format!("{}\t{}", target.display(), id));
     }
@@ -263,12 +335,30 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     // so PM's parse of the injected APK is just as stale.
     let live: Vec<&PathBuf> = served.iter().map(|(t, _)| t).collect();
     for target in previous.keys().filter(|t| !live.contains(t)) {
-        if !seeding && drop_entry(target) > 0 {
+        if seeding {
+            continue;
+        }
+        let (matched, removed) = drop_entry(target, &cache);
+        if removed > 0 {
             changed.push(target.clone());
+        }
+        // Same retry rule: keep the record so the next pass comes back to it.
+        // Dropping it would leave PM's parse of an injection that is GONE in
+        // place with nothing left that knows to look.
+        if matched > removed {
+            if let Some(old) = previous.get(target) {
+                lines.push(format!("{}\t{}", target.display(), old));
+            }
         }
     }
 
-    let _ = crate::statefile::write_atomic(STATE, lines.join("\n"));
+    if let Err(e) = crate::statefile::write_atomic(STATE, lines.join("\n")) {
+        // Silent here meant the next pass read no record, called every served
+        // APK changed, dropped the whole cache and printed REBOOT REQUIRED --
+        // on every run, with no reboot ever clearing it.
+        eprintln!("nomount: pmcache: could not write {STATE} ({e:#}) - the next pass will \
+                   re-invalidate every served APK");
+    }
     changed
 }
 
@@ -287,13 +377,35 @@ pub fn add_pending(targets: &[PathBuf]) {
         }
     }
     let body: Vec<String> = all.iter().map(|t| t.display().to_string()).collect();
-    let _ = crate::statefile::write_atomic(PENDING, body.join("\n"));
+    if let Err(e) = crate::statefile::write_atomic(PENDING, body.join("\n")) {
+        eprintln!(
+            "nomount: pmcache: could not write {PENDING} ({e:#}) - {} APK(s) need a reboot and \
+             nothing now records it",
+            all.len()
+        );
+    }
 }
 
+/// The accumulated reboot-required set.
+///
+/// `unwrap_or_default()` stood here and could not tell "not there yet" -- the
+/// normal case, correctly empty -- from "there and unreadable". In the second
+/// case `add_pending` rewrote the file with only the newest targets, and every
+/// earlier REBOOT REQUIRED APK was forgotten: exactly the regression the
+/// "Accumulates" contract above forbids. `read_state`, thirty lines up, has
+/// modelled this correctly all along.
 pub fn pending() -> Vec<PathBuf> {
-    fs::read_to_string(PENDING)
-        .map(|t| t.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
-        .unwrap_or_default()
+    match fs::read_to_string(PENDING) {
+        Ok(t) => t.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            eprintln!(
+                "nomount: pmcache: {PENDING} exists but could not be read ({e}) - the \
+                 reboot-required list may be incomplete"
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Called from the boot pass: PM re-parses this boot, so anything recorded by

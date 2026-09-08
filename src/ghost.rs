@@ -97,7 +97,21 @@ pub struct Summary {
     pub uids: usize,
     /// Paths the kernel refused (table full, or over its rule-length cap).
     pub rejected: usize,
-    /// The first few refusals, for a log line a human can act on.
+    /// Uids the kernel refused. SEPARATE from `rejected`, because the two tables
+    /// are pushed by the same function and used to share one counter: a uid
+    /// refusal was then reported as a path refusal, counted against the PATH
+    /// denominator (which can be 0, or smaller than the count), and its appid
+    /// printed where a path was promised. An engine that predates the `u=`
+    /// opcode fails every uid, so "3 of 0 path(s) REFUSED ... first: 10471" was
+    /// the ordinary output on that pairing, not a corner case.
+    pub rejected_uids: usize,
+    /// The first few PATH refusals, for a log line a human can act on.
+    ///
+    /// Paths only, on purpose. An appid off the hide list is the same secret the
+    /// hide list is (`blocklist::redact_hide_list` states the per-reader
+    /// invariant), and this text reaches `run_sync`'s stdout, `sync_after_pass`'s
+    /// stdout and `sync_quietly`'s stderr. Keeping uids out of the string is the
+    /// structural fix -- there is nothing left to gate.
     pub rejected_examples: Vec<String>,
     /// The engine's live state could not be read -- either the rule set (`nm
     /// list`) or the hidden-uid set (`nm l u`) -- so both tables were cleared
@@ -127,16 +141,30 @@ impl Summary {
                     .into(),
             );
         }
+        // Each table against ITS OWN denominator. `ghostable` is the desired path
+        // count; the desired uid count is what went in plus what came back
+        // refused.
+        let mut parts: Vec<String> = Vec::new();
         if self.rejected > 0 {
+            parts.push(format!("{} of {} path(s)", self.rejected, self.ghostable));
+        }
+        if self.rejected_uids > 0 {
+            parts.push(format!(
+                "{} of {} uid(s)",
+                self.rejected_uids,
+                self.uids + self.rejected_uids
+            ));
+        }
+        if !parts.is_empty() {
             let first = if self.rejected_examples.is_empty() {
                 String::new()
             } else {
                 format!("; first: {}", self.rejected_examples.join(" "))
             };
             return Some(format!(
-                "⚠ ghost cloak: {} of {} path(s) REFUSED by the kernel — the existence oracles \
-                 stay open for those{first}",
-                self.rejected, self.ghostable
+                "⚠ ghost cloak: {} REFUSED by the kernel — the existence oracles stay open for \
+                 those{first}",
+                parts.join(" and ")
             ));
         }
         None
@@ -353,11 +381,15 @@ fn push(nm: &Nm, kind: char, items: &[String], out: &mut Summary) {
                         'p' => out.paths += 1,
                         _ => out.uids += 1,
                     }
-                } else {
+                } else if kind == 'p' {
                     out.rejected += 1;
                     if out.rejected_examples.len() < 3 {
                         out.rejected_examples.push((*it).to_string());
                     }
+                } else {
+                    // Counted, never quoted: the item is an appid off the hide
+                    // list. See `Summary::rejected_examples`.
+                    out.rejected_uids += 1;
                 }
             }
         }
@@ -647,5 +679,38 @@ not-a-path -> /q
     #[test]
     fn ghost_uids_on_an_empty_set_is_empty() {
         assert!(ghost_uids(&[]).is_empty());
+    }
+
+    /// The two tables share `push`, and they used to share its refusal counters:
+    /// a refused UID was reported as a refused PATH, against the path
+    /// denominator, with the appid printed as the example. On an engine that
+    /// predates the `u=` opcode every uid fails, so the ordinary output was
+    /// "3 of 0 path(s) REFUSED ... first: 10471" -- wrong noun, impossible
+    /// denominator, and a hide-list appid in a line that promised a path.
+    #[test]
+    fn a_refused_uid_is_never_reported_as_a_refused_path() {
+        let s = Summary { uids: 1, rejected_uids: 3, ghostable: 0, ..Default::default() };
+        let w = s.warning().expect("a refused table must warn");
+        assert!(w.contains("3 of 4 uid(s)"), "the uid table has its own denominator: {w}");
+        assert!(!w.contains("path(s)"), "no path was refused: {w}");
+        assert!(!w.contains("10471"), "an appid must never reach this string: {w}");
+
+        // Paths still report as paths, against `ghostable`.
+        let s = Summary {
+            ghostable: 9,
+            rejected: 2,
+            rejected_examples: vec!["/product/app/A/A.apk".into()],
+            ..Default::default()
+        };
+        let w = s.warning().unwrap();
+        assert!(w.contains("2 of 9 path(s)"), "{w}");
+        assert!(w.contains("first: /product/app/A/A.apk"), "{w}");
+
+        // Both at once, and still no uid in the examples.
+        let s = Summary { ghostable: 9, rejected: 2, uids: 1, rejected_uids: 1, ..Default::default() };
+        let w = s.warning().unwrap();
+        assert!(w.contains("2 of 9 path(s) and 1 of 2 uid(s)"), "{w}");
+
+        assert!(Summary::default().warning().is_none(), "a clean sync says nothing");
     }
 }

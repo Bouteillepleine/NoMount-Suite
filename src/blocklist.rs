@@ -398,14 +398,43 @@ fn write(entries: &[String]) -> Result<()> {
     write_lines(BLOCKLIST_PATH, entries)
 }
 
+/// Refuse an entry the very next [`read`] would throw away.
+///
+/// [`parse_blocklist`] drops anything that trims empty or starts with `#`, and
+/// splits on `\n` -- so `nomount uid block "#com.foo"` returned `Ok(true)`, the
+/// CLI and the WebUI toasted "added", and the entry was gone before anything
+/// could act on it. An entry carrying a newline silently became two. A tab is in
+/// the same class one file over: `uidhide.cache` is `entry<TAB>appid` and
+/// `cache_read` does `split_once('\t')`, so a tab truncates the key it stores.
+fn check_entry(e: &str) -> Result<()> {
+    if e.is_empty() || e.starts_with('#') || e.contains(['\n', '\r', '\t']) {
+        anyhow::bail!(
+            "{e:?} cannot be a hide-list entry (blank, a comment, or carrying a newline or tab) \
+             — it would be dropped again on the next read"
+        );
+    }
+    Ok(())
+}
+
 /// Add many entries in one read-modify-write. Returns how many were new. A preset
 /// is ~50 entries, and `add` per entry rewrote the whole file each time.
 pub fn add_many(entries: &[String]) -> Result<usize> {
+    // Same lock, same reason as `whiteout::add`: `read()` -> mutate -> `write()`
+    // is not atomic just because `write()` is, and `uidhide` has MORE writers
+    // than `whiteouts.txt`, not fewer -- the WebUI's hide/un-hide buttons, this
+    // ~48-entry preset apply, and `migrate_legacy()` off every `read()`,
+    // including the `uid apply` uidwatch.sh fires on every package change.
+    // Interleaved, one edit is lost behind a green toast. `pass_lock` is bounded
+    // and proceeds unserialised on timeout, which is the right trade for a
+    // user-initiated verb; no caller of these three holds it, so there is no
+    // self-deadlock.
+    let _pass = crate::mount::pass_lock();
     let mut list = read()?;
     let mut added = 0;
     for e in entries {
         let e = e.trim();
-        if e.is_empty() || list.iter().any(|x| x == e) {
+        check_entry(e)?;
+        if list.iter().any(|x| x == e) {
             continue;
         }
         list.push(e.to_string());
@@ -424,7 +453,9 @@ pub fn cache_replace(map: &BTreeMap<String, u32>) {
 
 /// Add an entry (no-op if already present). Returns true if it was newly added.
 pub fn add(entry: &str) -> Result<bool> {
+    let _pass = crate::mount::pass_lock(); // see `add_many`
     let e = entry.trim().to_string();
+    check_entry(&e)?;
     let mut list = read()?;
     if list.contains(&e) {
         return Ok(false);
@@ -436,6 +467,7 @@ pub fn add(entry: &str) -> Result<bool> {
 
 /// Remove an entry (no-op if absent). Returns true if something was removed.
 pub fn remove(entry: &str) -> Result<bool> {
+    let _pass = crate::mount::pass_lock(); // see `add_many`
     let e = entry.trim();
     let mut list = read()?;
     let before = list.len();
