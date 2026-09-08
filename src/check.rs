@@ -73,11 +73,13 @@ pub enum Verdict {
     /// green: reporting an unrun check as clean is how a hole survives.
     Unmeasured,
     /// Something worth knowing that is not a failure. Two kinds reach it: a
-    /// hazard in the plan (nothing has gone wrong yet; something will), and
-    /// `audit::soft` -- a real, measured inconsistency that nothing shipping
-    /// actually probes. It said "a hazard in the plan" and had not been only that
-    /// since `soft()` was added, which is how the verdict line came to call a
-    /// measured device tell a plan warning.
+    /// hazard in the plan (nothing has gone wrong yet; something will), and a
+    /// measured DEVICE state a shipping detector can see today but that is not
+    /// broken -- the Suite's own `my_*` binds, and a hook framework's binds,
+    /// which are visible in every app's mountinfo and are staying. It said "a
+    /// hazard in the plan" and had not been only that since `audit::soft` was
+    /// added; `soft` is a Note now, and what took its place here is the one thing
+    /// amber is for. The line is: WARN = a shipping detector can see this.
     Warn,
     /// Measured, and it holds.
     Pass,
@@ -86,7 +88,11 @@ pub enum Verdict {
     /// counted as a pass.
     NotApplicable,
     /// Worth printing, not worth acting on. A standing observation about a
-    /// working configuration.
+    /// working configuration, and where `audit::soft` lands: a real, measured
+    /// inconsistency that NOTHING SHIPPING PROBES. It keeps its oracle string and
+    /// stays in `audit.json` and in `nomount check`'s text output as an engine
+    /// regression canary; it is not put in front of a user as something to fix.
+    /// The line is: NOTE = we measured a tell nothing looks at.
     Note,
 }
 
@@ -294,6 +300,14 @@ impl Tally {
 /// One `key=value` row of the fingerprint, or of the plan counts.
 pub type Fact = (String, String);
 
+/// A count that may not have been taken. `J::Null`, never `0`.
+fn num_or_null(n: Option<usize>) -> J {
+    match n {
+        Some(v) => J::Num(v as i64),
+        None => J::Null,
+    }
+}
+
 /// Everything one run of `nomount check` produced.
 ///
 /// `facts` is the flat key=value fingerprint of the live system that `health.txt`,
@@ -304,8 +318,12 @@ pub type Fact = (String, String);
 pub struct Report {
     pub ts: i64,
     pub engine: Option<u32>,
-    pub rules: usize,
-    pub directories: usize,
+    /// Live rules, and the directories holding them. `None` means the engine
+    /// would not list its rules, which is NOT the same statement as zero -- see
+    /// [`Report::text`]'s header for the argument, which the `--plan` arm already
+    /// made and this one did not.
+    pub rules: Option<usize>,
+    pub directories: Option<usize>,
     pub facts: Vec<Fact>,
     pub checks: Vec<Check>,
 }
@@ -365,11 +383,12 @@ impl Report {
                 if t.warn > 0 { format!(", plus {} warning(s)", t.warn) } else { String::new() }
             )
         // NOT "plan warning(s)". `t.warn` counts EVERY Warn in the report, and
-        // `audit.rs` emits three of them through `soft()` -- injected inode band,
-        // overlay dir inode range, erofs directory shape -- which are measured
-        // DEVICE tells, not plan hazards. On a device where the inode band goes
-        // soft the verdict read "1 plan warning(s)" and pointed the user at their
-        // module set.
+        // `audit.rs` emits measured DEVICE tells through it -- the Suite's own
+        // `my_*` binds and a hook framework's binds, both visible in every app's
+        // mountinfo -- not just plan hazards. On a device where one of those fires
+        // the verdict read "1 plan warning(s)" and pointed the user at their
+        // module set. (The four `soft()` engine canaries used to land here too;
+        // they are Notes now, because nothing shipping probes them.)
         } else if t.warn > 0 {
             format!("{} warning(s)", t.warn)
         } else {
@@ -408,8 +427,11 @@ impl Report {
                     None => J::Null,
                 },
             ),
-            ("rules", J::Num(self.rules as i64)),
-            ("directories", J::Num(self.directories as i64)),
+            // null, not 0, when the rule list could not be read. A consumer that
+            // prints `rules || 0` is back where it started, but at least the
+            // document no longer asserts a count nobody measured.
+            ("rules", num_or_null(self.rules)),
+            ("directories", num_or_null(self.directories)),
             // Which sections ran. Without this a cached report is ambiguous: a
             // reader cannot tell "the plan is clean" from "the plan was not
             // looked at", and those are the two answers this file exists to keep
@@ -457,16 +479,22 @@ impl Report {
         // anything, and a zero nobody measured reads exactly like a zero somebody
         // did. That confusion is the whole reason for this pass.
         if self.ran(Section::Device) {
-            let _ = writeln!(
-                s,
-                "nomount check: {} live rule(s) across {} directory(ies) | engine {}\n",
-                self.rules,
-                self.directories,
-                match self.engine {
-                    Some(v) => format!("v{v}"),
-                    None => "not responding".to_string(),
-                }
-            );
+            let engine = match self.engine {
+                Some(v) => format!("v{v}"),
+                None => "not responding".to_string(),
+            };
+            // ...and the SAME argument applies inside a device run whose rule dump
+            // failed. It printed "0 live rule(s) across 0 directory(ies)", which is
+            // a zero nobody measured wearing the clothes of one somebody did. The
+            // `engine-rule-dump` FAIL row below says why, but the header is the
+            // line that gets grepped and pasted.
+            let _ = match (self.rules, self.directories) {
+                (Some(r), Some(d)) => writeln!(
+                    s,
+                    "nomount check: {r} live rule(s) across {d} directory(ies) | engine {engine}\n"
+                ),
+                _ => writeln!(s, "nomount check: rule list unreadable | engine {engine}\n"),
+            };
         } else {
             let _ = writeln!(s, "nomount check: plan only, nothing on the device was measured\n");
         }
@@ -540,7 +568,9 @@ pub fn build(plan: bool, device: bool) -> Result<Report> {
     let (plan, device) = if !plan && !device { (true, true) } else { (plan, device) };
     let mut checks: Vec<Check> = Vec::new();
     let mut facts: Vec<(String, String)> = Vec::new();
-    let (mut rules, mut directories) = (0usize, 0usize);
+    // None on a --plan-only run too: nobody asked the engine anything there
+    // either, which is the case the header's own comment was written for.
+    let (mut rules, mut directories) = (None, None);
     let mut engine = None;
 
     if device {
@@ -634,8 +664,8 @@ mod tests {
         let r = |v: Vec<Check>| Report {
             ts: 0,
             engine: None,
-            rules: 0,
-            directories: 0,
+            rules: None,
+            directories: None,
             facts: Vec::new(),
             checks: v,
         };
@@ -682,8 +712,8 @@ mod tests {
         let mut r = Report {
             ts: 0,
             engine: None,
-            rules: 0,
-            directories: 0,
+            rules: None,
+            directories: None,
             facts: Vec::new(),
             checks: vec![
                 c("zero-mount-posture", Verdict::Pass),
@@ -705,13 +735,78 @@ mod tests {
         let r = Report {
             ts: 0,
             engine: Some(18),
-            rules: 3,
-            directories: 1,
+            rules: Some(3),
+            directories: Some(1),
             facts: Vec::new(),
             checks: vec![c("a", Verdict::Pass), c("b", Verdict::Unmeasured)],
         };
         assert_eq!(r.verdict(), "not fully measured (1 check(s) had nothing to look at)");
         assert!(r.json().contains("\"complete\":false"));
+    }
+
+    /// A note is not something to act on; a warning is. That is the whole ladder.
+    ///
+    /// `audit::soft` used to emit `Warn` for four tells nothing shipping probes,
+    /// so they were labelled "attention"/"will bite later" beside real failures
+    /// and put "N warning(s)" on the manager card -- while the genuinely
+    /// app-visible module mount sat at `Note`, the one verdict the WebUI's
+    /// `isShown` drops entirely. Both ends moved.
+    #[test]
+    fn a_note_is_information_and_a_warning_is_attention() {
+        assert_eq!(Verdict::Note.severity(), "info");
+        assert_eq!(Verdict::Warn.severity(), "attention");
+        let r = |v: Vec<Check>| Report {
+            ts: 0,
+            engine: None,
+            rules: None,
+            directories: None,
+            facts: Vec::new(),
+            checks: v,
+        };
+        // An engine canary nothing probes does not stop the run reading clean...
+        assert_eq!(r(vec![c("a", Verdict::Note), c("b", Verdict::Pass)]).verdict(), "clean");
+        // ...but a mount a detector can see today does, which is the point of
+        // promoting the zero-mount row off `Note`.
+        assert_eq!(r(vec![c("a", Verdict::Warn), c("b", Verdict::Pass)]).verdict(), "1 warning(s)");
+        // A note is still measured and still complete -- it is not an excuse.
+        assert!(Tally::of(&[c("a", Verdict::Note)]).complete());
+        assert_eq!(Tally::of(&[c("a", Verdict::Note)]).open_failures(), 0);
+    }
+
+    /// A count nobody measured must not print as a zero somebody did.
+    ///
+    /// `device_checks` returned `(checks, 0, 0)` when the rule dump failed, so the
+    /// header opened "nomount check: 0 live rule(s) across 0 directory(ies) |
+    /// engine v30" -- the exact confusion the `--plan` arm of this same function
+    /// was fixed for three lines above. The same 0 reached the WebUI's
+    /// bug-report clipboard.
+    #[test]
+    fn an_unread_rule_list_prints_as_unread_not_as_zero() {
+        let r = Report {
+            ts: 0,
+            engine: Some(30),
+            rules: None,
+            directories: None,
+            facts: Vec::new(),
+            checks: vec![c("engine-rule-dump", Verdict::Fail)],
+        };
+        let t = r.text();
+        assert!(t.contains("rule list unreadable | engine v30"), "{t}");
+        assert!(!t.contains("0 live rule(s)"), "{t}");
+        assert!(r.json().contains("\"rules\":null"), "{}", r.json());
+        assert!(r.json().contains("\"directories\":null"), "{}", r.json());
+
+        // A run that DID read them still says so, with the numbers.
+        let ok = Report {
+            ts: 0,
+            engine: Some(30),
+            rules: Some(3),
+            directories: Some(1),
+            facts: Vec::new(),
+            checks: vec![c("a", Verdict::Pass)],
+        };
+        assert!(ok.text().contains("3 live rule(s) across 1 directory(ies)"), "{}", ok.text());
+        assert!(ok.json().contains("\"rules\":3"), "{}", ok.json());
     }
 
     /// ids are derived, so a check cannot ship without one -- the gap that left
@@ -732,8 +827,8 @@ mod tests {
         let r = Report {
             ts: 7,
             engine: Some(18),
-            rules: 0,
-            directories: 0,
+            rules: None,
+            directories: None,
             facts: vec![("engine".into(), "v18".into()), ("consistency".into(), "ok".into())],
             checks: Vec::new(),
         };

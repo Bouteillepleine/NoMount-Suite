@@ -40,14 +40,30 @@ fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
 }
 /// A real, measured inconsistency that nothing shipping actually probes.
 ///
-/// Amber, not red, and the distinction is the Suite's whole posture: a FAIL on a
-/// user's device asserts "you are detectable", and for a tell no detector looks
-/// at that overclaims -- it teaches people to discount the row that does matter.
-/// The oracle string is still carried, because these stay the only regression
-/// canaries the engine layer has: if one fires, the engine really did produce an
-/// inconsistency and it is worth chasing, just not worth alarming a user over.
+/// NOTE, not amber, and the distinction is the Suite's whole posture: a FAIL on
+/// a user's device asserts "you are detectable", and for a tell no detector
+/// looks at that overclaims -- it teaches people to discount the row that does
+/// matter. The oracle string is still carried, because these stay the only
+/// regression canaries the engine layer has: if one fires, the engine really did
+/// produce an inconsistency and it is worth chasing, just not worth alarming a
+/// user over.
+///
+/// It used to return `Verdict::Warn`, which is what the doc-comment right above
+/// was written to prevent: `Verdict::severity()` maps Warn to "attention" and the
+/// WebUI labels that group "will bite later", so these four rows landed in the
+/// same bucket as a FAIL and `Report::verdict()` put "N warning(s)" on the
+/// manager card -- for tells whose own `meaning` says things like "Reading it
+/// needs a purpose-built detector." One rule now runs the ladder, and it is the
+/// one the Suite's posture already implies:
+///
+///   WARN = a shipping detector can see this on this device, today.
+///   NOTE = we measured a tell nothing probes; it stays an engine canary.
+///
+/// The cost is real and accepted: `isShown` in the WebUI excludes `note`, so
+/// these survive in `audit.json` and in `nomount check`'s text output but not in
+/// the WebUI list. That is the right trade for a row nobody can act on.
 fn soft(name: &'static str, evidence: String, oracle: &'static str) -> Check {
-    chk(name, Verdict::Warn, evidence).oracle(oracle)
+    chk(name, Verdict::Note, evidence).oracle(oracle)
 }
 /// "Does not apply here." Grey, never amber, never counted as a pass.
 fn na(name: &'static str, evidence: String) -> Check {
@@ -306,48 +322,67 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
 
 // ------------------------------------------------------------------- helpers
 
-/// The directories the ENGINE materialised itself, as `nm list` reports them.
+/// ONE rule dump, split into the two views every check here needs: live
+/// INJECTION targets, and the directories the ENGINE materialised itself.
 ///
-/// Not injects, so `live_targets` drops them -- but they are ours, and any check
-/// that partitions a directory into "ours" and "the ROM's" has to know that or it
-/// will count one of our own synthesized directories as stock.
-fn live_engine_dirs() -> Vec<PathBuf> {
-    let Ok(listed) = Nm::new().list() else { return Vec::new() };
-    crate::nm::parse_list(&listed)
-        .into_iter()
-        .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
-        .map(|r| r.target)
-        .collect()
-}
-
-/// Live INJECTION targets.
+/// **Injections, deliberately not every rule.** A whiteout's whole job is to make
+/// its target absent from the parent's listing, so feeding one to a check that
+/// asserts "this name appears in getdents" turns a working whiteout into a
+/// failure. The hand-rolled token split this replaced could not tell the kinds
+/// apart, so any device with a debloat module (or a hand-written
+/// `nomount whiteout add`) would have reported a fabricated N_DINO_STAT FAIL on
+/// the audit users are told to trust.
 ///
-/// Deliberately not every rule: a whiteout's whole job is to make its target
-/// absent from the parent's listing, so feeding one to a check that asserts
-/// "this name appears in getdents" turns a working whiteout into a failure. The
-/// hand-rolled token split this replaced could not tell the kinds apart, so any
-/// device with a debloat module (or a hand-written `nomount whiteout add`) would
-/// have reported a fabricated N_DINO_STAT FAIL on the audit users
-/// are told to trust. Route through the shared typed parser instead.
-fn live_targets() -> Option<Vec<PathBuf>> {
-    // `unwrap_or_default()` used to sit on this call, which made a REFUSED dump
-    // indistinguishable from "the engine has no rules". `version` is a separate
-    // `nm` invocation, so it still answered: check_engine_live PASSED, every
-    // target-dependent check found an empty list and returned NotApplicable, and
-    // the summary read all-clean with ZERO unmeasured -- a full green over a
-    // device whose rules were never read. doctor.rs already refuses this exact
-    // case ("engine rule dump failed"); the audit did not.
-    //
-    // An empty rule set is Ok(""), not Err, so None here means the engine
-    // genuinely would not answer.
+/// **uid 0 only**, for a second reason with the same shape: a `uid != 0` row
+/// comes from the hide path, is scoped to another identity, and `nm check` runs
+/// as uid 0 -- so our view of the directory is NOT the view the rule applies to.
+/// `check_dino_matches_stat` would push "{} absent from getdents" and FAIL,
+/// `.owner("the kernel engine")`, over a name uid 0 was never meant to see, and
+/// every rule-dependent denominator would count rows that are not served to the
+/// auditing process. Every other reader of this parser already filters it:
+/// `absorb::live_injections` (with a test named for it), `absorb`'s two other
+/// call sites and `doctor.rs`, whose own comment says `nm del` cannot even
+/// address a per-UID rule.
+///
+/// **Virtual dirs** are not injects, so the first half drops them -- but they are
+/// ours, and any check that partitions a directory into "ours" and "the ROM's"
+/// has to know that or it will count one of our own synthesized directories as
+/// stock. They are NOT uid-filtered: a per-UID virtual dir is invisible to uid 0,
+/// so it can never match a path this process stats, and excluding it would only
+/// narrow a list used to say "this one is not the ROM's".
+///
+/// **One dump, not two.** `live_targets` and `live_engine_dirs` were separate
+/// functions running `nm list` a moment apart -- two full netlink dumps of the
+/// whole rule table, the exact waste `service.sh:551` fixed on the shell side.
+/// Worse than the cost: `live_targets` refused to collapse a failed dump into an
+/// empty set and `live_engine_dirs` did precisely that with
+/// `else { return Vec::new() }`, so a second dump that failed (engine busy, a
+/// rule changing between the two) silently reclassified every virtual dir as
+/// STOCK POPULATION -- reopening the regression
+/// `a_synthesized_dir_is_not_stock_population` pins. One dump also removes the
+/// TOCTOU between them.
+///
+/// `unwrap_or_default()` used to sit on the `list()` call, which made a REFUSED
+/// dump indistinguishable from "the engine has no rules". `version` is a separate
+/// `nm` invocation, so it still answered: check_engine_live PASSED, every
+/// target-dependent check found an empty list and returned NotApplicable, and the
+/// summary read all-clean with ZERO unmeasured -- a full green over a device
+/// whose rules were never read. An empty rule set is `Ok("")`, not `Err`, so
+/// `None` here means the engine genuinely would not answer.
+fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let listed = Nm::new().list().ok()?;
-    Some(
-        crate::nm::parse_list(&listed)
-            .into_iter()
-            .filter(|r| r.kind == crate::nm::LiveKind::Inject)
-            .map(|r| r.target)
-            .collect(),
-    )
+    let rules = crate::nm::parse_list(&listed);
+    let targets = rules
+        .iter()
+        .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
+        .map(|r| r.target.clone())
+        .collect();
+    let dirs = rules
+        .iter()
+        .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
+        .map(|r| r.target.clone())
+        .collect();
+    Some((targets, dirs))
 }
 
 fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
@@ -368,6 +403,20 @@ fn fs_type(p: &Path) -> String {
         Some(0xF2F52010) => "f2fs".into(),
         Some(other) => format!("0x{other:x}"),
     }
+}
+
+/// Is this path inside a ROM partition?
+///
+/// `ROM_ROOTS` is a list of STRING prefixes -- `"/my_"` is one of them, and
+/// absorb.rs says so outright ("`/my_` is a ROM_ROOTS prefix"). Every other
+/// reader matches it as a string: absorb.rs twice, `check_no_rom_tmpfs` below,
+/// pmcache.rs. The one site that had a `PathBuf` on the left resolved to
+/// `Path::starts_with` instead, which is COMPONENT-wise, so `"/my_"` matched
+/// nothing at all -- no path component is ever literally `my_`. Named, so the
+/// two forms cannot be confused again and the difference is pinnable.
+fn on_rom_partition(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    crate::absorb::ROM_ROOTS.iter().any(|r| s.starts_with(r))
 }
 
 fn ino_of(p: &Path) -> Option<u64> {
@@ -418,41 +467,91 @@ fn check_zero_mount() -> Check {
             .collect::<Vec<_>>()
             .join(", ")
     };
+    // Name the owner. `module_dir_of` was already being called to decide the
+    // by-design split and its answer was thrown away -- for the leaked case, the
+    // one case where the reader has something to do with it, and for the
+    // by-design case, which now has a row of its own to attribute.
+    let owners_of = |v: &[&(&crate::absorb::MountRow, std::path::PathBuf)]| -> Vec<String> {
+        let mut o: Vec<String> = v
+            .iter()
+            .filter_map(|(_, src)| crate::absorb::module_dir_of(src))
+            .filter_map(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        o.sort();
+        o.dedup();
+        o
+    };
+    // "in this namespace", because that is the table that was read. `absorb`
+    // already documents a module that replicates its bind with
+    // `nsenter --mount=/proc/<pid>/ns/mnt` as one we "cannot see or unmount", and
+    // doctor.rs states it flatly: "It was replicated with nsenter, and apps can
+    // see it." Such a module PASSES here and is still visible to the app. The
+    // plan section reports those, so nothing is missed overall -- but this row
+    // must not assert more than it measured.
+    let oracle = "any app can read /proc/self/mountinfo and see a module mounted over the ROM in \
+                  this namespace";
     if leaked.is_empty() {
-        let note = if by_design.is_empty() {
-            "0 module mounts in this namespace".to_string()
-        } else {
+        if by_design.is_empty() {
+            return pass(N_ZERO_MOUNT, "0 module mounts in this namespace".into()).meaning(
+                "Nothing the Suite or your modules do shows up in this process's mount table. (A \
+                 module that replicates its bind into an app's own namespace with nsenter would \
+                 not appear here — the plan section reports those.)",
+            );
+        }
+        // WARN, not PASS, when a hook framework's binds are still up.
+        //
+        // The by-design split is OUR taxonomy, and `is_hook_framework` grants it
+        // to any module dir holding a `zygisk/` directory -- an EMPTY one is
+        // enough, zero bytes of payload. So a module shipping `mkdir zygisk` in
+        // its zip turned every mount it holds "by design" and the check the whole
+        // product is named after reported PASS with "0 unexpected module mounts".
+        //
+        // A detector does not know about the split: `/adb/modules/<id>/…` is in
+        // field 4 of every process's mountinfo either way, which is the entire
+        // signal this posture exists to deny. The same marker is recorded in
+        // `absorb` as having lost the arms race in the other direction (0-for-3
+        // against current releases), so it is unreliable in both.
+        //
+        // Amber says exactly what is true: these are visible, and the Suite will
+        // not remove them. Green said nothing was visible, which was not.
+        return chk(
+            N_ZERO_MOUNT,
+            Verdict::Warn,
             format!(
                 "0 unexpected module mounts; {} left by design (hook framework): {}",
                 by_design.len(),
                 show(&by_design)
-            )
-        };
-        let meaning = if by_design.is_empty() {
-            "Nothing the Suite or your modules do shows up in the mount table.".to_string()
-        } else {
-            format!(
-                "Nothing unexpected. {} hook-framework bind(s) remain on purpose — absorb never \
-                 takes those over, because breaking a Zygisk/Xposed hook surfaces hours later \
-                 during app install, not at boot.",
-                by_design.len()
-            )
-        };
-        pass(N_ZERO_MOUNT, note).meaning(meaning)
-    } else {
-        // Name the owner. `module_dir_of` was already being called to decide the
-        // by-design split and its answer was thrown away for the leaked case --
-        // the one case where the reader has something to do with it.
-        let owners: Vec<String> = {
-            let mut v: Vec<String> = leaked
-                .iter()
-                .filter_map(|(_, src)| crate::absorb::module_dir_of(src))
-                .filter_map(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .collect();
-            v.sort();
-            v.dedup();
-            v
-        };
+            ),
+        )
+        .oracle(oracle)
+        // ...and say what to DO about it. This arm fires on any device running a
+        // hook framework, which is most of them, and it ended on "nothing will
+        // remove them" -- a permanent amber with no remedy, which is how a reader
+        // learns to ignore the verdict line. There IS a remedy and round 7 named
+        // it: the manager's own per-app umount is exactly the control that takes
+        // a bind out of an app's namespace, and it is the one thing this product
+        // used to steer people away from. The Suite will not remove these itself;
+        // the manager can hide them from the apps that matter.
+        .meaning(format!(
+            "{} hook-framework bind(s) are readable by any app in its own mount table. Absorb \
+             never takes those over — breaking a Zygisk/Xposed hook surfaces hours later during \
+             app install, not at boot — so the Suite leaves them alone. A detector does not know \
+             they are on purpose. To hide them from a chosen app, turn ON your manager's \
+             \"umount modules\" for it: unlike anything the engine serves, these ARE mounts, so \
+             that switch does work on them.",
+            by_design.len()
+        ))
+        .owner({
+            let o = owners_of(&by_design);
+            if o.is_empty() {
+                "a hook framework".to_string()
+            } else {
+                o.join(", ")
+            }
+        });
+    }
+    {
+        let owners = owners_of(&leaked);
         let owner = if owners.is_empty() {
             "a bind from outside /data/adb/modules".to_string()
         } else {
@@ -486,10 +585,29 @@ fn check_zero_mount() -> Check {
         // chasing them cost an evening on an OP15.
         //
         // binds.list is the record of what WE bound, so it settles authorship.
-        let ours: std::collections::HashSet<std::path::PathBuf> =
-            crate::bind::tracked().into_iter().map(|(t, _)| t).collect();
+        //
+        // ...and when it cannot be READ, authorship is unsettled, not "none of
+        // ours". The infallible `tracked()` made an unreadable record look like an
+        // empty one, which lands in the third arm below -- the one that names a
+        // module and sends the reader to a post-fs-data.sh that has no bind in it.
+        // That is the same evening-costing dead end this block was written to end,
+        // reached through the error path.
+        let tracked = crate::bind::tracked_result();
+        let ours: std::collections::HashSet<std::path::PathBuf> = tracked
+            .as_ref()
+            .map(|v| v.iter().map(|(t, _)| t.clone()).collect())
+            .unwrap_or_default();
         let mine = leaked.iter().filter(|(r, _)| ours.contains(&r.target)).count();
-        let mut why = if mine == leaked.len() {
+        let mut why = if let Err(e) = &tracked {
+            format!(
+                "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
+                 Which of them the Suite made itself could NOT be determined: {} could not be \
+                 read ({e}). They serve content from {owner}. Fix that file first — until then, \
+                 do not go looking in a module for a bind it may not have made.",
+                leaked.len(),
+                crate::bind::BINDS_LIST
+            )
+        } else if mine == leaked.len() {
             format!(
                 "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
                  The SUITE made these itself: a my_* target is served by a real bind unless the \
@@ -542,7 +660,7 @@ fn check_zero_mount() -> Check {
             ));
         }
 
-        // NOTE, not FAIL, when every one of them is ours.
+        // WARN, not FAIL, when every one of them is ours.
         //
         // A my_* bind is the Suite's DEFAULT way to serve that content -- the
         // `my_hookless` opt-in is what switches it to injection, not the other way
@@ -550,12 +668,26 @@ fn check_zero_mount() -> Check {
         // device whose only crime is having a module with my_* content, and the
         // posture cost is real but accepted and already stated in the text.
         //
+        // It was `Verdict::Note`, and that was one step too far down. Note is the
+        // one verdict the WebUI does not render at all: `isShown` excludes it, so
+        // the row never appeared in "Needs your attention", never reached the
+        // copy-for-bug-report, and counted toward the "all clear" chip -- while
+        // `Report::verdict()` printed the literal string "clean" onto the manager
+        // card. On the DEFAULT configuration (`my_hookless` is opt-in) a device
+        // with real binds over /my_product, visible in every app's mountinfo, read
+        // all-clear, and the `meaning` below -- which is the only place the fix is
+        // written down -- was unreachable from every surface a user looks at.
+        //
+        // Warn is exactly the state described: real, measured, app-visible, and
+        // accepted-by-default rather than broken. This is the other end of the
+        // ladder rule on `soft()`: a shipping detector can see this one, so it is
+        // amber; the four engine canaries nothing probes are notes.
+        //
         // Mixed stays FAIL: a bind we did not make is still someone else's mount
         // over the ROM, and that is the case this check exists for.
         let evidence = format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked));
-        let oracle = "any app can read /proc/self/mountinfo and see a module mounted over the ROM";
         let c = if mine == leaked.len() {
-            chk(N_ZERO_MOUNT, Verdict::Note, evidence).oracle(oracle)
+            chk(N_ZERO_MOUNT, Verdict::Warn, evidence).oracle(oracle)
         } else {
             fail(N_ZERO_MOUNT, evidence, oracle)
         };
@@ -863,7 +995,20 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
 
 /// A synthesized directory on an overlay mount must not carry an inode from
 /// outside the range overlayfs hands its own entries.
-fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
+///
+/// "Ours" is `engine_dirs` -- the `LiveKind::VirtualDir` rows, i.e. the
+/// directories the engine actually materialised. It used to be
+/// `targets.iter().any(|t| t.starts_with(&p) || *t == p)`, "a directory some rule
+/// target lives under", which on almost every device is a REAL ROM DIRECTORY: a
+/// module injecting /product/priv-app/Mms/Mms.apk put /product/priv-app/Mms into
+/// "ours", and the engine created none of it. A stock subdirectory that merely
+/// CONTAINS an injection was then compared against `stock_max` of its siblings --
+/// and on overlayfs a copied-up directory's inode comes from the upper (f2fs) and
+/// a lower-only sibling's from the lower (erofs), so two stock directories can
+/// cross the 8x threshold on their own. The row then said "Folders the Suite
+/// created carry ID numbers far outside the ROM's range" about a directory the
+/// ROM shipped, `.owner("the kernel engine")`, un-actionable.
+fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut examined = 0usize;
     // See check_dino_matches_stat. The non-overlay `continue` above is genuinely
@@ -885,14 +1030,20 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
                 continue;
             }
             let Some(i) = ino_of(&p) else { continue };
-            let ours = targets.iter().any(|t| t.starts_with(&p) || *t == p);
+            let ours = engine_dirs.contains(&p);
             if ours {
                 dirs.push((p, i));
             } else if i > stock_max {
                 stock_max = i;
             }
         }
-        if stock_max == 0 {
+        // BOTH halves, or the count is of directories nothing was asked about.
+        // `stock_max == 0` was the only guard, so once "ours" narrowed to the
+        // engine's own directories a parent with none of them still incremented
+        // `examined` and the check reported "N overlay dir(s): synthesized inodes
+        // sit inside the stock range" over zero synthesized inodes -- the vacuous
+        // PASS its sibling was fixed for.
+        if stock_max == 0 || dirs.is_empty() {
             continue;
         }
         examined += 1;
@@ -912,11 +1063,14 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
             )
             .meaning("The folders this needed to read would not open, so this was not tested.");
         }
-        return na(N_OVERLAY_DIR_INO, "no injected directory on an overlay mount".into())
-            .meaning(
-                "This one only applies to folders the Suite creates on an overlayfs ROM, and you \
-                 have none.",
-            );
+        return na(
+            N_OVERLAY_DIR_INO,
+            "no directory the engine synthesized on an overlay mount, beside a stock one".into(),
+        )
+        .meaning(
+            "This one only applies to folders the Suite creates on an overlayfs ROM, and you \
+             have none.",
+        );
     }
     if outliers.is_empty() && unread > 0 {
         return unmeasured(
@@ -982,15 +1136,26 @@ fn dev_ino_of(p: &Path) -> Option<(u64, u64)> {
 /// plausible MAGNITUDE, and 101 against a sibling maximum of 71 is well inside
 /// its 8x threshold. Plausible and impossible at the same time.
 ///
-/// Amber rather than red, by this file's rule: it is a real measured
+/// A NOTE rather than a warning, by this file's rule: it is a real measured
 /// inconsistency, but nothing shipping is known to probe for it. The oracle
 /// string carries the recipe so it stays a regression canary for the engine.
-fn check_dir_ino_collision(targets: &[PathBuf]) -> Check {
-    // Directories the engine synthesized, identified the way
-    // `check_overlay_dir_ino` does it: a directory some rule target lives under.
+fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
+    // The directories the engine ACTUALLY synthesized -- `LiveKind::VirtualDir`,
+    // which is what `nm list` reports them as.
+    //
+    // This used to be "a directory some rule target lives under", copied from
+    // `check_overlay_dir_ino`, which on almost every device names real ROM
+    // directories: a module injecting /product/priv-app/Mms/Mms.apk put
+    // /product/priv-app/Mms, /product/priv-app and /product into "ours". With no
+    // synthesized directory anywhere, "ours" was still non-empty, the walk found
+    // no collision -- real directories cannot collide, that is the premise -- and
+    // the check returned PASS: "Every folder the Suite created has an identity
+    // number of its own." Nothing the Suite created was examined. It also burned
+    // a full partition walk (~2.4k stats under /system) on every boot pass and
+    // every WebUI open to answer a question that had no subject.
     let mut ours: HashMap<(u64, u64), PathBuf> = HashMap::new();
     let mut roots: Vec<PathBuf> = Vec::new();
-    for parent in parents_of(targets) {
+    for dir in engine_dirs {
         // ROM PARTITIONS ONLY. The engine synthesizes directories on the ROM;
         // a target under /data has real, system-owned parents that cannot be
         // ours and cannot collide with anything of ours.
@@ -1000,10 +1165,21 @@ fn check_dir_ino_collision(targets: &[PathBuf]) -> Check {
         // /data, hit the 20,000-directory cap, and reported the check UNMEASURED.
         // Measured on an OP15 the moment two absorbed app APKs appeared: a check
         // that had been answering in milliseconds stopped answering at all.
-        if !crate::absorb::ROM_ROOTS.iter().any(|r| parent.starts_with(r)) {
+        //
+        // STRING prefix, the way every other reader of ROM_ROOTS matches it
+        // (absorb.rs twice, `check_no_rom_tmpfs` below, pmcache.rs). This was the
+        // one site whose left operand is a PathBuf, so it resolved to
+        // `Path::starts_with`, which is COMPONENT-wise: "/system/" still matched
+        // (components [/, system]) but "/my_" matched nothing, because no path
+        // component is ever literally `my_`. So every synthesized directory under
+        // /my_product was silently skipped -- on exactly the configuration the
+        // zero-mount row tells the user to adopt (`my_hookless`) -- and if those
+        // were the only ones, the check returned a grey "nothing to test here"
+        // that was simply false.
+        if !on_rom_partition(dir) {
             continue;
         }
-        let mut p = parent.as_path();
+        let mut p = dir.as_path();
         while let Some(up) = p.parent() {
             if up.parent().is_none() {
                 break; // `up` is "/" -- `p` is the partition root
@@ -1013,21 +1189,12 @@ fn check_dir_ino_collision(targets: &[PathBuf]) -> Check {
         if !roots.iter().any(|r| r == Path::new(p)) {
             roots.push(p.to_path_buf());
         }
-        for anc in parent.ancestors() {
-            if anc.parent().is_none() || !anc.is_dir() {
-                continue;
-            }
-            // Only directories that exist because we serve something under them.
-            if !targets.iter().any(|t| t.starts_with(anc)) {
-                continue;
-            }
-            if let Some(k) = dev_ino_of(anc) {
-                ours.entry(k).or_insert_with(|| anc.to_path_buf());
-            }
+        if let Some(k) = dev_ino_of(dir) {
+            ours.entry(k).or_insert_with(|| dir.to_path_buf());
         }
     }
     if ours.is_empty() {
-        return na(N_DIR_INO_COLLIDE, "no directory holds an injection".into())
+        return na(N_DIR_INO_COLLIDE, "the engine synthesized no directory".into())
             .meaning("Nothing here creates a folder that the ROM does not already have.");
     }
 
@@ -1094,7 +1261,7 @@ fn check_dir_ino_collision(targets: &[PathBuf]) -> Check {
     }
     pass(
         N_DIR_INO_COLLIDE,
-        format!("{} director(ies) holding injections checked against {seen} on the same \
+        format!("{} director(ies) the engine synthesized checked against {seen} on the same \
                  partition(s); no shared inode",
                 ours.len()),
     )
@@ -1454,20 +1621,43 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         readable.iter().map(|p| fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(0)).collect();
 
     let counts = probe_as_uid(appid, || {
-        let (mut denied, mut mismatched) = (0u32, 0u32);
+        // ENOENT SPECIFICALLY, and a third counter for everything else.
+        //
+        // `denied` was a bare `is_err()`, and the FAIL it produces asserts "the
+        // PackageManager names those paths to the app while open() answers
+        // ENOENT" and ends "Update the kernel, or stop hiding from that app."
+        // Nothing here established ENOENT: a module-shipped file left root-owned
+        // 0600, or any EACCES/ELOOP/ENAMETOOLONG from the child, gave the same
+        // count -- and a STOCK file behaves identically there, so the per-UID
+        // decision was never involved at all. That is a false red ending in
+        // "reflash your kernel". `check_xattr_agrees_when_hidden` was fixed for
+        // exactly this and carries the paragraph; this site never was.
+        //
+        // `.unwrap_or(our_len)` on the stat was the same class the other way: a
+        // failed stat in the child became "sizes match", on the arm that decides
+        // a FAIL. A stat that will not answer is untested, not equal.
+        //
+        // `probe_as_uid` is const-generic over N and takes `size_of` on both ends
+        // of one pipe, so widening the answer cannot desync the two halves.
+        let (mut denied, mut mismatched, mut other) = (0u32, 0u32, 0u32);
         for (p, &our_len) in readable.iter().zip(ours.iter()) {
-            if fs::File::open(p.as_path()).is_err() {
-                denied += 1;
-            } else if fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(our_len) != our_len {
-                mismatched += 1;
+            match fs::File::open(p.as_path()) {
+                Ok(_) => match fs::metadata(p.as_path()).map(|m| m.len()) {
+                    Ok(n) if n != our_len => mismatched += 1,
+                    Ok(_) => {}
+                    Err(_) => other += 1,
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => denied += 1,
+                Err(_) => other += 1,
             }
         }
-        [denied, mismatched]
+        [denied, mismatched, other]
     });
-    let [denied, mismatched] = match counts {
+    let [denied, mismatched, other] = match counts {
         Ok(c) => c,
         Err(e) => return e.into_check(NAME),
     };
+    let tested = readable.len().saturating_sub(other as usize);
     // Naming the probe uid names an app on the hide list, and this evidence ends
     // up in `check.txt` -- which `nomount export` writes to shared storage, where
     // the same function withholds `uid_live.txt` and strips the ` [UID: n]` suffix
@@ -1478,13 +1668,28 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     // the gate doctor.rs already applies to the package names, and the one the
     // export's own closing note promises for "the check report's hide-list names".
     let who = hidden_uid_label(appid, crate::blocklist::redact_hide_list());
+    // A hit is a hit however partial the run was, so both FAIL arms below stand
+    // regardless of `other`. Only a CLEAN result depends on having looked --
+    // the same asymmetry `check_dino_matches_stat` and `check_erofs_dir_shape`
+    // carry, and evidence that could not be gathered is not evidence of health.
+    if denied == 0 && mismatched == 0 && other > 0 {
+        return unmeasured(
+            NAME,
+            format!(
+                "{who}: {tested} of {} PM-published rule target(s) answered; {other} failed to \
+                 open for a reason other than ENOENT (a mode or a path component, not hiding)",
+                readable.len()
+            ),
+        )
+        .meaning(
+            "Some published files could not be tested — they refused the app for a reason that \
+             has nothing to do with hiding — so this is an incomplete result, not a clean one.",
+        );
+    }
     if denied == 0 && mismatched == 0 {
         return pass(
             NAME,
-            format!(
-                "{who} opened all {} PM-published rule target(s), same bytes we serve",
-                readable.len()
-            ),
+            format!("{who} opened all {tested} PM-published rule target(s), same bytes we serve"),
         )
         .meaning(
             "A hidden app can still open every file Android told it about, with the same bytes. \
@@ -1495,9 +1700,8 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         return fail(
             NAME,
             format!(
-                "{who} opened all {} PM-published rule target(s) but {mismatched} \
-                 differed in size from the copy we serve",
-                readable.len()
+                "{who} opened all {tested} PM-published rule target(s) it could test but \
+                 {mismatched} differed in size from the copy we serve"
             ),
             "those rules shadow a stock file, so the blocked reader is answered from the stock \
              file -- while the PackageManager parsed OUR copy and publishes its version and \
@@ -1515,9 +1719,8 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     fail(
         NAME,
         format!(
-            "{who} could not open {denied} of {} PM-published rule target(s)\
+            "{who} was answered ENOENT on {denied} of {tested} PM-published rule target(s)\
              {}",
-            readable.len(),
             if mismatched > 0 { format!(", and {mismatched} more differed in size") } else { String::new() }
         ),
         "the PackageManager names those paths to the app while open() answers ENOENT -- \
@@ -1643,7 +1846,7 @@ fn check_no_foreign_rom_mount() -> Check {
 /// Is the engine actually there?
 ///
 /// Every other check in this file answers "is the hiding detectable". With the
-/// engine down there IS no hiding -- `live_targets()` comes back empty, every
+/// engine down there IS no hiding -- `live_rules()` comes back empty, every
 /// target-dependent check correctly reports n/a, the three mount checks correctly
 /// pass because nothing is mounted, and the summary reads `4 passed, 0 failed`.
 ///
@@ -1715,6 +1918,16 @@ const RULE_DEPENDENT: [&str; 8] = [
 /// reads `current_uid()`.
 fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
     const NAME: &str = N_XATTR_HIDDEN;
+    // FIRST, and above the engine round-trip. With no rules there is nothing to
+    // compare whatever the hide list says, and the answer this used to fall
+    // through to -- "no rule target opens as root", meaning "not even root can
+    // open your injected files" -- is alarming nonsense about a device that has
+    // no injected files at all. `check_maps_not_deleted` already opens with the
+    // same guard for the same reason.
+    if targets.is_empty() {
+        return na(NAME, "no live rules".into())
+            .meaning("Nothing is being injected yet, so there is nothing to compare.");
+    }
     let Ok(blocked) = Nm::new().uid_list_live() else {
         return unmeasured(NAME, "the engine would not list the per-UID hide set".into())
             .meaning("Not tested — the hide list could not be read.");
@@ -1738,7 +1951,29 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
             let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else {
                 continue;
             };
-            let opened = fs::File::open(p.as_path()).is_ok();
+            // CAPTURE THE ERRNO AT THE open(), not two syscalls later.
+            //
+            // `hidden` used to be decided by `std::io::Error::last_os_error()`
+            // read AFTER the two xattr calls below, and both of them overwrite
+            // errno on failure (ENODATA when `security.selinux` is absent,
+            // ERANGE, EACCES from a path component). So `hidden` reflected
+            // whichever syscall failed LAST, in two directions and both bad: an
+            // errno clobbered to non-ENOENT dropped a genuinely hidden file out
+            // of `denied` AND out of `leaked`, turning the FAIL this check exists
+            // for into silence; an errno clobbered TO ENOENT counted a file the
+            // per-UID decision never touched, inflating `denied` and letting the
+            // check report PASS -- "none of them answered xattr either" -- over a
+            // run where the discriminating case never arose. That is the exact
+            // hole the `denied == 0` guard below was added to close, re-entered
+            // through the back door.
+            //
+            // `io::Error` for an OS error carries the errno captured at the
+            // syscall and allocates nothing, so this is safe post-fork.
+            let open_err = match fs::File::open(p.as_path()) {
+                Ok(_) => None,
+                Err(e) => Some(e.raw_os_error().unwrap_or(0)),
+            };
+            let opened = open_err.is_none();
             // Size-only calls: ask whether the surface ANSWERS, without
             // pulling the value into this process. A leak is the fact that it
             // replied at all.
@@ -1759,8 +1994,7 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
                 // per-UID decision was never consulted at all. ENOENT is
                 // hiding's signature, and it is the only denial this check is
                 // about.
-                let hidden = std::io::Error::last_os_error().raw_os_error()
-                    == Some(libc::ENOENT);
+                let hidden = open_err == Some(libc::ENOENT);
                 if hidden {
                     denied += 1;
                     if xattr_answered {
@@ -1850,8 +2084,16 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
 }
 
 /// Every measured check, plus the two counts the report header carries.
-pub fn device_checks() -> (Vec<Check>, usize, usize) {
-    let Some(targets) = live_targets() else {
+///
+/// The counts are `Option`, and the None arm is the one that could not read the
+/// rule list. They were `0`, and `Report::text()` then opened with
+/// "nomount check: 0 live rule(s) across 0 directory(ies) | engine v30" -- the
+/// exact shape `check.rs` argues against three lines above the header it prints:
+/// "a zero nobody measured reads exactly like a zero somebody did". The same 0
+/// reached the WebUI's bug-report clipboard. A type the caller cannot forget to
+/// branch on is what keeps the two honest.
+pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
+    let Some((targets, engine_dirs)) = live_rules() else {
         // The rule list could not be read. The checks that do not touch it still
         // mean what they say, so they still run; the seven that do are reported as
         // what they are. Amber, never grey: NotApplicable would read as "nothing
@@ -1889,18 +2131,17 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
                     .meaning("Not tested — the rule list this needs could not be read."),
             );
         }
-        return (checks, 0, 0);
+        return (checks, None, None);
     };
     let parents = parents_of(&targets);
-    let engine_dirs = live_engine_dirs();
     let checks = vec![
         check_engine_live(),
         check_zero_mount(),
         check_surfaces(),
         check_dino_matches_stat(&targets),
         check_inode_band(&targets, &engine_dirs),
-        check_overlay_dir_ino(&targets),
-        check_dir_ino_collision(&targets),
+        check_overlay_dir_ino(&targets, &engine_dirs),
+        check_dir_ino_collision(&engine_dirs),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&targets),
         check_pm_apks_open_when_hidden(&targets),
@@ -1908,7 +2149,7 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
         check_no_rom_tmpfs(),
         check_no_foreign_rom_mount(),
     ];
-    (checks, targets.len(), parents.len())
+    (checks, Some(targets.len()), Some(parents.len()))
 }
 
 #[cfg(test)]
@@ -2120,6 +2361,88 @@ mod tests {
         assert_eq!(srcs[0], Path::new("/data/adb/rvhc/youtube-morphe-jhc-arm64.apk"));
         // No module dir, so it can never be excused as a hook framework.
         assert!(crate::absorb::module_dir_of(&srcs[0]).is_none());
+    }
+
+    /// The severity ladder has exactly one rule, and `soft()` is the bottom of it.
+    ///
+    /// `soft()` returned `Verdict::Warn`, which `Verdict::severity()` maps to
+    /// "attention" and the WebUI labels "will bite later" -- the same bucket as a
+    /// FAIL -- for four rows whose own documentation says nothing shipping probes
+    /// them ("Reading it needs a purpose-built detector"). That is the overclaim
+    /// the `soft()` doc-comment was written to prevent, and it also put
+    /// "N warning(s)" on the manager card for them.
+    ///
+    /// The other end of the same ladder is `check_zero_mount`, which had a real,
+    /// app-visible mount over the ROM at `Verdict::Note` -- the one verdict the
+    /// WebUI does not render at all.
+    #[test]
+    fn an_unprobed_tell_is_a_note_and_keeps_its_oracle() {
+        let s = soft(N_INODE_BAND, "evidence".into(), "the recipe");
+        assert_eq!(s.verdict.tag(), "NOTE", "a tell nothing probes must not read as attention");
+        assert_eq!(s.verdict.severity(), "info");
+        // Still a regression canary: the oracle is what makes it worth keeping.
+        assert_eq!(s.oracle.as_deref(), Some("the recipe"));
+        // ...and the promoted end is amber, not grey. `soft` and the zero-mount
+        // row must never share a verdict again -- one is seen by a detector today
+        // and the other is not.
+        assert_ne!(s.verdict.tag(), Verdict::Warn.tag());
+    }
+
+    /// `/my_*` is a ROM_ROOTS prefix, and `Path::starts_with` cannot see it.
+    ///
+    /// `ROM_ROOTS` holds string prefixes, and `"/my_"` is one of them. The
+    /// collision check was the one reader with a `PathBuf` on the left, so it got
+    /// `Path::starts_with`, which is component-wise: `"/system/"` still matched
+    /// (components `[/, system]`) but `"/my_"` matched nothing, because no path
+    /// component is ever literally `my_`. Every synthesized directory under
+    /// `/my_product` was therefore skipped -- on exactly the configuration the
+    /// zero-mount row tells the user to adopt -- and if those were the only ones
+    /// the check returned a grey "nothing to test here" that was false.
+    #[test]
+    fn a_my_partition_path_is_on_the_rom() {
+        assert!(on_rom_partition(Path::new("/my_product/priv-app/Foo")));
+        assert!(on_rom_partition(Path::new("/system/etc/nmt")));
+        assert!(on_rom_partition(Path::new("/product/priv-app/Mms")));
+        // /data is the exclusion this predicate exists for: an absorbed app APK
+        // put /data in the walk and the check stopped answering at the 20k cap.
+        assert!(!on_rom_partition(Path::new("/data/app/~~a/com.x-b/base.apk")));
+        // The exact form that was wrong, pinned so it cannot come back.
+        assert!(!Path::new("/my_product/priv-app/Foo").starts_with("/my_"));
+    }
+
+    /// The collision check must have a subject, and a real ROM ancestor is not one.
+    ///
+    /// "Ours" used to be "a directory some rule target lives under", which on
+    /// almost every device names real ROM directories -- so with no synthesized
+    /// directory anywhere the map was non-empty, the walk found no collision
+    /// (real directories cannot collide, that is the premise) and the check
+    /// reported PASS: "Every folder the Suite created has an identity number of
+    /// its own." Nothing the Suite created had been examined, and it burned a
+    /// full partition walk to say so.
+    #[test]
+    fn the_collision_check_has_no_subject_without_a_synthesized_dir() {
+        let c = check_dir_ino_collision(&[]);
+        assert_eq!(c.verdict.tag(), "N/A", "a vacuous walk must not read as a pass");
+        assert_eq!(c.evidence, "the engine synthesized no directory");
+    }
+
+    /// With no rules at all, the xattr check must not say "not even root can open
+    /// your injected files".
+    ///
+    /// The `files.is_empty()` arm was reachable with `targets` EMPTY too (engine
+    /// alive, zero rules, one app hidden), and it is alarming nonsense about a
+    /// device that has no injected files. Its sibling `check_maps_not_deleted`
+    /// already opened with this guard.
+    #[test]
+    fn the_xattr_check_is_quiet_when_there_are_no_rules() {
+        let c = check_xattr_agrees_when_hidden(&[]);
+        assert_eq!(c.verdict.tag(), "N/A");
+        assert_eq!(c.evidence, "no live rules");
+        assert!(
+            !c.meaning.contains("even as root"),
+            "must not claim root could not open files that do not exist: {}",
+            c.meaning
+        );
     }
 
     /// The by-design exemption still has to work for a real module source.
