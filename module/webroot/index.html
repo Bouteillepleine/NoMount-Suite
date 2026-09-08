@@ -2540,6 +2540,19 @@
           gr.map(checkRow).join("")
         : "";
     };
+    // Notes get a COLLAPSED disclosure, not a group of open cards.
+    //
+    // Five standing observations about a working setup, rendered in full, is a
+    // wall of text under a heading that says nothing needs doing -- it buries the
+    // "all clear" it is sitting beneath and re-teaches the reader to scroll past
+    // this screen. Collapsed, it is one quiet line: nothing is hidden (which is
+    // what made `note` unsafe to drop entirely), and nothing is in the way.
+    const noteGroup = function (gr) {
+      return gr.length
+        ? '<details class="ndet"><summary>Good to know <span class="cnt">' + gr.length +
+          "</span></summary>" + gr.map(checkRow).join("") + "</details>"
+        : "";
+    };
 
     if (!rows.length && ranSection(r, "device")) {
       // ...and the notes still render UNDER it. This is the arm a healthy device
@@ -2547,24 +2560,17 @@
       // invisible -- the defect that made amber look like the only honest option
       // in the first place. "Nothing to act on" and "here is what was observed"
       // are both true and both worth saying.
-      // Count it, do not guess it. "A couple" was written when this section held
-      // one row and read as a plain untruth beside a heading saying 5.
-      sub.textContent = notes.length
-        ? "Nothing needs your attention. " + notes.length +
-          (notes.length === 1 ? " thing is" : " things are") + " worth knowing."
-        : "Nothing needs your attention.";
+      sub.textContent = "Nothing needs your attention.";
       list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
         '<div class="fmean">' + clean + " check" + (clean === 1 ? "" : "s") +
         " ran across " + (r.sections || []).join(" and ") +
         ", and found nothing to act on.</div>" +
         '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>' +
-        group("Good to know", notes);
+        noteGroup(notes);
       return;
     }
 
-    sub.textContent = notes.length
-      ? "Sorted by what needs you first. Passes are left out; notes are at the bottom."
-      : "Sorted by what needs you first. Everything that passed is left out.";
+    sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
     // A run that was never asked about the device says nothing about
     // detectability, so it goes at the very top: everything below it is about the
     // module set, not about what an app can see.
@@ -2606,7 +2612,7 @@
       (unmeasured.length ? '<div class="fgroup">Not measured <span class="cnt">' +
         unmeasured.length + "</span></div>" + unmHead + unmeasured.map(checkRow).join("")
         : unmHead) +
-      group("Good to know", notes);
+      noteGroup(notes);
   }
 
   // One row. The order is deliberate: name and state, then the sentence a reader

@@ -23,10 +23,12 @@ a state that is working as designed. A warning that is always on is one nobody
 reads, and it drowns the ones that mean something.
 
 It is a note now, so the verdict line and the manager card read clean again. The
-row did not disappear with it: notes render in their own **Good to know** section
-at the bottom of Check, in the muted tag rather than amber, on the all-clear
-screen as well as the sorted one. Dropping them entirely is what made a real
-app-visible mount invisible for a release, and that is not the fix either.
+row did not disappear with it: notes live in a collapsed **Good to know**
+disclosure at the bottom of Check, in the muted tag rather than amber, on the
+all-clear screen as well as the sorted one. Dropping them entirely is what made a
+real app-visible mount invisible for a release; rendering five standing
+observations as open cards under a heading that says nothing needs doing is the
+other way to lose them. One quiet line, opened by whoever goes looking.
 
 The text leads with "nothing is wrong here and nothing needs fixing". It still
 names the one case where it matters — hiding from a specific app, where your
