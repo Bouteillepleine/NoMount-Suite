@@ -1742,7 +1742,6 @@
     const rows = r.checks.filter(function (c) { return isShown(c.verdict); });
     const attention = rows.filter(function (c) { return isAttention(c.verdict); });
     const unmeasured = rows.filter(function (c) { return c.verdict === "unmeasured"; });
-    const notes = (r.checks || []).filter(function (c) { return c.verdict === "note"; });
     const down = engineDown(r);
 
     if (down) { chip.textContent = "engine down"; chip.className = "chip bad"; }
@@ -1761,12 +1760,6 @@
           gr.map(checkRow).join("")
         : "";
     };
-    const noteGroup = function (gr) {
-      return gr.length
-        ? '<details class="ndet"><summary>Good to know <span class="cnt">' + gr.length +
-          "</span></summary>" + gr.map(checkRow).join("") + "</details>"
-        : "";
-    };
 
     if (down || guardTripped(r)) {
       sub.textContent = down
@@ -1782,7 +1775,7 @@
           : "Re-arm it in Bootloop guard on Status, then reboot.") +
         '</div><div class="fmeta"><span class="tag warn">' +
         (down ? "engine down" : "guard tripped") + "</span></div></div>" +
-        group("Needs your attention", attention) + noteGroup(notes);
+        group("Needs your attention", attention);
       return;
     }
     if (!rows.length && ranSection(r, "device")) {
@@ -1791,8 +1784,7 @@
         '<div class="fmean">' + clean + " check" + (clean === 1 ? "" : "s") +
         " ran across " + esc((r.sections || []).join(" and ")) +
         ", and found nothing to act on.</div>" +
-        '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>' +
-        noteGroup(notes);
+        '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>';
       return;
     }
 
@@ -1828,8 +1820,7 @@
       group("Needs your attention", attention) +
       (unmeasured.length ? '<div class="fgroup">Not measured <span class="cnt">' +
         unmeasured.length + "</span></div>" + unmHead + unmeasured.map(checkRow).join("")
-        : unmHead) +
-      noteGroup(notes);
+        : unmHead);
   }
 
   function checkRow(c) {

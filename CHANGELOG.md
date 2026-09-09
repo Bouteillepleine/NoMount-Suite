@@ -11,6 +11,10 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## Unreleased
+
+- Good to know is gone: notes no longer render in the WebUI. They stay in `nomount check --json` and in the copied report.
+
 ## v1.3.176 - engine v32 (unchanged)
 
 - Two layout fixes to the Hidden apps list, both introduced by v1.3.174.
