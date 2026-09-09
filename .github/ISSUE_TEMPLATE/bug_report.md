@@ -10,7 +10,7 @@ labels: bug
 
 ## Diagnostics
 
-**Easiest, no pc needed: open the module's WebUI, go to *Check* → *Developer
+**Easiest, no PC needed: open the module's WebUI, go to *Check* → *Developer
 tools* → *Export*.** Attach the folder it names.
 
 It writes a timestamped bundle to `/sdcard/Download`, already containing

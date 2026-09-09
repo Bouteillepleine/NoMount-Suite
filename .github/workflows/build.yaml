@@ -1,6 +1,13 @@
 name: NoMount Suite - module zip
 
 on:
+  # Called by release.yml on a v* tag, so the published zip is built by
+  # exactly these jobs rather than a parallel pipeline.
+  #
+  # `only` is declared on BOTH triggers and forwarded to the compile matrix, which
+  # is the only thing that reads it. It exists so a kernel-side change can be
+  # re-checked against one version without paying for all ten; leaving it empty
+  # (every push, and release.yml, which does not pass it) keeps the full matrix.
   workflow_call:
     inputs:
       only:
@@ -16,16 +23,58 @@ on:
         required: false
         default: ''
   push:
+    # `prerelease` is where the audit work lands before it reaches `suite`, and it
+    # was building nowhere: every commit on it was verified only on the three
+    # phones and by a local cross-compile, never by CI. The `release` job below
+    # is gated on a v* TAG, so a branch build runs test/build/package and cannot
+    # publish anything.
+    #
+    # `master` is this repository's default branch and was missing, so a push
+    # there built nothing at all. `main` stays because the same file ships to the
+    # NoMount-Suite mirror, whose default IS main -- one workflow, both repos.
     branches: [master, main, suite, prerelease]
+    # A README edit is not a build. Without this, every documentation commit
+    # spent a couple of minutes producing a zip identical to the last one, and
+    # the run list read as a wall of "readme:" entries with the real builds
+    # buried among them.
+    #
+    # CAVEAT: GitHub applies path filters to TAG pushes too. If a `v*` tag ever
+    # lands on a commit that touched only documentation, this workflow will not
+    # fire and no release will be published. Release tags here follow a version
+    # bump in Cargo.toml and module.prop, so that case does not arise in
+    # practice -- but if it ever does, run the workflow manually.
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - 'LICENSE'
       - '.gitattributes'
+      # Written by release.yml's publish job, which commits it to main right
+      # after a release goes out. Building for it would rebuild the zip that was
+      # just published, from the same tree, to no purpose.
       - 'update.json'
 
+# Least privilege: this workflow only builds and uploads artifacts.
 permissions:
   contents: read
+
+# Every `uses:` below is pinned to a COMMIT, with the tag it corresponded to in a
+# trailing comment. A tag is a movable pointer in someone else's repository, so
+# `@v4` is a standing agreement to run whatever they publish next, inside a job
+# that builds the root binary this project ships. The cost is that a pin has to
+# be bumped by hand; the comment is what makes that a two-minute job rather than
+# an archaeology exercise. Do not replace these with tags again.
+#
+# Node 20 is end-of-life on the runners, so the four GitHub-owned actions are on
+# their node24 releases: checkout v7, cache v6, upload-artifact v7,
+# download-artifact v8. Each bump was checked rather than assumed -- every input
+# this workflow passes still exists in the new version, cache/restore still
+# exposes `cache-hit`, and download-artifact still defaults to one subdirectory
+# per artifact name, which the package job below reads.
+#
+# `mlugg/setup-zig` is deliberately NOT bumped: v2.2.1 is its newest release and
+# still declares node20, so it stays and the runner keeps forcing it onto node24.
+# That warning is upstream's to clear and is the only one that should remain.
+# `dtolnay/rust-toolchain` is a composite action -- no JS runtime, unaffected.
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,13 +82,32 @@ env:
   NDK_HOME: /opt/ndk
 
 jobs:
+  # Did this PUSH touch the engine? The compile matrix is ten kernel clones and is
+  # only meaningful when hookless/ changed, so it is gated rather than run on every
+  # commit. This preserves the path filter the matrix used to carry itself.
+  #
+  # THE WHOLE PUSH RANGE, not HEAD^..HEAD. The old form asked only what the TIP
+  # commit touched, so a push of more than one commit tested only the last of them:
+  # a push whose engine change sat in any earlier commit skipped the matrix
+  # entirely and the run still went green. It did exactly that on the push that
+  # added this comment -- two commits, the kernel work in the first and a shell fix
+  # in the second, matrix "skipped", overall green. A gate that cannot see the
+  # change it exists to gate is worse than no gate, because it reports success.
+  #
+  # Fails OPEN in every case where the range cannot be established (a new branch,
+  # a force-push whose base is gone, a manual dispatch): running ten compiles that
+  # were not needed costs minutes, and skipping ten that were costs a broken
+  # engine on ten kernels.
   engine-changed:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.f.outputs.changed }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # 0, not 2: the base of a multi-commit push is not in a depth-2 clone,
+          # and `git diff` against an object we do not have is the silent skip
+          # this job was just fixed for.
           fetch-depth: 0
       - id: f
         env:
@@ -47,14 +115,16 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           set -eu
+          # A manual dispatch is someone asking for the full run on purpose, and
+          # it is the only way to get matrix coverage for a commit already pushed.
           if [ "$EVENT" != "push" ]; then
-            echo "not a push ($EVENT) - running the matrix"
+            echo "not a push ($EVENT) -- running the matrix"
             echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           base="${BEFORE:-}"
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
              || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            echo "no usable push base ('$base') - running the matrix"
+            echo "no usable push base ('$base') -- running the matrix"
             echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "range: $base..$GITHUB_SHA"
@@ -66,25 +136,35 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # The ten-version in-tree compile gate, called rather than triggered so it does
+  # not occupy its own row in the Actions list.
   compile-matrix:
     needs: engine-changed
     if: needs.engine-changed.outputs.changed == 'true'
     uses: ./.github/workflows/hookless-compile-matrix.yml
+    # `inputs` is null on a `push`, and a property of null is null, so this is ''
+    # there -- i.e. the full ten-version matrix, which is what a push must always
+    # get. Only a dispatch (or a caller that passes one) can narrow it.
     with:
       only: ${{ inputs.only || '' }}
 
+  # The unit tests are host tests (no NDK, no device), so they cost a minute and
+  # gate the thing that actually ships: `package` needs them green. `build` is
+  # deliberately NOT gated - the cross-compile is the slowest leg and there is no
+  # reason to hold it behind a fast check that cannot break it. A red test simply
+  # means no ZIP comes out the far end.
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
 
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: clippy
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -96,14 +176,50 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # --locked, like Test above. `test` was the only job pinned to Cargo.lock,
+      # so clippy and the cross-compile were free to resolve a different
+      # transitive set from the one the tests were green against.
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+      # The Rust is linted on every push; the SHELL was not, and the module is
+      # eight scripts that run as root at boot. Every bug found in the 2026-08-25
+      # audit session was in shell, not Rust: a uid parser that split on a space
+      # where the file uses a tab, a `\|` alternation toybox does not support, a
+      # `[ -e ]` that cannot tell ENOENT from EACCES.
+      #
+      # -s sh, because /system/bin/sh is mksh/ash, not bash.
+      #
+      # INFO level, and NO rule exclusions. It was `warning` at first, and that is
+      # one level ABOVE the check that matters most here: SC2086 (unquoted
+      # expansion) is info severity, so the gate could not see `find $_roots` in
+      # metamount.sh -- a find argument list built from third-party module
+      # DIRECTORY NAMES, where one space splits it in two. Everything the lower
+      # level newly reports is either fixed or carries an inline `disable` with
+      # its reason, which is the form that stays attached to the line it excuses;
+      # a bare -e list here would hide them from the file that needs them.
+      #
+      # -x, so a `. "$MODDIR/lib.sh"` is FOLLOWED. Without it every helper the
+      # entry points share reads as an undefined command and every variable
+      # lib.sh sets reads as unused -- i.e. the gate would punish the
+      # deduplication it exists to make safe.
+      #
+      # Honest about what this does NOT catch: shellcheck says nothing about
+      # `for x in $list`, because splitting there is usually intended, so the
+      # newline-IFS bug in the ghost populator would still have got through at
+      # any level.
       - name: Shellcheck module scripts
         run: |
           sudo apt-get install -y shellcheck >/dev/null 2>&1 || true
           shellcheck -x -s sh -S info -f gcc module/*.sh
+          # ...and the build script, which was the one shell file CI did not read
+          # -- while being the thing that assembles the zip everybody flashes.
+          # bash, not sh: it uses arrays and [[ ]] deliberately, and it runs on a
+          # workstation rather than on the phone.
           shellcheck -s bash -S info -f gcc scripts/package.sh
+          # ...and the kernel side, now that it lives here. One repo, one gate
+          # set: the engine's verify script is a root shell script on a device
+          # just like the module's are.
           shellcheck -s sh -S info -f gcc hookless/*.sh
 
   build:
@@ -111,13 +227,16 @@ jobs:
     strategy:
       matrix:
         profile: [debug, release]
+        # OnePlus (and anything that can run this kernel) is arm64-v8a only, and
+        # the module loads bin/$(getprop ro.product.cpu.abi) = arm64-v8a at
+        # runtime - so build and ship just arm64. Re-add targets for wider reach.
         target: [aarch64-linux-android]
         include:
           - target: aarch64-linux-android
             abi: arm64-v8a
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
 
@@ -125,6 +244,16 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -o ndk.zip
+          # VERIFY IT. This unpacks a 700 MB archive from a CDN and then compiles
+          # the root binary this project ships with the toolchain inside it, and
+          # nothing checked that the bytes were the ones Google published.
+          #
+          # sha1, because sha1 is the only digest Google's own package manifest
+          # carries (repository2-3.xml, <checksum type="sha1">). That is the right
+          # property for this job: what is needed here is second-preimage
+          # resistance -- "is this the r27c everyone else got?" -- and sha1 is not
+          # broken for that. It is broken for COLLISIONS, which would matter only
+          # if the NDK's publisher were the attacker.
           echo "${NDK_SHA1}  ndk.zip" | sha1sum -c - || {
             echo "::error::NDK archive does not match the checksum Google publishes for ${NDK_VERSION}"
             exit 1
@@ -132,13 +261,16 @@ jobs:
           unzip -q ndk.zip -d /opt
           mv /opt/android-ndk-${NDK_VERSION} ${NDK_HOME}
         env:
+          # From https://dl.google.com/android/repository/repository2-3.xml
+          # (<remotePackage path="ndk;27.2.12479018">, android-ndk-r27c-linux.zip).
+          # Bump this in the same commit as NDK_VERSION, never separately.
           NDK_SHA1: 090e8083a715fdb1a3e402d0763c388abb03fb4e
 
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -154,10 +286,15 @@ jobs:
           if [ "$PROFILE" = "release" ]; then
             FLAGS="--release"
           fi
+          # --locked: this is the build that PRODUCES THE SHIPPED BINARY, and it
+          # was the one leg free to resolve a different transitive dependency set
+          # from the one `test` was green against.
           cargo build --locked $FLAGS --target "$TARGET"
         env:
           PROFILE: ${{ matrix.profile }}
           TARGET: ${{ matrix.target }}
+          # arm64 only, like the matrix above. The armv7/x86_64/i686 linkers named
+          # targets this workflow has never built.
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
 
       - name: Assert debug info preserved
@@ -184,22 +321,25 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-${{ matrix.abi }}-${{ matrix.profile }}
           path: target/${{ matrix.target }}/${{ matrix.profile }}/nomount
+          # Intermediate: `package` downloads this in the same run and nothing
+          # else ever wants it. At 7 days these were the largest thing in the
+          # artifact store by a wide margin.
           retention-days: 1
 
   package:
     needs: [build, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
 
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
 
@@ -220,12 +360,15 @@ jobs:
           done
 
       - name: Setup zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.14.1
 
       - name: Build nm (freestanding netlink client)
         run: |
+          # The module shells out to bin/<abi>/nm; it is arch-shared C, built
+          # once here. Same zig incantation as the nomount source repo, then
+          # sstrip to ~3 KB. Placed next to nomount so package.sh bundles it.
           make -C userspace/tools/sstrip
           zig cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
             -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
@@ -247,14 +390,26 @@ jobs:
         env:
           VER: ${{ steps.ver.outputs.version }}
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nomount-release-zip
           path: release/release/00_NoMount-Module-*.zip
           retention-days: 30
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nomount-debug-zip
           path: release/debug/00_NoMount-Module-*.zip
+          # Shorter than the release zip: useful to attach to a bug report,
+          # not something that should accumulate for a month.
           retention-days: 7
+
+
+  # NO publish job lives here any more. It is `release.yml`, which calls this
+  # workflow as a reusable one and publishes the artifact `package` uploads
+  # above -- so the zip on a release page is built by exactly these jobs and not
+  # by a parallel pipeline. It had to move because this file gained a
+  # `paths-ignore` filter, and GitHub applies path filters to TAG pushes too: a
+  # `v*` tag landing on a documentation-only commit would have filtered the whole
+  # workflow out and published nothing, silently. This comment described the job
+  # that left; the description of what replaced it is at the top of release.yml.

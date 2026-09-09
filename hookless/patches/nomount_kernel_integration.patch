@@ -44,7 +44,7 @@ diff --git a/fs/Kconfig b/fs/Kconfig
 @@ -5,5 +5,12 @@
  menu "File systems"
  
-+config nomount
++config NOMOUNT
 +	bool "NoMount Path Redirection Subsystem"
 +	default n
 +	help

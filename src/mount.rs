@@ -609,7 +609,7 @@ pub fn run_plan() -> Result<()> {
             PlanKind::Bind => "bind",
         };
         let note = if !source_resolves(e) {
-            "  << unservable: source does not resolve, no rule will be created"
+            "  << UNSERVABLE: source does not resolve, no rule will be created"
         } else if e.kind == PlanKind::Whiteout && whiteout_leaves_hole(&e.target) {
             "  << applied, but the parent's size/nlink still count it (multi-block erofs)"
         } else {
