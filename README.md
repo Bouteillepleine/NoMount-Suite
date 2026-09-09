@@ -131,7 +131,7 @@ mismatched pair is the one failure neither half can explain (see Requirements).
 | Path | What it is |
 | :--- | :--- |
 | `src/` | The Rust metamodule and CLI (`nomount`) - the boot pass, the reconcile, the diagnostics. |
-| `hookless/` | The **Prism** kernel engine: `src/nomount.c`, the integration patch, and a matrix that compile-tests it against ten kernel versions. |
+| `hookless/` | The **Prism** kernel engine: `src/nomount.c` and the integration patch. |
 | `userspace/` | `nm`, the freestanding netlink client the Suite shells out to. No libc; ~4 KB. |
 | `module/` | What ships in the zip: boot scripts, the installer, and the WebUI. |
 | `scripts/` | `package.sh`, which builds and assembles the zip. |
@@ -153,10 +153,13 @@ falls back to a prebuilt - but only one that is newer than
 `userspace/src/nm.[ch]`, and it stops with an error rather than quietly
 packaging a stale binary.
 
-Every push runs the unit tests, clippy at `-D warnings`, and shellcheck over the
-module scripts and the build script; a push that touches `hookless/` also runs
-the ten-version kernel compile matrix. A push that touches only documentation
-runs nothing - `**.md` and `docs/**` are filtered out.
+A push to `prerelease` runs the unit tests, clippy at `-D warnings`, and
+shellcheck over the module scripts and the build script, then builds and packages
+the zip. A push that touches only documentation runs nothing - `**.md` and
+`docs/**` are filtered out. That is the whole of CI on this branch: the
+ten-version kernel compile matrix that used to run on any push touching
+`hookless/` was removed deliberately, so an engine change is now checked by the
+kernel builders and on a phone, not here.
 
 ## Out-of-tree variants
 
@@ -188,7 +191,7 @@ Both variants build from the Actions tab.
 | :--- | :--- | :--- |
 | **Build** | `LKM` | the module zip, with one `nomount-<kmi>.ko` bundled per GKI KMI generation plus a loader. The `ko <kmi>` jobs take ~2 minutes each. |
 | **NoMount LKM - out-of-tree build** | `LKM` | compile gate over all ten kernel versions. It proves the engine still builds as a module and nothing more - it runs modpost under `KBUILD_MODPOST_WARN=1`, which suppresses undefined symbols and missing namespace imports alike, so it cannot tell you a module would link. |
-| **NoMount KPM - build a KernelPatch module** | `KPM` | one `nomount-<kmi>.kpm` per KMI up to 6.6, built in the DDK containers, failing if any symbol would be unresolvable at load. Note the cfi caveat in `kpm/README.md`. |
+| ~~**NoMount KPM - build a KernelPatch module**~~ | `KPM` | **removed.** It built one `nomount-<kmi>.kpm` per KMI up to 6.6 in the DDK containers, failing if any symbol would be unresolvable at load, and it ran once in its life. The code is still on the `KPM` branch and the workflow is in git history; restore it there if the route is ever picked back up. Note the cfi caveat in `kpm/README.md`. |
 
 The per-KMI modules are built inside `ghcr.io/ylarod/ddk:<kmi>`, whose `$KDIR`
 already holds a released GKI kernel's own configured tree - the struct layouts,
@@ -256,8 +259,11 @@ an explanation in its own header).
 
 ## Compatibility
 
-All ten kernel versions compile on every engine change: 4.9, 4.14, 4.19, 5.4, 5.10,
-5.15, 6.1, 6.6, 6.12 and 6.18, legacy and current alike. What differs between the
+The engine is written to build on all ten kernel versions - 4.9, 4.14, 4.19, 5.4,
+5.10, 5.15, 6.1, 6.6, 6.12 and 6.18, legacy and current alike - and the
+out-of-tree compile gate on the `LKM` branch still covers that set. It is no
+longer checked on every engine change here; the in-tree matrix that did that was
+removed. What differs between the
 rows below is not whether the engine builds, but whether anyone has booted it on
 a phone and measured the result. Four have; the rest have not, which is a weaker
 claim, so it is written as one.
