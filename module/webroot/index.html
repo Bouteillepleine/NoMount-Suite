@@ -819,6 +819,12 @@
     <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
   </div>
 
+  <!-- The healthline above hides itself when there is nothing wrong, so this is
+       the way back to the report, the export and the incident record. -->
+  <button class="backline" onclick="openDetail()">
+    <span>Diagnostics</span><span class="bk-go" style="margin-left:auto">›</span>
+  </button>
+
   </section>
 
   <section class="tab" id="tab-hiding">
@@ -894,24 +900,6 @@
     </div>
   </div>
 
-  <div class="card collapsed" id="cardAbsorb">
-    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v4"/><path d="M2 12h20v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"/><path d="M12 3v6"/><path d="M9 6l3 3 3-3"/></svg>
-      <h2>Other modules' mounts</h2><span class="chip" id="abchip"> - </span><span class="chev">›</span>
-    </div>
-    <div id="abbody">
-      <p class="note" style="margin-top:0">A module that <b>bind-mounts its own content</b> does not know about NoMount, and its mount is just as readable to a scanner as one of ours would be. Absorbing re-serves it as a Prism injection and unmounts the original - the content still reaches the app, the mount stops existing.</p>
-      <p class="note"><b>This already runs by itself</b>, four times per boot: twice before zygote, then again after every module's boot scripts have finished, and once more late for modules that mount last. The chip above is what is left over after all of that. These buttons are for a mount that appears <i>later</i> - a module you just installed, or one that mounts on a timer - so you do not have to reboot to clear it. <b>Scan</b> only reports; nothing changes until you press Absorb.</p>
-      <p class="note">Binds belonging to a Zygisk/Xposed hook framework are never taken over, automatically or by hand: breaking a hook does not fail at boot, it fails hours later during an app install.</p>
-      <div class="uidbar">
-        <button class="act" style="flex:1 1 0" onclick="abScan(this)">Scan</button>
-        <button class="act danger" style="flex:1 1 0" onclick="abAbsorb(this)">Absorb</button>
-      </div>
-      <div class="list" id="abDone"></div>
-      <div class="list" id="abFound" style="display:none"></div>
-    </div>
-  </div>
-
   </section>
   <section class="tab" id="tab-rules">
   <div class="card">
@@ -944,6 +932,24 @@
     <div class="list" id="vfsfull" style="display:none"></div>
   </div>
 
+  <div class="card collapsed" id="cardAbsorb">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v4"/><path d="M2 12h20v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"/><path d="M12 3v6"/><path d="M9 6l3 3 3-3"/></svg>
+      <h2>Other modules' mounts</h2><span class="chip" id="abchip"> - </span><span class="chev">›</span>
+    </div>
+    <div id="abbody">
+      <p class="note" style="margin-top:0">A module that <b>bind-mounts its own content</b> does not know about NoMount, and its mount is just as readable to a scanner as one of ours would be. Absorbing re-serves it as a Prism injection and unmounts the original - the content still reaches the app, the mount stops existing.</p>
+      <p class="note"><b>This already runs by itself</b>, four times per boot: twice before zygote, then again after every module's boot scripts have finished, and once more late for modules that mount last. The chip above is what is left over after all of that. These buttons are for a mount that appears <i>later</i> - a module you just installed, or one that mounts on a timer - so you do not have to reboot to clear it. <b>Scan</b> only reports; nothing changes until you press Absorb.</p>
+      <p class="note">Binds belonging to a Zygisk/Xposed hook framework are never taken over, automatically or by hand: breaking a hook does not fail at boot, it fails hours later during an app install.</p>
+      <div class="uidbar">
+        <button class="act" style="flex:1 1 0" onclick="abScan(this)">Scan</button>
+        <button class="act danger" style="flex:1 1 0" onclick="abAbsorb(this)">Absorb</button>
+      </div>
+      <div class="list" id="abDone"></div>
+      <div class="list" id="abFound" style="display:none"></div>
+    </div>
+  </div>
+
   <div class="card">
     <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleModules(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
@@ -963,12 +969,12 @@
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
-      <h2>Check</h2><span class="chip" id="fchip"> - </span>
+      <h2>Diagnostics</h2><span class="chip" id="fchip"> - </span>
     </div>
-    <p class="note" id="fsub">Two halves, one report: what your module set will do at the next boot, and what apps can actually see on this device right now.</p>
+    <p class="note" id="fsub">What your module set will do at the next boot, and what apps can see on this device right now.</p>
     <div class="btns" style="flex-wrap:wrap">
-      <button class="act primary" onclick="runCheck(this)">Check my setup</button>
-      <button class="act" id="auCopy" onclick="copyReport(this)" style="display:none">Copy report</button>
+      <button class="act" onclick="runCheck(this)">Re-run</button>
+      <button class="act" id="auCopy" onclick="copyReport(this)">Copy report</button>
     </div>
     <div class="auage" id="auage" style="display:none"></div>
     <div class="list" id="findlist"></div>
@@ -1684,9 +1690,12 @@
                       (unm || 1) + (unm === 1 ? " check" : " checks") +
                       " had nothing to look at</span>";
     } else {
-      dot.className = "hl-dot ok";
-      txt.innerHTML = "<b>Nothing detectable</b>" + age;
+      // Nothing to say, so say nothing. The coverage metric above already
+      // reports the only thing worth reading on a healthy device.
+      el.style.display = "none";
+      return;
     }
+    el.style.display = "";
   }
 
   let CHECK_RUNNING = false;
@@ -1784,12 +1793,9 @@
       return;
     }
     if (!rows.length && ranSection(r, "device")) {
-      sub.textContent = "Nothing needs your attention.";
-      list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
-        '<div class="fmean">' + clean + " check" + (clean === 1 ? "" : "s") +
-        " ran across " + esc((r.sections || []).join(" and ")) +
-        ", and found nothing to act on.</div>" +
-        '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>';
+      sub.textContent = clean + " check" + (clean === 1 ? "" : "s") +
+        " ran across " + (r.sections || []).join(" and ") + ". Nothing to report.";
+      list.innerHTML = "";
       return;
     }
 
