@@ -1,78 +1,38 @@
-//! Decide whether this device's ROM directories describe their own contents.
-//!
-//! erofs stores a directory as packed 12-byte dirents followed by unpadded
-//! names, so a single-block directory reports exactly
-//! `st_size == 12*(entries incl "." and "..") + total name bytes`. f2fs and ext4
-//! report block multiples that encode nothing about the entry set, and an
-//! overlayfs mountpoint reports a value unrelated to either.
-//!
-//! The kernel cannot work this out for itself where it matters most. A
-//! synthesized directory inherits its PARENT's superblock, and on an
-//! overlay-backed ROM path that is overlayfs — whose magic says nothing about
-//! the layer whose shape the stock siblings actually show. `d_real()` cannot
-//! answer either: it resolves regular files, and a merged directory has no
-//! single real dentry. Two in-kernel attempts to infer it produced silent
-//! no-ops, which is exactly the failure mode this module exists to avoid.
-//!
-//! So measure it here, where a directory listing is one `read_dir` away, and
-//! tell the engine the answer. Proof, not inference: we only claim the shape
-//! when a REAL directory's reported size matches the formula for its own
-//! contents. When nothing proves it, the knob stays unset and the engine keeps
-//! its previous behaviour.
+//! Decide whether this device's ROM directories describe their own contents
 
 use std::fs;
 use std::path::Path;
 
-/// erofs's `statfs` magic. Written out twice before this — `0xE0F5E1E2` in
-/// audit.rs and `0xE0F5_E1E2` in whiteout.rs — for the one number that decides
-/// whether a directory's size means anything.
+/// erofs's `statfs` magic
 pub(crate) const EROFS_MAGIC: i64 = 0xE0F5_E1E2;
 
-/// `statfs(2)`'s `f_type` for `p`, or `None` if it would not statfs.
-///
-/// `as_bytes()`, not `to_string_lossy()`: a lossy path statfs()es something
-/// else, and the answer would be reported as the filesystem type of a path that
-/// was never asked about.
+/// `statfs(2)`'s `f_type` for `p`, or `None` if it would not statfs
 pub(crate) fn fs_magic(p: &Path) -> Option<i64> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
     let mut sf: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `c` is a NUL-terminated path and `sf` is a zeroed statfs.
     if unsafe { libc::statfs(c.as_ptr(), &mut sf) } != 0 {
         return None;
     }
     Some(sf.f_type as i64)
 }
 
-/// `12*(n+2) + sum(namelen) + 3` — the `+2`/`+3` are `.` and `..`, which the
-/// listing does not return but the on-disk directory always contains.
-///
-/// `None` when the directory would not list, or is empty. `audit.rs` carried
-/// a second copy of this arithmetic, so the formula every size claim in the
-/// Suite rests on had two definitions and one test.
+/// `12*(n+2) + sum(namelen) + 3` - the `+2`/`+3` are `.` and `..`, which the listing does
 pub(crate) fn erofs_model(dir: &Path) -> Option<u64> {
     let mut n: u64 = 0;
     let mut names: u64 = 0;
     for e in fs::read_dir(dir).ok()? {
-        // Skip a dirent we cannot read, do not abandon the directory: `?` here
-        // threw away the whole measurement over one bad entry, which reads as
-        // "shape not proven" and is exactly the silent no-op this module exists
-        // to avoid. A skipped entry can only make the model UNDERCOUNT, so the
-        // comparison still fails closed -- it never claims a shape it did not see.
         let Ok(e) = e else { continue };
         n += 1;
         names += e.file_name().as_encoded_bytes().len() as u64;
     }
     if n == 0 {
-        return None; // nothing to distinguish a shape from
+        return None;
     }
     Some(12 * (n + 2) + names + 3)
 }
 
-/// True when `dir`'s own reported size equals the erofs formula for its
-/// contents. Only meaningful under one block: past 4096 bytes erofs pads each
-/// block by an amount that depends on where the names fall, so a mismatch there
-/// proves nothing either way.
+/// True when `dir`'s own reported size equals the erofs formula for its contents
 fn fits_erofs_shape(dir: &Path) -> bool {
     let Ok(md) = fs::metadata(dir) else { return false };
     let size = md.len();
@@ -82,28 +42,12 @@ fn fits_erofs_shape(dir: &Path) -> bool {
     erofs_model(dir) == Some(size)
 }
 
-/// Walk the ROM looking for proof. Returns true as soon as a real directory
-/// demonstrates the shape.
-///
-/// Deliberately samples the CHILDREN of each root rather than the roots
-/// themselves: an overlay mountpoint (`/product/priv-app`) reports its own
-/// meaningless size — 27 bytes for 35 entries on OP15 — while the merged
-/// subdirectories beneath it report their lower layer's size verbatim, which is
-/// the value our synthesized siblings have to blend in with.
+/// Walk the ROM looking for proof
 pub fn rom_dirs_are_dirent_packed() -> bool {
     const ROOTS: &[&str] = &[
         "/system/app", "/system/priv-app", "/system/etc", "/product/app",
         "/product/priv-app", "/product/etc", "/vendor/etc", "/system_ext/app",
     ];
-    // No cross-root counter. `take(12)` per root is already the bound (8 roots,
-    // <= 96 stats, all of them cheap), and a `checked > 60` cap ACCUMULATED
-    // across roots -- so from roughly the sixth root on, each remaining root got
-    // one child sampled and then bailed, leaving `/system_ext/app` and
-    // `/vendor/etc` effectively unsampled. Failing to prove the shape is not
-    // neutral: `mount.rs` then never calls `set_dir_shape(true)`, the engine
-    // keeps the 4096 placeholder for synthesized directories, and
-    // `whiteout::measurable_hole` warns about holes the engine would have
-    // corrected.
     for root in ROOTS {
         let root = Path::new(root);
         if !root.is_dir() {
@@ -112,7 +56,6 @@ pub fn rom_dirs_are_dirent_packed() -> bool {
         if fits_erofs_shape(root) {
             return true;
         }
-        // Children of an overlay mountpoint are the informative case.
         let Ok(rd) = fs::read_dir(root) else { continue };
         for e in rd.flatten().take(12) {
             let p = e.path();
@@ -127,17 +70,15 @@ pub fn rom_dirs_are_dirent_packed() -> bool {
 #[cfg(test)]
 mod tests {
 
-    /// The formula, pinned against directories measured on OP15 erofs. If this
-    /// ever changes, every claim built on it is void.
+    /// The formula, pinned against directories measured on OP15 erofs
     #[test]
     fn model_matches_measured_erofs_directories() {
-        // (entries, total name bytes, observed st_size)
         for (n, names, size) in [
-            (17u64, 186u64, 417u64),   // /product/etc
-            (15, 236, 443),            // /system/app
-            (2, 13, 64),               // /product/priv-app/AICore
-            (1, 19, 58),               // /product/priv-app/AndroidAutoStub
-            (3, 16, 79),               // /product/priv-app/AIUnit
+            (17u64, 186u64, 417u64),
+            (15, 236, 443),
+            (2, 13, 64),
+            (1, 19, 58),
+            (3, 16, 79),
         ] {
             assert_eq!(12 * (n + 2) + names + 3, size, "n={n} names={names}");
         }

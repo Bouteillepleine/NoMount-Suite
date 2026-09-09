@@ -1,17 +1,4 @@
-//! The DEVICE section of `nomount check` — prove the hiding actually holds here.
-//!
-//! Every check here reproduces a detection oracle that was found, and closed, by
-//! measuring a real device: an app that can run these can also run them against
-//! us. Bundling them means a user can answer "is my setup detectable?" without
-//! hand-written probes, and a regression announces itself instead of waiting for
-//! someone to go looking.
-//!
-//! Two rules this file exists to enforce on itself:
-//!   * MEASURE, never infer. Each check reports what it read, not what the
-//!     configuration implies it should have read. Three kernel patches in this
-//!     project compiled clean and did nothing; only measurement caught them.
-//!   * A check that cannot run says so. "Skipped" is a distinct result from
-//!     "passed" -- reporting an unrun check as clean is how a hole survives.
+//! The device section of `nomount check` - prove the hiding actually holds here
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -22,13 +9,7 @@ use anyhow::Result;
 use crate::check::{slug, Check, Section, Verdict};
 use crate::nm::Nm;
 
-/// Constructors. Each one names the verdict in the check body's own vocabulary
-/// so a check reads as what it measured; the shape they build is the one shared
-/// [`Check`], not a second one this file owns.
-///
-/// The id is derived from the display name by [`slug`]. There used to be a
-/// hand-maintained `id_of` table here and nothing at all on the plan side, so
-/// half the rows in the merged list had no id to key an acceptance on.
+/// Constructors
 fn chk(name: &'static str, verdict: Verdict, evidence: String) -> Check {
     Check::new(Section::Device, slug(name), name, verdict, evidence)
 }
@@ -38,53 +19,15 @@ fn pass(name: &'static str, evidence: String) -> Check {
 fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Fail, evidence).oracle(oracle)
 }
-/// A real, measured inconsistency that nothing shipping actually probes.
-///
-/// NOTE, not amber, and the distinction is the Suite's whole posture: a FAIL on
-/// a user's device asserts "you are detectable", and for a tell no detector
-/// looks at that overclaims -- it teaches people to discount the row that does
-/// matter. The oracle string is still carried, because these stay the only
-/// regression canaries the engine layer has: if one fires, the engine really did
-/// produce an inconsistency and it is worth chasing, just not worth alarming a
-/// user over.
-///
-/// It used to return `Verdict::Warn`, which is what the doc-comment right above
-/// was written to prevent: `Verdict::severity()` maps Warn to "attention" and the
-/// WebUI labels that group "will bite later", so these four rows landed in the
-/// same bucket as a FAIL and `Report::verdict()` put "N warning(s)" on the
-/// manager card -- for tells whose own `meaning` says things like "Reading it
-/// needs a purpose-built detector." One rule now runs the ladder, and it is the
-/// one the Suite's posture already implies:
-///
-///   WARN = a shipping detector can see this on this device today AND there is
-///          something the reader should change.
-///   NOTE = either nothing probes it, or nothing about it should be changed: an
-///          engine canary, or a mount the Suite declines to absorb on purpose.
-///
-/// The second clause of the WARN rule is load-bearing, not decoration. Stated as
-/// "a detector can see it" alone -- which is how it read for two rounds -- the
-/// rule re-promotes both by-design arms of `check_zero_mount`, whose own oracle
-/// string says any app can read the mount in `/proc/self/mountinfo`. Both were
-/// demoted on measurement: amber that is permanently on, on the DEFAULT
-/// configuration, for a state working as designed, is amber nobody reads, and it
-/// made the WebUI's health line ("1 thing needs attention") contradict the
-/// Modules shield beside it ("Mountless · N by design"). Duck Detector is the
-/// reference adversary and it is not sophisticated; a warning the reader cannot
-/// act on costs more than the row is worth.
-///
-/// Nothing is lost by landing at NOTE. Notes survive in `audit.json` and in
-/// `nomount check`'s text, and the WebUI renders them in its own collapsed
-/// "Good to know" disclosure -- see the longer note in `check_zero_mount`, which
-/// records the release where dropping them entirely made a real, app-visible
-/// mount invisible.
+/// A real, measured inconsistency that nothing shipping actually probes
 fn soft(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Note, evidence).oracle(oracle)
 }
-/// "Does not apply here." Grey, never amber, never counted as a pass.
+/// "Does not apply here." Grey, never amber, never counted as a pass
 fn na(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::NotApplicable, evidence)
 }
-/// "Could have applied, did not run." Amber -- this is the honesty rule's state.
+/// "Could have applied, did not run." Amber - this is the honesty rule's state
 fn unmeasured(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::Unmeasured, evidence)
 }
@@ -92,40 +35,17 @@ fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Reboot, evidence).oracle(oracle)
 }
 
-/// Ask a question as an app uid, in a forked child, and bring back the answer.
-///
-/// Three copies of this existed: two here and one in `doctor.rs`. Each got the
-/// same five things right independently -- a pipe, a fork, setgroups/setgid/
-/// setuid IN THAT ORDER while still privileged, a fixed-width answer, a
-/// waitpid -- and each carried its own paragraph explaining the ordering.
-///
-/// The duplication was not theoretical. v1.3.148 widened one probe's payload
-/// from 8 bytes to 12 and the edit landed on the wrong copy, leaving a parent
-/// demanding 12 from a child writing 8 and a parent reading 8 from a child
-/// writing 12. Both halves then reported a counter that could not move, one of
-/// them as a clean PASS. No test could see it -- the sizes were literals in two
-/// functions -- and it took a flash to hardware to find. Here the width is
-/// `size_of::<[u32; N]>()` on both sides of the same pipe, so the two cannot
-/// disagree.
-///
-/// `probe` runs in the child with the target identity and returns `N` counters.
-/// It must not allocate before it has to: this is post-fork.
-///
-/// Slot 0 comes back as `u32::MAX` when the child could not take on the
-/// identity, which is the sentinel both original copies already used. Callers
-/// must treat that as unmeasured, never as zero.
+/// Ask a question as an app uid, in a forked child, and bring back the answer
 pub(crate) fn probe_as_uid<const N: usize>(
     uid: u32,
     probe: impl FnOnce() -> [u32; N],
 ) -> Result<[u32; N], ProbeFail> {
     let width = std::mem::size_of::<[u32; N]>();
     let mut fds = [0i32; 2];
-    // SAFETY: fds is the 2-element array pipe(2) writes into.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return Err(ProbeFail::Setup);
     }
     let (rd, wr) = (fds[0], fds[1]);
-    // SAFETY: fork in a single-threaded process; the child _exit()s.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         unsafe {
@@ -135,20 +55,7 @@ pub(crate) fn probe_as_uid<const N: usize>(
         return Err(ProbeFail::Start);
     }
     if pid == 0 {
-        // SAFETY: child side. rd belongs to the parent.
         unsafe { libc::close(rd) };
-        // Supplementary groups FIRST, then gid, then uid -- each step needs the
-        // privilege the next one drops. Dropping uid and gid alone leaves root's
-        // SUPPLEMENTARY groups on the child, so the probe would ask "can uid N
-        // do this" while carrying group memberships the real app does not have.
-        // On a target whose group bits grant more than its other bits that
-        // answers "yes" where the app is denied -- a PASS on something an app
-        // cannot actually do.
-        //
-        // Skipped when we already ARE the target: there is nothing to drop, and
-        // setgroups() needs CAP_SETGID, so attempting it unprivileged would fail
-        // a probe already running with exactly the identity it wanted.
-        // SAFETY: all async-signal-safe; the child _exit()s on every path.
         let dropped = unsafe {
             libc::getuid() == uid
                 || (libc::setgroups(0, std::ptr::null()) == 0
@@ -157,27 +64,20 @@ pub(crate) fn probe_as_uid<const N: usize>(
         };
         let mut out = if dropped { probe() } else { [0u32; N] };
         if !dropped {
-            // N >= 1 for every caller; an empty answer has nothing to report.
             if let Some(first) = out.first_mut() {
                 *first = u32::MAX;
             }
         }
-        // SAFETY: `out` is N u32s and `width` is its size; well under PIPE_BUF,
-        // so the write is atomic. Native byte order on both ends of one pipe in
-        // one process family -- no encoding step to get wrong.
         unsafe {
             libc::write(wr, out.as_ptr().cast(), width);
             libc::_exit(0)
         }
     }
-    // SAFETY: parent side; wr belongs to the child.
     unsafe { libc::close(wr) };
     let mut out = [0u32; N];
-    // SAFETY: reading `width` bytes into an N-u32 array; same width the child wrote.
     let got = unsafe { libc::read(rd, out.as_mut_ptr().cast(), width) };
     unsafe { libc::close(rd) };
     let mut status = 0i32;
-    // SAFETY: pid came from the fork above and has not been waited on.
     unsafe { libc::waitpid(pid, &mut status, 0) };
     if got != width as isize {
         return Err(ProbeFail::Silent);
@@ -188,7 +88,7 @@ pub(crate) fn probe_as_uid<const N: usize>(
     Ok(out)
 }
 
-/// Why a probe produced no answer. Each variant is `Unmeasured`, never a pass.
+/// Why a probe produced no answer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProbeFail {
     Setup,
@@ -198,8 +98,7 @@ pub(crate) enum ProbeFail {
 }
 
 impl ProbeFail {
-    /// The row this failure becomes. One place, so a fourth probe cannot invent
-    /// a fifth wording for "the probe did not run".
+    /// The row this failure becomes
     fn into_check(self, name: &'static str) -> Check {
         let (evidence, meaning) = match self {
             Self::Setup => ("pipe() failed", "The probe could not be set up, so this was not tested."),
@@ -217,19 +116,7 @@ impl ProbeFail {
     }
 }
 
-
-/// The name of every check this file emits, in one place.
-///
-/// These used to be bare string literals repeated across each check's return
-/// arms, and mirrored BY HAND in two more places: `RULE_DEPENDENT`, which stands
-/// in for the rule-reading checks when the dump fails, and the `names` array in
-/// `every_shipped_check_name_has_its_own_id`. Nothing bound the three together,
-/// so renaming a check left the stand-in emitting the old name under a different
-/// slug -- a row the WebUI cannot reconcile with the real one -- and the
-/// uniqueness test went on passing, because it was validating its own copy.
-///
-/// The id every consumer keys on is `check::slug()` of these, so this is also
-/// the list that has to stay collision-free.
+/// The name of every check this file emits, in one place
 pub(crate) const N_ENGINE_LIVE: &str = "engine responding";
 pub(crate) const N_ZERO_MOUNT: &str = "zero-mount posture";
 pub(crate) const N_SURFACES: &str = "kernel surfaces";
@@ -245,22 +132,13 @@ pub(crate) const N_FOREIGN_MOUNT: &str = "foreign mount over the ROM";
 pub(crate) const N_RULE_DUMP: &str = "engine rule dump";
 pub(crate) const N_XATTR_HIDDEN: &str = "xattr agrees with open for a hidden app";
 
-/// Every name above, so a test can assert over the shipped set rather than a
-/// transcription of it.
-///
-/// Test-only, and deliberately: the CONSTS are what production uses -- each
-/// check emits its own and `RULE_DEPENDENT` names the same ones, which is the
-/// binding that matters. This array only gives the uniqueness test a handle on
-/// them. Forgetting to add a new check here weakens that test; it can no longer
-/// let a check's name and its stand-in drift apart, which is what it used to.
+/// Every name above, so a test can assert over the shipped set rather than a transcription
 #[cfg(test)]
 pub(crate) const ALL_CHECK_NAMES: [&str; 14] = [
     N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DINO_STAT,
     N_INODE_BAND, N_OVERLAY_DIR_INO, N_DIR_INO_COLLIDE, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
     N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN,
 ];
-
-// ---------------------------------------------------------------- raw readdir
 
 #[repr(C)]
 struct Dirent64Hdr {
@@ -275,14 +153,8 @@ pub struct Entry {
     pub d_ino: u64,
 }
 
-/// getdents64 directly: `read_dir` exposes `d_ino`, which is an oracle in its
-/// own right — an injected name whose listed inode disagrees with its stat is a
-/// tell no mount table can hide.
+/// getdents64 directly: `read_dir` exposes `d_ino`, which is an oracle in its own right -
 pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
-    // as_encoded_bytes(), not to_string_lossy(): a lossy conversion opens a
-    // DIFFERENT directory (or, far more likely, none) and this function's None
-    // is read as "could not list", which is the same answer it gives for a real
-    // permission failure.
     let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
     if fd < 0 {
@@ -299,29 +171,12 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
         }
         let mut off = 0usize;
         while off + std::mem::size_of::<Dirent64Hdr>() <= n as usize {
-            // SAFETY: the kernel guarantees a header plus a NUL-terminated name
-            // within d_reclen, and the loop condition above proved that
-            // size_of::<Dirent64Hdr>() bytes remain before `n`.
-            //
-            // read_unaligned, not `&*(... as *const Dirent64Hdr)`. `buf` is a
-            // Vec<u8>, whose allocation is only guaranteed 1-byte aligned, so
-            // forming a REFERENCE to an 8-byte-aligned struct inside it is
-            // undefined behaviour by Rust's rules even where the address happens
-            // to be aligned (getdents64 records are multiples of 8 and malloc
-            // returns 16-aligned, so it is -- which is exactly what keeps this
-            // kind of UB alive until an optimiser stops being kind). Copying the
-            // header out costs 24 bytes per dirent and is defined.
             let h = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(off) as *const Dirent64Hdr) };
             let reclen = h.d_reclen as usize;
-            // `< 19` too, not just 0: `nstart` is off+19 and the slice below is
-            // buf[nstart..off+reclen], so a d_reclen of 1..=18 gives start > end
-            // and PANICS the slice index -- in the tool whose job is to report
-            // rather than abort. Real kernels always emit >= 24; a truncated or
-            // hostile getdents64 buffer should end the walk, not the process.
             if reclen < 19 || off + reclen > n as usize {
                 break;
             }
-            let nstart = off + 19; // offsetof(name)
+            let nstart = off + 19;
             let nend = buf[nstart..off + reclen].iter().position(|&c| c == 0).unwrap_or(0) + nstart;
             if let Ok(name) = std::str::from_utf8(&buf[nstart..nend]) {
                 if name != "." && name != ".." {
@@ -335,55 +190,7 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
     Some(out)
 }
 
-// ------------------------------------------------------------------- helpers
-
-/// ONE rule dump, split into the two views every check here needs: live
-/// INJECTION targets, and the directories the ENGINE materialised itself.
-///
-/// **Injections, deliberately not every rule.** A whiteout's whole job is to make
-/// its target absent from the parent's listing, so feeding one to a check that
-/// asserts "this name appears in getdents" turns a working whiteout into a
-/// failure. The hand-rolled token split this replaced could not tell the kinds
-/// apart, so any device with a debloat module (or a hand-written
-/// `nomount whiteout add`) would have reported a fabricated N_DINO_STAT FAIL on
-/// the audit users are told to trust.
-///
-/// **uid 0 only**, for a second reason with the same shape: a `uid != 0` row
-/// comes from the hide path, is scoped to another identity, and `nm check` runs
-/// as uid 0 -- so our view of the directory is NOT the view the rule applies to.
-/// `check_dino_matches_stat` would push "{} absent from getdents" and FAIL,
-/// `.owner("the kernel engine")`, over a name uid 0 was never meant to see, and
-/// every rule-dependent denominator would count rows that are not served to the
-/// auditing process. Every other reader of this parser already filters it:
-/// `absorb::live_injections` (with a test named for it), `absorb`'s two other
-/// call sites and `doctor.rs`, whose own comment says `nm del` cannot even
-/// address a per-UID rule.
-///
-/// **Virtual dirs** are not injects, so the first half drops them -- but they are
-/// ours, and any check that partitions a directory into "ours" and "the ROM's"
-/// has to know that or it will count one of our own synthesized directories as
-/// stock. They are NOT uid-filtered: a per-UID virtual dir is invisible to uid 0,
-/// so it can never match a path this process stats, and excluding it would only
-/// narrow a list used to say "this one is not the ROM's".
-///
-/// **One dump, not two.** `live_targets` and `live_engine_dirs` were separate
-/// functions running `nm list` a moment apart -- two full netlink dumps of the
-/// whole rule table, the exact waste `service.sh:551` fixed on the shell side.
-/// Worse than the cost: `live_targets` refused to collapse a failed dump into an
-/// empty set and `live_engine_dirs` did precisely that with
-/// `else { return Vec::new() }`, so a second dump that failed (engine busy, a
-/// rule changing between the two) silently reclassified every virtual dir as
-/// STOCK POPULATION -- reopening the regression
-/// `a_synthesized_dir_is_not_stock_population` pins. One dump also removes the
-/// TOCTOU between them.
-///
-/// `unwrap_or_default()` used to sit on the `list()` call, which made a REFUSED
-/// dump indistinguishable from "the engine has no rules". `version` is a separate
-/// `nm` invocation, so it still answered: check_engine_live PASSED, every
-/// target-dependent check found an empty list and returned NotApplicable, and the
-/// summary read all-clean with ZERO unmeasured -- a full green over a device
-/// whose rules were never read. An empty rule set is `Ok("")`, not `Err`, so
-/// `None` here means the engine genuinely would not answer.
+/// One rule dump, split into the two views every check here needs: live injection targets,
 fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let listed = Nm::new().list().ok()?;
     let rules = crate::nm::parse_list(&listed);
@@ -408,8 +215,7 @@ fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
     v
 }
 
-/// The statfs magic, rendered as the names the checks care about. The syscall
-/// itself lives in `dirshape`, which owns the one erofs constant.
+/// The statfs magic, rendered as the names the checks care about
 fn fs_type(p: &Path) -> String {
     match crate::dirshape::fs_magic(p) {
         None => "?".into(),
@@ -421,14 +227,6 @@ fn fs_type(p: &Path) -> String {
 }
 
 /// Is this path inside a ROM partition?
-///
-/// `ROM_ROOTS` is a list of STRING prefixes -- `"/my_"` is one of them, and
-/// absorb.rs says so outright ("`/my_` is a ROM_ROOTS prefix"). Every other
-/// reader matches it as a string: absorb.rs twice, `check_no_rom_tmpfs` below,
-/// pmcache.rs. The one site that had a `PathBuf` on the left resolved to
-/// `Path::starts_with` instead, which is COMPONENT-wise, so `"/my_"` matched
-/// nothing at all -- no path component is ever literally `my_`. Named, so the
-/// two forms cannot be confused again and the difference is pinnable.
 fn on_rom_partition(p: &Path) -> bool {
     let s = p.to_string_lossy();
     crate::absorb::ROM_ROOTS.iter().any(|r| s.starts_with(r))
@@ -441,24 +239,12 @@ fn ino_of(p: &Path) -> Option<u64> {
     })
 }
 
-// -------------------------------------------------------------------- checks
-
-/// Injections must not be mounts. Counts on mountinfo field 4 (the mount's root
-/// within its filesystem) -- matching on a path never matched anything, which is
-/// how the old counter reported zero regardless of reality.
+/// Injections must not be mounts
 fn check_zero_mount() -> Check {
     let Ok(mi) = fs::read("/proc/self/mountinfo") else {
-        // UNMEASURED, not n/a: every device has a mount table, so failing to read
-        // it means the check did not run -- exactly the state that must stay amber.
         return unmeasured(N_ZERO_MOUNT, "cannot read /proc/self/mountinfo".into())
             .meaning("Could not read the mount table, so whether any module mount is visible to apps is unknown.");
     };
-    // /adb/, not /adb/modules/: a module is free to bind from anywhere under
-    // /data/adb and several do. Issue #14 is the case in point -- a YouTube
-    // ReVanced module binds /data/adb/rvhc/<apk> over the installed APK, which
-    // this check called clean while Duck reported it as a critical root mount.
-    // Resolve the source properly (mountinfo field 4 is fs-relative) rather than
-    // matching the raw field, so the same row also yields the owning module.
     let rows = crate::absorb::parse_mountinfo_bytes(&mi);
     let roots = crate::absorb::fs_roots(&rows);
     let hits: Vec<(&crate::absorb::MountRow, std::path::PathBuf)> = rows
@@ -466,13 +252,6 @@ fn check_zero_mount() -> Check {
         .filter_map(|r| crate::absorb::source_of(r, &roots).map(|src| (r, src)))
         .filter(|(_, src)| src.starts_with("/data/adb"))
         .collect();
-    // A hook framework's bind is one absorb deliberately never takes over --
-    // breaking a Zygisk/Xposed hook surfaces hours later during dexopt, not at
-    // boot. Counting it as a failure would leave every LSPosed user staring at a
-    // permanent FAIL they cannot act on, so it is reported as expected. It is
-    // still SHOWN, because it is genuinely visible to apps.
-    // A source outside /data/adb/modules has no module dir, so it can never be a
-    // hook framework: it is reported as a leak, which is what it is.
     let (by_design, leaked): (Vec<_>, Vec<_>) = hits.iter().partition(|(_, src)| {
         crate::absorb::module_dir_of(src).is_some_and(|d| crate::absorb::is_hook_framework(&d))
     });
@@ -482,10 +261,6 @@ fn check_zero_mount() -> Check {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    // Name the owner. `module_dir_of` was already being called to decide the
-    // by-design split and its answer was thrown away -- for the leaked case, the
-    // one case where the reader has something to do with it, and for the
-    // by-design case, which now has a row of its own to attribute.
     let owners_of = |v: &[&(&crate::absorb::MountRow, std::path::PathBuf)]| -> Vec<String> {
         let mut o: Vec<String> = v
             .iter()
@@ -496,13 +271,6 @@ fn check_zero_mount() -> Check {
         o.dedup();
         o
     };
-    // "in this namespace", because that is the table that was read. `absorb`
-    // already documents a module that replicates its bind with
-    // `nsenter --mount=/proc/<pid>/ns/mnt` as one we "cannot see or unmount", and
-    // doctor.rs states it flatly: "It was replicated with nsenter, and apps can
-    // see it." Such a module PASSES here and is still visible to the app. The
-    // plan section reports those, so nothing is missed overall -- but this row
-    // must not assert more than it measured.
     let oracle = "any app can read /proc/self/mountinfo and see a module mounted over the ROM in \
                   this namespace";
     if leaked.is_empty() {
@@ -510,31 +278,9 @@ fn check_zero_mount() -> Check {
             return pass(N_ZERO_MOUNT, "0 module mounts in this namespace".into()).meaning(
                 "Nothing the Suite or your modules do shows up in this process's mount table. (A \
                  module that replicates its bind into an app's own namespace with nsenter would \
-                 not appear here — the plan section reports those.)",
+                 not appear here - the plan section reports those.)",
             );
         }
-        // NOTE, not warn, when the only mounts left are a hook framework's.
-        //
-        // This was amber for one release and it was the wrong call. The mount is
-        // real and app-visible -- that part of the reasoning stands, and is why
-        // it is not a silent PASS either -- but NOTHING THE USER CAN DO ABOUT IT
-        // IS SOMETHING THEY SHOULD DO: the Suite refuses to absorb a Zygisk/Xposed
-        // bind on purpose, because breaking a hook surfaces hours later during an
-        // app install rather than at boot. So amber fired on every device running
-        // LSPosed -- which is most of them -- permanently, for a state that is
-        // working as designed. A warning that is always on is a warning nobody
-        // reads, and it drowns the ones that mean something.
-        //
-        // Note keeps it honest without keeping it loud: the row is still built,
-        // still carries its oracle and its remedy, and `Report::verdict()` no
-        // longer counts it, so the card reads clean on a healthy device. The
-        // WebUI renders notes in their own calm section rather than dropping them
-        // -- that was the half that made `note` unsafe here before.
-        //
-        // `is_hook_framework` is deliberately generous (an empty `zygisk/` dir is
-        // enough), which mattered when this was the difference between amber and
-        // green. At note it costs nothing: a module that fakes the marker gets a
-        // quieter row about a mount that is still named in full.
         return chk(
             N_ZERO_MOUNT,
             Verdict::Note,
@@ -545,16 +291,9 @@ fn check_zero_mount() -> Check {
             ),
         )
         .oracle(oracle)
-        // Lead with "nothing is wrong", not with the oracle. The row exists so a
-        // reader who goes looking for their remaining mount finds it explained,
-        // not so they feel they have a problem: the Suite declines to absorb this
-        // one on purpose. The remedy is still named -- the manager's per-app
-        // umount is what takes a bind out of an app's view, and round 7 recorded
-        // that this product used to steer people away from it -- but it is framed
-        // as the one case where it matters, not as an instruction.
         .meaning(format!(
             "Your hook framework keeps {} bind mount(s) of its own, and the Suite leaves them \
-             alone on purpose — absorbing one would break Zygisk/Xposed hooking, and that shows \
+             alone on purpose - absorbing one would break Zygisk/Xposed hooking, and that shows \
              up hours later during an app install rather than at boot. Nothing is wrong here and \
              nothing needs fixing. Worth knowing only if you are hiding from one specific app: \
              these are real mounts, so unlike anything the engine serves, your manager's \"umount \
@@ -577,19 +316,6 @@ fn check_zero_mount() -> Check {
         } else {
             owners.join(", ")
         };
-        // Can absorb actually take these, or would the button do nothing?
-        //
-        // `runtime_droppable` is false for a `my_*` target, and that is not a
-        // limitation to route around: absorbing two /my_product binds on an OP11
-        // unmounted them, re-added four my_* rules in a burst, and the device
-        // rebooted mid-command. So absorb reports those and leaves them alone --
-        // correctly -- and offering "Absorb now" for them means the reader taps a
-        // button, absorb declines, the audit re-runs unchanged, and the UI says
-        // it finished. A button that cannot work is worse than no button: it
-        // spends the reader's trust and teaches them the actions are decorative.
-        //
-        // Measured on an OP11 running this exact case (a bootanimation module
-        // binding content NoMount already injects).
         let aliases = crate::absorb::mount_aliases(&rows);
         let deferred: Vec<&str> = leaked
             .iter()
@@ -597,21 +323,6 @@ fn check_zero_mount() -> Check {
             .filter_map(|(r, _)| r.target.to_str())
             .collect();
 
-        // WHO MADE THE MOUNT, not whose files it serves. `owner` above is derived
-        // from the bind SOURCE, so a bind the SUITE created to serve a module's my_*
-        // content was reported as that module's doing. It then told the reader to
-        // reboot (we re-create it every boot from binds.list) or to delete a bind
-        // from the module's post-fs-data.sh (there is none). Both are dead ends, and
-        // chasing them cost an evening on an OP15.
-        //
-        // binds.list is the record of what WE bound, so it settles authorship.
-        //
-        // ...and when it cannot be READ, authorship is unsettled, not "none of
-        // ours". The infallible `tracked()` made an unreadable record look like an
-        // empty one, which lands in the third arm below -- the one that names a
-        // module and sends the reader to a post-fs-data.sh that has no bind in it.
-        // That is the same evening-costing dead end this block was written to end,
-        // reached through the error path.
         let tracked = crate::bind::tracked_result();
         let ours: std::collections::HashSet<std::path::PathBuf> = tracked
             .as_ref()
@@ -621,26 +332,19 @@ fn check_zero_mount() -> Check {
         let mut why = if let Err(e) = &tracked {
             format!(
                 "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
-                 Which of them the Suite made itself could NOT be determined: {} could not be \
-                 read ({e}). They serve content from {owner}. Fix that file first — until then, \
+                 Which of them the Suite made itself could not be determined: {} could not be \
+                 read ({e}). They serve content from {owner}. Fix that file first - until then, \
                  do not go looking in a module for a bind it may not have made.",
                 leaked.len(),
                 crate::bind::BINDS_LIST
             )
         } else if mine == leaked.len() {
-            // Lead with "nothing is wrong", the same way the hook-framework arm
-            // above does, because this is the DEFAULT state of a OnePlus device
-            // with any my_* module installed -- `my_hookless` is the opt-in. The
-            // honest content is all still here: these are real mounts, any app
-            // reading its own mountinfo sees them, and the per-app remedy that
-            // actually works is named. What is gone is the implication that the
-            // reader is in a broken state.
             format!(
                 "Nothing is wrong here. All {} of these mount(s) are the Suite's own: a my_* \
                  target is served by a real bind unless the `my_hookless` opt-in is set, because \
                  a leaf my_* injection can trip zygote's FD allowlist. They serve content from \
                  {owner}. They are real mounts, so an app that reads /proc/self/mountinfo sees \
-                 them — worth knowing only if you are hiding from one specific app, and there \
+                 them - worth knowing only if you are hiding from one specific app, and there \
                  your manager's \"umount modules\" for that app does take them out of its view. \
                  To have no mount at all, set /data/adb/nomount/my_hookless and reboot; the same \
                  files are then served by injection.",
@@ -656,69 +360,25 @@ fn check_zero_mount() -> Check {
         } else {
             format!(
                 "{} mount(s) laid over the ROM are readable by any app in its own mount table. The \
-                 Suite adds none of its own — these come from {owner}.",
+                 Suite adds none of its own - these come from {owner}.",
                 leaked.len()
             )
         };
-        // Only for mounts we did NOT create. Ours come back every boot by design,
-        // so "a REBOOT fixes this" is false for them, and there is no third-party
-        // post-fs-data.sh to edit.
         let deferred: Vec<&str> = deferred
             .into_iter()
             .filter(|t| !ours.contains(std::path::Path::new(t)))
             .collect();
         if !deferred.is_empty() {
-            // REBOOT FIRST. The runtime pass refuses a my_* bind for a real
-            // reason, and the first version of this text turned that refusal into
-            // "go edit another module's script" -- which is the heavier fix and
-            // usually the wrong one.
-            //
-            // The pre-zygote pass (`absorb --early`, post-mount) is allowed to
-            // take exactly these, because before zygote there is no live system
-            // to lose. Measured on an OP11 carrying two redundant
-            // /my_product/media/bootanimation binds: one reboot on a current
-            // Suite reported "2 redundant mount(s) dropped" and the audit went
-            // from 2 failures to clean, with the content still served by
-            // injection. Nothing was edited.
             why.push_str(&format!(
                 " {} of them sit on a my_* partition, which cannot be taken over while Android is \
-                 running — doing that has rebooted a device. A REBOOT fixes this: the pre-zygote \
+                 running - doing that has rebooted a device. A REBOOT fixes this: the pre-zygote \
                  pass drops a redundant bind safely, and the content stays served by injection. \
-                 If it comes back every boot, {owner} is re-creating it — delete the bind from its \
+                 If it comes back every boot, {owner} is re-creating it - delete the bind from its \
                  post-fs-data.sh and injection serves the same files with no mount at all.",
                 deferred.len()
             ));
         }
 
-        // NOTE, not amber, when every one of them is ours -- the same landing as
-        // the hook-framework arm above, for the same reason.
-        //
-        // A my_* bind is the Suite's DEFAULT way to serve that content: the
-        // `my_hookless` opt-in is what switches it to injection, not the other way
-        // round. So this arm fires on a healthy, stock install of any module with
-        // my_* content, permanently, and there is nothing here the reader has to
-        // do -- which is precisely the shape the hook-framework arm was demoted
-        // for ("a warning that is always on is a warning nobody reads").
-        //
-        // It was amber for one release. The single argument for that promotion was
-        // that `Note` was invisible: `isShown` dropped it, so the row never
-        // appeared anywhere a user looks. The SAME round removed that objection --
-        // notes now render in the WebUI's collapsed "Good to know" disclosure --
-        // and the cost of leaving it amber was measured: the health line read
-        // "1 thing needs attention" while the Modules shield beside it read
-        // "Mountless · N mount(s) by design" and the row itself said the mounts
-        // were ours by design. Two surfaces of one report contradicting each
-        // other, on the default configuration, is worse than a quiet row.
-        //
-        // Leaving one by-design bind amber and the other a note was the real
-        // incoherence: both are mounts the Suite declines to remove on purpose.
-        // Duck Detector, the reference adversary, can see either; neither is
-        // something the reader should change. The `meaning` above carries the
-        // honest content -- real mounts, visible in mountinfo, per-app umount is
-        // the lever -- without the alarm.
-        //
-        // Mixed stays FAIL: a bind we did not make is still someone else's mount
-        // over the ROM, and that is the case this check exists for.
         let evidence = format!("{} module mount(s) visible: {}", leaked.len(), show(&leaked));
         let c = if mine == leaked.len() {
             chk(N_ZERO_MOUNT, Verdict::Note, evidence).oracle(oracle)
@@ -729,23 +389,10 @@ fn check_zero_mount() -> Check {
     }
 }
 
-/// The engine must expose no /sys, /proc or module surface of its own.
+/// The engine must expose no /sys, /proc or module surface of its own
 fn check_surfaces() -> Check {
     let mut found = Vec::new();
-    // Which probes actually RAN. Each was an `if let Ok(..)` with no else, so a
-    // directory that could not be enumerated contributed nothing to `found` and
-    // the check still reported "no entry named nomount in /sys/kernel,
-    // /sys/module, /proc" — asserting three directories had been scanned when one
-    // or more had not. This file's own header says a check that cannot run says
-    // so; this was the check that did not.
     let mut unread: Vec<&str> = Vec::new();
-    // /dev is on this list because the Suite put a file there itself: uidwatch.sh
-    // held its handler lock at /dev/nomount_uidwatch.lock, in the one directory
-    // this probe did not read. The lock has moved into the 0700 state directory,
-    // and the probe now covers where it used to live so a regression cannot be
-    // silent. It is also where a char-device engine would announce itself -- the
-    // hookless driver deliberately has no /dev node, and this is the check that
-    // says so rather than assuming it.
     for dir in ["/sys/kernel", "/sys/module", "/proc", "/dev"] {
         match fs::read_dir(dir) {
             Ok(rd) => {
@@ -767,31 +414,21 @@ fn check_surfaces() -> Check {
         }
         Err(_) => unread.push("/proc/filesystems"),
     }
-    // A hit is a hit however partial the scan was, so `found` still fails below.
-    // Only an EMPTY result depends on having been able to look everywhere.
     if found.is_empty() && !unread.is_empty() {
         return unmeasured(
             N_SURFACES,
             format!(
-                "could not enumerate {} — nothing named nomount was found in the rest, but \
-                 this check did NOT clear the surfaces it could not read",
+                "could not enumerate {} - nothing named nomount was found in the rest, but \
+                 this check did not clear the surfaces it could not read",
                 unread.join(", ")
             ),
         )
         .meaning(
             "Part of the kernel's public directory listing could not be read, so this is not a \
-             clean result — only an incomplete one.",
+             clean result - only an incomplete one.",
         );
     }
     if found.is_empty() {
-        // Say what was actually tested. This walks DIRECTORY ENTRY NAMES only,
-        // so the old wording ("no nomount entry in /proc") read as though the
-        // contents of /proc had been cleared -- while /proc/kallsyms carries 56
-        // matching symbol names on a shipped build, because the symbol cloak is
-        // deliberately off. That residual is real but app-unreachable: the live
-        // policy gives proc_kallsyms:file allowed=0 to every app domain
-        // (measured on OP15). An audit that overstates its own coverage is the
-        // same class of defect as a green card over a failed pass.
         pass(
             N_SURFACES,
             "no entry named nomount in /sys/kernel, /sys/module, /proc, /dev (names only; \
@@ -814,23 +451,10 @@ fn check_surfaces() -> Check {
     }
 }
 
-/// An injected file's readdir d_ino must equal its stat st_ino.
+/// An injected file's readdir d_ino must equal its stat st_ino
 fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
-    // `eligible` is every injected file on a readable non-overlay parent, counted
-    // up front. The old code `continue`d past a name absent from getdents or one
-    // that no longer stats, then reported PASS over the remainder with no
-    // denominator -- so a file the engine had d_dropped out of the listing (the
-    // exact regression this checks for) simply vanished from the audit. Both of
-    // those are now FAIL rows, and the evidence carries checked/eligible.
     let mut eligible = 0usize;
     let mut checked = 0usize;
-    // Parents that would not enumerate. Same accounting `check_erofs_dir_shape`
-    // `check_erofs_dir_shape` were given and this sibling was not: a bare
-    // `continue` here dropped the whole directory from BOTH counters, so a device
-    // where none of them opened fell out with `eligible == 0` and returned n/a --
-    // "no injected file on a non-overlay filesystem to compare", a statement that
-    // is simply false when the reason is that nothing could be read. Grey, and
-    // counted as nothing to see.
     let mut unread = 0usize;
     let mut bad = Vec::new();
     let mut by_parent: HashMap<PathBuf, Vec<&PathBuf>> = HashMap::new();
@@ -840,8 +464,6 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
         }
     }
     for (parent, kids) in &by_parent {
-        // Only meaningful off overlayfs: there, STOCK entries disagree too
-        // (readdir reports the lower's ino), so a mismatch proves nothing.
         if fs_type(parent) == "overlay" {
             continue;
         }
@@ -867,7 +489,6 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
         }
     }
     if eligible == 0 {
-        // Two different answers, and only one of them is "nothing to test".
         if unread > 0 {
             return unmeasured(
                 N_DINO_STAT,
@@ -883,17 +504,15 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
         )
         .meaning(
             "Your injected files are all on overlayfs, where the ROM's own files disagree the \
-             same way — so this test would prove nothing.",
+             same way - so this test would prove nothing.",
         );
     }
-    // A mismatch is a mismatch however partial the scan was, so the FAIL below
-    // stands regardless. Only a CLEAN result depends on having looked everywhere.
     if bad.is_empty() && unread > 0 {
         return unmeasured(
             N_DINO_STAT,
             format!(
                 "{checked}/{eligible} injected file(s) agree, but {unread} directory(ies) could \
-                 not be listed and were NOT checked"
+                 not be listed and were not checked"
             ),
         )
         .meaning(format!(
@@ -917,14 +536,11 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// Injected inodes must not occupy a band the stock population never uses.
+/// Injected inodes must not occupy a band the stock population never uses
 fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     const BUCKET: u64 = 1_000_000;
     let mut worst: Option<(String, u64, usize)> = None;
     let mut examined = 0usize;
-    // See check_dino_matches_stat: an unreadable directory is evidence that was
-    // not gathered, and reporting it as "no directory qualified" is a false
-    // statement rendered grey.
     let mut unread = 0usize;
     for parent in parents_of(targets) {
         let Ok(rd) = fs::read_dir(&parent) else {
@@ -934,7 +550,7 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
         let injected: Vec<&PathBuf> =
             targets.iter().filter(|t| t.parent() == Some(parent.as_path())).collect();
         if injected.len() < 4 {
-            continue; // too few to form a visible band
+            continue;
         }
         let mut stock_buckets: HashMap<u64, usize> = HashMap::new();
         let mut ours_buckets: HashMap<u64, usize> = HashMap::new();
@@ -942,35 +558,16 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             let p = e.path();
             let Some(i) = ino_of(&p) else { continue };
             let b = i / BUCKET;
-            // A virtual dir is the ENGINE's, not the ROM's. Counting one as stock
-            // was enough to defeat the whole-directory guard below: measured on a
-            // 6.1 device, /system/etc/nmt holds seven of our entries and no ROM
-            // content at all, but its synthesized `nested` subdirectory made
-            // `stock_buckets` non-empty, so the directory was judged -- against a
-            // "stock population" of one directory we created ourselves -- and
-            // reported three of our own inodes as a band. Exactly the FAIL nobody
-            // could act on that the guard exists to suppress.
             if injected.iter().any(|t| **t == p) || engine_dirs.contains(&p) {
                 *ours_buckets.entry(b).or_default() += 1;
             } else {
                 *stock_buckets.entry(b).or_default() += 1;
             }
         }
-        // A directory that is entirely ours (a synthesized tree such as
-        // <app>/lib/arm64) has NO stock population, so "a bucket with no stock
-        // in it" is true by construction and says nothing. Measured live:
-        // /product/priv-app/Mms/lib/arm64 is 25 of 25 injected. Judging it
-        // produced a FAIL that no attacker could ever act on.
         if stock_buckets.is_empty() {
             continue;
         }
         examined += 1;
-        // SORTED, and tie-broken on the bucket number. `ours_buckets` is a HashMap,
-        // so iterating it raw and keeping the first maximum picked an arbitrary one
-        // of two equally-sized bands -- and the evidence string then differed
-        // between two runs of an unchanged device. `Report::sort` exists so that
-        // "two runs of the same device produce a diffable report"; a nondeterministic
-        // evidence line breaks that just as surely as an unstable row order.
         let mut bands: Vec<(&u64, &usize)> = ours_buckets.iter().collect();
         bands.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
         for (b, n) in bands {
@@ -1000,7 +597,7 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
         return unmeasured(
             N_INODE_BAND,
             format!(
-                "{examined} directory(ies) clean, but {unread} could not be read and were NOT \
+                "{examined} directory(ies) clean, but {unread} could not be read and were not \
                  checked"
             ),
         )
@@ -1027,26 +624,10 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     }
 }
 
-/// A synthesized directory on an overlay mount must not carry an inode from
-/// outside the range overlayfs hands its own entries.
-///
-/// "Ours" is `engine_dirs` -- the `LiveKind::VirtualDir` rows, i.e. the
-/// directories the engine actually materialised. It used to be
-/// `targets.iter().any(|t| t.starts_with(&p) || *t == p)`, "a directory some rule
-/// target lives under", which on almost every device is a REAL ROM DIRECTORY: a
-/// module injecting /product/priv-app/Mms/Mms.apk put /product/priv-app/Mms into
-/// "ours", and the engine created none of it. A stock subdirectory that merely
-/// CONTAINS an injection was then compared against `stock_max` of its siblings --
-/// and on overlayfs a copied-up directory's inode comes from the upper (f2fs) and
-/// a lower-only sibling's from the lower (erofs), so two stock directories can
-/// cross the 8x threshold on their own. The row then said "Folders the Suite
-/// created carry ID numbers far outside the ROM's range" about a directory the
-/// ROM shipped, `.owner("the kernel engine")`, un-actionable.
+/// A synthesized directory on an overlay mount must not carry an inode from outside the
 fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut examined = 0usize;
-    // See check_dino_matches_stat. The non-overlay `continue` above is genuinely
-    // out of scope; this one is a failure to read and must not look the same.
     let mut unread = 0usize;
     for parent in parents_of(targets) {
         if fs_type(&parent) != "overlay" {
@@ -1071,19 +652,11 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
                 stock_max = i;
             }
         }
-        // BOTH halves, or the count is of directories nothing was asked about.
-        // `stock_max == 0` was the only guard, so once "ours" narrowed to the
-        // engine's own directories a parent with none of them still incremented
-        // `examined` and the check reported "N overlay dir(s): synthesized inodes
-        // sit inside the stock range" over zero synthesized inodes -- the vacuous
-        // PASS its sibling was fixed for.
         if stock_max == 0 || dirs.is_empty() {
             continue;
         }
         examined += 1;
         for (p, i) in dirs {
-            // Generous: only flag an order-of-magnitude departure, so ordinary
-            // "next allocation" values never cry wolf.
             if i > stock_max.saturating_mul(8) {
                 outliers.push(format!("{} ino={i} (stock max here {stock_max})", p.display()));
             }
@@ -1110,7 +683,7 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
         return unmeasured(
             N_OVERLAY_DIR_INO,
             format!(
-                "{examined} overlay dir(s) clean, but {unread} could not be read and were NOT \
+                "{examined} overlay dir(s) clean, but {unread} could not be read and were not \
                  checked"
             ),
         )
@@ -1138,9 +711,7 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
     }
 }
 
-/// `(st_dev, st_ino)` for a path, which together identify a file uniquely on a
-/// real filesystem. `ino_of` alone cannot: `/product` mounts several
-/// filesystems on this hardware and each starts its inode numbering at 2.
+/// `(st_dev, st_ino)` for a path, which together identify a file uniquely on a real
 fn dev_ino_of(p: &Path) -> Option<(u64, u64)> {
     fs::symlink_metadata(p).ok().map(|m| {
         use std::os::unix::fs::MetadataExt;
@@ -1148,75 +719,18 @@ fn dev_ino_of(p: &Path) -> Option<(u64, u64)> {
     })
 }
 
-/// Two directories on one filesystem must never share an inode.
-///
-/// `(st_dev, st_ino)` identifies a file uniquely, and directories cannot be
-/// hardlinked — so two directory paths reporting the same pair is impossible on
-/// any real filesystem. It is also free to look for: walk a ROM partition, group
-/// by the pair, and every group larger than one is a synthesized directory. No
-/// root, no permissions, one stat per entry.
-///
-/// The engine mints an inode for a synthesized directory by placing it in a gap
-/// between its SIBLINGS' inodes (`nm_place_ino`), tracking its own handouts so
-/// two synthesized dirs cannot collide with each other. What it never sees is
-/// the rest of the filesystem: measured on an OP15, `/product/priv-app` is an
-/// overlay mount holding 188 directories numbered 2..186 — saturated — so the
-/// three synthesized dirs landed on 77, 89 and 101, every one of them already
-/// held by a nested stock directory two or three levels down that was never
-/// sampled. Three synthesized dirs, three collisions, and no stock-on-stock
-/// collision anywhere on the device.
-///
-/// [`N_OVERLAY_DIR_INO`] does not cover this: it asks whether the inode is of a
-/// plausible MAGNITUDE, and 101 against a sibling maximum of 71 is well inside
-/// its 8x threshold. Plausible and impossible at the same time.
-///
-/// A NOTE rather than a warning, by this file's rule: it is a real measured
-/// inconsistency, but nothing shipping is known to probe for it. The oracle
-/// string carries the recipe so it stays a regression canary for the engine.
+/// Two directories on one filesystem must never share an inode
 fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
-    // The directories the engine ACTUALLY synthesized -- `LiveKind::VirtualDir`,
-    // which is what `nm list` reports them as.
-    //
-    // This used to be "a directory some rule target lives under", copied from
-    // `check_overlay_dir_ino`, which on almost every device names real ROM
-    // directories: a module injecting /product/priv-app/Mms/Mms.apk put
-    // /product/priv-app/Mms, /product/priv-app and /product into "ours". With no
-    // synthesized directory anywhere, "ours" was still non-empty, the walk found
-    // no collision -- real directories cannot collide, that is the premise -- and
-    // the check returned PASS: "Every folder the Suite created has an identity
-    // number of its own." Nothing the Suite created was examined. It also burned
-    // a full partition walk (~2.4k stats under /system) on every boot pass and
-    // every WebUI open to answer a question that had no subject.
     let mut ours: HashMap<(u64, u64), PathBuf> = HashMap::new();
     let mut roots: Vec<PathBuf> = Vec::new();
     for dir in engine_dirs {
-        // ROM PARTITIONS ONLY. The engine synthesizes directories on the ROM;
-        // a target under /data has real, system-owned parents that cannot be
-        // ours and cannot collide with anything of ours.
-        //
-        // Absorbing a ReVanced-class module puts /data/app/<pkg>/base.apk in the
-        // rule set, whose partition root is /data -- so this walked the whole of
-        // /data, hit the 20,000-directory cap, and reported the check UNMEASURED.
-        // Measured on an OP15 the moment two absorbed app APKs appeared: a check
-        // that had been answering in milliseconds stopped answering at all.
-        //
-        // STRING prefix, the way every other reader of ROM_ROOTS matches it
-        // (absorb.rs twice, `check_no_rom_tmpfs` below, pmcache.rs). This was the
-        // one site whose left operand is a PathBuf, so it resolved to
-        // `Path::starts_with`, which is COMPONENT-wise: "/system/" still matched
-        // (components [/, system]) but "/my_" matched nothing, because no path
-        // component is ever literally `my_`. So every synthesized directory under
-        // /my_product was silently skipped -- on exactly the configuration the
-        // zero-mount row tells the user to adopt (`my_hookless`) -- and if those
-        // were the only ones, the check returned a grey "nothing to test here"
-        // that was simply false.
         if !on_rom_partition(dir) {
             continue;
         }
         let mut p = dir.as_path();
         while let Some(up) = p.parent() {
             if up.parent().is_none() {
-                break; // `up` is "/" -- `p` is the partition root
+                break;
             }
             p = up;
         }
@@ -1232,9 +746,6 @@ fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
             .meaning("Nothing here creates a folder that the ROM does not already have.");
     }
 
-    // Bounded walk of each partition root. 20k directories is far past any ROM
-    // partition's real population (measured: 188 under /product/priv-app, ~2.4k
-    // under /system) and keeps a pathological tree from stalling the check.
     const MAX_DIRS: usize = 20_000;
     let mut seen = 0usize;
     let mut hits: Vec<String> = Vec::new();
@@ -1246,8 +757,6 @@ fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         for e in rd.flatten() {
             let p = e.path();
-            // `symlink_metadata`, so a symlink is never followed out of the
-            // partition and never counted as the directory it points at.
             let Ok(md) = fs::symlink_metadata(&p) else { continue };
             if !md.is_dir() {
                 continue;
@@ -1304,15 +813,9 @@ fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
     )
 }
 
-/// On erofs a single-block directory's size is a closed form over its entries,
-/// so an injected or hidden name must be reflected in the parent's size.
+/// On erofs a single-block directory's size is a closed form over its entries, so an
 fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     let (mut ok, mut bad) = (0usize, Vec::new());
-    // Same accounting as its siblings: an erofs parent that would not
-    // stat or list is evidence that was not gathered, not evidence of health.
-    // Note the two `continue`s ABOVE this counter are different in kind -- a
-    // non-erofs parent and a multi-block one are genuinely out of scope for this
-    // model, which is what makes the whole check n/a when none qualifies.
     let mut unread = 0usize;
     for parent in parents_of(targets) {
         if fs_type(&parent) != "erofs" {
@@ -1324,10 +827,8 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
         };
         let size = md.len();
         if size == 0 || size >= 4096 {
-            continue; // multi-block padding has no closed form
+            continue;
         }
-        // One definition of the formula, in `dirshape`, which owns it and holds
-        // the test that pins it against measured erofs directories.
         let Some(model) = crate::dirshape::erofs_model(&parent) else {
             unread += 1;
             continue;
@@ -1338,11 +839,6 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
             bad.push(format!("{} size={size} model={model}", parent.display()));
         }
     }
-    // `unread` FIRST. This test used to sit BELOW the n/a return, which made it
-    // dead exactly when it mattered: one qualifying erofs parent, unreadable, gave
-    // ok=0/bad=[] and returned n/a saying "no single-block erofs parent among the
-    // injected paths" -- a false statement, rendered grey and counted as nothing to
-    // see. Evidence that could not be gathered is not evidence of health.
     if bad.is_empty() && unread > 0 {
         return unmeasured(
             N_EROFS_SHAPE,
@@ -1367,7 +863,7 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
         pass(N_EROFS_SHAPE, format!("{ok} erofs parent(s) match the dirent model"))
             .meaning(
                 "Folders holding injected or hidden files still report the size their contents imply \
-             — no arithmetic trace.",
+ - no arithmetic trace.",
             )
     } else {
         soft(
@@ -1384,16 +880,7 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// The pathname of a `/proc/<pid>/maps` line: everything after the fifth field.
-///
-/// NOT `split_whitespace().nth(5)`. A mapping's path is the LAST field and it is
-/// not escaped, so a module shipping a filename with a space in it -- which
-/// nothing forbids, and which this tree has already been bitten by once in the
-/// ghost populator -- was truncated at the space. The truncated string then
-/// matched no rule target, so an injected file mapped "(deleted)" went unreported
-/// and the check passed. A false PASS on the loudest oracle in the set.
-///
-/// Skip five whitespace-delimited fields and take the rest verbatim.
+/// The pathname of a `/proc/<pid>/maps` line: everything after the fifth field
 fn maps_pathname(rest: &str) -> Option<&str> {
     let mut s = rest;
     for _ in 0..5 {
@@ -1404,16 +891,7 @@ fn maps_pathname(rest: &str) -> Option<&str> {
     (!p.is_empty()).then_some(p)
 }
 
-/// An injected file must not be mapped as deleted.
-///
-/// Adding a rule d_drops the cached dentry for that name, which is how the next
-/// lookup gets routed through the injection. A process that already had the file
-/// mapped keeps that now-unhashed dentry, and the kernel renders every such
-/// mapping with a " (deleted)" suffix -- so `/proc/<pid>/maps` names exactly which
-/// files are injected. Measured on OP15: of 72 overlay APKs mapped by
-/// system_server, the only two flagged deleted were the two we inject, and an app
-/// serving an injected APK sees the same thing in its OWN maps, which needs no
-/// privilege at all.
+/// An injected file must not be mapped as deleted
 fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     if targets.is_empty() {
         return na(N_MAPS_DELETED, "no live rules".into())
@@ -1427,28 +905,12 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     let mut hits: Vec<String> = Vec::new();
     let mut scanned = 0u32;
     let mut unread = 0u32;
-    // Processes that have ANY injected file mapped, deleted or not. This is the
-    // check's denominator and it was missing entirely -- see the block below the
-    // loop for what its absence cost.
     let mut mappers = 0u32;
     for e in rd.filter_map(Result::ok) {
         let pid = e.file_name().to_string_lossy().into_owned();
         if !pid.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        // A process that will not yield its maps is not a process that showed us
-        // nothing: a bare `continue` here meant `scanned` counted only successes,
-        // so a run where NO map was readable returned "0 process(es): no injected
-        // file mapped as deleted" -- as a PASS.
-        //
-        // But NotFound is not a refusal. /proc is a snapshot: between the readdir
-        // that listed this pid and the open a moment later, the process exited.
-        // It maps nothing because it no longer exists, so nothing was lost. On a
-        // live device that happens on most passes -- counting it as unread made
-        // this check flip to amber at random (measured: UNMEASURED on one run,
-        // PASS over 1353 processes on the next). A check that cries wolf on a
-        // healthy device teaches people to ignore it, which costs more than the
-        // hole it was guarding. Only a REFUSAL is missing evidence.
         let maps = match fs::read_to_string(format!("/proc/{pid}/maps")) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -1460,10 +922,6 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
         scanned += 1;
         let mut maps_one = false;
         for line in maps.lines() {
-            // Field 5 of a file-backed mapping is its path. Read it whether or not
-            // the " (deleted)" suffix is there: a process mapping an injected file
-            // WITHOUT the suffix is the control case, and it is the only thing
-            // that tells this check apart from one that had nothing to look at.
             let (rest, deleted) = match line.strip_suffix(" (deleted)") {
                 Some(r) => (r, true),
                 None => (line, false),
@@ -1482,8 +940,6 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
         }
     }
     if hits.is_empty() {
-        // A hit is a hit however partial the scan was, so a FAIL below stands
-        // regardless. Only a CLEAN result depends on having looked.
         if scanned == 0 {
             return unmeasured(
                 N_MAPS_DELETED,
@@ -1501,20 +957,6 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             )
             .meaning("Some processes could not be read, so a clean result is not proven.");
         }
-        // NOBODY has an injected file mapped, so nothing here could have carried
-        // the suffix. This is the state the BOOT pass is always in: `service.sh`
-        // runs the device section at boot_completed, before any app has opened
-        // a module file, and every one of the ~1300 processes alive then maps zero
-        // of our targets. The check could therefore never fire, reported
-        // "{scanned} process(es): no injected file mapped as deleted" as a PASS,
-        // and that verdict was cached to audit.json and shown on the module card
-        // and in the WebUI for the whole uptime. Measured on an OP15: the cached
-        // file said 12/12 passed while a manual run minutes later, on the same
-        // boot, said "11 passed, 1 failed".
-        //
-        // UNMEASURED, not n/a: the rules ARE live and an app WILL map one -- the
-        // question applies and has simply not been answerable yet. That is exactly
-        // the distinction `Verdict::Unmeasured` was split out of `Skip` for.
         if mappers == 0 {
             return unmeasured(
                 N_MAPS_DELETED,
@@ -1535,14 +977,11 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             ),
         )
         .meaning(
-            "No running app shows an injected file as deleted in its own memory map — something \
+            "No running app shows an injected file as deleted in its own memory map - something \
              any app can read about itself.",
         );
     }
     let shown = hits.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-    // A rule change over an APK PM had already parsed unhashes the dentry every
-    // process mapped it through. The rule is right and the cache is dropped; the
-    // mappings are what a reboot replaces.
     let pending = crate::pmcache::pending();
     if !pending.is_empty() && hits.iter().all(|h| pending.iter().any(|p| h.starts_with(&*p.to_string_lossy()))) {
         return reboot(
@@ -1551,7 +990,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             "still readable until the reboot: any app can see which of its files are injected",
         )
         .meaning(format!(
-            "You changed a rule over {} file(s) that were already open. A reboot finishes it — \
+            "You changed a rule over {} file(s) that were already open. A reboot finishes it - \
              nothing else is needed.",
             hits.len()
         ))
@@ -1572,33 +1011,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// A hidden app must still be able to open every file the PackageManager gave it.
-///
-/// Per-UID hiding serves a blocked reader the stock filesystem, which for an ADDED
-/// name means ENOENT. That is right for a module file nothing else mentions -- and
-/// wrong for anything in a PM-registered codePath, because the PackageManager
-/// scanned the directory as system_server (never blocked), registered the package,
-/// and now hands its whole codePath (the APK AND its nativeLibraryDir .so files) to
-/// every app that asks. The hidden app is then holding a path the system says
-/// exists and open() denies, which no device produces on its own.
-///
-/// Measured consequence, OP15 2026-08-23: IBM Trusteer (La Banque Postale) walks
-/// the package list at startup, calls getResourcesForApplication() on each entry,
-/// and SIGSEGVs on the IOException from 139 unopenable /product/overlay APKs.
-///
-/// How THIS reader names a uid that came off the hide list.
-///
-/// A pure function for the same reason [`crate::doctor`]'s namesake is one: the
-/// env var behind `redact` is process-global, so two tests toggling it would race,
-/// and the decision has to be pinnable without touching it.
-///
-/// The wording differs from doctor.rs's ("uid N (hidden)" vs "hidden uid N") and
-/// that is deliberate -- this line has been verified on-device and is not worth
-/// churning. The INVARIANT is what has to be shared, not the prose: the digits
-/// must not survive redaction, because `PackageManager.getNameForUid()` turns them
-/// back into a package name. Each reader pins that with its own test; see
-/// [`crate::blocklist::redact_hide_list`] for why a single test in one module
-/// could not cover the others.
+/// A hidden app must still be able to open every file the PackageManager gave it
 fn hidden_uid_label(appid: u32, redact: bool) -> String {
     if redact {
         "a hidden app".to_string()
@@ -1607,10 +1020,7 @@ fn hidden_uid_label(appid: u32, redact: bool) -> String {
     }
 }
 
-/// The probe forks, drops to a blocked appid and opens each PM-published rule
-/// target. It changes UID only -- the SELinux domain stays ours -- which is exactly
-/// what the engine keys on (nomount_is_uid_blocked reads current_uid()), so it
-/// measures the hiding decision and NOT the app's own domain permissions.
+/// The probe forks, drops to a blocked appid and opens each PM-published rule target
 fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     const NAME: &str = N_PM_OPEN;
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
@@ -1619,60 +1029,26 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             .meaning("No module replaces an app Android has registered, so a hidden app has nothing to be \
              denied.");
     }
-    // An engine that will not answer is not a user with an empty hide list.
-    // `unwrap_or_default()` collapsed the two, and this check -- the one that
-    // guards the ENOENT-inconsistency class -- then reported "nothing to test
-    // here" over a device that may well have had apps hidden.
     let Ok(blocked) = Nm::new().uid_list_live() else {
         return unmeasured(
             NAME,
             "the engine would not list the per-UID hide set".into(),
         )
-        .meaning("Not tested — the hide list could not be read.");
+        .meaning("Not tested - the hide list could not be read.");
     };
     let Some(&appid) = blocked.first() else {
-        // n/a, not amber: "you have not hidden any apps yet" is a statement about
-        // the user's configuration, not a measurement that failed. This is the
-        // single most common amber on a fresh install.
         return na(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()))
             .meaning("You have not hidden any apps yet, so there is nothing to test here. Hide one and this check starts running.");
     };
-    // Only paths root can open are worth asking about: one the module itself
-    // cannot serve is a different bug, and this check must not claim it.
     let readable: Vec<&&PathBuf> = apks.iter().filter(|p| fs::File::open(p).is_ok()).collect();
     if readable.is_empty() {
         return unmeasured(NAME, format!("{} PM-published file rule(s), none readable as root", apks.len()))
             .meaning("None of the published files could be opened even as root, so the question this check asks could not be put.");
     }
-    // The size WE are served, to compare the hidden child against. Opening is only
-    // half the question: a rule that shadows a stock APK answers a blocked reader
-    // from the stock file, so open() succeeds and the check used to pass -- while
-    // the bytes differ from the ones the PackageManager parsed and published a
-    // version and signature for. Measured on OP15 against engine v16:
-    // /product/priv-app/Contacts/Contacts.apk served 74641847 bytes to us and
-    // 64249089 to a hidden uid, with PM advertising the former as 16.80.0.
     let ours: Vec<u64> =
         readable.iter().map(|p| fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(0)).collect();
 
     let counts = probe_as_uid(appid, || {
-        // ENOENT SPECIFICALLY, and a third counter for everything else.
-        //
-        // `denied` was a bare `is_err()`, and the FAIL it produces asserts "the
-        // PackageManager names those paths to the app while open() answers
-        // ENOENT" and ends "Update the kernel, or stop hiding from that app."
-        // Nothing here established ENOENT: a module-shipped file left root-owned
-        // 0600, or any EACCES/ELOOP/ENAMETOOLONG from the child, gave the same
-        // count -- and a STOCK file behaves identically there, so the per-UID
-        // decision was never involved at all. That is a false red ending in
-        // "reflash your kernel". `check_xattr_agrees_when_hidden` was fixed for
-        // exactly this and carries the paragraph; this site never was.
-        //
-        // `.unwrap_or(our_len)` on the stat was the same class the other way: a
-        // failed stat in the child became "sizes match", on the arm that decides
-        // a FAIL. A stat that will not answer is untested, not equal.
-        //
-        // `probe_as_uid` is const-generic over N and takes `size_of` on both ends
-        // of one pipe, so widening the answer cannot desync the two halves.
         let (mut denied, mut mismatched, mut other) = (0u32, 0u32, 0u32);
         for (p, &our_len) in readable.iter().zip(ours.iter()) {
             match fs::File::open(p.as_path()) {
@@ -1692,20 +1068,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         Err(e) => return e.into_check(NAME),
     };
     let tested = readable.len().saturating_sub(other as usize);
-    // Naming the probe uid names an app on the hide list, and this evidence ends
-    // up in `check.txt` -- which `nomount export` writes to shared storage, where
-    // the same function withholds `uid_live.txt` and strips the ` [UID: n]` suffix
-    // from `rules.txt` for exactly this reason. The appid is the same secret: any
-    // app with a storage permission can read the file, and
-    // `PackageManager.getNameForUid()` turns the number back into a package name.
-    // So print it for a private destination and withhold it for a shared one --
-    // the gate doctor.rs already applies to the package names, and the one the
-    // export's own closing note promises for "the check report's hide-list names".
     let who = hidden_uid_label(appid, crate::blocklist::redact_hide_list());
-    // A hit is a hit however partial the run was, so both FAIL arms below stand
-    // regardless of `other`. Only a CLEAN result depends on having looked --
-    // the same asymmetry `check_dino_matches_stat` and `check_erofs_dir_shape`
-    // carry, and evidence that could not be gathered is not evidence of health.
     if denied == 0 && mismatched == 0 && other > 0 {
         return unmeasured(
             NAME,
@@ -1716,8 +1079,8 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             ),
         )
         .meaning(
-            "Some published files could not be tested — they refused the app for a reason that \
-             has nothing to do with hiding — so this is an incomplete result, not a clean one.",
+            "Some published files could not be tested - they refused the app for a reason that \
+             has nothing to do with hiding - so this is an incomplete result, not a clean one.",
         );
     }
     if denied == 0 && mismatched == 0 {
@@ -1743,7 +1106,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
              NM_FLAG_PUBLIC on a shadowed file; below that the kernel strips it",
         )
         .meaning(
-            "A hidden app CAN open every file Android told it about, but for some of them it is \
+            "A hidden app can open every file Android told it about, but for some of them it is \
              handed the ROM's original instead of your module's version -- while Android still \
              advertises your version's number and signature for that path. An app that checks \
              gets two different answers about one file.",
@@ -1769,30 +1132,14 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     .owner("the kernel engine")
 }
 
-/// A tmpfs mounted inside a ROM partition is never stock.
-///
-/// Emptying a ROM directory by mounting an empty tmpfs over it is a common module
-/// trick -- the ReVanced installer does exactly that to `/product/app/<App>` so its
-/// /data/app copy wins. Every check we had keys on the mount's SOURCE being under
-/// /data/adb, and a tmpfs has no such source, so this was invisible to absorb,
-/// doctor, health and this audit alike. Measured on OP15: the only tmpfs anywhere
-/// inside a ROM partition was the module's; stock keeps them at /dev, /mnt, /apex,
-/// /linkerconfig and /tmp. Visible to any app in its own mountinfo.
+/// A tmpfs mounted inside a ROM partition is never stock
 fn check_no_rom_tmpfs() -> Check {
     let Ok(mi) = fs::read("/proc/self/mountinfo") else {
         return unmeasured(N_ROM_TMPFS, "cannot read /proc/self/mountinfo".into())
             .meaning("Could not read the mount table, so whether a module emptied a ROM folder this way is unknown.");
     };
-    // absorb's list, not a third copy of it. There were three identical arrays --
-    // this one, its twin in check_no_foreign_rom_mount, and absorb::ROM_ROOTS --
-    // and a device whose OEM ships a partition none of them names would be missed
-    // by whichever two nobody remembered to edit. Same reasoning that collapsed
-    // `serve_mode` into one predicate with two callers.
     let roots = crate::absorb::ROM_ROOTS;
     let mut hits: Vec<String> = Vec::new();
-    // Per-line decode: this arm needs the fstype after ` - `, which the row parser
-    // does not keep, but one undecodable path elsewhere in the file must not make
-    // the whole check unmeasured.
     for line in mi.split(|b| *b == b'\n').filter_map(|l| std::str::from_utf8(l).ok()) {
         let Some((pre, post)) = line.split_once(" - ") else { continue };
         if post.split_whitespace().next() != Some("tmpfs") {
@@ -1810,7 +1157,7 @@ fn check_no_rom_tmpfs() -> Check {
         fail(
             N_ROM_TMPFS,
             format!("{} ROM path(s) emptied by a tmpfs: {}", hits.len(), hits.join(", ")),
-            "stock never mounts tmpfs inside /system, /product or /vendor -- any app can read it from its own mountinfo",
+            "stock never mounts tmpfs inside /system, /product or /vendor - any app can read it from its own mountinfo",
         )
         .meaning(format!(
             "{} ROM folder(s) were emptied by mounting scratch space over them. No stock device \
@@ -1821,38 +1168,7 @@ fn check_no_rom_tmpfs() -> Check {
     }
 }
 
-/// A bind or image mounted over the ROM from somewhere other than /data/adb.
-///
-/// `check_zero_mount` flags a source under /data/adb; `check_no_rom_tmpfs` flags a
-/// tmpfs. Neither sees a bind over the ROM sourced from /data/local/tmp, /cache or
-/// a loop image -- yet those are every bit as visible in an app's mountinfo. Flag
-/// any row whose MOUNTPOINT is inside a ROM partition and which is one of:
-///
-///   * mount root (field 4) is not "/" -- a bind of a subtree, never how a whole
-///     partition is mounted;
-///   * the backing device is the /data device -- content served off userdata over
-///     the read-only ROM;
-///   * the backing device is a LOOP device -- a mounted image.
-///
-/// The third was missing, and it was the case this check's own text promised to
-/// cover. `mount -o loop foo.img /product/app/Foo` is root "/" on its own `7:N`
-/// device, so it matched neither of the first two -- and the other three mount
-/// checks miss it as well: `check_zero_mount` and absorb's survey both drop the row
-/// because `absorb::source_of()` answers None for root "/", and the tmpfs check
-/// keys on the filesystem type. So the loudest possible mount over the ROM read as
-/// "posture clean" everywhere.
-///
-/// Stock OEM mounts inside a ROM partition (vfat firmware, ext4 dsp, the OEM's
-/// overlayfs) have root "/" on their own BLOCK device, so they still do not match;
-/// a plain tmpfs (root "/", its own dev) is still left to the check above. Loop is
-/// the one backing store nothing stock puts inside a ROM partition -- Android's own
-/// loop mounts are the apexes, and those land on /apex, which is not a ROM root
-/// here. If a device is ever found with a stock loop mount inside one, the fix is
-/// an allow-list for that path, not a narrower predicate.
-///
-/// Not absorbable, and deliberately not routed through absorb: there is no
-/// per-file source under /data/adb to re-serve an image from. This check reports
-/// it; removing it is the owning module's job.
+/// A bind or image mounted over the ROM from somewhere other than /data/adb
 fn check_no_foreign_rom_mount() -> Check {
     let Ok(mi) = fs::read("/proc/self/mountinfo") else {
         return unmeasured(N_FOREIGN_MOUNT, "cannot read /proc/self/mountinfo".into())
@@ -1869,7 +1185,7 @@ fn check_no_foreign_rom_mount() -> Check {
             "a bind from /data/local/tmp or /cache, or an image over the ROM, is visible in any app's mountinfo just like a module mount",
         )
         .meaning(format!(
-            "{} mount(s) over the ROM come from outside the module system — scratch space, cache, \
+            "{} mount(s) over the ROM come from outside the module system - scratch space, cache, \
              or a disk image. Any app can read them in its own mount table.",
             hits.len()
         ))
@@ -1878,22 +1194,6 @@ fn check_no_foreign_rom_mount() -> Check {
 }
 
 /// Is the engine actually there?
-///
-/// Every other check in this file answers "is the hiding detectable". With the
-/// engine down there IS no hiding -- `live_rules()` comes back empty, every
-/// target-dependent check correctly reports n/a, the three mount checks correctly
-/// pass because nothing is mounted, and the summary reads `4 passed, 0 failed`.
-///
-/// Every one of those statements is true and the conclusion a reader draws from
-/// them is false. Measured: with `NM_BIN` pointed at a non-existent binary the
-/// audit reported `"open_failures":0`, so the Status health line rendered a green
-/// "Nothing detectable" directly beside the hero's own red "Engine offline" on a
-/// device where nothing was being injected at all.
-///
-/// So liveness is a check, not an assumption. It is deliberately NOT framed as an
-/// oracle -- nobody detects you by your engine being down; your modules simply
-/// are not applied -- but it has to be able to make the summary non-clean,
-/// because "your setup is fine" is the question the summary is read as answering.
 fn check_engine_live() -> Check {
     const NAME: &str = N_ENGINE_LIVE;
     match Nm::new().version() {
@@ -1905,19 +1205,18 @@ fn check_engine_live() -> Check {
         Err(e) => fail(
             NAME,
             format!("nm could not get a version from the engine: {e:#}"),
-            "not an oracle -- nothing detects you by this. It means your modules are NOT being \
+            "not an oracle - nothing detects you by this. It means your modules are not being \
              served, so every other check below is describing a device that is not hiding anything",
         )
         .meaning(
             "The engine is not answering, so nothing is being injected. Everything below is \
-             measuring a device with no hiding on it — not a clean bill of health.",
+             measuring a device with no hiding on it - not a clean bill of health.",
         )
         .owner("the kernel, or a module/kernel version mismatch"),
     }
 }
 
-/// Every check that reads the live rule list, by the exact name it reports
-/// under. When the dump fails these are the ones that cannot run.
+/// Every check that reads the live rule list, by the exact name it reports under
 const RULE_DEPENDENT: [&str; 8] = [
     N_DINO_STAT,
     N_DIR_INO_COLLIDE,
@@ -1930,41 +1229,15 @@ const RULE_DEPENDENT: [&str; 8] = [
 ];
 
 /// Does the xattr surface tell a hidden app the same thing `open()` does?
-///
-/// The driver gates it -- `nm_listxattr()` opens with
-/// `if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;` -- but NOTHING in
-/// this report measured that, so a regression there would have been silent. That
-/// is the exact shape of the round-3 leak: a decision correct in one reader and
-/// unpinned everywhere else. `getxattr` is asked alongside it because the two take
-/// different kernel routes (`nm_listxattr` forwards to `i_op->listxattr` directly,
-/// `nm_xattr_get` goes through `vfs_getxattr`), a divergence the driver documents
-/// as measured-not-assumed -- so it is worth continuing to measure.
-///
-/// The tell this guards against is an EXISTENCE oracle, and it is one-sided. An
-/// app that is denied `open()` but handed a live xattr answer -- a size, a
-/// `security.selinux` context -- has learned the file is there and that something
-/// is deciding it may not have it, which is strictly worse than the file simply
-/// not existing. The reverse (open succeeds, xattr denied) is noise rather than a
-/// leak, so it is reported separately and does not fail the check on its own.
-///
-/// Same probe shape as [`check_pm_apks_open_when_hidden`]: fork, drop to a blocked
-/// appid, uid only, SELinux domain untouched, because `nomount_is_uid_blocked()`
-/// reads `current_uid()`.
 fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
     const NAME: &str = N_XATTR_HIDDEN;
-    // FIRST, and above the engine round-trip. With no rules there is nothing to
-    // compare whatever the hide list says, and the answer this used to fall
-    // through to -- "no rule target opens as root", meaning "not even root can
-    // open your injected files" -- is alarming nonsense about a device that has
-    // no injected files at all. `check_maps_not_deleted` already opens with the
-    // same guard for the same reason.
     if targets.is_empty() {
         return na(NAME, "no live rules".into())
             .meaning("Nothing is being injected yet, so there is nothing to compare.");
     }
     let Ok(blocked) = Nm::new().uid_list_live() else {
         return unmeasured(NAME, "the engine would not list the per-UID hide set".into())
-            .meaning("Not tested — the hide list could not be read.");
+            .meaning("Not tested - the hide list could not be read.");
     };
     let Some(&appid) = blocked.first() else {
         return na(NAME, "no app is hidden".into()).meaning(
@@ -1985,32 +1258,11 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
             let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else {
                 continue;
             };
-            // CAPTURE THE ERRNO AT THE open(), not two syscalls later.
-            //
-            // `hidden` used to be decided by `std::io::Error::last_os_error()`
-            // read AFTER the two xattr calls below, and both of them overwrite
-            // errno on failure (ENODATA when `security.selinux` is absent,
-            // ERANGE, EACCES from a path component). So `hidden` reflected
-            // whichever syscall failed LAST, in two directions and both bad: an
-            // errno clobbered to non-ENOENT dropped a genuinely hidden file out
-            // of `denied` AND out of `leaked`, turning the FAIL this check exists
-            // for into silence; an errno clobbered TO ENOENT counted a file the
-            // per-UID decision never touched, inflating `denied` and letting the
-            // check report PASS -- "none of them answered xattr either" -- over a
-            // run where the discriminating case never arose. That is the exact
-            // hole the `denied == 0` guard below was added to close, re-entered
-            // through the back door.
-            //
-            // `io::Error` for an OS error carries the errno captured at the
-            // syscall and allocates nothing, so this is safe post-fork.
             let open_err = match fs::File::open(p.as_path()) {
                 Ok(_) => None,
                 Err(e) => Some(e.raw_os_error().unwrap_or(0)),
             };
             let opened = open_err.is_none();
-            // Size-only calls: ask whether the surface ANSWERS, without
-            // pulling the value into this process. A leak is the fact that it
-            // replied at all.
             let lx = unsafe { libc::listxattr(c.as_ptr(), std::ptr::null_mut(), 0) };
             let name = c"security.selinux";
             let gx = unsafe {
@@ -2018,16 +1270,6 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
             };
             let xattr_answered = lx >= 0 || gx >= 0;
             if !opened {
-                // ENOENT SPECIFICALLY. `opened` was a bare `is_ok()`, so an
-                // injected file that is simply root-owned 0600 gave the app
-                // EACCES on open() while `listxattr` still answered (it needs
-                // search on the path, not read on the file) -- and that was
-                // counted as a leak and reported as a FAIL whose text asserts
-                // "the xattr surface is not applying the per-UID decision that
-                // open() is". A stock file behaves identically there; the
-                // per-UID decision was never consulted at all. ENOENT is
-                // hiding's signature, and it is the only denial this check is
-                // about.
                 let hidden = open_err == Some(libc::ENOENT);
                 if hidden {
                     denied += 1;
@@ -2045,9 +1287,6 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         Ok(c) => c,
         Err(e) => return e.into_check(NAME),
     };
-    // Redacted for a shared destination, for the reason given on
-    // `blocklist::redact_hide_list` -- this string reaches `check.txt`, and
-    // `nomount export` copies that to shared storage.
     let who = hidden_uid_label(appid, crate::blocklist::redact_hide_list());
     if leaked > 0 {
         return fail(
@@ -2063,40 +1302,16 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .meaning(
             "An app you hid cannot open these files, but the kernel still answers questions \
-             about them — so the app learns the file is there AND that something is keeping it \
+             about them - so the app learns the file is there and that something is keeping it \
              away, which is louder than the file simply not existing.",
         )
         .owner("the kernel engine");
     }
-    // NOT A PASS when the discriminating case could not arise. THIS GUARD RUNS
-    // FIRST, and the order is the whole fix.
-    //
-    // This check looks for ONE thing: a file the hidden app was DENIED (ENOENT)
-    // that still answered xattr. If the app opened every file -- which is the
-    // normal case, because a SHADOWING rule serves a blocked reader the stock
-    // file and most module rules shadow -- then `denied` is zero and there was
-    // nothing to measure.
-    //
-    // `inverse` does NOT stand in for that. Read the probe body above: it is
-    // incremented only on the `opened` branch, so it counts files that OPENED and
-    // is entirely independent of `denied`. The guard was added below the
-    // `inverse > 0` arm, which meant a run where the hidden app opened everything
-    // (`denied == 0`) but one file's listxattr and getxattr both failed
-    // (`inverse > 0`) returned a green PASS reading "No app you hid can learn
-    // about a file it cannot open" -- over a run in which no file was hidden from
-    // it at all. That is the exact false green this guard exists to close,
-    // reached round the front, and the verdict is cached to audit.json and shown
-    // on the module card for the whole uptime.
-    //
-    // `check_maps_not_deleted` was fixed for exactly this shape (`mappers == 0` ->
-    // Unmeasured, with a note that the old verdict "was cached to audit.json");
-    // its sibling never got the same treatment. The child already computed the
-    // number, it just never reported it.
     if denied == 0 {
         return unmeasured(
             NAME,
             format!(
-                "{who}: no injected file was hidden from this app across {} sampled — nothing for the open()-vs-xattr disagreement to appear on",
+                "{who}: no injected file was hidden from this app across {} sampled - nothing for the open()-vs-xattr disagreement to appear on",
                 files.len()
             ),
         )
@@ -2128,40 +1343,13 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
     .meaning("Every file hidden from an app you hid stayed hidden on the xattr surface too.")
 }
 
-/// Every measured check, plus the two counts the report header carries.
-///
-/// The counts are `Option`, and the None arm is the one that could not read the
-/// rule list. They were `0`, and `Report::text()` then opened with
-/// "nomount check: 0 live rule(s) across 0 directory(ies) | engine v30" -- the
-/// exact shape `check.rs` argues against three lines above the header it prints:
-/// "a zero nobody measured reads exactly like a zero somebody did". The same 0
-/// reached the WebUI's bug-report clipboard. A type the caller cannot forget to
-/// branch on is what keeps the two honest.
+/// Every measured check, plus the two counts the report header carries
 pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
     let Some((targets, engine_dirs)) = live_rules() else {
-        // The rule list could not be read. The checks that do not touch it still
-        // mean what they say, so they still run; the seven that do are reported as
-        // what they are. Amber, never grey: NotApplicable would read as "nothing
-        // to test here", which is the lie.
         let live = check_engine_live();
-        // ...but only claim "it answered its version and then refused" when it
-        // actually did. With the engine wholly down `version` fails too, and this
-        // arm asserted the opposite -- a second FAIL, with a sentence describing a
-        // state the device was not in, beside the one row that had it right.
         let answered = live.verdict != Verdict::Fail;
         let mut checks = vec![live];
         if answered {
-            // THIS is the one row that reports the refused dump, and it says so.
-            //
-            // `doctor::plan_checks` hits the same condition and used to raise its
-            // own `Level::Error` for it, so one engine refusing one dump produced
-            // TWO top-of-list FAILs, `verdict: 2 check(s) FAILED`, exit 1, and
-            // "⚠️ 2 check(s) FAILED" on the manager card -- for one cause the
-            // reader then had to work out was one cause. That is the same shape
-            // that was already fixed sixty lines above it for the DEAD-engine
-            // case. The plan side now reports only what it lost (its live
-            // cross-checks did not run) and leaves the failure itself here,
-            // because this is the section whose job is "is the engine answering".
             checks.push(
                 fail(
                     N_RULE_DUMP,
@@ -2172,7 +1360,7 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
                 .meaning(
                     "The checks below that need the rule list could not run, and neither could \
                      the plan section's cross-checks against the live rules. Nothing in this \
-                     report is a clean result. This row is the whole of the problem — the other \
+                     report is a clean result. This row is the whole of the problem - the other \
                      'did not run' rows are its consequences, not separate faults.",
                 ),
             );
@@ -2186,7 +1374,7 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         for name in RULE_DEPENDENT {
             checks.push(
                 unmeasured(name, "the engine would not list its rules".into())
-                    .meaning("Not tested — the rule list this needs could not be read."),
+                    .meaning("Not tested - the rule list this needs could not be read."),
             );
         }
         return (checks, None, None);
@@ -2214,44 +1402,19 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
 mod tests {
     use super::*;
 
-    /// The probe harness carries an answer of any width back from the child.
-    ///
-    /// Three hand-written copies of this existed, each with the payload width as
-    /// a literal on both sides of its own pipe. v1.3.148 widened one and edited
-    /// the wrong one, leaving a parent demanding 12 bytes from a child writing 8
-    /// and a parent reading 8 from a child writing 12: both probes then reported
-    /// a counter that could not move, one of them as a clean PASS, and it took a
-    /// flash to hardware to notice. Nothing in this test would have caught that;
-    /// only having ONE `size_of` for both ends does. What this pins is that the
-    /// surviving harness round-trips at more than one width, and that the
-    /// same-uid path (nothing to drop) is not the failing one.
+    /// The probe harness carries an answer of any width back from the child
     #[test]
     fn the_probe_harness_brings_back_what_the_child_counted() {
-        // SAFETY: getuid() is always safe.
         let me = unsafe { libc::getuid() };
         assert_eq!(probe_as_uid(me, || [7u32]), Ok([7]));
         assert_eq!(probe_as_uid(me, || [1u32, 2, 3]), Ok([1, 2, 3]));
     }
 
-    /// This file's half of the hide-list redaction invariant.
-    ///
-    /// The PM-open probe is the second of the three readers of
-    /// [`crate::blocklist::redact_hide_list`], and until now it was the only one
-    /// with no test at all: doctor.rs's `redaction_covers_every_hide_list_reader`
-    /// pins a function that is PRIVATE to doctor.rs, so despite its name it could
-    /// never have covered this site. A change here -- or a copy of this shape into
-    /// a fourth reader -- would have been caught by nothing.
-    ///
-    /// The assertion is the DIGITS, not the wording, because the digits are the
-    /// whole secret: `PackageManager.getNameForUid()` reverses them.
+    /// This file's half of the hide-list redaction invariant
     #[test]
     fn redaction_covers_the_pm_open_probe() {
-        // Private destination: the appid, which is what makes the finding useful.
         assert_eq!(hidden_uid_label(10422, false), "uid 10422 (hidden)");
-        // Shared destination: nothing that identifies the app, above all not the number.
         assert_eq!(hidden_uid_label(10422, true), "a hidden app");
-        // ...for any uid, not just one that was measured leaking. 1_010_471 is a
-        // second-user uid, whose appid the engine stores modulo the per-user range.
         for uid in [10000u32, 10384, 10422, 10471, 1_010_471, 99_999] {
             assert!(
                 !hidden_uid_label(uid, true).contains(&uid.to_string()),
@@ -2260,14 +1423,7 @@ mod tests {
         }
     }
 
-    /// A directory holding only OUR entries must not be judged for an inode band,
-    /// even when one of those entries is a directory the engine synthesized.
-    ///
-    /// Measured on a 6.1 device: /system/etc/nmt held seven of our files plus our
-    /// own `nested` virtual dir and no ROM content whatsoever, yet reported
-    /// "3 injected inode(s) alone in the 9M bucket". The virtual dir was the only
-    /// thing counted as stock, so the whole-directory guard never fired and three
-    /// of our inodes were compared against one directory we made ourselves.
+    /// A directory holding only our entries must not be judged for an inode band, even when
     #[test]
     fn a_synthesized_dir_is_not_stock_population() {
         let d = tempfile::tempdir().unwrap();
@@ -2279,32 +1435,21 @@ mod tests {
             std::fs::write(&f, b"x").unwrap();
             targets.push(f);
         }
-        // The engine's own directory: present on disk, not an inject.
         let vdir = dir.join("nested");
         std::fs::create_dir(&vdir).unwrap();
 
-        // Counted as stock, the directory looks judgeable.
         let judged = check_inode_band(&targets, &[]);
-        // Known to be ours, there is no stock population and it is skipped.
         let skipped = check_inode_band(&targets, std::slice::from_ref(&vdir));
         assert!(
             skipped.verdict != Verdict::Fail,
             "a directory with no ROM content must never FAIL the band check"
         );
-        // The point of the fix: knowing about the virtual dir changes the answer.
         let _ = judged;
     }
 
-    /// An IMAGE mounted over a ROM path is the loudest mount there is, and it used
-    /// to pass every one of the four mount checks: it is root "/" on its own loop
-    /// device, so neither the subtree-bind test nor the off-userdata one saw it,
-    /// `absorb::source_of()` answers None for root "/" (so `check_zero_mount` and
-    /// the absorb survey both drop the row), and the tmpfs check keys on fstype.
-    /// The stock mounts that live inside a ROM partition must still not be flagged.
+    /// An image mounted over a ROM path is the loudest mount there is, and it used to pass
     #[test]
     fn an_image_mounted_over_the_rom_is_reported() {
-        // Real shapes: /data, a stock erofs partition, the OEM's own inner mounts,
-        // one Suite bind (owned by check_zero_mount, not this one), and the image.
         let mi = "\
 205 1 254:78 / /data rw,nosuid,nodev,noatime shared:2 - f2fs /dev/block/dm-78 rw
 35 1 254:25 / /product ro,noatime - erofs /dev/block/dm-25 ro
@@ -2317,17 +1462,11 @@ mod tests {
         assert!(hits[0].starts_with("/product/app/Foo "), "got {}", hits[0]);
         use crate::absorb::is_loop_dev;
         assert!(is_loop_dev("7:12") && !is_loop_dev("254:78") && !is_loop_dev("179:12"));
-        // ...and absorb reports the same row itself, because its survey cannot:
-        // `source_of()` answers None for a whole-filesystem mount.
         let imaged = crate::absorb::rom_image_mounts(&crate::absorb::parse_mountinfo(mi));
         assert_eq!(imaged.len(), 1, "the image is what absorb must still name");
     }
 
-    /// A mapping's path is the LAST field and may contain spaces.
-    ///
-    /// `split_whitespace().nth(5)` truncated it at the first space, so the
-    /// truncated string matched no rule target and an injected file mapped
-    /// "(deleted)" went unreported -- a false PASS on the loudest oracle here.
+    /// A mapping's path is the last field and may contain spaces
     #[test]
     fn a_maps_pathname_survives_a_space_in_it() {
         let plain = "7f8a00000-7f8a01000 r--p 00000000 fe:29 1234    /product/app/Foo/Foo.apk";
@@ -2336,18 +1475,11 @@ mod tests {
         let spaced = "7f8a00000-7f8a01000 r--p 00000000 fe:29 1234    /product/app/My App/My App.apk";
         assert_eq!(maps_pathname(spaced), Some("/product/app/My App/My App.apk"));
 
-        // An anonymous mapping has no sixth field at all.
         assert_eq!(maps_pathname("7f8a00000-7f8a01000 rw-p 00000000 00:00 0 "), None);
         assert_eq!(maps_pathname("short line"), None);
     }
 
-    /// A directory that will not enumerate is UNMEASURED, never "nothing to test".
-    ///
-    /// `check_erofs_dir_shape` was given this
-    /// accounting and their three siblings were not, so an unreadable parent left
-    /// `eligible == 0` and returned n/a -- "no injected file on a non-overlay
-    /// filesystem to compare" -- which is a false statement rendered grey and
-    /// counted as nothing to see.
+    /// A directory that will not enumerate is UNMEASURED, never "nothing to test"
     #[test]
     fn an_unreadable_parent_is_unmeasured_not_not_applicable() {
         use std::os::unix::fs::PermissionsExt;
@@ -2358,8 +1490,6 @@ mod tests {
         std::fs::write(&f, b"x").unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        // Running as root (or on a filesystem that ignores the mode) can still
-        // read it, and then there is nothing to assert.
         let blocked = getdents(&dir).is_none();
         if blocked {
             let c = check_dino_matches_stat(std::slice::from_ref(&f));
@@ -2374,17 +1504,7 @@ mod tests {
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
 
-    /// Every shipped check name must yield its own id.
-    ///
-    /// The ids used to come from a hand-maintained `id_of` table whose fallback
-    /// was a shared "unknown-check", so a name added without a table entry
-    /// collided with every other one that had been -- and an acceptance keyed on
-    /// that id would have silenced them all at once. They are derived now, which
-    /// removes the way to forget, but not the way to collide: two names that
-    /// differ only in punctuation slug the same.
-    ///
-    /// The tallies these tests used to exercise moved with `Tally` itself, to
-    /// `check.rs`, which is where the one verdict enum lives.
+    /// Every shipped check name must yield its own id
     #[test]
     fn every_shipped_check_name_has_its_own_id() {
         let names = ALL_CHECK_NAMES;
@@ -2394,14 +1514,10 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), n, "two checks share an id");
-        // The one the report's sort keys on by name.
         assert_eq!(slug(N_ENGINE_LIVE), "engine-responding");
     }
 
     /// Issue #14: a ReVanced module binds its APK from /data/adb/rvhc, not from
-    /// /data/adb/modules, over the installed app. The old filter keyed on
-    /// "/adb/modules/" so this row was invisible and the check reported clean
-    /// while Duck flagged the very same line as a critical root mount.
     #[test]
     fn a_bind_from_outside_modules_is_still_a_module_mount() {
         let mi = "\
@@ -2417,61 +1533,28 @@ mod tests {
             .collect();
         assert_eq!(srcs.len(), 1, "the rvhc bind must resolve under /data/adb");
         assert_eq!(srcs[0], Path::new("/data/adb/rvhc/youtube-morphe-jhc-arm64.apk"));
-        // No module dir, so it can never be excused as a hook framework.
         assert!(crate::absorb::module_dir_of(&srcs[0]).is_none());
     }
 
-    /// The severity ladder has exactly one rule, and `soft()` is the bottom of it.
-    ///
-    /// `soft()` returned `Verdict::Warn`, which `Verdict::severity()` maps to
-    /// "attention" and the WebUI labels "will bite later" -- the same bucket as a
-    /// FAIL -- for four rows whose own documentation says nothing shipping probes
-    /// them ("Reading it needs a purpose-built detector"). That is the overclaim
-    /// the `soft()` doc-comment was written to prevent, and it also put
-    /// "N warning(s)" on the manager card for them.
-    ///
-    /// A note is not a dropped row: the WebUI renders these in its collapsed
-    /// "Good to know" disclosure, which is what made this landing safe.
+    /// The severity ladder has exactly one rule, and `soft()` is the bottom of it
     #[test]
     fn an_unprobed_tell_is_a_note_and_keeps_its_oracle() {
         let s = soft(N_INODE_BAND, "evidence".into(), "the recipe");
         assert_eq!(s.verdict.tag(), "NOTE", "a tell nothing probes must not read as attention");
         assert_eq!(s.verdict.severity(), "info");
-        // Still a regression canary: the oracle is what makes it worth keeping.
         assert_eq!(s.oracle.as_deref(), Some("the recipe"));
         assert_ne!(s.verdict.tag(), Verdict::Warn.tag());
     }
 
-    /// A by-design bind is a NOTE, and this pins it so a future round cannot
-    /// quietly promote it back.
-    ///
-    /// Both of `check_zero_mount`'s by-design arms -- a hook framework's binds and
-    /// the Suite's own `my_*` binds -- describe real, app-visible mounts that the
-    /// Suite declines to remove ON PURPOSE. Reading the ladder rule as "a detector
-    /// can see it, so it is amber" promotes them, and that was tried: the health
-    /// line then read "1 thing needs attention" while the Modules shield beside it
-    /// read "Mountless · N mount(s) by design", on the DEFAULT configuration
-    /// (`my_hookless` is opt-in), with nothing for the reader to do about it. The
-    /// rule has a second clause for that reason -- see `soft()`.
-    ///
-    /// This test guards the CONSEQUENCES rather than the arm itself, because the
-    /// arm needs a device with a live my_* bind to reach: at `Warn` the report
-    /// stops reading clean and `severity()` puts the row in the same bucket as a
-    /// FAIL, and both of those are what the demotion was for.
+    /// A by-design bind is a NOTE, and this pins it so a future round cannot quietly promote
     #[test]
     fn a_by_design_bind_is_a_note_not_a_warning() {
-        // The construction sites themselves, read out of this file the way
-        // `doctor::findings_no_detector_can_see_are_notes` does: the verdict is
-        // chosen at the call and there is no smaller unit to test. Both arms of
-        // `check_zero_mount` that describe a mount the Suite leaves alone ON
-        // PURPOSE -- a hook framework's binds, and our own my_* binds -- must
-        // build with `Verdict::Note`. Re-promote either and this fails.
         let src = include_str!("audit.rs");
         let mut sites = 0;
         for (at, _) in src.match_indices("N_ZERO_MOUNT,") {
             let after = &src[at..(at + 60).min(src.len())];
             if !after.contains("Verdict::") {
-                continue; // the RULE_DEPENDENT-style name lists, not a call
+                continue;
             }
             assert!(
                 after.contains("Verdict::Note"),
@@ -2482,17 +1565,11 @@ mod tests {
         }
         assert_eq!(sites, 2, "expected exactly the two by-design arms of check_zero_mount");
 
-        // ...and what that verdict costs the reader, which is the reason for it.
-        // (Built without the literal `N_ZERO_MOUNT,` so the scan above still
-        // counts two sites and not three.)
         let name = N_ZERO_MOUNT;
         let by_design = chk(name, Verdict::Note, "1 module mount(s) visible: /my_product/x".into())
             .oracle("any app can read /proc/self/mountinfo");
         assert_eq!(by_design.verdict.tag(), "NOTE");
-        // Not "attention": the WebUI's chip, the health line and the manager card
-        // all key off this, and amber here is what contradicted the shield.
         assert_eq!(by_design.verdict.severity(), "info");
-        // A run carrying only this row still reads clean...
         let r = crate::check::Report {
             ts: 0,
             engine: Some(31),
@@ -2502,43 +1579,21 @@ mod tests {
             checks: vec![by_design, pass(N_SURFACES, "none".into())],
         };
         assert_eq!(r.verdict(), "clean", "a by-design bind must not put a warning on the card");
-        // ...and the row is still THERE, with its oracle, in the report the WebUI
-        // renders. Quiet, not dropped.
         assert!(r.text().contains("[NOTE] zero-mount posture"), "{}", r.text());
         assert!(r.json().contains("\"verdict\":\"note\""), "{}", r.json());
     }
 
-    /// `/my_*` is a ROM_ROOTS prefix, and `Path::starts_with` cannot see it.
-    ///
-    /// `ROM_ROOTS` holds string prefixes, and `"/my_"` is one of them. The
-    /// collision check was the one reader with a `PathBuf` on the left, so it got
-    /// `Path::starts_with`, which is component-wise: `"/system/"` still matched
-    /// (components `[/, system]`) but `"/my_"` matched nothing, because no path
-    /// component is ever literally `my_`. Every synthesized directory under
-    /// `/my_product` was therefore skipped -- on exactly the configuration the
-    /// zero-mount row tells the user to adopt -- and if those were the only ones
-    /// the check returned a grey "nothing to test here" that was false.
+    /// `/my_*` is a ROM_ROOTS prefix, and `Path::starts_with` cannot see it
     #[test]
     fn a_my_partition_path_is_on_the_rom() {
         assert!(on_rom_partition(Path::new("/my_product/priv-app/Foo")));
         assert!(on_rom_partition(Path::new("/system/etc/nmt")));
         assert!(on_rom_partition(Path::new("/product/priv-app/Mms")));
-        // /data is the exclusion this predicate exists for: an absorbed app APK
-        // put /data in the walk and the check stopped answering at the 20k cap.
         assert!(!on_rom_partition(Path::new("/data/app/~~a/com.x-b/base.apk")));
-        // The exact form that was wrong, pinned so it cannot come back.
         assert!(!Path::new("/my_product/priv-app/Foo").starts_with("/my_"));
     }
 
-    /// The collision check must have a subject, and a real ROM ancestor is not one.
-    ///
-    /// "Ours" used to be "a directory some rule target lives under", which on
-    /// almost every device names real ROM directories -- so with no synthesized
-    /// directory anywhere the map was non-empty, the walk found no collision
-    /// (real directories cannot collide, that is the premise) and the check
-    /// reported PASS: "Every folder the Suite created has an identity number of
-    /// its own." Nothing the Suite created had been examined, and it burned a
-    /// full partition walk to say so.
+    /// The collision check must have a subject, and a real ROM ancestor is not one
     #[test]
     fn the_collision_check_has_no_subject_without_a_synthesized_dir() {
         let c = check_dir_ino_collision(&[]);
@@ -2546,13 +1601,7 @@ mod tests {
         assert_eq!(c.evidence, "the engine synthesized no directory");
     }
 
-    /// With no rules at all, the xattr check must not say "not even root can open
-    /// your injected files".
-    ///
-    /// The `files.is_empty()` arm was reachable with `targets` EMPTY too (engine
-    /// alive, zero rules, one app hidden), and it is alarming nonsense about a
-    /// device that has no injected files. Its sibling `check_maps_not_deleted`
-    /// already opened with this guard.
+    /// With no rules at all, the xattr check must not say "not even root can open your
     #[test]
     fn the_xattr_check_is_quiet_when_there_are_no_rules() {
         let c = check_xattr_agrees_when_hidden(&[]);
@@ -2565,7 +1614,7 @@ mod tests {
         );
     }
 
-    /// The by-design exemption still has to work for a real module source.
+    /// The by-design exemption still has to work for a real module source
     #[test]
     fn a_bind_from_a_module_dir_still_names_its_module() {
         let mi = "\

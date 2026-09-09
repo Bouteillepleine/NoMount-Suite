@@ -1,21 +1,4 @@
-//! Convert other people's bind mounts into hookless injections.
-//!
-//! The Suite is mountless, but a third-party module can still run its own
-//! `mount --bind` from a boot script, and every such mount is visible in
-//! `/proc/*/mountinfo` to any app — which is the entire signal the zero-mount
-//! posture exists to deny. Today that only holds because module authors
-//! cooperate (OnePlus_Dialer_Universal literally checks for meta-nomount and
-//! stands down). A module that does not know about NoMount punches straight
-//! through it.
-//!
-//! Absorption removes the dependency on cooperation: after module scripts have
-//! run, every mount whose source lives under `/data/adb` and whose target is on
-//! a read-only ROM partition is re-served as a VFS injection and then unmounted.
-//! The content stays available the whole time — the injection is added *first*,
-//! and the still-present mount simply shadows it until it goes away.
-//!
-//! This is only possible because injection is mountless: no overlay- or
-//! bind-based metamodule can absorb a mount, because it would have to create one.
+//! Convert other people's bind mounts into hookless injections
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -27,77 +10,32 @@ use anyhow::{Context, Result};
 use crate::nm::Nm;
 
 const MOUNTINFO: &str = "/proc/self/mountinfo";
-/// Only sources under here are module content we may take over.
+/// Only sources under here are module content we may take over
 const MODULE_ROOT: &str = "/data/adb";
-/// A mount backed by anything under here, landing outside it, is foreign content
-/// over the ROM — worth reporting even when `MODULE_ROOT` does not cover it.
+/// A mount backed by anything under here, landing outside it, is foreign content over the
 const FOREIGN_ROOT: &str = "/data";
-/// Opt-out list: module ids or target path prefixes to leave mounted. `.txt`
-/// to match its peer `whiteouts.txt` and because this file is meant to be
-/// hand-edited -- an extensionless file makes an Android file manager ask which
-/// app to open it with.
+/// Opt-out list: module ids or target path prefixes to leave mounted
 pub const SKIP_FILE: &str = "/data/adb/nomount/absorb-skip.txt";
-/// Pre-v1.2.1 name, still honoured so an existing install keeps its opt-outs.
+/// Pre-v1.2.1 name, still honoured so an existing install keeps its opt-outs
 const SKIP_FILE_LEGACY: &str = "/data/adb/nomount/absorb-skip";
-/// Rules absorb created, so `reload` knows they are wanted.
-///
-/// An absorbed rule belongs to no module *plan* -- it came from a bind whose
-/// source can sit anywhere inside the owning module, including paths the plan
-/// walk never visits. `reload` prunes every live rule the plan does not name, so
-/// without this record a single Reload silently undid every absorption and the
-/// mounts did not come back either: the content simply reverted to stock.
+/// Rules absorb created, so `reload` knows they are wanted
 pub const ABSORBED_LIST: &str = "/data/adb/nomount/absorbed.list";
-/// ROM directories absorb empties in place of another module's tmpfs.
-///
-/// Absorb-owned, deliberately NOT the user's durable `whiteouts.txt`: that list
-/// is re-applied at every boot and nothing prunes it, so a tmpfs takeover written
-/// there hid the ROM directory forever -- long after the module that mounted the
-/// tmpfs was uninstalled (M-S8). This one is re-derived from the live mount table
-/// on every absorb pass: an entry lives while its tmpfs keeps coming back and is
-/// dropped when it stops.
+/// ROM directories absorb empties in place of another module's tmpfs
 pub const ABSORBED_TMPFS_LIST: &str = "/data/adb/nomount/absorbed-tmpfs.list";
 
-/// Used when the skip file cannot be read at all. Keyed on the PATH BEING
-/// HOOKED, not on who installed it: a hook framework's module id varies between
-/// forks (`zygisk_lsposed`, `zygisk_lsposed_next`, `lsposed`, …) and an id list
-/// silently misses every one it does not name, while the path it hooks is the
-/// same for all of them. Losing the file must not quietly expose a framework, so
-/// this is what absorb falls back to rather than "skip nothing".
+/// Used when the skip file cannot be read at all
 const BUILTIN_SKIPS: &[&str] = &[
-    // Prefixes: each covers the plain, `d` (debug), `32` and `64` variants.
-    // BOTH apex names matter — ART lived in com.android.runtime before moving to
-    // com.android.art, and frameworks still hook whichever exists. Vector
-    // (JingMatrix) targets eight paths spread across the two, so keying on the
-    // com.android.art name alone silently missed half of them.
     "/apex/com.android.art/bin/dex2oat",
     "/apex/com.android.runtime/bin/dex2oat",
     "/system/bin/dex2oat", // pre-apex layout
     "/system/bin/app_process",
 ];
 
-/// Entries to leave alone: one per line, either a module id (matched against the
-/// bind's source) or an absolute target prefix. Blank lines and `#` ignored.
-/// The user's entries are ADDED to the built-ins, never substituted for them.
-/// They used to replace them, which meant writing a single line into the skip
-/// file silently dropped dex2oat and app_process protection — a footgun with a
-/// delayed, silent failure mode, since dexopt runs on app install rather than at
-/// boot. The built-ins are the floor; the file can only raise it.
+/// Entries to leave alone: one per line, either a module id (matched against the bind's
 fn skip_list() -> (Vec<String>, &'static str) {
     let mut entries: Vec<String> = BUILTIN_SKIPS.iter().map(|s| (*s).to_string()).collect();
-    // Read BOTH files and union them: returning after the first readable one
-    // silently ignored the legacy file whenever the new one existed. Report the
-    // primary (new) file if present, else the legacy, else the built-ins.
     let mut from = "the built-in list";
     for f in [SKIP_FILE, SKIP_FILE_LEGACY] {
-        // `if let Ok` with no `else` made NotFound (the normal state) and
-        // EACCES/EIO (a lost opt-out list) indistinguishable: on a read error every
-        // user entry vanished, `from` stayed "the built-in list", and absorb went on
-        // to take over the very module the user had written into the file --
-        // reporting `skipping X (listed in the built-in list)` for the built-ins so
-        // the output looked consistent with the wrong behaviour. This file is the
-        // ONLY user-facing opt-out, so losing it silently is a direct footgun.
-        // BUILTIN_SKIPS is still the floor, so a hook framework stays protected
-        // either way; this costs the user's own entries only.
         match std::fs::read_to_string(f) {
             Ok(s) => {
                 if from == "the built-in list" {
@@ -117,28 +55,12 @@ fn skip_list() -> (Vec<String>, &'static str) {
             ),
         }
     }
-    // dedup only removes ADJACENT duplicates, so it is a no-op on an unsorted vec.
     entries.sort();
     entries.dedup();
     (entries, from)
 }
 
-/// A module that provides Zygisk or an Xposed framework, detected by what it
-/// ships rather than by its id.
-///
-/// Absorbing a hook framework's own bind is the one absorption that can break
-/// something badly and late — dexopt runs on app install, not at boot, so the
-/// damage surfaces hours later as "modules stopped applying". Id lists fail in
-/// both directions here (Vector renames itself; Irena keeps `zygisk_lsposed`),
-/// and a path list only covers the paths someone thought to enumerate. What
-/// every one of them has in common is structure:
-///
-/// * a Zygisk **module** ships `zygisk/<abi>.so` — LSPosed and every fork,
-///   PlayIntegrityFix, HMA, zygisk-detach
-/// * a Zygisk **provider** ships the loader itself, `bin/zygiskd*` or
-///   `bin/zygisk-ptrace*` — Zygisk Next (`zygisksu`), ReZygisk, NeoZygisk
-///
-/// Either marker means: leave everything this module mounts alone.
+/// A module that provides Zygisk or an Xposed framework, detected by what it ships rather
 pub(crate) fn is_hook_framework(module_dir: &Path) -> bool {
     if module_dir.join("zygisk").is_dir() {
         return true;
@@ -150,7 +72,7 @@ pub(crate) fn is_hook_framework(module_dir: &Path) -> bool {
         .any(|e| e.file_name().to_string_lossy().starts_with("zygisk"))
 }
 
-/// `/data/adb/modules/<id>` for a path inside a module tree.
+/// `/data/adb/modules/<id>` for a path inside a module tree
 pub(crate) fn module_dir_of(src: &Path) -> Option<PathBuf> {
     let s = src.to_string_lossy();
     let rest = s.split("/modules/").nth(1)?;
@@ -161,20 +83,7 @@ pub(crate) fn module_dir_of(src: &Path) -> Option<PathBuf> {
     Some(PathBuf::from("/data/adb/modules").join(id))
 }
 
-/// Module ids that own a mount landing on a known hook path.
-///
-/// FINDING-2: identifying a hook framework by the files it ships lost to the
-/// arms race. `is_hook_framework` looks for `zygisk/` or `bin/zygisk*`, and
-/// against current releases it is 0-for-3 — Vector v2.2 ships `framework/` and
-/// `daemon.apk`, ReZygisk ships `machikado.arm64`/`misaki.sig`, Zygisk Next
-/// ships `mazoku`. Those names are deliberately obfuscated to defeat detectors,
-/// and they defeat ours the same way. Chasing them is a treadmill.
-///
-/// What cannot be renamed is the TARGET: a hook framework has to land on
-/// dex2oat or app_process to do its job. So identify by target, then protect by
-/// module — once a module is known to hook, every mount it owns is declined,
-/// including ones no list enumerates. The shipped-files check stays on as a
-/// second, independent signal; neither is load-bearing alone.
+/// Module ids that own a mount landing on a known hook path
 fn hooking_modules(rows: &[MountRow], roots: &HashMap<String, PathBuf>, skips: &[String]) -> HashSet<String> {
     let mut ids = HashSet::new();
     for r in rows {
@@ -192,59 +101,30 @@ fn hooking_modules(rows: &[MountRow], roots: &HashMap<String, PathBuf>, skips: &
     ids
 }
 
-/// Why a still-present module mount was left alone, when that was deliberate.
+/// Why a still-present module mount was left alone, when that was deliberate
 pub enum Declined {
-    /// The module ships Zygisk/Xposed markers, so absorb never touches it.
     Framework(String),
-    /// The module hooks a known path elsewhere, so all of its mounts are left
-    /// alone — including this one, which is not itself on a hook path.
     HooksElsewhere(String),
-    /// Named by the skip list (or the built-in fallback), which names its source.
     Listed(&'static str),
-    /// `my_*` is served by a real bind, so converting the module's bind to an
-    /// injection would trade a working mount for a zygote bootloop.
     MustBind,
 }
 
-/// What absorb will do about one foreign mount.
-///
-/// Absorb used to model only its own action -- "mounts I can convert" -- and
-/// treated everything else as absent, which is how a bind sourced from
-/// /data/local/tmp got reported as "posture already clean". The posture is a
-/// claim about what is visible in mountinfo, not about how much absorb managed
-/// to convert, so every foreign mount now lands in exactly one of these and
-/// silence is unreachable while one exists.
+/// What absorb will do about one foreign mount
 pub enum Disposition {
-    /// Convert it to injections.
     Absorb,
-    /// Every file this bind serves is ALREADY a live injection from the same
-    /// source file, so the mount adds nothing: drop it, add no rule.
-    ///
-    /// Worth its own verdict because both of the other answers are wrong for it.
-    /// `Absorb` would re-serve rules that already exist, and for a directory bind
-    /// would demand `--include-dirs` and snapshot a listing the module plan
-    /// already maintains properly. `Leaking` is what `serve_mode` returns for the
-    /// propagated twin of such a bind (`/mnt/vendor/my_product/...`, whose root is
-    /// in NON_PARTITION_ROOTS) even though dropping it removes nothing: it is the
-    /// same subtree as the servable path, already injected. Both were reported on
-    /// an OP11 whose Bootanimation module still ran a legacy `mount --bind` over
-    /// content NoMount was injecting anyway.
     Redundant,
-    /// Still mounted on purpose.
     Declined(Declined),
-    /// Still mounted because absorb cannot take it, and still visible to apps.
     Leaking(&'static str),
 }
 
-/// One foreign mount and its verdict.
+/// One foreign mount and its verdict
 pub struct Surveyed {
     pub target: PathBuf,
     pub source: PathBuf,
     pub disposition: Disposition,
 }
 
-/// `None` means nothing declined this mount — it is still mounted for some other
-/// reason (absorb has not run, or it failed), which is the only case worth a warning.
+/// `None` means nothing declined this mount - it is still mounted for some other reason
 pub(crate) fn declined_reason_with(
     src: &Path,
     target: &Path,
@@ -257,8 +137,6 @@ pub(crate) fn declined_reason_with(
         if is_hook_framework(&d) {
             return Some(Declined::Framework(id));
         }
-        // Identified by a hook path it mounts SOMEWHERE ELSE, so this mount is
-        // spared too even though its own target is ordinary.
         if hookers.contains(&id) {
             return Some(Declined::HooksElsewhere(id));
         }
@@ -266,7 +144,7 @@ pub(crate) fn declined_reason_with(
     is_skipped(src, target, skips).then_some(Declined::Listed(from))
 }
 
-/// True if this mount is explicitly excluded.
+/// True if this mount is explicitly excluded
 pub(crate) fn is_skipped(src: &Path, target: &Path, skips: &[String]) -> bool {
     if module_dir_of(src).is_some_and(|d| is_hook_framework(&d)) {
         return true;
@@ -276,47 +154,26 @@ pub(crate) fn is_skipped(src: &Path, target: &Path, skips: &[String]) -> bool {
         if k.starts_with('/') {
             t.starts_with(k.as_str())
         } else {
-            // module id: match the /data/adb/modules/<id>/ path component
             s.contains(&format!("/modules/{k}/"))
         }
     })
 }
 
-/// One parsed `/proc/self/mountinfo` row (the fields we need).
+/// One parsed `/proc/self/mountinfo` row (the fields we need)
 #[derive(Debug, Clone)]
 pub(crate) struct MountRow {
     pub dev: String,
-    /// Path of this mount's root *within its filesystem*, not an absolute path.
+    /// Path of this mount's root *within its filesystem*, not an absolute path
     pub root: String,
     pub target: PathBuf,
 }
 
-/// Read and parse `/proc/self/mountinfo` — as BYTES.
-///
-/// It used to be `read_to_string`, which returns `Err` on any invalid UTF-8 in
-/// the file, and the kernel escapes only space, tab, newline and backslash: a
-/// raw high byte in any mounted path is passed through verbatim. So ONE Latin-1
-/// filename in ONE mount, anywhere on the device -- an OTG volume label, another
-/// module's tree, an app's own mount -- failed the read, and `mount.rs` treats an
-/// unreadable mount table as fatal ("refusing to serve"). The result was **no
-/// injections at all, on every boot**, from a cause nothing on the device could
-/// report.
-///
-/// It also made the careful work below it unreachable: `unescape` assembles bytes
-/// specifically so a non-UTF-8 path survives, and `umount_detach` uses
-/// `as_encoded_bytes()` "because a module is free to ship a filename that is not
-/// UTF-8". Neither could ever be exercised, because the read failed first -- and
-/// the two tests pinning that property hand `parse_mountinfo` a `&str`, so they
-/// bypass the read entirely.
-///
-/// Now a row that cannot be decoded is skipped ALONE, the same graceful
-/// degradation the rest of this file uses, and `target` is carried through as raw
-/// bytes so `umount2` and `still_mounted` compare the path the kernel wrote.
+/// Read and parse `/proc/self/mountinfo` - as bytes
 pub(crate) fn read_mountinfo(path: &str) -> std::io::Result<Vec<MountRow>> {
     Ok(parse_mountinfo_bytes(&std::fs::read(path)?))
 }
 
-/// Parse mountinfo. Format: `id parent maj:min root mountpoint opts... - fstype source super`.
+/// Parse mountinfo
 pub(crate) fn parse_mountinfo_bytes(body: &[u8]) -> Vec<MountRow> {
     use std::os::unix::ffi::OsStringExt;
     let mut out = Vec::new();
@@ -325,21 +182,7 @@ pub(crate) fn parse_mountinfo_bytes(body: &[u8]) -> Vec<MountRow> {
         if f.len() < 5 {
             continue;
         }
-        // `dev` is maj:min — ASCII by the kernel's own format, so a row that
-        // fails here is malformed rather than merely non-UTF-8.
         let Ok(dev) = std::str::from_utf8(f[2]) else { continue };
-        // `root` is prefix-matched against the fs-root table, so it has to be
-        // text — but LOSSILY, never by dropping the row. Dropping it would take
-        // the TARGET with it, and the target is what `mounted_targets` and
-        // `still_mounted` answer from: a mount missing from that set reads as
-        // "nothing is mounted here", so `unmount_before_serving` serves the path
-        // and strands the mount in mountinfo until reboot. That is the exact
-        // damage this whole change exists to prevent, so the one field that must
-        // survive intact is the one that does.
-        //
-        // A lossy `root` costs that row its source resolution — `source_of`
-        // returns None and it is simply not classified as absorbable — which is
-        // the safe direction.
         out.push(MountRow {
             dev: dev.to_string(),
             root: String::from_utf8_lossy(&unescape_bytes(f[3])).into_owned(),
@@ -349,23 +192,16 @@ pub(crate) fn parse_mountinfo_bytes(body: &[u8]) -> Vec<MountRow> {
     out
 }
 
-/// The `&str` door, kept for the tests that feed literals.
+/// The `&str` door, kept for the tests that feed literals
 pub(crate) fn parse_mountinfo(body: &str) -> Vec<MountRow> {
     parse_mountinfo_bytes(body.as_bytes())
 }
 
-/// mountinfo octal-escapes space, tab, newline and backslash.
+/// mountinfo octal-escapes space, tab, newline and backslash
 fn unescape_bytes(b: &[u8]) -> Vec<u8> {
     if !b.contains(&b'\\') {
         return b.to_vec();
     }
-    // Collect BYTES, not chars. `out.push(b[i] as char)` is Latin-1: every byte
-    // >= 0x80 became U+0080..U+00FF and was then re-encoded as two UTF-8 bytes,
-    // so any non-ASCII path that also contained an escape came out corrupted --
-    // and the corrupted string is what umount2() and the injector are handed. It
-    // needed both to bite (the no-backslash fast path above returns early), which
-    // is why it survived: a module directory with an accent AND a space in its
-    // name. Assembling bytes and decoding once keeps such a path exact.
     let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
@@ -385,23 +221,18 @@ fn unescape_bytes(b: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The text door. Only callers that must have a `String` decode.
+/// The text door
 fn unescape(s: &str) -> String {
     let out = unescape_bytes(s.as_bytes());
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// Map each filesystem (maj:min) to where its ROOT is mounted, so a bind's
-/// fs-relative `root` field can be turned back into an absolute path. A bind of
-/// `/data/adb/x` reports `root=/adb/x` against the device `/data` is mounted on,
-/// so resolving it needs this table — a plain prefix match on `root` is wrong.
+/// Map each filesystem (maj:min) to where its root is mounted, so a bind's fs-relative
 pub(crate) fn fs_roots(rows: &[MountRow]) -> HashMap<String, PathBuf> {
     let mut m: HashMap<String, PathBuf> = HashMap::new();
     for r in rows.iter().filter(|r| r.root == "/") {
         m.entry(r.dev.clone())
             .and_modify(|cur| {
-                // Shortest mountpoint wins: that is the real fs root, not a
-                // later bind of the whole filesystem somewhere else.
                 if r.target.as_os_str().len() < cur.as_os_str().len() {
                     *cur = r.target.clone();
                 }
@@ -411,10 +242,10 @@ pub(crate) fn fs_roots(rows: &[MountRow]) -> HashMap<String, PathBuf> {
     m
 }
 
-/// Absolute source path backing a bind row, if it can be resolved.
+/// Absolute source path backing a bind row, if it can be resolved
 pub(crate) fn source_of(row: &MountRow, roots: &HashMap<String, PathBuf>) -> Option<PathBuf> {
     if row.root == "/" {
-        return None; // a whole-filesystem mount, not a bind of a subtree
+        return None;
     }
     let base = roots.get(&row.dev)?;
     let rel = row.root.trim_start_matches('/');
@@ -426,24 +257,11 @@ pub(crate) fn source_of(row: &MountRow, roots: &HashMap<String, PathBuf>) -> Opt
 }
 
 /// An installed app's APK: `/data/app/~~<hash>==/<pkg>-<hash>==/base.apk`, or the
-/// pre-Android-9 `/data/app/<pkg>-1/base.apk`, plus the `split_*.apk` siblings.
-///
-/// The one shape under `FOREIGN_ROOT` worth taking over. A patched-APK module
-/// (ReVanced and friends) binds its APK here from its own script, which leaves an
-/// `/adb/` token in every process's mount table -- issue #14. The engine serves
-/// `/data` targets perfectly well (measured on OP15: rule served, zero mounts,
-/// clean revert), so the old blanket "not on /data" refusal was a limit of the
-/// absorb gate, not of the engine.
-///
-/// Deliberately narrow: anything looser and absorb would start eating unrelated
-/// `/data` mounts, where a wrong take-over costs an app its data rather than a
-/// ROM file that can be re-served.
 pub(crate) fn is_app_apk(target: &Path) -> bool {
     if !target.starts_with("/data/app/") {
         return false;
     }
     let n = target.components().count();
-    // /data/app/<container>/<pkg-dir>/<file> = 6, /data/app/<pkg-dir>/<file> = 5.
     if n != 5 && n != 6 {
         return false;
     }
@@ -453,30 +271,26 @@ pub(crate) fn is_app_apk(target: &Path) -> bool {
         .is_some_and(|f| f == "base.apk" || (f.starts_with("split_") && f.ends_with(".apk")))
 }
 
-/// Is this mount module content laid over the ROM? OWNERSHIP only — whether the
-/// target can actually be served is `mount::serve_mode`'s question, and asking
-/// it here instead is what let absorb inject onto `/my_*` and `/apex`.
+/// Is this mount module content laid over the ROM?
 pub(crate) fn is_absorbable(src: &Path, target: &Path) -> bool {
     src.starts_with(MODULE_ROOT)
         && (!target.starts_with(FOREIGN_ROOT) || is_app_apk(target))
         && target.components().count() > 1
 }
 
-/// A foreign mount that exists in another mount namespace but not in ours.
+/// A foreign mount that exists in another mount namespace but not in ours
 pub struct Elsewhere {
-    /// Which process's namespace it was seen in, for the report.
+    /// Which process's namespace it was seen in, for the report
     pub seen_in: String,
     pub mount: Surveyed,
 }
 
-/// `mnt:[4026531841]`-style id, so two pids sharing a namespace are only read once.
+/// `mnt:[4026531841]`-style id, so two pids sharing a namespace are only read once
 fn mnt_ns_of(pid: &str) -> Option<String> {
     fs::read_link(format!("/proc/{pid}/ns/mnt")).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
-/// The pids whose namespace an app actually inherits or is judged against: init,
-/// and zygote (both bitnesses). Anything a module `nsenter`s into to make its
-/// bind stick for apps has to be one of these.
+/// The pids whose namespace an app actually inherits or is judged against: init, and
 fn namespace_probes() -> Vec<(String, String)> {
     let mut out = vec![("init".to_string(), "1".to_string())];
     let Ok(rd) = fs::read_dir("/proc") else { return out };
@@ -485,10 +299,6 @@ fn namespace_probes() -> Vec<(String, String)> {
         if !pid.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        // Match on CMDLINE, not comm. The ART runtime renames the zygote thread,
-        // so `/proc/<pid>/comm` reads `main` — keying on comm matched nothing and
-        // the whole cross-namespace check silently did nothing. cmdline still
-        // says `zygote64`/`zygote`, and it is NUL-padded, hence the trim.
         let Ok(raw) = fs::read_to_string(format!("/proc/{pid}/cmdline")) else { continue };
         let name = raw.split('\0').next().unwrap_or("").trim();
         if name == "zygote64" || name == "zygote" {
@@ -498,16 +308,7 @@ fn namespace_probes() -> Vec<(String, String)> {
     out
 }
 
-/// Foreign mounts visible in another namespace but not in ours.
-///
-/// absorb reads `/proc/self/mountinfo` and `umount2`s in its own namespace. A
-/// module that replicates its bind with `nsenter --mount=/proc/<pid>/ns/mnt`
-/// — custom-certificate-authorities does exactly this, into init AND zygote —
-/// is therefore invisible to the survey and out of reach of the unmount, so a
-/// "posture clean" verdict was only ever a claim about OUR namespace while the
-/// mount was still plainly there for apps. We cannot remove these from here
-/// (that needs setns, which is a different and much sharper tool), but staying
-/// silent about them is the failure this whole reporting model exists to avoid.
+/// Foreign mounts visible in another namespace but not in ours
 pub fn survey_elsewhere() -> Vec<Elsewhere> {
     let Some(mine) = mnt_ns_of("self") else { return Vec::new() };
     let ours: HashSet<(PathBuf, PathBuf)> = survey()
@@ -519,7 +320,6 @@ pub fn survey_elsewhere() -> Vec<Elsewhere> {
     let mut seen_ns: HashSet<String> = HashSet::from([mine]);
     let mut out = Vec::new();
     for (name, pid) in namespace_probes() {
-        // Same namespace as us (the common case) has nothing new to say.
         let Some(ns) = mnt_ns_of(&pid) else { continue };
         if !seen_ns.insert(ns) {
             continue;
@@ -533,40 +333,17 @@ pub fn survey_elsewhere() -> Vec<Elsewhere> {
     out
 }
 
-/// Live injections plus the mountpoint aliases needed to match a bind against
-/// them, so absorb can recognise a mount whose content it is already serving.
-///
-/// Both halves come from state absorb already reads: `nm list` for the rules,
-/// mountinfo for the aliases. Nothing here consults the module plan, so a rule
-/// counts only if the engine is really serving it right now.
+/// Live injections plus the mountpoint aliases needed to match a bind against them, so
 #[derive(Default)]
 pub(crate) struct Redundancy {
-    /// target -> source, uid-0 injects only. A per-UID rule does not make a
-    /// global mount redundant: dropping the mount would expose the stock file to
-    /// every other UID.
     live: HashMap<PathBuf, PathBuf>,
-    /// Mountpoint pairs that are the same subtree, both directions. OnePlus
-    /// mounts one filesystem at both `/my_product` and `/mnt/vendor/my_product`,
-    /// so a module bind propagates to both and only one of the two paths is
-    /// servable — the other is under `/mnt`, which `serve_mode` refuses.
     aliases: Vec<(PathBuf, PathBuf)>,
 }
 
-/// Stop walking a source this large rather than answer slowly: a bind big enough
-/// to blow this budget is not the legacy two-file case this exists for, and
-/// "not redundant" is the safe answer (absorb just handles it the old way).
+/// Stop walking a source this large rather than answer slowly: a bind big enough to blow
 const REDUNDANCY_FILE_BUDGET: usize = 5000;
 
-/// The uid-0 injections, target -> source.
-///
-/// Reshaped from [`crate::nm::parse_list`], the one parser of `nm list` text
-/// (`mount` and the plan lint derive their own shapes from the same rows). This used
-/// to be its own reader and had already drifted from mount.rs's -- they split a
-/// line differently -- with nothing to make them converge again.
-///
-/// Whiteouts and virtual dirs are dropped: neither can make a bind redundant.
-/// So is every per-UID rule -- it serves one UID, and dropping a global mount
-/// because of one would expose the stock file to every other UID.
+/// The uid-0 injections, target -> source
 pub(crate) fn live_injections(list: &str) -> HashMap<PathBuf, PathBuf> {
     crate::nm::parse_list(list)
         .into_iter()
@@ -575,8 +352,7 @@ pub(crate) fn live_injections(list: &str) -> HashMap<PathBuf, PathBuf> {
         .collect()
 }
 
-/// Mountpoints that are the same subtree, derived from mountinfo alone: identical
-/// (device, filesystem-root) is exactly what "same content" means.
+/// Mountpoints that are the same subtree, derived from mountinfo alone: identical (device,
 pub(crate) fn mount_aliases(rows: &[MountRow]) -> Vec<(PathBuf, PathBuf)> {
     let mut by_subtree: HashMap<(&str, &str), Vec<&PathBuf>> = HashMap::new();
     for r in rows {
@@ -595,17 +371,13 @@ pub(crate) fn mount_aliases(rows: &[MountRow]) -> Vec<(PathBuf, PathBuf)> {
     out
 }
 
-/// Relative paths of every regular file under `src`. A file source yields one
-/// empty path, meaning "src itself". `None` if the walk is too big or unreadable
-/// — an unknown listing must not be reported as fully covered.
+/// Relative paths of every regular file under `src`
 fn files_under(src: &Path) -> Option<Vec<PathBuf>> {
     fn walk(dir: &Path, prefix: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
         for e in std::fs::read_dir(dir).ok()?.flatten() {
             if out.len() >= REDUNDANCY_FILE_BUDGET {
                 return None;
             }
-            // Not `is_dir()`: that follows symlinks, and a symlinked directory
-            // would be walked as content the bind does not actually carry.
             let ft = e.file_type().ok()?;
             let rel = prefix.join(e.file_name());
             if ft.is_dir() {
@@ -621,7 +393,6 @@ fn files_under(src: &Path) -> Option<Vec<PathBuf>> {
     }
     let mut out = Vec::new();
     walk(src, Path::new(""), &mut out)?;
-    // An empty directory proves nothing is covered, so it is not redundant.
     (!out.is_empty()).then_some(out)
 }
 
@@ -630,8 +401,7 @@ impl Redundancy {
         Self { live: live_injections(list), aliases: mount_aliases(rows) }
     }
 
-    /// Every path this target is reachable by: itself, plus the same tail under
-    /// any mountpoint that is the same subtree.
+    /// Every path this target is reachable by: itself, plus the same tail under any mountpoint
     fn reachable(&self, target: &Path) -> Vec<PathBuf> {
         let mut out = vec![target.to_path_buf()];
         for (a, b) in &self.aliases {
@@ -642,10 +412,7 @@ impl Redundancy {
         out
     }
 
-    /// True if a live injection already serves every file this bind carries, from
-    /// the very same source file. Source identity is the point: a rule pointing at
-    /// a DIFFERENT file at the same target means the mount is shadowing content
-    /// the engine would otherwise serve, which is not redundant at all.
+    /// True if a live injection already serves every file this bind carries, from the very
     pub(crate) fn covers(&self, src: &Path, target: &Path) -> bool {
         let Some(files) = files_under(src) else { return false };
         files.iter().all(|rel| {
@@ -657,9 +424,7 @@ impl Redundancy {
     }
 }
 
-/// The verdict for one foreign mount. Split out of `survey` so it can be tested
-/// without a /proc to read.
-/// `None` means the mount is none of our business — not a report, not an action.
+/// The verdict for one foreign mount
 pub(crate) fn classify(
     src: &Path,
     target: &Path,
@@ -668,10 +433,6 @@ pub(crate) fn classify(
     hookers: &HashSet<String>,
     red: &Redundancy,
 ) -> Option<Disposition> {
-    // The target question belongs to mount.rs, not here — see `serve_mode`.
-    // An app APK is the exception: serve_mode refuses everything under /data
-    // because no ROM partition lives there, but this one path IS servable and is
-    // the only /data shape absorb accepts (see `is_app_apk`).
     let mode = if is_app_apk(target) {
         crate::mount::Serve::Inject
     } else {
@@ -679,21 +440,11 @@ pub(crate) fn classify(
     };
     if !is_absorbable(src, target) {
         if !src.starts_with(MODULE_ROOT) {
-            // Backed by /data but not by a module. Only interesting if it landed
-            // somewhere we would otherwise serve: Android's own storage plumbing
-            // binds /data/user -> /data_mirror/... and /data/media ->
-            // /mnt/pass_through/..., which is stock, not a module leak, and reporting
-            // those as leaks is worse than useless — nine of them drown the real one.
             return matches!(mode, crate::mount::Serve::Inject | crate::mount::Serve::Bind)
                 .then_some(Disposition::Leaking(
                     "source is outside /data/adb, so there is no module content to re-serve",
                 ));
         }
-        // Root-managed content laid over a /data path that is not an app APK. The
-        // engine could serve it, but absorb will not guess at arbitrary /data
-        // targets; it is still a real mount carrying an /adb/ token in every
-        // process's mount table, which is what the mountless posture exists to
-        // deny. Say so rather than returning no verdict.
         return Some(Disposition::Leaking(
             "target is on /data and is not an app APK, which absorb does not take over",
         ));
@@ -701,10 +452,6 @@ pub(crate) fn classify(
     if let Some(d) = declined_reason_with(src, target, skips, skip_src, hookers) {
         return Some(Disposition::Declined(d));
     }
-    // Asked BEFORE serve_mode, because serve_mode answers "can I serve this
-    // target?" and the whole point of a redundant bind is that nothing needs
-    // serving — the rules are already live. Asked AFTER the declines, so a hook
-    // framework stays skipped whatever its content looks like.
     if red.covers(src, target) {
         return Some(Disposition::Redundant);
     }
@@ -715,47 +462,23 @@ pub(crate) fn classify(
     })
 }
 
-/// Every mount whose source is on /data and whose target is not — content some
-/// module laid over the ROM, whoever owns it — paired with what absorb will do.
-///
-/// Deliberately wider than `MODULE_ROOT`: a module is free to bind from
-/// /data/local/tmp (custom-certificate-authorities does, off a tmpfs), and that
-/// mount is just as visible to an app as one we can convert. Stock ROM overlays
-/// never appear here — their source is the partition itself, so `source_of`
-/// returns None for them or a path outside /data.
+/// Every mount whose source is on /data and whose target is not - content some module laid
 pub fn survey() -> Result<Vec<Surveyed>> {
     survey_of(MOUNTINFO)
 }
 
-/// The same survey against any process's mountinfo, so another mount namespace
-/// can be inspected the same way our own is.
+/// The same survey against any process's mountinfo, so another mount namespace can be
 pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
     let rows = read_mountinfo(mountinfo).context("read mountinfo")?;
     let roots = fs_roots(&rows);
     let (skips, skip_src) = skip_list();
     let hookers = hooking_modules(&rows, &roots, &skips);
-    // One `nm list` per survey, not per row. An engine that will not answer
-    // leaves this empty, which only costs the redundancy shortcut: every mount
-    // then classifies exactly as it did before this existed.
     let red = Redundancy::new(&Nm::new().list().unwrap_or_default(), &rows);
 
     let mut out: Vec<Surveyed> = rows
         .iter()
         .filter_map(|r| {
             let src = source_of(r, &roots)?;
-            // Foreign = backed by /data. A target under /data/adb is a module's own
-            // scratch space (fbind and friends): not ours. A target elsewhere on
-            // /data is only ours when the SOURCE is root-managed content under
-            // /data/adb — that is module content laid over a real app path, and it
-            // is visible in that app's mount table.
-            //
-            // Discarding every /data target missed exactly that case. Issue #14 on
-            // OP15: a YouTube module binds
-            // /data/adb/rvhc/youtube-morphe-<abi>.apk over
-            // /data/app/~~<hash>/com.google.android.youtube-<hash>/base.apk. absorb
-            // never classified it, doctor never named it, and the Modules pane badged
-            // the module "mountless" while it held a live root-managed mount — a
-            // detector read /adb/ straight out of the process mount table.
             if !src.starts_with(FOREIGN_ROOT) {
                 return None;
             }
@@ -772,60 +495,29 @@ pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
             Some(Surveyed { target: r.target.clone(), source: src, disposition })
         })
         .collect();
-    // Deepest target first, so nested mounts come off in the right order.
     out.sort_by_key(|s| std::cmp::Reverse(s.target.components().count()));
     Ok(out)
 }
 
-/// A mount we intend to act on: convert it, or — when its content is already
-/// injected — simply drop it.
+/// A mount we intend to act on: convert it, or - when its content is already injected -
 pub struct Candidate {
     pub target: PathBuf,
     pub source: PathBuf,
-    /// Unmount only. Injecting would duplicate rules that already exist.
+    /// Unmount only
     pub redundant: bool,
 }
 
-
-/// Targets that currently have something mounted on them.
-///
-/// The mount pass needs this before it injects: adding a rule d_drops the
-/// cached dentry for that name, and a mount hangs off a specific
-/// (vfsmount, dentry) pair, so injecting over a live mount detaches it from
-/// path resolution. umount2 then returns EINVAL — even with MNT_DETACH — and
-/// the entry is stuck in mountinfo until reboot, which is the one thing the
-/// zero-mount posture exists to prevent. Absorb runs after boot and cannot undo
-/// it, so the unmount has to happen before the injection, not after.
-/// `None` when the mount table could not be read. NOT an empty set: an empty set
-/// means "nothing is mounted anywhere", which is the reading that made the mount
-/// pass inject over every live mount and strand each one in mountinfo until
-/// reboot while reporting `0 failed`.
+/// Targets that currently have something mounted on them
 pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
     Some(read_mountinfo(MOUNTINFO).ok()?.into_iter().map(|r| r.target).collect())
 }
 
-/// Targets absorb is currently serving. Read by `reload` so they survive a
-/// reconcile, and by `run_mount` so a fresh pass starts from an empty record.
-/// (target, source) for every absorbed rule that recorded one.
-///
-/// The file used to hold bare targets, which was enough for reload's prune guard
-/// but not to REBUILD a rule: `run_mount` clears the engine at boot, so an
-/// absorbed injection only came back if absorb saw the same bind again. For a
-/// patched-APK module that means the module has to mount first every boot -- and
-/// the mount is what marks other processes' mappings "(deleted)". Recording the
-/// source lets the boot pass re-serve it directly, so the module never needs to
-/// mount at all. Lines without a tab are the old format and yield no source.
+/// Targets absorb is currently serving
 pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
     read_absorbed_pairs().unwrap_or_default()
 }
 
-/// `Err` only when the record exists but could not be READ. A missing file is
-/// `Ok(empty)`, because "nothing has been absorbed yet" is a real answer.
-///
-/// `reload`'s prune guard is the one caller that must not confuse the two: this
-/// set is the ONLY thing protecting absorbed rules from being deleted, so an
-/// unreadable file collapsing to an empty set makes reload drop every absorbed
-/// rule and report `-N rules` as if that were the plan.
+/// `Err` only when the record exists but could not be read
 pub fn read_absorbed_pairs() -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
     match fs::read_to_string(ABSORBED_LIST) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -843,11 +535,7 @@ fn parse_absorbed_pairs(body: &str) -> Vec<(PathBuf, PathBuf)> {
         .collect()
 }
 
-/// The module id a recorded source belongs to, if any.
-///
-/// `modules_update` counts as the same module: a staged update is mid-install,
-/// not gone. Anything not under a module directory yields `None` and is never
-/// pruned -- if the row cannot be attributed, it is not this function's to judge.
+/// The module id a recorded source belongs to, if any
 fn owning_module(src: &Path) -> Option<String> {
     let s = src.to_string_lossy();
     for base in ["/data/adb/modules/", "/data/adb/modules_update/"] {
@@ -861,21 +549,7 @@ fn owning_module(src: &Path) -> Option<String> {
     None
 }
 
-/// Drop rows whose owning module is GONE from disk. Returns (kept, pruned ids).
-///
-/// Measured 2026-09-05: a `nmt06_selfmount` row survived an uninstall and five
-/// reboots, and the boot pass kept trying to re-serve from a source that no
-/// longer existed. One dead line accrues per self-mounting module ever installed.
-///
-/// The test is the MODULE DIRECTORY, never the source file. 56% of the corpus
-/// builds its payload at runtime, so at the moment absorb runs the file may
-/// legitimately not exist yet -- pruning on a missing file would delete live
-/// modules' rows on every boot and is the one mistake that turns a tidy-up into
-/// data loss. A `disable`d module is also kept: disabled is not uninstalled, and
-/// the row has to survive being switched back on.
-///
-/// `module_live` is injected so this is testable without a filesystem, the same
-/// split `apply_apk_refresh` uses.
+/// Drop rows whose owning module is gone from disk
 fn prune_absorbed_pairs(
     pairs: Vec<(PathBuf, PathBuf)>,
     module_live: impl Fn(&str) -> bool,
@@ -891,24 +565,6 @@ fn prune_absorbed_pairs(
                 }
                 false
             }
-            // A SOURCE THAT NO LONGER EXISTS, whoever owned it.
-            //
-            // `owning_module` reads the id out of `/data/adb/modules/<id>/...`,
-            // so a row whose source sits anywhere else has no id to look up and
-            // took the `_ => true` arm forever. That is not a corner case: a
-            // ReVanced-class module keeps its payload in `/data/adb/rvhc/` and
-            // binds it over `/data/app/.../base.apk`, so absorbing one records a
-            // source the prune could never attribute. Measured on an OP15 after
-            // uninstalling `youtube-morphe-jhc` and `googlephotos-jhc`: both
-            // rows survived with their sources deleted and the rules already
-            // dropped -- the card listed "Already absorbed - 2" where nothing
-            // was absorbed at all.
-            //
-            // The source file is the thing the record exists to re-serve from,
-            // so its absence makes the row dead regardless of ownership. Kept
-            // narrow deliberately: a row whose module IS still on disk is left
-            // alone even if the file is momentarily missing, because that is the
-            // update window rather than an uninstall.
             None if !src_exists(src) => {
                 gone.push(format!("{} (source gone)", src.display()));
                 false
@@ -919,39 +575,13 @@ fn prune_absorbed_pairs(
     (kept, gone)
 }
 
-/// Drop recorded rows whose module has been uninstalled, and say so.
-///
-/// `read_absorbed_pairs`, not the infallible twin, and the file is LEFT ALONE on
-/// a read error -- `set_absorbed_pairs` truncates, so rewriting from an empty
-/// read would destroy every recorded rule. Same discipline as
-/// `rewrite_absorbed_after_refresh` and the record merge in `run_absorb`.
-///
-/// Called on EVERY pass, including the one that absorbs nothing. The first cut
-/// of this put the prune inside the record-merge at the end of `run_absorb` --
-/// which `return`s early when there is nothing to absorb, i.e. on every healthy
-/// device. Stale rows accumulate precisely where nothing is ever absorbed again,
-/// so the tidy-up has to run on the path that does no work.
+/// Drop recorded rows whose module has been uninstalled, and say so
 fn prune_absorbed_record(early: bool) {
     let Ok(all) = read_absorbed_pairs() else { return };
     if all.is_empty() {
         return;
     }
-    // THE SOURCE-GONE ARM IS OFF ON THE PRE-BOOT PASSES. This function runs at the
-    // top of EVERY pass, including `absorb --early` from post-mount.sh /
-    // post-fs-data.sh, and the sibling arm's own doc spends a paragraph on why a
-    // missing file must not read as an uninstall: 56% of the corpus builds its
-    // payload at runtime, and a module that regenerates `/data/adb/<dir>/*.apk`
-    // from its own service.sh has not done so yet at post-fs-data. The row is the
-    // only thing that lets `run_mount` serve that APK without the module mounting,
-    // which is the whole point of the record. After boot_completed the file really
-    // should be there, so the late pass still prunes.
     let (kept, gone) = prune_absorbed_pairs(all, module_on_disk, |p| early || p.exists());
-    // ...and RELEASE what the user has since opted out of. Neither this prune nor
-    // `reapply_absorbed_pairs` consulted the skip list, and a recorded APK row is
-    // re-served at every `run_mount` INDEPENDENTLY OF ANY MOUNT -- so adding the
-    // module to absorb-skip.txt changed nothing at all, which is the one case the
-    // record exists to make mount-free. There is no `absorb --undo`, so this is
-    // the only lever the user has.
     let (skips, _) = skip_list();
     let mut released: Vec<String> = Vec::new();
     let kept: Vec<(PathBuf, PathBuf)> = kept
@@ -973,11 +603,6 @@ fn prune_absorbed_record(early: bool) {
         );
     }
     if !gone.is_empty() {
-        // "from uninstalled module(s)" asserted something the source-gone arm
-        // explicitly could not determine -- `owning_module` returned None by
-        // construction for every row it drops. `module/lib.sh` greps this line into
-        // boot.log, so the wrong sentence was what got durably recorded; the word is
-        // kept so that grep still matches.
         println!(
             "dropped {} stale recorded row(s) (uninstalled module, or a source that no longer \
              exists): {}",
@@ -985,8 +610,6 @@ fn prune_absorbed_record(early: bool) {
             gone.join(", ")
         );
     }
-    // One write for both, and only when something actually changed:
-    // `set_absorbed_pairs` truncates, so a no-op rewrite is pure risk.
     if !released.is_empty() || !gone.is_empty() {
         set_absorbed_pairs(&kept);
     }
@@ -998,29 +621,10 @@ fn module_on_disk(id: &str) -> bool {
         || Path::new("/data/adb/modules_update").join(id).is_dir()
 }
 
-/// Label an APK the Suite serves so the app can actually read it.
-///
-/// An app runs as untrusted_app and can read `apk_data_file`, not
-/// `adb_data_file` -- and everything under /data/adb carries adb_data_file,
-/// including a copy we keep there. Serving such a file gives the app a null
-/// Resources and it dies in handleBindApplication (measured on OP15:
-/// GraphicsEnvironment.queryAngleChoice NPE, twice, once taking the system with
-/// it). The label is an xattr and the boot pass relabels /data/adb/nomount, so a
-/// hand-applied chcon does not survive: re-assert it every time we serve.
-/// Returns whether the label is now correct. The result used to be discarded
-/// entirely, so a setxattr that failed (EOPNOTSUPP, EPERM under a restrictive
-/// policy, ENOENT on a source that vanished) still went on to `nm.add` and was
-/// counted as "re-served" -- and the consequence, per the paragraph above, is the
-/// app force-closing or taking the system with it. For a call whose failure is
-/// documented as system-crashing, the caller has to be able to decline.
+/// Label an APK the Suite serves so the app can actually read it
 fn label_apk_readable(p: &Path) -> bool {
     let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return false };
     let ctx = c"u:object_r:apk_data_file:s0";
-    // lsetxattr, not setxattr: `p` comes from absorbed.list, and setxattr FOLLOWS
-    // symlinks -- so a symlinked source relabels whatever it points at as
-    // apk_data_file. Writing that file needs root today, so this is
-    // defence-in-depth, but it costs nothing and the record has no business
-    // reaching through a link.
     let rc = unsafe {
         libc::lsetxattr(
             c.as_ptr(),
@@ -1032,7 +636,7 @@ fn label_apk_readable(p: &Path) -> bool {
     };
     if rc != 0 {
         eprintln!(
-            "nomount: could not label {} apk_data_file ({}) - NOT serving it: an app cannot read adb_data_file, and serving it anyway gives a null Resources and a crash in handleBindApplication",
+            "nomount: could not label {} apk_data_file ({}) - not serving it: an app cannot read adb_data_file, and serving it anyway gives a null Resources and a crash in handleBindApplication",
             p.display(),
             std::io::Error::last_os_error()
         );
@@ -1041,17 +645,7 @@ fn label_apk_readable(p: &Path) -> bool {
     true
 }
 
-/// Re-serve the absorbed APK rules recorded by a previous run.
-///
-/// Skips a target already served and a source that has gone (module uninstalled),
-/// so a stale record cannot resurrect a rule pointing at nothing.
-///
-/// `read_absorbed_pairs`, not the infallible twin. `absorbed_pairs()` is
-/// `unwrap_or_default`, so a record that exists but cannot be READ re-served
-/// nothing and said nothing — and `run_absorb` calls this FIRST, before the
-/// fallible read at the end of the pass that would have complained, and returns
-/// early when there is nothing to absorb. Net result: a pass that printed
-/// "posture clean" while every patched-APK rule went unserved and unmentioned.
+/// Re-serve the absorbed APK rules recorded by a previous run
 pub fn reapply_absorbed(nm: &Nm) -> u32 {
     match read_absorbed_pairs() {
         Ok(p) => reapply_absorbed_pairs(nm, &p),
@@ -1065,15 +659,8 @@ pub fn reapply_absorbed(nm: &Nm) -> u32 {
     }
 }
 
-/// Same, against a record read earlier -- `run_mount` has to snapshot it before it
-/// clears the file.
+/// Same, against a record read earlier - `run_mount` has to snapshot it before it clears
 pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
-    // NOT unwrap_or_default(). This dump IS the "already live" guard, and an empty
-    // string disarms it: every recorded pair is re-added, and re-adding a live
-    // rule d_drops the dentry and marks the file "(deleted)" in /proc/<pid>/maps
-    // for every process that mapped it — which absorb then reports as "re-served
-    // N recorded APK rule(s)", i.e. the damage counted as work done. Skip the
-    // re-serve instead; the next pass repeats it.
     let Ok(live) = nm.list() else {
         eprintln!(
             "nomount: cannot enumerate live rules - skipping the absorbed-rule re-serve this \
@@ -1081,10 +668,6 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
         );
         return 0;
     };
-    // One parse, one set. This walked `live.lines()` per pair with its own
-    // rsplit_once -- correct, but a fourth reader of a format `crate::nm::parse_list`
-    // owns, and O(pairs x lines). The parser also peels ` (public)` and the
-    // ` [UID: n]` identity, neither of which this could see.
     let live_targets: HashSet<PathBuf> = crate::nm::parse_list(&live)
         .into_iter()
         .filter(|r| r.kind == crate::nm::LiveKind::Inject)
@@ -1095,13 +678,6 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
         if !is_app_apk(target) || !source.exists() || !target.exists() {
             continue;
         }
-        // Same gate the writer applies, on the way back OUT. A record written by an
-        // older build (or edited by hand) can still carry ` -> `, ` [UID:` or a
-        // trailing ` (whiteout)`; `parse_absorbed_pairs` cannot strip them and this
-        // is the one place in the file that reaches `nm.add` without going through
-        // `add_repointing`. It also gates `label_apk_readable`, which would
-        // otherwise relabel the named source `apk_data_file` — readable by every
-        // app domain — before the add was ever attempted.
         if let Err(why) = crate::mount::path_is_representable(target)
             .and(crate::mount::path_is_representable(source))
         {
@@ -1112,17 +688,6 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
             );
             continue;
         }
-        // A DISABLED module must not keep having its APK served. `mount.rs` honours
-        // the manager's disable/remove/skip_mount markers for the whole module
-        // plan; this path never asked. `prune_absorbed_pairs` keeps a disabled
-        // module's ROW on purpose ("disabled is not uninstalled ... the row has to
-        // survive being switched back on") -- correct for the record, and exactly
-        // why the row is still here to be served. So the check belongs at the
-        // SERVE, not at the prune: keep the row, do not act on it. Without this a
-        // user who switched a patched-APK module off in KernelSU/Magisk still got
-        // the patched APK injected at every boot, from a record they cannot see,
-        // with nothing reporting it. A row whose source lives outside a module tree
-        // (`/data/adb/rvhc/...`) cannot be attributed and is left alone.
         if let Some(id) = owning_module(source) {
             if !crate::mount::module_enabled(&Path::new("/data/adb/modules").join(&id)) {
                 continue;
@@ -1131,43 +696,14 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
         if live_targets.contains(target) {
             continue;
         }
-        // NEVER inject over a live mount. This was the one rule-adding path in the
-        // tree with no such guard, while `mount::unmount_before_serving` and both
-        // absorb loops state the hazard five times between them: injecting d_drops
-        // the cached dentry, a mount hangs off a specific (vfsmount, dentry) pair,
-        // so the mount is detached from path resolution and `umount2` then returns
-        // EINVAL FOREVER. The mount is stranded in mountinfo until reboot, absorb
-        // reports "cannot unmount redundant ..." on every pass from then on, and
-        // `check_zero_mount` fails permanently on something nothing can remove.
-        //
-        // Reachable through the ordinary shape this function exists for: a
-        // patched-APK module binds its APK from its own `service.sh`, and if the
-        // boot-time re-serve did not take (record unreadable that pass, or the
-        // source not built yet at post-fs-data) the bind is live by the time
-        // `run_absorb` calls this -- which it did BEFORE its unmount loop.
-        //
-        // SKIP, and skipping is complete — not a deferral. This record exists for
-        // a target whose mount is GONE (the module stopped binding, or was
-        // uninstalled). If something IS mounted there, the survey loop below is
-        // about to absorb that bind, which re-serves the same path from the same
-        // module by the ordinary route. So the guard costs nothing: the only case
-        // it declines is the one another loop handles better.
-        //
-        // `still_mounted` fails CLOSED on an unreadable mount table, which is the
-        // right direction here — declining to re-serve leaves the path on stock
-        // bytes for one pass; injecting over a live mount is forever.
         if still_mounted(target) {
             eprintln!(
-                "nomount: not re-serving {} — something is mounted on it; injecting over a live \
+                "nomount: not re-serving {} - something is mounted on it; injecting over a live \
                  mount strands it in mountinfo until reboot",
                 target.display()
             );
             continue;
         }
-        // Decline rather than serve an unreadable label. The result was
-        // discarded, so a failed relabel still went on to add the rule and count
-        // it -- and the documented consequence is the app force-closing, or the
-        // system going down with it, behind a "re-served N" success line.
         if !label_apk_readable(source) {
             continue;
         }
@@ -1178,35 +714,12 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
     n
 }
 
-/// The absorbed TARGET set, derived from the pairs record (the file is always the
-/// tab-separated pairs format now — see H18). `reload`'s prune guard is the only
-/// consumer and it needs just the targets.
-/// `Err` when the record exists but could not be read — see [`read_absorbed_pairs`].
-/// There is deliberately no infallible twin: `reload`'s prune guard is the only
-/// caller, and for that caller an empty set on error deletes every absorbed rule
-/// on the device.
+/// The absorbed target set, derived from the pairs record (the file is always the
 pub fn read_absorbed_targets() -> std::io::Result<HashSet<PathBuf>> {
     Ok(read_absorbed_pairs()?.into_iter().map(|(t, _)| t).collect())
 }
 
-/// Pure half: the file body for a set of pairs, with unrepresentable rows dropped
-/// and the reason printed.
-///
-/// THE GATE BELONGS HERE, not only at the call sites, and it belongs BEFORE the
-/// `to_string_lossy` two lines down. Both halves come off `/proc/self/mountinfo`
-/// via `unescape_bytes`, which decodes `\012` back to a real newline and `\011` to
-/// a real tab — so a module that ships a directory whose NAME carries them, and
-/// binds it over a ROM path, gets absorb to write extra lines into this file.
-/// `parse_absorbed_pairs` is line-oriented and splits on the first tab, so a
-/// forged line reads back as a real recorded rule: target = some app's
-/// `/data/app/.../base.apk`, source = the module's payload. That row is re-served
-/// as root before zygote at every boot, `label_apk_readable` relabels the source
-/// `apk_data_file` so every app domain can read it, `refresh_app_apks` resolves a
-/// stale-looking install hash to the app's CURRENT one via `pm path`, and
-/// `prune_absorbed_pairs` never drops it while the payload exists — so it outlives
-/// the module's uninstall, attributed to nobody. `to_string_lossy` is the other
-/// half of the same problem: a non-UTF-8 name would be recorded as a DIFFERENT
-/// path, which the next prune then deletes as "source gone".
+/// Pure half: the file body for a set of pairs, with unrepresentable rows dropped and the
 fn absorbed_pairs_body(pairs: &[(PathBuf, PathBuf)]) -> String {
     let mut body = String::from(
         "# Targets absorb re-serves as injections; reload keeps these.\n\
@@ -1232,52 +745,25 @@ fn absorbed_pairs_body(pairs: &[(PathBuf, PathBuf)]) -> String {
     body
 }
 
-/// Replace the record, truncating.
-///
-/// `run_mount` no longer calls this with an empty set — it has not since H18. It
-/// reads the record, re-serves it and writes back the SAME pairs, so the write is
-/// a format normalisation and nothing else. Every other caller here refuses to
-/// write at all when the read failed, for the reason that makes this function
-/// dangerous: it truncates, so a rewrite from an empty read destroys every
-/// patched-APK rule on the device in its only copy.
+/// Replace the record, truncating
 pub fn set_absorbed_pairs(pairs: &[(PathBuf, PathBuf)]) {
     if let Some(d) = Path::new(ABSORBED_LIST).parent() {
         let _ = fs::create_dir_all(d);
     }
     let body = absorbed_pairs_body(pairs);
-    // ATOMIC, and 0600 by construction. This file is the only record of which
-    // patched APK is injected over which package -- the module fingerprint the
-    // hiding posture exists to deny, and the input the boot-time re-serve needs --
-    // so neither a half-written one nor an inherited 0666 is acceptable.
-    // `write_atomic` writes through a fresh temp, which makes the mode a property
-    // of the write rather than of the file's history; the `set_permissions` that
-    // used to follow (and only ran AFTER the wide window it was fixing) is gone.
     if let Err(e) = crate::statefile::write_atomic(ABSORBED_LIST, &body) {
         eprintln!("nomount: could not record absorbed targets: {e:#}");
     }
 }
 
-/// Is anything still mounted here? The authority on whether an unmount worked:
-/// umount2 reports EINVAL both for "never a mountpoint" and for "a peer already
-/// took it away", and only the second is fine.
+/// Is anything still mounted here?
 pub(crate) fn still_mounted(p: &Path) -> bool {
     read_mountinfo(MOUNTINFO)
         .map(|rows| rows.iter().any(|r| r.target == p))
-        // FAIL CLOSED. `unwrap_or(false)` said "nothing is mounted here" when the
-        // question could not be asked at all -- and every caller reads a `false`
-        // as permission to proceed: `unmount_before_serving` serves the target
-        // (injecting over a live mount strands it in mountinfo until reboot,
-        // which is the exact damage the doc above describes), and the two absorb
-        // loops treat a failed umount2 as a stranded peer. "Could not read the
-        // mount table" has to mean "assume it is still there", which costs one
-        // unserved target and a message, not a permanent leak.
         .unwrap_or(true)
 }
 
-/// The path to re-assert rules at. `target` itself when it is servable; otherwise
-/// the alias that is -- `/mnt/vendor/my_product/...` cannot carry an injection
-/// (`/mnt` is not a ROM partition) but its twin `/my_product/...` can, and they
-/// are the same subtree, so serving one serves both.
+/// The path to re-assert rules at
 pub(crate) fn servable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -> PathBuf {
     if matches!(crate::mount::serve_mode(target), crate::mount::Serve::Inject) {
         return target.to_path_buf();
@@ -1294,26 +780,7 @@ pub(crate) fn servable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -> PathBuf
 }
 
 /// May a redundant bind be dropped while Android is running?
-///
-/// Only when re-asserting its rules afterwards is safe, and on `my_*` it is not.
-/// Dropping the mount alone is not an option either: a rule registered behind a
-/// bind is inert until re-added, so an unmount without the re-assert silently
-/// reverts the path to the stock file. So `my_*` is reported and left alone --
-/// the fix there is to delete the owning module's bind, after which the next
-/// boot registers the rule with nothing shadowing it and no runtime re-add is
-/// ever needed.
-///
-/// Measured, not theorised: absorbing the two `/my_product/media/bootanimation`
-/// binds on an OP11 (Suite v1.3.22, engine v14) unmounted them, re-added four
-/// `my_*` rules in a burst, and the device rebooted mid-command -- clean
-/// `sys.boot.reason=reboot`, no tombstone, no crash record. That is the FD
-/// allowlist hazard `mount.rs::my_hookless_enabled` says it is trialling.
 pub(crate) fn runtime_droppable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -> bool {
-    // ANY component, not just the root: the twin of `/my_product/...` is
-    // `/mnt/vendor/my_product/...`, whose root is `mnt`. And checked on the
-    // target as well as on the servable path, because `serve_mode` only calls a
-    // my_* target injectable while the `my_hookless` marker is present — the
-    // hazard does not come and go with that marker.
     fn touches_my_partition(p: &Path) -> bool {
         p.components()
             .any(|c| c.as_os_str().to_str().is_some_and(|s| s.starts_with("my_")))
@@ -1322,73 +789,20 @@ pub(crate) fn runtime_droppable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -
 }
 
 pub(crate) fn umount_detach(p: &Path) -> bool {
-    // as_encoded_bytes(), NOT to_string_lossy(): a module is free to ship a
-    // filename that is not UTF-8, and the lossy form substitutes U+FFFD -- so
-    // the syscall would name a DIFFERENT path, the unmount would no-op on
-    // ENOENT, and the caller would read an ordinary `false` rather than "this
-    // path cannot be represented". The mount stays up and the posture report
-    // says it came down. This file already tests paths with an emoji and a tab
-    // in them, so odd names are in scope for it.
     let Ok(c) = CString::new(p.as_os_str().as_encoded_bytes()) else {
         return false;
     };
     unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) == 0 }
 }
 
-/// Is `target` already serving `source`? Compared by SIZE ALONE.
-///
-/// mtime is deliberately NOT compared. An injection mirrors the STOCK file's
-/// mtime rather than the backing file's -- that is what removes a bind's
-/// dev/ino/mtime tell -- so a rule that is serving perfectly still reports a
-/// different mtime from its source. Measured on an OP11 carrying 118 rules: 0 of
-/// 118 matched on mtime, while 116 of 118 matched on size and the two that did
-/// not were the one genuine drift the byte-level sweep also found. Comparing
-/// mtime therefore answered "not serving" for every live rule -- the answer that
-/// costs a d_drop each time, which is precisely what this function exists to
-/// avoid. Same size and different bytes is the residual it cannot see; `check`
-/// hashes both ends and still reports that.
-///
-/// Re-adding a live rule is not free: `nm add` d_drops the cached dentry, and any
-/// process that already MAPPED the file keeps the now-unhashed one, which the
-/// kernel renders as "…/file (deleted)" in /proc/<pid>/maps ever after. Measured
-/// on OP15 with a probe holding an mmap: idle 12s clean, `uid apply` clean,
-/// re-adding the same rule flipped it to (deleted). So a re-assert has to be able
-/// to tell "listed but not serving" (worth the drop) from "already serving"
-/// (pure cost).
+/// Is `target` already serving `source`?
 fn already_serving(target: &Path, source: &Path) -> bool {
     let (Ok(t), Ok(s)) = (fs::metadata(target), fs::metadata(source)) else { return false };
     t.len() == s.len()
 }
 
-/// `nm add`, but guaranteed to re-point a target that already has a rule.
-///
-/// A plain `add` over a live rule re-points correctly when the target sits in a
-/// real ROM directory -- and does NOT when it sits inside a directory the engine
-/// materialised itself. Measured on an OP15, engine v26:
-///
-///     /system/etc/nmt_x.txt      (stock dir)    add A, add B -> serves B
-///     /system/etc/nmt/collide    (virtual dir)  add A, add B -> serves A
-///
-/// The rule table takes the second source either way; only the virtual case
-/// keeps serving the first one's bytes. Absorb is exactly where that bites: it
-/// unmounts BEFORE injecting (see the note on unmount ordering above), so if the
-/// re-point silently does nothing, the content the bind was serving is simply
-/// gone for the rest of the session -- no mount, and a rule pointing somewhere
-/// it is not actually reading from.
-///
-/// `del` first sidesteps the whole distinction. It costs one netlink round trip,
-/// fails harmlessly when there was no rule, and the APK re-point path in this
-/// file has always done it this way.
+/// `nm add`, but guaranteed to re-point a target that already has a rule
 fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool {
-    // THE GATE, at the one place every absorb-side `nm.add` funnels through:
-    // `inject()`'s file and directory arms both call this, and so does
-    // `refresh_app_apks` with a path `pm` handed it. `mount::plan_tree` was the
-    // only door that checked, and absorb is a second door into the same rule
-    // table — with a worse source, because these paths come off
-    // /proc/self/mountinfo through `unescape_bytes`, which decodes `\012` into a
-    // real newline. The kernel is not a backstop: `nm_add_rule` only counts path
-    // components. Refusing returns false, which every caller already counts as a
-    // failure and reports.
     if let Err(why) = crate::mount::path_is_representable(target)
         .and(crate::mount::path_is_representable(source))
     {
@@ -1400,19 +814,6 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
         return false;
     }
     match live.get(target) {
-        // Already serving exactly this. Re-issuing would drop and rebuild a
-        // correct rule for nothing, and every drop is a window where the path
-        // resolves to stock.
-        //
-        // "The table names this source" is NOT proof the injection is live. A
-        // rule added while a bind shadowed the same name is inert until it is
-        // added again, and this function is only ever called after absorb has
-        // unmounted such a bind -- so trusting the table short-circuits exactly
-        // the case the re-assert exists for. Measured on an OP11: both
-        // /my_product/media/bootanimation rules were listed, both inert, absorb
-        // dropped the bind, re-added neither, reported 0 failed, and the path
-        // served the stock file for the rest of the session. Ask the filesystem,
-        // not the rule table.
         Some(cur) if cur.as_path() == source && already_serving(target, source) => true,
         Some(prev) => {
             let prev = prev.clone();
@@ -1421,9 +822,6 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
                 return true;
             }
             #[allow(clippy::needless_return)]
-            // The del already happened and absorb has already unmounted, so
-            // doing nothing here leaves the path on stock. Put back what was
-            // there; it is stale, but it is content rather than nothing.
             if nm.add(target, &prev).is_ok() {
                 eprintln!(
                     "nomount: absorb: could not re-point {} at {} -- restored the previous rule",
@@ -1432,24 +830,20 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
                 );
             } else {
                 eprintln!(
-                    "nomount: absorb: {} now has NO rule -- re-point and restore both failed",
+                    "nomount: absorb: {} now has NO rule - re-point and restore both failed",
                     target.display()
                 );
             }
             false
         }
-        // No live rule: a bare add cannot destroy anything, and there is no
-        // stale dentry to drop because nothing was serving this path.
         None => nm.add(target, source).is_ok(),
     }
 }
 
-/// Live `target -> source` for injects, read once per pass.
+/// Live `target -> source` for injects, read once per pass
 type LiveMap = std::collections::HashMap<PathBuf, PathBuf>;
 
-/// Snapshot the engine's inject rules. An unreadable list yields an empty map,
-/// which degrades `add_repointing` to the bare-add branch -- the pre-session
-/// behaviour, which is safe: it cannot delete a rule it does not know about.
+/// Snapshot the engine's inject rules
 fn live_injects(nm: &Nm) -> LiveMap {
     nm.list()
         .map(|l| {
@@ -1462,21 +856,7 @@ fn live_injects(nm: &Nm) -> LiveMap {
         .unwrap_or_default()
 }
 
-/// Inject `source` at `target`. A directory bind is expanded to one rule per
-/// file rather than a single directory rule: a directory rule REPLACES the stock
-/// directory, hiding every entry the module did not ship, which is the same
-/// whole-partition masking that bootloops zygote.
-///
-/// Records each (target, source) pair actually served into `out`, and returns how
-/// many adds FAILED.
-///
-/// Errors are accumulated, not propagated with `?`: the bind is already unmounted
-/// by the time this runs, so bailing on the first failed `nm.add` would leave the
-/// rest of a directory's files reverted to stock. Serve as much as possible and
-/// let the caller report the count. `out` carries the (target, source) PAIRS so
-/// the caller can record a directory bind's children -- the old code returned bare
-/// child targets and the caller then matched them against the parent candidate,
-/// recording nothing for a directory bind (M-S12).
+/// Inject `source` at `target`
 fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>,
           live: &LiveMap) -> u32 {
     let mut failed = 0u32;
@@ -1512,26 +892,16 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
 }
 
 /// The package an installed-APK path belongs to: `/data/app/~~a==/com.foo-b==/base.apk`
-/// yields `com.foo`. The trailing `-<hash>` (or `-1` on the old layout) is the
-/// install generation, and it is exactly what changes when the app updates.
 pub(crate) fn pkg_of_apk_target(target: &Path) -> Option<String> {
     if !is_app_apk(target) {
         return None;
     }
     let dir = target.parent()?.file_name()?.to_str()?;
     let (pkg, _gen) = dir.rsplit_once('-')?;
-    // A package name is dotted and never empty; anything else means the layout
-    // changed under us and guessing would re-point a rule at the wrong app.
     (!pkg.is_empty() && pkg.contains('.')).then(|| pkg.to_string())
 }
 
-/// Where PackageManager says the package lives right now.
-///
-/// Three outcomes, kept distinct so a caller never mistakes a transient failure
-/// for an uninstall: `Err` = pm itself failed (ENOENT on PATH, non-zero exit,
-/// binder not up at boot); `Ok(None)` = pm ran and reports the package absent;
-/// `Ok(Some)` = the current path. Invoked by absolute path so a stripped PATH in
-/// the boot environment does not read as "uninstalled".
+/// Where PackageManager says the package lives right now
 fn current_apk_of(pkg: &str) -> Result<Option<PathBuf>> {
     let out = std::process::Command::new("/system/bin/pm")
         .args(["path", pkg])
@@ -1546,47 +916,13 @@ fn current_apk_of(pkg: &str) -> Result<Option<PathBuf>> {
         .map(|p| PathBuf::from(p.trim())))
 }
 
-/// Re-point absorbed APK rules at the app's current path.
-///
-/// An absorbed rule names `/data/app/~~<hash>==/<pkg>-<hash>==/base.apk`, and both
-/// hashes are regenerated when the app updates: the rule then points at a path
-/// that no longer exists, so the app silently reverts to the stock APK until the
-/// next boot re-absorbs. PackageManager knows the new path, so ask it.
-///
-/// Returns (repointed, stale) — stale being rules whose package is simply gone
-/// (uninstalled), which are dropped rather than re-pointed.
-///
-/// THE RECORD MOVES WITH THE RULE. Re-pointing the live rule and leaving
-/// `absorbed.list` naming the old `/data/app/…` path made this function a
-/// one-shot: every reader of the record gates on `target.exists()`
-/// (`reapply_absorbed_pairs`, and `run_mount` through it), so from the next boot
-/// the stale row was skipped forever and the package silently reverted to the
-/// stock APK — with no live rule left for a later pass to find, because the boot
-/// `nm clear` had dropped it. That defeats the record's stated purpose in as many
-/// words ("the source lets the boot pass re-serve it without waiting for the
-/// owning module to mount again"); it only ever kept working for a module that
-/// re-binds on every boot, which is the case the record exists to make
-/// unnecessary. Dead rows accumulated too, since nothing pruned them.
+/// Re-point absorbed APK rules at the app's current path
 pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     let (mut repointed, mut stale) = (0u32, 0u32);
     let Ok(list) = nm.list() else { return (0, 0) };
     let mut pm_failed = false;
-    // What the record has to be told, collected here and applied once at the end.
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut dropped: Vec<PathBuf> = Vec::new();
-    // `crate::nm::parse_list`, not a fourth hand-rolled reader. This one split on
-    // the FIRST ` -> ` and peeled only the ` [UID: n]` suffix -- exactly the drift
-    // that parser's doc names as the reason it exists ("one split on the FIRST
-    // ` -> `, the others on the last; only one peeled ` (public)`"). The missing
-    // `(public)` peel was not cosmetic: it would have left `source` as
-    // "…/base.apk (public)", failed `source.exists()`, and dropped the rule
-    // through the "package is gone" arm below -- deleting a live rule and counting
-    // it as an uninstall. Unreachable only because `is_pm_published()` cannot grant
-    // the flag to a /data/app target, which is not a property this function should
-    // depend on.
-    // One parse, two uses: the walk below, and the live map `add_repointing`
-    // needs to know what the destination is currently served from. Building it
-    // from the same dump costs nothing and avoids a second `nm list`.
     let rules = crate::nm::parse_list(&list);
     let live: LiveMap = rules
         .iter()
@@ -1601,9 +937,6 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
         }
         let Some(pkg) = pkg_of_apk_target(target) else { continue };
         match current_apk_of(&pkg) {
-            // pm failed (binder not up at boot, non-zero exit): leave the rule
-            // alone. Treating this as "uninstalled" and deleting dropped every
-            // absorbed APK at once on a transient failure. Log once, not per rule.
             Err(_) => {
                 if !pm_failed {
                     pm_failed = true;
@@ -1613,14 +946,6 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                     );
                 }
             }
-            // THE APP MOVED, but its source is not there right now. The guard used
-            // to be `now != *target && source.exists()`, so this case fell through
-            // to the drop arm below -- deleting the live rule AND, via
-            // `rewrite_absorbed_after_refresh`, the only record able to rebuild it,
-            // and reporting it as "dropped N for an uninstalled app". The
-            // neighbouring `Err(_)` arm is guarded against exactly this reasoning
-            // and `prune_absorbed_pairs` names a missing source as "the update
-            // window rather than an uninstall"; only this arm did not get the rule.
             Ok(Some(now)) if now != *target && !source.exists() => {
                 eprintln!(
                     "nomount: {pkg} moved to {} but {} is not there right now -- leaving the \
@@ -1629,12 +954,6 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                     source.display()
                 );
             }
-            // pm can answer with a path that is not an installed-APK path at all:
-            // for a patched SYSTEM app whose /data/app update has been removed it
-            // returns `/system/priv-app/...`. Re-pointing there records a row
-            // `reapply_absorbed_pairs` will never re-serve (it gates on
-            // `is_app_apk`) and `prune_absorbed_pairs` will never drop (the source
-            // exists) -- a permanently dead row.
             Ok(Some(now)) if now != *target && !is_app_apk(&now) => {
                 eprintln!(
                     "nomount: pm reports {pkg} at {} which is not an installed-APK path; \
@@ -1643,31 +962,7 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                 );
             }
             Ok(Some(now)) if now != *target => {
-                // ADD FIRST, then drop the old rule -- and only if the add took.
-                //
-                // `del` then `add` is what `add_repointing` does for a target that
-                // already has a rule, and it is wrong here: the two targets are
-                // different paths, so there is nothing to re-point, and a failed
-                // add left the package with NO rule at all -- silently, since the
-                // status was discarded and `repointed` simply did not increment.
-                // `add_repointing`'s own note is the standard this was missing:
-                // "doing nothing here leaves the path on stock". The old target no
-                // longer exists on disk (that is the precondition for being in
-                // this branch), so it cannot be restored either; not destroying it
-                // until the replacement is live is the only order that can fail
-                // safely.
                 if add_repointing(nm, &now, &source, &live) {
-                    // RECORD BEFORE THE DEL, one re-point at a time. This loop is
-                    // inside a pass every caller kills on a hard deadline, and
-                    // accumulating into `moved` for a single write at the end meant
-                    // a kill here left the new rule live and unrecorded while the
-                    // record still named the old path: the next reload's prune
-                    // deletes the rule nothing claims, and the app is back on the
-                    // stock APK with no record able to rebuild it. Recording first
-                    // is also the safe half-state -- the record names the live
-                    // rule, and a stale rule at a path that no longer exists is
-                    // what the prune is for. Re-points are rare (an app update),
-                    // so the extra read+write costs nothing on a normal pass.
                     rewrite_absorbed_after_refresh(&[(target.to_path_buf(), now.clone())], &[]);
                     let _ = nm.del(target);
                     moved.push((target.to_path_buf(), now));
@@ -1681,9 +976,6 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                     );
                 }
             }
-            // pm answered: the package is gone, or the path is unchanged with no
-            // servable source — the rule points at a path that no longer exists, so
-            // drop it.
             Ok(_) => {
                 let _ = nm.del(target);
                 dropped.push(target.to_path_buf());
@@ -1697,18 +989,13 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     (repointed, stale)
 }
 
-/// Carry a re-point (and an uninstall) into the absorbed record.
-///
-/// `read_absorbed_pairs`, not the infallible twin, and the file is LEFT ALONE on
-/// a read error -- the same discipline `run_mount` and `run_absorb` both apply by
-/// hand, and for the same reason: `set_absorbed_pairs` truncates before writing,
-/// so rewriting from an empty read destroys every patched-APK rule on the device.
+/// Carry a re-point (and an uninstall) into the absorbed record
 fn rewrite_absorbed_after_refresh(moved: &[(PathBuf, PathBuf)], dropped: &[PathBuf]) {
     let all = match read_absorbed_pairs() {
         Ok(v) => v,
         Err(e) => {
             eprintln!(
-                "nomount: could not read {ABSORBED_LIST} ({e}) -- NOT rewriting it, so the \
+                "nomount: could not read {ABSORBED_LIST} ({e}) - not rewriting it, so the \
                  re-pointed APK rule(s) are unrecorded until the next successful absorb"
             );
             return;
@@ -1720,12 +1007,7 @@ fn rewrite_absorbed_after_refresh(moved: &[(PathBuf, PathBuf)], dropped: &[PathB
     }
 }
 
-/// Pure half of [`rewrite_absorbed_after_refresh`]: re-aim the rows a re-point
-/// moved, drop the rows an uninstall retired, and say whether anything changed.
-///
-/// Deduplicated on the target, because a partially-completed earlier pass can
-/// leave the destination already recorded -- two rows for one target would make
-/// the boot pass serve it twice.
+/// Pure half of [`rewrite_absorbed_after_refresh`]: re-aim the rows a re-point moved, drop
 fn apply_apk_refresh(
     mut pairs: Vec<(PathBuf, PathBuf)>,
     moved: &[(PathBuf, PathBuf)],
@@ -1744,36 +1026,18 @@ fn apply_apk_refresh(
     (pairs, changed)
 }
 
-/// ROM partitions a module might try to empty. A tmpfs anywhere under one of
-/// these is never stock: measured on OP15, 21 mounts land inside a ROM partition
-/// (vfat firmware, ext4 dsp, the OEM's own overlayfs) and not one of them is a
-/// tmpfs -- stock keeps those at /dev, /mnt, /apex, /linkerconfig and /tmp.
+/// ROM partitions a module might try to empty
 pub(crate) const ROM_ROOTS: &[&str] =
     &["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
 
-/// Is this device number a loop device? `mountinfo` field 3 is `maj:min`, and
-/// loop is major 7 on every Linux (`Documentation/admin-guide/devices.txt`).
-///
-/// This is what identifies a mounted IMAGE. An image is mounted whole, so its
-/// mount root is "/" and its device is its own -- neither of the two tests below
-/// can see it, which is why the check that claimed to cover "a loop image" could
-/// not. The alternative predicate ("its device differs from the partition it sits
-/// inside") would have flagged the stock OEM mounts the comment below lists, so
-/// the identity of the backing device is what makes this precise instead.
+/// Is this device number a loop device?
 pub(crate) fn is_loop_dev(dev: &str) -> bool {
     dev.split(':').next() == Some("7")
 }
 
-/// The foreign-mount rows over the ROM, as (evidence string, is_image) pairs.
-///
-/// Pure, so the predicate can be tested without a /proc to read -- the same split
-/// `classify` uses. Two callers want two slices of the same walk: the check wants
-/// every hit, and `run_absorb` wants the images alone, because those are the ones
-/// its survey structurally cannot see.
+/// The foreign-mount rows over the ROM, as (evidence string, is_image) pairs
 pub(crate) fn foreign_rom_rows(rows: &[MountRow]) -> Vec<(String, bool)> {
     let roots = ROM_ROOTS;
-    // maj:min of /data, so a mount served off userdata is recognised by device
-    // rather than by the source path (which mountinfo does not carry usefully here).
     let data_dev = rows.iter().find(|r| r.target == Path::new("/data")).map(|r| r.dev.clone());
     let mut hits: Vec<(String, bool)> = Vec::new();
     for r in rows {
@@ -1781,16 +1045,6 @@ pub(crate) fn foreign_rom_rows(rows: &[MountRow]) -> Vec<(String, bool)> {
         if !roots.iter().any(|root| t.starts_with(root)) {
             continue;
         }
-        // A bind sourced from /data/adb/modules is a MODULE mount, which is the
-        // one thing this check is not about: its own text says "outside the module
-        // system" and its owner string says "a mount made outside /data/adb".
-        // Both were false for the 85 my_* binds the Suite itself makes, so a stock
-        // install reported them here AND in zero-mount posture -- two red rows for
-        // one cause, one of them describing the opposite of what happened.
-        // zero-mount posture owns module mounts; this owns everything else.
-        //
-        // mountinfo's root is relative to the source filesystem, so a bind off
-        // userdata reads as /adb/modules/... rather than /data/adb/modules/...
         if r.root.starts_with("/adb/modules/") || r.root.starts_with("/data/adb/modules/") {
             continue;
         }
@@ -1804,25 +1058,17 @@ pub(crate) fn foreign_rom_rows(rows: &[MountRow]) -> Vec<(String, bool)> {
     hits
 }
 
-/// Every foreign-mount hit, evidence only.
+/// Every foreign-mount hit, evidence only
 pub(crate) fn foreign_rom_mounts(rows: &[MountRow]) -> Vec<String> {
     foreign_rom_rows(rows).into_iter().map(|(h, _)| h).collect()
 }
 
-/// Only the mounted IMAGES. `run_absorb` reports these itself: `source_of()`
-/// answers None for a whole-filesystem mount, so they never reach `classify()`
-/// and never appear in a survey.
+/// Only the mounted images
 pub(crate) fn rom_image_mounts(rows: &[MountRow]) -> Vec<String> {
     foreign_rom_rows(rows).into_iter().filter(|(_, img)| *img).map(|(h, _)| h).collect()
 }
 
 /// Is this mountinfo line a tmpfs laid over a ROM path?
-///
-/// A module that wants a stock directory to look empty mounts an empty tmpfs over
-/// it -- the ReVanced installer does exactly this to `/product/app/<App>` from a
-/// post-fs-data.d script, so its /data/app copy wins the PackageManager scan. It
-/// has no source under /data/adb, so every source-keyed check we have is blind to
-/// it while it sits in every process's mountinfo.
 pub(crate) fn rom_tmpfs_target(line: &str) -> Option<PathBuf> {
     let (pre, post) = line.split_once(" - ")?;
     if post.split_whitespace().next()? != "tmpfs" {
@@ -1832,10 +1078,7 @@ pub(crate) fn rom_tmpfs_target(line: &str) -> Option<PathBuf> {
     ROM_ROOTS.iter().any(|r| target.starts_with(r)).then(|| PathBuf::from(unescape(target)))
 }
 
-/// This boot, as the kernel names it. `None` when it cannot be read, and
-/// `absorb_rom_tmpfs` then declines the whole pass: an entry recorded with no
-/// stamp is NEVER expired (`tmpfs_entry_lives`), so guessing an empty string here
-/// would make every takeover from that point on permanent — M-S8 again.
+/// This boot, as the kernel names it
 fn boot_id() -> Option<String> {
     fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .ok()
@@ -1843,38 +1086,17 @@ fn boot_id() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Is this directory empty right now? `None` when it cannot be read at all.
+/// Is this directory empty right now?
 fn dir_is_empty(p: &Path) -> Option<bool> {
     fs::read_dir(p).ok().map(|mut e| e.next().is_none())
 }
 
-/// The ROM-tmpfs takeovers on record: target -> the boot in which its tmpfs was
-/// last SEEN mounted (empty string when the boot id was unreadable then).
+/// The ROM-tmpfs takeovers on record: target -> the boot in which its tmpfs was last seen
 pub(crate) fn absorbed_tmpfs() -> Vec<(PathBuf, String)> {
     read_absorbed_tmpfs().unwrap_or_default()
 }
 
-/// The fallible door, for the callers that must not treat a read error as "the
-/// record is empty".
-///
-/// This was `unwrap_or_default()` with no alternative, and it is the ONE
-/// only-copy record that still collapsed an I/O error into an empty list — the
-/// mistake `absorbed.list` is refused at all four of its write sites for, and
-/// which `run_reload` states in the line directly above its use:
-///
-///   > "cannot read the absorbed-rule record -- refusing to reload, because an
-///   >  empty record here would PRUNE every absorbed rule"
-///
-/// …and then extended that set from this function. An unreadable
-/// `absorbed-tmpfs.list` therefore made every ROM-tmpfs whiteout `prunable`: no
-/// module plan names them and they are not durable whiteouts, so one Reload
-/// deleted them all and the ROM directories a debloat module had emptied filled
-/// straight back in. Unlike the durable whiteouts, reload has no convergence
-/// loop for these and `reapply_tmpfs_whiteouts` runs only in `run_mount`, so
-/// nothing put them back until a reboot.
-///
-/// A MISSING file is `Ok(empty)` — that is the normal state on a device that has
-/// never absorbed a tmpfs — exactly as `read_absorbed_pairs` treats it.
+/// The fallible door, for the callers that must not treat a read error as "the record is
 pub(crate) fn read_absorbed_tmpfs() -> std::io::Result<Vec<(PathBuf, String)>> {
     match fs::read_to_string(ABSORBED_TMPFS_LIST) {
         Ok(s) => Ok(parse_tmpfs_record(&s)),
@@ -1883,14 +1105,12 @@ pub(crate) fn read_absorbed_tmpfs() -> std::io::Result<Vec<(PathBuf, String)>> {
     }
 }
 
-/// Targets only, fallibly. `run_reload` uses this.
+/// Targets only, fallibly
 pub(crate) fn read_absorbed_tmpfs_targets() -> std::io::Result<HashSet<PathBuf>> {
     Ok(read_absorbed_tmpfs()?.into_iter().map(|(t, _)| t).collect())
 }
 
-/// Pure: one `<target>\t<boot id>` per line. A line without a tab is read as a
-/// target with no stamp, which is never expired -- so a hand-written entry, or
-/// one from a build that did not stamp yet, hides until it is removed by hand.
+/// Pure: one `<target>\t<boot id>` per line
 fn parse_tmpfs_record(body: &str) -> Vec<(PathBuf, String)> {
     body.lines()
         .map(str::trim)
@@ -1902,34 +1122,17 @@ fn parse_tmpfs_record(body: &str) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-/// Just the targets. `reload`'s prune guard needs no more than that.
+/// Just the targets
 pub fn absorbed_tmpfs_targets() -> HashSet<PathBuf> {
     absorbed_tmpfs().into_iter().map(|(t, _)| t).collect()
 }
 
 /// Does a recorded takeover survive this pass?
-///
-/// Pure, because the answer is the whole of M-S8's reverse path and getting it
-/// wrong in either direction is a visible regression: too eager and the ROM
-/// directory fills back in under a module that still empties it every boot, too
-/// lazy and the hide is the permanent one this finding is about.
 fn tmpfs_entry_lives(seen_now: bool, seen_boot: &str, boot: &str, mounted: bool) -> bool {
-    // Seen this pass, still mounted (an opt-out, or an unmount that failed), or
-    // last seen in THIS boot -- absorb unmounts the tmpfs itself, so every later
-    // pass in the same boot finds it gone and must not read that as an uninstall.
-    // An unstamped entry is never expired: a fresh sighting cannot be told from
-    // an old one.
     seen_now || mounted || seen_boot.is_empty() || seen_boot == boot
 }
 
-/// Pure half: the file body for a set of entries, with unrepresentable targets
-/// dropped and the reason printed.
-///
-/// The gate is here rather than only at the call sites because this is the LAST
-/// place a path is still a `Path`: below it is `to_string_lossy`, which turns a
-/// non-UTF-8 name into a DIFFERENT path (U+FFFD), and `push('\t')`, which a name
-/// containing a newline turns into two lines — the second of which parses back as
-/// an unstamped, never-expiring whiteout on whatever it names.
+/// Pure half: the file body for a set of entries, with unrepresentable targets dropped and
 fn absorbed_tmpfs_body(entries: &[(PathBuf, String)]) -> String {
     let mut body = String::from(
         "# ROM directories absorb empties in place of a module's tmpfs.\n\
@@ -1959,57 +1162,34 @@ fn set_absorbed_tmpfs(entries: &[(PathBuf, String)]) {
         let _ = fs::create_dir_all(d);
     }
     let body = absorbed_tmpfs_body(entries);
-    // Atomic: this list is what re-applies the ROM-tmpfs whiteouts after the
-    // boot pass's `nm clear`, so a truncated one silently un-hides them.
     if let Err(e) = crate::statefile::write_atomic(ABSORBED_TMPFS_LIST, &body) {
         eprintln!("nomount: could not record the ROM tmpfs takeovers: {e:#}");
     }
 }
 
-/// Re-apply the recorded ROM-tmpfs whiteouts. Called by the boot pass after
-/// `nm clear`, which drops them along with every other rule.
-///
-/// Deliberately re-applies rather than re-derives: `run_mount` runs at
-/// post-fs-data, where a module's own script may not have re-mounted its tmpfs
-/// yet, and a mid-session `Re-apply` runs long after absorb already unmounted it.
-/// Deciding "the tmpfs is gone for good" from either point would put the stock
-/// directory back under a module that still wants it empty. Absorb, which runs
-/// after boot_completed, is the only place that can tell -- see
-/// `absorb_rom_tmpfs`, which confirms or expires each entry.
+/// Re-apply the recorded ROM-tmpfs whiteouts
 pub fn reapply_tmpfs_whiteouts(nm: &Nm) -> u32 {
     let mut n = 0u32;
-    // Fallible, like every other reader of an only-copy record: an unreadable
-    // `absorbed-tmpfs.list` re-applied NOTHING, returned 0, and `run_mount` prints
-    // its line only when the count is > 0 -- so the ROM directories a debloat
-    // module emptied were fully visible for the session and no line anywhere said
-    // so. `Ok(empty)` still means "nothing has ever been absorbed", which is the
-    // normal state.
     let record = match read_absorbed_tmpfs() {
         Ok(v) => v,
         Err(e) => {
             eprintln!(
                 "nomount: could not read {ABSORBED_TMPFS_LIST} ({e}) -- NO recorded ROM-directory \
-                 hide was re-applied, so every one of them is VISIBLE this session"
+                 hide was re-applied, so every one of them is visible this session"
             );
             return 0;
         }
     };
     let mut failed = 0u32;
     for (t, _) in record {
-        // Same gate `whiteout::apply` uses: a hand-edited entry that names a
-        // partition root or a /data path must not reach the engine from here.
         if crate::whiteout::validate(&t.to_string_lossy()).is_err() {
             eprintln!("nomount: skipping invalid ROM-tmpfs entry {}", t.display());
             continue;
         }
-        // A refused whiteout used to be dropped on the floor: `run_mount` prints
-        // only "re-applied N ROM directory hide(s)", so the one that failed was
-        // invisible while the boot log reported success for the others. Every other
-        // engine call in this file reports its failures.
         if let Err(e) = nm.whiteout(&t) {
             eprintln!(
                 "nomount: could not re-apply the ROM-directory hide on {} ({e:#}) -- it is \
-                 VISIBLE this session",
+                 visible this session",
                 t.display()
             );
             failed += 1;
@@ -2023,51 +1203,21 @@ pub fn reapply_tmpfs_whiteouts(nm: &Nm) -> u32 {
     n
 }
 
-/// What one ROM-tmpfs pass did, in the same buckets `run_absorb` reports the
-/// bind survey in -- a tmpfs left mounted is just as visible to an app as a bind
-/// is, so it must reach the same summary rather than be quietly dropped.
+/// What one ROM-tmpfs pass did, in the same buckets `run_absorb` reports the bind survey
 #[derive(Default)]
 struct TmpfsPass {
-    /// Emptied mountlessly (or, on a dry run, would be).
     done: u32,
     failed: u32,
-    /// Still mounted, still visible, and not by design.
     leaked: u32,
-    /// Still mounted on purpose (the opt-out list).
     declined: u32,
 }
 
-/// Take over the "make this ROM directory look empty" trick: drop the tmpfs and
-/// hide the path with a whiteout instead.
-///
-/// The whiteout is the mountless equivalent -- the directory reads as absent
-/// rather than empty, which is the same answer to a PackageManager scan.
-///
-/// It is recorded in absorb's OWN list, not appended to the user's durable
-/// `whiteouts.txt` (M-S8). That list is re-applied at every boot with nothing
-/// that ever prunes it, so a tmpfs takeover was permanent: uninstall the module
-/// that mounted it and the ROM directory stayed hidden forever, until the user
-/// happened to run `whiteout remove` on a path they never added. Here the record
-/// is re-derived from the live mount table each boot instead -- an entry is
-/// confirmed while its tmpfs keeps coming back, and expired when it stops -- and
-/// `run_mount` re-applies it in between so nothing regresses to stock mid-session.
+/// Take over the "make this ROM directory look empty" trick: drop the tmpfs and hide the
 fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
     let mut st = TmpfsPass::default();
-    // Raw bytes, and a per-LINE decode. `rom_tmpfs_target` needs the whole line
-    // (the fstype lives after the ` - ` separator, which `MountRow` does not
-    // keep), so this one cannot go through `read_mountinfo` -- but it must not go
-    // back to `read_to_string` either: one undecodable path anywhere in the file
-    // would take the whole ROM-tmpfs pass with it. Skip the line, keep the file.
     let Ok(raw) = fs::read(MOUNTINFO) else { return st };
     let (skips, _) = skip_list();
     let nm = Nm::new();
-    // `boot_id()`'s contract is "None disables expiry", and `unwrap_or_default()`
-    // did not honour it: an empty stamp expires OLD entries normally and makes
-    // every NEW one unstamped, which `tmpfs_entry_lives` never expires. That is a
-    // permanent hide on every ROM directory taken over from then on -- M-S8, the
-    // exact failure this function exists to reverse. /proc/sys/kernel/random/boot_id
-    // is always readable on Android, so this costs nothing on a real device;
-    // refusing the pass is the only answer that cannot create one.
     let Some(boot) = boot_id() else {
         eprintln!(
             "nomount: cannot read this boot's id -- skipping the ROM-tmpfs pass rather than \
@@ -2075,16 +1225,6 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
         );
         return st;
     };
-    // `read_absorbed_tmpfs`, NOT the infallible twin. `set_absorbed_tmpfs`
-    // TRUNCATES, so an unreadable record collapsing to an empty Vec here meant the
-    // first takeover this pass made rewrote the file with that one entry alone --
-    // destroying every other recorded ROM-directory takeover in its ONLY copy.
-    // `reapply_tmpfs_whiteouts` is what puts these back after the boot pass's
-    // `nm clear` and `run_mount` "deliberately cannot re-derive them", so the ROM
-    // directories a debloat module emptied come back at the next boot, and
-    // `run_reload` (which extends its prune set from this record) turns whatever
-    // is still live into something prunable. Same class as the three
-    // `absorbed.list` sites this file already refuses, in a new place.
     let mut record = match read_absorbed_tmpfs() {
         Ok(v) => v,
         Err(e) => {
@@ -2103,26 +1243,9 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
         .filter_map(|l| std::str::from_utf8(l).ok())
         .filter_map(rom_tmpfs_target)
     {
-        // The opt-out list applies here too. Converting a tmpfs to a whiteout
-        // swaps "directory empty" for "directory absent"; measured on OP15 across
-        // several boots those behave the same even for a system app that a
-        // /data/app package UPDATES -- YouTube installed, launched and ran with
-        // /product/app/YouTube whiteouted. Keep the opt-out anyway: one ROM, one
-        // app, and leaving a takeover alone should be a line in absorb-skip.txt
-        // rather than a rebuild.
         if is_skipped(Path::new("/"), &target, &skips) {
-            // RELEASE what a previous pass already took. The `continue` below
-            // happens before `seen.insert`, and the expiry rule keeps a recorded
-            // entry while its tmpfs is still MOUNTED -- which it is, precisely
-            // because we just declined to unmount it. So the row survived, and
-            // `reapply_tmpfs_whiteouts` re-applied our whiteout at every boot: the
-            // user got the module's tmpfs AND our hide on the same path, and the
-            // opt-out they had just written removed nothing. There is no
-            // `absorb --undo` and no other lever.
             if record.iter().any(|(t, _)| *t == target) {
                 if dry_run {
-                    // `--dry-run` promises to change nothing, and `nm del` is an
-                    // engine mutation like any other.
                     println!(
                         "would release the hide on {} (now on the opt-out list)",
                         target.display()
@@ -2140,16 +1263,6 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
             st.declined += 1;
             continue;
         }
-        // REPRESENTABILITY, before anything is touched. The record is
-        // `<target>\t<boot id>` per line, and `rom_tmpfs_target` OCTAL-UNESCAPES
-        // mountinfo field 5 -- so a module that mounts a tmpfs on a path whose
-        // name contains `\012` hands us a real newline, and `set_absorbed_tmpfs`
-        // writes a forged extra line. A line without a tab parses as an UNSTAMPED
-        // entry, which `tmpfs_entry_lives` never expires: a permanent whiteout on
-        // any ROM path the forged line names, surviving the module's uninstall and
-        // attributable to nobody. Refused BEFORE the unmount, so the cost is a
-        // tmpfs left up and reported rather than a ROM directory silently
-        // un-hidden.
         if let Err(why) = crate::mount::path_is_representable(&target) {
             eprintln!(
                 "nomount: LEAK the tmpfs over {} stays mounted: {why}, so absorb cannot record \
@@ -2159,33 +1272,11 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
             st.leaked += 1;
             continue;
         }
-        // OWNERSHIP (M-S8). Every other path in absorb requires the source to be
-        // under /data/adb before taking a mount over; this one cannot, because a
-        // fresh tmpfs HAS no source -- mountinfo gives it root `/` and device
-        // `none`, so `source_of` returns nothing and a source test would either
-        // reject every tmpfs (killing the feature) or nothing at all. What can be
-        // asserted is the shape of the trick itself: an EMPTY tmpfs over a ROM
-        // path means "pretend this directory has no entries", and a whiteout says
-        // exactly that. A tmpfs with files in it means the opposite -- the module
-        // is SERVING that content -- and converting it would delete the module's
-        // own files from view. Say so and leave it mounted.
         let t_str = target.to_string_lossy().into_owned();
         let was_durable = durable.contains(&t_str);
-        // Is this takeover already ours, from a previous pass?
         let ours = was_durable || record.iter().any(|(t, _)| *t == target);
         match dir_is_empty(&target) {
             Some(true) => {}
-            // Unreadable AND already on one of our records: OUR OWN whiteout is
-            // what makes it unreadable. A whiteout d_drops the dentry so the path
-            // resolves to ENOENT -- that is the feature -- and `run_mount`
-            // re-applies every recorded takeover at post-fs-data. So from the
-            // SECOND boot after a takeover this test could never see the directory
-            // again, and the leak branch below fired every pass: either the tmpfs
-            // was stranded in mountinfo forever (never unmounted, "LEAK" printed
-            // on every pass, zero-mount posture broken) or, if it could not mount
-            // over the d_dropped path at all, the entry expired and the ROM
-            // directory was un-hidden -- giving a 2-boot oscillation where the
-            // module's hide is off every other boot. Both silent.
             None if ours => {}
             other => {
                 eprintln!(
@@ -2205,30 +1296,9 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
             continue;
         }
         seen.insert(target.clone());
-        // Drop OUR OWN live rule on the path FIRST. A whiteout there (ours, from a
-        // previous pass, re-applied at boot) d_drops the dentry, which detaches the
-        // mount from path resolution -- umount2 then cannot find the mountpoint and
-        // the tmpfs is stranded until reboot. Same trap the inject-over-a-mountpoint
-        // comment below describes, reached from the other direction. Measured on
-        // OP15: with the whiteout already applied, every absorb reported "1 failed"
-        // and the tmpfs never went away.
-        //
-        // Scoped to rules absorb itself created (M-S8): this used to be an
-        // unconditional `nm del`, which would just as happily drop a rule another
-        // module legitimately owns at that path. Ours are the ones on one of the two
-        // records -- absorb's own list, or the durable list an older Suite wrote
-        // this very takeover into.
         if ours {
             let _ = nm.del(&target);
         }
-        // `||`, NOT `&&`. See the note on the main loop's copy of this test: one
-        // `umount2(MNT_DETACH)` removes ONE mount, so a stacked tmpfs returns 0 and
-        // leaves the path mounted. Confirmed on an OP15: two binds on one
-        // mountpoint, one detach, rc 0, still in mountinfo. Whiteouting on top of
-        // that d_drops the dentry and strands the survivor until reboot.
-        // The result is deliberately unused: `still_mounted` is the authority
-        // (umount2 reports EINVAL both for "never a mountpoint" and for "a peer
-        // already took it away", and only mountinfo can tell those apart).
         let _ = umount_detach(&target);
         if still_mounted(&target) {
             eprintln!(
@@ -2239,32 +1309,6 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
             st.failed += 1;
             continue;
         }
-        // Hand over a takeover an older Suite wrote into the user's durable list:
-        // that list is re-applied at every boot with nothing that ever prunes it,
-        // which is the permanent hide this finding is about. Done AFTER the unmount
-        // succeeded, so a takeover that fails half-way leaves the old record intact.
-        // The hide itself is re-applied a few lines down and recorded in absorb's
-        // list instead, so from now on it expires with the tmpfs.
-        // ANNOUNCE THE MOVE ONLY WHEN IT HAPPENED, and stop if it did not.
-        // `whiteout::remove` returns Err on a failed read, a failed write AND a
-        // failed `nm del`; the message was printed first and the result discarded,
-        // so on any of those the path stayed in whiteouts.txt -- "re-applied at
-        // every boot with nothing that ever prunes it" -- and was ALSO recorded in
-        // absorb's list a few lines down. Two lists with opposite lifetimes: absorb
-        // later expires its own row and un-hides the path, the durable list puts it
-        // straight back at the next boot, and the ROM directory is hidden forever
-        // with the owning module long uninstalled. That is M-S8 re-created by the
-        // code written to prevent it, behind a log line asserting the opposite.
-        //
-        // `remove_locked`, not `remove`: `run_absorb` already holds the pass lock,
-        // and `remove` takes it again through a fresh fd. flock does not exempt the
-        // same process across different open file descriptions, so that conflicts
-        // with our own lock and burns PASS_LOCK_WAIT (25s) per migrated entry
-        // before printing a "another pass still holds ..." line that is false.
-        // `nm_early_absorb` runs under `nmto 60` and service.sh's foreground pass
-        // under `nmto 90`, so migrating an old install's list timed the pass out at
-        // N=3 / N=4 -- mid-loop, which is exactly how the two-list state above got
-        // created.
         if was_durable {
             match crate::whiteout::remove_locked(&t_str) {
                 Ok(()) => println!(
@@ -2273,7 +1317,7 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
                 ),
                 Err(e) => {
                     eprintln!(
-                        "nomount: {t_str} is still in whiteouts.txt ({e:#}) -- NOT recording it \
+                        "nomount: {t_str} is still in whiteouts.txt ({e:#}) - not recording it \
                          in absorb's list too, because a path on both lists is hidden forever"
                     );
                     st.failed += 1;
@@ -2281,9 +1325,6 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
                 }
             }
         }
-        // `whiteout::add` is no longer the right door -- it writes the durable
-        // list. Its validation is, though: it is what refuses a partition root
-        // (`/my_product` matches ROM_ROOTS on its own) and any `..`.
         if let Err(e) = crate::whiteout::validate(&t_str) {
             eprintln!("nomount: {t_str} unmounted but will not be hidden: {e:#}");
             st.failed += 1;
@@ -2295,14 +1336,6 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
                     Some(e) => e.1 = boot.clone(),
                     None => record.push((target.clone(), boot.clone())),
                 }
-                // CHECKPOINT, for the same reason as the main loop's: the tmpfs is
-                // already unmounted and the whiteout already live, and this pass
-                // runs under a hard `nmto` kill. Deferring the only write to after
-                // the loop meant a kill on candidate k+1 left k paths whiteouted
-                // with no record -- and the expiry below is what un-hides them, so
-                // an unrecorded whiteout is a ROM directory hidden with nothing
-                // left that knows to restore it. One write per converted tmpfs;
-                // there are at most a handful on any device.
                 set_absorbed_tmpfs(&record);
                 st.done += 1;
             }
@@ -2315,27 +1348,7 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
     if dry_run {
         return st;
     }
-    // EXPIRY -- the reverse path the durable list never had. Absorb runs from
-    // service.sh after boot_completed, so every module's post-fs-data script has
-    // had its chance: a recorded target with no tmpfs over it, last seen in an
-    // EARLIER boot, belongs to a module that no longer asks for it (uninstalled,
-    // or the trick dropped). Drop the whiteout and the record, and the ROM
-    // directory comes back on its own.
-    //
-    // Keyed on the boot id rather than on "is it mounted right now", because
-    // absorb unmounts the tmpfs itself: every later pass in the SAME boot (the
-    // late pass, uidwatch) sees it gone, and expiring there would unhide a
-    // directory the owning module is still emptying every boot. An entry with no
-    // stamp at all is never expired -- we cannot tell a fresh sighting from an
-    // old one.
     let mut expired = 0u32;
-    // ONE mount-table read for the whole retain, not one per recorded entry:
-    // `still_mounted` re-reads and re-parses /proc/self/mountinfo every call, and
-    // this pass is bounded at 90s by service.sh with everything after it gated on
-    // its return. `mounted_targets` returns `None` (not an empty set) when the
-    // table cannot be read, and the fail-closed reading of that is "assume every
-    // entry is still mounted", i.e. expire nothing this pass -- the same direction
-    // `still_mounted`'s own `unwrap_or(true)` takes.
     let mounted = mounted_targets();
     record.retain(|(t, seen_boot)| {
         let is_mounted = mounted.as_ref().is_none_or(|m| m.contains(t));
@@ -2356,18 +1369,7 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
     st
 }
 
-/// Fold this pass's (target, source) pairs into the recorded set.
-///
-/// THE FRESH SOURCE WINS. This was `if !all.iter().any(|(t, _)| *t == p.0)`, i.e.
-/// a target already in the record kept whatever source it was FIRST absorbed
-/// from, and the pair just absorbed was thrown away. The record is supposed to
-/// describe the LIVE rule, and the live rule is the one this pass created -- so
-/// after a module update moved its APK, or after a different module took the
-/// same target over, the record went on naming the old path.
-///
-/// What reads it is why that matters: `reapply_absorbed_pairs` re-serves each
-/// recorded pair after a `clear`, and a pair naming a source that no longer
-/// exists re-serves nothing while the record still claims it does.
+/// Fold this pass's (target, source) pairs into the recorded set
 fn merge_absorbed(all: &mut Vec<(PathBuf, PathBuf)>, fresh: Vec<(PathBuf, PathBuf)>) {
     for p in fresh {
         match all.iter_mut().find(|(t, _)| *t == p.0) {
@@ -2377,44 +1379,18 @@ fn merge_absorbed(all: &mut Vec<(PathBuf, PathBuf)>, fresh: Vec<(PathBuf, PathBu
     }
 }
 
-/// `nomount absorb [--dry-run]`.
-///
-/// `early` is the post-fs-data pass. See `Commands::Absorb::early`: it exists
-/// solely to widen what may be taken over to include `my_*` targets, and nothing
-/// else about the run changes. Deliberately NOT pushed down into
-/// `disposition_of`, so `survey()` -- and therefore doctor and the WebUI -- keep
-/// describing each mount the same way whoever is asking; only the ACTION is
-/// phase-dependent, and a mount this pass defers is reported as deferred rather
-/// than silently dropped from the count.
+/// `nomount absorb [--dry-run]`
 pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> {
-    // Serialise against a concurrent mount/reload (M-S9): those clear and rebuild
-    // the engine, and absorb unmounts and re-adds rules -- interleaving the two
-    // corrupts both. A dry run changes nothing, so it needs no lock.
     let _pass = if dry_run { None } else { crate::mount::pass_lock() };
     let nm = Nm::new();
     nm.version()
         .context("hookless NoMount engine not responding")?;
 
-    // Before anything else, and on every pass: retire rows whose module is gone.
-    // Not on a dry run -- `--dry-run` promises to change nothing, and this writes.
     if !dry_run {
         prune_absorbed_record(early);
     }
 
-    // Report the whole picture BEFORE acting, so a mount absorb cannot take is
-    // never implied to be absent. "Nothing to absorb" and "nothing is mounted"
-    // are different claims and only the second one is the posture.
-    // Before surveying: a rule pointing at an APK path the app has moved away from
-    // is not a mount, so the survey would never see it, and the app would sit on
-    // the stock APK until a reboot. Cheap when there are none (no absorbed APK
-    // rules means no work).
     if !dry_run {
-        // Re-serve what a previous run recorded. This runs from service.sh AFTER
-        // boot_completed, which is the timing that works: the same rule applied at
-        // post-fs-data, before PackageManager scans, corrupts the package (null
-        // Resources, then a system crash -- see mount.rs). Post-boot it is exactly
-        // what absorb itself does when it takes a bind over, so a module that no
-        // longer mounts (or is uninstalled) still gets its content served.
         let reserved = reapply_absorbed(&nm);
         if reserved > 0 {
             println!("re-served {reserved} recorded APK rule(s)");
@@ -2424,39 +1400,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             println!("refreshed {repointed} app APK rule(s), dropped {stale} for an uninstalled app");
         }
     }
-    // A tmpfs over the ROM is not module content laid over a path, so the survey
-    // (which keys on the source) never sees it. Handle it first: it is the loudest
-    // mount of the lot and the one no source-keyed check ever reported.
     let tmpfs = absorb_rom_tmpfs(dry_run);
     let surveyed = survey()?;
-    // Same mountinfo the survey classified from, so a redundant target resolves
-    // to the same servable twin here as it did there.
-    // ONE read for both the aliases and the image sweep below: `read_mountinfo`
-    // parses the whole file, and this pass is bounded at 90s by service.sh with
-    // everything after it gated on its return. An unreadable table degrades to an
-    // empty Vec exactly as the two separate `unwrap_or_default()`s did.
     let rows = read_mountinfo(MOUNTINFO).unwrap_or_default();
     let aliases = mount_aliases(&rows);
-    // Seeded from the tmpfs pass: a tmpfs absorb would not convert is still a
-    // mount over the ROM, and the "posture clean" line below must not be reachable
-    // while one is up.
-    // tmpfs.failed belongs in `leaking` too. The only way to reach it while the
-    // tmpfs is still UP is the `umount_detach && still_mounted` branch in
-    // absorb_rom_tmpfs — i.e. exactly a foreign mount that survived. Leaving it
-    // out let the summary print "0 ROM tmpfs emptied mountlessly (1 failed)" and
-    // then, as its FINAL line, "nothing mounted over the ROM (posture clean)"
-    // about a mount sitting in every process's mountinfo. The other two failure
-    // modes there have already unmounted, so counting all of tmpfs.failed here can
-    // at worst over-report a leak, which is the safe direction for this line.
     let (mut leaking, mut declined) = (tmpfs.leaked + tmpfs.failed, tmpfs.declined);
-    // ...and from the mount table directly, for the one shape the SURVEY cannot
-    // see at all. `source_of()` answers None for a whole-filesystem mount (root
-    // "/"), so an IMAGE mounted over a ROM path -- `mount -o loop x.img
-    // /product/app/Foo` -- never reaches `classify()` and never appears in
-    // `surveyed`. Absorb cannot take one over either: there is no per-file source
-    // under /data/adb to re-serve it from, which is why this only counts. But it
-    // is a mount over the ROM in every app's mountinfo, and the "posture clean"
-    // line below is a claim about mountinfo, not about how much absorb converted.
     let imaged: Vec<String> = rom_image_mounts(&rows);
     for h in &imaged {
         leaking += 1;
@@ -2477,11 +1425,10 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 s.target.display(),
                 s.source.display()
             ),
-            // Still a foreign mount at the end of the run, so it counts as one.
             Disposition::Redundant => {
                 leaking += 1;
                 eprintln!(
-                    "nomount: LEAK {} <- {} is redundant (its content is already injected) but stays mounted: re-asserting a my_* rule at runtime has rebooted a device, and unmounting without that re-assert reverts the path to the stock file. Delete the bind from the owning module's post-fs-data.sh instead -- the next boot then serves it by injection with nothing to absorb",
+                    "nomount: LEAK {} <- {} is redundant (its content is already injected) but stays mounted: re-asserting a my_* rule at runtime has rebooted a device, and unmounting without that re-assert reverts the path to the stock file. Delete the bind from the owning module's post-fs-data.sh instead - the next boot then serves it by injection with nothing to absorb",
                     s.target.display(),
                     s.source.display()
                 );
@@ -2512,8 +1459,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         }
     }
 
-    // Same reasoning as the leak bucket: something we cannot act on still has to
-    // be said, or the summary line below overstates what absorb achieved.
     for e in survey_elsewhere() {
         leaking += 1;
         eprintln!(
@@ -2525,9 +1470,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         );
     }
 
-    // `runtime_droppable` is exactly the "does this touch a my_* partition"
-    // question, so it is the gate for BOTH dispositions here -- reused rather
-    // than restated, so the two can never drift apart.
     let mut deferred = 0usize;
     let cands: Vec<Candidate> = surveyed
         .into_iter()
@@ -2540,11 +1482,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                     false
                 }
             }
-            // NOT counted into `deferred`: the loop above has already counted a
-            // non-droppable redundant mount into `leaking` and told the user to
-            // delete the bind from the owning module. Counting it here too
-            // reported one mount twice and gave it two contradictory
-            // instructions in the same run.
             Disposition::Redundant => early || runtime_droppable(&s.target, &aliases),
             _ => false,
         })
@@ -2554,9 +1491,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             source: s.source,
         })
         .collect();
-    // Say what was put off, and until when. A my_* mount that this pass will not
-    // touch is not "left by design" -- the early pass CAN take it -- so reporting
-    // it in the declined bucket would be a different claim from the true one.
     if deferred > 0 {
         println!(
             "nomount absorb: {deferred} my_* mount(s) deferred to the pre-zygote pass \
@@ -2565,28 +1499,12 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         );
     }
     if cands.is_empty() {
-        // A ROM tmpfs is taken over above, not through the candidate list, so say
-        // so here -- otherwise a run that emptied one still reported "nothing to
-        // absorb", which reads as "we did nothing".
         if tmpfs.done > 0 || tmpfs.failed > 0 {
             println!(
                 "nomount absorb: {} ROM tmpfs emptied mountlessly ({} failed)",
                 tmpfs.done, tmpfs.failed
             );
         }
-        // "Nothing to absorb" is not "nothing is mounted". A declined mount is
-        // still a mount and still visible to an app, so only claim a clean
-        // posture when mountinfo genuinely holds no foreign mount at all.
-        //
-        // `deferred` is folded in for the same reason. A `Disposition::Absorb`
-        // mount that `runtime_droppable` refuses (any `my_*` path, which is what
-        // `serve_mode` classifies as Inject once the `my_hookless` marker is
-        // present) went into `deferred` ALONE — neither `leaking` nor `declined` —
-        // so the runtime pass printed the deferral line and then, as its LAST
-        // line, "posture clean". Every shell caller keeps `tail -1`
-        // (`module/lib.sh`, `module/service.sh`), so boot.log recorded a clean
-        // posture for a boot with a module bind naming /data/adb/modules in every
-        // app's mount table. A deferred mount is still mounted; it belongs here.
         match (leaking + deferred as u32, declined) {
             (0, 0) => println!("nomount absorb: nothing mounted over the ROM (posture clean)"),
             (0, d) => println!(
@@ -2594,7 +1512,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             ),
             (n, d) => println!(
                 "nomount absorb: nothing to absorb, but {n} foreign mount(s) remain, \
-                 plus {d} more left by design — the posture is NOT clean"
+                 plus {d} more left by design - the posture is not clean"
             ),
         }
         return Ok(());
@@ -2602,55 +1520,22 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 
     let (mut done, mut failed, mut skipped_dirs) = (0u32, 0u32, 0u32);
     let mut dropped = 0u32;
-    // One re-assert per servable target: the same rules are reachable from both
-    // mountpoints of a propagated bind, and re-adding them twice in a burst is
-    // exactly what preceded the reboot this path now avoids on my_*.
-    // One snapshot for the whole pass: add_repointing needs to know what a
-    // target is currently served from before it drops anything.
     let live_map = live_injects(&nm);
     let mut reasserted: HashSet<PathBuf> = HashSet::new();
-    // Recorded so `reload` does not prune them: an absorbed rule is not in any
-    // module plan, and the reconcile drops whatever the plan does not name. Held
-    // as (target, source) pairs so a directory bind's children are recorded too.
     let mut fresh: Vec<(PathBuf, PathBuf)> = Vec::new();
-    // READ THE RECORD BEFORE THE FIRST IRREVERSIBLE STEP, and check-point into it
-    // per candidate (below). Every entry point kills this pass on a hard deadline
-    // -- `nmto 90 absorb` (service.sh:283), `nmto 60` from the late pass, from
-    // `uidwatch.sh` on EVERY package change, and from `lib.sh`'s --early -- and
-    // the loop's first act per candidate is an `umount_detach` that cannot be
-    // undone. With one write after the whole loop, a kill after candidate k left
-    // k mounts consumed and k rule sets live with NOTHING recorded; the next
-    // reload's prune (mount.rs:1305) then deletes every one of those rules
-    // because no record protects them, the content reverts to stock, and the bind
-    // absorb already ate cannot be re-derived -- `survey()` sees no mount, so no
-    // later absorb can rebuild it. Reboot-only recovery. One atomic write per
-    // CONVERTED mount (a rare event) buys a resumable loop.
-    //
-    // Read here, not at the top: `refresh_app_apks` above writes this same file.
     let mut record = read_absorbed_pairs();
     for c in &cands {
-        // Apply the same directory rule the real run uses, so a dry run can never
-        // promise an action the real run would decline.
         let is_dir_bind = c.source.is_dir();
-        // A redundant bind skips the directory guard: that guard exists because
-        // absorb would have to snapshot a listing, and here it creates nothing.
-        // The rules covering this content are the module plan's, so `reload`
-        // keeps them current instead of freezing today's listing.
         if c.redundant {
             if dry_run {
                 println!(
-                    "would DROP redundant mount {} <- {}",
+                    "would drop redundant mount {} <- {}",
                     c.target.display(),
                     c.source.display()
                 );
                 dropped += 1;
                 continue;
             }
-            // A peer of an already-dropped mount is gone too: one `mount --bind`
-            // under shared propagation appears once per mountpoint, so unmounting
-            // either takes both. umount2 then fails on the second with EINVAL,
-            // which is success, not failure -- ask mountinfo, not errno. And ask
-            // it UNCONDITIONALLY: see the main loop's copy of this test.
             let _ = umount_detach(&c.target);
             if still_mounted(&c.target) {
                 eprintln!(
@@ -2661,29 +1546,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 failed += 1;
                 continue;
             }
-            // Re-issue the rules even though `nm list` already has them. A rule
-            // added while a bind shadowed the same name never took effect: the
-            // engine hangs its injection off a dentry the mount had already
-            // claimed, so the path kept resolving to the stock file and only
-            // started serving module content when the rule was added again.
-            // Measured on an OP11: after the unmount, the target still read the
-            // ROM's bootanimation.zip until `nm add` was repeated verbatim.
-            // Idempotent, so re-adding a rule that IS live costs nothing.
             let at = servable(&c.target, &aliases);
             if !reasserted.insert(at.clone()) {
                 continue;
             }
-            // Counted AFTER the dedup, not before. One `mount --bind` that
-            // OnePlus's dual mountpoint (`/my_product` + `/mnt/vendor/my_product`)
-            // turns into two mountinfo rows reported "2 redundant mount(s) dropped",
-            // and that number is what the WebUI card and boot.log carry.
             dropped += 1;
-            // No `already_serving` guard here: `c.source` is usually a
-            // DIRECTORY, and one directory's own size says nothing about the
-            // files inside it -- on the OP11 pair it compared 106 against 3440
-            // and answered "not serving" for content that was half correct. The
-            // check that matters is per file, and it lives in `add_repointing`,
-            // which is the only place holding the two files a rule names.
             let mut refreshed = Vec::new();
             let fails = inject(&nm, &c.source, &at, &mut refreshed, &live_map);
             if fails > 0 {
@@ -2698,7 +1565,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         if dry_run {
             if is_dir_bind && !include_dirs {
                 println!(
-                    "would SKIP directory bind {} <- {} (needs --include-dirs)",
+                    "would skip directory bind {} <- {} (needs --include-dirs)",
                     c.target.display(), c.source.display()
                 );
                 skipped_dirs += 1;
@@ -2707,10 +1574,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             }
             continue;
         }
-        // A DIRECTORY bind becomes one rule per file -- a static snapshot of the
-        // listing as it is right now. Anything the owning module adds to that
-        // directory later would simply never appear, and unlike a file bind we
-        // cannot tell whether it intends to. Opt-in only.
         if is_dir_bind && !include_dirs {
             println!(
                 "skipping directory bind {} <- {} (use --include-dirs; injection would \
@@ -2720,40 +1583,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             skipped_dirs += 1;
             continue;
         }
-        // Unmount FIRST, then inject. Inject-first looks safer (the mount shadows
-        // the injection, so content is never absent) but is actually fatal: adding
-        // a rule d_drops the cached dentry for that name, and a mount hangs off a
-        // specific (vfsmount, dentry) pair. Dropping it detaches the mount from
-        // path resolution, so umount2() then returns EINVAL -- the path is no
-        // longer a mountpoint -- and the entry is stranded in mountinfo until
-        // reboot while the content silently reverts to the file underneath.
-        // Verified on-device against LSPosed's dex2oat bind.
-        //
-        // Unmounting first costs a brief window where the stock file shows
-        // through. That is strictly better than an unremovable mount, and it also
-        // means nm_alloc_rule mirrors metadata from the REAL stock file rather
-        // than through the bind -- which is what makes absorption remove the
-        // bind's dev/ino/mtime tell instead of preserving it.
-        // ...and CONFIRM against mountinfo, like the redundant branch above and
-        // the tmpfs pass both already do. umount2 reports EINVAL both for "never a
-        // mountpoint" and for "a peer already took it away", and only the second
-        // is fine — so the main path, the one place that trusted umount2 alone,
-        // printed "cannot unmount X" and then SKIPPED the inject for a mount that
-        // was already gone. A false failure and content genuinely left unserved,
-        // which the deepest-first sort makes routine on a multi-mountpoint tree.
-        //
-        // ...and ask it UNCONDITIONALLY, not only when umount2 failed. `&&`
-        // short-circuits, so a SUCCESSFUL detach skipped the confirmation — and
-        // `umount2(MNT_DETACH)` removes exactly ONE mount from the stack. Two
-        // modules binding the same path (or one module binding it from both
-        // post-fs-data.sh and service.sh) leave a second mount behind, umount2
-        // returns 0, and the inject then d_drops a dentry a live mount hangs off:
-        // stranded in mountinfo until reboot, `check_zero_mount` failing forever
-        // on something nothing on the device can remove. Confirmed on an OP15 this
-        // session: two binds on one mountpoint, one `umount2(MNT_DETACH)`, rc 0,
-        // path still mounted and serving the first bind. `survey_of` emits one row
-        // per mountinfo LINE, so a stack now drains one layer per pass instead of
-        // wedging on the first.
         let _ = umount_detach(&c.target);
         if still_mounted(&c.target) {
             eprintln!(
@@ -2767,13 +1596,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         let before = fresh.len();
         let fails = inject(&nm, &c.source, &c.target, &mut fresh, &live_map);
         let served = fresh.len() - before;
-        // CHECKPOINT. The mount is gone and these rules are live; if the pass is
-        // killed on the next candidate they must already be protected from the
-        // next reload's prune. Written even when `fails > 0`: a partially-failed
-        // inject still created rules, which is the same reason the final write
-        // below is unconditional. On a read error there is nothing to merge into
-        // and the file is left alone -- `set_absorbed_pairs` truncates, so a
-        // rewrite from an empty read would destroy every patched-APK rule.
         if let Ok(all) = record.as_mut() {
             if served > 0 {
                 merge_absorbed(all, fresh[before..].to_vec());
@@ -2791,54 +1613,23 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             failed += 1;
         }
     }
-    // Written even when nothing was absorbed this run: a partially-failed inject
-    // still created rules, and those are exactly the ones reload must not drop.
-    // `fresh` already carries the (target, source) pairs -- including a directory
-    // bind's children, which the old parent-matching filter dropped (M-S12).
     let rules = fresh.len() as u32;
     let fresh_pairs: Vec<(PathBuf, PathBuf)> = fresh;
-    // Written unconditionally, and ONLY in the tab-separated pairs format:
-    // `set_absorbed` used to run right after this and rewrite absorbed.list in the
-    // legacy bare-target form, so `absorbed_pairs()` (which requires a tab) came
-    // back empty forever and the APK re-serve feature was dead (H18).
-    //
-    // `read_absorbed_pairs`, NOT `absorbed_pairs()`. The infallible twin is
-    // unwrap_or_default, so a record that exists but cannot be READ collapsed to
-    // an empty Vec here -- and `set_absorbed_pairs` truncates before writing, so
-    // one pass over an unreadable file destroyed every patched-APK rule on the
-    // device, permanently, and reported the run as a success. `run_mount` refuses
-    // exactly this by hand, with the note "rewriting it from an empty read would
-    // lose every patched-APK rule for good"; the same call in this file did not.
-    //
-    // On a read error, leave the file ALONE. The cost is that this pass's fresh
-    // rules go unrecorded until the next successful one, so a `reload` in between
-    // may prune them -- recoverable, and the next absorb re-creates them. Losing
-    // the file is not recoverable at all.
-    //
-    // `record` is the read hoisted above the loop, so this is now the final
-    // reconciliation of a set the per-candidate check-points have already been
-    // writing -- byte-identical to the last check-point when every candidate
-    // served something, and the only write when none did.
     match record {
         Ok(mut all) => {
-            // No prune here: `prune_absorbed_record` already ran at the top of
-            // this pass, on the path that reaches this one AND on the early
-            // return that does not.
             merge_absorbed(&mut all, fresh_pairs);
             all.sort();
             set_absorbed_pairs(&all);
         }
         Err(e) => eprintln!(
-            "nomount: could not read {ABSORBED_LIST} ({e}) -- NOT rewriting it, because an \
+            "nomount: could not read {ABSORBED_LIST} ({e}) - not rewriting it, because an \
              empty read here would delete every recorded rule. {rules} rule(s) from this pass \
              are unrecorded until the next successful absorb"
         ),
     }
 
-    // A leak is worth restating in the summary line: the per-mount notice above
-    // scrolls away, and "12 absorbed" reads like success on its own.
     let leaks = if leaking > 0 {
-        format!(", {leaking} NOT absorbed and still mounted")
+        format!(", {leaking} not absorbed and still mounted")
     } else {
         String::new()
     };
@@ -2847,8 +1638,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     } else {
         String::new()
     };
-    // Deferred mounts are still up. Without this the one line the boot log keeps
-    // never mentioned them at all.
     let defer = if deferred > 0 {
         format!(", {deferred} my_* mount(s) deferred and still mounted")
     } else {
@@ -2879,10 +1668,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 mod tests {
     use super::*;
 
-    /// The record has to follow the rule. Leaving it on the old `/data/app/…`
-    /// path made every reader skip it forever (they all gate on `target.exists()`),
-    /// so the patched APK stopped being re-served at boot and the row could never
-    /// be repaired -- there was no live rule left for a later pass to find.
+    /// The record has to follow the rule
     #[test]
     fn a_repointed_apk_moves_its_row_and_an_uninstall_drops_it() {
         let old = PathBuf::from("/data/app/~~a==/com.foo-a==/base.apk");
@@ -2906,8 +1692,7 @@ mod tests {
         assert!(next.iter().any(|(t, _)| *t == keep), "an untouched row survives");
     }
 
-    /// A partially-completed earlier pass can leave the destination already
-    /// recorded. Two rows for one target would have the boot pass serve it twice.
+    /// A partially-completed earlier pass can leave the destination already recorded
     #[test]
     fn a_repoint_onto_an_already_recorded_target_does_not_duplicate_it() {
         let old = PathBuf::from("/data/app/~~a==/com.foo-a==/base.apk");
@@ -2923,10 +1708,7 @@ mod tests {
         assert_eq!(next.len(), 1);
     }
 
-    /// A row whose module was uninstalled is dropped; everything else survives.
-    ///
-    /// The `nmt06_selfmount` row is the real one: measured surviving an uninstall
-    /// and five reboots on an OP15, 2026-09-05.
+    /// A row whose module was uninstalled is dropped; everything else survives
     #[test]
     fn prune_drops_rows_from_uninstalled_modules() {
         let pairs = vec![
@@ -2945,13 +1727,7 @@ mod tests {
         assert_eq!(kept[0].0, PathBuf::from("/system/etc/other"));
     }
 
-    /// THE mistake that turns a tidy-up into data loss.
-    ///
-    /// 56% of the corpus builds its payload at runtime, so when absorb runs the
-    /// recorded SOURCE FILE may legitimately not exist yet. Pruning on the file
-    /// rather than on the module directory would delete live modules' rows on
-    /// every boot. This test exists to make that regression impossible to land:
-    /// the module is live, the file is not mentioned, and the row must survive.
+    /// The mistake that turns a tidy-up into data loss
     #[test]
     fn prune_keeps_a_live_module_whose_payload_is_not_built_yet() {
         let pairs = vec![(
@@ -2963,16 +1739,14 @@ mod tests {
         assert_eq!(kept.len(), 1);
     }
 
-    /// Disabled is not uninstalled, and a staged update is not a removal.
+    /// Disabled is not uninstalled, and a staged update is not a removal
     #[test]
     fn prune_keeps_staged_and_unattributable_rows() {
         let pairs = vec![
-            // mid-update: recorded against modules_update, same module id
             (
                 PathBuf::from("/system/a"),
                 PathBuf::from("/data/adb/modules_update/upd/system/a"),
             ),
-            // not under any module tree: cannot be attributed, so not ours to judge
             (PathBuf::from("/system/b"), PathBuf::from("/data/local/tmp/b")),
         ];
         let (kept, gone) = prune_absorbed_pairs(pairs, |id| id == "upd", |_| true);
@@ -2994,8 +1768,7 @@ mod tests {
         assert_eq!(owning_module(Path::new("/data/adb/modules/")), None);
     }
 
-    /// Nothing to say means nothing is written: `set_absorbed_pairs` truncates
-    /// before it writes, so a needless rewrite is a needless window.
+    /// Nothing to say means nothing is written: `set_absorbed_pairs` truncates before it
     #[test]
     fn a_refresh_that_moved_nothing_reports_no_change() {
         let p = vec![(PathBuf::from("/data/app/~~a==/com.foo-a==/base.apk"), PathBuf::from("/x"))];
@@ -3003,31 +1776,20 @@ mod tests {
         assert!(!changed);
     }
 
-    // The real row this was derived from, captured on-device from a file bind.
     const SAMPLE: &str = "\
 205 1 254:78 / /data rw,nosuid,nodev,noatime shared:2 - f2fs /dev/block/dm-78 rw
 10222 205 254:78 /local/tmp/bt/src/f /data/local/tmp/bt/dst/f rw,noatime shared:60 - f2fs /dev/block/dm-78 rw
 900 205 254:78 /adb/modules/foo/system/bin/x /system/bin/x rw,noatime shared:9 - f2fs /dev/block/dm-78 rw
 35 1 0:35 / /product ro,noatime - erofs /dev/block/dm-25 ro";
 
-    /// Issue #14: a ReVanced module binds its patched APK over the installed app
-    /// from its own service.sh. That target is on /data, which absorb used to
-    /// refuse outright, so the Suite reported a clean posture while the bind sat
-    /// in every process's mount table.
-    /// An app update regenerates both hashes in
-    /// /data/app/~~<hash>==/<pkg>-<hash>==/base.apk, so an absorbed rule has to be
-    /// re-pointed by package name rather than by remembering the old path.
-    /// The ReVanced installer empties the stock system-app dir with a tmpfs from a
-    /// post-fs-data.d script. It has no source under /data/adb, so every
-    /// source-keyed check missed it while it sat in every process's mountinfo.
+    /// Issue #14: a ReVanced module binds its patched APK over the installed app from its own
     #[test]
     fn a_tmpfs_over_the_rom_is_recognised() {
         let line = "359 149 0:129 / /product/app/YouTube rw,relatime shared:77 - tmpfs none rw,seclabel";
         assert_eq!(rom_tmpfs_target(line).as_deref(), Some(Path::new("/product/app/YouTube")));
     }
 
-    /// M-S8: the record is absorb's own, keyed on the boot in which the tmpfs was
-    /// last seen, so an entry can expire. Lines from an older build carry no stamp.
+    /// M-S8: the record is absorb's own, keyed on the boot in which the tmpfs was last seen,
     #[test]
     fn the_tmpfs_record_round_trips_stamped_and_unstamped_lines() {
         let v = parse_tmpfs_record(
@@ -3045,29 +1807,17 @@ mod tests {
         );
     }
 
-    /// The expiry rule, which is the whole reverse path M-S8 asked for -- and the
-    /// regression it must not cause: absorb unmounts the tmpfs itself, so a second
-    /// pass in the SAME boot always finds it gone and must keep hiding anyway.
+    /// The expiry rule, which is the whole reverse path M-S8 asked for - and the regression it
     #[test]
     fn a_takeover_expires_only_after_a_boot_without_its_tmpfs() {
-        // Seen in this very pass.
         assert!(tmpfs_entry_lives(true, "old-boot", "this-boot", false));
-        // Not seen now, but seen earlier in THIS boot: absorb's own unmount.
         assert!(tmpfs_entry_lives(false, "this-boot", "this-boot", false));
-        // Still mounted (opt-out, or an unmount that failed): not ours to expire.
         assert!(tmpfs_entry_lives(false, "old-boot", "this-boot", true));
-        // Unstamped: kept, because an old sighting cannot be told from a new one.
         assert!(tmpfs_entry_lives(false, "", "this-boot", false));
-        // The one case that expires: a whole boot went by with no tmpfs there, so
-        // the module that wanted the directory empty is gone.
         assert!(!tmpfs_entry_lives(false, "old-boot", "this-boot", false));
     }
 
-    /// `/my_` is a ROM_ROOTS prefix, so a tmpfs mounted on the PARTITION ROOT
-    /// itself is recognised -- and must then be refused, because hiding a whole
-    /// partition is the forkSystemServer abort every other guard here exists for.
-    /// `whiteout::validate` is that refusal, which is why the takeover still calls
-    /// it now that it no longer goes through `whiteout::add`.
+    /// `/my_` is a ROM_ROOTS prefix, so a tmpfs mounted on the partition root itself is
     #[test]
     fn a_tmpfs_over_a_partition_root_is_recognised_but_never_hidden() {
         let line = "360 149 0:130 / /my_product rw,relatime shared:78 - tmpfs none rw,seclabel";
@@ -3076,8 +1826,7 @@ mod tests {
         assert!(crate::whiteout::validate("/product/app/YouTube").is_ok());
     }
 
-    /// Stock tmpfs mounts live outside the ROM partitions, and real filesystems
-    /// inside them (firmware vfat, dsp ext4, the OEM's overlayfs) are not ours.
+    /// Stock tmpfs mounts live outside the ROM partitions, and real filesystems inside them
     #[test]
     fn stock_mounts_are_left_alone() {
         for line in [
@@ -3106,8 +1855,7 @@ mod tests {
         );
     }
 
-    /// Guessing a package from a path that is not an app APK, or from a directory
-    /// with no generation suffix, would re-point a live rule at the wrong file.
+    /// Guessing a package from a path that is not an app APK, or from a directory with no
     #[test]
     fn a_package_name_is_not_guessed_from_anything_else() {
         for p in [
@@ -3134,8 +1882,7 @@ mod tests {
         assert!(is_app_apk(Path::new("/data/app/com.foo-1/base.apk")));
     }
 
-    /// The gate stays shut for everything else under /data: a wrong take-over
-    /// there costs an app its data, not a ROM file that can be re-served.
+    /// The gate stays shut for everything else under /data: a wrong take-over there costs an
     #[test]
     fn other_data_targets_stay_refused() {
         let src = Path::new("/data/adb/modules/x/foo");
@@ -3155,7 +1902,6 @@ mod tests {
     fn resolves_a_bind_source_via_its_filesystem_root() {
         let rows = parse_mountinfo(SAMPLE);
         let roots = fs_roots(&rows);
-        // field 4 is fs-relative: /adb/... must resolve against /data, not /
         let m = rows.iter().find(|r| r.target == Path::new("/system/bin/x")).unwrap();
         assert_eq!(
             source_of(m, &roots).unwrap(),
@@ -3195,14 +1941,12 @@ mod tests {
 
     #[test]
     fn path_key_covers_any_fork_id() {
-        // The same hook, installed under three different fork ids.
         let tgt = Path::new("/apex/com.android.art/bin/dex2oat64");
         let key: Vec<String> = vec!["/apex/com.android.art/bin/dex2oat".into()];
         for id in ["zygisk_lsposed", "zygisk_lsposed_next", "lsposed", "some_new_fork"] {
             let src = PathBuf::from(format!("/data/adb/modules/{id}/bin/dex2oat"));
             assert!(is_skipped(&src, tgt, &key), "path key must cover fork id {id}");
         }
-        // An id key, by contrast, only ever covers the one id it names.
         let idkey: Vec<String> = vec!["zygisk_lsposed".into()];
         let other = PathBuf::from("/data/adb/modules/zygisk_lsposed_next/bin/dex2oat");
         assert!(!is_skipped(&other, tgt, &idkey), "id key cannot cover a renamed fork");
@@ -3210,7 +1954,6 @@ mod tests {
 
     #[test]
     fn builtin_covers_every_dex2oat_path_vector_hooks() {
-        // The exact set from JingMatrix/Vector's Dex2OatServer.kt.
         let builtins: Vec<String> = BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect();
         let src = PathBuf::from("/data/adb/modules/zygisk_vector/bin/dex2oat64");
         for p in [
@@ -3233,52 +1976,34 @@ mod tests {
         let src = PathBuf::from("/data/adb/modules/anything/bin/dex2oat");
         assert!(is_skipped(&src, Path::new("/apex/com.android.art/bin/dex2oat64"), &builtins));
         assert!(is_skipped(&src, Path::new("/system/bin/app_process64"), &builtins));
-        // and does not over-reach
         assert!(!is_skipped(&src, Path::new("/product/etc/foo.xml"), &builtins));
     }
 
-    /// Real modules, real failures. SystemlessDebloater binds its dummy.apk over
-    /// stock APKs — on a OnePlus those live on my_*, where an injection bootloops
-    /// zygote. custom-certificate-authorities binds a /data/local/tmp tmpfs over
-    /// the cacerts apex. Absorb used to accept all three.
+    /// Real modules, real failures
     #[test]
     fn a_target_mount_rs_would_not_inject_is_never_absorbed() {
         let none: Vec<String> = vec![];
         let modsrc = PathBuf::from("/data/adb/modules/SystemlessDebloater/dummy.apk");
 
-        // my_* -> mount.rs serves these with a real bind, so absorb must decline.
         assert!(matches!(
             classify(&modsrc, Path::new("/my_product/app/Foo/Foo.apk"), &none, "test", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Declined(Declined::MustBind)
         ));
-        // apex is in NON_PARTITION_ROOTS: not ours to serve at all.
         assert!(matches!(
             classify(&modsrc, Path::new("/apex/com.android.conscrypt/cacerts"), &none, "test", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Leaking(_)
         ));
-        // A bare partition root would mask the whole partition.
         assert!(matches!(
             classify(&modsrc, Path::new("/product"), &none, "test", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Leaking(_)
         ));
-        // …and an ordinary ROM path still absorbs.
         assert!(matches!(
             classify(&modsrc, Path::new("/system/app/Foo/Foo.apk"), &none, "test", &HashSet::new(), &Redundancy::default()).unwrap(),
             Disposition::Absorb
         ));
     }
 
-    /// Issue #14: a YouTube module binds its patched APK straight over the installed
-    /// one -- source root-managed under /data/adb, target a real app path on /data.
-    /// Every /data target used to be discarded as "module scratch space", so nobody
-    /// surveyed it: absorb ignored it, doctor never named it, and the Modules pane
-    /// badged the module mountless while a detector read /adb/ out of the process
-    /// mount table.
-    ///
-    /// It was reported as an unfixable leak on the premise that hookless cannot
-    /// serve /data. That premise was wrong -- measured on OP15, a rule over a /data
-    /// file serves correctly and creates no mount -- so this is now ABSORBED: the
-    /// APK is re-served as an injection and the bind goes away.
+    /// Issue #14: a YouTube module binds its patched APK straight over the installed one -
     #[test]
     fn module_bind_over_an_installed_apk_is_absorbed() {
         let none: Vec<String> = Vec::new();
@@ -3292,8 +2017,6 @@ mod tests {
             "a module bind over an installed APK must be absorbed"
         );
 
-        // The neighbouring cases must not change: a module's own scratch space on
-        // /data/adb stays unreported, and so does a non-module /data source.
         let scratch = PathBuf::from("/data/adb/modules/foo/tmp");
         assert!(
             classify(&src, &scratch, &none, "test", &HashSet::new(), &Redundancy::default())
@@ -3316,9 +2039,6 @@ mod tests {
 
     #[test]
     fn a_bind_sourced_outside_data_adb_is_reported_not_ignored() {
-        // custom-certificate-authorities: `mount --bind /data/local/tmp/custom-ca-copy
-        // /system/etc/security/cacerts`. Absorb cannot re-serve a tmpfs it does not
-        // own, but staying quiet about it is what made the posture claim false.
         let d = classify(
             Path::new("/data/local/tmp/custom-ca-copy"),
             Path::new("/system/etc/security/cacerts"),
@@ -3329,9 +2049,6 @@ mod tests {
         );
         assert!(matches!(d, Some(Disposition::Leaking(_))), "must be reported as a leak");
 
-        // But Android's OWN storage plumbing is not a module leak: it binds
-        // /data/user -> /data_mirror/... and /data/media -> /mnt/pass_through/...
-        // Nine of these on a stock OP15 buried the one that mattered.
         for (s, t) in [
             ("/data/user", "/data_mirror/data_ce/null"),
             ("/data/media", "/mnt/pass_through/0/emulated"),
@@ -3346,8 +2063,6 @@ mod tests {
 
     #[test]
     fn a_declined_framework_still_beats_the_target_rule() {
-        // Ordering matters: a framework mount onto an injectable target must be
-        // declined for being a framework, not silently absorbed.
         let src = PathBuf::from("/data/adb/modules/anything/bin/dex2oat");
         let builtins: Vec<String> = BUILTIN_SKIPS.iter().map(|s| s.to_string()).collect();
         assert!(matches!(
@@ -3356,10 +2071,7 @@ mod tests {
         ));
     }
 
-    /// FINDING-2, the case marker-detection cannot reach: a framework that ships
-    /// none of the known files (ReZygisk's `machikado.arm64`, Zygisk Next's
-    /// `mazoku`) but still binds dex2oat. Identifying it by that target must then
-    /// protect the ORDINARY mount it also owns.
+    /// Finding-2, the case marker-detection cannot reach: a framework that ships none of the
     #[test]
     fn a_module_that_hooks_anywhere_has_all_its_mounts_declined() {
         const ROWS: &str = "\
@@ -3374,7 +2086,6 @@ mod tests {
         assert!(hookers.contains("obfuscated_fw"), "must be identified by the path it hooks");
         assert!(!hookers.contains("plain_mod"), "an ordinary module must not be swept in");
 
-        // Its unrelated mount is spared...
         let d = classify(
             Path::new("/data/adb/modules/obfuscated_fw/system/etc/f"),
             Path::new("/system/etc/f"),
@@ -3385,7 +2096,6 @@ mod tests {
         );
         assert!(matches!(d, Some(Disposition::Declined(Declined::HooksElsewhere(_)))));
 
-        // ...while an ordinary module's identical-shaped mount still absorbs.
         let d = classify(
             Path::new("/data/adb/modules/plain_mod/system/etc/g"),
             Path::new("/system/etc/g"),
@@ -3397,9 +2107,7 @@ mod tests {
         assert!(matches!(d, Some(Disposition::Absorb)));
     }
 
-    /// Two mountpoints of one filesystem subtree are the same content. OnePlus
-    /// mounts `254:34 /` at both `/my_product` and `/mnt/vendor/my_product`, which
-    /// is why a single `mount --bind` there shows up twice in mountinfo.
+    /// Two mountpoints of one filesystem subtree are the same content
     #[test]
     fn mount_aliases_pair_mountpoints_sharing_dev_and_root() {
         let rows = parse_mountinfo(&[
@@ -3414,17 +2122,14 @@ mod tests {
             PathBuf::from("/mnt/vendor/my_product"),
             PathBuf::from("/my_product")
         )));
-        // Both directions, so either path can be the one absorb was handed.
         assert!(a.contains(&(
             PathBuf::from("/my_product"),
             PathBuf::from("/mnt/vendor/my_product")
         )));
-        // A lone mountpoint is nobody's alias.
         assert!(!a.iter().any(|(x, _)| x == Path::new("/data")));
     }
 
-    /// A per-UID rule serves one UID. Dropping a global mount because of one
-    /// would expose the stock file to every other UID.
+    /// A per-UID rule serves one UID
     #[test]
     fn live_injections_ignores_per_uid_and_non_inject_rules() {
         let live = live_injections(
@@ -3437,9 +2142,7 @@ mod tests {
         assert!(live.contains_key(Path::new("/system/etc/a")));
     }
 
-    /// The case this exists for: a module still bind-mounts a directory whose
-    /// files NoMount is already injecting, and the bind propagated to a second
-    /// mountpoint that `serve_mode` refuses (`/mnt/...`). Both are redundant.
+    /// The case this exists for: a module still bind-mounts a directory whose files NoMount is
     #[test]
     fn a_bind_over_already_injected_content_is_redundant_through_either_path() {
         let d = tempfile::tempdir().unwrap();
@@ -3462,19 +2165,13 @@ mod tests {
         let red = Redundancy::new(&list, &rows);
 
         assert!(red.covers(&src, Path::new("/my_product/media/bootanimation")));
-        // The twin absorb calls "not a ROM partition": same subtree, so the rules
-        // that cover the servable path cover this one too.
         assert!(red.covers(&src, Path::new("/mnt/vendor/my_product/media/bootanimation")));
 
-        // One file not covered is enough to disqualify the whole bind: dropping it
-        // would expose the stock file underneath that one name.
         std::fs::write(src.join("extra.zip"), b"x").unwrap();
         assert!(!red.covers(&src, Path::new("/my_product/media/bootanimation")));
     }
 
-    /// A rule at the right target but pointing at a DIFFERENT file means the mount
-    /// is shadowing content the engine would otherwise serve — the opposite of
-    /// redundant, and unmounting it would change what apps read.
+    /// A rule at the right target but pointing at a different file means the mount is
     #[test]
     fn a_rule_from_another_source_does_not_make_a_bind_redundant() {
         let d = tempfile::tempdir().unwrap();
@@ -3482,12 +2179,11 @@ mod tests {
         std::fs::write(&src, b"x").unwrap();
         let red = Redundancy::new("/system/etc/f -> /data/adb/modules/other/system/etc/f", &[]);
         assert!(!red.covers(&src, Path::new("/system/etc/f")));
-        // ...and with the rule naming this very file, it is.
         let red = Redundancy::new(&format!("/system/etc/f -> {}", src.display()), &[]);
         assert!(red.covers(&src, Path::new("/system/etc/f")));
     }
 
-    /// An empty directory proves nothing, and a missing source proves nothing.
+    /// An empty directory proves nothing, and a missing source proves nothing
     #[test]
     fn nothing_to_prove_is_not_redundant() {
         let d = tempfile::tempdir().unwrap();
@@ -3498,12 +2194,7 @@ mod tests {
         assert!(!red.covers(&d.path().join("missing"), Path::new("/system/etc/x")));
     }
 
-    /// Whether a target is serving its source is judged on SIZE, not mtime. An
-    /// injection mirrors the stock file's mtime on purpose, so a rule that serves
-    /// perfectly still reports a different mtime from the file it serves --
-    /// measured on an OP11, where 0 of 118 live rules matched on mtime and 116
-    /// matched on size. An mtime comparison would call every one of them "not
-    /// serving" and re-issue it, which is the d_drop this guard exists to avoid.
+    /// Whether a target is serving its source is judged on size, not mtime
     #[test]
     fn serving_is_judged_on_size_not_mtime() {
         let d = tempfile::tempdir().unwrap();
@@ -3511,46 +2202,34 @@ mod tests {
         let source = d.path().join("source");
         std::fs::write(&served, b"1234").unwrap();
         std::fs::write(&source, b"1234").unwrap();
-        // Push the source's mtime far from the served file's, the way an
-        // injection that mirrors stock metadata leaves them.
         let c = std::ffi::CString::new(source.to_str().unwrap()).unwrap();
         let times = libc::utimbuf { actime: 1_000_000, modtime: 1_000_000 };
         assert_eq!(unsafe { libc::utime(c.as_ptr(), &times) }, 0);
         assert!(already_serving(&served, &source));
-        // A size difference is the drift this must still catch: it is what a
-        // dropped bind leaves behind when the rule underneath never took effect.
         std::fs::write(&served, b"12345").unwrap();
         assert!(!already_serving(&served, &source));
-        // Nothing to compare is not "serving".
         assert!(!already_serving(&d.path().join("gone"), &source));
     }
 
-    /// A redundant bind is only actionable while Android runs if re-asserting its
-    /// rules afterwards is safe. On `my_*` it is not, so it is reported instead.
+    /// A redundant bind is only actionable while Android runs if re-asserting its rules
     #[test]
     fn my_partitions_are_never_dropped_at_runtime() {
         let aliases = vec![(
             PathBuf::from("/mnt/vendor/my_product"),
             PathBuf::from("/my_product"),
         )];
-        // Both the servable path and its /mnt twin resolve to a my_* rule.
         assert!(!runtime_droppable(Path::new("/my_product/media/bootanimation"), &aliases));
         assert!(!runtime_droppable(
             Path::new("/mnt/vendor/my_product/media/bootanimation"),
             &aliases
         ));
-        // An ordinary partition stays actionable.
         assert!(runtime_droppable(Path::new("/system/etc/f"), &aliases));
         assert!(runtime_droppable(Path::new("/product/media/x.zip"), &[]));
     }
 
-    /// `/mnt/...` cannot carry an injection, but its same-subtree twin can, and
-    /// that is where the rules have to be re-asserted.
+    /// `/mnt/...` cannot carry an injection, but its same-subtree twin can, and that is where
     #[test]
     fn the_servable_twin_is_where_rules_land() {
-        // Deliberately not a my_* pair: `serve_mode` only treats my_* as injectable
-        // while the `my_hookless` marker exists, which is a property of the device
-        // under test, not of this function.
         let aliases = vec![
             (PathBuf::from("/mnt/vendor/product"), PathBuf::from("/product")),
             (PathBuf::from("/product"), PathBuf::from("/mnt/vendor/product")),
@@ -3559,20 +2238,17 @@ mod tests {
             servable(Path::new("/mnt/vendor/product/media/b"), &aliases),
             PathBuf::from("/product/media/b")
         );
-        // Already servable: unchanged.
         assert_eq!(
             servable(Path::new("/system/etc/f"), &aliases),
             PathBuf::from("/system/etc/f")
         );
-        // No alias to fall back on: returned as-is, and the caller's
-        // runtime_droppable/serve_mode checks still refuse it.
         assert_eq!(
             servable(Path::new("/mnt/vendor/other/f"), &aliases),
             PathBuf::from("/mnt/vendor/other/f")
         );
     }
 
-    /// The built-ins are a floor the skip file cannot lower.
+    /// The built-ins are a floor the skip file cannot lower
     #[test]
     fn user_skip_entries_add_to_the_builtins() {
         let (list, _) = skip_list();
@@ -3588,57 +2264,34 @@ mod tests {
         assert_eq!(rows[0].target, PathBuf::from("/c d"));
     }
 
-    /// A non-ASCII path that ALSO contains an escape must survive intact.
-    ///
-    /// Both are needed to reproduce: without a backslash `unescape` returns the
-    /// string untouched. With one, the old byte-at-a-time `as char` was Latin-1,
-    /// so each byte of a multi-byte character became its own U+00xx and was
-    /// re-encoded -- handing umount2() and the injector a path that no longer
-    /// names the mount.
+    /// A non-ASCII path that also contains an escape must survive intact
     #[test]
     fn unescape_preserves_non_ascii() {
         let rows = parse_mountinfo("1 1 0:1 /caf\u{e9}\\040mod /data/caf\u{e9}\\040mod rw - t s rw");
         assert_eq!(rows[0].root, "/café mod");
         assert_eq!(rows[0].target, PathBuf::from("/data/café mod"));
 
-        // Emoji: 4-byte UTF-8, the worst case for the old code.
         let rows = parse_mountinfo("1 1 0:1 /a\u{1F600}b\\040c /x\u{1F600}y\\040z rw - t s rw");
         assert_eq!(rows[0].root, "/a\u{1F600}b c");
         assert_eq!(rows[0].target, PathBuf::from("/x\u{1F600}y z"));
 
-        // The escapes mountinfo actually emits still decode.
         let rows = parse_mountinfo("1 1 0:1 /a\\011b /c\\012d rw - t s rw");
         assert_eq!(rows[0].root, "/a\tb");
         assert_eq!(rows[0].target, PathBuf::from("/c\nd"));
     }
 
-    /// A non-UTF-8 path must cost ONE ROW, not the whole mount table.
-    ///
-    /// This is the test the previous one could not be: it goes through the byte
-    /// path production uses. `read_to_string` returned `Err` on any invalid UTF-8
-    /// anywhere in the file, and the kernel escapes only space, tab, newline and
-    /// backslash — so one Latin-1 filename in any mount on the device failed the
-    /// read, and `mount.rs` treats an unreadable mount table as fatal. The result
-    /// was no injections at all, every boot.
-    ///
-    /// The old tests fed `parse_mountinfo` a `&str`, which cannot even express
-    /// the input that broke it.
+    /// A non-UTF-8 path must cost one row, not the whole mount table
     #[test]
     fn one_undecodable_path_costs_one_row_not_the_table() {
         use std::os::unix::ffi::OsStrExt;
         let mut body: Vec<u8> = Vec::new();
         body.extend_from_slice(b"1 1 0:1 /before /data/before rw - t s rw\n");
-        // 0xE9 alone is not valid UTF-8: a Latin-1 'e-acute' in a path, which the
-        // kernel passes through verbatim.
         body.extend_from_slice(b"2 1 0:1 /caf\xe9 /data/caf\xe9 rw - t s rw\n");
         body.extend_from_slice(b"3 1 0:1 /after /data/after rw - t s rw\n");
 
         let rows = parse_mountinfo_bytes(&body);
         assert_eq!(rows.len(), 3, "the undecodable row must not take its neighbours");
 
-        // ...and its TARGET is byte-exact, because that is what umount2 and
-        // `still_mounted` compare. `root` must be text (it is prefix-matched), so
-        // this row's is lossy — the target is the one that has to survive.
         assert_eq!(rows[0].target, PathBuf::from("/data/before"));
         assert_eq!(rows[2].target, PathBuf::from("/data/after"));
         assert_eq!(
@@ -3648,13 +2301,7 @@ mod tests {
         );
     }
 
-    /// A re-absorbed target records the source it is being served from NOW.
-    ///
-    /// The merge skipped any target already in the record, so the pair this pass
-    /// had just injected was discarded and the FIRST source it was ever absorbed
-    /// from stayed. `reapply_absorbed_pairs` re-serves from the record after a
-    /// `clear`, so once a module update moved its APK the record pointed at a
-    /// path that no longer exists — and went on claiming the rule was live.
+    /// A re-absorbed target records the source it is being served from now
     #[test]
     fn re_absorbing_a_target_records_the_new_source() {
         let t = PathBuf::from("/product/app/A/A.apk");
@@ -3670,7 +2317,6 @@ mod tests {
             "the record must name the source this pass served, not the first one ever absorbed"
         );
 
-        // An unrelated target is still appended, and an untouched one is untouched.
         let other = PathBuf::from("/product/app/B/B.apk");
         let other_src = PathBuf::from("/data/adb/modules/m/product/app/B/B.apk");
         merge_absorbed(&mut all, vec![(other.clone(), other_src.clone())]);
@@ -3679,14 +2325,7 @@ mod tests {
         assert_eq!(all[1], (other, other_src));
     }
 
-    /// A row whose SOURCE is gone is dropped even when no module owns it.
-    ///
-    /// `owning_module` reads the id out of `/data/adb/modules/<id>/...`, so a
-    /// ReVanced-class row -- payload in `/data/adb/rvhc/`, bound over
-    /// `/data/app/.../base.apk` -- has no id and took the keep-everything arm
-    /// forever. Measured on an OP15 after uninstalling both such modules: the
-    /// sources were deleted, the rules were already gone, and the record still
-    /// claimed two absorptions.
+    /// A row whose source is gone is dropped even when no module owns it
     #[test]
     fn a_row_whose_source_vanished_is_dropped_even_with_no_owning_module() {
         let rvhc = (
@@ -3698,7 +2337,6 @@ mod tests {
             PathBuf::from("/data/adb/modules/still_here/product/app/A/A.apk"),
         );
 
-        // Source gone, no owning module -> dropped.
         let (kept, gone) = prune_absorbed_pairs(
             vec![rvhc.clone(), owned.clone()],
             |id| id == "still_here",
@@ -3708,31 +2346,16 @@ mod tests {
         assert_eq!(gone.len(), 1);
         assert!(gone[0].contains("rvhc"), "{gone:?}");
 
-        // Source still there -> kept, however unattributable.
         let (kept, gone) = prune_absorbed_pairs(vec![rvhc.clone()], |_| true, |_| true);
         assert_eq!(kept, vec![rvhc], "a live source is not ours to drop");
         assert!(gone.is_empty());
     }
 
-    /// A path that mountinfo OCTAL-ESCAPED cannot forge a row in either record.
-    ///
-    /// The gate has to run on the DECODED path: `unescape_bytes` turns `\012`
-    /// back into a real newline and `\011` into a real tab, so a module that
-    /// ships a directory whose name carries them — and binds it over a ROM path —
-    /// hands absorb a path that splits both line-oriented records into two. The
-    /// second line reads back as a real recorded rule (target = another app's
-    /// `base.apk`, source = the module's payload) that is re-served as root at
-    /// every boot, relabelled `apk_data_file`, chased to the app's current install
-    /// by `refresh_app_apks`, and never pruned while the payload exists — so it
-    /// outlives the module's uninstall, attributed to nobody. In the tmpfs record
-    /// a tab-less forged line is worse still: `parse_tmpfs_record` reads it as an
-    /// UNSTAMPED entry, which `tmpfs_entry_lives` never expires.
+    /// A path that mountinfo octal-escaped cannot forge a row in either record
     #[test]
     fn an_octal_escaped_newline_cannot_forge_a_record_row() {
         let victim = "/data/app/~~aa==/com.victim-bb==/base.apk";
         let payload = "/data/adb/persist/pay.apk";
-        // Field 5 is the mount TARGET. The kernel writes newline as \012, tab as
-        // \011 — exactly the two separators the two records use.
         let rows = parse_mountinfo(&format!(
             "1 1 0:1 / /system/etc/x\\012{victim}\\011{payload} rw - t s rw"
         ));
@@ -3746,7 +2369,6 @@ mod tests {
             "the shared gate must reject the decoded path"
         );
 
-        // absorbed.list: the forged pair is dropped, the honest one survives.
         let ok_t = PathBuf::from("/system/etc/ok");
         let ok_s = PathBuf::from("/data/adb/modules/ok/system/etc/ok");
         let body = absorbed_pairs_body(&[
@@ -3757,7 +2379,6 @@ mod tests {
         let back = parse_absorbed_pairs(&body);
         assert_eq!(back, vec![(ok_t, ok_s)], "only the representable row may be written");
 
-        // absorbed-tmpfs.list: same, and the honest entry keeps its stamp.
         let ok = PathBuf::from("/product/app/Ok");
         let body = absorbed_tmpfs_body(&[
             (target, "boot-1".to_string()),

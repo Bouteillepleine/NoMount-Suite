@@ -1,66 +1,10 @@
 #!/system/bin/sh
-# Runs when the metamodule is uninstalled.
-#
-# service.sh writes /data/adb/bindhosts/mode_override.sh to select bindhosts'
-# mountless mode. That file is conditional on this Suite being live, so it is
-# inert once we are gone -- but leaving it behind is still wrong: install a
-# DIFFERENT metamodule later and a file we wrote would start selecting a mode
-# under something we do not control.
-#
-# Only remove our own. A user's hand-written override never carries the marker.
 _ovr=/data/adb/bindhosts/mode_override.sh
 if [ -f "$_ovr" ] && grep -q 'NoMount Suite' "$_ovr" 2>/dev/null; then
     rm -f "$_ovr"
 fi
 unset _ovr
 
-# Our whole state directory. Everything in here is ours -- config the WebUI
-# writes, caches, logs, and the self-disable flag -- and none of it means
-# anything once the module is gone.
-#
-# `disabled` is the one that actually bites. The bootloop guard writes it and
-# only the WebUI clears it, so leaving it behind meant the classic recovery
-# ("uninstall, reinstall") produced an install that reports success, injects
-# nothing, and never says why -- because the fresh module reads the old
-# flag on its first boot.
-# BUT NOT THE USER'S OWN CONFIG. ksud runs this on an UPDATE too, not only on a
-# real uninstall, so a plain `rm -rf` here silently threw away everything the
-# user had configured every time they flashed a newer Suite over an older one.
-# Measured on OP15 (2026-08-28, v1.3.106 -> v1.3.107): the hide list, the module
-# blocklist and the `my_hookless` opt-in all vanished. Losing the marker alone
-# moved 85 my_* files from injection back to bind mounts -- a silent revert to a
-# different serving mode, reported by `check` as someone else's foreign mounts.
-#
-# So: stash the user-owned files, drop everything else, and let customize.sh put
-# them back. The operational flags are deliberately NOT stashed -- `disabled` in
-# particular MUST die here, because that is the whole reason this rm exists.
-#
-# ...and ONLY on an update. This script runs for both, and a stash left behind by
-# a genuine uninstall is never collected: customize.sh is the only thing that
-# removes it, and after a real removal customize.sh never runs again. That left
-# /data/adb/nomount.bak on disk forever -- named after the module the user just
-# deleted, holding `uidhide`, which is the list of apps they were hiding from.
-# The header three paragraphs up promises none of this survives us, so it must
-# not.
-#
-# The discriminator is the manager's own `remove` marker: KernelSU, APatch and
-# Magisk all write it into the module directory when the USER asks for removal
-# and run this script at the next boot, whereas an update extracts the new module
-# over the old one with no marker at all. Belt and braces -- both boot entry
-# points (metamount.sh and post-fs-data.sh) also sweep a stash that outlived a
-# boot, so a manager that does not use the marker still cannot leave one lying
-# around. NOT service.sh, which this comment used to name and which has never
-# touched the file; that mistake is also why the removal branch below did not
-# think it had to clean up after itself.
-# `${0%/*}` on a SLASH-LESS `$0` expands to `$0` itself, so `sh uninstall.sh`
-# from inside the module directory makes MODDIR="uninstall.sh", the `remove`
-# marker test below is false, and a GENUINE REMOVAL takes the update branch --
-# creating /data/adb/nomount.bak holding `uidhide` and leaving it there forever,
-# the one outcome the header says must not happen. Both managers pass an absolute
-# path today (ksud joins it, Magisk builds MODULEROOT/<id>/uninstall.sh), so this
-# is insurance, not an observed bug; it is cheap and this is the one script whose
-# wrong branch leaks the hide list. Same shape uidwatch.sh uses, which just hard-
-# codes the path because inotifyd gives it no useful $0 at all.
 case "$0" in
     */*) MODDIR="${0%/*}" ;;
     *)   MODDIR=/data/adb/modules/meta-nomount ;;
@@ -71,67 +15,13 @@ _nmlog() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [uninstall] $*" >> /data/adb/nomount/boot.log 2>/dev/null
 }
 if [ -f "$MODDIR/remove" ]; then
-    # ...and take any stash ALREADY on disk with us. Declining to CREATE one is
-    # only half the promise the header makes. A stash survives a flash whose
-    # customize.sh aborted before it could consume one -- the sha256 refusal and
-    # the metamodule-conflict refusal both exit before the restore loop -- and the
-    # sweep that would otherwise collect it lives in the two BOOT entry points,
-    # neither of which runs again once the module is gone. So it sat there
-    # forever, named after the module the user had just deleted, holding `uidhide`:
-    # the list of apps they were hiding from.
     _nmlog "removal requested - dropping the state directory, and any stash left by an unfinished install, without saving anything"
     rm -rf "$_bak"
 elif [ -d /data/adb/nomount ]; then
-    # Everything the USER chose, and the operational records that cannot be
-    # rebuilt from anywhere else:
-    #   uidhide/.conf/.cache  the hide list, its policy, and the resolved-appid
-    #                         mirror the post-fs-data pass hides from. Losing the
-    #                         mirror leaves every app unhidden from post-fs-data
-    #                         to boot_completed on the first boot after an update.
-    #   blocklist             module ids the mount pass must not inject.
-    #   my_hookless           the my_* serving mode. Losing it moved 85 files from
-    #                         injection back to bind mounts on an OP15.
-    #   absorb-skip.txt       hand-edited opt-outs.
-    #   whiteouts.txt         durable hides.
-    #   snapshot.txt          the baseline `verify` diffs against.
-    #   spoof.conf            the user's `fix_shell_tmp` choice. customize.sh says
-    #                         in as many words that an existing file "is
-    #                         deliberately left where it is ... it may hold a
-    #                         deliberate fix_shell_tmp=0" -- which stopped being
-    #                         true the moment this rm started running on updates.
-    #   absorbed.list         the ONLY thing that can re-serve a patched-APK rule
-    #                         for a module that no longer mounts. absorb.rs guards
-    #                         this file against a truncating rewrite in three
-    #                         places; deleting it wholesale on every update made
-    #                         all three moot.
-    #   binds.list            the only record of the my_* binds we made, and of the
-    #                         ROM SELinux label we put on each backing file. Drop
-    #                         it and the next boot cannot tear those down or put
-    #                         the labels back, so a module file keeps a partition
-    #                         label under /data/adb indefinitely.
-    #   absorbed-tmpfs.list   the ROM directories absorb emptied in place of a
-    #                         module's tmpfs. run_mount re-APPLIES these after its
-    #                         `nm clear` and deliberately cannot re-derive them
-    #                         ("run_mount runs at post-fs-data, where a module's
-    #                         own script may not have re-mounted its tmpfs yet"),
-    #                         so losing the file un-hides every one of those
-    #                         directories from post-fs-data until absorb rebuilds
-    #                         the record after boot_completed. It was on neither
-    #                         list, with no note saying why -- the exact "saved and
-    #                         never returned" asymmetry this comment warns about.
-    #   apkstate.list         what we last served for each ROM APK. Without it
-    #                         pmcache::sync takes its `seeding` branch on the next
-    #                         pass and adopts whatever is there, so an update that
-    #                         ALSO changes a served APK skips the PackageManager
-    #                         cache drop -- the "Theme.AppCompat" force-close that
-    #                         module exists to prevent.
     _kept=0
     _lost=0
     rm -rf "$_bak"
     if mkdir -p "$_bak" 2>/dev/null && chmod 0700 "$_bak" 2>/dev/null; then
-        # Match the parent's label explicitly rather than relying on the type
-        # transition, exactly as customize.sh does for $NMDIR itself: the files
-        # inside name which apps are being hidden from.
         chcon u:object_r:adb_data_file:s0 "$_bak" 2>/dev/null
         for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
                   absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
@@ -140,60 +30,27 @@ elif [ -d /data/adb/nomount ]; then
             if cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null; then
                 _kept=$((_kept + 1))
             else
-                # A `cp -p` that dies part-way (ENOSPC) leaves a TRUNCATED file,
-                # and customize.sh restores on `[ -e ]` alone -- so a half-copied
-                # `uidhide` comes back as a legal hide list that hides nobody,
-                # which is precisely the silent state statefile.rs exists to
-                # prevent. A file we could not copy whole must not be there.
                 rm -f "$_bak/$_f" 2>/dev/null
                 _lost=$((_lost + 1))
             fi
         done
         unset _f
     else
-        # NEVER SILENT. The `rm -rf` below runs either way, so a stash that could
-        # not be created means the user's configuration is about to be destroyed
-        # with nothing to restore it from -- and this script had no diagnostic
-        # path at all, which made a total loss indistinguishable from a clean
-        # update.
         _lost=-1
         _wipe_ok=0
     fi
     if [ "$_lost" = "-1" ]; then
-        _nmlog "could not create $_bak - the hide list, whiteouts and settings will be LOST by this update"
+        _nmlog "could not create $_bak - the hide list, whiteouts and settings will be lost by this update"
     elif [ "$_lost" -gt 0 ]; then
-        # ...and KEEP the state directory, for the same reason the mkdir-failure
-        # arm does. This branch logged "will be lost" and then the `rm -rf` below
-        # made it true -- destroying the ORIGINALS of the very files the stash
-        # could not copy. The reasoning below ("the wipe exists for exactly one
-        # thing -- clearing `disabled` ... and that is one file") applies verbatim
-        # and was simply not extended to a PARTIAL stash. customize.sh's restore
-        # never overwrites a file already present, so the stashed copies and the
-        # live originals reconcile correctly.
         _wipe_ok=0
-        _nmlog "stashed $_kept setting(s) to $_bak, but $_lost could NOT be copied - keeping the live state directory so those survive"
+        _nmlog "stashed $_kept setting(s) to $_bak, but $_lost could not be copied - keeping the live state directory so those survive"
     else
         _nmlog "stashed $_kept setting(s) to $_bak for the incoming install"
     fi
     unset _kept _lost
 fi
 
-# ...and DO NOT WIPE when there is nothing to restore from.
-#
-# The block above logs "the hide list, whiteouts and settings will be LOST by
-# this update" and then the `rm -rf` below made that true. The wipe exists for
-# exactly one thing -- clearing `disabled` so a re-flash is not parked by the
-# previous install's guard trip -- and that is one file. Everything else it
-# removes is either regenerated or is the user's configuration.
-#
-# So when the stash could not be created, take the one file the wipe is for and
-# leave the rest. customize.sh copes: its restore never overwrites a file that is
-# already present.
 if [ "${_wipe_ok:-1}" = 0 ]; then
-    # The LITERAL path. $NMDIR is lib.sh's and this script does not source lib.sh
-    # (it defines its own _nmlog); the identifier appeared exactly once in the
-    # file, here, so the one message that fires when the user's hide list is at
-    # risk rendered as "keeping : the stash failed...".
     _nmlog "keeping /data/adb/nomount: the stash failed, so wiping it would destroy the only copy"
     rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount 2>/dev/null
 else

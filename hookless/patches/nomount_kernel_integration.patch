@@ -3,8 +3,8 @@ One integration patch for every supported kernel: 4.9 4.14 4.19 5.4 5.10 5.15
 
 There used to be ten of these, one per version, and the content was the same
 content ten times over: the fs/Kconfig body was byte-identical in all ten, and
-so was the fs/proc/task_mmu.c body. What differed was only the CONTEXT each
-hunk was anchored on -- and five of the ten (5.10 5.15 6.1 6.6 6.12) carried a
+so was the fs/proc/task_mmu.c body. What differed was only the context each
+hunk was anchored on - and five of the ten (5.10 5.15 6.1 6.6 6.12) carried a
 task_mmu.c hunk whose header understated its own line counts, which `git apply`
 rejects outright and only `patch --fuzz` would take.
 
@@ -15,17 +15,17 @@ assumed:
 
   fs/Kconfig          `menu "File systems"` and the DCACHE_WORD_ACCESS block
                       that opens the menu on all ten. The config therefore
-                      lands at the TOP of the File systems menu rather than at
+                      lands at the top of the File systems menu rather than at
                       the bottom, where the only anchor on offer is a bare
-                      `endmenu` -- and fs/Kconfig has five of those.
-  fs/Makefile         the quota/proc/kernfs/sysfs run. It has to come AFTER the
+                      `endmenu` - and fs/Kconfig has five of those.
+  fs/Makefile         the quota/proc/kernfs/sysfs run. It has to come after the
                       `obj-y :=` assignment, because CONFIG_NOMOUNT=y expands
                       the new line to `obj-y +=` and a `:=` below it would
                       throw the object away again. The end of the obj-y block
                       (where the old per-version hunks sat) is where the ten
                       trees diverge most, and on 4.9 it has no trailing context
                       to anchor on at all.
-  fs/proc/task_mmu.c  the dev/ino pair and the pgoff line after it -- the only
+  fs/proc/task_mmu.c  the dev/ino pair and the pgoff line after it - the only
                       four consecutive lines of show_map_vma() that 4.9 and
                       6.18 still agree on. The `if (file)` above them became
                       `if (vma->vm_file)` at 6.12, and file_inode() became
@@ -44,7 +44,7 @@ diff --git a/fs/Kconfig b/fs/Kconfig
 @@ -5,5 +5,12 @@
  menu "File systems"
  
-+config NOMOUNT
++config nomount
 +	bool "NoMount Path Redirection Subsystem"
 +	default n
 +	help

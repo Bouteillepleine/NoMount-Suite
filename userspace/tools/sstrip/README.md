@@ -11,7 +11,7 @@ Vendored from ELFkickers 3.2 by Brian Raiter, so the build does not depend on
   sha256 `9b81e6c53e0c94fc198d9882eb737156f36d565152dc32118897c77b06a2687c`
 - License: GPLv2+ (see the header on each file); compatible with this repo's GPLv3.
 
-Sources are unmodified. Only the subset `sstrip` links is kept — the rest of
+Sources are unmodified. Only the subset `sstrip` links is kept: the rest of
 libelfrw (`elfrw_dyn/rel/shdr/sym/ver`) is unreferenced by `sstrip.c`. The
 Makefile is ours, replacing upstream's two-directory `libelfrw.a` build.
 

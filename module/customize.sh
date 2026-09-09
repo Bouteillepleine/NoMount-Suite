@@ -1,35 +1,18 @@
 #!/system/bin/sh
-# NoMount metamodule installer. Requires a CONFIG_NOMOUNT kernel (the Prism
-# engine, reached over private raw netlink -- there is no /dev/nomount node).
 ui_print "- Installing NoMount metamodule"
 ui_print "- version $(grep_prop version "$MODPATH/module.prop")"
 
-# --- integrity check: verify bundled files against their sha256 manifest ---
-# Catches a CORRUPTED DOWNLOAD (a truncated or bit-rotted zip) before we run a
-# root binary. It is deliberately not an authenticity check and cannot be one:
-# the manifest ships inside the same zip, so anyone who alters a file alters the
-# manifest with it. Verifying provenance needs a signature over the zip against a
-# key that is not in the zip.
 SUMS="$MODPATH/nomount.sha256sums"
 if [ -f "$SUMS" ]; then
     if command -v sha256sum >/dev/null 2>&1; then
-        # KEEP the output. `>/dev/null 2>&1` threw away the one thing that tells a
-        # corrupt download apart from a manifest this device cannot read at all --
-        # and the second case really happened: a manifest written in BINARY mode
-        # ("<hash> *./path") makes toybox read the asterisk as part of the
-        # filename, so every entry fails to open and the install aborts with the
-        # reason hidden. An abort with no reason is a bug report nobody can act on.
         _sumout=$(cd "$MODPATH" && sha256sum -c "$SUMS" 2>&1)
         if [ $? -eq 0 ]; then
             ui_print "- Integrity check passed ($(wc -l < "$SUMS") files)"
         else
             ui_print "*********************************************************"
-            ui_print "! Integrity check FAILED — a file does not match its hash."
+            ui_print "! Integrity check FAILED - a file does not match its hash."
             ui_print "! This zip is corrupted or was modified. Re-download it."
             ui_print "! What sha256sum -c reported:"
-            # Only the failing lines, and a bounded number of them: a manifest
-            # this device cannot parse fails EVERY entry, and 250 identical
-            # lines scrolled the actual message off the recovery screen.
             printf '%s\n' "$_sumout" | grep -v ': OK$' | head -n 8 | while IFS= read -r _l; do
                 ui_print "!   $_l"
             done
@@ -44,31 +27,25 @@ else
     ui_print "- No sha256 manifest bundled; skipping integrity check"
 fi
 
-# --- refuse to co-exist with another metamodule ---
-# KSU/APatch allow only ONE metamodule to own module mounting; two will fight
-# in post-fs-data (broken mounts / bootloop). Abort early with a clear message.
 for mp in /data/adb/modules/*/module.prop; do
     [ -f "$mp" ] || continue
     mdir="${mp%/module.prop}"
     id="${mdir##*/}"
-    [ "$id" = "meta-nomount" ] && continue          # our own (update/reinstall)
-    [ -f "$mdir/remove" ] && continue               # pending uninstall
-    [ -f "$mdir/disable" ] && continue              # disabled -> won't run
+    [ "$id" = "meta-nomount" ] && continue
+    [ -f "$mdir/remove" ] && continue
+    [ -f "$mdir/disable" ] && continue
     if grep -q '^metamodule=1' "$mp"; then
         other="$(grep '^name=' "$mp" | head -n1 | cut -d= -f2-)"
         ui_print "*********************************************************"
         ui_print "! Another metamodule is already installed:"
         ui_print "!   $id${other:+  ($other)}"
-        ui_print "! KernelSU/APatch allow only ONE metamodule."
+        ui_print "! KernelSU/APatch allow only one metamodule."
         ui_print "! Remove or disable it first, then flash NoMount."
         ui_print "*********************************************************"
         abort "- Aborting install: metamodule conflict"
     fi
 done
 
-# Make the per-ABI binaries executable — BOTH the Suite driver (nomount) and the
-# hookless netlink client (nm) it shells out to. Missing +x on nm makes the boot
-# mount pass abort before it can inject.
 for abi in arm64-v8a armeabi-v7a x86_64 x86; do
     for b in nomount nm; do
         if [ -f "$MODPATH/bin/$abi/$b" ]; then
@@ -77,37 +54,17 @@ for abi in arm64-v8a armeabi-v7a x86_64 x86; do
     done
 done
 
-# --- does this kernel actually have the engine? ---------------------------
-# The header above says this needs a CONFIG_NOMOUNT kernel, but nothing checked
-# it: installing on a kernel without the hookless engine "succeeded" and then
-# injected nothing, silently. `nm v` asks the engine its version over netlink and
-# answers nothing if it is not there.
-#
-# A WARNING, never an abort: flashing from recovery is legitimate and the
-# recovery kernel has no engine, so aborting would block a valid install.
 _abi=$(getprop ro.product.cpu.abi 2>/dev/null)
-# Same fallback the boot scripts carry. An empty ABI builds "$MODPATH/bin//nm",
-# which is never executable, so the probe below ([ -x "$_nm" ]) fell through in
-# silence and the install printed nothing about the engine at all.
 [ -n "$_abi" ] || _abi=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
 [ -n "$_abi" ] || _abi=arm64-v8a
 _nm="$MODPATH/bin/${_abi}/nm"
-# ABI FIRST, and loudly. The zip ships arm64-v8a only, and the boot scripts load
-# bin/$(getprop ro.product.cpu.abi)/nomount -- so on any other ABI every one of
-# them takes an `[ -x "$BIN" ]` branch that is false and the module is a silent
-# no-op from the first boot onward. The install said nothing about it, because
-# the engine probe below is itself gated on [ -x "$_nm" ] with no else: no ABI
-# directory means no nm, means no probe, means no output at all.
 if [ ! -d "$MODPATH/bin/${_abi}" ]; then
     ui_print "*********************************************************"
     ui_print "! This zip has no binaries for this device's ABI."
     ui_print "!   device ABI: ${_abi}"
     # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
-    # name, for an incident report. The names are ours (arm64-v8a, x86_64...) and
-    # `find` cannot produce a one-line summary without more plumbing than the
-    # message is worth.
     ui_print "!   shipped:    $(ls "$MODPATH/bin" 2>/dev/null | tr '\n' ' ')"
-    ui_print "! The module will install and then inject NOTHING, on every"
+    ui_print "! The module will install and then inject nothing, on every"
     ui_print "! boot, silently. NoMount is arm64-v8a only."
     ui_print "*********************************************************"
 fi
@@ -118,22 +75,17 @@ if [ -x "$_nm" ]; then
     else
         ui_print "*********************************************************"
         ui_print "! The kernel's NoMount engine did not answer."
-        ui_print "! From recovery this is normal — it will work after boot."
+        ui_print "! From recovery this is normal - it will work after boot."
         ui_print "! On a running system it means this kernel has no NoMount"
-        ui_print "! support: the module installs but injects NOTHING."
+        ui_print "! support: the module installs but injects nothing."
         ui_print "! Flash a NoMount-enabled kernel, then reboot."
         ui_print "*********************************************************"
     fi
 else
-    # The missing `else`. "The engine probe did not run" and "the engine did not
-    # answer" are different problems with the same symptom (nothing is injected),
-    # and this arm printed nothing at all -- so an install onto an unsupported ABI,
-    # or from a partial extraction that dropped the exec bit, reported success and
-    # then quietly did nothing forever.
     ui_print "*********************************************************"
     ui_print "! Could not run the engine probe: no executable at"
     ui_print "!   bin/${_abi}/nm"
-    ui_print "! The engine state is UNKNOWN and the module may inject"
+    ui_print "! The engine state is unknown and the module may inject"
     ui_print "! nothing. Re-flash the zip; a partial extraction or an"
     ui_print "! unsupported ABI is the usual cause."
     ui_print "*********************************************************"
@@ -141,42 +93,17 @@ fi
 
 NMDIR=/data/adb/nomount
 mkdir -p "$NMDIR"
-# The 5th argument is NOT optional here. set_perm() defaults its SELinux
-# context to u:object_r:system_file:s0, and the live policy grants every app
-# domain read+search on system_file (dir 0x11140053, file 0x2044412) while
-# granting NOTHING on adb_data_file -- so omitting it relabelled the whole
-# state directory on every install, and the only thing keeping spoof.conf,
-# uidhide and blocklist away from an app was /data/adb refusing
-# traversal one level up. Measured on OP15. Match the parent explicitly.
 set_perm "$NMDIR" 0 0 0700 u:object_r:adb_data_file:s0
 
-# Put back what uninstall.sh stashed. ksud runs the OLD module's uninstall.sh
-# when you flash a newer Suite over an older one, and that removes the state
-# directory -- so before this existed, every update silently threw away the hide
-# list, the module blocklist and the my_hookless opt-in. Losing the marker alone
-# switched 85 my_* files from injection back to bind mounts on a live OP15.
-#
-# Restore is best-effort and never overwrites: customize.sh seeds some of these
-# a few lines below, and a file already present is the newer truth.
 _bak=/data/adb/nomount.bak
 if [ -d "$_bak" ]; then
     _rn=0
-    # Must stay in step with uninstall.sh's stash list, which documents why each
-    # file is on it. A name on one list and not the other is a file that is
-    # saved and never returned, or returned and never saved -- both silent.
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
-        # REMOVE what a failed copy left, exactly as uninstall.sh does on the
-        # stash side ("A file we could not copy whole must not be there"). Here it
-        # matters more: a `cp -p` that dies part-way (ENOSPC) leaves a TRUNCATED
-        # file in the LIVE state directory, where the `[ -e ]` guard above and
-        # every later pass treat it as the newer truth and nothing repairs it.
         cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || { rm -f "$NMDIR/$_f" 2>/dev/null; continue; }
-        # Explicit label: omitting arg 5 defaults to system_file, which is
-        # app-readable. Match the parent, as every other state file does.
         set_perm "$NMDIR/$_f" 0 0 0600 u:object_r:adb_data_file:s0
         _rn=$((_rn + 1))
     done
@@ -186,78 +113,20 @@ if [ -d "$_bak" ]; then
     unset _rn
 fi
 unset _bak
-# Nothing is seeded into spoof.conf any more: the boot-identity add-on it
-# configured is gone, and the one key still read from it -- `fix_shell_tmp`,
-# which gates the /data/local/tmp restore in metamount.sh / post-fs-data.sh /
-# service.sh -- defaults to ON when the file or the key is absent, so a fresh
-# install needs no file at all. An EXISTING file is the user's and survives an
-# update: it may hold a deliberate fix_shell_tmp=0, and an installer that
-# silently removes state under /data/adb is a worse surprise than a stale
-# config. That claim used to be false -- uninstall.sh runs on updates too and
-# its `rm -rf` took spoof.conf with it, so every flash quietly put
-# fix_shell_tmp back to the default -- which is why the file is now on the
-# stash list above rather than merely described as safe. Re-assert its mode and
-# label if it is there, because it sits in a 0700 directory whose contents are
-# read as root: 0644 once made it the only group/world-readable file in the
-# state dir, and omitting set_perm's 5th argument relabelled it to
-# u:object_r:system_file:s0, which the live policy grants every app domain read
-# on (file 0x2044412) while granting nothing on adb_data_file.
 CONF="$NMDIR/spoof.conf"
 [ -f "$CONF" ] && set_perm "$CONF" 0 0 0600 u:object_r:adb_data_file:s0
 
-# --- per-UID hiding ---
-# The hide list used to share /data/adb/nomount/blocklist with the module-skip
-# list, so hiding an app also told the mount pass to skip a module of that name,
-# and the WebUI's unhide button could delete a module-skip entry. It has its own
-# file (uidhide) now; an existing shared file is split on first read.
 [ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
 
-# 0644, and READABLE is the whole requirement: lib.sh is sourced by every entry
-# point, never executed, and each of them stops with a kmsg line if it cannot read
-# it. `ksud module install` leaves files it does not know about at whatever the
-# zip carried, and the extraction has already been observed dropping bits, so say
-# the mode rather than inherit it.
-#
-# FOUR arguments, deliberately, and the comment here used to claim the opposite
-# ("the 5th argument is not optional here either") above a four-argument call --
-# so one of the two was wrong and a reader could not tell which. This is a file in
-# the MODULE TREE, where set_perm's default (u:object_r:system_file:s0) is what
-# ksud gives every other file under /data/adb/modules; naming a different context
-# for this one would make it the odd file out, and nothing here needs one. $NMDIR
-# is the opposite case and keeps its explicit label: it lives under /data/adb, not
-# in the module tree, its parent is adb_data_file, and its contents name which apps
-# are being hidden from. Same for uidwatch.sh and uninstall.sh below.
 [ -f "$MODPATH/lib.sh" ] && set_perm "$MODPATH/lib.sh" 0 0 0644
 
-# Executable, not just readable. `ksud module install` leaves the scripts it
-# does not know about at 0644, and whether the manager runs this one as
-# `sh uninstall.sh` or execs it directly is not something we can read off the
-# binary -- so the difference is only discovered by uninstalling, which is
-# exactly when nobody is watching. This file had never shipped in a zip at
-# all until now, so it has never run anywhere: give it the bit and the
-# question stops mattering.
 [ -f "$MODPATH/uninstall.sh" ] && set_perm "$MODPATH/uninstall.sh" 0 0 0755
 
-# --- absorb opt-out list -----------------------------------------------------
-# `nomount absorb` converts other modules' bind mounts into injections. Safe for
-# a plain file bind (exec through an injection is verified working), but a hook
-# framework installs its bind from NATIVE daemon code that differs between forks
-# and versions, and the failure mode is SILENT AND DELAYED: dex2oat runs during
-# dexopt on app install, not at boot, so a broken hook surfaces hours later as
-# "modules stopped applying to new apps" and is near-impossible to attribute.
-# Skipped by default. The cost is one file keeping the bind's dev/ino/mtime
-# tell, which `nomount check --plan` reports so it is not invisible. Delete a line to
-# absorb that module once you have verified your fork.
-# Migrate the pre-v1.2.1 extensionless name. COPY, never move: the outgoing
-# binary is still live until the next reboot and reads the OLD name, so renaming
-# here would silently drop its opt-outs for anything that runs absorb in that
-# window. The new binary prefers .txt and falls back to the old name, so both
-# work; the stale copy is simply ignored afterwards.
 [ -f "$NMDIR/absorb-skip" ] && [ ! -f "$NMDIR/absorb-skip.txt" ] && \
     cp -f "$NMDIR/absorb-skip" "$NMDIR/absorb-skip.txt"
 if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
     {
-        echo "# One per line: an absolute TARGET PATH PREFIX, or a module id."
+        echo "# One per line: an absolute target path prefix, or a module id."
         echo "#"
         echo "# You rarely need to add a hook framework here: absorb already leaves"
         echo "# alone everything mounted by a module that ships zygisk/<abi>.so (any"
@@ -283,78 +152,31 @@ if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
     } > "$NMDIR/absorb-skip.txt"
 fi
 set_perm "$NMDIR/absorb-skip.txt" 0 0 0600 u:object_r:adb_data_file:s0
-# A flash is an explicit user action, so the bootloop counter's premise -- "this
-# device keeps failing to finish booting on its own" -- no longer holds. Without
-# this, the classic recovery (flash the update that FIXES the bootloop) inherits
-# a counter already at 2: the new code's first boot trips it, writes `disabled`,
-# and skips the whole post-fs-data pass -- before any of the new code has
-# run once. The user sees the update "not help".
 rm -f "$NMDIR/bootcount"
 
-# `disabled` is NOT cleared here. The guard writes it, but a user can also write
-# it by hand to park the Suite, and silently undoing that on every upgrade would
-# be its own surprise. Say so instead -- loudly, because an install that reports
-# success and then injects nothing, with no explanation, is the worse outcome.
 if [ -e "$NMDIR/disabled" ]; then
-    ui_print "- ⚠️  The Suite is DISABLED on this device — it will inject nothing at boot."
+    ui_print "- ⚠️  The Suite is disabled on this device - it will inject nothing at boot."
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
 fi
 
-# THE LAST LINE ON SCREEN. Users read it, so it has to be the right next step
-# for the state this install actually ended in. Gating the POSITIVE line was
-# half the fix: `$_ev` is empty in FOUR distinct states and the old `elif [ -z
-# "$_ev" ]` collapsed them all into "flash a kernel", which is wrong for three.
-#
-#  1. `$_nm` was never executable -- an unsupported ABI (the box above says so)
-#     or a partial extraction that dropped +x. The probe never RAN, so the engine
-#     state is UNKNOWN and a kernel flash cannot fix either cause. The two get
-#     SEPARATE arms: only the extraction one can be fixed by re-flashing, and
-#     telling a 32-bit user to re-flash an arm64-only zip is the same dead end
-#     one door along.
-#  2. Flashed from recovery, where the box at the probe has just said "From
-#     recovery this is normal — it will work after boot" -- and the next line
-#     used to contradict it and send a user with a perfectly good kernel off to
-#     flash a kernel. GATED ON `-z "$_ev"`, because this arm is reachable with the
-#     engine RESPONDING: on a device whose recovery lives in boot.img (OP15 /
-#     OrangeFox) the recovery kernel IS the NoMount kernel and `nm v` answers
-#     there, so "the engine cannot answer" printed six lines under "Prism engine:
-#     v31 (responding)". `_ev` set + `disabled` present now falls to the last arm,
-#     which is the one that names the actual next step.
-#  3. Running system, no engine: the message is right, and now names somewhere
-#     to GET one. Three surfaces state this problem and none named a solution.
-#  4. `$_ev` set but the Suite is disabled: neither arm fired and the install
-#     ended with no next step at all, 12 lines below the DISABLED warning.
-#
-# ...and the success arm now says REBOOT. "Modules are injected mountlessly at
-# boot" reads as a statement of current fact; nothing is served until the reboot
-# (ksud stages to modules_update and promotes at boot, and the pass runs at
-# post-fs-data). The failure branch got a NEXT STEP and the success branch did not.
 _booted=$(getprop sys.boot_completed 2>/dev/null)
 if [ -n "$_ev" ] && [ ! -e "$NMDIR/disabled" ]; then
     ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
-    ui_print "- NEXT STEP: reboot. Nothing is served until you do."
+    ui_print "- next step: reboot. Nothing is served until you do."
 elif [ ! -d "$MODPATH/bin/${_abi}" ]; then
-    # SPLIT OUT of the arm below, because the two causes the comment names have
-    # different answers and only one of them had a remedy written. Re-flashing an
-    # arm64-only zip onto a 32-bit device is the same dead end one door along, and
-    # the box above has just said the zip is arm64-v8a only. Say so once, plainly,
-    # and do not send them round the loop again.
-    ui_print "- NEXT STEP: none — this zip is arm64-v8a only and this device is ${_abi}."
+    ui_print "- next step: none - this zip is arm64-v8a only and this device is ${_abi}."
     ui_print "  Re-flashing cannot help. Remove it from your manager."
 elif [ ! -x "$_nm" ]; then
-    ui_print "- NEXT STEP: re-flash this zip. The engine could not be probed (see above),"
+    ui_print "- next step: re-flash this zip. The engine could not be probed (see above),"
     ui_print "  so we cannot tell you whether your kernel has NoMount."
 elif [ -z "$_ev" ] && [ "$_booted" != "1" ]; then
     ui_print "- Installed from recovery, where the engine cannot answer."
-    ui_print "- NEXT STEP: reboot, then open the WebUI — it says whether your kernel has it."
+    ui_print "- next step: reboot, then open the WebUI - it says whether your kernel has it."
 elif [ -z "$_ev" ]; then
-    # Ahead of the `disabled` arm on purpose: with no driver, clearing the flag
-    # changes nothing. The missing kernel is the more fundamental of the two.
-    ui_print "- NEXT STEP: flash a kernel built with CONFIG_NOMOUNT, then reboot."
+    ui_print "- next step: flash a kernel built with CONFIG_NOMOUNT, then reboot."
     ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases"
     ui_print "  Until you do, this module is installed and doing nothing."
 else
-    # The one remaining state: the engine answered and `disabled` is present.
-    ui_print "- NEXT STEP: clear the disable flag (see above), then reboot."
+    ui_print "- next step: clear the disable flag (see above), then reboot."
 fi
 unset _booted

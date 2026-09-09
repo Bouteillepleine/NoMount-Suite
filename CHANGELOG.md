@@ -3,3791 +3,557 @@
 > **The Suite and the Prism engine update separately.**
 >
 > The engine is compiled into the kernel (`CONFIG_NOMOUNT=y`); the Suite is this
-> module. Installing a Suite update does **not** move the engine — for that you
+> module. Installing a Suite update does **not** move the engine - for that you
 > flash a kernel built from the matching `hookless/` source.
 >
 > That is normal, not a fault: the Suite is built to run on an older engine.
 > Anything that needs a newer one is **named** by `nomount check` and by the
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
-> update would buy you. The footer shows both numbers — `Suite vX · engine vY`.
-
-## v1.3.176 — engine v32 (unchanged)
-
-Two layout fixes to the Hidden apps list, both introduced by v1.3.174's own
-change and both caught on the phone rather than in review.
-
-Deduplicating that list added a note to the rows an explicit entry and a glob
-both cover — *"also covered by `*.duckdetector`"* — which is worth saying, since
-it is why removing one of them will not un-hide the app. But the status column
-was `flex: 0 0 auto`, so it never shrank, and the package name (`min-width: 0`,
-`word-break: break-all`) absorbed every pixel it took. On the rows carrying that
-note the name collapsed to **one character per line**.
-
-The note now sits on its own line under the row, where a second sentence belongs,
-and the status column can shrink so it can never crush the name again whatever
-text lands in it.
-
-Fixing that by letting the row wrap then moved the ✕ onto a line of its own
-whenever the name was long, so the buttons marched down the card instead of
-lining up. The row no longer wraps at all: the name, status and note share one
-growing column that wraps internally, and the buttons keep the same place on
-every row.
-
-## v1.3.174 — engine v32
-
-The audit before a release tag. Nine reviewers over the whole tree, on the build
-the phone was actually running, with a red team and a device pass. The target was
-round 8 itself: it had fixed ~150 things in one parallel pass — 4,406 insertions
-across 41 files, written by ten agents who could not see each other's work — and
-three defects had already escaped it and been caught by accident.
-
-**Seven of the nine findings below are round-8 fixes that landed on one side of an
-interface.** None of the gates can see that class: 210 tests, clippy, shellcheck,
-`mksh -n`, `dash -n` and `node --check` were green on every one of them.
-
-### The hide list was still reaching shared storage, one file over
-
-Round 8 withheld `boot.log` from a shared export because it captures `uid apply`'s
-stderr, which prints hide-list globs and package names. But `nmlog` tees the same
-line to `/dev/kmsg`, prefixed literally `nomount: ` — and the bundle also carried
-`dmesg | grep -i nomount`, ungated. **Every line the fix withheld was republished
-in the same folder**, under a dialog promising the opposite. Measured on the
-reference device: three such lines in the ring, `dmesg_restrict=0`.
-
-Separately, `redact_app_paths` existed and was wired into exactly one place. A
-`/data/app/<pkg>/base.apk` path names which app on the phone has a patched APK —
-the same class of secret — and four files in the bundle carry it: `rules.txt`
-(the whole rule dump; an absorbed APK is a rule whose *target* is that path),
-`check.txt`, `mountinfo.txt` (a ReVanced-class module binds its payload over it,
-so it is a mount point) and `incident.log`. Redaction is now the default for a
-shared destination rather than a list of filenames, so the next file added to the
-bundle is covered by construction.
-
-### The status card said "clean" while the engine was down
-
-On a device with no NoMount kernel — the commonest way to arrive here — the hero
-read red "No kernel driver" and forty pixels below it the shield read
-`clean · Mountless · 1 mount by design`, with a green "all clear" chip and a body
-saying "20 checks ran and found nothing to act on". `refreshStatus` lost a
-microtask race and the repaint hook only ever re-painted the health line.
-
-Fixed at the source, and measured old-versus-new by running the page's own script
-against the device's real data. The repaint costs no extra shell call.
-
-### An unexpected value blanked the whole app
-
-One check without an `id` threw inside `refreshAll`, which had no `.catch`, so the
-user lost the version, the hero and every card and had to restart the WebUI. The
-crash site is gone — deleted along with the manager banner it existed to serve —
-and any throw now costs one card instead of the page. `node --check` passes on
-code that throws at runtime; this was the third defect of that shape in this file.
-
-### Warnings you cannot act on are no longer warnings
-
-The Suite's own `my_*` bind mounts were amber. That is the default state on a
-OnePlus device, there is nothing wrong with it, and the reader cannot act on it —
-so it made the health line say "1 thing needs attention" while the card beside it
-said "Mountless · 2 mounts by design". It is a note now, which renders in the
-collapsed **Good to know** section, exactly like the hook framework's own mounts.
-
-`audit.rs` emits no amber at all any more. The rule is written down in three
-places so the next reader cannot undo it: **warn means a detector can see it *and*
-there is something you should change.** Every remaining red row was re-checked
-against it; none fires on a healthy setup, and each names an owner or a remedy.
-
-### The rest
-
-`verify` reported `DRIFT version` and `DRIFT engine` after any update — a red
-"Drift from snapshot" for two deliberate actions of your own. It now says, once
-and calmly, that the snapshot predates the update, and reports no drift.
-
-The manager card could read `⚠️ 0 rules · 0 RRO · 0 mounts — healthy` on a device
-serving 257: a blocked rule dump leaves the count at zero by design, and
-`service.sh` overwrote the boot-time card that knew better. It says
-`rule count unavailable` now, and the two arms round 8 added to the boot card are
-no longer erased a minute later.
-
-Hidden apps said 22 where every other surface said 19 — an app matched by both a
-glob and an exact entry got two rows and two ✕ buttons. Deduped on appid, and the
-exact entry wins, so every ✕ changes something visible.
-
-`touch` on a *directory* returns 0, so round 8's replacement for the boot-log
-redirection could not report the failure it was written for; the file-type repair
-the bootloop guard already uses is now applied to `boot.log` too. A module
-directory named with a trailing newline or a backslash could write another
-module's manager card. A path with leading or trailing whitespace produced a
-phantom rule that every reload re-added and failed to delete, forever. A bind
-rollback could delete the only copy of a file's original SELinux label. `absorb`
-now records before the irreversible unmount, not after.
-
-And `package.sh` shipped a stale `nm` for eight days without saying so — the
-staleness check guarded one of the two candidate paths. It guards both now, fails
-loudly when every candidate is stale, and can build `nm` with the NDK toolchain
-instead of only zig.
-
-### Engine v32
-
-`nm add` on a path whose parent is a file was accepted, listed and graded clean
-while serving nothing; it returns `-ENOTDIR`, like the sibling arm always has.
-`SEEK_DATA`/`SEEK_HOLE` on a NoMount directory answered a negative offset with
-`-EINVAL` where every real directory answers `-ENXIO` — both arms now use the same
-unsigned comparison the kernel itself does, so the answer is identical for every
-offset a caller would use in earnest.
-
-Needs a kernel rebuild to take effect. The wire protocol is unchanged and no KMI
-symbol moves.
-
-## v1.3.173 — engine v31 (unchanged)
-
-### A hook framework's own mounts are information, not a warning
-
-v1.3.172 made the leftover Zygisk/Xposed bind amber. It is real and an app can
-see it — that part was right — but the Suite declines to absorb it *on purpose*,
-because breaking a hook surfaces hours later during an app install rather than
-at boot. So the warning fired on every device running LSPosed, permanently, for
-a state that is working as designed. A warning that is always on is one nobody
-reads, and it drowns the ones that mean something.
-
-It is a note now, so the verdict line and the manager card read clean again. The
-row did not disappear with it: notes live in a collapsed **Good to know**
-disclosure at the bottom of Check, in the muted tag rather than amber, on the
-all-clear screen as well as the sorted one. Dropping them entirely is what made a
-real app-visible mount invisible for a release; rendering five standing
-observations as open cards under a heading that says nothing needs doing is the
-other way to lose them. One quiet line, opened by whoever goes looking.
-
-The text leads with "nothing is wrong here and nothing needs fixing". It still
-names the one case where it matters — hiding from a specific app, where your
-manager's per-app "umount modules" does remove a real mount, unlike anything the
-engine serves.
-
-## v1.3.172 — engine v31 (unchanged)
-
-Three things v1.3.171 got wrong, two of them visible on the Check tab.
-
-### A version bump could not be built
-
-`package.sh` stamps the new version into `Cargo.toml` and left `Cargo.lock`
-naming the old one. The builds are `--locked` — which exists so the shipped
-binary cannot resolve a different dependency set from the one the tests were
-green against — so cargo refused to reconcile them and the run died on the
-first cross-compile:
-
-    error: cannot update the lock file ... because --locked was passed
-
-v1.3.171 built only because its lock already happened to say `1.3.171`. Every
-bump after it would have failed. The lock is refreshed offline, in the same
-place the stamp is written, so the two cannot drift again.
-
-### "will bite later" was the old ladder talking
-
-v1.3.171 settled what the two amber verdicts mean: **warn** is something a
-shipping detector can see *today*, **note** is a measured tell nothing probes.
-The badge still read *will bite later* — the previous meaning — so the one row
-that is a live, app-readable fact was labelled as a future concern. It reads
-`a detector can see this`.
-
-### The nav bar covered the last thing you were reading
-
-`.wrap` reserved a flat 108px for the floating capsule, but the capsule's own
-padding adds `env(safe-area-inset-bottom)` on top of that. On any device with a
-gesture bar the sum is larger than 108px, so the bottom of the last card — in
-practice the *What was measured* block, the evidence behind the finding — sat
-under the bar with no way to scroll it clear. Reserve the same inset the bar
-reserves.
-
-## v1.3.171 — engine v31
-
-Round 8: twelve reviewers over the whole tree, then a device pass on an OP15
-running exactly the audited build. ~150 findings, all of them fixed here.
-None was caught by the gates — 195 tests, clippy, shellcheck, mksh and
-`node --check` were all green on the tree that had every one of them.
-
-### The wrong-kernel card could never fire
-
-`metamount.sh` unset `_mout` eighteen lines before the `case` that reads it, so
-`_driver_ok` was permanently 1 and the `⛔ your kernel has no NoMount driver`
-arm was unreachable. Verified on the OP15 by replaying the three statements
-with the real "engine not responding" string under both busybox ash and mksh:
-`_driver_ok=1` in both.
-
-So the single commonest new-user mistake — flashing the module without the
-kernel half — fell through to `⚠️ ran, but no module had files to serve`, which
-sends the reader to look at their modules instead of at their kernel. The
-engine's own sentence was captured and went only to `boot.log`.
-
-Two more arms exist now: the mount pass failing, and the rule table not being
-readable. `_pass_ran=1` used to be set regardless of the pass's exit status, so
-a pass killed at 60s having injected 200 of 260 rules still ended the boot on
-`✅ N rules · mountless`. The comment above it claimed that was fixed; only the
-log line was. And `service.sh` no longer overwrites the wrong-kernel card after
-boot with a generic `0 rules` line — it reads `engine=down` out of `health.txt`.
-
-### One `:` could kill the boot script
-
-`: >> "$BOOTLOG"` is a redirection on a POSIX **special builtin**, so a failure
-aborts the shell — and `2>/dev/null` swallows the reason. `ksud` runs module
-scripts under `/data/adb/ksu/bin/busybox` with `ASH_STANDALONE` (confirmed by
-`strings` on the device), and under busybox ash the abort takes the **whole
-script**, not just the enclosing function.
-
-It sat 62 lines above the deliberate read-only-`/data` refusal written for
-exactly that case, making that refusal unreachable: no kmsg line, no `boot.log`,
-no `incident.log`, no bootcount, no card. The same shape at the moment the
-bootloop guard trips meant `disabled` was never created and the guard "tripped"
-silently on every boot while the WebUI showed **Armed**. Both are `touch` now,
-and the three writes that arm the guard are checked rather than assumed.
-
-The guard counter is also no longer cleared before the post-boot reload and
-absorb — the work this project's own notes record as having rebooted an OP11.
-A device rebooted by that pass used to loop forever with the counter zeroed on
-every cycle.
-
-### `nomount export` shipped the hide list
-
-The bundle carefully redacts hidden-app names out of `check.txt`, strips
-`[UID: n]` from `rules.txt` and withholds `uid_live.txt` — and then wrote
-`boot.log` and the legacy `blocklist` file next to them, into `/sdcard/Download`,
-readable by any app holding a storage permission.
-
-`boot.log` carries them because `service.sh` and `uidwatch.sh` capture
-`uid apply 2>&1`, and `uid apply` prints hide-list patterns and matched package
-names to stderr. Demonstrated on the OP15: `*.settings matches
-com.android.settings (appid 1000, below the app range)`, straight into the log
-line. The project treats that file as a secret on-device — `chmod 0600`.
-
-`blocklist` still holds them because the hide-list split **copies** rather than
-moves, by design. It is now filtered on a shared destination to the module ids
-that are its remaining purpose, and `boot.log` is withheld there entirely. A
-private export still carries both, which is what the bug-report template wanted.
-
-### A module could still forge a rule
-
-Round 7 closed the newline-forgery at the plan door and called it "the ONE place
-a path enters the plan". It was not the only door into the **rule table** or the
-only-copy records. `absorb` reaches `nm add` and writes `absorbed.list` and
-`absorbed-tmpfs.list` from mountinfo — which it octal-unescapes, so `\012` in a
-module's bind target arrives as a real newline — and `whiteout::validate` gated
-four callers of `nm.whiteout()` without ever asking. Both do now, and so do
-`vfs add` and `vfs whiteout`, which bypassed every gate the other paths enforce.
-
-The gate itself grew the two spellings its own doc named and never tested:
-` [UID:` anywhere in a path (it splits the rule line wherever it appears), and a
-path *ending* in ` (whiteout)`, ` (public)` or ` (virtual dir)` (those are
-stripped as suffixes, in a loop). Mid-path they stay legal — over-refusing would
-have cost real filenames.
-
-### A stacked mount was stranded forever
-
-`umount2(MNT_DETACH)` removes **one** mount from the stack, and absorb read a
-successful return as "the target is clear" — `&&` short-circuited before it
-asked mountinfo. Two modules binding the same path, or one binding it from both
-its own scripts, left a second mount that the inject then d_dropped: detached
-from path resolution, `umount2` returning EINVAL forever, and an entry naming
-`/data/adb/modules` in every app's mount table until reboot. Reproduced on the
-OP15 — two binds, one detach, rc 0, still mounted, still serving the first bind.
-
-The unmount result is no longer consulted at all; the mount table is.
-
-### mount and reload disagreed a fourth time
-
-`run_mount` unmounted a live target **before** checking whether the rule's source
-resolves, so a module shipping a dangling symlink destroyed a third party's mount
-and then created no rule. `run_reload` had the safe order. Also: reload's prune
-treated a bind target as wanted, leaving a stale inject rule that the next boot's
-`clear()` d_dropped out from under the bind; teardown now runs before the clear.
-And reload recorded whiteouts as changed APKs, producing a false REBOOT REQUIRED
-that flip-flopped every boot on any debloat module.
-
-### The report says what it measured
-
-The signature bug of this codebase, in about twenty new places: an error turned
-into a clean result. An engine that answered `version` but not `list` rendered
-both device probes as "Nothing to test". A broken `su` probe became a red FAIL
-blaming a kernel regression. `uid_live.txt` wrote `[]`, `fingerprint.txt` wrote
-empty, `dmesg-nomount.txt` swallowed a restricted dmesg — each in a bug-report
-bundle, each with the correct pattern a few lines away. `pmcache` lost an APK
-invalidation silently, leaving PackageManager on a stale parse and the app
-force-closing with nothing printed.
-
-The verdict ladder now means something: **warn** is what a shipping detector can
-see today, **note** is a measured tell nothing probes. Four rows whose own text
-said nothing probed them came down to note; the Suite's own bind mounts, which
-any app can read out of `/proc/self/mountinfo`, went up to warn — the WebUI hides
-notes, so that row and its fix instructions had never rendered at all.
-
-The manager banner about the umount switch had rendered nothing since v1.3.117:
-plan check ids carry a subject suffix and the WebUI looked up the bare string.
-
-### `nomount` is not a command
-
-The binary lives only inside the module and nothing puts it on `PATH`, so every
-shell line in the README and the issue template was `command not found`. There
-is an alias line now, and the issue template leads with the WebUI's Export
-button. The installer also stopped telling a wrong-ABI user to flash a kernel,
-the success path says **reboot**, and the WebUI finally says *where* to get a
-kernel — it had no external reference of any kind.
-
-### Engine v31
-
-Two hijack allocations reported failure instead of returning `void` — a silent
-one left a rule resolvable-but-unlistable while `nm add` exited 0 — and the
-sibling scan stopped sampling our own inodes, which could hand back `NM_CAP_FSYNC`
-and an `fsync()` returning 0 where every erofs sibling returns `-EINVAL`. Eight
-other samplers already had that guard. The redundant device-wide directory walk
-on the rule-add path is gone; the lazy path that already existed does it only
-when a synthesized directory is actually placed.
-
-All ten kernel versions compile clean at `W=1`. No KMI CRC moves.
-
-### Less of it
-
-The mount-pass block was 24 byte-identical lines in both boot entry points, and
-the rule-count preamble was two more copies; both are single functions in
-`lib.sh` now. The test that held the rule-count copies in step went with them —
-it now pins that there is exactly one. Also gone: the arm64-only build leftovers,
-a `staging/webroot` branch with no producer, and a banner about an inert setting.
-
-## v1.3.170 — engine v30 (unchanged)
-
-### Absorbed rows survived their module's uninstall forever
-
-`prune_absorbed_record` drops a recorded row when its OWNING MODULE is no longer
-on disk, and it finds that owner by reading the id out of
-`/data/adb/modules/<id>/...`. A row whose source sits anywhere else has no id to
-look up, so it fell through the keep-everything arm on every pass, for good.
-
-That is not a corner case. A ReVanced-class module keeps its payload in
-`/data/adb/rvhc/` and binds it over `/data/app/<pkg>/base.apk`, so absorbing one
-records a source the pruner can never attribute. Measured on an OP15 after
-uninstalling `youtube-morphe-jhc` and `googlephotos-jhc`: both modules gone,
-`/data/adb/rvhc/` gone, the live rules correctly dropped, both apps back on their
-real APKs — and the card still read **"Already absorbed · 2"**, both rows tagged
-`stale entry`, with nothing absorbed at all.
-
-A row is now also dropped when its SOURCE FILE is gone, which is the thing the
-record exists to re-serve from — its absence makes the row dead whoever owned it.
-Deliberately narrow: a row whose module IS still on disk is left alone even if
-the file is momentarily missing, because that is the update window rather than an
-uninstall.
-
-On device, the first boot after this:
-
-    [post-mount] dropped 2 recorded row(s) from uninstalled module(s):
-      /data/adb/rvhc/googlephotos-jhc.apk (source gone),
-      /data/adb/rvhc/youtube-morphe-jhc.apk (source gone)
-
-`absorbed.list` is empty again and the card is clean.
-
-## v1.3.169 — engine v30 (unchanged)
-
-### "Other modules' mounts: none", directly above "Already absorbed · 2"
-
-The chip counts what is still OUTSTANDING; the list beneath it records what has
-already been taken over. Both numbers were right, and the pair read as a
-contradiction — the card said **none** with two entries visible under it.
-
-The card's own prose does explain it — *"the chip above is what is left over
-after all of that"* — three paragraphs down, which is three paragraphs too late
-for a one-word chip. It now reads **"none left"** when there is a list under it,
-and plain **"none"** on a device that never absorbed anything. Both checked.
-
-Not a false green: nothing was being hidden or misreported, and the chip was
-never wrong. It just made the reader reconcile two numbers that looked like they
-disagreed.
-
-## v1.3.168 — engine v30 (unchanged)
-
-### The same fix, in the copy that mattered
-
-v1.3.167 taught the Hidden paths card to count the whiteouts `absorb` creates.
-It fixed the EXPANDED list and missed `woChipOnly()` — the path that runs while
-the card is collapsed, which is what a reader actually sees. So on device the
-card still read **0** with two ROM directories hidden, and the fix looked like it
-had not worked at all.
-
-Two definitions of "what is hidden" is what caused the original bug; shipping a
-fix that left one of them in place was the same mistake one layer down. There is
-now one `whiteoutSets()` — durable list plus every live whiteout rule not in it —
-and both the chip and the list read it.
-
-It also renders a failed read as **?** rather than **0**. While the card is
-collapsed that chip is the entire answer, and a read that did not happen must not
-look like "nothing hidden".
-
-Verified both paths against the live rule set: collapsed **2**, expanded **2**.
-
-## v1.3.167 — engine v30 (unchanged)
-
-Both findings below came from installing two real ReVanced-class modules
-(`youtube-morphe-jhc`, `googlephotos-jhc` from `j-hc/revanced-magisk-module`) —
-the first real-world modules of that class to run against the Suite.
-
-### "Hidden paths: 0 — Nothing hidden", with two ROM directories hidden
-
-`whiteout list` reports the DURABLE list (`whiteouts.txt`). `absorb` creates
-whiteouts too, when it takes over a module's "empty this ROM directory" tmpfs —
-those live in `absorbed-tmpfs.list`, are re-derived every boot, and are
-deliberately absent from the editable list because uninstalling the module is
-what removes them.
-
-They were invisible on the one screen a reader opens to ask *what is hidden?*
-Measured on an OP15: `/product/app/Photos` and `/product/app/YouTube` were both
-hidden by live whiteout rules while the card read **0** and **"Nothing hidden."**
-
-The count now includes them and they are listed, tagged `from a module`, with no
-delete button — they are not the user's to remove.
-
-### The inode-collision check went UNMEASURED once a module was absorbed
-
-`check_dir_ino_collision` derived its walk root from each target's partition
-root. Absorbing a ReVanced-class module puts `/data/app/<pkg>/base.apk` into the
-rule set, whose partition root is `/data` — so it walked the whole of `/data`,
-hit the 20,000-directory cap, and reported **unmeasured**. A check that had been
-answering in milliseconds stopped answering the moment two absorbed app APKs
-appeared.
-
-Restricted to ROM partitions, which is the only place the engine synthesizes
-directories: back to PASS, in **1,774** directories instead of 20,000+.
-
-### What the modules exercised, for the record
-
-Three mechanisms, all of which behaved:
-
-- **ROM tmpfs.** Their installer writes a `post-fs-data.d` script that runs
-  `mount -t tmpfs none /product/app/<App>` to blank the stock app. `absorb`
-  dropped both tmpfs mounts and installed whiteouts instead, recording them
-  against the boot id. The directories read as ABSENT rather than empty-with-a-
-  tmpfs-row, and `tmpfs over the ROM` reports PASS.
-- **Module content: nothing to inject, correctly.** Both ship `base.apk` at the
-  module root, not under a partition directory, so the plan is empty and neither
-  appears in `modules.tsv`. There is genuinely nothing to serve.
-- **The runtime binds (issue #14).** They bind `/data/adb/rvhc/*.apk` over
-  `/data/app/…/base.apk`. `check` caught both as a FAIL attributed to "a bind
-  from outside /data/adb/modules", and absorb took them over: **2 mount(s)
-  absorbed as 2 rule(s)**. Zero `rvhc` rows left in the mount table, and the
-  served bytes still identical to the patched APKs — verified across a reboot.
-
-## v1.3.166 — engine v30 (unchanged)
-
-### `lseek(SEEK_DATA)` on a synthesized directory — fixed and boot-verified
-
-A real directory answers `SEEK_DATA` and `SEEK_HOLE`; erofs uses
-`generic_file_llseek`, which returns the offset itself for `SEEK_DATA` and EOF
-for `SEEK_HOLE`. `nm_llseek` handled `SEEK_SET`/`CUR`/`END` for synthesized
-directories and sent everything else to `default: return -EINVAL` — so two
-`lseek` calls, with no root and no reference image, separated a directory the
-engine invented from a real one.
-
-Measured across `/product/priv-app` before the fix: **67 of 67 stock
-subdirectories answered, the synthesized one returned EINVAL for both.** After
-flashing a kernel built from this branch: **68 of 68 answer, 0 EINVAL**, and
-`HOLE` equals the size `stat` reports, exactly as it does for every real
-directory there.
-
-The fix mirrors `generic_file_llseek_size()` and takes the size from what
-`nm_file_getattr` reports rather than the raw 4096 placeholder — answering from
-the placeholder would have relocated the `stat`-vs-`SEEK_END` divergence the
-neighbouring arm was written to remove, not removed it.
-
-The inode-ceiling fix from v1.3.165 is unaffected: the independent scan still
-finds 188 directories over inodes 2..189 with no duplicate, and the report is
-`clean` — 0 failed, 0 warnings, 16 passed.
-
-## v1.3.165 — engine v30 (unchanged)
-
-### The engine fix is boot-verified
-
-`hookless/src/nomount.c` now places a synthesized directory's inode above the
-device-wide ceiling instead of in a gap between the target's siblings. Built for
-OP15 by `OnePlus-ReSukiSu_NMS` with `nomount_ref=prerelease` and flashed:
-
-    before   Mms=101  Mms/lib=77   Mms/lib/arm64=89    -- 3 collisions
-    after    Mms=187  Mms/lib=188  Mms/lib/arm64=189   -- 0 collisions
-
-The stock maximum on that filesystem is 186, so all three land immediately above
-it — free by construction, and carrying the same digit count as their neighbours,
-which is the property the sibling search was buying and never delivered. An
-independent scan (188 directories, inodes 2..189) finds no duplicated inode
-anywhere, and the whole report is `clean`: 0 failed, 0 warnings, 16 passed.
-
-### …and this check now says what it measured
-
-The PASS line read *"108 synthesized director(ies) checked"*. It counts every
-directory that HOLDS an injection — `/product/overlay` among them — and only
-three of the 108 were ones the engine invented.
-
-The wide set is deliberate and stays: a synthesized directory is always in it so
-no collision can be missed, and a real directory cannot collide with anything
-anyway (measured: zero stock-on-stock collisions across all 24 filesystems under
-`/product`). What it must not do is call them all synthesized. It now reads
-*"director(ies) holding injections"*, and the failure arm says *"directory(ies)
-the engine created"* rather than implying every one of them was.
-
-## v1.3.164 — engine v30 (unchanged)
-
-### New check: every synthesized directory shares an inode with a real one
-
-`(st_dev, st_ino)` identifies a file uniquely, and directories cannot be
-hardlinked — so two directory paths reporting the same pair is **impossible on a
-real filesystem**. It is also free to look for: walk a ROM partition, group its
-directories by that pair, and every group larger than one is a directory the
-engine invented. No root, no permissions, one `stat` per entry.
-
-Measured on an OP15, every synthesized directory on the device collides:
-
-    /product/priv-app/Mms           == /product/priv-app/OplusScreenRecorder/oat/arm64   (dev 56 ino 101)
-    /product/priv-app/Mms/lib       == /product/priv-app/GmsCore/m/independent/oat       (dev 56 ino 77)
-    /product/priv-app/Mms/lib/arm64 == /product/priv-app/Wallpapers/oat/arm64            (dev 56 ino 89)
-
-Three synthesized directories, three collisions, and **no stock-on-stock
-collision anywhere on the device**. So the oracle has perfect precision and
-perfect recall here.
-
-It is not bad luck, it is arithmetic. `/product/priv-app` is an overlay mount
-holding **188 directories in inode range 2..186** — 185 available values. By
-pigeonhole at least three must collide, and the three excess are exactly the
-three the engine added. Adding N synthesized directories to a saturated inode
-space guarantees N collisions.
-
-That is also why `nm_place_ino` cannot win as written: it searches for a free gap
-between the target's SIBLINGS (here 3..71) and tracks its own handouts so two
-synthesized dirs never collide with each other — but it never sees the rest of
-the filesystem, and every value it can reach below the device-wide maximum of 186
-is already held by a nested stock directory two or three levels down.
-
-**`overlay dir inode range` does not cover this.** That check asks whether the
-inode is of a plausible MAGNITUDE, and 101 against a sibling maximum of 71 is
-well inside its 8x threshold. The number is plausible and impossible at the same
-time, which is exactly why it passed.
-
-Amber, not red, by this file's standing rule: a real measured inconsistency that
-nothing shipping is known to probe for. The oracle string carries the recipe, so
-it stays a regression canary for the engine — and it is the check that will prove
-an engine-side fix works.
-
-The walk is bounded at 20,000 directories (measured: 188 under `/product/priv-app`,
-~2.4k under `/system`) and reports `unmeasured` rather than a pass if it ever hits
-that cap. It uses `symlink_metadata`, so a symlink is never followed out of the
-partition nor counted as its target.
-
-## v1.3.163 — engine v30 (unchanged)
-
-### "Real mounts: none" sat directly under "1 mount by design"
-
-`fmnt` counts mount findings graded **fail** or **reboot**. `audit.rs`
-deliberately grades the zero-mount posture a **note** when the only mount left is
-one `absorb` declines on purpose — a Zygisk/Xposed hook bind, or a `my_*` bind of
-ours. So on this device `fmnt` is 0, and the posture card's row, labelled **Real
-mounts**, read *"none — pure Prism"*.
-
-Directly above it the same card's headline said **"Mountless · 1 mount by
-design"**, and two lines below, the card's own prose said that mount "is left on
-purpose … A scanner reading mountinfo can see it." One card, three statements,
-one of them false under its own label.
-
-It reads *"none of ours · 1 left by design"* now. A device with genuinely nothing
-mounted still reads *"none — pure Prism"* under a *"Fully mountless"* headline —
-checked both ways.
-
-This is the same shape as every false green fixed this week: a summary word that
-is true only under a narrower definition than its label implies. The narrower
-definition was even the right one for `fmnt`'s purpose — it feeds the "something
-is mounting over the ROM" alarm, which a by-design bind must not trip. It was the
-label that overclaimed.
-
-## v1.3.162 — engine v30 (unchanged)
-
-### The Rules tab counted 260 while every other surface said 257
-
-`ruleDump` already draws the distinction, and says why in a comment: the engine
-materialises "(virtual dir)" entries which are structure, not rules, and
-"counting them gave 260 on a device where `nomount check`, health.txt and the
-manager card all said 257 — so the one number on the front page disagreed with
-every other number the Suite prints, which makes a real discrepancy
-indistinguishable from a bug."
-
-That fix reached the hero counter and stopped there. `refreshRuleSummary` — the
-pane whose entire job is to break the same number down — went on reading
-`d.lines.length`, so the Rules tab showed **260**, and "121 file redirects", next
-to a hero reading **257**. The RRO half was never affected, because a virtual
-dir's target is a directory and cannot end in `.apk`; the two totals therefore
-disagreed by exactly the virtual-dir count and nothing else, which is what made
-it survive being looked at.
-
-Now 257, and 118 + 139 = 257. The per-module bar was reading the same set, so it
-carried a phantom **"(other) 3"** segment — the virtual dirs, which name no
-module and could never be attributed to one. It is gone, and the legend now sums
-to the total.
-
-Measured on an OP15 with three virtual dirs live: `vfs list` returns 260 lines,
-the Suite reports 257 rules everywhere.
-
-### The panes the harness had not walked
-
-Hiding and Rules, both driven through their states. No further defects:
-
-- All four hide-list states render distinctly — `live`, `saved, not applied`,
-  `not installed`, and `live, not saved`, the last correctly carrying a 💾 button,
-  since persisting it is the fix. Glob-matched entries name the pattern that
-  caught them.
-- An unreadable hide list reads *"Unknown — the hide list could not be read"*
-  with a `?` chip, never an empty list.
-- An engine that does not answer gives the Rules pane *"Unknown — the engine did
-  not answer"*, also `?`.
-- With no fixture for the isolated-pool knob, that card says *"State unknown —
-  the engine did not answer"* rather than assuming a default.
-
-One thing deliberately NOT changed: with the engine down, the Modules pane still
-reports what each module contributes (`115 files · vfs`), because `nomount plan`
-is a userspace walk and answers fine without a driver. It is a different question
-from "is anything being served", which the card above it answers in red, and
-adding a second warning there would be noise.
-
-## v1.3.161 — engine v30 (unchanged)
-
-### A device that had switched itself off said "Active", in green
-
-When the bootloop guard trips, `disabled` is written and the boot pass is
-skipped — so the engine holds no rules at all. The status card's zero-rules
-branch then read:
-
-> **Active** · no rules — re-apply
-
-in green. "Re-apply" means press Reload, and `mount::guard_tripped` makes every
-serving verb REFUSE while `disabled` exists. The one card a reader checks first
-pointed them at a button that cannot work, on a device that had disabled itself
-— while the health line, the guard card and the incident banner directly around
-it all said so correctly, in red.
-
-Same shape as v1.3.160's engine fix, so the same remedy: the live `disabled`
-marker (read by `refreshGuard`, the one place that reads the file) is published,
-and the status card branches on it before anything else. It reads **Disabled ·
-the bootloop guard tripped — re-arm it under Details, then reboot**, in red. The
-wording holds for the other way in too, since `disabled` can be created by hand
-while rules from the last good boot are still live.
-
-### …and a stale paint could overwrite the fix
-
-`refreshStatus` awaits twice, so two overlapping calls interleave and the OLDER
-one can resume last. That is not hypothetical: the first fix above was defeated
-by it on the first try. `refreshGuard` re-ran the status paint on learning the
-guard had tripped, and the original call — still parked on `planByModule()` —
-woke up afterwards and painted "no rules — re-apply" in green over "Disabled".
-
-A generation counter now stops a superseded paint at its next checkpoint. Worth
-noting it was invisible until the second call existed: every earlier version of
-this function had exactly one caller.
-
-### How both were found
-
-The harness added in v1.3.160, driving the real page through states no amount of
-rebooting a working phone will produce. Seven checked; all now agree across the
-status card, the health line, the guard card and the incident banner:
-
-| state | reads |
-| --- | --- |
-| first run, no `audit.json` | *Not checked yet — tap to run a check* (never green) |
-| guard tripped | **Disabled** · re-arm, then reboot — red on all four surfaces |
-| a real FAIL row | *1 thing needs attention*, amber |
-| plan-only run | *Only your plan was checked — tap to check the device too* |
-| some checks unmeasured | *Not fully checked yet — 1 check had nothing to look at* |
-| no module ships content | *nothing to inject — no module provides files* |
-| content ships, nothing served | *no rules — re-apply* |
-
-Zero JS errors throughout. Two rows that looked wrong on the way — a FAIL
-carrying a passing `meaning`, and a row with no `oracle` line — were artefacts of
-flipping a verdict in the fixture, not defects: `checkRow` renders `owner` and
-`oracle` correctly when a check actually carries them.
-
-## v1.3.160 — engine v30 (unchanged)
-
-### The two halves of the front page can no longer disagree about the engine
-
-The status card asks the engine directly on every refresh. The health line under
-it reads the CACHED `audit.json`. Replace a NoMount kernel with a plain one and
-that file still says `engine: 30` until a boot check overwrites it — so in that
-window the card said **No kernel driver** in red while the line directly beneath
-it said **Nothing detectable** in green, off a stale report.
-
-`paintHealthLine`'s own comment says the shared report exists precisely so "the
-front page and the detail view cannot disagree, which is the whole failure mode
-that started this work". It handled the cached engine being absent; it had no way
-to know the LIVE one was. It does now, and the live answer wins.
-
-It also has to be REPAINTED: `refreshAll` fires its readers in parallel, so the
-health line had usually already been painted from the cache before the status
-card learned the engine was gone. Whichever finishes last now paints the same
-answer.
-
-### `scripts/webui-harness.py` — the WebUI can be run outside a phone
-
-The WebUI needs `ksu.exec`, which exists only inside a root manager's WebView, so
-nothing in CI or on a desktop could execute a line of it. Every change to it this
-session was verified by reading. That is how the nested-RRO classification bug
-shipped, and how the false-green above survived being looked at directly.
-
-The script captures what each command really returns on a device, stubs
-`ksu.exec` to replay it, and writes a page any browser can open. `index.html` is
-untouched — the stub is prepended. `build --no-driver` produces the wrong-kernel
-device, which is the state a new user hits and which no amount of rebooting a
-working phone will show you.
-
-Running the page against this device's own output: **no JS errors**, 257 rules,
-139 RRO overlays, 4 modules served, and every Modules-pane row matching
-`modules.tsv` exactly. The seven commands the harness has no fixture for return
-empty and the page still renders — which is its own result.
-
-It also reached two states the device could not produce. Feeding the plan a
-`bind` entry and an `<< UNSERVABLE` entry alongside a real one confirms the
-"planned file not served yet" count excludes both: 260 planned, 258 expected
-live, 257 live, **1** pending.
-
-**The captured fixtures include `pm list packages -3 -U`** — the device's
-third-party packages and their uids, the same secret `nomount export` withholds
-from shared storage. They are written under `target/` (gitignored) and the script
-says so; do not commit them or attach them to a bug report.
-
-## v1.3.159 — engine v30 (unchanged)
-
-`nomount mount --help` now says it is a BOOT verb, and points at `reload`.
-
-Running the mount pass mid-session clears the rule table and rebuilds it, so an
-app that already has an injected file mapped keeps the OLD inode and shows it as
-`(deleted)` in its own `/proc/self/maps`. That is one of the oracles `check`
-reports — and nothing said so anywhere a user would look. Measured while testing
-the Magisk entry point on this device: one hand-run pass turned a clean verdict
-into `1 check(s) FAILED — 26 injected file(s) show as deleted in a running app's
-own memory map`, cleared by a reboot. `reload` reaches the same state as a delta
-with nothing to see, which is why the WebUI's button calls it.
-
-### Verified: the Magisk entry point
-
-Every shared helper this session extracted — `nm_guard_bump`, `nm_early_absorb`,
-`nm_incident_missing_binary` — is used by BOTH boot entry points, and only the
-KernelSU one runs on this device: `post-fs-data.sh` detects `$KSU` and hands the
-boot to `metamount.sh`. So the path was refactored and never executed.
-
-Run from a plain root shell, `$KSU` is unset and the script takes the Magisk
-branch. Both halves check out:
-
-- **Guard tripped** — logs `[post-fs-data] disabled, skipping the mount pass`,
-  and the rule count is unchanged across the call, so the `if nm_guard_bump …;
-  then` restructuring skips the body it is supposed to skip.
-- **Guard armed** — the pass runs, re-serves all 257 rules, and writes
-  `[post-fs-data] nomount(suite): 4 modules | 257 rules …`, so v1.3.150's durable
-  success record works on this path too. `nm_early_absorb` logs its own line.
-
-The guard itself was then exercised against a sandbox state directory, which
-reaches two states a reboot cannot: a bootcount corrupted to `"3 3"` re-arms at 1
-instead of killing the shell mid-boot, and a `bootcount` that is a DIRECTORY is
-repaired and named in the log. Four consecutive bumps return 0, 0, 2, 1 — the
-exact contract both callers branch on — and the trip writes a complete incident
-record carrying the caller's own name for its path.
-
-## v1.3.158 — engine v30 (unchanged)
-
-### A nested RRO was badged as a plain file redirect
-
-Android installs a runtime overlay two ways: flat
-(`/product/overlay/Foo.apk`) or one directory per package
-(`/product/overlay/Foo/Foo.apk`). Both are live on real devices.
-
-v1.3.151 replaced three shell/JS content walks with one classifier, and the new
-classifier required the APK to sit DIRECTLY in `overlay/` — so the nested layout
-came out as `vfs`, in the manager badge and in the WebUI's Modules pane, while
-the WebUI's own Rules pane (whose expression has always been `[^\s]*`, which
-crosses directories) counted the same rule as an overlay. Two panes disagreeing
-about one module is precisely the defect v1.3.151 set out to remove; I
-reintroduced it in the fix.
-
-It survived because this device ships only the flat form. All three definitions
-are the same rule now — an APK anywhere under an `overlay/` directory, which is
-what the shell walk it replaced meant by `-path "*/overlay/*.apk"` — and a test
-pins both layouts.
-
-### Found by the category harness, which is the point of it
-
-The NMT suite builds one module per mechanism rather than flashing popular
-modules, and `nmt03_rro` ships the nested layout. Full run on this device, over
-three reboots:
-
-| | |
-| --- | --- |
-| Batch A (static, apk, rro, bin/lib, multipart, SAR alias, webui) | 60 pass, 0 fail |
-| Batch A+B (adds prop, self-mount, dynamic, whiteout, my_*, conflict pair) | 90 pass, **2 fail** |
-| After this fix | **92 pass, 0 fail, 0 skip** |
-
-The two failures were this bug and one stale assertion in the harness itself: it
-pinned the verdict string `"1 plan warning(s)"`, which v1.3.150 deliberately
-changed to `"1 warning(s)"` because `t.warn` counts device tells as well as plan
-hazards. Here the warning genuinely is a plan one — the `nmt12` pair claiming the
-same target — so the assertion was right by accident and the wording it pinned
-was wrong in general.
-
-Two harness changes went with it, in that repo: a new `c3_05_badged_as_overlay`
-check reading `modules.tsv` (nothing tested the file this session introduced —
-the bug was found by reading it by hand), and a teardown that fails loudly. Its
-`ksud module uninstall` loop was a multi-line string inside `adb shell "su -c
-..."`, the newlines did not survive the nesting, and it marked **nothing** while
-printing its success lines — the third distinct way that one teardown has failed
-silently, each documented in a comment above the next one. It checks its own
-count now and exits non-zero.
-
-## v1.3.157 — engine v30 (unchanged)
-
-### The card now says when a module is installed but not served
-
-Install a module and the engine keeps serving the previous set until something
-runs the pass. Nothing said so: the status card read *"modules injected"* either
-way, so the commonest sequence a user performs — install a module, open this
-page, see green — looked like it had worked.
-
-Measured rather than guessed, from two numbers the page already holds: the plan
-is what SHOULD be live, `vfs list` is what is. Only the deficit is reported,
-because the surplus direction is normal — durable whiteouts and absorbed rules
-are live and named nowhere in the module plan, which `run_reload` says in as many
-words. Binds are excluded (a my_* bind is a real mount and never appears in
-`vfs list`), and so is anything the plan has already marked `<< UNSERVABLE`.
-
-    modules injected · 1 planned file not served yet — press Reload
-
-Verified on device: 0 at rest, 1 after adding a file to a module tree, 0 again
-after Reload.
-
-### `mounts ?` → `mounts unknown`
-
-Its only explanation was a `title=` tooltip, and a phone has no hover — so the
-one tag on the page that means "we could not tell" was indistinguishable from
-one meaning "nothing found". The word is the fix; the tooltip stays for desktop.
-
-### Measured, not changed
-
-**Check-pane rows are not tooltip-only.** The audit listed "row explanations live
-only in `title=` tooltips, unreachable on a touch WebView" as a first-run defect.
-Every finding's `meaning` is rendered as visible text under its row
-(`index.html`'s `fmean` div). The Modules pane's three visibility tags were the
-only real instance, and the one that needed words now has them.
-
-## v1.3.156 — engine v30 (unchanged)
-
-Two records that could describe something other than what is live.
-
-- **An unreadable `apkstate.list` invalidated PM's parse of every injected APK.**
-  `seeding` asked whether the file EXISTS, while `read_state` returned an empty
-  map on *any* read error — so a record that was present but unreadable (a bad
-  label, an I/O error, a truncated write) gave `seeding = false` over an empty
-  previous set, and every served ROM APK then looked changed. That is a
-  `drop_entry` across the whole injected set, each one reported as swapped,
-  caused by a failure to READ. The two answers are distinct now, and an
-  unreadable record seeds instead: it drops nothing and rewrites itself from what
-  is served, so the next pass is correct again. Verified on device by making the
-  record a directory — the pass says so and completes; before, it would have
-  called all 141 recorded APKs changed.
-
-- **A re-absorbed target kept the source it was FIRST absorbed from.** The record
-  merge skipped any target already present, discarding the pair the pass had just
-  injected. `reapply_absorbed_pairs` re-serves from that record after a `clear`,
-  so once a module update moved its APK the record named a path that no longer
-  exists — and went on claiming the rule was live. The fresh source wins now, in
-  one `merge_absorbed` with a test.
-
-### Measured, not changed
-
-Three things the audit flagged turned out to be sound when put to the device, and
-are recorded here so the question is not reopened from a code reading:
-
-- **The `_ghost` cloak does cover the isolated pools.** Its `u` table is built
-  from the engine's blocked-appid dump, which does not list uids 90000–98999 or
-  99000–99999 — so on a reading of the source the cloak looks absent there. It is
-  not: `nomount_is_uid_blocked()` matches those pools by RANGE, before the table
-  is consulted. Measured on an OP15 against a ghosted path: uid 10384 (hidden),
-  90001 (app-zygote) and 99001 (platform-isolated) all answer *No such file or
-  directory* on both `stat` and `chmod`, while an unhidden app sees the file.
-- **`MIN_PATTERN_LITERAL` counts bytes, not characters** — and it cannot matter.
-  The dangerous glob it is supposed to stop, `*com.*`, carries four literal
-  characters and passes it, then is refused by the platform-appid guard instead:
-  61 installed packages containing `com.` run as appid 1000, and one match below
-  the app range fails the whole entry before it is persisted.
-- **`metamount`'s flock and `is_hook_framework`** were both on the deletion list.
-  `boot.log` carries zero "running WITHOUT a single-run guard" lines, so the lock
-  works here; and `is_hook_framework` fires for 5 of the 14 modules installed on
-  this device, including the LSPosed bind that `absorb` declines because of it.
-
-## v1.3.155 — engine v30 (unchanged)
-
-Two boot-path guarantees that only held on the paths anyone had thought of.
-
-### ksud is answered from every exit, not four of them
-
-`ksud kernel notify-module-mounted` is the metamodule hook ksud **waits on** to
-learn that module mounting has finished. `metamount.sh` called it at four exits —
-the missing-`lib.sh` arm, the unwritable-state-directory arm, the flock back-off
-and the end — each with a comment saying why leaving without it is worse than
-serving nothing: *"serving nothing is recoverable, not answering may not be."*
-
-The exits nobody had thought of were uncovered. An arithmetic syntax error kills
-a non-interactive shell on the spot in both mksh and ash — the exact class the
-bootcount sanitiser exists for — and so does a kill or an abort, and every one of
-those left ksud waiting. It is an `EXIT` trap now, defined before `lib.sh` is
-sourced so the first arm can use it, and idempotent so a trap firing after an
-explicit call costs nothing. The four explicit calls are one function.
-
-Verified against the device's own `/system/bin/sh`: a normal exit, an explicit
-early call, falling off the end, and a deliberate `$(( "3 3" + 1 ))` abort all
-notify exactly once — the last one being the case that used to notify never. Then
-verified where it counts, by rebooting: boot completes and the pass runs.
-
-### the uidwatch reaper tests death, not age
-
-The stale-lock reaper's premise was "old enough implies dead", and it acted on
-that alone. So a handler that was merely SLOW — waiting on the engine-wide pass
-lock behind a mount pass, which is legitimate and bounded at 25s, after a
-`uid apply` that takes its own time — had its lock deleted by the next handler
-along, which then ran concurrently. That is the same lost mutual exclusion the
-180s threshold was raised to prevent, reached by waiting longer instead of by
-dying.
-
-The lock carries its holder's pid now, and a live pid is never reaped whatever
-its age. The age test stays as the backstop for the two cases a pid cannot
-answer: a lock written by an older build (empty, so no pid) and a pid the kernel
-has since recycled. This narrows the race rather than closing it — the owner can
-still exit between `kill -0` and `rm -f`, and shell has no compare-and-delete —
-but the residue is bounded: two handlers both serialise on the pass lock and
-apply the same list twice.
-
-Verified on device across all four states: free, held by a live pid with a 1970
-mtime (**not** reaped, second instance backs off — the case that used to lose
-exclusion), held by a dead pid (reaped), and an empty legacy lock (age backstop
-reaps it, so an in-flight upgrade is not stranded). Then exercised for real with
-two concurrent handlers: one ran, one backed off, one `hide list re-applied` line.
-
-## v1.3.154 — engine v30 (unchanged)
-
-Three findings from the round-7 audit that had not shipped yet.
-
-- **`uid unblock` reported a removal it had not made.** The glob branch has
-  always distinguished the two cases ("was not in the hide list"); the plain
-  branch — the one the WebUI's un-hide button calls — discarded
-  `blocklist::remove`'s answer and printed *"removed from list"* for a name that
-  was never there, behind a toast the WebUI paints off `errno` alone.
-
-  List membership is not the whole answer either: `uid list` documents a real
-  *"live, not saved"* state, the kernel hiding an appid that is not in the file,
-  and there the unblock does do something. Both facts are now reported, through
-  one `unblock_message` covering all eight states, with a test asserting no two
-  of them produce the same sentence. On device, unblocking a name that was never
-  listed now says *"is not installed, and was not in the hide list"*.
-
-- **`nomount uid preset` with no name re-derived both kernel cloak tables.** With
-  no name the verb prints the list of available presets and changes nothing —
-  but `changes_ghost_inputs` matched `Preset { dry_run: false, .. }`, so listing
-  the presets forked the probe child and rewrote both `_ghost` tables on the way
-  out. That is exactly the cost `read_only_and_self_syncing_verbs_do_not` exists
-  to keep off read-only verbs; the pattern is `name: Some(_)` now, and the
-  no-name form is in that test.
-
-- **`boot.log` was unreachable from the app.** The bug-report template asks for
-  it by name — "the last 40 lines of `/data/adb/nomount/boot.log`" — and nothing
-  in the WebUI could produce it: there is no file viewer, and `export` is the one
-  button that hands someone a bundle. It is in the export now. It is rotated to
-  400 lines at every boot (~40 KB measured), and before shipping it to shared
-  storage its contents were checked for the secret the export protects: no
-  package names and no appids, the same standard `incident.log` — already
-  exported, and it does list enabled module ids — is held to. The private set
-  (`uidhide*`, `spoof.conf`) is still withheld from shared storage.
-
-## v1.3.153 — engine v30 (unchanged)
-
-Two last deletions, and the claim one of them was hiding.
-
-- **`File injections: mountless`** headed the stealth card's row list, hardcoded.
-  It said the same thing on every device, measured on none, and it is false on
-  any device serving `my_*` by bind — which is the default. The `Real mounts` row
-  directly beneath it is the measured answer to the same question, and it is the
-  one that can disagree. Removed.
-
-- **The unmeasured arm asserted the answer.** With no check yet run, the mount
-  posture line read *"File injections and RRO are Prism and su is sucompat, so
-  the Suite adds no mounts by construction — but nothing has measured that here
-  yet."* The first half is the claim; the second half is the state. It now says
-  only what is known, which is nothing.
-
-- **Two packaging fallbacks** in `scripts/package.sh`: `python` before `python3`,
-  and `zip -r9` for a host with no python at all. The zip(1) path silently gave up
-  reproducibility — the one provenance property the surrounding comment says the
-  block exists to protect — on a host that must have python anyway, since
-  `mkzip.py` is the only thing that writes an installable archive on Windows. A
-  missing `python3` is now an error naming its own fix.
-
-## v1.3.152 — engine v30 (unchanged)
-
-Deletions, part two: the boot scripts. No behaviour change intended; the one
-change that is visible is named below.
-
-### One bootloop guard, not two
-
-`metamount.sh` (KernelSU/APatch) and `post-fs-data.sh` (Magisk) each carried
-their own ~55-line copy of the guard: the not-a-regular-file repair, the
-bootcount sanitiser, the `sync`, the trip, and the incident record. This is the
-mechanism that recovers a device that will not boot, and it is the last place
-that should have had two implementations — the copies had already drifted, which
-is why the previous release shipped a test comparing their incident keys rather
-than removing one of them.
-
-`nm_guard_bump` in `lib.sh` is the only copy now. Its one argument is the entry
-point's name, which is all the two ever differed by. The drift test went with it.
-
-The same treatment for two more verbatim pairs:
-
-- **`nm_early_absorb`** — byte-identical in `post-mount.sh` (KSU/APatch) and
-  `post-fs-data.sh` (Magisk, which has no post-mount stage).
-- **`nm_incident_missing_binary`** — the "engine binary is not there" record,
-  written the same way by both entry points.
-
-Verified on an OP15 by inducing each state: a `bootcount` directory is repaired
-and named in `boot.log`, a bootcount of 2 trips the guard on the next boot and
-writes a full incident record (entry point, kernel, Suite version, rules at trip,
-the enabled module list, the newest tombstone), the boot after that logs
-*"disabled, skipping the mount pass"*, and clearing the markers restores a clean
-boot with a `clean` verdict.
-
-### `NM_MY_HOOKLESS` is gone
-
-The `my_*`-by-injection trial was gated on either a `/data/adb/nomount/my_hookless`
-marker or an `NM_MY_HOOKLESS` environment variable. **Nothing in the module ever
-set that variable**, and a boot script inherits no environment from a person's
-shell, so it could not arrive there — while the two sides disagreed about what it
-meant: `mount.rs` accepted any non-empty value that was not `0`, and the two shell
-scripts tested `= 1`. So the single case where it did anything, a hand-run
-`NM_MY_HOOKLESS=yes nomount mount`, took the injection path in Rust while the
-early-absorb pass stayed on the bind path. One durable marker, one answer.
-
-## v1.3.151 — engine v30 (unchanged)
-
-Deletions. No behaviour was meant to change; where it did, it is named below.
-
-The round-7 audit's counterweight was a simplification reviewer's thesis about
-this codebase, aimed at the same morning's work:
-
-> *"the dominant failure mode this codebase has is duplicating a rule and then
-> adding a test to pin the copies instead of removing them"*
-
-Correct. This release removes copies instead of pinning them.
-
-### One content walk, not four
-
-`src/mount.rs` decides what a module contributes: which of its top-level
-directories are partitions (`NON_PARTITION_ROOTS`), which files are servable,
-which targets are RRO overlays. **Three surfaces re-implemented that in shell and
-JavaScript** — `metamount.sh`'s manager badges, and the WebUI's "nothing to
-inject" probe and Modules pane — each with its own transcription of the partition
-list. On 2026-09-07 all four disagreed: two copies were missing `data_mirror` and
-`d` (the debugfs symlink the list exists for), and every copy still excluded
-`my_*`, long after the Suite began serving it — so a module shipping one
-`my_product` file was labelled *"script only … nothing for the Suite to inject"*
-next to a live rule serving it.
-
-The previous release's fix was three tests holding the copies in step. The copies
-are gone now:
-
-- The pass publishes what each module contributed to
-  `/data/adb/nomount/modules.tsv` (`write_module_summary`), from the plan it has
-  just built — so this costs no extra walk. `metamount.sh` reads that instead of
-  running **two bounded `find`s per enabled module, per boot, at post-fs-data
-  under the OPlus watchdog**.
-- The WebUI parses `nomount plan` once (`planByModule`) for both the Modules pane
-  and the "nothing to inject" probe. The pane can no longer disagree with the
-  Rules pane about a module: both count the same entries.
-- The three drift tests went with them.
-
-The live rule list could NOT have replaced the walk: a whiteout rule names no
-module, so a debloat module — which is nothing but whiteouts — would go unbadged,
-which is the bug that walk was last fixed for.
-
-**Visible change:** the Modules pane had two labels for one outcome — `script
-only` ("ships no partition directory at all") and `0 files` ("has a partition
-directory but no files in it"). Telling them apart was the entire reason for the
-walk, and the reader's next step is the same either way. They are now one label,
-`nothing to inject`.
-
-### One probe harness, not three
-
-Two checks in `audit.rs` and one in `doctor.rs` each forked, dropped to an app
-uid, and brought back a fixed-width answer — with their own pipe, their own
-`setgroups`/`setgid`/`setuid` ordering, their own payload width, and their own
-paragraph explaining why the group list has to go first.
-
-That duplication shipped a bug three releases ago: v1.3.148 widened one probe's
-payload from 8 bytes to 12 and the edit landed on the wrong copy, leaving a parent
-demanding 12 from a child writing 8 and a parent reading 8 from a child writing
-12. Both then reported a counter that could not move — one of them as a clean
-PASS — and it took a flash to hardware to find. `probe_as_uid` derives the width
-from `size_of` on both ends of one pipe, so the two cannot disagree again.
-
-### Also removed
-
-- **`check_dirent_cookie`** — it tested readdir cookies for `0x6e6d` in the top
-  16 bits of `d_off`. That was the OLD engine's scheme (v12, and maxsteeel's dev
-  fork); the shipped v30 packs `real_eof + 1 + id`, a small integer. The Warn arm
-  could not fire. Measured before deleting: *"0 of 566 dirents carry the magic"*
-  on an OP15 running engine v30. `Entry.d_off` went with it — nothing read it any
-  more.
-- **A second definition of the erofs dirent formula**, in `audit.rs`. Every size
-  claim the Suite makes rests on `12*(n+2) + names + 3`, and it had two
-  definitions and one test. `dirshape` owns it now, with the test that pins it
-  against measured directories.
-- **A second `statfs` decode and a second `0xE0F5E1E2`.** One `dirshape::fs_magic`.
-- **Two of the three renderers of `ghost::Summary`.** Three call sites rendered
-  the same two states — the tables were cleared, or the kernel refused paths — in
-  three different wordings, and both mean one thing to the reader: the existence
-  oracles are open right now. The wording lives on `Summary::warning()`; the
-  callers choose only the stream.
-
-## v1.3.150 — engine v30 (unchanged)
-
-The round-7 audit's first-run tier, plus the claims cluster it turned up.
-
-**The theme:** the commonest new-user mistake — flashing this module on a kernel
-without `CONFIG_NOMOUNT` — was the one path where every surface either mislabelled
-the cause or threw the reason away.
-
-### Fixed — the wrong-kernel path
-
-- **The boot path deleted the one sentence that explains it.** `mount.rs` writes
-  *"hookless NoMount engine not responding — is the CONFIG_NOMOUNT kernel
-  loaded?"* to **stderr**, and both entry points ran the pass with `2>/dev/null`.
-  What survived was a generic "mount pass exited 1 (failed)", no `incident.log`
-  (only written for a guard trip or a missing binary), and a card saying the
-  opposite of the truth. Both now capture stderr and log the reason. `pass_lock`'s
-  "continuing unserialised" warning — which `mount.rs` is explicit must not be
-  silent, because it names the window where an app sees the stock tree — was being
-  deleted the same way, as was the whiteout-apply failure reason.
-
-- **A SUCCESSFUL mount pass left no durable record.** Its summary went to stdout,
-  i.e. ksud's log or nowhere; `boot.log` never learned that 257 rules had been
-  applied. The user asking "did it work?" had only the card.
-
-- **The card said "engine ran but injected nothing" when the kernel had no
-  driver.** "Engine" means the kernel half everywhere a user can read it, but
-  `_engine_ran` only ever meant "our binary was executable and we invoked it", so
-  the wrong-kernel case reported the opposite of the truth and sent the reader
-  hunting for a module problem. The variable is `_pass_ran` now, and the missing
-  driver has its own branch: *"your kernel has no NoMount driver — flash a
-  NoMount kernel, then reboot"*.
-
-- **The installer's LAST LINE promised what it had just warned would not
-  happen.** `- Modules under /data/adb/modules are injected mountlessly at boot.`
-  was printed unconditionally, immediately after the block saying "this kernel has
-  no NoMount support: the module installs but injects NOTHING", and again after
-  the "Suite is DISABLED" warning. Users read the last line. It is gated now, and
-  the wrong-kernel case closes with the next step instead.
-
-- **The WebUI's dead end.** *"Engine offline / kernel driver not responding"* was
-  the first thing such a user saw, with no next step and no external link anywhere
-  in the app. It now reads *"No kernel driver — this kernel was not built with
-  NoMount; flash one that was, then reboot. Nothing is being injected."*
-
-- **The README never mentioned `CONFIG_NOMOUNT` on the first screen.** The hard
-  prerequisite was forty lines down, below a screenshot table, and the opening
-  callout told the reader to run a command they cannot run yet. There is now a
-  *Before you download* box with a one-line check
-  (`zcat /proc/config.gz | grep NOMOUNT`), and the Beta note moved to the bottom
-  where it is advice for people already running it.
-
-### Fixed — claims that outran the code
-
-`serve_mode` returns `Serve::Bind` for every `my_*` target unless the
-`my_hookless` marker is set, and **the marker is off by default** — so a stock
-OnePlus setup with any module shipping `my_*` content carries real bind mounts
-naming `/data/adb/modules` in every app's mountinfo. That is the loudest oracle on
-such a device, and four places said otherwise:
-
-- `module.prop` said "no overlayfs, binds or tmpfs … nothing here is a mount".
-- The manager card said kernel umount is *"inert here"*.
-- `doctor.rs` said *"It does nothing here — injections are not mounts"*.
-- The README said "No `overlayfs`, no `tmpfs`, no bind mounts".
-
-All four now state the `my_*` exception, and the two kernel-umount messages are
-conditional on the live bind record: with binds present they say the switch **does**
-hide them, and that it is the only thing that does. The Suite was pointing users
-away from the one control that closes its loudest tell. A test pins the branch.
-
-### Also
-
-The Reload button had no caption and no tooltip; its only explanation anywhere was
-inside the confirmation dialog of the destructive Clear-rules button beside it, so
-the only way to learn what Reload does was to first tap the red one. It has a
-visible one-line caption now — visible rather than a `title=`, because a phone has
-no hover. And the header subtitle, `Prism VFS · RRO overlays · sucompat root`,
-was three pieces of jargon that wrapped to three lines on a phone before the
-status; it now says what the product does.
-
-## v1.3.149 — engine v30 (unchanged)
-
-### Fixed
-
-- **Repairs a defect introduced in v1.3.148: the two hidden-app probes had their
-  pipe sizes crossed.** Widening the xattr probe's payload from 8 to 12 bytes (to
-  carry the new `denied` count) was applied to the FIRST matching block in the
-  file, which belongs to `check_pm_apks_open_when_hidden`. The result:
-  - the PM probe's parent demanded 12 bytes from a child still writing 8, so it
-    always reported `probe child said nothing` — an UNMEASURED where it had been
-    passing;
-  - the xattr probe's parent read 8 bytes from a child writing 12, so `denied`
-    was read off an empty slice and defaulted to 0 — making the new "its
-    discriminating case could not arise" arm fire unconditionally.
-
-  Caught by flashing to hardware, not by the test suite: both probes fork, drop
-  privilege and talk over a pipe, so nothing in `cargo test` exercises them.
-  Measured on an OP15 after the repair: the PM probe opens all 167 PM-published
-  targets, and the xattr probe reports `1 of 257 injected file(s) were hidden, and
-  none of them answered xattr either` — the one ghosted injected-only path, which
-  is the case the check exists for.
-
-- Stray whitespace inside four user-facing strings, where line continuations were
-  collapsed rather than honoured.
-
-## v1.3.148 — engine v30 (unchanged)
-
-The round-7 audit's second tier: **every place the report told you it was fine
-when it did not know.** Each of these renders "could not measure" identically to
-"measured and clean", which is this project's recurring bug and the reason
-`Verdict::Unmeasured` exists at all.
-
-### Fixed
-
-- **The manager card said `healthy` while `check` reported FAILED.** `_hv` held
-  the device half's own verdict and appeared on exactly two lines — assigned, then
-  logged — so the card ladder's only device input was the per-UID canary. A run
-  with failed detection checks printed **healthy** while the same `boot.log` said
-  "one or more findings are open" and `health.txt` carried
-  `verdict=N check(s) FAILED`. The ladder now branches on it, and reads the plan's
-  `unmeasured` count as well, which it also ignored. Pinned by a test.
-
-- **An unreadable mount table rendered as a clean mount posture.**
-  `doctor.rs`'s `survey().unwrap_or_default()` turned a read failure into an empty
-  vec, so every mount finding — foreign mount, module mount not absorbed ×3, left
-  by design ×4 — silently disappeared. `health.rs::count_mounts_split` was
-  rewritten to avoid exactly this ("(0, 0) said 'there are no module mounts' for a
-  question that was never asked"); the same substitution was still live here. Two
-  siblings fixed with it: a failed `ghost_list()` produced no row at all, while
-  the neighbouring `nm.list()` failure gets an explicit "could not enumerate, not
-  none"; and an unreadable hide list silently skipped all three
-  PM-published-opt-out checks.
-
-- **`check_xattr_agrees_when_hidden` passed when its own case could not arise.**
-  It looks for a file the hidden app was DENIED that still answered xattr. If the
-  app opened everything — the normal case, since a shadowing rule serves a blocked
-  reader the stock file — both counters were zero for want of anything to measure
-  and it returned green saying "told an app you hid the same story through both
-  surfaces". It now reports Unmeasured, the way `check_maps_not_deleted` was fixed
-  to. It also counted **EACCES** as a leak, so an injected file that is merely
-  root-owned 0600 could FAIL a check asserting the xattr surface ignores per-UID
-  hiding — on a file where hiding was never consulted and a stock file behaves
-  identically. ENOENT is hiding's signature and is now the only denial it counts.
-
-- **The verdict line ranked and named the wrong things.** It tested `warn` before
-  `complete()`, so unmeasured checks vanished from the one string `health.txt`
-  carries — while `Verdict`'s declaration order, `doctor::Level` and
-  `Report::sort` all rank Unmeasured above Warn. And it called every Warn a "plan
-  warning", though `audit::soft` emits four measured DEVICE tells through it.
-
-### WebUI
-
-- **The "other modules' mounts" chip was dead.** It grepped for the word
-  `unexpected`, which `audit.rs` emits in exactly one of three evidence strings —
-  the arm that always begins `0 unexpected`. A clean device and a device with real
-  absorbable mounts both rendered a grey dash. It only ever showed a number on a
-  device carrying a hook-framework bind, which is why nobody noticed. It
-  classifies off the verdict now.
-- **Two hide-list states rendered as green, counted, hidden apps.** The ladder
-  tested `/unreachable/`; the CLI prints `unreadable`, and `invalid glob:` had no
-  arm at all. "We could not evaluate this rule" and "this rule is malformed" both
-  read as "this app is hidden".
-- **The posture card claimed "zero mounts — nothing to hide" over a visible
-  mount.** `audit.rs` grades zero-mount-posture a `note` when the only mounts left
-  are ones absorb declines on purpose — *including a `my_*` bind of ours, which is
-  the default, since `serve_mode` returns Bind for `my_*` unless `my_hookless` is
-  set* — and attaches an oracle saying any app can read it in `mountinfo`. The
-  card's by-design counter matched only the hook-framework wording, so that case
-  fell through to the all-clear. It now counts either wording and says what the
-  mount is. Deliberately NOT promoted to a warning: the mounts are ours, on
-  purpose, and "Something is mounting over the ROM" would be the opposite
-  over-claim.
-- **Two scans reported a green "nothing found" when they had not run.**
-  `woScan` and `uidScan` ignored `errno`. `uidScan` also discarded stderr, where
-  `uidscan.sh` writes "no detector inventory … name matching is OFF" — a scan
-  running with its most valuable reason class disabled, presented identically to a
-  full one. It now says so in the toast.
-- **Re-arming the guard left "Nothing is being injected" on screen.**
-  `refreshIncident` early-returned without clearing `#incwarn`, so the banner
-  stayed on every tab until a page reload. Its comment blamed a race with
-  `paintManagerBanner`, which owns a different element.
-- **Two placeholders shipped green before anything was measured** — the shield's
-  `clean` class beside a caption reading "Checking what apps can see…", and a
-  green dot with the word **Armed** hardcoded in the static HTML.
-- **Refreshes that were no-ops.** `woAdd`, `woRemove` and `abAbsorb` called
-  `refreshStatus()` against the cached rule dump, so the counters repainted the
-  pre-change state; and "Clear rules" left the Rules tab showing the pre-clear
-  count, breakdown, module bar and file list — which reads as "the clear did not
-  work" right after the most destructive action on the page.
-
-## v1.3.147 — engine v30 (unchanged)
-
-The ten Tier-1 findings of the round-7 audit — twelve parallel reviewers plus a
-device pass, report in `NOMOUNT-SUITE-AUDIT-2026-09-07-ROUND7.md`. **None of these
-was caught by the gates**, which were green on the audited tree.
-
-### Fixed — could destroy state or brick a device
-
-- **A corrupted download uninstalled the Suite you already had.** The bundled
-  `update-binary` defaulted `MODPATH` to the LIVE `/data/adb/modules/meta-nomount`
-  — it is unset on the recovery and Magisk-app paths — and `abort()` is
-  `rm -rf "$MODPATH"`. So `customize.sh`'s integrity refusal and its
-  metamodule-conflict refusal did not fail an install, they removed the working
-  one. `unzip -o` also merged rather than replaced, so a file dropped in a later
-  version was never removed. It stages into `modules_update` now and lets the
-  manager promote it.
-
-- **An aborted install destroyed your settings, and the next boot deleted the
-  backup.** `uninstall.sh` stashes twelve files and wipes the state directory;
-  two aborts sit above `customize.sh`'s restore loop; and both boot entry points
-  then ran a bare `rm -rf /data/adb/nomount.bak`. The sweep's motive was right —
-  a stash holding `uidhide` must not rot — but the remedy was deletion. It is now
-  `nm_consume_stash` in `lib.sh`: restore, then delete. Two riders fixed with it:
-  the wipe no longer runs when the stash could not be created (it takes only
-  `disabled`, which is the one file the wipe exists for), and a `cp -p` that dies
-  part-way no longer leaves a TRUNCATED file for `customize.sh` to restore on
-  `[ -e ]` alone. `statefile.rs`'s test now pins all **three** lists.
-
-- **`nomount whiteout add /system/vendor` was accepted and bootlooped the
-  device.** `validate()` refused `..` but not a symlink. Verified on an OP15:
-  `/system/vendor -> /vendor`, `/system/product -> /product`,
-  `/system/system_ext -> /system_ext` — each three components, so
-  `is_partition_root` says no, and the engine then resolves with `LOOKUP_FOLLOW`
-  and lands a whiteout on a bare partition root. Durable and re-applied every
-  boot, so rebooting did not recover it; reachable from the WebUI text field. The
-  gate now re-checks the RESOLVED path (the list still stores what you typed).
-
-- **One `mkdir` permanently disarmed the bootloop guard.** `mkdir
-  /data/adb/nomount/bootcount` → `cat` prints nothing, `echo >` fails, and `echo`
-  is not a special builtin, so COUNT sat at 1 forever and GUARD_MAX was
-  unreachable. Measured on an OP15's own mksh: boots 1–5, COUNT=1, trips=no, with
-  the shell's complaint going to a stderr the boot path sends to `/dev/null`.
-  `mkdir …/disabled` split the product three ways — shell `-f` said not tripped,
-  `guard_tripped()`'s `exists()` said tripped, and the WebUI's `rm -f` could not
-  clear it. Both entry points now repair the file type before the guard, the
-  shell tests are `-e` to agree with the Rust, and the WebUI re-arm is `rm -rf`.
-  The two guard writes are also `sync`ed — they were the only durable state going
-  through neither `write_atomic` nor a sync, and the only ones where "the next
-  boot repairs it" is false by construction.
-
-### Fixed — integrity
-
-- **A newline in a module filename forged a rule that `absorb` acted on.**
-  Nothing validated path characters: not the plan walk, not the client, not the
-  kernel. `nm list` is line-oriented, so a module shipping
-  `system/etc/A
-/data/app/~~AA==/com.victim-BB==/base.apk` produced a line whose
-  target was an installed app's APK; `parse_list` returned it as a real rule and
-  `refresh_app_apks` re-pointed it through `add_repointing`, which is deliberately
-  NOT gated by `serve_mode`. Root then served the module's file as that app's
-  APK. Weaker spellings — a name containing ` -> `, ` (whiteout)` or ` [UID:` —
-  produced a phantom rule no prune could delete, so reload failed on it forever.
-  `path_is_representable` refuses all of them at the one place a path enters the
-  plan, with a printed reason. Verified on hardware with a real hostile tree: the
-  refusal fires and no `/data/app` rule appears.
-
-- **One non-UTF-8 byte anywhere in the mount table stopped all injection.** Every
-  mountinfo read was `read_to_string`, which fails on invalid UTF-8, and the
-  kernel escapes only space, tab, newline and backslash — so one Latin-1 filename
-  in any mount meant **no injections at all, every boot**, because `mount.rs`
-  treats an unreadable mount table as fatal. It also made the byte-exact
-  `unescape`/`umount_detach` work unreachable, and the tests pinning that property
-  fed the parser a `&str`. Now `read_mountinfo` reads bytes: a row that cannot be
-  decoded costs that row, `target` is carried through byte-exact (it is what
-  `umount2` and `still_mounted` compare), and `root` degrades lossily rather than
-  dropping the row — because dropping it would take the target with it, which is
-  the stranding hazard itself.
-
-### Fixed — correctness
-
-- **`absorb` injected over live mounts and stranded them forever.**
-  `reapply_absorbed_pairs` was the one rule-adding path with no mounted-target
-  guard. Injecting over a live mount detaches it from path resolution and
-  `umount2` then returns EINVAL permanently.
-
-- **`run_reload` applied whiteouts in random order, and recorded failed rules as
-  served.** Both kinds were applied from one loop over a `HashMap`, so a whiteout
-  could d_drop a dentry with injects underneath it — and the order differed
-  between two reloads of an unchanged device. `apply_order` is now one tested
-  function used by both apply paths. Separately, reload fed `pmcache::sync` the
-  raw plan where `run_mount` was fixed to use what actually applied; a rule that
-  failed was recorded as served, and when it later succeeded the cache was never
-  dropped, so PackageManager kept its parse of the stock APK permanently.
-
-- **`run_mount` stole other modules' `my_*` binds.** `unmount_before_serving` ran
-  for every plan entry, `Bind` included, so the boot pass tore down a third-party
-  bind and bound its own over the freed target — making `bind::apply`'s
-  `AlreadyMounted` arm unreachable. `run_reload` never did this. Now neither does.
-
-- **Three "only copy" records could be lost.** `absorbed_tmpfs()` was the last one
-  read as an empty list on error, while the line directly above it in `run_reload`
-  refuses the pass for exactly that; `bind.rs`'s `append_locked` was the only
-  non-atomic writer of an only-copy record and now truncates back on a short
-  write; and `whiteouts.txt`'s read-modify-write was unlocked while `absorb`'s
-  M-S8 migration writes it under the pass lock.
-
-### Also
-
-A module file, or a whole module, whose name is not UTF-8 is now skipped with a
-printed reason rather than a bare `continue`. A dot-prefixed module id is refused:
-`read_dir` served it while every shell and JS surface globs `*/`, so it was
-injected and invisible everywhere.
-
-## v1.3.146 — engine v30 (unchanged)
-
-### Changed
-
-- **The notes, held to the same rule.** All eleven NOTE-level plan findings were
-  re-read asking what the reader does with them.
-
-  **Dropped: `not FD-allowlisted for zygote`.** Its text ended in the word
-  *"fine"*, and a row that says "fine" is not a finding. Its history is a warning
-  about itself: it started as one Warn per file, buried real findings under ~85
-  identical lines, and was rolled up to one note per partition — three rows on any
-  OnePlus, on every run, forever, reporting that nothing had happened. The rollup
-  treated the symptom. Nothing reads it: it is a boot-safety property, no detector
-  sees it, and there is no action behind it. The DANGEROUS case is untouched and
-  stays an Error, per file — an overlay APK on a partition zygote's FD allowlist
-  does not cover aborts forkSystemServer, and that one names a file, predicts a
-  bootloop, and the fix is the reader's.
-
-  **Shortened: `isolated-process pools` and `directory holds only injected
-  files`.** Both are genuine oracles and both stay, but each was a paragraph that
-  restated an unchanging trade-off on every run. They now state the oracle and
-  stop; the argument lives in the code comment beside them, where a maintainer
-  looks for it.
-
-  **Kept as they are:** `whiteout leaves a measurable hole` and `module mount left
-  by design` (a detector reads both), `ghost cloak verified on this kernel` (a
-  measurement of this device, not an assumption from the build), `live rules not
-  fully accounted for` (an honest "I could not measure"), `stale legacy blocklist
-  entries` (the user's own config, and it fires only when there is something to
-  remove), and the two manager-umount notes from v1.3.145.
-
-## v1.3.145 — engine v30 (unchanged)
-
-### Changed
-
-- **The rest of the plan section, audited against the same rule.** All ~20
-  Warn/Error findings were re-read asking one question: *what does an app read to
-  see this?* Two failed it, and both were about the same thing — the root
-  manager's **Kernel umount** switch. No app can read a manager's settings, and
-  the switch's effect here is nothing at all: the Suite serves no mounts, so there
-  is nothing for it to unmount. `manager kernel umount ON` and the unknown-state
-  finding beside it (renamed `manager kernel umount unknown`) are now NOTES, and
-  the WebUI banner and the manager card dropped their ⚠️ with them. The claim
-  that the switch "has broken root on real devices" went too: that was true when
-  su arrived as a module overlay and anything stripping module content stripped su
-  with it — su is kernel sucompat now and outside the Suite entirely.
-
-  Everything else stays loud, and the test says why: a planned rule that is not
-  live, a module switched on and serving nothing, a target claimed twice, a
-  partition-root rule, a PM-published path answering ENOENT to a hidden app, the
-  ghost cloak over-reaching or leaking a label, a foreign mount over the ROM.
-  Each is either read by a detector or is the user's own content silently not
-  working.
-
-  The device section already worked this way and did not change: `soft()` exists
-  precisely so "a real, measured inconsistency that nothing shipping actually
-  probes" is amber rather than red, and `fail()` is type-forced to name the oracle
-  that reads it.
-
-## v1.3.144 — engine v30 (unchanged)
-
-### Changed
-
-- **The Suite reports what a detector can see, and stops there.** The
-  `my_* injection trial` WARN is now a NOTE, renamed `my_* served by injection`,
-  and cut from a paragraph to two sentences. Nothing that reads this device — the
-  Duck Detector, Holmes, the RASP families — can see a file under `/data/adb`, and
-  the marker's effect is FEWER mounts: `my_*` served by injection instead of a
-  real bind. It moves the posture the quiet way, and it was putting
-  *"1 thing needs attention"* on the WebUI of a device whose attention nothing
-  needed. The trial's real hazard — a leaf `my_*` injection tripping zygote's FD
-  allowlist — is handled by the bootloop guard, which is a mechanism, not
-  something a user acts on; it is documented at `mount::my_hookless_enabled`,
-  where it belongs. What the note still says is plain fact: `my_*` adds no mounts
-  here, the Suite did not write the marker, and which module did. A test pins the
-  level so it cannot be re-promoted without reading why.
-
-## v1.3.143 — engine v30 (unchanged)
-
-### Fixed
-
-- **"Delete the marker" told you the wrong thing about when it comes back.** The
-  `my_* injection trial` finding ended with a fixed sentence — *"stop the module
-  re-creating it, or it returns on the next boot"* — and whether that is true
-  depends entirely on WHICH script writes it. Measured on an OP15, 2026-09-07:
-  the only writer there is `OnePlus_Dialer_Universal/stage_overrides.sh`, whose
-  sole caller is that module's `action.sh`, i.e. the ▶ button — so deleting the
-  marker holds until the user taps it, and the one fact the reader needs in order
-  to act was wrong. (On an OP11 the same module writes it from `post-fs-data.sh`,
-  where the sentence was right; the two devices run different builds of it, which
-  is why this cannot be a fixed sentence.) The finding now names the FILE as well
-  as the module — `OnePlus_Dialer_Universal (stage_overrides.sh)` — and decides
-  the clause from `ENTRY_SCRIPTS`, the same list that decides whether an
-  incompatibility hit is conditional.
-
-## v1.3.142 — engine v30 (unchanged)
-
-Closes the nine findings of the 2026-09-07 audit of v1.3.141, which was the first
-audit run with a **debloat module installed**: SAN (`chisewaguri/systemapp_nuker`)
-v2.2.2 on an OP15 (CPH2747). Every finding below except the last two was invisible
-until a device planned a whiteout, and until then no device in the fleet ever had
-(`plan_whiteouts=0` on both phones, recorded in the v1.3.141 audit as an
-unexercised path).
-
-The Suite served SAN correctly throughout — 2 whiteouts across `/product` and
-`/my_stock`, zero mounts added, hot load/unload via `reload` clean, and the erofs
-parent measured `size=1043 nlink=44` against a model of `12*44 + 515 = 1043`, i.e.
-the engine's size/nlink recompute leaves **no arithmetic trace**. What broke was
-everything that DESCRIBES that work.
-
-### Fixed
-
-- **The manager card counted whiteouts as rules; nothing else did.** `health.rs`
-  reports `rules` as injects and `whiteouts` as its own field, and `check`,
-  `check --json` and `health.txt` all agree — but the card counted every row that
-  was not a `(virtual dir)`. Measured on an OP15 with SAN installed: the card said
-  **259 rules** while every other surface said **257**. That is precisely the
-  discrepancy the virtual-dir exclusion was added to remove, reached through the
-  other kind. Both writers now exclude whiteouts and report hidden paths as their
-  own `· N hidden` field. Pinned by a test that reads the shell.
-
-- **A whiteout-only module was reported as contributing nothing.** `metamount.sh`
-  and the WebUI's Modules pane both detect content with `find … -type f`, which
-  never matches a Magisk 0:0 char device — so a debloat module, which ships
-  nothing else, read as empty. Measured: SAN had two live, serving rules and got
-  **no `[NoMount · …]` badge at all** in the manager, and a row in the WebUI
-  reading *"0 files — Has a partition directory … but no files inside it, so it
-  contributes nothing."* Both walks now match `-type c` as well. Symlinks stay
-  out deliberately: a `system/product -> ../product` convergence link resolves to
-  a bare partition root, which `serve_mode` refuses, so counting it would count
-  something never served.
-
-- **A `my_*`-only module was reported as shipping no partition at all.** All three
-  shell/JS copies of the content walk carried `my_*) continue`, from before my_*
-  was served at all — and the Suite serves it now, by bind or by injection under
-  the `my_hookless` marker. Measured on an OP15: `op15_3d_lockscreen_wp` ships one
-  file under `my_product`, had **one live rule serving it**, got no badge, and the
-  WebUI labelled it *"script only — Ships no partition directory at all …
-  nothing for the Suite to inject."* The same walk under-counted
-  `OnePlus_Dialer_Universal` at 32 files against 115 live rules.
-
-- **Two copies of `NON_PARTITION_ROOTS` in one HTML file disagreed with each
-  other.** The "nothing to inject" probe carries the complete list and says so
-  (*"verbatim, `d` included"*); the Modules pane and `metamount.sh` were both
-  missing `data_mirror` and `d` — and `d` is the debugfs symlink the list exists
-  for, added after a module shipping a top-level `d/` tree was injected into
-  debugfs on an OP15. One page could therefore classify one module two ways. A
-  test now extracts all three copies and compares them to `mount::NON_PARTITION_ROOTS`,
-  so a fourth cannot drift. The Modules pane also picked up `set --` in place of
-  the unquoted `$roots`, which `metamount.sh` was fixed for and this copy was not:
-  the words in it are third-party module directory names.
-
-- **`not FD-allowlisted for zygote` counted whiteouts and virtual dirs as
-  "injected file(s)".** `doctor.rs` gates every other arm of that loop on
-  `r.kind` — the `pm_rules` arm has a paragraph about exactly this — and this one
-  did not, while asserting the kind in its own prose. Measured: installing SAN
-  added exactly one `/my_stock` entry, a whiteout, and the note went from
-  *"1 injected file(s)"* to *"2"*. A whiteout has no fd for zygote to validate and
-  a virtual dir is a directory nothing preloads; neither can reach that trap.
-
-- **`module content not served` double-counted convergence symlinks.**
-  `module_rom_files`' own doc says a `system/product -> ../product` link "would
-  double-count" — it is not followed, but it WAS counted, and `serve_mode`
-  refuses its target so nothing behind it is ever served. Measured: SAN's two
-  whiteouts were reported as *"ships 4 file(s) under system(2) my_stock(1)
-  product(1)"* — twice the real number, naming a partition the module ships
-  nothing on. A symlink to a FILE still counts (the plan injects those), and so
-  does a dangling one, which is content the module meant to ship.
-
-- **The incompatibility lint stated a conditional branch as fact.** `sourced_scripts`
-  follows one `.` level so a module cannot hide its mount logic in a helper, which
-  is right — and it means the scanner now quotes lines that may sit in a branch the
-  entry script never takes. Measured: SAN installs at `mounting_mode=2`, where the
-  metamodule serves it and `post-fs-data.sh` never reaches the
-  `. $MODDIR/mountify.sh` in its `mounting_mode=1` arm, and the report said flatly
-  that the module *"mounts its own content over a ROM path"* and that absorb
-  *"unmounts it, four times per boot"*. The device measured zero foreign mounts
-  throughout. A hit in a sourced helper now says so; deciding whether the branch
-  runs would need the module's own config, which is the kind of clever this
-  classifier has been narrowed away from twice.
-
-- **`nomount export` reported "File exists" for a directory that does not exist.**
-  On the DEFAULT destination, from the commonest invocation. `/sdcard` is a symlink
-  to `/storage/self/primary`, which does not resolve in the mount namespace an
-  adb-launched `su` gets, so `create_dir_all` failed on the leaf with ENOENT, walked
-  up to `mkdir("/sdcard")`, got EEXIST for the symlink, found `is_dir()` false, and
-  surfaced EEXIST attributed to the leaf: `create /sdcard/Download/nm-diag-… Caused
-  by: File exists`. The reader goes looking for a stale export to delete. The base
-  is now checked first and the refusal names the real obstacle.
-
-- **The Magisk boot path wrote a poorer incident record than the KSU one.**
-  `post-fs-data.sh` omitted `modules_enabled` — the most useful line in the file,
-  because a guard trip is nearly always "what did I install just before this" and
-  the answer is gone by the time anyone reads the report — and did not distinguish
-  a mount pass that TIMED OUT from one that failed. A test now compares the keys
-  both writers record.
-
-### Changed
-
-- **The manager card is one short line.** It was 200+ characters and the manager
-  truncated it: measured on an OP15, the card ended `…or a my_* bind of ou…`, so
-  the last thing it said was cut off mid-word. Everything restated there — the
-  architecture tagline, the per-mechanism module lists, the `[NoMount …]` bracket
-  under a row already titled "NoMount Suite" — is in `module.prop`, on the
-  per-module badges, or in the WebUI, and none of it changes between boots. It now
-  reads e.g. `✅ 257 rules · 139 RRO · 1 mount by design — healthy`.
-
-## v1.3.141 — engine v30 (unchanged)
-
-Closes the ten findings of the 2026-09-06 audit of v1.3.140, plus one found while
-verifying them on hardware and three more from a live audit of an OP11 running the
-result.
-
-### Fixed
-
-- **The incompatibility lint was blind to every `my_*` partition.** It carried its
-  own five-name list — `system vendor product system_ext odm` — matched as
-  `/{p}/`, and `/my_product/` does not contain `/product/`. So on the OnePlus/OPlus
-  ROM family this project targets, `SelfMount`, `RomWrite` and the `remount` arm
-  could not see eleven partitions at once. Measured on an OP11 (CPH2449):
-  `Bootanimation/post-fs-data.sh:5` is
-  `mount --bind $MODDIR/my_product/... /my_product/media/bootanimation/` — a
-  textbook self-mount, the only one on the device, and `check --plan` reported
-  nothing at all. The lint now shares `pmcache::ROM_PARTITIONS` with the rest of
-  the crate, a superset of the PM-scan roots that also names the three
-  (`my_bigball`, `my_manifest`, `my_reserve`) `ROM_ROOTS` documents as a known
-  gap — PM does not scan them, but a module can certainly write to them. A test
-  pins the two lists together and uses the real OP11 line as its vector.
-
-- **A module could be switched on, ship a whole ROM tree, and serve nothing — with
-  no check saying so.** New finding, `module content not served`. Measured on that
-  same OP11: `OnePlus_Dialer_Universal` had shipped **116 files across four
-  partitions and served zero of them since 2026-09-01**, because the module's OWN
-  bootloop guard had written a `skip_mount` and nothing ever clears one. Five days
-  of a dialer customisation quietly not applying while the manager listed the
-  module as enabled — the exact "installed and silently not applied" class this
-  report exists to end, one layer out. `disable` and `remove` are not findings
-  (content not being served is the point); `skip_mount` is not assumed to be
-  deliberate, because the marker is just a file and any root script can write one.
-
-- **`my_hookless` was read as intent whoever created it.** The marker switches
-  every `my_*` target from a bind to a hookless injection, which this build
-  documents as a trial with a named failure: a leaf my_* injection can trip
-  zygote's FD allowlist at forkSystemServer, i.e. a bootloop the guard recovers by
-  disabling the Suite. Nothing in the crate ever writes the file — so its presence
-  is evidence, and the report could not tell a user's opt-in from a third party's.
-  On the OP11 it was the latter: `OnePlus_Dialer_Universal/post-fs-data.sh` does
-  `touch /data/adb/nomount/my_hookless` whenever it detects NoMount, re-creating it
-  every boot, while shipping 84 files across `my_product`/`my_region`/`my_stock`.
-  Three boots failed on 2026-09-01 and both that module's guard and the Suite's
-  tripped. The new `my_* injection trial` check names the module that mentions the
-  marker and says what the combination costs.
-
-- **The bootloop guard bound the boot path and nothing else.** `disabled` means
-  "this device could not finish booting three times in a row", and it was tested
-  by the five shell entry points and by no other caller — so the WebUI's Reload
-  button, which drives `nomount reload` straight through `ksu.exec`, re-injected
-  the whole rule set on a device that had just disabled itself. On the same
-  screen that reads *"the bootloop guard tripped · the Suite disabled itself"*,
-  with no warning and a green toast. Found on an OP11 parked since 2026-09-01:
-  two live injection rules on a boot whose mount pass had correctly refused to
-  run.
-
-  The gate is now in the binary, where every caller meets it, and the cut is
-  SERVING rather than mutating so the guard cannot block its own recovery:
-  `mount`, `reload`, `absorb`, `vfs add`/`whiteout` and `whiteout add`/`apply`
-  refuse; everything that diagnoses (`check`, `plan`, `absorb --dry-run`,
-  `export`), everything that removes (`vfs del`/`clear`, `whiteout remove`), the
-  whole `uid` family and `ghost` stay open. No `--force`: the marker is the
-  switch, and a per-verb override would be a second way past it that nothing else
-  knows about — so the refusal names the one command that lifts it. No shell
-  caller can reach the gate, since all five already test the marker first.
-
-  The WebUI renders that refusal as a sentence instead of dumping stderr, and
-  reads it from the ACTUAL refusal rather than from the cached report — a stale
-  `guard tripped` in `audit.json` must never block a Reload that is now legal.
-
-- **The `_ghost` cloak went stale on every verb except `mount` and `reload`.**
-  That module exists to stop one path answering `stat` = OK and
-  `chmod`/`listxattr` = ENOENT at the same time — a contradiction no real file
-  can produce, and one its own header calls *worse* than leaving the oracle open.
-  It wired the re-derive into `mount` and `reload` and stopped there, so the
-  verbs that move the OTHER input did not have it:
-
-  * `uid unblock` — the WebUI's un-hide button — took an appid out of the
-    engine's blocked set and left it in the `u` table. One tap, and every ghosted
-    path produced exactly that contradiction for that app, until the next boot.
-  * `uid block` had the mirror-image gap: a newly hidden app was not in the
-    table, so all eleven oracle families stayed open for the app the user had
-    just asked to hide from.
-  * `absorb`, `whiteout add`/`remove`/`apply` and `vfs add`/`del`/`whiteout`/`clear`
-    moved the PATH table's inputs the same way.
-
-  Every verb that moves an input is now listed once, in
-  `cli::changes_ghost_inputs`, and re-derived by `main` after it runs —
-  regardless of the verb's exit status, because several of these change state and
-  then bail. Two tests pin the list in both directions; the read-only verbs
-  (`uid list`, `absorb --dry-run`, `check`, …) must stay out of it, since a
-  re-derive forks a probe child and rewrites two kernel tables.
-
-  It is deliberately SILENT on the happy path and speaks on stderr when it
-  cannot rebuild: it rides on another verb, and that verb's stdout is its answer.
-  `whiteout add`'s WebUI handler toasts `stdout.split("\n").pop()`, so a summary
-  line appended there would have become the toast.
-
-- **`service.sh` ran its one boot-time `ghost sync` before three passes that
-  invalidated it.** It sat near the top, "because this is the first point at
-  which the hide list has been applied" — true, and the wrong place: the
-  post-boot `reload`, `absorb`, `whiteout apply` and the authoritative
-  `uid apply` all run after it. Moved below them, where it is a backstop over
-  settled state rather than a snapshot of state about to change.
-
-- **The `_ghost` uid table was built from `uidhide.cache`, not from the engine.**
-  The cache is a mirror, and it is allowed to be wrong in the direction that
-  matters: `reapply_blocklist` records every entry it WANTED hidden, including
-  any whose `uid_block` the engine refused. That appid then sat in the table,
-  cloaked by `_ghost` and not hidden by the engine — the same contradiction,
-  reached with no user action at all. It now comes from `nm l u`, which is the
-  set the kernel actually matches against, with the same fail-open handling an
-  unreadable rule set already had.
-
-- **`nomount mount` applied every whiteout before every injection.** Batching the
-  `nm add` calls collected the injects and flushed them after the loop, which
-  inverted the one ordering rule this file states twice — "a whiteout d_drops the
-  dentry it names, so it has to land once the injections underneath are in".
-  `dedupe_by_target` does not cover it: a whiteout on `/system/etc/foo` and an
-  inject on `/system/etc/foo/bar` are different targets. Two explicit passes now,
-  injects first; `unmount_before_serving` still runs exactly once per target and
-  its refusal is carried across so both passes skip it.
-
-- **An update threw away `absorbed-tmpfs.list` and `apkstate.list`.**
-  `uninstall.sh` runs on updates too, and `rm -rf /data/adb/nomount` follows its
-  stash — so every Suite update un-hid the ROM directories a module had replaced
-  with a tmpfs, from post-fs-data until absorb rebuilt the record after
-  `boot_completed`, and put `pmcache` into its `seeding` branch so an update that
-  also changed a served APK skipped the PackageManager cache drop. Both files are
-  now stashed and restored, and a test parses BOTH shell lists and fails if they
-  ever disagree again — two prose comments could not hold two lists in step, and
-  did not.
-
-- **A module deleting ROM content was invisible if the line started with `rm`.**
-  The pattern was `" rm "` with a leading space, chosen so `set_perm` would not
-  match `rm ` inside `perm ` — but the classifier runs on a trimmed line.
-  Measured: `rm -rf /system/app/Foo` classified as nothing while the same command
-  behind `su -c` was correctly a ROM write.
-
-- **One finding printed as five ragged lines.** The `bind-mounts its own content`
-  explanation used literal `\n` escapes where its three siblings use `\`
-  continuations, so it carried five real newlines and seventeen spaces of indent
-  into `check.txt`. A test now pins the one-line property for every arm.
-
-- **`mkzip.py` stamped the wrong host on a Windows build.** `ZipInfo` picks
-  `create_system` from `sys.platform`, so a zip built there said MS-DOS/FAT and
-  every extractor discarded the `0o755` the script goes out of its way to
-  compute — the exact failure its own comment says it prevents. It also made the
-  archive unreproducible across platforms, which is the script's reason for
-  existing. Pinned to Unix.
-
-- **`uidwatch.sh` discarded absorb's record-prune line.** It was the fifth
-  `absorb` capture site and the only one without `nmlog_absorb_notes`, while
-  `lib.sh` said there were four — and it is the handler that runs on every
-  install, update and uninstall, i.e. exactly when a module's directory
-  disappears and the prune has something to say.
-
-- Comments that had stopped being true: the WebUI still said the absorbed list is
-  never pruned (it has been, since v1.3.137), `build.yaml` still carried the
-  description of the publish job that moved to `release.yml`, `statefile.rs`
-  named its temp `*.new.<pid>` when it is `<name>.<pid>.new`, and `release.yml`
-  ran a dedent `sed` over a heredoc that YAML had already dedented.
-
-## v1.3.140 — engine v30 (unchanged)
-
-### Added
-
-- **`updateJson`, so a manager can offer the update in-app.** It points at
-  `update.json` on `main`, and that file is written by the release workflow's
-  publish job and nowhere else — which is what makes the offer track RELEASES
-  rather than the prerelease branch. The job only runs on a `v*` tag, and tags
-  are only ever cut for releases, so a push to `prerelease` cannot move it.
-
-  Generated rather than hand-maintained, because the one field that must never
-  drift is `versionCode`: managers key the update offer on it, so a stale file
-  either hides a real release or offers one whose asset 404s. It is read out of
-  the `module.prop` INSIDE the published zip — the same byte the device compares
-  against, not a second source that can disagree — and emitted as a JSON number,
-  since a quoted one never compares greater than the installed version.
-
-  `update.json` is added to `build.yaml`'s `paths-ignore`: the publish job
-  commits it to `main` straight after a release, and building for that commit
-  would rebuild the zip just published, from the same tree, to no purpose.
-
-## v1.3.139 — engine v30 (unchanged)
-
-### Fixed
-
-- **A copy OUT of a ROM partition was reported as a write INTO one.** The
-  `rom_is_source` guard only recognised `$MODPATH`/`$MODDIR` as a destination, so
-  a module copying ROM content anywhere else read as a ROM write. Measured over
-  the 116 most-starred modules: HyperUnlocked runs
-  `su -c "cp -r ${DEFAULT_XMLDIR}/* $RESDIR/bakxml/"` with
-  `DEFAULT_XMLDIR=/system/system/etc/device_features` and
-  `RESDIR=/data/adb/HyperUnlocked` — a backup, flagged as a write. The
-  destination of a copy is its LAST path-shaped argument, so that is what is
-  asked now: the ROM path counts as a write only when that final token is itself
-  a ROM path. Precision over the corpus went 4/5 → 7/7 at n=204.
-
-  The blind spot predates v1.3.138; resolving ROM-path variables is what made the
-  line visible enough to hit it.
-
-## v1.3.138 — engine v30 (unchanged)
-
-### Fixed
-
-- **The incompatibility scanner never read the helper scripts its entry points
-  source.** It opens five fixed filenames, and modules put their mount logic in
-  helpers those five pull in — so all four lints were blind to them. Measured
-  across 434 scripts in the 204 most-starred modules: MoveCertificate (1947★)
-  runs `. $MODDIR/sh/compatible.sh` from `post-fs-data.sh` and every one of its
-  bind and `nsenter` lines lives in that file. Four modules were invisible to
-  every lint, two of them on boot paths (`systemapp_nuker`, `hifi-maximizer-mod`,
-  `MoveCertificate`, `drc-remover`).
-
-  `sourced_scripts()` now follows `.` / `source` / `sh` / `bash` of a `$MODDIR`
-  or `$MODPATH` path, one level, traversal-guarded, and the finding is reported
-  under the HELPER's own filename — naming the entry point would send the reader
-  to a file containing only the `.` directive. Reading every `*.sh` instead was
-  measured and rejected: 40 → 85 files in that corpus, and it pulls in
-  `uninstall.sh` and `action.sh`, neither of which runs at boot.
-
-- **The WebUI's absorbed-record list rendered legacy tab-less rows the engine
-  drops.** `parse_absorbed_pairs` requires a tab (`split_once` inside a
-  `filter_map`); the page's reader split the whole line into both halves, so a
-  legacy row displayed as absorbed "from" its own target path.
-
-## v1.3.137 — engine v30 (unchanged)
-
-### Added
-
-- **`bind-mounts its own content`, a fourth module-incompatibility finding.**
-  Bind-mounting a module's own payload over a ROM path is the single largest
-  mount-creating family in the corpus (28 bind-only + 22 mixed of 576) and the
-  one `absorb` exists for, yet nothing said so before the mount happened: `plan`
-  reads the LIVE mount table, and a module that has not run yet has no mount to
-  see. Reading its scripts is the only way to say it in advance.
-
-  It is `Info`, not `Warn` — alone among the four it resolves itself, because
-  absorb converts and unmounts it four times per boot. It is named so the reader
-  knows WHICH modules depend on absorb running: if absorb is ever disabled or
-  times out, these are the mounts that stay visible.
-
-  Ordered after the image-backed arm on purpose. `nsenter -t 1 -m -- mount
-  --bind` is both a bind and a namespace replication, and absorb says of that
-  shape that it "cannot see or unmount (replicated with nsenter)" — retagging it
-  as a self-mount would promise a takeover that cannot happen.
-
-- **The record of what absorb already took over is now visible.** Absorb runs by
-  itself four times a boot, so by the time anyone opens the WebUI the work is
-  done and the "what is left" count is zero — a card that only ever said "none"
-  while a real mechanism worked every boot. The engine already records each
-  takeover in `absorbed.list` so the boot pass can re-serve it; the same file
-  answers "what did it take".
-
-### Fixed
-
-- **Recorded rows from uninstalled modules were never retired.** A row survived
-  its module's uninstall and five reboots while the boot pass kept trying to
-  re-serve from a source that no longer existed — one dead line per self-mounting
-  module ever installed. A row is now dropped when its owning module directory is
-  gone from BOTH `/data/adb/modules` and `/data/adb/modules_update`.
-
-  The test is the module DIRECTORY, never the source FILE: 56% of the corpus
-  builds its payload at runtime, so at the moment absorb runs the recorded source
-  may legitimately not exist yet, and pruning on a missing file would delete live
-  modules' rows on every boot. Disabled is not uninstalled, a staged update is
-  not a removal, and a row not under any module tree is unattributable and never
-  pruned.
-
-  The prune runs at the TOP of every pass, including the one that absorbs
-  nothing. `run_absorb` returns early when there is nothing to absorb — i.e. on
-  every healthy device — and stale rows accumulate precisely where nothing is
-  ever absorbed again, so the tidy-up has to run on the do-nothing path.
-  `--dry-run` does not write.
-
-- **Absorb's record retirements were emitted on every boot and recorded on
-  none.** Every caller kept only `tail -1`, which is the summary line. They are
-  logged at all four capture sites now, not just `service.sh`: the prune fires on
-  the first pass to run, which is `post-fs-data`/`post-mount`'s `absorb --early`,
-  so a log line in `service.sh` alone would never have seen one.
-
-## v1.3.136 — engine v30 (unchanged)
-
-### Fixed
-
-- **`nomount check --json` writes operational warnings to STDOUT ahead of the
-  document, and the WebUI parsed the whole buffer.** On a device with a rule
-  targeting a bare partition root the engine prints
-  `nomount: <module>: skipping /product — a bare partition root …` before the
-  JSON; `JSON.parse` threw on the first character and the report was discarded
-  WHOLE, so the page rendered "Not checked yet" over a check that had just run
-  and written a perfectly good `audit.json`. Measured: 9155 bytes of valid report
-  thrown away by one leading line. The buffer is parsed first, then the document
-  inside it; junk and empty still yield nothing.
-
-## v1.3.135 — v1.3.126 — engine v30 (unchanged)
-
-### Changed
-
-- **The WebUI is organised by task instead of by data model.** `Modules` was a
-  tab because modules are a noun in the schema — it held a list and one status
-  line — while hiding, which is what the Suite is for, was split between two
-  other tabs. The tabs are now `Status` · `Hiding` · `Rules`: per-UID hiding,
-  hidden paths, detector globs and isolated processes are one place, the module
-  list folds into Rules, and the live "what apps can see" card sits on Status
-  directly under the verdict it backs.
-
-- **The hero verdict re-checks when the page opens.** The boot pass runs before
-  any app has opened an injected file, so its process-dependent checks had
-  nothing to look at and the line read "Not fully checked yet" for the rest of
-  the uptime — an amber meaning "nobody asked", shown to someone who just did.
-  The cached report still paints instantly; a live run replaces it in place,
-  guarded on freshness so reopening the page twice in a minute is one question.
-
-- **"What apps can see" folds to its verdict line**, and opens itself when the
-  verdict is not clean — the one time its rows matter. One tap of the chevron
-  stores a preference and ends that for good. Measured at 375×812: the Status
-  page went 1824 → 1494 px.
-
-- **The mountless headline matches the row underneath it.** "Zero mounts —
-  nothing to hide" is true of what the Suite adds and not of what an app sees:
-  a Zygisk/Xposed hook framework's `dex2oat` bind is left in place on purpose and
-  is a real row in `mountinfo`. With one present the headline now reads
-  "Mountless · 1 hook bind by design".
-
-### Added
-
-- **A card for the mounts other modules make.** `absorb` re-serves each as an
-  injection and unmounts the original, and it is the one repair for the
-  "Something is mounting over the ROM" verdict — which until now named the
-  offending module and had nowhere to send you. Scan reports without changing
-  anything; the four line kinds absorb can emit are tagged apart, so a bind it is
-  deliberately LEAVING is never labelled as one it is about to take.
-
-### Fixed
-
-- **The six collapsible card headers were `<div onclick>`** — unreachable by Tab,
-  announced as plain text, and never telling a screen reader whether the section
-  was open. They carry `role="button"`, `tabindex` and a synced `aria-expanded`
-  now, with Enter/Space doing what a click does.
-
-## v1.3.125 — engine v30 (unchanged)
-
-### Fixed
-
-- **The `_ghost` tables were populated once per boot and never re-synced.**
-  `service.sh` built them about ten seconds after `sys.boot_completed`; nothing
-  re-ran it. The WebUI's Reload button — whose own help text is "Install/remove a
-  module, tap Reload, no reboot" — and `nomount reload` / `nomount mount` all
-  rebuild the rule set underneath them, after which the tables describe the
-  PREVIOUS one.
-
-  Two consequences, both of which that shell block itself warned about: a newly
-  injected path is not in the table, so every existence oracle stays open for it;
-  and a path that went from injected-only to *shadowing* stays ghosted while the
-  engine correctly serves the hidden reader the stock file — so one path answers
-  `stat` = OK and `chmod`/`truncate`/`listxattr` = ENOENT at the same time, "a
-  self-contradiction no real file can produce, so a scanner does not even need a
-  control path to see it".
-
-  The forty lines of shell are now `src/ghost.rs` and a `nomount ghost sync`
-  subcommand, called at the end of `run_mount` and `run_reload` as well as once
-  from `service.sh`. The move also fixed three things in the logic itself:
-
-  * `[ -e "$p" ]` is false for ENOENT and EACCES alike, and conflating them
-    ghosts a merely-unreachable path — turning its EACCES into ENOENT while a
-    genuinely absent name under the same parent still answers EACCES, which is a
-    new tell of exactly the shape `_ghost` exists to remove. The probe now reads
-    `errno` and requires ENOENT.
-  * The candidate list was cut at the first `" ("` by `sed`, which also truncates
-    any target containing that substring — the same hazard the block below it
-    documented at length for a target containing a space. It now comes from
-    `nm::parse_list`, the one parser.
-  * One fork for the whole list instead of one `su` plus one `nm k g p+…` exec
-    per path, and one netlink command per table (`p=` / `u=` replace a table
-    under one kernel lock) instead of one per entry.
-
-- **The mount pass did one `fork`+`exec` of `nm` per rule.** `nm` has always
-  accepted up to 31 add-pairs per invocation; `Nm::add` passed exactly one, so a
-  measured 260-rule device paid 260 process spawns during post-fs-data. That is
-  both the boot cost and the root-exec burst OOS's kevent heuristic flags — the
-  very thing the ghost populate block explicitly avoided for its own writes while
-  the mount pass did it anyway. `Nm::add_many` batches by `--public` group and
-  falls back to one-at-a-time inside any chunk that fails, so per-rule failure
-  attribution is unchanged.
-
-- **Four different idioms for `Path` → `CString`, two of them lossy.**
-  `absorb::umount_detach`, `bind::umount_target`, `audit::getdents` and
-  `audit::fs_type` went through `to_string_lossy()`, which substitutes U+FFFD —
-  so on a non-UTF-8 path the syscall named a *different* path. For
-  `umount_detach` that means the unmount silently no-ops and the caller reads an
-  ordinary `false`, so the mount stays up while the posture report says it came
-  down. `bind::cstr` refused such paths outright, which is at least loud but
-  still a third behaviour. All five sites now use `as_encoded_bytes()`.
-
-- **`nm block <uid>` parsed the uid with no overflow bound.**
-  `uid = (uid << 3) + (uid << 1) + digit` wrapped silently, so
-  `nm block 4294967296` sent uid 0 — and uid 0 is the engine's own identity.
-  Bounded now, and checked against `strtoull` across the range boundary.
-
-- **Unaligned stores in `nm.c`'s batch encoder.** `*(unsigned int *)cursor`,
-  where `cursor` advances by `12 + v_len + r_len` for arbitrary path lengths, is
-  undefined behaviour however reliably it has worked. Replaced with `memcpy`,
-  which compiles to the same single store on every ABI this ships for.
-
-- **The zip was not reproducible.** `mkzip.py` stamped each entry with the
-  file's mtime, which git does not preserve, so two builds of one commit
-  produced different bytes and a published zip could not be compared against a
-  local rebuild. Fixed timestamp now, and `package.sh` prefers `mkzip.py` over
-  `zip -r9` for that reason and says which it used. `customize.sh` is right that
-  the bundled `nomount.sha256sums` cannot be an authenticity check; a
-  byte-identical rebuild is the cheapest thing that can be.
-
-### Added
-
-- **`nomount check` reports the isolated-process pool setting.** Once anything is
-  hidden, the default (`both`) means every app-zygote and platform-isolated
-  process sees the stock tree — so any *unblocked* app that declares
-  `android:isolatedProcess="true"` can compare its own view of a path against its
-  own isolated child's and prove injection with two reads and no privilege. The
-  engine documents that trade; nothing surfaced it, which made it the one setting
-  whose default creates a detector-visible differential and is invisible in the
-  report meant to find those. Reported as a note, with both directions stated,
-  because the opposite setting hands a hidden app a way to read through its own
-  isolated helper.
-
-- **`nomount ghost sync` and `nomount ghost list`.**
-
-### Notes
-
-- `pass_lock()`'s doc comment now names the one step that is not idempotent
-  (`run_mount`'s opening `nm.clear()`) rather than leaving it inside the word
-  "idempotent". The bounded-wait design is unchanged and still correct.
-
-## v1.3.124 — engine v30 (unchanged)
-
-### Changed
-
-- **An image-backed module is a note now, not a warning.** Reported from a OnePlus
-  CPH2649 whose three modules made the report permanently unhappy about a device that
-  was working correctly: "3 things need attention", on a setup where none of the three
-  had any action attached.
-
-  The axis for this is deliberately NOT "can the user fix it" — none of the three
-  incompatibilities is fixable in NoMount, and the only lever for any of them is to
-  remove the module. It is whether the finding **contradicts what the user believes
-  they have**. A `RomWrite` means the feature they installed the module FOR does not
-  work; a `MagiskMirror` means the module does nothing at all on KernelSU. Nothing else
-  on the device says so, so both stay loud. An `ImageBacked` module *works as intended*
-  — its only trace is a mount, and the device section's mount checks already report
-  that mount independently — so the finding explains a mount rather than breaking news.
-  That is `Verdict::Note`'s definition word for word: "worth printing, not worth acting
-  on, a standing observation about a working configuration."
-
-  It had been `Warn`, which put it on the "needs attention" axis and promised an action
-  that does not exist. A warning nobody can ever clear is what teaches people to stop
-  reading warnings.
-
-  Deliberately NOT extended to the other unfixable finding, "foreign mount in another
-  namespace": that one contradicts the zero-mount posture the same report otherwise
-  claims, so it has news to break and stays a warning. Nothing is hidden by this change
-  — the note prints in full, with the same evidence and explanation.
-
-## v1.3.123 — engine v30 (unchanged)
-
-### Fixed
-
-- **An incompatibility was reported against the wrong line — a probe instead of the
-  use.** Reported from a OnePlus CPH2649 running v1.3.122: `AutoSystemBoost` was named
-  an "image-backed or chroot module" and the evidence quoted was
-  `if command -v nsenter >/dev/null 2>&1`, a line that asks **whether** the tool exists
-  and never runs it.
-
-  The verdict was right and only the evidence was wrong. Reading the module's actual
-  source (`service.sh:502-503`) shows the probe is the first half of a two-line
-  condition whose second half is
-  `&& nsenter -t 1 -m -- mount --bind "$_rb_p" "$_rb_t"` — the module really does enter
-  PID 1's mount namespace and bind-mount there, which is exactly the case
-  `absorb.rs` already describes as one the Suite "cannot see or unmount (replicated with
-  nsenter)". So the module IS correctly flagged; the report simply cited the guard
-  rather than the operation, which makes a true finding look like a false one.
-
-  The cause was a bare `t.contains("nsenter")` matching the probe line first, and the
-  scanner reporting only the first match per module. This chain had
-  already learned that lesson twice — `chroot `, `proot ` and `unshare ` carry a
-  trailing space precisely to avoid over-matching, and the arm above it documents
-  `MIRROR=$MAGISKTMP/mirror` boilerplate accounting for 50 of 182 corpus matches —
-  but `nsenter` and `losetup` were matched bare and had no defence. `command -v X`,
-  `which X`, `type -p X` and `hash X` expressions are now **removed** from the line
-  before matching, rather than the line being skipped, so a script that probes and
-  then uses the tool still counts as a use. Verified on an OP15 against
-  AutoSystemBoost's real scripts: v1.3.122 quoted line 502 (the probe), v1.3.123 quotes
-  line 503 (the `nsenter --mount --bind`), and the warning correctly **remains**.
-
-  The classification also moved out of `scan_module_incompat()` into a pure
-  `classify_incompat_line()`. That function walks `/data/adb/modules`, so every
-  precision fix in the chain — and it is almost entirely precision fixes — could
-  previously only be checked by installing a module and reading the report. Four
-  tests now pin it, including the two older fixes (`rm ` inside `set_perm`, and
-  reading a stock file to seed a module copy) that were unreachable before.
-
-## v1.3.122 — engine v30 (unchanged)
-
-Two additions that both close the same kind of hole: a decision that is correct in
-the code but pinned by nothing, so a regression would be silent. Neither touches the
-engine. **Suite-only update, no kernel reflash.**
-
-Also recorded here because it is a result, not a change: the `/proc/<pid>/maps`
-**device-field oracle was measured and retired**. It had been carried as an open
-detection gap ("injected mappings show an anon device, stock shows erofs"). Across
-every readable `/proc/<pid>/maps` on OP15 — 7,288 unique dev+path pairs, 2,636 on ROM
-partitions — injected mappings were all on `00:1b`/`00:38`, but **so were 106 stock
-ROM files**, 37 of them ordinary `/product/priv-app/` apps. The two injected files
-outside an `overlay/` dir share device *and* path shape with those. A detector keying
-on it flags 106 stock files alongside 30 injected ones, so it is not a usable oracle
-and no fix is warranted. `check`'s maps probe deliberately continues to parse only
-the ` (deleted)` suffix and the path.
-
-### Added
-
-- **`check`: "xattr agrees with open for a hidden app"** — a 14th check. The driver
-  already gates the xattr surface (`nm_listxattr()` opens with
-  `if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;`), but nothing in the
-  report measured it, so a regression there would have been silent — the exact shape
-  of the v1.3.120 leak, where a decision was right in one reader and unpinned in the
-  others. The probe forks, drops to a blocked appid (uid only; the SELinux domain
-  stays ours, because `nomount_is_uid_blocked()` reads `current_uid()`), and asks
-  whether `listxattr`/`getxattr` ever answer for a file the same caller cannot
-  `open()`. That direction is an existence oracle and fails the check: an app denied
-  `open()` but handed a live `security.selinux` context has learned both that the
-  file is there and that something is keeping it away — louder than the file simply
-  not existing. The reverse (open succeeds, xattr does not) leaks nothing and is
-  reported without failing. Verified on OP15: for a hidden uid the injected-only path
-  answers `ENOENT` uniformly across stat/open/access/opath/rdlnk/gxatr/stfs, and a
-  shadowing path answers `OK` on both surfaces from the stock file.
-
-### Fixed
-
-- **`verify` could not see a field that disappeared, and had no test at all.** The
-  comparison lived inside `run_verify`, which reads a file and prints — so the only
-  part that can be wrong was untestable, and the verb shipped with nothing proving it
-  detects anything. It could only ever be observed agreeing with a snapshot taken
-  seconds earlier. Worse, it walked the LIVE fields and looked each one up in the
-  snapshot, so a field the snapshot had and live did **not** was never visited and
-  counted as no drift. Nothing on the device path reaches that today —
-  `Fingerprint::facts()` emits a fixed twelve-key array — but the case it misses is a
-  Suite upgrade that renames or drops a fingerprint field, i.e. precisely when a
-  stale baseline must speak up instead of reporting a clean bill. The comparison is
-  now a pure `drift_lines(saved, live)` that walks both directions, pinned by six
-  tests: a changed value, a live-only field, a snapshot-only field, `ts` correctly
-  ignored, key order irrelevant, and several fields moving at once.
-
-## v1.3.121 — engine v30 (unchanged)
-
-A fourth audit read the tree at v1.3.120 / engine v30, re-ran every gate and
-re-verified the previous rounds on hardware: the round-3 redaction fix holds live
-(appid-shaped tokens in a shared check report: **0**; private: 2), every state file
-is 0600 with no leftover temps, and the device reports 15 passed / 0 failed /
-verdict clean. It found no bug that changes an answer — the four items below are a
-latent crash, a dead CI filter, one piece of kernel hardening, and a test whose name
-promised more than it could deliver. **The kernel engine is untouched at v30 — this
-is a Suite-only update, and no kernel reflash is needed.** `NOMOUNT_VERSION` is a
-monotonic *capability* counter that userspace gates on, and none of this adds a
-capability, so it does not move.
-
-### Fixed
-
-- **`uidwatch.sh` could die on an arithmetic syntax error and silently skip a hide
-  pass.** `_now=$(date +%s)` carried neither the `|| echo 0` fallback nor the digit
-  guard that the identical computation in `service.sh` was given in the previous
-  release, and it feeds `$(( _now - $(stat -c %Y "$LOCK" || echo "$_now") ))` — so an
-  empty `_now` makes the fallback echo nothing too and the expression collapses to
-  `$(( _now - ))`. That is an arithmetic **syntax** error, which in both mksh and ash
-  kills a non-interactive shell outright; confirmed on-device, where nothing after the
-  line runs. The script would have died *before* taking its lock, so the handler for
-  the package that just changed — the `uid apply` that hides it — would not have run,
-  and a newly installed app would stay unhidden with nothing logged. The `stat` arm is
-  the genuinely reachable half: the lock can vanish between the `[ -f ]` and the `stat`
-  when another handler's EXIT trap unlinks it. Both values are now guarded separately
-  and before the arithmetic, and an unreadable clock yields age 0 — "not stale" — so a
-  lock that cannot be aged is never reaped.
-
-- **The kernel's `_ghost` dump trusted another repository for a NUL.**
-  `nomount_nl_dump_ghost()` fills an *uninitialised* stack buffer via the weak-extern
-  `ghost_get_rule()` and hands it to `nla_put_string()`, which calls `strlen()`.
-  `ghost.c` ships in a separate patch set, so that termination is a cross-repo
-  contract — and the comment on `NM_GHOST_RULE_MAX` already says the two sides can
-  drift. A fill that reached the end of the buffer would walk off the array into
-  whatever follows it on the stack. The loop now terminates the buffer itself; a
-  correct `_ghost` never notices.
-
-### Changed
-
-- **The compile matrix's `only` filter works now, and stopped being an injection
-  shape.** It read `github.event.inputs.only`, but the workflow lost its own
-  `workflow_dispatch` when it became reusable and nothing has declared an `only`
-  input since — so the expression was permanently empty, `run=1` was unconditional,
-  and the filter was dead code that still cost a step on all ten legs. It is a
-  declared `workflow_call` input, forwarded from `build.yaml` (which declares it on
-  both triggers), and empty everywhere it is not passed — so a push, and
-  `release.yml`, still get the full ten-version matrix. It was also the only place in
-  the four workflows that dropped `${{ }}` straight into a `run:` body, where a value
-  is substituted as text before bash parses it; it goes through `env:` now, which is
-  what the rest of the tree already does. Not reachable while the input did not
-  exist — declaring it is precisely what would have made it reachable, so both halves
-  land together.
-
-- **A redaction test stopped claiming coverage it could not have.**
-  `redaction_covers_every_hide_list_reader` exercised only `hidden_uid_label`, which
-  is *private to* `doctor.rs` — so despite the name it could never reach the second
-  reader, the PM-open probe in `audit.rs`, which carries its own copy of the decision.
-  That reader had no test at all. `blocklist.rs` compounded it by telling a future
-  fourth reader to "extend that one test", which is not actionable from another
-  module — the same shape that let the third reader ship unredacted in the first
-  place. The probe's choice is now a pure `hidden_uid_label(appid, redact)` pinned by
-  `redaction_covers_the_pm_open_probe`; the doctor test is renamed
-  `redaction_covers_the_doctor_readers` for what it actually covers; and the rule in
-  `blocklist.rs` is now per-reader — gate on the function, put the choice in a pure
-  label fn beside it, and pin it with a test asserting the **digits** cannot survive.
-  The wording may differ per reader; the digits may not.
-
-## v1.3.120 — engine v30 (unchanged)
-
-A third audit read the tree at v1.3.119 / engine v30 and re-ran every gate. All
-twenty-three earlier findings are closed; this release carries one real leak found
-by it, plus three places where a rule the codebase already states was not being
-enforced. **The kernel engine is untouched at v30 — this is a Suite-only update.**
-
-### Fixed
-
-- **A shared `nomount export` published an appid off the hide list.** The
-  ghost-cloak probe prints the uid it measured against — `guids.first()`, the
-  first entry of the engine's `_ghost` uid table, which `service.sh` populates
-  *from the hide list*. It went into `check.txt` unredacted, and `nomount export`
-  writes `check.txt` to shared storage, where the very same function withholds
-  `uidhide*` and `spoof.conf`, drops `uid_live.txt`, strips the ` [UID: n]`
-  suffixes from `rules.txt`, and then prints a closing note promising that "the
-  check report's hide-list names were redacted". Measured on a real device: a
-  `/sdcard/Download` export carried `to uid 10422`, an appid that resolves through
-  `uidhide.cache` to an installed package and is in the live blocked set —
-  `PackageManager.getNameForUid()` turns the number back into the name, so this is
-  the same secret the hide list itself is. This was the **third** reader of
-  `blocklist::redact_hide_list()`, whose own note says it lives there so "a third
-  reader cannot be added without finding it"; the probe was added afterwards and
-  did not. The decision is now a pure `hidden_uid_label(uid, redact)` with a test
-  asserting the digits cannot survive redaction, and the note names all three
-  readers.
-
-- **Every state file except `binds.list` was a non-atomic `fs::write`.**
-  `fs::write` truncates and *then* writes, so the file is empty for the window
-  between the two — and `bind.rs` had already spelled out what that costs, shipping
-  a temp-then-rename for `binds.list` alone. Every word of that argument applies
-  harder to `uidhide`, which is the hiding **policy**: a truncated hide list is not
-  a corrupt file, it is a *legal empty* one, so the next boot's apply pass blocks
-  nobody and every hidden app is silently visible to every injection with nothing
-  logged. `uidhide`, `uidhide.cache`, `uidhide.conf`, `absorbed.list`,
-  `absorbed-tmpfs.list`, `whiteouts.txt`, `apkstate.list`, its pending list,
-  `audit.json`, `health.txt` and `snapshot.txt` now all go through one
-  `statefile::write_atomic`, which `bind.rs` calls too rather than keeping a second
-  copy — that duplication is how the `nm list` parsers drifted. The shared version
-  also fsyncs the parent directory after the rename, which the `binds.list` copy
-  did not: `sync_all` on the temp makes the *content* durable and says nothing
-  about the directory entry naming it. Writing through a fresh temp also makes
-  0600 a property of the write instead of of the file's history, which retires the
-  `set_permissions` calls that used to run *after* the window they were fixing.
-  The diagnostic dump in `nomount export` stays a plain write, deliberately, and
-  now says why.
-
-- **`service.sh` validated the boot epoch's two inputs concatenated.**
-  `case "$_now$_up"` on `date +%s` and `/proc/uptime` together means an empty
-  `$_up` beside a valid `$_now` yields an all-digit string, passes, and reaches
-  `$((_now - ))` — an arithmetic *syntax* error, which in both mksh and ash kills a
-  non-interactive shell outright. The rest of the post-boot pass (absorb, the
-  whiteout re-apply, the authoritative `uid apply`, the package watcher, the status
-  card) would not run, and nothing would be logged. `metamount.sh` sanitizes
-  `bootcount` per-value before `$((COUNT + 1))` against exactly this; this guard
-  now does the same. Unreachable in practice — but it only *looked* like it
-  covered the empty case.
-
-- **`package.sh` never enforced the versionCode field widths it reasons about.**
-  `vcode = major*100000 + minor*1000 + patch` was chosen after v1.3.100 and v1.4.0
-  collided under the older two-digit fields and v1.3.101 shipped as a downgrade.
-  Three digits of patch and two of minor is a bound, and an unasserted bound is the
-  same bug waiting on a counter. Packaging now refuses a version that would not
-  fit, rather than emitting a colliding code that managers — which key updates on
-  versionCode alone — read as a downgrade.
-
-## v1.3.119 — engine v30
-
-A second audit read every tracked file at v1.3.118 / engine v29 and re-ran the
-project's own gates. It confirmed the twelve findings below as closed and raised
-eleven more: three reachable on the shipped build, six latent, and five places
-where two copies of one idea had drifted apart. All of them are fixed here.
-
-### Fixed
-
-- **An app update permanently killed the absorbed-APK record.**
-  `refresh_app_apks()` re-pointed the live rule when PackageManager moved a
-  package to a new `/data/app/…` path, and left `absorbed.list` naming the old
-  one. Every reader of that record gates on `target.exists()`, so from the next
-  boot the stale row was skipped — and there was no live rule left for a later
-  pass to find, because the boot `nm clear` had dropped it. The package silently
-  reverted to the stock APK, permanently, and dead rows accumulated. That defeats
-  the record's stated purpose in as many words ("the source lets the boot pass
-  re-serve it without waiting for the owning module to mount again"): it only
-  ever kept working for a module that re-binds every boot, which is the case the
-  record exists to make unnecessary. The re-point and the uninstall now both
-  carry into the record, in one write, with the same
-  leave-the-file-alone-on-a-read-error discipline the other two writers use.
-  The re-point also **adds before it deletes** now, and says so when it cannot:
-  it used to `del` then `add`, so a failed add left the package with no rule at
-  all — silently, since the status was discarded. The old target no longer exists
-  on disk by then, so it cannot be restored either; not destroying it until the
-  replacement is live is the only order that can fail safely.
-
-- **`nomount export`'s shared-storage guard was a raw prefix test on the
-  caller's argument.** The list had been patched by hand once already (adding
-  `/data/media`, after `nomount export /data/media/0/Download` published the hide
-  list on a real device), but the test itself was `String::starts_with` on the
-  unresolved string — so `//sdcard/Download`, `/data/local/../media/0/Download`
-  and any symlinked destination all read as PRIVATE and wrote `uidhide`,
-  `uidhide.cache`, `uidhide.conf` and `spoof.conf` into storage any app with a
-  storage permission can read, alongside an un-redacted `check.txt` and the
-  `[UID: n]` suffixes in `rules.txt`. In the other direction it called
-  `/data/media0` shared, because a raw prefix has no notion of a path boundary.
-  The destination is now resolved with `canonicalize` and matched with
-  `Path::starts_with`, which is component-wise and normalises a `//` root; both
-  the resolved and the literal form are tested and EITHER matching means shared,
-  so a canonicalize that fails falls to the withholding side.
-
-- **The Hidden paths card is back in the WebUI.** Durable whiteouts —
-  `whiteouts.txt`, the anchored scan for root-setup leftovers, the boot re-apply —
-  had no surface at all, so the feature existed only for someone with a root
-  shell, while `whiteout.rs` still explained its exit codes in terms of the card's
-  buttons and this changelog still advertised it. It is restored under **Rules**,
-  next to Active rules and Injected files, and NOT as it was: the earlier version
-  built `whiteout add ${v}` by concatenation behind a character blacklist and put
-  the path inside a generated `onclick` with `JSON.stringify` — both shapes this
-  page documents as forbidden, since `esc()` renders `'` as `&#39;` and an HTML
-  attribute decodes that before the JS in it is parsed. Every command goes through
-  `shq()`, rows carry data-attributes and one delegated listener, and the
-  validation is "absolute, no control characters" rather than a metacharacter
-  blacklist — a blacklist adds nothing against injection once `shq()` is doing the
-  work, and does take something away: it refused paths the engine accepts, which
-  for the delete button meant a saved row nothing in the UI could remove.
-
-- **`nm_dsnap_make()` cached its remaining failures as verdicts** (engine, and
-  the reason for **v30**). v29 split "could not ask" from "walked it and it does
-  not qualify" for the `dentry_open` arm and left the other three exits sharing
-  one `goto out`, which publishes `ok = false` — so a `GFP_NOFS` allocation
-  failure, or an `iterate_dir()` error, still cached a not-answer that
-  `nm_dsnap_fresh()` then kept until the backing directory's size or mtime moved.
-  Only `b.overflow` — more entries or name bytes than the model carries, a
-  property of the directory — leaves as a cacheable negative now; everything else
-  publishes nothing and retries.
-
-- **`metamount.sh` could exit without `ksud kernel notify-module-mounted`.**
-  `exec` is a POSIX special built-in, so a redirection error on one exits a
-  non-interactive shell — and the `2>/dev/null` on `exec 9>"$LOCK"`, which is
-  there for a different and good reason, threw the message away with it. An
-  unwritable `$NMDIR` (a full or read-only `/data`, a label that refuses creation,
-  the `mkdir -p` above it having failed) therefore killed the metamodule hook
-  right there: no log line, no incident, and no notify — the stalled-boot failure
-  the missing-`lib.sh` arm and the flock back-off both go out of their way to
-  prevent. The lock file is probed in a subshell first, where a special built-in's
-  redirection failure is catchable, and the failure arm notifies before leaving.
-  Refusing the pass rather than running it unguarded is deliberate: with `$NMDIR`
-  unwritable the bootcount cannot be written either, so the bootloop guard is dead.
-
-- **A genuine uninstall could leave `/data/adb/nomount.bak` behind forever.**
-  The `remove`-marker branch declined to CREATE a stash and did not delete one
-  already there — left by a flash whose `customize.sh` aborted before it could
-  consume one, which both the sha256 refusal and the metamodule-conflict refusal
-  do. The sweep that would collect it lives in the two BOOT entry points, neither
-  of which runs again once the module is gone, so the file sat there indefinitely,
-  named after the module the user had just deleted, holding `uidhide`. The comment
-  crediting `service.sh` with that sweep — which has never touched the file — is
-  corrected too; believing it is why the branch did not think it had to clean up.
-
-- **A guard that always passed, in both copies.** `mount::serve_mode` and
-  doctor's "partition name nested" check both read
-  `second == root && is_partition_root(Path::new(&format!("/{root}")))`, which
-  looks like "…and `/<root>` really is a partition on this device" and is a
-  tautology: `root` is one component, so that call is `count() <= 1` on a
-  one-component path. Behaviour is unchanged — `second == root` was always the
-  whole test — but a guard that is read as one and is not is worse than none, and
-  the comments now say what would be needed to make it real.
-
-- **doctor kept its own `is_partition_root`**, and it was the `count() == 1` form
-  mount.rs had already widened to `<= 1` because it answered FALSE for `/` —
-  "the one path where serving a rule is most catastrophic", and "a trap for the
-  next caller". The copy is gone; there is one definition and two callers.
-
-- **Two hand-rolled `nm list` parsers survived in `whiteout.rs`**, against
-  `crate::nm::parse_list`'s documented invariant that it is the one reader.
-  `live_whiteouts()` peeled ` (whiteout)` as a suffix and nothing else, so a rule
-  that also carried ` (public)` would not have matched — and `whiteout list` would
-  then report every saved entry as "not applied" while the engine served all of
-  them. Both go through the shared parser, and its test now covers the flag in the
-  order the client actually emits it.
-
-- **The Magisk boot path had drifted from the KSU one again.** `post-fs-data.sh`
-  did not read the mount pass's stdout, so the `nomount: WARNING` marker
-  `mount.rs` prints *for a boot script to grep* ("metamount.sh greps for this
-  marker") went unread there — a partial injection ended the boot with a zero exit
-  and nothing in `boot.log`, which is the only channel that path has. It also
-  never repaired `$NMDIR`'s modes and label, which `metamount.sh` has done at
-  every boot since that drift was measured. Both fixed, and the repair moved into
-  `lib.sh` as `nm_state_dir_repair` rather than pasted a second time.
-
-- **`uidscan.sh` was the last entry point not sourcing `lib.sh`.** It carried its
-  own copy of `nm_set_bin`'s ABI fallback, hardcoded `/data/adb/nomount` instead
-  of `$NMDIR`, had no `nmlog`, and ran under the boot umask — so `uidscan_cache`,
-  the list of installed apps it proposes hiding from, was created 0666 and stayed
-  that way until the next boot's `chmod` sweep. Its two diagnostics also went only
-  to stderr, which the WebUI discards; they reach `boot.log` now.
-
-- **`binds.list` is rewritten atomically.** Three sites used `fs::write`, which
-  truncates and then writes, on the file `teardown_all` calls "the ONLY record of
-  binds we made" — a short write (ENOSPC, or `metamount.sh` SIGKILLing the pass at
-  60s) leaves exactly what that function says losing the file costs: a live mount
-  over a `my_*` path whose backing file has already been relabelled back to
-  `adb_data_file`, that no later pass can see or unmount. Temp-then-rename, and
-  0600 stated rather than inherited (`fs::write` keeps an existing file's mode).
-
-- **The control plane now requires `CAP_SYS_ADMIN`** instead of `CAP_NET_ADMIN`
-  (engine, the other half of **v30**). `CAP_NET_ADMIN` was the faithful
-  translation of the `GENL_ADMIN_PERM` flag the generic-netlink family carried
-  before the move to a private protocol, and a bad fit for an interface whose one
-  `ADD_RULE` can serve a chosen file at any path on any ROM partition — that is
-  root-equivalent, and `CAP_NET_ADMIN` on Android is held by domains that are not
-  (netd, system_server). Nothing legitimate loses access: every caller in the tree
-  is uid 0 with a full capability set, and none of the privilege-dropping probes
-  in `nomount check` touch the socket. A kernel below 30 keeps the looser gate.
-
-- **`customize.sh` contradicted itself about `set_perm`'s 5th argument** — a
-  comment reading "the 5th argument is not optional here either" above a
-  four-argument call, so one of the two was wrong and a reader could not tell
-  which. The calls are right: these are files in the MODULE TREE, where
-  `set_perm`'s default is what ksud gives every other file under
-  `/data/adb/modules`. `$NMDIR` is the opposite case and keeps its explicit label.
-  The comments say so now.
-
-- **The WebUI's CSP is documented as containment, not XSS mitigation.** With
-  `script-src 'unsafe-inline'` — which a single-inline-script page cannot do
-  without — a CSP does not stop injected script from running; `default-src 'none'`
-  stops it reaching anywhere. The escaping is the defence, and the note now says
-  that plainly so the CSP's presence cannot excuse a missing `esc()`.
-
-## v1.3.118 — engine v29
-
-An external audit read every tracked file and re-ran the project's own gates;
-this is all twelve of its findings. Two were reachable on a shipped build, three
-were latent, and the rest are the duplication that produced one of them.
-
-### Fixed
-
-- **`nomount export` published a hidden app's appid to shared storage.** The
-  same function withholds `uidhide*`, skips `uid_live.txt` entirely and strips
-  the ` [UID: n]` suffix out of `rules.txt` when the destination is shared
-  storage — all because an appid off the hide list names an app you are hiding
-  from, and `PackageManager.getNameForUid()` turns the number back into a name.
-  It then wrote `check.txt` containing `uid <appid> (hidden) opened all …` from
-  the device section's PM-open probe, and closed with a note claiming "the check
-  report's hide-list names were redacted". `NM_REDACT_HIDE_LIST` was honoured in
-  exactly one place, the plan section. The test now lives in
-  `blocklist::redact_hide_list()` with both readers on it, so a third cannot be
-  added without finding it.
-
-- **An image mounted over the ROM passed every mount check.**
-  `mount -o loop x.img /product/app/Foo` is mount root `/` on its own loop
-  device, so it matched neither of `check_no_foreign_rom_mount`'s two tests —
-  while that check's own comment promised to cover "a loop image" and its
-  failure text says "an image over the ROM". The other three miss it too:
-  `check_zero_mount` and absorb's survey both drop the row because
-  `absorb::source_of()` answers None for a whole-filesystem mount, and the tmpfs
-  check keys on the filesystem type. So the loudest mount there is read as
-  "posture clean" on every surface. The predicate gained the backing device
-  (loop is major 7 on every Linux, and nothing stock puts one inside a ROM
-  partition — Android's own loop mounts are the apexes, which land on `/apex`),
-  and `absorb` now reports the same rows itself, because its survey structurally
-  cannot see them and it cannot re-serve one either.
-
-- **`uidwatch.sh` — the one entry point without the house guards.** It runs on
-  every install, update and uninstall, and it was the script that never got a
-  copy of `nmto`: it called `timeout` bare, which on a device with no toybox
-  `timeout` does not run the command unbounded but does not run it at all, so
-  per-UID hiding silently stopped following installs. It was also missing the
-  failure arm its neighbours carry, so a non-zero, non-124 `absorb` was logged
-  in the voice of a success — the same asymmetry that had already been fixed for
-  `uid apply` twenty lines above it, and that `service.sh` documents at length
-  for this very command. Both fixed, and both now come from `lib.sh` rather than
-  from a copy somebody has to remember to make. `uidscan.sh` had the same bare
-  `timeout` around its manifest probe; it carries the bound as a command prefix,
-  because a shell function cannot follow into `xargs sh -c`.
-
-- **`nm_dsnap_make()` cached "could not ask" as a verdict** (engine, and the
-  reason for **v29**). v28 fixed a lookup that ran under `nm_root_cred` — whose
-  SID is the kernel's, not root's — and closed with "the other `nm_root_cred`
-  users in this file never noticed because they only ever scan ROM paths". Three
-  of the four do. `nm_dsnap_make()` opens the rule's BACKING directory, which is
-  `/data` by construction, so it lands on exactly the labels that note measured
-  `kernel_t` as denied on. The open failure was then published with `ok = false`
-  — the encoding for "walked it, does not qualify" — which froze the v25
-  dir-target correction off for that rule until the backing directory's size or
-  mtime happened to move, silently, because the denial is dontaudit'd. It
-  publishes nothing and retries now, and says so once. The caller's creds are
-  deliberately not used here, unlike v28's fix: an app reading an injected ROM
-  directory cannot search a module tree, so that would disable the correction
-  for precisely the readers it exists for.
-
-- **`nomount_hijack_superblock()` could not report failure** (engine). It was
-  the one of three consecutive hijack steps in the topology walk that returned
-  `void`, and it installs our `->destroy_inode` — the only thing that frees an
-  injected inode's `nm_inode_info` and the `r_path`/`s_path`/`dir_node`
-  references it owns. On a `kzalloc` failure it bailed silently with the
-  directory inode already hijacked, and every synthetic inode minted on that
-  superblock afterwards leaked its payload for the life of the boot. It returns
-  `-ENOMEM` now and the add is refused, like its two neighbours. The xattr proxy
-  below it stays best-effort on purpose, and says why.
-
-- **`absorb::refresh_app_apks()` re-implemented the one `nm list` parser.** It
-  split on the FIRST ` -> ` and peeled only ` [UID: n]` — the exact drift
-  `crate::nm::parse_list` was introduced to end, named in that function's own
-  doc. A rule carrying ` (public)` would have had its source read as
-  "…/base.apk (public)", failed `source.exists()`, and been DELETED through the
-  "package is gone" arm. Unreachable only because `is_pm_published()` cannot
-  grant the flag to a `/data/app` target, which is not a property this function
-  should depend on. `reapply_absorbed_pairs` was hand-parsing too, and now does
-  one parse into a set instead of a `lines()` scan per pair.
-
-- **The last unquoted expansions in the module scripts.** `find $_roots …` in
-  `metamount.sh` built its argument list from third-party module DIRECTORY
-  NAMES: one space split it in two, a leading `-` made it a find primary. It
-  carries positional parameters now. CI could not see it — SC2086 is info
-  severity and the gate ran at warning, which is fixed below.
-
-### Changed
-
-- **One `lib.sh`, sourced by all five entry points**, replacing helpers that had
-  been pasted into each: `nmto()` was byte-identical in four scripts, the
-  `/data/local/tmp` restore in three, the ksud de-link in two, `nmlog` and the
-  ABI fallback in five. 72 of `post-fs-data.sh`'s 130 code lines were
-  `metamount.sh`'s. That file argued against sourcing — "a `.` of a file that a
-  partial install did not extract would leave every nmlog call undefined for the
-  rest of the pass" — and the argument is answered rather than ignored: every
-  source is guarded, so a missing `lib.sh` is a kmsg line and a non-zero exit
-  instead of a shell full of undefined functions. With four copies the
-  partial-install case was covered and the DRIFT case was not, and drift is the
-  one that actually happened (see `uidwatch.sh` above). Roughly 150 lines gone,
-  and `package.sh` ships `lib.sh` first so a truncated list fails loudly.
-
-- **One `nm_file_getattr()` body behind two wrappers** (engine). The two
-  signature arms were 81 of 83 lines identical, differing only in the
-  `generic_fillattr` arity and the `vfs_getattr_nosec` argument count — both
-  already `#if`-guarded elsewhere in the file. The duplicated copy was the
-  pre-4.11 one, i.e. the 4.9 build, which CI compiles and nobody boots: a fix
-  landing on one arm and not the other could not have been caught anywhere. The
-  stock-fact mirroring inside it (`v_ino`, `v_dev`, the times, `v_blksize`, the
-  statx attributes and `result_mask`) was written out twice per arm and is now
-  `nm_mirror_stat()`.
-
-- **The `nm` client lost its unreachable JSON writer.** `is_json` was only ever
-  set by `l u`, so the rules-JSON branch could not be reached and `print_json()`
-  was reachable only through an accidental `nm l u g`; both its doc comment and
-  the truncated-dump note described an `nm l j` the option parser stopped
-  accepting. 4984 → 4696 stripped bytes, in the one binary whose size is a
-  design goal.
-
-- **shellcheck runs at `-S info` with `-x`.** Warning is one level above SC2086,
-  the check that would have caught the `find $_roots` above; `-x` makes it
-  follow `. "$MODDIR/lib.sh"` so the deduplication is checked rather than
-  punished. Still no rule exclusions: what the lower level newly reports is
-  either fixed or carries an inline `disable` with its reason, on the line it
-  excuses.
-
-- **A Content-Security-Policy on the WebUI.** The page holds `ksu.exec()`, which
-  is an arbitrary root shell, and every device-derived value already goes
-  through `esc()` and every shell interpolation through `shq()` — that is the
-  defence and it is not being relaxed. The CSP is the backstop for the one that
-  gets missed: no `src=` of any kind is permitted, so an injected `<script src>`
-  or `<img onerror>` fetching one is dead. Verified to leave the page working,
-  inline handlers included.
-
-### Earlier in this cycle
-
-Three defects from a full read-through of the tree, and four things that had
-outlived what they described.
-
-### Fixed
-
-- **The Magisk boot path could bootloop with the guard disarmed.** The
-  pre-zygote `absorb --early` block sat ABOVE the bootloop counter in
-  `post-fs-data.sh` — so a boot that died inside it never advanced `bootcount`,
-  `GUARD_MAX` was unreachable, and the device looped with no self-recovery. That
-  is not a hypothetical failure for that block: re-asserting a `my_*` rule has
-  rebooted a device (OP11, four rules in a burst, clean `sys.boot.reason`, no
-  tombstone), which is exactly why the pass exists there and only there.
-  `metamount.sh` states the rule both files have to obey — "Anything placed
-  above [the guard] is something `disabled` never suppresses and the counter
-  cannot protect against" — and the KSU path always obeyed it: the counter is
-  incremented in `metamount.sh` and the early absorb runs later, from
-  `post-mount.sh`. The block now lives in the guard's `else` arm.
-
-  Moving it also fixed an inverted ORDER that came with the old position. KSU
-  runs the mount pass first and absorbs second; Magisk ran absorb first, so the
-  `nm clear` that opens the mount pass dropped every rule absorb had just
-  created — and `run_mount` re-serves only the absorbed record's APK entries
-  (`is_app_apk`). A non-APK takeover was therefore recorded, wiped, and not
-  re-served until `service.sh`'s pass, by which time its mount was gone and
-  there was nothing left to absorb: that path served the stock file for the
-  whole boot. Both paths now run in the same order.
-
-- **`uidwatch.sh` ran a full `absorb` on every package change, on every
-  device.** The gate was `[ -s absorbed.list ]`, but `set_absorbed_pairs` writes
-  a three-line comment header before it writes any pairs, so the file is
-  non-empty from the first mount pass whether or not anything has ever been
-  absorbed. Measured on an OP11: 184 bytes, 0 non-comment lines, and `absorb`
-  firing four times in the first 60 s after boot, each reporting "nothing to
-  absorb" — a mountinfo survey, an `nm list`, a `/proc` walk over ~1000 pids and
-  the engine-wide pass lock, once per install/update/uninstall, forever. Floor
-  cost measured at 133 ms per run. Both gates in that file now ask whether the
-  list holds an entry, using the same "first non-blank character is not `#`"
-  predicate its readers use.
-
-- **Per-UID hiding leaked module bytes under a shadowing dir-target rule**
-  (engine, `nm_dir_child_lookup`). A passthrough child inherited
-  `NM_FLAG_SHADOWS_STOCK` from its parent without inheriting anything for it to
-  point at, so the two halves of the pair disagreed: `nm_hidden_from_caller()`
-  saw the flag and declined `-ENOENT`, while `nm_stock_for_caller()` found no
-  `s_path` and returned NULL — a blocked reader was served the MODULE's bytes
-  for every name under that directory, while its `nm_open()` of the PARENT
-  handed it the pinned stock directory. readdir listed stock names, lookup
-  resolved module content. The child now resolves its own name under the
-  parent's stock directory and pins the result; a name genuinely absent there
-  loses the flag and is hidden like any other added name; a name that cannot be
-  resolved leaves the flags alone, because "could not ask" is not "not there".
-
-  Narrow, and stated as such: no shipped configuration builds that rule shape.
-  `mount.rs::inject_would_mask_dir` refuses a target resolving to a live
-  directory and `cli::handle_vfs` refuses a directory source, so only a
-  hand-issued `nm add <existing-dir> <dir>` reaches it, and no measured device
-  carried one. **Engine floor rises to v27**; userspace can neither set nor
-  observe the difference, so the bump is there for `doctor` to tell a flashed
-  engine from the one it replaced.
-
-  The first build of this fix was inert, and only measuring it said so. It
-  wrapped the stock lookup in `override_creds(nm_root_cred)` — whose SID is the
-  KERNEL's, not root's — and `lookup_one_len_unlocked()` ends in
-  `inode_permission()`, which runs the LSM. Asked directly through
-  `/sys/fs/selinux/access` on an OP15: `kernel_t` may search `system_file` and
-  `system_data_file` directories and may **not** search `shell_data_file` or
-  `adb_data_file`. So the lookup returned `-EACCES` on any /data-labelled
-  target, took the error arm, pinned nothing and left v26 behaviour in place —
-  silently, because that denial is `dontaudit`'d and logs no AVC. Same rule
-  shape, blocked reader, two labels:
-
-  ```
-  shell_data_file        both.txt=MODULE  modonly=MODULE    (inert)
-  system_data_root_file  both.txt=STOCK   modonly=<ENOENT>  (works)
-  ```
-
-  The lookup uses the caller's creds now, matching the module-side lookup beside
-  it, which removes the LSM dependency rather than trading one label for
-  another. The first-toucher-wins case that motivated the override is covered by
-  the parent already having passed `nm_inode_permission()`, whose mode, owner and
-  context mirror the stock ancestor.
-
-  **Engine floor is v28, not v27.** Two builds answered `nm v` with 27 and
-  behaved differently — the one flashed from the first commit is inert on /data
-  labels, the corrected one is not — and a capability counter exists precisely so
-  `doctor` can tell a flashed engine from the one it replaced. 27 could no longer
-  do that for itself. Nothing compares the number for equality (every gate in the
-  Suite is `>=`, `<` or a range), so raising it is safe; release tags become
-  `nm1.28.0`.
-
-- `post-fs-data.sh`'s `disabled` arm was a bare `:`, so a Magisk user whose
-  guard had tripped got nothing in `boot.log` at the stage that made the
-  decision. It logs the same line `metamount.sh` does.
-
-### Removed
-
-- **The `CONFIG_BOOT_CONFIG` gate in the compile matrix**, and the per-version
-  `bootcfg` column that drove it. It forced the symbol on and FATAL'd when it
-  did not stick, for `#ifdef CONFIG_BOOT_CONFIG` blocks that retired with knob
-  slots 0..3 — the driver names neither the symbol nor bootconfig anywhere. A
-  gate over code that does not exist cannot fail usefully and can only fail
-  spuriously.
-
-### Changed
-
-- `hookless/nm-verify-v14.sh` → `hookless/nm-verify.sh`. Both invariants it
-  checks still hold; what was stale was demanding `engine == 14`, which printed
-  "NOTE: expected 14" on every engine since. It now takes v14 as the floor those
-  invariants arrived at and refuses outright if the engine answers no version at
-  all.
-
-## v1.3.95 – v1.3.117
-
-The kernel engine now lives in this repository under `hookless/`, merged from
-what was `kbuild@hookless`: it is versioned and flashed with the userspace that
-drives it, and CI can finally assert that the two agree on the one list they
-both carry (`pmcache::PM_SCAN_DIRS` and the engine's `nm_vpath_in_pm_scandir`).
-Separately, the `kernel_patches/`
-directory has been **removed** — it held the original `/dev/nomount` char-device
-engine with `fs/namei.c` hooks and an ioctl control plane, which nothing in this
-repo could drive any more: `nm` and `src/nm.rs` speak netlink only, so a kernel
-built from those patches answered no CLI command. The README's Requirements
-section still pointed users at it, 50 lines after the text saying it was dead.
-
-### Removed
-
-Older entries below still describe these. They are gone.
-
-- **WebUI "Tools" tab** — Spoofing, Cloak, Hidden paths, Foreign mounts. Per-UID
-  hiding moved to Status. Any "WebUI › Tools › …" pointer is stale.
-- **`spoof.sh`** — vbmeta/uname spoofing, 761 lines and ~38 KB per zip, inert by
-  default and carrying two unfixed digest defects. Its one live piece, the
-  `/data/local/tmp` permission restore, moved into the boot scripts and still
-  honours `fix_shell_tmp`. An existing `spoof.conf` is left alone.
-- **`pathhide`, end to end.** No builder applies the patch, so `pathhide_ctl` is
-  a NULL weak symbol and the kernel answers `-EINVAL` to `nm k p` — including
-  the empty-value *presence probe*, because the NULL test runs before the probe
-  short-circuit. Both Suite gates therefore always took the false branch: the
-  boot pass in `service.sh` could never run, and `customize.sh` printed "kernel
-  pathhide not present (needs a pathhide-enabled kernel)" on **every install of
-  every kernel these builders produce**, naming a configuration gap that cannot
-  be closed. Gone: the boot pass, the install-time probe and its two messages,
-  the seeding and relabelling of `pathhide.conf`, and `nm`'s `l p` list option.
-  An existing `pathhide.conf` is now simply inert; nothing reads it.
-- **Dead `nm` surface** — the long-form aliases `whiteout`, `version` and `knob`
-  (no caller, no documentation), the `--uid` option (per-UID *rules* need it and
-  nothing has ever passed it; the wire field stays, always 0), and the `j` list
-  option (`l u` turns JSON on by itself, and no consumer of the JSON rule shape
-  exists).
-- **`NOMOUNT_NL_VERSION`** — a generic-netlink leftover, referenced by neither
-  the kernel nor the client.
-- **The boot-identity knobs and the pathhide forwarder, in the KERNEL too**
-  (`kbuild@hookless`). Retired: the uname release/version override, the
-  `/proc/cmdline` + `/proc/bootconfig` takeover, and the `_pathhide` control
-  forwarder and dump — 314 lines of driver, plus four includes nothing else
-  needed. `nm` loses the letters `r`, `v`, `c`, `b` and `p`.
-
-  Their enum SLOTS are reserved, not deleted. A knob is a raw `u32` at payload
-  offset 0 and a command travels as `NLMSG_MIN_TYPE + cmd`, so renumbering would
-  silently remap every knob and command below them for any `nm` already on a
-  device — `nm k d 1` would arrive as something else entirely. Slots 0-3 and 6
-  (knobs) and 10 (command) are reserved and will not be reused.
-
-  The `16:` capability claim in `nomount.h` is retracted in place rather than
-  removed, and `NOMOUNT_VERSION` stays 26: an engine reporting >= 16 no longer
-  implies pathhide support, but 17 and above still make claims that hold.
-  Validated by the ten-version compile matrix (4.9 through 6.18), zero warnings
-  at `W=1`.
-- **`spoof.log`** from `nomount export` — nothing has written it since `spoof.sh`
-  was removed.
-- **`scan.sh`** — scanned every installed APK on each boot to fill a cache whose
-  only reader was the deleted Cloak picker.
-
-### Fixed
-
-- **The status dot answers "is the engine up?", not "is anything wrong?"** It is green whenever the Suite is running, including when a module ships files and no rule serves them — the substate still names the action there, and `check` is what reports faults. Two alarms for one condition taught people to read the dot as noise. It stays amber only when the probe could not tell either way.
-- **"Idle" is gone.** While the engine answers, the card says ACTIVE — that is what the word is for. The substate line says what the Suite is doing and the dot says whether anything needs you. "Idle" read as "switched off" to people whose setup was fine, and it read badly even in the case that does need attention, where the engine is running too. Only "Engine offline" replaces it. The headline word answered "are there rules?" when the question a user asks is "is it working?" — so a device serving exactly what it should read as switched off. ACTIVE now means the Suite is doing its job, including correctly having nothing to do; IDLE is reserved for the one case that needs the user.
-- **"no rules — re-apply" on a device with nothing to apply.** The status
-  card had one message for both causes of zero rules, so a user whose modules are
-  all script-only was told to press Reload — which can never work, and the card
-  can never reach Active. It now says "nothing to inject — no module provides
-  files", in green, and keeps "no rules — re-apply" for the case where a module
-  does ship content. The extra check only runs when the count is zero.
-- **The last plan check that said "not measured" when it meant "nothing to
-  test".** `Level` had no N/A, so a plan finding with nothing to look at had to
-  claim it could have run. On a script-only device nine device checks correctly
-  said n/a while the ghost row alone kept the card amber. `Level::NotApplicable`
-  now exists, ordered to match `Verdict`, and the ghost row uses it when nothing
-  is being injected — while staying amber when rules are live and the cloak
-  really is off.
-
-- **"Nothing to test" was reported as "did not run".** On a device where no
-  module provides files, the per-UID canary and the served-bytes check had no
-  injected file to sample — and said UNMEASURED, with a remedy ("the boot pass
-  runs before any app has opened an injected file — run them now") that could
-  never work, because running again cannot conjure a rule. The card read "not
-  fully measured" on a device that was working exactly as designed. Both are now
-  N/A when there are zero rules, and stay UNMEASURED when rules exist but
-  sampling failed — which is the distinction those two words are for.
-
-- **A device with zero rules showed one rule, called "no rules".** `nomount vfs
-  list` printed that phrase on an empty engine, and the WebUI counts every
-  non-blank line of it as a rule — so the message counted itself. Status read
-  `INJECTION RULES 1`, Rules read `Active rules 1 · (other) 1`, and the rule row
-  was the word itself. Reported from an OP15 whose five modules are all script
-  only, where 0 rules is the correct answer. The empty list now prints nothing,
-  and the parser only counts lines that look like a path.
-
-- **Removing the module threw away everything you had configured.**
-  `uninstall.sh` did `rm -rf /data/adb/nomount`, taking the per-app hide list,
-  the module blocklist and the `my_hookless` opt-in with it — so the classic
-  recovery, remove then reinstall, silently reset your settings. (Flashing a
-  newer zip straight over an older one does NOT run it: measured on OP15,
-  v1.3.107 -> v1.3.108, all state intact.) Losing the marker alone moved
-  85 `my_*` files from injection back to bind mounts on a live OP15: 260 rules
-  became 175, and 85 mounts appeared over the ROM. `uninstall.sh` now stashes the
-  user-owned files and `customize.sh` restores them, saying how many it put back.
-  The operational flags are still cleared — `disabled` in particular, which is
-  why that `rm` exists at all.
-- **A Suite-made `my_*` bind is a NOTE, not a FAIL.** Serving `my_*` by bind is
-  the DEFAULT — the `my_hookless` marker is what switches it to injection, not
-  the reverse — so a stock install opened red on any device with a module that
-  ships `my_*` content. The posture cost is real and the text still states it,
-  but it is an accepted default, not a failure. A bind the Suite did NOT make
-  stays a FAIL: someone else's mount over the ROM is what the check is for.
-- **`foreign mount over the ROM` counted module mounts as foreign.** It flagged
-  every subtree bind over a ROM path, including binds sourced from
-  `/data/adb/modules` — while its own text read "come from outside the module
-  system" and its owner read "a mount made outside /data/adb". Both were the
-  opposite of the truth, and the same 85 binds were reported twice, in two
-  different red rows. Module binds now belong to `zero-mount posture` alone.
-- **`check` blamed other modules for the Suite's own mounts.** The owner was
-  derived from the bind SOURCE, so a bind the Suite made to serve a module's
-  `my_*` content was reported as that module's doing, with two remedies that
-  could not work: reboot (we re-create them every boot from `binds.list`) and
-  "delete the bind from its post-fs-data.sh" (there is none). It now reads
-  `binds.list` to settle authorship, says plainly when the Suite made the mount,
-  points at the `my_hookless` opt-in, and offers the reboot/edit advice only for
-  mounts it did not create.
-
-- **`service.sh` discarded `nm`'s exit status when building the ghost path
-  table.** `nm` exits 4 on a truncated dump specifically so a caller can tell a
-  prefix from the whole set, but the call was piped straight into `sed`, so `$?`
-  was `sort`'s. A truncated dump half-populated the table — the state the same
-  script calls worse than an empty one, because a hidden reader then sees some
-  paths ghosted and the rest not. The dump is now captured on its own, the
-  status checked, and a failure logged instead of silently half-applied. It was
-  also the only `nm` call in the file without a timeout; it has one now.
-- **`nomount check` said nothing when the ghost tables were empty.** The kernel
-  answers an empty, *successful* dump both for "`_ghost` not compiled in" and
-  for "compiled in, tables empty", and the check had no else arm — so neither
-  case produced a finding of any level, and the silence was indistinguishable
-  from a pass while `service.sh` logged the cloak as inert on the same boot. It
-  now reports UNMEASURED with both table counts.
-
-### Findings graded by what a detector can do
-
-A tell nothing probes is no longer a failure. `erofs directory shape`,
-`readdir cookie magic`, `overlay dir inode range` and `injected inode band` moved
-FAIL → WARN; "directory holds only injected files" became a NOTE; a check that
-could not run is now `UNMEASURED`, so "I did not look" stops counting against a
-healthy device.
-
-### Seven diagnostic verbs became one
-
-`doctor`, `audit`, `posture` and `selfcheck` are **gone**, replaced by
-`nomount check`. They were verbs over two verdict enums, three JSON shapes and a
-fourth `key=value` one, and the WebUI existed to merge all of it back into one
-list. `plan` was dropped with them and then brought back — see the table.
-
-| was | now |
-| :--- | :--- |
-| `nomount doctor [--json]` | `nomount check --plan [--json]` |
-| `nomount audit [--json] [--write]` | `nomount check --device [--json] [--write]` |
-| `nomount selfcheck [--write] [--json]` | `nomount check --device [--json] [--write]` |
-| `nomount posture` | removed — its three mount checks are rows in the one report |
-| `nomount plan` | **restored.** Dropped here as having "no caller anywhere", which was true inside this repo and false outside it: the module test harness parses it to lint a staged module before it is ever applied, and nothing else can. |
-
-`check` with neither flag runs both sections. It exits 1 when, and only when,
-`summary.open_failures > 0` — the rule `audit` had, so the boot pass reads it the
-same way.
-
-One verdict enum, seven states: `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`,
-`N/A`, `NOTE`. `UNMEASURED` and `N/A` stay deliberately distinct — "nothing here
-to test" is not a warning, "something stopped me testing" is, and neither is ever
-a pass.
-
-`snapshot`, `verify` and `export` are unchanged. `snapshot` was kept where
-`posture` was dropped because it answers a question `check` structurally
-cannot: not "is this device healthy now" but "has anything moved
-since the boot I was happy with".
-
-### The boot pass runs one measurement, not two
-
-`service.sh` used to run `selfcheck --write` in a settle loop and then
-`audit --json --write` separately. `check --device` does both halves in one pass,
-so the loop runs the combined command once and only retries when the per-UID
-consistency probe actually disagrees. The settle window and the "unchecked is not
-a verdict" rule are unchanged.
-
-The module card's health line parsed `summary: N errors, M warnings` out of
-`doctor`'s prose. That line no longer exists, so the regex matched nothing on
-every boot and the card silently sat in its "unknown" arm. It reads
-`check --plan --json` now.
-
-### A boot that never ran the mount pass says so
-
-On a KernelSU build **without metamodule support**, `metamount.sh` is never
-invoked and `post-fs-data.sh` hands over to it because `$KSU` is set — so the
-module was a completely silent no-op: no kmsg line, no `boot.log` entry, no
-`incident.log`, no card. Both entry points now stamp `mountpass.ts`, and
-`service.sh` reports a boot with no stamp on the card and in `incident.log`.
-
-The same for install-time: `customize.sh` now says so when the zip carries no
-binaries for the device's ABI (it ships **arm64-v8a only**), and when the engine
-probe could not run at all — a case that previously printed nothing.
-
-### Packaging
-
-- **The staleness guard could not catch the case that actually happens.** It
-  compared mtimes with `find src/ -newer <binary>` and deliberately excluded
-  `Cargo.toml` — but the version string is `env!("CARGO_PKG_VERSION")`, which
-  comes *from* `Cargo.toml`, so a version-bump-only release could never trip it.
-  It did not: the shipped v1.3.94 zip carries a binary reporting 1.3.92. The
-  staged binary is now asked its version directly, and packaging aborts if it
-  disagrees with the version being stamped.
-- **The sha256 manifest was unverifiable on Android.** A Windows/Git-Bash host's
-  `sha256sum` defaults to binary mode and writes `<hash> *./path`; Android's
-  toybox reads the `*` as part of the filename and fails every entry, and
-  `customize.sh` aborted the install with the reason hidden behind
-  `>/dev/null 2>&1`. The manifest is forced to text mode, and a failed check now
-  prints what `sha256sum -c` actually said.
-- **The recovery `update-binary` never ran `customize.sh`.** It unzipped,
-  chmod'd, printed a success line and exited 0 — skipping the integrity check,
-  the "only one metamodule" refusal (a bootloop vector), the `$NMDIR` SELinux
-  labelling and the bootcount reset. It also returned success when the `unzip`
-  had failed, and unpacked `META-INF` into the module directory. It now provides
-  the helpers `customize.sh` expects and sources it.
-- The release path no longer hardcodes one maintainer's `~/.cargo`.
-
-### Boot path
-
-- The per-module card/tagging block in `metamount.sh` ran **outside** the
-  bootloop guard and walked every enabled module's tree with an unbounded `find`.
-  A device that had already written `disabled` to save itself still paid for that
-  walk at post-fs-data. The loop is skipped once the guard has tripped, and each
-  `find` is bounded.
-- `bind` and opaque-directory reads no longer follow module symlinks.
-
-### Docs
-
-- The README documented roughly 40% of the CLI. Two documented commands did not
-  exist (`vfs enable|disable|refresh`, `vfs query-status`) and eleven real ones
-  were undocumented, `absorb` — which runs twice every boot — among them.
-- The README described a **hybrid overlayfs** design, "real overlayfs for RRO"
-  and per-app-umount hiding. The engine is 100% mountless: RRO overlay APKs are
-  hookless-injected into `/product/overlay` and friends, and OverlayManagerService
-  + idmap2 pick them up at the `system_server` scan. Those claims are gone.
-- Issue links pointed at `Bouteillepleine/nomount2.0`; security disclosure
-  pointed at `Enginex0/nomount`, a different owner entirely.
-
-### Deferred
-
-- **The spoof add-on (`module/spoof.sh`) is deferred and now ships off.** Every
-  knob defaults to `off` rather than `auto`. Two defects in the vbmeta digest
-  computation are known and unfixed, and both can produce a digest with the right
-  shape and the wrong value — which is a sharper tell than setting none: the
-  recursive chain-partition walk discards its status (a full-length digest over a
-  partial chain), and a device asking for SHA-512 silently gets a SHA-256 when
-  `sha512_of` fails. Both sites are marked in the source.
+> update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
+
+## v1.3.176 - engine v32 (unchanged)
+
+- Two layout fixes to the Hidden apps list, both introduced by v1.3.174.
+
+## v1.3.174 - engine v32
+
+- The hide list was still reaching shared storage, one file over.
+- The status card said "clean" while the engine was down.
+- An unexpected value blanked the whole app.
+- Warnings you cannot act on are no longer warnings.
+
+## v1.3.173 - engine v31 (unchanged)
+
+- A hook framework's own mounts are information, not a warning.
+
+## v1.3.172 - engine v31 (unchanged)
+
+- A version bump could not be built.
+- "will bite later" was the old ladder talking.
+- The nav bar covered the last thing you were reading.
+
+## v1.3.171 - engine v31
+
+- The wrong-kernel card could never fire.
+- One `:` could kill the boot script.
+- `nomount export` shipped the hide list.
+- A module could still forge a rule.
+- A stacked mount was stranded forever.
+- mount and reload disagreed a fourth time.
+- The report says what it measured.
+- `nomount` is not a command.
+
+## v1.3.170 - engine v30 (unchanged)
+
+- Absorbed rows survived their module's uninstall forever.
+
+## v1.3.169 - engine v30 (unchanged)
+
+- "Other modules' mounts: none", directly above "Already absorbed · 2".
+
+## v1.3.168 - engine v30 (unchanged)
+
+- The same fix, in the copy that mattered.
+
+## v1.3.167 - engine v30 (unchanged)
+
+- "Hidden paths: 0 - Nothing hidden", with two ROM directories hidden.
+- The inode-collision check went UNMEASURED once a module was absorbed.
+- What the modules exercised, for the record.
+- Module content: nothing to inject, correctly.
+- The runtime binds (issue #14).
+
+## v1.3.166 - engine v30 (unchanged)
+
+- `lseek(SEEK_DATA)` on a synthesized directory - fixed and boot-verified.
+
+## v1.3.165 - engine v30 (unchanged)
+
+- The engine fix is boot-verified.
+- ...and this check now says what it measured.
+
+## v1.3.164 - engine v30 (unchanged)
+
+- New check: every synthesized directory shares an inode with a real.
+
+## v1.3.163 - engine v30 (unchanged)
+
+- "Real mounts: none" sat directly under "1 mount by design".
+
+## v1.3.162 - engine v30 (unchanged)
+
+- The Rules tab counted 260 while every other surface said 257.
+- The panes the harness had not walked.
+
+## v1.3.161 - engine v30 (unchanged)
+
+- A device that had switched itself off said "Active", in green.
+- ...and a stale paint could overwrite the fix.
+- How both were found.
+
+## v1.3.160 - engine v30 (unchanged)
+
+- The two halves of the front page can no longer disagree about the engine.
+- `scripts/webui-harness.py` - the WebUI can be run outside a phone.
+
+## v1.3.159 - engine v30 (unchanged)
+
+- Verified: the Magisk entry point.
+
+## v1.3.158 - engine v30 (unchanged)
+
+- A nested RRO was badged as a plain file redirect.
+- Found by the category harness, which is the point.
+
+## v1.3.157 - engine v30 (unchanged)
+
+- The card now says when a module is installed but not served.
+- `mounts ?` → `mounts unknown`.
+- Measured, not changed.
+
+## v1.3.156 - engine v30 (unchanged)
+
+- An unreadable `apkstate.list` invalidated PM's parse of every injected APK.
+- A re-absorbed target kept the source it was first absorbed.
+- Measured, not changed.
+- The `_ghost` cloak does cover the isolated pools.
+- `MIN_PATTERN_LITERAL` counts bytes, not characters.
+- `metamount`'s flock and `is_hook_framework`.
+
+## v1.3.155 - engine v30 (unchanged)
+
+- ksud is answered from every exit, not four of them.
+- the uidwatch reaper tests death, not age.
+
+## v1.3.154 - engine v30 (unchanged)
+
+- `uid unblock` reported a removal it had not made.
+- `nomount uid preset` with no name re-derived both kernel cloak tables.
+- `boot.log` was unreachable from the app.
+
+## v1.3.153 - engine v30 (unchanged)
+
+- `File injections: mountless`.
+- The unmeasured arm asserted the answer.
+- Two packaging fallbacks.
+
+## v1.3.152 - engine v30 (unchanged)
+
+- One bootloop guard, not two.
+- `NM_MY_HOOKLESS` is gone.
+
+## v1.3.151 - engine v30 (unchanged)
+
+- One content walk, not four.
+- One probe harness, not three.
+- A second definition of the erofs dirent formula.
+- A second `statfs` decode and a second `0xE0F5E1E2`.
+- Two of the three renderers of `ghost::Summary`.
+
+## v1.3.150 - engine v30 (unchanged)
+
+- The boot path deleted the one sentence that explains.
+- A successful mount pass left no durable record.
+- The WebUI's dead end.
+- The readme never mentioned `CONFIG_NOMOUNT` on the first screen.
+
+## v1.3.149 - engine v30 (unchanged)
+
+- ### Fixed - Repairs a defect introduced in v1.3.148: the two hidden-app probes had their pipe sizes crossed.
+
+## v1.3.148 - engine v30 (unchanged)
+
+- The manager card said `healthy` while `check` reported FAILED.
+- An unreadable mount table rendered as a clean mount posture.
+- `check_xattr_agrees_when_hidden` passed when its own case could not arise.
+- The verdict line ranked and named the wrong things.
+- The "other modules' mounts" chip was dead.
+- Two hide-list states rendered as green, counted, hidden apps.
+- Two scans reported a green "nothing found" when they had not run.
+- Re-arming the guard left "Nothing is being injected" on screen.
+
+## v1.3.147 - engine v30 (unchanged)
+
+- A corrupted download uninstalled the Suite you already had.
+- One `mkdir` permanently disarmed the bootloop guard.
+- A newline in a module filename forged a rule that `absorb` acted.
+- One non-UTF-8 byte anywhere in the mount table stopped all injection.
+- `absorb` injected over live mounts and stranded them forever.
+- `run_mount` stole other modules' `my_*` binds.
+- Three "only copy" records could be lost.
+
+## v1.3.146 - engine v30 (unchanged)
+
+- The notes, held to the same rule.
+
+## v1.3.145 - engine v30 (unchanged)
+
+- The rest of the plan section, audited against the same rule.
+
+## v1.3.144 - engine v30 (unchanged)
+
+- The Suite reports what a detector can see, and stops there.
+
+## v1.3.143 - engine v30 (unchanged)
+
+- "Delete the marker" told you the wrong thing about when it comes back.
+
+## v1.3.142 - engine v30 (unchanged)
+
+- The manager card counted whiteouts as rules; nothing else did.
+- A whiteout-only module was reported as contributing nothing.
+- A `my_*`-only module was reported as shipping no partition at all.
+- `module content not served` double-counted convergence symlinks.
+- The incompatibility lint stated a conditional branch as fact.
+- `nomount export` reported "File exists" for a directory that does not exist.
+- The Magisk boot path wrote a poorer incident record than the KSU.
+- The manager card is one short line.
+
+## v1.3.141 - engine v30 (unchanged)
+
+- The incompatibility lint was blind to every `my_*` partition.
+- `my_hookless` was read as intent whoever created.
+- The bootloop guard bound the boot path and nothing else.
+- The `_ghost` cloak went stale on every verb except `mount` and `reload`.
+- The `_ghost` uid table was built from `uidhide.cache`, not from the engine.
+- `nomount mount` applied every whiteout before every injection.
+- An update threw away `absorbed-tmpfs.list` and `apkstate.list`.
+- A module deleting ROM content was invisible if the line started with `rm`.
+
+## v1.3.140 - engine v30 (unchanged)
+
+- `updateJson`, so a manager can offer the update in-app.
+
+## v1.3.139 - engine v30 (unchanged)
+
+- A copy out of a ROM partition was reported as a write into.
+
+## v1.3.138 - engine v30 (unchanged)
+
+- ### Fixed - The incompatibility scanner never read the helper scripts its entry points source.
+
+## v1.3.137 - engine v30 (unchanged)
+
+- `bind-mounts its own content`, a fourth module-incompatibility finding.
+- The record of what absorb already took over is now visible.
+- Recorded rows from uninstalled modules were never retired.
+
+## v1.3.136 - engine v30 (unchanged)
+
+- ### Fixed - `nomount check --json` writes operational warnings to stdout ahead of the document.
+
+## v1.3.135 - v1.3.126 - engine v30 (unchanged)
+
+- The WebUI is organised by task instead of by data model.
+- The hero verdict re-checks when the page opens.
+- "What apps can see" folds to its verdict line.
+- The mountless headline matches the row underneath.
+- A card for the mounts other modules make.
+- The six collapsible card headers were `<div onclick>`.
+
+## v1.3.125 - engine v30 (unchanged)
+
+- The `_ghost` tables were populated once per boot and never re-synced.
+- The mount pass did one `fork`+`exec` of `nm` per rule.
+- Four different idioms for `Path` → `CString`, two of them lossy.
+- `nm block <uid>` parsed the uid with no overflow bound.
+- Unaligned stores in `nm.c`'s batch encoder.
+- The zip was not reproducible.
+- `nomount check` reports the isolated-process pool setting.
+- `nomount ghost sync` and `nomount ghost list`.
+
+## v1.3.124 - engine v30 (unchanged)
+
+- An image-backed module is a note now, not a warning.
+
+## v1.3.123 - engine v30 (unchanged)
+
+- ### Fixed - An incompatibility was reported against the wrong line - a probe instead of the use.
+
+## v1.3.122 - engine v30 (unchanged)
+
+- `check`: "xattr agrees with open for a hidden app".
+- `verify` could not see a field that disappeared, and had no test at all.
+
+## v1.3.121 - engine v30 (unchanged)
+
+- The kernel's `_ghost` dump trusted another repository for a NUL.
+- A redaction test stopped claiming coverage it could not have.
+
+## v1.3.120 - engine v30 (unchanged)
+
+- A shared `nomount export` published an appid off the hide list.
+- Every state file except `binds.list` was a non-atomic `fs::write`.
+- `service.sh` validated the boot epoch's two inputs concatenated.
+- `package.sh` never enforced the versionCode field widths it reasons about.
+
+## v1.3.119 - engine v30
+
+- An app update permanently killed the absorbed-APK record.
+- The Hidden paths card is back in the WebUI.
+- `nm_dsnap_make()` cached its remaining failures as verdicts.
+- `metamount.sh` could exit without `ksud kernel notify-module-mounted`.
+- A genuine uninstall could leave `/data/adb/nomount.bak` behind forever.
+- A guard that always passed, in both copies.
+- doctor kept its own `is_partition_root`.
+- Two hand-rolled `nm list` parsers survived in `whiteout.rs`.
+
+## v1.3.118 - engine v29
+
+- `nomount export` published a hidden app's appid to shared storage.
+- An image mounted over the ROM passed every mount check.
+- `uidwatch.sh` - the one entry point without the house guards.
+- `nm_dsnap_make()` cached "could not ask" as a verdict.
+- `nomount_hijack_superblock()` could not report failure.
+- `absorb::refresh_app_apks()` re-implemented the one `nm list` parser.
+- The last unquoted expansions in the module scripts.
+- One `lib.sh`, sourced by all five entry points.
+
+## v1.3.95 - v1.3.117
+
+- WebUI "Tools" tab.
+- `pathhide`, end to end.
+- Dead `nm` surface.
+- The boot-identity knobs and the pathhide forwarder, in the kernel too.
+- The status dot answers "is the engine up?", not "is anything wrong?".
+- "Idle" is gone.
+- "no rules - re-apply" on a device with nothing to apply.
+- "Nothing to test" was reported as "did not run".
 
 ## v1.3.94
 
-- An inert SUSFS module is reported as information, not a warning.
+- - An inert SUSFS module is reported as information, not a warning.
 
 ## v1.3.93
 
-- An absent bootcount reads as zero, not as unknown.
+- - An absent bootcount reads as zero, not as unknown.
 
 ## v1.3.92
 
-- A process that vanished mid-probe is no longer counted as a failed measurement.
+- - A process that vanished mid-probe is no longer counted as a failed measurement.
 
 ## v1.3.91
 
-- `uninstall.sh` ships executable.
-- Stray indentation stopped leaking into user-facing messages.
-- **Unmeasured stopped being reported as clean.**
-- The absorbed record and the PackageManager cache are kept honest across a
-  re-absorb.
-- The release path was fixed: `customize.sh`, `uninstall.sh` and `package.sh`.
+- Unmeasured stopped being reported as clean.
 
 ## v1.3.88
 
-- The build commit is stamped beside the version, so a phone reporting a version
-  also says which commit it came from.
-- False greens the audit found were closed.
-- **One findings list instead of seven cards** in the WebUI.
-- Acceptance, history and the reach pill were **dropped** — including the
-  `nomount accept` command announced under v1.3.69 below, which no longer exists.
-- The mount table is read before the engine is cleared.
-- `uninstall.sh` ships, and unknown stopped being reported as nothing.
-- The release build stopped reporting itself dirty.
-- Packaging builds on a Windows NDK host too.
+- One findings list instead of seven cards.
 
 ## v1.3.81
 
-- A mount the table says is not there is no longer asserted.
-- A hand-written bindhosts override is not clobbered.
-- The `timeout` fallback is bounded rather than dropped, so a device without
-  toybox `timeout` still runs the command under a bound.
-- The drift check is reachable again, and `absorb` stopped losing a rule.
-- The lints stopped reporting things that are not happening.
+- - A mount the table says is not there is no longer asserted.
 
 ## v1.3.80
 
-- One inode is not a bucket.
-- An app's lib directory is treated as part of its codepath.
+- - One inode is not a bucket.
 
 ## v1.3.78
 
-- Each target is applied once, and what cannot work on this device is named.
-- `absorb` re-points when it serves a target that already has a rule.
-- Directories that hold nothing but injections are named.
-- A finding is stated once per module, not once per country directory.
-- An image a module ships but never mentions is noticed.
-- The question bindhosts asks about metamodules is answered.
+- - Each target is applied once, and what cannot work on this device is named.
 
 ## v1.3.76
 
-- An absorb a `my_*` bind cannot accept is no longer offered.
-- A deferred `my_*` bind points at a reboot, not at editing a module.
-- The umount setting that could not be read is named.
-- The engine version is read from the engine.
-- The manager warning is written for the person reading it.
-- User-facing messages were shortened.
-- The last check is remembered, and the report stays quiet when there is nothing
-  to say.
+- - An absorb a `my_` bind cannot accept is no longer offered.
 
 ## v1.3.69
 
-Requires **Prism engine v26** for the existence cloak; the injection engine and
-everything else here works from v16 as before. Pairs with a kernel built from
-`kbuild@hookless` at `347ec5c` or later. (The second requirement named here,
-`kernel_patches@main` at `8a41f77`, referred to the superseded ioctl engine; that
-directory has since been removed.)
+- The detection audit reports differently.
+- `SKIP` is now `N/A` or `UNMEASURED`.
+- Every check carries a plain-language line.
+- Findings name their owner.
+- Findings carry a reachability tag.
+- `--json` on `audit`, `doctor`, `selfcheck`.
+- The posture shield contradicted the audit.
+- The ghost path populator split rule paths on spaces.
 
-### The detection audit reports differently
+## v1.3.48 - v1.3.65
 
-Nothing about what is measured has changed, and no verdict has been softened.
-What changed is that the report stopped describing two different situations with
-the same word.
-
-- **`SKIP` is now `N/A` or `UNMEASURED`.** A check with nothing to test here —
-  no app on the hide list, no overlay mount, no single-block erofs parent — is
-  **not applicable**, renders grey, and never colours the chip or the tab. A
-  check that *could* have run and did not — mountinfo unreadable, the probe
-  child said nothing, a directory that would not enumerate — is **unmeasured**
-  and stays amber. Neither is ever counted as a pass.
-
-  This is why a perfectly healthy device used to open on `4 unverified` in amber
-  with an alert dot. It now reads `undetected`, with a grey `4 didn't apply`
-  beside it.
-- **Every check carries a plain-language line**, on every verdict, alongside the
-  evidence it already printed. The evidence is unchanged and one disclosure away.
-- **Findings name their owner.** `absorb` already resolved a leaked mount to the
-  module that made it and the audit discarded that answer for the one case where
-  the reader could act on it.
-- **Findings carry a reachability tag** — `any app`, `needs effort` — and sort by
-  it. One `getdents64` from any app and something needing a purpose-built erofs
-  model are not the same problem and no longer look the same.
-- **`nomount accept`** (REMOVED in v1.3.88 — see above) records that you have
-  looked at a failing check and decided
-  to live with it: a hook framework's bind, an installer's own tmpfs. It never
-  marks anything clean. The verdict stays `FAIL`, it stays visible, it renders
-  grey rather than green, it is counted separately, and it lapses the moment the
-  evidence changes.
-- **`--json` on `audit`, `doctor`, `selfcheck`**, plus a new `nomount posture`.
-  The WebUI reads these instead of regexing prose.
-- The boot pass caches the audit, so the WebUI opens on a verdict and an age
-  instead of a dash.
-
-### Fixed
-
-- **The posture shield contradicted the audit.** It counted foreign mounts with
-  `awk '$4 ~ "/adb/modules/"'`, which misses a bind from anywhere else under
-  `/data/adb` (a ReVanced module binds out of `/data/adb/rvhc`; the audit has a
-  regression test for it) and *counts* a hook framework's by-design bind, which
-  the audit deliberately does not. Measured on an OP15 with LSPosed: the shield
-  sat on a permanent amber "another module is mounting" over the one mount the
-  audit reports as expected. Both now come from `nomount posture`, which runs the
-  audit's own three mount checks.
-- **The ghost path populator split rule paths on spaces.** A target containing
-  one was torn in half: the fragment was submitted as a rule and accepted, the
-  remainder dropped, and the boot log still reported the cloak fully populated
-  while that path's existence oracles stayed open.
-- **Every WebUI refresh ran a full `doctor` to read two booleans.** That resolves
-  the whole mount plan, decodes the KSU allowlist and forks up to sixteen
-  children to sample the ghost table — then threw the result away and left the
-  Health card blank until the user pressed a button that ran it again. One run
-  now paints both.
-- The ghost rejection message named `GH_MAX_RULES=256`; the kernel has held 512
-  since the table was resized. It no longer names a number the kernel owns.
-
-### WebUI
-
-- **Diagnostics is no longer a tab.** The bottom nav is four places you *do*
-  something — Status, Modules, Rules, Tools. A fifth tab told every user there
-  was a fifth job here, and the alert dot on it actively pulled people toward the
-  one screen whose purpose is to enumerate what might be wrong.
-
-  In its place, **one line on the Status card**, fed by the audit the boot pass
-  already cached, so it costs nothing to show:
-
-  - *Nothing detectable · checked 3h ago* — green, and that is the end of it
-  - *2 things need attention ›* — the only state that asks for anything
-  - *1 check couldn't run* — amber, honest, not alarming
-  - *Nothing open · 1 accepted by you* — grey, because something IS still failing
-
-  The `not_applicable` count never appears there. Tapping the line opens the
-  findings list, with a way back; nothing else links to it.
-- **Snapshot, Verify and Export moved behind a "Developer tools" disclosure.**
-  Snapshot means nothing until you already suspect drift, Verify is meaningless
-  without one, and Export produces a folder for someone else to read. Sitting
-  them beside Self-check implied four equal choices. **Self-check** stays in the
-  open, because "does a normal app see what root sees" is a real question with a
-  yes/no answer.
-- **The plan check leads with errors and warnings**; the eleven informational
-  lines a healthy device produces sit behind *Full report*. Previously a real
-  error rendered identically to a note about zygote FD allowlisting.
-- **A tripped bootloop guard now raises a global banner** rather than a dot on a
-  tab that no longer exists. A Suite that disabled itself is worth interrupting
-  any screen for.
-- **Check my setup** runs the audit, the plan check and the runtime check and
-  gives one verdict. Every individual button is unchanged.
-- **Red is reserved for a Suite that is not running.** A detection finding — even
-  an open one — is amber: the setup is up and serving your modules either way.
-  Red is spent only on engine-down and a tripped bootloop guard, which are
-  categorically worse and must not read like everything else. The three amber
-  findings (`detectable`, `reboot to finish`, `not verified`) are told apart by
-  label and by group rather than by hue.
-- **A dead engine is now a finding.** With the engine down `live_targets()` is
-  empty, so every target-dependent check correctly reported n/a and the mount
-  checks correctly passed — nothing *is* mounted — and the summary read
-  `4 passed, 0 failed`. Every statement true, the conclusion false: the Status
-  line rendered a green "Nothing detectable" beside the hero's own red "Engine
-  offline". Liveness is a check now, ranked ahead of everything, and it carries
-  its own reachability class (`not a detection`) because nobody detects you by it.
-- **Checks no longer pass over a partial sample.** `readdir cookie magic` and
-  `erofs directory shape` each skipped an unreadable input and then passed over
-  whatever was left — a run where most parents failed to open still printed a
-  clean verdict. Both now count what they could not read and report
-  `unmeasured`. A *hit* still fails regardless of coverage; only a clean result
-  needs full coverage. (`kernel surfaces` was fixed this way long ago; the fix
-  was never carried to its siblings.)
-- **A manual audit persists.** The button ran `audit --json` with no `--write`,
-  so a verdict lived only in the page: close the WebUI, reopen it, and the
-  Status line fell back to "Not checked yet" until the next boot.
-- **Copy report** puts device, ROM, kernel, engine and Suite versions and every
-  non-clean finding on the clipboard in one press.
-- **Kernel features** says whether each cloak is active, idle or absent. These go
-  inert rather than half-applying when the kernel cannot support them, which was
-  previously announced only in `boot.log` and `/dev/kmsg`.
-- **What this can and can't hide** states up front what a VFS engine is and is not
-  responsible for, so verified-boot state and build keys stop reading as Suite
-  failures — and links to the switch that does normalise them.
-
-### Fixed (second pass)
-
-- `nomount export` built `NM_REDACT_HIDE_LIST=1 '<self_exe>' doctor` and handed
-  it to `sh -c`, with the path single-quoted but **not escaped** — while two
-  other call sites in the same crate escape correctly. The shell was only ever
-  there to set one environment variable; `Command::env` does that with no shell,
-  so there is nothing left to quote.
-- `nomount accept` validated its `--reason` *after* fingerprinting the finding,
-  which means running the whole audit — forking a probe child and reading
-  `/proc/<pid>/maps` for every process on the device — to then reject input it
-  had at the start. The rules moved to `accept::validate` and are checked first.
-
-### Build
-
-- The shell lint gate moved from `-S error` to `-S warning -e SC3043`. The four
-  suppressions this needed each carry their reason at the site.
-
-## v1.3.48 – v1.3.65
-
-These shipped without notes. Rather than reconstruct eighteen entries after the
-fact, here is the part that actually affects whether a build works for you:
-
-- **Engine floor rose to v26** over this range, for the existence cloak
-  (`_ghost`) and the `nm k g` control plane it is driven through. The injection
-  engine itself still works from v16 — on an older kernel the cloak goes inert
-  and nothing else changes.
-- **The existence cloak went live**, and is populated at boot from the live rule
-  set. It closes seven "resolve a path, then act" oracles that could tell a
-  hidden file from a missing one.
-- **The state directory's SELinux label was repaired.** An earlier build
-  relabelled `/data/adb/nomount` to a type every app domain can read, leaving
-  `/data/adb` refusing traversal as the only thing between an app and the hide
-  list. Reinstalling fixes it.
-- **The early absorb pass moved to post-mount**, and `my_*` binds are absorbed
-  before zygote.
-
-Per-commit detail is in `git log v1.3.47..v1.3.65`.
+- Engine floor rose to v26.
+- The existence cloak went live.
+- The state directory's SELinux label was repaired.
+- The early absorb pass moved to post-mount.
 
 ## v1.3.47
 
-Pairs with a kernel built from `kbuild@hookless` at 27f8d95 or later. Nothing here
-requires a new engine version — v16 is still the floor, same as v1.3.46.
-
-### Fixed
-- **The audit probe kept root's supplementary groups.** `nomount audit` forks a
-  child, drops to a hidden app's uid and asks whether it can still open the ROM
-  APKs a `--public` rule serves. It called `setgid`/`setuid` but never
-  `setgroups`, so the child carried root's group memberships into the test: on a
-  target whose group bits grant more than its other bits, the probe reported the
-  file readable where the real app is denied — a PASS on a check that should have
-  failed. Groups are cleared first, while still privileged.
-- The WebUI built two shell commands with a value interpolated outside `shq()`:
-  the `nm` client path (derived from `ro.product.cpu.abi`) and the config key in
-  `setConf`. Neither is reachable today — every caller passes a literal — but both
-  were the only interpolations on those lines that could break out of their
-  quoting.
+- The audit probe kept root's supplementary groups.
 
 ## v1.3.46
 
-Requires a kernel with **Prism engine v16**. On an older engine the maps/fd cloak
-goes inert (the presence probe fails and no rules are applied) — the injection
-engine itself is unaffected. Flash the kernel and the module as a set.
-
-### Fixed
-- **Per-UID hiding leaked through the xattr path.** An app on the hide list got
-  `ENOENT` from `stat()`, `open()`, `access()` and `readdir()` for an injected
-  file — and a valid answer from `listxattr()`/`getxattr()`, handing back the
-  injected file's SELinux label at a path `stat()` said did not exist. Measured
-  on OP15 as 10/10 reproducible once any unblocked process had warmed the shared
-  dentry; now 0/10, with an unblocked reader unaffected.
-
-  `fs/xattr.c::xattr_permission()` returns early for `security.*` without calling
-  `inode_permission()`, so the engine's existing `-ENOENT` guard was never
-  consulted on that path. The guard is now in the xattr ops themselves, and a
-  hidden reader of a *shadowing* rule is served the stock file — the same answer
-  `open()` already gave it. Reach was an added rule whose parent is a real
-  directory; rules under a synthesized parent were never exposed.
-
-- **The maps/fd cloak announced itself.** `pathhide` created `/proc/pathhide`
-  unconditionally, and `proc:dir read` is granted to `untrusted_app`,
-  `app_zygote` and `priv_app` — so any app could find the node with one readdir
-  of `/proc`. A stock kernel has no such entry, which made it a louder tell than
-  the package names it was concealing. The node is gone; configuration rides
-  nomount's netlink channel (`nm k p`, `nm l p`), which is CAP_NET_ADMIN-gated
-  and creates no dirent. Reading the live list back also works reliably now, so
-  applying rules no longer risks clearing another module's.
-
-- **`nm` dispatched on the first character of the command.** `nm check`,
-  `nm count` and `nm config` all executed `clear`, which drops every rule *and*
-  the blocked-UID set, exiting 0. Commands are matched as whole words.
-
-- `nm l j` emitted paths into JSON unescaped, so a filename containing `"` or
-  `\` produced a document the Suite's own reload reader could not parse.
-- `--public` (exemption from per-UID hiding) was granted to any `.apk` under a
-  ROM partition. It is justified only by the PackageManager already advertising
-  the path, so it is now limited to the directories PM actually scans — an APK in
-  e.g. `/product/etc` stays hidden.
-- `nm v` walked netlink attributes using the reply's own length field without
-  bounding it by the bytes actually read.
-- `spoof.log` and `pathhide.conf` were `0644` inside a `0700` directory whose
-  every other file is `0600`.
-- Blocking an appid in the isolated-process pools reported `-EEXIST` against an
-  empty table and silently did not add it.
-
-### Changed
-- `pathhide` no longer disables interrupts around its rule scan — nothing takes
-  that lock from interrupt context, and the scan runs once per VMA on
-  `/proc/<pid>/maps`.
-- Removing a pathhide rule that does not exist now reports `-ENOENT` instead of
-  success.
+- Per-UID hiding leaked through the xattr path.
+- The maps/fd cloak announced itself.
+- `nm` dispatched on the first character of the command.
 
 ## v1.3.17
 
-### Fixed
-- **`doctor` told KernelSU Next users to delete a working module**
-  ([KsuNext_NMS#13](https://github.com/Bouteillepleine/OnePlus-KsuNext_NMS/issues/13)).
-  SUSFS presence was a boolean, and "the manager could not answer" collapsed into
-  "the kernel has no SUSFS". KernelSU Next's ksud has no `susfs` subcommand at all,
-  so on a kernel that *did* have SUSFS the check reported it missing and advised
-  removing the module. It is three states now — Present, Absent, Unknown — and the
-  removal advice needs a real answer. When nobody can tell us, the finding states
-  the condition instead of asserting it.
-
-  The Suite does not use SUSFS and deliberately knows nothing about its internals —
-  no prctl magic, no command constants to keep in step with its releases. The one
-  honest source is whether the manager's own CLI answers, so that is all we ask.
+- `doctor` told KernelSU Next users to delete a working module.
 
 ## v1.3.16
 
-### Fixed
-- **Rules that hide nothing were counted as hidden apps.** A glob with no installed
-  match, and a package that is not installed, both sat in the "Hidden apps" list and
-  in the card's count — so the count claimed more was in force than actually was.
-  They now appear under **Waiting**, with a line explaining that a glob keeps
-  watching, and only entries actually in force are counted.
-- The isolated-process control wrapped 3 + 1 on a phone. It is a grid now: four
-  across when they fit, an even 2x2 when they do not.
+- Rules that hide nothing were counted as hidden apps.
 
 ## v1.3.15
 
-Candidate scan replaces the blunt preset. Adding a whole inventory put dozens of
-entries for apps that are not installed in front of the handful that are — on the
-test device, 41 of 48 entries were dead. The scan proposes only what is here, and
-says why, in the same shape as the Cloak picker.
-
-### Added
-- **`uidscan.sh` + a Scan button.** Finds installed third-party apps worth hiding
-  from and labels each: `detector` (matches the known-detector inventory, globs
-  included), `queries-root` (the manifest names a root manager in `<queries>` — it is
-  looking for us), `su-perm` (requests `ACCESS_SUPERUSER`). Nothing is hidden until
-  picked. Detectors and root-lookers are pre-picked; `su-perm` is not, because those
-  are usually your own root tools and hiding shows them the stock tree instead of
-  your module content. `QUERY_ALL_PACKAGES` is an annotation only, never a reason on
-  its own — ~50 of 64 apps request it, so a list led by it is noise, not a shortlist.
-  The inventory comes from `nomount uid preset --dry-run`, so the package list still
-  has exactly one home and the globs work verbatim as shell `case` patterns.
-- **`nomount uid preset --globs`** and an "Add detector globs" button: the five glob
-  rules on their own. They are the part a scan cannot give you — they keep matching
-  a detector installed tomorrow, or repackaged under a new name.
-
-### Fixed
-- **The scanner could silently check nothing.** `$INV` must word-split, so it cannot
-  be quoted — but its entries are globs, and without `set -f` the shell pathname-
-  expands them against the caller's cwd first. A file named `x.duckdetector` in that
-  directory replaced the rule `*.duckdetector` with that filename and the rule
-  stopped matching, in a scan that otherwise looked like it ran fine. Verified on
-  device by seeding a cwd with trap files.
-- **Globs could not be typed or removed in the WebUI.** `UID_TARGET_RE` rejected
-  `*`, so the Hide field refused a glob and the ✕ on a glob row reported "characters
-  nomount won't take". Widened — and every target is now single-quoted where it is
-  interpolated into a shell command, because an unquoted `*` would have been expanded
-  by the shell before nomount ever saw it.
-- **Whiteout paths reached the shell unquoted.** `whiteout add` rejected `;|&$` but
-  not `*` or `?`, and `whiteout remove`/the suggestion buttons validated nothing at
-  all before interpolating. All three now share one validator and are quoted.
-- A scan that found nothing, or a list emptied by applying, rendered an empty box.
-- Candidates already in the hide list were offered again, pre-picked.
+- `uidscan.sh` + a Scan button.
+- `nomount uid preset --globs`.
+- The scanner could silently check nothing.
+- Globs could not be typed or removed in the WebUI.
+- Whiteout paths reached the shell unquoted.
 
 ## v1.3.14
 
-Hide-list globs, a curated detector preset, and the per-UID card rebuilt so it is
-readable on a phone.
-
-### Added
-- **Globs in the hide list.** `*.duckdetector`, `me.garfieldhan.*` and `*chunqiu*`
-  are now valid entries, re-matched on every apply — so a detector that reinstalls
-  under a new package name stays hidden, and one installed later is covered without
-  being added by hand. Anchors are allowed at the ends only and a glob must carry at
-  least four literal characters, so a typo cannot hide injections from the whole
-  device. `uid list` prints each matched package with the glob that caught it, and
-  removing the glob un-hides them.
-- **`nomount uid preset detectors`** — 43 known detectors plus the five globs above,
-  in one command, with `--dry-run` to see it first. Also a one-tap button in the
-  WebUI. The inventory is adapted from Hide My Applist (HMA-OSS, AGPL-3.0); none of
-  its code is used, only the package list.
-
-### Fixed
-- **The isolated-process control could lie about the kernel's state.** It only
-  adopted the engine's answer when a regex matched, so if the engine did not answer
-  at all — old kernel, no netlink — the control went on displaying "Hide from all
-  (default)" whatever the kernel was actually doing. It now shows the state as
-  unknown instead, and the failure path waits for the re-read before re-enabling.
-- **A bad `packages.list` read could have un-hidden every hidden app.** The map
-  answers "not installed" identically whether an app is gone or the file could not
-  be read, and the new reconcile pass treats "not wanted" as "stop hiding". One
-  unreadable pass would therefore have un-hidden everything and wiped the resolved
-  mirror. Un-hiding is now gated on having actually read the map, and an empty parse
-  counts as unread.
-- **A glob can no longer reach a platform UID.** Unlike an exact entry it is
-  evaluated on every pass, so it could start matching a package sharing
-  `android.uid.system` (appid 1000) long after being added, with no chance for the
-  `--force` prompt. Those matches are skipped and named on stderr.
-- `metamount.sh` claimed in its header that it hides RRO mounts via SUSFS. It does
-  not — the Suite makes no SUSFS call at all; RRO goes through the hookless engine
-  and leaves no mount to hide. The only `ksu_susfs` reference is the guard against
-  another module's action button clobbering ksud.
-
-### Changed
-- **Per-UID hiding card rebuilt.** The isolated-process `<select>` is now a
-  segmented control: the native picker was drawn by the OS, ignored the theme
-  entirely and covered the card behind it. One tap instead of two. The two long
-  explanations fold away, which is most of the card's height back.
-- The apply pass reads `packages.list` once instead of once per entry, and writes
-  the hide list and the resolved mirror once instead of once per entry — a
-  ~50-entry preset was doing ~50 rewrites of each in the boot path.
+- Globs in the hide list.
+- `nomount uid preset detectors`.
+- The isolated-process control could lie about the kernel's state.
+- A bad `packages.list` read could have un-hidden every hidden app.
+- A glob can no longer reach a platform UID.
+- Per-UID hiding card rebuilt.
 
 ## v1.3.13
 
-Audit pass over per-UID hiding, kernel to WebUI. Everything below is that audit's
-findings, fixed. The kernel half lives in `kbuild@hookless`.
-
-### Fixed
-- **A hidden app could still see the shape of what was hidden.** `getattr` on an
-  injected directory was the one major kernel entry point with no per-UID gate, so
-  a hidden app got the *corrected* link count and erofs directory size while its
-  own `readdir` and `lookup` returned the stock set. `stat()` and `readdir()`
-  disagreed by exactly the number of hidden entries — for the one caller most
-  likely to be measuring. The correction is skipped for a hidden reader now, and
-  the link-count delta only counts children that reader can actually see.
-- **A hidden app could read through its own SDK-runtime sandbox process.** Matching
-  is on the appid, and a sandbox process runs at `appid + 10000` — outside the list.
-  Unlike an isolated pool uid, that one names its owner exactly, so it is followed
-  back to the app instead of being left uncovered.
-- **"Re-apply" silently unhid every app.** `nm clear` drops the kernel's hidden-UID
-  set along with the rules, and the mount pass clears before it rebuilds — so the
-  WebUI's Re-apply button (and `vfs clear`) left every app on the list visible for
-  the rest of the session, with nothing to put it back. Both paths re-assert the
-  list now.
-- **The hide list and the module-skip list were the same file.**
-  `/data/adb/nomount/blocklist` was read as *module ids to skip injecting* and
-  written as *apps to hide*. Hiding an app inserted it into the module-skip set, and
-  every module-skip entry appeared in the WebUI as a hidden app with a ✕ that
-  deleted it — one click from injecting a self-mounting module. Hiding moved to
-  `/data/adb/nomount/uidhide`; an existing file is split on first read, with entries
-  that name an installed module left where they were.
-- **Apps were unhidden for the first ~10–20 s of every boot.** The list was applied
-  only after `sys.boot_completed` plus a sleep, long after injections went live — a
-  detector with a `BOOT_COMPLETED` receiver had a clean window. Each resolve is now
-  mirrored to `uidhide.cache`, and the mount pass re-hides from it at post-fs-data,
-  before any app starts. The later pass stays authoritative: it re-resolves against
-  `packages.list`, refreshes the mirror, and retires an appid an entry no longer
-  maps to (appids are reused after an uninstall).
-- **An entry for a not-yet-installed app stayed inert until the next reboot.**
-  `uidwatch.sh` re-applies the list on install/uninstall/update, via `inotifyd` on
-  the package map.
-- **`uid apply` could not fail.** Kernel errors were discarded and the pass reported
-  "applied N" regardless, so an engine that hid nothing looked identical to a clean
-  run — on the one path whose job is to be trustworthy. It counts and reports
-  failures now, exits non-zero, and `service.sh` logs the failure loudly.
-- **Blocking a platform uid was one keystroke away.** `1000` hides injections from
-  system_server (RRO and framework patches revert to stock), `2000` breaks the
-  health canary permanently (it probes as shell), `0` hides them from root. Appids
-  below 10000 are refused without `--force`, and the canary reports
-  `unchecked:probe-uid-hidden` instead of a standing inconsistency warning.
-- **`blocked=0` when the engine could not be asked.** `nm l u` fails loudly on
-  EPERM / engine-down, but the health fingerprint still reported zero hidden apps —
-  a working feature with an empty list. It says `unknown` now, and `uid list` says
-  "engine unreachable".
-- **WebUI input and output handling.** The hide field's deny-list let glob
-  characters through to an unquoted shell word; it is an allow-list now. List rows
-  are escaped and their buttons carry data attributes instead of generated inline
-  handlers.
-- **A `--uid`-scoped rule missed the app's clones,** comparing a raw UID where the
-  hide list compares appids.
-
-- **`export` published the live hidden set.** The hide list is deliberately kept
-  off shared storage — it names the apps you are hiding from — but `uid_live.txt`,
-  the kernel's live hidden set, was written unconditionally, and the WebUI exports
-  to `/sdcard/Download` by default. It obeys the same rule now, along with
-  `uidhide` and its resolved-appid cache.
-
-### Added
-- **`nomount uid isolated <both|appzygote|platform|off>`** (WebUI: Per-UID hiding ›
-  Isolated processes). An isolated process gets a pool UID that says nothing about
-  which app spawned it, so hiding from a listed app can only mean hiding from every
-  isolated process. That closes the hole where a hidden app farms its probing out to
-  an isolated helper — but while it is on, an app that *is not* hidden can spot the
-  injection by diffing its own view against its own isolated child's. The default is
-  unchanged (both pools); the trade is now a deliberate, documented setting rather
-  than a hardcoded range.
-- **`nomount uid apply --early`** — resolve from the cached mirror, for the
-  post-fs-data pass.
-- **`nm k i <0..3>`** — the isolated-pool knob on the existing knob transport.
-
-### Changed
-- README's feature list, command table and kernel section still described the
-  superseded hooked engine (`/dev/nomount`, SUSFS `sus_path`, a per-UID hash table);
-  the WebUI note claimed hiding covered `su` (it is sucompat — untouched) and *not*
-  isolated processes (the opposite of what the kernel does). Both corrected.
-- `kernel_patches/` is marked superseded: those patches are the ioctl engine, which
-  no current client can drive.
-- Shipped scripts and assets are pinned to LF via `.gitattributes` — a Windows clone
-  would otherwise check `module/*.sh` out with CRLF, and a local `package.sh` run
-  would zip them that way.
+- A hidden app could still see the shape of what was hidden.
+- A hidden app could read through its own SDK-runtime sandbox process.
+- "Re-apply" silently unhid every app.
+- The hide list and the module-skip list were the same file.
+- Apps were unhidden for the first ~10-20 s of every boot.
+- An entry for a not-yet-installed app stayed inert until the next reboot.
+- `uid apply` could not fail.
+- Blocking a platform uid was one keystroke away.
 
 ## v1.3.6
 
-### Fixed
-- **A single Reload deleted every durable whiteout and every absorbed rule.** The reconcile drops any live rule the module plan does not name, and neither of those is nameable from a plan: a `nomount whiteout add` target is a *stock* path with no module and no backing file, and an absorbed rule comes from another module's bind whose source can sit anywhere inside that module, including paths the plan walk never visits. So tapping Reload in the WebUI silently stopped every manual hide and reverted every absorbed file to the stock one underneath, while `whiteout list` still reported them as applied and nothing came back until a reboot. Both lists are now protected from the prune, absorb records what it serves in `absorbed.list`, and a durable whiteout the engine is not serving is re-applied — so Reload converges on the saved state instead of merely not destroying it.
-- **Every module-mount counter was a constant zero.** The card, the per-module badges, the WebUI module rows and the `mounts=` field of the health fingerprint all counted mounts by grepping `/proc/self/mountinfo` for `/data/adb/modules`, which never matches: field 4 is the mount's root *within its own filesystem*, so a bind out of a module reads `/adb/modules/<id>/…` because `/data` is its own filesystem. Every readout therefore claimed a clean posture on a device with real module mounts — verified live, one LSPosed `dex2oat` bind reported as zero everywhere. All four now match on the root field, and the Rust side resolves sources the way `absorb` already did.
-- **The posture shield said "fully mountless — zero mounts" while another module was mounting.** It only ever counted `nomount_*` devices, which the mountless engine does not create, so the verdict could not be anything but clean. It now counts module-backed mounts and says which they are — that mount is as readable to an app as one of ours would be, and claiming zero over the top of it was the one false reassurance this card exists to prevent.
-- **`ro.boot.vbmeta.size` was never set.** `compute_vbmeta_digest` recorded the chain length in a variable, but every caller runs it inside `$(...)`, so the value was gone before it could be read — which also meant the size cache it fell back to was never written, leaving the property permanently unset with `vbmeta_size=auto`. The length is written to the cache from inside the function now, and measured on demand when the digest itself was not recomputed. Verified on OP15: computes 19776, which is exactly what the bootloader reports.
-- **`/data/local/tmp` read as permanently dirty.** `stat -c %C` answers correctly from a root shell but returns the bare letter `C` in the post-fs-data and ksud service contexts this actually runs in, so the label never compared equal: `chcon` was re-run on every boot, a change that had not happened was logged each time, and the status the UI reads never left "dirty". The reading is taken only when it looks like a context, with `ls -Zd` as a fallback, and "could not read" is no longer treated as "wrong".
-- **Durable whiteouts did not apply until well after boot.** They were only re-applied from `service.sh`, which waits for `sys.boot_completed` and then a further 10s settle — so a path hidden precisely because it is a tell was plainly visible for the whole of boot. They now run in the mount pass, alongside the injections; `service.sh` still re-applies, which is idempotent.
-- **`whiteout list` reported a path as hidden when nothing was hiding it.** State was inferred from whether the path exists, so an entry for a path this ROM does not ship read as `hidden` — indistinguishable from working. It now asks the engine which targets it is actually serving and distinguishes applied, saved-but-not-applied, and saved-with-no-such-path.
-- **Packaging silently shipped a stale `nm`.** `nm` is freestanding C that only CI ever compiled; a local `package.sh --build` fell back to a gitignored prebuilt with nothing in the output saying so, so any change to `userspace/src/nm.c` was quietly left out of the zip. It is built from source when zig is present, and a prebuilt older than its source is now a hard error instead of a silent substitution.
-- **`nm` reported success for work it had not done.** Arguments past the 64th were dropped silently, so a long batch `add` applied part of its list and still exited 0; `nm add` and `nm w` with no operands also exited 0. Both fail now.
-- Live-rule parsing in `doctor` did not strip the ` [UID: N]` suffix, so every metadata check on a per-UID rule silently no-opped, and split on the first ` -> ` rather than the last. `measurable_hole` forked `nm v` once per whiteout and re-read `whiteouts.txt` each time; both are cached now, which matters most for a debloat module, which is entirely whiteouts.
-
-### Added
-- **Hidden paths card in the WebUI, with a real scan.** `nomount whiteout add/remove/list/suggest` had existed for a while with no way to reach it short of a root shell. The card lists each hidden path with its true state, adds and removes them, and **Scan** now walks the ROM (depth 2, so `/system/app/<Dir>/Superuser.apk` is reachable) for files only a root setup leaves behind, listing each hit with its reason and its own Hide button. `suggest` was previously three hardcoded path existence tests, none of which exist on a modern device. Matching is anchored rather than substring, because a substring sweep for `ksu`/`adbd` on OP15 returns `cksum` and `debuggerd` — proposing a hide for a stock coreutil is worse than proposing nothing. Candidates are filtered against what the engine is already serving (a walk of `/system/bin` meets module content, and hiding that hides the module), against paths no ordinary app can even see (`/system/bin/su` on a sucompat kernel is present for a granted uid and ENOENT for every app, so it is not a tell), and against paths that only stat and never open. Nothing is ever applied automatically.
-- **Foreign mounts card in the WebUI.** Scan and absorb from the UI, with the survey's own wording about what was left mounted on purpose and why — previously visible only by reading `nomount doctor` output.
-- **A spinner on every control that shells out.** A Cloak scan unzips every third-party manifest, absorb walks mountinfo and unmounts, `doctor` resolves the whole plan — with only a disabled button and a changed label there was no sign anything was still running. All 17 such controls now show the same spinning ring and restore their own label.
-
-### Fixed (WebUI, found in the pre-release re-audit)
-- `--dim` was referenced by seven CSS rules and defined by none, so each resolved to an invalid value: the app-picker's UID column, the section headings and the empty states all rendered at full `--txt` brightness instead of muted, and `.blk .dot` lost its background entirely — the status dot next to a hidden app was invisible in the `live` and `not installed` states, which is most of them. `--dim` is defined for both themes and those two states get their own colour.
-- The Hidden-paths rows built their handlers as `onclick="woAddPath(${JSON.stringify(path)},this)"`. `JSON.stringify` emits double quotes, which closed the double-quoted attribute at the first character of the path, so **both the Hide and the Remove buttons were completely inert**. They take the path from a `data-` attribute now, like the Cloak rows already did, and `esc()` escapes quotes so every other `title="…"` is safe too.
-
-### Changed
-- **`nomount export` no longer writes the block list to shared storage.** The default destination is `/sdcard/Download`, readable by any app holding a storage permission, and the block list names the apps you are hiding *from*. It and `spoof.conf` are omitted there and the omission is stated; pass a private path to include them.
-- The bind lock file is created 0600 rather than inheriting the boot umask, and `nm`'s doc comment no longer describes the generic-netlink control plane it stopped using.
+- A single Reload deleted every durable whiteout and every absorbed rule.
+- Every module-mount counter was a constant zero.
+- The posture shield said "fully mountless - zero mounts" while another module was mounting.
+- `ro.boot.vbmeta.size` was never set.
+- `/data/local/tmp` read as permanently dirty.
+- Durable whiteouts did not apply until well after boot.
+- `whiteout list` reported a path as hidden when nothing was hiding.
+- Packaging silently shipped a stale `nm`.
 
 ## v1.3.0
 
-### Fixed
-- **Injecting over a live mount stranded it in `mountinfo` permanently.** Adding a rule `d_drop`s the cached dentry for that name, and a mount hangs off a specific `(vfsmount, dentry)` pair — so serving a path that already had a mount detached that mount from path resolution, after which `umount2` fails with EINVAL even with `MNT_DETACH` and the entry is stuck until reboot. `absorb` runs after boot and cannot undo it, so any module whose own script mounted earlier than the mount pass left a permanent entry behind — exactly the surface the zero-mount posture exists to remove. Reported in the field: a bootanimation module binding at post-fs-data, injected over by the mount pass, two unremovable mounts that `absorb` then correctly refused to touch. The mount pass and `reload` now read `mountinfo` and unmount a target before serving it; if the unmount fails they leave it alone rather than stranding it.
+- Injecting over a live mount stranded it in `mountinfo` permanently.
 
 ## v1.2.9
 
-### Changed
-- **A mount left standing on purpose is now info, not a warning.** LSPosed's `dex2oat` bind was reported as a warning on every health check, but absorb is never going to take it — the framework rule declines it by design — so there was nothing to act on and the card sat permanently at "1 warning". `doctor` now separates the two cases: a mount declined by the hook-framework rule or by the skip list is `[info] module mount left by design` and stays out of the warning count, while a mount that *nothing* declined is still a warning, because that one means absorb did not run or failed.
-- **The rules breakdown bar now reads as the same material as the capsules.** It was a flat strip sitting next to domed pills. It gets the capsule's gloss and inset highlight/shade, applied as an overlay because the colour segments are children that fill the bar — an inset shadow on the bar itself is painted underneath them and never shows. One gloss spans the whole bar so it domes as a single capsule rather than looking like separate beads, and the light-theme gloss is softened from the capsule's value, which is tuned for a near-white chip and goes chalky over saturated colours.
+- A mount left standing on purpose is now info, not a warning.
+- The rules breakdown bar now reads as the same material as the capsules.
 
 ## v1.2.8
 
-### Added
-- **`/data/local/tmp` is restored to the owner, mode and SELinux context AOSP ships.** Every device has it `0771 shell:shell u:object_r:shell_data_file:s0`; `ksud` stages files there and commonly leaves it `0777` and/or `root:root`, so the drift is caused by having a root manager rather than by anything the Suite hides — which makes it a zero-false-positive probe for a detector that can stat the path without root, and one no amount of mount-hiding can answer. Each field is corrected only when it already differs, so a clean device is a no-op, and the pass runs at post-fs-data and again after boot completes because `ksud` and `adbd` keep staging files there for the whole of boot. Config key `fix_shell_tmp` (default on); `spoof.sh shell-tmp-status` reports the current state and the real inode.
+- `/data/local/tmp` is restored to the owner, mode and SELinux context AOSP ships.
 
 ## v1.2.7
 
-### Changed
-- **Absorb now leaves every hook framework alone, by what it ships rather than by its name.** A module is treated as a framework if it carries `zygisk/<abi>.so` (any Zygisk module — LSPosed and all its forks, PlayIntegrityFix, HMA, zygisk-detach) or `bin/zygisk*` (the providers — Zygisk Next, ReZygisk, NeoZygisk), and then *nothing* it mounts is absorbed. This replaces guesswork with a structural fact: an id list misses renamed forks and a path list only covers the paths someone enumerated, while both markers are part of how these modules are built. `zygisksu` is also seeded into the skip file, and absorb and `doctor` now say which module the framework rule matched.
+- Absorb now leaves every hook framework alone, by what it ships rather than by its name.
 
 ## v1.2.6
 
-### Changed
-- **Module whiteouts are held to the same rule as manual ones.** v1.2.5 guarded `whiteout add`, but the mount pass called the engine directly, so a module's `.replace` marker or Magisk char-device marker could still hide an entry on a non-overlay path and leave the directory reporting a size and link count that count it. Those are now declined with the reason printed, `doctor` reports them at plan time rather than after a reboot, and the override is the durable list: `nomount whiteout add <path> --force` marks the decision and the mount pass then honours it. Whiteouts under an overlayfs mount are unaffected.
+- Module whiteouts are held to the same rule as manual ones.
 
 ## v1.2.5
 
-### Changed
-- **`whiteout add` now refuses a target that is not on overlayfs.** Hiding an entry is only unmeasurable where the directory's own metadata does not describe its contents. On the ROM's erofs partitions it does, exactly — `st_size == 12*entries + name bytes` and `st_nlink == 2 + subdirs`, which held with zero deviation across every stock directory checked on OP15. Removing an entry from the listing without changing either is something no real filesystem does, and one `stat` plus one `getdents64` finds it with no knowledge of the stock ROM. Overlayfs merged directories report neither relationship, so a whiteout there carries no evidence. `--force` overrides. `whiteout suggest` no longer proposes targets that would be refused, `whiteout apply` warns at boot for entries already on the list, and `doctor` reports them.
+- `whiteout add` now refuses a target that is not on overlayfs.
 
 ## v1.2.4
 
-### Fixed
-- **Absorb and `doctor` named a skip file that may not exist.** With no skip file present the built-in hook-path list is used, but both still reported "listed in /data/adb/nomount/absorb-skip.txt" and told you to remove an entry from it — sending you to edit a file that is not there. `skip_list()` now returns its source, absorb names it, and `doctor` says the built-in list is in use and how to override it.
+- Absorb and `doctor` named a skip file that may not exist.
 
 ## v1.2.3
 
-### Fixed
-- **The hook-path skip missed half of Vector's dex2oat paths.** ART lived in `/apex/com.android.runtime` before moving to `/apex/com.android.art`, and frameworks still hook whichever exists — JingMatrix's Vector targets eight paths spread across both. Keying only on `com.android.art` covered its four `art` variants by prefix and silently missed all four `com.android.runtime` ones, so those binds would have been absorbed. Both apex names are now covered, plus the pre-apex `/system/bin/dex2oat`. A test asserts the exact eight paths Vector hooks.
+- The hook-path skip missed half of Vector's dex2oat paths.
 
 ## v1.2.2
 
-### Fixed
-- **The absorb opt-out no longer depends on knowing a fork's module id.** The seeded skip list named specific ids (`zygisk_lsposed`, …), and matching is on `/modules/<id>/` — so a hook framework installed under any other id (`zygisk_lsposed_next`, a renamed fork, a new one) was not matched and its bind was absorbed. It now keys on the **path being hooked** (`/apex/com.android.art/bin/dex2oat`, `/system/bin/app_process`), which is identical across forks. Module ids still work for anything else.
-- **A missing skip file no longer fails open.** `skip_list()` returned an empty list when the file could not be read, so deleting or losing it silently absorbed *everything*, hook frameworks included. It now falls back to the built-in hook paths, so the protection survives losing the file.
+- The absorb opt-out no longer depends on knowing a fork's module id.
+- A missing skip file no longer fails open.
 
 ## v1.2.1
 
-### Changed
-- **`absorb-skip` is now `absorb-skip.txt`.** It is a hand-edited list — `doctor` tells you to edit it by name — and an extensionless file makes an Android file manager ask which app to open it with. Now matches its peer `whiteouts.txt`. An existing `absorb-skip` is *copied* to the new name on install — deliberately not moved, since the outgoing binary stays live until the next reboot and reads the old name, so a rename would silently drop its opt-outs in that window. The new binary prefers `.txt` and falls back to the old name, so both work.
+- `absorb-skip` is now `absorb-skip.txt`.
 
 ## v1.2.0
 
-Audit fix pass (14 findings) plus two new capabilities: absorbing other modules' mounts, and durable whiteouts.
-
-### Added
-- **`nomount absorb` — take over bind mounts other modules made.** A third-party module can still run its own `mount --bind` from a boot script, and every such mount is visible in `/proc/*/mountinfo` to any app, defeating the mountless posture no matter how mountless the Suite itself is. Absorb re-serves each module-backed mount as a hookless injection and drops the mount. Only possible *because* injection is mountless — no overlay- or bind-based metamodule can absorb a mount, since it would have to create one. Runs from `service.sh` after module scripts have settled. Verified on-device against LSPosed's `dex2oat` bind: the mount disappeared and `dex2oat64` picked up its stock apex `dev`/`ino` in place of `/data`'s.
-  - Unmounts **before** injecting. Injecting first `d_drop`s the cached dentry, and a mount hangs off a specific `(vfsmount, dentry)` pair — dropping it detaches the mount from path resolution, so `umount2()` then returns `EINVAL` and the entry is stranded in mountinfo until reboot while content silently reverts to the file underneath.
-  - Directory binds are **opt-in** (`--include-dirs`): injection snapshots the listing, so files the owning module adds later would never appear.
-  - Opt-out list at `/data/adb/nomount/absorb-skip` (module id or target prefix). **Hook frameworks are skipped by default** — their bind comes from native daemon code that differs between forks, and the failure mode is silent and delayed (dex2oat runs during dexopt on app install, not at boot). `doctor` reports whatever stays mounted, so the trade is visible rather than silent.
-- **`nomount whiteout` — durable whiteouts.** Whiteouts live in kernel memory and were lost on every reboot. A persisted list at `/data/adb/nomount/whiteouts.txt` is re-applied at boot. `add`/`remove`/`list`/`apply`/`suggest`; validation refuses partition roots (masking a whole partition is the same `forkSystemServer` abort an injection on a root causes), relative paths and `/data`. `suggest` inspects *this* device and only proposes genuinely openable files — a path that stats but cannot be opened is fabricated at the syscall layer (KSU sucompat's `su` does exactly this), and hiding it would be useless at best.
-
-### Changed
-- **`/my_*` content is always served.** The `self_binds_my` heuristic — which grepped a module's boot scripts and silently dropped its *entire* `/my_*` content if they "looked like" they mounted it — is gone. With hookless `/my_*` nothing bind-mounts, so the duplicate-mount hazard it guarded is gone; if a module does bind its own path, that real mount takes precedence over the injection anyway. Coverage no longer depends on a text match over shell source.
-- **`doctor` gained an informational level.** The zygote FD-allowlist note fired once per injected file — 85 identical warnings on a configuration that boots fine, burying anything real. Now one counted line per partition, at `[info]`, excluded from the warning count. Overlay APKs on such a partition still error per-file, which is the case that actually aborts `forkSystemServer`.
-
-### Fixed
-- **Boot-time root code execution via the state directory.** `/data/adb/nomount` was created under the boot umask (`0777`) at all five `mkdir` sites, and `spoof.sh` **sourced** `spoof.conf` out of it as root at post-fs-data. Anything able to write there got arbitrary root code execution. The directory is now `0700` everywhere, and the config is *parsed* (known keys only, values never evaluated) instead of sourced.
-- **World-writable `/dev` lock that could wedge the mount pass.** The single-run guard was a `noclobber` file in `/dev` — `0666`, named after the project, and "held" by mere existence, so anything able to create that path pre-empted the whole mount pass. Now a real `flock` in the `0700` state directory.
-- **Bind-list locking silently degraded to no locking.** `Lock::acquire()` returned `Option` and every call site bound it to `_lock` and continued, so a failed open or `flock` meant no serialization at all — the exact concurrent mount/reload corruption of `binds.list` the lock exists to prevent. It now returns `Result` and propagates.
-- **Module files were permanently relabelled.** A bind copied the target's SELinux label onto the module's source file and never restored it — not on teardown, not on umount, and not when the `mount` that followed failed. The original label is now recorded in `binds.list` and restored on all three paths.
-- **The bootloop guard disarmed itself on a hanging boot.** The counter was cleared even when the `sys.boot_completed` wait *timed out*, so a boot that never finished re-armed the guard instead of counting toward `GUARD_MAX` — precisely the boots it exists to catch.
-- **`chattr -i` on ksud is restored.** The susfs-action guard cleared the immutable flag to copy the binary and left it off permanently.
-- **Per-UID rules are removable.** `parse_live_rules` stripped the ` [UID: N]` suffix, so a per-UID rule and a global one for the same target shared a key and `nm del` (always uid 0) could never remove the per-UID one — it re-counted as a failure on every reload, forever. Live rules are now keyed on `(target, uid)`.
-- **Appid vs uid comparison.** The kernel stores and returns the appid (`uid % 100000`), so a raw-uid comparison missed for any work-profile or clone uid and reported "not blocked" for one that is.
-- **`nm` client hardening.** `get_attr()` now bounds the attribute payload before returning a pointer (a truncated attribute yielded one running past the message, which `print_str` then walked to a NUL); numeric arguments are validated instead of silently computing garbage from non-digits; the version printer handles any width rather than exactly two digits.
-- **Dump errors no longer read as success.** `nm list` conflated `NLMSG_ERROR` with `NLMSG_DONE` and exited 0, so a dump that aborted mid-stream handed `reload` a silently truncated list which it acted on as the whole live set.
-- **`versionCode` no longer regresses on an auto-bump.** `package.sh` derived it by stripping dots (`1.2.0` → `120`), below the `10102` already shipped for v1.1.2 — a manager reads that as a downgrade. Now `major*10000 + minor*100 + patch`.
-- **CI least privilege.** The build and package jobs inherited the repository default token scope; the workflow now pins `permissions: contents: read`.
-
-### Note
-This release pairs with the hookless kernel engine at `kbuild@hookless` ≥ `a12e0d0`, which moves the boot-identity knobs off `/sys/kernel/*` onto the netlink control plane. `spoof.sh` probes both layouts, so kernel and module can be flashed out of step.
+- `nomount absorb` - take over bind mounts other modules made.
+- `nomount whiteout` - durable whiteouts.
+- `/my_*` content is always served.
+- `doctor` gained an informational level.
+- Boot-time root code execution via the state directory.
+- World-writable `/dev` lock that could wedge the mount pass.
+- Bind-list locking silently degraded to no locking.
+- Module files were permanently relabelled.
 
 ## v1.1.2
 
-Hookless `/my_*` (opt-in) + self-manage detection across variables.
-
-### Added
-- **Hookless `/my_*` serving (opt-in, `NM_MY_HOOKLESS`).** `/my_*` targets can now be served by the same mountless hookless VFS injection as every other partition instead of a real bind — zero mounts. Enable with `NM_MY_HOOKLESS=1` (metamount env) or a `/data/adb/nomount/my_hookless` marker; the default stays bind. Cold-boot validated on OP15 (6.12): a `/my_product` framework feature-config served hookless survived the real init→zygote `forkSystemServer` FD-allowlist with no bootloop — refuting the long-held "my_* hookless bootloops" assumption for this case. Guarded by the existing `GUARD_MAX` self-disable. NOT yet validated for preloaded overlay APKs / framework jars / fonts under `/my_*`, so the safe default remains bind while multi-device data is gathered.
-
-### Fixed
-- **Self-manage detection matches across the script and resolves simple vars.** `self_binds_my` no longer requires `my_` and `mount`/`bind` on one line: it collects vars assigned a `my_*` value (`DST=/my_product/…`) and flags any `mount`/`bind` line that reaches a `my_*` path directly *or* through such a var (`mount "$DST"`). This catches the real-world pattern used by `op15_3d_lockscreen_wp`, `OxygenCustomizer` and `OnePlus_Dialer_Universal` that the one-line heuristic missed — which, under hookless `/my_*`, would otherwise double-handle the same target. Still precise: an unrelated `mount` plus an unrelated `my_` mention elsewhere does not trip it. 6 unit tests added.
+- Hookless `/my_*` serving (opt-in, `NM_MY_HOOKLESS`).
+- Self-manage detection matches across the script and resolves simple vars.
 
 ## v1.1.1
 
-Follow-up audit cleanup of two v1.1.0 P2s.
-
-### Fixed
-- **Self-manage detection no longer trips on comments.** `self_binds_my` now requires `my_` and `mount`/`bind` on the *same non-comment line* (an actual bind), instead of matching those tokens anywhere in a boot script -- a commented-out `my_` mention next to an unrelated `mount` no longer causes a module's my_* overrides to be dropped.
-- **reload re-binds a my_* backing whose source changed.** binds.list now records `target\tsource`, so a hot `reload` detects a bind whose backing file moved and re-binds it, instead of only reconciling added/removed targets (source changes previously waited for a full mount). Legacy target-only rows are backfilled on first reload.
+- Self-manage detection no longer trips on comments.
+- reload re-binds a my_* backing whose source changed.
 
 ## v1.1.0
 
-Audit fix pass over the v1.0.11-1.0.13 additions (dynamic resolver, my_* bind hybrid, gap-free reload).
-
-### Fixed
-- **reload reconciles changed source/kind, not just presence.** A target that moves between modules, or flips inject<->whiteout on the same path, is now re-applied (`~changed`) instead of frozen at the old rule until a full mount. `parse_live` captures source+kind; `reload` diffs them.
-- **my_* bind hardening.** Aborts the bind if the SELinux relabel fails (never exposes a mislabeled `adb_data_file` override -> avc + tell); unbinds if the mount can't be recorded (no untracked-leak/stacking); and skips a target another module already mounted. binds.list read-modify-write is now flock-serialized against a concurrent mount/reload.
-- **Self-manage detection narrowed.** A module's my_* content is left to it only if one of its boot scripts actually mounts/binds a my_* path -- previously *any* `service.sh`/`post-fs-data.sh` (very common) wrongly caused its my_* overrides to be dropped. Also checks `post-mount.sh`.
-- **Partition discovery follows symlinks again.** Split from canonicalization after v1.0.13: discovery walks a symlinked top-level root (so `system_ext/` etc. isn't dropped where that root is a symlink), while `system/<X>` canonicalization keeps lstat.
-- **reload safety + robustness.** Propagates an `nm list` failure instead of silently mass-re-adding; parses live rules by suffix/rsplit so paths with spaces/parens/arrows aren't mis-split; excludes `/data_mirror` from partition detection.
+- reload reconciles changed source/kind, not just presence.
+- my_* bind hardening.
+- Self-manage detection narrowed.
+- Partition discovery follows symlinks again.
+- reload safety + robustness.
 
 ## v1.0.13
 
-### Fixed
-- **Dynamic resolver mistook `/system`-symlinks for partitions.** `/etc -> /system/etc` (and `/bin`) are symlinks, and the resolver's `is_dir()` check followed them, so classic-layout `system/etc/...` wrongly canonicalized to `/etc/...` (a harmless-but-wrong target on the same inode, which tripped doctor's zygote FD-allowlist warning). Now uses `symlink_metadata` (lstat) so only a real partition mount (`/vendor`, `/product`, `/odm`, `/my_product`, …) canonicalizes; `system/etc` correctly stays `/system/etc`.
+- Dynamic resolver mistook `/system`-symlinks for partitions.
 
 ## v1.0.12
 
-### Added
-- **Gap-free hot load / unload** (`nomount reload`, WebUI **Reload** button). Reconciles the live rule set to the currently installed modules and applies only the delta — no `clear`, so injections never drop mid-reload. Install a module and tap Reload: just its files go live. Remove one and Reload: just its files go away. No reboot. Also reconciles my_* binds incrementally (umount removed, bind new). The old full-rebuild pass still runs at boot; the WebUI's "Re-apply" button is now the gap-free "Reload".
+- Gap-free hot load / unload.
 
 ## v1.0.11
 
-### Added
-- **my_* partition support via a scoped bind hybrid.** OnePlus/Oppo `my_*` partitions are in zygote's FD allowlist, so hookless injection there bootloops (`CreateFromFd` rejects the spoofed inode). Those files were silently dropped before; now a module's `my_*` content is served by a real file-over-file bind (which keeps the true inode and passes the check), with the source SELinux-relabeled to the partition's context and the mount tracked for teardown on the next pass. **Scoped:** a module that ships its own `post-fs-data.sh`/`service.sh` already binds its `my_*` content, so those are left to it (no double-mount). Everything hookless can reach stays mountless.
-- **`nomount plan`** — read-only: prints exactly what the mount pass would do (resolved target, kind, source) without applying. `doctor` now also reports the my_* bind count.
-
-### Changed
-- **`system/<X>` resolution is now dynamic.** The classic layout maps `system/<X>/…` to `/<X>/…` for any real separate partition on the device (`/vendor`, `/product`, `/odm`, `/system_ext`, `/system_dlkm`, `/oem`, `/my_product`, …), matching magic-mount — replacing a hardcoded four-partition list that mis-targeted `system/system_dlkm`, `system/oem`, etc. to a literal `/system/<X>`. Plain `/system` subdirs (`system/app`, `system/bin`) are unaffected.
+- my_* partition support via a scoped bind hybrid.
+- `system/<X>` resolution is now dynamic.
 
 ## v1.0.10
 
-### Changed
-- **Procfs boot-state spoof now rides on the Boot-state toggle.** The `/proc/cmdline` + `/proc/bootconfig` sanitizer (previously the config-only `spoof_cmdline`) now follows `spoof_props`, so enabling **Boot-state (props + procfs)** in Tools › Spoofing normalizes the raw procfs boot-state alongside the props in one switch. It always required props to be on anyway, so a separate toggle was just a footgun. The procfs half is a no-op when the kernel has no `/sys/kernel/nomount` knobs. Advanced: set `spoof_cmdline=0` in `spoof.conf` to keep procfs untouched while still spoofing props.
+- Procfs boot-state spoof now rides on the Boot-state toggle.
 
 ## v1.0.9
 
-### Added
-- **`/proc/cmdline` + `/proc/bootconfig` boot-state sanitizer** (`spoof_cmdline`, opt-in, off by default). `resetprop` only moves the derived `ro.boot.*` props; the raw `androidboot.*`/`oplusboot.*` boot state in `/proc/cmdline` (and `/proc/bootconfig` on GKI) still contradicts them, which a detector can read directly. When the kernel exposes the `nomount` cmdline/bootconfig knobs, the module now serves a sanitized copy (verifiedbootstate=green, device_state=locked, flash.locked=1, warranty_bit=0, veritymode=enforcing, `verifiedbooterror` stripped, digest matched to the props). Prefix-agnostic, so it covers OnePlus `oplusboot.*` as well as generic `androidboot.*`. Requires `spoof_props=1` and only runs once the boot-state prop is actually normalized, so it can never flip the inconsistency the other way.
-- **Detection-posture card** (WebUI › Status). Reports the residual tells a scanner can still read on a mountless engine — verified-boot state (worst of cmdline/bootconfig), build keys, SELinux — instead of a mount-only "clean" that was always green on a mountless build.
-
-### Changed
-- **Fingerprint harmonization.** `do_props` now rewrites `:userdebug`/`test-keys` tails in the composite fingerprint, description and flavor to `:user`/`release-keys` across all partitions, matching the `ro.build.type`/`tags` it already sets — closing a tags-vs-fingerprint inconsistency.
-
-### Fixed
-- Whiteout of a partition root is now refused in the plan builder and the doctor (a `product/.replace` marker could otherwise hide a whole partition and bootloop).
-- A single malformed block-list entry no longer aborts the boot-time UID-apply (which would leave every app un-hidden); bad entries are skipped.
-- `nm` path resolution is bounded to `PATH_MAX` and the list walk is signedness-safe, closing an out-of-bounds read on an over-long path or a negative reply.
+- `/proc/cmdline` + `/proc/bootconfig` boot-state sanitizer.
 
 ## v1.0.6
 
-### Changed
-- **Cloak scanner is ~8× faster.** The Xposed-module probe now uses an `xargs -P` worker pool scaled to CPU count instead of fixed 8-at-a-time batches with a `wait` barrier, so one slow or wedged APK can no longer stall a whole batch. On a 303-app device the full scan dropped from ~30 s to ~3.7 s (identical results). The **Scan Xposed modules** button now also shows a "Scanning…" toast on press for immediate feedback.
+- Cloak scanner is ~8× faster.
 
 ## v1.0.5
 
-### Added
-- **Clear incident** — WebUI › Tools › Last incident now has a button to delete the saved `incident.log`, so the forensic card can be dismissed once the trip has been reviewed. The card note now states plainly that it is a saved record (survives reboots until overwritten or cleared), and that current disabled/armed state is the guard chip on Status.
-
-### Changed
-- **Re-arm & enable also clears the incident record.** Re-arming already dropped `disabled` + `bootcount`; it now also removes `incident.log`, so acknowledging a trip clears the lingering card in one action. The incident nav-alert dot is now cleared when the log is gone (previously it was only ever set).
+- Re-arm & enable also clears the incident record.
 
 ## v1.0.4
 
-### Changed
-- **Cloak scanner is fast and no longer hangs.** The Xposed-module probe now runs in parallel (8 APKs at a time) with a per-APK `timeout`, and caches the result to `/data/adb/nomount/xposed_cache`. The WebUI reads the cache on open (~20 ms) instead of scanning ~all installed APKs; `service.sh` rebuilds the cache in the background at boot; the **Scan** button forces a refresh.
+- Cloak scanner is fast and no longer hangs.
 
 ## v1.0.3
 
-### Fixed
-- **Cloak scanner found no Xposed modules.** The manifest probe grep'd the compiled `AndroidManifest.xml` for `xposedmodule`, but binary XML stores pool strings as UTF-16 (null bytes between chars) so the ASCII grep never matched. `scan.sh` now strips nulls (`tr -d '\000'`) before the grep.
+- Cloak scanner found no Xposed modules.
 
 ## v1.0.2
 
-### Added
-- **Cloak (maps/fd)** — WebUI › Tools card to select Xposed/LSPosed packages and hide their APKs from every `/proc/<pid>/maps` and `/proc/<pid>/fd` via the kernel `pathhide` interface. Applied live and re-applied on boot from `/data/adb/nomount/pathhide.conf`. Collapsible list + module scanner.
-
-### Fixed
-- **metamount.sh module counter** — `grep -c … || echo 0` doubled the `0`, tripping a per-module arithmetic error in the card-refresh path (non-fatal but noisy).
+- metamount.sh module counter.
 
 ## v1.0.1
 
-### Fixed
-- **False "per-UID inconsistency" on the manager card at boot.** The runtime
-  self-consistency canary ran a single probe shortly after `boot_completed`, but
-  app UIDs have not all launched and materialised their per-UID injection that
-  early, so a transient disagreement stamped a scary "⚠️ per-UID inconsistency"
-  on the card every boot even when the steady state was healthy. `service.sh`
-  now retries the probe across a settle window (up to 6 × 15 s) and keeps the
-  *settled* verdict; only a divergence that persists through the whole window —
-  a real d_drop-style regression — reaches the card.
+- False "per-UID inconsistency" on the manager card at boot.
 
-## v2.1.0 — superseded engine (historical)
+## v2.1.0 - superseded engine (historical)
 
-> **These notes describe the ORIGINAL `/dev/nomount` char-device engine and are
-> kept as a record, not as current behaviour.** Nothing below is true of the
-> Prism engine this Suite drives today: there is no `/dev/nomount` node, the
-> control plane is netlink, RRO overlays are injected hooklessly with **no
-> `overlayfs` and no tmpfs**, and SUSFS is optional and unused. The version
-> number also predates the 1.3.x line it sits below.
-
-First release of the reworked hybrid metamodule.
-
-### Mount
-- **Mountless VFS redirection** — direct-path module files load at stock system
-  paths via the `/dev/nomount` driver, with zero `/proc/mounts` entries.
-- **Hybrid RRO overlay support** — module `**/overlay/*.apk` dirs are mounted as
-  a real `overlayfs` (staged on tmpfs, because `/data` f2fs `casefold` is
-  rejected by overlayfs as a lowerdir) so Android's `idmap2` / `OverlayManager`
-  pipeline can enable them. Without this, RRO overlays stay `STATE_NO_IDMAP` and
-  theming (e.g. OxygenCustomizer) breaks. Everything else stays mountless.
-- **Self-mounting module blocklist** — skip modules that manage their own path
-  redirection (built-in list + `/data/adb/nomount/blocklist`).
-
-### Detection hiding (own footprint)
-- Overlay mounts are registered with KernelSU's native umount
-  (`kernel_umount` + `umount-config`) so they're `MNT_DETACH`ed inside DenyList
-  apps' namespaces.
-- `/dev/nomount` is hidden from non-root scanners via SUSFS `sus_path`.
-- **Per-app UID isolation** — block specific UIDs so the VFS hook returns
-  pristine stock for them.
-
-### Manager & WebUI
-- **Per-module manager tags** — each module's description is tagged with how
-  it's served (`vfs` / `overlay` / `vfs + overlay`).
-- **WebUI** — engine status/toggle, remount, bootloop-guard status + re-arm,
-  modules list, active rules viewer, overlay-mounts list, and UID exclusions.
-
-### Safety
-- **Bootloop guard** — a boot counter self-disables NoMount after repeated
-  failed boots and re-arms once the system boots healthy.
-- **Install-time sha256 integrity check** — every bundled file is verified
-  against a manifest at install; a corrupt or tampered zip aborts.
-
-### Kernel
-- Kernel patches for android12-5.10, android13-5.15, android14-6.1,
-  android15-6.6, android16-6.12 (raw GKI + SUSFS-compatible variants). The
-  recursion guard uses `current->journal_info` — never `android_oem_data1`,
-  which OEMs like OnePlus use for their own per-task pointer (writing to it
-  soft-locks the device at boot).
+- Mountless VFS redirection.
+- Hybrid RRO overlay support.
+- Self-mounting module blocklist.
+- Detection hiding (own footprint).
+- Per-app UID isolation.
+- Manager & WebUI.
+- Per-module manager tags.
+- Install-time sha256 integrity check.

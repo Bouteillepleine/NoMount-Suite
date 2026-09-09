@@ -1,9 +1,6 @@
-/*
- * nm.c - NoMount CLI Userspace Tool
- */
+/* nm.c - NoMount CLI Userspace Tool */
 #include "nm.h"
 
-/* --- MAIN --- */
 __attribute__((noreturn, used))
 void c_main(long *sp) {
     struct nm_mem mem __attribute__((aligned(16)));
@@ -18,39 +15,13 @@ void c_main(long *sp) {
 
     int fd = sys3(SYS_SOCKET, AF_NETLINK, SOCK_RAW, NOMOUNT_NL_PROTO);
     if (fd < 0) {
-        /* The wrong-kernel first run -- the single most likely failure this
-         * product has, and it said NOTHING on either stream. Nm::run quotes
-         * stderr, so every Suite caller rendered it as an argv, a code, and an
-         * empty reason, which reads as "engine not responding" and sends the
-         * user looking at the engine. The two causes are indistinguishable from
-         * here, so name both: nm.h documents randomising NOMOUNT_NL_PROTO per
-         * build, and a kernel built with a different number simply never
-         * answers. */
         print_err("nm: cannot open the NoMount netlink socket - this kernel has no NoMount "
                   "engine (CONFIG_NOMOUNT), or nm and the kernel were built with different "
                   "NOMOUNT_NL_PROTO values\n");
         exit_code = 2; goto do_exit;
     }
-    /* Before the FIRST read, and covering every later one: a kernel that takes
-     * the message and never replies must not hang us, because nm runs during
-     * post-fs-data and a hang there hangs boot. See NM_RECV_TIMEOUT_SEC. */
     set_recv_timeout(fd);
 
-    /* No family resolution: the private raw-netlink protocol is addressed
-     * directly (kernel is portid 0); the command rides in nlmsg_type. */
-
-    /* Exact command WORDS, not a first-character match.
-     *
-     * This used to be `argv[1][0]`, so any word beginning with the right letter
-     * ran the command. `nm check`, `nm count` and `nm config` all executed CLEAR
-     * -- which drops every rule AND the blocked-UID set (see __nomount_clear_all:
-     * per-UID hiding is runtime-only state and CLEAR_ALL is its reset). A typo at
-     * a root shell was a silent, total wipe with a success exit code.
-     *
-     * The table carries every spelling the Suite actually uses -- nm.rs, the
-     * module scripts and the WebUI between them issue add/del/w/block/unblock/
-     * clear/list/l/v/k -- plus the obvious long forms. Anything else is refused
-     * rather than guessed at. */
     static const struct { const char *name; char op; } nm_cmds[] = {
         { "add", 'a' },   { "del", 'd' },     { "w", 'w' },
         { "block", 'b' }, { "unblock", 'u' },  { "clear", 'c' },
@@ -62,24 +33,10 @@ void c_main(long *sp) {
         if (strcmp(argv[1], nm_cmds[ci].name) == 0) { cmd = nm_cmds[ci].op; break; }
     }
     if (!cmd) {
-        /* Every argument error in this file goes to fd 2, not fd 1. nm.h states
-         * the rule ("Diagnostics ... go to fd 2") for the reason a diagnostic
-         * must never be read back as a rule; the reason it must be SEEN AT ALL
-         * is the same one. Nm::run quotes stderr and the WebUI toasts
-         * `r.stderr`, so each of these used to reach the user as
-         * `nm [...] failed (exit 3):` with nothing after the colon. */
         print_err("nm: unknown command\n");
         exit_code = 3; goto do_exit;
     }
-    /* Wire field only. Per-UID RULES would need `--uid`, which no caller in the
-     * Suite has ever passed, so the option is gone and this stays 0. The kernel
-     * still reads the field, so it keeps its slot in the payload below. */
     const unsigned int target_uid = 0;
-    /* NM_FLAG_PUBLIC: this rule stays visible to a UID on the hide list. Only
-     * meaningful on `add`, and only correct for a path the system already
-     * advertises to that UID anyway -- a ROM APK the PackageManager has scanned
-     * and now names to every app that asks. The kernel refuses it on a rule that
-     * shadows a stock file, so a wrong `--public` cannot leak module bytes. */
     unsigned int add_flags = 0;
     const char *p_args[64];
     int p_count = 0;
@@ -88,18 +45,11 @@ void c_main(long *sp) {
         if (strcmp(argv[i], "--public") == 0) {
             add_flags |= 64;
         } else if (argv[i][0] == '-' && argv[i][1] == '-') {
-            /* Anything else spelled like an option is a mistake, and taking it for
-             * a PATH is the worst way to handle one: a typo ("--publik") would be
-             * accepted as the virtual path of the very rule it was meant to flag,
-             * applying a wrong rule and exiting 0. */
             print_err("nm: unknown option\n");
             exit_code = 3; goto do_exit;
         } else if (p_count < 64) {
             p_args[p_count++] = argv[i];
         } else {
-            /* Silently dropping the tail meant a batch `nm add` past 64 arguments
-             * applied part of its work and still exited 0, so the caller recorded
-             * every pair as applied. Refuse the whole command instead. */
             print_err("nm: too many arguments (max 64)\n");
             exit_code = 3; goto do_exit;
         }
@@ -107,13 +57,7 @@ void c_main(long *sp) {
 
     if (cmd == 'a' || cmd == 'd' || cmd == 'w') {
         int step = 1 + (cmd == 'a');
-        /* Was exit 0: `nm add` with no operands reported success and did nothing,
-         * so a caller that built an empty argument list saw its work "applied". */
         if (p_count < step) { print_err("nm: missing operand\n"); exit_code = 3; goto do_exit; }
-        /* An ODD tail is the same class this file already refuses twice above:
-         * `nm add /a /b /c` processed (/a,/b), dropped /c and exited 0, so a
-         * caller recorded every pair as applied. `step` is 1 for del/w, where
-         * this can never fire. */
         if (p_count % step) { print_err("nm: odd number of add operands\n"); exit_code = 3; goto do_exit; }
 
         const char *cwd = (sys3(SYS_GETCWD, (long)mem.cwd_buf, PATH_MAX, 0) > 0) ? mem.cwd_buf : "/";
@@ -124,10 +68,7 @@ void c_main(long *sp) {
 
         for (int i = 0; i + step - 1 < p_count; i += step) {
             char *v_end = resolve_path(mem.v_resolved, cwd, p_args[i]);
-            int v_len = v_end ? (int)(v_end - mem.v_resolved) : 0; /* NULL = overran PATH_MAX */
-            /* Was a bare `continue`: the operand was dropped, the rest of the
-             * batch applied, and the caller got exit 3 with nothing said. Name the
-             * path -- with a batch of 31 pairs the exit code alone cannot. */
+            int v_len = v_end ? (int)(v_end - mem.v_resolved) : 0;
             if (!v_len) { print_err("nm: path too long: "); print_err(p_args[i]); print_err("\n");
                           exit_code = 3; continue; }
 
@@ -142,31 +83,13 @@ void c_main(long *sp) {
             int header_size = (target_cmd == 2) ? 12 : 6;
             if ((cursor - mem.payload) + header_size + v_len + r_len > MAX_PAYLOAD) {
                 int rc = do_nm_cmd(fd,target_cmd, 6, mem.payload, cursor - mem.payload, 5, &mem);
-                /* A silent kernel will not answer the NEXT batch either, and
-                 * grinding through the rest of a large `nm add` at five seconds
-                 * a batch is the boot-time stall this bound exists to prevent. */
                 if (nm_timed_out(rc)) goto do_timeout;
                 if (rc < 0) print_refused("this batch", rc);
                 exit_code |= (rc < 0);
                 cursor = mem.payload;
             }
 
-            /* memcpy for the header words, not a cast-and-store.
-             *
-             * `cursor` advances by 12 + v_len + r_len for ARBITRARY path
-             * lengths, so it is unaligned for most records, and
-             * `*(unsigned int *)cursor = x` on an unaligned pointer is
-             * undefined behaviour -- the compiler is entitled to assume the
-             * alignment its type claims. It happens to work on every ABI this
-             * ships for (aarch64 with SCTLR.A clear, x86_64, ARMv7 with
-             * unaligned access enabled), which is exactly the kind of "works
-             * until -Oz picks a different instruction" this file cannot afford:
-             * a mis-encoded header is a rule applied to the wrong path.
-             *
-             * memcpy() of 2 and 4 bytes compiles to the same single store on
-             * every one of those targets, so this costs nothing. nm.h already
-             * defines memcpy for the freestanding build. */
-            if (target_cmd == 2) { /* ADD / WHITEOUT */
+            if (target_cmd == 2) {
                 unsigned int hdr_flags = (cmd == 'w') ? 4u : add_flags;
                 unsigned short hv = (unsigned short)v_len, hr = (unsigned short)r_len;
                 memcpy(cursor + 0, &hdr_flags, 4);
@@ -176,7 +99,7 @@ void c_main(long *sp) {
                 memcpy(cursor + 12, mem.v_resolved, v_len);
                 if (r_len > 0) memcpy(cursor + 12 + v_len, mem.r_resolved, r_len);
                 cursor += 12 + v_len + r_len;
-            } else { /* DEL */
+            } else {
                 unsigned short hv = (unsigned short)v_len;
                 memcpy(cursor + 0, &target_uid, 4);
                 memcpy(cursor + 4, &hv, 2);
@@ -195,32 +118,12 @@ void c_main(long *sp) {
         goto do_exit;
 
     } else if (cmd == 'b' || cmd == 'u') {
-        /* Was a bare `goto do_exit`: exit 1, nothing printed on either stream,
-         * so the caller had an exit code and no reason at all. */
         if (p_count < 1) { print_err("nm: missing uid\n"); exit_code = 3; goto do_exit; }
         unsigned int uid = 0; const char *s = p_args[0];
         int ndig = 0;
-        /* All three refusals below jump to one sentence at `bad_uid`. They were
-         * silent exits: an empty string, a non-digit and an out-of-range value
-         * each exited 3 with nothing on either stream, so the WebUI's hide button
-         * on a malformed target toasted an empty reason. */
         if (!*s) goto bad_uid;
         while (*s) {
             if (*s < '0' || *s > '9') goto bad_uid;
-            /* BOUND IT. This used to wrap silently, so `nm block 4294967296`
-             * sent uid 0 -- and uid 0 is the engine's own identity, so the
-             * kernel would have been asked to hide every injection from ksud,
-             * the nm client and every module script. Ten digits is the widest a
-             * u32 can be; past that, or past the u32 range on the tenth, refuse
-             * rather than truncate. The character-set test three lines up
-             * already refuses a typo; this refuses one that is all digits.
-             *
-             * Consequence worth stating: an 11-digit LEADING-ZERO form such as
-             * "00000010123" is refused too, where strtoull would take it. No
-             * caller in the tree produces one -- nm.rs sends
-             * blocklist::appid().to_string() -- and accepting arbitrary padding
-             * would mean carrying the digit count separately from the range
-             * check for no gain. */
             if (++ndig > 10 || uid > 429496729u ||
                 (uid == 429496729u && *s > '5')) goto bad_uid;
             uid = (uid << 3) + (uid << 1) + (*s++ - '0');
@@ -232,56 +135,13 @@ void c_main(long *sp) {
         goto do_exit;
 
     } else if (cmd == 'k') {
-        /* k <r|v|c|b> <value> -- boot-identity knob, formerly a sysfs attribute.
-         * Payload: [u32 knob][value bytes]; an empty value clears the override. */
         int knob = -1;
         const char *val;
         int vlen = 0;
 
-        /* Exact knob WORDS, for the reason the command table above matches words
-         * (see the note at `nm_cmds`): this was `p_args[0][0]`, so any token
-         * beginning with the right letter selected that knob. `nm k cold` rewrote
-         * /proc/cmdline, `nm k dir` flipped the directory-shape knob, `nm k boot
-         * ...` rewrote /proc/bootconfig -- each from a word that was never a knob
-         * name, and each exiting 0. Every caller in the tree passes the bare
-         * letter (service.sh / customize.sh / the WebUI's `nm k p`, nm.rs's
-         * `k i` and `k d`), so the letters are the whole vocabulary; anything
-         * else is refused rather than guessed at.
-         *
-         *   Slots 0..3 (uname release/version, /proc/cmdline, /proc/bootconfig)
-         *     and slot 6 (_pathhide) are RETIRED -- no letter reaches them and
-         *     the kernel no longer implements them. The ordinals are reserved
-         *     rather than reused: the knob is a raw u32 on the wire, so a new
-         *     letter in an old slot would mean something different to an nm
-         *     binary built before the change.
-         *   d <0|1> -- this device's ROM dirs are dirent-packed (erofs-shaped),
-         *     so a synthesized dir must report the formula rather than 4096.
-         *     Measured by the Suite; see NM_KNOB_VDIR_EROFS_SIZE.
-         *   i <0..3> -- which isolated-process pools per-UID hiding covers:
-         *     1 = app-zygote, 2 = platform, 3 = both (default), 0 = neither.
-         *     See NM_KNOB_HIDE_ISOLATED for the trade this expresses.
-         *   g <cmd> -- one _ghost control command, forwarded verbatim to its
-         *     parser. For the hidden-path table: "p=<path>\n<path>..." replaces
-         *     the WHOLE table under one acquisition of the kernel's lock,
-         *     "p+<path>\n<path>..." appends, "p-" clears. "u=" / "u+" / "u-"
-         *     are the same three for the hidden-uid table. `=` is what
-         *     crate::ghost sends for the first chunk of every sync -- i.e. it
-         *     carries essentially all real traffic -- so a reader never sees a
-         *     half-built table; this comment used to name a "p~" spelling that
-         *     appears nowhere else in the tree and omit "=" entirely, which is
-         *     the wrong way round for the only two places a kernel-side reader
-         *     looks. Do not use "~": nothing sends it and nothing tests it.
-         *     `nm k g` with
-         *     NO value exits 0 only when _ghost is compiled in AND the engine is
-         *     >= v26 (below that the knob does not exist and the kernel answers
-         *     -EINVAL). _ghost's guards are dead code until BOTH tables are
-         *     populated, so this knob is what makes them live. */
         static const struct { const char *name; int knob; } nm_knobs[] = {
             { "d", 4 }, { "i", 5 }, { "g", 7 },
         };
-        /* Same as the uid path above: `nm k` alone exited 1 in silence. Note
-         * this is the KNOB NAME, not its value -- `nm k g` with no value is the
-         * _ghost presence probe and has p_count 1. */
         if (p_count < 1) { print_err("nm: missing knob\n"); exit_code = 3; goto do_exit; }
         for (unsigned int ki = 0; ki < sizeof(nm_knobs) / sizeof(nm_knobs[0]); ki++) {
             if (strcmp(p_args[0], nm_knobs[ki].name) == 0) { knob = nm_knobs[ki].knob; break; }
@@ -292,17 +152,11 @@ void c_main(long *sp) {
         }
         val = (p_count > 1) ? p_args[1] : "";
         while (val[vlen]) vlen++;
-        /* Was silent. `nm k g` carries a whole _ghost table in one value, so this
-         * is the refusal crate::ghost's chunking exists to avoid -- it has to say
-         * which limit it hit. */
         if (4 + vlen > MAX_PAYLOAD) { print_err("nm: knob value too long\n"); exit_code = 3; goto do_exit; }
         *(unsigned int *)mem.payload = (unsigned int)knob;
         if (vlen) memcpy(mem.payload + 4, val, vlen);
         int rc = do_nm_cmd(fd, 9, 6, mem.payload, 4 + vlen, 5, &mem);
         if (nm_timed_out(rc)) goto do_timeout;
-        /* The `nm k g` presence probe lands here on an engine below v26, where
-         * the knob does not exist and the kernel answers -EINVAL. That is a
-         * legitimate "no", and it now says so instead of exiting 1 in silence. */
         if (rc < 0) print_refused("this knob", rc);
         exit_code = (rc < 0);
         goto do_exit;
@@ -318,29 +172,14 @@ void c_main(long *sp) {
         int vlen_rx = do_nm_cmd(fd, 1, 0, (void *)0, 0, 1, &mem);
         if (nm_timed_out(vlen_rx)) goto do_timeout;
         struct nlmsghdr *vh = (struct nlmsghdr *)mem.rx_buf;
-        /* Bound the header's own length claim by what was actually READ before
-         * walking attributes off it. The list path below already does this per
-         * message; this one trusted nlmsg_len outright, so a short or malformed
-         * reply sent get_attr walking past rx_buf. */
         if (vlen_rx >= 16 && vh->nlmsg_len <= (unsigned int)vlen_rx) {
             unsigned int *ver = get_attr(mem.rx_buf, 5, 4);
             if (ver) {
-                /* print_uint handles any width; the old two-digit routine printed
-                 * "02" for 2 and garbage for >= 100. */
                 print_uint(*ver);
                 print_str("\n");
                 exit_code = 0; goto do_exit;
             }
         }
-        /* Every other way out of this block fell through the whole else-if chain
-         * to do_exit with exit_code still at its initial 1 and NOTHING printed:
-         * a negative errno from the command (an engine present but refusing
-         * NM_CMD_GET_VERSION is not a timeout, so it neither times out nor
-         * prints), a reply shorter than a header, or a missing version
-         * attribute. Nm::version() then reported `nm v failed (exit 1): ` with
-         * an empty reason -- on the one command every liveness path in the Suite
-         * starts with, which is why an empty reason there sends the reader
-         * looking in the wrong place. */
         if (vlen_rx < 0) print_refused("the version query", vlen_rx);
         else print_err("nm: the engine did not answer with a version - it may be too old, or "
                        "built with a different NOMOUNT_NL_PROTO\n");
@@ -348,110 +187,45 @@ void c_main(long *sp) {
 
     } else if (cmd == 'l') {
         int is_uids = 0, is_gh = 0;
-        /* WHOLE-TOKEN, not first-character. `p_args[i][0] == 'x'` was the same
-         * bug class already fixed for commands and for knobs: any word starting
-         * with the right letter selected the mode, and any word that started
-         * with none of them was silently ignored rather than refused. That is
-         * exactly how `nm l g` came to print the ordinary rule list -- 'g'
-         * matched nothing, so the ghost dump looked empty-but-working while it
-         * had never been requested at all. Every caller passes a bare letter. */
         for (int i = 0; i < p_count; i++) {
             const char *a = p_args[i];
             if (a[0] && !a[1]) {
                 if (a[0] == 'u') { is_uids = 1; continue; }
-                /* `nm l g` -- the _ghost tables, as "p /abs/path" and "u <uid>".
-                 * Same plain-lines shape as `l p`, and the only way to tell a
-                 * FULL table from a populated one: a partial table cloaks some
-                 * paths and not others, which is its own pattern. */
                 if (a[0] == 'g') { is_gh = 1; continue; }
             }
             print_err("nm: unknown list option\n");
             exit_code = 3; goto do_exit;
         }
-        /* ONLY `l u` emits JSON, and what it emits is an array of INTEGERS -- the
-         * shape nm.rs harvests digits out of. The rule list and the ghost tables
-         * are plain lines, which is what every caller in the tree parses. There
-         * used to be a JSON writer for the rules as well, but the only thing that
-         * ever selected it was an `nm l j` the option loop above stopped
-         * accepting, so it and print_json() were unreachable text in a binary
-         * whose size is a design goal. Both are gone.
-         *
-         * The consequence for the truncated-dump contract below is unchanged: a
-         * short list still exits 4, and the caller (nm.rs's Nm::run) still bails
-         * on any non-zero status. */
 
         int target_cmd = is_gh ? 11 : is_uids ? 8 : 7;
-        /* signed: a negative errno from do_nm_cmd()/read() must fail the while(len>0)
-         * guard, not wrap to a huge unsigned length that walks rx_buf out of bounds. */
         int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
-        /* "have we emitted an element yet", for the uid array's comma. */
         int first = 1;
-        /* A dump that aborts mid-stream (kernel returns -EAGAIN when the rule
-         * table mutated under the cursor) must NOT look like success: callers
-         * feed this list straight into the reload delta, so a silently truncated
-         * list is acted on as if it were the whole live set.
-         *
-         * That guard used to cover only this FIRST read. A dump of any real size
-         * spans several -- and the continuation read at the foot of the loop had
-         * no guard at all: an -ENOBUFS, a receive timeout or a premature EOF
-         * simply failed `while (len > 0)` and fell through to list_done with
-         * exit_code still 0. The Suite then pruned every rule the dump had not
-         * reached yet. See the loop's tail. */
         if (nm_timed_out(len)) goto do_timeout;
-        /* A FIRST-read failure is a REFUSAL, not a truncation: nothing was ever
-         * streamed. `nm l g` on a kernel without the _ghost patch set lands
-         * here -- NM_CMD_GET_GHOST is command 11 and only exists from engine
-         * v26, so nm_nl_rcv_msg's dump test does not match, the switch falls to
-         * -EINVAL, and the kernel ACKs with the error. Sending that to the
-         * truncated-dump message told a perfectly healthy device that its rule
-         * table was incomplete. Same exit code (4 is "the dump failed"), a
-         * different sentence. */
         if (len < 0) goto list_refused;
         exit_code = 0;
         if (is_uids) print_str("[\n");
 
         while (len > 0) {
-            /* `len >= 16` FIRST, and `nlmsg_len >= 16` rather than merely
-             * non-zero. The old condition read msg->nlmsg_len before proving a
-             * whole nlmsghdr was left in what we actually read, and accepted a
-             * claimed length of 1..15 -- which the `v` path above already refuses
-             * for the same reason ("bound the header's own length claim by what
-             * was actually READ before walking attributes off it"). Nothing
-             * reaches past rx_buf either way, but this is the one place in the
-             * file that was not applying its own rule. */
             for (struct nlmsghdr *msg = (void *)mem.rx_buf;
                     len >= 16 && msg->nlmsg_len >= 16 && msg->nlmsg_len <= (unsigned int)len;
                     len -= msg->nlmsg_len, msg = (void *)((char *)msg + msg->nlmsg_len)) {
-                if (msg->nlmsg_type == 3) goto list_done;          /* NLMSG_DONE */
-                if (msg->nlmsg_type == 2) {                        /* NLMSG_ERROR */
-                    /* The errno sits at offset 16, so a message that does not
-                     * carry 20 bytes has no error field to read. Treat that as a
-                     * FAILURE rather than reading past the message and calling
-                     * whatever is there a plain ACK: a truncated error reply is
-                     * not an acknowledgement. */
+                if (msg->nlmsg_type == 3) goto list_done;
+                if (msg->nlmsg_type == 2) {
                     if (msg->nlmsg_len < 20) {
                         print_err("nm: the kernel ended this dump with a truncated error reply\n");
                         exit_code = 4;
                     } else if (*(int *)((char *)msg + 16)) {
-                        /* Was a silent exit 4 mid-dump, with a PREFIX of the rule
-                         * set already on stdout -- the one failure shape where the
-                         * caller most needs to be told the list it just read is
-                         * incomplete rather than short. */
                         print_refused("this dump partway through", *(int *)((char *)msg + 16));
                         exit_code = 4;
                     }
-                    goto list_done;                                /* err 0 == plain ACK */
+                    goto list_done;
                 }
 
                 if (is_gh) {
-                    /* The needle rides in NOMOUNT_ATTR_VIRTUAL_PATH -- see the
-                     * kernel dump for why that attribute is reused. Plain lines:
-                     * doctor.rs::parse_ghost_tables reads "p /abs/path" and
-                     * "u <uid>" straight off this. */
                     char *rule = get_attr_str(msg, 1);
                     if (rule) { print_str(rule); print_str("\n"); }
                 } else if (is_uids) {
-                    unsigned int *uid = get_attr(msg, 4, 4); /* NOMOUNT_ATTR_UID */
+                    unsigned int *uid = get_attr(msg, 4, 4);
                     if (uid) {
                         if (!first) print_str(",\n");
                         print_str("  "); print_uint(*uid);
@@ -466,16 +240,8 @@ void c_main(long *sp) {
                     if (v && r) {
                         int is_whiteout    = (flags && (*flags & 4));
                         int is_virtual_dir = (flags && (*flags & 2)); 
-                        /* Reported so `nomount check` can tell an added ROM APK
-                         * that opted out of hiding from one that did not -- the
-                         * kernel may have stripped the bit (a shadowing rule), so
-                         * what was asked for is not always what is live. */
                         int is_public      = (flags && (*flags & 64));
 
-                        /* The one format for a rule, and the one crate::nm::parse_list
-                         * reads: `<target> -> <source>`, with ` (whiteout)`,
-                         * ` (virtual dir)`, ` (public)` and ` [UID: n]` as
-                         * suffixes it peels in any order. */
                         print_str(v);
                         if (is_whiteout) print_str(" (whiteout)");
                         else if (is_virtual_dir) print_str(" (virtual dir)");
@@ -489,20 +255,7 @@ void c_main(long *sp) {
             len = nm_read(fd, &mem);
             if (nm_timed_out(len)) goto do_timeout;
         }
-        /* Reaching HERE means the loop ran out of input without ever seeing
-         * NLMSG_DONE or NLMSG_ERROR -- those are the only two exits, and both
-         * jump to list_done. So the stream ended early: read() failed (-ENOBUFS
-         * is the realistic one on a large raw-netlink dump) or returned 0.
-         * Whatever was printed is a PREFIX of the rule set, and the reload delta
-         * cannot tell a prefix from the whole set. Fail. */
         exit_code = 4;
-        /* Deliberately NOT closing the JSON array (`l u`). Exit code 4 is the
-         * contract -- nm.rs's Nm::run bails on any non-zero status, which is how
-         * every Rust caller sees this -- but a truncated uid list also has to be
-         * unparseable for anyone who forgets to check, and an unterminated array
-         * is. The plain-line dumps carry the same signal in the exit code alone,
-         * which is why the diagnostic goes to stderr: it can never be read back
-         * as a rule. */
         print_err("nm: rule dump ended early - list is incomplete\n");
         goto do_exit;
 list_refused:
@@ -516,17 +269,11 @@ list_done:
     goto do_exit;
 
 bad_uid:
-    /* One sentence for the three refusals in the block/unblock parser. Placed
-     * after the chain's `goto do_exit` so it is only ever reached by that goto. */
     print_err("nm: uid must be 1-10 digits and fit in 32 bits\n");
     exit_code = 3;
     goto do_exit;
 
 do_timeout:
-    /* Distinct from every other failure: the kernel took the message and never
-     * answered within NM_RECV_TIMEOUT_SEC. Before the SO_RCVTIMEO bound this
-     * blocked forever, and because metamount.sh and post-fs-data.sh run nm during
-     * post-fs-data, forever meant the device never finished booting. */
     print_err("nm: no answer from the kernel (timed out)\n");
     exit_code = NM_EXIT_TIMEOUT;
 
