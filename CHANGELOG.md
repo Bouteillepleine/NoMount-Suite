@@ -15,7 +15,8 @@
 
 - Good to know is gone: notes no longer render in the WebUI. They stay in `nomount check --json` and in the copied report.
 - Status leads with module coverage: served, absorbed, and how many ship files the Suite is not serving.
-- Absorb moved from Hiding to Rules, next to Modules: it is about handling modules, not hiding them.
+- Absorb moved from Hiding to Rules, next to Modules: it is about handling modules, not hiding them, and it is called Absorbable mounts now.
+- The coverage metric opens the Modules list, so the count is a way in rather than a readout.
 - Check is Diagnostics now, off the main path. The status line only appears when something needs it; the check itself still runs at boot and on reload.
 
 ## v1.3.176 - engine v32 (unchanged)

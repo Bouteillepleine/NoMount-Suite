@@ -165,6 +165,9 @@
   .metric .v { font-size: 21px; font-weight: 750; margin-top: 4px; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; }
   /* its own line, or a 21px figure and a 12px qualifier share a baseline and
      "4 served" reads as one run-on value */
+  .metric.tap { cursor: pointer; transition: border-color .2s, background .2s; }
+  .metric.tap:active { background: rgba(255,255,255,0.06); }
+  .metric .k .chev { font-size: 11px; opacity: .55; }
   .metric .v small { display: block; margin-top: 2px; font-size: 12px; font-weight: 600;
                      color: var(--muted); letter-spacing: 0; }
   /* the word that belongs to the figure, on the figure's line */
@@ -758,7 +761,13 @@
       <div class="metric"><div class="k">Injection rules</div><div class="v" id="mRules"> - </div></div>
       <div class="metric"><div class="k">RRO overlays</div><div class="v" id="mOv"> - </div></div>
       <div class="metric"><div class="k">Root · su</div><div class="v" id="mSu"> - </div></div>
-      <div class="metric"><div class="k">Module coverage</div><div class="v" id="mMod"> - </div></div>
+      <div class="metric tap" role="button" tabindex="0"
+           onclick="showTab('rules',document.getElementById('nb-rules'))"
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}"
+           title="Open Modules">
+        <div class="k">Module coverage <span class="chev">›</span></div>
+        <div class="v" id="mMod"> - </div>
+      </div>
     </div>
     <button class="healthline" id="healthline" onclick="openDetail()">
       <span class="hl-dot" id="hlDot"></span>
@@ -935,7 +944,7 @@
   <div class="card collapsed" id="cardAbsorb">
     <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v4"/><path d="M2 12h20v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"/><path d="M12 3v6"/><path d="M9 6l3 3 3-3"/></svg>
-      <h2>Other modules' mounts</h2><span class="chip" id="abchip"> - </span><span class="chev">›</span>
+      <h2>Absorbable mounts</h2><span class="chip" id="abchip"> - </span><span class="chev">›</span>
     </div>
     <div id="abbody">
       <p class="note" style="margin-top:0">A module that <b>bind-mounts its own content</b> does not know about NoMount, and its mount is just as readable to a scanner as one of ours would be. Absorbing re-serves it as a Prism injection and unmounts the original - the content still reaches the app, the mount stops existing.</p>
