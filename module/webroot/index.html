@@ -167,6 +167,8 @@
      "4 served" reads as one run-on value */
   .metric .v small { display: block; margin-top: 2px; font-size: 12px; font-weight: 600;
                      color: var(--muted); letter-spacing: 0; }
+  /* the word that belongs to the figure, on the figure's line */
+  .metric .v .unit { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
 
   .btns { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 16px; }
   button.act {
@@ -2246,13 +2248,13 @@
     }).length;
     // "4 served · 3 absorbed · 0 unserved" - the bare number needs the word,
     // or "4 0 unserved" reads as two figures
-    const extra = ["served"];
-    if (ABSORBED_N > 0) extra.push(ABSORBED_N + " absorbed");
+    const rest = [];
+    if (ABSORBED_N > 0) rest.push(ABSORBED_N + " absorbed");
     // shown even at zero: "0 unserved" is the statement that the module set is
     // fully covered, which is the whole point of the Suite
-    extra.push(unserved + " unserved");
-    $("mMod").innerHTML = MOD_SERVED +
-      (extra.length ? ' <small>' + extra.join(" · ") + "</small>" : "");
+    rest.push(unserved + " unserved");
+    $("mMod").innerHTML = MOD_SERVED + ' <span class="unit">served</span>' +
+      "<small>" + rest.join(" · ") + "</small>";
   }
 
   async function refreshAbsorb() {
