@@ -9,12 +9,12 @@ on:
     # `prerelease` is where the audit work lands before it reaches `suite`, and it
     # was building nowhere: every commit on it was verified only on the three
     # phones and by a local cross-compile, never by CI. The `release` job below
-    # is gated on a v* TAG, so a branch build runs test/build/package and cannot
+    # is gated on a v* tag, so a branch build runs test/build/package and cannot
     # publish anything.
     #
     # `master` is this repository's default branch and was missing, so a push
     # there built nothing at all. `main` stays because the same file ships to the
-    # NoMount-Suite mirror, whose default IS main -- one workflow, both repos.
+    # NoMount-Suite mirror, whose default is main - one workflow, both repos.
     # LKM is this branch: the variant that ships the engine as a module.
     # Without it here the zip job never ran on the branch whose whole
     # purpose is producing that zip.
@@ -24,11 +24,11 @@ on:
     # the run list read as a wall of "readme:" entries with the real builds
     # buried among them.
     #
-    # CAVEAT: GitHub applies path filters to TAG pushes too. If a `v*` tag ever
+    # CAVEAT: GitHub applies path filters to tag pushes too. If a `v*` tag ever
     # lands on a commit that touched only documentation, this workflow will not
     # fire and no release will be published. Release tags here follow a version
     # bump in Cargo.toml and module.prop, so that case does not arise in
-    # practice -- but if it ever does, run the workflow manually.
+    # practice - but if it ever does, run the workflow manually.
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -39,7 +39,7 @@ on:
 permissions:
   contents: read
 
-# Every `uses:` below is pinned to a COMMIT, with the tag it corresponded to in a
+# Every `uses:` below is pinned to a commit, with the tag it corresponded to in a
 # trailing comment. A tag is a movable pointer in someone else's repository, so
 # `@v4` is a standing agreement to run whatever they publish next, inside a job
 # that builds the root binary this project ships. The cost is that a pin has to
@@ -48,15 +48,15 @@ permissions:
 #
 # Node 20 is end-of-life on the runners, so the four GitHub-owned actions are on
 # their node24 releases: checkout v7, cache v6, upload-artifact v7,
-# download-artifact v8. Each bump was checked rather than assumed -- every input
+# download-artifact v8. Each bump was checked rather than assumed - every input
 # this workflow passes still exists in the new version, cache/restore still
 # exposes `cache-hit`, and download-artifact still defaults to one subdirectory
 # per artifact name, which the package job below reads.
 #
-# `mlugg/setup-zig` is deliberately NOT bumped: v2.2.1 is its newest release and
+# `mlugg/setup-zig` is deliberately not bumped: v2.2.1 is its newest release and
 # still declares node20, so it stays and the runner keeps forcing it onto node24.
 # That warning is upstream's to clear and is the only one that should remain.
-# `dtolnay/rust-toolchain` is a composite action -- no JS runtime, unaffected.
+# `dtolnay/rust-toolchain` is a composite action - no JS runtime, unaffected.
 
 env:
   CARGO_TERM_COLOR: always
@@ -97,7 +97,7 @@ jobs:
 
   # The unit tests are host tests (no NDK, no device), so they cost a minute and
   # gate the thing that actually ships: `package` needs them green. `build` is
-  # deliberately NOT gated - the cross-compile is the slowest leg and there is no
+  # deliberately not gated - the cross-compile is the slowest leg and there is no
   # reason to hold it behind a fast check that cannot break it. A red test simply
   # means no ZIP comes out the far end.
   test:
@@ -126,11 +126,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # The Rust is linted on every push; the SHELL was not, and the module is
+      # The Rust is linted on every push; the shell was not, and the module is
       # eight scripts that run as root at boot. Every bug found in the 2026-08-25
       # audit session was in shell, not Rust: a uid parser that split on a space
       # where the file uses a tab, a `\|` alternation toybox does not support, a
-      # `[ -e ]` that cannot tell ENOENT from EACCES.
+      # `[ -e ]` that cannot tell enoent from eacces.
       #
       # -s sh, because /system/bin/sh is mksh/ash, not bash.
       #
@@ -138,11 +138,11 @@ jobs:
       # at first because `local` is flagged as non-POSIX (SC3043) and spoof.sh
       # used it ~25 times; that was then narrowed to `-e SC3043` so everything
       # below "error" was checked again. spoof.sh is gone and no script left
-      # declares `local`, so the exclusion goes too -- a suppression kept past the
+      # declares `local`, so the exclusion goes too - a suppression kept past the
       # file that needed it silently un-lints the next `local` somebody writes
       # into a script that runs as root at boot.
       #
-      # Honest about what this does NOT catch: shellcheck says nothing about
+      # Honest about what this does not catch: shellcheck says nothing about
       # `for x in $list`, because splitting there is usually intended, so the
       # newline-IFS bug in the ghost populator would still have got through at
       # any level. The three suppressions in the scripts each carry their reason
@@ -152,7 +152,7 @@ jobs:
           sudo apt-get install -y shellcheck >/dev/null 2>&1 || true
           shellcheck -s sh -S warning -f gcc module/*.sh
           # ...and the build script, which was the one shell file CI did not read
-          # -- while being the thing that assembles the zip everybody flashes.
+          # - while being the thing that assembles the zip everybody flashes.
           # bash, not sh: it uses arrays and [[ ]] deliberately, and it runs on a
           # workstation rather than on the phone.
           shellcheck -s bash -S warning -f gcc scripts/package.sh
@@ -183,15 +183,15 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -o ndk.zip
-          # VERIFY IT. This unpacks a 700 MB archive from a CDN and then compiles
+          # Verify it. This unpacks a 700 MB archive from a cdn and then compiles
           # the root binary this project ships with the toolchain inside it, and
           # nothing checked that the bytes were the ones Google published.
           #
           # sha1, because sha1 is the only digest Google's own package manifest
           # carries (repository2-3.xml, <checksum type="sha1">). That is the right
           # property for this job: what is needed here is second-preimage
-          # resistance -- "is this the r27c everyone else got?" -- and sha1 is not
-          # broken for that. It is broken for COLLISIONS, which would matter only
+          # resistance - "is this the r27c everyone else got?" - and sha1 is not
+          # broken for that. It is broken for collisions, which would matter only
           # if the NDK's publisher were the attacker.
           echo "${NDK_SHA1}  ndk.zip" | sha1sum -c - || {
             echo "::error::NDK archive does not match the checksum Google publishes for ${NDK_VERSION}"
@@ -267,13 +267,13 @@ jobs:
           # artifact store by a wide margin.
           retention-days: 1
 
-  # LKM BRANCH ONLY -------------------------------------------------------
+  # LKM branch only -------------------------------------------------------
   # One engine module per GKI KMI generation, built inside the Android DDK
   # containers whose $KDIR already holds a released GKI kernel's real
   # Module.symvers. No kernel is compiled here; the whole matrix takes ~2 min.
   #
   # The zip bundles all seven and customize.sh keeps whichever one loads. That
-  # is what lets this branch install on a kernel WITHOUT CONFIG_NOMOUNT=y.
+  # is what lets this branch install on a kernel without CONFIG_NOMOUNT=y.
   kmi-modules:
     name: ko ${{ matrix.kmi }}
     runs-on: ubuntu-24.04
@@ -304,8 +304,8 @@ jobs:
           test -s "$KDIR/Module.symvers" || {
             echo "::error::no Module.symvers in the DDK tree"; exit 1; }
           # Deliberately no KBUILD_MODPOST_WARN. This links against a real
-          # export table, so an undefined symbol -- or a VFS namespace the
-          # module forgot to import -- has to fail the build. The ten-version
+          # export table, so an undefined symbol - or a VFS namespace the
+          # module forgot to import - has to fail the build. The ten-version
           # compile gate suppresses exactly those, which is why it cannot stand
           # in for this one.
           make -j"$(nproc)" -C "$KDIR" ARCH=arm64 CC=clang \
@@ -357,10 +357,10 @@ jobs:
         with:
           version: 0.14.1
 
-      # LKM BRANCH ONLY. The ko-* artifacts downloaded above become the
+      # LKM branch only. The ko-* artifacts downloaded above become the
       # module set the zip ships. Counted, because a zip that quietly lost one
       # installs fine and then fails only on the devices whose KMI went
-      # missing -- the worst way to find out.
+      # missing - the worst way to find out.
       - name: Stage the engine modules
         run: |
           set -eu
@@ -386,8 +386,8 @@ jobs:
           git -C /tmp/kol checkout -q af7fb29222377181220d9814f46b6a8b12cb770c
           make -C /tmp/kol TARGET=aarch64-linux
 
-          # sstrip, the same treatment nm gets below -- though it buys almost
-          # nothing here: ko-loader's own CFLAGS already pass -s, so this only
+          # sstrip, the same treatment nm gets below - though it buys almost
+          # nothing here: ko-loader's own cflags already pass -s, so this only
           # removes section headers, measured at 234656 -> 233876 bytes. The
           # binary is large because it statically links a libc, not because it
           # carries debug info, and shrinking that would mean rewriting it
@@ -446,7 +446,7 @@ jobs:
   # Publish on a v* tag.
   #
   # The tag already triggered a build, but the ZIP only ever became a 30-day
-  # ARTIFACT -- which needs a GitHub login to download, is not linkable, and is
+  # Artifact - which needs a GitHub login to download, is not linkable, and is
   # gone a month later. So "tagging a release" produced no release. This turns the
   # tag into the thing people can actually install from.
   #

@@ -2,10 +2,10 @@ name: NoMount LKM - out-of-tree build
 
 # Builds the engine as a loadable module against all ten supported kernels.
 #
-# WHAT THIS ACTUALLY PROVES, and what it does not.
+# What this actually proves, and what it does not.
 #
-# An out-of-tree build here stops at `modules_prepare`, which does NOT produce
-# Module.symvers -- so modpost cannot tell an exported symbol from a missing one
+# An out-of-tree build here stops at `modules_prepare`, which does not produce
+# Module.symvers - so modpost cannot tell an exported symbol from a missing one
 # and reports every external reference as undefined. The first run of this
 # workflow duly "found" _printk, memcpy and init_net, all of which are exported,
 # and on 5.15/6.1 it emitted a .ko anyway with "suppressed 90 unresolved symbol
@@ -13,8 +13,8 @@ name: NoMount LKM - out-of-tree build
 #
 # Building each kernel far enough for a real Module.symvers is ~30 minutes per
 # version. The cheap and honest substitute: take modpost's undefined list and
-# subtract the kernel's OWN EXPORT_SYMBOL* set, read from its source. What
-# survives is the set of symbols the module truly cannot link against -- the
+# subtract the kernel's own EXPORT_SYMBOL* set, read from its source. What
+# survives is the set of symbols the module truly cannot link against - the
 # work item. An empty result means the module links cleanly against a fully
 # built tree, and that is what this job passes on.
 #
@@ -38,7 +38,7 @@ on:
 # NOTE: this workflow's entire run history was deleted once during an Actions
 # cleanup. The file survived, but GitHub delists a workflow that has no runs,
 # so it disappeared from the sidebar until the next push re-registered it.
-# Deleting runs is not the same as deleting a workflow -- but with no runs
+# Deleting runs is not the same as deleting a workflow - but with no runs
 # left, the effect on the Actions page is indistinguishable.
 
 permissions:
@@ -57,7 +57,7 @@ jobs:
       fail-fast: false
       matrix:
         # The same ten the in-tree matrix covers, with the same refs and the same
-        # toolchain per version. 4.9/4.14/4.19 need GCC: Ubuntu's clang cannot
+        # toolchain per version. 4.9/4.14/4.19 need gcc: Ubuntu's clang cannot
         # compile them (asm-offsets dies on "register 'sp' unsuitable for global
         # register variables"), which is a compiler-vs-old-kernel mismatch and
         # says nothing about this module.
@@ -140,7 +140,7 @@ jobs:
           fi
           echo "MAKEOPTS=$M" >> "$GITHUB_ENV"
           make $M defconfig
-          # KPROBES is what lkm/nm_oot.c's kallsyms bootstrap needs; MODULES is
+          # Kprobes is what lkm/nm_oot.c's kallsyms bootstrap needs; modules is
           # what makes an out-of-tree build possible at all.
           ./scripts/config --enable CONFIG_KPROBES --enable CONFIG_MODULES
           make $M olddefconfig
@@ -171,9 +171,9 @@ jobs:
             | sed 's/.*(\s*//' | sort -u > /tmp/exported.txt || true
           comm -23 /tmp/undef.txt /tmp/exported.txt > "$out" || true
 
-          # `|| true`, NOT `|| echo 0`. grep -c PRINTS 0 and EXITS 1 when it
+          # `|| true`, not `|| echo 0`. grep -c PRINTS 0 and EXITS 1 when it
           # matches nothing, so `|| echo 0` appends a second zero and the
-          # variable becomes a two-line "0 0" -- which then fails the -eq test with
+          # variable becomes a two-line "0 0" - which then fails the -eq test with
           # "integer expression expected" and reports a clean result as a
           # failure. That is exactly what the first ten-version run did.
           u=$(grep -c . /tmp/undef.txt || true)
@@ -206,9 +206,9 @@ jobs:
           path: |
             /tmp/lkm-${{ matrix.ver }}.log
             /tmp/redirects-${{ matrix.ver }}.txt
-          # The .ko this job produces is deliberately NOT uploaded. It comes from
+          # The .ko this job produces is deliberately not uploaded. It comes from
           # a modules_prepare build under KBUILD_MODPOST_WARN, so its symbols were
-          # never really resolved -- the header above says such a .ko is not
+          # never really resolved - the header above says such a .ko is not
           # evidence of anything, and offering it for download invites someone to
           # try loading a module that cannot work. The loadable ones come from the
           # per-KMI jobs in build.yaml.
