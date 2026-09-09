@@ -2,13 +2,13 @@ name: NoMount KPM - build a KernelPatch module
 
 # Builds kpm/ into one nomount-<kmi>.kpm per GKI KMI generation.
 #
-# WHY PER KMI, AND WHY IN THE DDK CONTAINERS -- a correctness argument here, not
+# Why per KMI, and why in the DDK containers - a correctness argument here, not
 # just a speed one.
 #
 # The engine half of a .kpm is compiled against real kernel headers because it
 # dereferences struct inode, dentry and super_block. Those layouts depend on the
-# kernel's CONFIG, so building against a generic `make defconfig` tree can give
-# field offsets that do not match the GKI kernel the module is loaded into -- and
+# kernel's config, so building against a generic `make defconfig` tree can give
+# field offsets that do not match the GKI kernel the module is loaded into - and
 # that failure is not a link error, it is reading the wrong bytes at runtime.
 # The DDK's $KDIR is a released GKI kernel's own configured tree, so the layouts
 # are the ones the device actually has.
@@ -17,10 +17,10 @@ name: NoMount KPM - build a KernelPatch module
 # android13-5.10 are the same kernel version and different KMIs, and nothing
 # about a version number promises the structs agree.
 #
-# WHY THE SYMBOL LIST IS THE HARD PART, and why it is generated, not written.
+# Why the symbol list is the hard part, and why it is generated, not written.
 #
 # A .kpm gets no relocation against the kernel's export table: KernelPatch's
-# loader resolves undefined symbols against its OWN table only
+# loader resolves undefined symbols against its own table only
 # (kernel/patch/module/module.c, simplify_symbols) and the kallsyms fallback
 # there is commented out because "kernel symbol cause overflow in relocation" --
 # an AArch64 `bl` reaches only +/-128 MB. So every kernel call has to become an
@@ -76,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Stops at 6.6 on purpose -- see the version-cap note above.
+        # Stops at 6.6 on purpose - see the version-cap note above.
         # android11-5.4 is absent because the DDK publishes no container for it;
         # that is a real coverage gap, not an oversight.
         include:
@@ -125,7 +125,7 @@ jobs:
           test -f "$KDIR/include/generated/autoconf.h" || {
             echo "::error::no generated headers in \$KDIR"; exit 1; }
           echo "KMI ${{ matrix.kmi }}, KDIR=$KDIR"
-          # The DDK is a BUILD directory, not a source tree: the first
+          # The DDK is a build directory, not a source tree: the first
           # attempt died on a missing include/linux/kconfig.h. Print the
           # layout so the Makefile is pointed at whatever is really here
           # rather than at what a source checkout would have.
@@ -141,8 +141,8 @@ jobs:
       # show_map_vma(), right after `dev = inode->i_sb->s_dev; ino =
       # inode->i_ino;`, it calls vfs_map_meta_override(inode, &dev, &ino).
       #
-      # A KPM cannot patch a mid-function statement -- KernelPatch hooks whole
-      # functions -- so the equivalent needs two hooks working together:
+      # A KPM cannot patch a mid-function statement - KernelPatch hooks whole
+      # functions - so the equivalent needs two hooks working together:
       #
       #   show_map_vma(m, vma)        gives the VMA, and through vm_file->f_inode
       #                               the inode the override actually needs (it
@@ -153,7 +153,7 @@ jobs:
       #                               a before-hook rewrites them.
       #
       # Both are `static`, and show_vma_header_prefix is small and called twice,
-      # so either may be inlined away -- in which case there is no symbol to hook
+      # so either may be inlined away - in which case there is no symbol to hook
       # and this route is closed on that KMI. That is a fact about the kernel, not
       # something the port can decide, so it is measured here rather than assumed.
       #
@@ -224,7 +224,7 @@ jobs:
           cd kpm
           out=/tmp/kpm-syms-${{ matrix.kmi }}.txt
           # -s matters: without it make echoes each recipe to stdout and the
-          # compile command line lands IN the symbol list.
+          # compile command line lands in the symbol list.
           make -s undefined \
             TARGET_COMPILE=aarch64-linux-gnu- \
             KP_DIR=/tmp/kp \
@@ -256,9 +256,9 @@ jobs:
             2>&1 | tee -a /tmp/kpm-compile-${{ matrix.kmi }}.log | tail -30
           test -f nomount.kpm && cp nomount.kpm "$GITHUB_WORKSPACE/nomount-${{ matrix.kmi }}.kpm"
 
-      # THE gate that separates "it linked" from "it could load". Anything
+      # The gate that separates "it linked" from "it could load". Anything
       # undefined that KernelPatch does not itself provide fails the load of the
-      # WHOLE module with "unknown symbol", so this is not advisory.
+      # Whole module with "unknown symbol", so this is not advisory.
       - name: Undefined symbols left in the .kpm
         if: steps.sel.outputs.run == '1'
         run: |
@@ -279,7 +279,7 @@ jobs:
 
           # What KernelPatch supplies to a module, read from the SDK we just
           # cloned rather than hardcoded. The list used to be three names --
-          # kallsyms_lookup_name, printk, symbol_lookup_name -- and that was
+          # kallsyms_lookup_name, printk, symbol_lookup_name - and that was
           # wrong the moment the maps spoof started calling hook_wrap():
           # KernelPatch exports around a hundred symbols, and a gate that
           # knows three of them fails builds that would have loaded fine.
