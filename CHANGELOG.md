@@ -14,6 +14,7 @@
 ## Unreleased
 
 - Good to know is gone: notes no longer render in the WebUI. They stay in `nomount check --json` and in the copied report.
+- Status leads with module coverage: served, absorbed, and how many ship files the Suite is not serving.
 
 ## v1.3.176 - engine v32 (unchanged)
 

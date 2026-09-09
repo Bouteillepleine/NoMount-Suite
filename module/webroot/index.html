@@ -2022,7 +2022,8 @@
       return `<div class="mrow"><div class="mname">${esc(id)}</div>` +
              `<div class="mmeta">${files}${vis}<span class="tag ${cls}"${tip ? ` title="${esc(tip)}"` : ""}>${label}</span></div></div>`;
     }).join("");
-    $("mMod").textContent = served;
+    MOD_SERVED = served;
+    paintModuleMetric();
   }
 
   async function refreshRuleSummary() {
@@ -2212,6 +2213,7 @@
     );
     const rows = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
     ABSORBED_N = rows.length;
+    paintModuleMetric();
     if (!rows.length) { box.innerHTML = ""; return; }
     const owner = (s) => {
       const m = s.match(/\/data\/adb\/modules(?:_update)?\/([^/]+)/);
@@ -2230,6 +2232,23 @@
   }
 
   let ABSORBED_N = -1;
+  let MOD_SERVED = -1;
+  // Coverage is the thing the Suite exists to get right, so it goes on Status
+  // rather than in a check nobody opens. Painted by whichever of refreshModules
+  // and refreshAbsorbed finishes last: they run in parallel.
+  function paintModuleMetric() {
+    if (MOD_SERVED < 0) return;
+    const unserved = ((CHECK && CHECK.checks) || []).filter(function (c) {
+      return c.name === "module content not served";
+    }).length;
+    const extra = [];
+    if (ABSORBED_N > 0) extra.push(ABSORBED_N + " absorbed");
+    // shown even at zero: "0 unserved" is the statement that the module set is
+    // fully covered, which is the whole point of the Suite
+    extra.push(unserved + " unserved");
+    $("mMod").innerHTML = MOD_SERVED +
+      (extra.length ? ' <small>' + extra.join(" · ") + "</small>" : "");
+  }
 
   async function refreshAbsorb() {
     await refreshAbsorbed();
