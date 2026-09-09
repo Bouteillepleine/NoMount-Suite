@@ -1,4 +1,4 @@
-name: NoMount LKM — out-of-tree build
+name: NoMount LKM - out-of-tree build
 
 # Builds the engine as a loadable module against all ten supported kernels.
 #
@@ -182,7 +182,7 @@ jobs:
 
           {
             echo "### ${{ matrix.ver }} (${{ matrix.tc }})"
-            echo "- unresolved at modpost: **$u** (no Module.symvers at this stage — expected)"
+            echo "- unresolved at modpost: **$u** (no Module.symvers at this stage - expected)"
             echo "- exported by this kernel: $e"
             echo "- **needing a kallsyms redirect: $r**"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -191,7 +191,7 @@ jobs:
             echo "All $u unresolved symbols are exported by this kernel."
             echo "The module links cleanly against a fully built tree; no shim needed."
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "✅ every unresolved symbol is exported — links against a built tree, no shim needed" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ every unresolved symbol is exported - links against a built tree, no shim needed" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "These are NOT exported and need an NM_SYM() entry in lkm/nm_oot.h:"
             cat "$out"
