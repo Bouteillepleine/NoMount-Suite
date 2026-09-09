@@ -319,6 +319,9 @@
     font-size: 13.5px; font-weight: 620; color: var(--txt); line-height: 1.35;
     overflow-wrap: anywhere; word-break: break-word;
   }
+  /* why a module is not served, on the row that names it */
+  .mwhy { font-size: 11.5px; line-height: 1.45; color: var(--muted); margin-top: 5px; }
+  .mrow.unserved { border-color: rgba(251,191,36,.38); }
   .mmeta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .mmeta .files {
     font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-right: auto;
@@ -2012,6 +2015,12 @@
     const out = r.stdout.trim();
     if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
     const byModule = await planByModule();
+    // The check already works out which modules ship files nobody serves
+    // and names the owner. Say it on the row, not only in the count.
+    const unservedBy = {};
+    ((CHECK && CHECK.checks) || []).forEach(function (c) {
+      if (c.name === "module content not served" && c.owner) unservedBy[c.owner] = c;
+    });
     const rows = out.split("\n").filter(Boolean);
     $("modcount").textContent = rows.length;
     let served = 0;
@@ -2039,7 +2048,14 @@
         : mnt > 0
         ? `<span class="tag warn" title="This module has ${mnt} mount(s) of its own in the mount table - visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
         : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
-      return `<div class="mrow"><div class="mname">${esc(id)}</div>` +
+      const uns = unservedBy[id];
+      if (uns) {
+        label = "not served"; cls = "warn"; tip = "";
+      }
+      const why = uns
+        ? `<div class="mwhy">${esc(uns.evidence || uns.meaning || "")}</div>`
+        : "";
+      return `<div class="mrow${uns ? " unserved" : ""}"><div class="mname">${esc(id)}</div>${why}` +
              `<div class="mmeta">${files}${vis}<span class="tag ${cls}"${tip ? ` title="${esc(tip)}"` : ""}>${label}</span></div></div>`;
     }).join("");
     MOD_SERVED = served;
