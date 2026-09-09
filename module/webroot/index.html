@@ -753,7 +753,7 @@
       <div class="metric"><div class="k">Injection rules</div><div class="v" id="mRules"> - </div></div>
       <div class="metric"><div class="k">RRO overlays</div><div class="v" id="mOv"> - </div></div>
       <div class="metric"><div class="k">Root · su</div><div class="v" id="mSu"> - </div></div>
-      <div class="metric"><div class="k">Modules served</div><div class="v" id="mMod"> - </div></div>
+      <div class="metric"><div class="k">Module coverage</div><div class="v" id="mMod"> - </div></div>
     </div>
     <button class="healthline" id="healthline" onclick="openDetail()">
       <span class="hl-dot" id="hlDot"></span>
@@ -2241,7 +2241,9 @@
     const unserved = ((CHECK && CHECK.checks) || []).filter(function (c) {
       return c.name === "module content not served";
     }).length;
-    const extra = [];
+    // "4 served · 3 absorbed · 0 unserved" - the bare number needs the word,
+    // or "4 0 unserved" reads as two figures
+    const extra = ["served"];
     if (ABSORBED_N > 0) extra.push(ABSORBED_N + " absorbed");
     // shown even at zero: "0 unserved" is the statement that the module set is
     // fully covered, which is the whole point of the Suite

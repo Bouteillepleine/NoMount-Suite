@@ -6,8 +6,9 @@ on:
   #
   # `only` is declared on both triggers and forwarded to the compile matrix, which
   # is the only thing that reads it. It exists so a kernel-side change can be
-  # re-checked against one version without paying for all ten; leaving it empty
-  # (every push, and release.yml, which does not pass it) keeps the full matrix.
+  # re-checked against one version without paying for the rest. Empty means all
+  # ten - which is what a dispatch and a release get; a plain branch push narrows
+  # itself to five, see the `compile-matrix` job for which five and why.
   workflow_call:
     inputs:
       only:
@@ -23,16 +24,26 @@ on:
         required: false
         default: ''
   push:
-    # `prerelease` is where the audit work lands before it reaches `suite`, and it
-    # was building nowhere: every commit on it was verified only on the three
-    # phones and by a local cross-compile, never by CI. The `release` job below
-    # is gated on a v* TAG, so a branch build runs test/build/package and cannot
-    # publish anything.
+    # ONE branch. `prerelease` is where the work lands, so it is where the work is
+    # checked.
     #
-    # `master` is this repository's default branch and was missing, so a push
-    # there built nothing at all. `main` stays because the same file ships to the
-    # NoMount-Suite mirror, whose default is main - one workflow, both repos.
-    branches: [master, main, suite, prerelease]
+    # `main` used to be here too, and every push to it was a duplicate: a release
+    # is `git push newrepo prerelease:main`, a fast-forward, so those 21 runs (of
+    # 82, over eleven days) rebuilt a tree that prerelease had already built and
+    # tested minutes earlier - and then the `v*` tag fired a THIRD identical
+    # pipeline through release.yml. Two of the three proved nothing.
+    #
+    # `master` and `suite` were dead strings: neither branch exists on this
+    # remote. They were here because this file also shipped to
+    # `Bouteillepleine/nomount`, whose default is `master` and whose `suite`
+    # branch was the working one - that stopped being true on 2026-08-29, when
+    # `suite` froze and this repository became the live one.
+    #
+    # ACCEPTED CAVEAT: a commit landing directly on `main` without passing through
+    # `prerelease` builds nothing until a tag reaches it. Nothing does that today
+    # except release.yml's own update.json commit, which is `paths-ignore`d below
+    # anyway. If it ever happens, dispatch this workflow by hand.
+    branches: [prerelease]
     # A README edit is not a build. Without this, every documentation commit
     # spent a couple of minutes producing a zip identical to the last one, and
     # the run list read as a wall of "readme:" entries with the real builds
@@ -136,17 +147,34 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # The ten-version in-tree compile gate, called rather than triggered so it does
-  # not occupy its own row in the Actions list.
+  # The in-tree compile gate, called rather than triggered so it does not occupy
+  # its own row in the Actions list.
   compile-matrix:
     needs: engine-changed
     if: needs.engine-changed.outputs.changed == 'true'
     uses: ./.github/workflows/hookless-compile-matrix.yml
-    # `inputs` is null on a `push`, and a property of null is null, so this is ''
-    # there - i.e. the full ten-version matrix, which is what a push must always
-    # get. Only a dispatch (or a caller that passes one) can narrow it.
+    # FIVE on a branch push, TEN on a tag.
+    #
+    # A branch push gets the five KMIs a real device runs - 5.10, 5.15, 6.1, 6.6,
+    # 6.12, i.e. exactly the set the _NMS builders can produce a kernel for. The
+    # release tag gets all ten, so 4.9/4.14/4.19/5.4/6.18 are still gates on
+    # everything that ships; they just stop being gates on every intermediate
+    # commit. The trade accepted here is that a breakage confined to one of those
+    # five shows up at the tag rather than at the commit that caused it, which is
+    # a bisect over the pushes since the last release - and none of the five is a
+    # kernel anyone here can boot.
+    #
+    # `inputs` is null on a push and a property of null is null, so `inputs.only`
+    # is falsy there and the branch/tag test below decides. `github.ref_type`, not
+    # `github.event_name`, is what separates the two: a called workflow sees the
+    # CALLER's event, and release.yml is itself triggered by a `push` - of a tag.
+    # Testing the event name alone would have quietly narrowed every release to
+    # five.
+    #
+    # A dispatch (of this workflow or of release.yml) is someone asking on purpose:
+    # it gets whatever `only` says, and all ten when that is empty.
     with:
-      only: ${{ inputs.only || '' }}
+      only: ${{ inputs.only || (github.event_name == 'push' && github.ref_type == 'branch' && '5.10,5.15,6.1,6.6,6.12' || '') }}
 
   # The unit tests are host tests (no NDK, no device), so they cost a minute and
   # gate the thing that actually ships: `package` needs them green. `build` is

@@ -35,13 +35,17 @@ name: NoMount KPM - build a KernelPatch module
 # at 6.6, and kpm/nm_kpm_shim.h fails the compile if anything tries to go higher.
 # See kpm/README.md.
 
+# DISPATCH ONLY. This used to also fire on every push to the `KPM` branch, and in
+# its whole life that trigger produced one run (2026-08-30). KernelPatch does not
+# come up on 6.12 at all - see the version cap above and
+# kpm/README.md - so the route is parked, not abandoned: six DDK containers that
+# build clean are worth keeping runnable, and a workflow nobody pushes to costs
+# nothing but the row it occupies in the sidebar.
+#
+# The file stays on `main` because GitHub only offers a workflow_dispatch for
+# files on the default branch; `variant_ref` below is what points it at the branch
+# the code actually lives on.
 on:
-  push:
-    branches: [KPM]
-    paths:
-      - 'kpm/**'
-      - 'hookless/src/**'
-      - '.github/workflows/build-kpm.yml'
   workflow_dispatch:
     inputs:
       only:

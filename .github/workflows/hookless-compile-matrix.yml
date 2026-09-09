@@ -324,23 +324,10 @@ jobs:
             /tmp/nm_sparse.log
           if-no-files-found: ignore
 
-  summary:
-    name: summary
-    needs: compile
-    if: always()
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Render result grid
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          {
-            echo "## NoMount hookless - compile matrix"
-            echo ""
-            echo "| kernel | fs/nomount.o |"
-            echo "|--------|--------------|"
-            gh run view "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --json jobs \
-              --jq '.jobs[] | select(.name|test("^[0-9]")) | "| \(.name) | \(if .conclusion=="success" then "✅ pass" elif .conclusion=="skipped" then "⏭ skip" else "❌ "+(.conclusion//"?") end) |"' \
-              | sort -V
-          } >> "$GITHUB_STEP_SUMMARY"
+# NO `summary` job any more. It rendered a markdown grid of the ten legs by asking
+# the API for the job list that GitHub already prints directly above it - the same
+# information, one click away, restated. And because it was `needs: compile` it
+# became the last thing in the run, so release.yml's `publish` waited on it: in
+# v1.3.176 the build finished 18:56:26, `summary` did not get a runner until
+# 19:06:22, and the release took 13m12s instead of under three minutes. A
+# nice-to-have that gates a publish is not a nice-to-have.
