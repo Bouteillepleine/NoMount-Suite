@@ -378,7 +378,12 @@ jobs:
           set -eu
           # Loads a .ko where ksud has no insmod and a bare insmod is refused by
           # SELinux. Built with the same zig set up above for nm.
-          git clone --depth 1 https://github.com/maxsteeel/ko-loader /tmp/kol
+          # Pinned. This was `--depth 1` of the default branch, so upstream
+          # af7fb29 ("ko-loader -> lkmloader") renamed the binary out from
+          # under the three paths below and the package job started failing on
+          # a tree nothing here had changed.
+          git clone https://github.com/maxsteeel/ko-loader /tmp/kol
+          git -C /tmp/kol checkout -q af7fb29222377181220d9814f46b6a8b12cb770c
           make -C /tmp/kol TARGET=aarch64-linux
 
           # sstrip, the same treatment nm gets below -- though it buys almost
@@ -389,12 +394,12 @@ jobs:
           # freestanding the way nm is. Kept for the section-header trim and so
           # the size is printed rather than assumed.
           make -C userspace/tools/sstrip
-          before=$(stat -c%s /tmp/kol/ko-loader)
-          userspace/tools/sstrip/sstrip -z /tmp/kol/ko-loader
-          after=$(stat -c%s /tmp/kol/ko-loader)
+          before=$(stat -c%s /tmp/kol/lkmloader)
+          userspace/tools/sstrip/sstrip -z /tmp/kol/lkmloader
+          after=$(stat -c%s /tmp/kol/lkmloader)
           echo "ko-loader: $before -> $after bytes"
 
-          install -Dm755 /tmp/kol/ko-loader module/bin/ko-loader-arm64
+          install -Dm755 /tmp/kol/lkmloader module/bin/ko-loader-arm64
           file module/bin/ko-loader-arm64
 
       - name: Build nm (freestanding netlink client)
