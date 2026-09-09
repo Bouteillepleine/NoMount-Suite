@@ -2,11 +2,11 @@
 
 > **Beta.** It works at the kernel VFS layer, and the whole point of this stage
 > is getting it to stable. What moves it there is reports from setups outside
-> the tested set — a different device, a different root manager, a module that
+> the tested set - a different device, a different root manager, a module that
 > behaves oddly. `nomount export` produces the bundle for that, hide list
 > already redacted.
 
-Loads root modules **without touching the mount table** — RRO theming overlays
+Loads root modules **without touching the mount table** - RRO theming overlays
 included. No `overlayfs`, no `tmpfs`, no bind mounts: `/proc/mounts` stays 100%
 stock, so there is no mount gap for a scanner to find.
 
@@ -35,7 +35,7 @@ metamodule can be active, so it refuses to install alongside another.
 
 - **arm64** device; the zip ships an `arm64-v8a` binary only.
 - A kernel with the **Prism** engine (`CONFIG_NOMOUNT=y`). Its source lives in
-  this repository under [`hookless/`](hookless/) — the driver, the integration
+  this repository under [`hookless/`](hookless/) - the driver, the integration
   patch, and a matrix that compile-tests it against every supported kernel
   version. The engine and this Suite are versioned together because they have to
   be flashed together: the control plane is a private protocol between them, and
@@ -45,8 +45,8 @@ metamodule can be active, so it refuses to install alongside another.
   doing nothing silently.
   **Magisk and APatch are untested.** Both code paths exist and are exercised by
   the boot scripts, but nobody has reported back from either, so treat them as
-  unverified rather than supported — everything below was measured on ReSukiSU.
-- **SUSFS is not needed** — the Suite already does the job. Nothing here is a
+  unverified rather than supported - everything below was measured on ReSukiSU.
+- **SUSFS is not needed** - the Suite already does the job. Nothing here is a
   mount, so there is no mount for it to conceal and no gap for it to close. The
   two can coexist, as some users have reported having built their kernels with
   SUSFS.
@@ -58,7 +58,7 @@ mismatched pair is the one failure neither half can explain (see Requirements).
 
 | Path | What it is |
 | :--- | :--- |
-| `src/` | The Rust metamodule and CLI (`nomount`) — the boot pass, the reconcile, the diagnostics. |
+| `src/` | The Rust metamodule and CLI (`nomount`) - the boot pass, the reconcile, the diagnostics. |
 | `hookless/` | The **Prism** kernel engine: `src/nomount.c`, the integration patch, and a matrix that compile-tests it against ten kernel versions. |
 | `userspace/` | `nm`, the freestanding netlink client the Suite shells out to. No libc; ~4 KB. |
 | `module/` | What ships in the zip: boot scripts, the installer, and the WebUI. |
@@ -115,7 +115,7 @@ module scripts and the build script, and the ten-version kernel compile matrix.
 `check` is the one diagnostic: `--plan` is static (does the module set resolve
 into a bad rule?), `--device` is measured (is what we serve detectable, and is it
 being served?). Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`,
-`N/A`, `NOTE` — "nothing to test" and "something stopped me testing" are
+`N/A`, `NOTE` - "nothing to test" and "something stopped me testing" are
 deliberately different, and neither is a pass.
 
 A WebUI covers the same ground on the phone: status, modules, rules, per-app
@@ -123,7 +123,7 @@ hiding.
 
 ## Compatibility
 
-**All ten kernel versions compile on every push** — 4.9, 4.14, 4.19, 5.4, 5.10,
+**All ten kernel versions compile on every push** - 4.9, 4.14, 4.19, 5.4, 5.10,
 5.15, 6.1, 6.6, 6.12 and 6.18, legacy and current alike. What differs between the
 rows below is not whether the engine builds, but whether anyone has booted it on
 a phone and measured the result. Four have; the rest have not, which is a weaker
@@ -131,7 +131,7 @@ claim, so it is written as one.
 
 **None of this is OnePlus-specific.** The engine is ordinary VFS code: no vendor
 hooks, no SoC assumptions, nothing that reads a OnePlus tree. The table names
-OnePlus devices because those are the kernels that have been *built and booted* —
+OnePlus devices because those are the kernels that have been *built and booted* - 
 the three kernel builders shipping it are OnePlus builders, so that is simply
 where the evidence comes from. Any device whose kernel you can rebuild with
 `CONFIG_NOMOUNT=y` works the same way, on any of the ten versions. The last row
@@ -144,20 +144,20 @@ them.
 | 6.12 | **OnePlus 15** | ✅ Booted, `check` clean, 258/258 rules verified |
 | 6.1 | **OnePlus 13R** | ✅ Booted, 261/261 rules verified |
 | 5.15 | **OnePlus 11** | ✅ Booted, `check` clean, 118/118 rules verified |
-| 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, … (18 models) | ✅ Booted, 261/261 rules verified |
-| 5.10 | Ace 2, Ace 2V, Nord 3, … (6 models) | 🧩 Compiled, not tested |
-| 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these — other vendors do | 🧩 Compiled, not tested |
+| 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, ... (18 models) | ✅ Booted, 261/261 rules verified |
+| 5.10 | Ace 2, Ace 2V, Nord 3, ... (6 models) | 🧩 Compiled, not tested |
+| 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these - other vendors do | 🧩 Compiled, not tested |
 
 "Compiled" means `fs/nomount.o` builds against that version's canonical tree in
-CI — it says nothing about whether the device boots. A report either way is
+CI - it says nothing about whether the device boots. A report either way is
 worth an issue.
 
 Root managers: **KernelSU**, **SukiSU** and **ReSukiSU** via the metamodule
 hook; **Magisk** via `post-fs-data.sh`, and **APatch** via the same metamodule
-hook. Every device in the table above ran ReSukiSU — Magisk and APatch have not
+hook. Every device in the table above ran ReSukiSU - Magisk and APatch have not
 been tested by anyone yet.
 
-Tested another combo? Open an issue — `nomount export` produces a bundle with the
+Tested another combo? Open an issue - `nomount export` produces a bundle with the
 hide list already redacted, which is the most useful thing to attach. A report
 that one of the untested managers works is as useful as a bug.
 
@@ -174,14 +174,14 @@ are injected hooklessly rather than mounted.
 
 ## Special thanks
 
-- **[maxsteeel/nomount](https://github.com/maxsteeel/nomount)** — the original this is built on.
-- **[HymoFS](https://github.com/Anatdx/HymoFS)** — inspiration for the VFS approach.
-- **[A7mdwassa](https://github.com/A7mdwassa)** — tester and contributor.
-- **[ZQZCC](https://github.com/ZQZCC)** — WebUI MD3-style design.
-- **[backslashxx](https://github.com/backslashxx)** — code optimization.
-- **[KernelSU](https://github.com/tiann/KernelSU)** & **SukiSU-Ultra** — root solution and metamodule framework.
-- **[SUSFS](https://gitlab.com/simonpunk/susfs4ksu)** — the stealth layer.
-- **All testers** — thanks for making this project more stable!
+- **[maxsteeel/nomount](https://github.com/maxsteeel/nomount)** - the original this is built on.
+- **[HymoFS](https://github.com/Anatdx/HymoFS)** - inspiration for the VFS approach.
+- **[A7mdwassa](https://github.com/A7mdwassa)** - tester and contributor.
+- **[ZQZCC](https://github.com/ZQZCC)** - WebUI MD3-style design.
+- **[backslashxx](https://github.com/backslashxx)** - code optimization.
+- **[KernelSU](https://github.com/tiann/KernelSU)** & **SukiSU-Ultra** - root solution and metamodule framework.
+- **[SUSFS](https://gitlab.com/simonpunk/susfs4ksu)** - the stealth layer.
+- **All testers** - thanks for making this project more stable!
 
 ## Disclaimer
 

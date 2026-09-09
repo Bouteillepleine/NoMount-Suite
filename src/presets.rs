@@ -1,43 +1,21 @@
-//! Curated hide-list presets.
-//!
-//! One preset today: the known root/environment detectors. Hiding from a detector
-//! shows it the stock filesystem, which is exactly the view it would get on an
-//! unmodified device.
-//!
-//! The detector inventory is adapted from Hide My Applist (HMA-OSS,
-//! `frknkrc44/HMA-OSS`, AGPL-3.0) `DetectorAppsPreset.kt`, whose maintainers keep
-//! it current. Only the package inventory is used — none of HMA's code, which
-//! hooks PackageManagerService in system_server and is a different layer from this
-//! engine entirely.
-//!
-//! ⚠️ Do NOT take anything from upstream `dr-tsng/hide-my-applist`: it relicensed
-//! to a proprietary licence at v3.4.
-//!
-//! The four globs matter more than the 43 exact names: the detectors we have
-//! actually torn down ship under package names that move between builds, and a
-//! glob is the only entry shape that keeps holding.
+//! Curated hide-list presets
 
-/// Preset name accepted on the command line and by the WebUI.
+/// Preset name accepted on the command line and by the WebUI
 pub const DETECTORS: &str = "detectors";
 
-/// Every preset the CLI knows, as `(name, description)`.
+/// Every preset the CLI knows, as `(name, description)`
 pub const ALL: &[(&str, &str)] = &[(DETECTORS, "known root / environment detectors")];
 
-/// Package-name globs. These are the durable half of the preset — see the module
-/// note. Kept in the same syntax the hide list accepts.
+/// Package-name globs
 pub const DETECTOR_PATTERNS: &[&str] = &[
-    // Holmes and the rest of the Garfield suite.
     "me.garfieldhan.*",
-    // Chunqiu, including the transposed spelling it also ships under.
     "*chunqiu*",
     "*chuqniu*",
-    // Duck Detector — repackaged constantly, always keeps the suffix.
     "*.duckdetector",
-    // Key-attestation probes.
     "*.keyattestation",
 ];
 
-/// Detectors that ship under a stable package name.
+/// Detectors that ship under a stable package name
 pub const DETECTOR_PACKAGES: &[&str] = &[
     "com.reveny.nativecheck",
     "icu.nullptr.nativetest",
@@ -84,7 +62,7 @@ pub const DETECTOR_PACKAGES: &[&str] = &[
     "com.bryancandi.knoxcheck",
 ];
 
-/// Look a preset up by name. Returns `(patterns, packages)`.
+/// Look a preset up by name
 pub fn get(name: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
     match name.trim().to_ascii_lowercase().as_str() {
         DETECTORS => Some((DETECTOR_PATTERNS, DETECTOR_PACKAGES)),
@@ -92,7 +70,7 @@ pub fn get(name: &str) -> Option<(&'static [&'static str], &'static [&'static st
     }
 }
 
-/// Every entry of a preset, globs first so a `uid list` reads patterns-then-names.
+/// Every entry of a preset, globs first so a `uid list` reads patterns-then-names
 pub fn entries(name: &str) -> Option<Vec<String>> {
     let (pats, pkgs) = get(name)?;
     Some(pats.iter().chain(pkgs.iter()).map(|s| s.to_string()).collect())

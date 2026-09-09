@@ -1,4 +1,4 @@
-name: NoMount hookless — compile-test matrix
+name: NoMount hookless - compile-test matrix
 
 # Validates the hookless kernel patch (fs/nomount.c + fs/nomount.h) against the
 # canonical source tree for each of the 10 supported kernel versions.
@@ -117,7 +117,7 @@ jobs:
             sudo apt-get install -y --no-install-recommends clang lld llvm
             clang --version | head -1
           else
-            # distro aarch64 GCC (gcc-13) — satisfies compiler-gcc.h >=5.1 (the AOSP
+            # distro aarch64 GCC (gcc-13) - satisfies compiler-gcc.h >=5.1 (the AOSP
             # gcc-4.9 prebuilt is GCC 4.9, rejected as too old).
             aarch64-linux-gnu-gcc --version | head -1
           fi
@@ -267,12 +267,12 @@ jobs:
           echo "== sparse C=2 (advisory) =="
           rm -f out/fs/nomount.o
           make $MAKEOPTS C=2 CHECK="sparse" fs/nomount.o 2>&1 | tee /tmp/nm_sparse.log || true
-          # Count only OUR file's diagnostics — the W=1/sparse build can drag in
+          # Count only OUR file's diagnostics - the W=1/sparse build can drag in
           # kernel-tree noise (arm64 vdso missing-prototypes, defconfig quirks)
           # that is not ours and not actionable here.
           w=$(grep 'warning:' /tmp/nm_w1.log 2>/dev/null | grep -c 'nomount\.[ch]' || true)
           s=$(grep 'warning:\|error:' /tmp/nm_sparse.log 2>/dev/null | grep -c 'nomount\.[ch]' || true)
-          echo "::notice::${{ matrix.ver }} (nomount.c only) — W=1 warnings: ${w:-0}, sparse notes: ${s:-0}"
+          echo "::notice::${{ matrix.ver }} (nomount.c only) - W=1 warnings: ${w:-0}, sparse notes: ${s:-0}"
           # Sparse stays advisory (it is noisy against Android trees), but W=1 is a
           # GATE. It used to be a bare ::notice:: on a continue-on-error step with
           # KCFLAGS=-Wno-error inherited, so the number was computed and thrown
@@ -317,7 +317,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           {
-            echo "## NoMount hookless — compile matrix"
+            echo "## NoMount hookless - compile matrix"
             echo ""
             echo "| kernel | fs/nomount.o |"
             echo "|--------|--------------|"

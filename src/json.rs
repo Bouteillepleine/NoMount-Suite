@@ -1,23 +1,8 @@
-//! A minimal JSON writer.
-//!
-//! Deliberately hand-rolled rather than pulling in serde. Every dependency in
-//! this crate is pinned with `=` and there are four of them; a derive-macro
-//! stack for what amounts to three flat report shapes would be the largest
-//! dependency change in the project's history, and the reports are emitted, not
-//! parsed, so none of serde's real value applies.
-//!
-//! The one thing this MUST get right is escaping. The strings that flow through
-//! here are file paths and evidence text taken from the live system -- a module
-//! is free to ship a filename containing a quote or a backslash, and the WebUI
-//! runs `JSON.parse` on the result, so a single unescaped byte turns a diagnostic
-//! into a broken page. Control characters below 0x20 are escaped as `\u00XX`
-//! because raw ones are invalid inside a JSON string.
+//! A minimal JSON writer
 
 use std::fmt::Write as _;
 
-/// Escape `s` into `out` as the *contents* of a JSON string (no surrounding
-/// quotes). `\u{2028}`/`\u{2029}` are escaped too: both are valid in JSON but
-/// are line terminators in older JavaScript parsers.
+/// Escape `s` into `out` as the *contents* of a JSON string (no surrounding quotes)
 fn escape_into(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
@@ -38,14 +23,13 @@ fn escape_into(out: &mut String, s: &str) {
     }
 }
 
-/// A JSON value being built. Only the shapes the reports need.
+/// A JSON value being built
 pub enum J {
     Str(String),
     Num(i64),
     Bool(bool),
     Null,
     Arr(Vec<J>),
-    /// Insertion-ordered so a textual diff of two reports reads cleanly.
     Obj(Vec<(&'static str, J)>),
 }
 
@@ -53,8 +37,7 @@ impl J {
     pub fn s(v: impl Into<String>) -> J {
         J::Str(v.into())
     }
-    /// `Some` -> string, `None` -> `null`. The distinction matters: a missing
-    /// owner and an empty owner are different answers.
+    /// `Some` -> string, `None` -> `null`
     pub fn os(v: Option<impl Into<String>>) -> J {
         match v {
             Some(x) => J::Str(x.into()),
@@ -111,8 +94,7 @@ impl J {
 mod tests {
     use super::*;
 
-    /// The case that turns a diagnostic into a broken WebUI page: a path a
-    /// module is perfectly free to ship.
+    /// The case that turns a diagnostic into a broken WebUI page: a path a module is perfectly
     #[test]
     fn quotes_and_backslashes_in_a_path_survive() {
         let j = J::Obj(vec![("target", J::s("/product/app/He said \"hi\"\\x.apk"))]);
@@ -122,8 +104,7 @@ mod tests {
         );
     }
 
-    /// Evidence is multi-line in several checks; a raw newline inside a JSON
-    /// string is invalid, not merely ugly.
+    /// Evidence is multi-line in several checks; a raw newline inside a JSON string is
     #[test]
     fn control_characters_are_escaped() {
         let j = J::s("a\nb\tc\u{1}d");

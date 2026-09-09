@@ -1,30 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * The NoMount engine, compiled for a KernelPatch module.
- *
- * Built against the REAL kernel headers (K_FLAGS in the Makefile), not the
- * KernelPatch SDK: the engine dereferences struct inode, dentry and super_block,
- * so their layouts must be the target KMI's actual ones. nm_kpm_entry.c is the
- * mirror image -- SDK headers, no kernel headers. Two include worlds, joined by
- * `ld -r`.
- *
- * The engine is INCLUDED, not copied: ../hookless/src/nomount.c is the one copy
- * in this repository, shared with the in-tree build and the LKM variant, so this
- * port cannot silently drift from what the Suite ships.
- *
- * INCLUDE ORDER IS LOad-BEARING. The shim defines function-like macros named
- * after kernel functions, and such a macro expands anywhere the name is followed
- * by '(' -- including inside the header that DECLARES it. Defining the shim
- * before <linux/string.h> would rewrite string.h's own declaration of memcpy and
- * break the compile. So: engine headers first, then the shim, then the engine.
- * nomount.c's own #includes are then no-ops behind their include guards.
- */
 
-/* LSE atomics expand to inline asm relying on in-tree alternative patching this
- * object never goes through. The old port did the same. */
 #undef CONFIG_ARM64_LSE_ATOMICS
 
-/* Exactly the headers nomount.c includes, pulled in ahead of the shim. */
 #include <linux/init.h>
 #include <linux/namei.h>
 #include <linux/slab.h>
@@ -39,24 +16,11 @@
 #include <linux/sort.h>
 #include "../hookless/src/nomount.h"
 
-/*
- * A .kpm has no struct module. The MODULE macros in the engine reference
- * __this_module, so give them one to point at rather than patching the engine.
- */
 struct module __this_module;
 
 #include "nm_kpm_shim.h"
 #include "../hookless/src/nomount.c"
 
-/*
- * The string and memory routines cannot be redirected by macro: the compiler
- * emits calls to them on its own -- a struct assignment becomes a memcpy that no
- * macro ever sees -- so they need real definitions in this object. Freestanding
- * implementations, deliberately simple; none is on a hot path in this engine.
- *
- * Defined after the engine so the shim's macros (which do not cover these) and
- * the kernel's declarations have both been seen.
- */
 #undef memcpy
 #undef memset
 #undef memcmp
@@ -144,26 +108,11 @@ char *strrchr(const char *s, int c)
 	return (char *)last;
 }
 
-/*
- * nomount_init/nomount_exit are static in the engine and reached there by
- * fs_initcall()/module_exit(), neither of which a .kpm goes through --
- * KernelPatch calls KPM_INIT directly. These two wrappers are the only glue,
- * giving the entry half (which cannot see kernel headers) a plain symbol.
- */
-/*
- * The weak optional externs, as pointers. nomount.c's own declarations of
- * ghost_ctl/ghost_get_rule expand through the shim into declarations of these,
- * so the engine's `if (!ghost_ctl)` probe reads whatever they hold. They stay
- * NULL when no ghost module is loaded, which is exactly what that probe means.
- */
 int (*nm_w_ghost_ctl)(const char *buf, size_t count);
 int (*nm_w_ghost_get_rule)(int idx, char *out, size_t outsz);
 
 long nm_engine_init(void)
 {
-	/* The weak pair is reached by address rather than by call, so it is bound
-	 * here rather than by a trampoline. Everything else the engine calls goes
-	 * through nm_kpm_tramp.c, which needs no wiring. */
 	nm_w_ghost_ctl = (typeof(nm_w_ghost_ctl))nm_kpm_sym[NMS_ghost_ctl];
 	nm_w_ghost_get_rule = (typeof(nm_w_ghost_get_rule))nm_kpm_sym[NMS_ghost_get_rule];
 
