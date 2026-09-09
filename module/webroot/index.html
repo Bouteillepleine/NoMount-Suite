@@ -163,7 +163,10 @@
   .metric { background: var(--card2); border: 1px solid var(--brd2); border-radius: 13px; padding: 12px 13px; }
   .metric .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.7px; }
   .metric .v { font-size: 21px; font-weight: 750; margin-top: 4px; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; }
-  .metric .v small { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
+  /* its own line, or a 21px figure and a 12px qualifier share a baseline and
+     "4 served" reads as one run-on value */
+  .metric .v small { display: block; margin-top: 2px; font-size: 12px; font-weight: 600;
+                     color: var(--muted); letter-spacing: 0; }
 
   .btns { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 16px; }
   button.act {
