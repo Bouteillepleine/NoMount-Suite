@@ -133,7 +133,7 @@ jobs:
           # The generator decides which symbols never enter the table - compiler
           # builtins it defines locally, and the two KernelPatch supplies - and a second
           # copy in this file is how the gate would start disagreeing with it.
-          python3 repo/.github/kpm-allowed.py > allowed.txt
+          KP_DIR="$GITHUB_WORKSPACE/kp" python3 repo/.github/kpm-allowed.py > allowed.txt
           missing="$(comm -23 undef.txt allowed.txt || true)"
           if [ -n "$missing" ]; then
             echo "::error::${{ matrix.ver }}: symbols the module needs are absent from nm_kpm_table.h"
