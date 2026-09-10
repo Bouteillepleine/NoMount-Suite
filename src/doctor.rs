@@ -1953,7 +1953,7 @@ hosts_file=/system/etc/hosts.d/x
     #[test]
     fn an_nsenter_replicated_bind_stays_image_backed() {
         assert_eq!(
-            classify_incompat_line("nsenter -t 1 -m - mount --bind $MODDIR/etc /system/etc"),
+            classify_incompat_line("nsenter -t 1 -m -- mount --bind $MODDIR/etc /system/etc"),
             Some(Incompat::ImageBacked)
         );
         assert_eq!(

@@ -105,9 +105,8 @@ settings are preserved across an update, and restored if an install aborts.
 
 - **arm64** device; the zip ships an `arm64-v8a` binary only.
 - A kernel with the **Prism** engine (`CONFIG_NOMOUNT=y`). Its source lives in
-  this repository under [`hookless/`](hookless/) - the driver, the integration
-  patch, and a matrix that compile-tests it against every supported kernel
-  version. The engine and this Suite are versioned together because they have to
+  this repository under [`hookless/`](hookless/) - the driver and the integration
+  patch. The engine and this Suite are versioned together because they have to
   be flashed together: the control plane is a private protocol between them, and
   a mismatched pair reads as "engine not responding" with nothing to say why.
 - **KernelSU**, **SukiSU** or **ReSukiSU** (metamodule hook), or **Magisk**
@@ -224,7 +223,7 @@ path). The WebUI covers the same ground with no shell at all.
 | `nomount vfs whiteout <path>` | Make a path appear absent (this rule only). |
 | `nomount vfs list` | Show live rules. |
 | `nomount vfs clear` | Flush every rule. |
-| `nomount whiteout add <path> [--force]` | Hide a path now and on every boot. |
+| `nomount whiteout add <path> [--force]` | Hide a path now and on every boot. `--force` only silences the "leaves a measurable hole" note; nothing is refused on that ground. |
 | `nomount whiteout remove <path>` | Stop hiding it. |
 | `nomount whiteout list` | The durable list, and whether each entry is applied. |
 | `nomount whiteout apply` | Re-apply the whole list. |
@@ -287,9 +286,10 @@ them.
 | 5.10 | Ace 2, Ace 2V, Nord 3, ... (6 models) | 🧩 Compiled, not tested |
 | 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these - other vendors do | 🧩 Compiled, not tested |
 
-"Compiled" means `fs/nomount.o` builds against that version's canonical tree in
-CI - it says nothing about whether the device boots. A report either way is
-worth an issue.
+"Compiled" means `fs/nomount.o` built against that version's canonical tree the
+last time a matrix ran - the in-tree one is gone, and only the `LKM` branch's
+out-of-tree gate still covers the set. It says nothing about whether the device
+boots. A report either way is worth an issue.
 
 Root managers: **KernelSU**, **SukiSU** and **ReSukiSU** via the metamodule
 hook; **Magisk** via `post-fs-data.sh`, and **APatch** via the same metamodule

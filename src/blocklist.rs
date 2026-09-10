@@ -45,7 +45,7 @@ pub enum Resolved {
     NotInstalled,
 }
 
-/// Resolve a hide-list target to an appid
+/// A hide-list glob, anchored at one end or both
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
     Prefix(String),

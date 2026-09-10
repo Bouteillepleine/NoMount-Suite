@@ -11,8 +11,7 @@ nmlog() {
 }
 
 nmlog_absorb_notes() {
-    printf '%s
-' "$1" | grep -i 'uninstalled module' | while IFS= read -r _l; do
+    printf '%s\n' "$1" | grep -i 'uninstalled module' | while IFS= read -r _l; do
         [ -n "$_l" ] && nmlog "$_l"
     done
 }

@@ -59,15 +59,10 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             }
             if real.is_dir() {
                 anyhow::bail!(
-                    concat!(
-                        "{} is a directory.
-",
-                        "A directory rule hides every stock entry under its target, and its
-",
-                        "children report the source filesystem's block counts, which a single
-",
-                        "stat separates from stock. Add the files individually instead."
-                    ),
+                    "{} is a directory. A directory rule hides every stock entry under its \
+                     target, and its children report the source filesystem's block counts, \
+                     which a single stat separates from stock. Add the files individually \
+                     instead.",
                     real.display()
                 );
             }

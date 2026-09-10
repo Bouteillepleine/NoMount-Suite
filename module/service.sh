@@ -140,8 +140,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
         _ab2_all=$(nmto 90 "$BIN" absorb 2>&1)
         _ab2_rc=$?
         nmlog_absorb_notes "$_ab2_all"
-        _ab2=$(printf '%s
-' "$_ab2_all" | tail -1)
+        _ab2=$(printf '%s\n' "$_ab2_all" | tail -1)
         if [ "$_ab2_rc" -eq 124 ]; then
             nmlog "late absorb pass timed out after 90s"
         elif [ "$_ab2_rc" -ne 0 ]; then
@@ -162,8 +161,7 @@ fi
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts.txt"; then
     _wo_all=$(nmto 30 "$BIN" whiteout apply 2>&1)
     _wo_rc=$?
-    _wo_last=$(printf '%s
-' "$_wo_all" | tail -1)
+    _wo_last=$(printf '%s\n' "$_wo_all" | tail -1)
     if [ "$_wo_rc" -ne 0 ]; then
         nmlog "⚠ whiteout apply FAILED (exit $_wo_rc) - hidden paths are still visible: $_wo_last"
     else
@@ -191,11 +189,9 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     if [ "$_gh_rc" -eq 124 ]; then
         nmlog "⚠ ghost sync timed out after 60s - the existence oracles stay open this boot"
     elif [ "$_gh_rc" -ne 0 ]; then
-        nmlog "⚠ ghost sync FAILED (rc=$_gh_rc): $(printf '%s
-' "$_gh" | tail -1)"
+        nmlog "⚠ ghost sync FAILED (rc=$_gh_rc): $(printf '%s\n' "$_gh" | tail -1)"
     elif [ -n "$_gh" ]; then
-        nmlog "$(printf '%s
-' "$_gh" | tail -1)"
+        nmlog "$(printf '%s\n' "$_gh" | tail -1)"
     fi
     unset _gh _gh_rc
 fi

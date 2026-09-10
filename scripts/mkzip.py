@@ -1,4 +1,7 @@
-# """Zip a staging dir with forward-slash entry names, preserved exec bits, and a fixed
+"""Zip a staging dir: forward-slash entry names, preserved exec bits, fixed timestamps.
+
+Reproducible - the same staging tree gives the same bytes.
+"""
 import os
 import stat
 import sys

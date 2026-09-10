@@ -43,7 +43,7 @@ pub(crate) struct PassLock(std::fs::File);
 /// How long a pass will wait for another pass before giving up and running unserialised
 pub(crate) const PASS_LOCK_WAIT: u64 = 25;
 
-/// Take the process-wide pass lock
+/// The bootloop guard's marker: present means the Suite parked itself
 pub const DISABLED_MARKER: &str = "/data/adb/nomount/disabled";
 
 /// Has the bootloop guard parked the Suite?
@@ -51,7 +51,8 @@ pub fn guard_tripped() -> bool {
     Path::new(DISABLED_MARKER).exists()
 }
 
-/// Timing out and proceeding unserialised is the lesser evil: the passes are idempotent,
+/// Take the process-wide pass lock. Timing out and proceeding unserialised is the lesser
+/// evil: the passes are idempotent, and stalling the boot is not.
 pub(crate) fn pass_lock() -> Option<PassLock> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
@@ -1182,6 +1183,48 @@ mod tests {
     }
 
     const METAMOUNT_SRC: &str = include_str!("../module/metamount.sh");
+
+    /// The WebUI's only automated coverage, and the only thing that noticed when it died was
+    /// an audit. A bulk comment strip (eae5476) took `STUB` -- a triple-quoted block -- along
+    /// with the docstrings, leaving `build()` referencing a name that no longer existed, so
+    /// every run raised NameError. Six WebUI changes then shipped unexercised. Two lines of
+    /// grep is the whole guard: the constant has to be DEFINED, and every command `capture`
+    /// records has to have a branch in the stub that replays it -- an unstubbed one answers
+    /// rc=1 and silently drives the page's "could not read" path instead of the real one.
+    #[test]
+    fn the_webui_harness_still_has_its_stub_and_replays_every_command() {
+        const HARNESS: &str = include_str!("../scripts/webui-harness.py");
+
+        assert!(
+            HARNESS.contains("\nSTUB = \"\"\""),
+            "webui-harness.py references STUB but no longer defines it - `build` cannot run. \
+             Recover it with: git show <before-the-strip>:scripts/webui-harness.py"
+        );
+
+        let block = |head: &str, end: &str| -> &str {
+            let at = HARNESS.find(head).unwrap_or_else(|| panic!("{head} is gone or renamed"));
+            let rest = &HARNESS[at + head.len()..];
+            &rest[..rest.find(end).expect("unterminated block")]
+        };
+        let commands = block("COMMANDS = {", "\n}");
+        let stub = block("STUB = \"\"\"", "\"\"\"");
+
+        let keys: Vec<&str> = commands
+            .lines()
+            .map(str::trim)
+            .filter_map(|l| l.strip_prefix('"'))
+            .filter_map(|l| l.split_once("\":"))
+            .map(|(k, _)| k)
+            .collect();
+        assert!(keys.len() > 10, "COMMANDS parsed as {} keys - the parser has drifted", keys.len());
+        for k in keys {
+            assert!(
+                stub.contains(&format!("key = '{k}'")),
+                "COMMANDS has {k:?} and the stub has no branch for it, so the page gets rc=1 \
+                 for that command and renders its unreadable path instead of the captured one"
+            );
+        }
+    }
 
     /// The manager card must consult the verdict, not just log it
     #[test]

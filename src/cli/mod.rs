@@ -115,7 +115,9 @@ pub enum UidAction {
 pub enum WhiteoutAction {
     Add {
         path: String,
-        /// Hide it anyway on a filesystem where the hole is measurable (see the refusal message)
+        /// Silence the note when hiding it leaves a measurable hole. Nothing is ever refused
+        /// on that ground -- declining would make the module asking for it a no-op -- so this
+        /// only quiets a warning you have already read. `nomount check --plan` lists them all.
         #[arg(long)]
         force: bool,
     },

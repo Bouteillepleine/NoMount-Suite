@@ -19,6 +19,11 @@
 - The coverage metric opens the Modules list, so the count is a way in rather than a readout.
 - A module the Suite is not serving says so on its own row, with the reason.
 - Check is Diagnostics now, off the main path. The status line only appears when something needs it; the check itself still runs at boot and on reload.
+- The coverage metric no longer says "0 unserved" when nothing measured it. With no cached report it says so.
+- The mount and absorb cards say the same thing in half the words.
+- Absorb no longer claims to run four times a boot. Two of those four need the `my_hookless` trial; the card, the mount check and the health canary all say which.
+- `whiteout add --force` never refused anything; its help said it did.
+- The WebUI test harness was broken by a comment sweep and is back, with a test that fails if it breaks again.
 
 ## v1.3.176 - engine v32 (unchanged)
 

@@ -371,9 +371,10 @@ fn check_zero_mount() -> Check {
         if !deferred.is_empty() {
             why.push_str(&format!(
                 " {} of them sit on a my_* partition, which cannot be taken over while Android is \
-                 running - doing that has rebooted a device. A REBOOT fixes this: the pre-zygote \
-                 pass drops a redundant bind safely, and the content stays served by injection. \
-                 If it comes back every boot, {owner} is re-creating it - delete the bind from its \
+                 running - doing that has rebooted a device. Only the pre-zygote pass can take \
+                 one, and that pass runs only with the my_hookless trial on \
+                 (/data/adb/nomount/my_hookless), so a plain reboot does NOT clear this. The fix \
+                 that always works: {owner} is re-creating it, so delete the bind from its \
                  post-fs-data.sh and injection serves the same files with no mount at all.",
                 deferred.len()
             ));

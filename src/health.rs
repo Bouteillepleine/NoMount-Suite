@@ -155,12 +155,12 @@ impl Fingerprint {
                 .meaning(
                     "A path serves content its own rule does not name. Either two rules hit one \
                      target, or the rule was registered while another module's `mount --bind` \
-                     owned that path and never took effect. A bind made at post-fs-data is \
-                     already handled: the pre-zygote absorb pass drops it and re-asserts the \
-                     rule underneath, so this points at a bind that appeared after boot - \
-                     absorb leaves those alone on my_*, because re-asserting there on a live \
-                     system has rebooted a device. Delete that bind from the owning module \
-                     and reboot.",
+                     owned that path and never took effect. The post-boot absorb pass drops \
+                     such a bind and re-asserts the rule underneath - and the pre-zygote pass \
+                     does it before zygote when the my_hookless trial is on - so seeing this \
+                     after boot means absorb could not take it. On my_* it never will: \
+                     re-asserting there on a live system has rebooted a device. Delete that \
+                     bind from the owning module and reboot.",
                 )
                 .owner("the mount pass"),
         });

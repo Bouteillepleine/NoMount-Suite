@@ -3,7 +3,13 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<!-- This page holds ksu.exec(), which is an arbitrary root shell, and it renders values that c -->
+<!-- This page holds ksu.exec(), an arbitrary root shell, and renders values that come off the
+     device. esc() on every one of them and shq() on every shell interpolation IS the defence;
+     the CSP below is only the backstop for the one that gets missed. Be precise about what
+     that backstop is: with script-src 'unsafe-inline' - which a single inline <script> cannot
+     do without - a CSP does NOT stop injected script RUNNING. It stops it reaching anything:
+     default-src 'none' leaves no connect-src, no form-action and no img-src beyond 'self', so
+     there is nowhere to send what it read. Containment, never an excuse for a missing esc(). -->
 
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
 <title>NoMount Suite</title>
@@ -950,9 +956,9 @@
       <h2>Absorbable mounts</h2><span class="chip" id="abchip"> - </span><span class="chev">›</span>
     </div>
     <div id="abbody">
-      <p class="note" style="margin-top:0">A module that <b>bind-mounts its own content</b> does not know about NoMount, and its mount is just as readable to a scanner as one of ours would be. Absorbing re-serves it as a Prism injection and unmounts the original - the content still reaches the app, the mount stops existing.</p>
-      <p class="note"><b>This already runs by itself</b>, four times per boot: twice before zygote, then again after every module's boot scripts have finished, and once more late for modules that mount last. The chip above is what is left over after all of that. These buttons are for a mount that appears <i>later</i> - a module you just installed, or one that mounts on a timer - so you do not have to reboot to clear it. <b>Scan</b> only reports; nothing changes until you press Absorb.</p>
-      <p class="note">Binds belonging to a Zygisk/Xposed hook framework are never taken over, automatically or by hand: breaking a hook does not fail at boot, it fails hours later during an app install.</p>
+      <p class="note" style="margin-top:0">A module that <b>bind-mounts its own content</b> leaves a mount any scanner can read. Absorbing re-serves it as a Prism injection and unmounts the original - same content, no mount.</p>
+      <p class="note"><b>This runs by itself</b>: once after every module's boot script, once more 45s later, and - only with the <code>my_hookless</code> trial on - before zygote too. The chip is what is left after that. The buttons are for a mount that shows up <i>later</i>, so you need not reboot. <b>Scan</b> only reports.</p>
+      <p class="note">A Zygisk/Xposed hook framework's binds are never taken over: a broken hook fails at the next app install, not at boot.</p>
       <div class="uidbar">
         <button class="act" style="flex:1 1 0" onclick="abScan(this)">Scan</button>
         <button class="act danger" style="flex:1 1 0" onclick="abAbsorb(this)">Absorb</button>
@@ -1459,28 +1465,21 @@
         ". These are properties and boot state, not mounts - nothing on this page changes them.");
     } else {
       const how =
-        "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat " +
-        "(kernel&nbsp;· mountless), and RRO overlays are Prism too - OverlayManager&nbsp;+ idmap2 " +
-        "read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> " +
-        "mount table, so there is no mount-gap for a scanner to flag.";
+        "Injections and RRO overlays are both Prism - <b>no overlayfs</b>, no tmpfs - and su is " +
+        "sucompat. Root and apps see the <b>same</b> mount table, so there is no gap to flag.";
       if (ourBinds > 0) {
+        const them = ourBinds > 1 ? "them" : "it";
         say("clean", "Mountless · " + ourBinds + " my_* bind" + (ourBinds > 1 ? "s" : ""),
           (ourBinds > 1 ? "these are" : "this is") + " served by a real bind, by design",
-          "File injections are Prism and RRO overlays are Prism too - " +
-          "OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. " +
-          "The exception is a <code>my_*</code> partition: it is served by a real bind unless " +
-          "the <code>my_hookless</code> trial is on, so " + ourBinds + " bind" +
-          (ourBinds > 1 ? "s" : "") + " of ours " + (ourBinds > 1 ? "are" : "is") +
-          " in the mount table and an app reading <code>mountinfo</code> can see " +
-          (ourBinds > 1 ? "them" : "it") + ". That is the default on this hardware and nothing " +
-          "here is broken.");
+          how + " The exception is <code>my_*</code>: served by a real bind unless the " +
+          "<code>my_hookless</code> trial is on, so apps reading <code>mountinfo</code> see " +
+          them + ". Default here, nothing broken.");
       } else if (byDesign > 0) {
         say("clean", "Mountless · " + byDesign + " mount" + (byDesign > 1 ? "s" : "") + " by design",
           "the Suite adds none it can avoid - " + byDesign + " left in place on purpose",
-          how + " What remains is left on purpose: a Zygisk/Xposed hook framework's bind, which " +
-          "<code>absorb</code> deliberately never takes over - breaking a hook does not fail at " +
-          "boot, it fails hours later during an app install. A scanner reading " +
-          "<code>mountinfo</code> can see " + (byDesign > 1 ? "them" : "it") + ".");
+          how + " What is left is a hook framework's own bind, which <code>absorb</code> never " +
+          "takes over: a broken hook fails at the next app install, not at boot. Apps can see " +
+          (byDesign > 1 ? "them" : "it") + ".");
       } else {
         say("clean", "Fully mountless", "zero mounts - nothing to hide", how);
       }
@@ -2274,16 +2273,21 @@
   // and refreshAbsorbed finishes last: they run in parallel.
   function paintModuleMetric() {
     if (MOD_SERVED < 0) return;
-    const unserved = ((CHECK && CHECK.checks) || []).filter(function (c) {
-      return c.name === "module content not served";
-    }).length;
-    // "4 served · 3 absorbed · 0 unserved" - the bare number needs the word,
-    // or "4 0 unserved" reads as two figures
+    // "0 unserved" is the strongest claim this page makes: the module set is
+    // fully covered. It is only the plan section's to make. With no cached
+    // report -- absent audit.json, or service.sh deleting it after a check that
+    // timed out or did not finish -- filtering an empty list also yields 0, and
+    // the card asserted full coverage having measured nothing. Same rule as
+    // everywhere else here: unmeasured is not clean. (paintAbsorbChip's `n < 0`
+    // is the same guard.)
+    const measured = ranSection(CHECK, "plan");
+    const unserved = measured
+      ? CHECK.checks.filter(function (c) { return c.name === "module content not served"; }).length
+      : -1;
+    // the bare number needs its word, or "4 0 unserved" reads as two figures
     const rest = [];
     if (ABSORBED_N > 0) rest.push(ABSORBED_N + " absorbed");
-    // shown even at zero: "0 unserved" is the statement that the module set is
-    // fully covered, which is the whole point of the Suite
-    rest.push(unserved + " unserved");
+    rest.push(unserved < 0 ? "coverage unchecked" : unserved + " unserved");
     $("mMod").innerHTML = MOD_SERVED + ' <span class="unit">served</span>' +
       "<small>" + rest.join(" · ") + "</small>";
   }
@@ -2574,8 +2578,10 @@
       const [name, stateRaw] = l.split("\t");
       const s = (stateRaw || "").trim();
       let cls = "live";
+      // Every string here is one `nomount uid list` really emits. `/unreachable/`
+      // used to be in the "gone" set and nothing has ever produced it.
       if (/unread/.test(s)) cls = "unknown";
-      else if (/not installed/.test(s) || /unreachable/.test(s) ||
+      else if (/not installed/.test(s) ||
           /no match/.test(s) || /invalid glob/.test(s)) cls = "gone";
       else if (/not applied/.test(s)) cls = "pending";
       else if (/not saved/.test(s)) cls = "drift";
