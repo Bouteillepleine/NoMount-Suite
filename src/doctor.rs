@@ -1,4 +1,3 @@
-//! The plan section of `nomount check` - lint the mount plan before a reboot turns a bad
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -10,7 +9,6 @@ use crate::check::{slug, Check, Section, Verdict};
 use crate::mount::{collect_plan, PlanEntry, PlanKind};
 use crate::nm::{LiveRule, Nm};
 
-/// Partitions whose file descriptors zygote will accept across `forkSystemServer`
 const ZYGOTE_FD_ALLOWLISTED: &[&str] = &[
     "system", "product", "vendor", "system_ext", "odm", "apex", "oem",
 ];
@@ -30,7 +28,6 @@ struct Finding {
     detail: String,
 }
 
-/// This file's three levels, onto the one shared verdict
 fn verdict_of(level: &Level) -> Verdict {
     match level {
         Level::Error => Verdict::Fail,
@@ -41,7 +38,6 @@ fn verdict_of(level: &Level) -> Verdict {
     }
 }
 
-/// Who a doctor finding is about, where the check name makes it recoverable
 fn owner_of(f: &Finding) -> Option<String> {
     const PER_MODULE: &[&str] = &[
         "partition-root target",
@@ -60,7 +56,6 @@ fn owner_of(f: &Finding) -> Option<String> {
     }
 }
 
-/// What a hidden caller sees at a ghosted path
 #[derive(PartialEq)]
 enum GhostSeen {
     Absent,
@@ -69,7 +64,6 @@ enum GhostSeen {
     Unknown,
 }
 
-/// Become `uid` in a forked child and look at `path`
 fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     use std::os::unix::ffi::OsStrExt;
     let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -119,7 +113,6 @@ fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     }
 }
 
-/// Split `nm l g` output into its two tables
 fn parse_ghost_tables(txt: &str) -> (Vec<PathBuf>, Vec<u32>) {
     let mut paths = Vec::new();
     let mut uids = Vec::new();
@@ -148,7 +141,6 @@ fn is_partition_root(p: &Path) -> bool {
     p.components().skip(1).count() == 1
 }
 
-/// Does the engine actually hold the rules the plan describes - and nothing else?
 fn reconcile_plan_and_live(
     plan: &[PlanEntry],
     live: &[LiveRule],
@@ -284,7 +276,6 @@ fn reconcile_plan_and_live(
     out
 }
 
-/// One `.replace` marker or opaque dir expands into a whiteout per stock entry the module
 fn expansions_by_marker(plan: &[PlanEntry]) -> Vec<(&Path, &str, usize)> {
     let mut by: HashMap<&Path, (&str, usize)> = HashMap::new();
     for e in plan.iter().filter(|e| e.kind == PlanKind::Whiteout) {
@@ -297,7 +288,6 @@ fn expansions_by_marker(plan: &[PlanEntry]) -> Vec<(&Path, &str, usize)> {
     v
 }
 
-/// Report threshold for one marker's expansion
 fn expansion_level(count: usize) -> Option<Level> {
     match count {
         0..=49 => None,
@@ -306,7 +296,6 @@ fn expansion_level(count: usize) -> Option<Level> {
     }
 }
 
-/// A way a module can be incompatible with this environment, and why
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Incompat {
     RomWrite,
@@ -341,7 +330,6 @@ impl Incompat {
     }
 }
 
-/// Scan enabled modules' scripts for the three incompatibilities above
 fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
     const PARTS: [&str; 5] = ["system", "vendor", "product", "system_ext", "odm"];
     const SCRIPTS: [&str; 5] = [
@@ -425,7 +413,6 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
     out
 }
 
-/// First filesystem image found in a module tree, as a module-relative path
 fn find_shipped_image(
     root: &std::path::Path,
     dir: &std::path::Path,
@@ -464,7 +451,6 @@ fn find_shipped_image(
     None
 }
 
-/// The subject a finding is about: the first token of its detail
 fn subject_of(f: &Finding) -> Option<&str> {
     fn trim(t: &str) -> &str {
         t.trim_end_matches([',', ':', '.'])
@@ -482,7 +468,6 @@ fn subject_of(f: &Finding) -> Option<&str> {
         .find(|t| t.starts_with('/') && t.len() > 1 && t.len() <= 128)
 }
 
-/// Turn plan findings into checks, giving each one an id nothing else in the report shares
 fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     findings
@@ -512,7 +497,6 @@ fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
         .collect()
 }
 
-/// Every plan-side check, plus the counts the report carries as facts
 pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let mut fd_note: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut f: Vec<Finding> = Vec::new();
@@ -1197,7 +1181,6 @@ mod tests {
         }
     }
 
-    /// Whiteouts are grouped by the marker that produced them, so one `.replace` reads as one
     #[test]
     fn expansions_are_grouped_by_their_marker() {
         let mut plan = vec![
@@ -1229,7 +1212,6 @@ mod tests {
         }
     }
 
-    /// The gap this check closes
     #[test]
     fn a_plan_and_a_rule_set_that_disagree_are_a_finding() {
         let plan = vec![
@@ -1249,7 +1231,6 @@ mod tests {
         assert!(!checks.contains(&"live rule disagrees with the plan"), "{checks:?}");
     }
 
-    /// The three exemptions reload's prune pass makes, made here too
     #[test]
     fn durable_absorbed_and_per_uid_rules_are_not_unexplained() {
         let plan = vec![inj("m", "/system/etc/a", "/data/adb/modules/m/system/etc/a")];
@@ -1268,7 +1249,6 @@ mod tests {
         assert!(f.is_empty(), "{:?}", f.iter().map(|x| x.detail.as_str()).collect::<Vec<_>>());
     }
 
-    /// A source that moved between modules is the dangerous shape: the rule count still
     #[test]
     fn a_live_rule_naming_another_source_is_an_error() {
         let plan = vec![inj("winner", "/system/etc/a", "/data/adb/modules/winner/system/etc/a")];
@@ -1281,7 +1261,6 @@ mod tests {
         assert_eq!(f[0].level, Level::Error);
     }
 
-    /// An unreadable exemption list must not turn every whiteout on the device into an
     #[test]
     fn an_unreadable_exemption_list_reports_nothing_extra() {
         let plan: Vec<PlanEntry> = Vec::new();
@@ -1293,7 +1272,6 @@ mod tests {
         assert_eq!(f[0].level, Level::Info);
     }
 
-    /// A report, never a cap: the levels escalate but nothing is ever withheld
     #[test]
     fn expansion_levels_escalate_but_never_refuse() {
         assert_eq!(expansion_level(1), None);
@@ -1304,7 +1282,6 @@ mod tests {
         assert_eq!(expansion_level(224), Some(Level::Warn));
     }
 
-    /// A shipped image is reported module-relative, as its doc promises
     #[test]
     fn a_shipped_image_is_named_relative_to_its_module() {
         let base = std::env::temp_dir().join("nm-doctor-img-test");
@@ -1318,7 +1295,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// No two checks in one report may share an id
     #[test]
     fn plan_findings_never_share_an_id() {
         let f = vec![
@@ -1371,7 +1347,6 @@ mod tests {
         assert_eq!(checks[1].name, "module mount left by design");
     }
 
-    /// The subject is the first token, which is where every repeatable plan finding puts the
     #[test]
     fn a_findings_subject_is_the_head_of_its_detail() {
         let f = |d: &str| Finding { level: Level::Info, check: "c", detail: d.to_string() };
@@ -1402,7 +1377,6 @@ mod tests {
         assert!(!is_partition_root(Path::new("/product/overlay/x.apk")));
     }
 
-    /// The parser itself, and its suffix-peeling, now live with the client that produces the
     #[test]
     fn parse_live_still_yields_the_rows_the_checks_read() {
         let v = crate::nm::parse_list(

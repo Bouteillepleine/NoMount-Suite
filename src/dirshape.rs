@@ -1,9 +1,7 @@
-//! Decide whether this device's ROM directories describe their own contents
 
 use std::fs;
 use std::path::Path;
 
-/// `12*(n+2) + sum(namelen) + 3` - the `+2`/`+3` are `.` and `..`, which the listing does
 fn erofs_model(dir: &Path) -> Option<u64> {
     let mut n: u64 = 0;
     let mut names: u64 = 0;
@@ -18,7 +16,6 @@ fn erofs_model(dir: &Path) -> Option<u64> {
     Some(12 * (n + 2) + names + 3)
 }
 
-/// True when `dir`'s own reported size equals the erofs formula for its contents
 fn fits_erofs_shape(dir: &Path) -> bool {
     let Ok(md) = fs::metadata(dir) else { return false };
     let size = md.len();
@@ -28,7 +25,6 @@ fn fits_erofs_shape(dir: &Path) -> bool {
     erofs_model(dir) == Some(size)
 }
 
-/// Walk the ROM looking for proof
 pub fn rom_dirs_are_dirent_packed() -> bool {
     const ROOTS: &[&str] = &[
         "/system/app", "/system/priv-app", "/system/etc", "/product/app",
@@ -61,7 +57,6 @@ pub fn rom_dirs_are_dirent_packed() -> bool {
 #[cfg(test)]
 mod tests {
 
-    /// The formula, pinned against directories measured on OP15 erofs
     #[test]
     fn model_matches_measured_erofs_directories() {
         for (n, names, size) in [

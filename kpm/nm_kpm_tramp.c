@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include "nm_kpm_syms.h"
 
 #define NM_TRAMP(name, idx)					\

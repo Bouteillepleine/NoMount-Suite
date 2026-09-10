@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 
 #undef CONFIG_ARM64_LSE_ATOMICS
 

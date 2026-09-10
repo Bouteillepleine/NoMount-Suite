@@ -1,4 +1,3 @@
-//! The device section of `nomount check` - prove the hiding actually holds here
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -9,7 +8,6 @@ use anyhow::Result;
 use crate::check::{slug, Check, Section, Verdict};
 use crate::nm::Nm;
 
-/// Constructors
 fn chk(name: &'static str, verdict: Verdict, evidence: String) -> Check {
     Check::new(Section::Device, slug(name), name, verdict, evidence)
 }
@@ -19,15 +17,12 @@ fn pass(name: &'static str, evidence: String) -> Check {
 fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Fail, evidence).oracle(oracle)
 }
-/// A real, measured inconsistency that nothing shipping actually probes
 fn soft(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Warn, evidence).oracle(oracle)
 }
-/// "Does not apply here." Grey, never amber, never counted as a pass
 fn na(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::NotApplicable, evidence)
 }
-/// "Could have applied, did not run." Amber - this is the honesty rule's state
 fn unmeasured(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::Unmeasured, evidence)
 }
@@ -35,7 +30,6 @@ fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Reboot, evidence).oracle(oracle)
 }
 
-/// The name of every check this file emits, in one place
 pub(crate) const N_ENGINE_LIVE: &str = "engine responding";
 pub(crate) const N_ZERO_MOUNT: &str = "zero-mount posture";
 pub(crate) const N_SURFACES: &str = "kernel surfaces";
@@ -50,7 +44,6 @@ pub(crate) const N_ROM_TMPFS: &str = "tmpfs over the ROM";
 pub(crate) const N_FOREIGN_MOUNT: &str = "foreign mount over the ROM";
 pub(crate) const N_RULE_DUMP: &str = "engine rule dump";
 
-/// Every name above, so a test can assert over the shipped set rather than a transcription
 #[cfg(test)]
 pub(crate) const ALL_CHECK_NAMES: [&str; 13] = [
     N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DIRENT_COOKIE, N_DINO_STAT,
@@ -72,7 +65,6 @@ pub struct Entry {
     pub d_off: i64,
 }
 
-/// getdents64 directly: `read_dir` exposes neither `d_off` nor `d_ino`, and both are
 pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
     let c = std::ffi::CString::new(dir.as_os_str().to_string_lossy().as_bytes()).ok()?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
@@ -109,7 +101,6 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
     Some(out)
 }
 
-/// The directories the engine materialised itself, as `nm list` reports them
 fn live_engine_dirs() -> Vec<PathBuf> {
     let Ok(listed) = Nm::new().list() else { return Vec::new() };
     crate::nm::parse_list(&listed)
@@ -119,7 +110,6 @@ fn live_engine_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Live injection targets
 fn live_targets() -> Option<Vec<PathBuf>> {
     let listed = Nm::new().list().ok()?;
     Some(
@@ -162,7 +152,6 @@ fn ino_of(p: &Path) -> Option<u64> {
     })
 }
 
-/// Injections must not be mounts
 fn check_zero_mount() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
         return unmeasured(N_ZERO_MOUNT, "cannot read /proc/self/mountinfo".into())
@@ -280,7 +269,6 @@ fn check_zero_mount() -> Check {
     }
 }
 
-/// The engine must expose no /sys, /proc or module surface of its own
 fn check_surfaces() -> Check {
     let mut found = Vec::new();
     let mut unread: Vec<&str> = Vec::new();
@@ -342,7 +330,6 @@ fn check_surfaces() -> Check {
     }
 }
 
-/// readdir cookies must not carry the engine's magic
 fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
     const NM_MAGIC: i64 = 0x6e6d;
     let (mut scanned, mut hits) = (0usize, 0usize);
@@ -402,7 +389,6 @@ fn check_dirent_cookie(parents: &[PathBuf]) -> Check {
     }
 }
 
-/// An injected file's readdir d_ino must equal its stat st_ino
 fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     let mut eligible = 0usize;
     let mut checked = 0usize;
@@ -487,7 +473,6 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// Injected inodes must not occupy a band the stock population never uses
 fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     const BUCKET: u64 = 1_000_000;
     let mut worst: Option<(String, u64, usize)> = None;
@@ -575,7 +560,6 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     }
 }
 
-/// A synthesized directory on an overlay mount must not carry an inode from outside the
 fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut examined = 0usize;
@@ -659,7 +643,6 @@ fn check_overlay_dir_ino(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// On erofs a single-block directory's size is a closed form over its entries, so an
 fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     let (mut ok, mut bad) = (0usize, Vec::new());
     let mut unread = 0usize;
@@ -732,7 +715,6 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// The pathname of a `/proc/<pid>/maps` line: everything after the fifth field
 fn maps_pathname(rest: &str) -> Option<&str> {
     let mut s = rest;
     for _ in 0..5 {
@@ -743,7 +725,6 @@ fn maps_pathname(rest: &str) -> Option<&str> {
     (!p.is_empty()).then_some(p)
 }
 
-/// An injected file must not be mapped as deleted
 fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     if targets.is_empty() {
         return na(N_MAPS_DELETED, "no live rules".into())
@@ -863,7 +844,6 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// A hidden app must still be able to open every file the PackageManager gave it
 fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     const NAME: &str = N_PM_OPEN;
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
@@ -999,7 +979,6 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     .owner("the kernel engine")
 }
 
-/// A tmpfs mounted inside a ROM partition is never stock
 fn check_no_rom_tmpfs() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
         return unmeasured(N_ROM_TMPFS, "cannot read /proc/self/mountinfo".into())
@@ -1035,7 +1014,6 @@ fn check_no_rom_tmpfs() -> Check {
     }
 }
 
-/// A bind or image mounted over the ROM from somewhere other than /data/adb
 fn check_no_foreign_rom_mount() -> Check {
     let Ok(mi) = fs::read_to_string("/proc/self/mountinfo") else {
         return unmeasured(N_FOREIGN_MOUNT, "cannot read /proc/self/mountinfo".into())
@@ -1077,7 +1055,6 @@ fn check_no_foreign_rom_mount() -> Check {
     }
 }
 
-/// Is the engine actually there?
 fn check_engine_live() -> Check {
     const NAME: &str = N_ENGINE_LIVE;
     match Nm::new().version() {
@@ -1100,7 +1077,6 @@ fn check_engine_live() -> Check {
     }
 }
 
-/// Every check that reads the live rule list, by the exact name it reports under
 const RULE_DEPENDENT: [&str; 7] = [
     N_DIRENT_COOKIE,
     N_DINO_STAT,
@@ -1111,7 +1087,6 @@ const RULE_DEPENDENT: [&str; 7] = [
     N_PM_OPEN,
 ];
 
-/// Every measured check, plus the two counts the report header carries
 pub fn device_checks() -> (Vec<Check>, usize, usize) {
     let Some(targets) = live_targets() else {
         let live = check_engine_live();
@@ -1168,7 +1143,6 @@ pub fn device_checks() -> (Vec<Check>, usize, usize) {
 mod tests {
     use super::*;
 
-    /// A directory holding only our entries must not be judged for an inode band, even when
     #[test]
     fn a_synthesized_dir_is_not_stock_population() {
         let d = tempfile::tempdir().unwrap();
@@ -1192,7 +1166,6 @@ mod tests {
         let _ = judged;
     }
 
-    /// A mapping's path is the last field and may contain spaces
     #[test]
     fn a_maps_pathname_survives_a_space_in_it() {
         let plain = "7f8a00000-7f8a01000 r--p 00000000 fe:29 1234    /product/app/Foo/Foo.apk";
@@ -1205,7 +1178,6 @@ mod tests {
         assert_eq!(maps_pathname("short line"), None);
     }
 
-    /// A directory that will not enumerate is UNMEASURED, never "nothing to test"
     #[test]
     fn an_unreadable_parent_is_unmeasured_not_not_applicable() {
         use std::os::unix::fs::PermissionsExt;
@@ -1230,7 +1202,6 @@ mod tests {
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
 
-    /// Every shipped check name must yield its own id
     #[test]
     fn every_shipped_check_name_has_its_own_id() {
         let names = ALL_CHECK_NAMES;
@@ -1243,7 +1214,6 @@ mod tests {
         assert_eq!(slug(N_ENGINE_LIVE), "engine-responding");
     }
 
-    /// Issue #14: a ReVanced module binds its APK from /data/adb/rvhc, not from
     #[test]
     fn a_bind_from_outside_modules_is_still_a_module_mount() {
         let mi = "\
@@ -1262,7 +1232,6 @@ mod tests {
         assert!(crate::absorb::module_dir_of(&srcs[0]).is_none());
     }
 
-    /// The by-design exemption still has to work for a real module source
     #[test]
     fn a_bind_from_a_module_dir_still_names_its_module() {
         let mi = "\

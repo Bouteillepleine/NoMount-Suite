@@ -1,4 +1,3 @@
-/* --- arch --- */
 #if defined(__aarch64__)
     #define SYS_GETCWD     17
     #define SYS_READ       63

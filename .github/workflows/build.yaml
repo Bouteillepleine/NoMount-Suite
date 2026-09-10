@@ -1,59 +1,18 @@
 name: NoMount Suite - module zip
 
 on:
-  # Called by release.yml on a v* tag, so the published zip is built by
-  # exactly these jobs rather than a parallel pipeline.
   workflow_call:
   workflow_dispatch:
   push:
-    # `prerelease` is where the audit work lands before it reaches `suite`, and it
-    # was building nowhere: every commit on it was verified only on the three
-    # phones and by a local cross-compile, never by CI. The `release` job below
-    # is gated on a v* tag, so a branch build runs test/build/package and cannot
-    # publish anything.
-    #
-    # `master` is this repository's default branch and was missing, so a push
-    # there built nothing at all. `main` stays because the same file ships to the
-    # NoMount-Suite mirror, whose default is main - one workflow, both repos.
     branches: [master, main, suite, prerelease]
-    # A README edit is not a build. Without this, every documentation commit
-    # spent a couple of minutes producing a zip identical to the last one, and
-    # the run list read as a wall of "readme:" entries with the real builds
-    # buried among them.
-    #
-    # CAVEAT: GitHub applies path filters to tag pushes too. If a `v*` tag ever
-    # lands on a commit that touched only documentation, this workflow will not
-    # fire and no release will be published. Release tags here follow a version
-    # bump in Cargo.toml and module.prop, so that case does not arise in
-    # practice - but if it ever does, run the workflow manually.
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - 'LICENSE'
       - '.gitattributes'
 
-# Least privilege: this workflow only builds and uploads artifacts.
 permissions:
   contents: read
-
-# Every `uses:` below is pinned to a commit, with the tag it corresponded to in a
-# trailing comment. A tag is a movable pointer in someone else's repository, so
-# `@v4` is a standing agreement to run whatever they publish next, inside a job
-# that builds the root binary this project ships. The cost is that a pin has to
-# be bumped by hand; the comment is what makes that a two-minute job rather than
-# an archaeology exercise. Do not replace these with tags again.
-#
-# Node 20 is end-of-life on the runners, so the four GitHub-owned actions are on
-# their node24 releases: checkout v7, cache v6, upload-artifact v7,
-# download-artifact v8. Each bump was checked rather than assumed - every input
-# this workflow passes still exists in the new version, cache/restore still
-# exposes `cache-hit`, and download-artifact still defaults to one subdirectory
-# per artifact name, which the package job below reads.
-#
-# `mlugg/setup-zig` is deliberately not bumped: v2.2.1 is its newest release and
-# still declares node20, so it stays and the runner keeps forcing it onto node24.
-# That warning is upstream's to clear and is the only one that should remain.
-# `dtolnay/rust-toolchain` is a composite action - no JS runtime, unaffected.
 
 env:
   CARGO_TERM_COLOR: always
@@ -61,9 +20,6 @@ env:
   NDK_HOME: /opt/ndk
 
 jobs:
-  # Did this push touch the engine? The compile matrix is ten kernel clones and
-  # is only meaningful when hookless/ changed, so it is gated rather than run on
-  # every commit. This preserves the path filter the matrix used to carry itself.
   engine-changed:
     runs-on: ubuntu-latest
     outputs:
@@ -85,18 +41,11 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # The ten-version in-tree compile gate, called rather than triggered so it does
-  # not occupy its own row in the Actions list.
   compile-matrix:
     needs: engine-changed
     if: needs.engine-changed.outputs.changed == 'true'
     uses: ./.github/workflows/hookless-compile-matrix.yml
 
-  # The unit tests are host tests (no NDK, no device), so they cost a minute and
-  # gate the thing that actually ships: `package` needs them green. `build` is
-  # deliberately not gated - the cross-compile is the slowest leg and there is no
-  # reason to hold it behind a fast check that cannot break it. A red test simply
-  # means no ZIP comes out the far end.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -123,39 +72,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # The Rust is linted on every push; the shell was not, and the module is
-      # eight scripts that run as root at boot. Every bug found in the 2026-08-25
-      # audit session was in shell, not Rust: a uid parser that split on a space
-      # where the file uses a tab, a `\|` alternation toybox does not support, a
-      # `[ -e ]` that cannot tell enoent from eacces.
-      #
-      # -s sh, because /system/bin/sh is mksh/ash, not bash.
-      #
-      # WARNING level, not error, and NO rule exclusions. The gate was error-only
-      # at first because `local` is flagged as non-POSIX (SC3043) and spoof.sh
-      # used it ~25 times; that was then narrowed to `-e SC3043` so everything
-      # below "error" was checked again. spoof.sh is gone and no script left
-      # declares `local`, so the exclusion goes too - a suppression kept past the
-      # file that needed it silently un-lints the next `local` somebody writes
-      # into a script that runs as root at boot.
-      #
-      # Honest about what this does not catch: shellcheck says nothing about
-      # `for x in $list`, because splitting there is usually intended, so the
-      # newline-IFS bug in the ghost populator would still have got through at
-      # any level. The three suppressions in the scripts each carry their reason
-      # inline; a bare -e list here would hide them from the file that needs them.
       - name: Shellcheck module scripts
         run: |
           sudo apt-get install -y shellcheck >/dev/null 2>&1 || true
           shellcheck -s sh -S warning -f gcc module/*.sh
-          # ...and the build script, which was the one shell file CI did not read
-          # - while being the thing that assembles the zip everybody flashes.
-          # bash, not sh: it uses arrays and [[ ]] deliberately, and it runs on a
-          # workstation rather than on the phone.
           shellcheck -s bash -S warning -f gcc scripts/package.sh
-          # ...and the kernel side, now that it lives here. One repo, one gate
-          # set: the engine's verify script is a root shell script on a device
-          # just like the module's are.
           shellcheck -s sh -S warning -f gcc hookless/*.sh
 
   build:
@@ -163,9 +84,6 @@ jobs:
     strategy:
       matrix:
         profile: [debug, release]
-        # OnePlus (and anything that can run this kernel) is arm64-v8a only, and
-        # the module loads bin/$(getprop ro.product.cpu.abi) = arm64-v8a at
-        # runtime - so build and ship just arm64. Re-add targets for wider reach.
         target: [aarch64-linux-android]
         include:
           - target: aarch64-linux-android
@@ -180,16 +98,6 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -o ndk.zip
-          # Verify it. This unpacks a 700 MB archive from a cdn and then compiles
-          # the root binary this project ships with the toolchain inside it, and
-          # nothing checked that the bytes were the ones Google published.
-          #
-          # sha1, because sha1 is the only digest Google's own package manifest
-          # carries (repository2-3.xml, <checksum type="sha1">). That is the right
-          # property for this job: what is needed here is second-preimage
-          # resistance - "is this the r27c everyone else got?" - and sha1 is not
-          # broken for that. It is broken for collisions, which would matter only
-          # if the NDK's publisher were the attacker.
           echo "${NDK_SHA1}  ndk.zip" | sha1sum -c - || {
             echo "::error::NDK archive does not match the checksum Google publishes for ${NDK_VERSION}"
             exit 1
@@ -197,9 +105,6 @@ jobs:
           unzip -q ndk.zip -d /opt
           mv /opt/android-ndk-${NDK_VERSION} ${NDK_HOME}
         env:
-          # From https://dl.google.com/android/repository/repository2-3.xml
-          # (<remotePackage path="ndk;27.2.12479018">, android-ndk-r27c-linux.zip).
-          # Bump this in the same commit as NDK_VERSION, never separately.
           NDK_SHA1: 090e8083a715fdb1a3e402d0763c388abb03fb4e
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -259,9 +164,6 @@ jobs:
         with:
           name: bin-${{ matrix.abi }}-${{ matrix.profile }}
           path: target/${{ matrix.target }}/${{ matrix.profile }}/nomount
-          # Intermediate: `package` downloads this in the same run and nothing
-          # else ever wants it. At 7 days these were the largest thing in the
-          # artifact store by a wide margin.
           retention-days: 1
 
   package:
@@ -300,9 +202,6 @@ jobs:
 
       - name: Build nm (freestanding netlink client)
         run: |
-          # The module shells out to bin/<abi>/nm; it is arch-shared C, built
-          # once here. Same zig incantation as the nomount source repo, then
-          # sstrip to ~3 KB. Placed next to nomount so package.sh bundles it.
           make -C userspace/tools/sstrip
           zig cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
             -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
@@ -334,17 +233,4 @@ jobs:
         with:
           name: nomount-debug-zip
           path: release/debug/00_NoMount-Module-*.zip
-          # Shorter than the release zip: useful to attach to a bug report,
-          # not something that should accumulate for a month.
           retention-days: 7
-
-
-  # Publish on a v* tag.
-  #
-  # The tag already triggered a build, but the ZIP only ever became a 30-day
-  # Artifact - which needs a GitHub login to download, is not linkable, and is
-  # gone a month later. So "tagging a release" produced no release. This turns the
-  # tag into the thing people can actually install from.
-  #
-  # Release-only: `needs: package` means the tests gated it (package needs test),
-  # so nothing ships without them green.

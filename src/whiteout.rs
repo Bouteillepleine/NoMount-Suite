@@ -1,4 +1,3 @@
-//! Persistent whiteouts - hide stock ROM files that are themselves the tell
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +8,6 @@ use crate::nm::Nm;
 
 pub const WHITEOUT_PATH: &str = "/data/adb/nomount/whiteouts.txt";
 
-/// Statfs magic of the directory holding `target`
 fn parent_fs_magic(target: &Path) -> Option<i64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -22,7 +20,6 @@ fn parent_fs_magic(target: &Path) -> Option<i64> {
     Some(sf.f_type as i64)
 }
 
-/// Does hiding `target` leave evidence in its PARENT's metadata?
 pub(crate) fn measurable_hole(target: &Path) -> bool {
     const EROFS_MAGIC: i64 = 0xE0F5_E1E2;
     if parent_fs_magic(target) != Some(EROFS_MAGIC) {
@@ -36,13 +33,11 @@ pub(crate) fn measurable_hole(target: &Path) -> bool {
     engine_predates_v13()
 }
 
-/// Cached: `measurable_hole` runs once per whiteout, and every call used to fork `nm v`
 fn engine_predates_v13() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| crate::nm::Nm::new().version().map(|v| v < 13).unwrap_or(true))
 }
 
-/// How a filename is matched
 enum Match {
     Exact(&'static str),
     Prefix(&'static str),
@@ -59,7 +54,6 @@ impl Match {
     }
 }
 
-/// What the scan looks for, and why each one is a tell
 const PATTERNS: &[(Match, &str)] = &[
     (Match::Prefix("install-recovery"), "recovery-restore script; a classic root-check target"),
     (Match::Exact("daemonsu"), "SuperSU daemon binary"),
@@ -76,7 +70,6 @@ const PATTERNS: &[(Match, &str)] = &[
     (Match::Suffix("SuperSUDaemon"), "SuperSU init.d hook"),
 ];
 
-/// Directories the scan reads
 const SCAN_DIRS: &[&str] = &[
     "/system/bin", "/system/xbin", "/system/sbin", "/system/etc", "/system/etc/init",
     "/system/etc/init.d", "/system/addon.d", "/system/framework", "/system/lib",
@@ -84,12 +77,10 @@ const SCAN_DIRS: &[&str] = &[
     "/product/etc/init", "/system_ext/bin", "/system_ext/etc/init",
 ];
 
-/// A path that stats but cannot be opened is not a real file - it is fabricated at the
 fn is_real_file(p: &Path) -> bool {
     p.is_file() && fs::File::open(p).is_ok()
 }
 
-/// Read the persisted list: trimmed, comment- and blank-stripped, deduplicated
 pub fn read() -> Result<Vec<String>> {
     let raw = match fs::read_to_string(WHITEOUT_PATH) {
         Ok(s) => s,
@@ -99,7 +90,6 @@ pub fn read() -> Result<Vec<String>> {
     Ok(parse(&raw))
 }
 
-/// Pure: trimmed, comment/blank-stripped, order-preserving, deduplicated
 fn parse(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -126,7 +116,6 @@ fn write(entries: &[String]) -> Result<()> {
     fs::write(WHITEOUT_PATH, body).context("write whiteouts.txt")
 }
 
-/// A path is only worth whiting out if it is absolute, currently exists, and is not a
 pub(crate) fn validate(p: &str) -> Result<()> {
     let path = Path::new(p);
     if !path.is_absolute() {
@@ -200,7 +189,6 @@ pub fn remove(target: &str) -> Result<()> {
     }
 }
 
-/// Targets the engine is currently whiting out, from `nm list`
 fn live_whiteouts() -> std::collections::HashSet<String> {
     Nm::new()
         .list()
@@ -232,7 +220,6 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
-/// Re-apply the whole list
 pub fn apply() -> Result<()> {
     let nm = Nm::new();
     let (mut ok, mut failed) = (0u32, 0u32);
@@ -260,7 +247,6 @@ pub fn apply() -> Result<()> {
     Ok(())
 }
 
-/// Targets NoMount is currently serving
 fn injected_targets() -> std::collections::HashSet<String> {
     Nm::new()
         .list()
@@ -273,7 +259,6 @@ fn injected_targets() -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// Can an ordinary, non-root-granted app see this path at all?
 fn app_can_see(path: &str) -> bool {
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     std::process::Command::new("su")
@@ -283,15 +268,12 @@ fn app_can_see(path: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// One thing the scan found worth hiding
 pub struct Candidate {
     pub path: String,
     pub why: &'static str,
-    /// Hiding it still leaves the parent's size and link count counting it
     pub hole: bool,
 }
 
-/// Walk the ROM for files that only a root setup leaves behind
 pub fn scan() -> (Vec<Candidate>, usize, usize) {
     let have = read().unwrap_or_default();
     let injected = injected_targets();
@@ -337,7 +319,6 @@ pub fn scan() -> (Vec<Candidate>, usize, usize) {
     (out, invisible, ours)
 }
 
-/// `nomount whiteout suggest` - scan this device and propose what it finds
 pub fn suggest() -> Result<()> {
     let (found, invisible, ours) = scan();
     for c in &found {
@@ -375,7 +356,6 @@ mod tests {
         assert_eq!(parse(raw), vec!["/system/bin/x".to_string(), "/system/bin/y".to_string()]);
     }
 
-    /// The false positive that made a substring sweep useless: "ksu" is inside `cksum`, and
     #[test]
     fn patterns_are_anchored_and_miss_stock_binaries() {
         for stock in ["cksum", "debuggerd", "sh", "linker64", "app_process64", "toybox"] {
@@ -401,7 +381,6 @@ mod tests {
         assert!(validate("/system/bin/install-recovery.sh").is_ok());
     }
 
-    /// The durable list may not name a path the module plan would refuse
     #[test]
     fn refuses_every_root_the_module_plan_refuses() {
         for p in [
@@ -432,7 +411,6 @@ mod tests {
         }
     }
 
-    /// `..` must not be a way around the partition-root refusal
     #[test]
     fn rejects_dotdot_escapes_to_a_partition_root() {
         for p in [

@@ -1,4 +1,3 @@
-# """Zip a staging dir with forward-slash entry names and preserved exec bits
 import os
 import stat
 import sys
