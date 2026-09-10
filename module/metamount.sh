@@ -42,7 +42,10 @@ if ! command -v flock >/dev/null 2>&1; then
 elif ! ls /proc/self/fd/9 >/dev/null 2>&1; then
     nmlog "fd 9 is close-on-exec in this shell, so flock cannot use it - mount pass running without a single-run guard"
 else
-    flock -n 9 || exit 0
+    # The loser must NOT notify: `trap nm_notify_mounted EXIT` would tell the manager that
+    # mounting has finished while the instance that holds the lock is still injecting, and
+    # that signal is what releases zygote. Only the pass that actually ran reports done.
+    flock -n 9 || { _nm_notified=1; exit 0; }
 fi
 
 nm_set_bin
@@ -64,7 +67,7 @@ if nm_guard_bump "ksu/apatch metamount path"; then
 fi
 
 if command -v ksud >/dev/null 2>&1; then
-    _vf=""; _ov=""
+    _vf=""; _ov=""; _nmods=0
     if [ -e "$NMDIR/disabled" ]; then
         nmlog "guard is tripped - skipping per-module tagging (nothing is served)"
     else
@@ -81,6 +84,7 @@ if command -v ksud >/dev/null 2>&1; then
         if [ "$_o" = 1 ] && [ "$_v" = 1 ]; then _t="vfs + overlay"; _ov="$_ov $mid";
         elif [ "$_o" = 1 ]; then _t="overlay"; _ov="$_ov $mid";
         else _t="vfs"; _vf="$_vf $mid"; fi
+        _nmods=$((_nmods + 1))
         _n=$(_nmcount -F "/data/adb/modules/$mid/")
         _m=$(NM_P="/adb/modules/$mid" awk '$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}' \
              /proc/self/mountinfo 2>/dev/null); _m=${_m:-0}
@@ -92,10 +96,9 @@ if command -v ksud >/dev/null 2>&1; then
     done
     fi
 
-    _mods=0
-    set -f
-    for _x in $_vf $_ov; do _mods=$((_mods + 1)); done
-    set +f
+    # Count as we go rather than re-splitting the joined lists: a third-party module can
+    # create a directory name containing a space, and `for _x in $_vf $_ov` splits on it.
+    _mods=${_nmods:-0}
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ -e "$NMDIR/disabled" ]; then
         _desc="⛔ disabled - bootloop guard tripped, open the WebUI"

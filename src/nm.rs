@@ -25,6 +25,27 @@ impl Nm {
         Self { bin }
     }
 
+    /// `nm`'s own exit code for "the engine did not answer within the netlink timeout"
+    /// (`NM_EXIT_TIMEOUT`, userspace/src/nm.h). Retrying a rule against a wedged engine only
+    /// buys another 5s stall, so `add_many` must abandon the whole pass on this.
+    const EXIT_TIMEOUT: i32 = 5;
+    /// ...and this is "could not talk to the engine at all" (no socket, no driver).
+    const EXIT_NO_ENGINE: i32 = 2;
+
+    fn engine_is_unreachable(code: Option<i32>) -> bool {
+        matches!(code, Some(Nm::EXIT_TIMEOUT) | Some(Nm::EXIT_NO_ENGINE))
+    }
+
+    /// Run, returning the exit code alongside the failure so a caller can tell
+    /// "this rule was refused" from "the engine is gone".
+    fn run_coded(&self, args: &[&str]) -> std::result::Result<String, Option<i32>> {
+        let out = Command::new(&self.bin).args(args).output().map_err(|_| None)?;
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        Err(out.status.code())
+    }
+
     fn run(&self, args: &[&str]) -> Result<String> {
         let out = Command::new(&self.bin)
             .args(args)
@@ -131,19 +152,25 @@ impl Nm {
         self.run(&["k", "g", cmd]).map(drop)
     }
 
-    /// `nm add` for many rules in one process
-    fn add_batch(&self, public: bool, pairs: &[(&Path, &Path)]) -> Result<()> {
+    /// `nm add` for many rules in one process, keeping `nm`'s exit code so the caller can
+    /// tell a refused rule from an engine that is not there.
+    fn add_batch_coded(
+        &self,
+        public: bool,
+        pairs: &[(&Path, &Path)],
+    ) -> std::result::Result<(), Option<i32>> {
         let mut args: Vec<&str> = Vec::with_capacity(1 + usize::from(public) + pairs.len() * 2);
         args.push("add");
         if public {
             args.push("--public");
         }
         for (v, r) in pairs {
-            args.push(path_str(v)?);
-            args.push(path_str(r)?);
+            args.push(path_str(v).map_err(|_| None)?);
+            args.push(path_str(r).map_err(|_| None)?);
         }
-        self.run(&args).map(drop)
+        self.run_coded(&args).map(drop)
     }
+
 }
 
 /// `nm`'s cap is 64 words in its path array (`p_args`), and `add` puts two paths in it per
@@ -153,14 +180,39 @@ impl Nm {
     /// Apply many injections with as few processes as possible
     pub fn add_many<'a>(&self, pairs: &[(&'a Path, &'a Path)]) -> Vec<(&'a Path, &'a Path)> {
         let mut failed = Vec::new();
+        let mut gave_up = false;
         for (public, group) in batch_groups(pairs, crate::pmcache::is_pm_published) {
             for chunk in group.chunks(ADD_BATCH_PAIRS) {
-                if self.add_batch(public, chunk).is_ok() {
+                if gave_up {
+                    failed.extend(chunk.iter().copied());
+                    continue;
+                }
+                let batch = self.add_batch_coded(public, chunk);
+                if batch.is_ok() {
+                    continue;
+                }
+                // A refused RULE is worth splitting the batch for; an absent engine is not.
+                // Retrying 31 rules against a wedged engine costs 31 more 5s netlink
+                // timeouts per chunk, which on a large module set turns a fast, loud failure
+                // into an hours-long boot.
+                if Nm::engine_is_unreachable(batch.unwrap_err()) {
+                    eprintln!(
+                        "nomount: the engine stopped answering mid-pass - abandoning the                          remaining injections rather than retrying each one against it.                          {} rule(s) in this chunk and everything after it are unserved.",
+                        chunk.len()
+                    );
+                    gave_up = true;
+                    failed.extend(chunk.iter().copied());
                     continue;
                 }
                 for (v, r) in chunk {
-                    if self.add_batch(public, std::slice::from_ref(&(*v, *r))).is_err() {
-                        failed.push((*v, *r));
+                    match self.add_batch_coded(public, std::slice::from_ref(&(*v, *r))) {
+                        Ok(_) => {}
+                        Err(code) => {
+                            failed.push((*v, *r));
+                            if Nm::engine_is_unreachable(code) {
+                                gave_up = true;
+                            }
+                        }
                     }
                 }
             }

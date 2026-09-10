@@ -56,6 +56,22 @@ pub(crate) fn probe_as_uid<const N: usize>(
     }
     if pid == 0 {
         unsafe { libc::close(rd) };
+        // Never "succeed" as root. This binary runs as root, so `getuid() == uid` made
+        // probe_as_uid(0) report a successful drop having dropped nothing - the probe then
+        // measured ROOT's view and the caller published it as an app's. On a device that
+        // short circuit is now unreachable for any other uid (we are always root), so the
+        // setres* path always actually runs; it survives only for the unit test, which
+        // legitimately probes as its own non-root uid.
+        //
+        // Screening a platform uid (< FIRST_APP_APPID) is the CALLER's job: it has to
+        // report Unmeasured rather than silently measure the wrong identity.
+        if uid == 0 {
+            unsafe {
+                let sentinel = [u32::MAX; N];
+                libc::write(wr, sentinel.as_ptr().cast(), width);
+                libc::_exit(0)
+            }
+        }
         let dropped = unsafe {
             libc::getuid() == uid
                 || (libc::setgroups(0, std::ptr::null()) == 0
@@ -166,8 +182,16 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
         let n = unsafe {
             libc::syscall(libc::SYS_getdents64, fd, buf.as_mut_ptr(), buf.len()) as isize
         };
-        if n <= 0 {
+        if n == 0 {
             break;
+        }
+        // A mid-listing failure must not read as EOF: the contract here is
+        // `None == could not list`, and a short Some(..) makes every unread entry look
+        // "absent from getdents" - which check_dino_matches_stat scores as a FAIL against
+        // the engine instead of the honest UNMEASURED.
+        if n < 0 {
+            unsafe { libc::close(fd) };
+            return None;
         }
         let mut off = 0usize;
         while off + std::mem::size_of::<Dirent64Hdr>() <= n as usize {
@@ -177,7 +201,13 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
                 break;
             }
             let nstart = off + 19;
-            let nend = buf[nstart..off + reclen].iter().position(|&c| c == 0).unwrap_or(0) + nstart;
+            // No NUL in the record means the kernel handed us something malformed. Bail out
+            // rather than fabricate an empty-named entry that no target can ever match.
+            let Some(rel) = buf[nstart..off + reclen].iter().position(|&c| c == 0) else {
+                unsafe { libc::close(fd) };
+                return None;
+            };
+            let nend = nstart + rel;
             if let Ok(name) = std::str::from_utf8(&buf[nstart..nend]) {
                 if name != "." && name != ".." {
                     out.push(Entry { name: name.to_string(), d_ino: h.d_ino });
@@ -191,7 +221,7 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
 }
 
 /// One rule dump, split into the two views every check here needs: live injection targets,
-fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
+fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
     let listed = Nm::new().list().ok()?;
     let rules = crate::nm::parse_list(&listed);
     let targets = rules
@@ -199,12 +229,23 @@ fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
         .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
         .map(|r| r.target.clone())
         .collect();
+    // Every inject target, per-UID rules included. The inode-shaped checks must narrow to
+    // uid 0 (root cannot see what a per-UID rule serves), but `check_maps_not_deleted` needs
+    // only the PATH - and a per-UID rule's mapping showing `(deleted)` is an oracle for
+    // exactly the app the rule was written for.
+    let mut all_targets: Vec<PathBuf> = rules
+        .iter()
+        .filter(|r| r.kind == crate::nm::LiveKind::Inject)
+        .map(|r| r.target.clone())
+        .collect();
+    all_targets.sort();
+    all_targets.dedup();
     let dirs = rules
         .iter()
         .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
         .map(|r| r.target.clone())
         .collect();
-    Some((targets, dirs))
+    Some((targets, dirs, all_targets))
 }
 
 fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
@@ -229,7 +270,7 @@ fn fs_type(p: &Path) -> String {
 /// Is this path inside a ROM partition?
 fn on_rom_partition(p: &Path) -> bool {
     let s = p.to_string_lossy();
-    crate::absorb::ROM_ROOTS.iter().any(|r| s.starts_with(r))
+    crate::absorb::on_rom_path(&s)
 }
 
 fn ino_of(p: &Path) -> Option<u64> {
@@ -1037,6 +1078,14 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .meaning("Not tested - the hide list could not be read.");
     };
+    // `uid_list_live` parses every ASCII-digit run out of the engine's dump with no
+    // validity filter, so a stray token, a count, or a genuinely hidden platform uid can
+    // land here. None of those can stand in for "an app": report Unmeasured rather than
+    // measure the wrong identity and publish it as a pass.
+    let blocked: Vec<u32> = blocked
+        .into_iter()
+        .filter(|u| crate::blocklist::appid(*u) >= crate::blocklist::FIRST_APP_APPID)
+        .collect();
     let Some(&appid) = blocked.first() else {
         return na(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()))
             .meaning("You have not hidden any apps yet, so there is nothing to test here. Hide one and this check starts running.");
@@ -1139,7 +1188,6 @@ fn check_no_rom_tmpfs() -> Check {
         return unmeasured(N_ROM_TMPFS, "cannot read /proc/self/mountinfo".into())
             .meaning("Could not read the mount table, so whether a module emptied a ROM folder this way is unknown.");
     };
-    let roots = crate::absorb::ROM_ROOTS;
     let mut hits: Vec<String> = Vec::new();
     for line in mi.split(|b| *b == b'\n').filter_map(|l| std::str::from_utf8(l).ok()) {
         let Some((pre, post)) = line.split_once(" - ") else { continue };
@@ -1147,7 +1195,7 @@ fn check_no_rom_tmpfs() -> Check {
             continue;
         }
         let Some(target) = pre.split_whitespace().nth(4) else { continue };
-        if roots.iter().any(|r| target.starts_with(r)) {
+        if crate::absorb::on_rom_path(target) {
             hits.push(target.to_string());
         }
     }
@@ -1240,6 +1288,14 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         return unmeasured(NAME, "the engine would not list the per-UID hide set".into())
             .meaning("Not tested - the hide list could not be read.");
     };
+    // `uid_list_live` parses every ASCII-digit run out of the engine's dump with no
+    // validity filter, so a stray token, a count, or a genuinely hidden platform uid can
+    // land here. None of those can stand in for "an app": report Unmeasured rather than
+    // measure the wrong identity and publish it as a pass.
+    let blocked: Vec<u32> = blocked
+        .into_iter()
+        .filter(|u| crate::blocklist::appid(*u) >= crate::blocklist::FIRST_APP_APPID)
+        .collect();
     let Some(&appid) = blocked.first() else {
         return na(NAME, "no app is hidden".into()).meaning(
             "You have not hidden any apps yet, so there is nothing to test here. Hide one and \
@@ -1346,7 +1402,7 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
 
 /// Every measured check, plus the two counts the report header carries
 pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
-    let Some((targets, engine_dirs)) = live_rules() else {
+    let Some((targets, engine_dirs, all_inject_targets)) = live_rules() else {
         let live = check_engine_live();
         let answered = live.verdict != Verdict::Fail;
         let mut checks = vec![live];
@@ -1390,7 +1446,7 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         check_overlay_dir_ino(&targets, &engine_dirs),
         check_dir_ino_collision(&engine_dirs),
         check_erofs_dir_shape(&targets),
-        check_maps_not_deleted(&targets),
+        check_maps_not_deleted(&all_inject_targets),
         check_pm_apks_open_when_hidden(&targets),
         check_xattr_agrees_when_hidden(&targets),
         check_no_rom_tmpfs(),
@@ -1425,6 +1481,7 @@ mod tests {
     }
 
     /// A directory holding only our entries must not be judged for an inode band, even when
+    /// every name in it is one of ours - there is no stock population left to compare against.
     #[test]
     fn a_synthesized_dir_is_not_stock_population() {
         let d = tempfile::tempdir().unwrap();
@@ -1519,6 +1576,7 @@ mod tests {
     }
 
     /// Issue #14: a ReVanced module binds its APK from /data/adb/rvhc, not from
+    /// /data/adb/modules - and that bind is still module content laid over the ROM.
     #[test]
     fn a_bind_from_outside_modules_is_still_a_module_mount() {
         let mi = "\
@@ -1573,6 +1631,7 @@ mod tests {
         assert_eq!(by_design.verdict.severity(), "info");
         let r = crate::check::Report {
             ts: 0,
+            sections: vec![crate::check::Section::Device],
             engine: Some(31),
             rules: Some(257),
             directories: Some(40),

@@ -204,6 +204,27 @@ pub fn remove(target: &str) -> Result<()> {
     remove_locked(target)
 }
 
+/// Drop `target` from the durable list ONLY, leaving the engine alone.
+///
+/// For a caller that has already deleted the live rule itself and will re-assert its own.
+/// `remove_locked` cannot serve that case: it issues its own `nm del`, which then hits a
+/// path with no rule, and the engine answers -ENOENT, so `nm` exits 1 and the whole call
+/// returns `Err` -- after the list has already been rewritten. absorb's tmpfs migration read
+/// that `Err` as "the entry is still listed", printed exactly that, and skipped recording
+/// the takeover; the entry was in fact gone, so the directory ended up neither hidden by
+/// whiteouts.txt nor tracked by absorb. The success branch there was unreachable.
+pub(crate) fn forget_locked(target: &str) -> Result<bool> {
+    let t = norm(target.trim());
+    let mut list = read()?;
+    let before = list.len();
+    list.retain(|x| *x != t);
+    if list.len() == before {
+        return Ok(false);
+    }
+    write(&list)?;
+    Ok(true)
+}
+
 /// `remove`, for a caller that already holds `mount::pass_lock()`
 pub(crate) fn remove_locked(target: &str) -> Result<()> {
     let normalised = norm(target.trim());

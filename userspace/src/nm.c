@@ -209,7 +209,21 @@ void c_main(long *sp) {
             for (struct nlmsghdr *msg = (void *)mem.rx_buf;
                     len >= 16 && msg->nlmsg_len >= 16 && msg->nlmsg_len <= (unsigned int)len;
                     len -= msg->nlmsg_len, msg = (void *)((char *)msg + msg->nlmsg_len)) {
-                if (msg->nlmsg_type == 3) goto list_done;
+                if (msg->nlmsg_type == 3) {
+                    /* NLMSG_DONE carries an int status, and discarding it meant a dump
+                     * the kernel had to cut short - ENOBUFS on a large rule table, or a
+                     * dump callback that failed partway - was printed as a SHORT LIST
+                     * WITH EXIT 0. Nothing downstream could tell an incomplete rule
+                     * table from a complete one, and the Suite decides what is served
+                     * from exactly this output. Older kernels send a bare DONE header
+                     * with no payload, hence the length test rather than assuming one. */
+                    if (msg->nlmsg_len >= 20 && *(int *)((char *)msg + 16)) {
+                        print_refused("this dump at its end", *(int *)((char *)msg + 16));
+                        print_err("nm: the rule list above is INCOMPLETE\n");
+                        exit_code = 4;
+                    }
+                    goto list_done;
+                }
                 if (msg->nlmsg_type == 2) {
                     if (msg->nlmsg_len < 20) {
                         print_err("nm: the kernel ended this dump with a truncated error reply\n");

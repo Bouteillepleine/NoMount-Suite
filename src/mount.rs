@@ -103,10 +103,19 @@ const NON_PARTITION_ROOTS: &[&str] = &[
 ];
 
 /// Discovery: should we walk a top-level module dir `<name>`?
+///
+/// `symlink_metadata`, exactly like [`is_real_partition`]. `Path::is_dir()` follows, and the
+/// two functions disagreeing is what let one physical file be planned at two targets.
 fn is_partition_dir(name: &str) -> bool {
+    is_real_partition(name)
+}
+
+/// A top-level module dir that names a root SYMLINK rather than a partition
+fn is_root_symlink(name: &str) -> bool {
     !name.is_empty()
-        && !NON_PARTITION_ROOTS.contains(&name)
-        && Path::new(&format!("/{name}")).is_dir()
+        && fs::symlink_metadata(format!("/{name}"))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
 }
 
 /// Canonicalization: is `<name>` a real separate partition, so `system/<name>/...` should
@@ -256,7 +265,21 @@ fn source_resolves(e: &PlanEntry) -> bool {
 
 /// Would serving this resolved source hand a non-root process control of the bytes a ROM
 fn resolved_source_is_untrusted(resolved: &Path) -> bool {
-    resolved.starts_with("/data/") && !resolved.starts_with("/data/adb/")
+    // Two separate app-writable regions, and only the first was covered.
+    //
+    // `/data/...` outside `/data/adb/` catches /data/local/tmp, /data/data and
+    // /data/media. It does NOT catch the same shared volume reached by any of its
+    // other names - /storage/emulated/0, /sdcard, /mnt/media_rw, /mnt/expand - none
+    // of which begin with /data/. A symlink resolving to /storage/emulated/0/x.apk
+    // therefore passed a guard whose whole purpose is to stop a non-root process
+    // controlling the bytes served into the ROM namespace, and any app holding
+    // storage permission can rewrite that file.
+    //
+    // health.rs already enumerates those roots for the export-destination check, so
+    // this reuses that one list rather than restating it. A second copy is how these
+    // surfaces drift apart.
+    (resolved.starts_with("/data/") && !resolved.starts_with("/data/adb/"))
+        || crate::health::is_shared_storage(resolved)
 }
 
 pub(crate) fn module_enabled(dir: &Path) -> bool {
@@ -290,6 +313,16 @@ pub(crate) enum PlanKind {
     Inject,
     Whiteout,
     Bind,
+}
+
+/// One module entry the plan REFUSED, and why. Kept so `check --plan` can report it: the
+/// refusal used to reach stderr and nowhere else, so a module that lost content this way
+/// still produced a "clean" report. Two live modules on the audit device were in exactly
+/// that state.
+pub(crate) struct Refused {
+    pub module: String,
+    pub target: PathBuf,
+    pub why: &'static str,
 }
 
 /// One intended operation, resolved but not yet applied
@@ -397,11 +430,17 @@ pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Col
 }
 
 /// Recursively resolve a module subtree rooted at `dir` into plan entries
-fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
-    let mut entries: Vec<_> = match fs::read_dir(dir) {
-        Ok(e) => e.flatten().collect(),
-        Err(_) => return,
-    };
+fn plan_tree(
+    module: &str,
+    module_root: &Path,
+    dir: &Path,
+    out: &mut Vec<PlanEntry>,
+    refused: &mut Vec<Refused>,
+) -> std::io::Result<()> {
+    // The error propagates. Swallowing it returned a SHORT plan, and `run_reload` diffs the
+    // plan against the live rules - so an SELinux denial or an EIO on one module subtree
+    // pruned every rule that module owned and reported it as `-N rules ... 0 failed`.
+    let mut entries: Vec<_> = fs::read_dir(dir)?.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let ft = match entry.file_type() {
@@ -438,7 +477,7 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             if is_opaque_dir(&source) && can_whiteout(&target).is_ok() {
                 expand_replacement(module, &target, &source, &source, 0, out);
             }
-            plan_tree(module, module_root, &source, out);
+            plan_tree(module, module_root, &source, out, refused)?;
         } else if name == ".replace" {
             if let Some(parent) = target.parent() {
                 if can_whiteout(parent).is_err() {
@@ -459,23 +498,43 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                 kind: PlanKind::Whiteout,
             });
         } else {
-            if ft.is_symlink()
-                && fs::canonicalize(&source)
-                    .map(|r| resolved_source_is_untrusted(&r))
-                    .unwrap_or(false)
-            {
-                eprintln!(
-                    "nomount: {module}: skipping {} - it is a symlink resolving outside \
-                     /data/adb; the engine follows it, so a non-root process would control \
-                     the bytes served at {}",
-                    source.display(),
-                    target.display()
-                );
-                continue;
+            if ft.is_symlink() {
+                let resolved = fs::canonicalize(&source).ok();
+                if resolved.as_deref().map(resolved_source_is_untrusted).unwrap_or(false) {
+                    eprintln!(
+                        "nomount: {module}: skipping {} - it is a symlink resolving outside \
+                         /data/adb; the engine follows it, so a non-root process would control \
+                         the bytes served at {}",
+                        source.display(),
+                        target.display()
+                    );
+                    continue;
+                }
+                // ...and it must resolve to a FILE. `entry.file_type()` is lstat-based, so a
+                // symlink to a directory fell through to the leaf-inject arm below; the engine
+                // then kern_path()s the source WITH follow and installs a directory rule -
+                // exactly what `nomount vfs add` refuses by name, because such a rule hides
+                // every stock entry under its target and its children report the source
+                // filesystem's block counts, which one stat separates from stock.
+                if resolved.as_deref().map(Path::is_dir).unwrap_or(false) {
+                    eprintln!(
+                        "nomount: {module}: skipping {} - it is a symlink to a directory, which \
+                         the engine follows, so this would install a directory rule at {}. \
+                         Ship the files individually.",
+                        source.display(),
+                        target.display()
+                    );
+                    continue;
+                }
             }
             match serve_mode(&target) {
                 Serve::Refuse(why) => {
                     eprintln!("nomount: {module}: skipping {} - {why}", target.display());
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: target.clone(),
+                        why,
+                    });
                 }
                 Serve::Bind => {
                     out.push(PlanEntry {
@@ -502,6 +561,7 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             }
         }
     }
+    Ok(())
 }
 
 /// Drop any mount sitting on a target we are about to serve
@@ -549,9 +609,10 @@ fn warn_whiteout_hole(target: &Path, module: &str) {
 }
 
 /// Build the full plan for every enabled, non-blocklisted module
-pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
+pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
     let blocklist = load_blocklist();
     let mut plan = Vec::new();
+    let mut refused: Vec<Refused> = Vec::new();
     let mut skipped = 0u32;
     let dirs = fs::read_dir(MODULES_DIR)
         .with_context(|| format!("cannot enumerate {MODULES_DIR} -- refusing to treat that as \"no modules installed\", which would clear every rule"))?;
@@ -590,18 +651,32 @@ pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
                     continue;
                 };
                 if !is_partition_dir(name) {
+                    if is_root_symlink(name) {
+                        eprintln!(
+                            "nomount: {id}: skipping {name}/ - /{name} is a symlink, not a \
+                             partition. Ship this content under the partition it resolves to \
+                             (usually system/{name}/) so it lands on one target rather than two."
+                        );
+                    }
                     continue;
                 }
-                plan_tree(&id, &mdir, &e.path(), &mut plan);
+                plan_tree(&id, &mdir, &e.path(), &mut plan, &mut refused).with_context(|| {
+                    format!(
+                        "cannot walk {}/{name} -- refusing to return a partial plan, because \
+                         `reload` diffs it against the live rules and would prune every rule \
+                         this module owns as an intentional unload",
+                        mdir.display()
+                    )
+                })?;
             }
         }
     }
-    Ok((plan, skipped))
+    Ok((plan, skipped, refused))
 }
 
 /// Print the resolved plan without applying it: target, kind, source, module
 pub fn run_plan() -> Result<()> {
-    let (plan, skipped) = collect_plan()?;
+    let (plan, skipped, refused) = collect_plan()?;
     let (plan, _) = dedupe_by_target(plan);
     for e in &plan {
         let k = match e.kind {
@@ -618,6 +693,14 @@ pub fn run_plan() -> Result<()> {
         };
         println!("{k:8} {} <- {} [{}]{note}", e.target.display(), e.source.display(), e.module);
     }
+    for r in &refused {
+        println!(
+            "REFUSED  {} <- (nothing) [{}]  << {}",
+            r.target.display(),
+            r.module,
+            r.why
+        );
+    }
     let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
     let dead = plan.iter().filter(|e| !source_resolves(e)).count();
     let declined = plan.iter()
@@ -626,6 +709,9 @@ pub fn run_plan() -> Result<()> {
     let mut extra = String::new();
     if dead > 0 { extra.push_str(&format!(", {dead} unservable")); }
     if declined > 0 { extra.push_str(&format!(", {declined} whiteout(s) leaving a measurable hole")); }
+    if !refused.is_empty() {
+        extra.push_str(&format!(", {} refused", refused.len()));
+    }
     println!("({} entries: {} binds, {skipped} blocklisted{extra})", plan.len(), binds);
     Ok(())
 }
@@ -676,7 +762,7 @@ pub fn run_reload() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding - is the CONFIG_NOMOUNT kernel loaded?")?;
 
-    let (plan, skipped) = collect_plan()?;
+    let (plan, skipped, _refused) = collect_plan()?;
     let (plan, collisions) = dedupe_by_target(plan);
     for c in &collisions {
         eprintln!(
@@ -748,10 +834,13 @@ pub fn run_reload() -> Result<()> {
             failed += 1;
             continue;
         }
+        // NO del-then-add. The engine replaces a rule at the same (vpath, uid) atomically
+        // under nomount_write_mutex, inheriting SHADOWS_STOCK and v_cap from the victim. The
+        // del only opened a window: if the add then failed (netlink timeout, ENOMEM, a batch
+        // refusal) the target was left with NO rule at all, silently reverted to the stock
+        // file, and the prune loop could not restore it because the plan still wanted it -
+        // while the pass printed "(gap-free)".
         let existed = live.contains_key(&(t.to_path_buf(), 0));
-        if existed {
-            let _ = nm.del(&e.target);
-        }
         let r = match e.kind {
             PlanKind::Inject => nm.add(&e.target, &e.source),
             PlanKind::Whiteout => {
@@ -912,7 +1001,7 @@ pub fn run_mount() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding - is the CONFIG_NOMOUNT kernel loaded?")?;
 
-    let (plan, skipped) = collect_plan()?;
+    let (plan, skipped, _refused) = collect_plan()?;
 
     let (plan, collisions) = dedupe_by_target(plan);
     for c in &collisions {
@@ -1227,6 +1316,33 @@ mod tests {
     }
 
     /// The manager card must consult the verdict, not just log it
+    /// Both CI jobs must pin the SAME rustc. The test job proves the tree is green and the
+    /// cross job builds the binary that ships; if those pins drift, the shipped binary was
+    /// built by a compiler no test ever ran under.
+    #[test]
+    fn the_two_ci_toolchain_pins_agree() {
+        const BUILD_YAML: &str = include_str!("../.github/workflows/build.yaml");
+        let pins: Vec<&str> = BUILD_YAML
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("toolchain:"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            pins.len(),
+            2,
+            "expected exactly two pinned `toolchain:` values (host test job, cross build job),              got {pins:?} - a job added or removed without pinning floats on whatever stable              was released that morning"
+        );
+        assert_eq!(
+            pins[0], pins[1],
+            "the two CI jobs pin different rustc versions ({pins:?}) - the binary that ships              would be built by a compiler the tests never ran under"
+        );
+        assert!(
+            pins[0].chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "the pin must be an exact version, not a floating channel like `stable`: {:?}",
+            pins[0]
+        );
+    }
+
     #[test]
     fn the_manager_card_consults_the_check_verdict() {
         let uses: Vec<&str> = SERVICE
@@ -1241,6 +1357,78 @@ mod tests {
             SERVICE.contains("_sum_get unmeasured"),
             "the card must read the plan's unmeasured count"
         );
+    }
+
+    const PAGE: &str = include_str!("../module/webroot/index.html");
+    const HARNESS_SRC: &str = include_str!("../scripts/webui-harness.py");
+
+    /// The WebUI matches on literal text the Rust prints. A prose pass that rewords one end
+    /// silently breaks the other -- no test fails, no error appears, the reader just gets the
+    /// wrong answer forever. `eae5476` did exactly that to three strings; two of them
+    /// (`would DROP`/`would SKIP`) sat dead for a release. Read BOTH ends here.
+    #[test]
+    fn the_webui_matches_the_strings_absorb_actually_prints() {
+        const ABSORB: &str = include_str!("absorb.rs");
+        // (the page's regex literal, the format string absorb.rs emits)
+        for (matcher, producer) in [
+            (r#"[/^would skip directory bind /"#, r#""would skip directory bind {} <- {}"#),
+            (r#"[/^would drop redundant mount /"#, r#""would drop redundant mount {} <- {}"#),
+            (r#"[/^would absorb /"#, r#""would absorb {} <- {}""#),
+            (r#"[/^would empty /"#, r#""would empty {} mountlessly"#),
+            (r#"[/^redundant /"#, r#""redundant {} <- {}"#),
+            (r#"[/^nomount: LEAK /"#, r#""nomount: LEAK "#),
+        ] {
+            assert!(
+                PAGE.contains(matcher),
+                "index.html no longer carries the matcher {matcher} - if absorb's wording moved, \
+                 move the matcher with it rather than deleting this row"
+            );
+            assert!(
+                ABSORB.contains(producer),
+                "absorb.rs no longer prints {producer}, but index.html still matches on it: \
+                 the Absorb scan card will render that line untagged"
+            );
+        }
+    }
+
+    /// `ksud feature list` prints `[ENABLED (1)] su_compat`. `grep` is case-sensitive, so
+    /// lowercasing this one word made the Status card report a sucompat device's su as
+    /// `external` - measured on an OP15, and visible in a user screenshot for a full release.
+    #[test]
+    fn the_sucompat_probe_greps_for_the_case_ksud_actually_prints() {
+        assert!(
+            PAGE.contains("grep su_compat | grep -q ENABLED"),
+            "index.html's sucompat probe must grep for ENABLED, the spelling ksud emits"
+        );
+        assert!(
+            !PAGE.contains("grep -q enabled"),
+            "a lowercase `enabled` grep never matches ksud's output"
+        );
+    }
+
+    /// The harness replays the page. Where it runs a DIFFERENT command than the page does,
+    /// it is testing something the user never sees -- which is how `ksud=` went missing from
+    /// the harness for three commits while `refreshStealth` branched on it first.
+    #[test]
+    fn the_harness_runs_the_same_probes_the_page_does() {
+        // Each fragment must appear on both sides, byte for byte.
+        // Raw strings: both files escape the inner quotes for their own host language, and
+        // the escape is part of the bytes that have to match.
+        for frag in [
+            r#"grep su_compat "#,
+            r#"| grep -q ENABLED && echo 1 || echo 0)"; "#,
+            r#"echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; "#,
+            r#"echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; "#,
+            r#"echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; "#,
+            r#"echo "se=$(getenforce 2>/dev/null)""#,
+        ] {
+            assert!(PAGE.contains(frag), "index.html's stealth probe lost: {frag:?}");
+            assert!(
+                HARNESS_SRC.contains(frag),
+                "webui-harness.py's `stealth` command lost {frag:?}, so the harness feeds the \
+                 page a fixture the page's own command would never have produced"
+            );
+        }
     }
 
     fn entry(module: &str, target: &str, source: &str) -> PlanEntry {
@@ -1507,6 +1695,14 @@ mod tests {
             "/data/media/0/Download/x.apk",
             "/data/data/com.evil/files/payload",
             "/data/app/~~AA==/com.evil-BB==/base.apk",
+            // The same shared volume under its other names. None of these begin
+            // with /data/, so all four were accepted before.
+            "/storage/emulated/0/Download/x.apk",
+            "/sdcard/Download/x.apk",
+            "/mnt/media_rw/1234-5678/x.apk",
+            "/mnt/expand/abcd/x.apk",
+            "/mnt/user/0/emulated/0/x.apk",
+            "/mnt/runtime/write/emulated/0/x.apk",
         ] {
             assert!(resolved_source_is_untrusted(Path::new(bad)), "must refuse: {bad}");
         }
@@ -1517,6 +1713,10 @@ mod tests {
             "/system/etc/x",
             "/my_product/app/Foo/Foo.apk",
             "/database/x",
+            // Not shared storage despite the prefix overlap - `starts_with` on Path
+            // matches whole components, so these must still be accepted.
+            "/storageroom/x",
+            "/data/adb/modules/M/system/etc/x",
         ] {
             assert!(!resolved_source_is_untrusted(Path::new(ok)), "must accept: {ok}");
         }

@@ -166,10 +166,22 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
                     }
                     for (pkg, uid) in hits {
                         if uid < blocklist::FIRST_APP_APPID {
-                            eprintln!(
-                                "nomount: {e} matches {pkg} (appid {uid}, below the app range) - \
-                                 not hiding from it; add it explicitly with `uid block --force`"
-                            );
+                            // service.sh and uidwatch.sh capture this with 2>&1 and hand it
+                            // to nmlog, which writes to /dev/kmsg. The export code withholds
+                            // dmesg precisely because it can name a hidden app, so honour the
+                            // same flag rather than putting fresh names into the ring.
+                            if blocklist::redact_hide_list() {
+                                eprintln!(
+                                    "nomount: a hide-list glob matches a package whose appid \
+                                     {uid} is below the app range - not hiding from it"
+                                );
+                            } else {
+                                eprintln!(
+                                    "nomount: {e} matches {pkg} (appid {uid}, below the app \
+                                     range) - not hiding from it; add it explicitly with \
+                                     `uid block --force`"
+                                );
+                            }
                             rep.skipped += 1;
                             continue;
                         }
@@ -177,7 +189,11 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
                     }
                 }
                 Err(err) => {
-                    eprintln!("nomount: skipping hide-list glob {e:?}: {err:#}");
+                    if blocklist::redact_hide_list() {
+                        eprintln!("nomount: skipping an invalid hide-list glob: {err:#}");
+                    } else {
+                        eprintln!("nomount: skipping hide-list glob {e:?}: {err:#}");
+                    }
                     rep.skipped += 1;
                 }
             }
@@ -195,7 +211,11 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             }
             Ok(Resolved::NotInstalled) => rep.not_installed += 1,
             Err(err) => {
-                eprintln!("nomount: skipping hide-list entry {e:?}: {err:#}");
+                if blocklist::redact_hide_list() {
+                    eprintln!("nomount: skipping an unresolvable hide-list entry: {err:#}");
+                } else {
+                    eprintln!("nomount: skipping hide-list entry {e:?}: {err:#}");
+                }
                 rep.skipped += 1;
             }
         }
@@ -252,7 +272,20 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
                 rep.failed += 1;
             }
         }
-        blocklist::cache_replace(&desired);
+        // Only when every retire actually landed. `cache_replace` is what makes the mirror
+        // authoritative for the next pass, so writing it after a failed `uid_unblock` orphans
+        // that appid: still hidden by the kernel, named by neither `uidhide` nor the cache, so
+        // no later `uid apply` and no boot pass will ever try again. The non-glob
+        // `uid unblock` path guards exactly this hazard and says so; this one is the path
+        // `vfs clear`, `uid preset`, `uid apply` and uidwatch.sh all go through.
+        if rep.failed == 0 {
+            blocklist::cache_replace(&desired);
+        } else {
+            eprintln!(
+                "nomount: {} hide-list entr(ies) could not be applied, so the resolved-appid                  mirror is left as it was - rewriting it now would lose the record of an appid                  the kernel is still hiding",
+                rep.failed
+            );
+        }
     }
 
     rep
@@ -317,6 +350,17 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 }
                 let installed = blocklist::installed_packages().unwrap_or_default();
                 let hits = blocklist::expand(&target, &installed)?;
+                // The literal-length guard in `Pattern::parse` counts CHARACTERS, which is
+                // not the breadth its own message promises ("a broader glob would hide
+                // injections from most of the device"): `org.*` is four characters and can
+                // match a third of the device. Bound what it actually claims to bound.
+                const GLOB_HIT_CEILING: usize = 24;
+                if hits.len() > GLOB_HIT_CEILING && !force {
+                    bail!(
+                        "{target} matches {} installed package(s). A glob this broad hides                          your module content from all of them, RRO overlays included, and is                          almost always a typo. Narrow it, or pass --force if you mean it.",
+                        hits.len()
+                    );
+                }
                 if let Some((pkg, uid)) = hits.iter().find(|(_, u)| *u < blocklist::FIRST_APP_APPID)
                 {
                     bail!(

@@ -21,7 +21,7 @@ impl Section {
 }
 
 /// The single verdict
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verdict {
     Fail,
     Reboot,
@@ -216,6 +216,11 @@ fn num_or_null(n: Option<usize>) -> J {
 /// Everything one run of `nomount check` produced
 pub struct Report {
     pub ts: i64,
+    /// Which sections were actually RUN, recorded rather than inferred from the findings.
+    /// `plan_checks` emits a finding only when it has one, so a device with a perfectly
+    /// clean module set produced zero plan checks - and `ran(Plan)`, which asked "is there
+    /// a plan check", then said the plan half had been skipped.
+    pub sections: Vec<Section>,
     pub engine: Option<u32>,
     /// Live rules, and the directories holding them
     pub rules: Option<usize>,
@@ -295,13 +300,7 @@ impl Report {
             ("directories", num_or_null(self.directories)),
             (
                 "sections",
-                J::Arr(
-                    [Section::Plan, Section::Device]
-                        .into_iter()
-                        .filter(|x| self.ran(*x))
-                        .map(|x| J::s(x.slug()))
-                        .collect(),
-                ),
+                J::Arr(self.sections.iter().map(|x| J::s(x.slug())).collect()),
             ),
             ("verdict", J::s(self.verdict())),
             ("summary", self.tally().json()),
@@ -321,7 +320,7 @@ impl Report {
 
     /// Did this run include the given section?
     pub fn ran(&self, section: Section) -> bool {
-        self.checks.iter().any(|c| c.section == section)
+        self.sections.contains(&section)
     }
 
     /// The human report
@@ -426,7 +425,14 @@ pub fn build(plan: bool, device: bool) -> Result<Report> {
         }
     }
 
-    let mut r = Report { ts: now_secs(), engine, rules, directories, facts, checks };
+    let mut sections = Vec::new();
+    if plan {
+        sections.push(Section::Plan);
+    }
+    if device {
+        sections.push(Section::Device);
+    }
+    let mut r = Report { ts: now_secs(), sections, engine, rules, directories, facts, checks };
     r.sort();
     Ok(r)
 }
@@ -471,6 +477,7 @@ mod tests {
     fn the_verdict_line_ranks_and_names_what_it_counts() {
         let r = |v: Vec<Check>| Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: None,
             rules: None,
             directories: None,
@@ -509,6 +516,7 @@ mod tests {
     fn a_dead_engine_sorts_above_every_other_failure() {
         let mut r = Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: None,
             rules: None,
             directories: None,
@@ -532,6 +540,7 @@ mod tests {
     fn a_run_with_nothing_open_but_something_unmeasured_is_not_clean() {
         let r = Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: Some(18),
             rules: Some(3),
             directories: Some(1),
@@ -549,6 +558,7 @@ mod tests {
         assert_eq!(Verdict::Warn.severity(), "attention");
         let r = |v: Vec<Check>| Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: None,
             rules: None,
             directories: None,
@@ -566,6 +576,7 @@ mod tests {
     fn an_unread_rule_list_prints_as_unread_not_as_zero() {
         let r = Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: Some(30),
             rules: None,
             directories: None,
@@ -580,6 +591,7 @@ mod tests {
 
         let ok = Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: Some(30),
             rules: Some(3),
             directories: Some(1),
@@ -599,11 +611,46 @@ mod tests {
         assert_eq!(slug("///"), "unnamed-check");
     }
 
+    /// A section that produced no findings is not a section that did not run. `sections`
+    /// used to be inferred from the checks, so a perfectly clean plan half looked identical
+    /// to a skipped one - and the WebUI, which reads that field to decide whether to trust
+    /// the plan, told the user coverage was unchecked on exactly the device that was fully
+    /// covered.
+    #[test]
+    fn a_section_that_found_nothing_still_reports_as_having_run() {
+        let clean_plan = Report {
+            ts: 0,
+            sections: vec![Section::Plan, Section::Device],
+            engine: Some(32),
+            rules: Some(3),
+            directories: Some(1),
+            facts: Vec::new(),
+            // not one Plan check: the plan half emits a finding only when it has one
+            checks: vec![c("a", Verdict::Pass)],
+        };
+        assert!(clean_plan.ran(Section::Plan), "it ran; it just had nothing to say");
+        assert!(clean_plan.ran(Section::Device));
+        assert!(clean_plan.json().contains(r#""sections":["plan","device"]"#), "{}", clean_plan.json());
+
+        let device_only = Report {
+            ts: 0,
+            sections: vec![Section::Device],
+            engine: Some(32),
+            rules: Some(3),
+            directories: Some(1),
+            facts: Vec::new(),
+            checks: vec![c("a", Verdict::Pass)],
+        };
+        assert!(!device_only.ran(Section::Plan), "this one really was skipped");
+        assert!(device_only.json().contains(r#""sections":["device"]"#), "{}", device_only.json());
+    }
+
     /// health.txt has exactly one renderer now
     #[test]
     fn the_fingerprint_renders_as_key_equals_value() {
         let r = Report {
             ts: 7,
+            sections: vec![Section::Device],
             engine: Some(18),
             rules: None,
             directories: None,

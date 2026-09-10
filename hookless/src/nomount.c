@@ -389,7 +389,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     inode = new_inode(virtual_sb);
     if (unlikely(!inode)) return NULL;
 
-    info = kmem_cache_alloc(nm_inode_cachep, GFP_KERNEL);
+    info = kmem_cache_alloc(nm_inode_cachep, GFP_KERNEL | __GFP_ZERO);
     if (unlikely(!info)) {
         iput(inode);
         return NULL;
@@ -701,13 +701,12 @@ static int nm_open(struct inode *inode, struct file *file)
 
     if (unlikely(!info)) return -ENODEV;
     if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
-    if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
-        file->private_data = NULL;
-        return 0;
-    }
-    if (unlikely(!info->r_path.dentry)) return -ENODEV;
-
     {
+        /* BEFORE the VIRTUAL_DIR arm. NM_FLAG_VIRTUAL_DIR is in NM_FLAGS_USER_MASK, so
+         * userspace can set it on a path that exists in stock - and returning the empty
+         * virtual listing there while nm_file_getattr_common() answers from the stock inode
+         * gives an empty directory with nlink > 2, which no real directory has.
+         */
         struct path *stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
             real_file = dentry_open(stock, file->f_flags, current_cred());
@@ -717,6 +716,11 @@ static int nm_open(struct inode *inode, struct file *file)
             return 0;
         }
     }
+    if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
+        file->private_data = NULL;
+        return 0;
+    }
+    if (unlikely(!info->r_path.dentry)) return -ENODEV;
 
     real_file = dentry_open(&info->r_path, file->f_flags, current_cred());
     if (IS_ERR(real_file)) {
@@ -972,14 +976,11 @@ static void nm_mirror_blocks(const struct nm_inode_info *info, struct kstat *sta
     stat->blocks = (blkcnt_t)(want >> 9);
 }
 
-static int nm_readlink(struct dentry *dentry, char __user *buf, int buflen)
-{
-    struct inode *inode = d_backing_inode(dentry);
-
-    if (inode && unlikely(nm_hidden_from_caller(inode->i_private)))
-        return -ENOENT;
-    return -EINVAL;
-}
+/* No ->readlink. vfs_readlink() short-circuits on it and never consults ->get_link, so
+ * installing one meant an injected symlink could only ever answer -ENOENT or -EINVAL:
+ * readlink(2) was broken and `ls -l` printed "Invalid argument" for the entry. The generic
+ * path calls ->get_link, which serves the real target; the hidden-caller test lives there.
+ */
 
 static int nomount_hijacked_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
@@ -1509,12 +1510,24 @@ static int nm_path_stat(const struct path *p, struct kstat *st)
 #endif
 }
 
+/* A whiteout only removes bytes from the parent if the parent REALLY had that entry.
+ * Without the SHADOWS_STOCK test a whiteout created for a path kern_path() could not
+ * resolve still shrank st_size, so the parent's size no longer matched its own listing -
+ * the exact arithmetic tell the size fix-up exists to remove.
+ */
 static s32 nm_child_size_contrib(const struct nomount_child_node *child)
 {
     s32 bytes = (s32)(NM_EROFS_DIRENT_SZ + child->name_len);
 
-    if (child->flags & NM_FLAG_WHITEOUT)
+    if (child->flags & NM_FLAG_WHITEOUT) {
+        /* Only if the ROM really had this entry. A whiteout on a path kern_path() could not
+         * resolve removes nothing, so subtracting here made st_size disagree with the
+         * listing a reader can enumerate.
+         */
+        if (!(child->flags & NM_FLAG_SHADOWS_STOCK))
+            return 0;
         return -bytes;
+    }
     if (child->flags & NM_FLAG_SHADOWS_STOCK)
         return 0;
     return bytes;
@@ -1757,8 +1770,29 @@ static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struc
     struct nm_inode_info *info = inode->i_private;
     struct inode *real_inode;
     struct dentry *target_dentry;
+    struct path *stock;
     if (unlikely(!info || !info->r_path.dentry))
         return ERR_PTR(dentry ? -EIO : -ECHILD);
+
+    /* This was the only inode op with no per-UID test. The VFS does not call ->permission
+     * on a symlink during pick_link and nm_d_revalidate deliberately keeps a hidden
+     * caller's cached dentry valid, so without this a blocked uid got ENOENT from lstat()
+     * and readlink() while stat() and open() SUCCEEDED through the link. Nothing on a real
+     * filesystem answers both ways about one path.
+     */
+    if (unlikely(nm_hidden_from_caller(info)))
+        return ERR_PTR(-ENOENT);
+    /* ...and a shadowing rule must hand a hidden caller the STOCK link, exactly as
+     * nm_open()/nm_file_getattr_common() hand it the stock file.
+     */
+    stock = nm_stock_for_caller(info);
+    if (unlikely(stock)) {
+        struct inode *si = d_backing_inode(stock->dentry);
+
+        if (si && si->i_op && si->i_op->get_link)
+            return si->i_op->get_link(dentry ? stock->dentry : NULL, si, done);
+        return ERR_PTR(-EINVAL);
+    }
 
     real_inode = d_backing_inode(info->r_path.dentry);
     target_dentry = dentry ? info->r_path.dentry : NULL;
@@ -1872,6 +1906,49 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     struct dentry *child, *res;
     struct inode *new_inode, *r_child;
     u32 gen = (u32)atomic_read(&nm_rule_gen);
+
+    /* A hidden caller is READING THE STOCK DIRECTORY: nm_open() redirects it to s_path and
+     * nm_dir_iterate_dir() then iterates that, so its listing is the stock one. Looking its
+     * children up under the MODULE tree therefore produced a directory that lists a name it
+     * cannot open - a stock-only child came back negative and was d_add(NULL)'d - which is a
+     * hard oracle: no filesystem enumerates a name that then ENOENTs. Look up where the
+     * listing came from.
+     */
+    {
+        struct path *stock = nm_stock_for_caller(info);
+
+        if (unlikely(stock && stock->dentry)) {
+            child = nm_lookup_backing_child(dentry->d_name.name, stock->dentry,
+                                            dentry->d_name.len);
+            if (IS_ERR(child))
+                return ERR_CAST(child);
+            if (d_is_negative(child)) {
+                dput(child);
+                nm_install_dentry_ops(dentry);
+                d_add(dentry, NULL);
+                return NULL;
+            }
+            memset(&ri, 0, sizeof(ri));
+            ri.gen = gen;
+            ri.r_path.mnt = stock->mnt;
+            ri.r_path.dentry = child;
+            path_get(&ri.r_path);
+            r_child = d_backing_inode(child);
+            ri.flags = info->flags & (NM_FLAG_HAVE_TIMES | NM_FLAG_OVL_INO | NM_FLAG_PUBLIC);
+            if (r_child && S_ISDIR(r_child->i_mode))
+                ri.flags |= NM_FLAG_IS_DIR;
+            new_inode = nomount_create_new_inode(dir->i_sb, &ri);
+            nm_put_rule_info(&ri);
+            dput(child);
+            if (!new_inode)
+                return ERR_PTR(-ENOMEM);
+            nm_install_dentry_ops(dentry);
+            res = d_splice_alias(new_inode, dentry);
+            if (!IS_ERR(res) && res)
+                nm_install_dentry_ops(res);
+            return res;
+        }
+    }
 
     child = nm_lookup_backing_child(dentry->d_name.name, info->r_path.dentry,
                                     dentry->d_name.len);
@@ -2068,8 +2145,26 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
         const char *full;
         int r;
 
-        if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
+        if (unlikely(!info)) return -ENODATA;
+        /* Hidden FIRST. Returning -ENODATA to a caller the path is hidden from proves an
+         * xattr-capable object is there, while every sibling op says -ENOENT.
+         */
         if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
+        {
+            struct path *stock = nm_stock_for_caller(info);
+
+            /* ...and a shadowing rule must write where its own getxattr reads, or a hidden
+             * caller's set-then-get returns the value it did not write.
+             */
+            if (unlikely(stock)) {
+                full = nm_full_xattr_name(proxy, name, &alloc);
+                r = vfs_setxattr(IDMAP_PATH(info->s_path) stock->dentry, full, buffer, size,
+                                 flags);
+                kfree(alloc);
+                return r;
+            }
+        }
+        if (unlikely(!info->r_path.dentry)) return -ENODATA;
         full = nm_full_xattr_name(proxy, name, &alloc);
         r = vfs_setxattr(IDMAP_CALL info->r_path.dentry, full, buffer, size, flags);
         kfree(alloc);
@@ -2262,7 +2357,6 @@ static const struct inode_operations nm_file_iops = {
     .setattr = nm_setattr,
     .listxattr = nm_listxattr,
     .get_link = nm_get_link,
-    .readlink = nm_readlink,
     .fiemap = nm_fiemap,
 };
 
@@ -2285,7 +2379,6 @@ static const struct inode_operations nm_dir_iops = {
     .getattr = nm_file_getattr,
     .setattr = nm_setattr,
     .listxattr = nm_listxattr,
-    .readlink = nm_readlink,
 };
 
 static const struct dentry_operations nm_dops = {
@@ -2322,6 +2415,26 @@ static inline int nomount_hijack_superblock(struct super_block *sb)
     int i, count = 0;
     if (unlikely(!sb || !sb->s_op)) return 0;
     if (__get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode)) return 0;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0)
+    /* Before 5.2 the VFS's destroy_inode() is
+     *     if (ops->destroy_inode) ops->destroy_inode(inode);
+     *     else                    call_rcu(&inode->i_rcu, i_callback);
+     * and `i_callback`/`inode_cachep` are private to fs/inode.c. Installing our hook on a
+     * superblock whose fs defines no ->destroy_inode therefore suppresses the only path that
+     * frees the inode - and we cannot stand in for it - so every inode of that superblock
+     * leaks. There is no ->free_inode to fall back on either; that arrives in 5.2, and the
+     * block below handles it.
+     *
+     * Every fs a ROM actually uses (ext4, f2fs, erofs, squashfs) defines ->destroy_inode, so
+     * this has never been observed. Decline the superblock rather than leak on the one that
+     * does not: a rule that does not take is recoverable, an unbounded inode leak is not.
+     */
+    if (!sb->s_op->destroy_inode) {
+        nm_warn("not hijacking a superblock whose fs has no destroy_inode (pre-5.2): our hook would suppress the VFS's own free path\n");
+        return -EOPNOTSUPP;
+    }
+#endif
 
     nm_sop = kzalloc(sizeof(*nm_sop), GFP_KERNEL);
     if (unlikely(!nm_sop)) return -ENOMEM;
@@ -2656,12 +2769,28 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
     }
 }
 
+/* How many NAMES one scan buffers. Sized against a kzalloc of
+ * NM_INO_SAMPLES * (NAME_MAX + 1) = 16 KB, so this one cannot grow much.
+ */
 #define NM_INO_SAMPLES 64
+/* How many stock inode numbers the placer remembers for a directory.
+ *
+ * This is the set `nm_ino_taken()` checks a candidate against, so anything past it can be
+ * handed out again: at 64 a directory with more entries than that - /system/app and
+ * /system/priv-app on any stock ROM - could be given a v_ino a real sibling already owns,
+ * and two paths sharing (st_dev, st_ino) with st_nlink == 1 is something no filesystem
+ * does. It costs 8 bytes per slot in each of the NM_RANGE_SLOTS cached populations (static
+ * storage, not stack), so 256 buys 4x the coverage for ~12 KB.
+ *
+ * Not a proof: a directory with more than NM_INO_POP_SAMPLES entries can still collide.
+ * `check_dir_ino_collision` in the Suite measures that on the live device and reports it.
+ */
+#define NM_INO_POP_SAMPLES 256
 #define NM_INO_MINE    256
 #define NM_RANGE_SLOTS 8
 
 struct nm_ino_pop {
-    u64 v[NM_INO_SAMPLES];
+    u64 v[NM_INO_POP_SAMPLES];
     int n;
     u64 mine[NM_INO_MINE];
     int nmine;
@@ -2699,7 +2828,7 @@ static void nm_pop_insert(struct nm_ino_pop *pop, u64 ino)
 {
     int j = pop->n;
 
-    if (!ino || pop->n >= NM_INO_SAMPLES)
+    if (!ino || pop->n >= NM_INO_POP_SAMPLES)
         return;
     while (j > 0 && pop->v[j - 1] > ino) {
         pop->v[j] = pop->v[j - 1];
@@ -4095,17 +4224,19 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     err = nomount_generate_virtual_topology(rule);
     if (err != 0) {
+        /* PUT THE VICTIM BACK. The replacement never took, so tearing down the rule that was
+         * serving this path a moment ago leaves it with no rule at all - the stock file, or
+         * nothing, silently exposed on a transient -ENOMEM or -ENOTDIR, with only an nm_err
+         * line to say so. `nm sync` re-pushing a batch is enough to hit it.
+         *
+         * Only `hash_del_rcu` was done above; the victim's child node and its parent dir are
+         * untouched, so re-inserting the hash node restores it whole.
+         */
         if (victim)
-            __nomount_delete_child_locked(victim->parent_dir, victim);
-        if (victim && victims)
-            hlist_add_head(&victim->victim_node, victims);
+            hash_add_rcu(nomount_rules_ht, &victim->vpath_node, victim->v_hash);
         nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len, NULL);
         mutex_unlock(&nomount_write_mutex);
         nm_free_rule(rule);
-        if (victim && !victims) {
-            synchronize_rcu();
-            nm_free_rule(victim);
-        }
         return err;
     }
 

@@ -26,9 +26,14 @@ _health_get() {
     sed -n "s/^$1=//p" "$NMDIR/health.txt" 2>/dev/null
 }
 
+# 15 minutes, not 4. A first boot after an OTA, or after flashing a large module set,
+# routinely needs longer than 240s to reach sys.boot_completed while dexopt runs - and every
+# boot that timed out left `bootcount` incremented, so three slow-but-successful boots in a
+# row tripped a guard that exists for bootloops. The loop still exits the moment the prop
+# flips, so a healthy device pays nothing for the larger budget.
 i=0
 booted=0
-while [ "$i" -lt 120 ]; do
+while [ "$i" -lt 450 ]; do
     if [ "$(getprop sys.boot_completed)" = "1" ]; then booted=1; break; fi
     sleep 2
     i=$((i + 1))
@@ -104,7 +109,12 @@ unset _bh_dir _bh_ovr _bh_rc
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     _rl_all=$(nmto 60 "$BIN" reload 2>&1)
     _rl_rc=$?
-    _rl=$(printf '%s\n' "$_rl_all" | tail -1)
+    # The summary is the FIRST line: mount.rs prints it, then an optional REBOOT REQUIRED
+    # block, then ghost::sync_after_pass's own line. `tail -1` therefore logged the ghost
+    # line - the one line a bug report is read for, replaced by a different one. Same shape
+    # as lib.sh's `grep -m1 '^nomount(suite):'` for the mount pass.
+    _rl=$(printf '%s\n' "$_rl_all" | grep -m1 '^nomount reload:')
+    [ -n "$_rl" ] || _rl=$(printf '%s\n' "$_rl_all" | tail -1)
     if [ "$_rl_rc" -eq 124 ]; then
         nmlog "post-boot reload timed out after 60s - late module content may be unserved"
     elif [ "$_rl_rc" -ne 0 ]; then
@@ -128,6 +138,9 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     fi
     (
         sleep 45
+        # Re-check: the user can hit Disable in the WebUI during this window, and the Suite
+        # should not perform one more reload+absorb after being told to stop.
+        [ -e "$NMDIR/disabled" ] && exit 0
         _rl2_all=$(nmto 60 "$BIN" reload 2>&1)
         _rl2_rc=$?
         if [ "$_rl2_rc" -eq 124 ]; then
@@ -170,7 +183,11 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts
     unset _wo_all _wo_rc _wo_last
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
+# _has_entries, not `[ -s ]`, matching uidwatch.sh and the whiteouts test above.
+# `-s` is true for a uidhide holding nothing but comments or blank lines, so this ran a
+# 60s `uid apply` for an empty hide list and logged "hide list re-applied" - while
+# uidwatch.sh, testing the same file correctly, skipped it. One file, two answers.
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/uidhide"; then
     _bl=$(nmto 60 "$BIN" uid apply 2>&1)
     _bl_rc=$?
     if [ "$_bl_rc" -eq 0 ]; then
@@ -293,8 +310,21 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         _health="health unknown - plan check did not finish"
     fi
     _fgn=$(_health_get mounts_foreign)
-    case "$_fgn" in ''|*[!0-9]*) _fgn=$_mnt ;; esac
-    if [ "${_fgn:-0}" -gt 0 ]; then
+    case "$_fgn" in
+        ''|*[!0-9]*)
+            # No fresh health record: `mounts_foreign` is total-minus-by-design, and $_mnt is
+            # the TOTAL. Substituting one for the other reported our own my_* binds as
+            # foreign on precisely the boot the check failed to land. Say unmeasured instead.
+            _fgn=""
+            ;;
+    esac
+    if [ -z "$_fgn" ]; then
+        if [ "${_mnt:-0}" -gt 0 ]; then
+            _mstate="$_mnt mount(s), origin unmeasured"
+        else
+            _mstate="0 mounts"
+        fi
+    elif [ "$_fgn" -gt 0 ]; then
         _mstate="⚠ $_fgn foreign mount(s)"
     elif [ "${_mnt:-0}" -gt 0 ]; then
         _mstate="$_mnt mount by design"

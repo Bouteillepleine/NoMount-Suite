@@ -1293,8 +1293,12 @@
         : "nothing to inject - no module provides files";
       dot.className = "dot ok";
     } else if (ships > 0) {
-      $("substate").textContent = "no rules - re-apply";
-      dot.className = "dot ok";
+      // The plan ships files and the engine holds nothing: measured, and NOT healthy. This
+      // painted green while the `ships === -1` case below - where the plan could not even be
+      // read - correctly painted amber, i.e. a known-bad device looked better than an
+      // unknown one. Reachable from this page's own Clear rules button.
+      $("substate").textContent = "no rules - " + ships + " planned file(s) unserved, re-apply";
+      dot.className = "dot warn";
     } else {
       $("substate").textContent = "no rules";
       dot.className = "dot warn";
@@ -1316,7 +1320,7 @@
     if (STEALTH_PROBE) return STEALTH_PROBE;
     STEALTH_PROBE = (async function () {
       const r = await exec(
-        'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q enabled && echo 1 || echo 0)"; ' +
+        'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
         'echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; ' +
         'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
         'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
@@ -1356,7 +1360,11 @@
       const v = c.evidence.match(/(\d+)\s+module mount\(s\) visible/);
       return v ? parseInt(v[1], 10) : 0;
     })();
-    const ourBindsWarn = ourBinds > 0 && mrows[0].verdict === "warn";
+    // `zero-mount posture` is emitted as pass/note/fail/unmeasured and NEVER as "warn" -
+    // pinned by audit.rs's own test - so keying on "warn" made this permanently false and
+    // the "Our own my_* binds are visible" arm below unreachable. Ask the question the arm
+    // is actually about: is the Suite's own bind visible to an app?
+    const ourBindsWarn = ourBinds > 0 && appNm > 0;
     const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
     const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
     const fmnt = measured ? bad.length : -1;
@@ -1611,6 +1619,14 @@
   }
 
   let CHECK = null;
+
+  // Every spelling of a hidden appid that any producer emits. Keep in step with
+  // `hidden_uid_label` in src/audit.rs AND src/doctor.rs.
+  function redactUids(s) {
+    return String(s == null ? "" : s)
+      .replace(/uid \d+ \(hidden\)/g, "uid <redacted> (hidden)")
+      .replace(/hidden uid \d+/g, "hidden uid <redacted>");
+  }
 
   function parseJson(r) {
     const raw = (r.stdout || "").trim();
@@ -1892,7 +1908,11 @@
       if (!isShown(c.verdict)) return;
       lines.push("[" + String(c.verdict).toUpperCase() + "] " + c.name + " (" + c.section + ")");
       if (c.owner) lines.push("  from: " + c.owner);
-      lines.push("  measured: " + String(c.evidence).replace(/uid \d+ \(hidden\)/g, "uid <redacted> (hidden)"));
+      // BOTH label formats: audit.rs writes "uid N (hidden)", doctor.rs writes
+      // "hidden uid N". `runCheck` does not set NM_REDACT_HIDE_LIST, so the real appid is in
+      // the JSON and this is the only thing standing between it and a pasted bug report.
+      lines.push("  measured: " + redactUids(c.evidence));
+      if (c.meaning) lines.push("  means: " + redactUids(c.meaning));
       lines.push("");
     });
     const text = lines.join("\n");
@@ -2274,13 +2294,18 @@
   function paintModuleMetric() {
     if (MOD_SERVED < 0) return;
     // "0 unserved" is the strongest claim this page makes: the module set is
-    // fully covered. It is only the plan section's to make. With no cached
-    // report -- absent audit.json, or service.sh deleting it after a check that
-    // timed out or did not finish -- filtering an empty list also yields 0, and
-    // the card asserted full coverage having measured nothing. Same rule as
-    // everywhere else here: unmeasured is not clean. (paintAbsorbChip's `n < 0`
-    // is the same guard.)
-    const measured = ranSection(CHECK, "plan");
+    // fully covered. With no cached report -- absent audit.json, or service.sh
+    // deleting it after a check that timed out or did not finish -- filtering an
+    // empty list also yields 0, and the card asserted full coverage having
+    // measured nothing. Unmeasured is not clean.
+    //
+    // The question is "is there a report", NOT `ranSection(CHECK,"plan")`: the
+    // plan half emits a finding only when it HAS one, so a device whose module
+    // set is perfectly clean produces zero plan checks and `sections` omits
+    // "plan" entirely. Keying on that rendered "coverage unchecked" on exactly
+    // the fully-covered device the metric exists to praise -- the inverse of
+    // this bug. See check.rs's `ran()`, which cannot tell clean from absent.
+    const measured = !!(CHECK && Array.isArray(CHECK.checks));
     const unserved = measured
       ? CHECK.checks.filter(function (c) { return c.name === "module content not served"; }).length
       : -1;
@@ -2318,8 +2343,8 @@
       const KINDS = [
         [/^skipping the tmpfs over /, "off",  "left alone"],
         [/^skipping /,                "off",  "left alone"],
-        [/^would SKIP directory bind /, "off", "needs --include-dirs"],
-        [/^would DROP redundant mount /, "vfs", "already served"],
+        [/^would skip directory bind /, "off", "needs --include-dirs"],
+        [/^would drop redundant mount /, "vfs", "already served"],
         [/^redundant /,               "vfs",  "already served"],
         [/^would absorb /,            "warn", "would absorb"],
         [/^would empty /,             "warn", "would empty"],

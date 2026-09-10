@@ -131,6 +131,14 @@ static int readphdrtable(void)
 
     if (!(phdrs = realloc(phdrs, ehdr.e_phnum * sizeof *phdrs)))
 	return err("Out of memory!");
+    /* Seek first. Without this the table was read from wherever elfrw_read_Ehdr left the
+     * file pointer, which only happens to be right when e_phoff == e_ehsize. Any other
+     * layout produced garbage phdrs, written straight back by commitchanges() - which does
+     * seek - leaving a truncated, unloadable binary and exit 0. (Upstream ELFkickers 3.2
+     * has this line; it was lost when the sources were vendored.)
+     */
+    if (fseek(thefile, ehdr.e_phoff, SEEK_SET))
+	return ferr("could not seek in file.");
     if (elfrw_read_Phdrs(thefile, phdrs, ehdr.e_phnum) != ehdr.e_phnum)
 	return ferr("missing or incomplete program segment header table.");
 

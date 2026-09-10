@@ -67,6 +67,17 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Commands::Unbind => {
+            if bind::teardown_all() {
+                Ok(())
+            } else {
+                // Non-zero, so uninstall.sh can say so rather than wiping binds.list
+                // on top of a bind that is still mounted.
+                anyhow::bail!(
+                    "at least one recorded bind could not be umounted; its row is kept in                      binds.list so a later pass can retry it"
+                )
+            }
+        }
         Commands::Version => {
             println!("nomount v{}", env!("CARGO_PKG_VERSION"));
             Ok(())

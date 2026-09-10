@@ -77,13 +77,58 @@ if [ "${vmin:-0}" -ge 100 ] || [ "${vpat:-0}" -ge 1000 ]; then
     echo "       the largest already published) before bumping further." >&2
     exit 1
 fi
+case "$NEW_VERSION" in
+    *-*)
+        echo "fatal: v${NEW_VERSION} carries a pre-release suffix, and the versionCode formula" >&2
+        echo "       drops it: v${vbase}-<suffix> and v${vbase} both map to the same code." >&2
+        echo "       Managers key the update offer on versionCode alone, so everyone who took" >&2
+        echo "       the pre-release would never be offered the final. Use a distinct patch" >&2
+        echo "       number instead of a suffix." >&2
+        exit 1
+        ;;
+esac
 vcode=$(( ${vmaj:-0} * 100000 + ${vmin:-0} * 1000 + ${vpat:-0} ))
+
+# ...and it must not fall below the published one, nor collide with it across a version
+# change. The width guard above only bounds the fields; the error text has always promised
+# "keep every new code above the largest already published" and nothing enforced it, so a
+# hotfix cut on an older line (v1.3.99 after v1.3.176) would publish a LOWER code and
+# silently stop every device being offered anything. Rebuilding the tree's own already-
+# published version is allowed: packaging is not publishing.
+_published=$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$PROJECT_ROOT/update.json" 2>/dev/null | head -1)
+if [ -n "${_published:-}" ]; then
+    if [ "$vcode" -lt "$_published" ]; then
+        echo "fatal: versionCode ${vcode} for v${NEW_VERSION} is BELOW the published" >&2
+        echo "       ${_published} (see update.json). Root managers key the update offer on" >&2
+        echo "       versionCode alone, so publishing this would read as a downgrade and" >&2
+        echo "       no device would ever be offered it. Cut the version forward instead." >&2
+        exit 1
+    elif [ "$vcode" -eq "$_published" ] && [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
+        echo "fatal: versionCode ${vcode} for v${NEW_VERSION} COLLIDES with the published" >&2
+        echo "       ${_published} (see update.json), and this is a version change, not a" >&2
+        echo "       rebuild. Two different versions sharing one code means the second is" >&2
+        echo "       never offered. Cut the version forward instead." >&2
+        exit 1
+    elif [ "$vcode" -eq "$_published" ]; then
+        # A plain rebuild of the tree's own, already-published version. Packaging is not
+        # publishing, and blocking this would break the ordinary build-and-sideload loop.
+        echo "==> note: rebuilding already-published v${NEW_VERSION} (versionCode ${vcode});"
+        echo "    fine to sideload, but bump the version before cutting a release."
+    fi
+fi
+unset _published
 sed -i "s/^version=.*/version=v${NEW_VERSION}/" "$MODULE_DIR/module.prop"
 sed -i "s/^versionCode=.*/versionCode=${vcode}/" "$MODULE_DIR/module.prop"
 
+grep -q "^version=v${NEW_VERSION}\$" "$MODULE_DIR/module.prop" \
+    || { echo "fatal: could not stamp version= into module.prop" >&2; exit 1; }
+grep -q "^versionCode=${vcode}\$" "$MODULE_DIR/module.prop" \
+    || { echo "fatal: could not stamp versionCode= into module.prop - the release would" >&2
+         echo "       publish, and only release.yml's post-publish read would notice." >&2; exit 1; }
+
 VERSION="v${NEW_VERSION}"
 
-BUILD_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --short head 2>/dev/null || echo unknown)"
+BUILD_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 _dirt="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
           | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$' || true)"
 if [ -n "$_dirt" ]; then
@@ -114,7 +159,25 @@ build_nm() {
         return 1
     fi
     make -s -C "$PROJECT_ROOT/userspace/tools/sstrip" >/dev/null 2>&1 || true
-    "$PROJECT_ROOT/userspace/tools/sstrip/sstrip" -z "$PROJECT_ROOT/nm-arm64" >/dev/null 2>&1 || true
+    # NOT `|| true`. commitchanges() rewrites the header before it can fail, so a failed
+    # strip leaves a corrupt file behind - and the staleness gate below only compares mtimes,
+    # which a corrupt file passes. Skip the strip if the tool is missing; fail if it errors.
+    if [ -x "$PROJECT_ROOT/userspace/tools/sstrip/sstrip" ]; then
+        if ! "$PROJECT_ROOT/userspace/tools/sstrip/sstrip" -z "$PROJECT_ROOT/nm-arm64" >/dev/null 2>&1; then
+            echo "fatal: sstrip failed on nm-arm64; it rewrites the ELF header before it can" >&2
+            echo "       fail, so the file is now suspect. Not packaging it." >&2
+            rm -f "$PROJECT_ROOT/nm-arm64"
+            return 2
+        fi
+    else
+        echo "==> nm: sstrip not built; shipping the unstripped binary" >&2
+    fi
+    # ...and prove what came out is still a loadable ELF, which no check did before.
+    if ! head -c 4 "$PROJECT_ROOT/nm-arm64" | grep -q 'ELF'; then
+        echo "fatal: nm-arm64 is not an ELF after stripping." >&2
+        rm -f "$PROJECT_ROOT/nm-arm64"
+        return 2
+    fi
     local profile
     for profile in debug release; do
         install -Dm755 "$PROJECT_ROOT/nm-arm64" \
@@ -200,7 +263,10 @@ verify_binary_version() {
             *) echo "       binary reports: $got" >&2; return 1 ;;
         esac
     fi
-    if grep -qaF -- "$want" "$bin"; then
+    # Anchored: the character after the version must not be another digit, or "1.3.17"
+    # matches inside a binary built at "1.3.176" and repackaging an old label over a newer
+    # binary passes the guard whose whole job is to stop that.
+    if grep -qaE -- "nomount v${want//./\.}([^0-9]|\$)" "$bin"; then
         return 0
     fi
     local seen
@@ -408,7 +474,13 @@ ui_print "- Unpacked via recovery"
 if [ -f "$MODPATH/customize.sh" ]; then
     . "$MODPATH/customize.sh"
 else
-    ui_print "! customize.sh is missing from this zip - install not verified."
+    # Not a warning to print past. customize.sh IS this install's verification and
+    # labelling: the sha256 manifest check, the "only one metamodule" refusal, and the
+    # explicit adb_data_file label on $NMDIR. Without it nothing verified the payload,
+    # nothing refused a second metamodule, and the state directory keeps the default
+    # system_file label that every app domain can read. A zip missing it is corrupt,
+    # so fail the install instead of reporting success.
+    abort "! customize.sh is missing from this zip - the install cannot be verified or labelled. Re-download the zip."
 fi
 
 exit 0
@@ -495,19 +567,68 @@ if [ "$DEPLOY" = true ]; then
 
     REMOTE="/data/local/tmp/nomount-deploy.zip"
     echo "==> Deploying $ZIP to device"
-    adb push "$ZIP" "$REMOTE"
-    if adb shell '[ -x /data/adb/ksu/bin/ksud ]' 2>/dev/null; then
-        adb shell "/data/adb/ksu/bin/ksud module install $REMOTE" \
-            || { echo "fatal: ksud module install failed" >&2; exit 1; }
-    elif adb shell '[ -x /data/adb/ap/bin/apd ]' 2>/dev/null; then
-        adb shell "/data/adb/ap/bin/apd module install $REMOTE" \
-            || { echo "fatal: apd module install failed" >&2; exit 1; }
+
+    # Git Bash (MSYS) rewrites any argument that looks like a unix path, so the REMOTE
+    # path reached adb as "C:/Program Files/Git/data/local/tmp/nomount-deploy.zip" and the
+    # push failed with secure_mkdirs(). MSYS_NO_PATHCONV=1 stops that rewrite - but it
+    # stops it for the LOCAL path too, and adb.exe needs a real Windows path for the file
+    # it reads. So both are needed: disable the rewrite, and hand adb an already-converted
+    # local path. On a non-MSYS host neither applies and $ZIP is passed through unchanged.
+    _adb_local="$ZIP"
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            export MSYS_NO_PATHCONV=1
+            if command -v cygpath >/dev/null 2>&1; then
+                _adb_local="$(cygpath -w "$ZIP")"
+            fi
+            ;;
+    esac
+
+    adb push "$_adb_local" "$REMOTE" || { echo "fatal: adb push failed" >&2; exit 1; }
+
+    # Run through `su -c`, and carry the status back in the OUTPUT rather than in
+    # adb's exit code. Two separate measured problems, both silent:
+    #
+    #   * adb does not reliably propagate the remote exit status - `adb shell
+    #     'exit 7'` returns 0 on this adb/device pair. So `if adb shell '[ -x ... ]'`
+    #     was ALWAYS true: every deploy took the ksud branch whatever the device was
+    #     running, and every `|| { echo fatal; exit 1; }` under it was unreachable.
+    #     A deploy that installed nothing still printed "Module installed".
+    #   * /data/adb is 0700 root:root, so the probes only see anything at all when
+    #     adbd happens to be running as root. Through `su -c` they work either way.
+    #
+    # The command is embedded in single quotes for su, so it must not contain any
+    # itself; every caller below is a plain path + arguments.
+    _dev_sh() {
+        _dev_out=$(adb shell "su -c '$1'"'; echo "__nmrc=$?"' 2>&1 | tr -d "\r")
+        printf '%s' "$_dev_out" | sed "/^__nmrc=/d"
+        case "$_dev_out" in
+            *__nmrc=0*) return 0 ;;
+            *)          return 1 ;;
+        esac
+    }
+
+    if _dev_sh "[ -x /data/adb/ksu/bin/ksud ]" >/dev/null 2>&1; then
+        _mgr="ksud"; _cmd="/data/adb/ksu/bin/ksud module install $REMOTE"
+    elif _dev_sh "[ -x /data/adb/ap/bin/apd ]" >/dev/null 2>&1; then
+        _mgr="apd";  _cmd="/data/adb/ap/bin/apd module install $REMOTE"
+    elif _dev_sh "command -v magisk" >/dev/null 2>&1; then
+        _mgr="magisk"; _cmd="magisk --install-module $REMOTE"
     else
-        adb shell "su -c 'magisk --install-module $REMOTE'" \
-            || { echo "fatal: magisk --install-module failed (no ksud/apd either)" >&2; exit 1; }
+        echo "fatal: no root manager found on the device (no ksud, apd or magisk)." >&2
+        echo "       Nothing was installed." >&2
+        adb shell "rm -f $REMOTE" >/dev/null 2>&1
+        exit 1
     fi
-    adb shell "rm -f $REMOTE"
-    echo "==> Module installed"
+
+    echo "==> Installing via $_mgr"
+    if ! _dev_sh "$_cmd"; then
+        echo "fatal: $_mgr module install FAILED - nothing was installed." >&2
+        adb shell "rm -f $REMOTE" >/dev/null 2>&1
+        exit 1
+    fi
+    adb shell "rm -f $REMOTE" >/dev/null 2>&1
+    echo "==> Module installed via $_mgr"
 
     if [ "$REBOOT" = true ]; then
         echo "==> Rebooting device"

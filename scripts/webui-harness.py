@@ -58,8 +58,16 @@ COMMANDS = {
     "dev": 'echo "$(getprop ro.product.marketname)|$(getprop ro.product.manufacturer)|'
            '$(getprop ro.product.model)|$(getprop ro.build.version.release)|'
            '$(getprop ro.build.version.sdk)|$(uname -r)"',
+    # VERBATIM from index.html's `refreshStealth`. It had drifted twice: the
+    # sweep lowercased the page's `grep -q ENABLED` and left this one alone, and
+    # the `ksud=` line was added to the page in 77604ca and never added here --
+    # which pinned `noKsud` true, so the Root-su tile rendered "not measured" in
+    # every harness run and the sucompat path could not be driven at all. That is
+    # the failure this file exists to catch, reproduced inside it. Keep the two
+    # byte-identical when either changes.
     "stealth": 'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat '
                '| grep -q ENABLED && echo 1 || echo 0)"; '
+               'echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; '
                'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; '
                'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; '
                'echo "se=$(getenforce 2>/dev/null)"',

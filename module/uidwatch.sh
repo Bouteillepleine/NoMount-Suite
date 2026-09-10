@@ -21,13 +21,17 @@ LOCK=$NMDIR/.uidwatch.lock
 if [ -f "$LOCK" ]; then
     _lp=$(cat "$LOCK" 2>/dev/null)
     case "$_lp" in ''|*[!0-9]*) _lp=0 ;; esac
-    if [ "$_lp" = 0 ] || ! kill -0 "$_lp" 2>/dev/null; then
-        _now=$(date +%s 2>/dev/null || echo 0)
-        case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
-        _mt=$(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now")
-        case "$_mt" in ''|*[!0-9]*) _mt=$_now ;; esac
-        _age=$(( _now - _mt ))
-        [ "$_age" -ge 180 ] && rm -f "$LOCK"
+    _now=$(date +%s 2>/dev/null || echo 0)
+    case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+    _mt=$(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now")
+    case "$_mt" in ''|*[!0-9]*) _mt=$_now ;; esac
+    _age=$(( _now - _mt ))
+    # The age test is UNCONDITIONAL. It used to sit inside the "holder is dead" branch, so a
+    # holder killed by the low-memory killer whose PID had since been recycled kept `kill -0`
+    # answering yes - and the watcher stayed wedged, silently, until the next reboot cleared
+    # the lock. No pass takes anywhere near 180s.
+    if [ "$_lp" = 0 ] || [ "$_age" -ge 180 ] || ! kill -0 "$_lp" 2>/dev/null; then
+        rm -f "$LOCK"
     fi
 fi
 ( set -o noclobber; echo $$ > "$LOCK" ) 2>/dev/null || exit 0

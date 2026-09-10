@@ -64,6 +64,13 @@ pub enum Commands {
         #[command(subcommand)]
         action: GhostAction,
     },
+    /// Umount every bind recorded in binds.list and put each source's own SELinux label back.
+    ///
+    /// Exists for uninstall.sh. `teardown_all` was reachable only from the boot mount pass,
+    /// so an uninstall deleted binds.list - the only record of what we bound - while those
+    /// binds were still mounted. Nothing could ever clean them up afterwards, and live bind
+    /// mounts are the exact thing this module exists to avoid leaving behind.
+    Unbind,
     Version,
 }
 

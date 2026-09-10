@@ -104,12 +104,19 @@ mod tests {
             "lib.sh's boot-time stash consumer names a different set than uninstall.sh saves"
         );
 
+        // EVERY file the three lists carry. The equality assertion above catches a list
+        // that drifts from its siblings; this catches all three being trimmed together,
+        // which is just as good a way to lose a user's hide list across an update.
         for must in [
             "uidhide",
             "uidhide.conf",
             "uidhide.cache",
+            "blocklist",
             "my_hookless",
+            "absorb-skip.txt",
             "whiteouts.txt",
+            "snapshot.txt",
+            "spoof.conf",
             "absorbed.list",
             "absorbed-tmpfs.list",
             "binds.list",

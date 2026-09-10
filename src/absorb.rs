@@ -257,6 +257,7 @@ pub(crate) fn source_of(row: &MountRow, roots: &HashMap<String, PathBuf>) -> Opt
 }
 
 /// An installed app's APK: `/data/app/~~<hash>==/<pkg>-<hash>==/base.apk`, or the
+/// `split_*.apk` beside it. The `~~<hash>==` wrapper is optional, hence 5 or 6 components.
 pub(crate) fn is_app_apk(target: &Path) -> bool {
     if !target.starts_with("/data/app/") {
         return false;
@@ -675,7 +676,11 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
         .collect();
     let mut n = 0;
     for (target, source) in pairs {
-        if !is_app_apk(target) || !source.exists() || !target.exists() {
+        // Every recorded row, not only the /data/app ones. `run_mount` does `nm clear` and
+        // then calls this; skipping ROM-path rows meant a mid-session mount pass dropped
+        // them permanently - absorb could not re-take them either, because their bind was
+        // already unmounted - while absorbed.list went on claiming they were served.
+        if !source.exists() || !target.exists() {
             continue;
         }
         if let Err(why) = crate::mount::path_is_representable(target)
@@ -704,7 +709,9 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
             );
             continue;
         }
-        if !label_apk_readable(source) {
+        // apk_data_file is what lets an app's own loader read a served APK; a ROM-path
+        // row is read through the engine and must keep the label it has.
+        if is_app_apk(target) && !label_apk_readable(source) {
             continue;
         }
         if nm.add(target, source).is_ok() {
@@ -892,12 +899,19 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
 }
 
 /// The package an installed-APK path belongs to: `/data/app/~~a==/com.foo-b==/base.apk`
+/// yields `com.foo`. `None` for anything that is not an installed-APK path.
 pub(crate) fn pkg_of_apk_target(target: &Path) -> Option<String> {
     if !is_app_apk(target) {
         return None;
     }
     let dir = target.parent()?.file_name()?.to_str()?;
-    let (pkg, _gen) = dir.rsplit_once('-')?;
+    // split_once, NOT rsplit_once: the directory is `<pkg>-<suffix>` where the suffix is
+    // 22 chars of URL-safe base64, which contains '-' about a quarter of the time. A
+    // package name cannot contain '-' at all, so the FIRST hyphen is the separator.
+    // Measured on an OP15: 106 of 380 app directories mis-parsed under rsplit_once, and a
+    // mis-parse makes `pm path` fail, which the caller reads as "pm is not answering" and
+    // leaves the rule un-repointed for good.
+    let (pkg, _gen) = dir.split_once('-')?;
     (!pkg.is_empty() && pkg.contains('.')).then(|| pkg.to_string())
 }
 
@@ -961,6 +975,20 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                     now.display()
                 );
             }
+            // `pm path` answers with applicationInfo.sourceDir, i.e. base.apk. A recorded
+            // rule may target a split (is_app_apk accepts `split_*.apk`), and re-pointing
+            // that split's payload onto base.apk injects the wrong file over the app's own
+            // manifest - it then cannot load at all, and the record makes it permanent.
+            Ok(Some(now))
+                if now != *target
+                    && now.file_name() != target.file_name() =>
+            {
+                eprintln!(
+                    "nomount: {pkg} moved to {}, but the recorded rule targets {} - `pm path`                      only reports the base APK, so this split cannot be re-pointed                      automatically; leaving the rule and its record alone",
+                    now.display(),
+                    target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                );
+            }
             Ok(Some(now)) if now != *target => {
                 if add_repointing(nm, &now, &source, &live) {
                     rewrite_absorbed_after_refresh(&[(target.to_path_buf(), now.clone())], &[]);
@@ -1020,13 +1048,37 @@ fn apply_apk_refresh(
         }
     }
     pairs.retain(|(t, _)| !dropped.iter().any(|d| d == t));
+    // Collapse duplicate targets BEFORE sorting, keeping the last write - the row this pass
+    // just re-pointed. `sort()` then `dedup_by` kept the lexicographically smallest source
+    // instead, so a partially-completed earlier pass could leave the stale source recorded
+    // while the engine served the new one, and the next boot re-served the stale one.
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut keep: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(pairs.len());
+    for p in pairs.into_iter().rev() {
+        if seen.insert(p.0.clone()) {
+            keep.push(p);
+        }
+    }
+    let mut pairs = keep;
     pairs.sort();
-    pairs.dedup_by(|a, b| a.0 == b.0);
     let changed = pairs != before;
     (pairs, changed)
 }
 
 /// ROM partitions a module might try to empty
+/// Is `p` a ROM path - at a partition root, or under one?
+///
+/// `ROM_ROOTS` entries carry a trailing slash so that `/system/` cannot match `/systemx`.
+/// A bare `starts_with` therefore also misses the root ITSELF: `"/product"` does not start
+/// with `"/product/"`. A tmpfs mounted exactly at `/product` - a common debloat trick - was
+/// invisible to `check_no_rom_tmpfs`, which then reported PASS with its own named oracle
+/// wide open. Both spellings, in one place.
+pub(crate) fn on_rom_path(p: &str) -> bool {
+    ROM_ROOTS.iter().any(|r| {
+        p.starts_with(r) || (r.ends_with('/') && p == r.trim_end_matches('/'))
+    })
+}
+
 pub(crate) const ROM_ROOTS: &[&str] =
     &["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
 
@@ -1075,7 +1127,7 @@ pub(crate) fn rom_tmpfs_target(line: &str) -> Option<PathBuf> {
         return None;
     }
     let target = pre.split_whitespace().nth(4)?;
-    ROM_ROOTS.iter().any(|r| target.starts_with(r)).then(|| PathBuf::from(unescape(target)))
+    on_rom_path(target).then(|| PathBuf::from(unescape(target)))
 }
 
 /// This boot, as the kernel names it
@@ -1091,11 +1143,12 @@ fn dir_is_empty(p: &Path) -> Option<bool> {
     fs::read_dir(p).ok().map(|mut e| e.next().is_none())
 }
 
-/// The ROM-tmpfs takeovers on record: target -> the boot in which its tmpfs was last seen
-pub(crate) fn absorbed_tmpfs() -> Vec<(PathBuf, String)> {
-    read_absorbed_tmpfs().unwrap_or_default()
-}
-
+/// Read the ROM-tmpfs takeover record: target -> the boot its tmpfs was last seen in.
+///
+/// There is deliberately no infallible sibling. There used to be (`absorbed_tmpfs` /
+/// `absorbed_tmpfs_targets`, `unwrap_or_default()`), and `doctor` reached for it - which
+/// turned "I could not read the record" into "there are no takeovers" and accused every
+/// takeover whiteout of being a rule nothing explains. Every caller handles the error.
 /// The fallible door, for the callers that must not treat a read error as "the record is
 pub(crate) fn read_absorbed_tmpfs() -> std::io::Result<Vec<(PathBuf, String)>> {
     match fs::read_to_string(ABSORBED_TMPFS_LIST) {
@@ -1120,11 +1173,6 @@ fn parse_tmpfs_record(body: &str) -> Vec<(PathBuf, String)> {
             None => (PathBuf::from(l), String::new()),
         })
         .collect()
-}
-
-/// Just the targets
-pub fn absorbed_tmpfs_targets() -> HashSet<PathBuf> {
-    absorbed_tmpfs().into_iter().map(|(t, _)| t).collect()
 }
 
 /// Does a recorded takeover survive this pass?
@@ -1243,6 +1291,9 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
         .filter_map(|l| std::str::from_utf8(l).ok())
         .filter_map(rom_tmpfs_target)
     {
+        // NB: no source path exists for a tmpfs, so only the `/`-prefixed path keys in
+        // absorb-skip.txt can decline one. A module-id key cannot: `is_skipped` resolves the
+        // owner from the SOURCE, and there is none. Say so where the list is consulted.
         if is_skipped(Path::new("/"), &target, &skips) {
             if record.iter().any(|(t, _)| *t == target) {
                 if dry_run {
@@ -1310,8 +1361,13 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
             continue;
         }
         if was_durable {
-            match crate::whiteout::remove_locked(&t_str) {
-                Ok(()) => println!(
+            // `forget_locked`, not `remove_locked`: the rule is already gone (we deleted it
+            // above), and this pass re-applies its own whiteout below. `remove_locked` would
+            // issue a second `nm del` against a path with no rule, get -ENOENT, and return
+            // Err with the list ALREADY rewritten - which made this arm's failure branch
+            // unconditional and its success branch dead code.
+            match crate::whiteout::forget_locked(&t_str) {
+                Ok(_) => println!(
                     "moved {t_str} out of whiteouts.txt into absorb's own list: it came from a \
                      tmpfs, so it should stop hiding when that tmpfs does"
                 ),
@@ -1583,6 +1639,23 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             skipped_dirs += 1;
             continue;
         }
+        // Last check before the irreversible step. `classify` is deliberately lexical and
+        // says nothing about whether the source is still on disk; the kernel appends
+        // `//deleted` to a bind's mountinfo root once its source dentry is unlinked, so a
+        // vanished source reaches here looking perfectly absorbable. Unmounting then drops
+        // the LAST reference to the content and the inject that should replace it cannot
+        // resolve, so the ROM path silently reverts to stock. `reapply_absorbed_pairs` and
+        // `prune_absorbed_pairs` both guard on this; the run path did not.
+        if !c.source.exists() {
+            leaking += 1;
+            eprintln!(
+                "nomount: LEAK {} <- {} stays mounted: its source no longer exists, so \
+                 absorbing it would drop the content instead of re-serving it",
+                c.target.display(),
+                c.source.display()
+            );
+            continue;
+        }
         let _ = umount_detach(&c.target);
         if still_mounted(&c.target) {
             eprintln!(
@@ -1667,6 +1740,47 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Android's app directory is `<pkg>-<22 chars of URL-safe base64>`. The suffix
+    /// contains `-` about a quarter of the time (106 of 380 measured on an OP15) and a
+    /// package name never can, so the separator is the FIRST hyphen. Under `rsplit_once`
+    /// every one of those resolved to a package that does not exist, `pm path` failed, and
+    /// the caller read that as "pm is not answering" and left the rule un-repointed for good.
+    #[test]
+    fn the_package_is_taken_from_the_first_hyphen_not_the_last() {
+        let pkg = |p: &str| pkg_of_apk_target(Path::new(p));
+        for (dir, want) in [
+            ("com.aurora.store-wGPab65m-g9eKk4hn6AwhQ==", "com.aurora.store"),
+            ("com.google.android.apps.podcasts-aFR-fM5j_05Sjby4cePVSQ==",
+             "com.google.android.apps.podcasts"),
+            ("com.secondream.novagram-eId8imI-ZGqO1myGu9Qy8g==", "com.secondream.novagram"),
+            ("com.foo-b==", "com.foo"),
+        ] {
+            assert_eq!(
+                pkg(&format!("/data/app/~~a==/{dir}/base.apk")).as_deref(),
+                Some(want),
+                "{dir}"
+            );
+        }
+        assert_eq!(pkg("/data/app/~~a==/nodots-b==/base.apk"), None);
+        assert_eq!(pkg("/system/app/Foo/Foo.apk"), None);
+    }
+
+    /// A split rule must never be re-pointed onto base.apk: `pm path` reports only
+    /// applicationInfo.sourceDir, so "the app moved" says nothing about where the split went.
+    /// Injecting a split's payload over the base APK makes the app unloadable, and the record
+    /// makes it permanent.
+    #[test]
+    fn a_split_apk_row_is_not_repointed_onto_the_base_apk() {
+        let split = Path::new("/data/app/~~a==/com.foo-a==/split_config.arm64_v8a.apk");
+        let base = Path::new("/data/app/~~b==/com.foo-b==/base.apk");
+        assert!(is_app_apk(split), "a split target is recordable in the first place");
+        assert_ne!(
+            split.file_name(),
+            base.file_name(),
+            "the guard that stops the re-point is the file-name comparison"
+        );
+    }
 
     /// The record has to follow the rule
     #[test]

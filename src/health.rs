@@ -317,8 +317,14 @@ fn head(path: &str, n: usize) -> Option<Vec<u8>> {
 /// Does what the engine serves at each target match the source its own rule names?
 fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     const CAP: usize = 20_000;
+    let comparable = rules.iter().filter(|r| r.uid == 0).count();
     let mut checked = 0;
-    for rule in rules.iter().take(CAP) {
+    // uid == 0 only. A `[UID: n]` rule serves ONE uid, and root is not it: root stats the
+    // target and is handed the stock file, so size and bytes differ by design and this
+    // reported FAIL - blaming a stray `mount --bind` and telling the user to delete it and
+    // reboot - on a perfectly healthy device. Every other consumer of the rule list narrows
+    // the same way (audit::live_rules, absorb::live_injections, and mount's (target, uid) key).
+    for rule in rules.iter().filter(|r| r.uid == 0).take(CAP) {
         let Some(source) = rule.source.as_deref() else { continue };
         let target = rule.target.as_path();
         let Ok(sm) = fs::metadata(source) else { continue };
@@ -344,6 +350,10 @@ fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     }
     if checked == 0 {
         "unchecked".to_string()
+    } else if comparable > CAP {
+        // Everything past the cap went uncompared. `check_dir_ino_collision` reports its own
+        // cap as UNMEASURED rather than a pass; do the same here instead of saying "ok".
+        format!("unchecked:over-cap({checked} of {comparable})")
     } else {
         "ok".to_string()
     }
@@ -417,6 +427,7 @@ fn fingerprint_text() -> Result<String> {
 }
 
 /// `nomount verify` - diff the live fingerprint against the saved snapshot and name every
+/// field that moved, so drift since the last known-good boot is visible rather than implied.
 pub fn run_verify() -> Result<()> {
     let saved = match fs::read_to_string(SNAPSHOT) {
         Ok(s) => s,
@@ -473,9 +484,28 @@ fn is_version_context(key: &str, sval: &str, lval: &str) -> bool {
     let version_shaped = |v: &str| {
         v.strip_prefix('v').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
     };
+    // Only an INCREASE is "an update you made". A downgrade is the regression this whole
+    // verb exists to surface: an engine below v17 strips NM_FLAG_PUBLIC from a shadowed
+    // file, and below v15 cannot express the opt-out at all. Reporting `engine v32 -> v20`
+    // as "nothing is wrong with it" is the one answer `verify` must never give.
+    //
+    // Two shapes to compare: `engine` is `v<int>`, `version` is dotted `a.b.c`.
+    let parts = |v: &str| -> Option<Vec<u64>> {
+        let v = v.trim().trim_start_matches('v');
+        if v.is_empty() {
+            return None;
+        }
+        v.split('.').map(|p| p.parse::<u64>().ok()).collect()
+    };
+    let moved_forward = |a: &str, b: &str| -> bool {
+        match (parts(a), parts(b)) {
+            (Some(x), Some(y)) => y >= x,
+            _ => false,
+        }
+    };
     match key {
-        "version" => true,
-        "engine" => version_shaped(sval) && version_shaped(lval),
+        "version" => moved_forward(sval, lval),
+        "engine" => version_shaped(sval) && version_shaped(lval) && moved_forward(sval, lval),
         _ => false,
     }
 }
@@ -510,7 +540,7 @@ fn version_context(saved: &str, live: &str) -> Option<String> {
 }
 
 /// Every root under which a destination is readable by any app holding a storage
-const SHARED_ROOTS: &[&str] = &[
+pub(crate) const SHARED_ROOTS: &[&str] = &[
     "/sdcard",
     "/storage",
     "/mnt/sdcard",
@@ -524,7 +554,7 @@ const SHARED_ROOTS: &[&str] = &[
 ];
 
 /// Is `p` inside a shared volume?
-fn is_shared_storage(p: &Path) -> bool {
+pub(crate) fn is_shared_storage(p: &Path) -> bool {
     SHARED_ROOTS.iter().any(|r| p.starts_with(r))
 }
 
@@ -760,6 +790,36 @@ fn redact_app_paths(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A DOWNGRADE is not "an update you made" - it is the regression `verify` exists for.
+    /// An engine below v17 strips NM_FLAG_PUBLIC from a shadowed file; below v15 it cannot
+    /// express the opt-out at all. Suppressing that row printed "no drift" plus "nothing is
+    /// wrong with it" over exactly the state the user needed to see.
+    #[test]
+    fn a_version_that_went_backwards_is_drift_not_context() {
+        assert!(is_version_context("engine", "v30", "v32"), "forward is the user's own update");
+        assert!(is_version_context("engine", "v32", "v32"), "unchanged is not drift");
+        assert!(!is_version_context("engine", "v32", "v20"), "an engine DOWNGRADE is drift");
+        assert!(!is_version_context("engine", "v30", "down"), "a dead engine is drift");
+
+        assert!(is_version_context("version", "1.3.163", "1.3.176"), "Suite forward");
+        assert!(!is_version_context("version", "1.3.176", "1.3.163"), "Suite DOWNGRADE is drift");
+        assert!(!is_version_context("version", "1.3.176", "garbage"), "unparseable is drift");
+
+        let drifted = drift_lines("engine=v32
+rules=3
+", "engine=v20
+rules=3
+");
+        assert_eq!(drifted.len(), 1, "{drifted:?}");
+        assert!(drifted[0].contains("engine"), "{drifted:?}");
+        assert!(
+            version_context("engine=v32
+", "engine=v20
+").is_none(),
+            "a downgrade must not be excused in the note either"
+        );
+    }
 
     /// The export destination's parent, judged in the three states that matter
     #[test]

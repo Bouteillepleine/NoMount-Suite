@@ -40,7 +40,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Keyed on the TAG being published, not on github.ref. On a tag push that ref is
+  # refs/tags/v1.2.3; on the documented manual re-publish of the SAME tag it is whatever
+  # branch the UI had selected. Two different group names, so the two runs do not exclude
+  # each other - and both then race to publish the release and to commit update.json on
+  # main. The tag is the thing that has to be serialised, so key on the tag.
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -119,7 +124,7 @@ jobs:
             echo "  asset      : $zip ($(stat -c %s "$zip") bytes)"
             echo "  version    : matches the tag"
             if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              echo "  NOTE: a release for $TAG already exists; a real run would fail here."
+              echo "  release    : $TAG already exists; a real run would REPLACE its asset in place."
             else
               echo "  release    : does not exist yet, would be created"
             fi
@@ -160,11 +165,29 @@ jobs:
           # only thing it could ever have done is silently eat ten characters off
           # every line if this block were re-indented.
 
-          gh release create "$TAG" "$zip" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "NoMount Suite $TAG" \
-            --notes-file /tmp/notes.md \
-            --generate-notes
+          # Create, or replace the asset on a release that already exists.
+          #
+          # The header documents workflow_dispatch as "manual re-publish, for the case
+          # where a release needs rebuilding from an existing tag without moving it" - and
+          # a bare `gh release create` fails with "release already exists" on precisely
+          # that input, so the documented path could never actually run. Everything that
+          # makes re-publishing safe has already been asserted above: the zip version
+          # equals the tag, and the tag points at the commit this zip was built from. The
+          # only thing left to do is put the new asset on the existing release.
+          #
+          # --clobber replaces the asset in place, so the release URL, its notes and its
+          # publication date all survive; deleting and recreating the release would break
+          # every existing link to it and re-notify every watcher.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists - replacing its asset in place"
+            gh release upload "$TAG" "$zip" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$zip" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "NoMount Suite $TAG" \
+              --notes-file /tmp/notes.md \
+              --generate-notes
+          fi
 
       # update.json is written here and nowhere else, which is what makes the
       # in-manager update offer track releases rather than the prerelease branch:
@@ -219,10 +242,31 @@ jobs:
           fi
           git -c user.name=Bouteillepleine -c user.email=steve0007.xda@gmail.com \
             commit -q -m "update.json -> $TAG"
-          # The release is already live at this point; failing to move the
-          # pointer must be loud, but it is not the release failing.
-          git push origin main || {
-            echo "::error::release $TAG published, but update.json could not be pushed to main"
-            exit 1
-          }
+          # Retried, because this is a read-modify-write on a shared branch. The clone
+          # above is a snapshot; any commit landing on main between it and this push makes
+          # the push a non-fast-forward and it is rejected. A single attempt therefore left
+          # the release live with update.json still pointing at the PREVIOUS one - exactly
+          # the stale-pointer state this whole step exists to prevent - and it is likeliest
+          # right after a release, when follow-up commits are being pushed.
+          #
+          # Rebase rather than merge: this commit only ever touches update.json, which is
+          # generated here and nowhere else, so it replays onto anything cleanly. If it
+          # somehow does not, the rebase is aborted rather than left half-applied.
+          _pushed=0
+          for _try in 1 2 3 4 5; do
+              if git push origin main; then _pushed=1; break; fi
+              echo "push rejected (attempt $_try) - main moved; rebasing onto it and retrying"
+              git fetch --depth 50 origin main || true
+              if ! git rebase FETCH_HEAD; then
+                  git rebase --abort || true
+                  echo "::error::update.json could not be rebased onto main - resolve by hand"
+                  break
+              fi
+              sleep $(( _try * 3 ))
+          done
+          if [ "$_pushed" != 1 ]; then
+              echo "::error::release $TAG published, but update.json could not be pushed to main"
+              echo "::error::devices keep being offered the previous release until this lands"
+              exit 1
+          fi
           echo "update.json now points at $TAG"
