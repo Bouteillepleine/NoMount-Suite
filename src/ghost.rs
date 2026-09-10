@@ -1,4 +1,3 @@
-//! Populate the kernel's `_ghost` tables from the live rule set
 
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
@@ -8,29 +7,19 @@ use anyhow::Result;
 
 use crate::nm::{LiveKind, Nm};
 
-/// What one sync did
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Summary {
-    /// Rule targets considered
     pub candidates: usize,
-    /// Of those, absent to the probe uid - i.e
     pub ghostable: usize,
-    /// Actually installed in the kernel's path table
     pub paths: usize,
-    /// Hidden uids installed
     pub uids: usize,
-    /// Paths the kernel refused (table full, or over its rule-length cap)
     pub rejected: usize,
-    /// Uids the kernel refused
     pub rejected_uids: usize,
-    /// The first few path refusals, for a log line a human can act on
     pub rejected_examples: Vec<String>,
-    /// The engine's live state could not be read - either the rule set (`nm list`) or the
     pub dump_failed: bool,
 }
 
 impl Summary {
-    /// The cloak only fires when both tables are non-empty - so this is the one line worth
     pub fn effective(&self) -> bool {
         self.paths > 0 && self.uids > 0
     }
@@ -72,7 +61,6 @@ impl Summary {
 
 const CTL_CHUNK: usize = 12 * 1024;
 
-/// Which rule targets are candidates for ghosting
 pub(crate) fn candidates(list: &str) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = crate::nm::parse_list(list)
         .into_iter()
@@ -226,7 +214,6 @@ fn push(nm: &Nm, kind: char, items: &[String], out: &mut Summary) {
     }
 }
 
-/// Re-derive both `_ghost` tables from the live rule set and the hide list
 pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
     if !nm.ghost_present() {
         return Ok(None);
@@ -276,7 +263,6 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
     Ok(Some(out))
 }
 
-/// `sync`, plus the one line a boot script or the WebUI should see
 pub fn run_sync(verbose: bool) -> Result<()> {
     let nm = Nm::new();
     match sync(&nm)? {
@@ -307,7 +293,6 @@ pub fn run_sync(verbose: bool) -> Result<()> {
     }
 }
 
-/// Re-derive after a verb that changed an input, without narrating it
 pub fn sync_quietly(nm: &Nm) {
     if let Ok(Some(s)) = sync(nm) {
         if let Some(w) = s.warning() {
@@ -316,7 +301,6 @@ pub fn sync_quietly(nm: &Nm) {
     }
 }
 
-/// Called at the end of `mount` and `reload`
 pub fn sync_after_pass(nm: &Nm) {
     let Ok(Some(s)) = sync(nm) else { return };
     if let Some(w) = s.warning() {

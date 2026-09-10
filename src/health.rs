@@ -1,4 +1,3 @@
-//! Runtime health: the regression canary that would have caught the d_drop bug on the
 
 use std::fmt::Write as _;
 use std::fs;
@@ -13,7 +12,6 @@ use crate::nm::Nm;
 const NM_DIR: &str = "/data/adb/nomount";
 const SNAPSHOT: &str = "/data/adb/nomount/snapshot.txt";
 
-/// One line-based `key=value` fingerprint of the live system
 pub struct Fingerprint {
     version: String,
     uname: String,
@@ -30,7 +28,6 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
-    /// The flat key=value document `health.txt` and `snapshot.txt` are made of
     pub fn facts(&self) -> Vec<crate::check::Fact> {
         let unk = |v: Option<usize>| v.map_or_else(|| "unknown".to_string(), |n| n.to_string());
         [
@@ -52,7 +49,6 @@ impl Fingerprint {
         .collect()
     }
 
-    /// The verdicts those facts imply, as ordinary checks
     pub fn checks(&self) -> Vec<Check> {
         let mk = |name: &'static str, v: Verdict, ev: String| {
             Check::new(Section::Device, slug(name), name, v, ev)
@@ -396,7 +392,6 @@ pub fn gather() -> Fingerprint {
     }
 }
 
-/// `nomount snapshot` - freeze the current fingerprint as the known-good baseline
 pub fn run_snapshot() -> Result<()> {
     let body = fingerprint_text()?;
     crate::statefile::write_atomic(SNAPSHOT, &body).context("write snapshot.txt")?;
@@ -412,8 +407,6 @@ fn fingerprint_text() -> Result<String> {
     Ok(body)
 }
 
-/// `nomount verify` - diff the live fingerprint against the saved snapshot and name every
-/// field that moved, so drift since the last known-good boot is visible rather than implied.
 pub fn run_verify() -> Result<()> {
     let saved = match fs::read_to_string(SNAPSHOT) {
         Ok(s) => s,
@@ -516,7 +509,6 @@ fn version_context(saved: &str, live: &str) -> Option<String> {
     ))
 }
 
-/// Every root under which a destination is readable by any app holding a storage
 pub(crate) const SHARED_ROOTS: &[&str] = &[
     "/sdcard",
     "/storage",
@@ -530,7 +522,6 @@ pub(crate) const SHARED_ROOTS: &[&str] = &[
     "/mnt/expand",
 ];
 
-/// Is `p` inside a shared volume?
 pub(crate) fn is_shared_storage(p: &Path) -> bool {
     SHARED_ROOTS.iter().any(|r| p.starts_with(r))
 }
@@ -562,7 +553,6 @@ fn base_unusable(base: &Path) -> Option<String> {
     None
 }
 
-/// `nomount export [dir]` - dump diagnostics to a timestamped, stealth-named folder
 pub fn run_export(dir: Option<String>) -> Result<()> {
     let ts = read_cmd("date", &["+%Y%m%d-%H%M%S"]);
     let ts = if ts.is_empty() {

@@ -1,10 +1,8 @@
-//! `nomount check` - the one diagnostic verb, and the one shape it answers in
 
 use anyhow::Result;
 
 use crate::json::J;
 
-/// Where a check comes from, and therefore what its answer depends on
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Plan,
@@ -20,7 +18,6 @@ impl Section {
     }
 }
 
-/// The single verdict
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verdict {
     Fail,
@@ -55,7 +52,6 @@ impl Verdict {
             Verdict::Note => "NOTE",
         }
     }
-    /// The coarse axis the one findings list sorts and colours on
     pub fn severity(self) -> &'static str {
         match self {
             Verdict::Fail | Verdict::Reboot | Verdict::Warn => "attention",
@@ -66,20 +62,14 @@ impl Verdict {
     }
 }
 
-/// One answer, whichever section produced it
 pub struct Check {
-    /// Stable slug
     pub id: String,
     pub name: String,
     pub section: Section,
     pub verdict: Verdict,
-    /// What was actually read
     pub evidence: String,
-    /// One line in the reader's terms, on every verdict
     pub meaning: String,
-    /// What an attacker would do with a failure
     pub oracle: Option<String>,
-    /// Who caused this: a module id, the kernel, the root manager, the user's own configuration
     pub owner: Option<String>,
 }
 
@@ -129,7 +119,6 @@ impl Check {
     }
 }
 
-/// Turn a display name into a stable id: lowercase, non-alphanumerics collapsed to single
 pub fn slug(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut hyphen = false;
@@ -152,7 +141,6 @@ pub fn slug(name: &str) -> String {
     }
 }
 
-/// Counts, one per verdict
 pub struct Tally {
     pub fail: usize,
     pub reboot: usize,
@@ -179,11 +167,9 @@ impl Tally {
         }
         t
     }
-    /// Findings the reader still has to act on
     pub fn open_failures(&self) -> usize {
         self.fail + self.reboot
     }
-    /// Did every check that could apply actually get measured?
     pub fn complete(&self) -> bool {
         self.unmeasured == 0
     }
@@ -202,7 +188,6 @@ impl Tally {
     }
 }
 
-/// One `key=value` row of the fingerprint, or of the plan counts
 pub type Fact = (String, String);
 
 fn num_or_null(n: Option<usize>) -> J {
@@ -212,16 +197,10 @@ fn num_or_null(n: Option<usize>) -> J {
     }
 }
 
-/// Everything one run of `nomount check` produced
 pub struct Report {
     pub ts: i64,
-    /// Which sections were actually RUN, recorded rather than inferred from the findings.
-    /// `plan_checks` emits a finding only when it has one, so a device with a perfectly
-    /// clean module set produced zero plan checks - and `ran(Plan)`, which asked "is there
-    /// a plan check", then said the plan half had been skipped.
     pub sections: Vec<Section>,
     pub engine: Option<u32>,
-    /// Live rules, and the directories holding them
     pub rules: Option<usize>,
     pub directories: Option<usize>,
     pub facts: Vec<Fact>,
@@ -236,7 +215,6 @@ impl Report {
         Tally::of(&self.checks)
     }
 
-    /// Worst first, then by section, then by name - a stable order, so two runs of the same
     pub fn sort(&mut self) {
         self.checks.sort_by(|a, b| {
             let key = |c: &Check| {
@@ -251,7 +229,6 @@ impl Report {
         });
     }
 
-    /// The one-line verdict, in the reader's terms
     pub fn verdict(&self) -> String {
         let t = self.tally();
         if t.fail > 0 {
@@ -271,7 +248,6 @@ impl Report {
         }
     }
 
-    /// `health.txt` / `snapshot.txt`: the facts as key=value, one per line
     pub fn fingerprint_text(&self) -> String {
         let mut s = String::new();
         for (k, v) in &self.facts {
@@ -317,12 +293,10 @@ impl Report {
         .render()
     }
 
-    /// Did this run include the given section?
     pub fn ran(&self, section: Section) -> bool {
         self.sections.contains(&section)
     }
 
-    /// The human report
     pub fn text(&self) -> String {
         use std::fmt::Write as _;
         let mut s = String::new();
@@ -398,7 +372,6 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Build a report over the requested sections
 pub fn build(plan: bool, device: bool) -> Result<Report> {
     let (plan, device) = if !plan && !device { (true, true) } else { (plan, device) };
     let mut checks: Vec<Check> = Vec::new();
@@ -436,7 +409,6 @@ pub fn build(plan: bool, device: bool) -> Result<Report> {
     Ok(r)
 }
 
-/// `nomount check [--plan] [--device] [--json] [--write]`
 pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()> {
     let want_device = device || !plan;
     let r = build(plan, device)?;

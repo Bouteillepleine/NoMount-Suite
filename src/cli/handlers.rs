@@ -106,13 +106,11 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
     Ok(())
 }
 
-/// Outcome of one re-apply pass
 pub struct ApplyReport {
     pub hidden: u32,
     pub skipped: u32,
     pub failed: u32,
     pub retired: u32,
-    /// Entries that named an app this device does not have installed
     pub not_installed: u32,
 }
 
@@ -122,7 +120,6 @@ impl ApplyReport {
     }
 }
 
-/// Re-assert the persistent hide list (and the isolated-pool policy) against the kernel
 pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
     let mut rep = ApplyReport { hidden: 0, skipped: 0, failed: 0, retired: 0, not_installed: 0 };
 

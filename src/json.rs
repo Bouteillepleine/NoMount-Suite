@@ -1,4 +1,3 @@
-//! A minimal JSON writer
 
 use std::fmt::Write as _;
 
@@ -22,7 +21,6 @@ fn escape_into(out: &mut String, s: &str) {
     }
 }
 
-/// A JSON value being built
 pub enum J {
     Str(String),
     Num(i64),
@@ -36,7 +34,6 @@ impl J {
     pub fn s(v: impl Into<String>) -> J {
         J::Str(v.into())
     }
-    /// `Some` -> string, `None` -> `null`
     pub fn os(v: Option<impl Into<String>>) -> J {
         match v {
             Some(x) => J::Str(x.into()),

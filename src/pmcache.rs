@@ -1,4 +1,3 @@
-//! PackageManager's on-disk parse cache
 
 use std::collections::HashMap;
 use std::fs;
@@ -13,7 +12,6 @@ const ROM_ROOTS: &[&str] = &[
     "/my_stock/", "/my_company/", "/my_carrier/", "/my_engineering/", "/my_heytap/", "/my_preload/",
 ];
 
-/// ROM partition names, for anything that needs "is this path on the ROM" rather than
 pub const ROM_PARTITIONS: &[&str] = &[
     "system", "system_ext", "product", "vendor", "odm",
     "my_product", "my_region", "my_stock", "my_company", "my_carrier", "my_engineering",
@@ -22,7 +20,6 @@ pub const ROM_PARTITIONS: &[&str] = &[
 
 const PM_SCAN_DIRS: &[&str] = &["app", "priv-app", "overlay", "app-ext", "priv-app-ext"];
 
-/// Any file inside a directory pm scans, i.e
 pub fn is_pm_published(target: &Path) -> bool {
     let s = target.to_string_lossy();
     if !ROM_ROOTS.iter().any(|r| s.starts_with(r)) {
@@ -35,7 +32,6 @@ pub fn is_pm_published(target: &Path) -> bool {
         .is_some_and(|d| PM_SCAN_DIRS.contains(&d))
 }
 
-/// A ROM APK PM parses at scan time
 pub fn is_rom_apk(target: &Path) -> bool {
     target.extension().is_some_and(|e| e == "apk") && is_pm_published(target)
 }
@@ -110,7 +106,6 @@ fn identity(source: &Path) -> Option<String> {
     Some(format!("{}\t{}", m.mtime(), m.size()))
 }
 
-/// Invalidate PM's cached parse for every ROM APK whose served bytes changed since the
 pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     let (previous, seeding) = match read_state() {
         Some(p) => (p, !Path::new(STATE).exists()),
@@ -184,7 +179,6 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     changed
 }
 
-/// Record APKs invalidated while pm was already running: their parse is only rebuilt at
 pub fn add_pending(targets: &[PathBuf]) {
     if targets.is_empty() {
         return;
@@ -220,7 +214,6 @@ fn pending_result() -> std::io::Result<Vec<PathBuf>> {
     }
 }
 
-/// The accumulated reboot-required set, best effort
 pub fn pending() -> Vec<PathBuf> {
     pending_result().unwrap_or_else(|e| {
         eprintln!(
@@ -231,7 +224,6 @@ pub fn pending() -> Vec<PathBuf> {
     })
 }
 
-/// Called from the boot pass: PM re-parses this boot, so anything recorded by an earlier
 pub fn clear_pending() {
     let _ = fs::remove_file(PENDING);
 }

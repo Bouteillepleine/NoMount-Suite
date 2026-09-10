@@ -1,4 +1,3 @@
-//! Persistent whiteouts - hide stock ROM files that are themselves the tell
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +12,6 @@ fn parent_fs_magic(target: &Path) -> Option<i64> {
     crate::dirshape::fs_magic(target.parent().unwrap_or(Path::new("/")))
 }
 
-/// Does hiding `target` leave evidence in its PARENT's metadata?
 pub(crate) fn measurable_hole(target: &Path) -> bool {
     if parent_fs_magic(target) != Some(crate::dirshape::EROFS_MAGIC) {
         return false;
@@ -74,7 +72,6 @@ fn is_real_file(p: &Path) -> bool {
     p.is_file() && fs::File::open(p).is_ok()
 }
 
-/// Read the persisted list: trimmed, comment- and blank-stripped, deduplicated
 pub fn read() -> Result<Vec<String>> {
     let raw = match fs::read_to_string(WHITEOUT_PATH) {
         Ok(s) => s,
@@ -122,7 +119,6 @@ fn write(entries: &[String]) -> Result<()> {
     crate::statefile::write_atomic(WHITEOUT_PATH, body).context("write whiteouts.txt")
 }
 
-/// A path is only worth whiting out if it is absolute, currently exists, and is not a
 pub(crate) fn validate(p: &str) -> Result<()> {
     let path = Path::new(p);
     if !path.is_absolute() {
@@ -189,21 +185,11 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     }
 }
 
-/// Take the pass lock and remove
 pub fn remove(target: &str) -> Result<()> {
     let _pass = crate::mount::pass_lock();
     remove_locked(target)
 }
 
-/// Drop `target` from the durable list ONLY, leaving the engine alone.
-///
-/// For a caller that has already deleted the live rule itself and will re-assert its own.
-/// `remove_locked` cannot serve that case: it issues its own `nm del`, which then hits a
-/// path with no rule, and the engine answers -ENOENT, so `nm` exits 1 and the whole call
-/// returns `Err` -- after the list has already been rewritten. absorb's tmpfs migration read
-/// that `Err` as "the entry is still listed", printed exactly that, and skipped recording
-/// the takeover; the entry was in fact gone, so the directory ended up neither hidden by
-/// whiteouts.txt nor tracked by absorb. The success branch there was unreachable.
 pub(crate) fn forget_locked(target: &str) -> Result<bool> {
     let t = norm(target.trim());
     let mut list = read()?;
@@ -216,7 +202,6 @@ pub(crate) fn forget_locked(target: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// `remove`, for a caller that already holds `mount::pass_lock()`
 pub(crate) fn remove_locked(target: &str) -> Result<()> {
     let normalised = norm(target.trim());
     let t = normalised.as_str();
@@ -275,7 +260,6 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
-/// Re-apply the whole list
 pub fn apply() -> Result<()> {
     let nm = Nm::new();
     let (mut ok, mut failed) = (0u32, 0u32);
@@ -325,15 +309,12 @@ fn probe_works() -> bool {
     *P.get_or_init(|| app_can_see_raw("/system/bin/sh"))
 }
 
-/// One thing the scan found worth hiding
 pub struct Candidate {
     pub path: String,
     pub why: &'static str,
-    /// Hiding it still leaves the parent's size and link count counting it
     pub hole: bool,
 }
 
-/// Walk the ROM for files that only a root setup leaves behind
 pub fn scan() -> Result<(Vec<Candidate>, usize, usize)> {
     let have = read().unwrap_or_default();
     let injected = injected_targets()?;
@@ -380,7 +361,6 @@ pub fn scan() -> Result<(Vec<Candidate>, usize, usize)> {
     Ok((out, invisible, ours))
 }
 
-/// `nomount whiteout suggest` - scan this device and propose what it finds
 pub fn suggest() -> Result<()> {
     let (found, invisible, ours) = scan()?;
     for c in &found {

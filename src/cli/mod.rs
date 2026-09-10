@@ -114,7 +114,6 @@ pub enum WhiteoutAction {
     Suggest,
 }
 
-/// Would this verb put injection state into the engine?
 pub fn serves_injections(cmd: &Commands) -> bool {
     match cmd {
         Commands::Mount | Commands::Reload => true,
@@ -129,7 +128,6 @@ pub fn serves_injections(cmd: &Commands) -> bool {
     }
 }
 
-/// Does this verb change the state the kernel's `_ghost` tables are derived from?
 pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
     match cmd {
         Commands::Uid { action } => matches!(

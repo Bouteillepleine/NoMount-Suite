@@ -1,4 +1,3 @@
-//! Persistent, package-name-aware UID block list
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -6,7 +5,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-/// Source of truth for the persistent hide list
 pub const BLOCKLIST_PATH: &str = "/data/adb/nomount/uidhide";
 
 const LEGACY_PATH: &str = "/data/adb/nomount/blocklist";
@@ -19,29 +17,23 @@ const PACKAGES_LIST: &str = "/data/system/packages.list";
 
 const MODULES_DIR: &str = "/data/adb/modules";
 
-/// Android packs (user, appid) into a uid
 pub const PER_USER_RANGE: u32 = 100_000;
 
-/// Below this is the platform (root, system_server, shell, radio...)
 pub const FIRST_APP_APPID: u32 = 10_000;
 
-/// Normalise a raw UID to the appid the kernel matches on
 pub fn appid(uid: u32) -> u32 {
     uid % PER_USER_RANGE
 }
 
-/// Must this run withhold which apps are hidden?
 pub fn redact_hide_list() -> bool {
     std::env::var_os("NM_REDACT_HIDE_LIST").is_some()
 }
 
-/// What an entry resolved to, for display in `uid list`
 pub enum Resolved {
     Uid(u32),
     NotInstalled,
 }
 
-/// A hide-list glob, anchored at one end or both
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
     Prefix(String),
@@ -49,11 +41,9 @@ pub enum Pattern {
     Contains(String),
 }
 
-/// Shortest literal a glob may carry
 pub const MIN_PATTERN_LITERAL: usize = 4;
 
 impl Pattern {
-    /// Parse a glob
     pub fn parse(entry: &str) -> Option<Result<Pattern>> {
         let e = entry.trim();
         if !e.contains('*') {
@@ -89,7 +79,6 @@ impl Pattern {
     }
 }
 
-/// Every installed package and its appid, from `packages.list`
 pub fn installed_packages() -> Option<Vec<(String, u32)>> {
     installed_from(&fs::read_to_string(PACKAGES_LIST).ok()?)
 }
@@ -114,7 +103,6 @@ fn parse_installed(list: &str) -> Vec<(String, u32)> {
     out
 }
 
-/// Resolve an exact entry against an already-loaded package map
 pub fn resolve_in(target: &str, installed: &[(String, u32)]) -> Result<Resolved> {
     let t = target.trim();
     if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
@@ -127,7 +115,6 @@ pub fn resolve_in(target: &str, installed: &[(String, u32)]) -> Result<Resolved>
     }
 }
 
-/// Expand one hide-list entry into the concrete `(package, appid)` pairs it covers
 pub fn expand(entry: &str, installed: &[(String, u32)]) -> Result<Vec<(String, u32)>> {
     let e = entry.trim();
     if let Some(pat) = Pattern::parse(e) {
@@ -144,7 +131,6 @@ pub fn expand(entry: &str, installed: &[(String, u32)]) -> Result<Vec<(String, u
     }
 }
 
-/// True if the entry is a glob (well-formed or not) rather than a package/UID
 pub fn is_pattern(entry: &str) -> bool {
     entry.contains('*')
 }
@@ -161,7 +147,6 @@ pub fn resolve(target: &str) -> Result<Resolved> {
     }
 }
 
-/// Resolve preferring the cache, for the early-boot pass
 pub fn resolve_early(target: &str, cache: &BTreeMap<String, u32>) -> Result<Resolved> {
     if let Some(uid) = cache.get(target.trim()) {
         return Ok(Resolved::Uid(*uid));
@@ -169,7 +154,6 @@ pub fn resolve_early(target: &str, cache: &BTreeMap<String, u32>) -> Result<Reso
     resolve(target)
 }
 
-/// Reverse of `uid_for_package`: the first package owning `uid`, for labelling a UID the
 pub fn package_for_uid(uid: u32) -> Option<String> {
     parse_package_for_uid(&fs::read_to_string(PACKAGES_LIST).ok()?, uid)
 }
@@ -221,7 +205,6 @@ fn migrate_legacy() {
     let _ = write_lines(BLOCKLIST_PATH, &apps);
 }
 
-/// Read the persistent hide list: trimmed, comment- and blank-stripped, order preserved,
 pub fn read() -> Result<Vec<String>> {
     migrate_legacy();
     let raw = match fs::read_to_string(BLOCKLIST_PATH) {
@@ -269,7 +252,6 @@ fn check_entry(e: &str) -> Result<()> {
     Ok(())
 }
 
-/// Add many entries in one read-modify-write
 pub fn add_many(entries: &[String]) -> Result<usize> {
     let _pass = crate::mount::pass_lock();
     let mut list = read()?;
@@ -289,12 +271,10 @@ pub fn add_many(entries: &[String]) -> Result<usize> {
     Ok(added)
 }
 
-/// Replace the whole resolved-appid mirror in one write
 pub fn cache_replace(map: &BTreeMap<String, u32>) {
     cache_write(map);
 }
 
-/// Add an entry (no-op if already present)
 pub fn add(entry: &str) -> Result<bool> {
     let _pass = crate::mount::pass_lock();
     let e = entry.trim().to_string();
@@ -308,7 +288,6 @@ pub fn add(entry: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Remove an entry (no-op if absent)
 pub fn remove(entry: &str) -> Result<bool> {
     let _pass = crate::mount::pass_lock();
     let e = entry.trim();
@@ -323,7 +302,6 @@ pub fn remove(entry: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Read the `entry<tab>appid` mirror
 pub fn cache_read() -> BTreeMap<String, u32> {
     let mut map = BTreeMap::new();
     let Ok(raw) = fs::read_to_string(CACHE_PATH) else { return map };
@@ -348,7 +326,6 @@ fn cache_write(map: &BTreeMap<String, u32>) {
     let _ = crate::statefile::write_atomic(CACHE_PATH, body);
 }
 
-/// Record `entry -> appid` for the next early-boot pass
 pub fn cache_put(entry: &str, uid: u32) {
     let mut map = cache_read();
     if map.insert(entry.trim().to_string(), appid(uid)) != Some(appid(uid)) {
@@ -356,7 +333,6 @@ pub fn cache_put(entry: &str, uid: u32) {
     }
 }
 
-/// Drop an entry from the mirror (unhidden, or its package went away)
 pub fn cache_forget(entry: &str) {
     let mut map = cache_read();
     if map.remove(entry.trim()).is_some() {
@@ -364,10 +340,8 @@ pub fn cache_forget(entry: &str) {
     }
 }
 
-/// Which isolated-process pools the kernel hides from: 1 = app-zygote pool, 2 = platform
 pub const DEFAULT_HIDE_ISOLATED: u32 = 3;
 
-/// Read the persisted isolated-pool policy (default when unset/garbled)
 pub fn hide_isolated() -> u32 {
     let Ok(raw) = fs::read_to_string(CONF_PATH) else { return DEFAULT_HIDE_ISOLATED };
     for line in raw.lines() {
@@ -382,7 +356,6 @@ pub fn hide_isolated() -> u32 {
     DEFAULT_HIDE_ISOLATED
 }
 
-/// Persist the isolated-pool policy so `apply` can re-assert it after a reboot or a `nm
 pub fn set_hide_isolated(mode: u32) -> Result<()> {
     crate::statefile::write_atomic(
         CONF_PATH,

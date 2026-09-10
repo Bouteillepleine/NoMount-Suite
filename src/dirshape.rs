@@ -1,12 +1,9 @@
-//! Decide whether this device's ROM directories describe their own contents
 
 use std::fs;
 use std::path::Path;
 
-/// erofs's `statfs` magic
 pub(crate) const EROFS_MAGIC: i64 = 0xE0F5_E1E2;
 
-/// `statfs(2)`'s `f_type` for `p`, or `None` if it would not statfs
 pub(crate) fn fs_magic(p: &Path) -> Option<i64> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
@@ -17,7 +14,6 @@ pub(crate) fn fs_magic(p: &Path) -> Option<i64> {
     Some(sf.f_type as i64)
 }
 
-/// `12*(n+2) + sum(namelen) + 3` - the `+2`/`+3` are `.` and `..`, which the listing does
 pub(crate) fn erofs_model(dir: &Path) -> Option<u64> {
     let mut n: u64 = 0;
     let mut names: u64 = 0;
@@ -41,7 +37,6 @@ fn fits_erofs_shape(dir: &Path) -> bool {
     erofs_model(dir) == Some(size)
 }
 
-/// Walk the ROM looking for proof
 pub fn rom_dirs_are_dirent_packed() -> bool {
     const ROOTS: &[&str] = &[
         "/system/app", "/system/priv-app", "/system/etc", "/product/app",

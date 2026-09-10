@@ -1,4 +1,3 @@
-//! Real bind mounts for targets hookless injection cannot serve
 
 use anyhow::{bail, Context, Result};
 use std::ffi::CString;
@@ -100,13 +99,11 @@ fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The result of an [`apply`] that succeeded
 pub enum BindOutcome {
     Bound,
     AlreadyMounted,
 }
 
-/// File-over-file bind of `source` onto an existing `target`
 pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     let s = source.to_str().context("non-utf8 bind source")?.to_string();
     let t = target.to_str().context("non-utf8 bind target")?.to_string();
@@ -201,12 +198,10 @@ fn parse_line(l: &str) -> Option<(PathBuf, PathBuf, String)> {
     Some((PathBuf::from(t), PathBuf::from(s), lbl.to_string()))
 }
 
-/// (target, source) pairs we currently have bound (from binds.list)
 pub fn tracked() -> Vec<(PathBuf, PathBuf)> {
     tracked_full().into_iter().map(|(t, s, _)| (t, s)).collect()
 }
 
-/// As [`tracked`], but an unreadable `binds.list` is an error rather than an empty list
 pub fn tracked_result() -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
     match fs::read_to_string(BINDS_LIST) {
         Ok(s) => Ok(s.lines().filter_map(parse_line).map(|(t, s, _)| (t, s)).collect()),
@@ -234,7 +229,6 @@ fn umount_target(target: &Path) -> Result<(), String> {
     Err(e.to_string())
 }
 
-/// Umount a single tracked bind and drop it from the list (gap-free reload)
 pub fn umount_one(target: &Path) -> bool {
     let _lock = match Lock::acquire() {
         Ok(l) => l,
@@ -270,7 +264,6 @@ pub fn umount_one(target: &Path) -> bool {
     true
 }
 
-/// Umount every bind we recorded, then clear the list
 pub fn teardown_all() -> bool {
     let _lock = match Lock::acquire() {
         Ok(l) => l,

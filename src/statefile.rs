@@ -1,11 +1,9 @@
-//! Crash-safe replacement of the state files under `/data/adb/nomount`
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-/// Replace `path` with `body`, atomically, mode 0600
 pub(crate) fn write_atomic(path: impl AsRef<Path>, body: impl AsRef<[u8]>) -> std::io::Result<()> {
     let path = path.as_ref();
     let dir = path.parent().unwrap_or_else(|| Path::new("/"));

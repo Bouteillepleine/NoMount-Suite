@@ -1,4 +1,3 @@
-//! The plan section of `nomount check` - lint the mount plan before a reboot turns a bad
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -810,7 +809,6 @@ fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
         .collect()
 }
 
-/// Every plan-side check, plus the counts the report carries as facts
 pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let mut f: Vec<Finding> = Vec::new();
     let (plan, skipped, refused) = collect_plan()?;

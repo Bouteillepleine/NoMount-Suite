@@ -1,4 +1,3 @@
-//! The device section of `nomount check` - prove the hiding actually holds here
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -31,7 +30,6 @@ fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Reboot, evidence).oracle(oracle)
 }
 
-/// Ask a question as an app uid, in a forked child, and bring back the answer
 pub(crate) fn probe_as_uid<const N: usize>(
     uid: u32,
     probe: impl FnOnce() -> [u32; N],
@@ -91,7 +89,6 @@ pub(crate) fn probe_as_uid<const N: usize>(
     Ok(out)
 }
 
-/// Why a probe produced no answer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProbeFail {
     Setup,
@@ -118,7 +115,6 @@ impl ProbeFail {
     }
 }
 
-/// The name of every check this file emits, in one place
 pub(crate) const N_ENGINE_LIVE: &str = "engine responding";
 pub(crate) const N_ZERO_MOUNT: &str = "zero-mount posture";
 pub(crate) const N_SURFACES: &str = "kernel surfaces";
@@ -154,7 +150,6 @@ pub struct Entry {
     pub d_ino: u64,
 }
 
-/// getdents64 directly: `read_dir` exposes `d_ino`, which is an oracle in its own right -
 pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
     let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
@@ -1347,7 +1342,6 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
     .meaning("Every file hidden from an app you hid stayed hidden on the xattr surface too.")
 }
 
-/// Every measured check, plus the two counts the report header carries
 pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
     let Some((targets, engine_dirs, all_inject_targets)) = live_rules() else {
         let live = check_engine_live();

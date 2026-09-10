@@ -1,4 +1,3 @@
-//! Metamodule mount pass for the NoMount Suite
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -34,22 +33,16 @@ use crate::nm::Nm;
 pub(crate) const MODULES_DIR: &str = "/data/adb/modules";
 const PASS_LOCK: &str = "/data/adb/nomount/pass.lock";
 
-/// RAII holder for the pass lock; the flock releases when it drops
 pub(crate) struct PassLock(std::fs::File);
 
-/// How long a pass will wait for another pass before giving up and running unserialised
 pub(crate) const PASS_LOCK_WAIT: u64 = 25;
 
-/// The bootloop guard's marker: present means the Suite parked itself
 pub const DISABLED_MARKER: &str = "/data/adb/nomount/disabled";
 
-/// Has the bootloop guard parked the Suite?
 pub fn guard_tripped() -> bool {
     Path::new(DISABLED_MARKER).exists()
 }
 
-/// Take the process-wide pass lock. Timing out and proceeding unserialised is the lesser
-/// evil: the passes are idempotent, and stalling the boot is not.
 pub(crate) fn pass_lock() -> Option<PassLock> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
@@ -145,15 +138,12 @@ fn my_hookless_enabled() -> bool {
     Path::new(MY_HOOKLESS_MARKER).exists()
 }
 
-/// The `my_*` injection trial's opt-in marker
 pub const MY_HOOKLESS_MARKER: &str = "/data/adb/nomount/my_hookless";
 
-/// True if `target` is a partition root (`/product`, `/system`, `/vendor`, ...) rather
 pub(crate) fn is_partition_root(target: &Path) -> bool {
     target.components().skip(1).count() <= 1
 }
 
-/// How a target may be served - the single answer both the native module plan and `absorb`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Serve {
     Inject,
@@ -185,7 +175,6 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
     Serve::Inject
 }
 
-/// May a whiteout be applied to `target`?
 pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     let Some(root) = target.components().nth(1).and_then(|c| c.as_os_str().to_str()) else {
         return Err("not a path under a partition");
@@ -203,12 +192,10 @@ fn inject_would_mask_dir(target: &Path) -> bool {
     target.is_dir()
 }
 
-/// Must this target be unmounted before we serve it?
 pub(crate) fn needs_unmount_before_serving(kind: PlanKind) -> bool {
     matches!(kind, PlanKind::Inject | PlanKind::Whiteout)
 }
 
-/// The order the engine must be fed: every inject, then every whiteout, each in plan order
 pub(crate) fn apply_order(plan: &[PlanEntry]) -> Vec<&PlanEntry> {
     plan.iter()
         .filter(|e| e.kind == PlanKind::Inject)
@@ -216,7 +203,6 @@ pub(crate) fn apply_order(plan: &[PlanEntry]) -> Vec<&PlanEntry> {
         .collect()
 }
 
-/// Is this path representable in the engine's wire format?
 pub(crate) fn path_is_representable(p: &Path) -> Result<(), &'static str> {
     let Some(s) = p.to_str() else {
         return Err("its name is not valid UTF-8, which the rule format cannot carry");
@@ -279,7 +265,6 @@ struct Stats {
     whiteouts: u32,
 }
 
-/// What the Suite intends to do for one module entry
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PlanKind {
     Inject,
@@ -287,17 +272,12 @@ pub(crate) enum PlanKind {
     Bind,
 }
 
-/// One module entry the plan REFUSED, and why. Kept so `check --plan` can report it: the
-/// refusal used to reach stderr and nowhere else, so a module that lost content this way
-/// still produced a "clean" report. Two live modules on the audit device were in exactly
-/// that state.
 pub(crate) struct Refused {
     pub module: String,
     pub target: PathBuf,
     pub why: &'static str,
 }
 
-/// One intended operation, resolved but not yet applied
 pub(crate) struct PlanEntry {
     pub module: String,
     pub target: PathBuf,
@@ -354,14 +334,12 @@ fn expand_replacement(
     }
 }
 
-/// One target claimed by more than one module: the winner, and who it beat
 pub(crate) struct Collision {
     pub target: PathBuf,
     pub winner: String,
     pub losers: Vec<String>,
 }
 
-/// Collapse entries claiming the same target, keeping the last
 pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Collision>) {
     let mut last: HashMap<PathBuf, usize> = HashMap::new();
     for (i, e) in plan.iter().enumerate() {
@@ -543,7 +521,6 @@ fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: 
     gone
 }
 
-/// Does applying this whiteout leave a measurable hole?
 pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
     if !crate::whiteout::measurable_hole(target) {
         return false;
@@ -567,7 +544,6 @@ fn warn_whiteout_hole(target: &Path, module: &str) {
     }
 }
 
-/// Build the full plan for every enabled, non-blocklisted module
 pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
     let blocklist = load_blocklist();
     let mut plan = Vec::new();
@@ -633,7 +609,6 @@ pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
     Ok((plan, skipped, refused))
 }
 
-/// Print the resolved plan without applying it: target, kind, source, module
 pub fn run_plan() -> Result<()> {
     let (plan, skipped, refused) = collect_plan()?;
     let (plan, _) = dedupe_by_target(plan);
@@ -710,7 +685,6 @@ fn prunable(
     uid == 0 && !wanted && !durable_whiteouts.contains(target) && !absorbed.contains(target)
 }
 
-/// `nomount reload`: gap-free hot load/unload
 pub fn run_reload() -> Result<()> {
     let _pass = pass_lock();
     let nm = Nm::new();
@@ -908,7 +882,6 @@ pub fn run_reload() -> Result<()> {
     Ok(())
 }
 
-/// Metamodule entry point (`nomount mount`): rebuild rules from the current set of enabled
 pub(crate) const MODULE_SUMMARY: &str = "/data/adb/nomount/modules.tsv";
 
 fn write_module_summary(plan: &[PlanEntry]) -> std::io::Result<()> {

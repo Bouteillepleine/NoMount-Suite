@@ -1,4 +1,3 @@
-//! Client for the hookless NoMount kernel engine
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,7 +60,6 @@ impl Nm {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    /// `nm v` - driver version; doubles as a liveness/engine check
     pub fn version(&self) -> Result<u32> {
         self.run(&["v"])?
             .trim()
@@ -69,41 +67,34 @@ impl Nm {
             .context("nm v: non-numeric version (engine not responding?)")
     }
 
-    /// `nm add <virtual> <real>` - inject a VFS redirect
     pub fn add(&self, virtual_path: &Path, real: &Path) -> Result<()> {
         let public = crate::pmcache::is_pm_published(virtual_path);
         self.run(&add_argv(public, path_str(virtual_path)?, path_str(real)?))
             .map(drop)
     }
 
-    /// `nm del <virtual>` - remove a redirect by its virtual path
     pub fn del(&self, virtual_path: &Path) -> Result<()> {
         self.run(&["del", path_str(virtual_path)?]).map(drop)
     }
 
-    /// `nm w <path>` - whiteout (make a path appear absent)
     pub fn whiteout(&self, path: &Path) -> Result<()> {
         self.run(&["w", path_str(path)?]).map(drop)
     }
 
-    /// `nm block <uid>` - hide injections from this UID (sus_path substitute)
     pub fn uid_block(&self, uid: u32) -> Result<()> {
         self.run(&["block", &crate::blocklist::appid(uid).to_string()])
             .map(drop)
     }
 
-    /// `nm unblock <uid>`
     pub fn uid_unblock(&self, uid: u32) -> Result<()> {
         self.run(&["unblock", &crate::blocklist::appid(uid).to_string()])
             .map(drop)
     }
 
-    /// `nm k i <0..3>` - which isolated-process pools per-UID hiding covers
     pub fn set_hide_isolated(&self, mode: u32) -> Result<()> {
         self.run(&["k", "i", &mode.to_string()]).map(drop)
     }
 
-    /// `nm l u` - the kernel's live blocked-UID set (authoritative, straight from the driver's
     pub fn uid_list_live(&self) -> Result<Vec<u32>> {
         let out = self.run(&["l", "u"])?;
         let mut uids = Vec::new();
@@ -115,32 +106,26 @@ impl Nm {
         Ok(uids)
     }
 
-    /// Tell the engine whether this device's ROM directories are dirent-packed, so a
     pub fn set_dir_shape(&self, packed: bool) -> Result<()> {
         self.run(&["k", "d", if packed { "1" } else { "0" }]).map(|_| ())
     }
 
-    /// `nm clear` - drop all rules
     pub fn clear(&self) -> Result<()> {
         self.run(&["clear"]).map(drop)
     }
 
-    /// `nm list` - current rules (raw text)
     pub fn list(&self) -> Result<String> {
         self.run(&["list"])
     }
 
-    /// `nm l g` - the _ghost tables as `p /abs/path` and `u <uid>` lines
     pub fn ghost_list(&self) -> Result<String> {
         self.run(&["l", "g"])
     }
 
-    /// `nm k g` with no value - the presence probe
     pub fn ghost_present(&self) -> bool {
         self.run(&["k", "g"]).is_ok()
     }
 
-    /// `nm k g <cmd>` - one _ghost control command
     pub fn ghost_ctl(&self, cmd: &str) -> Result<()> {
         self.run(&["k", "g", cmd]).map(drop)
     }
@@ -167,7 +152,6 @@ impl Nm {
 const ADD_BATCH_PAIRS: usize = 31;
 
 impl Nm {
-    /// Apply many injections with as few processes as possible
     pub fn add_many<'a>(&self, pairs: &[(&'a Path, &'a Path)]) -> Vec<(&'a Path, &'a Path)> {
         let mut failed = Vec::new();
         let mut gave_up = false;
@@ -238,7 +222,6 @@ fn path_str(p: &Path) -> Result<&str> {
         .with_context(|| format!("non-UTF8 path: {}", p.display()))
 }
 
-/// What a `nm list` line describes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LiveKind {
     Inject,
@@ -246,19 +229,14 @@ pub(crate) enum LiveKind {
     VirtualDir,
 }
 
-/// One parsed `nm list` line
 pub(crate) struct LiveRule {
     pub target: PathBuf,
-    /// Present only for an [`LiveKind::Inject`]
     pub source: Option<PathBuf>,
-    /// The ` [UID: N]` suffix, or 0 for a global rule
     pub uid: u32,
     pub kind: LiveKind,
-    /// The engine printed the per-rule `(public)` flag (engine >= 17 reports flags)
     pub public: bool,
 }
 
-/// Parse `nm list` output into typed rules - the one parser of this text
 pub(crate) fn parse_list(list: &str) -> Vec<LiveRule> {
     list.lines()
         .filter_map(|line| {
