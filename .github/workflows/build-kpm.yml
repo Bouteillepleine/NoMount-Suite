@@ -118,23 +118,33 @@ jobs:
         if: steps.sel.outputs.run == '1'
         run: |
           set -euo pipefail
-          make -s -C repo/kpm undefined \
-            TARGET_COMPILE=aarch64-linux-gnu- \
-            KP_DIR="$GITHUB_WORKSPACE/kp" \
-            KERNEL_DIR="$GITHUB_WORKSPACE/ksrc" > undef.txt
-          grep -oE '"[A-Za-z_][A-Za-z0-9_]*"' repo/kpm/nm_kpm_table.h \
-            | tr -d '"' | sort -u > known.txt
-          missing="$(comm -23 undef.txt known.txt || true)"
+          # The FINAL relocatable, not the individual objects.
+          #
+          # `make undefined` surveys nm_engine.o and nm_maps_spoof.o so gen-shim.py can
+          # find what needs redirecting. That set is not the load-time set: it also
+          # lists the module own symbols, which `ld -r` resolves inside the .kpm. Using
+          # it here reported nm_kpm_sym (defined in nm_kpm_entry.c) and
+          # vfs_map_meta_override (defined in nm_maps_spoof.c) as load failures on the
+          # first run. `nm -u` over the linked .kpm is the exact set KernelPatch has to
+          # place through kallsyms.
+          aarch64-linux-gnu-nm -u repo/kpm/nomount.kpm > raw.txt
+          awk "{ print \$NF }" raw.txt | sed "/^$/d" | sort -u > undef.txt
+          # LOCAL and KP_PROVIDED are read from gen-shim.py rather than restated here.
+          # The generator decides which symbols never enter the table - compiler
+          # builtins it defines locally, and the two KernelPatch supplies - and a second
+          # copy in this file is how the gate would start disagreeing with it.
+          python3 repo/.github/kpm-allowed.py > allowed.txt
+          missing="$(comm -23 undef.txt allowed.txt || true)"
           if [ -n "$missing" ]; then
             echo "::error::${{ matrix.ver }}: symbols the module needs are absent from nm_kpm_table.h"
             echo "KernelPatch resolves every external reference through kallsyms at load"
             echo "time and rejects the whole module on the first one it cannot place, so"
             echo "each of these is a load failure on hardware, not a warning:"
-            printf '%s\n' "$missing" | sed 's/^/    /'
+            echo "$missing" | sed "s/^/    /"
             echo "Regenerate with kpm/gen-shim.py and commit the result."
             exit 1
           fi
-          echo "all $(wc -l < undef.txt) undefined symbol(s) are covered by the table"
+          echo "all $(wc -l < undef.txt) undefined symbol(s) in the linked .kpm are covered"
 
       - name: Name the artifact by KMI
         if: steps.sel.outputs.run == '1'
