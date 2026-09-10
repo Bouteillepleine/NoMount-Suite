@@ -6,17 +6,22 @@ leave undefined, and none of them belong in nm_kpm_table.h:
 
   LOCAL        compiler builtins gen-shim.py defines locally (memset, memcpy, ...)
   KP_PROVIDED  the two the generator already knows KernelPatch supplies
-  SDK ABI      everything else KernelPatch itself defines - hook_wrap,
-               hook_unwrap_remove and friends, declared in kernel/include/*.h
+  KP exports   everything else KernelPatch hands to modules
 
 The first two are imported from gen-shim.py rather than restated, because the
-generator is what decides them and a second copy is how this check would start
-disagreeing with the thing it checks. The third is read from the SDK checkout,
-for the same reason: KernelPatch's headers are the authority on its own ABI.
+generator decides them and a second copy is how this check would start
+disagreeing with the thing it checks.
 
-gen-shim.py's KP_PROVIDED lists only two symbols because it surveys the
-KERNEL-side objects, which never reference the SDK. A whole-module survey does,
-so the SDK set has to be derived here.
+The third is read from KP_EXPORT_SYMBOL(x) in the SDK source. That macro IS the
+declaration that puts a symbol in KernelPatch's module-facing table, so it is the
+authority on what a module may leave undefined.
+
+An earlier version of this file instead took every function DECLARED in
+kernel/include/*.h, on the assumption that a header declaration meant "provided".
+Measured against the pinned SDK, the two sets overlap in only 27 of 205 names:
+98 symbols are declared but never exported, and a module referencing one of those
+would pass this gate and then fail to load on hardware. That is the failure this
+gate exists to prevent, so the proxy is not good enough.
 """
 import importlib.util
 import io
@@ -36,25 +41,27 @@ allowed = set(gen_shim.LOCAL) | set(gen_shim.KP_PROVIDED)
 table = io.open(os.path.join(KPM, "nm_kpm_table.h"), encoding="utf-8").read()
 allowed |= set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', table))
 
-DECL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+EXPORT = re.compile(r"KP_EXPORT_SYMBOL\(([A-Za-z_0-9]+)\)")
 kp_dir = os.environ.get("KP_DIR", "")
-sdk = set()
+exports = set()
 if kp_dir:
-    inc = os.path.join(kp_dir, "kernel", "include")
-    for base, _dirs, names in os.walk(inc):
+    for base, _dirs, names in os.walk(os.path.join(kp_dir, "kernel")):
         for n in names:
-            if not n.endswith(".h"):
+            try:
+                body = io.open(os.path.join(base, n), encoding="utf-8", errors="replace").read()
+            except OSError:
                 continue
-            body = io.open(os.path.join(base, n), encoding="utf-8", errors="replace").read()
-            for line in body.split("\n"):
-                s = line.strip()
-                if not s.endswith(";") or s.startswith(("#", "*", "//")):
-                    continue
-                m = DECL.search(s)
-                if m:
-                    sdk.add(m.group(1))
-    allowed |= sdk
+            exports |= set(EXPORT.findall(body))
+    # Finding none means the macro was renamed or the checkout is wrong. Carrying on
+    # would silently reject every SDK symbol and report a wall of false failures, so
+    # say which of the two it is instead.
+    if not exports:
+        print("fatal: no KP_EXPORT_SYMBOL found under %s/kernel - the SDK checkout is "
+              "wrong, or the macro was renamed. Cannot judge the gate." % kp_dir,
+              file=sys.stderr)
+        sys.exit(2)
+    allowed |= exports
 
 for name in sorted(allowed):
     print(name)
-print("%d allowed (%d from the SDK headers)" % (len(allowed), len(sdk)), file=sys.stderr)
+print("%d allowed (%d exported by KernelPatch)" % (len(allowed), len(exports)), file=sys.stderr)
