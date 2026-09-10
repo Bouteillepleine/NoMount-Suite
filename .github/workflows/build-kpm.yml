@@ -7,6 +7,10 @@ on:
       - 'kpm/**'
       - 'hookless/src/**'
       - '.github/workflows/build-kpm.yml'
+      # The load gate's allow-list logic lives here, so a change to it has to
+      # re-run the gate. Without this line an edit to the gate itself was the one
+      # change that could never be tested by the gate.
+      - '.github/kpm-allowed.py'
   workflow_dispatch:
     inputs:
       only:
