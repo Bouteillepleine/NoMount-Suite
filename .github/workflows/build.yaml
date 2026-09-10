@@ -108,6 +108,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
+          # Full history: the case-only sweep below diffs the pushed range, and the
+          # default depth-1 checkout has no predecessor to diff against.
+          fetch-depth: 0
 
       # Pinned, like every `uses:` sha above. The ref said "stable", which means whatever
       # stable was released that morning: a new stable ships new clippy lints and
@@ -184,6 +187,47 @@ jobs:
           # set: the engine's verify script is a root shell script on a device
           # just like the module's are.
           shellcheck -s sh -S info -f gcc hookless/*.sh
+
+      # A bulk prose rewrite that quietly lowercases a load-bearing token is this
+      # repository's demonstrated failure mode, and it is invisible to every gate
+      # above: the tree still compiles, the tests still pass, and the wrong thing
+      # happens silently. Six commits on 2026-09-09 titled "updates" turned
+      # `rev-parse --short HEAD` into `head` (every published zip then stamped
+      # SUITE_COMMIT "unknown"), `ARCH=`/`LLVM=` into `arch=`/`llvm=` (kbuild
+      # ignores the lowercase form), and `+config NOMOUNT` into `+config nomount`
+      # in the kernel integration patch. Three survived undetected into the next
+      # audit round.
+      #
+      # Blocking rather than advisory, on measurement: 150 hits across those six
+      # commits, ZERO across 40 ordinary ones. `[case-ok]` in a commit message is
+      # the documented way through for a deliberate rename.
+      #
+      # Needs real history, hence fetch-depth below - the default depth-1 checkout
+      # has no range to diff.
+      - name: Case-only-change sweep
+        if: github.event_name == 'push'
+        run: |
+          base="${{ github.event.before }}"
+          sha="${{ github.sha }}"
+          # All-zeros on a branch first push, and unreachable after a force-push. In
+          # both cases there is no honest range, so check the head commit alone rather
+          # than inventing one.
+          #
+          # Written as if/elif rather than `test ... && usable=no`: GitHub runs each
+          # `run:` under `bash -e`, where a bare `[ ... ] && x=y` that tests FALSE
+          # returns 1 and aborts the whole step.
+          usable=yes
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+              usable=no
+          elif ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+              usable=no
+          fi
+          if [ "$usable" = no ]; then
+              echo "no usable base ($base) - checking $sha alone"
+              python3 scripts/case-sweep.py "$sha"
+          else
+              python3 scripts/case-sweep.py "$base..$sha"
+          fi
 
   build:
     runs-on: ubuntu-latest

@@ -1280,6 +1280,31 @@ mod tests {
     /// grep is the whole guard: the constant has to be DEFINED, and every command `capture`
     /// records has to have a branch in the stub that replays it -- an unstubbed one answers
     /// rc=1 and silently drives the page's "could not read" path instead of the real one.
+    /// The case-only sweep is a blocking CI gate, and a gate nobody invokes is not a gate.
+    /// It guards a failure mode that is invisible to the compiler, the linter and every
+    /// other test here, so its wiring is pinned rather than trusted.
+    #[test]
+    fn the_case_sweep_gate_is_wired_into_ci() {
+        const BUILD_YAML: &str = include_str!("../.github/workflows/build.yaml");
+        const SWEEP: &str = include_str!("../scripts/case-sweep.py");
+
+        assert!(
+            BUILD_YAML.contains("scripts/case-sweep.py"),
+            "build.yaml no longer invokes scripts/case-sweep.py - the case-only gate is off,              and the bulk-rewrite class it catches (HEAD -> head, ARCH -> arch) is silent"
+        );
+        assert!(
+            BUILD_YAML.contains("fetch-depth: 0"),
+            "the sweep diffs the pushed range, so the test job's checkout needs full history;              with the default depth-1 checkout it has no predecessor to diff and checks nothing"
+        );
+        // The escape hatch has to be the same string on both sides, or a commit the author
+        // marked as deliberate still fails and the failure text names a marker that does
+        // not work.
+        assert!(
+            SWEEP.contains(r#"SKIP_MARKER = "[case-ok]""#),
+            "case-sweep.py's escape-hatch marker changed; the failure message it prints and              this contract must name the same string"
+        );
+    }
+
     #[test]
     fn the_webui_harness_still_has_its_stub_and_replays_every_command() {
         const HARNESS: &str = include_str!("../scripts/webui-harness.py");
