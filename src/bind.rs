@@ -11,10 +11,8 @@ pub(crate) const BINDS_LIST: &str = "/data/adb/nomount/binds.list";
 const LOCK_FILE: &str = "/data/adb/nomount/binds.lock";
 const SELINUX_XATTR: &[u8] = b"security.selinux\0";
 
-/// flock(LOCK_EX) guard so binds.list read-modify-write is atomic across a concurrent
 struct Lock(fs::File);
 impl Lock {
-    /// Fails loudly
     fn acquire() -> Result<Lock> {
         let f = {
             use std::os::unix::fs::OpenOptionsExt;
@@ -43,19 +41,16 @@ impl Drop for Lock {
     }
 }
 
-/// One conversion, lossless
 fn cstr(p: &Path) -> Result<CString> {
     CString::new(p.as_os_str().as_encoded_bytes()).context("nul byte in path")
 }
 
-/// True if `target` is already a mount point (some other module bound it)
 fn is_mounted(target: &Path) -> bool {
     fs::read_to_string("/proc/self/mountinfo")
         .map(|s| crate::absorb::parse_mountinfo(&s).iter().any(|r| r.target == target))
         .unwrap_or(false)
 }
 
-/// Read a path's SELinux label, if it has one
 fn read_selinux(p: &Path) -> Option<Vec<u8>> {
     let c = cstr(p).ok()?;
     let mut buf = [0u8; 256];
@@ -66,7 +61,6 @@ fn read_selinux(p: &Path) -> Option<Vec<u8>> {
     if n <= 0 { None } else { Some(buf[..n as usize].to_vec()) }
 }
 
-/// Put a previously captured label back on `p`
 fn restore_selinux(p: &Path, label: &[u8]) {
     if let Ok(c) = cstr(p) {
         unsafe {
@@ -76,7 +70,6 @@ fn restore_selinux(p: &Path, label: &[u8]) {
     }
 }
 
-/// Put the source file's own label back, now that nothing is bound over it
 fn restore_source_label(source: &Path, lbl: &str) {
     if source.as_os_str().is_empty() {
         return;
@@ -84,12 +77,10 @@ fn restore_source_label(source: &Path, lbl: &str) {
     restore_selinux(source, format!("{}\0", label_to_restore(lbl)).as_bytes());
 }
 
-/// What to write back when the row's label field is empty
 fn label_to_restore(lbl: &str) -> &str {
     if lbl.is_empty() { "u:object_r:adb_data_file:s0" } else { lbl }
 }
 
-/// Copy `target`'s SELinux label onto `source`, so the bound file reports the partition's
 fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     let (sc, tc) = (cstr(source)?, cstr(target)?);
     let name = SELINUX_XATTR.as_ptr() as *const libc::c_char;
@@ -161,17 +152,14 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     Ok(BindOutcome::Bound)
 }
 
-/// Replace binds.list, atomically
 fn write_binds_list(body: &str) -> std::io::Result<()> {
     crate::statefile::write_atomic(BINDS_LIST, body)
 }
 
-/// Does this row name exactly this (target, source) pair?
 fn row_is(t: &Path, s: &Path, target: &str, source: &str) -> bool {
     t.to_string_lossy() == target && s.to_string_lossy() == source
 }
 
-/// Drop one (target, source) row from binds.list
 fn remove_record_locked(target: &str, source: &str) {
     let remaining: String = tracked_full()
         .into_iter()
@@ -183,7 +171,6 @@ fn remove_record_locked(target: &str, source: &str) {
     }
 }
 
-/// Append a "target\tsource" record to binds.list
 fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Result<bool> {
     use std::os::unix::fs::OpenOptionsExt;
     if tracked_full().iter().any(|(t, s, _)| row_is(t, s, target, source)) {
@@ -202,7 +189,6 @@ fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Resul
     Ok(true)
 }
 
-/// Parse one binds.list line into (target, source)
 fn parse_line(l: &str) -> Option<(PathBuf, PathBuf, String)> {
     let l = l.trim();
     if l.is_empty() {
@@ -229,14 +215,12 @@ pub fn tracked_result() -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
     }
 }
 
-/// As [`tracked`], plus each row's recorded original source label
 fn tracked_full() -> Vec<(PathBuf, PathBuf, String)> {
     fs::read_to_string(BINDS_LIST)
         .map(|s| s.lines().filter_map(parse_line).collect())
         .unwrap_or_default()
 }
 
-/// Take the bind down, or say why not
 fn umount_target(target: &Path) -> Result<(), String> {
     let c = CString::new(target.as_os_str().as_encoded_bytes())
         .map_err(|_| "nul byte in path".to_string())?;
@@ -341,7 +325,6 @@ pub fn teardown_all() -> bool {
 mod tests {
     use super::*;
 
-    /// `binds.list` is the only record of the binds we made, and `parse_line` is the only
     #[test]
     fn a_binds_list_row_round_trips_through_parse_line() {
         let row = "/my_product/etc/x\t/data/adb/modules/m/my_product/etc/x\tu:object_r:adb_data_file:s0";
@@ -359,7 +342,6 @@ mod tests {
         assert!(parse_line("   ").is_none(), "a blank line is not a row");
     }
 
-    /// The idempotency guard and the rollback filter must answer the same question, or a
     #[test]
     fn the_rollback_matches_exactly_what_the_append_guard_skips() {
         let (t, s) = ("/my_product/etc/x", "/data/adb/modules/m/my_product/etc/x");
@@ -370,7 +352,6 @@ mod tests {
         assert!(!row_is(Path::new("/my_product/etc/xy"), Path::new(s), t, s));
     }
 
-    /// An empty label field means the row cannot say what the source carried, and skipping the
     #[test]
     fn an_unrecorded_label_falls_back_to_adb_data_file() {
         assert_eq!(label_to_restore(""), "u:object_r:adb_data_file:s0");

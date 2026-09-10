@@ -42,9 +42,6 @@ if ! command -v flock >/dev/null 2>&1; then
 elif ! ls /proc/self/fd/9 >/dev/null 2>&1; then
     nmlog "fd 9 is close-on-exec in this shell, so flock cannot use it - mount pass running without a single-run guard"
 else
-    # The loser must NOT notify: `trap nm_notify_mounted EXIT` would tell the manager that
-    # mounting has finished while the instance that holds the lock is still injecting, and
-    # that signal is what releases zygote. Only the pass that actually ran reports done.
     flock -n 9 || { _nm_notified=1; exit 0; }
 fi
 
@@ -96,8 +93,6 @@ if command -v ksud >/dev/null 2>&1; then
     done
     fi
 
-    # Count as we go rather than re-splitting the joined lists: a third-party module can
-    # create a directory name containing a space, and `for _x in $_vf $_ov` splits on it.
     _mods=${_nmods:-0}
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ -e "$NMDIR/disabled" ]; then

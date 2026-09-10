@@ -26,10 +26,6 @@ if [ -f "$LOCK" ]; then
     _mt=$(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now")
     case "$_mt" in ''|*[!0-9]*) _mt=$_now ;; esac
     _age=$(( _now - _mt ))
-    # The age test is UNCONDITIONAL. It used to sit inside the "holder is dead" branch, so a
-    # holder killed by the low-memory killer whose PID had since been recycled kept `kill -0`
-    # answering yes - and the watcher stayed wedged, silently, until the next reboot cleared
-    # the lock. No pass takes anywhere near 180s.
     if [ "$_lp" = 0 ] || [ "$_age" -ge 180 ] || ! kill -0 "$_lp" 2>/dev/null; then
         rm -f "$LOCK"
     fi

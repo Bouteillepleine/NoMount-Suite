@@ -5,7 +5,6 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-/// Last-resort location of the bundled `nm` binary
 const DEFAULT_NM_BIN: &str = "/data/adb/modules/meta-nomount/bin/arm64-v8a/nm";
 
 pub struct Nm {
@@ -25,19 +24,13 @@ impl Nm {
         Self { bin }
     }
 
-    /// `nm`'s own exit code for "the engine did not answer within the netlink timeout"
-    /// (`NM_EXIT_TIMEOUT`, userspace/src/nm.h). Retrying a rule against a wedged engine only
-    /// buys another 5s stall, so `add_many` must abandon the whole pass on this.
     const EXIT_TIMEOUT: i32 = 5;
-    /// ...and this is "could not talk to the engine at all" (no socket, no driver).
     const EXIT_NO_ENGINE: i32 = 2;
 
     fn engine_is_unreachable(code: Option<i32>) -> bool {
         matches!(code, Some(Nm::EXIT_TIMEOUT) | Some(Nm::EXIT_NO_ENGINE))
     }
 
-    /// Run, returning the exit code alongside the failure so a caller can tell
-    /// "this rule was refused" from "the engine is gone".
     fn run_coded(&self, args: &[&str]) -> std::result::Result<String, Option<i32>> {
         let out = Command::new(&self.bin).args(args).output().map_err(|_| None)?;
         if out.status.success() {
@@ -152,8 +145,6 @@ impl Nm {
         self.run(&["k", "g", cmd]).map(drop)
     }
 
-    /// `nm add` for many rules in one process, keeping `nm`'s exit code so the caller can
-    /// tell a refused rule from an engine that is not there.
     fn add_batch_coded(
         &self,
         public: bool,
@@ -173,7 +164,6 @@ impl Nm {
 
 }
 
-/// `nm`'s cap is 64 words in its path array (`p_args`), and `add` puts two paths in it per
 const ADD_BATCH_PAIRS: usize = 31;
 
 impl Nm {
@@ -191,10 +181,6 @@ impl Nm {
                 if batch.is_ok() {
                     continue;
                 }
-                // A refused RULE is worth splitting the batch for; an absent engine is not.
-                // Retrying 31 rules against a wedged engine costs 31 more 5s netlink
-                // timeouts per chunk, which on a large module set turns a fast, loud failure
-                // into an hours-long boot.
                 if Nm::engine_is_unreachable(batch.unwrap_err()) {
                     eprintln!(
                         "nomount: the engine stopped answering mid-pass - abandoning the                          remaining injections rather than retrying each one against it.                          {} rule(s) in this chunk and everything after it are unserved.",
@@ -221,7 +207,6 @@ impl Nm {
     }
 }
 
-/// Split `pairs` into the two `--public` groups, preserving order within each
 fn batch_groups<'a>(
     pairs: &[(&'a Path, &'a Path)],
     is_public: fn(&Path) -> bool,
@@ -237,7 +222,6 @@ fn batch_groups<'a>(
     out
 }
 
-/// The argv `add` hands to `nm`
 fn add_argv<'a>(public: bool, virtual_path: &'a str, real: &'a str) -> Vec<&'a str> {
     let mut args = Vec::with_capacity(4);
     args.push("add");
@@ -335,7 +319,6 @@ pub(crate) fn parse_list(list: &str) -> Vec<LiveRule> {
 mod tests {
     use super::*;
 
-    /// The flag is what keeps a PackageManager-registered APK readable by an app on the hide
     #[test]
     fn public_adds_the_flag_before_the_paths() {
         assert_eq!(
@@ -348,7 +331,6 @@ mod tests {
         );
     }
 
-    /// The policy `add` applies, stated where it is easy to check: everything pm scans and
     #[test]
     fn only_pm_published_files_opt_out_of_hiding() {
         for p in [
@@ -407,7 +389,6 @@ mod tests {
         assert!(parse_list(" (whiteout)").is_empty());
     }
 
-    /// `--public` is per-invocation, so a batch may never mix the two kinds
     #[test]
     fn batches_never_mix_public_and_private() {
         fn fake_public(p: &Path) -> bool {
@@ -427,7 +408,6 @@ mod tests {
         assert_eq!(groups[1].1, vec![(b, src), (d, src)]);
     }
 
-    /// An empty side must not produce an empty invocation: `nm add` with no operand is an
     #[test]
     fn an_empty_group_is_dropped() {
         fn none_public(_: &Path) -> bool { false }
@@ -439,14 +419,12 @@ mod tests {
         assert!(batch_groups(&[], none_public).is_empty());
     }
 
-    /// The chunk has to fit nm's 64-slot path array, which nm refuses to exceed rather than
     #[test]
     fn a_batch_fits_nms_argv_cap() {
         let paths = ADD_BATCH_PAIRS * 2;
         assert!(paths <= 64, "{paths} paths would be refused by nm");
     }
 
-    /// A source path containing ` -> ` must not move the split: the source is whatever follows
     #[test]
     fn parse_list_splits_on_the_last_arrow() {
         let v = parse_list("/system/etc/a -> b -> /data/adb/modules/M/x\n");

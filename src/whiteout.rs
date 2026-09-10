@@ -9,7 +9,6 @@ use crate::nm::Nm;
 
 pub const WHITEOUT_PATH: &str = "/data/adb/nomount/whiteouts.txt";
 
-/// Statfs magic of the directory holding `target`
 fn parent_fs_magic(target: &Path) -> Option<i64> {
     crate::dirshape::fs_magic(target.parent().unwrap_or(Path::new("/")))
 }
@@ -27,13 +26,11 @@ pub(crate) fn measurable_hole(target: &Path) -> bool {
     engine_predates_v13()
 }
 
-/// Cached: `measurable_hole` runs once per whiteout, and every call used to fork `nm v`
 fn engine_predates_v13() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| crate::nm::Nm::new().version().map(|v| v < 13).unwrap_or(true))
 }
 
-/// How a filename is matched
 enum Match {
     Exact(&'static str),
     Prefix(&'static str),
@@ -50,7 +47,6 @@ impl Match {
     }
 }
 
-/// What the scan looks for, and why each one is a tell
 const PATTERNS: &[(Match, &str)] = &[
     (Match::Prefix("install-recovery"), "recovery-restore script; a classic root-check target"),
     (Match::Exact("daemonsu"), "SuperSU daemon binary"),
@@ -67,7 +63,6 @@ const PATTERNS: &[(Match, &str)] = &[
     (Match::Suffix("SuperSUDaemon"), "SuperSU init.d hook"),
 ];
 
-/// Directories the scan reads
 const SCAN_DIRS: &[&str] = &[
     "/system/bin", "/system/xbin", "/system/sbin", "/system/etc", "/system/etc/init",
     "/system/etc/init.d", "/system/addon.d", "/system/framework", "/system/lib",
@@ -75,7 +70,6 @@ const SCAN_DIRS: &[&str] = &[
     "/product/etc/init", "/system_ext/bin", "/system_ext/etc/init",
 ];
 
-/// A path that stats but cannot be opened is not a real file - it is fabricated at the
 fn is_real_file(p: &Path) -> bool {
     p.is_file() && fs::File::open(p).is_ok()
 }
@@ -90,7 +84,6 @@ pub fn read() -> Result<Vec<String>> {
     Ok(parse(&raw))
 }
 
-/// Mirror the engine's `nm_norm_vpath`: collapse runs of `/`, drop a trailing one
 fn norm(p: &str) -> String {
     let mut out = String::with_capacity(p.len());
     for c in p.chars() {
@@ -105,7 +98,6 @@ fn norm(p: &str) -> String {
     out
 }
 
-/// Pure: trimmed, normalised, comment/blank-stripped, order-preserving, deduplicated
 fn parse(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -148,7 +140,6 @@ pub(crate) fn validate(p: &str) -> Result<()> {
     Ok(())
 }
 
-/// The gate applied to the resolved path, kept pure so it can be tested without a ROM to
 fn resolved_is_allowed(literal: &Path, resolved: &Path) -> std::result::Result<(), String> {
     if resolved == literal {
         return Ok(());
@@ -249,14 +240,12 @@ pub(crate) fn remove_locked(target: &str) -> Result<()> {
     }
 }
 
-/// The engine's live rule set, or an error saying we could not read it
 fn live_rules() -> Result<Vec<crate::nm::LiveRule>> {
     Ok(crate::nm::parse_list(&Nm::new().list().context(
         "cannot read the engine's rule set, so nothing can be said about which entries are applied",
     )?))
 }
 
-/// Targets the engine is currently whiting out, from `nm list`
 fn live_whiteouts() -> Result<std::collections::HashSet<String>> {
     Ok(live_rules()?
         .into_iter()
@@ -314,7 +303,6 @@ pub fn apply() -> Result<()> {
     Ok(())
 }
 
-/// Targets NoMount is currently serving
 fn injected_targets() -> Result<std::collections::HashSet<String>> {
     Ok(live_rules()?
         .into_iter()
@@ -323,7 +311,6 @@ fn injected_targets() -> Result<std::collections::HashSet<String>> {
         .collect())
 }
 
-/// Can an ordinary, non-root-granted app see this path at all?
 fn app_can_see_raw(path: &str) -> bool {
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     std::process::Command::new("su")
@@ -333,7 +320,6 @@ fn app_can_see_raw(path: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Does the visibility probe work at all on this device?
 fn probe_works() -> bool {
     static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *P.get_or_init(|| app_can_see_raw("/system/bin/sh"))
@@ -437,7 +423,6 @@ mod tests {
         assert_eq!(parse(raw), vec!["/system/bin/x".to_string(), "/system/bin/y".to_string()]);
     }
 
-    /// The false positive that made a substring sweep useless: "ksu" is inside `cksum`, and
     #[test]
     fn patterns_are_anchored_and_miss_stock_binaries() {
         for stock in ["cksum", "debuggerd", "sh", "linker64", "app_process64", "toybox"] {
@@ -463,7 +448,6 @@ mod tests {
         assert!(validate("/system/bin/install-recovery.sh").is_ok());
     }
 
-    /// The durable list may not name a path the module plan would refuse
     #[test]
     fn refuses_every_root_the_module_plan_refuses() {
         for p in [
@@ -494,7 +478,6 @@ mod tests {
         }
     }
 
-    /// `..` must not be a way around the partition-root refusal
     #[test]
     fn a_symlink_that_resolves_to_a_partition_root_is_refused() {
         for (lit, real) in [
@@ -534,7 +517,6 @@ mod tests {
         assert!(validate("/system/bin/install-recovery.sh").is_ok());
     }
 
-    /// A whiteout target is the second door into the rule table, and it did not ask the
     #[test]
     fn a_whiteout_target_the_wire_format_cannot_carry_is_refused() {
         for bad in [
@@ -557,7 +539,6 @@ mod tests {
         assert!(validate("/system/etc/A [UID] B").is_ok());
     }
 
-    /// The engine normalises the vpath and `nm list` prints the normalised spelling, so the
     #[test]
     fn norm_mirrors_the_engines_vpath_normalisation() {
         assert_eq!(norm("/product/app/AIMemory/"), "/product/app/AIMemory");
@@ -569,7 +550,6 @@ mod tests {
         assert_eq!(norm("/product/app/Foo (2)/x.apk"), "/product/app/Foo (2)/x.apk");
     }
 
-    /// ...and the durable file is healed on read, so an entry an older Suite already wrote
     #[test]
     fn parse_normalises_and_collapses_the_two_spellings() {
         let raw = "/product/app/Foo/\n/product/app/Foo\n/system//bin//x\n";

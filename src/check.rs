@@ -205,7 +205,6 @@ impl Tally {
 /// One `key=value` row of the fingerprint, or of the plan counts
 pub type Fact = (String, String);
 
-/// A count that may not have been taken
 fn num_or_null(n: Option<usize>) -> J {
     match n {
         Some(v) => J::Num(v as i64),
@@ -472,7 +471,6 @@ mod tests {
         Check::new(Section::Device, id, id, v, "evidence")
     }
 
-    /// The one-line verdict is the only string `health.txt` carries and `service.sh` puts on
     #[test]
     fn the_verdict_line_ranks_and_names_what_it_counts() {
         let r = |v: Vec<Check>| Report {
@@ -499,7 +497,6 @@ mod tests {
         assert_eq!(r(vec![c("a", Verdict::Pass)]).verdict(), "clean");
     }
 
-    /// The distinction the whole `Unmeasured` state exists for, now on the one enum: an
     #[test]
     fn unmeasured_is_neither_a_failure_nor_a_clean_result() {
         let t = Tally::of(&[c("a", Verdict::Pass), c("b", Verdict::Unmeasured)]);
@@ -511,7 +508,6 @@ mod tests {
         assert!(w.complete());
     }
 
-    /// Worst first, and a dead engine ahead of everything: with it down, every other row
     #[test]
     fn a_dead_engine_sorts_above_every_other_failure() {
         let mut r = Report {
@@ -551,7 +547,6 @@ mod tests {
         assert!(r.json().contains("\"complete\":false"));
     }
 
-    /// A note is not something to act on; a warning is
     #[test]
     fn a_note_is_information_and_a_warning_is_attention() {
         assert_eq!(Verdict::Note.severity(), "info");
@@ -571,7 +566,6 @@ mod tests {
         assert_eq!(Tally::of(&[c("a", Verdict::Note)]).open_failures(), 0);
     }
 
-    /// A count nobody measured must not print as a zero somebody did
     #[test]
     fn an_unread_rule_list_prints_as_unread_not_as_zero() {
         let r = Report {
@@ -602,7 +596,6 @@ mod tests {
         assert!(ok.json().contains("\"rules\":3"), "{}", ok.json());
     }
 
-    /// ids are derived, so a check cannot ship without one - the gap that left every doctor
     #[test]
     fn slugs_are_stable_and_never_empty() {
         assert_eq!(slug("PM-published files open for a hidden app"), "pm-published-files-open-for-a-hidden-app");
@@ -611,11 +604,6 @@ mod tests {
         assert_eq!(slug("///"), "unnamed-check");
     }
 
-    /// A section that produced no findings is not a section that did not run. `sections`
-    /// used to be inferred from the checks, so a perfectly clean plan half looked identical
-    /// to a skipped one - and the WebUI, which reads that field to decide whether to trust
-    /// the plan, told the user coverage was unchecked on exactly the device that was fully
-    /// covered.
     #[test]
     fn a_section_that_found_nothing_still_reports_as_having_run() {
         let clean_plan = Report {
@@ -625,7 +613,6 @@ mod tests {
             rules: Some(3),
             directories: Some(1),
             facts: Vec::new(),
-            // not one Plan check: the plan half emits a finding only when it has one
             checks: vec![c("a", Verdict::Pass)],
         };
         assert!(clean_plan.ran(Section::Plan), "it ran; it just had nothing to say");
@@ -645,7 +632,6 @@ mod tests {
         assert!(device_only.json().contains(r#""sections":["device"]"#), "{}", device_only.json());
     }
 
-    /// health.txt has exactly one renderer now
     #[test]
     fn the_fingerprint_renders_as_key_equals_value() {
         let r = Report {

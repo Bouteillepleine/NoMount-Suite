@@ -69,9 +69,6 @@ nm_consume_stash() {
     if [ "$_rn" -gt 0 ]; then
         nmlog "restored $_rn setting(s) from a stash left by an unfinished install"
     fi
-    # KEEP the stash unless every file it holds is now in place. `rm -rf` was unconditional,
-    # so a full-/data update lost the only copy of the hide list, the whiteouts and the
-    # absorbed record - and silently, because the log line above is gated on _rn > 0.
     if [ "$_rn" -ge "$_want" ]; then
         rm -rf "$_bak" 2>/dev/null
     else
@@ -196,14 +193,6 @@ nm_rule_counts() {
     _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
     _rules=$(_nmcount -v -c -E '\(virtual dir\)|\(whiteout\)')
     _wo=$(_nmcount -c '(whiteout)')
-    # Counted the same way the WebUI counts it (index.html: vpath() then d.rro), because
-    # these two numbers are shown to the same person for the same thing - the module
-    # description says "N RRO" and the WebUI overlay tile says another N.
-    #
-    # `grep -c '/overlay/[^ ]*\.apk'` matched anywhere on the whole `nm l` line, so it
-    # also counted a rule whose TARGET is an ordinary app but whose SOURCE happens to sit
-    # under a module's overlay/ directory, and it counted whiteouts and virtual dirs. The
-    # WebUI tests only the target, anchored at the end, over injects alone.
     _rro=$(printf '%s\n' "$_NMLIST" | awk '
         /\(whiteout\)|\(virtual dir\)/ { next }
         {
@@ -245,12 +234,6 @@ nm_guard_bump() {
     case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
     COUNT=$((COUNT + 1))
     echo "$COUNT" > "$NMDIR/bootcount"
-    # REFUSE, do not merely warn. `>` truncates before it writes, so a failure here (a full
-    # /data being the usual cause) leaves the file EMPTY - the next boot parses that as 0 and
-    # starts counting again, so the counter can never reach GUARD_MAX. That is an unbounded
-    # bootloop with no self-disable, arriving under exactly the condition most likely to make
-    # the engine misbehave. metamount.sh already refuses to serve when it cannot create its
-    # lock; this is the same call.
     if [ "$(cat "$NMDIR/bootcount" 2>/dev/null)" != "$COUNT" ]; then
         nmlog "⛔ cannot write $NMDIR/bootcount - the bootloop guard cannot arm, so nothing is being injected this boot. /data being full is the usual cause; free space and reboot."
         return 3

@@ -45,28 +45,18 @@ import re
 import subprocess
 import sys
 
-# Files where case can be load-bearing. Documentation is deliberately absent: prose
-# capitalisation changes constantly and breaks nothing.
 CODE_EXT = (".sh", ".rs", ".c", ".h", ".yml", ".yaml", ".patch", ".py", ".toml", ".json")
 
-# A comment in any language this repo uses. `.patch` bodies are intentionally NOT
-# treated as comments - `+config NOMOUNT` is a patch body line, and it is exactly
-# the kind of thing this gate exists to catch.
 COMMENT = re.compile(r"^\s*(///|//|#|/\*|\*|--|<!--)")
 
-# An ALL-CAPS token of three characters or more: HEAD, ARCH, LLVM, FATAL, MAKEOPTS,
-# CONFIG_NOMOUNT, SELINUX. Three rather than two, because two-letter capitals occur
-# in ordinary prose ("IO", "OK") often enough to cost precision for nothing.
 CAPS = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
 
 SKIP_MARKER = "[case-ok]"
-
 
 def git(*args):
     return subprocess.run(
         ["git", *args], capture_output=True, text=True, errors="replace"
     ).stdout
-
 
 def case_only_pairs(rev):
     """Yield (path, old, new) for -/+ lines in `rev` that differ only in case."""
@@ -77,8 +67,6 @@ def case_only_pairs(rev):
     def flush():
         if not path or not path.endswith(CODE_EXT):
             return
-        # -U0 keeps hunks tight, so pairing removals with additions in order is a
-        # sound approximation of "this line became that line".
         for old, new in zip(dels, adds):
             if old != new and old.lower() == new.lower():
                 found.append((path, old, new))
@@ -98,7 +86,6 @@ def case_only_pairs(rev):
     flush()
     return found
 
-
 def hits_for(rev):
     out = []
     for path, old, new in case_only_pairs(rev):
@@ -109,15 +96,11 @@ def hits_for(rev):
             out.append((path, lost, old.strip(), new.strip()))
     return out
 
-
 def revs_in(spec):
     """Commits to examine. Accepts `a..b`, or a list of individual revisions."""
     if ".." in spec:
-        # Ignore merge commits: their diff against the first parent replays work
-        # that was already checked on the branch being merged.
         return [r for r in git("rev-list", "--no-merges", spec).split() if r]
     return [spec]
-
 
 def main(argv):
     if len(argv) < 2:
@@ -170,7 +153,6 @@ def main(argv):
         % (len(specs) - skipped, skipped, SKIP_MARKER)
     )
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

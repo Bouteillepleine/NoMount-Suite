@@ -25,9 +25,6 @@ nm_state_dir_repair
 nm_set_bin
 chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 
-# Same writability precheck metamount.sh does on the KSU path: if $NMDIR cannot be written,
-# the bootloop guard cannot arm, and serving without a guard is what turns one bad rule into
-# an unrecoverable device.
 if ! ( : >> "$NMDIR/.mount.lock" ) 2>/dev/null; then
     nmlog "⛔ cannot write $NMDIR - the bootloop guard cannot arm; nothing was injected this boot"
     exit 0

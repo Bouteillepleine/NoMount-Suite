@@ -1,8 +1,3 @@
-/* sstrip: Copyright (C) 1999,2011 by Brian Raiter <breadbox@muppetlabs.com>
- * License GPLv2+: GNU GPL version 2 or later.
- * This is free software; you are free to change and redistribute it.
- * There is NO WARRANTY, to the extent permitted by law.
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,8 +13,6 @@
 #define	FALSE	0
 #endif
 
-/* The online help text.
- */
 static char const *yowzitch =
     "Usage: sstrip [OPTIONS] FILE...\n"
     "Remove all nonessential bytes from executable ELF files.\n\n"
@@ -27,8 +20,6 @@ static char const *yowzitch =
     "      --help          Display this help and exit.\n"
     "      --version       Display version information and exit.\n";
 
-/* Version and license information.
- */
 static char const *vourzhon =
     "sstrip, version 2.1\n"
     "Copyright (C) 1999,2011 by Brian Raiter <breadbox@muppetlabs.com>\n"
@@ -36,40 +27,24 @@ static char const *vourzhon =
     "This is free software; you are free to change and redistribute it.\n"
     "There is NO WARRANTY, to the extent permitted by law.\n";
 
-/* The name of the program.
- */
 static char const *theprogram;
 
-/* TRUE if we should attempt to truncate zero bytes from the end of
- * the file.
- */
 static int dozerotrunc = FALSE;
 
-/* Information for each executable operated upon.
- */
 static char const  *thefilename;	/* the name of the current file */
 static FILE        *thefile;		/* the currently open file handle */
 static Elf64_Ehdr   ehdr;		/* the current file's ELF header */
 static Elf64_Phdr  *phdrs;		/* the program segment header table */
 unsigned long       newsize;		/* the proposed new file size */
 
-/* A simple error-handling function. FALSE is always returned for the
- * convenience of the caller.
- */
 static int err(char const *errmsg)
 {
     fprintf(stderr, "%s: %s: %s\n", theprogram, thefilename, errmsg);
     return FALSE;
 }
 
-/* A macro for I/O errors: The given error message is used only when
- * errno is not set.
- */
 #define	ferr(msg) (err(ferror(thefile) ? strerror(errno) : (msg)))
 
-/* readcmdline() attemps to parse the command line arguments, and only
- * returns if succeeded and there is work to do.
- */
 static void readcmdline(int argc, char *argv[])
 {
     static char const *optstring = "z";
@@ -107,10 +82,6 @@ static void readcmdline(int argc, char *argv[])
     }
 }
 
-/* readelfheader() reads the ELF header into our global variable, and
- * checks to make sure that this is in fact a file that we should be
- * munging.
- */
 static int readelfheader(void)
 {
     if (elfrw_read_Ehdr(thefile, &ehdr) != 1)
@@ -122,8 +93,6 @@ static int readelfheader(void)
     return TRUE;
 }
 
-/* readphdrtable() loads the program segment header table into memory.
- */
 static int readphdrtable(void)
 {
     if (!ehdr.e_phoff || !ehdr.e_phnum)
@@ -131,12 +100,6 @@ static int readphdrtable(void)
 
     if (!(phdrs = realloc(phdrs, ehdr.e_phnum * sizeof *phdrs)))
 	return err("Out of memory!");
-    /* Seek first. Without this the table was read from wherever elfrw_read_Ehdr left the
-     * file pointer, which only happens to be right when e_phoff == e_ehsize. Any other
-     * layout produced garbage phdrs, written straight back by commitchanges() - which does
-     * seek - leaving a truncated, unloadable binary and exit 0. (Upstream ELFkickers 3.2
-     * has this line; it was lost when the sources were vendored.)
-     */
     if (fseek(thefile, ehdr.e_phoff, SEEK_SET))
 	return ferr("could not seek in file.");
     if (elfrw_read_Phdrs(thefile, phdrs, ehdr.e_phnum) != ehdr.e_phnum)
@@ -145,26 +108,15 @@ static int readphdrtable(void)
     return TRUE;
 }
 
-/* getmemorysize() determines the offset of the last byte of the file
- * that is referenced by an entry in the program segment header table.
- * (Anything in the file after that point is not used when the program
- * is executing, and thus can be safely discarded.)
- */
 static int getmemorysize(void)
 {
     unsigned long size, n;
     int i;
 
-    /* Start by setting the size to include the ELF header and the
-     * complete program segment header table.
-     */
     size = ehdr.e_phoff + ehdr.e_phnum * sizeof *phdrs;
     if (size < ehdr.e_ehsize)
 	size = ehdr.e_ehsize;
 
-    /* Then keep extending the size to include whatever data the
-     * program segment header table references.
-     */
     for (i = 0 ; i < ehdr.e_phnum ; ++i) {
 	if (phdrs[i].p_type != PT_NULL) {
 	    n = phdrs[i].p_offset + phdrs[i].p_filesz;
@@ -177,10 +129,6 @@ static int getmemorysize(void)
     return TRUE;
 }
 
-/* truncatezeros() examines the bytes at the end of the file's
- * size-to-be, and reduces the size to exclude any trailing zero
- * bytes.
- */
 static int truncatezeros(void)
 {
     unsigned char contents[1024];
@@ -202,8 +150,6 @@ static int truncatezeros(void)
 	    --size;
     } while (size && !n);
 
-    /* Sanity check.
-     */
     if (!size)
 	return err("ELF file is completely blank!");
 
@@ -211,27 +157,16 @@ static int truncatezeros(void)
     return TRUE;
 }
 
-/* modifyheaders() removes references to the section header table if
- * it was stripped, and reduces program header table entries that
- * included truncated bytes at the end of the file.
- */
 static int modifyheaders(void)
 {
     int i;
 
-    /* If the section header table is gone, then remove all references
-     * to it in the ELF header.
-     */
     if (ehdr.e_shoff >= newsize) {
 	ehdr.e_shoff = 0;
 	ehdr.e_shnum = 0;
 	ehdr.e_shstrndx = 0;
     }
 
-    /* The program adjusts the file size of any segment that was
-     * truncated. The case of a segment being completely stripped out
-     * is handled separately.
-     */
     for (i = 0 ; i < ehdr.e_phnum ; ++i) {
 	if (phdrs[i].p_offset >= newsize) {
 	    phdrs[i].p_offset = newsize;
@@ -244,22 +179,15 @@ static int modifyheaders(void)
     return TRUE;
 }
 
-/* commitchanges() writes the new headers back to the original file
- * and sets the file to its new size.
- */
 static int commitchanges(void)
 {
     size_t n;
 
-    /* Save the changes to the ELF header, if any.
-     */
     if (fseek(thefile, 0, SEEK_SET))
 	return ferr("could not rewind file");
     if (!elfrw_write_Ehdr(thefile, &ehdr))
 	return ferr("could not modify file");
 
-    /* Save the changes to the program segment header table, if any.
-     */
     if (fseek(thefile, ehdr.e_phoff, SEEK_SET)) {
 	ferr("could not seek in file");
 	goto warning;
@@ -269,15 +197,10 @@ static int commitchanges(void)
 	goto warning;
     }
 
-    /* Eleventh-hour sanity check: don't truncate before the end of
-     * the program segment header table.
-     */
     n = ehdr.e_phnum * ehdr.e_phentsize;
     if (newsize < ehdr.e_phoff + n)
 	newsize = ehdr.e_phoff + n;
 
-    /* Chop off the end of the file.
-     */
     if (ftruncate(fileno(thefile), newsize)) {
 	err(errno ? strerror(errno) : "could not resize file");
 	goto warning;
@@ -289,9 +212,6 @@ static int commitchanges(void)
     return err("ELF file may have been corrupted!");
 }
 
-/* main() loops over the cmdline arguments, leaving all the real work
- * to the other functions.
- */
 int main(int argc, char *argv[])
 {
     int failures = 0;

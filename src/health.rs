@@ -190,7 +190,6 @@ fn read_cmd(prog: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// Size a normal (non-root) app sees for `path`, via `su <uid> -c stat`
 fn app_size(uid: u32, path: &str) -> String {
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     let out = Command::new("su")
@@ -201,7 +200,6 @@ fn app_size(uid: u32, path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// How many mounts are backed by module content
 fn count_mounts_split() -> Option<(usize, usize)> {
     let Ok(body) = fs::read_to_string("/proc/self/mountinfo") else { return None };
     let rows = crate::absorb::parse_mountinfo(&body);
@@ -226,10 +224,8 @@ fn count_mounts_split() -> Option<(usize, usize)> {
     Some((total, by_design))
 }
 
-/// The unprivileged uid the consistency canary probes as (`shell`)
 const PROBE_UID: u32 = 2000;
 
-/// The Narcissus canary: sample a few injected files and confirm a normal app (uid 2000,
 fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<bool>) -> String {
     match probe_uid_hidden {
         Some(true) => return "unchecked:probe-uid-hidden".to_string(),
@@ -295,7 +291,6 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
     }
 }
 
-/// How much of a file to compare when sizes match
 const DRIFT_BYTES: usize = 4096;
 
 fn head(path: &str, n: usize) -> Option<Vec<u8>> {
@@ -314,16 +309,10 @@ fn head(path: &str, n: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Does what the engine serves at each target match the source its own rule names?
 fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     const CAP: usize = 20_000;
     let comparable = rules.iter().filter(|r| r.uid == 0).count();
     let mut checked = 0;
-    // uid == 0 only. A `[UID: n]` rule serves ONE uid, and root is not it: root stats the
-    // target and is handed the stock file, so size and bytes differ by design and this
-    // reported FAIL - blaming a stray `mount --bind` and telling the user to delete it and
-    // reboot - on a perfectly healthy device. Every other consumer of the rule list narrows
-    // the same way (audit::live_rules, absorb::live_injections, and mount's (target, uid) key).
     for rule in rules.iter().filter(|r| r.uid == 0).take(CAP) {
         let Some(source) = rule.source.as_deref() else { continue };
         let target = rule.target.as_path();
@@ -351,8 +340,6 @@ fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     if checked == 0 {
         "unchecked".to_string()
     } else if comparable > CAP {
-        // Everything past the cap went uncompared. `check_dir_ino_collision` reports its own
-        // cap as UNMEASURED rather than a pass; do the same here instead of saying "ok".
         format!("unchecked:over-cap({checked} of {comparable})")
     } else {
         "ok".to_string()
@@ -418,7 +405,6 @@ pub fn run_snapshot() -> Result<()> {
     Ok(())
 }
 
-/// The live fingerprint as `health.txt`/`snapshot.txt` text, stamped
 fn fingerprint_text() -> Result<String> {
     let r = crate::check::build(false, true)?;
     let mut body = r.fingerprint_text();
@@ -452,7 +438,6 @@ pub fn run_verify() -> Result<()> {
     Ok(())
 }
 
-/// Every field that moved between two fingerprints, as the lines `verify` prints
 fn drift_lines(saved: &str, live: &str) -> Vec<String> {
     let kv = |txt: &str| -> Vec<(String, String)> {
         txt.lines()
@@ -479,17 +464,10 @@ fn drift_lines(saved: &str, live: &str) -> Vec<String> {
     out
 }
 
-/// Is this pair the user's own version move rather than drift?
 fn is_version_context(key: &str, sval: &str, lval: &str) -> bool {
     let version_shaped = |v: &str| {
         v.strip_prefix('v').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
     };
-    // Only an INCREASE is "an update you made". A downgrade is the regression this whole
-    // verb exists to surface: an engine below v17 strips NM_FLAG_PUBLIC from a shadowed
-    // file, and below v15 cannot express the opt-out at all. Reporting `engine v32 -> v20`
-    // as "nothing is wrong with it" is the one answer `verify` must never give.
-    //
-    // Two shapes to compare: `engine` is `v<int>`, `version` is dotted `a.b.c`.
     let parts = |v: &str| -> Option<Vec<u64>> {
         let v = v.trim().trim_start_matches('v');
         if v.is_empty() {
@@ -510,7 +488,6 @@ fn is_version_context(key: &str, sval: &str, lval: &str) -> bool {
     }
 }
 
-/// The one sentence that says the comparison spans two versions, or `None` when it does not
 fn version_context(saved: &str, live: &str) -> Option<String> {
     let get = |txt: &str, key: &str| -> Option<String> {
         txt.lines()
@@ -558,7 +535,6 @@ pub(crate) fn is_shared_storage(p: &Path) -> bool {
     SHARED_ROOTS.iter().any(|r| p.starts_with(r))
 }
 
-/// Why the export destination's parent cannot hold a new directory, or `None` when nothing
 fn base_unusable(base: &Path) -> Option<String> {
     for p in base.ancestors() {
         if p.as_os_str().is_empty() {
@@ -702,7 +678,6 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// What `dmesg-nomount.txt` carries, and whether the bundle's closing note must name it as
 fn dmesg_section(shared: bool, dmesg: &str) -> (String, bool) {
     if shared && !dmesg.is_empty() {
         return (
@@ -724,7 +699,6 @@ fn dmesg_section(shared: bool, dmesg: &str) -> (String, bool) {
     (dmesg.to_string(), false)
 }
 
-/// The rule dump, filtered for a shared destination
 fn redact_rules_for_shared(rules: &str) -> String {
     rules
         .lines()
@@ -734,7 +708,6 @@ fn redact_rules_for_shared(rules: &str) -> String {
         .join("\n")
 }
 
-/// One exported state file, filtered for a shared destination
 fn redact_for_shared(name: &str, body: &str) -> String {
     let keep_installed = |l: &&str| -> bool {
         let t = l.trim();
@@ -757,7 +730,6 @@ fn redact_for_shared(name: &str, body: &str) -> String {
     }
 }
 
-/// [`redact_app_paths`] over a whole document, trailing newline kept
 fn redact_app_paths_doc(body: &str) -> String {
     if !body.contains("/data/app/") {
         return body.to_string();
@@ -769,7 +741,6 @@ fn redact_app_paths_doc(body: &str) -> String {
     s
 }
 
-/// One `key=value` fingerprint line with any `/data/app/...` path blanked
 fn redact_app_paths(line: &str) -> String {
     if !line.contains("/data/app/") {
         return line.to_string();
@@ -791,10 +762,6 @@ fn redact_app_paths(line: &str) -> String {
 mod tests {
     use super::*;
 
-    /// A DOWNGRADE is not "an update you made" - it is the regression `verify` exists for.
-    /// An engine below v17 strips NM_FLAG_PUBLIC from a shadowed file; below v15 it cannot
-    /// express the opt-out at all. Suppressing that row printed "no drift" plus "nothing is
-    /// wrong with it" over exactly the state the user needed to see.
     #[test]
     fn a_version_that_went_backwards_is_drift_not_context() {
         assert!(is_version_context("engine", "v30", "v32"), "forward is the user's own update");
@@ -821,7 +788,6 @@ rules=3
         );
     }
 
-    /// The export destination's parent, judged in the three states that matter
     #[test]
     fn an_unresolvable_export_base_is_named_instead_of_reported_as_existing() {
         use std::os::unix::fs::symlink;
@@ -855,7 +821,6 @@ rules=3
         assert!(base_unusable(&f).is_some_and(|w| w.contains("not a directory")));
     }
 
-    /// `verify` had NO test proving it detects anything: the comparison lived inside a
     #[test]
     fn drift_names_a_changed_field() {
         let saved = "engine=v30\nrules=257\nblocked=19\nts=1\n";
@@ -864,7 +829,6 @@ rules=3
         assert_eq!(d, vec!["DRIFT rules: snapshot=257 -> live=260"]);
     }
 
-    /// `ts` moves on every call by construction
     #[test]
     fn drift_ignores_the_timestamp() {
         let saved = "engine=v30\nrules=257\nts=1788327280\n";
@@ -872,7 +836,6 @@ rules=3
         assert!(drift_lines(saved, live).is_empty(), "ts must not count as drift");
     }
 
-    /// A field the live fingerprint gained
     #[test]
     fn drift_reports_a_field_only_live_has() {
         let saved = "engine=v30\n";
@@ -880,7 +843,6 @@ rules=3
         assert_eq!(drift_lines(saved, live), vec!["DRIFT guard: snapshot=<absent> -> live=armed"]);
     }
 
-    /// A field the snapshot has and live no longer emits
     #[test]
     fn drift_reports_a_field_the_snapshot_had_and_live_lost() {
         let saved = "engine=v30\nmanager_umount=off\n";
@@ -892,7 +854,6 @@ rules=3
         );
     }
 
-    /// Identical inputs are the pass case, and it must survive key REORDERING -- the
     #[test]
     fn drift_is_empty_for_the_same_fingerprint_in_any_order() {
         let saved = "engine=v30\nrules=257\nguard=armed\nts=1\n";
@@ -900,7 +861,6 @@ rules=3
         assert!(drift_lines(saved, live).is_empty());
     }
 
-    /// Several fields at once, both directions in one comparison
     #[test]
     fn drift_reports_every_moved_field_not_just_the_first() {
         let saved = "engine=v30\nrules=257\nmanager_umount=off\n";
@@ -912,7 +872,6 @@ rules=3
         assert!(d.iter().any(|l| l.contains("guard") && l.contains("<absent>")));
     }
 
-    /// A Suite update and an engine update are the two things a user does ON purpose, and
     #[test]
     fn drift_says_nothing_about_the_users_own_update() {
         let saved = "version=1.3.163\nengine=v30\nrules=257\nguard=armed\nts=1\n";
@@ -937,7 +896,6 @@ rules=3
         assert!(d.iter().any(|l| l.starts_with("DRIFT guard:")));
     }
 
-    /// ...but `engine=down` is not a version move
     #[test]
     fn an_engine_that_stopped_answering_is_still_drift() {
         let saved = "version=1.3.163\nengine=v30\n";
@@ -965,7 +923,6 @@ rules=3
         }
     }
 
-    /// The verdict tag, not the enum: `Verdict` deliberately derives only what its ordering
     fn verdict_of(fp: &Fingerprint, id: &str) -> &'static str {
         fp.checks()
             .into_iter()
@@ -975,7 +932,6 @@ rules=3
             .tag()
     }
 
-    /// The spellings a raw `String::starts_with` on the caller's argument could not see
     #[test]
     fn every_spelling_of_shared_storage_is_recognised() {
         for p in [
@@ -991,7 +947,6 @@ rules=3
         }
     }
 
-    /// ...and the other direction: a raw prefix has no notion of a path boundary, so it called
     #[test]
     fn private_destinations_are_not_mistaken_for_shared_ones() {
         for p in [
@@ -1005,7 +960,6 @@ rules=3
         }
     }
 
-    /// "Nothing to test" is only honest while the engine is answering
     #[test]
     fn zero_rules_is_only_not_applicable_when_the_engine_answered() {
         let up = fp("v26", 0);
@@ -1043,7 +997,6 @@ rules=3
         assert_eq!(verdict_of(&bad, "per-UID consistency canary"), "FAIL");
     }
 
-    /// The export's shared-storage filter, on the two files that keep their place in the
     #[test]
     fn a_shared_export_filters_the_files_it_still_includes() {
         let body = "# a comment\n\ncom.example.bank\nsome_module_id\n";
@@ -1054,7 +1007,6 @@ rules=3
         assert_eq!(redact_for_shared("incident.log", body), body);
     }
 
-    /// An absorbed patched APK's path names which app on this phone is patched
     #[test]
     fn a_shared_export_keeps_data_app_paths_out_of_the_fingerprint() {
         let line = "served_matches_rule=drift:/data/app/~~aB1/com.mybank.app-x9/base.apk\
@@ -1074,7 +1026,6 @@ rules=3
         assert!(redact_for_shared("health.txt", doc).contains("rules=257"));
     }
 
-    /// The kernel ring republishes, verbatim, the file `boot.log` is withheld to keep private
     #[test]
     fn a_shared_export_keeps_the_kernel_ring_out_of_the_bundle() {
         let ring = "[1.0] nomount: *.bank matches com.mybank.app (appid 10231, below the app \
@@ -1095,7 +1046,6 @@ rules=3
         }
     }
 
-    /// The rule dump and the check report both name an absorbed APK's path, and the round-8
     #[test]
     fn a_shared_export_keeps_data_app_paths_out_of_the_rule_list_and_the_report() {
         let dump = "/system/etc/hosts -> /data/adb/modules/M/system/etc/hosts\n\
@@ -1124,7 +1074,6 @@ rules=3
         assert!(!redact_for_shared("incident.log", inc).contains("com.mybank.app"));
     }
 
-    /// The three shapes this module's own parser got wrong before it was deleted
     #[test]
     fn the_shared_parser_survives_the_three_shapes_the_local_one_mangled() {
         let list = "/system/etc/a -> b -> /data/adb/modules/M/system/etc/ab\n\

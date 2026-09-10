@@ -21,17 +21,11 @@ if [ -f "$SUMS" ]; then
         fi
         unset _sumout
     else
-        # Not a pass. Nothing was checked, and saying "skipping" invites reading that as
-        # "fine". Name what is unverified so the line is a result, not a shrug.
         ui_print "! sha256sum is missing from this recovery - the payload was NOT verified."
         ui_print "! Installing unverified. If this zip came from anywhere but the official"
         ui_print "! release page, cancel and re-flash from a full Android boot instead."
     fi
 else
-    # package.sh always writes this manifest, so a zip without one did not come out of
-    # the build pipeline intact. "Skipping" turned the one check that would have caught
-    # a tampered or truncated payload into a line of text nobody reads, and then installed
-    # it anyway. Absence of the manifest is itself the failure.
     ui_print "*********************************************************"
     ui_print "! No sha256 manifest in this zip - it cannot be verified."
     ui_print "! Every official build ships one, so this zip is corrupt,"

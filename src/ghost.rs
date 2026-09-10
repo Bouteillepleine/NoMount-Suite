@@ -35,7 +35,6 @@ impl Summary {
         self.paths > 0 && self.uids > 0
     }
 
-    /// The warning this sync earns, if any
     fn warning(&self) -> Option<String> {
         if self.dump_failed {
             return Some(
@@ -71,7 +70,6 @@ impl Summary {
     }
 }
 
-/// `nm k g` payloads ride in one netlink attribute
 const CTL_CHUNK: usize = 12 * 1024;
 
 /// Which rule targets are candidates for ghosting
@@ -87,7 +85,6 @@ pub(crate) fn candidates(list: &str) -> Vec<PathBuf> {
     v
 }
 
-/// Normalise the engine's blocked-uid dump into the `_ghost` `u` table
 fn ghost_uids(live: &[u32]) -> Vec<u32> {
     let mut v: Vec<u32> = live
         .iter()
@@ -99,7 +96,6 @@ fn ghost_uids(live: &[u32]) -> Vec<u32> {
     v
 }
 
-/// Ask, as `uid`, which of `paths` are absent - not merely unreadable
 fn absent_to(uid: u32, paths: &[PathBuf]) -> Option<Vec<bool>> {
     if paths.is_empty() {
         return Some(Vec::new());
@@ -170,7 +166,6 @@ fn absent_to(uid: u32, paths: &[PathBuf]) -> Option<Vec<bool>> {
     Some(buf.into_iter().map(|b| b == 1).collect())
 }
 
-/// Push a whole table in as few netlink commands as possible
 fn push(nm: &Nm, kind: char, items: &[String], out: &mut Summary) {
     let mut first = true;
     let mut chunk: Vec<&str> = Vec::new();
@@ -335,7 +330,6 @@ pub fn sync_after_pass(nm: &Nm) {
 mod tests {
     use super::*;
 
-    /// The three exclusions, in the one place they are decided
     #[test]
     fn candidates_exclude_whiteouts_and_public_rules() {
         let list = "\
@@ -357,14 +351,12 @@ mod tests {
         );
     }
 
-    /// A target containing " (" survives
     #[test]
     fn candidates_keep_a_target_containing_a_bracket() {
         let list = "/product/app/Foo (2)/x.apk -> /data/adb/modules/M/x.apk\n";
         assert_eq!(candidates(list), vec![PathBuf::from("/product/app/Foo (2)/x.apk")]);
     }
 
-    /// Duplicates collapse and relative junk is dropped, so a malformed dump cannot inflate
     #[test]
     fn candidates_are_sorted_deduped_and_absolute() {
         let list = "\
@@ -389,7 +381,6 @@ not-a-path -> /q
         assert!(!s.effective(), "no paths -> every guard is dead code");
     }
 
-    /// The probe must answer "absent" for a path that is not there and "present" for one that
     #[test]
     fn absent_to_distinguishes_present_from_missing() {
         let d = std::env::temp_dir().join(format!("nm-ghost-{}", std::process::id()));
@@ -409,20 +400,17 @@ not-a-path -> /q
         assert_eq!(absent_to(unsafe { libc::getuid() }, &[]), Some(Vec::new()));
     }
 
-    /// The `u` table is the ENGINE's blocked set, normalised the way the engine matches it
     #[test]
     fn ghost_uids_normalises_clones_to_one_appid() {
         assert_eq!(ghost_uids(&[1_010_471, 10_471, 10_123]), vec![10_123, 10_471]);
     }
 
-    /// Root must never enter the table
     #[test]
     fn ghost_uids_never_cloaks_from_root() {
         assert_eq!(ghost_uids(&[0, 10_123, 100_000]), vec![10_123]);
         assert!(ghost_uids(&[0]).is_empty(), "a set of only root leaves the table empty");
     }
 
-    /// Same live set -> same command, whatever order the kernel dumped it in
     #[test]
     fn ghost_uids_is_order_independent() {
         assert_eq!(ghost_uids(&[10_009, 10_471, 10_123]), ghost_uids(&[10_123, 10_009, 10_471]));
@@ -433,7 +421,6 @@ not-a-path -> /q
         assert!(ghost_uids(&[]).is_empty());
     }
 
-    /// The two tables share `push`, and they used to share its refusal counters: a refused UID
     #[test]
     fn a_refused_uid_is_never_reported_as_a_refused_path() {
         let s = Summary { uids: 1, rejected_uids: 3, ghostable: 0, ..Default::default() };

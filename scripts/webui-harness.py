@@ -33,19 +33,12 @@ OUT = os.path.join(ROOT, "target")
 FIXTURES = os.path.join(OUT, "webui-fixtures.json")
 BIN = "/data/adb/modules/meta-nomount/bin/arm64-v8a"
 
-# key -> the shell the page runs. Matched by SUBSTRING in the stub below, so the
-# key order there matters more than exactness here.
 COMMANDS = {
     "abi": "getprop ro.product.cpu.abi",
     "engver": "%s/nm v" % BIN,
     "plan": "%s/nomount plan" % BIN,
     "vfslist": "NM_BIN=%s/nm %s/nomount vfs list" % (BIN, BIN),
     "audit": "cat /data/adb/nomount/audit.json",
-    # VERBATIM from index.html's `refreshModules` (search it for
-    # `for d in /data/adb/modules`). It used to be a hand-copy that had already
-    # drifted -- `for m in` / `"$m"` against the page's `for d in` / `"$d"` --
-    # which is the whole failure mode a harness is supposed to catch, reproduced
-    # inside the harness. Keep the two byte-identical when either changes.
     "modules": (
         'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; id=$(basename "$d"); '
         'mnt=$(awk -v m="$id" \'$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}\' '
@@ -58,13 +51,6 @@ COMMANDS = {
     "dev": 'echo "$(getprop ro.product.marketname)|$(getprop ro.product.manufacturer)|'
            '$(getprop ro.product.model)|$(getprop ro.build.version.release)|'
            '$(getprop ro.build.version.sdk)|$(uname -r)"',
-    # VERBATIM from index.html's `refreshStealth`. It had drifted twice: the
-    # sweep lowercased the page's `grep -q ENABLED` and left this one alone, and
-    # the `ksud=` line was added to the page in 77604ca and never added here --
-    # which pinned `noKsud` true, so the Root-su tile rendered "not measured" in
-    # every harness run and the sucompat path could not be driven at all. That is
-    # the failure this file exists to catch, reproduced inside it. Keep the two
-    # byte-identical when either changes.
     "stealth": 'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat '
                '| grep -q ENABLED && echo 1 || echo 0)"; '
                'echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; '
@@ -72,25 +58,12 @@ COMMANDS = {
                'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; '
                'echo "se=$(getenforce 2>/dev/null)"',
     "appnm": 'su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"',
-    # `-e`, matching the page and `mount::guard_tripped` (Path::exists): a
-    # `disabled` DIRECTORY parks the Suite exactly as a file does.
     "disabled": "[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0",
     "incident": "cat /data/adb/nomount/incident.log 2>/dev/null",
     "snapshot": "[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0",
     "uidlist": "NM_BIN=%s/nm %s/nomount uid list" % (BIN, BIN),
-    # WITHOUT --write, unlike the page, so `capture` stays read-only. The stub
-    # matches on `check --json`, which the page's `check --json --write` contains.
-    # Missing entirely until now, so `runCheck`/`autoCheck`/`renderCheck`-off-a-
-    # live-run fell through to the unmatched `{out:'', rc:1}` branch -- i.e. the
-    # one code path that cannot be driven at all was the path carrying three of
-    # round 9's Tier-1 findings.
     "check": "NM_BIN=%s/nm %s/nomount check --json" % (BIN, BIN),
     "pkgs": "pm list packages -3 -U 2>/dev/null | sort",
-    # The stub already had an `absorbedlist` branch and COMMANDS had no such key,
-    # so `f['absorbedlist']` was always undefined and ABSORBED_N always 0 -- which
-    # is exactly the state neither of the two most recent absorb-card commits can
-    # be reproduced in. The one thing the harness exists to test was the one thing
-    # it could not show.
     "absorbedlist": (
         "while IFS= read -r l; do case \"$l\" in ''|'#'*) continue;; esac; "
         "t=${l%%\t*}; s=${l#*\t}; [ \"$t\" = \"$s\" ] && continue; "
@@ -101,17 +74,9 @@ COMMANDS = {
     "whiteoutlist": "NM_BIN=%s/nm %s/nomount whiteout list" % (BIN, BIN),
     "isolated": "NM_BIN=%s/nm %s/nomount uid isolated" % (BIN, BIN),
     "bootcount": "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi",
-    # `refreshAll`'s staged-version probe. Unstubbed until now, so it fell to the
-    # rc=1 branch, `pv` came back empty and `staged` was always false -- i.e. the
-    # "X staged - reboot to activate" footer and its tooltip could not be driven
-    # at all. Same shape as the `check` and `absorbedlist` gaps above.
     "modprop": "sed -n 's/^version=//p' /data/adb/modules/meta-nomount/module.prop",
 }
 
-# Substring tests, in order. NO regex escapes: a `\b` that does not survive a
-# shell heredoc becomes a literal backspace, and the branch then silently never
-# matches -- which is exactly how the first version of this fed the page an
-# empty plan and made every module render as "nothing to inject".
 STUB = """
 <script>
 window.__FX = __FIXTURES__;
@@ -157,31 +122,17 @@ window.addEventListener('error', function (e) {
 </script>
 """
 
-
 def capture():
     os.makedirs(OUT, exist_ok=True)
     env = dict(os.environ, MSYS_NO_PATHCONV="1")
-    # One warm-up, output discarded. A cold or version-mismatched daemon writes
-    # "adb server is out of date.  killing... / * daemon started successfully *"
-    # to STDOUT, and every fixture then carries that banner as if the device had
-    # said it -- measured: all 18 captured that way, rc=0 throughout, so nothing
-    # complained and the page was fed adb's chatter as getprop/getenforce output.
     subprocess.run(["adb", "start-server"], capture_output=True, env=env)
     fx = {}
     for key, cmd in COMMANDS.items():
-        # shlex.quote, NOT json.dumps. json.dumps produces a DOUBLE-quoted string,
-        # and `adb shell` hands the whole line to the device's shell, which
-        # expands $d/$id/$mnt/$(basename ...) before `su -c` ever sees them. The
-        # `modules` fixture -- the only one with variables -- therefore captured
-        # EMPTY on every run, so the Modules pane, the mountless/N-mounts badge
-        # and the served count could not be exercised at all. Measured on an OP15,
-        # same command both ways: json.dumps rc=0 len=0, shlex.quote rc=0 len=318.
         p = subprocess.run(
             ["adb", "shell", "su -c " + shlex.quote(cmd)],
             capture_output=True, text=True, env=env,
         )
         out = p.stdout.rstrip("\n")
-        # A harness that poisons its own inputs is worse than no harness.
         if "daemon started successfully" in out or "adb server is out of date" in out:
             sys.exit("FATAL: adb wrote its own banner into %r -- re-run capture" % key)
         fx[key] = {"out": out, "rc": p.returncode}
@@ -190,18 +141,10 @@ def capture():
         json.dump(fx, f)
     print("wrote %s -- contains package names and uids, do NOT commit" % FIXTURES)
 
-
 def build(no_driver=False):
     with open(FIXTURES, encoding="utf-8") as f:
         fx = json.load(f)
     if no_driver:
-        # A kernel built without CONFIG_NOMOUNT. `audit.json` and `check` are
-        # deliberately LEFT as captured: a stale clean report from when the
-        # engine worked is precisely the case where the page's two halves can
-        # disagree, and the one the "false green" findings live in.
-        # uidlist/whiteoutlist/isolated go through `nm` too, so a no-driver
-        # kernel fails them exactly as it fails `vfs list`; blanking only the
-        # first three made the no-driver page healthier than the real thing.
         for k in ("vfslist", "engver", "plan", "uidlist", "whiteoutlist", "isolated"):
             fx[k] = {"out": "", "rc": 1}
     with open(os.path.join(ROOT, "module", "webroot", "index.html"), encoding="utf-8") as f:
@@ -211,7 +154,6 @@ def build(no_driver=False):
     with open(dest, "w", encoding="utf-8", newline="\n") as f:
         f.write(page.replace("\n<script>\n", stub + "\n<script>\n", 1))
     print("wrote %s" % dest)
-
 
 if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else "build"

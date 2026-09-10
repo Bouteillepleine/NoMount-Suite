@@ -7,7 +7,6 @@ use super::{UidAction, VfsAction};
 use crate::blocklist::{self, appid, Resolved};
 use crate::nm::Nm;
 
-/// What `uid unblock` actually did, in words
 fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -> String {
     match (uid, existed, unhid) {
         (Some(uid), true, true) => format!("ok: {target} (uid {uid}) unhidden"),
@@ -34,7 +33,6 @@ fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -
     }
 }
 
-/// Serialise a verb's kernel mutation against the mount pass
 fn pass_guard() -> Option<crate::mount::PassLock> {
     crate::mount::pass_lock()
 }
@@ -166,10 +164,6 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
                     }
                     for (pkg, uid) in hits {
                         if uid < blocklist::FIRST_APP_APPID {
-                            // service.sh and uidwatch.sh capture this with 2>&1 and hand it
-                            // to nmlog, which writes to /dev/kmsg. The export code withholds
-                            // dmesg precisely because it can name a hidden app, so honour the
-                            // same flag rather than putting fresh names into the ring.
                             if blocklist::redact_hide_list() {
                                 eprintln!(
                                     "nomount: a hide-list glob matches a package whose appid \
@@ -272,12 +266,6 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
                 rep.failed += 1;
             }
         }
-        // Only when every retire actually landed. `cache_replace` is what makes the mirror
-        // authoritative for the next pass, so writing it after a failed `uid_unblock` orphans
-        // that appid: still hidden by the kernel, named by neither `uidhide` nor the cache, so
-        // no later `uid apply` and no boot pass will ever try again. The non-glob
-        // `uid unblock` path guards exactly this hazard and says so; this one is the path
-        // `vfs clear`, `uid preset`, `uid apply` and uidwatch.sh all go through.
         if rep.failed == 0 {
             blocklist::cache_replace(&desired);
         } else {
@@ -291,7 +279,6 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
     rep
 }
 
-/// `both | appzygote | platform | off` <-> the kernel's pool bitmask
 fn parse_isolated_mode(s: &str) -> Option<u32> {
     match s.trim().to_ascii_lowercase().as_str() {
         "both" | "all" | "3" => Some(3),
@@ -302,7 +289,6 @@ fn parse_isolated_mode(s: &str) -> Option<u32> {
     }
 }
 
-/// Which `uid list` row speaks for each appid: the first exact row if there is one, else
 fn list_winners(rows: &[(Option<u32>, bool)]) -> BTreeMap<u32, usize> {
     let mut winner: BTreeMap<u32, usize> = BTreeMap::new();
     for (i, (appid, glob)) in rows.iter().enumerate() {
@@ -350,10 +336,6 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 }
                 let installed = blocklist::installed_packages().unwrap_or_default();
                 let hits = blocklist::expand(&target, &installed)?;
-                // The literal-length guard in `Pattern::parse` counts CHARACTERS, which is
-                // not the breadth its own message promises ("a broader glob would hide
-                // injections from most of the device"): `org.*` is four characters and can
-                // match a third of the device. Bound what it actually claims to bound.
                 const GLOB_HIT_CEILING: usize = 24;
                 if hits.len() > GLOB_HIT_CEILING && !force {
                     bail!(
@@ -695,7 +677,6 @@ mod tests {
         assert_eq!(parse_isolated_mode("sometimes"), None);
     }
 
-    /// One row per appid, and the exact entry is the one that speaks
     #[test]
     fn a_uid_list_row_is_per_appid_and_the_exact_entry_wins() {
         let rows = [(Some(10438), true), (Some(10438), false), (Some(10471), false)];
@@ -709,7 +690,6 @@ mod tests {
         assert!(list_winners(&[(None, true), (None, false)]).is_empty());
     }
 
-    /// `uid unblock` must not report a removal it did not make
     #[test]
     fn unblock_reports_both_halves_of_what_it_did() {
         let listed_and_hiding = unblock_message("com.a", Some(10123), true, true);

@@ -9,16 +9,12 @@ use anyhow::{Context, Result};
 /// Source of truth for the persistent hide list
 pub const BLOCKLIST_PATH: &str = "/data/adb/nomount/uidhide";
 
-/// Where this list used to live - the same file `mount.rs` reads as the list of module ids
 const LEGACY_PATH: &str = "/data/adb/nomount/blocklist";
 
-/// Resolved appids, mirrored from the last successful resolve
 const CACHE_PATH: &str = "/data/adb/nomount/uidhide.cache";
 
-/// Feature settings that must be re-asserted after every reboot / `nm clear`
 const CONF_PATH: &str = "/data/adb/nomount/uidhide.conf";
 
-/// Android's canonical package→UID map
 const PACKAGES_LIST: &str = "/data/system/packages.list";
 
 const MODULES_DIR: &str = "/data/adb/modules";
@@ -98,13 +94,11 @@ pub fn installed_packages() -> Option<Vec<(String, u32)>> {
     installed_from(&fs::read_to_string(PACKAGES_LIST).ok()?)
 }
 
-/// Pure half of [`installed_packages`]: `None` when the body yields no packages, which on
 fn installed_from(list: &str) -> Option<Vec<(String, u32)>> {
     let parsed = parse_installed(list);
     if parsed.is_empty() { None } else { Some(parsed) }
 }
 
-/// Pure: `packages.list` body -> (package, appid)
 fn parse_installed(list: &str) -> Vec<(String, u32)> {
     let mut out = Vec::new();
     for line in list.lines() {
@@ -180,7 +174,6 @@ pub fn package_for_uid(uid: u32) -> Option<String> {
     parse_package_for_uid(&fs::read_to_string(PACKAGES_LIST).ok()?, uid)
 }
 
-/// Pure: first package owning `uid` in a `packages.list` body (col0=pkg, col1=uid)
 fn parse_package_for_uid(list: &str, uid: u32) -> Option<String> {
     for line in list.lines() {
         let mut cols = line.split(' ');
@@ -192,7 +185,6 @@ fn parse_package_for_uid(list: &str, uid: u32) -> Option<String> {
     None
 }
 
-/// Look up a package's UID in `packages.list`
 fn uid_for_package(pkg: &str) -> Result<Option<u32>> {
     let list = match fs::read_to_string(PACKAGES_LIST) {
         Ok(s) => s,
@@ -201,7 +193,6 @@ fn uid_for_package(pkg: &str) -> Result<Option<u32>> {
     Ok(parse_uid_for_package(&list, pkg))
 }
 
-/// Pure: the UID for `pkg` in a `packages.list` body
 fn parse_uid_for_package(list: &str, pkg: &str) -> Option<u32> {
     for line in list.lines() {
         let mut cols = line.split(' ');
@@ -214,7 +205,6 @@ fn parse_uid_for_package(list: &str, pkg: &str) -> Option<u32> {
     None
 }
 
-/// One-time split of the shared `blocklist` file, run while the new file is absent
 fn migrate_legacy() {
     if Path::new(BLOCKLIST_PATH).exists() {
         return;
@@ -242,7 +232,6 @@ pub fn read() -> Result<Vec<String>> {
     Ok(parse_blocklist(&raw))
 }
 
-/// Pure: trimmed, comment/blank-stripped, order-preserved, deduplicated
 fn parse_blocklist(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -257,7 +246,6 @@ fn parse_blocklist(raw: &str) -> Vec<String> {
     out
 }
 
-/// Atomic
 fn write_lines(path: &str, entries: &[String]) -> Result<()> {
     let mut body = String::new();
     for e in entries {
@@ -267,12 +255,10 @@ fn write_lines(path: &str, entries: &[String]) -> Result<()> {
     crate::statefile::write_atomic(path, body).with_context(|| format!("write {path}"))
 }
 
-/// Persist the list (LF-terminated, one entry per line)
 fn write(entries: &[String]) -> Result<()> {
     write_lines(BLOCKLIST_PATH, entries)
 }
 
-/// Refuse an entry the very next [`read`] would throw away
 fn check_entry(e: &str) -> Result<()> {
     if e.is_empty() || e.starts_with('#') || e.contains(['\n', '\r', '\t']) {
         anyhow::bail!(
@@ -495,7 +481,6 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
         assert!(!pat("*chunqiu*").matches("com.google.android.gms"));
     }
 
-    /// The guard that stops a typo hiding injections from the whole device
     #[test]
     fn globs_that_are_too_broad_are_refused() {
         for bad in ["*", "**", "*a*", "*ab*", "*abc*", "a*"] {
@@ -528,7 +513,6 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
         assert!(expand("*", &installed).is_err());
     }
 
-    /// The gate that stops a bad read being read as "every app was uninstalled"
     #[test]
     fn resolve_in_agrees_with_resolve_without_touching_the_disk() {
         let installed = vec![("com.a".to_string(), 10123u32), ("com.b".to_string(), 10456)];

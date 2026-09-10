@@ -12,7 +12,6 @@ staging, out = sys.argv[1], sys.argv[2]
 if os.path.exists(out):
     os.remove(out)
 
-
 def is_executable(rel):
     """Decide the exec bit from the ENTRY PATH alone.
 
@@ -29,7 +28,6 @@ def is_executable(rel):
         or rel.endswith("/update-binary")
     )
 
-
 count = 0
 missed = []
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
@@ -39,10 +37,6 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             full = os.path.join(root, name)
             rel = os.path.relpath(full, staging).replace(os.sep, "/")
             executable = is_executable(rel)
-            # One-way check. On a host that really does carry exec bits, a staged
-            # file marked +x that no rule matches means the rules have fallen
-            # behind the tree. On Windows the bit is never set, so this cannot
-            # misfire there - it simply catches nothing.
             if not executable and bool(os.stat(full).st_mode & stat.S_IXUSR):
                 missed.append(rel)
             mode = 0o100755 if executable else 0o100644

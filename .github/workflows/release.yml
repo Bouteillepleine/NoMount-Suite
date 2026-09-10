@@ -1,29 +1,8 @@
 name: NoMount Suite - release
 
-# Publishes a GitHub release when a v* tag is pushed.
-#
-# Why this is A separate workflow
-#
-# The release used to be a job inside build.yaml, gated on `startsWith(github.ref,
-# 'refs/tags/v')`. That worked until build.yaml gained a `paths-ignore` filter to
-# stop documentation commits triggering builds - and GitHub applies path filters
-# to tag pushes as well. A `v*` tag landing on a commit that happened to touch
-# only documentation would have been filtered out, the workflow would never have
-# fired, and no release would have been published. Silently.
-#
-# Splitting it removes that interaction entirely: this file has no path filter,
-# so a tag always builds and always publishes.
-#
-# It does not duplicate the pipeline. build.yaml is called as a reusable
-# workflow, so the zip is produced by exactly the same jobs as every other build,
-# and the artifact it uploads is visible to the publish job below because a
-# called workflow shares the caller's run.
-
 on:
   push:
     tags: ['v*']
-  # Manual re-publish, for the case where a release needs rebuilding from an
-  # existing tag without moving it.
   workflow_dispatch:
     inputs:
       tag:
@@ -40,25 +19,16 @@ permissions:
   contents: read
 
 concurrency:
-  # Keyed on the TAG being published, not on github.ref. On a tag push that ref is
-  # refs/tags/v1.2.3; on the documented manual re-publish of the SAME tag it is whatever
-  # branch the UI had selected. Two different group names, so the two runs do not exclude
-  # each other - and both then race to publish the release and to commit update.json on
-  # main. The tag is the thing that has to be serialised, so key on the tag.
   group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  # The same build every push gets: tests, clippy, shellcheck, the binaries, the
-  # zip. Nothing release-specific happens here, which is the point - what gets
-  # published is what CI already builds.
   build:
     uses: ./.github/workflows/build.yaml
 
   publish:
     needs: build
     runs-on: ubuntu-latest
-    # Elevated for this job only - the workflow default stays contents: read.
     permissions:
       contents: write
     steps:
@@ -71,17 +41,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
-          # Empty on a tag push, so a real release is never a dry run by accident.
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
           zip=$(ls dist/00_NoMount-Module-*.zip | head -1)
           test -s "$zip"
-          # The zip is named from Cargo.toml; the release is named from the tag.
-          # Nothing asserted the two agreed, so tagging v1.4.0 on a tree whose
-          # Cargo.toml still said 1.3.88 published a release titled v1.4.0 whose
-          # asset was v1.3.88 - and since managers key updates on versionCode,
-          # that "new release" is invisible as an update to every device.
           zipver="${zip##*00_NoMount-Module-}"
           zipver="${zipver%.zip}"
           zipver="${zipver%-debug}"
@@ -90,23 +54,6 @@ jobs:
             echo "       Bump Cargo.toml and re-tag; do not publish a mismatch." >&2
             exit 1
           fi
-          # ...and the tag must point at the commit this zip was built from, not
-          # merely carry the same version string.
-          #
-          # `build:` above is `uses: ./.github/workflows/build.yaml`, and a
-          # reusable workflow always runs at the CALLER's ref. On a tag push that
-          # is the tag, so that path is sound. On the documented manual
-          # re-publish, the caller's ref is whatever branch the UI had selected --
-          # so when main has moved past the tag without a version bump (which has
-          # happened here: five commits landed on top of release v1.3.80 without
-          # one), the check above passes and a zip built from main is published
-          # under the tag. The asset and the tag then disagree and the only place
-          # it shows is the SUITE_COMMIT stamp inside the zip.
-          #
-          # `repos/.../commits/<tag>`, not `git/ref/tags/<tag>`: the latter gives
-          # the TAG OBJECT's sha for an annotated tag, which never equals a commit
-          # sha, so it would fail every annotated release. This endpoint
-          # dereferences either kind to the commit.
           tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq '.sha')
           if [ "$tag_sha" != "$GITHUB_SHA" ]; then
             echo "FATAL: $TAG points at $tag_sha but this build is $GITHUB_SHA." >&2
@@ -114,10 +61,6 @@ jobs:
             exit 1
           fi
 
-          # Dry run stops here: everything above has already run for real - the
-          # build, the artifact download across the workflow_call boundary, the
-          # tag-vs-zip version check and the tag-vs-commit check - which is the
-          # whole of what could go wrong. Only the irreversible step is skipped.
           if [ "${DRY_RUN:-}" = 'true' ]; then
             echo "DRY RUN - nothing published."
             echo "  tag        : $TAG"
@@ -132,17 +75,6 @@ jobs:
           fi
 
           echo "publishing $TAG <- $zip ($(stat -c %s "$zip") bytes)"
-          # The tag is authoritative for the name; the notes point at the commit
-          # log rather than restating it, so this never goes stale.
-          # The engine ships in the kernel and the Suite ships as a zip, so an
-          # in-manager update moves one and not the other - and this release page
-          # is where that update offer lands. Saying it here is what keeps "the
-          # new Suite did not enable X" reading as a kernel they have not flashed
-          # yet, rather than as a bug in the Suite.
-          #
-          # --notes-file sets the same body --notes does, which gh prepends to the
-          # generated notes; a file avoids quoting a multi-line note through the
-          # workflow, the shell and gh all at once.
           cat > /tmp/notes.md <<'NOTES'
           > **The Suite and the Prism engine update separately.**
           >
@@ -155,29 +87,7 @@ jobs:
           > WebUI instead of silently doing nothing, so you can see what a kernel update would
           > buy you. The footer shows both numbers - `Suite vX · engine vY`.
           NOTES
-          # No dedent step. There was a `sed -i 's/^          //'` here, on the
-          # assumption that the heredoc body arrives with this file's ten spaces
-          # of yaml indentation still on it. It does not: `run: |` is a block
-          # scalar, so yaml strips the block's own indentation before the shell
-          # ever sees a byte, and both the body and the `NOTES` terminator reach
-          # bash at column 0 - which is also why an unquoted terminator works
-          # here at all. The sed therefore matched nothing on every run, and the
-          # only thing it could ever have done is silently eat ten characters off
-          # every line if this block were re-indented.
 
-          # Create, or replace the asset on a release that already exists.
-          #
-          # The header documents workflow_dispatch as "manual re-publish, for the case
-          # where a release needs rebuilding from an existing tag without moving it" - and
-          # a bare `gh release create` fails with "release already exists" on precisely
-          # that input, so the documented path could never actually run. Everything that
-          # makes re-publishing safe has already been asserted above: the zip version
-          # equals the tag, and the tag points at the commit this zip was built from. The
-          # only thing left to do is put the new asset on the existing release.
-          #
-          # --clobber replaces the asset in place, so the release URL, its notes and its
-          # publication date all survive; deleting and recreating the release would break
-          # every existing link to it and re-notify every watcher.
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "release $TAG already exists - replacing its asset in place"
             gh release upload "$TAG" "$zip" --repo "$GITHUB_REPOSITORY" --clobber
@@ -189,16 +99,6 @@ jobs:
               --generate-notes
           fi
 
-      # update.json is written here and nowhere else, which is what makes the
-      # in-manager update offer track releases rather than the prerelease branch:
-      # this job runs only on a v* tag, and tags are only ever cut for releases.
-      # A push to `prerelease` cannot move it.
-      #
-      # Generated, not hand-maintained, because the one field that must never
-      # drift is versionCode - managers key the update offer on it, so a stale
-      # file either hides a real release or offers one whose asset 404s. It is
-      # read out of the module.prop inside the published zip: the same byte the
-      # device compares against, not a second source that can disagree with it.
       - name: Point update.json at this release
         if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
@@ -222,19 +122,10 @@ jobs:
             '}' > /tmp/update.json
           cat /tmp/update.json
 
-          # Onto main, not onto the tag: the tag may sit behind main by the time
-          # this runs, and update.json has to land on the branch module.prop
-          # actually points at.
           git clone --depth 1 --branch main \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" /tmp/mainwt
           cp /tmp/update.json /tmp/mainwt/update.json
           cd /tmp/mainwt
-          # `git add` first, then diff the index. `git diff --quiet -- <path>`
-          # compares the worktree against the index and is blind to an untracked
-          # file, so on the very first release - when update.json does not exist
-          # in the repo yet - it reported "no change" and skipped the very commit
-          # that creates it. Measured on v1.3.140: the JSON generated correctly,
-          # the clone succeeded, and the step exited 0 having done nothing.
           git add update.json
           if git diff --cached --quiet -- update.json; then
             echo "update.json already current -- nothing to commit."
@@ -242,16 +133,6 @@ jobs:
           fi
           git -c user.name=Bouteillepleine -c user.email=steve0007.xda@gmail.com \
             commit -q -m "update.json -> $TAG"
-          # Retried, because this is a read-modify-write on a shared branch. The clone
-          # above is a snapshot; any commit landing on main between it and this push makes
-          # the push a non-fast-forward and it is rejected. A single attempt therefore left
-          # the release live with update.json still pointing at the PREVIOUS one - exactly
-          # the stale-pointer state this whole step exists to prevent - and it is likeliest
-          # right after a release, when follow-up commits are being pushed.
-          #
-          # Rebase rather than merge: this commit only ever touches update.json, which is
-          # generated here and nowhere else, so it replays onto anything cleanly. If it
-          # somehow does not, the rebase is aborted rather than left half-applied.
           _pushed=0
           for _try in 1 2 3 4 5; do
               if git push origin main; then _pushed=1; break; fi

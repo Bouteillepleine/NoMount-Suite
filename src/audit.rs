@@ -9,7 +9,6 @@ use anyhow::Result;
 use crate::check::{slug, Check, Section, Verdict};
 use crate::nm::Nm;
 
-/// Constructors
 fn chk(name: &'static str, verdict: Verdict, evidence: String) -> Check {
     Check::new(Section::Device, slug(name), name, verdict, evidence)
 }
@@ -19,15 +18,12 @@ fn pass(name: &'static str, evidence: String) -> Check {
 fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Fail, evidence).oracle(oracle)
 }
-/// A real, measured inconsistency that nothing shipping actually probes
 fn soft(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Note, evidence).oracle(oracle)
 }
-/// "Does not apply here." Grey, never amber, never counted as a pass
 fn na(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::NotApplicable, evidence)
 }
-/// "Could have applied, did not run." Amber - this is the honesty rule's state
 fn unmeasured(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::Unmeasured, evidence)
 }
@@ -56,15 +52,6 @@ pub(crate) fn probe_as_uid<const N: usize>(
     }
     if pid == 0 {
         unsafe { libc::close(rd) };
-        // Never "succeed" as root. This binary runs as root, so `getuid() == uid` made
-        // probe_as_uid(0) report a successful drop having dropped nothing - the probe then
-        // measured ROOT's view and the caller published it as an app's. On a device that
-        // short circuit is now unreachable for any other uid (we are always root), so the
-        // setres* path always actually runs; it survives only for the unit test, which
-        // legitimately probes as its own non-root uid.
-        //
-        // Screening a platform uid (< FIRST_APP_APPID) is the CALLER's job: it has to
-        // report Unmeasured rather than silently measure the wrong identity.
         if uid == 0 {
             unsafe {
                 let sentinel = [u32::MAX; N];
@@ -114,7 +101,6 @@ pub(crate) enum ProbeFail {
 }
 
 impl ProbeFail {
-    /// The row this failure becomes
     fn into_check(self, name: &'static str) -> Check {
         let (evidence, meaning) = match self {
             Self::Setup => ("pipe() failed", "The probe could not be set up, so this was not tested."),
@@ -148,7 +134,6 @@ pub(crate) const N_FOREIGN_MOUNT: &str = "foreign mount over the ROM";
 pub(crate) const N_RULE_DUMP: &str = "engine rule dump";
 pub(crate) const N_XATTR_HIDDEN: &str = "xattr agrees with open for a hidden app";
 
-/// Every name above, so a test can assert over the shipped set rather than a transcription
 #[cfg(test)]
 pub(crate) const ALL_CHECK_NAMES: [&str; 14] = [
     N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DINO_STAT,
@@ -185,10 +170,6 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
         if n == 0 {
             break;
         }
-        // A mid-listing failure must not read as EOF: the contract here is
-        // `None == could not list`, and a short Some(..) makes every unread entry look
-        // "absent from getdents" - which check_dino_matches_stat scores as a FAIL against
-        // the engine instead of the honest UNMEASURED.
         if n < 0 {
             unsafe { libc::close(fd) };
             return None;
@@ -201,8 +182,6 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
                 break;
             }
             let nstart = off + 19;
-            // No NUL in the record means the kernel handed us something malformed. Bail out
-            // rather than fabricate an empty-named entry that no target can ever match.
             let Some(rel) = buf[nstart..off + reclen].iter().position(|&c| c == 0) else {
                 unsafe { libc::close(fd) };
                 return None;
@@ -220,7 +199,6 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
     Some(out)
 }
 
-/// One rule dump, split into the two views every check here needs: live injection targets,
 fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
     let listed = Nm::new().list().ok()?;
     let rules = crate::nm::parse_list(&listed);
@@ -229,10 +207,6 @@ fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
         .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
         .map(|r| r.target.clone())
         .collect();
-    // Every inject target, per-UID rules included. The inode-shaped checks must narrow to
-    // uid 0 (root cannot see what a per-UID rule serves), but `check_maps_not_deleted` needs
-    // only the PATH - and a per-UID rule's mapping showing `(deleted)` is an oracle for
-    // exactly the app the rule was written for.
     let mut all_targets: Vec<PathBuf> = rules
         .iter()
         .filter(|r| r.kind == crate::nm::LiveKind::Inject)
@@ -256,7 +230,6 @@ fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
     v
 }
 
-/// The statfs magic, rendered as the names the checks care about
 fn fs_type(p: &Path) -> String {
     match crate::dirshape::fs_magic(p) {
         None => "?".into(),
@@ -267,7 +240,6 @@ fn fs_type(p: &Path) -> String {
     }
 }
 
-/// Is this path inside a ROM partition?
 fn on_rom_partition(p: &Path) -> bool {
     let s = p.to_string_lossy();
     crate::absorb::on_rom_path(&s)
@@ -280,7 +252,6 @@ fn ino_of(p: &Path) -> Option<u64> {
     })
 }
 
-/// Injections must not be mounts
 fn check_zero_mount() -> Check {
     let Ok(mi) = fs::read("/proc/self/mountinfo") else {
         return unmeasured(N_ZERO_MOUNT, "cannot read /proc/self/mountinfo".into())
@@ -431,7 +402,6 @@ fn check_zero_mount() -> Check {
     }
 }
 
-/// The engine must expose no /sys, /proc or module surface of its own
 fn check_surfaces() -> Check {
     let mut found = Vec::new();
     let mut unread: Vec<&str> = Vec::new();
@@ -493,7 +463,6 @@ fn check_surfaces() -> Check {
     }
 }
 
-/// An injected file's readdir d_ino must equal its stat st_ino
 fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     let mut eligible = 0usize;
     let mut checked = 0usize;
@@ -578,7 +547,6 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// Injected inodes must not occupy a band the stock population never uses
 fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     const BUCKET: u64 = 1_000_000;
     let mut worst: Option<(String, u64, usize)> = None;
@@ -666,7 +634,6 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     }
 }
 
-/// A synthesized directory on an overlay mount must not carry an inode from outside the
 fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut examined = 0usize;
@@ -753,7 +720,6 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
     }
 }
 
-/// `(st_dev, st_ino)` for a path, which together identify a file uniquely on a real
 fn dev_ino_of(p: &Path) -> Option<(u64, u64)> {
     fs::symlink_metadata(p).ok().map(|m| {
         use std::os::unix::fs::MetadataExt;
@@ -761,7 +727,6 @@ fn dev_ino_of(p: &Path) -> Option<(u64, u64)> {
     })
 }
 
-/// Two directories on one filesystem must never share an inode
 fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
     let mut ours: HashMap<(u64, u64), PathBuf> = HashMap::new();
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -855,7 +820,6 @@ fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
     )
 }
 
-/// On erofs a single-block directory's size is a closed form over its entries, so an
 fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     let (mut ok, mut bad) = (0usize, Vec::new());
     let mut unread = 0usize;
@@ -922,7 +886,6 @@ fn check_erofs_dir_shape(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// The pathname of a `/proc/<pid>/maps` line: everything after the fifth field
 fn maps_pathname(rest: &str) -> Option<&str> {
     let mut s = rest;
     for _ in 0..5 {
@@ -933,7 +896,6 @@ fn maps_pathname(rest: &str) -> Option<&str> {
     (!p.is_empty()).then_some(p)
 }
 
-/// An injected file must not be mapped as deleted
 fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     if targets.is_empty() {
         return na(N_MAPS_DELETED, "no live rules".into())
@@ -1053,7 +1015,6 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     }
 }
 
-/// A hidden app must still be able to open every file the PackageManager gave it
 fn hidden_uid_label(appid: u32, redact: bool) -> String {
     if redact {
         "a hidden app".to_string()
@@ -1062,7 +1023,6 @@ fn hidden_uid_label(appid: u32, redact: bool) -> String {
     }
 }
 
-/// The probe forks, drops to a blocked appid and opens each PM-published rule target
 fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     const NAME: &str = N_PM_OPEN;
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
@@ -1078,10 +1038,6 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .meaning("Not tested - the hide list could not be read.");
     };
-    // `uid_list_live` parses every ASCII-digit run out of the engine's dump with no
-    // validity filter, so a stray token, a count, or a genuinely hidden platform uid can
-    // land here. None of those can stand in for "an app": report Unmeasured rather than
-    // measure the wrong identity and publish it as a pass.
     let blocked: Vec<u32> = blocked
         .into_iter()
         .filter(|u| crate::blocklist::appid(*u) >= crate::blocklist::FIRST_APP_APPID)
@@ -1182,7 +1138,6 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     .owner("the kernel engine")
 }
 
-/// A tmpfs mounted inside a ROM partition is never stock
 fn check_no_rom_tmpfs() -> Check {
     let Ok(mi) = fs::read("/proc/self/mountinfo") else {
         return unmeasured(N_ROM_TMPFS, "cannot read /proc/self/mountinfo".into())
@@ -1217,7 +1172,6 @@ fn check_no_rom_tmpfs() -> Check {
     }
 }
 
-/// A bind or image mounted over the ROM from somewhere other than /data/adb
 fn check_no_foreign_rom_mount() -> Check {
     let Ok(mi) = fs::read("/proc/self/mountinfo") else {
         return unmeasured(N_FOREIGN_MOUNT, "cannot read /proc/self/mountinfo".into())
@@ -1242,7 +1196,6 @@ fn check_no_foreign_rom_mount() -> Check {
     }
 }
 
-/// Is the engine actually there?
 fn check_engine_live() -> Check {
     const NAME: &str = N_ENGINE_LIVE;
     match Nm::new().version() {
@@ -1265,7 +1218,6 @@ fn check_engine_live() -> Check {
     }
 }
 
-/// Every check that reads the live rule list, by the exact name it reports under
 const RULE_DEPENDENT: [&str; 8] = [
     N_DINO_STAT,
     N_DIR_INO_COLLIDE,
@@ -1277,7 +1229,6 @@ const RULE_DEPENDENT: [&str; 8] = [
     N_XATTR_HIDDEN,
 ];
 
-/// Does the xattr surface tell a hidden app the same thing `open()` does?
 fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
     const NAME: &str = N_XATTR_HIDDEN;
     if targets.is_empty() {
@@ -1288,10 +1239,6 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         return unmeasured(NAME, "the engine would not list the per-UID hide set".into())
             .meaning("Not tested - the hide list could not be read.");
     };
-    // `uid_list_live` parses every ASCII-digit run out of the engine's dump with no
-    // validity filter, so a stray token, a count, or a genuinely hidden platform uid can
-    // land here. None of those can stand in for "an app": report Unmeasured rather than
-    // measure the wrong identity and publish it as a pass.
     let blocked: Vec<u32> = blocked
         .into_iter()
         .filter(|u| crate::blocklist::appid(*u) >= crate::blocklist::FIRST_APP_APPID)
@@ -1459,7 +1406,6 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
 mod tests {
     use super::*;
 
-    /// The probe harness carries an answer of any width back from the child
     #[test]
     fn the_probe_harness_brings_back_what_the_child_counted() {
         let me = unsafe { libc::getuid() };
@@ -1467,7 +1413,6 @@ mod tests {
         assert_eq!(probe_as_uid(me, || [1u32, 2, 3]), Ok([1, 2, 3]));
     }
 
-    /// This file's half of the hide-list redaction invariant
     #[test]
     fn redaction_covers_the_pm_open_probe() {
         assert_eq!(hidden_uid_label(10422, false), "uid 10422 (hidden)");
@@ -1480,8 +1425,6 @@ mod tests {
         }
     }
 
-    /// A directory holding only our entries must not be judged for an inode band, even when
-    /// every name in it is one of ours - there is no stock population left to compare against.
     #[test]
     fn a_synthesized_dir_is_not_stock_population() {
         let d = tempfile::tempdir().unwrap();
@@ -1505,7 +1448,6 @@ mod tests {
         let _ = judged;
     }
 
-    /// An image mounted over a ROM path is the loudest mount there is, and it used to pass
     #[test]
     fn an_image_mounted_over_the_rom_is_reported() {
         let mi = "\
@@ -1524,7 +1466,6 @@ mod tests {
         assert_eq!(imaged.len(), 1, "the image is what absorb must still name");
     }
 
-    /// A mapping's path is the last field and may contain spaces
     #[test]
     fn a_maps_pathname_survives_a_space_in_it() {
         let plain = "7f8a00000-7f8a01000 r--p 00000000 fe:29 1234    /product/app/Foo/Foo.apk";
@@ -1537,7 +1478,6 @@ mod tests {
         assert_eq!(maps_pathname("short line"), None);
     }
 
-    /// A directory that will not enumerate is UNMEASURED, never "nothing to test"
     #[test]
     fn an_unreadable_parent_is_unmeasured_not_not_applicable() {
         use std::os::unix::fs::PermissionsExt;
@@ -1562,7 +1502,6 @@ mod tests {
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
 
-    /// Every shipped check name must yield its own id
     #[test]
     fn every_shipped_check_name_has_its_own_id() {
         let names = ALL_CHECK_NAMES;
@@ -1575,8 +1514,6 @@ mod tests {
         assert_eq!(slug(N_ENGINE_LIVE), "engine-responding");
     }
 
-    /// Issue #14: a ReVanced module binds its APK from /data/adb/rvhc, not from
-    /// /data/adb/modules - and that bind is still module content laid over the ROM.
     #[test]
     fn a_bind_from_outside_modules_is_still_a_module_mount() {
         let mi = "\
@@ -1595,7 +1532,6 @@ mod tests {
         assert!(crate::absorb::module_dir_of(&srcs[0]).is_none());
     }
 
-    /// The severity ladder has exactly one rule, and `soft()` is the bottom of it
     #[test]
     fn an_unprobed_tell_is_a_note_and_keeps_its_oracle() {
         let s = soft(N_INODE_BAND, "evidence".into(), "the recipe");
@@ -1605,7 +1541,6 @@ mod tests {
         assert_ne!(s.verdict.tag(), Verdict::Warn.tag());
     }
 
-    /// A by-design bind is a NOTE, and this pins it so a future round cannot quietly promote
     #[test]
     fn a_by_design_bind_is_a_note_not_a_warning() {
         let src = include_str!("audit.rs");
@@ -1643,7 +1578,6 @@ mod tests {
         assert!(r.json().contains("\"verdict\":\"note\""), "{}", r.json());
     }
 
-    /// `/my_*` is a ROM_ROOTS prefix, and `Path::starts_with` cannot see it
     #[test]
     fn a_my_partition_path_is_on_the_rom() {
         assert!(on_rom_partition(Path::new("/my_product/priv-app/Foo")));
@@ -1653,7 +1587,6 @@ mod tests {
         assert!(!Path::new("/my_product/priv-app/Foo").starts_with("/my_"));
     }
 
-    /// The collision check must have a subject, and a real ROM ancestor is not one
     #[test]
     fn the_collision_check_has_no_subject_without_a_synthesized_dir() {
         let c = check_dir_ino_collision(&[]);
@@ -1661,7 +1594,6 @@ mod tests {
         assert_eq!(c.evidence, "the engine synthesized no directory");
     }
 
-    /// With no rules at all, the xattr check must not say "not even root can open your
     #[test]
     fn the_xattr_check_is_quiet_when_there_are_no_rules() {
         let c = check_xattr_agrees_when_hidden(&[]);
@@ -1674,7 +1606,6 @@ mod tests {
         );
     }
 
-    /// The by-design exemption still has to work for a real module source
     #[test]
     fn a_bind_from_a_module_dir_still_names_its_module() {
         let mi = "\

@@ -25,13 +25,10 @@ pub enum Commands {
         action: UidAction,
     },
     Absorb {
-        /// Report what would be absorbed without changing anything
         #[arg(long)]
         dry_run: bool,
-        /// Also absorb directory binds
         #[arg(long)]
         include_dirs: bool,
-        /// Pre-zygote pass
         #[arg(long)]
         early: bool,
     },
@@ -40,16 +37,12 @@ pub enum Commands {
         action: WhiteoutAction,
     },
     Check {
-        /// Only the static half: does the module set resolve into a bad rule?
         #[arg(long)]
         plan: bool,
-        /// Only the measured half: is what we serve detectable on this device, and is it being
         #[arg(long)]
         device: bool,
-        /// Emit one JSON object instead of prose
         #[arg(long)]
         json: bool,
-        /// Also cache to /data/adb/nomount/audit.json, and (unless --plan) write the fingerprint
         #[arg(long)]
         write: bool,
     },
@@ -64,12 +57,6 @@ pub enum Commands {
         #[command(subcommand)]
         action: GhostAction,
     },
-    /// Umount every bind recorded in binds.list and put each source's own SELinux label back.
-    ///
-    /// Exists for uninstall.sh. `teardown_all` was reachable only from the boot mount pass,
-    /// so an uninstall deleted binds.list - the only record of what we bound - while those
-    /// binds were still mounted. Nothing could ever clean them up afterwards, and live bind
-    /// mounts are the exact thing this module exists to avoid leaving behind.
     Unbind,
     Version,
 }
@@ -93,23 +80,19 @@ pub enum VfsAction {
 pub enum UidAction {
     Block {
         target: String,
-        /// Allow a platform appid (< 10000: root, system_server, shell ...)
         #[arg(long)]
         force: bool,
     },
     Unblock { target: String },
     List,
     Apply {
-        /// Early-boot pass: resolve from the cached appid mirror first, so it works at
         #[arg(long)]
         early: bool,
     },
     Preset {
         name: Option<String>,
-        /// Print what would be added without touching the list
         #[arg(long)]
         dry_run: bool,
-        /// Only the glob rules, not the exact package names
         #[arg(long)]
         globs: bool,
     },
@@ -122,9 +105,6 @@ pub enum UidAction {
 pub enum WhiteoutAction {
     Add {
         path: String,
-        /// Silence the note when hiding it leaves a measurable hole. Nothing is ever refused
-        /// on that ground -- declining would make the module asking for it a no-op -- so this
-        /// only quiets a warning you have already read. `nomount check --plan` lists them all.
         #[arg(long)]
         force: bool,
     },
@@ -179,7 +159,6 @@ pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
 mod tests {
     use super::*;
 
-    /// The verbs the bootloop guard has to hold off: each ends with more being served than
     #[test]
     fn every_serving_verb_is_refused_while_the_guard_is_tripped() {
         for c in [
@@ -197,7 +176,6 @@ mod tests {
         }
     }
 
-    /// ...and the guard must not block its own recovery
     #[test]
     fn the_guard_never_blocks_diagnosis_or_removal() {
         for c in [
@@ -228,7 +206,6 @@ mod tests {
         }
     }
 
-    /// The verbs that move an input
     #[test]
     fn every_mutating_verb_resyncs_the_cloak() {
         for c in [
@@ -257,7 +234,6 @@ mod tests {
         }
     }
 
-    /// A verb that promises to change nothing must not fork a probe child and rewrite two
     #[test]
     fn read_only_and_self_syncing_verbs_do_not() {
         for c in [

@@ -32,7 +32,6 @@ pub(crate) fn erofs_model(dir: &Path) -> Option<u64> {
     Some(12 * (n + 2) + names + 3)
 }
 
-/// True when `dir`'s own reported size equals the erofs formula for its contents
 fn fits_erofs_shape(dir: &Path) -> bool {
     let Ok(md) = fs::metadata(dir) else { return false };
     let size = md.len();
@@ -70,7 +69,6 @@ pub fn rom_dirs_are_dirent_packed() -> bool {
 #[cfg(test)]
 mod tests {
 
-    /// The formula, pinned against directories measured on OP15 erofs
     #[test]
     fn model_matches_measured_erofs_directories() {
         for (n, names, size) in [

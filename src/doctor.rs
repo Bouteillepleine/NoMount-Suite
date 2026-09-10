@@ -10,7 +10,6 @@ use crate::check::{slug, Check, Section, Verdict};
 use crate::mount::{collect_plan, is_partition_root, PlanEntry, PlanKind};
 use crate::nm::{LiveRule, Nm};
 
-/// Partitions whose file descriptors zygote will accept across `forkSystemServer`
 const ZYGOTE_FD_ALLOWLISTED: &[&str] = &[
     "system", "product", "vendor", "system_ext", "odm", "apex", "oem",
 ];
@@ -30,7 +29,6 @@ struct Finding {
     detail: String,
 }
 
-/// This file's three levels, onto the one shared verdict
 fn verdict_of(level: &Level) -> Verdict {
     match level {
         Level::Error => Verdict::Fail,
@@ -41,7 +39,6 @@ fn verdict_of(level: &Level) -> Verdict {
     }
 }
 
-/// Who a doctor finding is about, where the check name makes it recoverable
 fn owner_of(f: &Finding) -> Option<String> {
     const PER_MODULE: &[&str] = &[
         "module entry refused",
@@ -65,7 +62,6 @@ fn owner_of(f: &Finding) -> Option<String> {
     }
 }
 
-/// What a hidden caller sees at a ghosted path
 #[derive(PartialEq)]
 enum GhostSeen {
     Absent,
@@ -74,7 +70,6 @@ enum GhostSeen {
     Unknown,
 }
 
-/// Become `uid` in a forked child and look at `path`
 fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     use std::os::unix::ffi::OsStrExt;
     let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -89,10 +84,6 @@ fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     const UNKNOWN: u32 = 3;
     let seen = crate::audit::probe_as_uid(uid, || unsafe {
         let mut st: libc::stat = std::mem::zeroed();
-        // lstat + an explicit ENOENT test, mirroring ghost.rs's populator. `stat` follows
-        // the link, so a ghosted DANGLING symlink answered ENOENT and scored as a working
-        // cloak although the entry is still perfectly visible to the app; and any other
-        // failure (EACCES on a parent, ELOOP, ENAMETOOLONG) scored the same way.
         if libc::lstat(cpath.as_ptr(), &mut st) == 0 {
             return [VISIBLE];
         }
@@ -116,8 +107,6 @@ fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     }
 }
 
-
-/// How a finding names a uid that came off the hide list
 fn hidden_uid_label(uid: u32, redact: bool) -> String {
     if redact {
         "a hidden app".to_string()
@@ -126,7 +115,6 @@ fn hidden_uid_label(uid: u32, redact: bool) -> String {
     }
 }
 
-/// Split `nm l g` output into its two tables
 fn parse_ghost_tables(txt: &str) -> (Vec<PathBuf>, Vec<u32>) {
     let mut paths = Vec::new();
     let mut uids = Vec::new();
@@ -151,7 +139,6 @@ fn partition_of(p: &Path) -> Option<String> {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
 }
 
-/// Does the engine actually hold the rules the plan describes - and nothing else?
 fn reconcile_plan_and_live(
     plan: &[PlanEntry],
     live: &[LiveRule],
@@ -274,9 +261,6 @@ fn reconcile_plan_and_live(
         }
         None => {
             out.push(Finding {
-                // Unmeasured, not Info: these lists only fail to read when a read genuinely
-                // failed (NotFound maps to Ok(empty) on both), so a whole classification arm
-                // went untested. As Info it counted as complete and the verdict said "clean".
                 level: Level::Unmeasured,
                 check: "live rules not fully accounted for",
                 detail: "the durable whiteout list or the absorbed-rule record could not be \
@@ -290,7 +274,6 @@ fn reconcile_plan_and_live(
     out
 }
 
-/// One `.replace` marker or opaque dir expands into a whiteout per stock entry the module
 fn expansions_by_marker(plan: &[PlanEntry]) -> Vec<(&Path, &str, usize)> {
     let mut by: HashMap<&Path, (&str, usize)> = HashMap::new();
     for e in plan.iter().filter(|e| e.kind == PlanKind::Whiteout) {
@@ -303,7 +286,6 @@ fn expansions_by_marker(plan: &[PlanEntry]) -> Vec<(&Path, &str, usize)> {
     v
 }
 
-/// Report threshold for one marker's expansion
 fn expansion_level(count: usize) -> Option<Level> {
     match count {
         0..=49 => None,
@@ -311,7 +293,6 @@ fn expansion_level(count: usize) -> Option<Level> {
     }
 }
 
-/// A way a module can be incompatible with this environment, and why
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Incompat {
     RomWrite,
@@ -321,7 +302,6 @@ enum Incompat {
 }
 
 impl Incompat {
-    /// How loud this kind is, and why they are not all the same
     fn level(self) -> Level {
         match self {
             Incompat::RomWrite | Incompat::MagiskMirror => Level::Warn,
@@ -363,7 +343,6 @@ impl Incompat {
     }
 }
 
-/// Scan enabled modules' scripts for the three incompatibilities above
 fn rom_path_vars(script: &str) -> std::collections::HashMap<String, String> {
     const PARTS: &[&str] = crate::pmcache::ROM_PARTITIONS;
     let mut out = std::collections::HashMap::new();
@@ -385,7 +364,6 @@ fn rom_path_vars(script: &str) -> std::collections::HashMap<String, String> {
     out
 }
 
-/// Substitute `$NAME` / `${NAME}` for the ROM paths [`rom_path_vars`] found
 fn expand_rom_vars(line: &str, vars: &std::collections::HashMap<String, String>) -> String {
     let mut names: Vec<&String> = vars.keys().collect();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
@@ -397,12 +375,8 @@ fn expand_rom_vars(line: &str, vars: &std::collections::HashMap<String, String>)
     acc
 }
 
-/// Which incompatibility, if any, one line of a module script announces
 fn classify_incompat_line(t: &str) -> Option<Incompat> {
     const PARTS: &[&str] = crate::pmcache::ROM_PARTITIONS;
-    // A trailing `# ...` is a comment, not an argument. Leaving it in made the last path
-    // token come from prose, which flipped `rom_is_source` and accused a module of writing
-    // to the ROM because its comment mentioned one.
     let t = match t.find(" #") {
         Some(at)
             if t[..at].matches('"').count().is_multiple_of(2)
@@ -433,25 +407,15 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
         None => false,
     };
     let removes = t.starts_with("rm ") || t.contains(" rm ");
-    // mkdir, sed -i, install and dd are ROM writes too, and were invisible.
     let writes_otherwise = ["mkdir ", "sed -i", "install ", "dd "]
         .iter()
         .any(|v| t.starts_with(v) || t.contains(&format!(" {v}")));
-    // ...and so is a redirection, but only when the REDIRECT TARGET is the ROM path. A bare
-    // `t.contains('>')` also matches the `2>/dev/null` on almost every line in these scripts.
     let redirects_into_rom = t.match_indices('>').any(|(at, _)| {
         let rest = t[at + 1..].trim_start_matches('>').trim_start();
         let tok = rest.split_whitespace().next().unwrap_or("");
         PARTS.iter().any(|p| tok.starts_with(&format!("/{p}/")))
     });
     let uses_an_image_tool = {
-        // Word-initial only: `ui_print "nsenter is not available"` merely NAMES the tool,
-        // and was being reported as an image-backed module for saying so.
-        // A tool INVOKED, not merely named. Two things to get right at once:
-        //   `ui_print "nsenter is not available"` names it inside a message  -> not a use
-        //   `LOOP="$(/system/bin/losetup -sf "$F")"` uses it inside a message -> IS a use
-        // so quote-counting alone is wrong. Track command-substitution depth: text inside
-        // `$( ... )` is command context again however many quotes enclose it.
         let in_command_context = |hay: &str| -> Vec<bool> {
             let (mut dq, mut sq, mut depth) = (false, false, 0usize);
             let b: Vec<char> = hay.chars().collect();
@@ -494,10 +458,6 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
             .any(|n| at_word_start(&probeless, n))
     };
     let binds_without_a_later_umount = {
-        // ORDER, not presence. `mount --bind X Y && umount Y` is a no-op and must stay quiet;
-        // `umount Y; mount --bind X Y` is the commonest spelling of a real self-mount and was
-        // invisible because the veto was line-wide. Veto only when the umount comes AFTER the
-        // last bind on the line.
         let last_bind = ["--bind", "--rbind", "-o bind", "-o rbind", "-t overlay"]
             .iter()
             .filter_map(|m| probeless.rfind(m))
@@ -515,8 +475,6 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
         && PARTS.iter().any(|p| t.contains(&format!(" /{p}/"))))
         || (t.contains("remount")
             && PARTS.iter().any(|p| {
-                // `/system` and `/system/` both name the partition; only the first spelling
-                // was recognised, so `mount -o remount,rw /system/` slipped through.
                 t.contains(&format!(" /{p} "))
                     || t.contains(&format!(" /{p}/ "))
                     || t.ends_with(&format!(" /{p}"))
@@ -555,7 +513,6 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
     }
 }
 
-/// Module-local scripts an entry script pulls in, as relative paths
 fn sourced_scripts(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in body.lines() {
@@ -595,7 +552,6 @@ fn sourced_scripts(body: &str) -> Vec<String> {
     out
 }
 
-/// Installed modules whose scripts write the `my_hookless` marker
 fn my_hookless_writers() -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir("/data/adb/modules") else { return out };
@@ -628,7 +584,6 @@ fn my_hookless_writers() -> Vec<(String, String)> {
     out
 }
 
-/// When a deleted `my_hookless` marker would come back
 fn marker_returns_when(files: &[String]) -> &'static str {
     if files.iter().any(|f| ENTRY_SCRIPTS.contains(&f.as_str())) {
         "it is written from a boot script, so it returns on the next boot"
@@ -638,7 +593,6 @@ fn marker_returns_when(files: &[String]) -> &'static str {
     }
 }
 
-/// Why a module that ships ROM content is contributing nothing, or `None` if there is
 fn unserved_reason(markers: &[String], served: bool) -> Option<&'static str> {
     if served || markers.iter().any(|m| m == "disable" || m == "remove") {
         return None;
@@ -650,7 +604,6 @@ fn unserved_reason(markers: &[String], served: bool) -> Option<&'static str> {
     }
 }
 
-/// Files a module ships under a real ROM partition, and which partitions
 fn module_rom_files(mdir: &Path) -> (usize, Vec<String>) {
     let mut n = 0usize;
     let mut parts: Vec<String> = Vec::new();
@@ -673,7 +626,6 @@ fn module_rom_files(mdir: &Path) -> (usize, Vec<String>) {
     (n, parts)
 }
 
-/// Bounded recursive file count
 fn count_files(dir: &Path, depth: usize) -> usize {
     if depth > 12 {
         return 0;
@@ -695,17 +647,14 @@ fn count_files(dir: &Path, depth: usize) -> usize {
     n
 }
 
-/// Can a live rule of this kind reach zygote's FD-allowlist trap at all?
 fn fd_note_applies(kind: crate::nm::LiveKind) -> bool {
     kind == crate::nm::LiveKind::Inject
 }
 
-/// The five scripts a manager runs directly
 const ENTRY_SCRIPTS: [&str; 5] = [
     "post-fs-data.sh", "service.sh", "boot-completed.sh", "post-mount.sh", "customize.sh",
 ];
 
-/// The sentence to append when the evidence line lives in a sourced helper rather than in
 fn reached_only_if_sourced(script: &str) -> &'static str {
     if ENTRY_SCRIPTS.contains(&script) {
         return "";
@@ -777,7 +726,6 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
     out
 }
 
-/// First filesystem image found in a module tree, as a module-relative path
 fn find_shipped_image(
     root: &std::path::Path,
     dir: &std::path::Path,
@@ -816,7 +764,6 @@ fn find_shipped_image(
     None
 }
 
-/// The subject a finding is about: the first token of its detail
 fn subject_of(f: &Finding) -> Option<&str> {
     fn trim(t: &str) -> &str {
         t.trim_end_matches([',', ':', '.'])
@@ -834,7 +781,6 @@ fn subject_of(f: &Finding) -> Option<&str> {
         .find(|t| t.starts_with('/') && t.len() > 1 && t.len() <= 128)
 }
 
-/// Turn plan findings into checks, giving each one an id nothing else in the report shares
 fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     findings
@@ -912,12 +858,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         }
     }
 
-    // Entries the planner refused. Until now these reached stderr and nothing else: the
-    // module still counted as "served" (its other files planned fine), so `module content
-    // not served` stayed quiet and the report said clean while content went unserved. The
-    // old `partition-root target` check that was supposed to catch this could never fire -
-    // every PlanEntry construction site filters partition roots BEFORE building the entry,
-    // so the plan it inspected never contained one.
     {
         let mut by_module: HashMap<&str, Vec<&crate::mount::Refused>> = HashMap::new();
         for r in &refused {
@@ -1332,10 +1272,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             let durable: Option<HashSet<PathBuf>> = crate::whiteout::read()
                 .ok()
                 .map(|v| v.into_iter().map(PathBuf::from).collect());
-            // BOTH readers fallible. `absorbed_tmpfs_targets()` swallows a read error as an
-            // empty set, which turned "I could not read the record" into "there are no
-            // takeovers" and published every takeover whiteout as a rule nothing explains -
-            // while `nomount reload`, told the same thing, refuses to run at all.
             let absorbed: Option<HashSet<PathBuf>> =
                 match (
                     crate::absorb::read_absorbed_targets(),
@@ -1426,9 +1362,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         });
     }
 
-    // 15..17, NOT 15..18: v17 is the version that KEEPS the flag on a shadowed file (see
-    // audit.rs's NM_FLAG_PUBLIC note and the >= 17 gate above), so including it here fired
-    // both findings at once and told a v17 user to "rebuild from >= 17".
     if live_ok && !hidden_apps.is_empty() && pm_rules > 0 && (15..17).contains(&engine_v) {
         f.push(Finding {
             level: Level::Warn,
@@ -1455,14 +1388,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         }
         if let Ok(txt) = &listed {
             let (gpaths, guids) = parse_ghost_tables(txt);
-            // Output we could not parse is NOT "no ghost rules".
-            //
-            // The `p <path>` / `u <uid>` grammar is produced by ghost_get_rule(), which is a
-            // weak extern satisfied elsewhere in the kernel tree - there is no source file in
-            // this repo to pin it against, so a drift test cannot exist here. What can exist
-            // is a loud failure: before this, a grammar change made both tables come back
-            // empty, the whole probe below was skipped, and NOTHING was reported. The cloak
-            // read as untested-but-silent, which is indistinguishable from a pass.
             if !txt.trim().is_empty() && gpaths.is_empty() && guids.is_empty() {
                 f.push(Finding {
                     level: Level::Unmeasured,
@@ -1519,9 +1444,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     });
                 }
                 if unknown > 0 && !(visible.is_empty() && leaked.is_empty()) {
-                    // The clean arm below reports `unknown`; this path used to drop it, so a
-                    // 16-path sample that measured one and failed fifteen still counted as
-                    // complete and `Tally::complete()` stayed true.
                     f.push(Finding {
                         level: Level::Unmeasured,
                         check: "ghost cloak only partly sampled",
@@ -1563,9 +1485,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     });
                 }
             } else {
-                // An unreadable hide list leaves `hidden_apps` empty too, and saying
-                // "nothing is hidden on this device" about a list we could not read asserts
-                // as fact something never measured.
                 let nothing_hidden = hidden_apps.is_empty() && !hide_list_unreadable;
                 let nothing_injected = !plan.iter().any(|e| e.kind == PlanKind::Inject);
                 f.push(Finding {
@@ -1790,7 +1709,6 @@ mod tests {
     use super::*;
     use crate::nm::LiveKind;
 
-    /// The three incompatibilities are not equally loud, and the axis is not fixability - none
     #[test]
     fn only_the_silently_broken_kinds_are_loud() {
         assert_eq!(Incompat::RomWrite.level(), Level::Warn);
@@ -1800,7 +1718,6 @@ mod tests {
         assert_eq!(verdict_of(&Level::Warn).severity(), "attention");
     }
 
-    /// The exact line that produced a false "image-backed or chroot module" on a OnePlus
     #[test]
     fn a_capability_probe_is_not_an_image_backed_module() {
         assert_eq!(
@@ -1819,7 +1736,6 @@ mod tests {
         }
     }
 
-    /// The five entry scripts are not where the mounts always are
     #[test]
     fn a_sourced_helper_is_followed() {
         assert_eq!(sourced_scripts(". $MODDIR/sh/compatible.sh"), vec!["sh/compatible.sh"]);
@@ -1832,7 +1748,6 @@ source $MODPATH/a.sh"),
         );
     }
 
-    /// The reference must not be able to walk the scanner out of the module, and must not fire
     #[test]
     fn sourced_scripts_stays_inside_the_module() {
         for quiet in [
@@ -1846,8 +1761,6 @@ source $MODPATH/a.sh"),
         }
     }
 
-    /// A module that bind-mounts its own content over the ROM is the family absorb exists for,
-    /// so every spelling of that mount has to be recognised and named.
     #[test]
     fn a_module_that_binds_over_the_rom_is_named() {
         for real in [
@@ -1864,7 +1777,6 @@ source $MODPATH/a.sh"),
         }
     }
 
-    /// Re-Malwack binds through a variable, so the mount line alone carries no ROM path
     #[test]
     fn a_bind_through_a_variable_is_resolved() {
         let script = concat!(
@@ -1890,7 +1802,6 @@ source $MODPATH/a.sh"),
         );
     }
 
-    /// Longest-name-first, or `$hosts` eats the front of `$hosts_file`
     #[test]
     fn overlapping_variable_names_expand_longest_first() {
         let vars = rom_path_vars("hosts=/system/etc/hosts
@@ -1902,7 +1813,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// The FD-allowlist tally counts injected files, and says so in its own text
     #[test]
     fn the_fd_allowlist_tally_counts_only_injects() {
         assert!(fd_note_applies(crate::nm::LiveKind::Inject));
@@ -1916,7 +1826,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// A layout-convergence symlink is not shipped content
     #[test]
     fn a_convergence_symlink_is_not_counted_as_shipped_content() {
         use std::os::unix::fs::symlink;
@@ -1940,7 +1849,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// A dangling link is content the module meant to ship, so it still counts --
     #[test]
     fn a_dangling_symlink_still_counts_as_shipped_content() {
         use std::os::unix::fs::symlink;
@@ -1950,7 +1858,6 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(count_files(&d.path().join("product"), 0), 1);
     }
 
-    /// Evidence found in a sourced helper is conditional, and must not be stated as fact
     #[test]
     fn a_hit_inside_a_sourced_helper_is_marked_conditional() {
         for entry in ENTRY_SCRIPTS {
@@ -1968,13 +1875,8 @@ hosts_file=/system/etc/hosts.d/x
         }
     }
 
-    /// The kernel-umount note must depend on whether we actually made binds
-    /// Unparseable ghost output must not read as "no ghost rules". The grammar comes from
-    /// ghost_get_rule() in the kernel tree, which this repo cannot pin with include_str!,
-    /// so the parser has to make drift visible instead of silently returning empty tables.
     #[test]
     fn the_ghost_table_parser_separates_empty_from_unparseable() {
-        // Real output: both tables populated.
         let (p, u) = parse_ghost_tables("u 10123
 p /system/app/Foo/Foo.apk
 p /product/x.apk
@@ -1982,13 +1884,9 @@ p /product/x.apk
         assert_eq!(u, vec![10123]);
         assert_eq!(p.len(), 2, "both p-lines parse");
 
-        // Genuinely nothing registered - empty text, empty tables.
         let (p, u) = parse_ghost_tables("");
         assert!(p.is_empty() && u.is_empty(), "empty input yields empty tables");
 
-        // Drift: non-empty text that matches neither prefix. The tables come back empty,
-        // which is exactly why the caller must test the INPUT for emptiness too rather
-        // than inferring "no ghosts" from an empty parse.
         let drift = "path=/system/app/Foo/Foo.apk
 uid=10123
 ";
@@ -1999,7 +1897,6 @@ uid=10123
         );
         assert!(!drift.trim().is_empty(), "...and the raw text is what distinguishes them");
 
-        // A `p` line that is not absolute is ignored, so a relative path cannot be probed.
         let (p, _) = parse_ghost_tables("p not/absolute
 ");
         assert!(p.is_empty(), "only absolute paths are accepted");
@@ -2014,12 +1911,6 @@ uid=10123
         let unknown_at = src
             .find("check: \"manager kernel umount unknown\",")
             .expect("finding gone or renamed");
-        // A marker that REALLY follows the unknown block in the source. This used to look for
-        // "---- live checks", a string whose only occurrence in the file is this line itself,
-        // so `end` landed ~670 lines later: the "block under test" swallowed the rest of
-        // plan_checks and part of the test module, and both assertions below passed no matter
-        // what the arm actually did. Deleting the Err arm - the exact regression this test
-        // exists to catch - would not have failed it.
         let end = unknown_at
             + src[unknown_at..]
                 .find("    let nm = Nm::new();")
@@ -2050,7 +1941,6 @@ uid=10123
         );
     }
 
-    /// The rule: the Suite warns about what a detector can see, or about the user's own
     #[test]
     fn findings_no_detector_can_see_are_notes() {
         let src = include_str!("doctor.rs");
@@ -2071,7 +1961,6 @@ uid=10123
         }
     }
 
-    /// "Delete the marker" is only actionable if the report says when it comes back, and that
     #[test]
     fn when_the_my_hookless_marker_comes_back_depends_on_the_writer() {
         assert!(
@@ -2094,14 +1983,12 @@ uid=10123
         );
     }
 
-    /// A module switched ON whose content reaches nothing
     #[test]
     fn a_module_that_ships_content_and_serves_nothing_is_named() {
         assert_eq!(unserved_reason(&["skip_mount".into()], false), Some("skip_mount"));
         assert_eq!(unserved_reason(&[], false), Some("none"));
     }
 
-    /// The user turning a module OFF is not a finding - content not being served is the entire
     #[test]
     fn a_disabled_or_served_module_is_not_a_finding() {
         assert_eq!(unserved_reason(&["disable".into()], false), None);
@@ -2111,7 +1998,6 @@ uid=10123
         assert_eq!(unserved_reason(&["skip_mount".into(), "remove".into()], false), None);
     }
 
-    /// The `my_*` partitions, which this whole chain could not see
     #[test]
     fn my_partitions_are_not_invisible() {
         assert_eq!(
@@ -2137,7 +2023,6 @@ uid=10123
         assert_eq!(vars.get("boot_dir").map(String::as_str), Some("/my_product/media/bootanimation"));
     }
 
-    /// Widening the list must not make `/system_ext/` match `system`, or a partition name
     #[test]
     fn a_wider_partition_list_does_not_over_match() {
         for quiet in [
@@ -2154,7 +2039,6 @@ uid=10123
         );
     }
 
-    /// Every way this arm could over-count, on the same evidence the arms above were narrowed
     #[test]
     fn self_mount_does_not_over_count() {
         for quiet in [
@@ -2171,11 +2055,8 @@ uid=10123
         }
     }
 
-    /// Every heuristic gap round 11 measured, in both directions.
     #[test]
     fn the_incompat_scanner_sees_what_it_missed_and_stops_accusing_what_it_should_not() {
-        // FALSE NEGATIVES that used to return None.
-        // the umount veto was line-wide, so "unmount the old one, then bind" was invisible
         let real = "umount /system/etc/hosts 2>/dev/null; mount --bind $MODDIR/hosts /system/etc/hosts";
         assert_eq!(classify_incompat_line(real), Some(Incompat::SelfMount), "missed: {real}");
         for real in [
@@ -2189,18 +2070,14 @@ uid=10123
             assert_eq!(classify_incompat_line(real), Some(Incompat::RomWrite), "missed: {real}");
         }
 
-        // FALSE POSITIVES that used to be reported.
         for quiet in [
-            // a trailing comment naming a ROM path is prose, not an argument
             r#"cp "$MODDIR/foo" "$TMPDIR/foo"   # replaces /system/etc/foo"#,
-            // naming a tool is not using it
             r#"ui_print "nsenter is not available""#,
             r#"echo "run losetup first""#,
         ] {
             assert_eq!(classify_incompat_line(quiet), None, "over-counted: {quiet}");
         }
 
-        // ...and the invocations that DO count, including via an absolute path
         for real in [
             "/system/bin/nsenter --mount=/proc/1/ns/mnt sh",
             "LOOP=\"$(/system/bin/losetup -sf \"$F\")\"",
@@ -2209,7 +2086,6 @@ uid=10123
         }
     }
 
-    /// ORDER: an nsenter-replicated bind stays ImageBacked
     #[test]
     fn an_nsenter_replicated_bind_stays_image_backed() {
         assert_eq!(
@@ -2224,7 +2100,6 @@ uid=10123
         );
     }
 
-    /// The two genuine reports from that same device must still fire - the fix must not buy
     #[test]
     fn real_image_backed_modules_are_still_named() {
         assert_eq!(
@@ -2240,7 +2115,6 @@ uid=10123
         }
     }
 
-    /// Probe and use on one line is still a use - the probe expression is removed, the line is
     #[test]
     fn probing_then_using_on_one_line_still_counts() {
         assert_eq!(
@@ -2249,7 +2123,6 @@ uid=10123
         );
     }
 
-    /// Every `explain()` arm is one line, because check.rs renders it as one (`
     #[test]
     fn no_explanation_carries_a_raw_newline() {
         for k in [
@@ -2268,7 +2141,6 @@ uid=10123
         }
     }
 
-    /// Deleting ROM content is the loudest thing the RomWrite arm reports, and the commonest
     #[test]
     fn rm_is_seen_at_the_start_of_a_line_and_after_a_word() {
         assert_eq!(
@@ -2285,7 +2157,6 @@ uid=10123
         assert_eq!(classify_incompat_line("rm -rf /data/adb/foo"), None);
     }
 
-    /// The two precision fixes this chain already carried, pinned now that they are reachable:
     #[test]
     fn the_older_precision_fixes_still_hold() {
         assert_eq!(classify_incompat_line("set_perm /system/bin/foo 0 0 0755"), None);
@@ -2299,7 +2170,6 @@ uid=10123
         );
     }
 
-    /// A BACKUP out of the ROM is a read, whatever it copies into
     #[test]
     fn copying_out_of_the_rom_is_not_a_rom_write() {
         assert_eq!(
@@ -2328,7 +2198,6 @@ uid=10123
         }
     }
 
-    /// Whiteouts are grouped by the marker that produced them, so one `.replace` reads as one
     #[test]
     fn expansions_are_grouped_by_their_marker() {
         let mut plan = vec![
@@ -2360,7 +2229,6 @@ uid=10123
         }
     }
 
-    /// The gap this check closes
     #[test]
     fn a_plan_and_a_rule_set_that_disagree_are_a_finding() {
         let plan = vec![
@@ -2380,7 +2248,6 @@ uid=10123
         assert!(!checks.contains(&"live rule disagrees with the plan"), "{checks:?}");
     }
 
-    /// The three exemptions reload's prune pass makes, made here too
     #[test]
     fn durable_absorbed_and_per_uid_rules_are_not_unexplained() {
         let plan = vec![inj("m", "/system/etc/a", "/data/adb/modules/m/system/etc/a")];
@@ -2399,7 +2266,6 @@ uid=10123
         assert!(f.is_empty(), "{:?}", f.iter().map(|x| x.detail.as_str()).collect::<Vec<_>>());
     }
 
-    /// A source that moved between modules is the dangerous shape: the rule count still
     #[test]
     fn a_live_rule_naming_another_source_is_an_error() {
         let plan = vec![inj("winner", "/system/etc/a", "/data/adb/modules/winner/system/etc/a")];
@@ -2412,12 +2278,6 @@ uid=10123
         assert_eq!(f[0].level, Level::Error);
     }
 
-    /// An unreadable exemption list must not turn every whiteout on the device into an
-    /// accusation - and must not be reported as a clean run either. Both lists map NotFound
-    /// to `Ok(empty)`, so reaching the `None` arm means a read genuinely failed and a whole
-    /// classification arm went untested. At `Info` that counted as complete and the one-line
-    /// verdict printed "clean"; `Unmeasured` is the state this project reserves for exactly
-    /// "something stopped me testing".
     #[test]
     fn an_unreadable_exemption_list_is_unmeasured_not_clean() {
         let plan: Vec<PlanEntry> = Vec::new();
@@ -2434,7 +2294,6 @@ uid=10123
         );
     }
 
-    /// A report, never a cap and never an alarm: nothing is ever withheld, and no count makes
     #[test]
     fn expansion_levels_escalate_but_never_refuse() {
         assert_eq!(expansion_level(1), None);
@@ -2446,7 +2305,6 @@ uid=10123
         assert_eq!(expansion_level(20_000), Some(Level::Info), "no count is an alarm");
     }
 
-    /// A shipped image is reported module-relative, as its doc promises
     #[test]
     fn a_shipped_image_is_named_relative_to_its_module() {
         let base = std::env::temp_dir().join("nm-doctor-img-test");
@@ -2460,7 +2318,6 @@ uid=10123
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// No two checks in one report may share an id
     #[test]
     fn plan_findings_never_share_an_id() {
         let f = vec![
@@ -2519,7 +2376,6 @@ uid=10123
         assert_eq!(checks[1].name, "module mount left by design");
     }
 
-    /// The subject is the first token, which is where every repeatable plan finding puts the
     #[test]
     fn a_findings_subject_is_the_head_of_its_detail() {
         let f = |d: &str| Finding { level: Level::Info, check: "c", detail: d.to_string() };
@@ -2534,7 +2390,6 @@ uid=10123
         assert_eq!(subject_of(&f("")), None);
     }
 
-    /// The ghost-cloak probe is the third reader of the hide list in a report that `nomount
     #[test]
     fn redaction_covers_the_doctor_readers() {
         assert_eq!(hidden_uid_label(10422, false), "hidden uid 10422");
@@ -2557,7 +2412,6 @@ uid=10123
         assert_eq!(partition_of(Path::new("/")), None);
     }
 
-    /// Kept after the local copy was deleted, because it is this file's callers that depend on
     #[test]
     fn is_partition_root_only_for_bare_roots() {
         assert!(is_partition_root(Path::new("/product")));
@@ -2567,7 +2421,6 @@ uid=10123
         assert!(!is_partition_root(Path::new("/product/overlay/x.apk")));
     }
 
-    /// The parser itself, and its suffix-peeling, now live with the client that produces the
     #[test]
     fn parse_live_still_yields_the_rows_the_checks_read() {
         let v = crate::nm::parse_list(

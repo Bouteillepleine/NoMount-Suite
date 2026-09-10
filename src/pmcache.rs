@@ -5,12 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const CACHE_DIR: &str = "/data/system/package_cache";
-/// Last-served identity per ROM APK: `target \t mtime \t size`
 const STATE: &str = "/data/adb/nomount/apkstate.list";
-/// APKs invalidated after pm had already parsed them - cured by a reboot
 const PENDING: &str = "/data/adb/nomount/pm-reboot.list";
 
-/// ROM partitions whose APKs pm parses at scan time
 const ROM_ROOTS: &[&str] = &[
     "/system/", "/system_ext/", "/product/", "/vendor/", "/odm/", "/my_product/", "/my_region/",
     "/my_stock/", "/my_company/", "/my_carrier/", "/my_engineering/", "/my_heytap/", "/my_preload/",
@@ -23,7 +20,6 @@ pub const ROM_PARTITIONS: &[&str] = &[
     "my_heytap", "my_preload", "my_bigball", "my_manifest", "my_reserve",
 ];
 
-/// The directory names pm actually scans for packages
 const PM_SCAN_DIRS: &[&str] = &["app", "priv-app", "overlay", "app-ext", "priv-app-ext"];
 
 /// Any file inside a directory pm scans, i.e
@@ -44,7 +40,6 @@ pub fn is_rom_apk(target: &Path) -> bool {
     target.extension().is_some_and(|e| e == "apk") && is_pm_published(target)
 }
 
-/// The cache-entry prefixes pm may use for this APK
 fn cache_keys(target: &Path) -> Vec<String> {
     let mut keys = Vec::new();
     if let Some(file) = target.file_name() {
@@ -64,7 +59,6 @@ fn cache_keys(target: &Path) -> Vec<String> {
     keys
 }
 
-/// Every file in the cache, flattened, read once per pass
 fn cache_files() -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for d in fs::read_dir(CACHE_DIR)? {
@@ -75,7 +69,6 @@ fn cache_files() -> std::io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Drop every cached parse for `target` out of `cache`
 fn drop_entry(target: &Path, cache: &[PathBuf]) -> (usize, usize) {
     let keys = cache_keys(target);
     if keys.is_empty() {
@@ -95,7 +88,6 @@ fn drop_entry(target: &Path, cache: &[PathBuf]) -> (usize, usize) {
     (matched, removed)
 }
 
-/// What we last served for a target, as recorded by [`sync`]
 fn read_state() -> Option<HashMap<PathBuf, String>> {
     let txt = match fs::read_to_string(STATE) {
         Ok(t) => t,
@@ -112,7 +104,6 @@ fn read_state() -> Option<HashMap<PathBuf, String>> {
     )
 }
 
-/// mtime+size of the file actually being served
 fn identity(source: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     let m = fs::metadata(source).ok()?;
@@ -221,7 +212,6 @@ pub fn add_pending(targets: &[PathBuf]) {
     }
 }
 
-/// The accumulated reboot-required set, error-preserving
 fn pending_result() -> std::io::Result<Vec<PathBuf>> {
     match fs::read_to_string(PENDING) {
         Ok(t) => Ok(t.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect()),
@@ -250,14 +240,12 @@ pub fn clear_pending() {
 mod tests {
     use super::*;
 
-    /// A my_* APK is bind-served, and a bind swaps the parsed bytes too - it must be tracked
     #[test]
     fn my_partition_apks_are_tracked() {
         assert!(is_rom_apk(Path::new("/my_product/app/Foo/Foo.apk")));
         assert!(is_rom_apk(Path::new("/my_stock/priv-app/Bar/Bar.apk")));
     }
 
-    /// `ROM_PARTITIONS` must cover every root `ROM_ROOTS` names, or the lint that asks "is
     #[test]
     fn rom_partitions_cover_every_pm_scan_root() {
         for r in ROM_ROOTS {
@@ -281,7 +269,6 @@ mod tests {
         assert!(!is_rom_apk(Path::new("/data/adb/nomount/apks/youtube-patched.apk")));
     }
 
-    /// A file on a ROM partition that pm does not scan must not be treated as one it does:
     #[test]
     fn files_outside_a_pm_scan_dir_stay_hidden() {
         for p in [
@@ -307,7 +294,6 @@ mod tests {
         assert!(!is_rom_apk(Path::new("/product/priv-app/Mms/lib/arm64/libjni.so")));
     }
 
-    /// Both layouts pm uses, measured on OP15: `Contacts-16-...` for a dir it owns,
     #[test]
     fn the_kernel_carries_the_same_pm_scan_lists() {
         let src = std::fs::read_to_string("hookless/src/nomount.c").expect(

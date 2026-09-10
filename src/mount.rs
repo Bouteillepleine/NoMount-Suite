@@ -5,14 +5,12 @@ use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-/// Magisk's whiteout marker is a 0:0 char device - both halves of that
 fn is_whiteout_marker(ft: &fs::FileType, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     ft.is_char_device()
         && fs::symlink_metadata(path).map(|m| m.rdev() == 0).unwrap_or(false)
 }
 
-/// Does this directory carry overlayfs's `trusted.overlay.opaque=y`?
 fn is_opaque_dir(p: &Path) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -34,7 +32,6 @@ use anyhow::{Context, Result};
 use crate::nm::Nm;
 
 pub(crate) const MODULES_DIR: &str = "/data/adb/modules";
-/// Serialises the whole-engine passes (`mount`, `reload`, `absorb`) against each other
 const PASS_LOCK: &str = "/data/adb/nomount/pass.lock";
 
 /// RAII holder for the pass lock; the flock releases when it drops
@@ -102,15 +99,10 @@ const NON_PARTITION_ROOTS: &[&str] = &[
     "postinstall", "second_stage_resources", "bin", "sbin", "d",
 ];
 
-/// Discovery: should we walk a top-level module dir `<name>`?
-///
-/// `symlink_metadata`, exactly like [`is_real_partition`]. `Path::is_dir()` follows, and the
-/// two functions disagreeing is what let one physical file be planned at two targets.
 fn is_partition_dir(name: &str) -> bool {
     is_real_partition(name)
 }
 
-/// A top-level module dir that names a root SYMLINK rather than a partition
 fn is_root_symlink(name: &str) -> bool {
     !name.is_empty()
         && fs::symlink_metadata(format!("/{name}"))
@@ -118,7 +110,6 @@ fn is_root_symlink(name: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Canonicalization: is `<name>` a real separate partition, so `system/<name>/...` should
 fn is_real_partition(name: &str) -> bool {
     !name.is_empty()
         && !NON_PARTITION_ROOTS.contains(&name)
@@ -127,7 +118,6 @@ fn is_real_partition(name: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Resolve a module-relative path to its absolute target
 fn resolve_target_path(relative: &Path) -> Option<PathBuf> {
     let s = relative.to_str()?;
     if s.is_empty() {
@@ -142,7 +132,6 @@ fn resolve_target_path(relative: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(format!("/{s}")))
 }
 
-/// A target on an OnePlus/Oppo `my_*` partition, which must be served by a real bind (see
 fn is_my_partition(target: &Path) -> bool {
     target
         .components()
@@ -152,7 +141,6 @@ fn is_my_partition(target: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// EXPERIMENTAL: route `my_*` targets through hookless inject instead of a real bind
 fn my_hookless_enabled() -> bool {
     Path::new(MY_HOOKLESS_MARKER).exists()
 }
@@ -211,7 +199,6 @@ pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A leaf inject must land on a file (or on nothing - a synthesized virtual entry)
 fn inject_would_mask_dir(target: &Path) -> bool {
     target.is_dir()
 }
@@ -258,26 +245,11 @@ pub(crate) fn path_is_representable(p: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Can this entry actually produce a rule?
 fn source_resolves(e: &PlanEntry) -> bool {
     e.kind != PlanKind::Inject || e.source.exists()
 }
 
-/// Would serving this resolved source hand a non-root process control of the bytes a ROM
 fn resolved_source_is_untrusted(resolved: &Path) -> bool {
-    // Two separate app-writable regions, and only the first was covered.
-    //
-    // `/data/...` outside `/data/adb/` catches /data/local/tmp, /data/data and
-    // /data/media. It does NOT catch the same shared volume reached by any of its
-    // other names - /storage/emulated/0, /sdcard, /mnt/media_rw, /mnt/expand - none
-    // of which begin with /data/. A symlink resolving to /storage/emulated/0/x.apk
-    // therefore passed a guard whose whole purpose is to stop a non-root process
-    // controlling the bytes served into the ROM namespace, and any app holding
-    // storage permission can rewrite that file.
-    //
-    // health.rs already enumerates those roots for the export-destination check, so
-    // this reuses that one list rather than restating it. A second copy is how these
-    // surfaces drift apart.
     (resolved.starts_with("/data/") && !resolved.starts_with("/data/adb/"))
         || crate::health::is_shared_storage(resolved)
 }
@@ -333,7 +305,6 @@ pub(crate) struct PlanEntry {
     pub kind: PlanKind,
 }
 
-/// Expand a "replace this directory" marker into rules the engine actually has
 fn expand_replacement(
     module: &str,
     stock_dir: &Path,
@@ -429,7 +400,6 @@ pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Col
     (kept, collisions)
 }
 
-/// Recursively resolve a module subtree rooted at `dir` into plan entries
 fn plan_tree(
     module: &str,
     module_root: &Path,
@@ -437,9 +407,6 @@ fn plan_tree(
     out: &mut Vec<PlanEntry>,
     refused: &mut Vec<Refused>,
 ) -> std::io::Result<()> {
-    // The error propagates. Swallowing it returned a SHORT plan, and `run_reload` diffs the
-    // plan against the live rules - so an SELinux denial or an EIO on one module subtree
-    // pruned every rule that module owned and reported it as `-N rules ... 0 failed`.
     let mut entries: Vec<_> = fs::read_dir(dir)?.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
@@ -510,12 +477,6 @@ fn plan_tree(
                     );
                     continue;
                 }
-                // ...and it must resolve to a FILE. `entry.file_type()` is lstat-based, so a
-                // symlink to a directory fell through to the leaf-inject arm below; the engine
-                // then kern_path()s the source WITH follow and installs a directory rule -
-                // exactly what `nomount vfs add` refuses by name, because such a rule hides
-                // every stock entry under its target and its children report the source
-                // filesystem's block counts, which one stat separates from stock.
                 if resolved.as_deref().map(Path::is_dir).unwrap_or(false) {
                     eprintln!(
                         "nomount: {module}: skipping {} - it is a symlink to a directory, which \
@@ -564,7 +525,6 @@ fn plan_tree(
     Ok(())
 }
 
-/// Drop any mount sitting on a target we are about to serve
 fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: &Path) -> bool {
     if !targets.contains(target) {
         return true;
@@ -595,7 +555,6 @@ pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
     !forced.contains(target)
 }
 
-/// Warn (only) when a whiteout will leave a measurable hole
 fn warn_whiteout_hole(target: &Path, module: &str) {
     if whiteout_leaves_hole(target) {
         eprintln!(
@@ -716,13 +675,11 @@ pub fn run_plan() -> Result<()> {
     Ok(())
 }
 
-/// A live leaf rule from `nm list`
 enum LiveRule {
     Inject(PathBuf),
     Whiteout,
 }
 
-/// The live leaf rules the reconcile diffs against, keyed by (target, UID): injects and
 fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
     crate::nm::parse_list(list)
         .into_iter()
@@ -737,14 +694,12 @@ fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
         .collect()
 }
 
-/// The order stale rules must be deleted in: deepest first, then path, then uid
 fn prune_order(live: &HashMap<(PathBuf, u32), LiveRule>) -> Vec<&(PathBuf, u32)> {
     let mut stale: Vec<&(PathBuf, u32)> = live.keys().collect();
     stale.sort_by_key(|(t, uid)| (std::cmp::Reverse(t.components().count()), t.clone(), *uid));
     stale
 }
 
-/// May the reconcile drop this live rule?
 fn prunable(
     target: &Path,
     uid: u32,
@@ -834,12 +789,6 @@ pub fn run_reload() -> Result<()> {
             failed += 1;
             continue;
         }
-        // NO del-then-add. The engine replaces a rule at the same (vpath, uid) atomically
-        // under nomount_write_mutex, inheriting SHADOWS_STOCK and v_cap from the victim. The
-        // del only opened a window: if the add then failed (netlink timeout, ENOMEM, a batch
-        // refusal) the target was left with NO rule at all, silently reverted to the stock
-        // file, and the prune loop could not restore it because the plan still wanted it -
-        // while the pass printed "(gap-free)".
         let existed = live.contains_key(&(t.to_path_buf(), 0));
         let r = match e.kind {
             PlanKind::Inject => nm.add(&e.target, &e.source),
@@ -962,7 +911,6 @@ pub fn run_reload() -> Result<()> {
 /// Metamodule entry point (`nomount mount`): rebuild rules from the current set of enabled
 pub(crate) const MODULE_SUMMARY: &str = "/data/adb/nomount/modules.tsv";
 
-/// Publish the per-module breakdown of a plan
 fn write_module_summary(plan: &[PlanEntry]) -> std::io::Result<()> {
     use std::collections::BTreeMap;
     let mut per: BTreeMap<&str, (usize, bool, bool)> = BTreeMap::new();
@@ -989,7 +937,6 @@ fn write_module_summary(plan: &[PlanEntry]) -> std::io::Result<()> {
     crate::statefile::write_atomic(std::path::Path::new(MODULE_SUMMARY), &body)
 }
 
-/// Is this target served as an RRO overlay rather than a file redirect?
 fn is_rro_apk(target: &std::path::Path) -> bool {
     target.extension().is_some_and(|e| e == "apk")
         && target.components().any(|c| c.as_os_str() == "overlay")
@@ -1155,7 +1102,6 @@ pub fn run_mount() -> Result<()> {
     Ok(())
 }
 
-/// Same filter, but over pairs that were actually applied rather than planned
 fn served_apks_applied(
     applied: &[(PathBuf, PathBuf)],
     absorbed: &[(PathBuf, PathBuf)],
@@ -1172,7 +1118,6 @@ fn served_apks_applied(
 mod tests {
     use super::*;
 
-    /// A path the wire format cannot carry must never reach the engine
     #[test]
     fn a_path_the_wire_format_cannot_carry_is_refused() {
         let forge = Path::new("/system/etc/A\n/data/app/~~AA==/com.victim-BB==/base.apk");
@@ -1211,7 +1156,6 @@ mod tests {
         }
     }
 
-    /// Only injects and whiteouts get unmounted first; a bind does not
     #[test]
     fn only_engine_served_kinds_are_unmounted_first() {
         assert!(needs_unmount_before_serving(PlanKind::Inject));
@@ -1222,7 +1166,6 @@ mod tests {
         );
     }
 
-    /// Every inject before every whiteout, plan order preserved within each
     #[test]
     fn injects_are_applied_before_whiteouts_in_plan_order() {
         let mut plan = vec![
@@ -1247,11 +1190,9 @@ mod tests {
         );
     }
 
-    /// The shell entry points, read by the drift tests below
     const LIB: &str = include_str!("../module/lib.sh");
     const SERVICE: &str = include_str!("../module/service.sh");
 
-    /// The manager card must count rules the way every other surface does
     #[test]
     fn the_manager_card_excludes_whiteouts_from_its_rule_count() {
         let line = LIB
@@ -1273,16 +1214,6 @@ mod tests {
 
     const METAMOUNT_SRC: &str = include_str!("../module/metamount.sh");
 
-    /// The WebUI's only automated coverage, and the only thing that noticed when it died was
-    /// an audit. A bulk comment strip (eae5476) took `STUB` -- a triple-quoted block -- along
-    /// with the docstrings, leaving `build()` referencing a name that no longer existed, so
-    /// every run raised NameError. Six WebUI changes then shipped unexercised. Two lines of
-    /// grep is the whole guard: the constant has to be DEFINED, and every command `capture`
-    /// records has to have a branch in the stub that replays it -- an unstubbed one answers
-    /// rc=1 and silently drives the page's "could not read" path instead of the real one.
-    /// The case-only sweep is a blocking CI gate, and a gate nobody invokes is not a gate.
-    /// It guards a failure mode that is invisible to the compiler, the linter and every
-    /// other test here, so its wiring is pinned rather than trusted.
     #[test]
     fn the_case_sweep_gate_is_wired_into_ci() {
         const BUILD_YAML: &str = include_str!("../.github/workflows/build.yaml");
@@ -1296,9 +1227,6 @@ mod tests {
             BUILD_YAML.contains("fetch-depth: 0"),
             "the sweep diffs the pushed range, so the test job's checkout needs full history;              with the default depth-1 checkout it has no predecessor to diff and checks nothing"
         );
-        // The escape hatch has to be the same string on both sides, or a commit the author
-        // marked as deliberate still fails and the failure text names a marker that does
-        // not work.
         assert!(
             SWEEP.contains(r#"SKIP_MARKER = "[case-ok]""#),
             "case-sweep.py's escape-hatch marker changed; the failure message it prints and              this contract must name the same string"
@@ -1340,10 +1268,6 @@ mod tests {
         }
     }
 
-    /// The manager card must consult the verdict, not just log it
-    /// Both CI jobs must pin the SAME rustc. The test job proves the tree is green and the
-    /// cross job builds the binary that ships; if those pins drift, the shipped binary was
-    /// built by a compiler no test ever ran under.
     #[test]
     fn the_two_ci_toolchain_pins_agree() {
         const BUILD_YAML: &str = include_str!("../.github/workflows/build.yaml");
@@ -1387,14 +1311,9 @@ mod tests {
     const PAGE: &str = include_str!("../module/webroot/index.html");
     const HARNESS_SRC: &str = include_str!("../scripts/webui-harness.py");
 
-    /// The WebUI matches on literal text the Rust prints. A prose pass that rewords one end
-    /// silently breaks the other -- no test fails, no error appears, the reader just gets the
-    /// wrong answer forever. `eae5476` did exactly that to three strings; two of them
-    /// (`would DROP`/`would SKIP`) sat dead for a release. Read BOTH ends here.
     #[test]
     fn the_webui_matches_the_strings_absorb_actually_prints() {
         const ABSORB: &str = include_str!("absorb.rs");
-        // (the page's regex literal, the format string absorb.rs emits)
         for (matcher, producer) in [
             (r#"[/^would skip directory bind /"#, r#""would skip directory bind {} <- {}"#),
             (r#"[/^would drop redundant mount /"#, r#""would drop redundant mount {} <- {}"#),
@@ -1416,9 +1335,6 @@ mod tests {
         }
     }
 
-    /// `ksud feature list` prints `[ENABLED (1)] su_compat`. `grep` is case-sensitive, so
-    /// lowercasing this one word made the Status card report a sucompat device's su as
-    /// `external` - measured on an OP15, and visible in a user screenshot for a full release.
     #[test]
     fn the_sucompat_probe_greps_for_the_case_ksud_actually_prints() {
         assert!(
@@ -1431,14 +1347,8 @@ mod tests {
         );
     }
 
-    /// The harness replays the page. Where it runs a DIFFERENT command than the page does,
-    /// it is testing something the user never sees -- which is how `ksud=` went missing from
-    /// the harness for three commits while `refreshStealth` branched on it first.
     #[test]
     fn the_harness_runs_the_same_probes_the_page_does() {
-        // Each fragment must appear on both sides, byte for byte.
-        // Raw strings: both files escape the inner quotes for their own host language, and
-        // the escape is part of the bytes that have to match.
         for frag in [
             r#"grep su_compat "#,
             r#"| grep -q ENABLED && echo 1 || echo 0)"; "#,
@@ -1465,7 +1375,6 @@ mod tests {
         }
     }
 
-    /// Two modules claiming one target must produce exactly one applied rule
     #[test]
     fn dedupe_keeps_the_last_claim() {
         let plan = vec![
@@ -1482,7 +1391,6 @@ mod tests {
         assert_eq!(collisions[0].losers, vec!["a_mod".to_string()]);
     }
 
-    /// An uncontested plan must pass through untouched - no reordering, no allocation of a
     #[test]
     fn dedupe_is_a_noop_without_collisions() {
         let plan = vec![
@@ -1496,7 +1404,6 @@ mod tests {
         assert_eq!(kept[1].module, "b");
     }
 
-    /// `/product/product/...` is the installer nesting `system/product` inside an existing
     #[test]
     fn serve_mode_refuses_repeated_partition_name() {
         assert!(matches!(
@@ -1511,7 +1418,6 @@ mod tests {
         assert_eq!(serve_mode(Path::new("/system/etc/system/x")), Serve::Inject);
     }
 
-    /// The whole point of `serve_mode` is that absorb gets the same answer this file acts on,
     #[test]
     fn serve_mode_refuses_what_plan_tree_refuses() {
         assert_eq!(serve_mode(Path::new("/system/bin/x")), Serve::Inject);
@@ -1527,7 +1433,6 @@ mod tests {
         assert!(can_whiteout(Path::new("/d/tracing/x")).is_err());
     }
 
-    /// `.replace` must hide the stock entries the module does not ship, and leave the ones it
     #[test]
     fn replace_expands_to_the_unshipped_entries_only() {
         let Some(base) = test_base("replace-expand") else { return };
@@ -1558,7 +1463,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// A stock directory the module replaces with a file of the same name is not recursed
     #[test]
     fn replace_does_not_descend_where_the_module_ships_a_file() {
         let Some(base) = test_base("replace-file-over-dir") else { return };
@@ -1576,7 +1480,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// No stock directory to replace: the module's content is served on its own and the engine
     #[test]
     fn replace_on_a_directory_the_rom_does_not_have_is_a_no_op() {
         let Some(base) = test_base("replace-absent") else { return };
@@ -1591,7 +1494,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// A tree deeper than the guard stops instead of walking forever
     #[test]
     fn replace_expansion_stops_at_the_depth_guard() {
         let Some(base) = test_base("replace-depth") else { return };
@@ -1614,7 +1516,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// Somewhere `can_whiteout` accepts (not /tmp, whose root is non-partition)
     fn test_base(tag: &str) -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
         let base = PathBuf::from(home).join(format!(".nomount-test-{tag}"));
@@ -1627,7 +1528,6 @@ mod tests {
         Some(base)
     }
 
-    /// Only a 0:0 char device is Magisk's whiteout marker
     #[test]
     fn only_a_zero_zero_char_device_is_a_whiteout_marker() {
         let real = Path::new("/dev/null");
@@ -1646,7 +1546,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// A whiteout is a d_drop, not a serve, so it is allowed wherever the path itself is ours
     #[test]
     fn whiteout_allowed_on_my_partitions() {
         assert!(can_whiteout(Path::new("/my_stock/app/OplusOperationManual")).is_ok());
@@ -1655,7 +1554,6 @@ mod tests {
         assert!(can_whiteout(Path::new("/system/priv-app/Foo")).is_ok());
     }
 
-    /// The refusals that do carry over from `serve_mode`: a bare partition root masks every
     #[test]
     fn whiteout_refuses_partition_roots_and_non_rom() {
         assert!(can_whiteout(Path::new("/my_stock")).is_err());
@@ -1666,7 +1564,6 @@ mod tests {
         assert!(can_whiteout(Path::new("/")).is_err());
     }
 
-    /// A Reload used to delete every durable whiteout and every absorbed rule, because neither
     #[test]
     fn reload_never_prunes_durable_or_absorbed_rules() {
         let durable: HashSet<PathBuf> = ["/system/etc/tell.conf"].iter().map(PathBuf::from).collect();
@@ -1679,7 +1576,6 @@ mod tests {
         assert!(prunable(Path::new("/system/app/Gone.apk"), 0, false, &durable, &absorbed));
     }
 
-    /// A per-UID rule is not the module plan's to prune, and `nm del` (always uid 0) could not
     #[test]
     fn reload_never_prunes_per_uid_rules() {
         let none = HashSet::new();
@@ -1689,7 +1585,6 @@ mod tests {
         assert!(!prunable(t, 1000, false, &none, &none));
     }
 
-    /// A stale directory rule must be deleted after the rules underneath it
     #[test]
     fn stale_rules_are_pruned_deepest_first() {
         let live = parse_live_rules(
@@ -1712,7 +1607,6 @@ mod tests {
         );
     }
 
-    /// An inject source that resolves somewhere a non-root process can rewrite is refused: the
     #[test]
     fn an_inject_source_resolving_into_app_writable_data_is_untrusted() {
         for bad in [
@@ -1720,8 +1614,6 @@ mod tests {
             "/data/media/0/Download/x.apk",
             "/data/data/com.evil/files/payload",
             "/data/app/~~AA==/com.evil-BB==/base.apk",
-            // The same shared volume under its other names. None of these begin
-            // with /data/, so all four were accepted before.
             "/storage/emulated/0/Download/x.apk",
             "/sdcard/Download/x.apk",
             "/mnt/media_rw/1234-5678/x.apk",
@@ -1738,8 +1630,6 @@ mod tests {
             "/system/etc/x",
             "/my_product/app/Foo/Foo.apk",
             "/database/x",
-            // Not shared storage despite the prefix overlap - `starts_with` on Path
-            // matches whole components, so these must still be accepted.
             "/storageroom/x",
             "/data/adb/modules/M/system/etc/x",
         ] {
@@ -1756,7 +1646,6 @@ mod tests {
         assert!(m.contains_key(&(PathBuf::from("/d"), 0)));
     }
 
-    /// Both RRO layouts count as an overlay
     #[test]
     fn both_rro_layouts_are_overlays() {
         assert!(is_rro_apk(Path::new("/product/overlay/Foo.apk")), "flat");

@@ -14,18 +14,6 @@ _nmlog() {
     echo "nomount: $*" > /dev/kmsg 2>/dev/null
     echo "$(date '+%Y-%m-%d %H:%M:%S') [uninstall] $*" >> /data/adb/nomount/boot.log 2>/dev/null
 }
-# Tear the recorded my_* binds down BEFORE anything touches the state directory.
-#
-# binds.list is the only record of what we bound, and both branches below destroy it -
-# the `remove` branch deletes it outright, the upgrade branch stashes it and wipes the
-# live directory. Neither umounted anything first, so an uninstall left live bind mounts
-# over ROM paths with nothing left that could ever find them again: they survive until
-# the next reboot, and a leftover mount is precisely what a zero-mount module must not
-# leave behind. `nomount unbind` also puts each source's own SELinux label back, which
-# matters because relabel-to-target left them carrying the partition label.
-#
-# Best-effort by design: this runs while the module is being removed, so a failure here
-# must not stop the uninstall - it is logged and the reboot clears the rest.
 for _abi in arm64-v8a armeabi-v7a x86_64 x86; do
     _nmbin="$MODDIR/bin/$_abi/nomount"
     [ -x "$_nmbin" ] || continue
