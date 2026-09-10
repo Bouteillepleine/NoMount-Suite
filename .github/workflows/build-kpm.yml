@@ -1,4 +1,39 @@
-name: NoMount KPM - per-KMI build
+name: NoMount KPM — build a KernelPatch module
+
+# Builds kpm/ into one nomount-<kmi>.kpm per GKI KMI generation.
+#
+# WHY PER KMI, AND WHY IN THE DDK CONTAINERS -- a correctness argument here, not
+# just a speed one.
+#
+# The engine half of a .kpm is compiled against real kernel headers because it
+# dereferences struct inode, dentry and super_block. Those layouts depend on the
+# kernel's CONFIG, so building against a generic `make defconfig` tree can give
+# field offsets that do not match the GKI kernel the module is loaded into -- and
+# that failure is not a link error, it is reading the wrong bytes at runtime.
+# The DDK's $KDIR is a released GKI kernel's own configured tree, so the layouts
+# are the ones the device actually has.
+#
+# It is also what makes the KMI generation the right unit: android12-5.10 and
+# android13-5.10 are the same kernel version and different KMIs, and nothing
+# about a version number promises the structs agree.
+#
+# WHY THE SYMBOL LIST IS THE HARD PART, and why it is generated, not written.
+#
+# A .kpm gets no relocation against the kernel's export table: KernelPatch's
+# loader resolves undefined symbols against its OWN table only
+# (kernel/patch/module/module.c, simplify_symbols) and the kallsyms fallback
+# there is commented out because "kernel symbol cause overflow in relocation" --
+# an AArch64 `bl` reaches only +/-128 MB. So every kernel call has to become an
+# indirect call through a table, which is what kpm/nm_kpm_tramp.c does.
+#
+# The list also cannot be scraped from modpost, which caps its output
+# ("suppressed 90 unresolved symbol warnings") and under-reports. `nm -u` over
+# the compiled engine is exact, and that is what the survey step runs.
+#
+# VERSION CAP. KernelPatch does not come up on 6.12+ -- it hangs in its own
+# pagetable bring-up, so a module built for it could never load. The matrix stops
+# at 6.6, and kpm/nm_kpm_shim.h fails the compile if anything tries to go higher.
+# See kpm/README.md.
 
 on:
   push:
@@ -7,156 +42,296 @@ on:
       - 'kpm/**'
       - 'hookless/src/**'
       - '.github/workflows/build-kpm.yml'
-      # The load gate's allow-list logic lives here, so a change to it has to
-      # re-run the gate. Without this line an edit to the gate itself was the one
-      # change that could never be tested by the gate.
-      - '.github/kpm-allowed.py'
   workflow_dispatch:
     inputs:
       only:
-        description: "Comma-separated KMIs to build (blank = all)"
+        description: "Comma-separated KMIs (empty = all). e.g. android15-6.6"
         required: false
+        default: ''
+      variant_ref:
+        description: "Branch holding kpm/ (this file lives on main; the code does not)"
+        required: false
+        default: 'KPM'
+      kp_repo:
+        description: "KernelPatch SDK repo"
+        required: false
+        default: 'https://github.com/bmax121/KernelPatch'
+      kp_ref:
+        description: "KernelPatch ref (empty = the pinned commit below)"
+        required: false
+        default: '72a904c412754e25f54353c30f31f5c884ed0673'
+
+permissions:
+  contents: read
 
 concurrency:
   group: kpm-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-
 jobs:
   build:
-    name: ${{ matrix.ver }}
+    name: ${{ matrix.kmi }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
+        # Stops at 6.6 on purpose -- see the version-cap note above.
+        # android11-5.4 is absent because the DDK publishes no container for it;
+        # that is a real coverage gap, not an oversight.
         include:
-          - { ver: '5.4',  kref: 'android11-5.4'  }
-          - { ver: '5.10', kref: 'android12-5.10' }
-          - { ver: '5.15', kref: 'android13-5.15' }
-          - { ver: '6.1',  kref: 'android14-6.1'  }
-          - { ver: '6.6',  kref: 'android15-6.6'  }
+          - { kmi: android12-5.10, tag: '20251104' }
+          - { kmi: android13-5.10, tag: '20251104' }
+          - { kmi: android13-5.15, tag: '20251104' }
+          - { kmi: android14-5.15, tag: '20251104' }
+          - { kmi: android14-6.1,  tag: '20251104' }
+          - { kmi: android15-6.6,  tag: '20251104' }
+    container:
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-${{ matrix.tag }}
     steps:
       - name: Should this KMI run?
         id: sel
+        env:
+          ONLY: ${{ github.event.inputs.only }}
         run: |
-          only="${{ github.event.inputs.only }}"
-          if [ -z "$only" ] || printf '%s' "$only" | tr ',' '\n' | grep -qx "${{ matrix.ver }}"; then
+          set -eu
+          if [ -z "${ONLY:-}" ] || printf '%s' "$ONLY" | tr ',' '\n' | grep -qx '${{ matrix.kmi }}'; then
             echo "run=1" >> "$GITHUB_OUTPUT"
           else
-            echo "run=0" >> "$GITHUB_OUTPUT"; echo "skipped ${{ matrix.ver }}"
+            echo "run=0" >> "$GITHUB_OUTPUT"; echo "skipped ${{ matrix.kmi }}"
           fi
 
+      # kpm/ lives on its own branch, but GitHub only offers a workflow_dispatch
+      # file that sits on the default branch. So this file is on main and checks
+      # the variant branch out explicitly.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.sel.outputs.run == '1'
         with:
-          path: repo
+          ref: ${{ github.event.inputs.variant_ref || 'KPM' }}
 
-      - name: Install toolchain
+      - name: Validate the tree and the DDK
         if: steps.sel.outputs.run == '1'
         run: |
-          set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            bc bison flex libssl-dev libelf-dev build-essential rsync \
-            clang lld llvm gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu >/dev/null
-          clang --version | head -1
+          set -eu
+          test -f kpm/Makefile || { echo "::error::no kpm/Makefile on this ref"; exit 1; }
+          test -f hookless/src/nomount.c || {
+            echo "::error::engine source missing; kpm/ includes it"; exit 1; }
+          if [ -z "${KDIR:-}" ] || [ ! -f "$KDIR/Makefile" ]; then
+            echo "::error::KDIR unusable in this container: ${KDIR:-<empty>}"; exit 1
+          fi
+          # The engine object needs the generated headers, not Module.symvers --
+          # a .kpm resolves through kallsyms, so an export table would not help
+          # it. This is the one thing that must be present.
+          test -f "$KDIR/include/generated/autoconf.h" || {
+            echo "::error::no generated headers in \$KDIR"; exit 1; }
+          echo "KMI ${{ matrix.kmi }}, KDIR=$KDIR"
+          # The DDK is a BUILD directory, not a source tree: the first
+          # attempt died on a missing include/linux/kconfig.h. Print the
+          # layout so the Makefile is pointed at whatever is really here
+          # rather than at what a source checkout would have.
+          echo "--- \$KDIR:"; ls "$KDIR" | head -30
+          echo "--- \$KDIR/include:"; ls "$KDIR/include" 2>/dev/null | head -20
+          echo "--- source link:"; ls -ld "$KDIR/source" 2>/dev/null || echo "(none)"
+          echo "--- kconfig.h anywhere under /opt:"
+          find /opt -name kconfig.h -path "*linux*" 2>/dev/null | head -5
+
+      # Is the maps spoof reachable on this KMI?
+      #
+      # The in-tree build gets it by patching fs/proc/task_mmu.c: inside
+      # show_map_vma(), right after `dev = inode->i_sb->s_dev; ino =
+      # inode->i_ino;`, it calls vfs_map_meta_override(inode, &dev, &ino).
+      #
+      # A KPM cannot patch a mid-function statement -- KernelPatch hooks whole
+      # functions -- so the equivalent needs two hooks working together:
+      #
+      #   show_map_vma(m, vma)        gives the VMA, and through vm_file->f_inode
+      #                               the inode the override actually needs (it
+      #                               tests i_op against NoMount's vtables and
+      #                               reads i_private). A before-hook records the
+      #                               replacement dev/ino for this task.
+      #   show_vma_header_prefix(...) receives dev as arg 5 and ino as arg 6, and
+      #                               a before-hook rewrites them.
+      #
+      # Both are `static`, and show_vma_header_prefix is small and called twice,
+      # so either may be inlined away -- in which case there is no symbol to hook
+      # and this route is closed on that KMI. That is a fact about the kernel, not
+      # something the port can decide, so it is measured here rather than assumed.
+      #
+      # Reported only. Nothing depends on it yet: the hook is not written, and a
+      # .kpm without it is still the same engine minus the maps spoof.
+      - name: Is the maps-spoof hook point present?
+        if: steps.sel.outputs.run == '1'
+        continue-on-error: true
+        run: |
+          set -eu
+          map="$KDIR/System.map"
+          if [ ! -s "$map" ]; then
+            echo "no System.map in the DDK tree; cannot tell" ; exit 0
+          fi
+          {
+            echo "#### ${{ matrix.kmi }} — maps-spoof hook point"
+            echo '```'
+            for fn in show_map_vma show_vma_header_prefix; do
+              if awk -v f="$fn" '$3 == f {found=1} END {exit !found}' "$map"; then
+                printf '  %-24s present in System.map (hookable)\n' "$fn"
+              else
+                printf '  %-24s ABSENT -- inlined, nothing to hook\n' "$fn"
+              fi
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for fn in show_map_vma show_vma_header_prefix; do
+            awk -v f="$fn" '$3 == f {print "  " f " -> " $1}' "$map" || true
+            awk -v f="$fn" '$3 == f {found=1} END {if (!found) print "  " f " -> ABSENT"}' "$map"
+          done
+
+      - name: Cross toolchain
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -eu
+          # kpm/Makefile builds with gcc. The DDK ships AOSP clang for kernel
+          # work but not a cross gcc, so it is installed here rather than
+          # switching the Makefile: the entry half is compiled against the
+          # KernelPatch SDK headers, which is a gcc-shaped build.
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu git make file >/dev/null
           aarch64-linux-gnu-gcc --version | head -1
 
-      - name: Restore kernel clone
-        id: kcache
+      - name: Clone the KernelPatch SDK
         if: steps.sel.outputs.run == '1'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ksrc
-          key: kpm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
-
-      - name: Clone kernel source on cache miss
-        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        env:
+          KP_REPO: ${{ github.event.inputs.kp_repo }}
+          KP_REF: ${{ github.event.inputs.kp_ref }}
         run: |
-          set -e
-          git clone --depth 1 -b "${{ matrix.kref }}" \
-            https://android.googlesource.com/kernel/common ksrc
-          echo "Kernel: $(head -3 ksrc/Makefile | tr '\n' ' ')"
+          set -eu
+          repo="${KP_REPO:-https://github.com/bmax121/KernelPatch}"
+          # Pinned by default, like every `uses:` sha in this repository. Two reasons
+          # this is not `clone -b "$KP_REF"`:
+          #
+          #   * on a push there are no workflow inputs, so KP_REF is empty and the old
+          #     form silently cloned whatever the SDK default branch was that morning -
+          #     the gate below reads its allow-list straight out of this checkout, so a
+          #     drifting SDK moves the gate under the build.
+          #   * `clone -b` takes a branch or a tag, never a commit sha, so pinning had
+          #     to become clone-then-checkout.
+          ref="${KP_REF:-72a904c412754e25f54353c30f31f5c884ed0673}"
+          git clone --filter=blob:none --no-checkout "$repo" /tmp/kp
+          git -C /tmp/kp checkout -q "$ref" || {
+            echo "::error::KernelPatch ref $ref not found in $repo"; exit 1; }
+          test -d /tmp/kp/kernel/include || {
+            echo "::error::$repo is not a KernelPatch checkout"; exit 1; }
+          echo "KernelPatch at $(git -C /tmp/kp rev-parse --short HEAD)"
 
-      - name: Save kernel clone
-        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ksrc
-          key: kpm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
-
-      - name: Checkout the KernelPatch SDK
+      - name: Symbol survey
+        id: survey
         if: steps.sel.outputs.run == '1'
+        continue-on-error: true
         run: |
-          set -e
-          git clone --filter=blob:none https://github.com/bmax121/KernelPatch.git kp
-          git -C kp checkout -q 72a904c412754e25f54353c30f31f5c884ed0673
-          test -d kp/kernel/include
+          set -o pipefail
+          cd kpm
+          out=/tmp/kpm-syms-${{ matrix.kmi }}.txt
+          # -s matters: without it make echoes each recipe to stdout and the
+          # compile command line lands IN the symbol list.
+          make -s undefined \
+            TARGET_COMPILE=aarch64-linux-gnu- \
+            KP_DIR=/tmp/kp \
+            KERNEL_DIR="$KDIR" \
+            2>/tmp/kpm-compile-${{ matrix.kmi }}.log | tee "$out"
 
-      - name: Prepare kernel for external modules
-        if: steps.sel.outputs.run == '1'
-        run: |
-          set -euxo pipefail
-          cd ksrc
-          M="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
-          make $M defconfig
-          ./scripts/config --enable CONFIG_KPROBES --enable CONFIG_MODULES
-          make $M olddefconfig
-          make $M -j"$(nproc)" modules_prepare
+          # The engine object must be arm64. Worth checking explicitly: when this
+          # once used the host compiler by accident, it surfaced as assembler
+          # noise about register sizes and never said "wrong architecture".
+          if [ -f nm_engine.o ]; then
+            arch=$(file -b nm_engine.o); echo "nm_engine.o: $arch"
+            case "$arch" in
+              *aarch64*) ;;
+              *) echo "::error::nm_engine.o is not aarch64 ($arch)"; exit 1 ;;
+            esac
+          fi
 
       - name: Build nomount.kpm
+        id: kpmbuild
         if: steps.sel.outputs.run == '1'
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          make -C repo/kpm all \
+          set -o pipefail
+          cd kpm
+          make \
             TARGET_COMPILE=aarch64-linux-gnu- \
-            KP_DIR="$GITHUB_WORKSPACE/kp" \
-            KERNEL_DIR="$GITHUB_WORKSPACE/ksrc" \
-            KBUILD_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-"
-          ls -l repo/kpm/nomount.kpm
+            KP_DIR=/tmp/kp \
+            KERNEL_DIR="$KDIR" \
+            2>&1 | tee -a /tmp/kpm-compile-${{ matrix.kmi }}.log | tail -30
+          test -f nomount.kpm && cp nomount.kpm "$GITHUB_WORKSPACE/nomount-${{ matrix.kmi }}.kpm"
 
-      - name: Every undefined symbol must be in the redirect table
+      # THE gate that separates "it linked" from "it could load". Anything
+      # undefined that KernelPatch does not itself provide fails the load of the
+      # WHOLE module with "unknown symbol", so this is not advisory.
+      - name: Undefined symbols left in the .kpm
         if: steps.sel.outputs.run == '1'
         run: |
-          set -euo pipefail
-          # The FINAL relocatable, not the individual objects.
+          set -eu
+          kpm="$GITHUB_WORKSPACE/nomount-${{ matrix.kmi }}.kpm"
+          if [ ! -f "$kpm" ]; then
+            {
+              echo "#### ${{ matrix.kmi }} — no .kpm built"
+              echo '```'
+              tail -30 /tmp/kpm-compile-${{ matrix.kmi }}.log 2>/dev/null || echo "(no log)"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::no .kpm was produced"; exit 1
+          fi
+
+          out=/tmp/kpm-undef-${{ matrix.kmi }}.txt
+          aarch64-linux-gnu-nm -u "$kpm" | awk '{print $2}' | sort -u > "$out"
+
+          # What KernelPatch supplies to a module, read from the SDK we just
+          # cloned rather than hardcoded. The list used to be three names --
+          # kallsyms_lookup_name, printk, symbol_lookup_name -- and that was
+          # wrong the moment the maps spoof started calling hook_wrap():
+          # KernelPatch exports around a hundred symbols, and a gate that
+          # knows three of them fails builds that would have loaded fine.
           #
-          # `make undefined` surveys nm_engine.o and nm_maps_spoof.o so gen-shim.py can
-          # find what needs redirecting. That set is not the load-time set: it also
-          # lists the module own symbols, which `ld -r` resolves inside the .kpm. Using
-          # it here reported nm_kpm_sym (defined in nm_kpm_entry.c) and
-          # vfs_map_meta_override (defined in nm_maps_spoof.c) as load failures on the
-          # first run. `nm -u` over the linked .kpm is the exact set KernelPatch has to
-          # place through kallsyms.
-          aarch64-linux-gnu-nm -u repo/kpm/nomount.kpm > raw.txt
-          awk "{ print \$NF }" raw.txt | sed "/^$/d" | sort -u > undef.txt
-          # LOCAL and KP_PROVIDED are read from gen-shim.py rather than restated here.
-          # The generator decides which symbols never enter the table - compiler
-          # builtins it defines locally, and the two KernelPatch supplies - and a second
-          # copy in this file is how the gate would start disagreeing with it.
-          KP_DIR="$GITHUB_WORKSPACE/kp" python3 repo/.github/kpm-allowed.py > allowed.txt
-          missing="$(comm -23 undef.txt allowed.txt || true)"
-          if [ -n "$missing" ]; then
-            echo "::error::${{ matrix.ver }}: symbols the module needs are absent from nm_kpm_table.h"
-            echo "KernelPatch resolves every external reference through kallsyms at load"
-            echo "time and rejects the whole module on the first one it cannot place, so"
-            echo "each of these is a load failure on hardware, not a warning:"
-            echo "$missing" | sed "s/^/    /"
-            echo "Regenerate with kpm/gen-shim.py and commit the result."
+          # KP_EXPORT_SYMBOL(x) is the declaration that puts a symbol in the
+          # table its loader resolves against, so it is the authority here.
+          grep -rhoE 'KP_EXPORT_SYMBOL[(][a-zA-Z_0-9]+[)]' /tmp/kp/kernel \
+            | sed 's/.*(//; s/)//' | sort -u > /tmp/kp-provided.txt
+          echo "KernelPatch exports $(wc -l < /tmp/kp-provided.txt) symbols to modules"
+          if [ ! -s /tmp/kp-provided.txt ]; then
+            echo "::error::found no KP_EXPORT_SYMBOL in the SDK; cannot judge the gate"
             exit 1
           fi
-          echo "all $(wc -l < undef.txt) undefined symbol(s) in the linked .kpm are covered"
 
-      - name: Name the artifact by KMI
-        if: steps.sel.outputs.run == '1'
-        run: cp repo/kpm/nomount.kpm "nomount-${{ matrix.kref }}.kpm"
+          left=/tmp/kpm-unresolvable-${{ matrix.kmi }}.txt
+          comm -23 "$out" /tmp/kp-provided.txt > "$left" || true
+          {
+            echo "#### ${{ matrix.kmi }} — $(stat -c%s "$kpm") bytes"
+            echo '```'
+            if [ -s "$out" ]; then cat "$out"; else echo '(nothing undefined)'; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s "$left" ]; then
+            {
+              echo
+              echo "**$(wc -l < "$left") of these are not provided by KernelPatch.**"
+              echo "The loader rejects the whole module on the first one, so this"
+              echo ".kpm would not load:"
+              echo '```'
+              cat "$left"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$(wc -l < "$left") symbols cannot be resolved at load"
+            exit 1
+          fi
+          echo "All undefined symbols are ones KernelPatch provides." >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: steps.sel.outputs.run == '1'
+        if: steps.sel.outputs.run == '1' && always()
         with:
-          name: nomount-kpm-${{ matrix.ver }}
-          path: nomount-${{ matrix.kref }}.kpm
-          retention-days: 7
+          name: kpm-${{ matrix.kmi }}
+          path: |
+            nomount-${{ matrix.kmi }}.kpm
+            /tmp/kpm-syms-${{ matrix.kmi }}.txt
+            /tmp/kpm-compile-${{ matrix.kmi }}.log
+          if-no-files-found: warn
