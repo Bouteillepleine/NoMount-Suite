@@ -1,4 +1,3 @@
-/* nm.c - NoMount CLI Userspace Tool */
 #include "nm.h"
 
 __attribute__((noreturn, used))

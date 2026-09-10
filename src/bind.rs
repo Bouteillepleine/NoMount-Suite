@@ -1,4 +1,3 @@
-//! Real bind mounts for targets hookless injection cannot serve
 
 use anyhow::{bail, Context, Result};
 use std::ffi::CString;
@@ -11,10 +10,8 @@ const BINDS_LIST: &str = "/data/adb/nomount/binds.list";
 const LOCK_FILE: &str = "/data/adb/nomount/binds.lock";
 const SELINUX_XATTR: &[u8] = b"security.selinux\0";
 
-/// flock(LOCK_EX) guard so binds.list read-modify-write is atomic across a concurrent
 struct Lock(fs::File);
 impl Lock {
-    /// Fails loudly
     fn acquire() -> Result<Lock> {
         let f = {
             use std::os::unix::fs::OpenOptionsExt;
@@ -47,14 +44,12 @@ fn cstr(p: &Path) -> Result<CString> {
     CString::new(p.to_str().context("non-utf8 path")?.as_bytes()).context("nul byte in path")
 }
 
-/// True if `target` is already a mount point (some other module bound it)
 fn is_mounted(target: &Path) -> bool {
     fs::read_to_string("/proc/self/mountinfo")
         .map(|s| crate::absorb::parse_mountinfo(&s).iter().any(|r| r.target == target))
         .unwrap_or(false)
 }
 
-/// Read a path's SELinux label, if it has one
 fn read_selinux(p: &Path) -> Option<Vec<u8>> {
     let c = cstr(p).ok()?;
     let mut buf = [0u8; 256];
@@ -65,7 +60,6 @@ fn read_selinux(p: &Path) -> Option<Vec<u8>> {
     if n <= 0 { None } else { Some(buf[..n as usize].to_vec()) }
 }
 
-/// Put a previously captured label back on `p`
 fn restore_selinux(p: &Path, label: &[u8]) {
     if let Ok(c) = cstr(p) {
         unsafe {
@@ -75,7 +69,6 @@ fn restore_selinux(p: &Path, label: &[u8]) {
     }
 }
 
-/// Copy `target`'s SELinux label onto `source`, so the bound file reports the partition's
 fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     let (sc, tc) = (cstr(source)?, cstr(target)?);
     let name = SELINUX_XATTR.as_ptr() as *const libc::c_char;
@@ -95,13 +88,11 @@ fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The result of an [`apply`] that succeeded
 pub enum BindOutcome {
     Bound,
     AlreadyMounted,
 }
 
-/// File-over-file bind of `source` onto an existing `target`
 pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     let s = source.to_str().context("non-utf8 bind source")?.to_string();
     let t = target.to_str().context("non-utf8 bind target")?.to_string();
@@ -144,7 +135,6 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     Ok(BindOutcome::Bound)
 }
 
-/// Drop one (target, source) row from binds.list
 fn remove_record_locked(target: &str, source: &str) {
     let remaining: String = tracked_full()
         .into_iter()
@@ -156,7 +146,6 @@ fn remove_record_locked(target: &str, source: &str) {
     }
 }
 
-/// Append a "target\tsource" record to binds.list
 fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Result<()> {
     let mut f = fs::OpenOptions::new()
         .create(true)
@@ -165,7 +154,6 @@ fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Resul
     writeln!(f, "{target}\t{source}\t{orig_label}")
 }
 
-/// Parse one binds.list line into (target, source)
 fn parse_line(l: &str) -> Option<(PathBuf, PathBuf, String)> {
     let l = l.trim();
     if l.is_empty() {
@@ -178,19 +166,16 @@ fn parse_line(l: &str) -> Option<(PathBuf, PathBuf, String)> {
     Some((PathBuf::from(t), PathBuf::from(s), lbl.to_string()))
 }
 
-/// (target, source) pairs we currently have bound (from binds.list)
 pub fn tracked() -> Vec<(PathBuf, PathBuf)> {
     tracked_full().into_iter().map(|(t, s, _)| (t, s)).collect()
 }
 
-/// As [`tracked`], plus each row's recorded original source label
 fn tracked_full() -> Vec<(PathBuf, PathBuf, String)> {
     fs::read_to_string(BINDS_LIST)
         .map(|s| s.lines().filter_map(parse_line).collect())
         .unwrap_or_default()
 }
 
-/// Take the bind down, or say why not
 fn umount_target(target: &Path) -> Result<(), String> {
     let c = CString::new(target.to_string_lossy().as_bytes())
         .map_err(|_| "nul byte in path".to_string())?;
@@ -204,7 +189,6 @@ fn umount_target(target: &Path) -> Result<(), String> {
     Err(e.to_string())
 }
 
-/// Umount a single tracked bind and drop it from the list (gap-free reload)
 pub fn umount_one(target: &Path) -> bool {
     let _lock = match Lock::acquire() {
         Ok(l) => l,
@@ -242,7 +226,6 @@ pub fn umount_one(target: &Path) -> bool {
     true
 }
 
-/// Umount every bind we recorded, then clear the list
 pub fn teardown_all() -> bool {
     let _lock = match Lock::acquire() {
         Ok(l) => l,

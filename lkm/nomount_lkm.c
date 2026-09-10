@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 #include "nm_oot.h"
 #include "nm_maps_spoof.h"
 

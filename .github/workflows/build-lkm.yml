@@ -1,26 +1,5 @@
 name: NoMount LKM - out-of-tree build
 
-# Builds the engine as a loadable module against all ten supported kernels.
-#
-# What this actually proves, and what it does not.
-#
-# An out-of-tree build here stops at `modules_prepare`, which does not produce
-# Module.symvers - so modpost cannot tell an exported symbol from a missing one
-# and reports every external reference as undefined. The first run of this
-# workflow duly "found" _printk, memcpy and init_net, all of which are exported,
-# and on 5.15/6.1 it emitted a .ko anyway with "suppressed 90 unresolved symbol
-# warnings". A .ko from that build is not evidence of anything.
-#
-# Building each kernel far enough for a real Module.symvers is ~30 minutes per
-# version. The cheap and honest substitute: take modpost's undefined list and
-# subtract the kernel's own EXPORT_SYMBOL* set, read from its source. What
-# survives is the set of symbols the module truly cannot link against - the
-# work item. An empty result means the module links cleanly against a fully
-# built tree, and that is what this job passes on.
-#
-# Read lkm/README.md for what this variant costs. It is not the recommended
-# build and this workflow does not treat it as one.
-
 on:
   push:
     branches: [LKM]
@@ -34,12 +13,6 @@ on:
         description: "Comma-separated versions (empty = all). e.g. 4.9,6.12"
         required: false
         default: ''
-
-# NOTE: this workflow's entire run history was deleted once during an Actions
-# cleanup. The file survived, but GitHub delists a workflow that has no runs,
-# so it disappeared from the sidebar until the next push re-registered it.
-# Deleting runs is not the same as deleting a workflow - but with no runs
-# left, the effect on the Actions page is indistinguishable.
 
 permissions:
   contents: read
@@ -56,11 +29,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The same ten the in-tree matrix covers, with the same refs and the same
-        # toolchain per version. 4.9/4.14/4.19 need gcc: Ubuntu's clang cannot
-        # compile them (asm-offsets dies on "register 'sp' unsuitable for global
-        # register variables"), which is a compiler-vs-old-kernel mismatch and
-        # says nothing about this module.
         include:
           - { ver: '4.9',  kref: 'deprecated/android-4.9-q',       tc: gcc   }
           - { ver: '4.14', kref: 'deprecated/android-4.14-stable', tc: gcc   }
@@ -140,8 +108,6 @@ jobs:
           fi
           echo "MAKEOPTS=$M" >> "$GITHUB_ENV"
           make $M defconfig
-          # Kprobes is what lkm/nm_oot.c's kallsyms bootstrap needs; modules is
-          # what makes an out-of-tree build possible at all.
           ./scripts/config --enable CONFIG_KPROBES --enable CONFIG_MODULES
           make $M olddefconfig
           make $M -j"$(nproc)" modules_prepare
@@ -152,9 +118,6 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          # KBUILD_MODPOST_WARN: without Module.symvers every external symbol is
-          # "undefined", and on 6.6+ modpost makes that fatal. Warn instead, so
-          # the run produces the symbol list that the next step judges.
           make -C ksrc $MAKEOPTS KBUILD_MODPOST_WARN=1 \
             M="$PWD/repo/lkm" modules 2>&1 | tee /tmp/lkm-${{ matrix.ver }}.log
 
@@ -171,11 +134,6 @@ jobs:
             | sed 's/.*(\s*//' | sort -u > /tmp/exported.txt || true
           comm -23 /tmp/undef.txt /tmp/exported.txt > "$out" || true
 
-          # `|| true`, not `|| echo 0`. grep -c PRINTS 0 and EXITS 1 when it
-          # matches nothing, so `|| echo 0` appends a second zero and the
-          # variable becomes a two-line "0 0" - which then fails the -eq test with
-          # "integer expression expected" and reports a clean result as a
-          # failure. That is exactly what the first ten-version run did.
           u=$(grep -c . /tmp/undef.txt || true)
           e=$(grep -c . /tmp/exported.txt || true)
           r=$(grep -c . "$out" || true)
@@ -206,11 +164,5 @@ jobs:
           path: |
             /tmp/lkm-${{ matrix.ver }}.log
             /tmp/redirects-${{ matrix.ver }}.txt
-          # The .ko this job produces is deliberately not uploaded. It comes from
-          # a modules_prepare build under KBUILD_MODPOST_WARN, so its symbols were
-          # never really resolved - the header above says such a .ko is not
-          # evidence of anything, and offering it for download invites someone to
-          # try loading a module that cannot work. The loadable ones come from the
-          # per-KMI jobs in build.yaml.
           retention-days: 7
           if-no-files-found: ignore

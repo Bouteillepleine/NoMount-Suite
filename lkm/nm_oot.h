@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _NM_OOT_H
 #define _NM_OOT_H
 

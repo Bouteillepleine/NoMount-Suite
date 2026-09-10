@@ -1,18 +1,15 @@
-//! Metamodule mount pass for the NoMount Suite
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-/// Magisk's whiteout marker is a 0:0 char device - both halves of that
 fn is_whiteout_marker(ft: &fs::FileType, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     ft.is_char_device()
         && fs::symlink_metadata(path).map(|m| m.rdev() == 0).unwrap_or(false)
 }
 
-/// Does this directory carry overlayfs's `trusted.overlay.opaque=y`?
 fn is_opaque_dir(p: &Path) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -34,16 +31,12 @@ use anyhow::{Context, Result};
 use crate::nm::Nm;
 
 pub(crate) const MODULES_DIR: &str = "/data/adb/modules";
-/// Serialises the whole-engine passes (`mount`, `reload`, `absorb`) against each other
 const PASS_LOCK: &str = "/data/adb/nomount/pass.lock";
 
-/// RAII holder for the pass lock; the flock releases when it drops
 pub(crate) struct PassLock(std::fs::File);
 
-/// How long a pass will wait for another pass before giving up and running unserialised
 pub(crate) const PASS_LOCK_WAIT: u64 = 25;
 
-/// Take the process-wide pass lock
 pub(crate) fn pass_lock() -> Option<PassLock> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
@@ -83,14 +76,12 @@ const NON_PARTITION_ROOTS: &[&str] = &[
     "postinstall", "second_stage_resources", "bin", "sbin", "d",
 ];
 
-/// Discovery: should we walk a top-level module dir `<name>`?
 fn is_partition_dir(name: &str) -> bool {
     !name.is_empty()
         && !NON_PARTITION_ROOTS.contains(&name)
         && Path::new(&format!("/{name}")).is_dir()
 }
 
-/// Canonicalization: is `<name>` a real separate partition, so `system/<name>/...` should
 fn is_real_partition(name: &str) -> bool {
     !name.is_empty()
         && !NON_PARTITION_ROOTS.contains(&name)
@@ -99,7 +90,6 @@ fn is_real_partition(name: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Resolve a module-relative path to its absolute target
 fn resolve_target_path(relative: &Path) -> Option<PathBuf> {
     let s = relative.to_str()?;
     if s.is_empty() {
@@ -114,7 +104,6 @@ fn resolve_target_path(relative: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(format!("/{s}")))
 }
 
-/// A target on an OnePlus/Oppo `my_*` partition, which must be served by a real bind (see
 fn is_my_partition(target: &Path) -> bool {
     target
         .components()
@@ -124,7 +113,6 @@ fn is_my_partition(target: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// EXPERIMENTAL: route `my_*` targets through hookless inject instead of a real bind
 fn my_hookless_enabled() -> bool {
     std::env::var_os("NM_MY_HOOKLESS")
         .map(|v| v != "0" && !v.is_empty())
@@ -132,12 +120,10 @@ fn my_hookless_enabled() -> bool {
         || Path::new("/data/adb/nomount/my_hookless").exists()
 }
 
-/// True if `target` is a partition root (`/product`, `/system`, `/vendor`, ...) rather
 fn is_partition_root(target: &Path) -> bool {
     target.components().skip(1).count() <= 1
 }
 
-/// How a target may be served - the single answer both the native module plan and `absorb`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Serve {
     Inject,
@@ -169,7 +155,6 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
     Serve::Inject
 }
 
-/// May a whiteout be applied to `target`?
 pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     let Some(root) = target.components().nth(1).and_then(|c| c.as_os_str().to_str()) else {
         return Err("not a path under a partition");
@@ -183,12 +168,10 @@ pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A leaf inject must land on a file (or on nothing - a synthesized virtual entry)
 fn inject_would_mask_dir(target: &Path) -> bool {
     target.is_dir()
 }
 
-/// Can this entry actually produce a rule?
 fn source_resolves(e: &PlanEntry) -> bool {
     e.kind != PlanKind::Inject || e.source.exists()
 }
@@ -218,7 +201,6 @@ struct Stats {
     whiteouts: u32,
 }
 
-/// What the Suite intends to do for one module entry
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlanKind {
     Inject,
@@ -226,7 +208,6 @@ pub(crate) enum PlanKind {
     Bind,
 }
 
-/// One intended operation, resolved but not yet applied
 pub(crate) struct PlanEntry {
     pub module: String,
     pub target: PathBuf,
@@ -234,7 +215,6 @@ pub(crate) struct PlanEntry {
     pub kind: PlanKind,
 }
 
-/// Expand a "replace this directory" marker into rules the engine actually has
 fn expand_replacement(
     module: &str,
     stock_dir: &Path,
@@ -284,14 +264,12 @@ fn expand_replacement(
     }
 }
 
-/// One target claimed by more than one module: the winner, and who it beat
 pub(crate) struct Collision {
     pub target: PathBuf,
     pub winner: String,
     pub losers: Vec<String>,
 }
 
-/// Collapse entries claiming the same target, keeping the last
 pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Collision>) {
     let mut last: HashMap<PathBuf, usize> = HashMap::new();
     for (i, e) in plan.iter().enumerate() {
@@ -330,7 +308,6 @@ pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Col
     (kept, collisions)
 }
 
-/// Recursively resolve a module subtree rooted at `dir` into plan entries
 fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
     let mut entries: Vec<_> = match fs::read_dir(dir) {
         Ok(e) => e.flatten().collect(),
@@ -409,7 +386,6 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
     }
 }
 
-/// Drop any mount sitting on a target we are about to serve
 fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: &Path) -> bool {
     if !targets.contains(target) {
         return true;
@@ -428,7 +404,6 @@ fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: 
     gone
 }
 
-/// Does applying this whiteout leave a measurable hole?
 pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
     if !crate::whiteout::measurable_hole(target) {
         return false;
@@ -440,7 +415,6 @@ pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
     !forced.contains(target)
 }
 
-/// Warn (only) when a whiteout will leave a measurable hole
 fn warn_whiteout_hole(target: &Path, module: &str) {
     if whiteout_leaves_hole(target) {
         eprintln!(
@@ -453,7 +427,6 @@ fn warn_whiteout_hole(target: &Path, module: &str) {
     }
 }
 
-/// Build the full plan for every enabled, non-blocklisted module
 pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
     let blocklist = load_blocklist();
     let mut plan = Vec::new();
@@ -496,7 +469,6 @@ pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
     Ok((plan, skipped))
 }
 
-/// Print the resolved plan without applying it: target, kind, source, module
 pub fn run_plan() -> Result<()> {
     let (plan, skipped) = collect_plan()?;
     let (plan, _) = dedupe_by_target(plan);
@@ -527,13 +499,11 @@ pub fn run_plan() -> Result<()> {
     Ok(())
 }
 
-/// A live leaf rule from `nm list`
 enum LiveRule {
     Inject(PathBuf),
     Whiteout,
 }
 
-/// The live leaf rules the reconcile diffs against, keyed by (target, UID): injects and
 fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
     crate::nm::parse_list(list)
         .into_iter()
@@ -548,7 +518,6 @@ fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
         .collect()
 }
 
-/// May the reconcile drop this live rule?
 fn prunable(
     target: &Path,
     uid: u32,
@@ -559,7 +528,6 @@ fn prunable(
     uid == 0 && !wanted && !durable_whiteouts.contains(target) && !absorbed.contains(target)
 }
 
-/// `nomount reload`: gap-free hot load/unload
 pub fn run_reload() -> Result<()> {
     let _pass = pass_lock();
     let nm = Nm::new();
@@ -732,7 +700,6 @@ pub fn run_reload() -> Result<()> {
     Ok(())
 }
 
-/// Metamodule entry point (`nomount mount`): rebuild rules from the current set of enabled
 pub fn run_mount() -> Result<()> {
     let _pass = pass_lock();
     let nm = Nm::new();
@@ -868,7 +835,6 @@ pub fn run_mount() -> Result<()> {
     Ok(())
 }
 
-/// Every ROM APK a rule serves, as (target, source), from the module plan plus the
 fn served_apks(plan: &[PlanEntry], absorbed: &[(PathBuf, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
     plan.iter()
         .filter(|e| matches!(e.kind, PlanKind::Inject | PlanKind::Bind))
@@ -878,7 +844,6 @@ fn served_apks(plan: &[PlanEntry], absorbed: &[(PathBuf, PathBuf)]) -> Vec<(Path
         .collect()
 }
 
-/// Same filter, but over pairs that were actually applied rather than planned
 fn served_apks_applied(
     applied: &[(PathBuf, PathBuf)],
     absorbed: &[(PathBuf, PathBuf)],
@@ -904,7 +869,6 @@ mod tests {
         }
     }
 
-    /// Two modules claiming one target must produce exactly one applied rule
     #[test]
     fn dedupe_keeps_the_last_claim() {
         let plan = vec![
@@ -921,7 +885,6 @@ mod tests {
         assert_eq!(collisions[0].losers, vec!["a_mod".to_string()]);
     }
 
-    /// An uncontested plan must pass through untouched - no reordering, no allocation of a
     #[test]
     fn dedupe_is_a_noop_without_collisions() {
         let plan = vec![
@@ -935,7 +898,6 @@ mod tests {
         assert_eq!(kept[1].module, "b");
     }
 
-    /// `/product/product/...` is the installer nesting `system/product` inside an existing
     #[test]
     fn serve_mode_refuses_repeated_partition_name() {
         assert!(matches!(
@@ -950,7 +912,6 @@ mod tests {
         assert_eq!(serve_mode(Path::new("/system/etc/system/x")), Serve::Inject);
     }
 
-    /// The whole point of `serve_mode` is that absorb gets the same answer this file acts on,
     #[test]
     fn serve_mode_refuses_what_plan_tree_refuses() {
         assert_eq!(serve_mode(Path::new("/system/bin/x")), Serve::Inject);
@@ -966,7 +927,6 @@ mod tests {
         assert!(can_whiteout(Path::new("/d/tracing/x")).is_err());
     }
 
-    /// `.replace` must hide the stock entries the module does not ship, and leave the ones it
     #[test]
     fn replace_expands_to_the_unshipped_entries_only() {
         let Some(base) = test_base("replace-expand") else { return };
@@ -997,7 +957,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// A stock directory the module replaces with a file of the same name is not recursed
     #[test]
     fn replace_does_not_descend_where_the_module_ships_a_file() {
         let Some(base) = test_base("replace-file-over-dir") else { return };
@@ -1015,7 +974,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// No stock directory to replace: the module's content is served on its own and the engine
     #[test]
     fn replace_on_a_directory_the_rom_does_not_have_is_a_no_op() {
         let Some(base) = test_base("replace-absent") else { return };
@@ -1030,7 +988,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// A tree deeper than the guard stops instead of walking forever
     #[test]
     fn replace_expansion_stops_at_the_depth_guard() {
         let Some(base) = test_base("replace-depth") else { return };
@@ -1053,7 +1010,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// Somewhere `can_whiteout` accepts (not /tmp, whose root is non-partition)
     fn test_base(tag: &str) -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
         let base = PathBuf::from(home).join(format!(".nomount-test-{tag}"));
@@ -1066,7 +1022,6 @@ mod tests {
         Some(base)
     }
 
-    /// Only a 0:0 char device is Magisk's whiteout marker
     #[test]
     fn only_a_zero_zero_char_device_is_a_whiteout_marker() {
         let real = Path::new("/dev/null");
@@ -1085,7 +1040,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// A whiteout is a d_drop, not a serve, so it is allowed wherever the path itself is ours
     #[test]
     fn whiteout_allowed_on_my_partitions() {
         assert!(can_whiteout(Path::new("/my_stock/app/OplusOperationManual")).is_ok());
@@ -1094,7 +1048,6 @@ mod tests {
         assert!(can_whiteout(Path::new("/system/priv-app/Foo")).is_ok());
     }
 
-    /// The refusals that do carry over from `serve_mode`: a bare partition root masks every
     #[test]
     fn whiteout_refuses_partition_roots_and_non_rom() {
         assert!(can_whiteout(Path::new("/my_stock")).is_err());
@@ -1105,7 +1058,6 @@ mod tests {
         assert!(can_whiteout(Path::new("/")).is_err());
     }
 
-    /// A Reload used to delete every durable whiteout and every absorbed rule, because neither
     #[test]
     fn reload_never_prunes_durable_or_absorbed_rules() {
         let durable: HashSet<PathBuf> = ["/system/etc/tell.conf"].iter().map(PathBuf::from).collect();
@@ -1118,7 +1070,6 @@ mod tests {
         assert!(prunable(Path::new("/system/app/Gone.apk"), 0, false, &durable, &absorbed));
     }
 
-    /// A per-UID rule is not the module plan's to prune, and `nm del` (always uid 0) could not
     #[test]
     fn reload_never_prunes_per_uid_rules() {
         let none = HashSet::new();

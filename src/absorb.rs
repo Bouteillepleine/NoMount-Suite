@@ -1,4 +1,3 @@
-//! Convert other people's bind mounts into hookless injections
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -10,20 +9,13 @@ use anyhow::{Context, Result};
 use crate::nm::Nm;
 
 const MOUNTINFO: &str = "/proc/self/mountinfo";
-/// Only sources under here are module content we may take over
 const MODULE_ROOT: &str = "/data/adb";
-/// A mount backed by anything under here, landing outside it, is foreign content over the
 const FOREIGN_ROOT: &str = "/data";
-/// Opt-out list: module ids or target path prefixes to leave mounted
 pub const SKIP_FILE: &str = "/data/adb/nomount/absorb-skip.txt";
-/// Pre-v1.2.1 name, still honoured so an existing install keeps its opt-outs
 const SKIP_FILE_LEGACY: &str = "/data/adb/nomount/absorb-skip";
-/// Rules absorb created, so `reload` knows they are wanted
 pub const ABSORBED_LIST: &str = "/data/adb/nomount/absorbed.list";
-/// ROM directories absorb empties in place of another module's tmpfs
 pub const ABSORBED_TMPFS_LIST: &str = "/data/adb/nomount/absorbed-tmpfs.list";
 
-/// Used when the skip file cannot be read at all
 const BUILTIN_SKIPS: &[&str] = &[
     "/apex/com.android.art/bin/dex2oat",
     "/apex/com.android.runtime/bin/dex2oat",
@@ -31,7 +23,6 @@ const BUILTIN_SKIPS: &[&str] = &[
     "/system/bin/app_process",
 ];
 
-/// Entries to leave alone: one per line, either a module id (matched against the bind's
 fn skip_list() -> (Vec<String>, &'static str) {
     let mut entries: Vec<String> = BUILTIN_SKIPS.iter().map(|s| (*s).to_string()).collect();
     let mut from = "the built-in list";
@@ -53,7 +44,6 @@ fn skip_list() -> (Vec<String>, &'static str) {
     (entries, from)
 }
 
-/// A module that provides Zygisk or an Xposed framework, detected by what it ships rather
 pub(crate) fn is_hook_framework(module_dir: &Path) -> bool {
     if module_dir.join("zygisk").is_dir() {
         return true;
@@ -65,7 +55,6 @@ pub(crate) fn is_hook_framework(module_dir: &Path) -> bool {
         .any(|e| e.file_name().to_string_lossy().starts_with("zygisk"))
 }
 
-/// `/data/adb/modules/<id>` for a path inside a module tree
 pub(crate) fn module_dir_of(src: &Path) -> Option<PathBuf> {
     let s = src.to_string_lossy();
     let rest = s.split("/modules/").nth(1)?;
@@ -76,7 +65,6 @@ pub(crate) fn module_dir_of(src: &Path) -> Option<PathBuf> {
     Some(PathBuf::from("/data/adb/modules").join(id))
 }
 
-/// Module ids that own a mount landing on a known hook path
 fn hooking_modules(rows: &[MountRow], roots: &HashMap<String, PathBuf>, skips: &[String]) -> HashSet<String> {
     let mut ids = HashSet::new();
     for r in rows {
@@ -94,7 +82,6 @@ fn hooking_modules(rows: &[MountRow], roots: &HashMap<String, PathBuf>, skips: &
     ids
 }
 
-/// Why a still-present module mount was left alone, when that was deliberate
 pub enum Declined {
     Framework(String),
     HooksElsewhere(String),
@@ -102,7 +89,6 @@ pub enum Declined {
     MustBind,
 }
 
-/// What absorb will do about one foreign mount
 pub enum Disposition {
     Absorb,
     Redundant,
@@ -110,14 +96,12 @@ pub enum Disposition {
     Leaking(&'static str),
 }
 
-/// One foreign mount and its verdict
 pub struct Surveyed {
     pub target: PathBuf,
     pub source: PathBuf,
     pub disposition: Disposition,
 }
 
-/// `None` means nothing declined this mount - it is still mounted for some other reason
 pub(crate) fn declined_reason_with(
     src: &Path,
     target: &Path,
@@ -137,7 +121,6 @@ pub(crate) fn declined_reason_with(
     is_skipped(src, target, skips).then_some(Declined::Listed(from))
 }
 
-/// True if this mount is explicitly excluded
 pub(crate) fn is_skipped(src: &Path, target: &Path, skips: &[String]) -> bool {
     if module_dir_of(src).is_some_and(|d| is_hook_framework(&d)) {
         return true;
@@ -152,16 +135,13 @@ pub(crate) fn is_skipped(src: &Path, target: &Path, skips: &[String]) -> bool {
     })
 }
 
-/// One parsed `/proc/self/mountinfo` row (the fields we need)
 #[derive(Debug, Clone)]
 pub(crate) struct MountRow {
     pub dev: String,
-    /// Path of this mount's root *within its filesystem*, not an absolute path
     pub root: String,
     pub target: PathBuf,
 }
 
-/// Parse mountinfo
 pub(crate) fn parse_mountinfo(body: &str) -> Vec<MountRow> {
     let mut out = Vec::new();
     for line in body.lines() {
@@ -178,7 +158,6 @@ pub(crate) fn parse_mountinfo(body: &str) -> Vec<MountRow> {
     out
 }
 
-/// mountinfo octal-escapes space, tab, newline and backslash
 fn unescape(s: &str) -> String {
     if !s.contains('\\') {
         return s.to_string();
@@ -203,7 +182,6 @@ fn unescape(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// Map each filesystem (maj:min) to where its root is mounted, so a bind's fs-relative
 pub(crate) fn fs_roots(rows: &[MountRow]) -> HashMap<String, PathBuf> {
     let mut m: HashMap<String, PathBuf> = HashMap::new();
     for r in rows.iter().filter(|r| r.root == "/") {
@@ -218,7 +196,6 @@ pub(crate) fn fs_roots(rows: &[MountRow]) -> HashMap<String, PathBuf> {
     m
 }
 
-/// Absolute source path backing a bind row, if it can be resolved
 pub(crate) fn source_of(row: &MountRow, roots: &HashMap<String, PathBuf>) -> Option<PathBuf> {
     if row.root == "/" {
         return None;
@@ -232,7 +209,6 @@ pub(crate) fn source_of(row: &MountRow, roots: &HashMap<String, PathBuf>) -> Opt
     })
 }
 
-/// An installed app's APK: `/data/app/~~<hash>==/<pkg>-<hash>==/base.apk`, or the
 pub(crate) fn is_app_apk(target: &Path) -> bool {
     if !target.starts_with("/data/app/") {
         return false;
@@ -247,26 +223,21 @@ pub(crate) fn is_app_apk(target: &Path) -> bool {
         .is_some_and(|f| f == "base.apk" || (f.starts_with("split_") && f.ends_with(".apk")))
 }
 
-/// Is this mount module content laid over the ROM?
 pub(crate) fn is_absorbable(src: &Path, target: &Path) -> bool {
     src.starts_with(MODULE_ROOT)
         && (!target.starts_with(FOREIGN_ROOT) || is_app_apk(target))
         && target.components().count() > 1
 }
 
-/// A foreign mount that exists in another mount namespace but not in ours
 pub struct Elsewhere {
-    /// Which process's namespace it was seen in, for the report
     pub seen_in: String,
     pub mount: Surveyed,
 }
 
-/// `mnt:[4026531841]`-style id, so two pids sharing a namespace are only read once
 fn mnt_ns_of(pid: &str) -> Option<String> {
     fs::read_link(format!("/proc/{pid}/ns/mnt")).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
-/// The pids whose namespace an app actually inherits or is judged against: init, and
 fn namespace_probes() -> Vec<(String, String)> {
     let mut out = vec![("init".to_string(), "1".to_string())];
     let Ok(rd) = fs::read_dir("/proc") else { return out };
@@ -284,7 +255,6 @@ fn namespace_probes() -> Vec<(String, String)> {
     out
 }
 
-/// Foreign mounts visible in another namespace but not in ours
 pub fn survey_elsewhere() -> Vec<Elsewhere> {
     let Some(mine) = mnt_ns_of("self") else { return Vec::new() };
     let ours: HashSet<(PathBuf, PathBuf)> = survey()
@@ -309,17 +279,14 @@ pub fn survey_elsewhere() -> Vec<Elsewhere> {
     out
 }
 
-/// Live injections plus the mountpoint aliases needed to match a bind against them, so
 #[derive(Default)]
 pub(crate) struct Redundancy {
     live: HashMap<PathBuf, PathBuf>,
     aliases: Vec<(PathBuf, PathBuf)>,
 }
 
-/// Stop walking a source this large rather than answer slowly: a bind big enough to blow
 const REDUNDANCY_FILE_BUDGET: usize = 5000;
 
-/// The uid-0 injections, target -> source
 pub(crate) fn live_injections(list: &str) -> HashMap<PathBuf, PathBuf> {
     crate::nm::parse_list(list)
         .into_iter()
@@ -328,7 +295,6 @@ pub(crate) fn live_injections(list: &str) -> HashMap<PathBuf, PathBuf> {
         .collect()
 }
 
-/// Mountpoints that are the same subtree, derived from mountinfo alone: identical (device,
 pub(crate) fn mount_aliases(rows: &[MountRow]) -> Vec<(PathBuf, PathBuf)> {
     let mut by_subtree: HashMap<(&str, &str), Vec<&PathBuf>> = HashMap::new();
     for r in rows {
@@ -347,7 +313,6 @@ pub(crate) fn mount_aliases(rows: &[MountRow]) -> Vec<(PathBuf, PathBuf)> {
     out
 }
 
-/// Relative paths of every regular file under `src`
 fn files_under(src: &Path) -> Option<Vec<PathBuf>> {
     fn walk(dir: &Path, prefix: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
         for e in std::fs::read_dir(dir).ok()?.flatten() {
@@ -377,7 +342,6 @@ impl Redundancy {
         Self { live: live_injections(list), aliases: mount_aliases(rows) }
     }
 
-    /// Every path this target is reachable by: itself, plus the same tail under any mountpoint
     fn reachable(&self, target: &Path) -> Vec<PathBuf> {
         let mut out = vec![target.to_path_buf()];
         for (a, b) in &self.aliases {
@@ -388,7 +352,6 @@ impl Redundancy {
         out
     }
 
-    /// True if a live injection already serves every file this bind carries, from the very
     pub(crate) fn covers(&self, src: &Path, target: &Path) -> bool {
         let Some(files) = files_under(src) else { return false };
         files.iter().all(|rel| {
@@ -400,7 +363,6 @@ impl Redundancy {
     }
 }
 
-/// The verdict for one foreign mount
 pub(crate) fn classify(
     src: &Path,
     target: &Path,
@@ -438,12 +400,10 @@ pub(crate) fn classify(
     })
 }
 
-/// Every mount whose source is on /data and whose target is not - content some module laid
 pub fn survey() -> Result<Vec<Surveyed>> {
     survey_of(MOUNTINFO)
 }
 
-/// The same survey against any process's mountinfo, so another mount namespace can be
 pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
     let body = std::fs::read_to_string(mountinfo).context("read mountinfo")?;
     let rows = parse_mountinfo(&body);
@@ -476,26 +436,21 @@ pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
     Ok(out)
 }
 
-/// A mount we intend to act on: convert it, or - when its content is already injected -
 pub struct Candidate {
     pub target: PathBuf,
     pub source: PathBuf,
-    /// Unmount only
     pub redundant: bool,
 }
 
-/// Targets that currently have something mounted on them
 pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
     let body = std::fs::read_to_string(MOUNTINFO).ok()?;
     Some(parse_mountinfo(&body).into_iter().map(|r| r.target).collect())
 }
 
-/// Targets absorb is currently serving
 pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
     read_absorbed_pairs().unwrap_or_default()
 }
 
-/// `Err` only when the record exists but could not be read
 pub fn read_absorbed_pairs() -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
     match fs::read_to_string(ABSORBED_LIST) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -513,7 +468,6 @@ fn parse_absorbed_pairs(body: &str) -> Vec<(PathBuf, PathBuf)> {
         .collect()
 }
 
-/// Label an APK the Suite serves so the app can actually read it
 fn label_apk_readable(p: &Path) -> bool {
     let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return false };
     let ctx = c"u:object_r:apk_data_file:s0";
@@ -537,12 +491,10 @@ fn label_apk_readable(p: &Path) -> bool {
     true
 }
 
-/// Re-serve the absorbed APK rules recorded by a previous run
 pub fn reapply_absorbed(nm: &Nm) -> u32 {
     reapply_absorbed_pairs(nm, &absorbed_pairs())
 }
 
-/// Same, against a record read earlier - `run_mount` has to snapshot it before it clears
 pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
     let Ok(live) = nm.list() else {
         eprintln!(
@@ -570,12 +522,10 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
     n
 }
 
-/// The absorbed target set, derived from the pairs record (the file is always the
 pub fn read_absorbed_targets() -> std::io::Result<HashSet<PathBuf>> {
     Ok(read_absorbed_pairs()?.into_iter().map(|(t, _)| t).collect())
 }
 
-/// Replace the record
 pub fn set_absorbed_pairs(pairs: &[(PathBuf, PathBuf)]) {
     if let Some(d) = Path::new(ABSORBED_LIST).parent() {
         let _ = fs::create_dir_all(d);
@@ -598,14 +548,12 @@ pub fn set_absorbed_pairs(pairs: &[(PathBuf, PathBuf)]) {
     let _ = fs::set_permissions(ABSORBED_LIST, std::os::unix::fs::PermissionsExt::from_mode(0o600));
 }
 
-/// Is anything still mounted here?
 pub(crate) fn still_mounted(p: &Path) -> bool {
     std::fs::read_to_string(MOUNTINFO)
         .map(|b| parse_mountinfo(&b).iter().any(|r| r.target == p))
         .unwrap_or(true)
 }
 
-/// The path to re-assert rules at
 pub(crate) fn servable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -> PathBuf {
     if matches!(crate::mount::serve_mode(target), crate::mount::Serve::Inject) {
         return target.to_path_buf();
@@ -621,7 +569,6 @@ pub(crate) fn servable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -> PathBuf
     target.to_path_buf()
 }
 
-/// May a redundant bind be dropped while Android is running?
 pub(crate) fn runtime_droppable(target: &Path, aliases: &[(PathBuf, PathBuf)]) -> bool {
     fn touches_my_partition(p: &Path) -> bool {
         p.components()
@@ -637,13 +584,11 @@ pub(crate) fn umount_detach(p: &Path) -> bool {
     unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) == 0 }
 }
 
-/// Is `target` already serving `source`?
 fn already_serving(target: &Path, source: &Path) -> bool {
     let (Ok(t), Ok(s)) = (fs::metadata(target), fs::metadata(source)) else { return false };
     t.len() == s.len()
 }
 
-/// `nm add`, but guaranteed to re-point a target that already has a rule
 fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool {
     match live.get(target) {
         Some(cur) if cur.as_path() == source && already_serving(target, source) => true,
@@ -672,10 +617,8 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
     }
 }
 
-/// Live `target -> source` for injects, read once per pass
 type LiveMap = std::collections::HashMap<PathBuf, PathBuf>;
 
-/// Snapshot the engine's inject rules
 fn live_injects(nm: &Nm) -> LiveMap {
     nm.list()
         .map(|l| {
@@ -688,7 +631,6 @@ fn live_injects(nm: &Nm) -> LiveMap {
         .unwrap_or_default()
 }
 
-/// Inject `source` at `target`
 fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>,
           live: &LiveMap) -> u32 {
     let mut failed = 0u32;
@@ -723,7 +665,6 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
     failed
 }
 
-/// The package an installed-APK path belongs to: `/data/app/~~a==/com.foo-b==/base.apk`
 pub(crate) fn pkg_of_apk_target(target: &Path) -> Option<String> {
     if !is_app_apk(target) {
         return None;
@@ -733,7 +674,6 @@ pub(crate) fn pkg_of_apk_target(target: &Path) -> Option<String> {
     (!pkg.is_empty() && pkg.contains('.')).then(|| pkg.to_string())
 }
 
-/// Where PackageManager says the package lives right now
 fn current_apk_of(pkg: &str) -> Result<Option<PathBuf>> {
     let out = std::process::Command::new("/system/bin/pm")
         .args(["path", pkg])
@@ -748,7 +688,6 @@ fn current_apk_of(pkg: &str) -> Result<Option<PathBuf>> {
         .map(|p| PathBuf::from(p.trim())))
 }
 
-/// Re-point absorbed APK rules at the app's current path
 pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     let (mut repointed, mut stale) = (0u32, 0u32);
     let Ok(list) = nm.list() else { return (0, 0) };
@@ -786,11 +725,9 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
     (repointed, stale)
 }
 
-/// ROM partitions a module might try to empty
 pub(crate) const ROM_ROOTS: &[&str] =
     &["/system/", "/product/", "/vendor/", "/system_ext/", "/odm/", "/oem/", "/my_"];
 
-/// Is this mountinfo line a tmpfs laid over a ROM path?
 pub(crate) fn rom_tmpfs_target(line: &str) -> Option<PathBuf> {
     let (pre, post) = line.split_once(" - ")?;
     if post.split_whitespace().next()? != "tmpfs" {
@@ -800,7 +737,6 @@ pub(crate) fn rom_tmpfs_target(line: &str) -> Option<PathBuf> {
     ROM_ROOTS.iter().any(|r| target.starts_with(r)).then(|| PathBuf::from(unescape(target)))
 }
 
-/// This boot, as the kernel names it
 fn boot_id() -> Option<String> {
     fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .ok()
@@ -808,17 +744,14 @@ fn boot_id() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Is this directory empty right now?
 fn dir_is_empty(p: &Path) -> Option<bool> {
     fs::read_dir(p).ok().map(|mut e| e.next().is_none())
 }
 
-/// The ROM-tmpfs takeovers on record: target -> the boot in which its tmpfs was last seen
 pub(crate) fn absorbed_tmpfs() -> Vec<(PathBuf, String)> {
     fs::read_to_string(ABSORBED_TMPFS_LIST).map(|s| parse_tmpfs_record(&s)).unwrap_or_default()
 }
 
-/// Pure: one `<target>\t<boot id>` per line
 fn parse_tmpfs_record(body: &str) -> Vec<(PathBuf, String)> {
     body.lines()
         .map(str::trim)
@@ -830,12 +763,10 @@ fn parse_tmpfs_record(body: &str) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-/// Just the targets
 pub fn absorbed_tmpfs_targets() -> HashSet<PathBuf> {
     absorbed_tmpfs().into_iter().map(|(t, _)| t).collect()
 }
 
-/// Does a recorded takeover survive this pass?
 fn tmpfs_entry_lives(seen_now: bool, seen_boot: &str, boot: &str, mounted: bool) -> bool {
     seen_now || mounted || seen_boot.is_empty() || seen_boot == boot
 }
@@ -862,7 +793,6 @@ fn set_absorbed_tmpfs(entries: &[(PathBuf, String)]) {
     }
 }
 
-/// Re-apply the recorded ROM-tmpfs whiteouts
 pub fn reapply_tmpfs_whiteouts(nm: &Nm) -> u32 {
     let mut n = 0u32;
     for (t, _) in absorbed_tmpfs() {
@@ -877,7 +807,6 @@ pub fn reapply_tmpfs_whiteouts(nm: &Nm) -> u32 {
     n
 }
 
-/// What one ROM-tmpfs pass did, in the same buckets `run_absorb` reports the bind survey
 #[derive(Default)]
 struct TmpfsPass {
     done: u32,
@@ -886,7 +815,6 @@ struct TmpfsPass {
     declined: u32,
 }
 
-/// Take over the "make this ROM directory look empty" trick: drop the tmpfs and hide the
 fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
     let mut st = TmpfsPass::default();
     let Ok(body) = fs::read_to_string(MOUNTINFO) else { return st };
@@ -982,7 +910,6 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
     st
 }
 
-/// `nomount absorb [--dry-run]`
 pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> {
     let _pass = if dry_run { None } else { crate::mount::pass_lock() };
     let nm = Nm::new();
@@ -1260,14 +1187,12 @@ mod tests {
 900 205 254:78 /adb/modules/foo/system/bin/x /system/bin/x rw,noatime shared:9 - f2fs /dev/block/dm-78 rw
 35 1 0:35 / /product ro,noatime - erofs /dev/block/dm-25 ro";
 
-    /// Issue #14: a ReVanced module binds its patched APK over the installed app from its own
     #[test]
     fn a_tmpfs_over_the_rom_is_recognised() {
         let line = "359 149 0:129 / /product/app/YouTube rw,relatime shared:77 - tmpfs none rw,seclabel";
         assert_eq!(rom_tmpfs_target(line).as_deref(), Some(Path::new("/product/app/YouTube")));
     }
 
-    /// M-S8: the record is absorb's own, keyed on the boot in which the tmpfs was last seen,
     #[test]
     fn the_tmpfs_record_round_trips_stamped_and_unstamped_lines() {
         let v = parse_tmpfs_record(
@@ -1285,7 +1210,6 @@ mod tests {
         );
     }
 
-    /// The expiry rule, which is the whole reverse path M-S8 asked for - and the regression it
     #[test]
     fn a_takeover_expires_only_after_a_boot_without_its_tmpfs() {
         assert!(tmpfs_entry_lives(true, "old-boot", "this-boot", false));
@@ -1295,7 +1219,6 @@ mod tests {
         assert!(!tmpfs_entry_lives(false, "old-boot", "this-boot", false));
     }
 
-    /// `/my_` is a ROM_ROOTS prefix, so a tmpfs mounted on the partition root itself is
     #[test]
     fn a_tmpfs_over_a_partition_root_is_recognised_but_never_hidden() {
         let line = "360 149 0:130 / /my_product rw,relatime shared:78 - tmpfs none rw,seclabel";
@@ -1304,7 +1227,6 @@ mod tests {
         assert!(crate::whiteout::validate("/product/app/YouTube").is_ok());
     }
 
-    /// Stock tmpfs mounts live outside the ROM partitions, and real filesystems inside them
     #[test]
     fn stock_mounts_are_left_alone() {
         for line in [
@@ -1333,7 +1255,6 @@ mod tests {
         );
     }
 
-    /// Guessing a package from a path that is not an app APK, or from a directory with no
     #[test]
     fn a_package_name_is_not_guessed_from_anything_else() {
         for p in [
@@ -1360,7 +1281,6 @@ mod tests {
         assert!(is_app_apk(Path::new("/data/app/com.foo-1/base.apk")));
     }
 
-    /// The gate stays shut for everything else under /data: a wrong take-over there costs an
     #[test]
     fn other_data_targets_stay_refused() {
         let src = Path::new("/data/adb/modules/x/foo");
@@ -1457,7 +1377,6 @@ mod tests {
         assert!(!is_skipped(&src, Path::new("/product/etc/foo.xml"), &builtins));
     }
 
-    /// Real modules, real failures
     #[test]
     fn a_target_mount_rs_would_not_inject_is_never_absorbed() {
         let none: Vec<String> = vec![];
@@ -1481,7 +1400,6 @@ mod tests {
         ));
     }
 
-    /// Issue #14: a YouTube module binds its patched APK straight over the installed one -
     #[test]
     fn module_bind_over_an_installed_apk_is_absorbed() {
         let none: Vec<String> = Vec::new();
@@ -1549,7 +1467,6 @@ mod tests {
         ));
     }
 
-    /// Finding-2, the case marker-detection cannot reach: a framework that ships none of the
     #[test]
     fn a_module_that_hooks_anywhere_has_all_its_mounts_declined() {
         const ROWS: &str = "\
@@ -1585,7 +1502,6 @@ mod tests {
         assert!(matches!(d, Some(Disposition::Absorb)));
     }
 
-    /// Two mountpoints of one filesystem subtree are the same content
     #[test]
     fn mount_aliases_pair_mountpoints_sharing_dev_and_root() {
         let rows = parse_mountinfo(&[
@@ -1607,7 +1523,6 @@ mod tests {
         assert!(!a.iter().any(|(x, _)| x == Path::new("/data")));
     }
 
-    /// A per-UID rule serves one UID
     #[test]
     fn live_injections_ignores_per_uid_and_non_inject_rules() {
         let live = live_injections(
@@ -1620,7 +1535,6 @@ mod tests {
         assert!(live.contains_key(Path::new("/system/etc/a")));
     }
 
-    /// The case this exists for: a module still bind-mounts a directory whose files NoMount is
     #[test]
     fn a_bind_over_already_injected_content_is_redundant_through_either_path() {
         let d = tempfile::tempdir().unwrap();
@@ -1649,7 +1563,6 @@ mod tests {
         assert!(!red.covers(&src, Path::new("/my_product/media/bootanimation")));
     }
 
-    /// A rule at the right target but pointing at a different file means the mount is
     #[test]
     fn a_rule_from_another_source_does_not_make_a_bind_redundant() {
         let d = tempfile::tempdir().unwrap();
@@ -1661,7 +1574,6 @@ mod tests {
         assert!(red.covers(&src, Path::new("/system/etc/f")));
     }
 
-    /// An empty directory proves nothing, and a missing source proves nothing
     #[test]
     fn nothing_to_prove_is_not_redundant() {
         let d = tempfile::tempdir().unwrap();
@@ -1672,7 +1584,6 @@ mod tests {
         assert!(!red.covers(&d.path().join("missing"), Path::new("/system/etc/x")));
     }
 
-    /// Whether a target is serving its source is judged on size, not mtime
     #[test]
     fn serving_is_judged_on_size_not_mtime() {
         let d = tempfile::tempdir().unwrap();
@@ -1689,7 +1600,6 @@ mod tests {
         assert!(!already_serving(&d.path().join("gone"), &source));
     }
 
-    /// A redundant bind is only actionable while Android runs if re-asserting its rules
     #[test]
     fn my_partitions_are_never_dropped_at_runtime() {
         let aliases = vec![(
@@ -1705,7 +1615,6 @@ mod tests {
         assert!(runtime_droppable(Path::new("/product/media/x.zip"), &[]));
     }
 
-    /// `/mnt/...` cannot carry an injection, but its same-subtree twin can, and that is where
     #[test]
     fn the_servable_twin_is_where_rules_land() {
         let aliases = vec![
@@ -1726,7 +1635,6 @@ mod tests {
         );
     }
 
-    /// The built-ins are a floor the skip file cannot lower
     #[test]
     fn user_skip_entries_add_to_the_builtins() {
         let (list, _) = skip_list();
@@ -1742,7 +1650,6 @@ mod tests {
         assert_eq!(rows[0].target, PathBuf::from("/c d"));
     }
 
-    /// A non-ASCII path that also contains an escape must survive intact
     #[test]
     fn unescape_preserves_non_ascii() {
         let rows = parse_mountinfo("1 1 0:1 /caf\u{e9}\\040mod /data/caf\u{e9}\\040mod rw - t s rw");

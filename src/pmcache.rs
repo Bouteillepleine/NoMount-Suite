@@ -1,25 +1,19 @@
-//! PackageManager's on-disk parse cache
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const CACHE_DIR: &str = "/data/system/package_cache";
-/// Last-served identity per ROM APK: target \t source \t mtime \t size
 const STATE: &str = "/data/adb/nomount/apkstate.list";
-/// APKs invalidated after pm had already parsed them - cured by a reboot
 const PENDING: &str = "/data/adb/nomount/pm-reboot.list";
 
-/// ROM partitions whose APKs pm parses at scan time
 const ROM_ROOTS: &[&str] = &[
     "/system/", "/system_ext/", "/product/", "/vendor/", "/odm/", "/my_product/", "/my_region/",
     "/my_stock/", "/my_company/", "/my_carrier/", "/my_engineering/", "/my_heytap/", "/my_preload/",
 ];
 
-/// The directory names pm actually scans for packages
 const PM_SCAN_DIRS: &[&str] = &["app", "priv-app", "overlay", "app-ext", "priv-app-ext"];
 
-/// Any file inside a directory pm scans, i.e
 pub fn is_pm_published(target: &Path) -> bool {
     let s = target.to_string_lossy();
     if !ROM_ROOTS.iter().any(|r| s.starts_with(r)) {
@@ -32,12 +26,10 @@ pub fn is_pm_published(target: &Path) -> bool {
         .is_some_and(|d| PM_SCAN_DIRS.contains(&d))
 }
 
-/// A ROM APK PM parses at scan time
 pub fn is_rom_apk(target: &Path) -> bool {
     target.extension().is_some_and(|e| e == "apk") && is_pm_published(target)
 }
 
-/// The cache-entry prefixes pm may use for this APK
 fn cache_keys(target: &Path) -> Vec<String> {
     let mut keys = Vec::new();
     if let Some(file) = target.file_name() {
@@ -57,7 +49,6 @@ fn cache_keys(target: &Path) -> Vec<String> {
     keys
 }
 
-/// Drop every cached parse for `target`
 fn drop_entry(target: &Path) -> usize {
     let keys = cache_keys(target);
     if keys.is_empty() {
@@ -78,7 +69,6 @@ fn drop_entry(target: &Path) -> usize {
     n
 }
 
-/// What we last served for a target, as recorded by [`sync`]
 fn read_state() -> HashMap<PathBuf, String> {
     let Ok(txt) = fs::read_to_string(STATE) else { return HashMap::new() };
     txt.lines()
@@ -89,14 +79,12 @@ fn read_state() -> HashMap<PathBuf, String> {
         .collect()
 }
 
-/// mtime+size of the file actually being served
 fn identity(source: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     let m = fs::metadata(source).ok()?;
     Some(format!("{}\t{}", m.mtime(), m.size()))
 }
 
-/// Invalidate PM's cached parse for every ROM APK whose served bytes changed since the
 pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     let seeding = !Path::new(STATE).exists();
     let previous = read_state();
@@ -123,7 +111,6 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     changed
 }
 
-/// Record APKs invalidated while pm was already running: their parse is only rebuilt at
 pub fn add_pending(targets: &[PathBuf]) {
     if targets.is_empty() {
         return;
@@ -144,7 +131,6 @@ pub fn pending() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Called from the boot pass: PM re-parses this boot, so anything recorded by an earlier
 pub fn clear_pending() {
     let _ = fs::remove_file(PENDING);
 }
@@ -153,7 +139,6 @@ pub fn clear_pending() {
 mod tests {
     use super::*;
 
-    /// A my_* APK is bind-served, and a bind swaps the parsed bytes too - it must be tracked
     #[test]
     fn my_partition_apks_are_tracked() {
         assert!(is_rom_apk(Path::new("/my_product/app/Foo/Foo.apk")));
@@ -169,7 +154,6 @@ mod tests {
         assert!(!is_rom_apk(Path::new("/data/adb/nomount/apks/youtube-patched.apk")));
     }
 
-    /// A file on a ROM partition that pm does not scan must not be treated as one it does:
     #[test]
     fn files_outside_a_pm_scan_dir_stay_hidden() {
         for p in [
@@ -195,7 +179,6 @@ mod tests {
         assert!(!is_rom_apk(Path::new("/product/priv-app/Mms/lib/arm64/libjni.so")));
     }
 
-    /// Both layouts pm uses, measured on OP15: `Contacts-16-...` for a dir it owns,
     #[test]
     fn the_kernel_carries_the_same_pm_scan_lists() {
         let src = std::fs::read_to_string("hookless/src/nomount.c").expect(

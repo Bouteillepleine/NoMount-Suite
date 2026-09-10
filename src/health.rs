@@ -1,4 +1,3 @@
-//! Runtime health: the regression canary that would have caught the d_drop bug on the
 
 use std::fmt::Write as _;
 use std::fs;
@@ -13,7 +12,6 @@ use crate::nm::Nm;
 const NM_DIR: &str = "/data/adb/nomount";
 const SNAPSHOT: &str = "/data/adb/nomount/snapshot.txt";
 
-/// One line-based `key=value` fingerprint of the live system
 pub struct Fingerprint {
     version: String,
     uname: String,
@@ -30,7 +28,6 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
-    /// The flat key=value document `health.txt` and `snapshot.txt` are made of
     pub fn facts(&self) -> Vec<crate::check::Fact> {
         let unk = |v: Option<usize>| v.map_or_else(|| "unknown".to_string(), |n| n.to_string());
         [
@@ -52,7 +49,6 @@ impl Fingerprint {
         .collect()
     }
 
-    /// The verdicts those facts imply, as ordinary checks
     pub fn checks(&self) -> Vec<Check> {
         let mk = |name: &'static str, v: Verdict, ev: String| {
             Check::new(Section::Device, slug(name), name, v, ev)
@@ -153,7 +149,6 @@ fn read_cmd(prog: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// Size a normal (non-root) app sees for `path`, via `su <uid> -c stat`
 fn app_size(uid: u32, path: &str) -> String {
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     let out = Command::new("su")
@@ -164,7 +159,6 @@ fn app_size(uid: u32, path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// How many mounts are backed by module content
 fn count_mounts_split() -> Option<(usize, usize)> {
     let Ok(body) = fs::read_to_string("/proc/self/mountinfo") else { return None };
     let rows = crate::absorb::parse_mountinfo(&body);
@@ -188,10 +182,8 @@ fn count_mounts_split() -> Option<(usize, usize)> {
     Some((total, by_design))
 }
 
-/// The unprivileged uid the consistency canary probes as (`shell`)
 const PROBE_UID: u32 = 2000;
 
-/// The Narcissus canary: sample a few injected files and confirm a normal app (uid 2000,
 fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: bool) -> String {
     if probe_uid_hidden {
         return "unchecked:probe-uid-hidden".to_string();
@@ -248,7 +240,6 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: bool) -> S
     }
 }
 
-/// How much of a file to compare when sizes match
 const DRIFT_BYTES: usize = 4096;
 
 fn head(path: &str, n: usize) -> Option<Vec<u8>> {
@@ -267,7 +258,6 @@ fn head(path: &str, n: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Does what the engine serves at each target match the source its own rule names?
 fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     const CAP: usize = 20_000;
     let mut checked = 0;
@@ -344,7 +334,6 @@ pub fn gather() -> Fingerprint {
     }
 }
 
-/// `nomount snapshot` - freeze the current fingerprint as the known-good baseline
 pub fn run_snapshot() -> Result<()> {
     let body = fingerprint_text()?;
     fs::create_dir_all(NM_DIR).ok();
@@ -354,7 +343,6 @@ pub fn run_snapshot() -> Result<()> {
     Ok(())
 }
 
-/// The live fingerprint as `health.txt`/`snapshot.txt` text, stamped
 fn fingerprint_text() -> Result<String> {
     let r = crate::check::build(false, true)?;
     let mut body = r.fingerprint_text();
@@ -362,7 +350,6 @@ fn fingerprint_text() -> Result<String> {
     Ok(body)
 }
 
-/// `nomount verify` - diff the live fingerprint against the saved snapshot and name every
 pub fn run_verify() -> Result<()> {
     let saved = match fs::read_to_string(SNAPSHOT) {
         Ok(s) => s,
@@ -396,7 +383,6 @@ pub fn run_verify() -> Result<()> {
     Ok(())
 }
 
-/// `nomount export [dir]` - dump diagnostics to a timestamped, stealth-named folder
 pub fn run_export(dir: Option<String>) -> Result<()> {
     let ts = read_cmd("date", &["+%Y%m%d-%H%M%S"]);
     let base = dir.unwrap_or_else(|| "/sdcard/Download".to_string());
@@ -506,7 +492,6 @@ mod tests {
         }
     }
 
-    /// The verdict tag, not the enum: `Verdict` deliberately derives only what its ordering
     fn verdict_of(fp: &Fingerprint, id: &str) -> &'static str {
         fp.checks()
             .into_iter()
@@ -516,7 +501,6 @@ mod tests {
             .tag()
     }
 
-    /// "Nothing to test" is only honest while the engine is answering
     #[test]
     fn zero_rules_is_only_not_applicable_when_the_engine_answered() {
         let up = fp("v26", 0);
@@ -531,7 +515,6 @@ mod tests {
         assert_eq!(verdict_of(&serving, "per-UID consistency canary"), "UNMEASURED");
     }
 
-    /// The three shapes this module's own parser got wrong before it was deleted
     #[test]
     fn the_shared_parser_survives_the_three_shapes_the_local_one_mangled() {
         let list = "/system/etc/a -> b -> /data/adb/modules/M/system/etc/ab\n\
