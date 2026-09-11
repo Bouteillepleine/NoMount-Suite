@@ -2821,6 +2821,15 @@ struct nm_ino_scan {
     char pathbuf[PATH_MAX];
 };
 
+static struct file *nm_open_dir(struct path *p, const struct cred *caller)
+{
+    struct file *f = dentry_open(p, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+
+    if (IS_ERR(f) && caller && caller != nm_root_cred)
+        f = dentry_open(p, O_RDONLY | O_DIRECTORY | O_NOATIME, caller);
+    return f;
+}
+
 static void nm_pop_insert(struct nm_ino_pop *pop, u64 ino)
 {
     int j = pop->n;
@@ -2916,7 +2925,7 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
 
     *((filldir_t *)&sc->ctx.actor) = nm_ino_actor;
     old = override_creds(nm_root_cred);
-    dir = dentry_open(&dp, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+    dir = nm_open_dir(&dp, old);
     path_put(&dp);
     if (!IS_ERR(dir)) {
         iterate_dir(dir, &sc->ctx);
@@ -3109,7 +3118,7 @@ static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max,
 
         *((filldir_t *)&sc->ctx.actor) = nm_dmax_actor;
         old = override_creds(nm_root_cred);
-        dir = dentry_open(&dp, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+        dir = nm_open_dir(&dp, old);
         path_put(&dp);
         if (IS_ERR(dir)) {
             revert_creds(old);
