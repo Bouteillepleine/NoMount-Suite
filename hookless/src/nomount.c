@@ -10,6 +10,7 @@
 #include <linux/magic.h>
 #include <linux/hash.h>
 #include <linux/sort.h>
+#include <linux/sched.h>
 #include "nomount.h"
 
 #define NM_PER_USER_RANGE   100000
@@ -2725,9 +2726,75 @@ struct nm_ino_pop {
     u64 mine[NM_INO_MINE];
     int nmine;
     u64 hw;
-    u64 dmax;
-    bool dmax_valid;
+    dev_t dev;
 };
+
+#define NM_DEV_INO_SLOTS 16
+
+struct nm_dev_ino {
+    dev_t dev;
+    u64 hw;
+    u64 dmax;
+    u64 amax;
+    int dmax_err;
+    bool dmax_valid;
+    bool valid;
+};
+
+static struct nm_dev_ino nm_dev_ino_tab[NM_DEV_INO_SLOTS];
+static int nm_dev_ino_next;
+static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max,
+                                  u64 *out_any);
+
+static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
+{
+    struct nm_dev_ino *s = NULL;
+    u64 m = 0, a = 0;
+    int i, err;
+
+    if (!dev)
+        return NULL;
+    for (i = 0; i < NM_DEV_INO_SLOTS; i++) {
+        if (nm_dev_ino_tab[i].valid && nm_dev_ino_tab[i].dev == dev) {
+            s = &nm_dev_ino_tab[i];
+            if (!s->dmax_valid && s->dmax_err == -ENOMEM && seed) {
+                err = nm_subtree_dir_ino_max(seed, dev, &m, &a);
+                s->dmax_err = err;
+                if (err == 0) {
+                    s->dmax = m;
+                    s->amax = a;
+                    s->dmax_valid = true;
+                }
+            }
+            return s;
+        }
+    }
+    if (!seed)
+        return NULL;
+    for (i = 0; i < NM_DEV_INO_SLOTS; i++) {
+        if (!nm_dev_ino_tab[i].valid) {
+            s = &nm_dev_ino_tab[i];
+            break;
+        }
+    }
+    if (!s) {
+        s = &nm_dev_ino_tab[nm_dev_ino_next];
+        nm_dev_ino_next = (nm_dev_ino_next + 1) % NM_DEV_INO_SLOTS;
+    }
+    s->dev = dev;
+    s->hw = 0;
+    s->dmax = 0;
+    s->amax = 0;
+    err = nm_subtree_dir_ino_max(seed, dev, &m, &a);
+    s->dmax_err = err;
+    s->dmax_valid = err == 0;
+    if (s->dmax_valid) {
+        s->dmax = m;
+        s->amax = a;
+    }
+    s->valid = true;
+    return s;
+}
 
 static bool nm_path_is_injected(const char *path, size_t len)
 {
@@ -2821,8 +2888,15 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     pop->n = 0;
     pop->nmine = 0;
     pop->hw = 0;
+    pop->dev = 0;
     if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
         return -ENOENT;
+    {
+        struct kstat dk;
+
+        if (nm_path_stat(&dp, &dk) == 0)
+            pop->dev = dk.dev;
+    }
     sc = kzalloc(sizeof(*sc), GFP_KERNEL | __GFP_NOWARN);
     if (!sc) { path_put(&dp); return -ENOMEM; }
 
@@ -2871,7 +2945,7 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
         kfree(sc->names);
     kfree(sc);
 
-    return pop->n ? 0 : -ENOENT;
+    return 0;
 }
 
 struct nm_range_slot {
@@ -2883,8 +2957,6 @@ struct nm_range_slot {
 };
 static struct nm_range_slot nm_range_cache[NM_RANGE_SLOTS];
 static int nm_range_cache_next;
-
-static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max);
 
 static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_dir)
 {
@@ -2904,26 +2976,9 @@ static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_d
     sl->valid = false;
     if (nm_dir_ino_pop(dirpath, want_dir, &sl->pop) != 0)
         return NULL;
-    sl->pop.dmax = 0;
-    sl->pop.dmax_valid = false;
-    if (want_dir) {
-        struct path rp;
+    if (want_dir)
+        nm_dev_ino_get(sl->pop.dev, dirpath);
 
-        if (kern_path(dirpath, LOOKUP_FOLLOW, &rp) == 0) {
-            struct kstat rk;
-            int r = nm_path_stat(&rp, &rk);
-
-            path_put(&rp);
-            if (r == 0) {
-                u64 m = 0;
-
-                if (nm_subtree_dir_ino_max(dirpath, rk.dev, &m) == 0) {
-                    sl->pop.dmax = m;
-                    sl->pop.dmax_valid = true;
-                }
-            }
-        }
-    }
     sl->hash = h;
     sl->len = (u16)len;
     sl->want_dir = want_dir;
@@ -2932,30 +2987,44 @@ static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_d
 }
 
 #define NM_DMAX_NAMES 128
-#define NM_DMAX_DIRS  2048
+#define NM_DMAX_DIRS  8192
+#define NM_DMAX_DIRS_MIN 2048
 
 struct nm_dmax_scan {
     struct dir_context ctx;
     char (*names)[NAME_MAX + 1];
     int n_names;
-    bool overflow;
+    int seen;
+    int skip;
+    u64 amax;
+    bool more;
+    bool unknown_dt;
 };
 
 static NM_ACTOR_RET nm_dmax_actor(struct dir_context *ctx, const char *name,
                                   int namelen, loff_t off, u64 ino, unsigned int dt)
 {
     struct nm_dmax_scan *s = container_of(ctx, struct nm_dmax_scan, ctx);
+    int idx;
 
     if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
         return NM_ACTOR_CONTINUE;
+
+    if (ino > s->amax)
+        s->amax = ino;
+
     if (dt == DT_UNKNOWN) {
-        s->overflow = true;
+        s->unknown_dt = true;
         return NM_ACTOR_CONTINUE;
     }
     if (dt != DT_DIR)
         return NM_ACTOR_CONTINUE;
+
+    idx = s->seen++;
+    if (idx < s->skip)
+        return NM_ACTOR_CONTINUE;
     if (s->n_names >= NM_DMAX_NAMES) {
-        s->overflow = true;
+        s->more = true;
         return NM_ACTOR_CONTINUE;
     }
     memcpy(s->names[s->n_names], name, namelen);
@@ -2964,14 +3033,20 @@ static NM_ACTOR_RET nm_dmax_actor(struct dir_context *ctx, const char *name,
     return NM_ACTOR_CONTINUE;
 }
 
-static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max)
+static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max,
+                                  u64 *out_any)
 {
     char **queue;
     struct nm_dmax_scan *sc;
-    u64 max = 0;
-    int qhead = 0, qtail = 0, visited = 0, ret = 0, i;
+    u64 max = 0, any = 0;
+    int qhead = 0, qtail = 0, visited = 0, ret = 0, i, skip;
+    int cap = NM_DMAX_DIRS;
 
-    queue = kcalloc(NM_DMAX_DIRS, sizeof(*queue), GFP_KERNEL | __GFP_NOWARN);
+    queue = kcalloc(cap, sizeof(*queue), GFP_KERNEL | __GFP_NOWARN);
+    if (!queue) {
+        cap = NM_DMAX_DIRS_MIN;
+        queue = kcalloc(cap, sizeof(*queue), GFP_KERNEL | __GFP_NOWARN);
+    }
     if (!queue)
         return -ENOMEM;
     sc = kzalloc(sizeof(*sc), GFP_KERNEL | __GFP_NOWARN);
@@ -3025,65 +3100,80 @@ static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max)
         struct path dp;
         struct file *dir;
 
-        if (++visited > NM_DMAX_DIRS) {
+        if (++visited > cap) {
             ret = -E2BIG;
             break;
         }
         if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
             continue;
 
-        sc->n_names = 0;
-        sc->overflow = false;
-        sc->ctx.pos = 0;
         *((filldir_t *)&sc->ctx.actor) = nm_dmax_actor;
         old = override_creds(nm_root_cred);
         dir = dentry_open(&dp, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
         path_put(&dp);
-        if (!IS_ERR(dir)) {
+        if (IS_ERR(dir)) {
+            revert_creds(old);
+            continue;
+        }
+
+        skip = 0;
+        for (;;) {
+            sc->n_names = 0;
+            sc->seen = 0;
+            sc->skip = skip;
+            sc->more = false;
+            sc->unknown_dt = false;
+            vfs_llseek(dir, 0, SEEK_SET);
+            sc->ctx.pos = 0;
             iterate_dir(dir, &sc->ctx);
-            fput(dir);
-        }
-        revert_creds(old);
-        if (sc->overflow) {
-            ret = -E2BIG;
-            break;
-        }
-
-        for (i = 0; i < sc->n_names; i++) {
-            char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->names[i]);
-            struct path fp;
-            struct kstat fk;
-
-            if (!cp) {
-                ret = -ENOMEM;
+            if (sc->unknown_dt) {
+                ret = -E2BIG;
                 break;
             }
-            if (nm_path_is_injected(cp, strlen(cp))) {
-                kfree(cp);
-                continue;
-            }
-            if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
-                int r = nm_path_stat(&fp, &fk);
 
-                path_put(&fp);
-                if (r == 0 && S_ISDIR(fk.mode) && fk.dev == dev) {
-                    if (fk.ino > max)
-                        max = fk.ino;
-                    if (qtail < NM_DMAX_DIRS) {
-                        queue[qtail] = cp;
-                        qtail++;
-                        continue;
-                    }
-                    ret = -E2BIG;
+            for (i = 0; i < sc->n_names; i++) {
+                char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->names[i]);
+                struct path fp;
+                struct kstat fk;
+
+                if (!cp) {
+                    ret = -ENOMEM;
+                    break;
                 }
+                if (nm_path_is_injected(cp, strlen(cp))) {
+                    kfree(cp);
+                    continue;
+                }
+                if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
+                    int r = nm_path_stat(&fp, &fk);
+
+                    path_put(&fp);
+                    if (r == 0 && S_ISDIR(fk.mode) && fk.dev == dev) {
+                        if (fk.ino > max)
+                            max = fk.ino;
+                        if (qtail < cap) {
+                            queue[qtail] = cp;
+                            qtail++;
+                            continue;
+                        }
+                        ret = -E2BIG;
+                    }
+                }
+                kfree(cp);
+                if (ret)
+                    break;
             }
-            kfree(cp);
-            if (ret)
+            if (ret || !sc->more || !sc->n_names)
                 break;
+            skip += sc->n_names;
+            cond_resched();
         }
+        fput(dir);
+        revert_creds(old);
     }
 
 out:
+    any = sc->amax;
     for (i = 0; i < qtail; i++)
         kfree(queue[i]);
     kfree(queue);
@@ -3091,8 +3181,10 @@ out:
     kfree(sc);
     if (ret == 0 && !max)
         ret = -ENOENT;
-    if (ret == 0)
+    if (ret == 0) {
         *out_max = max;
+        *out_any = any > max ? any : max;
+    }
     return ret;
 }
 
@@ -3111,10 +3203,15 @@ static bool nm_ino_taken(const struct nm_ino_pop *pop, u64 c)
 
 static unsigned long nm_ino_take(struct nm_ino_pop *pop, u64 c)
 {
+    struct nm_dev_ino *di;
+
     if (pop->nmine < NM_INO_MINE)
         pop->mine[pop->nmine++] = c;
     if (c > pop->hw)
         pop->hw = c;
+    di = nm_dev_ino_get(pop->dev, NULL);
+    if (di && c > di->hw)
+        di->hw = c;
     return (unsigned long)c;
 }
 
@@ -3161,18 +3258,55 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
 
 static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
 {
+    struct nm_dev_ino *di = nm_dev_ino_get(pop->dev, NULL);
     u64 c;
 
-    if (!pop->dmax_valid)
+    if (!di || !di->dmax_valid)
         return nm_place_ino(pop, spread);
 
-    c = pop->dmax;
+    c = di->dmax;
     if (pop->hw > c)
         c = pop->hw;
+    if (di->hw > c)
+        c = di->hw;
     c++;
     while (nm_ino_taken(pop, c))
         c++;
     return nm_ino_take(pop, c);
+}
+
+static unsigned long nm_place_any_ino(dev_t dev)
+{
+    struct nm_dev_ino *di = nm_dev_ino_get(dev, NULL);
+    u64 c;
+
+    if (!di || !di->dmax_valid || !di->amax)
+        return 0;
+    c = di->amax;
+    if (di->hw > c)
+        c = di->hw;
+    c++;
+    di->hw = c;
+    return (unsigned long)c;
+}
+
+static unsigned long nm_place_entry_ino(struct nm_ino_pop *pop, const char *parent,
+                                        bool is_dir, u64 spread)
+{
+    struct nm_ino_pop *alt;
+    dev_t dev = pop ? pop->dev : 0;
+
+    if (is_dir)
+        return pop ? nm_place_dir_ino(pop, spread) : 0;
+    if (pop && pop->n)
+        return nm_place_ino(pop, spread);
+
+    alt = nm_dir_ino_pop_cached(parent, true);
+    if (alt && alt->n)
+        return nm_place_ino(alt, spread);
+    if (alt && alt->dev)
+        dev = alt->dev;
+    return nm_place_any_ino(dev);
 }
 
 static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
@@ -3510,9 +3644,9 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 irule->v_cap = anc_cap;
                 if (!anc_dpop)
                     anc_dpop = nm_real_ancestor_pop(nm_get_vpath(irule));
-                if (anc_dpop && anc_dpop->n)
-                    irule->v_ino = nm_place_dir_ino(anc_dpop, (u64)irule->v_hash);
-                else if (anc_ino)
+                irule->v_ino = anc_dpop ?
+                        nm_place_dir_ino(anc_dpop, (u64)irule->v_hash) : 0;
+                if (!irule->v_ino && anc_ino)
                     irule->v_ino = (anc_ino & ~0xFFFFUL) | (irule->v_hash & 0xFFFF) | 1UL;
                 if (anc_ovl) {
                     irule->flags |= NM_FLAG_OVL_INO;
@@ -3964,10 +4098,13 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
                     char *parent = kstrndup(vp, slash - vp, GFP_KERNEL);
 
                     if (parent) {
-                        pop = nm_dir_ino_pop_cached(parent,
-                                                    !!(rule->flags & NM_FLAG_IS_DIR));
-                        if (pop)
-                            rule->v_ino = nm_place_ino(pop, spread);
+                        bool is_dir = !!(rule->flags & NM_FLAG_IS_DIR);
+                        unsigned long placed;
+
+                        pop = nm_dir_ino_pop_cached(parent, is_dir);
+                        placed = nm_place_entry_ino(pop, parent, is_dir, spread);
+                        if (placed)
+                            rule->v_ino = placed;
                         kfree(parent);
                     }
                 }
@@ -3987,12 +4124,15 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
 
                         if (nm_path_stat(&v_path_struct, &kst) == 0) {
                             struct nm_ino_pop *pop;
+                            bool is_dir = !!(rule->flags & NM_FLAG_IS_DIR);
+                            unsigned long placed = 0;
 
                             rule->v_dev = kst.dev;
-                            pop = nm_dir_ino_pop_cached(parent,
-                                                        !!(rule->flags & NM_FLAG_IS_DIR));
-                            if (pop)
-                                rule->v_ino = nm_place_ino(pop, (u64)rule->v_hash);
+                            pop = nm_dir_ino_pop_cached(parent, is_dir);
+                            placed = nm_place_entry_ino(pop, parent, is_dir,
+                                                        (u64)rule->v_hash);
+                            if (placed)
+                                rule->v_ino = placed;
                             else
                                 rule->v_ino = (unsigned long)((kst.ino & ~0xFFFFFULL) + 0x100000ULL +
                                                               ((u64)rule->v_hash & 0xFFFFFULL));
