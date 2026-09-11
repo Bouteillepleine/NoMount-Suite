@@ -121,7 +121,7 @@ pub(crate) const N_SURFACES: &str = "kernel surfaces";
 pub(crate) const N_DINO_STAT: &str = "readdir ino vs stat ino";
 pub(crate) const N_INODE_BAND: &str = "injected inode band";
 pub(crate) const N_OVERLAY_DIR_INO: &str = "overlay dir inode range";
-pub(crate) const N_DIR_INO_COLLIDE: &str = "synthesized dir inode collision";
+pub(crate) const N_DIR_INO_COLLIDE: &str = "synthesized inode collision";
 pub(crate) const N_EROFS_SHAPE: &str = "erofs directory shape";
 pub(crate) const N_MAPS_DELETED: &str = "injected files in maps";
 pub(crate) const N_PM_OPEN: &str = "PM-published files open for a hidden app";
@@ -722,10 +722,10 @@ fn dev_ino_of(p: &Path) -> Option<(u64, u64)> {
     })
 }
 
-fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
+fn check_dir_ino_collision(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut ours: HashMap<(u64, u64), PathBuf> = HashMap::new();
     let mut roots: Vec<PathBuf> = Vec::new();
-    for dir in engine_dirs {
+    for dir in engine_dirs.iter().chain(targets.iter()) {
         if !on_rom_partition(dir) {
             continue;
         }
@@ -744,8 +744,8 @@ fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
         }
     }
     if ours.is_empty() {
-        return na(N_DIR_INO_COLLIDE, "the engine synthesized no directory".into())
-            .meaning("Nothing here creates a folder that the ROM does not already have.");
+        return na(N_DIR_INO_COLLIDE, "the engine synthesized nothing".into())
+            .meaning("Nothing here creates a file or folder that the ROM does not already have.");
     }
 
     const MAX_DIRS: usize = 20_000;
@@ -760,17 +760,19 @@ fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
         for e in rd.flatten() {
             let p = e.path();
             let Ok(md) = fs::symlink_metadata(&p) else { continue };
+            let k = {
+                use std::os::unix::fs::MetadataExt;
+                (md.dev(), md.ino())
+            };
+            if let Some(mine) = ours.get(&k) {
+                if *mine != p {
+                    hits.push(format!("{} == {} (dev {} ino {})", mine.display(), p.display(), k.0, k.1));
+                }
+            }
             if !md.is_dir() {
                 continue;
             }
             seen += 1;
-            if let Some(k) = dev_ino_of(&p) {
-                if let Some(mine) = ours.get(&k) {
-                    if *mine != p {
-                        hits.push(format!("{} == {} (dev {} ino {})", mine.display(), p.display(), k.0, k.1));
-                    }
-                }
-            }
             stack.push(p);
             if seen >= MAX_DIRS {
                 break;
@@ -783,16 +785,18 @@ fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
         hits.dedup();
         return soft(
             N_DIR_INO_COLLIDE,
-            format!("{} directory(ies) the engine created share an inode with a real one: {}",
+            format!("{} entr(ies) the engine created share an inode with a real one: {}",
                     hits.len(), hits.join("; ")),
-            "two directories on one filesystem cannot share (st_dev, st_ino) -- an app groups \
-             a ROM partition's directories by that pair and every group larger than one is a \
-             directory this engine invented. nm_place_ino() samples only the target's siblings, \
-             so it cannot see an inode a nested stock directory already holds",
+            "two names on one filesystem cannot share (st_dev, st_ino) unless they are the same \
+             file -- an app groups a ROM partition's entries by that pair and every unexpected \
+             group is something this engine invented. Placement needs the partition's own \
+             highest inode to sit above; where the engine cannot read that it derives a range \
+             from the nearest real ancestor instead, and a range narrower than the number of \
+             entries a module synthesizes collides by birthday alone",
         )
         .meaning(
-            "A folder the Suite created reports the same identity number as a real ROM folder. \
-             Nothing on a real device does that, so one scan of the partition finds every folder \
+            "Something the Suite created reports the same identity number as a real ROM file or \
+             folder. Nothing on a real device does that, so one scan of the partition finds what \
              the Suite invented.",
         )
         .owner("the kernel engine")
@@ -806,12 +810,13 @@ fn check_dir_ino_collision(engine_dirs: &[PathBuf]) -> Check {
     }
     pass(
         N_DIR_INO_COLLIDE,
-        format!("{} director(ies) the engine synthesized checked against {seen} on the same \
-                 partition(s); no shared inode",
+        format!("{} entr(ies) the engine synthesized checked against every name under {seen} \
+                 director(ies) on the same partition(s); no shared inode",
                 ours.len()),
     )
     .meaning(
-        "Every folder the Suite created has an identity number of its own, like a real one.",
+        "Every file and folder the Suite created has an identity number of its own, like a real \
+         one.",
     )
 }
 
@@ -1385,7 +1390,7 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         check_dino_matches_stat(&targets),
         check_inode_band(&targets, &engine_dirs),
         check_overlay_dir_ino(&targets, &engine_dirs),
-        check_dir_ino_collision(&engine_dirs),
+        check_dir_ino_collision(&targets, &engine_dirs),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&all_inject_targets),
         check_pm_apks_open_when_hidden(&targets),
@@ -1583,9 +1588,9 @@ mod tests {
 
     #[test]
     fn the_collision_check_has_no_subject_without_a_synthesized_dir() {
-        let c = check_dir_ino_collision(&[]);
+        let c = check_dir_ino_collision(&[], &[]);
         assert_eq!(c.verdict.tag(), "N/A", "a vacuous walk must not read as a pass");
-        assert_eq!(c.evidence, "the engine synthesized no directory");
+        assert_eq!(c.evidence, "the engine synthesized nothing");
     }
 
     #[test]
