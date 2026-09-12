@@ -56,7 +56,7 @@ ccflags-y += -Wno-unused-function
 # The in-tree build has none of this problem: it is compiled with the kernel,
 # LTO, CFI and all. That remains the supported way to run the engine.
 ccflags-y += -fno-lto
-ccflags-y += -fno-sanitize=cfi
+ccflags-$(CONFIG_CC_IS_CLANG) += -fno-sanitize=cfi
 
 # And no stack protector. Turning CFI off changed codegen enough that
 # android12-5.10 started referencing __stack_chk_guard -- the canary VALUE, not

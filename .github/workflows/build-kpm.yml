@@ -77,8 +77,9 @@ jobs:
       fail-fast: false
       matrix:
         # Stops at 6.6 on purpose -- see the version-cap note above.
-        # android11-5.4 is absent because the DDK publishes no container for it;
-        # that is a real coverage gap, not an oversight.
+        # android11-5.4 is absent from THIS job because the DDK publishes no
+        # container for it; it is built by the build-5_4 job below, against a
+        # cloned and configured android11-5.4 tree instead.
         include:
           - { kmi: android12-5.10, tag: '20251104' }
           - { kmi: android13-5.10, tag: '20251104' }
@@ -274,57 +275,13 @@ jobs:
           kpm="$GITHUB_WORKSPACE/nomount-${{ matrix.kmi }}.kpm"
           if [ ! -f "$kpm" ]; then
             {
-              echo "#### ${{ matrix.kmi }} — no .kpm built"
+              echo "#### ${{ matrix.kmi }} — compile log tail"
               echo '```'
               tail -30 /tmp/kpm-compile-${{ matrix.kmi }}.log 2>/dev/null || echo "(no log)"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::no .kpm was produced"; exit 1
           fi
-
-          out=/tmp/kpm-undef-${{ matrix.kmi }}.txt
-          aarch64-linux-gnu-nm -u "$kpm" | awk '{print $2}' | sort -u > "$out"
-
-          # What KernelPatch supplies to a module, read from the SDK we just
-          # cloned rather than hardcoded. The list used to be three names --
-          # kallsyms_lookup_name, printk, symbol_lookup_name -- and that was
-          # wrong the moment the maps spoof started calling hook_wrap():
-          # KernelPatch exports around a hundred symbols, and a gate that
-          # knows three of them fails builds that would have loaded fine.
-          #
-          # KP_EXPORT_SYMBOL(x) is the declaration that puts a symbol in the
-          # table its loader resolves against, so it is the authority here.
-          grep -rhoE 'KP_EXPORT_SYMBOL[(][a-zA-Z_0-9]+[)]' /tmp/kp/kernel \
-            | sed 's/.*(//; s/)//' | sort -u > /tmp/kp-provided.txt
-          echo "KernelPatch exports $(wc -l < /tmp/kp-provided.txt) symbols to modules"
-          if [ ! -s /tmp/kp-provided.txt ]; then
-            echo "::error::found no KP_EXPORT_SYMBOL in the SDK; cannot judge the gate"
-            exit 1
-          fi
-
-          left=/tmp/kpm-unresolvable-${{ matrix.kmi }}.txt
-          comm -23 "$out" /tmp/kp-provided.txt > "$left" || true
-          {
-            echo "#### ${{ matrix.kmi }} — $(stat -c%s "$kpm") bytes"
-            echo '```'
-            if [ -s "$out" ]; then cat "$out"; else echo '(nothing undefined)'; fi
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [ -s "$left" ]; then
-            {
-              echo
-              echo "**$(wc -l < "$left") of these are not provided by KernelPatch.**"
-              echo "The loader rejects the whole module on the first one, so this"
-              echo ".kpm would not load:"
-              echo '```'
-              cat "$left"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::$(wc -l < "$left") symbols cannot be resolved at load"
-            exit 1
-          fi
-          echo "All undefined symbols are ones KernelPatch provides." >> "$GITHUB_STEP_SUMMARY"
+          sh kpm/gate.sh "$kpm" /tmp/kp "${{ matrix.kmi }}"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.sel.outputs.run == '1' && always()
@@ -334,4 +291,143 @@ jobs:
             nomount-${{ matrix.kmi }}.kpm
             /tmp/kpm-syms-${{ matrix.kmi }}.txt
             /tmp/kpm-compile-${{ matrix.kmi }}.log
+          if-no-files-found: warn
+
+  build-5_4:
+    name: android11-5.4
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Should this KMI run?
+        id: sel
+        env:
+          ONLY: ${{ github.event.inputs.only }}
+        run: |
+          set -eu
+          if [ -z "${ONLY:-}" ] || printf '%s' "$ONLY" | tr ',' '\n' | grep -qx 'android11-5.4'; then
+            echo "run=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=0" >> "$GITHUB_OUTPUT"; echo "skipped android11-5.4"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.sel.outputs.run == '1'
+        with:
+          ref: ${{ github.event.inputs.variant_ref || 'KPM' }}
+
+      - name: Toolchain
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            bc bison flex libssl-dev libelf-dev file >/dev/null
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Cache the kernel tree
+        if: steps.sel.outputs.run == '1'
+        id: kcache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ksrc
+          key: kpm-ksrc-android11-5.4-v1
+
+      - name: Clone android11-5.4
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        run: |
+          set -eu
+          git clone --depth 1 -b android11-5.4 \
+            https://android.googlesource.com/kernel/common ksrc
+          head -3 ksrc/Makefile | tr '\n' ' '; echo
+
+      - name: Configure the tree
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -eu
+          cd ksrc
+          M="ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          make -j"$(nproc)" $M gki_defconfig >/dev/null
+          ./scripts/config --disable KASAN --disable FORTIFY_SOURCE \
+                           --disable DEBUG_LIST --disable LOCKDEP \
+                           --disable PROVE_LOCKING --disable DEBUG_LOCK_ALLOC \
+                           --disable TRACE_IRQFLAGS --disable DEBUG_ATOMIC_SLEEP || true
+          make -j"$(nproc)" $M olddefconfig >/dev/null
+          make -j"$(nproc)" $M modules_prepare 2>&1 | tail -5
+          test -f include/generated/autoconf.h || {
+            echo "::error::modules_prepare produced no autoconf.h"; exit 1; }
+
+      - name: Clone the KernelPatch SDK
+        if: steps.sel.outputs.run == '1'
+        env:
+          KP_REPO: ${{ github.event.inputs.kp_repo }}
+          KP_REF: ${{ github.event.inputs.kp_ref }}
+        run: |
+          set -eu
+          repo="${KP_REPO:-https://github.com/bmax121/KernelPatch}"
+          ref="${KP_REF:-72a904c412754e25f54353c30f31f5c884ed0673}"
+          git clone --filter=blob:none --no-checkout "$repo" /tmp/kp
+          git -C /tmp/kp checkout -q "$ref" || {
+            echo "::error::KernelPatch ref $ref not found in $repo"; exit 1; }
+          test -d /tmp/kp/kernel/include || {
+            echo "::error::$repo is not a KernelPatch checkout"; exit 1; }
+          echo "KernelPatch at $(git -C /tmp/kp rev-parse --short HEAD)"
+
+      - name: Symbol survey
+        if: steps.sel.outputs.run == '1'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd kpm
+          make -s undefined \
+            TARGET_COMPILE=aarch64-linux-gnu- \
+            KP_DIR=/tmp/kp \
+            KERNEL_DIR="$GITHUB_WORKSPACE/ksrc" \
+            KBUILD_ARGS="ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error" \
+            2>/tmp/kpm-compile-android11-5.4.log | tee /tmp/kpm-syms-android11-5.4.txt
+          if [ -f nm_engine.o ]; then
+            arch=$(file -b nm_engine.o); echo "nm_engine.o: $arch"
+            case "$arch" in
+              *aarch64*) ;;
+              *) echo "::error::nm_engine.o is not aarch64 ($arch)"; exit 1 ;;
+            esac
+          fi
+
+      - name: Build nomount.kpm
+        if: steps.sel.outputs.run == '1'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd kpm
+          make \
+            TARGET_COMPILE=aarch64-linux-gnu- \
+            KP_DIR=/tmp/kp \
+            KERNEL_DIR="$GITHUB_WORKSPACE/ksrc" \
+            KBUILD_ARGS="ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error" \
+            2>&1 | tee -a /tmp/kpm-compile-android11-5.4.log | tail -30
+          test -f nomount.kpm && cp nomount.kpm "$GITHUB_WORKSPACE/nomount-android11-5.4.kpm"
+
+      - name: Undefined symbols left in the .kpm
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -eu
+          kpm="$GITHUB_WORKSPACE/nomount-android11-5.4.kpm"
+          if [ ! -f "$kpm" ]; then
+            {
+              echo "#### android11-5.4 — compile log tail"
+              echo '```'
+              tail -30 /tmp/kpm-compile-android11-5.4.log 2>/dev/null || echo "(no log)"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          sh kpm/gate.sh "$kpm" /tmp/kp android11-5.4
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.sel.outputs.run == '1' && always()
+        with:
+          name: kpm-android11-5.4
+          path: |
+            nomount-android11-5.4.kpm
+            /tmp/kpm-syms-android11-5.4.txt
+            /tmp/kpm-compile-android11-5.4.log
           if-no-files-found: warn
