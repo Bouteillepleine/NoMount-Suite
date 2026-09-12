@@ -55,6 +55,7 @@ enum nm_kpm_sym {
 	NMS_kasprintf,
 	NMS_kern_path,
 	NMS_kfree,
+	NMS_kfree_call_rcu,
 	NMS_kfree_skb,
 	NMS_kfree_skb_reason,
 	NMS_kmem_cache_alloc,
