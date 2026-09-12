@@ -208,7 +208,7 @@ phone.
 | 6.1 | **OnePlus 13R** | ✅ Booted |
 | 5.15 | **OnePlus 11** | ✅ Booted |
 | 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, ... (18 models) | ✅ Booted |
-| 5.10 | Ace 2, Ace 2V, Nord 3, ... (6 models) | 🧩 Compiled, not tested |
+| 5.10 | Ace 2, Ace 2V, Nord 3, ... (6 models) | ✅ Booted |
 | 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these - other vendors do | 🧩 Compiled, not tested |
 
 "Compiled" means `fs/nomount.o` built against that version's canonical tree; the
