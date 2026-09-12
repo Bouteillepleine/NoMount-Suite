@@ -1,3 +1,9 @@
+/* elfrw.h: The elfrw library's internally shared functions.
+ * Copyright (C) 2011 by Brian Raiter <breadbox@muppetlabs.com>
+ * License GPLv2+: GNU GPL version 2 or later.
+ * This is free software; you are free to change and redistribute it.
+ * There is NO WARRANTY, to the extent permitted by law.
+ */
 #ifndef _elfrw_int_h_
 #define _elfrw_int_h_
 
@@ -5,13 +11,21 @@
 #include <elf.h>
 #include "elfrw.h"
 
+/* Internal shared variables.
+ */
 extern unsigned char _elfrw_native_data;
 extern unsigned char _elfrw_current_class;
 extern unsigned char _elfrw_current_data;
 extern unsigned char _elfrw_current_version;
 
+/* Macros that encapsulate the commonly needed tests.
+ */
 #define native_form() (_elfrw_native_data == _elfrw_current_data)
 #define is64bit_form() (_elfrw_current_class == ELFCLASS64)
+
+/*
+ * Endianness-swapping functions.
+ */
 
 static inline unsigned short rev2(unsigned short in)
 {

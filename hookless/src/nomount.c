@@ -761,6 +761,22 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
         }
         case SEEK_CUR: offset += file->f_pos; break;
         case SEEK_SET: break;
+        case SEEK_DATA:
+        case SEEK_HOLE: {
+            struct nm_inode_info *vi = file_inode(file)->i_private;
+            struct super_block *sb = file_inode(file)->i_sb;
+            loff_t sz = i_size_read(file_inode(file));
+
+            if (vi && vi->dir_node &&
+                (sb->s_magic == EROFS_SUPER_MAGIC_V1 || nm_vdir_erofs_size))
+                sz = nm_vdir_size(vi->dir_node, sb->s_blocksize);
+            if ((unsigned long long)offset >= (unsigned long long)sz)
+                return -ENXIO;
+            if (whence == SEEK_HOLE)
+                offset = sz;
+            file->f_pos = offset;
+            return offset;
+        }
         default:       return -EINVAL;
         }
         if (offset < 0) return -EINVAL;
@@ -768,7 +784,8 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
         return offset;
     }
 
-    if (whence == SEEK_END && S_ISDIR(file_inode(file)->i_mode)) {
+    if ((whence == SEEK_END || whence == SEEK_DATA || whence == SEEK_HOLE) &&
+        S_ISDIR(file_inode(file)->i_mode)) {
         struct nm_inode_info *di = file_inode(file)->i_private;
 
         if (di && di->r_path.dentry &&
@@ -776,6 +793,12 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
             loff_t sz = nm_dsnap_dir_size(file_inode(file), di);
 
             if (sz > 0) {
+                if (whence != SEEK_END) {
+                    if ((unsigned long long)offset >= (unsigned long long)sz) return -ENXIO;
+                    if (whence == SEEK_HOLE) offset = sz;
+                    file->f_pos = offset;
+                    return offset;
+                }
                 offset += sz;
                 if (offset < 0) return -EINVAL;
                 file->f_pos = offset;
@@ -1300,6 +1323,7 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
     struct nm_dsnap *s;
     struct timespec64 mt;
     unsigned int i, off = 0;
+    bool cannot_build = false;
 
     s = kzalloc(sizeof(*s), GFP_NOFS | __GFP_NOWARN);
     if (!s) return NULL;
@@ -1311,25 +1335,27 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
 
     b.ent = kmalloc_array(NM_DSNAP_MAX_ENTS, sizeof(*b.ent), GFP_NOFS | __GFP_NOWARN);
     b.names = kmalloc(NM_DSNAP_MAX_BYTES, GFP_NOFS | __GFP_NOWARN);
-    if (!b.ent || !b.names) goto out;
+    if (!b.ent || !b.names) { cannot_build = true; goto out; }
 
     old = override_creds(nm_root_cred);
     dir = dentry_open(&info->r_path, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
     if (!IS_ERR(dir)) {
         if (iterate_dir(dir, &b.ctx) < 0)
-            b.overflow = true;
+            cannot_build = true;
         fput(dir);
     } else {
-        b.overflow = true;
+        nm_warn_once("cannot open a dir-target's backing directory (relabel the module tree); serving it unmodified\n");
+        cannot_build = true;
     }
     revert_creds(old);
+    if (cannot_build) goto out;
     if (b.overflow) goto out;
 
     sort(b.ent, b.n, sizeof(*b.ent), nm_dsnap_cmp, NULL);
 
     s->ent = kmalloc_array(b.n + 1, sizeof(*s->ent), GFP_NOFS | __GFP_NOWARN);
     s->names = kmalloc(b.nbytes + 1, GFP_NOFS | __GFP_NOWARN);
-    if (!s->ent || !s->names) goto out;
+    if (!s->ent || !s->names) { cannot_build = true; goto out; }
 
     nm_epack_step(&pk, 1);
     nm_epack_step(&pk, 2);
@@ -1349,6 +1375,10 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
 out:
     kfree(b.ent);
     kfree(b.names);
+    if (cannot_build) {
+        nm_dsnap_free(s);
+        return NULL;
+    }
     return s;
 }
 
@@ -1596,89 +1626,38 @@ out:
     return res;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
-static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
+static void nm_mirror_stat(const struct nm_inode_info *info, struct inode *v_inode,
+                           struct kstat *stat)
 {
-    struct inode *v_inode = d_backing_inode(dentry);
-    struct nm_inode_info *info = v_inode->i_private;
-    int res;
-    if (unlikely(!info)) return -EIO;
-    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
-    {
-        struct path *stock = nm_stock_for_caller(info);
-        if (unlikely(stock)) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-            return vfs_getattr_nosec(stock, stat, request_mask, query_flags);
-#else
-            return vfs_getattr_nosec(stock, stat);
-#endif
-        }
+    stat->ino = info->v_ino;
+    stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
+    if (info->flags & NM_FLAG_HAVE_TIMES) {
+        stat->atime = info->v_atime;
+        stat->mtime = info->v_mtime;
+        stat->ctime = info->v_ctime;
     }
-
-    if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
-        generic_fillattr(v_inode, stat);
-        stat->ino = info->v_ino;
-        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->flags & NM_FLAG_HAVE_TIMES) {
-            stat->atime = info->v_atime;
-            stat->mtime = info->v_mtime;
-            stat->ctime = info->v_ctime;
-        }
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_attr_mask) {
-            stat->attributes = info->v_attributes;
-            stat->attributes_mask = info->v_attr_mask;
-        }
-#endif
-        if (info->v_blksize) stat->blksize = info->v_blksize;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
-#endif
-        stat->nlink = nm_vdir_nlink(info->dir_node);
-        if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
-            unsigned long vbs = v_inode->i_sb->s_blocksize;
-
-            stat->size = nm_vdir_size(info->dir_node, vbs);
-            if (vbs)
-                stat->blocks = (blkcnt_t)((((u64)stat->size + vbs - 1) & ~((u64)vbs - 1)) >> 9);
-        }
-        return 0;
+    if (info->v_attr_mask) {
+        stat->attributes = info->v_attributes;
+        stat->attributes_mask = info->v_attr_mask;
     }
-
-    res = vfs_getattr_nosec(&info->r_path, stat);
-    if (likely(res == 0)) {
-        stat->ino = info->v_ino;
-        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->flags & NM_FLAG_HAVE_TIMES) {
-            stat->atime = info->v_atime;
-            stat->mtime = info->v_mtime;
-            stat->ctime = info->v_ctime;
-        }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_attr_mask) {
-            stat->attributes = info->v_attributes;
-            stat->attributes_mask = info->v_attr_mask;
-        }
 #endif
-        if (info->v_blksize) stat->blksize = info->v_blksize;
+    if (info->v_blksize) stat->blksize = info->v_blksize;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
+    if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #endif
-        if (S_ISDIR(stat->mode)) {
-            if (!nm_dsnap_size_fix(info, v_inode, stat))
-                nm_dir_size_fix(info, stat);
-        } else {
-            nm_mirror_blocks(info, stat);
-        }
-    }
-    return res;
 }
-#else
-static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat, u32 request_mask, unsigned int query_flags)
+
+static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat *stat,
+                                  u32 request_mask, unsigned int query_flags)
 {
-    struct inode *v_inode = d_backing_inode(path->dentry);
     struct nm_inode_info *info = v_inode->i_private;
     int res;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+    (void)request_mask;
+    (void)query_flags;
+#endif
     if (unlikely(!info)) return -EIO;
     if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     {
@@ -1695,26 +1674,12 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     if (unlikely(info->flags & NM_FLAG_VIRTUAL_DIR)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
         generic_fillattr(IDMAP_CALL request_mask, v_inode, stat);
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
         generic_fillattr(IDMAP_CALL v_inode, stat);
+#else
+        generic_fillattr(v_inode, stat);
 #endif
-        stat->ino = info->v_ino;
-        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->flags & NM_FLAG_HAVE_TIMES) {
-            stat->atime = info->v_atime;
-            stat->mtime = info->v_mtime;
-            stat->ctime = info->v_ctime;
-        }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_attr_mask) {
-            stat->attributes = info->v_attributes;
-            stat->attributes_mask = info->v_attr_mask;
-        }
-#endif
-        if (info->v_blksize) stat->blksize = info->v_blksize;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
-#endif
+        nm_mirror_stat(info, v_inode, stat);
         stat->nlink = nm_vdir_nlink(info->dir_node);
         if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
             unsigned long vbs = v_inode->i_sb->s_blocksize;
@@ -1726,25 +1691,13 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
         return 0;
     }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
     res = vfs_getattr_nosec(&info->r_path, stat, request_mask, query_flags);
+#else
+    res = vfs_getattr_nosec(&info->r_path, stat);
+#endif
     if (likely(res == 0)) {
-        stat->ino = info->v_ino;
-        stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-        if (info->flags & NM_FLAG_HAVE_TIMES) {
-            stat->atime = info->v_atime;
-            stat->mtime = info->v_mtime;
-            stat->ctime = info->v_ctime;
-        }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_attr_mask) {
-            stat->attributes = info->v_attributes;
-            stat->attributes_mask = info->v_attr_mask;
-        }
-#endif
-        if (info->v_blksize) stat->blksize = info->v_blksize;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-        if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
-#endif
+        nm_mirror_stat(info, v_inode, stat);
         if (S_ISDIR(stat->mode)) {
             if (!nm_dsnap_size_fix(info, v_inode, stat))
                 nm_dir_size_fix(info, stat);
@@ -1753,6 +1706,19 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
         }
     }
     return res;
+}
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
+static int nm_file_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
+{
+    (void)mnt;
+    return nm_file_getattr_common(d_backing_inode(dentry), stat, 0, 0);
+}
+#else
+static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat, u32 request_mask, unsigned int query_flags)
+{
+    return nm_file_getattr_common(IDMAP_CALL d_backing_inode(path->dentry), stat,
+                                  request_mask, query_flags);
 }
 #endif
 
@@ -1929,6 +1895,27 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
                               NM_FLAG_PUBLIC | NM_FLAG_SHADOWS_STOCK);
     if (r_child && S_ISDIR(r_child->i_mode))
         ri.flags |= NM_FLAG_IS_DIR;
+
+    if (unlikely(info->s_path.dentry && (info->flags & NM_FLAG_SHADOWS_STOCK))) {
+        struct dentry *schild = nm_lookup_backing_child(dentry->d_name.name,
+                                                        info->s_path.dentry,
+                                                        dentry->d_name.len);
+
+        if (!IS_ERR(schild)) {
+            if (d_is_negative(schild)) {
+                ri.flags &= ~NM_FLAG_SHADOWS_STOCK;
+            } else {
+                struct inode *si = d_backing_inode(schild);
+
+                if (si && si->i_op != &nm_file_iops && si->i_op != &nm_dir_iops) {
+                    ri.s_path.mnt = info->s_path.mnt;
+                    ri.s_path.dentry = schild;
+                    path_get(&ri.s_path);
+                }
+            }
+            dput(schild);
+        }
+    }
 
     ri.v_ino   = nm_child_ino(info->v_ino, dentry->d_name.name, dentry->d_name.len, false);
     ri.v_dino  = (info->flags & NM_FLAG_OVL_INO)
@@ -2329,14 +2316,15 @@ static void nomount_hijacked_put_super(struct super_block *sb)
     if (orig_put) orig_put(sb);
 }
 
-static inline void nomount_hijack_superblock(struct super_block *sb)
+static inline int nomount_hijack_superblock(struct super_block *sb)
 {
     struct nm_sop *nm_sop;
     int i, count = 0;
-    if (unlikely(!sb || !sb->s_op || __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode))) return;
+    if (unlikely(!sb || !sb->s_op)) return 0;
+    if (__get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode)) return 0;
 
     nm_sop = kzalloc(sizeof(*nm_sop), GFP_KERNEL);
-    if (unlikely(!nm_sop)) return;
+    if (unlikely(!nm_sop)) return -ENOMEM;
 
     nm_sop->fake_sop = *(sb->s_op);
     nm_sop->orig_sop = sb->s_op;
@@ -2356,7 +2344,9 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
         const struct xattr_handler **new_array;
         while (sb->s_xattr[count]) count++;
         new_array = kzalloc((count + 1) * sizeof(void *), GFP_KERNEL);
-        if (new_array) {
+        if (!new_array) {
+            nm_warn_once("xattr proxy allocation failed; injected inodes on this mount will report no security label\n");
+        } else {
             for (i = 0; i < count; i++) {
                 struct nm_xattr_proxy *proxy = kzalloc(sizeof(*proxy), GFP_KERNEL);
                 if (!proxy) break;
@@ -2386,65 +2376,70 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
     list_add_tail_rcu(&nm_sop->list, &nomount_sb_list);
     smp_store_release(&sb->s_op, &nm_sop->fake_sop);
     nm_debug("Superblock successfully hijacked for dev: 0x%x\n", sb->s_dev);
+    return 0;
 }
 
-static inline void nomount_hijack_virtual_parent(struct nomount_dir_node *dir_node, struct inode *inode)
+static inline int nomount_hijack_virtual_parent(struct nomount_dir_node *dir_node, struct inode *inode)
 {
     struct nm_fop *nm_fop;
 
-    if (unlikely(!inode->i_fop)) return;
+    if (unlikely(!inode->i_fop)) return 0;
     nm_fop = nm_get_fop(smp_load_acquire(&inode->i_fop));
     if (nm_fop) {
         smp_store_release(&nm_fop->dir_node, dir_node);
-        return;
+        return 0;
     }
     if (unlikely(!inode->i_fop->iterate_shared
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
                  && !inode->i_fop->iterate
 #endif
-        )) return;
+        )) return 0;
 
     nm_fop = kmem_cache_zalloc(nm_fop_cachep, GFP_KERNEL);
-    if (likely(nm_fop)) {
-        nm_fop->fake_fop = *(inode->i_fop);
-        nm_fop->orig_fop = inode->i_fop;
-        nm_fop->dir_node = dir_node;
+    if (unlikely(!nm_fop))
+        return -ENOMEM;
 
-        if (nm_fop->orig_fop->iterate_shared)
-            nm_fop->fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
+    nm_fop->fake_fop = *(inode->i_fop);
+    nm_fop->orig_fop = inode->i_fop;
+    nm_fop->dir_node = dir_node;
+
+    if (nm_fop->orig_fop->iterate_shared)
+        nm_fop->fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
-        if (nm_fop->orig_fop->iterate)
-            nm_fop->fake_fop.iterate = nomount_hijacked_iterate_dir;
+    if (nm_fop->orig_fop->iterate)
+        nm_fop->fake_fop.iterate = nomount_hijacked_iterate_dir;
 #endif
 
-        smp_store_release(&inode->i_fop, &nm_fop->fake_fop);
-        nm_debug("i_fop successfully hijacked for virtual parent dir (ino: %lu)\n", inode->i_ino);
-    }
+    smp_store_release(&inode->i_fop, &nm_fop->fake_fop);
+    nm_debug("i_fop successfully hijacked for virtual parent dir (ino: %lu)\n", inode->i_ino);
+    return 0;
 }
 
-static inline void nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, struct inode *inode)
+static inline int nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, struct inode *inode)
 {
     struct nm_iop *nm_iop;
 
-    if (unlikely(!inode->i_op)) return;
+    if (unlikely(!inode->i_op)) return 0;
     nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
     if (nm_iop) {
         smp_store_release(&nm_iop->dir_node, dir_node);
-        return;
+        return 0;
     }
-    if (unlikely(!inode->i_op->lookup)) return;
+    if (unlikely(!inode->i_op->lookup)) return 0;
 
     nm_iop = kmem_cache_zalloc(nm_iop_cachep, GFP_KERNEL);
-    if (likely(nm_iop)) {
-        nm_iop->fake_iop = *(inode->i_op);
-        nm_iop->orig_iop = inode->i_op;
-        nm_iop->dir_node = dir_node;
+    if (unlikely(!nm_iop))
+        return -ENOMEM;
 
-        if (nm_iop->orig_iop->lookup) nm_iop->fake_iop.lookup = nomount_hijacked_lookup;
-        nm_iop->fake_iop.getattr = nomount_hijacked_getattr;
-        smp_store_release(&inode->i_op, &nm_iop->fake_iop);
-        nm_debug("i_op successfully hijacked for parent dir (ino: %lu)\n", inode->i_ino);
-    }
+    nm_iop->fake_iop = *(inode->i_op);
+    nm_iop->orig_iop = inode->i_op;
+    nm_iop->dir_node = dir_node;
+
+    if (nm_iop->orig_iop->lookup) nm_iop->fake_iop.lookup = nomount_hijacked_lookup;
+    nm_iop->fake_iop.getattr = nomount_hijacked_getattr;
+    smp_store_release(&inode->i_op, &nm_iop->fake_iop);
+    nm_debug("i_op successfully hijacked for parent dir (ino: %lu)\n", inode->i_ino);
+    return 0;
 }
 
 static void nm_dir_node_rcu_free(struct rcu_head *head)
@@ -2671,6 +2666,8 @@ struct nm_ino_pop {
     u64 mine[NM_INO_MINE];
     int nmine;
     u64 hw;
+    u64 dmax;
+    bool dmax_valid;
 };
 
 static bool nm_path_is_injected(const char *path, size_t len)
@@ -2767,7 +2764,7 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     pop->hw = 0;
     if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
         return -ENOENT;
-    sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+    sc = kzalloc(sizeof(*sc), GFP_KERNEL | __GFP_NOWARN);
     if (!sc) { path_put(&dp); return -ENOMEM; }
 
     sc->want_dir = want_dir;
@@ -2780,7 +2777,7 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     sc->overlay = dp.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
 #endif
     if (sc->overlay) {
-        sc->names = kzalloc(NM_INO_SAMPLES * (NAME_MAX + 1), GFP_KERNEL);
+        sc->names = kzalloc(NM_INO_SAMPLES * (NAME_MAX + 1), GFP_KERNEL | __GFP_NOWARN);
         if (!sc->names) { kfree(sc); path_put(&dp); return -ENOMEM; }
     }
 
@@ -2828,6 +2825,8 @@ struct nm_range_slot {
 static struct nm_range_slot nm_range_cache[NM_RANGE_SLOTS];
 static int nm_range_cache_next;
 
+static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max);
+
 static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_dir)
 {
     size_t len = strlen(dirpath);
@@ -2846,11 +2845,196 @@ static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_d
     sl->valid = false;
     if (nm_dir_ino_pop(dirpath, want_dir, &sl->pop) != 0)
         return NULL;
+    sl->pop.dmax = 0;
+    sl->pop.dmax_valid = false;
+    if (want_dir) {
+        struct path rp;
+
+        if (kern_path(dirpath, LOOKUP_FOLLOW, &rp) == 0) {
+            struct kstat rk;
+            int r = nm_path_stat(&rp, &rk);
+
+            path_put(&rp);
+            if (r == 0) {
+                u64 m = 0;
+
+                if (nm_subtree_dir_ino_max(dirpath, rk.dev, &m) == 0) {
+                    sl->pop.dmax = m;
+                    sl->pop.dmax_valid = true;
+                }
+            }
+        }
+    }
     sl->hash = h;
     sl->len = (u16)len;
     sl->want_dir = want_dir;
     sl->valid = true;
     return &sl->pop;
+}
+
+#define NM_DMAX_NAMES 128
+#define NM_DMAX_DIRS  2048
+
+struct nm_dmax_scan {
+    struct dir_context ctx;
+    char (*names)[NAME_MAX + 1];
+    int n_names;
+    bool overflow;
+};
+
+static NM_ACTOR_RET nm_dmax_actor(struct dir_context *ctx, const char *name,
+                                  int namelen, loff_t off, u64 ino, unsigned int dt)
+{
+    struct nm_dmax_scan *s = container_of(ctx, struct nm_dmax_scan, ctx);
+
+    if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
+        return NM_ACTOR_CONTINUE;
+    if (dt == DT_UNKNOWN) {
+        s->overflow = true;
+        return NM_ACTOR_CONTINUE;
+    }
+    if (dt != DT_DIR)
+        return NM_ACTOR_CONTINUE;
+    if (s->n_names >= NM_DMAX_NAMES) {
+        s->overflow = true;
+        return NM_ACTOR_CONTINUE;
+    }
+    memcpy(s->names[s->n_names], name, namelen);
+    s->names[s->n_names][namelen] = '\0';
+    s->n_names++;
+    return NM_ACTOR_CONTINUE;
+}
+
+static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max)
+{
+    char **queue;
+    struct nm_dmax_scan *sc;
+    u64 max = 0;
+    int qhead = 0, qtail = 0, visited = 0, ret = 0, i;
+
+    queue = kcalloc(NM_DMAX_DIRS, sizeof(*queue), GFP_KERNEL | __GFP_NOWARN);
+    if (!queue)
+        return -ENOMEM;
+    sc = kzalloc(sizeof(*sc), GFP_KERNEL | __GFP_NOWARN);
+    if (!sc) {
+        kfree(queue);
+        return -ENOMEM;
+    }
+    sc->names = kzalloc(NM_DMAX_NAMES * (NAME_MAX + 1), GFP_KERNEL | __GFP_NOWARN);
+    if (!sc->names) {
+        kfree(sc);
+        kfree(queue);
+        return -ENOMEM;
+    }
+    queue[qtail] = kstrdup(root, GFP_KERNEL);
+    if (!queue[qtail]) {
+        ret = -ENOMEM;
+        goto out;
+    }
+    for (;;) {
+        char *up = kstrdup(queue[qtail], GFP_KERNEL);
+        char *slash;
+        struct path pp;
+        struct kstat pk;
+
+        if (!up)
+            break;
+        slash = strrchr(up, '/');
+        if (!slash || slash == up) {
+            kfree(up);
+            break;
+        }
+        *slash = '\0';
+        if (kern_path(up, LOOKUP_FOLLOW, &pp) != 0) {
+            kfree(up);
+            break;
+        }
+        if (nm_path_stat(&pp, &pk) != 0 || pk.dev != dev) {
+            path_put(&pp);
+            kfree(up);
+            break;
+        }
+        path_put(&pp);
+        kfree(queue[qtail]);
+        queue[qtail] = up;
+    }
+    qtail++;
+
+    while (qhead < qtail && ret == 0) {
+        char *dirpath = queue[qhead++];
+        const struct cred *old;
+        struct path dp;
+        struct file *dir;
+
+        if (++visited > NM_DMAX_DIRS) {
+            ret = -E2BIG;
+            break;
+        }
+        if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
+            continue;
+
+        sc->n_names = 0;
+        sc->overflow = false;
+        sc->ctx.pos = 0;
+        *((filldir_t *)&sc->ctx.actor) = nm_dmax_actor;
+        old = override_creds(nm_root_cred);
+        dir = dentry_open(&dp, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
+        path_put(&dp);
+        if (!IS_ERR(dir)) {
+            iterate_dir(dir, &sc->ctx);
+            fput(dir);
+        }
+        revert_creds(old);
+        if (sc->overflow) {
+            ret = -E2BIG;
+            break;
+        }
+
+        for (i = 0; i < sc->n_names; i++) {
+            char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->names[i]);
+            struct path fp;
+            struct kstat fk;
+
+            if (!cp) {
+                ret = -ENOMEM;
+                break;
+            }
+            if (nm_path_is_injected(cp, strlen(cp))) {
+                kfree(cp);
+                continue;
+            }
+            if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
+                int r = nm_path_stat(&fp, &fk);
+
+                path_put(&fp);
+                if (r == 0 && S_ISDIR(fk.mode) && fk.dev == dev) {
+                    if (fk.ino > max)
+                        max = fk.ino;
+                    if (qtail < NM_DMAX_DIRS) {
+                        queue[qtail] = cp;
+                        qtail++;
+                        continue;
+                    }
+                    ret = -E2BIG;
+                }
+            }
+            kfree(cp);
+            if (ret)
+                break;
+        }
+    }
+
+out:
+    for (i = 0; i < qtail; i++)
+        kfree(queue[i]);
+    kfree(queue);
+    kfree(sc->names);
+    kfree(sc);
+    if (ret == 0 && !max)
+        ret = -ENOENT;
+    if (ret == 0)
+        *out_max = max;
+    return ret;
 }
 
 static bool nm_ino_taken(const struct nm_ino_pop *pop, u64 c)
@@ -2914,6 +3098,22 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
             c++;
         return nm_ino_take(pop, c);
     }
+}
+
+static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
+{
+    u64 c;
+
+    if (!pop->dmax_valid)
+        return nm_place_ino(pop, spread);
+
+    c = pop->dmax;
+    if (pop->hw > c)
+        c = pop->hw;
+    c++;
+    while (nm_ino_taken(pop, c))
+        c++;
+    return nm_ino_take(pop, c);
 }
 
 static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
@@ -3139,14 +3339,21 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 #ifdef OVERLAYFS_SUPER_MAGIC
                 anc_ovl = p_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
 #endif
-                anc_dpop = nm_dir_ino_pop_cached(lookup_path, true);
+                if (!hlist_empty(&pending_list))
+                    anc_dpop = nm_dir_ino_pop_cached(lookup_path, true);
                 anc_dino = anc_ino;
-                if (anc_ovl) {
+                if (anc_ovl && !hlist_empty(&pending_list)) {
                     anc_dino = nm_child_dotdot_of(lookup_path);
                     if (!anc_dino)
                         anc_dino = ((u64)h_parent & 0x03FFFFFFULL) | 0x02000000ULL | 1ULL;
                 }
                 have_anc = true;
+            }
+            if (unlikely(!S_ISDIR(v_inode->i_mode))) {
+                err = -ENOTDIR;
+                path_put(&p_path);
+                if (i > 0) v_path[i] = orig_v_path;
+                break;
             }
             dir_node = nomount_get_dir_node(v_inode);
             fresh_node = !dir_node;
@@ -3154,23 +3361,27 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
             if (unlikely(!dir_node)) {
                 err = -ENOMEM;
             } else {
-                nomount_hijack_virtual_parent(dir_node, v_inode);
-                nomount_hijack_dir_inode(dir_node, v_inode);
-                nomount_hijack_superblock(p_path.dentry->d_sb);
+                err = nomount_hijack_virtual_parent(dir_node, v_inode);
+                if (!err)
+                    err = nomount_hijack_dir_inode(dir_node, v_inode);
+                if (!err)
+                    err = nomount_hijack_superblock(p_path.dentry->d_sb);
+                if (likely(!err)) {
 
-                qname.name = child_name;
-                qname.len = child_len;
-                qname.hash = full_name_hash(p_path.dentry, child_name, child_len);
-                if (p_path.dentry->d_flags & DCACHE_OP_HASH)
-                    p_path.dentry->d_op->d_hash(p_path.dentry, &qname);
+                    qname.name = child_name;
+                    qname.len = child_len;
+                    qname.hash = full_name_hash(p_path.dentry, child_name, child_len);
+                    if (p_path.dentry->d_flags & DCACHE_OP_HASH)
+                        p_path.dentry->d_op->d_hash(p_path.dentry, &qname);
 
-                dentry = d_lookup(p_path.dentry, &qname);
-                if (dentry) {
-                    if (!nm_dentry_matches_rule(dentry, current_rule))
-                        d_drop(dentry);
-                    dput(dentry);
+                    dentry = d_lookup(p_path.dentry, &qname);
+                    if (dentry) {
+                        if (!nm_dentry_matches_rule(dentry, current_rule))
+                            d_drop(dentry);
+                        dput(dentry);
+                    }
+                    err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
                 }
-                err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
                 if (unlikely(err) && fresh_node &&
                     idr_is_empty(&dir_node->children_idr)) {
                     nomount_restore_dir_node(dir_node);
@@ -3241,7 +3452,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 if (!anc_dpop)
                     anc_dpop = nm_real_ancestor_pop(nm_get_vpath(irule));
                 if (anc_dpop && anc_dpop->n)
-                    irule->v_ino = nm_place_ino(anc_dpop, (u64)irule->v_hash);
+                    irule->v_ino = nm_place_dir_ino(anc_dpop, (u64)irule->v_hash);
                 else if (anc_ino)
                     irule->v_ino = (anc_ino & ~0xFFFFUL) | (irule->v_hash & 0xFFFF) | 1UL;
                 if (anc_ovl) {
@@ -3439,12 +3650,20 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
             struct kstat fk;
 
             if (!cp) continue;
+            if (nm_path_is_injected(cp, strlen(cp))) {
+                kfree(cp);
+                continue;
+            }
             if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
                 int r = nm_path_stat(&fp, &fk);
+                struct inode *ci = d_backing_inode(fp.dentry);
                 char fctx[NM_CTX_MAX];
                 u16 fctxlen = 0;
                 dev_t fmapdev = 0;
                 u8 fcap = 0;
+
+                if (!ci || ci->i_op == &nm_file_iops || ci->i_op == &nm_dir_iops)
+                    r = -EINVAL;
 
                 if (r == 0) {
                     if (nm_read_secctx(d_backing_inode(fp.dentry), fctx, &fctxlen) != 0)
@@ -3473,6 +3692,10 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
         char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->subdirs[i]);
 
         if (!cp) continue;
+        if (nm_path_is_injected(cp, strlen(cp))) {
+            kfree(cp);
+            continue;
+        }
         if (nm_scan_dir_for_file(cp, out, octx, octxlen, omapdev, ocap, depth + 1) == 0) { kfree(cp); ret = 0; goto done; }
         kfree(cp);
     }
@@ -4218,6 +4441,7 @@ static int nomount_nl_dump_ghost(struct sk_buff *skb, struct netlink_callback *c
         return 0;
 
     while (ghost_get_rule(idx, rule, sizeof(rule)) > 0) {
+        rule[sizeof(rule) - 1] = '\0';
         hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
                         NM_CMD_TO_TYPE(NM_CMD_GET_GHOST), 0, NLM_F_MULTI);
         if (!hdr) break;
@@ -4277,7 +4501,7 @@ static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
     int cmd = NM_TYPE_TO_CMD(nlh->nlmsg_type);
     int ret;
 
-    if (!netlink_capable(skb, CAP_NET_ADMIN))
+    if (!netlink_capable(skb, CAP_SYS_ADMIN))
         return -EPERM;
 
     if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS || cmd == NM_CMD_GET_GHOST) {

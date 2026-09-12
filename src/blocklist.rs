@@ -1,3 +1,4 @@
+//! Persistent, package-name-aware UID block list
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -5,31 +6,46 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+/// Source of truth for the persistent hide list
 pub const BLOCKLIST_PATH: &str = "/data/adb/nomount/uidhide";
 
+/// Where this list used to live - the same file `mount.rs` reads as the list of module ids
 const LEGACY_PATH: &str = "/data/adb/nomount/blocklist";
 
+/// Resolved appids, mirrored from the last successful resolve
 const CACHE_PATH: &str = "/data/adb/nomount/uidhide.cache";
 
+/// Feature settings that must be re-asserted after every reboot / `nm clear`
 const CONF_PATH: &str = "/data/adb/nomount/uidhide.conf";
 
+/// Android's canonical package→UID map
 const PACKAGES_LIST: &str = "/data/system/packages.list";
 
 const MODULES_DIR: &str = "/data/adb/modules";
 
+/// Android packs (user, appid) into a uid
 pub const PER_USER_RANGE: u32 = 100_000;
 
+/// Below this is the platform (root, system_server, shell, radio...)
 pub const FIRST_APP_APPID: u32 = 10_000;
 
+/// Normalise a raw UID to the appid the kernel matches on
 pub fn appid(uid: u32) -> u32 {
     uid % PER_USER_RANGE
 }
 
+/// Must this run withhold which apps are hidden?
+pub fn redact_hide_list() -> bool {
+    std::env::var_os("NM_REDACT_HIDE_LIST").is_some()
+}
+
+/// What an entry resolved to, for display in `uid list`
 pub enum Resolved {
     Uid(u32),
     NotInstalled,
 }
 
+/// Resolve a hide-list target to an appid
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
     Prefix(String),
@@ -37,9 +53,11 @@ pub enum Pattern {
     Contains(String),
 }
 
+/// Shortest literal a glob may carry
 pub const MIN_PATTERN_LITERAL: usize = 4;
 
 impl Pattern {
+    /// Parse a glob
     pub fn parse(entry: &str) -> Option<Result<Pattern>> {
         let e = entry.trim();
         if !e.contains('*') {
@@ -75,15 +93,18 @@ impl Pattern {
     }
 }
 
+/// Every installed package and its appid, from `packages.list`
 pub fn installed_packages() -> Option<Vec<(String, u32)>> {
     installed_from(&fs::read_to_string(PACKAGES_LIST).ok()?)
 }
 
+/// Pure half of [`installed_packages`]: `None` when the body yields no packages, which on
 fn installed_from(list: &str) -> Option<Vec<(String, u32)>> {
     let parsed = parse_installed(list);
     if parsed.is_empty() { None } else { Some(parsed) }
 }
 
+/// Pure: `packages.list` body -> (package, appid)
 fn parse_installed(list: &str) -> Vec<(String, u32)> {
     let mut out = Vec::new();
     for line in list.lines() {
@@ -99,6 +120,7 @@ fn parse_installed(list: &str) -> Vec<(String, u32)> {
     out
 }
 
+/// Resolve an exact entry against an already-loaded package map
 pub fn resolve_in(target: &str, installed: &[(String, u32)]) -> Result<Resolved> {
     let t = target.trim();
     if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
@@ -111,6 +133,7 @@ pub fn resolve_in(target: &str, installed: &[(String, u32)]) -> Result<Resolved>
     }
 }
 
+/// Expand one hide-list entry into the concrete `(package, appid)` pairs it covers
 pub fn expand(entry: &str, installed: &[(String, u32)]) -> Result<Vec<(String, u32)>> {
     let e = entry.trim();
     if let Some(pat) = Pattern::parse(e) {
@@ -127,6 +150,7 @@ pub fn expand(entry: &str, installed: &[(String, u32)]) -> Result<Vec<(String, u
     }
 }
 
+/// True if the entry is a glob (well-formed or not) rather than a package/UID
 pub fn is_pattern(entry: &str) -> bool {
     entry.contains('*')
 }
@@ -143,6 +167,7 @@ pub fn resolve(target: &str) -> Result<Resolved> {
     }
 }
 
+/// Resolve preferring the cache, for the early-boot pass
 pub fn resolve_early(target: &str, cache: &BTreeMap<String, u32>) -> Result<Resolved> {
     if let Some(uid) = cache.get(target.trim()) {
         return Ok(Resolved::Uid(*uid));
@@ -150,10 +175,12 @@ pub fn resolve_early(target: &str, cache: &BTreeMap<String, u32>) -> Result<Reso
     resolve(target)
 }
 
+/// Reverse of `uid_for_package`: the first package owning `uid`, for labelling a UID the
 pub fn package_for_uid(uid: u32) -> Option<String> {
     parse_package_for_uid(&fs::read_to_string(PACKAGES_LIST).ok()?, uid)
 }
 
+/// Pure: first package owning `uid` in a `packages.list` body (col0=pkg, col1=uid)
 fn parse_package_for_uid(list: &str, uid: u32) -> Option<String> {
     for line in list.lines() {
         let mut cols = line.split(' ');
@@ -165,6 +192,7 @@ fn parse_package_for_uid(list: &str, uid: u32) -> Option<String> {
     None
 }
 
+/// Look up a package's UID in `packages.list`
 fn uid_for_package(pkg: &str) -> Result<Option<u32>> {
     let list = match fs::read_to_string(PACKAGES_LIST) {
         Ok(s) => s,
@@ -173,6 +201,7 @@ fn uid_for_package(pkg: &str) -> Result<Option<u32>> {
     Ok(parse_uid_for_package(&list, pkg))
 }
 
+/// Pure: the UID for `pkg` in a `packages.list` body
 fn parse_uid_for_package(list: &str, pkg: &str) -> Option<u32> {
     for line in list.lines() {
         let mut cols = line.split(' ');
@@ -185,6 +214,7 @@ fn parse_uid_for_package(list: &str, pkg: &str) -> Option<u32> {
     None
 }
 
+/// One-time split of the shared `blocklist` file, run while the new file is absent
 fn migrate_legacy() {
     if Path::new(BLOCKLIST_PATH).exists() {
         return;
@@ -201,6 +231,7 @@ fn migrate_legacy() {
     let _ = write_lines(BLOCKLIST_PATH, &apps);
 }
 
+/// Read the persistent hide list: trimmed, comment- and blank-stripped, order preserved,
 pub fn read() -> Result<Vec<String>> {
     migrate_legacy();
     let raw = match fs::read_to_string(BLOCKLIST_PATH) {
@@ -211,6 +242,7 @@ pub fn read() -> Result<Vec<String>> {
     Ok(parse_blocklist(&raw))
 }
 
+/// Pure: trimmed, comment/blank-stripped, order-preserved, deduplicated
 fn parse_blocklist(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -225,28 +257,41 @@ fn parse_blocklist(raw: &str) -> Vec<String> {
     out
 }
 
+/// Atomic
 fn write_lines(path: &str, entries: &[String]) -> Result<()> {
-    if let Some(dir) = Path::new(path).parent() {
-        fs::create_dir_all(dir).ok();
-    }
     let mut body = String::new();
     for e in entries {
         body.push_str(e);
         body.push('\n');
     }
-    fs::write(path, body).with_context(|| format!("write {path}"))
+    crate::statefile::write_atomic(path, body).with_context(|| format!("write {path}"))
 }
 
+/// Persist the list (LF-terminated, one entry per line)
 fn write(entries: &[String]) -> Result<()> {
     write_lines(BLOCKLIST_PATH, entries)
 }
 
+/// Refuse an entry the very next [`read`] would throw away
+fn check_entry(e: &str) -> Result<()> {
+    if e.is_empty() || e.starts_with('#') || e.contains(['\n', '\r', '\t']) {
+        anyhow::bail!(
+            "{e:?} cannot be a hide-list entry (blank, a comment, or carrying a newline or tab) \
+ - it would be dropped again on the next read"
+        );
+    }
+    Ok(())
+}
+
+/// Add many entries in one read-modify-write
 pub fn add_many(entries: &[String]) -> Result<usize> {
+    let _pass = crate::mount::pass_lock();
     let mut list = read()?;
     let mut added = 0;
     for e in entries {
         let e = e.trim();
-        if e.is_empty() || list.iter().any(|x| x == e) {
+        check_entry(e)?;
+        if list.iter().any(|x| x == e) {
             continue;
         }
         list.push(e.to_string());
@@ -258,12 +303,16 @@ pub fn add_many(entries: &[String]) -> Result<usize> {
     Ok(added)
 }
 
+/// Replace the whole resolved-appid mirror in one write
 pub fn cache_replace(map: &BTreeMap<String, u32>) {
     cache_write(map);
 }
 
+/// Add an entry (no-op if already present)
 pub fn add(entry: &str) -> Result<bool> {
+    let _pass = crate::mount::pass_lock();
     let e = entry.trim().to_string();
+    check_entry(&e)?;
     let mut list = read()?;
     if list.contains(&e) {
         return Ok(false);
@@ -273,7 +322,9 @@ pub fn add(entry: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Remove an entry (no-op if absent)
 pub fn remove(entry: &str) -> Result<bool> {
+    let _pass = crate::mount::pass_lock();
     let e = entry.trim();
     let mut list = read()?;
     let before = list.len();
@@ -286,6 +337,7 @@ pub fn remove(entry: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Read the `entry<tab>appid` mirror
 pub fn cache_read() -> BTreeMap<String, u32> {
     let mut map = BTreeMap::new();
     let Ok(raw) = fs::read_to_string(CACHE_PATH) else { return map };
@@ -300,9 +352,6 @@ pub fn cache_read() -> BTreeMap<String, u32> {
 }
 
 fn cache_write(map: &BTreeMap<String, u32>) {
-    if let Some(dir) = Path::new(CACHE_PATH).parent() {
-        fs::create_dir_all(dir).ok();
-    }
     let mut body = String::new();
     for (k, v) in map {
         body.push_str(k);
@@ -310,9 +359,10 @@ fn cache_write(map: &BTreeMap<String, u32>) {
         body.push_str(&v.to_string());
         body.push('\n');
     }
-    let _ = fs::write(CACHE_PATH, body);
+    let _ = crate::statefile::write_atomic(CACHE_PATH, body);
 }
 
+/// Record `entry -> appid` for the next early-boot pass
 pub fn cache_put(entry: &str, uid: u32) {
     let mut map = cache_read();
     if map.insert(entry.trim().to_string(), appid(uid)) != Some(appid(uid)) {
@@ -320,6 +370,7 @@ pub fn cache_put(entry: &str, uid: u32) {
     }
 }
 
+/// Drop an entry from the mirror (unhidden, or its package went away)
 pub fn cache_forget(entry: &str) {
     let mut map = cache_read();
     if map.remove(entry.trim()).is_some() {
@@ -327,8 +378,10 @@ pub fn cache_forget(entry: &str) {
     }
 }
 
+/// Which isolated-process pools the kernel hides from: 1 = app-zygote pool, 2 = platform
 pub const DEFAULT_HIDE_ISOLATED: u32 = 3;
 
+/// Read the persisted isolated-pool policy (default when unset/garbled)
 pub fn hide_isolated() -> u32 {
     let Ok(raw) = fs::read_to_string(CONF_PATH) else { return DEFAULT_HIDE_ISOLATED };
     for line in raw.lines() {
@@ -343,11 +396,9 @@ pub fn hide_isolated() -> u32 {
     DEFAULT_HIDE_ISOLATED
 }
 
+/// Persist the isolated-pool policy so `apply` can re-assert it after a reboot or a `nm
 pub fn set_hide_isolated(mode: u32) -> Result<()> {
-    if let Some(dir) = Path::new(CONF_PATH).parent() {
-        fs::create_dir_all(dir).ok();
-    }
-    fs::write(
+    crate::statefile::write_atomic(
         CONF_PATH,
         format!("# NoMount per-UID hiding settings\nhide_isolated={mode}\n"),
     )
@@ -444,6 +495,7 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
         assert!(!pat("*chunqiu*").matches("com.google.android.gms"));
     }
 
+    /// The guard that stops a typo hiding injections from the whole device
     #[test]
     fn globs_that_are_too_broad_are_refused() {
         for bad in ["*", "**", "*a*", "*ab*", "*abc*", "a*"] {
@@ -476,6 +528,7 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
         assert!(expand("*", &installed).is_err());
     }
 
+    /// The gate that stops a bad read being read as "every app was uninstalled"
     #[test]
     fn resolve_in_agrees_with_resolve_without_touching_the_disk() {
         let installed = vec![("com.a".to_string(), 10123u32), ("com.b".to_string(), 10456)];

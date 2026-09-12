@@ -60,32 +60,60 @@ trap _unstamp EXIT
 
 sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$PROJECT_ROOT/Cargo.toml"
 
+if [ -f "$PROJECT_ROOT/Cargo.lock" ] && [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
+    (cd "$PROJECT_ROOT" && "${CARGO:-cargo}" update --offline --quiet -p nomount 2>/dev/null) \
+        || (cd "$PROJECT_ROOT" && "${CARGO:-cargo}" metadata --offline --format-version 1 >/dev/null 2>&1) \
+        || echo "    !! could not refresh Cargo.lock for $NEW_VERSION; --locked builds may fail" >&2
+fi
+
 vbase="${NEW_VERSION%%-*}"
 IFS=. read -r vmaj vmin vpat <<< "$vbase"
+if [ "${vmin:-0}" -ge 100 ] || [ "${vpat:-0}" -ge 1000 ]; then
+    echo "fatal: v${NEW_VERSION} does not fit the versionCode field widths." >&2
+    echo "       vcode = major*100000 + minor*1000 + patch needs minor < 100 and" >&2
+    echo "       patch < 1000; this version would collide with another release and" >&2
+    echo "       managers, which key updates on versionCode alone, would read it as" >&2
+    echo "       a downgrade. Widen the multipliers (and keep every new code above" >&2
+    echo "       the largest already published) before bumping further." >&2
+    exit 1
+fi
 vcode=$(( ${vmaj:-0} * 100000 + ${vmin:-0} * 1000 + ${vpat:-0} ))
 sed -i "s/^version=.*/version=v${NEW_VERSION}/" "$MODULE_DIR/module.prop"
 sed -i "s/^versionCode=.*/versionCode=${vcode}/" "$MODULE_DIR/module.prop"
 
 VERSION="v${NEW_VERSION}"
 
-BUILD_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
-            | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$')" ]; then
+BUILD_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --short head 2>/dev/null || echo unknown)"
+_dirt="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
+          | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$' || true)"
+if [ -n "$_dirt" ]; then
     BUILD_COMMIT="${BUILD_COMMIT}+dirty"
 fi
 export BUILD_COMMIT
 echo "==> Build commit: ${BUILD_COMMIT}"
+if [ -n "$_dirt" ]; then
+    echo "    +dirty because these paths are not clean:"
+    printf '%s\n' "$_dirt" | sed 's/^/      /'
+fi
+unset _dirt
 
 build_nm() {
-    local zig
+    local zig cc
     zig="$(command -v zig || true)"
-    if [ -z "$zig" ]; then
+    cc="${NDK_BIN:-/nonexistent}/aarch64-linux-android26-clang"
+    if [ -n "$zig" ]; then
+        "$zig" cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
+            -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
+            "$PROJECT_ROOT/userspace/src/nm.c" -o "$PROJECT_ROOT/nm-arm64" || return 2
+    elif [ -x "$cc" ]; then
+        echo "==> nm: no zig on path, building with the NDK's clang instead"
+        "$cc" -Oz -static -nostdlib -ffreestanding \
+            -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
+            "$PROJECT_ROOT/userspace/src/nm.c" -o "$PROJECT_ROOT/nm-arm64" || return 2
+    else
         return 1
     fi
     make -s -C "$PROJECT_ROOT/userspace/tools/sstrip" >/dev/null 2>&1 || true
-    "$zig" cc -target aarch64-linux -Oz -static -nostdlib -ffreestanding \
-        -fno-unwind-tables -fno-ident -Wno-invalid-noreturn -Wl,--entry=_start \
-        "$PROJECT_ROOT/userspace/src/nm.c" -o "$PROJECT_ROOT/nm-arm64" || return 2
     "$PROJECT_ROOT/userspace/tools/sstrip/sstrip" -z "$PROJECT_ROOT/nm-arm64" >/dev/null 2>&1 || true
     local profile
     for profile in debug release; do
@@ -97,18 +125,6 @@ build_nm() {
     return 0
 }
 
-if $BUILD; then
-    build_nm || _nmrc=$?
-    case "${_nmrc:-0}" in
-        0) ;;
-        2) echo "fatal: zig is on path but compiling userspace/src/nm.c FAILED." >&2
-           echo "       Fix the compile error; shipping the previous prebuilt would" >&2
-           echo "       package a binary that does not match the source in this zip." >&2
-           exit 1 ;;
-        *) echo "==> nm: no zig on path, will fall back to a prebuilt" ;;
-    esac
-fi
-
 mkdir -p "$RELEASE_DIR/debug" "$RELEASE_DIR/release"
 
 if [ "$CLEAN" = true ]; then
@@ -118,6 +134,7 @@ fi
 
 SCRIPTS=(
     customize.sh
+    lib.sh
     metamount.sh
     post-fs-data.sh
     post-mount.sh
@@ -148,9 +165,6 @@ setup_toolchain() {
     export NDK_BIN="$ndk/toolchains/llvm/prebuilt/${hostdir:-linux-x86_64}/bin"
     if [ "$hostdir" = "windows-x86_64" ]; then
         export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android26-clang.cmd"
-        export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_BIN/armv7a-linux-androideabi26-clang.cmd"
-        export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_BIN/x86_64-linux-android26-clang.cmd"
-        export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$NDK_BIN/i686-linux-android26-clang.cmd"
     fi
     if [ -z "$ndk" ] || [ ! -d "$NDK_BIN" ]; then
         echo "fatal: Android NDK not found. Set ANDROID_NDK_HOME." >&2
@@ -172,7 +186,7 @@ build_rust() {
     for abi in "${!ABI_TARGET[@]}"; do
         target="${ABI_TARGET[$abi]}"
         echo "==> [$profile] Building $abi ($target)"
-        "$CARGO" build --manifest-path "$PROJECT_ROOT/Cargo.toml" \
+        "$CARGO" build --locked --manifest-path "$PROJECT_ROOT/Cargo.toml" \
             --target "$target" $cargo_flag 2>&1
     done
     echo "==> [$profile] All Rust targets built"
@@ -254,18 +268,26 @@ package_zip() {
             }
         fi
 
-        local nm_src="$PROJECT_ROOT/target/$target/$target_subdir/nm"
-        if [ -f "$nm_src" ]; then
-            cp "$nm_src" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
-        elif [ -f "$MODULE_DIR/bin/$abi/nm" ]; then
-            if [ "$PROJECT_ROOT/userspace/src/nm.c" -nt "$MODULE_DIR/bin/$abi/nm" ] \
-               || [ "$PROJECT_ROOT/userspace/src/nm.h" -nt "$MODULE_DIR/bin/$abi/nm" ]; then
-                echo "fatal: $MODULE_DIR/bin/$abi/nm predates userspace/src/nm.[ch]." >&2
-                echo "       Install zig (0.14.x) and re-run, or let CI build it." >&2
-                rm -rf "$staging"
-                exit 1
+        local nm_cand nm_stale=""
+        for nm_cand in "$PROJECT_ROOT/target/$target/$target_subdir/nm" \
+                       "$MODULE_DIR/bin/$abi/nm"; do
+            [ -f "$nm_cand" ] || continue
+            if [ "$PROJECT_ROOT/userspace/src/nm.c" -nt "$nm_cand" ] \
+               || [ "$PROJECT_ROOT/userspace/src/nm.h" -nt "$nm_cand" ]; then
+                nm_stale="${nm_stale}${nm_stale:+, }$nm_cand"
+                continue
             fi
-            cp "$MODULE_DIR/bin/$abi/nm" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
+            cp "$nm_cand" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
+            break
+        done
+        if [ ! -f "$staging/bin/$abi/nm" ] && [ -n "$nm_stale" ]; then
+            echo "fatal: every nm candidate for $abi predates userspace/src/nm.[ch]:" >&2
+            echo "         $nm_stale" >&2
+            echo "       Re-run with --build (zig 0.14.x, or the NDK's clang), or take" >&2
+            echo "       the binary from CI. Packaging the old one would ship an nm that" >&2
+            echo "       does not match the source in this zip." >&2
+            rm -rf "$staging"
+            exit 1
         fi
     done
 
@@ -275,28 +297,25 @@ package_zip() {
         exit 1
     fi
 
-    local webroot_src=""
-    if [ -d "$MODULE_DIR/webroot" ]; then
-        webroot_src="$MODULE_DIR/webroot"
-    elif [ -d "$PROJECT_ROOT/staging/webroot" ]; then
-        webroot_src="$PROJECT_ROOT/staging/webroot"
+    if [ ! -f "$MODULE_DIR/webroot/index.html" ]; then
+        echo "fatal: no module/webroot/index.html - the zip would ship no WebUI." >&2
+        rm -rf "$staging"
+        exit 1
     fi
-    if [ -n "$webroot_src" ]; then
-        cp -r "$webroot_src" "$staging/webroot"
-        if [ -f "$staging/webroot/index.html" ]; then
-            sed -i "s/const SUITE_VERSION = \"[^\"]*\"/const SUITE_VERSION = \"${VERSION}\"/" \
-                "$staging/webroot/index.html"
-            sed -i "s/const SUITE_COMMIT = \"[^\"]*\"/const SUITE_COMMIT = \"${BUILD_COMMIT}\"/" \
-                "$staging/webroot/index.html"
-            if ! grep -q "const SUITE_VERSION = \"${VERSION}\"" "$staging/webroot/index.html"; then
-                echo "fatal: could not stamp SUITE_VERSION into webroot/index.html" >&2
-                exit 1
-            fi
-            if ! grep -q "const SUITE_COMMIT = \"${BUILD_COMMIT}\"" "$staging/webroot/index.html"; then
-                echo "fatal: could not stamp SUITE_COMMIT into webroot/index.html" >&2
-                exit 1
-            fi
-        fi
+    cp -r "$MODULE_DIR/webroot" "$staging/webroot"
+    sed -i "s/const SUITE_VERSION = \"[^\"]*\"/const SUITE_VERSION = \"${VERSION}\"/" \
+        "$staging/webroot/index.html"
+    sed -i "s/const SUITE_COMMIT = \"[^\"]*\"/const SUITE_COMMIT = \"${BUILD_COMMIT}\"/" \
+        "$staging/webroot/index.html"
+    if ! grep -q "const SUITE_VERSION = \"${VERSION}\"" "$staging/webroot/index.html"; then
+        echo "fatal: could not stamp SUITE_VERSION into webroot/index.html" >&2
+        rm -rf "$staging"
+        exit 1
+    fi
+    if ! grep -q "const SUITE_COMMIT = \"${BUILD_COMMIT}\"" "$staging/webroot/index.html"; then
+        echo "fatal: could not stamp SUITE_COMMIT into webroot/index.html" >&2
+        rm -rf "$staging"
+        exit 1
     fi
 
     mkdir -p "$staging/META-INF/com/google/android"
@@ -337,7 +356,28 @@ set_perm() {
     return 0
 }
 
-MODPATH="${MODPATH:-/data/adb/modules/meta-nomount}"
+# Stage, never the live install.
+#
+# `MODPATH` is set by ksud and by the Magisk app when they drive the install, and
+# it points at /data/adb/modules_update/<id> -- a staging directory the manager
+# promotes at the next boot. It is unset on the two paths that run this script
+# directly (recovery, and the Magisk app's own zip handler), and the fallback was
+# the live module directory. Two consequences, both bad:
+#
+#   * `abort()` above is `rm -rf "$MODPATH"`. So customize.sh's integrity refusal
+#     and its metamodule-conflict refusal did not FAIL an install - they
+#     uninstalled the working Suite the user already had. A corrupted download
+#     took out a good install.
+#   * `unzip -o` MERGES over the existing tree, so a file dropped in a later
+#     version was never removed and `nomount.sha256sums` cannot see it (it only
+#     checks that listed files match).
+#
+# Staging fixes both: abort's `rm -rf` then throws away a scratch directory, and
+# the manager replaces the live tree wholesale instead of merging into it.
+MODPATH="${MODPATH:-/data/adb/modules_update/meta-nomount}"
+# A stale staging directory from an install that aborted must not merge into this
+# one, for the same reason `unzip -o` must not merge into the live tree.
+rm -rf "$MODPATH"
 mkdir -p "$MODPATH" || { ui_print "! cannot create $MODPATH"; exit 1; }
 
 # -x meta-INF: this installer is not module content, and unzipping it into the
@@ -355,6 +395,15 @@ fi
 
 chmod 755 "$MODPATH"/*.sh "$MODPATH"/bin/*/nomount "$MODPATH"/bin/*/nm 2>/dev/null
 
+# Above the source, deliberately. customize.sh spends forty lines choosing the
+# last line ON screen - the right next step for the state this install actually
+# ended in, including "your kernel has no NoMount support, the module installs
+# but injects NOTHING". Printing an unqualified "- NoMount installed" after that
+# stapled a success line under every failure box. Only an abort() escaped it,
+# because abort exits. So say the narrow true thing first, and let customize.sh
+# have the last word.
+ui_print "- Unpacked via recovery"
+
 # Sourced, not exec'd, so customize.sh's abort() is this script's abort().
 if [ -f "$MODPATH/customize.sh" ]; then
     . "$MODPATH/customize.sh"
@@ -362,7 +411,6 @@ else
     ui_print "! customize.sh is missing from this zip - install not verified."
 fi
 
-ui_print "- NoMount installed via recovery"
 exit 0
 UPDATER
     chmod 0755 "$staging/META-INF/com/google/android/update-binary"
@@ -385,12 +433,13 @@ UPDATER
     echo "    Sums:    $(wc -l < "$staging/nomount.sha256sums") files hashed"
 
     rm -f "$out_path"
-    if command -v zip >/dev/null 2>&1; then
-        (cd "$staging" && zip -r9 "$out_path" .)
-    else
-        python3 "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path" \
-            || python "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path"
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "fatal: python3 is required to build the archive (scripts/mkzip.py)." >&2
+        rm -rf "$staging"
+        exit 1
     fi
+    python3 "$SCRIPT_DIR/mkzip.py" "$staging" "$out_path"
+    echo "    Archive: mkzip.py (reproducible)"
     rm -rf "$staging"
 
     echo "    Output:  $out_path"
@@ -404,6 +453,17 @@ echo ""
 
 if [ "$BUILD" = true ]; then
     setup_toolchain
+
+    build_nm || _nmrc=$?
+    case "${_nmrc:-0}" in
+        0) ;;
+        2) echo "fatal: a cross compiler is on path but compiling userspace/src/nm.c FAILED." >&2
+           echo "       Fix the compile error; shipping the previous prebuilt would" >&2
+           echo "       package a binary that does not match the source in this zip." >&2
+           exit 1 ;;
+        *) echo "==> nm: no zig and no NDK clang; a prebuilt will be used only if it is" >&2
+           echo "    newer than userspace/src/nm.[ch] -- otherwise packaging stops below." >&2 ;;
+    esac
 
     build_rust "debug"
     build_rust "release"
@@ -436,10 +496,16 @@ if [ "$DEPLOY" = true ]; then
     REMOTE="/data/local/tmp/nomount-deploy.zip"
     echo "==> Deploying $ZIP to device"
     adb push "$ZIP" "$REMOTE"
-    adb shell "/data/adb/ksu/bin/ksud module install $REMOTE" 2>/dev/null \
-        || adb shell "/data/adb/ap/bin/apd module install $REMOTE" 2>/dev/null \
-        || adb shell "su -c 'magisk --install-module $REMOTE'" 2>/dev/null \
-        || { echo "fatal: module install failed" >&2; exit 1; }
+    if adb shell '[ -x /data/adb/ksu/bin/ksud ]' 2>/dev/null; then
+        adb shell "/data/adb/ksu/bin/ksud module install $REMOTE" \
+            || { echo "fatal: ksud module install failed" >&2; exit 1; }
+    elif adb shell '[ -x /data/adb/ap/bin/apd ]' 2>/dev/null; then
+        adb shell "/data/adb/ap/bin/apd module install $REMOTE" \
+            || { echo "fatal: apd module install failed" >&2; exit 1; }
+    else
+        adb shell "su -c 'magisk --install-module $REMOTE'" \
+            || { echo "fatal: magisk --install-module failed (no ksud/apd either)" >&2; exit 1; }
+    fi
     adb shell "rm -f $REMOTE"
     echo "==> Module installed"
 

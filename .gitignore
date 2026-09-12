@@ -15,3 +15,19 @@
 # CI zip, including tagged releases, as `+dirty`. A suffix that is always
 # present is a suffix nobody reads.
 /nm-arm64
+
+# zig's LOCAL build cache. `zig cc` puts it in the working directory, which for
+# the packaging job is the repo root -- so `git status --porcelain` reported
+# `?? .zig-cache/` and package.sh stamped EVERY CI zip `+dirty`, tagged releases
+# included (v1.3.118 shipped as `710cdcb+dirty`, v1.3.119 as `8fbb35d+dirty`).
+# A suffix that is always on is a suffix nobody reads, and it hid for releases
+# because the marker never said WHAT was dirty; it does now.
+#
+# Not reproducible locally, which is why it took a CI run to name: outside
+# Actions `zig cc` resolves its cache under ~/.cache/zig and leaves the tree
+# clean (measured, zig 0.14.1). mlugg/setup-zig redirects the GLOBAL cache so it
+# can save it between runs, and the local cache then materialises here.
+# `zig-cache/` is the pre-0.14 spelling, kept so a toolchain downgrade cannot
+# quietly bring the problem back.
+/.zig-cache/
+/zig-cache/

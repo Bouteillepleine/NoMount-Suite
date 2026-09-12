@@ -1,3 +1,4 @@
+# """Zip a staging dir with forward-slash entry names, preserved exec bits, and a fixed
 import os
 import stat
 import sys
@@ -16,7 +17,8 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             full = os.path.join(root, name)
             rel = os.path.relpath(full, staging).replace(os.sep, "/")
             st = os.stat(full)
-            zi = zipfile.ZipInfo(rel)
+            zi = zipfile.ZipInfo(rel, date_time=(1980, 1, 1, 0, 0, 0))
+            zi.create_system = 3
             executable = (
                 rel.endswith(".sh")
                 or rel.startswith("bin/")
@@ -24,11 +26,11 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
                 or rel.endswith("/update-binary")
                 or bool(st.st_mode & stat.S_IXUSR)
             )
-            mode = 0o755 if executable else 0o644
+            mode = 0o100755 if executable else 0o100644
             zi.external_attr = (mode & 0xFFFF) << 16
             zi.compress_type = zipfile.ZIP_DEFLATED
             with open(full, "rb") as f:
-                z.writestr(zi, f.read())
+                z.writestr(zi, f.read(), compresslevel=9)
             count += 1
 
 print("entries: %d -> %s" % (count, out))

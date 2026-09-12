@@ -9,7 +9,7 @@
 
 # The module ships shell scripts that /system/bin/sh executes directly, and a
 # WebUI the manager loads verbatim. core.autocrlf=true on a Windows clone would
-# check these out with CRLF, and a local package.sh run would zip them that way —
+# check these out with CRLF, and a local package.sh run would zip them that way -
 # a \r on the shebang line or after a `then` breaks the script on-device (the
 # same class of failure as the CRLF'd ksud installer.sh). Pin them.
 *.sh        text eol=lf

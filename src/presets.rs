@@ -1,8 +1,12 @@
+//! Curated hide-list presets
 
+/// Preset name accepted on the command line and by the WebUI
 pub const DETECTORS: &str = "detectors";
 
+/// Every preset the CLI knows, as `(name, description)`
 pub const ALL: &[(&str, &str)] = &[(DETECTORS, "known root / environment detectors")];
 
+/// Package-name globs
 pub const DETECTOR_PATTERNS: &[&str] = &[
     "me.garfieldhan.*",
     "*chunqiu*",
@@ -11,6 +15,7 @@ pub const DETECTOR_PATTERNS: &[&str] = &[
     "*.keyattestation",
 ];
 
+/// Detectors that ship under a stable package name
 pub const DETECTOR_PACKAGES: &[&str] = &[
     "com.reveny.nativecheck",
     "icu.nullptr.nativetest",
@@ -57,6 +62,7 @@ pub const DETECTOR_PACKAGES: &[&str] = &[
     "com.bryancandi.knoxcheck",
 ];
 
+/// Look a preset up by name
 pub fn get(name: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
     match name.trim().to_ascii_lowercase().as_str() {
         DETECTORS => Some((DETECTOR_PATTERNS, DETECTOR_PACKAGES)),
@@ -64,6 +70,7 @@ pub fn get(name: &str) -> Option<(&'static [&'static str], &'static [&'static st
     }
 }
 
+/// Every entry of a preset, globs first so a `uid list` reads patterns-then-names
 pub fn entries(name: &str) -> Option<Vec<String>> {
     let (pats, pkgs) = get(name)?;
     Some(pats.iter().chain(pkgs.iter()).map(|s| s.to_string()).collect())

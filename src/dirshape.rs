@@ -1,8 +1,24 @@
+//! Decide whether this device's ROM directories describe their own contents
 
 use std::fs;
 use std::path::Path;
 
-fn erofs_model(dir: &Path) -> Option<u64> {
+/// erofs's `statfs` magic
+pub(crate) const EROFS_MAGIC: i64 = 0xE0F5_E1E2;
+
+/// `statfs(2)`'s `f_type` for `p`, or `None` if it would not statfs
+pub(crate) fn fs_magic(p: &Path) -> Option<i64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+    let mut sf: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut sf) } != 0 {
+        return None;
+    }
+    Some(sf.f_type as i64)
+}
+
+/// `12*(n+2) + sum(namelen) + 3` - the `+2`/`+3` are `.` and `..`, which the listing does
+pub(crate) fn erofs_model(dir: &Path) -> Option<u64> {
     let mut n: u64 = 0;
     let mut names: u64 = 0;
     for e in fs::read_dir(dir).ok()? {
@@ -16,6 +32,7 @@ fn erofs_model(dir: &Path) -> Option<u64> {
     Some(12 * (n + 2) + names + 3)
 }
 
+/// True when `dir`'s own reported size equals the erofs formula for its contents
 fn fits_erofs_shape(dir: &Path) -> bool {
     let Ok(md) = fs::metadata(dir) else { return false };
     let size = md.len();
@@ -25,12 +42,12 @@ fn fits_erofs_shape(dir: &Path) -> bool {
     erofs_model(dir) == Some(size)
 }
 
+/// Walk the ROM looking for proof
 pub fn rom_dirs_are_dirent_packed() -> bool {
     const ROOTS: &[&str] = &[
         "/system/app", "/system/priv-app", "/system/etc", "/product/app",
         "/product/priv-app", "/product/etc", "/vendor/etc", "/system_ext/app",
     ];
-    let mut checked = 0usize;
     for root in ROOTS {
         let root = Path::new(root);
         if !root.is_dir() {
@@ -45,10 +62,6 @@ pub fn rom_dirs_are_dirent_packed() -> bool {
             if p.is_dir() && fits_erofs_shape(&p) {
                 return true;
             }
-            checked += 1;
-            if checked > 60 {
-                break;
-            }
         }
     }
     false
@@ -57,6 +70,7 @@ pub fn rom_dirs_are_dirent_packed() -> bool {
 #[cfg(test)]
 mod tests {
 
+    /// The formula, pinned against directories measured on OP15 erofs
     #[test]
     fn model_matches_measured_erofs_directories() {
         for (n, names, size) in [

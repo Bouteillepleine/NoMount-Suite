@@ -1,17 +1,62 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use super::{UidAction, VfsAction};
 use crate::blocklist::{self, appid, Resolved};
 use crate::nm::Nm;
 
+/// What `uid unblock` actually did, in words
+fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -> String {
+    match (uid, existed, unhid) {
+        (Some(uid), true, true) => format!("ok: {target} (uid {uid}) unhidden"),
+        (Some(_), true, false) => {
+            format!("ok: {target} removed from the hide list - it was not being hidden")
+        }
+        (Some(uid), false, true) => format!(
+            "ok: {target} (uid {uid}) unhidden - it was not in the hide list, so nothing was saved"
+        ),
+        (Some(_), false, false) => {
+            format!("ok: {target} was not hidden, and was not in the hide list")
+        }
+        (None, true, true) => format!(
+            "ok: {target} removed from the hide list, and its last known uid unhidden - it is \
+             not installed now"
+        ),
+        (None, true, false) => format!("ok: {target} removed from the hide list (not installed)"),
+        (None, false, true) => {
+            format!("ok: {target} unhidden - not installed, and it was not in the hide list")
+        }
+        (None, false, false) => {
+            format!("ok: {target} is not installed, and was not in the hide list")
+        }
+    }
+}
+
+/// Serialise a verb's kernel mutation against the mount pass
+fn pass_guard() -> Option<crate::mount::PassLock> {
+    crate::mount::pass_lock()
+}
+
 pub fn handle_vfs(action: VfsAction) -> Result<()> {
     let nm = Nm::new();
     match action {
         VfsAction::Add { virtual_path, real_path } => {
+            let virt = Path::new(&virtual_path);
             let real = Path::new(&real_path);
+            if crate::mount::is_partition_root(virt) {
+                anyhow::bail!(
+                    "refusing {}: a rule on a bare partition root masks every stock entry \
+                     under it, which aborts forkSystemServer. Name a file inside it.",
+                    virt.display()
+                );
+            }
+            for (side, p) in [("target", virt), ("source", real)] {
+                if let Err(why) = crate::mount::path_is_representable(p) {
+                    anyhow::bail!("refusing {} {}: {why}", side, p.display());
+                }
+            }
             if real.is_dir() {
                 anyhow::bail!(
                     concat!(
@@ -34,10 +79,16 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             println!("ok");
         }
         VfsAction::Whiteout { path } => {
-            nm.whiteout(Path::new(&path))?;
+            crate::whiteout::validate(&path)?;
+            let p = Path::new(&path);
+            if let Err(why) = crate::mount::path_is_representable(p) {
+                anyhow::bail!("refusing {}: {why}", p.display());
+            }
+            nm.whiteout(p)?;
             println!("ok");
         }
         VfsAction::Clear => {
+            let _pass = pass_guard();
             nm.clear()?;
             let re = reapply_blocklist(&nm, false);
             if re.hidden > 0 || re.failed > 0 {
@@ -62,11 +113,14 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
     Ok(())
 }
 
+/// Outcome of one re-apply pass
 pub struct ApplyReport {
     pub hidden: u32,
     pub skipped: u32,
     pub failed: u32,
     pub retired: u32,
+    /// Entries that named an app this device does not have installed
+    pub not_installed: u32,
 }
 
 impl ApplyReport {
@@ -75,8 +129,9 @@ impl ApplyReport {
     }
 }
 
+/// Re-assert the persistent hide list (and the isolated-pool policy) against the kernel
 pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
-    let mut rep = ApplyReport { hidden: 0, skipped: 0, failed: 0, retired: 0 };
+    let mut rep = ApplyReport { hidden: 0, skipped: 0, failed: 0, retired: 0, not_installed: 0 };
 
     let mode = blocklist::hide_isolated();
     if nm.set_hide_isolated(mode).is_err() && mode != blocklist::DEFAULT_HIDE_ISOLATED {
@@ -91,7 +146,7 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             return rep;
         }
     };
-    if entries.is_empty() {
+    if entries.is_empty() && cache.is_empty() {
         return rep;
     }
     let mut live = nm.uid_list_live().unwrap_or_default();
@@ -143,7 +198,7 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             Ok(Resolved::Uid(uid)) => {
                 desired.insert(e.clone(), uid);
             }
-            Ok(Resolved::NotInstalled) => rep.skipped += 1,
+            Ok(Resolved::NotInstalled) => rep.not_installed += 1,
             Err(err) => {
                 eprintln!("nomount: skipping hide-list entry {e:?}: {err:#}");
                 rep.skipped += 1;
@@ -208,6 +263,7 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
     rep
 }
 
+/// `both | appzygote | platform | off` <-> the kernel's pool bitmask
 fn parse_isolated_mode(s: &str) -> Option<u32> {
     match s.trim().to_ascii_lowercase().as_str() {
         "both" | "all" | "3" => Some(3),
@@ -216,6 +272,24 @@ fn parse_isolated_mode(s: &str) -> Option<u32> {
         "off" | "none" | "0" => Some(0),
         _ => None,
     }
+}
+
+/// Which `uid list` row speaks for each appid: the first exact row if there is one, else
+fn list_winners(rows: &[(Option<u32>, bool)]) -> BTreeMap<u32, usize> {
+    let mut winner: BTreeMap<u32, usize> = BTreeMap::new();
+    for (i, (appid, glob)) in rows.iter().enumerate() {
+        let Some(a) = *appid else { continue };
+        match winner.get(&a) {
+            None => {
+                winner.insert(a, i);
+            }
+            Some(&w) if rows[w].1 && !*glob => {
+                winner.insert(a, i);
+            }
+            _ => {}
+        }
+    }
+    winner
 }
 
 fn isolated_mode_name(mode: u32) -> &'static str {
@@ -231,6 +305,17 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
     let nm = Nm::new();
     match action {
         UidAction::Block { target, force } => {
+            let t = target.trim();
+            if t.is_empty() {
+                bail!("nothing to hide: give a package name, a uid, or a glob");
+            }
+            if target.contains(['\n', '\r', '\t']) || t.starts_with('#') {
+                bail!(
+                    "{target:?} cannot be stored: a newline, a tab and a leading '#' are the \
+                     hide list's own syntax, so the entry would not survive being written and \
+                     read back"
+                );
+            }
             if blocklist::is_pattern(&target) {
                 if let Some(parsed) = blocklist::Pattern::parse(&target) {
                     parsed?;
@@ -246,6 +331,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     );
                 }
                 blocklist::add(&target)?;
+                let _pass = pass_guard();
                 let rep = reapply_blocklist(&nm, false);
                 println!(
                     "ok: {target} saved - matches {} installed package(s), now hiding {}{}",
@@ -267,6 +353,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 }
             }
             blocklist::add(&target)?;
+            let _pass = pass_guard();
             match resolved {
                 Resolved::Uid(uid) => {
                     blocklist::cache_put(&target, uid);
@@ -286,6 +373,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
         UidAction::Unblock { target } => {
             if blocklist::is_pattern(&target) {
                 let existed = blocklist::remove(&target)?;
+                let _pass = pass_guard();
                 let rep = reapply_blocklist(&nm, false);
                 if existed {
                     println!(
@@ -303,57 +391,121 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 return Ok(());
             }
             let cached = blocklist::cache_read().get(target.trim()).copied();
-            blocklist::remove(&target)?;
+            let existed = blocklist::remove(&target)?;
+            let _pass = pass_guard();
             match blocklist::resolve(&target)? {
                 Resolved::Uid(uid) => {
-                    let live = nm.uid_list_live().unwrap_or_default();
-                    if live.iter().any(|u| appid(*u) == appid(uid)) {
+                    let live = nm.uid_list_live().with_context(|| {
+                        format!(
+                            "{target} was removed from the hide list, but the engine could not \
+                             be asked which appids it is hiding - it may still be hidden"
+                        )
+                    })?;
+                    let was_live = live.iter().any(|u| appid(*u) == appid(uid));
+                    if was_live {
                         nm.uid_unblock(uid)?;
                     }
+                    let mut retired_old = false;
                     if let Some(old) = cached {
                         if old != uid && live.iter().any(|u| appid(*u) == old) {
-                            let _ = nm.uid_unblock(old);
+                            nm.uid_unblock(old).with_context(|| {
+                                format!(
+                                    "{target}: appid {old} is still hidden and nothing on disk \
+                                     names it any more - re-add it with `nomount uid block \
+                                     {target}` and retry, or clear the engine with \
+                                     `nomount vfs clear`"
+                                )
+                            })?;
+                            retired_old = true;
                         }
                     }
-                    println!("ok: {target} (uid {uid}) unhidden");
+                    let unhid = was_live || retired_old;
+                    println!("{}", unblock_message(&target, Some(uid), existed, unhid));
                 }
                 Resolved::NotInstalled => {
+                    let mut unhid = false;
                     if let Some(old) = cached {
-                        if nm.uid_list_live().unwrap_or_default().iter().any(|u| appid(*u) == old) {
-                            let _ = nm.uid_unblock(old);
+                        let live = nm.uid_list_live().with_context(|| {
+                            format!(
+                                "{target} was removed from the hide list, but the engine could \
+                                 not be asked whether appid {old} is still hidden"
+                            )
+                        })?;
+                        if live.iter().any(|u| appid(*u) == old) {
+                            nm.uid_unblock(old).with_context(|| {
+                                format!(
+                                    "{target}: appid {old} is still hidden and nothing on disk \
+                                     names it any more - re-add it with `nomount uid block \
+                                     {target}` and retry, or clear the engine with \
+                                     `nomount vfs clear`"
+                                )
+                            })?;
+                            unhid = true;
                         }
                     }
-                    println!("ok: {target} removed from list");
+                    println!("{}", unblock_message(&target, None, existed, unhid));
                 }
             }
         }
         UidAction::List => {
             let persisted = blocklist::read()?;
-            let live = nm.uid_list_live().unwrap_or_default();
-            let mut covered: Vec<u32> = Vec::new();
+            let live_res = nm.uid_list_live();
+            let engine_unknown = live_res.is_err();
+            let live = live_res.unwrap_or_default();
+            let state_of = |uid: u32| -> &'static str {
+                if engine_unknown {
+                    "engine unreadable"
+                } else if live.iter().any(|u| appid(*u) == appid(uid)) {
+                    "live"
+                } else {
+                    "saved, not applied"
+                }
+            };
+            struct Line {
+                appid: Option<u32>,
+                glob: bool,
+                entry: String,
+                name: String,
+                text: String,
+            }
+            let mut lines: Vec<Line> = Vec::new();
 
             let installed_opt = blocklist::installed_packages();
             let installed = installed_opt.clone().unwrap_or_default();
             for e in &persisted {
                 if blocklist::is_pattern(e) {
+                    let mut note: Option<String> = None;
                     if installed_opt.is_none() {
-                        println!("{e}\tglob · package map unreadable");
-                        continue;
-                    }
-                    match blocklist::expand(e, &installed) {
-                        Ok(hits) if hits.is_empty() => println!("{e}\tglob · no match"),
-                        Ok(hits) => {
-                            for (pkg, uid) in hits {
-                                covered.push(uid);
-                                let state = if live.iter().any(|u| appid(*u) == appid(uid)) {
-                                    "live"
-                                } else {
-                                    "saved, not applied"
-                                };
-                                println!("{pkg}\tvia {e} · uid {uid} · {state}");
+                        note = Some(format!("{e}\tglob · package map unreadable"));
+                    } else {
+                        match blocklist::expand(e, &installed) {
+                            Ok(hits) if hits.is_empty() => {
+                                note = Some(format!("{e}\tglob · no match"));
                             }
+                            Ok(hits) => {
+                                for (pkg, uid) in hits {
+                                    let text =
+                                        format!("{pkg}\tvia {e} · uid {uid} · {}", state_of(uid));
+                                    lines.push(Line {
+                                        appid: Some(appid(uid)),
+                                        glob: true,
+                                        entry: e.clone(),
+                                        name: pkg,
+                                        text,
+                                    });
+                                }
+                            }
+                            Err(err) => note = Some(format!("{e}\tinvalid glob: {err:#}")),
                         }
-                        Err(err) => println!("{e}\tinvalid glob: {err:#}"),
+                    }
+                    if let Some(text) = note {
+                        lines.push(Line {
+                            appid: None,
+                            glob: true,
+                            entry: e.clone(),
+                            name: e.clone(),
+                            text,
+                        });
                     }
                     continue;
                 }
@@ -364,21 +516,51 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                         continue;
                     }
                 };
-                match resolved {
+                let (row_appid, text) = match resolved {
                     Resolved::Uid(uid) => {
-                        covered.push(uid);
-                        let state = if live.iter().any(|u| appid(*u) == appid(uid)) {
-                            "live"
-                        } else {
-                            "saved, not applied"
-                        };
-                        println!("{e}\tuid {uid} · {state}");
+                        (Some(appid(uid)), format!("{e}\tuid {uid} · {}", state_of(uid)))
                     }
-                    Resolved::NotInstalled => println!("{e}\tnot installed"),
+                    Resolved::NotInstalled => (None, format!("{e}\tnot installed")),
+                };
+                lines.push(Line {
+                    appid: row_appid,
+                    glob: false,
+                    entry: e.clone(),
+                    name: e.clone(),
+                    text,
+                });
+            }
+            let winner =
+                list_winners(&lines.iter().map(|l| (l.appid, l.glob)).collect::<Vec<_>>());
+            for (i, l) in lines.iter().enumerate() {
+                let Some(a) = l.appid else {
+                    println!("{}", l.text);
+                    continue;
+                };
+                if winner[&a] != i {
+                    continue;
+                }
+                let mut also: Vec<&str> = Vec::new();
+                for o in lines.iter().filter(|o| o.appid == Some(a)) {
+                    let label = if o.entry != l.entry {
+                        o.entry.as_str()
+                    } else if o.name != l.name {
+                        o.name.as_str()
+                    } else {
+                        continue;
+                    };
+                    if !also.contains(&label) {
+                        also.push(label);
+                    }
+                }
+                if also.is_empty() {
+                    println!("{}", l.text);
+                } else {
+                    println!("{} · also covered by {}", l.text, also.join(", "));
                 }
             }
             for uid in &live {
-                if !covered.iter().any(|c| appid(*c) == appid(*uid)) {
+                if !winner.contains_key(&appid(*uid)) {
                     let name =
                         blocklist::package_for_uid(*uid).unwrap_or_else(|| format!("uid {uid}"));
                     println!("{name}\tuid {uid} · live, not saved");
@@ -386,14 +568,21 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             }
 
             if persisted.is_empty() && live.is_empty() {
-                println!("no blocked apps");
+                if engine_unknown {
+                    println!(
+                        "hide list empty\tengine unreadable - cannot say what the kernel is hiding"
+                    );
+                } else {
+                    println!("no blocked apps");
+                }
             }
         }
         UidAction::Apply { early } => {
+            let _pass = pass_guard();
             let rep = reapply_blocklist(&nm, early);
             println!(
-                "hidden {}, skipped {}, retired {}, failed {}",
-                rep.hidden, rep.skipped, rep.retired, rep.failed
+                "hidden {}, not installed {}, skipped {}, retired {}, failed {}",
+                rep.hidden, rep.not_installed, rep.skipped, rep.retired, rep.failed
             );
             if rep.failed > 0 {
                 bail!("{} entr(ies) could not be applied", rep.failed);
@@ -423,6 +612,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 return Ok(());
             }
             let added = blocklist::add_many(&entries)?;
+            let _pass = pass_guard();
             let rep = reapply_blocklist(&nm, false);
             println!(
                 "preset {name}: {added} new, {} already present · now hiding {}{}",
@@ -440,6 +630,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 let Some(v) = parse_isolated_mode(&m) else {
                     bail!("unknown mode '{m}' - use both | appzygote | platform | off");
                 };
+                let _pass = pass_guard();
                 nm.set_hide_isolated(v).map_err(|e| {
                     e.context("engine did not accept the isolated-pool knob (kernel too old?)")
                 })?;
@@ -463,5 +654,63 @@ mod tests {
         assert_eq!(parse_isolated_mode(" off "), Some(0));
         assert_eq!(parse_isolated_mode("2"), Some(2));
         assert_eq!(parse_isolated_mode("sometimes"), None);
+    }
+
+    /// One row per appid, and the exact entry is the one that speaks
+    #[test]
+    fn a_uid_list_row_is_per_appid_and_the_exact_entry_wins() {
+        let rows = [(Some(10438), true), (Some(10438), false), (Some(10471), false)];
+        let w = list_winners(&rows);
+        assert_eq!(w.len(), 2, "one row per appid, not one per hide-list entry");
+        assert_eq!(w[&10438], 1, "the exact entry speaks, so its ✕ changes something");
+        assert_eq!(w[&10471], 2);
+
+        assert_eq!(list_winners(&[(Some(1), false), (Some(1), true)])[&1], 0);
+        assert_eq!(list_winners(&[(Some(1), true), (Some(1), true)])[&1], 0);
+        assert!(list_winners(&[(None, true), (None, false)]).is_empty());
+    }
+
+    /// `uid unblock` must not report a removal it did not make
+    #[test]
+    fn unblock_reports_both_halves_of_what_it_did() {
+        let listed_and_hiding = unblock_message("com.a", Some(10123), true, true);
+        let listed_only = unblock_message("com.a", Some(10123), true, false);
+        let hiding_only = unblock_message("com.a", Some(10123), false, true);
+        let neither = unblock_message("com.a", Some(10123), false, false);
+
+        assert!(listed_and_hiding.contains("unhidden"));
+        assert!(
+            !listed_only.contains("unhidden"),
+            "nothing was unhidden here: {listed_only}"
+        );
+        assert!(listed_only.contains("removed"));
+        assert!(
+            hiding_only.contains("not in the hide list"),
+            "an appid hidden but never listed must say so: {hiding_only}"
+        );
+        assert!(
+            !neither.contains("removed") && !neither.contains("unhidden"),
+            "unblocking something that was neither listed nor hidden must not \
+             claim either: {neither}"
+        );
+
+        let gone_unlisted = unblock_message("com.a", None, false, false);
+        assert!(
+            !gone_unlisted.contains("removed") && !gone_unlisted.contains("unhidden"),
+            "{gone_unlisted}"
+        );
+        assert!(unblock_message("com.a", None, true, false).contains("removed"));
+
+        let all = [
+            listed_and_hiding, listed_only, hiding_only, neither, gone_unlisted,
+            unblock_message("com.a", None, true, false),
+            unblock_message("com.a", None, true, true),
+            unblock_message("com.a", None, false, true),
+        ];
+        let mut seen: Vec<&str> = all.iter().map(String::as_str).collect();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "two states produce the same sentence");
     }
 }

@@ -1,6 +1,8 @@
+//! A minimal JSON writer
 
 use std::fmt::Write as _;
 
+/// Escape `s` into `out` as the *contents* of a JSON string (no surrounding quotes)
 fn escape_into(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
@@ -21,6 +23,7 @@ fn escape_into(out: &mut String, s: &str) {
     }
 }
 
+/// A JSON value being built
 pub enum J {
     Str(String),
     Num(i64),
@@ -34,6 +37,7 @@ impl J {
     pub fn s(v: impl Into<String>) -> J {
         J::Str(v.into())
     }
+    /// `Some` -> string, `None` -> `null`
     pub fn os(v: Option<impl Into<String>>) -> J {
         match v {
             Some(x) => J::Str(x.into()),
@@ -90,6 +94,7 @@ impl J {
 mod tests {
     use super::*;
 
+    /// The case that turns a diagnostic into a broken WebUI page: a path a module is perfectly
     #[test]
     fn quotes_and_backslashes_in_a_path_survive() {
         let j = J::Obj(vec![("target", J::s("/product/app/He said \"hi\"\\x.apk"))]);
@@ -99,6 +104,7 @@ mod tests {
         );
     }
 
+    /// Evidence is multi-line in several checks; a raw newline inside a JSON string is
     #[test]
     fn control_characters_are_escaped() {
         let j = J::s("a\nb\tc\u{1}d");

@@ -62,6 +62,7 @@ if [ ! -d "$MODPATH/bin/${_abi}" ]; then
     ui_print "*********************************************************"
     ui_print "! This zip has no binaries for this device's ABI."
     ui_print "!   device ABI: ${_abi}"
+    # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
     ui_print "!   shipped:    $(ls "$MODPATH/bin" 2>/dev/null | tr '\n' ' ')"
     ui_print "! The module will install and then inject nothing, on every"
     ui_print "! boot, silently. NoMount is arm64-v8a only."
@@ -99,10 +100,10 @@ if [ -d "$_bak" ]; then
     _rn=0
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-              absorbed.list binds.list; do
+              absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
-        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || continue
+        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || { rm -f "$NMDIR/$_f" 2>/dev/null; continue; }
         set_perm "$NMDIR/$_f" 0 0 0600 u:object_r:adb_data_file:s0
         _rn=$((_rn + 1))
     done
@@ -116,6 +117,8 @@ CONF="$NMDIR/spoof.conf"
 [ -f "$CONF" ] && set_perm "$CONF" 0 0 0600 u:object_r:adb_data_file:s0
 
 [ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
+
+[ -f "$MODPATH/lib.sh" ] && set_perm "$MODPATH/lib.sh" 0 0 0644
 
 [ -f "$MODPATH/uninstall.sh" ] && set_perm "$MODPATH/uninstall.sh" 0 0 0755
 
@@ -151,9 +154,29 @@ fi
 set_perm "$NMDIR/absorb-skip.txt" 0 0 0600 u:object_r:adb_data_file:s0
 rm -f "$NMDIR/bootcount"
 
-if [ -f "$NMDIR/disabled" ]; then
+if [ -e "$NMDIR/disabled" ]; then
     ui_print "- ⚠️  The Suite is disabled on this device - it will inject nothing at boot."
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
 fi
 
-ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
+_booted=$(getprop sys.boot_completed 2>/dev/null)
+if [ -n "$_ev" ] && [ ! -e "$NMDIR/disabled" ]; then
+    ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
+    ui_print "- next step: reboot. Nothing is served until you do."
+elif [ ! -d "$MODPATH/bin/${_abi}" ]; then
+    ui_print "- next step: none - this zip is arm64-v8a only and this device is ${_abi}."
+    ui_print "  Re-flashing cannot help. Remove it from your manager."
+elif [ ! -x "$_nm" ]; then
+    ui_print "- next step: re-flash this zip. The engine could not be probed (see above),"
+    ui_print "  so we cannot tell you whether your kernel has NoMount."
+elif [ -z "$_ev" ] && [ "$_booted" != "1" ]; then
+    ui_print "- Installed from recovery, where the engine cannot answer."
+    ui_print "- next step: reboot, then open the WebUI - it says whether your kernel has it."
+elif [ -z "$_ev" ]; then
+    ui_print "- next step: flash a kernel built with CONFIG_NOMOUNT, then reboot."
+    ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases"
+    ui_print "  Until you do, this module is installed and doing nothing."
+else
+    ui_print "- next step: clear the disable flag (see above), then reboot."
+fi
+unset _booted

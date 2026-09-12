@@ -3,8 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<!-- This page holds ksu.exec(), which is an arbitrary root shell, and it renders values that c -->
+
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
 <title>NoMount Suite</title>
-<!-- WebUI shortcut icon is driven by webroot/config.json + icon.png (KernelSU/MMRL WebUI) -->
 <link rel="icon" type="image/png" href="icon.png" />
 <style>
   :root {
@@ -145,14 +147,17 @@
     content: ""; position: absolute; inset: 0; pointer-events: none;
     background: radial-gradient(420px 180px at 88% -30%, rgba(124,156,255,0.18), transparent 70%);
   }
-  .statusline { display: flex; align-items: center; gap: 12px; }
+  .statusline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--muted); transition: .3s; }
   .dot.ok   { background: var(--ok);   box-shadow: 0 0 13px var(--ok),   0 0 0 5px rgba(53,210,154,0.14); }
   .dot.warn { background: var(--warn); box-shadow: 0 0 13px var(--warn), 0 0 0 5px rgba(251,191,36,0.14); }
   .dot.bad  { background: var(--bad);  box-shadow: 0 0 13px var(--bad),  0 0 0 5px rgba(248,113,122,0.14); }
   .dot.off  { background: var(--muted); }
   .statusline .st { font-size: 19px; font-weight: 720; letter-spacing: -0.2px; }
-  .statusline .sub { margin-left: auto; font-size: 12px; color: var(--muted); text-align: right; }
+  .statusline .sub { margin-left: auto; min-width: 0; font-size: 12px; color: var(--muted); text-align: right; line-height: 1.45; }
+  @media (max-width: 430px) {
+    .statusline .sub { flex: 1 0 100%; margin-left: 0; margin-top: 6px; text-align: left; }
+  }
 
   .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 17px; }
   .metric { background: var(--card2); border: 1px solid var(--brd2); border-radius: 13px; padding: 12px 13px; }
@@ -178,6 +183,15 @@
   .row:first-child { border-top: none; }
   .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .name.mono { font-family: var(--mono); font-size: 12.5px; }
+  .abrow { align-items: flex-start; }
+  .abrow .ab-main { flex: 1; min-width: 0; }
+  .abrow .ab-path {
+    font-family: var(--mono); font-size: 12px; line-height: 1.45;
+    word-break: break-all; overflow-wrap: anywhere;
+  }
+  .abrow .ab-why { font-size: 11.5px; color: var(--muted); line-height: 1.4; margin-top: 3px; }
+  .abrow .ab-why:first-child { margin-top: 0; font-size: 12px; color: var(--txt); }
+  .abrow .tag { margin-top: 1px; }
   .tag {
     font-size: 10.5px; padding: 4px 10px; border-radius: 999px; font-weight: 680;
     letter-spacing: 0.2px; white-space: nowrap;
@@ -423,15 +437,19 @@
     border-radius: 11px; padding: 8px 10px 8px 12px;
   }
   .blk .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .blk .bmid { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .blk .btop { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
   .blk .bn { flex: 1 1 auto; min-width: 0; font-size: 13px; word-break: break-all; }
-  .blk .bs { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .blk .bs { flex: 0 1 auto; min-width: 0; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .blk .bcov { font-size: 11px; line-height: 1.4; color: var(--dim); }
   .blk.live    .bs  { color: var(--acc2, #57e6c3); }
   .blk.pending .dot, .blk.drift .dot { background: var(--warn, #d9a441); }
   .blk.live .dot { background: var(--ok); }
   .blk.gone .dot { background: var(--faint); }
+  .blk.unknown .dot { background: var(--faint); }
   .blk.pending .bs,  .blk.drift .bs  { color: var(--warn, #d9a441); }
   .blk .bx {
-    flex: 0 0 auto; width: 30px; height: 30px; line-height: 28px; text-align: center;
+    flex: 0 0 auto; width: 38px; height: 38px; line-height: 36px; text-align: center;
     border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
     background: rgba(255,255,255,0.06); color: var(--dim);
   }
@@ -515,7 +533,7 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
-  .wrap { padding-bottom: 108px; }
+  .wrap { padding-bottom: calc(108px + env(safe-area-inset-bottom)); }
   .tab { display: none; }
   .tab.on { display: block; animation: tabin .18s ease both; }
   @keyframes tabin { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
@@ -706,7 +724,7 @@
     </div>
     <div class="brand">
       <h1>NoMount Suite</h1>
-      <p>Prism VFS · RRO overlays · sucompat root</p>
+      <p>Your modules, served with no mounts to find</p>
     </div>
     <div class="hbtns">
       <span class="ver" id="ver">v...</span>
@@ -714,13 +732,12 @@
         <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2.4M12 19.2v2.4M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2.4 12h2.4M19.2 12h2.4M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7"/></svg>
         <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.4 8.4 0 1 0 10.5 10.5z"/></svg>
       </button>
-      <button class="iconbtn" id="refreshBtn" onclick="refreshAll(this)" title="Refresh">
+      <button class="iconbtn" id="refreshBtn" onclick="refreshAll(this).catch(refreshFailed)" title="Refresh">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
       </button>
     </div>
   </header>
 
-  <div class="banner" id="mgrwarn" hidden></div>
   <div class="banner" id="incwarn" hidden></div>
 
   <section class="tab on" id="tab-status">
@@ -749,6 +766,7 @@
         Reload
       </button>
     </div>
+    <p class="note" style="margin:8px 2px 0">Installed or removed a module? Tap Reload - no reboot needed.</p>
     <div class="btns" style="margin-top:9px">
       <button class="act danger" style="flex:none;min-width:0;padding:9px 14px;font-size:12.5px" onclick="clearRules(this)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
@@ -757,6 +775,20 @@
     </div>
   </div>
 
+  <div class="card collapsed" id="cardPosture">
+    <div class="stealth-head card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
+      <div class="shield" id="shield">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
+      </div>
+      <div>
+        <div class="t" id="stealthT">What apps can see</div>
+        <div class="d" id="stealthD">Checking what apps can see...</div>
+      </div>
+      <span class="chev">›</span>
+    </div>
+    <div class="list" id="posture"></div>
+    <p class="note" id="stealthNote"></p>
+  </div>
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
@@ -770,8 +802,24 @@
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
+      <h2>Bootloop guard</h2><span class="chip" id="gchip"> - </span>
+    </div>
+    <div class="statusline">
+      <span class="dot" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Checking...</span>
+      <span class="sub">trips at boot #3</span>
+    </div>
+    <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
+  </div>
+
+  </section>
+
+  <section class="tab" id="tab-hiding">
+
   <div class="card" id="cardPerUID">
-    <div class="card-h clp" onclick="toggleCard(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
       <h2>Per-UID hiding</h2><span class="chip" id="uidchip"> - </span><span class="chev">›</span>
     </div>
@@ -824,55 +872,53 @@
   </div>
 
   <div class="card">
-    <div class="card-h">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
-      <h2>Bootloop guard</h2><span class="chip" id="gchip"> - </span>
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleWhiteouts(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
+      <h2>Hidden paths</h2><span class="chip" id="wochip"> - </span><span class="chev">›</span>
     </div>
-    <div class="statusline">
-      <span class="dot ok" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Armed</span>
-      <span class="sub">trips at boot #3</span>
+    <div id="wobody" style="display:none">
+      <p class="note" style="margin-top:0">Make a <b>stock ROM file</b> disappear - for paths that are themselves the tell, like <code>install-recovery.sh</code>. The list is saved and re-applied on every boot, in the same pass as the injections. Nothing is installed and nothing is mounted. <b>Scan</b> walks the ROM for files only a root setup leaves behind; on a mountless install it usually finds nothing, which is the correct answer - nothing is written to <code>/system</code>, so there is nothing on it to hide.</p>
+      <div class="uidbar">
+        <input id="woPath" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+               placeholder="/system/bin/install-recovery.sh" />
+        <button class="act" onclick="woAdd(this)">Hide</button>
+        <button class="act" onclick="woScan(this)">Scan this device</button>
+      </div>
+      <div class="list" id="woFound" style="display:none"></div>
+      <div class="list" id="woList"></div>
     </div>
-    <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
+  </div>
+
+  <div class="card collapsed" id="cardAbsorb">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v4"/><path d="M2 12h20v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"/><path d="M12 3v6"/><path d="M9 6l3 3 3-3"/></svg>
+      <h2>Other modules' mounts</h2><span class="chip" id="abchip"> - </span><span class="chev">›</span>
+    </div>
+    <div id="abbody">
+      <p class="note" style="margin-top:0">A module that <b>bind-mounts its own content</b> does not know about NoMount, and its mount is just as readable to a scanner as one of ours would be. Absorbing re-serves it as a Prism injection and unmounts the original - the content still reaches the app, the mount stops existing.</p>
+      <p class="note"><b>This already runs by itself</b>, four times per boot: twice before zygote, then again after every module's boot scripts have finished, and once more late for modules that mount last. The chip above is what is left over after all of that. These buttons are for a mount that appears <i>later</i> - a module you just installed, or one that mounts on a timer - so you do not have to reboot to clear it. <b>Scan</b> only reports; nothing changes until you press Absorb.</p>
+      <p class="note">Binds belonging to a Zygisk/Xposed hook framework are never taken over, automatically or by hand: breaking a hook does not fail at boot, it fails hours later during an app install.</p>
+      <div class="uidbar">
+        <button class="act" style="flex:1 1 0" onclick="abScan(this)">Scan</button>
+        <button class="act danger" style="flex:1 1 0" onclick="abAbsorb(this)">Absorb</button>
+      </div>
+      <div class="list" id="abDone"></div>
+      <div class="list" id="abFound" style="display:none"></div>
+    </div>
   </div>
 
   </section>
-
-  <section class="tab" id="tab-modules">
-
-  <div class="card">
-    <div class="stealth-head">
-      <div class="shield clean" id="shield">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
-      </div>
-      <div>
-        <div class="t" id="stealthT">Detection posture</div>
-        <div class="d" id="stealthD">Checking what apps can see...</div>
-      </div>
-    </div>
-    <div class="list" id="posture"></div>
-    <p class="note" id="stealthNote"></p>
-  </div>
-
-  <div class="card">
-    <div class="card-h clp" onclick="toggleModules(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-      <h2>Modules</h2><span class="chip" id="modcount">0</span><span class="chev">›</span>
-    </div>
-    <div class="list" id="modules" style="display:none"></div>
-  </div>
-
-  </section>
-
   <section class="tab" id="tab-rules">
   <div class="card">
-    <div class="card-h clp" onclick="toggleRules(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleRules(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <h2>Active rules</h2><span class="chip" id="rulechip"> - </span><span class="chev">›</span>
     </div>
     <p class="note" id="rulebreak" style="margin-top:0"> - </p>
     <div id="ruleModuleBar" style="display:none"></div>
     <div class="uidbar" id="rulefilterbar" style="display:none">
-      <input id="rulefilter" type="text" placeholder="Filter by path or module..." oninput="filterRules()" />
+      <input id="rulefilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+             placeholder="Filter by path or module..." oninput="filterRules()" />
       <button class="act" id="rulegroupBtn" style="flex:1 1 0" onclick="toggleRuleGroup(this)">Group by module</button>
       <button class="act" style="flex:1 1 0" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
     </div>
@@ -881,15 +927,24 @@
   </div>
 
   <div class="card">
-    <div class="card-h clp" onclick="toggleFiles(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleFiles(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
       <h2>Injected files</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
     </div>
     <div class="uidbar" id="vfsfilterbar" style="display:none;margin-bottom:11px">
-      <input id="vfsfilter" type="text" placeholder="Filter files..." oninput="renderFilesFull()" />
+      <input id="vfsfilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+             placeholder="Filter files..." oninput="renderFilesFull()" />
     </div>
     <div class="list" id="vfsdirs" style="display:none"></div>
     <div class="list" id="vfsfull" style="display:none"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleModules(this)">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <h2>Modules</h2><span class="chip" id="modcount">0</span><span class="chev">›</span>
+    </div>
+    <div class="list" id="modules" style="display:none"></div>
   </div>
 
   </section>
@@ -915,7 +970,7 @@
 
     <details class="ndet" id="devtools">
       <summary>Developer tools</summary>
-      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today’s fingerprint as the baseline, replacing any earlier one. <b>Verify</b> diffs the live system against it. <b>Export</b> writes <code>check.txt</code>, <code>fingerprint.txt</code> and the mount table to <code>/sdcard/Download</code> - your hide list and the apps it names are deliberately left out of a shared destination.</p>
+      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today’s fingerprint as the baseline, replacing any earlier one. <b>Verify</b> diffs the live system against it. <b>Export</b> writes a folder under <code>/sdcard/Download</code> with the check report, the fingerprint, the live rules and the mount table - attach the whole folder to a bug report. Anything naming the apps you hide is left out of a shared destination, the boot log included; the folder says so and tells you how to get the full set privately.</p>
       <div class="btns" style="flex-wrap:wrap">
         <button class="act" onclick="runSnapshot(this)">Snapshot</button>
         <button class="act" onclick="runVerify(this)">Verify</button>
@@ -930,7 +985,7 @@
   </div>
 
   <div class="card collapsed" id="incidentcard" style="display:none">
-    <div class="card-h clp" onclick="toggleCard(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
       <h2>Last incident</h2><span class="chip bad">guard tripped</span><span class="chev">›</span>
     </div>
@@ -960,9 +1015,9 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
       <span>Status</span>
     </button>
-    <button class="navb" id="nb-modules" role="tab" aria-selected="false" onclick="showTab('modules',this)">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-      <span>Modules</span>
+    <button class="navb" id="nb-hiding" role="tab" aria-selected="false" onclick="showTab('hiding',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 6.2A9.8 9.8 0 0 1 12 6c6 0 9 6 9 6a15 15 0 0 1-3 3.6"/><path d="M6.2 6.5A15 15 0 0 0 3 12s3 6 9 6a9.6 9.6 0 0 0 4.3-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/></svg>
+      <span>Hiding</span>
     </button>
     <button class="navb" id="nb-rules" role="tab" aria-selected="false" onclick="showTab('rules',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
@@ -1023,10 +1078,45 @@
     return /^\d+$/.test(v) ? v : "";
   }
 
+  let PLAN_BY_MODULE = null;
+  function planByModule(force) {
+    if (PLAN_BY_MODULE && !force) return PLAN_BY_MODULE;
+    PLAN_BY_MODULE = (async function () {
+      const r = await exec(shq(await bin()) + " plan 2>/dev/null");
+      if (r.errno !== 0) { PLAN_BY_MODULE = null; return null; }
+      const modules = {};
+      let total = 0;
+      let expectLive = 0;
+      (r.stdout || "").split("\n").forEach((l) => {
+        const m = /^(inject|whiteout|bind)\s+(.*) <- (.*) \[([^\]]*)\]/.exec(l);
+        if (!m) return;
+        const kind = m[1], target = m[2], id = m[4];
+        if (kind !== "bind" && l.indexOf("<< UNSERVABLE") < 0) expectLive++;
+        const e = modules[id] || (modules[id] = { files: 0, overlay: false, vfs: false, bind: false });
+        e.files++;
+        total++;
+        if (kind === "bind") e.bind = true;
+        else if (/\/overlay\/[^\s]*\.apk$/.test(target)) e.overlay = true;
+        else e.vfs = true;
+      });
+      return { total, expectLive, modules };
+    })();
+    return PLAN_BY_MODULE;
+  }
+
   async function nm(args) {
     const b = await bin();
     const nmClient = b.replace(/nomount$/, "nm");
     return exec(`NM_BIN=${shq(nmClient)} ${shq(b)} ${args}`);
+  }
+
+  function failText(r, fallback) {
+    const e = ((r && r.stderr) || "").trim();
+    if (/bootloop guard has parked the Suite/.test(e)) {
+      return "Blocked - the bootloop guard disabled the Suite, so nothing is injected. " +
+             "Open Status to find out why, then clear it and reboot.";
+    }
+    return "Failed: " + ((fallback || "").trim() || e || "error");
   }
 
   const _SPIN = '<svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
@@ -1082,6 +1172,19 @@
   }
 
   let RULES = null;
+  let ENGINE_LIVE = null;
+  let GUARD_TRIPPED = null;
+  let STATUS_GEN = 0;
+  function vpath(l) {
+    let s = String(l).trim();
+    s = s.replace(/\s\[UID:\s*\d+\]$/, "");
+    if (s.endsWith(" (public)")) s = s.slice(0, -9);
+    const i = s.lastIndexOf(" -> ");
+    if (i >= 0) return s.slice(0, i).trim();
+    if (s.endsWith(" (whiteout)")) s = s.slice(0, -11);
+    else if (s.endsWith(" (virtual dir)")) s = s.slice(0, -14);
+    return s.trim();
+  }
   function ruleDump() {
     if (RULES) return RULES;
     RULES = nm("vfs list").then(function (r) {
@@ -1092,51 +1195,73 @@
         ok: r.errno === 0,
         raw: (r.stdout || "").trim(),
         lines: lines,
-        targets: lines.map(l => (l.split(" ->")[0] || "").trim().replace(/\s*\(virtual dir\)$/, "")),
         rules: lines.filter(l => !l.includes("(virtual dir)")).length,
+        injects: lines.filter(l => !l.includes("(virtual dir)") && !l.includes("(whiteout)"))
+                      .map(vpath),
       };
-      d.rro = d.targets.filter(t => /\/overlay\/[^\s]*\.apk$/.test(t));
+      d.rro = d.injects.filter(t => /\/overlay\/[^\s]*\.apk$/.test(t));
       return d;
     });
     return RULES;
   }
 
   async function refreshStatus() {
+    const gen = ++STATUS_GEN;
     const d = await ruleDump();
+    if (gen !== STATUS_GEN) return d.rules;
     const dot = $("dot");
+    const wasLive = ENGINE_LIVE;
+    ENGINE_LIVE = d.ok;
+    paintHealthLine(CHECK);
+    if (wasLive !== d.ok) {
+      if (!CHECK_RUNNING) renderCheck(CHECK);
+      refreshStealth();
+    }
     if (!d.ok) {
-      $("state").textContent = "Engine offline";
-      $("substate").textContent = "kernel driver not responding";
+      $("state").textContent = "No kernel driver";
+      $("substate").textContent =
+        "this kernel was not built with NoMount - flash one that was, then reboot. " +
+        "Nothing is being injected. Prebuilt OnePlus kernels: " +
+        "github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases · " +
+        "source: github.com/Bouteillepleine/NoMount-Suite";
       dot.className = "dot bad";
       $("mRules").textContent = " - ";
       $("mOv").textContent = " - ";
       return 0;
     }
-    $("mRules").textContent = d.rules;
+    $("mRules").textContent = d.injects.length;
     $("mOv").textContent = d.rro.length;
+    if (GUARD_TRIPPED === true) {
+      $("state").textContent = "Disabled";
+      $("substate").textContent =
+        "the bootloop guard tripped - re-arm it in Bootloop guard below, then reboot";
+      dot.className = "dot bad";
+      return d.rules;
+    }
     $("state").textContent = "Active";
     if (d.rules > 0) {
-      $("substate").textContent = "modules injected";
+      let pending = 0;
+      try {
+        const p = await planByModule();
+        if (p) pending = Math.max(0, p.expectLive - d.rules);
+      } catch (e) {  }
+      if (gen !== STATUS_GEN) return d.rules;
+      $("substate").textContent = pending > 0
+        ? `modules injected · ${pending} planned file${pending > 1 ? "s" : ""} not served yet - press Reload`
+        : "modules injected";
       dot.className = "dot ok";
       return d.rules;
     }
-    let ships = -1;
+    let ships = -1, planned = -1;
     try {
-      const q = await exec(
-        'n=0; for m in /data/adb/modules/*/; do ' +
-        '[ -f "$m/disable" ] && continue; [ -f "$m/remove" ] && continue; ' +
-        '[ -f "$m/skip_mount" ] && continue; ' +
-        'for pd in "$m"*/; do [ -d "$pd" ] || continue; ' +
-        '[ -L "${pd%/}" ] && continue; p=${pd%/}; p=${p##*/}; ' +
-        'case "$p" in data|data_mirror|mnt|dev|proc|sys|cache|metadata|config' +
-        '|storage|sdcard|apex|tmp|debug_ramdisk|linkerconfig|postinstall' +
-        '|second_stage_resources|bin|sbin|d) continue;; esac; ' +
-        '[ -d "/$p" ] || continue; n=$((n+1)); break; done; done; echo $n'
-      );
-      if (q.errno === 0) ships = parseInt((q.stdout || '').trim(), 10);
+      const p = await planByModule();
+      if (p) { ships = p.expectLive; planned = p.total; }
     } catch (e) {  }
+    if (gen !== STATUS_GEN) return d.rules;
     if (ships === 0) {
-      $("substate").textContent = "nothing to inject - no module provides files";
+      $("substate").textContent = planned > 0
+        ? "nothing to inject - this device's module content is served by real binds"
+        : "nothing to inject - no module provides files";
       dot.className = "dot ok";
     } else if (ships > 0) {
       $("substate").textContent = "no rules - re-apply";
@@ -1157,22 +1282,52 @@
     $("dApi").textContent = p[4] || " - ";
     $("dKernel").textContent = p[5] || " - ";
   }
+  let STEALTH_PROBE = null;
+  function stealthProbe() {
+    if (STEALTH_PROBE) return STEALTH_PROBE;
+    STEALTH_PROBE = (async function () {
+      const r = await exec(
+        'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q enabled && echo 1 || echo 0)"; ' +
+        'echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; ' +
+        'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
+        'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
+        'echo "se=$(getenforce 2>/dev/null)";'
+      );
+      const kv = {};
+      r.stdout.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1).trim(); });
+      const rootNm = parseInt(kv.root_nm || "0", 10);
+      let appNm = 0;
+      if (rootNm > 0) {
+        const appOut = ((await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"')).stdout || "").trim();
+        appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
+      }
+      return { ok: r.errno === 0, kv: kv, rootNm: rootNm, appNm: appNm };
+    })();
+    return STEALTH_PROBE;
+  }
   async function refreshStealth() {
-    const r = await exec(
-      'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q enabled && echo 1 || echo 0)"; ' +
-      'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
-      'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
-      'echo "se=$(getenforce 2>/dev/null)";'
-    );
-    const kv = {};
-    r.stdout.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1).trim(); });
+    const probe = await stealthProbe();
+    const kv = probe.kv;
     const sucompat = kv.sucompat === "1";
-    const rootNm = parseInt(kv.root_nm || "0", 10);
-
-    const appOut = ((await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"')).stdout || "").trim();
-    const appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
+    const noKsud = kv.ksud !== "1";
+    const rootNm = probe.rootNm, appNm = probe.appNm;
 
     const mrows = ["zero-mount-posture", "tmpfs-over-the-rom", "foreign-mount-over-the-rom"].map(checkById);
+
+    const byDesign = (function () {
+      const c = mrows[0];
+      if (!c || !c.evidence) return 0;
+      const d = c.evidence.match(/(\d+)\s+left by design/);
+      return d ? parseInt(d[1], 10) : 0;
+    })();
+    const ourBinds = (function () {
+      const c = mrows[0];
+      if (!c || !c.evidence) return 0;
+      if (c.verdict !== "note" && c.verdict !== "warn") return 0;
+      const v = c.evidence.match(/(\d+)\s+module mount\(s\) visible/);
+      return v ? parseInt(v[1], 10) : 0;
+    })();
+    const ourBindsWarn = ourBinds > 0 && mrows[0].verdict === "warn";
     const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
     const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
     const fmnt = measured ? bad.length : -1;
@@ -1185,22 +1340,29 @@
     if (keyMatch) tells.push("build keys");
     if (seTell) tells.push("SELinux " + se);
 
-    $("mSu").innerHTML = r.errno !== 0 ? 'not measured <small>probe did not run</small>'
+    $("mSu").innerHTML = !probe.ok ? 'not measured <small>probe did not run</small>'
+      : noKsud ? 'not measured <small>no KernelSU-family manager here</small>'
       : sucompat ? 'sucompat <small>kernel · mountless</small>'
       : 'external <small>unmanaged</small>';
 
     const rows = [
-      { k: "File injections", v: "mountless", t: "vfs" },
-      { k: "Root · su", v: sucompat ? "sucompat · mountless" : "external", t: sucompat ? "vfs" : "off" },
+      sucompat ? { k: "Root · su", v: "sucompat · mountless", t: "vfs" }
+        : noKsud ? { k: "Root · su", v: "not measured", t: "off" }
+        : { k: "Root · su", v: "external", t: "off" },
     ];
     if (rootNm > 0) {
       rows.push(appNm === 0 ? { k: "Real mounts", v: "root " + rootNm + " · apps 0 - hidden", t: "vfs" }
               : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " - VISIBLE", t: "warn" }
               : { k: "Real mounts", v: "root " + rootNm + " · app-view n/a", t: "off" });
     } else {
-      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " visible to apps", t: "warn" }
+      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " finding" + (fmnt > 1 ? "s" : "") + " - open Check", t: "warn" }
               : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
-              : { k: "Real mounts", v: "none - pure Prism", t: "vfs" });
+              : ourBinds > 0
+                ? { k: "Real mounts", v: ourBinds + " of ours · my_* bind" + (ourBinds > 1 ? "s" : ""),
+                    t: ourBindsWarn ? "warn" : "vfs" }
+              : byDesign > 0
+                ? { k: "Real mounts", v: "none of ours · " + byDesign + " left by design", t: "vfs" }
+                : { k: "Real mounts", v: "none - pure Prism", t: "vfs" });
     }
     rows.push({ k: "Build keys",
                 v: fp === "" ? "n/a" : keyMatch ? keyMatch[0].replace(/^:|\/$/g, "") + " · tell" : "release-keys",
@@ -1221,12 +1383,22 @@
       $("stealthT").textContent = title;
       $("stealthD").textContent = desc;
       $("stealthNote").innerHTML = note;
+      if (kind !== "clean") {
+        let pref = null;
+        try { pref = localStorage.getItem("nmcol:cardPosture"); } catch (e) {}
+        const card = $("cardPosture");
+        if (pref === null && card && card.classList.contains("collapsed")) {
+          card.classList.remove("collapsed");
+          const ch = card.querySelector(".card-h");
+          if (ch) { ch.classList.add("open"); setExp(ch); }
+        }
+      }
     };
     if (engineDown(CHECK)) {
       say("warn", "The engine isn’t running", "nothing is being injected",
         "There are no mounts because there is nothing being served. This card cannot say " +
         "anything about how you look to an app until the engine answers - open <b>Check</b> " +
-        "from the Status tab.");
+        "from the line above.");
     } else if (appNm > 0) {
       say("warn", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
         "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
@@ -1236,15 +1408,19 @@
       say("warn", "Something is mounting over the ROM",
         owner ? "from " + owner : fmnt + " finding(s) in the mount table",
         esc(bad.map(function (c) { return c.meaning || c.name; }).join(" ")) +
-        " Open <b>Check</b> from the Status tab - it names each one, who caused it, and what " +
+        " Open <b>Check</b> from the line above - it names each one, who caused it, and what " +
         "you can do about it.");
+    } else if (ourBindsWarn) {
+      say("warn", "Our own my_* binds are visible",
+        ourBinds + " real bind" + (ourBinds > 1 ? "s" : "") + " any app can read",
+        esc((mrows[0] && (mrows[0].meaning || mrows[0].evidence)) || "") +
+        " Open <b>Check</b> from the line above.");
     } else if (fmnt < 0) {
       say("warn", "Mount posture not measured", "no check has read the mount table yet",
-        "File injections and RRO are Prism and su is sucompat, so the Suite adds no mounts by " +
-        "construction - but nothing has measured that here yet. Run <b>Check my setup</b> from " +
-        "the Status tab.");
+        "Nothing has read the mount table here yet, so this says nothing either " +
+        "way. Open <b>Check</b> from the line above.");
     } else if (appNm < 0 && rootNm > 0) {
-      say("warn", "Detection posture", "app-view check unavailable",
+      say("warn", "App view unavailable", "could not measure what a non-root reader sees",
         "Couldn’t drop to a non-root uid to verify here, and root sees " + rootNm +
         " <code>nomount_*</code> mount(s).");
     } else if (rootNm > 0) {
@@ -1259,11 +1435,32 @@
         "Mount surface is clean, but a scanner can still read: " + tells.map(esc).join(", ") +
         ". These are properties and boot state, not mounts - nothing on this page changes them.");
     } else {
-      say("clean", "Fully mountless", "zero mounts - nothing to hide",
+      const how =
         "The Suite adds <b>zero mounts</b>: file injections are Prism, su is sucompat " +
         "(kernel&nbsp;· mountless), and RRO overlays are Prism too - OverlayManager&nbsp;+ idmap2 " +
         "read the injected APKs directly, <b>no overlayfs</b>. Root and apps see the <b>same</b> " +
-        "mount table, so there is no mount-gap for a scanner to flag.");
+        "mount table, so there is no mount-gap for a scanner to flag.";
+      if (ourBinds > 0) {
+        say("clean", "Mountless · " + ourBinds + " my_* bind" + (ourBinds > 1 ? "s" : ""),
+          (ourBinds > 1 ? "these are" : "this is") + " served by a real bind, by design",
+          "File injections are Prism and RRO overlays are Prism too - " +
+          "OverlayManager&nbsp;+ idmap2 read the injected APKs directly, <b>no overlayfs</b>. " +
+          "The exception is a <code>my_*</code> partition: it is served by a real bind unless " +
+          "the <code>my_hookless</code> trial is on, so " + ourBinds + " bind" +
+          (ourBinds > 1 ? "s" : "") + " of ours " + (ourBinds > 1 ? "are" : "is") +
+          " in the mount table and an app reading <code>mountinfo</code> can see " +
+          (ourBinds > 1 ? "them" : "it") + ". That is the default on this hardware and nothing " +
+          "here is broken.");
+      } else if (byDesign > 0) {
+        say("clean", "Mountless · " + byDesign + " mount" + (byDesign > 1 ? "s" : "") + " by design",
+          "the Suite adds none it can avoid - " + byDesign + " left in place on purpose",
+          how + " What remains is left on purpose: a Zygisk/Xposed hook framework's bind, which " +
+          "<code>absorb</code> deliberately never takes over - breaking a hook does not fail at " +
+          "boot, it fails hours later during an app install. A scanner reading " +
+          "<code>mountinfo</code> can see " + (byDesign > 1 ? "them" : "it") + ".");
+      } else {
+        say("clean", "Fully mountless", "zero mounts - nothing to hide", how);
+      }
     }
   }
 
@@ -1271,7 +1468,7 @@
     const cr = await exec(
       "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi"
     );
-    const dr = await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0");
+    const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
     if (dr.errno !== 0) {
       $("gchip").textContent = "?";
       $("gstate").textContent = "Unknown - could not read the guard";
@@ -1281,6 +1478,13 @@
     }
     const c = cr.errno === 0 ? cr.stdout.trim() : "";
     const disabled = dr.stdout.trim() === "1";
+    const wasTripped = GUARD_TRIPPED;
+    GUARD_TRIPPED = disabled;
+    if (wasTripped !== disabled) {
+      refreshStatus();
+      if (!CHECK_RUNNING) renderCheck(CHECK); else paintHealthLine(CHECK);
+      refreshStealth();
+    }
     $("gchip").textContent = "boot " + (cr.errno !== 0 ? "?" : c === "" ? "0" : c) + "/3";
     if (disabled) {
       $("gstate").textContent = "Tripped - disabled"; $("gdot").className = "dot bad"; $("rearm").style.display = "";
@@ -1375,9 +1579,13 @@
       $("ruleslist").textContent = keep.join("\n");
     }
     $("rulecount").style.display = "";
+    const vd = lines.filter(function (l) { return l.includes("(virtual dir)"); }).length;
+    const wo = lines.filter(function (l) { return l.includes("(whiteout)"); }).length;
     $("rulecount").textContent = q
-      ? keep.length + " of " + lines.length + " rules match"
-      : lines.length + " rules";
+      ? keep.length + " of " + lines.length + " lines match"
+      : (lines.length - vd - wo) + " rules" +
+        (wo ? " · " + wo + " hidden path" + (wo === 1 ? "" : "s") : "") +
+        (vd ? " · " + vd + " engine-made director" + (vd === 1 ? "y" : "ies") : "");
   }
 
   let CHECK = null;
@@ -1385,7 +1593,10 @@
   function parseJson(r) {
     const raw = (r.stdout || "").trim();
     if (!raw) return null;
-    try { return JSON.parse(raw); } catch (e) { return null; }
+    try { return JSON.parse(raw); } catch (e) {}
+    const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+    if (a < 0 || b <= a) return null;
+    try { return JSON.parse(raw.slice(a, b + 1)); } catch (e) { return null; }
   }
 
   function ranSection(r, s) {
@@ -1402,9 +1613,11 @@
   function checkById(id) { return findCheck(CHECK, id); }
 
   function engineDown(r) {
+    if (ENGINE_LIVE === false) return true;
     return !!r && ranSection(r, "device") && r.engine === null;
   }
   function guardTripped(r) {
+    if (GUARD_TRIPPED !== null) return GUARD_TRIPPED;
     const g = findCheck(r, "boot-guard-armed");
     return !!g && g.verdict === "fail";
   }
@@ -1412,8 +1625,9 @@
   const VERDICT_LABEL = {
     fail: "needs attention",
     reboot: "reboot to finish",
-    warn: "will bite later",
+    warn: "a detector can see this",
     unmeasured: "not measured",
+    note: "for information",
   };
   function isAttention(v) { return v === "fail" || v === "reboot" || v === "warn"; }
   function isShown(v) { return isAttention(v) || v === "unmeasured"; }
@@ -1470,25 +1684,46 @@
     }
   }
 
+  let CHECK_RUNNING = false;
   async function runCheck(btn) {
     const done = busy(btn, "Checking...");
     $("findlist").innerHTML = '<div class="empty">Checking...</div>';
-    CHECK = parseJson(await nm("check --json --write"));
-    renderCheck(CHECK);
-    paintManagerBanner(CHECK);
-    refreshStealth();
+    CHECK_RUNNING = true;
+    try {
+      const r0 = await nm("check --json --write");
+      const rep = parseJson(r0);
+      if (rep) CHECK = rep;
+      else toast("Check did not run - " +
+                 (((r0.stderr || "").trim().split("\n")[0]) || "no output"), "bad");
+      renderCheck(CHECK);
+      refreshStealth();
+    } finally { CHECK_RUNNING = false; }
     done();
+  }
+
+  const CHECK_FRESH_SECS = 60;
+  async function autoCheck() {
+    if (CHECK_RUNNING) return;
+    const ts = CHECK && typeof CHECK.ts === "number" ? CHECK.ts : 0;
+    const fresh = ts && (Math.floor(Date.now() / 1000) - ts) < CHECK_FRESH_SECS;
+    if (fresh && ranSection(CHECK, "device")) return;
+    CHECK_RUNNING = true;
+    try {
+      const r = parseJson(await nm("check --json --write"));
+      if (r) { CHECK = r; renderCheck(CHECK); refreshStealth(); }
+    } catch (e) {
+    } finally { CHECK_RUNNING = false; }
   }
 
   async function loadCheckCache() {
     CHECK = parseJson(await exec("cat /data/adb/nomount/audit.json 2>/dev/null"));
     renderCheck(CHECK);
-    paintManagerBanner(CHECK);
   }
 
   function renderCheck(r) {
     const list = $("findlist"), chip = $("fchip"), sub = $("fsub"), age = $("auage");
     paintHealthLine(r);
+    paintAbsorbChip();
     $("auCopy").style.display = r ? "" : "none";
 
     if (!r || !r.checks) {
@@ -1507,6 +1742,7 @@
     const rows = r.checks.filter(function (c) { return isShown(c.verdict); });
     const attention = rows.filter(function (c) { return isAttention(c.verdict); });
     const unmeasured = rows.filter(function (c) { return c.verdict === "unmeasured"; });
+    const notes = (r.checks || []).filter(function (c) { return c.verdict === "note"; });
     const down = engineDown(r);
 
     if (down) { chip.textContent = "engine down"; chip.className = "chip bad"; }
@@ -1519,23 +1755,48 @@
     const s = r.summary || {};
     const clean = (s.pass || 0) + (s.not_applicable || 0) + (s.note || 0);
 
-    if (!rows.length && ranSection(r, "device")) {
-      sub.textContent = "Nothing needs your attention.";
-      list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
-        '<div class="fmean">' + clean + " check" + (clean === 1 ? "" : "s") +
-        " ran across " + (r.sections || []).join(" and ") +
-        ", and found nothing to act on.</div>" +
-        '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>';
-      return;
-    }
-
-    sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
     const group = function (title, gr) {
       return gr.length
         ? '<div class="fgroup">' + title + ' <span class="cnt">' + gr.length + "</span></div>" +
           gr.map(checkRow).join("")
         : "";
     };
+    const noteGroup = function (gr) {
+      return gr.length
+        ? '<details class="ndet"><summary>Good to know <span class="cnt">' + gr.length +
+          "</span></summary>" + gr.map(checkRow).join("") + "</details>"
+        : "";
+    };
+
+    if (down || guardTripped(r)) {
+      sub.textContent = down
+        ? "The engine is not answering, so nothing here describes what is being served."
+        : "The Suite disabled itself, so nothing is being injected.";
+      list.innerHTML =
+        '<div class="frow"><div class="fname">' +
+        (down ? "The engine isn’t running" : "The bootloop guard tripped") + "</div>" +
+        '<div class="fmean">' +
+        (down
+          ? "Nothing is being injected, so a clean result below says nothing about how you " +
+            "look to an app."
+          : "Re-arm it in Bootloop guard on Status, then reboot.") +
+        '</div><div class="fmeta"><span class="tag warn">' +
+        (down ? "engine down" : "guard tripped") + "</span></div></div>" +
+        group("Needs your attention", attention) + noteGroup(notes);
+      return;
+    }
+    if (!rows.length && ranSection(r, "device")) {
+      sub.textContent = "Nothing needs your attention.";
+      list.innerHTML = '<div class="frow"><div class="fname">Nothing to report</div>' +
+        '<div class="fmean">' + clean + " check" + (clean === 1 ? "" : "s") +
+        " ran across " + esc((r.sections || []).join(" and ")) +
+        ", and found nothing to act on.</div>" +
+        '<div class="fmeta"><span class="tag vfs">all clear</span></div></div>' +
+        noteGroup(notes);
+      return;
+    }
+
+    sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
     let head = "";
     if (!ranSection(r, "device")) {
       head = '<div class="frow"><div class="fname">Only your plan was checked</div>' +
@@ -1567,7 +1828,8 @@
       group("Needs your attention", attention) +
       (unmeasured.length ? '<div class="fgroup">Not measured <span class="cnt">' +
         unmeasured.length + "</span></div>" + unmHead + unmeasured.map(checkRow).join("")
-        : unmHead);
+        : unmHead) +
+      noteGroup(notes);
   }
 
   function checkRow(c) {
@@ -1576,7 +1838,7 @@
     b.push('<div class="fname">' + esc(c.name) + "</div>");
     if (c.meaning) b.push('<div class="fmean">' + esc(c.meaning) + "</div>");
     if (c.owner) b.push('<div class="fowner">From: <b>' + esc(c.owner) + "</b></div>");
-    b.push('<div class="fmeta"><span class="tag warn">' +
+    b.push('<div class="fmeta"><span class="tag ' + (c.verdict === "note" ? "off" : "warn") + '">' +
            esc(VERDICT_LABEL[c.verdict] || c.verdict) + "</span>" +
            '<span class="tag off">' + esc(c.section || "") + "</span></div>");
     b.push('<details><summary>What was measured</summary><div class="ev">' +
@@ -1603,7 +1865,10 @@
       "kernel: " + (p[3] || "?"),
       "engine: " + (CHECK.engine === null || CHECK.engine === undefined ? "not responding" : "v" + CHECK.engine),
       "sections: " + ((CHECK.sections || []).join(", ") || "?"),
-      "rules: " + (CHECK.rules || 0) + " across " + (CHECK.directories || 0) + " directories",
+      "rules: " + (CHECK.rules === null || CHECK.rules === undefined
+        ? "could not enumerate"
+        : CHECK.rules + " across " + (CHECK.directories === null || CHECK.directories === undefined
+            ? "?" : CHECK.directories) + " directories"),
       "summary: " + (s.fail || 0) + " failed, " + (s.reboot || 0) + " pending reboot, " +
         (s.unmeasured || 0) + " unmeasured, " + (s.warn || 0) + " warnings, " +
         (s.pass || 0) + " passed, " + (s.not_applicable || 0) + " n/a, " + (s.note || 0) + " notes",
@@ -1632,32 +1897,6 @@
       $("devtools").open = true;
       toast("Clipboard unavailable - the report is in Raw report, ready to select.");
     }
-  }
-
-  function paintManagerBanner(r) {
-    const el = $("mgrwarn");
-    if (!el) return;
-    if (!ranSection(r, "plan")) {
-      el.hidden = false;
-      el.innerHTML = "Your root manager’s <b>Kernel umount</b> switch has not been checked yet " +
-        "(<code>nomount check --plan</code> has not run). Nothing here is a mount, so that " +
-        "switch hides nothing the Suite serves either way.";
-      return;
-    }
-    if (checkById("manager-kernel-umount-on")) {
-      el.hidden = false;
-      el.innerHTML = "⚠️ Turn <b>Kernel umount</b> OFF in your root manager. Nothing here is " +
-        "a mount, so it hides nothing the Suite serves - and it has broken root on real devices. " +
-        "To hide from one app, use <b>Per-UID hiding</b> on the Status tab instead.";
-      return;
-    }
-    const unknown = checkById("check-a-setting-in-your-root-manager");
-    if (unknown) {
-      el.hidden = false;
-      el.innerHTML = "⚠️ " + esc(unknown.meaning || unknown.evidence);
-      return;
-    }
-    el.hidden = true;
   }
 
   function _healthShow(txt) { const o = $("healthout"); o.style.display = ""; o.textContent = txt.trim() || "(no output)"; }
@@ -1708,12 +1947,17 @@
     const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
-    if (!txt) { card.style.display = "none"; return; }
+    if (!txt) {
+      card.style.display = "none";
+      const w = $("incwarn");
+      if (w) w.hidden = true;
+      return;
+    }
     card.style.display = "";
     $("incidentout").textContent = txt;
     const el = $("incwarn");
     if (el) {
-      const dr = await exec("[ -f /data/adb/nomount/disabled ] && echo 1 || echo 0");
+      const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
       const off = ((dr && dr.stdout) || "").trim() === "1";
       const btn = '<button class="act" style="flex:none;min-width:0;padding:11px 15px;' +
         'font-size:12px;margin-left:8px" onclick="openDetail()">See what happened</button>';
@@ -1744,22 +1988,10 @@
       'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; ' +
       'id=$(basename "$d"); ' +
       'mnt=$(awk -v m="$id" \'$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); ' +
-      '[ "$id" = meta-nomount ] && { echo "$id|suite|||$mnt"; continue; }; ' +
-      '[ "$id" = kernelnosu ] && { echo "$id|su|||$mnt"; continue; }; ' +
+      '[ "$id" = meta-nomount ] && { echo "$id|suite|$mnt"; continue; }; ' +
+      '[ "$id" = kernelnosu ] && { echo "$id|su|$mnt"; continue; }; ' +
       'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && st=off; ' +
-      'roots=""; for pd in "$d"*/; do [ -d "$pd" ] || continue; [ -L "${pd%/}" ] && continue; n=$(basename "$pd"); ' +
-      'case "$n" in data|mnt|dev|proc|sys|cache|metadata|config|storage|sdcard|apex|tmp' +
-      '|debug_ramdisk|linkerconfig|postinstall|second_stage_resources|bin|sbin) continue;; ' +
-      'my_*) continue;; esac; [ -d "/$n" ] || continue; roots="$roots $pd"; done; ' +
-      '[ -z "$roots" ] && [ "$st" = on ] && st=nopart; ' +
-      'mech=""; cnt=0; ' +
-      'if [ "$st" = on ]; then ov=0; vf=0; ' +
-      'cnt=$(find $roots -type f 2>/dev/null | wc -l); ' +
-      '[ -n "$(find $roots -path "*/overlay/*.apk" -print -quit 2>/dev/null)" ] && ov=1; ' +
-      '[ -n "$(find $roots -type f ! -path "*/overlay/*" -print -quit 2>/dev/null)" ] && vf=1; ' +
-      'if [ "$ov" = 1 ] && [ "$vf" = 1 ]; then mech="vfs+overlay"; ' +
-      'elif [ "$ov" = 1 ]; then mech="overlay"; elif [ "$vf" = 1 ]; then mech="vfs"; fi; fi; ' +
-      'echo "$id|$st|$mech|$cnt|$mnt"; done'
+      'echo "$id|$st|$mnt"; done'
     ));
     if (r.errno !== 0) {
       box.innerHTML = '<div class="empty">Unknown - the module list could not be read.</div>';
@@ -1768,30 +2000,31 @@
     }
     const out = r.stdout.trim();
     if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
+    const byModule = await planByModule();
     const rows = out.split("\n").filter(Boolean);
     $("modcount").textContent = rows.length;
     let served = 0;
     box.innerHTML = rows.map((l) => {
       const p = l.split("|");
       const id = p[0];
-      const cnt = parseInt(p[3] || "0", 10);
-      const mntRaw = (p[4] || "").trim();
+      const plan = byModule ? (byModule.modules[id] || { files: 0, overlay: false, vfs: false }) : null;
+      const cnt = plan ? plan.files : 0;
+      const mntRaw = (p[2] || "").trim();
       const mnt = /^\d+$/.test(mntRaw) ? parseInt(mntRaw, 10) : -1;
       let label, cls, showCnt = false, tip = "";
       if (p[1] === "suite") { label = "suite"; cls = "suite"; tip = "The NoMount Suite metamodule itself."; }
       else if (p[1] === "su") { label = "su backend"; cls = "su"; served++; tip = "Provides su; not injected by the Suite."; }
-      else {
-        const st = p[1], mech = p[2];
-        if (st === "nopart") { label = "script only"; cls = "off"; tip = "Ships no partition directory at all (scripts, zygisk, binaries) - nothing for the Suite to inject."; }
-        else if (st === "off") { label = "skipped"; cls = "off"; tip = "Has a disable / remove / skip_mount marker, so the Suite leaves it alone."; }
-        else if (mech === "overlay") { label = "overlay"; cls = "ov"; served++; showCnt = true; }
-        else if (mech === "vfs+overlay") { label = "vfs + overlay"; cls = "ov"; served++; showCnt = true; }
-        else if (mech === "vfs") { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
-        else { label = "0 files"; cls = "off"; tip = "Has a partition directory (product/, system/, ...) but no files inside it, so it contributes nothing."; }
-      }
+      else if (p[1] === "off") { label = "skipped"; cls = "off"; tip = "Has a disable / remove / skip_mount marker, so the Suite leaves it alone."; }
+      else if (!plan) { label = "?"; cls = "off"; tip = "The plan could not be read, so what this module contributes is unknown."; }
+      else if (plan.overlay && plan.vfs) { label = "vfs + overlay"; cls = "ov"; served++; showCnt = true; }
+      else if (plan.overlay) { label = "overlay"; cls = "ov"; served++; showCnt = true; }
+      else if (plan.vfs) { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
+      else if (plan.bind) { label = "bind"; cls = "off"; served++; showCnt = true;
+                            tip = "Served by a real bind mount, not an injection - a my_* target is bound unless the my_hookless trial is on."; }
+      else { label = "nothing to inject"; cls = "off"; tip = "This module ships no files the Suite can serve - scripts, zygisk, binaries, or an empty partition directory."; }
       const files = (showCnt && cnt > 0) ? `<span class="files">${cnt} file${cnt > 1 ? "s" : ""}</span>` : `<span class="files"></span>`;
       const vis = mnt < 0
-        ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown - it is not a claim that it owns no mount">mounts ?</span>`
+        ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown - it is not a claim that it owns no mount">mounts unknown</span>`
         : mnt > 0
         ? `<span class="tag warn" title="This module has ${mnt} mount(s) of its own in the mount table - visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
         : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
@@ -1808,12 +2041,12 @@
       $("rulebreak").textContent = "Unknown \u2014 the engine did not answer.";
       return;
     }
-    const rro = d.rro.length, vfs = d.lines.length - rro;
-    $("rulechip").textContent = d.lines.length;
-    $("rulebreak").textContent = d.lines.length
+    const rro = d.rro.length, vfs = d.injects.length - rro;
+    $("rulechip").textContent = d.injects.length;
+    $("rulebreak").textContent = d.injects.length
       ? `${vfs} file redirect${vfs === 1 ? "" : "s"} · ${rro} RRO overlay APK${rro === 1 ? "" : "s"} - all Prism, no mounts`
       : "No rules active.";
-    _paintRuleModuleBar(d.lines);
+    _paintRuleModuleBar(d.lines.filter((l) => !l.includes("(virtual dir)")));
   }
 
   const _RM_PALETTE = ["#57e6c3", "#7c9cff", "#c792ea", "#fbbf24", "#f8717a", "#4fd1e0", "#9ccc65"];
@@ -1853,7 +2086,7 @@
     }
     const isOv = (p) => /\/overlay\/[^\s]*\.apk$/.test(p);
     const dirs = {};
-    _files = d.targets.filter(Boolean).sort();
+    _files = d.injects.filter(Boolean).sort();
     for (const vp of _files) {
       const dir = vp.replace(/\/[^/]*$/, "") || "/";
       const e = dirs[dir] || (dirs[dir] = { n: 0, ov: 0 });
@@ -1871,6 +2104,284 @@
     }).join("");
     if ($("vfsfull").style.display !== "none") renderFilesFull();
   }
+  const WO_PATH_RE = /^\/[^\x00-\x1f\x7f]+$/;
+  function toggleWhiteouts(h) {
+    const on = h.classList.toggle("open");
+    setExp(h);
+    $("wobody").style.display = on ? "" : "none";
+    if (on) refreshWhiteouts();
+  }
+  async function whiteoutSets() {
+    const r = await nm("whiteout list");
+    if (r.errno !== 0) return { ok: false, durable: [], auto: [] };
+    const durable = (r.stdout || "").split("\n").map(x => x.trim())
+      .filter(Boolean).filter(l => !/^no whiteouts/.test(l));
+    const live = await ruleDump();
+    const auto = live.ok
+      ? live.lines.filter(l => l.includes("(whiteout)"))
+          .map(l => (l.split(" (whiteout)")[0] || "").trim())
+          .filter(p => p && !durable.some(x => x.split("	")[0] === p))
+      : [];
+    return { ok: true, durable, auto };
+  }
+
+  async function woChipOnly() {
+    const w = await whiteoutSets();
+    $("wochip").textContent = w.ok ? String(w.durable.length + w.auto.length) : "?";
+  }
+  async function refreshWhiteouts() {
+    const box = $("woList");
+    const w = await whiteoutSets();
+    if (!w.ok) {
+      $("wochip").textContent = "?";
+      box.innerHTML = '<div class="empty">Unknown - the list could not be read.</div>';
+      return;
+    }
+    const lines = w.durable;
+    const auto = w.auto;
+    const autoHtml = auto.map((p) =>
+      `<div class="row abrow"><span class="ab-main">` +
+      `<div class="ab-path">${esc(p)}</div>` +
+      `<div class="ab-why">managed automatically - it goes when the module that asked for it goes</div>` +
+      `</span><span class="tag vfs">from a module</span></div>`).join("");
+
+    if (!lines.length) {
+      $("wochip").textContent = String(auto.length);
+      box.innerHTML = auto.length
+        ? '<div class="empty">Nothing saved by you. The Suite hid ' + auto.length +
+          ' ROM path' + (auto.length > 1 ? 's' : '') +
+          " in place of a module's tmpfs:</div>" + autoHtml
+        : '<div class="empty">Nothing hidden.</div>';
+      return;
+    }
+    $("wochip").textContent = String(lines.length + auto.length);
+    box.innerHTML = lines.map(l => {
+      const path = l.split("\t")[0];
+      const st = (l.split("\t")[1] || "").trim();
+      const cls = /^hidden/.test(st) ? "vfs"
+        : /^not applied \(and no such path/.test(st) ? "off" : "warn";
+      const hint = /^not applied - run/.test(st) ? "saved, not live yet - tap Reload on Status"
+                 : /^applied, but still visible/.test(st) ? "the engine is not serving it - tap Reload on Status"
+                 : /^not applied \(and no such path/.test(st) ? "this ROM has no such path - nothing to hide"
+                 : "";
+      const tag = /^not applied \(/.test(st) ? "not applied" : st.split(" - ")[0];
+      return `<div class="row abrow"><span class="ab-main">` +
+             `<div class="ab-path">${esc(path)}</div>` +
+             (hint ? `<div class="ab-why">${esc(hint)}</div>` : "") + `</span>` +
+             `<span class="tag ${cls}">${esc(tag)}</span>` +
+             `<button class="bx" title="Stop hiding" data-act="wodel" data-nmp="${esc(path)}">✕</button></div>`;
+    }).join("") + autoHtml;
+  }
+  async function woAdd(btn) {
+    const v = ($("woPath").value || "").trim();
+    if (!v) { toast("Enter an absolute path", "bad"); return; }
+    if (!WO_PATH_RE.test(v)) { toast("An absolute path, on one line", "bad"); return; }
+    const done = busy(btn, "Hiding...");
+    const r = await woApply(v);
+    if (r.errno === 0) $("woPath").value = "";
+    RULES = null;
+    PLAN_BY_MODULE = null;
+    done(); refreshWhiteouts(); refreshStatus();
+  }
+  async function woApply(path) {
+    const r = await nm(`whiteout add ${shq(path)}`);
+    const txt = ((r.stdout || "") + (r.stderr || "")).trim();
+    toast(r.errno === 0 ? (txt.split("\n").pop() || "Hidden") : failText(r, txt),
+          r.errno === 0 ? "ok" : "bad");
+    return r;
+  }
+  async function woRemove(path, btn) {
+    const done = busy(btn);
+    const r = await nm(`whiteout remove ${shq(path)}`);
+    const txt = ((r.stdout || "") + (r.stderr || "")).trim();
+    toast(r.errno === 0 ? "No longer hidden" : "Failed: " + (txt || "error"),
+          r.errno === 0 ? "ok" : "bad");
+    RULES = null;
+    PLAN_BY_MODULE = null;
+    done(); refreshWhiteouts(); refreshStatus();
+  }
+  function absorbable(r) {
+    const c = findCheck(r, "zero-mount-posture");
+    if (!c) return -1;
+    if (c.verdict === "pass") return 0;
+    if (c.verdict === "unmeasured") return -1;
+    if (c.verdict === "note" || c.verdict === "warn") return 0;
+    const m = c.evidence && c.evidence.match(/(\d+)\s+module mount\(s\) visible/);
+    return m ? parseInt(m[1], 10) : -1;
+  }
+  async function refreshAbsorbed() {
+    const box = $("abDone");
+    if (!box) return;
+    const r = await exec(
+      "while IFS= read -r l; do case \"$l\" in ''|'#'*) continue;; esac; " +
+      "t=${l%%\t*}; s=${l#*\t}; " +
+      "[ \"$t\" = \"$s\" ] && continue; " +
+      "printf '%s\\t%s\\t%s\\n' \"$t\" \"$s\" \"$([ -e \"$s\" ] && echo live || echo gone)\"; " +
+      "done < /data/adb/nomount/absorbed.list 2>/dev/null"
+    );
+    const rows = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
+    ABSORBED_N = rows.length;
+    if (!rows.length) { box.innerHTML = ""; return; }
+    const owner = (s) => {
+      const m = s.match(/\/data\/adb\/modules(?:_update)?\/([^/]+)/);
+      return m ? m[1] : s;
+    };
+    box.innerHTML = `<div class="blk-head">Already absorbed · ${rows.length}</div>` +
+      rows.map(function (l) {
+        const p = l.split("\t"), tgt = p[0] || "", src = p[1] || "", live = p[2] === "live";
+        return `<div class="row abrow"><span class="ab-main">` +
+               `<div class="ab-path">${esc(tgt)}</div>` +
+               `<div class="ab-why">from ${esc(owner(src))}` +
+               (live ? "" : " - module no longer installed") + `</div>` +
+               `</span><span class="tag ${live ? "vfs" : "off"}">` +
+               (live ? "absorbed" : "stale entry") + `</span></div>`;
+      }).join("");
+  }
+
+  let ABSORBED_N = -1;
+
+  async function refreshAbsorb() {
+    await refreshAbsorbed();
+    paintAbsorbChip();
+  }
+  function paintAbsorbChip() {
+    const chip = $("abchip");
+    if (!chip) return;
+    const n = absorbable(CHECK);
+    if (n < 0) { chip.textContent = " - "; chip.className = "chip"; return; }
+    chip.textContent = n === 0 ? (ABSORBED_N > 0 ? "none left" : "none") : String(n);
+    chip.className = n === 0 ? "chip ok" : "chip warn";
+  }
+
+  async function abScan(btn) {
+    const done = busy(btn, "Scanning...");
+    const r = await nm("absorb --dry-run");
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    const box = $("abFound");
+    box.style.display = "";
+    const lines = out.split("\n").map(x => x.trim()).filter(Boolean);
+    if (!lines.length) {
+      box.innerHTML = '<div class="empty">No answer from absorb.</div>';
+    } else {
+      const KINDS = [
+        [/^skipping the tmpfs over /, "off",  "left alone"],
+        [/^skipping /,                "off",  "left alone"],
+        [/^would SKIP directory bind /, "off", "needs --include-dirs"],
+        [/^would DROP redundant mount /, "vfs", "already served"],
+        [/^redundant /,               "vfs",  "already served"],
+        [/^would absorb /,            "warn", "would absorb"],
+        [/^would empty /,             "warn", "would empty"],
+        [/^nomount: LEAK /,           "warn", "absorb cannot fix"],
+        [/^nomount absorb: \d+ my_\* mount\(s\) deferred/, "warn", "deferred to next boot"],
+      ];
+      const owner = (s) => {
+        const m = s.match(/\/data\/adb\/modules(?:_update)?\/([^/]+)/);
+        return m ? m[1] : s;
+      };
+      box.innerHTML = lines.map(function (l) {
+        let kind = null;
+        for (var i = 0; i < KINDS.length && !kind; i++) if (KINDS[i][0].test(l)) kind = KINDS[i];
+        if (!kind) {
+          if (/^nomount absorb:/.test(l))
+            return `<div class="empty">${esc(l.replace(/^nomount absorb:\s*/, ""))}</div>`;
+          return `<div class="empty">${esc(l)}</div>`;
+        }
+        if (kind[2] === "absorb cannot fix" || kind[2] === "deferred to next boot")
+          return `<div class="row abrow"><span class="ab-main">` +
+                 `<div class="ab-why">` +
+                 esc(l.replace(/^nomount: LEAK /, "").replace(/^nomount absorb: /, "")) +
+                 `</div></span><span class="tag ${kind[1]}">${kind[2]}</span></div>`;
+
+        let rest = l.replace(kind[0], "");
+        let why = "";
+        const paren = rest.match(/\s*\(([^)]*)\)\s*$/);
+        if (paren) { why = paren[1]; rest = rest.slice(0, paren.index); }
+        const arrow = rest.split(" <- ");
+        const path = arrow[0].trim();
+        if (why === kind[2]) why = "";
+        if (arrow[1]) why = (why ? why + " · " : "") + "from " + owner(arrow[1].trim());
+        return `<div class="row abrow"><span class="ab-main">` +
+               `<div class="ab-path">${esc(path)}</div>` +
+               (why ? `<div class="ab-why">${esc(why)}</div>` : "") +
+               `</span><span class="tag ${kind[1]}">${kind[2]}</span></div>`;
+      }).join("");
+    }
+    done();
+  }
+
+  async function abAbsorb(btn) {
+    const n = absorbable(CHECK);
+    if (n === 0) { toast("Nothing to absorb", "ok"); return; }
+    if (!(await confirmAction(
+      "Absorb other modules' mounts?",
+      "Each bind another module made is re-served as a Prism injection and then unmounted. " +
+      "The files still reach apps; the mounts stop existing. Hook-framework binds are left alone. " +
+      "If something depended on the mount itself rather than its contents, reboot to restore it.",
+      "Absorb"))) return;
+    const done = busy(btn, "Absorbing...");
+    const r = await nm("absorb");
+    const out = ((r.stdout || "") + (r.stderr || "")).trim();
+    $("abFound").style.display = "";
+    $("abFound").innerHTML = `<div class="empty">${esc(out || "(no output)")}</div>`;
+    toast(r.errno !== 0 ? failText(r)
+          : /deferred to the pre-zygote pass/.test(out)
+            ? "Deferred to the next boot - nothing could be absorbed while Android is running"
+            : "Absorb complete",
+          r.errno === 0 ? "ok" : "bad");
+    await runCheck(null);
+    RULES = null;
+    PLAN_BY_MODULE = null;
+    refreshStatus();
+    refreshAbsorb();
+    done();
+  }
+
+  async function woScan(btn) {
+    const done = busy(btn, "Scanning...");
+    const r = await nm("whiteout suggest");
+    if (r.errno !== 0) {
+      $("woFound").style.display = "";
+      $("woFound").innerHTML = '<div class="empty">Scan did not run - ' +
+        esc((r.stderr || "").trim() || "the command failed") + "</div>";
+      toast("Scan did not run", "bad");
+      done();
+      return;
+    }
+    const out = (r.stdout || "") + (r.stderr || "");
+    const box = $("woFound");
+    const cands = out.split("\n").map(x => x.trim()).filter(l => l.indexOf("\t") > 0);
+    const notes = out.split("\n").map(x => x.trim())
+      .filter(l => /^\(|^nothing to suggest/.test(l)).join(" ");
+    box.style.display = "";
+    if (!cands.length) {
+      box.innerHTML = `<div class="empty">${esc(notes || "Nothing found.")}</div>`;
+      toast("Nothing to hide on this device", "ok");
+    } else {
+      box.innerHTML =
+        `<div class="blk-head">Found · ${cands.length}</div>` +
+        cands.map(l => {
+          const p = l.split("\t")[0], why = l.split("\t")[1] || "";
+          return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(p)}</span>` +
+                 `<span class="tag warn" title="${esc(why)}">${esc(why.split(";")[0])}</span>` +
+                 `<button class="bx" title="Hide this path" data-act="woadd" data-nmp="${esc(p)}">+</button></div>`;
+        }).join("") +
+        (notes ? `<div class="empty">${esc(notes)}</div>` : "");
+      toast(cands.length + " candidate(s) found", "ok");
+    }
+    done();
+  }
+  document.getElementById("wobody").addEventListener("click", async ev => {
+    const b = ev.target.closest("button[data-act]");
+    if (!b) return;
+    const p = b.getAttribute("data-nmp") || "";
+    if (!WO_PATH_RE.test(p)) { toast("That path has characters nomount won't take", "bad"); return; }
+    if (b.getAttribute("data-act") === "wodel") { woRemove(p, b); return; }
+    const done = busy(b);
+    const r = await woApply(p);
+    done(); refreshWhiteouts();
+    if (r.errno === 0) { const row = b.closest(".row"); if (row) row.remove(); }
+  });
+
   function renderFilesFull() {
     const q = ($("vfsfilter").value || "").trim().toLowerCase();
     const f = q ? _files.filter(p => p.toLowerCase().indexOf(q) !== -1) : _files;
@@ -1884,10 +2395,12 @@
   }
   function toggleModules(h) {
     const on = h.classList.toggle("open");
+    setExp(h);
     $("modules").style.display = on ? "" : "none";
   }
   function toggleFiles(h) {
     const on = h.classList.toggle("open");
+    setExp(h);
     $("vfsdirs").style.display = on ? "" : "none";
     $("vfsfull").style.display = on ? "" : "none";
     $("vfsfilterbar").style.display = on ? "" : "none";
@@ -1913,6 +2426,7 @@
   }
   async function toggleRules(h) {
     rulesShown = h.classList.toggle("open");
+    setExp(h);
     $("ruleslist").style.display = rulesShown ? "" : "none";
     $("rulefilterbar").style.display = rulesShown ? "" : "none";
     $("rulecount").style.display = rulesShown ? "" : "none";
@@ -1923,10 +2437,19 @@
     const svg = btn.querySelector("svg");
     btn.disabled = true; if (svg) svg.classList.add("spin");
     const r = await nm("reload");
-    if (r.errno === 0) toast(r.stdout.replace(/^nomount reload:\s*/, "").trim() || "Reloaded", "ok");
-    else toast("Failed: " + (r.stderr || "error"), "bad");
+    const out = (r.stdout || "").trim();
+    if (r.errno === 0) {
+      toast((out.split("\n")[0] || "").replace(/^nomount reload:\s*/, "") || "Reloaded", "ok");
+    }
+    else toast(failText(r), "bad");
     if (svg) svg.classList.remove("spin"); btn.disabled = false;
-    refreshAll();
+    await refreshAll().catch(refreshFailed);
+    const w = $("incwarn");
+    if (w && r.errno === 0 && /REBOOT REQUIRED/.test(out)) {
+      w.hidden = false;
+      w.innerHTML = "⚠️ A system APK changed - <b>reboot to finish</b>. " +
+        "Until then, apps over those APKs can force-close.";
+    }
   }
   async function clearRules(btn) {
     if (!(await confirmAction(
@@ -1937,10 +2460,14 @@
       "Clear rules"))) return;
     const done = busy(btn, "Clearing...");
     const r = await nm("vfs clear");
-    if (r.errno === 0) toast((r.stdout || "").trim().replace(/^ok\b\s*/, "Rules cleared ") || "Rules cleared", "ok");
-    else toast("Failed: " + (r.stderr || "error"), "bad");
+    if (r.errno === 0) toast((r.stdout || "").replace(/^ok\b\s*/, "Rules cleared ").trim() || "Rules cleared", "ok");
+    else toast(/could not be re-applied/.test(r.stderr || "")
+                 ? "Rules cleared - but the hide list could not be re-applied: those apps are not hidden"
+                 : failText(r), "bad");
     RULES = null;
-    done(); refreshStatus(); refreshBlocked(); if (rulesShown) loadRules();
+    PLAN_BY_MODULE = null;
+    done();
+    refreshAll().catch(refreshFailed);
   }
   async function rearm(btn) {
     if (!(await confirmAction(
@@ -1950,7 +2477,7 @@
       "stays off until you reboot.",
       "Delete and re-arm"))) return;
     btn.disabled = true;
-    await exec("rm -f /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
+    await exec("rm -rf /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
     toast("Guard re-armed - reboot to re-enable", "ok");
     btn.disabled = false; refreshGuard(); refreshIncident();
   }
@@ -1999,30 +2526,48 @@
       const [name, stateRaw] = l.split("\t");
       const s = (stateRaw || "").trim();
       let cls = "live";
-      if (/not installed/.test(s) || /unreachable/.test(s) || /no match/.test(s)) cls = "gone";
+      if (/unread/.test(s)) cls = "unknown";
+      else if (/not installed/.test(s) || /unreachable/.test(s) ||
+          /no match/.test(s) || /invalid glob/.test(s)) cls = "gone";
       else if (/not applied/.test(s)) cls = "pending";
       else if (/not saved/.test(s)) cls = "drift";
       const uidM = s.match(/uid (\d+)/);
       const viaM = s.match(/^via (\S+)/);
       const target = viaM ? viaM[1]
         : (/^uid \d+$/.test(name) ? (uidM ? uidM[1] : name) : name);
-      const xTitle = viaM ? `Remove ${viaM[1]} - un-hides every app it matches` : "Unhide";
-      const save = cls === "drift"
+      const xTitle = viaM ? `Remove ${viaM[1]} - the rule hiding this app` : "Unhide";
+      const actionable = UID_TARGET_RE.test(target);
+      const covIdx = s.indexOf(" \u00b7 also covered by ");
+      const sHead = covIdx === -1 ? s : s.slice(0, covIdx);
+      const sCov  = covIdx === -1 ? "" : s.slice(covIdx + 3);
+      const save = cls === "drift" && actionable
         ? `<button class="bx save" title="Save so it survives reboot" data-act="save" data-nmt="${esc(target)}">💾</button>` : "";
-      return { active: cls !== "gone", html: `<div class="blk ${cls}">
+      return { active: cls === "live" || cls === "pending" || cls === "drift",
+               hiding: cls === "live" || cls === "drift",
+               unknown: cls === "unknown",
+               key: uidM ? uidM[1] : name,
+               html: `<div class="blk ${cls}">
         <span class="dot"></span>
-        <span class="bn">${esc(name)}</span>
-        <span class="bs">${esc(s)}</span>
+        <span class="bmid">
+          <span class="btop"><span class="bn">${esc(name)}</span><span class="bs">${esc(sHead)}</span></span>
+          ${sCov ? `<span class="bcov">${esc(sCov)}</span>` : ""}
+        </span>
         ${save}
-        <button class="bx" title="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>
+        ${actionable ? `<button class="bx" title="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>` : ""}
       </div>` };
     });
     const active = rows.filter(function (x) { return x.active; });
-    const waiting = rows.filter(function (x) { return !x.active; });
+    const unknown = rows.filter(function (x) { return x.unknown; });
+    const waiting = rows.filter(function (x) { return !x.active && !x.unknown; });
+    const hiding = new Set(rows.filter(function (x) { return x.hiding; })
+                               .map(function (x) { return x.key; })).size;
     const htmlOf = function (a) { return a.map(function (x) { return x.html; }).join(""); };
-    if (uc) uc.textContent = String(active.length);
+    if (uc) uc.textContent = unknown.length ? "?" : String(hiding);
     box.innerHTML =
-      (active.length ? `<div class="blk-head">Hidden apps · ${active.length}</div>` + htmlOf(active) : "") +
+      (active.length ? `<div class="blk-head">Hidden apps · ${hiding}</div>` + htmlOf(active) : "") +
+      (unknown.length ? `<div class="blk-head">Could not be checked · ${unknown.length}</div>` +
+        `<div class="blk-sub">These are saved, but the engine did not answer, so whether they are
+          in force right now is unknown.</div>` + htmlOf(unknown) : "") +
       (waiting.length ? `<div class="blk-head">Waiting · ${waiting.length}</div>` +
         `<div class="blk-sub">Nothing installed matches these yet. A glob keeps watching, so a
           detector installed later is hidden the moment it appears.</div>` + htmlOf(waiting) : "");
@@ -2105,10 +2650,14 @@
     st.classList.toggle("bad", !!bad);
   }
   async function refreshIsolated() {
+    if (!(await ruleDump()).ok) {
+      isoPaint(null, "Engine not responding - this is the saved policy, not what the kernel is doing.", true);
+      return;
+    }
     const r = await nm("uid isolated");
     const m = (r.stdout || "").trim().match(/^(both|appzygote|platform|off)/);
     if (r.errno === 0 && m) isoPaint(m[1]);
-    else isoPaint(null, "State unknown - the engine did not answer.", true);
+    else isoPaint(null, "Could not read the saved policy.", true);
   }
   async function setIsolated(mode) {
     const seg = $("isoSeg");
@@ -2148,7 +2697,14 @@
   }
   async function uidScan(btn) {
     const done = busy(btn, "Scanning...");
-    const r = await exec("sh /data/adb/modules/meta-nomount/uidscan.sh 2>/dev/null");
+    const r = await exec("sh /data/adb/modules/meta-nomount/uidscan.sh");
+    if (r.errno !== 0) {
+      done();
+      toast("Scan did not run - " +
+            (((r.stderr || "").trim().split("\n")[0]) || "the script failed"), "bad");
+      return;
+    }
+    const degraded = /no detector inventory/i.test(r.stderr || "");
     usParse(r.stdout);
     const cur = await nm("uid list");
     (cur.stdout || "").split("\n").forEach(function (l) {
@@ -2158,7 +2714,11 @@
     done();
     if (!usShown) usToggle($("usShow"));
     usRender();
-    toast(US.size ? `${US.size} candidate(s)` : "Nothing worth hiding found", US.size ? "ok" : "");
+    const note = degraded ? " (by manifest only - the detector name list was unavailable)" : "";
+    toast(
+      US.size ? `${US.size} candidate(s)${note}` : `Nothing worth hiding found${note}`,
+      US.size ? "ok" : ""
+    );
   }
   function usToggle(btn) {
     usShown = !usShown;
@@ -2207,11 +2767,20 @@
     const picks = [...US.entries()].filter(function ([, e]) { return e.pick; }).map(function ([p]) { return p; });
     if (!picks.length) return;
     const done = busy(btn, "Hiding...");
+    const b = await bin();
+    const nmClient = b.replace(/nomount$/, "nm");
+    await exec(`NM_BIN=${shq(nmClient)} ` +
+               picks.map(function (p) { return `${shq(b)} uid block ${shq(p)}`; }).join("; "));
+    const after = await nm("uid list");
+    const listed = {};
+    (after.stdout || "").split("\n").forEach(function (l) {
+      const n = (l.split("\t")[0] || "").trim();
+      if (n) listed[n] = 1;
+    });
     let ok = 0, bad = 0;
-    for (const p of picks) {
-      const r = await nm(`uid block ${shq(p)}`);
-      if (r.errno === 0) { ok++; US.delete(p); } else bad++;
-    }
+    picks.forEach(function (p) {
+      if (listed[p]) { ok++; US.delete(p); } else bad++;
+    });
     done();
     usRender();
     refreshBlocked();
@@ -2249,10 +2818,22 @@
     refreshBlocked();
   }
 
+  function setExp(h) {
+    if (h) h.setAttribute("aria-expanded", h.classList.contains("open") ? "true" : "false");
+  }
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    const h = e.target && e.target.closest && e.target.closest(".card-h.clp");
+    if (!h) return;
+    e.preventDefault();
+    h.click();
+  });
+
   function toggleCard(h) {
     const card = h.closest(".card");
     const on = card.classList.toggle("collapsed");
     h.classList.toggle("open", !on);
+    setExp(h);
     if (card.id) { try { localStorage.setItem("nmcol:" + card.id, on ? "1" : "0"); } catch (e) {} }
   }
   function applyCardState() {
@@ -2262,14 +2843,22 @@
       const collapsed = v === null ? card.classList.contains("collapsed") : v === "1";
       card.classList.toggle("collapsed", collapsed);
       const h = card.querySelector(".card-h");
-      if (h) h.classList.toggle("open", !collapsed);
+      if (h) { h.classList.toggle("open", !collapsed); setExp(h); }
     });
   }
 
+  function refreshFailed(e) {
+    const ic = document.querySelector("#refreshBtn svg");
+    if (ic) ic.classList.remove("spin");
+    toast("Something went wrong reading the device - press refresh to try again. " +
+          ((e && e.message) || e), "bad");
+  }
   async function refreshAll(btn) {
     const ic = btn && btn.querySelector("svg");
     if (ic) ic.classList.add("spin");
     RULES = null;
+    PLAN_BY_MODULE = null;
+    STEALTH_PROBE = null;
     await loadCheckCache();
     const ev = await engineVersion();
     const eng = ev ? ("engine v" + ev) : "engine offline";
@@ -2285,8 +2874,10 @@
     $("footver").textContent = "Suite " + suiteId + " · " + eng +
       (staged ? " · " + pv + " staged - reboot to activate" : "");
     await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
+                       refreshAbsorb(),
                        refreshModules(), refreshFiles(), refreshRuleSummary(),
-                       refreshIncident(), refreshBlocked(), refreshIsolated()]);
+                       refreshIncident(), refreshBlocked(), refreshIsolated(),
+                       $("wobody").style.display === "none" ? woChipOnly() : refreshWhiteouts()]);
     if (rulesShown) loadRules();
     loadPkgList();
     if (ic) ic.classList.remove("spin");
@@ -2301,7 +2892,7 @@
   window.addEventListener("load", function () { movePill(false); });
 
   applyCardState();
-  refreshAll();
+  refreshAll().then(autoCheck).catch(refreshFailed);
 </script>
 </body>
 </html>

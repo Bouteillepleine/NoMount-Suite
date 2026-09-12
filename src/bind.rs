@@ -1,3 +1,4 @@
+//! Real bind mounts for targets hookless injection cannot serve
 
 use anyhow::{bail, Context, Result};
 use std::ffi::CString;
@@ -6,12 +7,14 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
-const BINDS_LIST: &str = "/data/adb/nomount/binds.list";
+pub(crate) const BINDS_LIST: &str = "/data/adb/nomount/binds.list";
 const LOCK_FILE: &str = "/data/adb/nomount/binds.lock";
 const SELINUX_XATTR: &[u8] = b"security.selinux\0";
 
+/// flock(LOCK_EX) guard so binds.list read-modify-write is atomic across a concurrent
 struct Lock(fs::File);
 impl Lock {
+    /// Fails loudly
     fn acquire() -> Result<Lock> {
         let f = {
             use std::os::unix::fs::OpenOptionsExt;
@@ -40,16 +43,19 @@ impl Drop for Lock {
     }
 }
 
+/// One conversion, lossless
 fn cstr(p: &Path) -> Result<CString> {
-    CString::new(p.to_str().context("non-utf8 path")?.as_bytes()).context("nul byte in path")
+    CString::new(p.as_os_str().as_encoded_bytes()).context("nul byte in path")
 }
 
+/// True if `target` is already a mount point (some other module bound it)
 fn is_mounted(target: &Path) -> bool {
     fs::read_to_string("/proc/self/mountinfo")
         .map(|s| crate::absorb::parse_mountinfo(&s).iter().any(|r| r.target == target))
         .unwrap_or(false)
 }
 
+/// Read a path's SELinux label, if it has one
 fn read_selinux(p: &Path) -> Option<Vec<u8>> {
     let c = cstr(p).ok()?;
     let mut buf = [0u8; 256];
@@ -60,6 +66,7 @@ fn read_selinux(p: &Path) -> Option<Vec<u8>> {
     if n <= 0 { None } else { Some(buf[..n as usize].to_vec()) }
 }
 
+/// Put a previously captured label back on `p`
 fn restore_selinux(p: &Path, label: &[u8]) {
     if let Ok(c) = cstr(p) {
         unsafe {
@@ -69,6 +76,20 @@ fn restore_selinux(p: &Path, label: &[u8]) {
     }
 }
 
+/// Put the source file's own label back, now that nothing is bound over it
+fn restore_source_label(source: &Path, lbl: &str) {
+    if source.as_os_str().is_empty() {
+        return;
+    }
+    restore_selinux(source, format!("{}\0", label_to_restore(lbl)).as_bytes());
+}
+
+/// What to write back when the row's label field is empty
+fn label_to_restore(lbl: &str) -> &str {
+    if lbl.is_empty() { "u:object_r:adb_data_file:s0" } else { lbl }
+}
+
+/// Copy `target`'s SELinux label onto `source`, so the bound file reports the partition's
 fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     let (sc, tc) = (cstr(source)?, cstr(target)?);
     let name = SELINUX_XATTR.as_ptr() as *const libc::c_char;
@@ -88,11 +109,13 @@ fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The result of an [`apply`] that succeeded
 pub enum BindOutcome {
     Bound,
     AlreadyMounted,
 }
 
+/// File-over-file bind of `source` onto an existing `target`
 pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     let s = source.to_str().context("non-utf8 bind source")?.to_string();
     let t = target.to_str().context("non-utf8 bind target")?.to_string();
@@ -113,12 +136,15 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     let orig_label = read_selinux(source);
     let lbl = orig_label.as_deref().map(|l| String::from_utf8_lossy(l).trim_end_matches('\0').to_string())
         .unwrap_or_default();
-    if let Err(e) = append_locked(&t, &s, &lbl) {
-        if let Some(l) = &orig_label { restore_selinux(source, l); }
-        bail!("bind of {t} could not be recorded ({e}); not bound");
-    }
+    let newly_recorded = match append_locked(&t, &s, &lbl) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(l) = &orig_label { restore_selinux(source, l); }
+            bail!("bind of {t} could not be recorded ({e}); not bound");
+        }
+    };
     if let Err(e) = mirror_selinux(source, target).with_context(|| format!("relabel for bind of {t}")) {
-        remove_record_locked(&t, &s);
+        if newly_recorded { remove_record_locked(&t, &s); }
         if let Some(l) = &orig_label { restore_selinux(source, l); }
         return Err(e);
     }
@@ -128,32 +154,55 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
         libc::mount(sc.as_ptr(), tc.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null())
     };
     if r != 0 {
-        remove_record_locked(&t, &s);
+        if newly_recorded { remove_record_locked(&t, &s); }
         if let Some(l) = &orig_label { restore_selinux(source, l); }
         bail!("bind {} -> {t}: {}", source.display(), std::io::Error::last_os_error());
     }
     Ok(BindOutcome::Bound)
 }
 
+/// Replace binds.list, atomically
+fn write_binds_list(body: &str) -> std::io::Result<()> {
+    crate::statefile::write_atomic(BINDS_LIST, body)
+}
+
+/// Does this row name exactly this (target, source) pair?
+fn row_is(t: &Path, s: &Path, target: &str, source: &str) -> bool {
+    t.to_string_lossy() == target && s.to_string_lossy() == source
+}
+
+/// Drop one (target, source) row from binds.list
 fn remove_record_locked(target: &str, source: &str) {
     let remaining: String = tracked_full()
         .into_iter()
-        .filter(|(t, s, _)| !(t.to_string_lossy() == target && s.to_string_lossy() == source))
+        .filter(|(t, s, _)| !row_is(t, s, target, source))
         .map(|(t, s, l)| format!("{}\t{}\t{}\n", t.display(), s.display(), l))
         .collect();
-    if let Err(e) = fs::write(BINDS_LIST, &remaining) {
+    if let Err(e) = write_binds_list(&remaining) {
         eprintln!("nomount: could not roll back a failed bind record in {BINDS_LIST}: {e}");
     }
 }
 
-fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Result<()> {
+/// Append a "target\tsource" record to binds.list
+fn append_locked(target: &str, source: &str, orig_label: &str) -> std::io::Result<bool> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if tracked_full().iter().any(|(t, s, _)| row_is(t, s, target, source)) {
+        return Ok(false);
+    }
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(BINDS_LIST)?;
-    writeln!(f, "{target}\t{source}\t{orig_label}")
+    let orig = f.metadata()?.len();
+    if let Err(e) = writeln!(f, "{target}\t{source}\t{orig_label}") {
+        let _ = f.set_len(orig);
+        return Err(e);
+    }
+    Ok(true)
 }
 
+/// Parse one binds.list line into (target, source)
 fn parse_line(l: &str) -> Option<(PathBuf, PathBuf, String)> {
     let l = l.trim();
     if l.is_empty() {
@@ -166,18 +215,30 @@ fn parse_line(l: &str) -> Option<(PathBuf, PathBuf, String)> {
     Some((PathBuf::from(t), PathBuf::from(s), lbl.to_string()))
 }
 
+/// (target, source) pairs we currently have bound (from binds.list)
 pub fn tracked() -> Vec<(PathBuf, PathBuf)> {
     tracked_full().into_iter().map(|(t, s, _)| (t, s)).collect()
 }
 
+/// As [`tracked`], but an unreadable `binds.list` is an error rather than an empty list
+pub fn tracked_result() -> std::io::Result<Vec<(PathBuf, PathBuf)>> {
+    match fs::read_to_string(BINDS_LIST) {
+        Ok(s) => Ok(s.lines().filter_map(parse_line).map(|(t, s, _)| (t, s)).collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// As [`tracked`], plus each row's recorded original source label
 fn tracked_full() -> Vec<(PathBuf, PathBuf, String)> {
     fs::read_to_string(BINDS_LIST)
         .map(|s| s.lines().filter_map(parse_line).collect())
         .unwrap_or_default()
 }
 
+/// Take the bind down, or say why not
 fn umount_target(target: &Path) -> Result<(), String> {
-    let c = CString::new(target.to_string_lossy().as_bytes())
+    let c = CString::new(target.as_os_str().as_encoded_bytes())
         .map_err(|_| "nul byte in path".to_string())?;
     if unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) } == 0 {
         return Ok(());
@@ -189,6 +250,7 @@ fn umount_target(target: &Path) -> Result<(), String> {
     Err(e.to_string())
 }
 
+/// Umount a single tracked bind and drop it from the list (gap-free reload)
 pub fn umount_one(target: &Path) -> bool {
     let _lock = match Lock::acquire() {
         Ok(l) => l,
@@ -208,16 +270,14 @@ pub fn umount_one(target: &Path) -> bool {
     let rows = tracked_full();
     for (t, s, lbl) in rows.iter().filter(|(t, _, _)| t == target) {
         let _ = t;
-        if !lbl.is_empty() {
-            restore_selinux(s, format!("{lbl}\0").as_bytes());
-        }
+        restore_source_label(s, lbl);
     }
     let remaining: String = rows
         .into_iter()
         .filter(|(t, _, _)| t != target)
         .map(|(t, s, l)| format!("{}\t{}\t{}\n", t.display(), s.display(), l))
         .collect();
-    if let Err(e) = fs::write(BINDS_LIST, &remaining) {
+    if let Err(e) = write_binds_list(&remaining) {
         eprintln!(
             "nomount: could not update {BINDS_LIST}: {e} - a bind may be left \
              recorded (or unrecorded) and will not be cleaned up on the next pass"
@@ -226,6 +286,7 @@ pub fn umount_one(target: &Path) -> bool {
     true
 }
 
+/// Umount every bind we recorded, then clear the list
 pub fn teardown_all() -> bool {
     let _lock = match Lock::acquire() {
         Ok(l) => l,
@@ -258,12 +319,10 @@ pub fn teardown_all() -> bool {
             kept.push_str(&format!("{}\t{}\t{}\n", t.display(), s.display(), lbl));
             continue;
         }
-        if !lbl.is_empty() {
-            restore_selinux(&s, format!("{lbl}\0").as_bytes());
-        }
+        restore_source_label(&s, &lbl);
     }
     if !kept.is_empty() {
-        if let Err(e) = fs::write(BINDS_LIST, &kept) {
+        if let Err(e) = write_binds_list(&kept) {
             eprintln!("nomount: could not rewrite {BINDS_LIST}: {e} - a bind that is still \
                        mounted has lost its only record");
         }
@@ -276,4 +335,46 @@ pub fn teardown_all() -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `binds.list` is the only record of the binds we made, and `parse_line` is the only
+    #[test]
+    fn a_binds_list_row_round_trips_through_parse_line() {
+        let row = "/my_product/etc/x\t/data/adb/modules/m/my_product/etc/x\tu:object_r:adb_data_file:s0";
+        let (t, s, l) = parse_line(row).expect("a full row parses");
+        assert_eq!(t, PathBuf::from("/my_product/etc/x"));
+        assert_eq!(s, PathBuf::from("/data/adb/modules/m/my_product/etc/x"));
+        assert_eq!(l, "u:object_r:adb_data_file:s0");
+        assert_eq!(format!("{}\t{}\t{}", t.display(), s.display(), l), row);
+
+        let (t, s, l) = parse_line("/my_product/etc/x\t/data/adb/modules/m/x").unwrap();
+        assert_eq!((t, s, l.as_str()), (PathBuf::from("/my_product/etc/x"),
+                                        PathBuf::from("/data/adb/modules/m/x"), ""));
+        let (_, s, _) = parse_line("/my_product/etc/x").unwrap();
+        assert!(s.as_os_str().is_empty());
+        assert!(parse_line("   ").is_none(), "a blank line is not a row");
+    }
+
+    /// The idempotency guard and the rollback filter must answer the same question, or a
+    #[test]
+    fn the_rollback_matches_exactly_what_the_append_guard_skips() {
+        let (t, s) = ("/my_product/etc/x", "/data/adb/modules/m/my_product/etc/x");
+        assert!(row_is(Path::new(t), Path::new(s), t, s));
+        assert!(row_is(Path::new(t), Path::new(s), t, s));
+        assert!(!row_is(Path::new(t), Path::new("/data/adb/modules/other/x"), t, s));
+        assert!(!row_is(Path::new("/my_product/etc/y"), Path::new(s), t, s));
+        assert!(!row_is(Path::new("/my_product/etc/xy"), Path::new(s), t, s));
+    }
+
+    /// An empty label field means the row cannot say what the source carried, and skipping the
+    #[test]
+    fn an_unrecorded_label_falls_back_to_adb_data_file() {
+        assert_eq!(label_to_restore(""), "u:object_r:adb_data_file:s0");
+        assert_eq!(label_to_restore("u:object_r:system_file:s0"), "u:object_r:system_file:s0");
+        restore_source_label(Path::new(""), "");
+    }
 }

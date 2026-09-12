@@ -1,3 +1,4 @@
+/* --- arch --- */
 #if defined(__aarch64__)
     #define SYS_GETCWD     17
     #define SYS_READ       63
@@ -153,30 +154,7 @@ static noinline void print_err(const char *s) {
     sys3(SYS_WRITE, 2, (long)s, len);
 }
 
-static noinline void print_json(const char *s) {
-    static const char hexd[] = "0123456789abcdef";
-    char esc[6];
-    long i = 0, run = 0;
-
-    while (s[i]) {
-        unsigned char c = (unsigned char)s[i];
-        if (c != '"' && c != '\\' && c >= 0x20) { i++; run++; continue; }
-        if (run) sys3(SYS_WRITE, 1, (long)(s + i - run), run);
-        run = 0;
-        if (c == '"' || c == '\\') {
-            esc[0] = '\\'; esc[1] = (char)c;
-            sys3(SYS_WRITE, 1, (long)esc, 2);
-        } else {
-            esc[0] = '\\'; esc[1] = 'u'; esc[2] = '0'; esc[3] = '0';
-            esc[4] = hexd[(c >> 4) & 0xF]; esc[5] = hexd[c & 0xF];
-            sys3(SYS_WRITE, 1, (long)esc, 6);
-        }
-        i++;
-    }
-    if (run) sys3(SYS_WRITE, 1, (long)(s + i - run), run);
-}
-
-static noinline void print_uint(unsigned int n) {
+static noinline void print_num(int fd, unsigned int n) {
     char buf[12];
     int i = 11;
     buf[i] = '\0';
@@ -184,8 +162,20 @@ static noinline void print_uint(unsigned int n) {
     do {
         buf[--i] = (n % 10) + '0';
         n /= 10;
-    } while (n > 0);    
-    print_str(&buf[i]);
+    } while (n > 0);
+    long len = 0;
+    while (buf[i + len]) len++;
+    sys3(SYS_WRITE, fd, (long)&buf[i], len);
+}
+
+static noinline void print_uint(unsigned int n) { print_num(1, n); }
+
+static noinline void print_refused(const char *what, int rc) {
+    print_err("nm: the kernel refused ");
+    print_err(what);
+    print_err(" (errno ");
+    print_num(2, rc < 0 ? -(unsigned int)rc : (unsigned int)rc);
+    print_err(")\n");
 }
 
 static noinline char* resolve_path(char *p, const char *cwd, const char *rel) {
@@ -201,16 +191,26 @@ static noinline char* resolve_path(char *p, const char *cwd, const char *rel) {
     return p;
 }
 
-static noinline void *get_attr(const void *nh, int type) {
+static noinline void *get_attr(const void *nh, int type, unsigned int min_payload) {
     unsigned int max_len = ((struct nlmsghdr *)nh)->nlmsg_len;
     char *attr = (char *)nh + 16;
     while ((attr - (char *)nh) + 4 <= max_len) {
         unsigned short alen = *(unsigned short *)attr;
         if (alen < 4 || (attr - (char *)nh) + alen > max_len) break;
-        if (*(unsigned short *)(attr + 2) == type) return attr + 4;
+        if (*(unsigned short *)(attr + 2) == type)
+            return (alen >= 4 + min_payload) ? attr + 4 : (void *)0;
         attr += (alen + 3) & -4;
     }
     return (void *)0;
+}
+
+static noinline char *get_attr_str(const void *nh, int type) {
+    char *s = get_attr(nh, type, 1);
+    if (!s) return (char *)0;
+    unsigned int alen = *(unsigned short *)(s - 4);
+    for (unsigned int p = 0; 4 + p < alen; p++)
+        if (!s[p]) return s;
+    return (char *)0;
 }
 
 static noinline void set_recv_timeout(int fd) {

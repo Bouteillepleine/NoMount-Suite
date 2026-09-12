@@ -1,9 +1,11 @@
+//! Client for the hookless NoMount kernel engine
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+/// Last-resort location of the bundled `nm` binary
 const DEFAULT_NM_BIN: &str = "/data/adb/modules/meta-nomount/bin/arm64-v8a/nm";
 
 pub struct Nm {
@@ -29,16 +31,23 @@ impl Nm {
             .output()
             .with_context(|| format!("exec {} {:?}", self.bin, args))?;
         if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let mut msg = err.trim().to_string();
+            if msg.is_empty() {
+                let out_s = String::from_utf8_lossy(&out.stdout);
+                msg = out_s.lines().next().unwrap_or_default().trim().to_string();
+            }
             bail!(
-                "nm {:?} failed (code {:?}): {}",
-                args,
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
+                "nm {} failed (exit {}): {}",
+                args.join(" "),
+                out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+                msg
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
+    /// `nm v` - driver version; doubles as a liveness/engine check
     pub fn version(&self) -> Result<u32> {
         self.run(&["v"])?
             .trim()
@@ -46,34 +55,41 @@ impl Nm {
             .context("nm v: non-numeric version (engine not responding?)")
     }
 
+    /// `nm add <virtual> <real>` - inject a VFS redirect
     pub fn add(&self, virtual_path: &Path, real: &Path) -> Result<()> {
         let public = crate::pmcache::is_pm_published(virtual_path);
         self.run(&add_argv(public, path_str(virtual_path)?, path_str(real)?))
             .map(drop)
     }
 
+    /// `nm del <virtual>` - remove a redirect by its virtual path
     pub fn del(&self, virtual_path: &Path) -> Result<()> {
         self.run(&["del", path_str(virtual_path)?]).map(drop)
     }
 
+    /// `nm w <path>` - whiteout (make a path appear absent)
     pub fn whiteout(&self, path: &Path) -> Result<()> {
         self.run(&["w", path_str(path)?]).map(drop)
     }
 
+    /// `nm block <uid>` - hide injections from this UID (sus_path substitute)
     pub fn uid_block(&self, uid: u32) -> Result<()> {
         self.run(&["block", &crate::blocklist::appid(uid).to_string()])
             .map(drop)
     }
 
+    /// `nm unblock <uid>`
     pub fn uid_unblock(&self, uid: u32) -> Result<()> {
         self.run(&["unblock", &crate::blocklist::appid(uid).to_string()])
             .map(drop)
     }
 
+    /// `nm k i <0..3>` - which isolated-process pools per-UID hiding covers
     pub fn set_hide_isolated(&self, mode: u32) -> Result<()> {
         self.run(&["k", "i", &mode.to_string()]).map(drop)
     }
 
+    /// `nm l u` - the kernel's live blocked-UID set (authoritative, straight from the driver's
     pub fn uid_list_live(&self) -> Result<Vec<u32>> {
         let out = self.run(&["l", "u"])?;
         let mut uids = Vec::new();
@@ -85,23 +101,91 @@ impl Nm {
         Ok(uids)
     }
 
+    /// Tell the engine whether this device's ROM directories are dirent-packed, so a
     pub fn set_dir_shape(&self, packed: bool) -> Result<()> {
         self.run(&["k", "d", if packed { "1" } else { "0" }]).map(|_| ())
     }
 
+    /// `nm clear` - drop all rules
     pub fn clear(&self) -> Result<()> {
         self.run(&["clear"]).map(drop)
     }
 
+    /// `nm list` - current rules (raw text)
     pub fn list(&self) -> Result<String> {
         self.run(&["list"])
     }
 
+    /// `nm l g` - the _ghost tables as `p /abs/path` and `u <uid>` lines
     pub fn ghost_list(&self) -> Result<String> {
         self.run(&["l", "g"])
     }
+
+    /// `nm k g` with no value - the presence probe
+    pub fn ghost_present(&self) -> bool {
+        self.run(&["k", "g"]).is_ok()
+    }
+
+    /// `nm k g <cmd>` - one _ghost control command
+    pub fn ghost_ctl(&self, cmd: &str) -> Result<()> {
+        self.run(&["k", "g", cmd]).map(drop)
+    }
+
+    /// `nm add` for many rules in one process
+    fn add_batch(&self, public: bool, pairs: &[(&Path, &Path)]) -> Result<()> {
+        let mut args: Vec<&str> = Vec::with_capacity(1 + usize::from(public) + pairs.len() * 2);
+        args.push("add");
+        if public {
+            args.push("--public");
+        }
+        for (v, r) in pairs {
+            args.push(path_str(v)?);
+            args.push(path_str(r)?);
+        }
+        self.run(&args).map(drop)
+    }
 }
 
+/// `nm`'s cap is 64 words in its path array (`p_args`), and `add` puts two paths in it per
+const ADD_BATCH_PAIRS: usize = 31;
+
+impl Nm {
+    /// Apply many injections with as few processes as possible
+    pub fn add_many<'a>(&self, pairs: &[(&'a Path, &'a Path)]) -> Vec<(&'a Path, &'a Path)> {
+        let mut failed = Vec::new();
+        for (public, group) in batch_groups(pairs, crate::pmcache::is_pm_published) {
+            for chunk in group.chunks(ADD_BATCH_PAIRS) {
+                if self.add_batch(public, chunk).is_ok() {
+                    continue;
+                }
+                for (v, r) in chunk {
+                    if self.add_batch(public, std::slice::from_ref(&(*v, *r))).is_err() {
+                        failed.push((*v, *r));
+                    }
+                }
+            }
+        }
+        failed
+    }
+}
+
+/// Split `pairs` into the two `--public` groups, preserving order within each
+fn batch_groups<'a>(
+    pairs: &[(&'a Path, &'a Path)],
+    is_public: fn(&Path) -> bool,
+) -> Vec<(bool, Vec<(&'a Path, &'a Path)>)> {
+    let mut out = Vec::new();
+    for public in [false, true] {
+        let g: Vec<(&Path, &Path)> =
+            pairs.iter().copied().filter(|(v, _)| is_public(v) == public).collect();
+        if !g.is_empty() {
+            out.push((public, g));
+        }
+    }
+    out
+}
+
+/// The argv `add` hands to `nm`
 fn add_argv<'a>(public: bool, virtual_path: &'a str, real: &'a str) -> Vec<&'a str> {
     let mut args = Vec::with_capacity(4);
     args.push("add");
@@ -118,6 +202,7 @@ fn path_str(p: &Path) -> Result<&str> {
         .with_context(|| format!("non-UTF8 path: {}", p.display()))
 }
 
+/// What a `nm list` line describes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LiveKind {
     Inject,
@@ -125,14 +210,19 @@ pub(crate) enum LiveKind {
     VirtualDir,
 }
 
+/// One parsed `nm list` line
 pub(crate) struct LiveRule {
     pub target: PathBuf,
+    /// Present only for an [`LiveKind::Inject`]
     pub source: Option<PathBuf>,
+    /// The ` [UID: N]` suffix, or 0 for a global rule
     pub uid: u32,
     pub kind: LiveKind,
+    /// The engine printed the per-rule `(public)` flag (engine >= 17 reports flags)
     pub public: bool,
 }
 
+/// Parse `nm list` output into typed rules - the one parser of this text
 pub(crate) fn parse_list(list: &str) -> Vec<LiveRule> {
     list.lines()
         .filter_map(|line| {
@@ -193,6 +283,7 @@ pub(crate) fn parse_list(list: &str) -> Vec<LiveRule> {
 mod tests {
     use super::*;
 
+    /// The flag is what keeps a PackageManager-registered APK readable by an app on the hide
     #[test]
     fn public_adds_the_flag_before_the_paths() {
         assert_eq!(
@@ -205,6 +296,7 @@ mod tests {
         );
     }
 
+    /// The policy `add` applies, stated where it is easy to check: everything pm scans and
     #[test]
     fn only_pm_published_files_opt_out_of_hiding() {
         for p in [
@@ -244,10 +336,13 @@ mod tests {
         assert_eq!(v[0].source.as_deref(), Some(Path::new("/data/adb/modules/M/x.apk")));
         assert!(v[0].public);
         assert_eq!(v[0].uid, 10123);
-        let w = parse_list("/system/y (public) (whiteout)\n");
-        assert_eq!(w.len(), 1);
-        assert_eq!(w[0].kind, LiveKind::Whiteout);
-        assert!(w[0].public);
+        for line in ["/system/y (public) (whiteout)\n", "/system/y (whiteout) (public)\n"] {
+            let w = parse_list(line);
+            assert_eq!(w.len(), 1, "{line:?}");
+            assert_eq!(w[0].kind, LiveKind::Whiteout, "{line:?}");
+            assert_eq!(w[0].target, PathBuf::from("/system/y"), "{line:?}");
+            assert!(w[0].public, "{line:?}");
+        }
         let p = parse_list("/product/z -> /data/adb/modules/M/z\n");
         assert!(!p[0].public);
         assert_eq!(p[0].uid, 0);
@@ -260,6 +355,46 @@ mod tests {
         assert!(parse_list(" (whiteout)").is_empty());
     }
 
+    /// `--public` is per-invocation, so a batch may never mix the two kinds
+    #[test]
+    fn batches_never_mix_public_and_private() {
+        fn fake_public(p: &Path) -> bool {
+            p.to_string_lossy().contains("/overlay/")
+        }
+        let a = Path::new("/system/lib64/a.so");
+        let b = Path::new("/product/overlay/B.apk");
+        let c = Path::new("/system/etc/c.conf");
+        let d = Path::new("/product/overlay/D.apk");
+        let src = Path::new("/data/adb/modules/M/x");
+        let pairs = [(a, src), (b, src), (c, src), (d, src)];
+        let groups = batch_groups(&pairs, fake_public);
+        assert_eq!(groups.len(), 2);
+        assert!(!groups[0].0, "the private group comes first");
+        assert_eq!(groups[0].1, vec![(a, src), (c, src)]);
+        assert!(groups[1].0, "the --public group comes second");
+        assert_eq!(groups[1].1, vec![(b, src), (d, src)]);
+    }
+
+    /// An empty side must not produce an empty invocation: `nm add` with no operand is an
+    #[test]
+    fn an_empty_group_is_dropped() {
+        fn none_public(_: &Path) -> bool { false }
+        let a = Path::new("/system/lib64/a.so");
+        let src = Path::new("/data/adb/modules/M/x");
+        let groups = batch_groups(&[(a, src)], none_public);
+        assert_eq!(groups.len(), 1, "only the private group survives");
+        assert!(!groups[0].0);
+        assert!(batch_groups(&[], none_public).is_empty());
+    }
+
+    /// The chunk has to fit nm's 64-slot path array, which nm refuses to exceed rather than
+    #[test]
+    fn a_batch_fits_nms_argv_cap() {
+        let paths = ADD_BATCH_PAIRS * 2;
+        assert!(paths <= 64, "{paths} paths would be refused by nm");
+    }
+
+    /// A source path containing ` -> ` must not move the split: the source is whatever follows
     #[test]
     fn parse_list_splits_on_the_last_arrow() {
         let v = parse_list("/system/etc/a -> b -> /data/adb/modules/M/x\n");

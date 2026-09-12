@@ -1,11 +1,23 @@
+/* elfrw.c: Initialization and single-value functions.
+ * Copyright (C) 2011 by Brian Raiter <breadbox@muppetlabs.com>
+ * License GPLv2+: GNU GPL version 2 or later.
+ * This is free software; you are free to change and redistribute it.
+ * There is NO WARRANTY, to the extent permitted by law.
+ */
 #include <stdio.h>
 #include <elf.h>
 #include "elfrw_int.h"
 
+/* The library's current settings.
+ */
 unsigned char _elfrw_native_data;
 unsigned char _elfrw_current_class;
 unsigned char _elfrw_current_data;
 unsigned char _elfrw_current_version;
+
+/*
+ * Initialization functions.
+ */
 
 int elfrw_initialize_direct(unsigned char class, unsigned char data,
 			    unsigned char version)
@@ -55,6 +67,10 @@ void elfrw_getsettings(unsigned char *class, unsigned char *data,
     if (version)
 	*version = _elfrw_current_version;
 }
+
+/*
+ * The basic read functions.
+ */
 
 int elfrw_read_Half(FILE *fp, Elf64_Half *in)
 {
@@ -121,6 +137,10 @@ int elfrw_read_Versym(FILE *fp, Elf64_Versym *in)
 {
     return elfrw_read_Half(fp, (Elf64_Half*)in);
 }
+
+/*
+ * The basic write functions.
+ */
 
 int elfrw_write_Half(FILE *fp, Elf64_Half const *out)
 {

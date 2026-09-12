@@ -6,6 +6,7 @@ mod blocklist;
 mod cli;
 mod dirshape;
 mod doctor;
+mod ghost;
 mod health;
 mod json;
 mod manager;
@@ -13,6 +14,7 @@ mod mount;
 mod nm;
 mod pmcache;
 mod presets;
+mod statefile;
 mod whiteout;
 
 use anyhow::Result;
@@ -24,7 +26,19 @@ fn main() -> Result<()> {
     unsafe { libc::umask(0o077) };
 
     let cli = Cli::parse();
-    match cli.command {
+    let resync_ghost = cli::changes_ghost_inputs(&cli.command);
+    if cli::serves_injections(&cli.command) && mount::guard_tripped() {
+        anyhow::bail!(
+            "the bootloop guard has parked the Suite ({}), so nothing is being injected - \
+             this device failed to finish booting three times in a row. `nomount check` and \
+             {}/incident.log say what happened; once you know why, clear the marker and reboot: \
+             rm {}",
+            mount::DISABLED_MARKER,
+            "/data/adb/nomount",
+            mount::DISABLED_MARKER
+        );
+    }
+    let r = match cli.command {
         Commands::Mount => mount::run_mount(),
         Commands::Vfs { action } => cli::handlers::handle_vfs(action),
         Commands::Uid { action } => cli::handlers::handle_uid(action),
@@ -46,9 +60,20 @@ fn main() -> Result<()> {
         Commands::Snapshot => health::run_snapshot(),
         Commands::Verify => health::run_verify(),
         Commands::Export { dir } => health::run_export(dir),
+        Commands::Ghost { action } => match action {
+            cli::GhostAction::Sync => ghost::run_sync(true),
+            cli::GhostAction::List => {
+                print!("{}", nm::Nm::new().ghost_list()?);
+                Ok(())
+            }
+        },
         Commands::Version => {
             println!("nomount v{}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+    };
+    if resync_ghost {
+        ghost::sync_quietly(&nm::Nm::new());
     }
+    r
 }

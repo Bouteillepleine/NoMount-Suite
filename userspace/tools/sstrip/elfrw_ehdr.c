@@ -1,7 +1,18 @@
+/* elfrw_ehdr.c: Functions for the ELF header.
+ * Copyright (C) 2011 by Brian Raiter <breadbox@muppetlabs.com>
+ * License GPLv2+: GNU GPL version 2 or later.
+ * This is free software; you are free to change and redistribute it.
+ * There is NO WARRANTY, to the extent permitted by law.
+ */
 #include <stdio.h>
 #include <string.h>
 #include <elf.h>
 #include "elfrw_int.h"
+
+/*
+ * Reading and writing the ELF header. elfrw_read_Ehdr() is unique in
+ * that it also automatically initializes the elfrw settings.
+ */
 
 int elfrw_read_Ehdr(FILE *fp, Elf64_Ehdr *in)
 {
