@@ -199,15 +199,15 @@ The engine builds on all ten kernel versions - 4.9, 4.14, 4.19, 5.4, 5.10, 5.15,
 6.1, 6.6, 6.12 and 6.18 - and none of it is OnePlus-specific: it is ordinary VFS
 code, no vendor hooks, no SoC assumptions. The table names OnePlus devices only
 because those are the kernels anyone has *built and booted*. What differs between
-the rows is not whether the engine builds, but whether it has been measured on a
+the rows is not whether the engine builds, but whether anyone has booted it on a
 phone.
 
 | Kernel | Tested on | Status |
 | :--- | :--- | :--- |
-| 6.12 | **OnePlus 15** | ✅ Booted, `check` clean - 15 passed, 0 failed, 0 unmeasured; 257 injections served, zero mounts of our own |
-| 6.1 | **OnePlus 13R** | ✅ Booted, 261/261 rules verified |
-| 5.15 | **OnePlus 11** | ✅ Booted, `check` clean, 118/118 rules verified |
-| 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, ... (18 models) | ✅ Booted, 261/261 rules verified |
+| 6.12 | **OnePlus 15** | ✅ Booted |
+| 6.1 | **OnePlus 13R** | ✅ Booted |
+| 5.15 | **OnePlus 11** | ✅ Booted |
+| 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, ... (18 models) | ✅ Booted |
 | 5.10 | Ace 2, Ace 2V, Nord 3, ... (6 models) | 🧩 Compiled, not tested |
 | 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these - other vendors do | 🧩 Compiled, not tested |
 
