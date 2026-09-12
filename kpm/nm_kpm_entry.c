@@ -9,8 +9,12 @@
 
 #include "nm_kpm_syms.h"
 
+#ifndef NM_KPM_VER
+#define NM_KPM_VER "0.0.0-unknown"
+#endif
+
 KPM_NAME("nomount");
-KPM_VERSION("1.26.0");
+KPM_VERSION(NM_KPM_VER);
 KPM_LICENSE("GPL v2");
 KPM_AUTHOR("XxxY");
 KPM_DESCRIPTION("NoMount Prism VFS engine (KernelPatch module build)");
@@ -50,6 +54,8 @@ static long nm_kpm_resolve(void)
 		if (!p && !e->optional) {
 			logke("nomount: kpm: required symbol not found: %s\n", e->name);
 			missing++;
+		} else if (!p) {
+			logkw("nomount: kpm: optional symbol absent: %s\n", e->name);
 		}
 		nm_kpm_sym[e->idx] = p;
 	}

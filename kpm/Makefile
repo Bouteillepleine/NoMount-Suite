@@ -49,6 +49,12 @@ CC_INCLUDE := $(shell $(CC) -print-file-name=include)
 
 COMMON := -O2 -fno-stack-protector -fno-pic -ffreestanding -Wall
 
+NM_ENGINE_VERSION := $(shell sed -n 's/^#define NM_MODULE_VERSION[ \t]*"\(.*\)".*/\1/p' \
+                       $(ENGINE_DIR)/nomount.h)
+ifeq ($(NM_ENGINE_VERSION),)
+    $(error could not read NM_MODULE_VERSION from $(ENGINE_DIR)/nomount.h)
+endif
+
 # How kbuild is invoked for the engine object. Defaults to clang because the GKI
 # kernels this targets are clang-built and their headers use clang-only
 # attributes; a gcc kbuild against them fails in ways that have nothing to do
@@ -65,8 +71,8 @@ all: nomount.kpm
 nomount.kpm: nm_kpm_entry.o nm_engine.o nm_maps_spoof.o nm_kpm_tramp.o
 	$(CC) -r -o $@ $^
 
-nm_kpm_entry.o: nm_kpm_entry.c nm_kpm_syms.h nm_kpm_table.h
-	$(CC) $(COMMON) $(KP_FLAGS) -c -o $@ $<
+nm_kpm_entry.o: nm_kpm_entry.c nm_kpm_syms.h nm_kpm_table.h $(ENGINE_DIR)/nomount.h
+	$(CC) $(COMMON) $(KP_FLAGS) -DNM_KPM_VER='"$(NM_ENGINE_VERSION)"' -c -o $@ $<
 
 # The trampolines. Compiled with no kernel headers at all -- the file uses only
 # the shared enum, which is the whole point of doing this in asm rather than as
