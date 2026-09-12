@@ -1,5 +1,0 @@
-# arm64-v8a only, matching scripts/package.sh's ABI_TARGET and build.yaml's
-# matrix. Entries for armv7/x86_64/i686 lived here for targets nothing in this
-# repo has ever built; add them back alongside the ABI, not before it.
-[target.aarch64-linux-android]
-linker = "aarch64-linux-android26-clang"
