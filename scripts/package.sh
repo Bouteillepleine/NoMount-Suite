@@ -218,7 +218,6 @@ setup_toolchain() {
         echo "fatal: Android NDK not found. Set ANDROID_NDK_HOME." >&2
         exit 1
     fi
-    # The only place the cross-linker is named; there is no .cargo/config.toml to drift from.
     local clang="$NDK_BIN/aarch64-linux-android26-clang"
     [ "$hostdir" = "windows-x86_64" ] && clang="$clang.cmd"
     export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$clang"
