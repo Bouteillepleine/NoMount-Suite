@@ -5,37 +5,19 @@ included. No `overlayfs`, no `tmpfs`: files are served by redirecting VFS lookup
 in the kernel, so `/proc/mounts` shows the stock set and there is no mount gap
 for a scanner to find.
 
-One exception: OnePlus/Oppo `my_*` partitions are served by a
-real bind mount, because a hookless injection there trips zygote's FD allowlist
-and bootloops the device. If a module of yours ships `my_*` content, those binds
-are in the mount table and an app can read them. `nomount check` counts them and
-the WebUI names them; the `my_hookless` trial removes them at the risk the
-bootloop guard exists to catch.
-
-### Before you download
-
-This needs a custom kernel. NoMount is two halves: a kernel driver and this
-module. The module on its own does nothing: it installs, it reports, and it
-injects not one file.
-
-- **Already running a NoMount kernel?** Check it:
-  `zcat /proc/config.gz | grep NOMOUNT` - you want `CONFIG_NOMOUNT=y`. If that
-  errors instead of printing, your kernel does not publish its config
-  (`CONFIG_IKCONFIG_PROC` is off, which custom kernels drop fairly often) - that
-  is *not* the same as "not set". Flash the zip and read the install screen
-  instead: it probes the engine directly and says which it is.
-- **OnePlus?** Prebuilt kernels are linked under [Install](#install); flash one
-  first.
-- **Anything else?** You need to build your kernel with `CONFIG_NOMOUNT=y` from
-  the `hookless/` source here. If that is not something you do, this project is
-  not ready for you yet.
-
-If you flash the module on a stock kernel it will tell you so - on the install
-screen, on the module card, and in the WebUI - but it is a wasted reboot.
-
 It is a metamodule: at boot it scans `/data/adb/modules/`, classifies every file
 and programs the kernel engine over netlink. No per-module setup. Only one
 metamodule can be active, so it refuses to install alongside another.
+
+> **This needs a custom kernel.** NoMount is two halves: the **Prism** kernel
+> driver and this module. On a stock kernel the module installs, reports, and
+> injects not one file - the installer says so rather than reporting success.
+
+One exception to zero mounts: OnePlus/Oppo `my_*` partitions are served by a real
+bind mount, because a hookless injection there trips zygote's FD allowlist and
+bootloops the device. Those binds are visible to any app. `nomount check` counts
+them and the WebUI names them; the `my_hookless` trial removes them at the risk
+the bootloop guard exists to catch.
 
 <table>
   <tr>
@@ -56,18 +38,18 @@ metamodule can be active, so it refuses to install alongside another.
 
 ## Install
 
-The kernel comes first. The Suite is the userspace half of a pair; the engine
-lives in the kernel. Flashing the zip on a kernel without it installs cleanly and
-then injects **nothing** - the installer says so in as many words rather than
-reporting success, but it is still the wrong order.
-
 **1. Get a kernel with the Prism engine.**
 
 | | |
 | :--- | :--- |
 | **OnePlus** | Prebuilt kernels from [`OnePlus-ReSukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases), [`OnePlus-KsuNext_NMS`](https://github.com/Bouteillepleine/OnePlus-KsuNext_NMS/releases) or [`OnePlus-SukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-SukiSu_NMS/releases) - pick the one matching the root manager you want. |
 | **Anything else** | Build your own with `CONFIG_NOMOUNT=y`. The driver and its integration patch are in [`hookless/`](hookless/); nothing in them is vendor- or SoC-specific. |
-| **Cannot rebuild?** | See [Out-of-tree variants](#out-of-tree-variants) - untested on hardware, and each branch says what that costs before it says anything else. |
+| **Cannot rebuild?** | See [Out-of-tree variants](#out-of-tree-variants) - untested on hardware. |
+
+Already on a NoMount kernel? `zcat /proc/config.gz | grep NOMOUNT` should print
+`CONFIG_NOMOUNT=y`. If it errors instead, your kernel simply does not publish its
+config - not the same as "not set". Flash the zip and read the install screen,
+which probes the engine directly.
 
 **2. Install the module.** Download
 [the latest release](https://github.com/Bouteillepleine/NoMount-Suite/releases/latest)
@@ -78,15 +60,15 @@ ksud module install /sdcard/Download/00_NoMount-Module-vX.Y.Z.zip
 ```
 
 The installer verifies the zip against a bundled `sha256` manifest, refuses to
-sit alongside another metamodule, and probes the engine so you find out *at
-install time* whether the kernel has it. From recovery that probe cannot answer,
+sit alongside another metamodule, and probes the engine so you find out at
+install time whether the kernel has it. From recovery that probe cannot answer,
 which it also says.
 
 **3. Reboot.** Module content is served from the first boot pass onwards.
 
-**4. Check it worked.** The WebUI opens on Status. The same answers from a root
-shell - but `nomount` is **not on `PATH`**: it ships inside the module and
-nothing installs it system-wide, so set this up once per shell first.
+**4. Check it worked.** The WebUI opens on Status. Same answers from a root shell
+- but `nomount` is **not on `PATH`**: it ships inside the module, so set this up
+once per shell first.
 
 ```sh
 alias nomount=/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount
@@ -104,28 +86,24 @@ settings are preserved across an update, and restored if an install aborts.
 ## Requirements
 
 - **arm64** device; the zip ships an `arm64-v8a` binary only.
-- A kernel with the **Prism** engine (`CONFIG_NOMOUNT=y`). Its source lives in
-  this repository under [`hookless/`](hookless/) - the driver and the integration
-  patch. The engine and this Suite are versioned together because they have to
-  be flashed together: the control plane is a private protocol between them, and
-  a mismatched pair reads as "engine not responding" with nothing to say why.
+- A kernel with the **Prism** engine (`CONFIG_NOMOUNT=y`), source in
+  [`hookless/`](hookless/). The engine and this Suite are versioned together
+  because they have to be flashed together: the control plane is a private
+  protocol between them, and a mismatched pair reads as "engine not responding"
+  with nothing to say why.
 - **KernelSU**, **SukiSU** or **ReSukiSU** (metamodule hook), or **Magisk**
-  (`post-fs-data`). If neither path runs, the module says so loudly rather than
-  doing nothing silently.
-  Magisk and APatch are untested. Both code paths exist and are exercised by
-  the boot scripts, but nobody has reported back from either, so treat them as
-  unverified rather than supported - everything below was measured on ReSukiSU.
+  (`post-fs-data`). Everything here was measured on ReSukiSU; the Magisk and
+  APatch code paths exist and run, but nobody has reported back from either, so
+  treat them as unverified rather than supported.
 - SUSFS is not needed for the ordinary case - nothing the engine serves is a
-  mount, so there is no mount for it to conceal. The one exception is the `my_*`
-  binds described at the top: those are ordinary mounts, they are on by default
-  (`my_hookless` is the opt-in that removes them), and SUSFS *can* hide them -
-  so can your manager's "umount modules" switch. The two can coexist, as some
-  users have reported having built their kernels with SUSFS.
+  mount. The `my_*` binds above are the exception: they are ordinary mounts, on
+  by default, and SUSFS or your manager's "umount modules" switch can hide them.
+  The two coexist fine.
 
 ## Repository layout
 
-Both halves of the system live here, because they are flashed as a pair and a
-mismatched pair is the one failure neither half can explain (see Requirements).
+Both halves live here, because they are flashed as a pair and a mismatched pair
+is the one failure neither half can explain.
 
 | Path | What it is |
 | :--- | :--- |
@@ -137,7 +115,7 @@ mismatched pair is the one failure neither half can explain (see Requirements).
 
 ## Building
 
-The zip is built by CI on every code push and published on a `v*` tag, so you
+CI builds the zip on every code push and publishes it on a `v*` tag, so you
 rarely need to. Locally:
 
 ```
@@ -145,73 +123,41 @@ cargo test && cargo clippy --all-targets -- -D warnings
 ANDROID_NDK_HOME=/path/to/ndk scripts/package.sh --build --version vX.Y.Z
 ```
 
-You need the Android NDK for the Rust cross-compile. `nm` is built from source
-too: by `zig cc` if zig is on `PATH` (what CI uses), otherwise by the NDK's own
-clang, so you do not have to install zig. If neither is available, `package.sh`
-falls back to a prebuilt - but only one that is newer than
-`userspace/src/nm.[ch]`, and it stops with an error rather than quietly
+The Android NDK is required for the Rust cross-compile. `nm` is built from
+source too - by `zig cc` if zig is on `PATH` (what CI uses), otherwise by the
+NDK's own clang. If neither is available, `package.sh` falls back to a prebuilt,
+but only one newer than `userspace/src/nm.[ch]`; otherwise it errors rather than
 packaging a stale binary.
-
-A push to `prerelease` runs the unit tests, clippy at `-D warnings`, and
-shellcheck over the module scripts and the build script, then builds and packages
-the zip. A push that touches only documentation runs nothing - `**.md` and
-`docs/**` are filtered out. That is the whole of CI on this branch: the
-ten-version kernel compile matrix that used to run on any push touching
-`hookless/` was removed deliberately, so an engine change is now checked by the
-kernel builders and on a phone, not here.
 
 ## Out-of-tree variants
 
 The supported build is in-tree: `CONFIG_NOMOUNT=y`, compiled into the kernel.
 Two other ways to load the same engine live on their own branches, for cases
-where you cannot rebuild the kernel. Both include `hookless/src/nomount.c`
-rather than copying it, so neither can drift from what the Suite ships.
+where you cannot rebuild the kernel. Both `#include` `hookless/src/nomount.c`
+rather than copying it, so neither can drift from what the Suite ships, and both
+carry the `/proc/<pid>/maps` spoof (through kprobes in the LKM, KernelPatch hooks
+in the KPM).
 
 | | branch | `/proc/modules` | maps spoof | kernels |
 | :--- | :--- | :--- | :--- | :--- |
 | **in-tree** | `main` | absent | yes | 4.9 - 6.18 |
-| **KPM** (KernelPatch/APatch) | [`KPM`](../../tree/KPM) | absent | yes - two KernelPatch hooks | 6 KMIs, 5.10 - 6.6 |
-| **LKM** (loadable module) | [`LKM`](../../tree/LKM) | **listed** | yes - two kprobes | 4.9 - 6.18 |
+| **KPM** (KernelPatch/APatch) | [`KPM`](../../tree/KPM) | absent | yes | 6 KMIs, 5.10 - 6.6 |
+| **LKM** (loadable module) | [`LKM`](../../tree/LKM) | **listed** | yes | 4.9 - 6.18 |
 
-Both now carry the `/proc/<pid>/maps` spoof, reaching the same
-`vfs_map_meta_override()` the in-tree call site does - through kprobes in the
-LKM and KernelPatch hooks in the KPM, two each, because the inode and the
-`dev`/`ino` pair live in different functions.
-
-Neither has been loaded on a device. They compile, and CI proves that much and
-no more - read each branch's `README.md`, which says what it costs before it
-says anything else.
-
-### Building them in CI
-
-Both variants build from the Actions tab.
-
-| workflow | branch | what it gives you |
-| :--- | :--- | :--- |
-| **Build** | `LKM` | the module zip, with one `nomount-<kmi>.ko` bundled per GKI KMI generation plus a loader. The `ko <kmi>` jobs take ~2 minutes each. |
-| **NoMount LKM - out-of-tree build** | `LKM` | compile gate over all ten kernel versions. It proves the engine still builds as a module and nothing more - it runs modpost under `KBUILD_MODPOST_WARN=1`, which suppresses undefined symbols and missing namespace imports alike, so it cannot tell you a module would link. |
-| ~~**NoMount KPM - build a KernelPatch module**~~ | `KPM` | **removed.** It built one `nomount-<kmi>.kpm` per KMI up to 6.6 in the DDK containers, failing if any symbol would be unresolvable at load, and it ran once in its life. The code is still on the `KPM` branch and the workflow is in git history; restore it there if the route is ever picked back up. Note the cfi caveat in `kpm/README.md`. |
-
-The per-KMI modules are built inside `ghcr.io/ylarod/ddk:<kmi>`, whose `$KDIR`
-already holds a released GKI kernel's own configured tree - the struct layouts,
-and for the LKM the real `Module.symvers`, that a phone actually has, without
-compiling a kernel. (A `.kpm` resolves its symbols through kallsyms, so an export
-table would not help it; what it needs from `$KDIR` is the generated headers and
-the layouts they imply.)
-
-A module is portable across a **KMI generation**, not a kernel version:
-`android12-5.10` and `android13-5.10` are the same version and different KMIs.
-Vermagic must still match at load - it is `UTS_RELEASE` plus flags, and GKI keeps
-the git SHA out of it, which is what lets one `.ko` serve a generation. A custom
-kernel that sets its own `LOCALVERSION` breaks that, so check `modinfo
-nomount.ko` against `cat /proc/version` before assuming.
+Neither has been loaded on a device. They compile, and CI proves that much and no
+more - read each branch's `README.md`, which says what it costs before it says
+anything else. The `LKM` branch's **Build** workflow produces the module zip with
+one `nomount-<kmi>.ko` per GKI KMI generation plus a loader; note that a module
+is portable across a *KMI generation*, not a kernel version, and vermagic must
+still match at load, so check `modinfo nomount.ko` against `cat /proc/version`.
 
 ## Commands
 
 Every command below is the module's own binary at
-`/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount` - there is nothing to
-install on `PATH`, so use the alias from **Install** step 4 (or type the full
-path). The WebUI covers the same ground with no shell at all.
+`/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount` - use the alias from
+**Install** step 4, or type the full path. The WebUI covers the same ground with
+no shell at all: status, modules, rules, per-app hiding, and the durable
+hidden-paths list.
 
 | Command | Description |
 | :--- | :--- |
@@ -234,21 +180,12 @@ path). The WebUI covers the same ground with no shell at all.
 | `nomount uid apply [--early]` | Re-apply the hide list. |
 | `nomount uid preset [name] [--dry-run] [--globs]` | Add a curated preset; no argument lists what is available. |
 | `nomount uid isolated [mode]` | Which isolated-process pools are hidden. |
-| `nomount check [--plan] [--device] [--json] [--write]` | **The** diagnostic. `--plan` static, `--device` measured, neither flag runs both. Exits 1 on a FAIL. `--write` caches for the WebUI and card. |
+| `nomount check [--plan] [--device] [--json] [--write]` | **The** diagnostic. `--plan` static (does the module set resolve into a bad rule?), `--device` measured (is what we serve detectable, and is it being served?); neither flag runs both. Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`, `N/A`, `NOTE` - "nothing to test" and "something stopped me testing" are deliberately different, and neither is a pass. Exits 1 on a FAIL. |
 | `nomount plan` | Print what the mount pass would resolve to, without applying it. Read-only. |
 | `nomount snapshot` | Freeze the current fingerprint as a baseline. |
 | `nomount verify` | Diff live against that baseline and name what drifted. |
 | `nomount export [dir]` | Dump diagnostics to a folder; the hide list is redacted on shared storage. |
 | `nomount version` | Print the version. |
-
-`check` is the one diagnostic: `--plan` is static (does the module set resolve
-into a bad rule?), `--device` is measured (is what we serve detectable, and is it
-being served?). Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`,
-`N/A`, `NOTE` - "nothing to test" and "something stopped me testing" are
-deliberately different, and neither is a pass.
-
-A WebUI covers the same ground on the phone: status, modules, rules, per-app
-hiding, and the durable hidden-paths list.
 
 Two files under `/data/adb/nomount/` are hand-edited rather than driven by a
 command, one entry per line: `blocklist` (module ids the boot pass must not
@@ -258,24 +195,12 @@ an explanation in its own header).
 
 ## Compatibility
 
-The engine is written to build on all ten kernel versions - 4.9, 4.14, 4.19, 5.4,
-5.10, 5.15, 6.1, 6.6, 6.12 and 6.18, legacy and current alike - and the
-out-of-tree compile gate on the `LKM` branch still covers that set. It is no
-longer checked on every engine change here; the in-tree matrix that did that was
-removed. What differs between the
-rows below is not whether the engine builds, but whether anyone has booted it on
-a phone and measured the result. Four have; the rest have not, which is a weaker
-claim, so it is written as one.
-
-None of this is OnePlus-specific. The engine is ordinary VFS code: no vendor
-hooks, no SoC assumptions, nothing that reads a OnePlus tree. The table names
-OnePlus devices because those are the kernels that have been *built and booted* -
-the three kernel builders shipping it are OnePlus builders, so that is simply
-where the evidence comes from. Any device whose kernel you can rebuild with
-`CONFIG_NOMOUNT=y` works the same way, on any of the ten versions. The last row
-is not a gap in support: no OnePlus ships those versions, so no OnePlus builder
-boots them, but plenty of other devices run them and the engine builds for all of
-them.
+The engine builds on all ten kernel versions - 4.9, 4.14, 4.19, 5.4, 5.10, 5.15,
+6.1, 6.6, 6.12 and 6.18 - and none of it is OnePlus-specific: it is ordinary VFS
+code, no vendor hooks, no SoC assumptions. The table names OnePlus devices only
+because those are the kernels anyone has *built and booted*. What differs between
+the rows is not whether the engine builds, but whether it has been measured on a
+phone.
 
 | Kernel | Tested on | Status |
 | :--- | :--- | :--- |
@@ -286,20 +211,14 @@ them.
 | 5.10 | Ace 2, Ace 2V, Nord 3, ... (6 models) | 🧩 Compiled, not tested |
 | 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these - other vendors do | 🧩 Compiled, not tested |
 
-"Compiled" means `fs/nomount.o` built against that version's canonical tree the
-last time a matrix ran - the in-tree one is gone, and only the `LKM` branch's
-out-of-tree gate still covers the set. It says nothing about whether the device
-boots. A report either way is worth an issue.
+"Compiled" means `fs/nomount.o` built against that version's canonical tree; the
+`LKM` branch's out-of-tree gate still covers the whole set. It says nothing about
+whether the device boots. A report either way is worth an issue.
 
-Root managers: **KernelSU**, **SukiSU** and **ReSukiSU** via the metamodule
-hook; **Magisk** via `post-fs-data.sh`, and **APatch** via the same metamodule
-hook. Every device in the table above ran ReSukiSU - Magisk and APatch have not
-been tested by anyone yet.
-
-Tested another combo? Open an issue - the WebUI's **Check → Developer tools →
-Export** button (or `nomount export` from a shell) produces a bundle with the
-hide list already redacted, which is the most useful thing to attach. A report
-that one of the untested managers works is as useful as a bug.
+Tested another device or root manager? Open an issue - the WebUI's **Check →
+Developer tools → Export** button (or `nomount export` from a shell) produces a
+bundle with the hide list already redacted, which is the most useful thing to
+attach. A report that one of the untested managers works is as useful as a bug.
 
 ## License and origin
 
@@ -334,5 +253,4 @@ are not responsible for bricked devices or thermonuclear war.
 > **Beta.** It works at the kernel VFS layer, and the whole point of this stage
 > is getting it to stable. What moves it there is reports from setups outside
 > the tested set - a different device, a different root manager, a module that
-> behaves oddly. The WebUI's **Check → Developer tools → Export** button
-> produces the bundle for that, hide list already redacted - no pc needed.
+> behaves oddly.
