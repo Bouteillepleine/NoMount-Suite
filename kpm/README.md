@@ -25,24 +25,36 @@ build; see the repository root readme.
 ## Status
 
 **Builds for every supported KMI; never loaded on hardware.** The engine it wraps
-is `../hookless/src/nomount.c` at `NM_MODULE_VERSION 1.26.0` - the same one the
+is `../hookless/src/nomount.c` at `NM_MODULE_VERSION 1.32.0` - the same one the
 in-tree build and the Suite ship, included rather than copied so it cannot drift.
 
-CI builds a `nomount-<kmi>.kpm` for each GKI KMI generation up to 6.6, inside the
-Android DDK containers, and the only symbols left undefined in them are the two
-KernelPatch supplies to every module (`kallsyms_lookup_name`, `printk`).
-`.github/workflows/build-kpm.yml` fails the build if anything else survives,
-because KernelPatch's loader rejects the whole module on the first symbol it
-cannot resolve.
+That only holds within a branch. This branch is the whole repository plus
+`kpm/`, so it has to be refreshed from `main` or the .kpm wraps an old engine -
+it had drifted to 1.26.0/Suite 1.3.117. `KPM_VERSION` is no longer written down
+either: the Makefile reads `NM_MODULE_VERSION` out of the header.
 
-| KMI | size |
-| :--- | ---: |
-| `android12-5.10` | 1053600 |
-| `android13-5.10` | 1068560 |
-| `android13-5.15` | 1059496 |
-| `android14-5.15` | 1060936 |
-| `android14-6.1`  | 1082912 |
-| `android15-6.6`  | 737392 |
+CI builds a `nomount-<kmi>.kpm` for each GKI KMI generation up to 6.6, inside the
+Android DDK containers, and the only symbols left undefined in them are ones
+KernelPatch supplies to every module. `kpm/gate.sh` fails the build if anything
+else survives - reading the allow-list out of the KernelPatch checkout, since
+`KP_EXPORT_SYMBOL()` is what actually decides - because KernelPatch's loader
+rejects the whole module on the first symbol it cannot resolve.
+
+| KMI | built by | gate |
+| :--- | :--- | :--- |
+| `android11-5.4`  | `build-5_4`, cloned+configured tree, gcc | clean, local tree |
+| `android12-5.10` | DDK container, clang | clean, CI and local tree |
+| `android13-5.10` | DDK container, clang | clean, CI |
+| `android13-5.15` | DDK container, clang | clean, CI and local tree |
+| `android14-5.15` | DDK container, clang | clean, CI |
+| `android14-6.1`  | DDK container, clang | clean, CI and local tree |
+| `android15-6.6`  | DDK container, clang | clean, CI and local tree |
+
+"Local tree" is a checkout configured with `gki_defconfig`: enough for the
+symbol list and the gate, not enough for struct offsets, which is why CI uses
+the containers. A 5.10 tree needs `CROSS_COMPILE=` alongside `CC=clang` (later
+versions infer it), and the local 5.10 run had `CONFIG_STACKPROTECTOR` off
+because clang 18 rejects that tree's `-mstack-protector-guard=sysreg`.
 
 Building per KMI is a correctness requirement here, not a convenience. The engine
 half is compiled against real kernel headers because it dereferences `struct
@@ -54,7 +66,34 @@ own configured tree. It also settles the unit: `android12-5.10` and
 `android13-5.10` are the same version and different KMIs, and nothing about a
 version number promises the structs agree.
 
-`android11-5.4` is absent because the DDK publishes no container for it.
+`android11-5.4` has no DDK container, so the `build-5_4` job clones and
+configures that kernel and builds with the distro cross gcc - a weaker guarantee
+than a container, and still the symbol list and the gate. Reaching it needed one
+fix: `Kbuild` passed `-fno-sanitize=cfi` unconditionally, gcc rejects the
+argument, so every gcc target died at the first object. The flag is now keyed on
+`CONFIG_CC_IS_CLANG`.
+
+### The table said every symbol was required, and that refuses to load
+
+The failure a build gate cannot see, and the reason "it builds" and "it loads"
+are different claims.
+
+`nm_kpm_table.h` is shared by all targets and `nm_kpm_entry.c` refuses to start
+when a *required* symbol is not in kallsyms - while the names are not shared:
+6.5 renamed `__list_add_valid` to `__list_add_valid_or_report`, `printk` became
+`_printk`, `kfree_skb` became `kfree_skb_reason`, and each build references
+whichever name its own headers gave it.
+
+The checked-in table had been generated without `--per-version`, so every row
+came out `optional = 0`. A 6.6 module demanded `__list_add_valid`, which 6.6
+does not have; a 5.10 module demanded `__list_add_valid_or_report`, which 5.10
+does not have. Both would have logged "required symbol not found" and refused,
+on every KMI, while passing the build gate on all of them.
+
+So the per-target lists are not optional input: `optional` is union minus
+intersection across every target, and `gen-shim.py` now rejects an empty list
+file, because that input marks everything optional - the same bug the other way
+round, a module that loads and then jumps through a NULL slot.
 
 ### The `/proc/<pid>/maps` spoof
 
@@ -104,9 +143,14 @@ and cfi included. That remains the supported way to run the engine.
 ### What is still not done
 
 1. **A load test on a real APatch device at 6.6 or below.** No OnePlus 15 can
-   serve: it runs 6.12, above KernelPatch's cap. Until someone loads it, this is
-   `UNMEASURED` in the sense the rest of this project uses the word - it builds,
-   which is a different claim from it working.
+   serve: it runs 6.12, above KernelPatch's cap. An OnePlus 11 is 5.15 and in
+   range. Until someone loads it this is `UNMEASURED` in the sense the rest of
+   this project uses the word - it builds, which is a different claim from it
+   working. The required/optional fix only buys a load that reaches the engine;
+   before it, the module refused at symbol resolve on every KMI.
+
+2. **The CFI question below.** Only a load on 5.10 or 5.15 answers it, and it is
+   the first thing to suspect if one panics there.
 
 ## How the symbol plumbing works
 
@@ -186,10 +230,24 @@ each supported kernel and uploads the result. `nm -u` over the compiled engine
 is exact; modpost is not, because it caps its output (*"suppressed 90 unresolved
 symbol warnings"*) and so under-reports.
 
+Regenerating takes one list per target plus their union. File names inside the
+directory need only be distinct, so the workflow's `kpm-syms-<kmi>.txt`
+artifacts drop straight in:
+
+```bash
+mkdir per-target
+cp kpm-syms-*.txt per-target/
+sort -u per-target/*.txt > union.txt
+python3 kpm/gen-shim.py --syms union.txt --per-version per-target
+```
+
+`--per-version` is what decides which rows are optional; skipping it marks every
+symbol required, which is the bug above.
+
 ## Comparison
 
 | | `/proc/modules` | maps spoof | kernel range |
 | :--- | :--- | :--- | :--- |
 | **in-tree** (`CONFIG_NOMOUNT=y`) | absent | yes | 4.9 - 6.18 |
-| **KPM** (here) | absent | yes, via two KernelPatch hooks | 6 KMIs, 5.10 - 6.6 |
+| **KPM** (here) | absent | yes, via two KernelPatch hooks | 7 KMIs, 5.4 - 6.6 |
 | **LKM** (`../lkm/`) | **listed** | yes, via two kprobes | 4.9 - 6.18 |
