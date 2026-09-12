@@ -11,23 +11,12 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
-## Unreleased
+## v1.3.178 - engine v33
 
-- Good to know is gone: notes no longer render in the WebUI. They stay in `nomount check --json` and in the copied report.
-- Status leads with module coverage: served, absorbed, and how many ship files the Suite is not serving.
-- Absorb moved from Hiding to Rules, next to Modules: it is about handling modules, not hiding them, and it is called Absorbable mounts now.
-- The coverage metric opens the Modules list, so the count is a way in rather than a readout.
-- A module the Suite is not serving says so on its own row, with the reason.
-- Check is Diagnostics now, off the main path. The status line only appears when something needs it; the check itself still runs at boot and on reload.
-- The coverage metric no longer says "0 unserved" when nothing measured it. With no cached report it says so - and it no longer says the opposite either, on a device whose plan is perfectly clean.
-- The mount and absorb cards say the same thing in half the words.
-- Absorb no longer claims to run four times a boot. It runs twice, three times with the `my_hookless` trial; the card, the mount check and the health canary all say which.
+- Engine v33: synthesized inodes now sit above the partition maximum, so an injected file can no longer land on a shipped file's inode; the range is read with the caller's credentials when the kernel domain cannot read it.
+- Status leads with module coverage - served, absorbed, and what the Suite is not serving, with the reason on the row. Notes are gone from the WebUI, Check is Diagnostics off the main path, and Absorb sits with Rules as Absorbable mounts.
+- A comment sweep had quietly broken the build stamp, the su source line, Absorb's Scan tags and the WebUI harness. All four are fixed, and tests now read both ends of anything a sweep can rewrite.
 - `whiteout add --force` never refused anything; its help said it did.
-- The WebUI test harness was broken by a comment sweep and is back, with a test that fails if it breaks again.
-- The build stamp said `unknown` in every zip CI has produced since the comment sweep lowercased one letter of `HEAD`.
-- Status said your su came from somewhere else. The sweep lowercased the word it looks for.
-- Absorb's Scan lost the two tags that tell a directory bind from a redundant one. Same sweep, same cause.
-- Everything a comment sweep can quietly rewrite now has a test that reads both ends of it.
 
 ## v1.3.176 - engine v32 (unchanged)
 
