@@ -253,6 +253,7 @@ pub(crate) fn is_absorbable(src: &Path, target: &Path) -> bool {
 
 pub struct Elsewhere {
     pub seen_in: String,
+    pub pid: String,
     pub mount: Surveyed,
 }
 
@@ -294,7 +295,11 @@ pub fn survey_elsewhere() -> Vec<Elsewhere> {
         }
         for m in survey_of(&format!("/proc/{pid}/mountinfo")).unwrap_or_default() {
             if !ours.contains(&(m.target.clone(), m.source.clone())) {
-                out.push(Elsewhere { seen_in: format!("{name} (pid {pid})"), mount: m });
+                out.push(Elsewhere {
+                    seen_in: format!("{name} (pid {pid})"),
+                    pid: pid.clone(),
+                    mount: m,
+                });
             }
         }
     }
@@ -733,6 +738,59 @@ pub(crate) fn umount_detach(p: &Path) -> bool {
         return false;
     };
     unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) == 0 }
+}
+
+/// Unmount a path inside another process's mount namespace.
+///
+/// Zygote's namespace is the one every app inherits, so a bind made there is visible in every
+/// app's own mount table however clean ours is. setns(CLONE_NEWNS) refuses a multi-threaded
+/// caller and there is no way back to our own namespace afterwards, so the move happens in a
+/// forked child that exists only to leave the namespace it entered.
+fn umount_detach_in(pid: &str, p: &Path) -> bool {
+    let (Ok(target), Ok(ns)) = (
+        CString::new(p.as_os_str().as_encoded_bytes()),
+        CString::new(format!("/proc/{pid}/ns/mnt")),
+    ) else {
+        return false;
+    };
+    unsafe {
+        let child = libc::fork();
+        if child < 0 {
+            return false;
+        }
+        if child == 0 {
+            let fd = libc::open(ns.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+            if fd < 0 {
+                libc::_exit(1);
+            }
+            if libc::setns(fd, libc::CLONE_NEWNS) != 0 {
+                libc::_exit(2);
+            }
+            let rc = libc::umount2(target.as_ptr(), libc::MNT_DETACH);
+            libc::_exit(if rc == 0 { 0 } else { 3 });
+        }
+        let mut status: libc::c_int = 0;
+        if libc::waitpid(child, &mut status, 0) < 0 {
+            return false;
+        }
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    }
+}
+
+/// The only cross-namespace mount absorb may unmount. A `Redundant` one is already served by
+/// a live injection, so removing it changes nothing an app can read; every other disposition
+/// names a mount whose content the owning module is the only source of, and taking that away
+/// in a namespace the owner cannot see would break it with no way to notice.
+pub(crate) fn droppable_elsewhere(d: &Disposition) -> bool {
+    matches!(d, Disposition::Redundant)
+}
+
+/// Fails closed: an unreadable mount table reads as "still mounted", so a path absorb cannot
+/// confirm it removed is reported as a leak rather than silently counted as handled.
+fn mounted_in(pid: &str, target: &Path) -> bool {
+    read_mountinfo(&format!("/proc/{pid}/mountinfo"))
+        .map(|rows| rows.iter().any(|r| r.target == target))
+        .unwrap_or(true)
 }
 
 fn already_serving(target: &Path, source: &Path) -> bool {
@@ -1427,7 +1485,34 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         }
     }
 
+    let mut elsewhere_dropped = 0u32;
     for e in survey_elsewhere() {
+        // Zygote's namespace is the one every app inherits, so a bind there is in every app's
+        // own mount table no matter how clean ours is. Only a mount a live injection already
+        // serves can be dropped from it: unmounting anything else would take away content the
+        // owning module is the only source of.
+        if droppable_elsewhere(&e.mount.disposition) {
+            if dry_run {
+                println!(
+                    "would drop redundant mount {} in {} (already served by an injection)",
+                    e.mount.target.display(),
+                    e.seen_in
+                );
+                elsewhere_dropped += 1;
+                continue;
+            }
+            if umount_detach_in(&e.pid, &e.mount.target)
+                && !mounted_in(&e.pid, &e.mount.target)
+            {
+                println!(
+                    "dropped redundant mount {} in {} (already served by an injection)",
+                    e.mount.target.display(),
+                    e.seen_in
+                );
+                elsewhere_dropped += 1;
+                continue;
+            }
+        }
         leaking += 1;
         eprintln!(
             "nomount: LEAK {} <- {} is mounted in {} but not in our namespace: absorb \
@@ -1435,6 +1520,12 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             e.mount.target.display(),
             e.mount.source.display(),
             e.seen_in
+        );
+    }
+    if elsewhere_dropped > 0 {
+        println!(
+            "nomount absorb: {elsewhere_dropped} mount(s) dropped from another namespace - an \
+             app already running keeps the copy it forked with until it is restarted"
         );
     }
 
@@ -1731,6 +1822,19 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_already_injected_mount_may_be_unmounted_in_another_namespace() {
+        // Redundant means a live injection already serves that path, so dropping the mount
+        // changes nothing an app can read.
+        assert!(droppable_elsewhere(&Disposition::Redundant));
+        // Everything else is content the owning module is the only source of. Unmounting it
+        // inside zygote's namespace would break the module where it cannot see why.
+        assert!(!droppable_elsewhere(&Disposition::Absorb));
+        assert!(!droppable_elsewhere(&Disposition::Leaking("whatever the reason")));
+        assert!(!droppable_elsewhere(&Disposition::Declined(Declined::MustBind)));
+        assert!(!droppable_elsewhere(&Disposition::Declined(Declined::Framework("zygisk_lsposed".to_string()))));
+    }
 
     #[test]
     fn a_bind_that_carries_no_file_anywhere_is_a_hide_not_an_injection() {
