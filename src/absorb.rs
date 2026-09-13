@@ -15,6 +15,7 @@ pub const SKIP_FILE: &str = "/data/adb/nomount/absorb-skip.txt";
 const SKIP_FILE_LEGACY: &str = "/data/adb/nomount/absorb-skip";
 pub const ABSORBED_LIST: &str = "/data/adb/nomount/absorbed.list";
 pub const ABSORBED_TMPFS_LIST: &str = "/data/adb/nomount/absorbed-tmpfs.list";
+const TREE_SCAN_DEPTH: u32 = 16;
 
 const BUILTIN_SKIPS: &[&str] = &[
     "/apex/com.android.art/bin/dex2oat",
@@ -1035,6 +1036,92 @@ fn dir_is_empty(p: &Path) -> Option<bool> {
     fs::read_dir(p).ok().map(|mut e| e.next().is_none())
 }
 
+/// A directory bind whose source carries no file anywhere: it hides what the ROM ships at the
+/// target rather than serving anything, so absorbing it means emptying the directory, not
+/// injecting the nothing it contains.
+pub(crate) fn is_hiding_bind(source: &Path) -> bool {
+    source.is_dir() && tree_has_no_files(source, TREE_SCAN_DEPTH)
+}
+
+fn tree_has_no_files(p: &Path, depth: u32) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(p) else {
+        return false;
+    };
+    for e in entries.flatten() {
+        match e.file_type() {
+            Ok(ft) if ft.is_dir() => {
+                if !tree_has_no_files(&e.path(), depth - 1) {
+                    return false;
+                }
+            }
+            Ok(_) => return false,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+fn take_over_empty_dir(
+    nm: &Nm,
+    target: &Path,
+    record: &mut Vec<(PathBuf, String)>,
+    durable: &[String],
+    boot: &str,
+    from: &str,
+) -> bool {
+    let t_str = target.to_string_lossy().into_owned();
+    let was_durable = durable.contains(&t_str);
+    let ours = was_durable || record.iter().any(|(t, _)| t == target);
+    if ours {
+        let _ = nm.del(target);
+    }
+    let _ = umount_detach(target);
+    if still_mounted(target) {
+        eprintln!(
+            "nomount: {} still has a mount on it after the unmount - leaving it for the \
+             next pass",
+            target.display()
+        );
+        return false;
+    }
+    if was_durable {
+        match crate::whiteout::forget_locked(&t_str) {
+            Ok(_) => println!(
+                "moved {t_str} out of whiteouts.txt into absorb's own list: it came from \
+                 {from}, so it should stop hiding when that does"
+            ),
+            Err(e) => {
+                eprintln!(
+                    "nomount: {t_str} is still in whiteouts.txt ({e:#}) - not recording it \
+                     in absorb's list too, because a path on both lists is hidden forever"
+                );
+                return false;
+            }
+        }
+    }
+    if let Err(e) = crate::whiteout::validate(&t_str) {
+        eprintln!("nomount: {t_str} unmounted but will not be hidden: {e:#}");
+        return false;
+    }
+    match nm.whiteout(target) {
+        Ok(()) => {
+            match record.iter_mut().find(|(t, _)| t == target) {
+                Some(e) => e.1 = boot.to_string(),
+                None => record.push((target.to_path_buf(), boot.to_string())),
+            }
+            set_absorbed_tmpfs(record);
+            true
+        }
+        Err(e) => {
+            eprintln!("nomount: {} unmounted but the whiteout failed: {e:#}", target.display());
+            false
+        }
+    }
+}
+
 pub(crate) fn read_absorbed_tmpfs() -> std::io::Result<Vec<(PathBuf, String)>> {
     match fs::read_to_string(ABSORBED_TMPFS_LIST) {
         Ok(s) => Ok(parse_tmpfs_record(&s)),
@@ -1064,9 +1151,9 @@ fn tmpfs_entry_lives(seen_now: bool, seen_boot: &str, boot: &str, mounted: bool)
 
 fn absorbed_tmpfs_body(entries: &[(PathBuf, String)]) -> String {
     let mut body = String::from(
-        "# ROM directories absorb empties in place of a module's tmpfs.\n\
-         # <target>\\t<boot id when its tmpfs was last seen> -- absorb re-derives this\n\
-         # from the live mount table every boot and drops an entry whose tmpfs is gone,\n\
+        "# ROM directories absorb empties in place of a module's tmpfs or empty-dir bind.\n\
+         # <target>\\t<boot id when that mount was last seen> -- absorb re-derives this\n\
+         # from the live mount table every boot and drops an entry whose mount is gone,\n\
          # so uninstalling the owning module restores the directory. Not hand-edited:\n\
          # a hide you want to keep belongs in whiteouts.txt.\n",
     );
@@ -1222,53 +1309,10 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
             continue;
         }
         seen.insert(target.clone());
-        if ours {
-            let _ = nm.del(&target);
-        }
-        let _ = umount_detach(&target);
-        if still_mounted(&target) {
-            eprintln!(
-                "nomount: {} still has a mount on it after the unmount - leaving it for the \
-                 next pass",
-                target.display()
-            );
+        if take_over_empty_dir(&nm, &target, &mut record, &durable, &boot, "a tmpfs") {
+            st.done += 1;
+        } else {
             st.failed += 1;
-            continue;
-        }
-        if was_durable {
-            match crate::whiteout::forget_locked(&t_str) {
-                Ok(_) => println!(
-                    "moved {t_str} out of whiteouts.txt into absorb's own list: it came from a \
-                     tmpfs, so it should stop hiding when that tmpfs does"
-                ),
-                Err(e) => {
-                    eprintln!(
-                        "nomount: {t_str} is still in whiteouts.txt ({e:#}) - not recording it \
-                         in absorb's list too, because a path on both lists is hidden forever"
-                    );
-                    st.failed += 1;
-                    continue;
-                }
-            }
-        }
-        if let Err(e) = crate::whiteout::validate(&t_str) {
-            eprintln!("nomount: {t_str} unmounted but will not be hidden: {e:#}");
-            st.failed += 1;
-            continue;
-        }
-        match nm.whiteout(&target) {
-            Ok(()) => {
-                match record.iter_mut().find(|(t, _)| *t == target) {
-                    Some(e) => e.1 = boot.clone(),
-                    None => record.push((target.clone(), boot.clone())),
-                }
-                set_absorbed_tmpfs(&record);
-                st.done += 1;
-            }
-            Err(e) => {
-                eprintln!("nomount: {} unmounted but the whiteout failed: {e:#}", target.display());
-                st.failed += 1;
-            }
         }
     }
     if dry_run {
@@ -1425,7 +1469,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     if cands.is_empty() {
         if tmpfs.done > 0 || tmpfs.failed > 0 {
             println!(
-                "nomount absorb: {} ROM tmpfs emptied mountlessly ({} failed)",
+                "nomount absorb: {} ROM director(ies) emptied mountlessly ({} failed)",
                 tmpfs.done, tmpfs.failed
             );
         }
@@ -1443,6 +1487,28 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     }
 
     let (mut done, mut failed, mut skipped_dirs) = (0u32, 0u32, 0u32);
+    let (mut emptied, mut would_empty) = (0u32, 0u32);
+    // An empty directory bind is hidden the same way a module's tmpfs over a ROM directory is:
+    // unmount, then whiteout, with a record absorb can expire when the module stops binding.
+    // Refuse the takeover outright if that record cannot be read, rather than hiding a
+    // directory with nothing to un-hide it later.
+    let mut hide_state = match (read_absorbed_tmpfs(), boot_id()) {
+        (Ok(r), Some(b)) => Some((r, crate::whiteout::read().unwrap_or_default(), b)),
+        (Err(e), _) => {
+            eprintln!(
+                "nomount: could not read {ABSORBED_TMPFS_LIST} ({e}) - leaving every empty \
+                 directory bind mounted this pass"
+            );
+            None
+        }
+        (_, None) => {
+            eprintln!(
+                "nomount: cannot read this boot's id - leaving every empty directory bind \
+                 mounted this pass rather than recording a hide that is never expired"
+            );
+            None
+        }
+    };
     let mut dropped = 0u32;
     let live_map = live_injects(&nm);
     let mut reasserted: HashSet<PathBuf> = HashSet::new();
@@ -1493,6 +1559,12 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                     c.target.display(), c.source.display()
                 );
                 skipped_dirs += 1;
+            } else if is_dir_bind && is_hiding_bind(&c.source) {
+                println!(
+                    "would empty {} mountlessly (empty directory bind -> whiteout)",
+                    c.target.display()
+                );
+                would_empty += 1;
             } else {
                 println!("would absorb {} <- {}", c.target.display(), c.source.display());
             }
@@ -1517,6 +1589,40 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             );
             continue;
         }
+        if is_dir_bind && is_hiding_bind(&c.source) {
+            // There is nothing to inject: the bind carries no files, so its whole purpose is
+            // to make the ROM directory look empty. Unmounting it and injecting that nothing
+            // would hand the ROM's own files straight back - the opposite of what the module
+            // does - so it is emptied mountlessly instead.
+            let Some((record, durable, boot)) = hide_state.as_mut() else {
+                leaking += 1;
+                eprintln!(
+                    "nomount: LEAK {} <- {} stays mounted: absorb has no record it could \
+                     expire, and hiding the directory without one would hide it forever",
+                    c.target.display(),
+                    c.source.display()
+                );
+                continue;
+            };
+            if let Err(why) = crate::mount::path_is_representable(&c.target) {
+                leaking += 1;
+                eprintln!(
+                    "nomount: LEAK {} <- {} stays mounted: {why}, so absorb cannot record the \
+                     takeover and will not make one it could never expire",
+                    c.target.display(),
+                    c.source.display()
+                );
+                continue;
+            }
+            if take_over_empty_dir(
+                &nm, &c.target, record, durable, boot, "an empty directory bind",
+            ) {
+                emptied += 1;
+            } else {
+                failed += 1;
+            }
+            continue;
+        }
         let _ = umount_detach(&c.target);
         if still_mounted(&c.target) {
             eprintln!(
@@ -1536,6 +1642,30 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 all.sort();
                 set_absorbed_pairs(all);
             }
+        }
+        if served == 0 && fails == 0 {
+            // The unmount went through but nothing replaced it, so the target is showing the
+            // ROM's own content again. Hide it instead of reporting a success that undid the
+            // owning module.
+            let took = match hide_state.as_mut() {
+                Some((rec, durable, boot))
+                    if crate::mount::path_is_representable(&c.target).is_ok() =>
+                {
+                    take_over_empty_dir(&nm, &c.target, rec, durable, boot, "an empty directory bind")
+                }
+                _ => false,
+            };
+            if took {
+                emptied += 1;
+            } else {
+                leaking += 1;
+                eprintln!(
+                    "nomount: {} was unmounted but nothing was injected in its place and it \
+                     could not be hidden either - the stock content is visible there",
+                    c.target.display()
+                );
+            }
+            continue;
         }
         if fails == 0 {
             done += 1;
@@ -1579,9 +1709,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     };
     if dry_run {
         println!(
-            "nomount absorb: {} mount(s) would be absorbed, {} ROM tmpfs, {skipped_dirs} directory bind(s) skipped{drops}{leaks}{defer} (dry run)",
-            cands.len() as u32 - skipped_dirs - dropped,
-            tmpfs.done
+            "nomount absorb: {} mount(s) would be absorbed, {} ROM director(ies) emptied mountlessly, {skipped_dirs} directory bind(s) skipped{drops}{leaks}{defer} (dry run)",
+            cands.len() as u32 - skipped_dirs - dropped - would_empty,
+            tmpfs.done + would_empty
         );
     } else {
         let dirs = if skipped_dirs > 0 {
@@ -1590,8 +1720,8 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             String::new()
         };
         println!(
-            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {} ROM tmpfs emptied mountlessly, {} failed{dirs}{drops}{leaks}{defer}",
-            tmpfs.done,
+            "nomount absorb: {done} mount(s) absorbed as {rules} rule(s), {} ROM director(ies) emptied mountlessly, {} failed{dirs}{drops}{leaks}{defer}",
+            tmpfs.done + emptied,
             failed + tmpfs.failed
         );
     }
@@ -1601,6 +1731,43 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bind_that_carries_no_file_anywhere_is_a_hide_not_an_injection() {
+        let root = std::env::temp_dir().join(format!("nm-emptybind-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mk = |p: &Path| fs::create_dir_all(p).unwrap();
+
+        mk(&root.join("bare"));
+        mk(&root.join("nested/oat"));
+        mk(&root.join("has-file"));
+        fs::write(root.join("has-file/App.apk"), b"x").unwrap();
+        mk(&root.join("file-deeper/oat/arm64"));
+        fs::write(root.join("file-deeper/oat/arm64/App.odex"), b"x").unwrap();
+
+        // The debloater case: an empty directory bound over a ROM app folder.
+        assert!(tree_has_no_files(&root.join("bare"), TREE_SCAN_DEPTH));
+        // Still a hide: empty subdirectories carry nothing to inject either.
+        assert!(tree_has_no_files(&root.join("nested"), TREE_SCAN_DEPTH));
+        // These have content, so they absorb into injections as before.
+        assert!(!tree_has_no_files(&root.join("has-file"), TREE_SCAN_DEPTH));
+        assert!(!tree_has_no_files(&root.join("file-deeper"), TREE_SCAN_DEPTH));
+        // An unreadable or missing source is never treated as "empty on purpose".
+        assert!(!tree_has_no_files(&root.join("does-not-exist"), TREE_SCAN_DEPTH));
+        // Depth is capped, and hitting the cap must not claim the tree is empty.
+        assert!(!tree_has_no_files(&root.join("nested"), 1));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_dir_takeover_expires_when_its_mount_stops_coming_back() {
+        // Same record as a tmpfs takeover: while the module still binds the directory the
+        // hide lives, and the boot after the module goes away it is released.
+        assert!(tmpfs_entry_lives(false, "boot-1", "boot-2", true), "module still binds it");
+        assert!(tmpfs_entry_lives(false, "boot-2", "boot-2", false), "taken over this boot");
+        assert!(!tmpfs_entry_lives(false, "boot-1", "boot-2", false), "module is gone");
+    }
 
     #[test]
     fn the_package_is_taken_from_the_first_hyphen_not_the_last() {

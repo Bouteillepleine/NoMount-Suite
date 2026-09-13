@@ -1614,6 +1614,18 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     s.source.display()
                 ),
             ),
+            crate::absorb::Disposition::Absorb if crate::absorb::is_hiding_bind(&s.source) => (
+                Level::Warn,
+                "module mount not absorbed",
+                format!(
+                    "{} <- {} is a directory bind that carries no files, so it is hiding \
+                     what the ROM ships there rather than serving anything. A plain \
+                     `nomount absorb` skips it; `nomount absorb --include-dirs` empties the \
+                     directory mountlessly instead, which keeps it hidden with no mount",
+                    s.target.display(),
+                    s.source.display()
+                ),
+            ),
             crate::absorb::Disposition::Absorb if s.source.is_dir() => (
                 Level::Warn,
                 "module mount not absorbed",
