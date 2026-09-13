@@ -1644,24 +1644,24 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             continue;
         }
         if dry_run {
-            if is_dir_bind && !include_dirs {
-                println!(
-                    "would skip directory bind {} <- {} (needs --include-dirs)",
-                    c.target.display(), c.source.display()
-                );
-                skipped_dirs += 1;
-            } else if is_dir_bind && is_hiding_bind(&c.source) {
+            if is_hiding_bind(&c.source) {
                 println!(
                     "would empty {} mountlessly (empty directory bind -> whiteout)",
                     c.target.display()
                 );
                 would_empty += 1;
+            } else if is_dir_bind && !include_dirs {
+                println!(
+                    "would skip directory bind {} <- {} (needs --include-dirs)",
+                    c.target.display(), c.source.display()
+                );
+                skipped_dirs += 1;
             } else {
                 println!("would absorb {} <- {}", c.target.display(), c.source.display());
             }
             continue;
         }
-        if is_dir_bind && !include_dirs {
+        if is_dir_bind && !include_dirs && !is_hiding_bind(&c.source) {
             println!(
                 "skipping directory bind {} <- {} (use --include-dirs; injection would \
                  snapshot the listing and miss files added later)",
@@ -1680,7 +1680,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             );
             continue;
         }
-        if is_dir_bind && is_hiding_bind(&c.source) {
+        if is_hiding_bind(&c.source) {
             // There is nothing to inject: the bind carries no files, so its whole purpose is
             // to make the ROM directory look empty. Unmounting it and injecting that nothing
             // would hand the ROM's own files straight back - the opposite of what the module
