@@ -11,6 +11,10 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.180 - engine v33 (unchanged)
+
+- Absorb can now drop a mount from zygote's namespace, which is the one every app inherits: a module that binds with `nsenter` put its mount in every app's table however clean ours was. Only a mount a live injection already serves is dropped - anything else is content the owning module is the only source of - and an app already running keeps the copy it forked with until it is restarted.
+
 ## v1.3.179 - engine v33 (unchanged)
 
 - `absorb --include-dirs` un-debloated a device. A bind whose source carries no files is hiding what the ROM ships there, not serving anything; absorb unmounted it, injected the nothing it contained, and reported success while every hidden app came back. Such a bind is now emptied mountlessly - unmount, then whiteout - on the same record that already expires a module tmpfs, so uninstalling the module still restores the directory.
