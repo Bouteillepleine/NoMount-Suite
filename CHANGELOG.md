@@ -11,6 +11,11 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.179 - engine v33 (unchanged)
+
+- `absorb --include-dirs` un-debloated a device. A bind whose source carries no files is hiding what the ROM ships there, not serving anything; absorb unmounted it, injected the nothing it contained, and reported success while every hidden app came back. Such a bind is now emptied mountlessly - unmount, then whiteout - on the same record that already expires a module tmpfs, so uninstalling the module still restores the directory.
+- Absorb will not report a mount absorbed when it served no rule: if nothing replaced the mount it just removed, it hides the directory instead, and says so when it cannot.
+
 ## v1.3.178 - engine v33
 
 - Engine v33: synthesized inodes now sit above the partition maximum, so an injected file can no longer land on a shipped file's inode; the range is read with the caller's credentials when the kernel domain cannot read it.
