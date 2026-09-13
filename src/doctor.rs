@@ -1619,9 +1619,9 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 "module mount not absorbed",
                 format!(
                     "{} <- {} is a directory bind that carries no files, so it is hiding \
-                     what the ROM ships there rather than serving anything. A plain \
-                     `nomount absorb` skips it; `nomount absorb --include-dirs` empties the \
-                     directory mountlessly instead, which keeps it hidden with no mount",
+                     what the ROM ships there rather than serving anything. Absorb empties the \
+                     directory mountlessly instead of unmounting it - automatically, on every \
+                     pass - so this is only still here if absorb has not run since the bind was",
                     s.target.display(),
                     s.source.display()
                 ),
