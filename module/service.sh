@@ -54,9 +54,10 @@ if [ "$_hookran" = 0 ]; then
     } > "$NMDIR/incident.log" 2>/dev/null
 fi
 
-nm_fix_shell_tmp
-
-nm_delink_ksud service
+if [ ! -e "$NMDIR/disabled" ]; then
+    nm_fix_shell_tmp
+    nm_delink_ksud service
+fi
 
 _bh_dir=/data/adb/bindhosts
 _bh_ovr="$_bh_dir/mode_override.sh"
@@ -87,8 +88,7 @@ unset _bh_dir _bh_ovr _bh_rc
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     _rl_all=$(nmto 60 "$BIN" reload 2>&1)
     _rl_rc=$?
-    _rl=$(printf '%s\n' "$_rl_all" | grep -m1 '^nomount reload:')
-    [ -n "$_rl" ] || _rl=$(printf '%s\n' "$_rl_all" | tail -1)
+    _rl=$(_rl_summary "$_rl_all")
     if [ "$_rl_rc" -eq 124 ]; then
         nmlog "post-boot reload timed out after 60s - late module content may be unserved"
     elif [ "$_rl_rc" -ne 0 ]; then
@@ -118,9 +118,9 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
         if [ "$_rl2_rc" -eq 124 ]; then
             nmlog "late reload pass timed out after 60s"
         elif [ "$_rl2_rc" -ne 0 ]; then
-            nmlog "⚠ late reload pass FAILED (exit $_rl2_rc): $(printf '%s\n' "$_rl2_all" | tail -1)"
+            nmlog "⚠ late reload pass FAILED (exit $_rl2_rc): $(_rl_summary "$_rl2_all")"
         else
-            nmlog "late reload pass: $(printf '%s\n' "$_rl2_all" | tail -1)"
+            nmlog "late reload pass: $(_rl_summary "$_rl2_all")"
         fi
         _ab2_all=$(nmto 90 "$BIN" absorb 2>&1)
         _ab2_rc=$?

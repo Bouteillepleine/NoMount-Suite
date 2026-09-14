@@ -79,6 +79,13 @@ nm_consume_stash() {
     return 0
 }
 
+_rl_summary() {
+    _rls=$(printf '%s\n' "$1" | grep -m1 '^nomount reload:')
+    [ -n "$_rls" ] || _rls=$(printf '%s\n' "$1" | tail -1)
+    printf '%s' "$_rls"
+    unset _rls
+}
+
 _has_entries() { [ -s "$1" ] && grep -qE '^[[:space:]]*[^[:space:]#]' "$1" 2>/dev/null; }
 
 nm_boot_log_rotate() {
