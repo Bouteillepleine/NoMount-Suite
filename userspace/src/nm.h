@@ -219,6 +219,12 @@ static noinline void set_recv_timeout(int fd) {
     sys5(SYS_SETSOCKOPT, fd, SOL_SOCKET, SO_RCVTIMEO, (long)&tv, (long)sizeof(tv));
 }
 
+/* A reply whose declared nlmsg_len exceeds what was actually received, or an NLMSG_ERROR
+   carrying a positive "errno", is not something this kernel produces. get_attr walks by the
+   DECLARED length, so accepting either would let a malformed reply steer it past the buffer,
+   and the errno doubles as a byte count in the caller. */
+#define NM_ERR_PROTO (-71)
+
 static noinline int nm_read(int fd, struct nm_mem *mem) {
     int res = sys3(SYS_READ, fd, (long)mem->rx_buf, RX_BUF_SIZE);
     return (res == -NM_EAGAIN) ? NM_ERR_TIMEOUT : res;
@@ -244,7 +250,17 @@ static noinline int do_nm_cmd(int fd, int cmd, int atype, const void *data, int 
     int res = sys3(SYS_WRITE, fd, (long)nlh, nlh->nlmsg_len);
     if (res < 0) return res;
     res = nm_read(fd, mem);
-    if (res >= 20 && ((struct nlmsghdr *)mem->rx_buf)->nlmsg_type == 2) res = *(int *)(mem->rx_buf + 16);
+    if (res < 0) return res;
+
+    if (res >= 16) {
+        unsigned int mlen = ((struct nlmsghdr *)mem->rx_buf)->nlmsg_len;
+        if (mlen < 16 || mlen > (unsigned int)res) return NM_ERR_PROTO;
+    }
+
+    if (res >= 20 && ((struct nlmsghdr *)mem->rx_buf)->nlmsg_type == 2) {
+        int err = *(int *)(mem->rx_buf + 16);
+        return err > 0 ? NM_ERR_PROTO : err;
+    }
 
     return res;
 }
