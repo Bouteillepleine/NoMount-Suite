@@ -120,7 +120,16 @@ grep -q "^versionCode=${vcode}\$" "$MODULE_DIR/module.prop" \
 
 VERSION="v${NEW_VERSION}"
 
-BUILD_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse --verify --short HEAD 2>/dev/null || true)"
+if [ -z "$BUILD_COMMIT" ]; then
+    if [ -n "${SUITE_ALLOW_UNSTAMPED:-}" ]; then
+        BUILD_COMMIT="unknown"
+    else
+        echo "fatal: cannot resolve HEAD, so the zip would ship an unknown SUITE_COMMIT." >&2
+        echo "       Build from a git checkout, or set SUITE_ALLOW_UNSTAMPED=1 to accept it." >&2
+        exit 1
+    fi
+fi
 _dirt="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
           | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$' || true)"
 if [ -n "$_dirt" ]; then
@@ -251,7 +260,7 @@ verify_binary_version() {
             *) echo "       binary reports: $got" >&2; return 1 ;;
         esac
     fi
-    if grep -qaE -- "nomount v${want//./\.}([^0-9]|\$)" "$bin"; then
+    if grep -qaE -- "nomount v${want//./\\.}([^0-9]|\$)" "$bin"; then
         return 0
     fi
     local seen
@@ -310,8 +319,8 @@ package_zip() {
             cp "$MODULE_DIR/bin/$abi/nomount" "$staging/bin/$abi/nomount"; found_nomount=$((found_nomount + 1))
         fi
         if [ -f "$staging/bin/$abi/nomount" ]; then
-            verify_binary_version "$staging/bin/$abi/nomount" "${VERSION#v}" || {
-                echo "fatal: [$profile] bin/$abi/nomount does not report ${VERSION#v}." >&2
+            verify_binary_version "$staging/bin/$abi/nomount" "$NEW_VERSION" || {
+                echo "fatal: [$profile] bin/$abi/nomount does not report $NEW_VERSION." >&2
                 echo "       The zip would be labelled ${VERSION} around a binary that" >&2
                 echo "       answers something else. Re-run with --build." >&2
                 rm -rf "$staging"
