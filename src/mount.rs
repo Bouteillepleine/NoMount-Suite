@@ -1286,6 +1286,20 @@ mod tests {
              reads it, and the comment that stated this invariant was deleted by the comment \
              strip - so only this test can catch it"
         );
+        const ENGINE_MATRIX: &str = include_str!("../.github/workflows/hookless-compile-matrix.yml");
+        for ver in ["4.9", "4.14", "4.19", "5.4", "5.10", "5.15", "6.1", "6.6", "6.12", "6.18"] {
+            assert!(
+                ENGINE_MATRIX.contains(&format!("ver: '{ver}'")),
+                "the engine compile matrix no longer covers {ver}. c223943 deleted this whole \
+                 workflow and nothing compile-tested the shipped engine until it was restored; \
+                 the LKM branch's gate builds a different engine version and does not cover it"
+            );
+        }
+        assert!(
+            ENGINE_MATRIX.contains("workflow_dispatch") && ENGINE_MATRIX.contains("push:"),
+            "the engine matrix is reachable only through another workflow again. That is how it \
+             vanished: removing one `uses:` line silently took all ten versions with it"
+        );
         assert!(
             BUILD_YAML.contains("git describe --tags --abbrev=0"),
             "the tag-push fallback is gone. A tag push reports an all-zero `before`, so without \
