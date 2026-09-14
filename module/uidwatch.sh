@@ -35,7 +35,8 @@ trap 'rm -f "$LOCK"' EXIT INT TERM
 
 sleep 3
 if _has_entries "$NMDIR/uidhide"; then
-    _out=$(nmto 60 "$BIN" uid apply 2>&1)
+    # Redacted: _out is logged to /dev/kmsg below, and `uid apply` names hide-list entries.
+    _out=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _urc=$?
     if [ "$_urc" -eq 124 ]; then
         nmlog "⚠ hide list apply after package change timed out after 60s - apps you expect to be hidden are not"

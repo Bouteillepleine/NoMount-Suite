@@ -173,7 +173,9 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts
 fi
 
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/uidhide"; then
-    _bl=$(nmto 60 "$BIN" uid apply 2>&1)
+    # Redacted: this output goes to nmlog -> /dev/kmsg, and `uid apply` names the hide-list
+    # entries and the packages they matched. Only the counts are used below.
+    _bl=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _bl_rc=$?
     if [ "$_bl_rc" -eq 0 ]; then
         nmlog "hide list re-applied ($_bl)"

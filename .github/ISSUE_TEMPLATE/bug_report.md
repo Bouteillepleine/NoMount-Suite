@@ -10,14 +10,16 @@ labels: bug
 
 ## Diagnostics
 
-**Easiest, no PC needed: open the module's WebUI, go to *Check* → *Developer
-tools* → *Export*.** Attach the folder it names.
+**Easiest, no PC needed: open the module's WebUI, go to *Diagnostics* →
+*Developer tools* → *Export*.** Attach the folder it names.
 
-It writes a timestamped bundle to `/sdcard/Download`, already containing
-`boot.log`, `check.txt` and the mount table. **The per-app hide list is redacted
-automatically** when the destination is shared storage - package names and
-appids are withheld. Export to a private path instead if you are willing to
-include them and can share the bundle privately.
+It writes a timestamped bundle to `/sdcard/Download` containing `check.txt`,
+the mount table, the live rules and `dmesg-nomount.txt`. **Anything that names
+the apps you hide is withheld automatically** when the destination is shared
+storage: the hide-list files, `spoof.conf` and `boot.log` are left out, and the
+bundle lists what it withheld. If your report is about boot behaviour we will
+probably need `boot.log` too - export to a private path instead
+(`nomount export /data/local/tmp/nm-report`) and share that bundle privately.
 
 From a root shell instead - note `nomount` is **not on `PATH`**, it ships inside
 the module:

@@ -87,10 +87,11 @@ settings are preserved across an update, and restored if an install aborts.
 
 - **arm64** device; the zip ships an `arm64-v8a` binary only.
 - A kernel with the **Prism** engine (`CONFIG_NOMOUNT=y`), source in
-  [`hookless/`](hookless/). The engine and this Suite are versioned together
-  because they have to be flashed together: the control plane is a private
-  protocol between them, and a mismatched pair reads as "engine not responding"
-  with nothing to say why.
+  [`hookless/`](hookless/). Flash the engine and this Suite as a set. The Suite
+  tolerates an older engine and says which capability is missing (`nomount check`
+  names the version and the consequence), but a change to the *wire protocol*
+  itself is not a version difference it can report - it reads as "engine not
+  responding" with nothing to say why.
 - **KernelSU**, **SukiSU** or **ReSukiSU** (metamodule hook), or **Magisk**
   (`post-fs-data`). Everything here was measured on ReSukiSU; the Magisk and
   APatch code paths exist and run, but nobody has reported back from either, so
@@ -115,8 +116,9 @@ is the one failure neither half can explain.
 
 ## Building
 
-CI builds the zip on every code push and publishes it on a `v*` tag, so you
-rarely need to. Locally:
+CI builds the zip on every push to `main` or `prerelease` and publishes it on a
+`v*` tag, so you rarely need to. Pushes that touch `hookless/` also run the
+ten-version engine compile matrix. Locally:
 
 ```
 cargo test && cargo clippy --all-targets -- -D warnings
@@ -134,8 +136,10 @@ packaging a stale binary.
 The supported build is in-tree: `CONFIG_NOMOUNT=y`, compiled into the kernel.
 Two other ways to load the same engine live on their own branches, for cases
 where you cannot rebuild the kernel. Both `#include` `hookless/src/nomount.c`
-rather than copying it, so neither can drift from what the Suite ships, and both
-carry the `/proc/<pid>/maps` spoof (through kprobes in the LKM, KernelPatch hooks
+rather than copying it, so neither diverges in *source*, but each branch carries
+its own revision of it and they do fall behind - check `NOMOUNT_VERSION` in
+`hookless/src/nomount.h` on the branch before trusting one. Both carry the
+`/proc/<pid>/maps` spoof (through kprobes in the LKM, KernelPatch hooks
 in the KPM).
 
 | | branch | `/proc/modules` | maps spoof | kernels |
@@ -185,6 +189,9 @@ hidden-paths list.
 | `nomount snapshot` | Freeze the current fingerprint as a baseline. |
 | `nomount verify` | Diff live against that baseline and name what drifted. |
 | `nomount export [dir]` | Dump diagnostics to a folder; the hide list is redacted on shared storage. |
+| `nomount ghost sync` | Re-arm the existence cloak: work out which injected-only paths can be made to look absent to a hidden app, and program them. Run by the boot scripts. |
+| `nomount ghost list` | Show what the cloak currently covers. |
+| `nomount unbind` | Unmount the real binds recorded in `binds.list` (the `my_*` ones). A bind that will not come down keeps its row so a later pass retries it, and the command exits 1. |
 | `nomount version` | Print the version. |
 
 Two files under `/data/adb/nomount/` are hand-edited rather than driven by a
@@ -211,12 +218,13 @@ phone.
 | 5.10 | Ace 2, Ace 2V, Nord 3, ... (6 models) | ✅ Booted |
 | 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these - other vendors do | 🧩 Compiled, not tested |
 
-"Compiled" means `fs/nomount.o` built against that version's canonical tree; the
-`LKM` branch's out-of-tree gate still covers the whole set. It says nothing about
-whether the device boots. A report either way is worth an issue.
+"Compiled" means `fs/nomount.o` built against that version's canonical tree by
+the [engine compile matrix](.github/workflows/hookless-compile-matrix.yml), which
+runs on every push touching `hookless/`. It says nothing about whether the device
+boots. A report either way is worth an issue.
 
-Tested another device or root manager? Open an issue - the WebUI's **Check →
-Developer tools → Export** button (or `nomount export` from a shell) produces a
+Tested another device or root manager? Open an issue - the WebUI's **Diagnostics
+→ Developer tools → Export** button (or `nomount export` from a shell) produces a
 bundle with the hide list already redacted, which is the most useful thing to
 attach. A report that one of the untested managers works is as useful as a bug.
 
