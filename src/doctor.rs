@@ -334,10 +334,11 @@ impl Incompat {
             Incompat::SelfMount =>
                 "this module mounts its own content over a ROM path instead of shipping a \
                  tree, so for part of every boot the mount is real and readable by any app. \
-                 absorb re-serves it as an injection and unmounts it -- automatically, four \
-                 times per boot -- so nothing needs doing. Named here because the module \
-                 depends on absorb running: if absorb is disabled or times out, this is one \
-                 of the mounts that stays visible.",
+                 absorb re-serves it as an injection and unmounts it automatically -- two \
+                 passes on a stock KernelSU device, both after zygote has started, so there \
+                 is a window early in each boot where the mount is still there. Named here \
+                 because the module depends on absorb running: if absorb is disabled or \
+                 times out, this is one of the mounts that stays visible.",
         }
     }
 }
@@ -1005,10 +1006,13 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Info,
             check: "directory holds only injected files",
             detail: format!(
-                "{list}. Injected files take inode numbers from a band the ROM never \
-                 allocates, so a directory holding several of them and no stock file is \
-                 one cluster that is entirely yours. Ship into a directory that already \
-                 has stock content and it disappears."
+                "{list}. Injected files normally take their inode numbers from the gaps \
+                 between the stock files sitting beside them, which is what makes them \
+                 blend in -- but that needs stock files in the same directory to borrow \
+                 gaps from. A directory holding only injected files has none, so its \
+                 inodes come from above the partition's high-water mark instead and form \
+                 one contiguous run. Ship into a directory that already has stock content \
+                 and it disappears."
             ),
         });
     }
