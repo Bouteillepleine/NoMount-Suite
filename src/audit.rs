@@ -722,10 +722,19 @@ fn dev_ino_of(p: &Path) -> Option<(u64, u64)> {
     })
 }
 
+fn hard_linked(p: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(p).map(|m| m.nlink() > 1).unwrap_or(false)
+}
+
 fn check_dir_ino_collision(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut ours: HashMap<(u64, u64), PathBuf> = HashMap::new();
     let mut roots: Vec<PathBuf> = Vec::new();
-    for dir in engine_dirs.iter().chain(targets.iter()) {
+    for (dir, is_dir_subject) in engine_dirs
+        .iter()
+        .map(|d| (d, true))
+        .chain(targets.iter().map(|t| (t, false)))
+    {
         if !on_rom_partition(dir) {
             continue;
         }
@@ -739,6 +748,15 @@ fn check_dir_ino_collision(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Chec
         if !roots.iter().any(|r| r == Path::new(p)) {
             roots.push(p.to_path_buf());
         }
+        // A synthesized directory's inode is always the engine's own, so it is always a subject.
+        // A file target's is not: while a rule is live but unserved the path still reports the
+        // STOCK inode, and a ROM that hardlinks that file has a second legitimate name for it.
+        // Counting those as "the engine created this" reported the ROM's own hardlinks as the
+        // engine's collisions. Directories are excluded from the test because every directory
+        // has nlink >= 2 by construction.
+        if !is_dir_subject && hard_linked(dir) {
+            continue;
+        }
         if let Some(k) = dev_ino_of(dir) {
             ours.entry(k).or_insert_with(|| dir.to_path_buf());
         }
@@ -750,16 +768,23 @@ fn check_dir_ino_collision(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Chec
 
     const MAX_DIRS: usize = 20_000;
     let mut seen = 0usize;
+    let mut unread = 0usize;
     let mut hits: Vec<String> = Vec::new();
     let mut stack: Vec<PathBuf> = roots;
     while let Some(dir) = stack.pop() {
         if seen >= MAX_DIRS {
             break;
         }
-        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        let Ok(rd) = fs::read_dir(&dir) else {
+            unread += 1;
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
-            let Ok(md) = fs::symlink_metadata(&p) else { continue };
+            let Ok(md) = fs::symlink_metadata(&p) else {
+                unread += 1;
+                continue;
+            };
             let k = {
                 use std::os::unix::fs::MetadataExt;
                 (md.dev(), md.ino())
@@ -808,10 +833,25 @@ fn check_dir_ino_collision(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Chec
         )
         .meaning("The partition was too large to scan fully, so this was not settled.");
     }
+    // Read nothing at all: the walk settled nothing and must not read as a clean result. A few
+    // unreadable entries in an otherwise complete walk are not that -- they narrow coverage, so
+    // they are reported in the evidence rather than turned into a verdict of their own.
+    if seen == 0 {
+        return unmeasured(
+            N_DIR_INO_COLLIDE,
+            format!("no directory under the partition(s) could be read ({unread} refused)"),
+        )
+        .meaning("Nothing could be opened to compare against, so this was not settled.");
+    }
+    let scope = if unread == 0 {
+        format!("every name under {seen} director(ies)")
+    } else {
+        format!("{seen} director(ies), {unread} entr(ies) that would not open excepted")
+    };
     pass(
         N_DIR_INO_COLLIDE,
-        format!("{} entr(ies) the engine synthesized checked against every name under {seen} \
-                 director(ies) on the same partition(s); no shared inode",
+        format!("{} entr(ies) the engine synthesized checked against {scope} \
+                 on the same partition(s); no shared inode",
                 ours.len()),
     )
     .meaning(
@@ -1584,6 +1624,27 @@ mod tests {
         assert!(on_rom_partition(Path::new("/product/priv-app/Mms")));
         assert!(!on_rom_partition(Path::new("/data/app/~~a/com.x-b/base.apk")));
         assert!(!Path::new("/my_product/priv-app/Foo").starts_with("/my_"));
+    }
+
+    #[test]
+    fn a_hardlinked_rom_file_is_not_a_subject_of_the_collision_check() {
+        // check_dir_ino_collision itself is gated on on_rom_partition(), which no tempdir path
+        // satisfies, so the predicate that keeps the ROM's own hardlinks out of the subject set
+        // is pinned here directly. A file target reports the STOCK inode while its rule is live
+        // but unserved, and a ROM that hardlinks that file has a second legitimate name for it -
+        // which read as "the engine created two names for one inode".
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("a");
+        std::fs::write(&a, b"x").unwrap();
+        assert!(!hard_linked(&a), "a file with one name must stay a subject");
+
+        let b = d.path().join("b");
+        std::fs::hard_link(&a, &b).unwrap();
+        assert!(hard_linked(&a), "a hardlinked ROM file must be excluded");
+        assert!(hard_linked(&b));
+
+        // Directories always have nlink >= 2, which is why the caller only applies this to files.
+        assert!(hard_linked(d.path()), "the exclusion would swallow every synthesized directory");
     }
 
     #[test]
