@@ -238,7 +238,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
         rm -f "$NMDIR/audit.json"
         nmlog "⚠ check timed out after 60s - dropped the stale cache; the WebUI will show no verdict"
     elif [ -s "$NMDIR/audit.json" ]; then
-        nmlog "check cached - one or more findings are open (see the Detection audit card)"
+        nmlog "check cached - one or more findings are open (see the Diagnostics card)"
     else
         rm -f "$NMDIR/audit.json"
         nmlog "⚠ check did not complete - the WebUI will show no cached verdict"

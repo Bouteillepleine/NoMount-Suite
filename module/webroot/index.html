@@ -1434,8 +1434,8 @@
     if (engineDown(CHECK)) {
       say("warn", "The engine isn’t running", "nothing is being injected",
         "There are no mounts because there is nothing being served. This card cannot say " +
-        "anything about how you look to an app until the engine answers - open <b>Check</b> " +
-        "from the line above.");
+        "anything about how you look to an app until the engine answers - open " +
+        "<b>Diagnostics</b>.");
     } else if (appNm > 0) {
       say("warn", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
         "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
@@ -1445,17 +1445,17 @@
       say("warn", "Something is mounting over the ROM",
         owner ? "from " + owner : fmnt + " finding(s) in the mount table",
         esc(bad.map(function (c) { return c.meaning || c.name; }).join(" ")) +
-        " Open <b>Check</b> from the line above - it names each one, who caused it, and what " +
+        " Open <b>Diagnostics</b> - it names each one, who caused it, and what " +
         "you can do about it.");
     } else if (ourBindsWarn) {
       say("warn", "Our own my_* binds are visible",
         ourBinds + " real bind" + (ourBinds > 1 ? "s" : "") + " any app can read",
         esc((mrows[0] && (mrows[0].meaning || mrows[0].evidence)) || "") +
-        " Open <b>Check</b> from the line above.");
+        " Open <b>Diagnostics</b>.");
     } else if (fmnt < 0) {
       say("warn", "Mount posture not measured", "no check has read the mount table yet",
         "Nothing has read the mount table here yet, so this says nothing either " +
-        "way. Open <b>Check</b> from the line above.");
+        "way. Open <b>Diagnostics</b>.");
     } else if (appNm < 0 && rootNm > 0) {
       say("warn", "App view unavailable", "could not measure what a non-root reader sees",
         "Couldn’t drop to a non-root uid to verify here, and root sees " + rootNm +
@@ -1663,10 +1663,20 @@
   const VERDICT_LABEL = {
     fail: "needs attention",
     reboot: "reboot to finish",
-    warn: "a detector can see this",
+    warn: "worth a look",
     unmeasured: "not measured",
     note: "for information",
   };
+
+  // Only a finding that carries an oracle - a named way an app would actually observe it - may
+  // claim a detector can see it. Half the warn findings are not visibility problems at all
+  // ("module content not served", "planned rule not live", "target claimed twice"), and
+  // stamping them all with the detector line told the user they were exposed by something no
+  // app can look at, directly above evidence saying the files are served by nothing.
+  function verdictLabel(c) {
+    if ((c.verdict === "warn" || c.verdict === "fail") && c.oracle) return "a detector can see this";
+    return VERDICT_LABEL[c.verdict] || c.verdict;
+  }
   function isAttention(v) { return v === "fail" || v === "reboot" || v === "warn"; }
   function isShown(v) { return isAttention(v) || v === "unmeasured"; }
 
@@ -1685,17 +1695,21 @@
     const el = $("healthline"), dot = $("hlDot"), txt = $("hlTxt");
     if (!el) return;
     el.classList.remove("attn", "down");
-    if (!r || !r.summary) {
-      dot.className = "hl-dot";
-      txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\"> - tap to run a check</span>";
-      return;
-    }
+    // engineDown() and guardTripped() answer from ENGINE_LIVE/GUARD_TRIPPED without needing a
+    // report, so they are asked first. Testing !r first told the one user who most needs an
+    // answer - the kernel has no engine, so no check can ever produce a report - that they had
+    // simply not run a check yet, and sent them to press a button that does not exist.
     if (engineDown(r) || guardTripped(r)) {
       el.classList.add("attn", "down");
       dot.className = "hl-dot bad";
       txt.innerHTML = engineDown(r)
         ? "<b>The engine isn’t running</b> <span class=\"age\">· nothing is being injected</span>"
         : "<b>The bootloop guard tripped</b> <span class=\"age\">· the Suite disabled itself</span>";
+      return;
+    }
+    if (!r || !r.summary) {
+      dot.className = "hl-dot";
+      txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\"> - tap to run a check</span>";
       return;
     }
     const s = r.summary;
@@ -1765,11 +1779,16 @@
     const list = $("findlist"), chip = $("fchip"), sub = $("fsub"), age = $("auage");
     paintHealthLine(r);
     paintAbsorbChip();
-    $("auCopy").style.display = r ? "" : "none";
+    // Keep Copy report reachable when the engine is down. That is the state a bug report is
+    // most needed in, and it is exactly the state that produces no report to gate the button on.
+    $("auCopy").style.display = (r || engineDown(r)) ? "" : "none";
 
     if (!r || !r.checks) {
-      list.innerHTML = '<div class="empty">Not checked yet - press <b>Check my setup</b>.</div>';
-      chip.textContent = "not checked"; chip.className = "chip warn";
+      list.innerHTML = engineDown(r)
+        ? '<div class="empty">No kernel driver, so there is nothing to check yet. Use <b>Copy report</b> to get the details for a bug report.</div>'
+        : '<div class="empty">Not checked yet - press <b>Re-run</b>.</div>';
+      chip.textContent = engineDown(r) ? "engine down" : "not checked";
+      chip.className = engineDown(r) ? "chip bad" : "chip warn";
       age.style.display = "none";
       return;
     }
@@ -1868,7 +1887,7 @@
     if (c.meaning) b.push('<div class="fmean">' + esc(c.meaning) + "</div>");
     if (c.owner) b.push('<div class="fowner">From: <b>' + esc(c.owner) + "</b></div>");
     b.push('<div class="fmeta"><span class="tag ' + (c.verdict === "note" ? "off" : "warn") + '">' +
-           esc(VERDICT_LABEL[c.verdict] || c.verdict) + "</span>" +
+           esc(verdictLabel(c)) + "</span>" +
            '<span class="tag off">' + esc(c.section || "") + "</span></div>");
     b.push('<details><summary>What was measured</summary><div class="ev">' +
            esc(c.evidence || "(nothing recorded)") +
@@ -1879,7 +1898,39 @@
   }
 
   async function copyReport(btn) {
-    if (!CHECK) { toast("Run the check first."); return; }
+    if (!CHECK && !engineDown(CHECK)) { toast("Run the check first."); return; }
+    if (!CHECK) {
+      // No engine means no report will ever exist, so hand over what can be gathered without
+      // one rather than refusing - this is the install that most needs to be reportable.
+      const d = busy(btn, "Copying...");
+      const e = await exec(
+        'echo "$(getprop ro.product.marketname)|$(getprop ro.build.version.release)|' +
+        '$(getprop ro.build.id)|$(uname -r)"'
+      );
+      const q = (e.stdout || "").trim().split("|");
+      const t = [
+        "NoMount Suite " + SUITE_VERSION +
+          (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " - check",
+        "device: " + (q[0] || "?") + " · Android " + (q[1] || "?") + " · " + (q[2] || "?"),
+        "kernel: " + (q[3] || "?"),
+        "engine: not responding - no CONFIG_NOMOUNT kernel, so no check could run",
+      ].join("\n");
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(t);
+        copied = true;
+      } catch (err) { copied = false; }
+      d();
+      if (copied) toast("Report copied.");
+      else {
+        $("auditout").textContent = t;
+        const dd = $("auditout").closest("details");
+        if (dd) dd.open = true;
+        $("devtools").open = true;
+        toast("Clipboard unavailable - the report is in Raw report, ready to select.");
+      }
+      return;
+    }
     const done = busy(btn, "Copying...");
     const env = await exec(
       'echo "$(getprop ro.product.marketname)|$(getprop ro.build.version.release)|' +
@@ -2400,9 +2451,18 @@
     const out = ((r.stdout || "") + (r.stderr || "")).trim();
     $("abFound").style.display = "";
     $("abFound").innerHTML = `<div class="empty">${esc(out || "(no output)")}</div>`;
+    // The deferred line is printed before absorb decides whether anything else was taken, so it
+    // can sit alongside a summary that absorbed plenty. Only say nothing was absorbed when the
+    // summary itself says so. The deferral is also conditional on the my_hookless trial, which
+    // the old wording dropped - without the marker those mounts are not taken at the next boot
+    // either, so promising "the next boot" was wrong on a default install.
+    const deferred = /deferred to the pre-zygote pass/.test(out);
+    const absorbedNone = /nothing to absorb/.test(out) || /: 0 mount\(s\) absorbed/.test(out);
     toast(r.errno !== 0 ? failText(r)
-          : /deferred to the pre-zygote pass/.test(out)
-            ? "Deferred to the next boot - nothing could be absorbed while Android is running"
+          : deferred
+            ? (absorbedNone
+                ? "Deferred - my_* mounts cannot be absorbed while Android is running"
+                : "Absorbed, with my_* mounts deferred")
             : "Absorb complete",
           r.errno === 0 ? "ok" : "bad");
     await runCheck(null);
