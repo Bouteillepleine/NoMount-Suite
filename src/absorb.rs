@@ -278,6 +278,14 @@ fn namespace_probes() -> Vec<(String, String)> {
     out
 }
 
+/// `None` when our own mount namespace could not be read, so no other namespace could be
+/// compared against it. That is not the same as "no foreign mounts", and a caller that cannot
+/// tell them apart reports a clean posture it never established.
+pub fn survey_elsewhere_checked() -> Option<Vec<Elsewhere>> {
+    mnt_ns_of("self")?;
+    Some(survey_elsewhere())
+}
+
 pub fn survey_elsewhere() -> Vec<Elsewhere> {
     let Some(mine) = mnt_ns_of("self") else { return Vec::new() };
     let ours: HashSet<(PathBuf, PathBuf)> = survey()

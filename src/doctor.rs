@@ -1494,9 +1494,19 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 }
             } else {
                 let nothing_hidden = hidden_apps.is_empty() && !hide_list_unreadable;
-                let nothing_injected = !plan.iter().any(|e| e.kind == PlanKind::Inject);
+                // Live rules count, not just the plan: an injection absorbed from another module
+                // or added by hand is served without ever appearing in the plan, and calling that
+                // "nothing to inject" reported N/A on a device that had plenty to cloak.
+                let nothing_injected =
+                    !plan.iter().any(|e| e.kind == PlanKind::Inject) && gpaths.is_empty();
                 f.push(Finding {
-                    level: if nothing_hidden || nothing_injected {
+                    // The level has to follow the same reasoning as the text below it. An
+                    // unreadable hide list used to print "not a pass, and not a nothing-to-test
+                    // either" while being graded NotApplicable - which is not counted as
+                    // unmeasured, so the report still claimed to be complete.
+                    level: if hide_list_unreadable {
+                        Level::Unmeasured
+                    } else if nothing_hidden || nothing_injected {
                         Level::NotApplicable
                     } else {
                         Level::Unmeasured
@@ -1663,7 +1673,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         f.push(Finding { level, check, detail });
     }
 
-    for e in crate::absorb::survey_elsewhere() {
+    let elsewhere = match crate::absorb::survey_elsewhere_checked() {
+        Some(v) => v,
+        None => {
+            f.push(Finding {
+                level: Level::Unmeasured,
+                check: "foreign mount in another namespace",
+                detail: "our own mount namespace could not be read, so no other process's \
+                         mount table could be compared against it. Whether another namespace \
+                         carries a mount this one cannot see was not established."
+                    .to_string(),
+            });
+            Vec::new()
+        }
+    };
+    for e in elsewhere {
         f.push(Finding {
             level: Level::Warn,
             check: "foreign mount in another namespace",
