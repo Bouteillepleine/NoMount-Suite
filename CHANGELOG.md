@@ -11,6 +11,23 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.181 - engine v33 (the engine fixes below need a kernel rebuild)
+
+- The existence cloak covered fewer processes than the hiding did. The engine normalises a uid before deciding (`uid % 100000`, plus the sdksandbox remap), so one hide-list entry covers an app in every work profile, clone and sandbox - but the cloak compared the raw uid, so those same processes were hidden and not absent: `stat` said ENOENT while `truncate` still answered EROFS. The cloak now normalises the same way. Until you flash a kernel carrying it, userspace expands the table instead, and says so if it runs out of room.
+- Engine: a `getdents64` whose buffer could not hold even the first entry was read as the end of the directory, which moved the offset into the synthesized range and dropped the whole real listing on the next call.
+- Engine: every change to the rule table now bumps the generation a `nm list` dump checks, including the path that puts a replaced rule back after a failure. A dump could previously finish claiming consistency while having skipped a rule.
+- Engine: `NM_FLAG_VIRTUAL_DIR` is no longer accepted from userspace - no client sends it, and the engine's own directories set it themselves.
+- Engine: a directory that gains synthesized subdirectories reports the matching link count instead of the stock one.
+- Absorb no longer drops a redundant `my_*` mount from another namespace at runtime. The in-namespace pass has always refused that - re-asserting a `my_*` rule on a live system has rebooted a device - and the cross-namespace pass was not applying the same rule.
+- Absorb refuses the entries the planner refuses: `.replace` markers, whiteout markers, and symlinks resolving somewhere a non-root process could write.
+- A failed install no longer deletes your settings. `customize.sh` removed the stash whether or not the copy succeeded, and said nothing when it had not.
+- Verdicts say what they measured. Not finishing a scan, an unreadable mount table, an unreadable namespace, an unreadable pending-reboot list and a failed absence probe were each reported as a clean or failed result; all of them now read as not measured.
+- `check` no longer writes. It created the hide-list file as a side effect of reading it, and it now takes the pass lock so it cannot sample the engine halfway through a reload.
+- A stale hide-list entry no longer raises a permanent alarm. Retiring an appid the engine was not hiding counted as a failure, which then blocked the mirror rewrite, so the same warning repeated on every apply until reboot.
+- Every command and flag has help text. `uid hide` / `uid unhide` are accepted, and `vfs clear` says how to get the rules back.
+- The status pane says what it found: a healthy device gets its verdict and a freshness stamp back, findings lead with plain English, and the wrong-kernel first run can produce a bug report instead of pointing at a button that does not exist.
+- Build: the release gate escapes the version it greps for, refuses to ship an unknown commit stamp, and parses the generated installer before packaging it. A non-release build now says so in the footer.
+
 ## v1.3.180 - engine v33 (unchanged)
 
 - Absorb can now drop a mount from zygote's namespace, which is the one every app inherits: a module that binds with `nsenter` put its mount in every app's table however clean ours was. Only a mount a live injection already serves is dropped - anything else is content the owning module is the only source of - and an app already running keeps the copy it forked with until it is restarted.
