@@ -238,6 +238,7 @@ struct nomount_proxy_ctx {
     struct nomount_dir_node *dir_node;
     const struct nm_inode_info *dir_info;
     int emitted;
+    bool refused;
 };
 
 static inline unsigned long nm_child_ino(unsigned long base, const char *name, int len, bool dirent)
@@ -312,6 +313,7 @@ do_real_actor:
     ret = proxy->orig_ctx->actor(proxy->orig_ctx, name, namelen, offset, ino, d_type);
     proxy->ctx.pos = proxy->orig_ctx->pos;
     if (ret == NM_ACTOR_CONTINUE) proxy->emitted++;
+    else proxy->refused = true;
 
     return ret;
 }
@@ -1549,6 +1551,13 @@ static void nm_dir_size_fix(struct nm_inode_info *info, struct kstat *stat)
     if (stat->size <= 0 || stat->size >= 4096)
         return;
     nm_dir_deltas(info->dir_node, &nld, &delta);
+    if (nld > 0) {
+        /* A directory's nlink is 2 plus its subdirectories. The synthesized ones were counted
+           here and then dropped, so a folder could list more subdirectories than its own nlink
+           admits to - a mismatch no real directory has. */
+        u64 nl = (u64)stat->nlink + (u64)nld;
+        stat->nlink = (nl > UINT_MAX) ? UINT_MAX : (unsigned int)nl;
+    }
     if (!delta)
         return;
     fixed = stat->size + delta;
@@ -1847,11 +1856,16 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
             .orig_ctx = ctx, .dir_node = dir_node,
             .dir_info = (info && real_file->f_path.dentry == info->r_path.dentry)
                         ? info : NULL,
-            .emitted = 0
+            .emitted = 0,
+            .refused = false
         };
         res = iterate_dir(real_file, &proxy_ctx.ctx);
         ctx->pos = proxy_ctx.ctx.pos;
-        if (res < 0 || proxy_ctx.emitted > 0) return res;
+        /* `refused` means the caller's buffer would not take the entry we offered, not that the
+           real directory is finished. Treating that as EOF moved f_pos into the virtual cookie
+           band, so the next getdents64 resumed among the synthesized entries and the whole real
+           listing vanished - which a buffer too small for the first dirent triggers every time. */
+        if (res < 0 || proxy_ctx.emitted > 0 || proxy_ctx.refused) return res;
         if (!dir_node) return res;
         nm_publish_real_eof(dir_node, ctx->pos);
         ctx->pos = nm_pack_pos(dir_node, 0);
@@ -4315,14 +4329,23 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     err = nomount_generate_virtual_topology(rule);
     if (err != 0) {
-        if (victim)
+        if (victim) {
             hash_add_rcu(nomount_rules_ht, &victim->vpath_node, victim->v_hash);
+            /* The victim was unhashed above and is back now. A dump that walked this bucket in
+               between skipped it, and without a generation change its guard would report a
+               consistent listing that is missing a rule. */
+            atomic_inc(&nm_rule_gen);
+        }
         nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len, NULL);
         mutex_unlock(&nomount_write_mutex);
         nm_free_rule(rule);
         return err;
     }
 
+    /* Bracket the publication. Bumping only afterwards left a window where a dump could emit
+       the new rule and still finish on the generation it started with, so its -EAGAIN never
+       fired. */
+    atomic_inc(&nm_rule_gen);
     hash_add_rcu(nomount_rules_ht, &rule->vpath_node, rule->v_hash);
     atomic_inc(&nm_rule_gen);
 
