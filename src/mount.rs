@@ -1204,6 +1204,37 @@ mod tests {
             SWEEP.contains(r#"SKIP_MARKER = "[case-ok]""#),
             "case-sweep.py's escape-hatch marker changed; the failure message it prints and              this contract must name the same string"
         );
+        let branches = BUILD_YAML
+            .lines()
+            .find(|l| l.trim_start().starts_with("branches:"))
+            .unwrap_or("")
+            .to_string();
+        for branch in ["prerelease", "main"] {
+            assert!(
+                branches.contains(branch),
+                "build.yaml's push trigger does not name `{branch}`, so pushes to it run no \
+                 tests, no shellcheck and no case sweep. Listing prerelease alone is how 13 of \
+                 22 commits reached v1.3.180 ungated: {branches:?}"
+            );
+        }
+        assert!(
+            SWEEP.contains(".html"),
+            "case-sweep.py stopped covering .html, so module/webroot/index.html is outside the \
+             gate again - the file where `grep -q ENABLED` became `enabled` and where the \
+             `would DROP`/`would SKIP` classifiers were lowercased"
+        );
+        assert!(
+            !SWEEP.contains("zip(dels, adds)"),
+            "case-sweep.py is pairing removed lines to added lines by position again. Any hunk \
+             that adds a different number of lines than it removes - every prose re-wrap, which \
+             is the shape a bulk rewrite makes - shifts the pairs and hides the damage"
+        );
+        assert!(
+            BUILD_YAML.contains("git describe --tags --abbrev=0"),
+            "the tag-push fallback is gone. A tag push reports an all-zero `before`, so without \
+             a previous-tag fallback the sweep checks the tag commit alone and every other \
+             commit in the release ships unswept"
+        );
     }
 
     #[test]

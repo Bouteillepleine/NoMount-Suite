@@ -4,7 +4,7 @@ on:
   workflow_call:
   workflow_dispatch:
   push:
-    branches: [prerelease]
+    branches: [prerelease, main]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -69,8 +69,18 @@ jobs:
               usable=no
           fi
           if [ "$usable" = no ]; then
-              echo "no usable base ($base) - checking $sha alone"
-              python3 scripts/case-sweep.py "$sha"
+              # A tag push reports an all-zero "before", so the pushed range is unknowable from
+              # the event alone. Falling back to the tag commit by itself would sweep one commit
+              # and wave through every other commit in the release - which is how six code
+              # commits reached v1.3.180 unswept. Sweep back to the previous tag instead.
+              prev="$(git describe --tags --abbrev=0 "$sha^" 2>/dev/null || true)"
+              if [ -n "$prev" ] && git cat-file -e "$prev^{commit}" 2>/dev/null; then
+                  echo "no usable base ($base) - sweeping $prev..$sha"
+                  python3 scripts/case-sweep.py "$prev..$sha"
+              else
+                  echo "no usable base ($base) and no previous tag - checking $sha alone"
+                  python3 scripts/case-sweep.py "$sha"
+              fi
           else
               python3 scripts/case-sweep.py "$base..$sha"
           fi

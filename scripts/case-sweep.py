@@ -30,10 +30,18 @@ That last clause is what keeps it quiet. Re-capitalising an English sentence ins
 a string does not lose an ALL-CAPS token, so it passes; turning HEAD into head, or
 ARCH into arch, does not.
 
-Measured before being made blocking:
+Measured before being made blocking, and re-measured after the round-12 repair of the two
+holes below (pairing by content rather than position, and admitting .html):
 
-    the six "updates" commits   150 hits
-    40 ordinary commits           0 hits
+    eae5476    98 -> 103 hits
+    662e959    43 ->  44 hits
+    7e4222e   clean ->  2 hits   <- the repair: this one reported clean while carrying the
+                                    `would DROP`/`would SKIP` damage round 11 had to find by hand
+    46 ordinary commits            0 hits, before and after
+
+The two holes were: pairing removed lines to added lines BY POSITION, which an unbalanced
+hunk (any prose re-wrap) shifts out of alignment - the exact hunk shape a bulk rewrite makes;
+and omitting .html, which is where two of the four casualties named above actually landed.
 
 Escape hatch
 ------------
@@ -45,7 +53,7 @@ import re
 import subprocess
 import sys
 
-CODE_EXT = (".sh", ".rs", ".c", ".h", ".yml", ".yaml", ".patch", ".py", ".toml", ".json")
+CODE_EXT = (".sh", ".rs", ".c", ".h", ".yml", ".yaml", ".patch", ".py", ".toml", ".json", ".html")
 
 COMMENT = re.compile(r"^\s*(///|//|#|/\*|\*|--|<!--)")
 
@@ -67,9 +75,22 @@ def case_only_pairs(rev):
     def flush():
         if not path or not path.endswith(CODE_EXT):
             return
-        for old, new in zip(dels, adds):
-            if old != new and old.lower() == new.lower():
-                found.append((path, old, new))
+        # Pair by content, never by position. A bulk prose rewrite re-wraps paragraphs, so the
+        # hunk it produces removes a different number of lines than it adds and every later pair
+        # is off by one - which is exactly the hunk shape this gate exists to catch. Each added
+        # line is consumed once so a line is never matched twice.
+        by_lower = {}
+        for new in adds:
+            by_lower.setdefault(new.lower(), []).append(new)
+        for old in dels:
+            bucket = by_lower.get(old.lower())
+            if not bucket:
+                continue
+            for i, new in enumerate(bucket):
+                if new != old:
+                    found.append((path, old, new))
+                    bucket.pop(i)
+                    break
 
     for line in diff.split("\n"):
         if line.startswith("+++ b/"):
