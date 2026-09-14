@@ -323,7 +323,14 @@ fn cache_write(map: &BTreeMap<String, u32>) {
         body.push_str(&v.to_string());
         body.push('\n');
     }
-    let _ = crate::statefile::write_atomic(CACHE_PATH, body);
+    // Swallowing this silently staled the resolved-appid mirror: the next early-boot pass
+    // reads the old file, re-applies stale appids, and nothing ever said the write failed.
+    if let Err(e) = crate::statefile::write_atomic(CACHE_PATH, body) {
+        eprintln!(
+            "nomount: could not update {CACHE_PATH} ({e}) - the resolved-appid mirror is stale, \
+             so an early-boot pass may re-apply the previous appids until this is fixed"
+        );
+    }
 }
 
 pub fn cache_put(entry: &str, uid: u32) {
