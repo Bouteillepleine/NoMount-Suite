@@ -123,6 +123,18 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     // Unknown reads as "not mounted" here: binding again over our own bind is recoverable,
     // refusing to bind because we could not look is not.
     if mount_state(target).unwrap_or(false) {
+        // Still record it. The mount exists either way, and a bind with no row in binds.list is
+        // one `unbind` cannot take down and `check` cannot account for - the row is how the
+        // Suite knows this mount is its own.
+        let lbl = read_selinux(source)
+            .map(|l| String::from_utf8_lossy(&l).trim_end_matches('\0').to_string())
+            .unwrap_or_default();
+        if let Err(e) = append_locked(&t, &s, &lbl) {
+            eprintln!(
+                "nomount: {t} is already bound but its row could not be recorded ({e}) - \
+                 `nomount unbind` will not remove it"
+            );
+        }
         return Ok(BindOutcome::AlreadyMounted);
     }
     let orig_label = read_selinux(source);

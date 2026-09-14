@@ -850,7 +850,18 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
             }
             false
         }
-        None => nm.add(target, source).is_ok(),
+        None => {
+            if nm.add(target, source).is_ok() {
+                return true;
+            }
+            eprintln!(
+                "nomount: absorb: could not install a rule for {} <- {} - that path is not \
+                 served",
+                target.display(),
+                source.display()
+            );
+            false
+        }
     }
 }
 
