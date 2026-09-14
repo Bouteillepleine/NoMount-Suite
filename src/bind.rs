@@ -44,10 +44,12 @@ fn cstr(p: &Path) -> Result<CString> {
     CString::new(p.as_os_str().as_encoded_bytes()).context("nul byte in path")
 }
 
-fn is_mounted(target: &Path) -> bool {
+/// `None` when the mount table could not be read at all. The two callers want opposite
+/// defaults for that case, so neither gets to inherit a silent one.
+fn mount_state(target: &Path) -> Option<bool> {
     fs::read_to_string("/proc/self/mountinfo")
+        .ok()
         .map(|s| crate::absorb::parse_mountinfo(&s).iter().any(|r| r.target == target))
-        .unwrap_or(false)
 }
 
 fn read_selinux(p: &Path) -> Option<Vec<u8>> {
@@ -118,7 +120,9 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     }
 
     let _lock = Lock::acquire()?;
-    if is_mounted(target) {
+    // Unknown reads as "not mounted" here: binding again over our own bind is recoverable,
+    // refusing to bind because we could not look is not.
+    if mount_state(target).unwrap_or(false) {
         return Ok(BindOutcome::AlreadyMounted);
     }
     let orig_label = read_selinux(source);
@@ -223,7 +227,10 @@ fn umount_target(target: &Path) -> Result<(), String> {
         return Ok(());
     }
     let e = std::io::Error::last_os_error();
-    if !is_mounted(target) {
+    // Unknown reads as "still mounted" here. Treating an unreadable mount table as proof the
+    // umount worked reported success and dropped the row, leaving a real bind with nothing
+    // recording it.
+    if mount_state(target) == Some(false) {
         return Ok(());
     }
     Err(e.to_string())
