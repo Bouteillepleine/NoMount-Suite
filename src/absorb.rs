@@ -1464,7 +1464,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     let surveyed = survey()?;
     let rows = read_mountinfo(MOUNTINFO).unwrap_or_default();
     let aliases = mount_aliases(&rows);
-    let (mut leaking, mut declined) = (tmpfs.leaked + tmpfs.failed, tmpfs.declined);
+    // tmpfs.failed is already reported in the summary's failed total, and it does NOT mean the
+    // mount survived: take_over_empty_dir also fails when the unmount worked and the whiteout
+    // did not. Counting it here both double-reported it and claimed "still mounted" for a path
+    // that may well be gone. tmpfs.leaked is the count that really is still mounted.
+    let (mut leaking, mut declined) = (tmpfs.leaked, tmpfs.declined);
     let imaged: Vec<String> = rom_image_mounts(&rows);
     for h in &imaged {
         leaking += 1;
