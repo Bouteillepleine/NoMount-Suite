@@ -5,6 +5,7 @@
 
 MODDIR=/data/adb/modules/meta-nomount
 NMLOG_TAG=uidwatch
+# shellcheck source=module/lib.sh
 . "$MODDIR/lib.sh" 2>/dev/null || {
     echo "nomount: lib.sh missing or unreadable at $MODDIR - the package watcher cannot run; re-flash the zip" > /dev/kmsg 2>/dev/null
     exit 1

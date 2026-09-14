@@ -1,6 +1,7 @@
 #!/system/bin/sh
 MODDIR="${0%/*}"
 NMLOG_TAG=service
+# shellcheck source=module/lib.sh
 . "$MODDIR/lib.sh" 2>/dev/null || {
     echo "nomount: lib.sh missing or unreadable at $MODDIR - the post-boot pass did not run; re-flash the zip" > /dev/kmsg 2>/dev/null
     exit 1
@@ -297,6 +298,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     fi
     _mu=$(_health_get manager_umount | head -1)
     if [ "$_mu" = "on" ]; then
+        # shellcheck disable=SC1111  # typographic quotes on purpose: this names
         if [ "${_mnt:-0}" -gt 0 ]; then
             _muc=" · “kernel umount” ON (it hides our $_mnt bind(s))"
             _mul=", manager kernel_umount is ON (hides our $_mnt bind(s))"

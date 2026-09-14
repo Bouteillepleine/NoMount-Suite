@@ -1,6 +1,7 @@
 #!/system/bin/sh
 MODDIR="${0%/*}"
 NMLOG_TAG=uidscan
+# shellcheck source=module/lib.sh
 . "$MODDIR/lib.sh" 2>/dev/null || {
     echo "nomount: lib.sh missing or unreadable at $MODDIR - the hide-list scan cannot run; re-flash the zip" > /dev/kmsg 2>/dev/null
     exit 1
@@ -39,6 +40,7 @@ if [ -z "$PKGS" ]; then
     exit 0
 fi
 
+# shellcheck disable=SC2016  # single quotes are the point: this is the body of
 printf '%s\n' "$PKGS" | tr '\n' '\0' | xargs -0 -P "$J" -n1 sh -c '
     apk="${1%=*}"; pkg="${1##*=}"
     [ -n "$pkg" ] || exit 0
@@ -53,6 +55,7 @@ printf '%s\n' "$PKGS" | tr '\n' '\0' | xargs -0 -P "$J" -n1 sh -c '
     set +f
 
     if [ -f "$apk" ]; then
+        # shellcheck disable=SC2086  # $NM_TO is a command prefix ("timeout 2" or
         man=$($NM_TO unzip -p "$apk" AndroidManifest.xml 2>/dev/null | tr -d "\000")
         case "$man" in
             *topjohnwu.magisk*|*me.weishu.kernelsu*|*eu.chainfire.supersu*|\

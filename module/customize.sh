@@ -69,6 +69,7 @@ if [ ! -d "$MODPATH/bin/${_abi}" ]; then
     ui_print "*********************************************************"
     ui_print "! This zip has no binaries for this device's ABI."
     ui_print "!   device ABI: ${_abi}"
+    # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
     ui_print "!   shipped:    $(ls "$MODPATH/bin" 2>/dev/null | tr '\n' ' ')"
     ui_print "! The module will install and then inject nothing, on every"
     ui_print "! boot, silently. NoMount is arm64-v8a only."
