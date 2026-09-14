@@ -372,6 +372,12 @@ package_zip() {
         rm -rf "$staging"
         exit 1
     fi
+    sed -i "s/const SUITE_PROFILE = \"[^\"]*\"/const SUITE_PROFILE = \"${profile}\"/" \
+        "$staging/webroot/index.html"
+    if ! grep -q "const SUITE_PROFILE = \"${profile}\"" "$staging/webroot/index.html"; then
+        echo "fatal: could not stamp SUITE_PROFILE into webroot/index.html" >&2
+        exit 1
+    fi
     if ! grep -q "const SUITE_COMMIT = \"${BUILD_COMMIT}\"" "$staging/webroot/index.html"; then
         echo "fatal: could not stamp SUITE_COMMIT into webroot/index.html" >&2
         rm -rf "$staging"
@@ -427,6 +433,10 @@ fi
 
 exit 0
 UPDATER
+    if ! sh -n "$staging/META-INF/com/google/android/update-binary"; then
+        echo "fatal: the generated update-binary is not valid shell - the zip would fail at flash time, on device, with no way to see why." >&2
+        exit 1
+    fi
     chmod 0755 "$staging/META-INF/com/google/android/update-binary"
     echo "" > "$staging/META-INF/com/google/android/updater-script"
 

@@ -1072,6 +1072,7 @@
   "use strict";
   const SUITE_VERSION = "dev";
   const SUITE_COMMIT = "dev";
+  const SUITE_PROFILE = "dev";
   let execId = 0;
   const KSU = window.ksu;
   const $ = (id) => document.getElementById(id);
@@ -3048,7 +3049,8 @@
       ? pv + " is installed but not live yet - its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
       : "Suite " + SUITE_VERSION + " - " + eng + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
     const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
-    $("footver").textContent = "Suite " + suiteId + " · " + eng +
+    const prof = (SUITE_PROFILE && SUITE_PROFILE !== "release") ? " · " + SUITE_PROFILE + " build" : "";
+    $("footver").textContent = "Suite " + suiteId + prof + " · " + eng +
       (staged ? " · " + pv + " staged - reboot to activate" : "");
     await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
                        refreshAbsorb(),
