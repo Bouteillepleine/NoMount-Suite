@@ -132,6 +132,10 @@ pub enum VfsAction {
         path: String,
     },
     /// Flush every live rule (the boot pass puts them back on the next reboot)
+    #[command(after_help = "\
+Nothing is served afterwards until the rules come back. `nomount mount` rebuilds them from
+the installed modules without a reboot; a reboot does the same. Your hide list, whiteouts
+and settings are untouched - this clears the engine's live table only.")]
     Clear,
     /// Show live rules
     List,
@@ -140,7 +144,7 @@ pub enum VfsAction {
 #[derive(Subcommand)]
 pub enum UidAction {
     /// Hide everything the Suite serves from an app
-    #[command(after_help = "\
+    #[command(alias = "hide", after_help = "\
 Matches on appid, so one entry covers the app in every user profile, its clones
 and its sandbox.
 
@@ -155,6 +159,7 @@ and its sandbox.
         force: bool,
     },
     /// Stop hiding from an app
+    #[command(alias = "unhide")]
     Unblock {
         /// A package name or numeric uid
         target: String,
