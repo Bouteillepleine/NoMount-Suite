@@ -121,7 +121,22 @@ fn expand_ghost_uids(appids: &[u32], users: &[u32]) -> Vec<u32> {
             push(u * crate::blocklist::PER_USER_RANGE + a + SDKSANDBOX_OFF, &mut v);
         }
     }
-    v.truncate(GHOST_MAX_UIDS);
+    if v.len() > GHOST_MAX_UIDS {
+        // Silently dropping the tail would re-open the hole this expansion exists to close, on
+        // whichever profile sorts last. Each hidden app costs one slot per user profile plus one
+        // sandbox slot per profile, so the ceiling arrives fast on a device with clones.
+        eprintln!(
+            "nomount ghost: {} uid(s) needed for {} hidden app(s) across {} user profile(s), but \
+             the cloak holds {GHOST_MAX_UIDS} - dropping {}. Those processes stay hidden, but \
+             answer EROFS/EEXIST where an absent path would answer ENOENT. Hide fewer apps, or \
+             remove a user profile.",
+            v.len(),
+            appids.len(),
+            users.len(),
+            v.len() - GHOST_MAX_UIDS
+        );
+        v.truncate(GHOST_MAX_UIDS);
+    }
     v
 }
 
