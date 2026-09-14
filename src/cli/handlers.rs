@@ -267,7 +267,9 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             blocklist::cache_replace(&desired);
         } else {
             eprintln!(
-                "nomount: {} hide-list entr(ies) could not be applied, so the resolved-appid                  mirror is left as it was - rewriting it now would lose the record of an appid                  the kernel is still hiding",
+                "nomount: {} hide-list entr(ies) could not be applied, so the resolved-appid \
+                 mirror is left as it was - rewriting it now would lose the record of an appid \
+                 the kernel is still hiding",
                 rep.failed
             );
         }
@@ -336,7 +338,9 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 const GLOB_HIT_CEILING: usize = 24;
                 if hits.len() > GLOB_HIT_CEILING && !force {
                     bail!(
-                        "{target} matches {} installed package(s). A glob this broad hides                          your module content from all of them, RRO overlays included, and is                          almost always a typo. Narrow it, or pass --force if you mean it.",
+                        "{target} matches {} installed package(s). A glob this broad hides \
+                         your module content from all of them, RRO overlays included, and is \
+                         almost always a typo. Narrow it, or pass --force if you mean it.",
                         hits.len()
                     );
                 }

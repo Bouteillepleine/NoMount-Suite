@@ -63,7 +63,9 @@ nm_consume_stash() {
         _rn=$((_rn + 1))
     done
     _want=0
-    for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
+    for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
+              absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
+              absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] && _want=$((_want + 1))
     done
     if [ "$_rn" -gt 0 ]; then

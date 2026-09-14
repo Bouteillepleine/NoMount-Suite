@@ -966,7 +966,9 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                     && now.file_name() != target.file_name() =>
             {
                 eprintln!(
-                    "nomount: {pkg} moved to {}, but the recorded rule targets {} - `pm path`                      only reports the base APK, so this split cannot be re-pointed                      automatically; leaving the rule and its record alone",
+                    "nomount: {pkg} moved to {}, but the recorded rule targets {} - `pm path` \
+                     only reports the base APK, so this split cannot be re-pointed \
+                     automatically; leaving the rule and its record alone",
                     now.display(),
                     target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                 );

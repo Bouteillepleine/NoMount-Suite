@@ -875,7 +875,8 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 level: Level::Warn,
                 check: "module entry refused",
                 detail: format!(
-                    "{m}: {} entr(ies) the planner refused, so that content is not served and                      nothing else reports it. {}{}",
+                    "{m}: {} entr(ies) the planner refused, so that content is not served and \
+                     nothing else reports it. {}{}",
                     rs.len(),
                     shown.join(", "),
                     if more > 0 { format!(", and {more} more") } else { String::new() }
@@ -1391,7 +1392,10 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     level: Level::Unmeasured,
                     check: "ghost cloak list could not be parsed",
                     detail: format!(
-                        "the engine answered `nm l g` with {} byte(s), but no line matched the                          expected `p /abs/path` or `u <uid>` grammar, so the existence cloak was                          not tested. The kernel's ghost_get_rule() has probably changed format.                          This is not a pass.",
+                        "the engine answered `nm l g` with {} byte(s), but no line matched the \
+                         expected `p /abs/path` or `u <uid>` grammar, so the existence cloak was \
+                         not tested. The kernel's ghost_get_rule() has probably changed format. \
+                         This is not a pass.",
                         txt.trim().len()
                     ),
                 });
@@ -1446,7 +1450,9 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         level: Level::Unmeasured,
                         check: "ghost cloak only partly sampled",
                         detail: format!(
-                            "{unknown} of {attempted} sampled path(s) could not be probed at                              all, so the finding(s) above speak for {} path(s), not the whole                              sample",
+                            "{unknown} of {attempted} sampled path(s) could not be probed at \
+                             all, so the finding(s) above speak for {} path(s), not the whole \
+                             sample",
                             attempted - unknown
                         ),
                     });
@@ -1903,7 +1909,8 @@ uid=10123
         let (p, u) = parse_ghost_tables(drift);
         assert!(
             p.is_empty() && u.is_empty(),
-            "drifted grammar parses to nothing - the caller cannot tell this from 'no ghosts'              without checking the raw text, and doctor.rs does"
+            "drifted grammar parses to nothing - the caller cannot tell this from 'no ghosts' \
+             without checking the raw text, and doctor.rs does"
         );
         assert!(!drift.trim().is_empty(), "...and the raw text is what distinguishes them");
 

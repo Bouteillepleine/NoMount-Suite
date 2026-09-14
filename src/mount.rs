@@ -874,7 +874,8 @@ pub fn run_reload() -> Result<()> {
             if pm.len() > 3 { ", ..." } else { "" }
         );
         println!(
-            "         PackageManager parsed the old bytes; its cache is dropped but only \
+            " \
+        PackageManager parsed the old bytes; its cache is dropped but only \
              re-read at the next scan. Apps over these APKs can force-close until then."
         );
     }
@@ -1194,15 +1195,18 @@ mod tests {
 
         assert!(
             BUILD_YAML.contains("scripts/case-sweep.py"),
-            "build.yaml no longer invokes scripts/case-sweep.py - the case-only gate is off,              and the bulk-rewrite class it catches (HEAD -> head, ARCH -> arch) is silent"
+            "build.yaml no longer invokes scripts/case-sweep.py - the case-only gate is off, \
+             and the bulk-rewrite class it catches (HEAD -> head, ARCH -> arch) is silent"
         );
         assert!(
             BUILD_YAML.contains("fetch-depth: 0"),
-            "the sweep diffs the pushed range, so the test job's checkout needs full history;              with the default depth-1 checkout it has no predecessor to diff and checks nothing"
+            "the sweep diffs the pushed range, so the test job's checkout needs full history; \
+             with the default depth-1 checkout it has no predecessor to diff and checks nothing"
         );
         assert!(
             SWEEP.contains(r#"SKIP_MARKER = "[case-ok]""#),
-            "case-sweep.py's escape-hatch marker changed; the failure message it prints and              this contract must name the same string"
+            "case-sweep.py's escape-hatch marker changed; the failure message it prints and \
+             this contract must name the same string"
         );
         let branches = BUILD_YAML
             .lines()
@@ -1228,6 +1232,25 @@ mod tests {
             "case-sweep.py is pairing removed lines to added lines by position again. Any hunk \
              that adds a different number of lines than it removes - every prose re-wrap, which \
              is the shape a bulk rewrite makes - shifts the pairs and hides the damage"
+        );
+        const NOMOUNT_H: &str = include_str!("../hookless/src/nomount.h");
+        let wire = NOMOUNT_H
+            .lines()
+            .find_map(|l| l.strip_prefix("#define NOMOUNT_VERSION"))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .expect("nomount.h no longer defines NOMOUNT_VERSION");
+        let label = NOMOUNT_H
+            .lines()
+            .find_map(|l| l.strip_prefix("#define NM_MODULE_VERSION"))
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .expect("nomount.h no longer defines NM_MODULE_VERSION");
+        assert_eq!(
+            label.split('.').nth(1).and_then(|m| m.parse::<u32>().ok()),
+            Some(wire),
+            "NM_MODULE_VERSION ({label}) and NOMOUNT_VERSION ({wire}) have drifted. The label is \
+             what the kernel builders scrape to name a released kernel, nothing in this repo \
+             reads it, and the comment that stated this invariant was deleted by the comment \
+             strip - so only this test can catch it"
         );
         assert!(
             BUILD_YAML.contains("git describe --tags --abbrev=0"),
@@ -1283,11 +1306,14 @@ mod tests {
         assert_eq!(
             pins.len(),
             2,
-            "expected exactly two pinned `toolchain:` values (host test job, cross build job),              got {pins:?} - a job added or removed without pinning floats on whatever stable              was released that morning"
+            "expected exactly two pinned `toolchain:` values (host test job, cross build job), \
+             got {pins:?} - a job added or removed without pinning floats on whatever stable \
+             was released that morning"
         );
         assert_eq!(
             pins[0], pins[1],
-            "the two CI jobs pin different rustc versions ({pins:?}) - the binary that ships              would be built by a compiler the tests never ran under"
+            "the two CI jobs pin different rustc versions ({pins:?}) - the binary that ships \
+             would be built by a compiler the tests never ran under"
         );
         assert!(
             pins[0].chars().next().is_some_and(|c| c.is_ascii_digit()),

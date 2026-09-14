@@ -167,7 +167,9 @@ impl Nm {
                 }
                 if Nm::engine_is_unreachable(batch.unwrap_err()) {
                     eprintln!(
-                        "nomount: the engine stopped answering mid-pass - abandoning the                          remaining injections rather than retrying each one against it.                          {} rule(s) in this chunk and everything after it are unserved.",
+                        "nomount: the engine stopped answering mid-pass - abandoning the \
+                         remaining injections rather than retrying each one against it. \
+                         {} rule(s) in this chunk and everything after it are unserved.",
                         chunk.len()
                     );
                     gave_up = true;

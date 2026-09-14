@@ -72,7 +72,8 @@ fn main() -> Result<()> {
                 Ok(())
             } else {
                 anyhow::bail!(
-                    "at least one recorded bind could not be umounted; its row is kept in                      binds.list so a later pass can retry it"
+                    "at least one recorded bind could not be umounted; its row is kept in \
+                     binds.list so a later pass can retry it"
                 )
             }
         }
