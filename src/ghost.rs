@@ -73,15 +73,67 @@ pub(crate) fn candidates(list: &str) -> Vec<PathBuf> {
     v
 }
 
+/// The cloak's own table is fixed at 128 entries (GH_MAX_UIDS) and it refuses a longer list,
+/// so the expansion below is capped rather than allowed to silently overflow.
+const GHOST_MAX_UIDS: usize = 128;
+
+/// Secondary users present on the device -- work profiles, clones, additional accounts.
+fn device_user_ids() -> Vec<u32> {
+    let mut v = vec![0u32];
+    if let Ok(rd) = std::fs::read_dir("/data/system/users") {
+        for e in rd.flatten() {
+            if let Some(n) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) {
+                v.push(n);
+            }
+        }
+    }
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// Expand blocked appids into every raw uid the engine hides them under.
+///
+/// The engine normalises before deciding (`uid % NM_PER_USER_RANGE`, plus a remap of the
+/// sdksandbox range down to the appid), so one hide-list entry covers the app in every user
+/// profile and in its sandbox. The cloak compares the RAW uid and does not normalise, so a table
+/// of bare appids left those same processes hidden-but-not-absent: stat says ENOENT while
+/// truncate still answers EROFS and mkdirat still answers EEXIST. Ordered so that if the cap
+/// bites it drops the least likely uid rather than a primary-user one.
+fn expand_ghost_uids(appids: &[u32], users: &[u32]) -> Vec<u32> {
+    const SDKSANDBOX_OFF: u32 = 10_000;
+    let mut v: Vec<u32> = Vec::new();
+    let push = |u: u32, v: &mut Vec<u32>| {
+        if u != 0 && !v.contains(&u) {
+            v.push(u);
+        }
+    };
+    for a in appids {
+        push(*a, &mut v);
+    }
+    for u in users.iter().filter(|u| **u != 0) {
+        for a in appids {
+            push(u * crate::blocklist::PER_USER_RANGE + a, &mut v);
+        }
+    }
+    for u in users {
+        for a in appids {
+            push(u * crate::blocklist::PER_USER_RANGE + a + SDKSANDBOX_OFF, &mut v);
+        }
+    }
+    v.truncate(GHOST_MAX_UIDS);
+    v
+}
+
 fn ghost_uids(live: &[u32]) -> Vec<u32> {
-    let mut v: Vec<u32> = live
+    let mut appids: Vec<u32> = live
         .iter()
         .map(|u| crate::blocklist::appid(*u))
         .filter(|u| *u != 0)
         .collect();
-    v.sort_unstable();
-    v.dedup();
-    v
+    appids.sort_unstable();
+    appids.dedup();
+    expand_ghost_uids(&appids, &device_user_ids())
 }
 
 fn absent_to(uid: u32, paths: &[PathBuf]) -> Option<Vec<bool>> {
@@ -315,6 +367,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_cloak_covers_every_uid_the_engine_hides_the_app_under() {
+        // One hide-list entry, primary user plus a work profile.
+        let out = expand_ghost_uids(&[10384], &[0, 10]);
+        assert!(out.contains(&10384), "the app itself");
+        assert!(out.contains(&1010384), "the same app in user 10 (work profile / clone)");
+        assert!(out.contains(&20384), "its sdksandbox uid in user 0");
+        assert!(out.contains(&1020384), "its sdksandbox uid in user 10");
+        assert!(!out.contains(&0), "uid 0 is never ghosted");
+
+        // A single-user device must not grow entries it has no processes for.
+        let solo = expand_ghost_uids(&[10384], &[0]);
+        assert_eq!(solo, vec![10384, 20384]);
+
+        // The kernel table is 128 entries and refuses a longer list.
+        let many: Vec<u32> = (10000..10200).collect();
+        assert_eq!(expand_ghost_uids(&many, &[0, 10]).len(), GHOST_MAX_UIDS);
+
+        // Primary-user appids come first, so a cap drops the speculative uids, not the real ones.
+        let capped = expand_ghost_uids(&many, &[0, 10]);
+        assert_eq!(capped[0], 10000);
+        assert!(capped.iter().take(GHOST_MAX_UIDS).all(|u| many.contains(u)));
+    }
+
+    #[test]
     fn candidates_exclude_whiteouts_and_public_rules() {
         let list = "\
 /product/app/A/A.apk -> /data/adb/modules/M/product/app/A/A.apk
@@ -385,13 +461,21 @@ not-a-path -> /q
     }
 
     #[test]
-    fn ghost_uids_normalises_clones_to_one_appid() {
-        assert_eq!(ghost_uids(&[1_010_471, 10_471, 10_123]), vec![10_123, 10_471]);
+    fn ghost_uids_collapses_the_live_list_to_appids_then_re_expands_it() {
+        // The live list is whatever uids the engine reports, clones included; they collapse to
+        // one appid and then expand again into the uids the CLOAK has to match raw. Collapsing
+        // and stopping there is what left a hidden app's clone hidden-but-not-absent.
+        let out = ghost_uids(&[1_010_471, 10_471, 10_123]);
+        assert!(out.contains(&10_123) && out.contains(&10_471), "both appids survive");
+        assert!(out.contains(&20_123) && out.contains(&20_471), "and their sdksandbox uids");
+        assert_eq!(out.len(), out.iter().collect::<std::collections::HashSet<_>>().len());
     }
 
     #[test]
     fn ghost_uids_never_cloaks_from_root() {
-        assert_eq!(ghost_uids(&[0, 10_123, 100_000]), vec![10_123]);
+        let out = ghost_uids(&[0, 10_123, 100_000]);
+        assert!(out.contains(&10_123));
+        assert!(!out.contains(&0), "uid 0 and anything normalising to appid 0 stay out");
         assert!(ghost_uids(&[0]).is_empty(), "a set of only root leaves the table empty");
     }
 
