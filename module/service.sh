@@ -183,7 +183,7 @@ fi
 
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
-    inotifyd "$MODDIR/uidwatch.sh" /data/system >/dev/null 2>&1 &
+    inotifyd "$MODDIR/uidwatch.sh" /data/system:cewDMmynd >/dev/null 2>&1 &
     nmlog "hide-list package watcher started"
 fi
 

@@ -3702,6 +3702,12 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
             }
             hash_add_rcu(nomount_rules_ht, &irule->vpath_node, irule->v_hash);
         }
+        /* The implicit ancestors each took the previous one's dino as their parent; the deepest
+           of them is the target's parent, so prev_dino is what the target needs too. Without
+           this, nm_dirent_ino falls back to the directory's own v_ino and a directory-target
+           rule reports d_ino("..") == d_ino("."), which no real directory does. */
+        if (!target_rule->v_pdino)
+            target_rule->v_pdino = prev_dino;
     } else {
         hlist_for_each_entry_safe(irule, tmp, &pending_list, vpath_node) {
             hlist_del_init(&irule->vpath_node);
