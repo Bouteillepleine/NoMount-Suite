@@ -1134,7 +1134,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
 
     if let (Ok(raw), Ok(hide)) = (
         std::fs::read_to_string("/data/adb/nomount/blocklist"),
-        crate::blocklist::read(),
+        crate::blocklist::read_for_report(),
     ) {
         let hidden: std::collections::HashSet<String> = hide.into_iter().collect();
         let stale: Vec<String> = raw
@@ -1230,7 +1230,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let engine = nm.version().ok();
     let live_ok = engine.is_some();
     let mut hide_list_unreadable = false;
-    let hidden_apps = match crate::blocklist::read() {
+    let hidden_apps = match crate::blocklist::read_for_report() {
         Ok(v) => v,
         Err(e) => {
             hide_list_unreadable = true;

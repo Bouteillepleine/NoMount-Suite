@@ -205,14 +205,36 @@ fn migrate_legacy() {
     let _ = write_lines(BLOCKLIST_PATH, &apps);
 }
 
-pub fn read() -> Result<Vec<String>> {
-    migrate_legacy();
+fn load(migrate: bool) -> Result<Vec<String>> {
+    if migrate {
+        migrate_legacy();
+    }
     let raw = match fs::read_to_string(BLOCKLIST_PATH) {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Nothing migrated yet: read the legacy file in place rather than writing one, so a
+            // report still sees the real hide list without changing anything.
+            return match fs::read_to_string(LEGACY_PATH) {
+                Ok(legacy) => Ok(parse_blocklist(&legacy)
+                    .into_iter()
+                    .filter(|e| !Path::new(MODULES_DIR).join(e).is_dir())
+                    .collect()),
+                Err(_) => Ok(Vec::new()),
+            };
+        }
         Err(e) => return Err(e).context("read hide list"),
     };
     Ok(parse_blocklist(&raw))
+}
+
+pub fn read() -> Result<Vec<String>> {
+    load(true)
+}
+
+/// For the diagnostics. `check` is a read-only verb and used to create the hide-list file as a
+/// side effect of looking at it, through the legacy migration hidden inside `read`.
+pub fn read_for_report() -> Result<Vec<String>> {
+    load(false)
 }
 
 fn parse_blocklist(raw: &str) -> Vec<String> {
@@ -374,6 +396,23 @@ pub fn set_hide_isolated(mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_for_a_report_never_creates_the_hide_list() {
+        // check is read-only; the legacy migration used to run inside read() and write the
+        // file as a side effect of diagnosing it.
+        let src = include_str!("blocklist.rs");
+        let body = src.split("pub fn read_for_report").nth(1).unwrap();
+        let first = body.split("}
+").next().unwrap();
+        assert!(
+            first.contains("load(false)"),
+            "read_for_report must not migrate: {first}"
+        );
+        let rd = src.split("pub fn read()").nth(1).unwrap().split("}
+").next().unwrap();
+        assert!(rd.contains("load(true)"), "read() still migrates for the mutating verbs");
+    }
 
     const LIST: &str = "com.foo 10123 0 /data/user/0/com.foo default none 0 34 1 @null\n\
 me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 35 1 @null\n";
