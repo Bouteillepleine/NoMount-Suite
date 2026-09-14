@@ -1639,6 +1639,18 @@ static void nm_mirror_stat(const struct nm_inode_info *info, struct inode *v_ino
     if (info->v_blksize) stat->blksize = info->v_blksize;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
     if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
+#ifdef STATX_BTIME
+    if (!(stat->result_mask & STATX_BTIME)) {
+        stat->btime.tv_sec = 0;
+        stat->btime.tv_nsec = 0;
+    }
+#endif
+#ifdef STATX_DIOALIGN
+    if (!(stat->result_mask & STATX_DIOALIGN)) {
+        stat->dio_mem_align = 0;
+        stat->dio_offset_align = 0;
+    }
+#endif
 #endif
 }
 
