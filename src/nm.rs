@@ -10,6 +10,14 @@ pub struct Nm {
     bin: String,
 }
 
+/// Why one `nm` invocation failed. The exit code alone said "a rule in this chunk was
+/// refused"; the per-rule retry exists to find out WHICH and why, and it was throwing the
+/// engine's answer away.
+pub(crate) struct NmErr {
+    pub code: Option<i32>,
+    pub why: String,
+}
+
 impl Nm {
     pub fn new() -> Self {
         let bin = std::env::var("NM_BIN").ok().unwrap_or_else(|| {
@@ -30,12 +38,18 @@ impl Nm {
         matches!(code, Some(Nm::EXIT_TIMEOUT) | Some(Nm::EXIT_NO_ENGINE))
     }
 
-    fn run_coded(&self, args: &[&str]) -> std::result::Result<String, Option<i32>> {
-        let out = Command::new(&self.bin).args(args).output().map_err(|_| None)?;
+    fn run_coded(&self, args: &[&str]) -> std::result::Result<String, NmErr> {
+        let out = Command::new(&self.bin)
+            .args(args)
+            .output()
+            .map_err(|e| NmErr { code: None, why: e.to_string() })?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
         }
-        Err(out.status.code())
+        Err(NmErr {
+            code: out.status.code(),
+            why: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
@@ -134,15 +148,15 @@ impl Nm {
         &self,
         public: bool,
         pairs: &[(&Path, &Path)],
-    ) -> std::result::Result<(), Option<i32>> {
+    ) -> std::result::Result<(), NmErr> {
         let mut args: Vec<&str> = Vec::with_capacity(1 + usize::from(public) + pairs.len() * 2);
         args.push("add");
         if public {
             args.push("--public");
         }
         for (v, r) in pairs {
-            args.push(path_str(v).map_err(|_| None)?);
-            args.push(path_str(r).map_err(|_| None)?);
+            args.push(path_str(v).map_err(|e| NmErr { code: None, why: e.to_string() })?);
+            args.push(path_str(r).map_err(|e| NmErr { code: None, why: e.to_string() })?);
         }
         self.run_coded(&args).map(drop)
     }
@@ -165,7 +179,7 @@ impl Nm {
                 if batch.is_ok() {
                     continue;
                 }
-                if Nm::engine_is_unreachable(batch.unwrap_err()) {
+                if Nm::engine_is_unreachable(batch.unwrap_err().code) {
                     eprintln!(
                         "nomount: the engine stopped answering mid-pass - abandoning the \
                          remaining injections rather than retrying each one against it. \
@@ -179,10 +193,23 @@ impl Nm {
                 for (v, r) in chunk {
                     match self.add_batch_coded(public, std::slice::from_ref(&(*v, *r))) {
                         Ok(_) => {}
-                        Err(code) => {
+                        Err(e) => {
                             failed.push((*v, *r));
-                            if Nm::engine_is_unreachable(code) {
+                            eprintln!(
+                                "nomount: rule refused for {}: {}",
+                                v.display(),
+                                if e.why.is_empty() {
+                                    e.code.map_or_else(
+                                        || "nm did not run".to_string(),
+                                        |c| format!("nm exit {c}"),
+                                    )
+                                } else {
+                                    e.why.clone()
+                                }
+                            );
+                            if Nm::engine_is_unreachable(e.code) {
                                 gave_up = true;
+                                break;
                             }
                         }
                     }
