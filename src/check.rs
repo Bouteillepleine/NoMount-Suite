@@ -411,6 +411,12 @@ pub fn build(plan: bool, device: bool) -> Result<Report> {
 
 pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()> {
     let want_device = device || !plan;
+    // Serialise against the passes that change what we are about to measure. The boot script's
+    // settle canary can run for ~450s while the detached T+45s reload/absorb pass is still
+    // going, and a check sampling the engine mid-reload reports an inconsistency that is really
+    // just a half-applied pass. pass_lock waits 25s and then proceeds anyway, so a stuck pass
+    // delays the diagnosis rather than blocking it.
+    let _pass = crate::mount::pass_lock();
     let r = build(plan, device)?;
 
     if json {
