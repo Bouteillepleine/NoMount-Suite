@@ -773,7 +773,7 @@
       <div class="metric tap" role="button" tabindex="0"
            onclick="showTab('rules',document.getElementById('nb-rules'))"
            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}"
-           title="Open Modules">
+           title="Open Rules">
         <div class="k">Module coverage <span class="chev">›</span></div>
         <div class="v" id="mMod"> - </div>
       </div>
@@ -1275,10 +1275,20 @@
         if (p) pending = Math.max(0, p.expectLive - d.rules);
       } catch (e) {  }
       if (gen !== STATUS_GEN) return d.rules;
-      $("substate").textContent = pending > 0
-        ? `modules injected · ${pending} planned file${pending > 1 ? "s" : ""} not served yet - press Reload`
-        : "modules injected";
-      dot.className = "dot ok";
+      // The hero used to paint green from the rule count alone, so it read "Active · modules
+      // injected" with a green dot while the findings list directly below said three things
+      // needed attention. Injection working and nothing being wrong are different questions.
+      const attn = checkAttention();
+      const bits = [];
+      if (pending > 0) {
+        bits.push(`${pending} planned file${pending > 1 ? "s" : ""} not served yet - press Reload`);
+      }
+      if (attn > 0) {
+        bits.push(`${attn} thing${attn > 1 ? "s need" : " needs"} attention - see Diagnostics`);
+      }
+      $("substate").textContent = bits.length ? "modules injected · " + bits.join(" · ")
+                                              : "modules injected";
+      dot.className = (pending > 0 || attn > 0) ? "dot warn" : "dot ok";
       return d.rules;
     }
     let ships = -1, planned = -1;
@@ -1571,7 +1581,12 @@
     } else {
       movePill(true);
     }
-    try { sessionStorage.setItem("nm_tab", name); } catch (e) {}
+    // Only panes that have a nav button are worth restoring. Diagnostics is a detail view opened
+    // from the health line, so remembering it left the next visit on a pane with nothing lit in
+    // the nav and no obvious way back.
+    try {
+      if (document.getElementById("nb-" + name)) sessionStorage.setItem("nm_tab", name);
+    } catch (e) {}
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -1678,6 +1693,14 @@
     return VERDICT_LABEL[c.verdict] || c.verdict;
   }
   function isAttention(v) { return v === "fail" || v === "reboot" || v === "warn"; }
+
+  // How many findings the last check left open. Returns 0 when nothing has been checked, so a
+  // device with no report reads as "no news", never as "N things wrong".
+  function checkAttention() {
+    const s = CHECK && CHECK.summary;
+    if (!s) return 0;
+    return (s.open_failures || 0) + (s.warn || 0) + (s.reboot || 0);
+  }
   function isShown(v) { return isAttention(v) || v === "unmeasured"; }
 
   function auAge(ts) {
@@ -1731,10 +1754,8 @@
                       (unm || 1) + (unm === 1 ? " check" : " checks") +
                       " had nothing to look at</span>";
     } else {
-      // Nothing to say, so say nothing. The coverage metric above already
-      // reports the only thing worth reading on a healthy device.
-      el.style.display = "none";
-      return;
+      dot.className = "hl-dot ok";
+      txt.innerHTML = "<b>Nothing detectable</b>" + age;
     }
     el.style.display = "";
   }
@@ -1883,8 +1904,18 @@
   function checkRow(c) {
     const b = [];
     b.push('<div class="frow" id="chk-' + esc(c.id) + '">');
-    b.push('<div class="fname">' + esc(c.name) + "</div>");
-    if (c.meaning) b.push('<div class="fmean">' + esc(c.meaning) + "</div>");
+    // Lead with the plain-English meaning the backend already writes for 65 of these, and keep
+    // the check's own name as the secondary technical label. Leading with "readdir ino vs stat
+    // ino" told the reader nothing they could act on.
+    if (c.meaning) {
+      b.push('<div class="fname">' + esc(c.meaning) + "</div>");
+      b.push('<div class="fmean">' + esc(c.name) + "</div>");
+    } else {
+      b.push('<div class="fname">' + esc(c.name) + "</div>");
+    }
+    if (c.verdict === "reboot") {
+      b.push('<div class="fmean"><b>Next:</b> reboot to finish this one.</div>');
+    }
     if (c.owner) b.push('<div class="fowner">From: <b>' + esc(c.owner) + "</b></div>");
     b.push('<div class="fmeta"><span class="tag ' + (c.verdict === "note" ? "off" : "warn") + '">' +
            esc(verdictLabel(c)) + "</span>" +
@@ -3001,10 +3032,14 @@
     await loadCheckCache();
     const ev = await engineVersion();
     const eng = ev ? ("engine v" + ev) : "engine offline";
+    // A pending update lives in modules_update and swaps in on the next reboot; its presence IS
+    // the signal, including a same-version reinstall carrying new code. This used to read the
+    // LIVE module.prop, whose version package.sh stamps from the same value as SUITE_VERSION,
+    // so the two could never differ and the indicator was permanently off.
     const pv = (await exec(
-      "sed -n 's/^version=//p' /data/adb/modules/meta-nomount/module.prop"
+      "sed -n 's/^version=//p' /data/adb/modules_update/meta-nomount/module.prop 2>/dev/null"
     )).stdout.trim();
-    const staged = SUITE_VERSION !== "dev" && pv && pv !== SUITE_VERSION;
+    const staged = !!pv;
     $("ver").textContent = SUITE_VERSION + (staged ? " ·" : "");
     $("ver").title = staged
       ? pv + " is installed but not live yet - its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
