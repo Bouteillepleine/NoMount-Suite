@@ -105,19 +105,33 @@ set_perm "$NMDIR" 0 0 0700 u:object_r:adb_data_file:s0
 _bak=/data/adb/nomount.bak
 if [ -d "$_bak" ]; then
     _rn=0
+    _fail=0
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
-        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || { rm -f "$NMDIR/$_f" 2>/dev/null; continue; }
-        set_perm "$NMDIR/$_f" 0 0 0600 u:object_r:adb_data_file:s0
-        _rn=$((_rn + 1))
+        if cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null; then
+            set_perm "$NMDIR/$_f" 0 0 0600 u:object_r:adb_data_file:s0
+            _rn=$((_rn + 1))
+        else
+            rm -f "$NMDIR/$_f" 2>/dev/null
+            _fail=$((_fail + 1))
+        fi
     done
     unset _f
     [ "$_rn" -gt 0 ] && ui_print "- Restored $_rn setting(s) kept from your previous install"
-    rm -rf "$_bak"
-    unset _rn
+    # This is the primary restore path; lib.sh only mops up an install that never got here.
+    # Deleting the stash unconditionally threw away the sole copy of uidhide, whiteouts.txt,
+    # snapshot.txt and binds.list whenever a copy failed - silently, because $_rn stayed 0
+    # and gated off the line above.
+    if [ "$_fail" -eq 0 ]; then
+        rm -rf "$_bak"
+    else
+        ui_print "- ! $_fail setting(s) could not be restored; keeping $_bak"
+        ui_print "  Free some space and reboot - they are recovered on the next boot."
+    fi
+    unset _rn _fail
 fi
 unset _bak
 CONF="$NMDIR/spoof.conf"

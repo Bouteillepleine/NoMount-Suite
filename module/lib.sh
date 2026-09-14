@@ -52,31 +52,33 @@ nm_consume_stash() {
     _bak=/data/adb/nomount.bak
     [ -d "$_bak" ] || { unset _bak; return 0; }
     _rn=0
+    _fail=0
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
-        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || { rm -f "$NMDIR/$_f" 2>/dev/null; continue; }
-        chmod 0600 "$NMDIR/$_f" 2>/dev/null
-        chcon u:object_r:adb_data_file:s0 "$NMDIR/$_f" 2>/dev/null
-        _rn=$((_rn + 1))
-    done
-    _want=0
-    for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
-              absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-              absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
-        [ -e "$_bak/$_f" ] && _want=$((_want + 1))
+        if cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null; then
+            chmod 0600 "$NMDIR/$_f" 2>/dev/null
+            chcon u:object_r:adb_data_file:s0 "$NMDIR/$_f" 2>/dev/null
+            _rn=$((_rn + 1))
+        else
+            rm -f "$NMDIR/$_f" 2>/dev/null
+            _fail=$((_fail + 1))
+        fi
     done
     if [ "$_rn" -gt 0 ]; then
         nmlog "restored $_rn setting(s) from a stash left by an unfinished install"
     fi
-    if [ "$_rn" -ge "$_want" ]; then
+    # Count copies that actually failed, never "wanted minus restored": a file already present
+    # in $NMDIR is skipped by the loop and needs no restoring, so counting it as outstanding
+    # warned about a full /data on every healthy boot and kept the stash alive forever.
+    if [ "$_fail" -eq 0 ]; then
         rm -rf "$_bak" 2>/dev/null
     else
-        nmlog "⚠ restored only $_rn of $_want stashed setting(s) - KEEPING $_bak so the rest are not lost; free some space and reboot"
+        nmlog "⚠ $_fail stashed setting(s) could not be restored - KEEPING $_bak so they are not lost; free some space and reboot"
     fi
-    unset _bak _rn _f _want
+    unset _bak _rn _fail _f
     return 0
 }
 
