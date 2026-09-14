@@ -120,6 +120,27 @@ impl ApplyReport {
     }
 }
 
+/// Retire one appid the hide list no longer wants hidden.
+///
+/// The engine answers -ENOENT for an appid it is not currently hiding, which `nm` reports as a
+/// non-zero exit. An entry whose package has since been uninstalled -- or anything that cleared
+/// the IDR, `nomount vfs clear` included -- is therefore already retired, not a failure. Counting
+/// it as one raised "those apps are not hidden" on a healthy device, and because the caller only
+/// rewrites the resolved-appid mirror when `failed == 0`, the stale entry survived and the same
+/// false alarm repeated on every `uid apply` until the next reboot.
+fn retire_appid(nm: &Nm, live: &mut Vec<u32>, rep: &mut ApplyReport, old: u32) {
+    if !live.iter().any(|u| appid(*u) == old) {
+        rep.retired += 1;
+        return;
+    }
+    if nm.uid_unblock(old).is_ok() {
+        live.retain(|u| appid(*u) != old);
+        rep.retired += 1;
+    } else {
+        rep.failed += 1;
+    }
+}
+
 pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
     let mut rep = ApplyReport { hidden: 0, skipped: 0, failed: 0, retired: 0, not_installed: 0 };
 
@@ -223,12 +244,7 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
         if can_retire {
             if let Some(old) = cache.get(key) {
                 if *old != uid && !desired.values().any(|v| *v == *old) {
-                    if nm.uid_unblock(*old).is_ok() {
-                        live.retain(|u| appid(*u) != *old);
-                        rep.retired += 1;
-                    } else {
-                        rep.failed += 1;
-                    }
+                    retire_appid(nm, &mut live, &mut rep, *old);
                 }
             }
         }
@@ -256,12 +272,7 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             if desired.values().any(|v| *v == *old) {
                 continue;
             }
-            if nm.uid_unblock(*old).is_ok() {
-                live.retain(|u| appid(*u) != *old);
-                rep.retired += 1;
-            } else {
-                rep.failed += 1;
-            }
+            retire_appid(nm, &mut live, &mut rep, *old);
         }
         if rep.failed == 0 {
             blocklist::cache_replace(&desired);
