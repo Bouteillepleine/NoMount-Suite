@@ -214,14 +214,11 @@ fn pending_result() -> std::io::Result<Vec<PathBuf>> {
     }
 }
 
-pub fn pending() -> Vec<PathBuf> {
-    pending_result().unwrap_or_else(|e| {
-        eprintln!(
-            "nomount: pmcache: {PENDING} exists but could not be read ({e}) - the \
-             reboot-required list may be incomplete"
-        );
-        Vec::new()
-    })
+/// `Err` when the list exists but will not open, which is NOT the same as "nothing is
+/// pending" - the caller that cannot tell them apart blames the kernel for a reboot it
+/// simply could not see was due.
+pub fn pending() -> std::io::Result<Vec<PathBuf>> {
+    pending_result()
 }
 
 pub fn clear_pending() {

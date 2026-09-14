@@ -1026,7 +1026,24 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
         );
     }
     let shown = hits.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-    let pending = crate::pmcache::pending();
+    let pending = match crate::pmcache::pending() {
+        Ok(v) => v,
+        Err(e) => {
+            return unmeasured(
+                N_MAPS_DELETED,
+                format!(
+                    "{} injected file(s) mapped as deleted: {shown} - but the reboot-required \
+                     list could not be read ({e}), so whether a reboot settles this is unknown",
+                    hits.len()
+                ),
+            )
+            .meaning(
+                "Some open files still point at their pre-change contents. That is normal right \
+                 after a rule change and a reboot clears it - but the list that would confirm \
+                 that could not be read, so this was not settled either way.",
+            );
+        }
+    };
     if !pending.is_empty() && hits.iter().all(|h| pending.iter().any(|p| h.starts_with(&*p.to_string_lossy()))) {
         return reboot(
             N_MAPS_DELETED,
