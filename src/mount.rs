@@ -231,6 +231,40 @@ pub(crate) fn path_is_representable(p: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Why a module-tree entry must not become a plain injection rule.
+///
+/// plan_tree applies these when it builds a plan from a module's tree. absorb::inject walks a
+/// mounted source directly and reached add_repointing without them, so a tree carrying any of
+/// these produced a rule the planner exists to refuse -- most seriously a symlink resolving
+/// into a world-writable place (under /data but not /data/adb, or shared storage), where a
+/// non-root process would control the bytes served at a ROM path.
+pub(crate) fn absorb_refusal(source: &Path) -> Option<&'static str> {
+    let Ok(md) = fs::symlink_metadata(source) else {
+        return Some("its type could not be read");
+    };
+    let ft = md.file_type();
+    if source.file_name().map(|n| n == ".replace").unwrap_or(false) {
+        return Some("it is a .replace marker - a directive that only means something inside a \
+                     module tree, and would otherwise be served as a literal file at a ROM path");
+    }
+    if is_whiteout_marker(&ft, source) {
+        return Some("it is a character-device whiteout marker, which only means something \
+                     inside a module tree");
+    }
+    if ft.is_symlink() {
+        let resolved = fs::canonicalize(source).ok();
+        if resolved.as_deref().map(resolved_source_is_untrusted).unwrap_or(false) {
+            return Some("it is a symlink resolving into a world-writable location; the engine \
+                         follows it, so a non-root process would control the bytes served");
+        }
+        if resolved.as_deref().map(Path::is_dir).unwrap_or(false) {
+            return Some("it is a symlink to a directory, which the engine follows, so this \
+                         would install a directory rule");
+        }
+    }
+    None
+}
+
 fn source_resolves(e: &PlanEntry) -> bool {
     e.kind != PlanKind::Inject || e.source.exists()
 }
@@ -1522,6 +1556,32 @@ mod tests {
         assert!(out.is_empty());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn absorb_refuses_the_entries_the_planner_refuses() {
+        let d = tempfile::tempdir().unwrap();
+
+        let plain = d.path().join("libfoo.so");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(absorb_refusal(&plain).is_none(), "an ordinary file must still be absorbed");
+
+        let repl = d.path().join(".replace");
+        std::fs::write(&repl, b"").unwrap();
+        assert!(absorb_refusal(&repl).is_some(), ".replace would be served as a literal file");
+
+        // The untrusted set is "under /data but not /data/adb", plus shared storage - those are
+        // the places a non-root process can write. A tempdir is none of them, so the predicate
+        // is exercised directly rather than through a symlink a test cannot plant under /data.
+        assert!(resolved_source_is_untrusted(Path::new("/data/local/tmp/evil.so")));
+        assert!(resolved_source_is_untrusted(Path::new("/data/media/0/evil.so")));
+        assert!(!resolved_source_is_untrusted(Path::new("/data/adb/modules/m/lib.so")));
+
+        let dirlink = d.path().join("dirlink");
+        std::os::unix::fs::symlink(d.path(), &dirlink).unwrap();
+        assert!(absorb_refusal(&dirlink).is_some(), "a symlink to a directory must be refused");
+
+        assert!(absorb_refusal(&d.path().join("nope")).is_some(), "a missing source is refused");
     }
 
     #[test]

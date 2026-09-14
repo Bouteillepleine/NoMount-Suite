@@ -880,12 +880,26 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
             let child_tgt = target.join(e.file_name());
             if ft.is_dir() {
                 failed += inject(nm, &child_src, &child_tgt, out, live);
+            } else if let Some(why) = crate::mount::absorb_refusal(&child_src) {
+                // A refusal, not a failure: the planner declines the same entry, so absorb
+                // says why and leaves it rather than counting it against the module.
+                println!(
+                    "nomount: not absorbing {} -> {} - {why}",
+                    child_tgt.display(),
+                    child_src.display()
+                );
             } else if add_repointing(nm, &child_tgt, &child_src, live) {
                 out.push((child_tgt, child_src));
             } else {
                 failed += 1;
             }
         }
+    } else if let Some(why) = crate::mount::absorb_refusal(source) {
+        println!(
+            "nomount: not absorbing {} -> {} - {why}",
+            target.display(),
+            source.display()
+        );
     } else if add_repointing(nm, target, source, live) {
         out.push((target.to_path_buf(), source.to_path_buf()));
     } else {
