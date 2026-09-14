@@ -10,7 +10,6 @@ nm_notify_mounted() {
     return 0
 }
 trap nm_notify_mounted EXIT
-# shellcheck source=module/lib.sh
 . "$MODDIR/lib.sh" 2>/dev/null || {
     echo "nomount: lib.sh missing or unreadable at $MODDIR - nothing was injected this boot; re-flash the zip" > /dev/kmsg 2>/dev/null
     nm_notify_mounted

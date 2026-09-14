@@ -59,7 +59,6 @@ def git(*args):
                           errors="replace").stdout
 
 
-# ------------------------------------------------------------------ (a) case
 
 def case_pairs(rev):
     diff = git("show", "--format=", "--unified=0", "--no-color", rev)
@@ -109,7 +108,6 @@ def sweep_case(spec):
     return 1 if total else 0
 
 
-# ----------------------------------------------------------------- (b) links
 
 def read(rel):
     with open(os.path.join(ROOT, rel), encoding="utf-8", errors="replace") as f:

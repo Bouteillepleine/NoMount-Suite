@@ -75,10 +75,6 @@ def case_only_pairs(rev):
     def flush():
         if not path or not path.endswith(CODE_EXT):
             return
-        # Pair by content, never by position. A bulk prose rewrite re-wraps paragraphs, so the
-        # hunk it produces removes a different number of lines than it adds and every later pair
-        # is off by one - which is exactly the hunk shape this gate exists to catch. Each added
-        # line is consumed once so a line is never matched twice.
         by_lower = {}
         for new in adds:
             by_lower.setdefault(new.lower(), []).append(new)

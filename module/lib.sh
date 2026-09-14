@@ -70,9 +70,6 @@ nm_consume_stash() {
     if [ "$_rn" -gt 0 ]; then
         nmlog "restored $_rn setting(s) from a stash left by an unfinished install"
     fi
-    # Count copies that actually failed, never "wanted minus restored": a file already present
-    # in $NMDIR is skipped by the loop and needs no restoring, so counting it as outstanding
-    # warned about a full /data on every healthy boot and kept the stash alive forever.
     if [ "$_fail" -eq 0 ]; then
         rm -rf "$_bak" 2>/dev/null
     else
@@ -94,7 +91,6 @@ nm_boot_log_rotate() {
 }
 
 nm_incident_tombstone() {
-    # shellcheck disable=SC2010  # `ls -t` is the point: we want the newest
     _t=$(ls -t /data/tombstones/tombstone_* 2>/dev/null | grep -v '\.pb$' | head -1)
     [ -n "$_t" ] || return 0
     echo "tombstone=$_t"
@@ -107,7 +103,6 @@ nm_set_bin() {
     ABI=$(getprop ro.product.cpu.abi)
     [ -n "$ABI" ] || ABI=$(getprop ro.product.cpu.abilist 2>/dev/null | cut -d, -f1)
     [ -n "$ABI" ] || ABI=arm64-v8a
-    # shellcheck disable=SC2034  # read by the sourcing script, which shellcheck
     BIN="$MODDIR/bin/$ABI/nomount"
     NM_BIN="$MODDIR/bin/$ABI/nm"
     export NM_BIN
@@ -125,7 +120,6 @@ nm_fix_shell_tmp() {
     _stm=$(stat -c %a /data/local/tmp 2>/dev/null)
     _sto=$(stat -c %u:%g /data/local/tmp 2>/dev/null)
     _stc=$(stat -c %C /data/local/tmp 2>/dev/null)
-    # shellcheck disable=SC2012  # `ls -Zd` on one known directory: there is no
     case "$_stc" in *:*:*) ;; *) _stc=$(ls -Zd /data/local/tmp 2>/dev/null | awk '{print $1}') ;; esac
     case "$_stc" in *:*:*) ;; *) _stc="" ;; esac
     _stw=""
@@ -275,7 +269,6 @@ nm_incident_missing_binary() {
         echo "when=$(date '+%Y-%m-%d %H:%M:%S') epoch=$(date +%s)"
         echo "reason=engine did not run: no executable at $BIN ($1)"
         echo "abi=$ABI (ro.product.cpu.abi=$(getprop ro.product.cpu.abi 2>/dev/null))"
-        # shellcheck disable=SC2012  # listing the ABI directories the ZIP shipped, by
         echo "shipped_abis=$(ls "$MODDIR/bin" 2>/dev/null | tr '\n' ' ')"
         echo "kernel=$(uname -r)"
         echo "suite=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)"

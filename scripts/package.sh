@@ -371,21 +371,10 @@ package_zip() {
 
     mkdir -p "$staging/META-INF/com/google/android"
     cat > "$staging/META-INF/com/google/android/update-binary" << 'UPDATER'
-#!/sbin/sh
-# Recovery installer.
-#
-# Everything that makes an install safe lives in customize.sh: the sha256
-# manifest check, the "only one metamodule" refusal (two metamodules fighting in
-# post-fs-data is a bootloop vector), the $NMDIR mode + SELinux label, and the
-# bootcount reset. This script used to unzip, chmod, print a success line and
-# exit 0 - skipping all four, and reporting success even when the unzip failed.
-# So it now builds the handful of helpers customize.sh expects and sources it.
 
 OUTFD=/proc/self/fd/$2
 ZIPFILE="$3"
 
-# Two echoes rather than `echo -e`: recovery's /sbin/sh is usually busybox or
-# toybox ash, where -e is not a flag and gets printed literally.
 ui_print() { echo "ui_print $1" >> $OUTFD; echo "ui_print" >> $OUTFD; }
 abort() { ui_print "$1"; rm -rf "$MODPATH"; exit 1; }
 grep_prop() {
@@ -393,9 +382,6 @@ grep_prop() {
     shift
     sed -n "$_gp_re" "$@" 2>/dev/null | head -n 1
 }
-# The manager's set_perm, including its fifth argument. Dropping the SELinux
-# context is not cosmetic here: customize.sh labels $NMDIR adb_data_file
-# explicitly because the default (system_file) is readable by every app domain.
 set_perm() {
     chown "$2:$3" "$1" 2>/dev/null
     chmod "$4" "$1" 2>/dev/null
@@ -407,34 +393,10 @@ set_perm() {
     return 0
 }
 
-# Stage, never the live install.
-#
-# `MODPATH` is set by ksud and by the Magisk app when they drive the install, and
-# it points at /data/adb/modules_update/<id> -- a staging directory the manager
-# promotes at the next boot. It is unset on the two paths that run this script
-# directly (recovery, and the Magisk app's own zip handler), and the fallback was
-# the live module directory. Two consequences, both bad:
-#
-#   * `abort()` above is `rm -rf "$MODPATH"`. So customize.sh's integrity refusal
-#     and its metamodule-conflict refusal did not FAIL an install - they
-#     uninstalled the working Suite the user already had. A corrupted download
-#     took out a good install.
-#   * `unzip -o` MERGES over the existing tree, so a file dropped in a later
-#     version was never removed and `nomount.sha256sums` cannot see it (it only
-#     checks that listed files match).
-#
-# Staging fixes both: abort's `rm -rf` then throws away a scratch directory, and
-# the manager replaces the live tree wholesale instead of merging into it.
 MODPATH="${MODPATH:-/data/adb/modules_update/meta-nomount}"
-# A stale staging directory from an install that aborted must not merge into this
-# one, for the same reason `unzip -o` must not merge into the live tree.
 rm -rf "$MODPATH"
 mkdir -p "$MODPATH" || { ui_print "! cannot create $MODPATH"; exit 1; }
 
-# -x meta-INF: this installer is not module content, and unzipping it into the
-# module directory left an update-binary sitting under /data/adb/modules. And the
-# status is checked - the old `exit 0` reported a successful install of nothing
-# when the unzip had failed.
 if ! unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" >&2; then
     ui_print "*********************************************************"
     ui_print "! Unpacking the zip FAILED - nothing was installed."
@@ -446,25 +408,11 @@ fi
 
 chmod 755 "$MODPATH"/*.sh "$MODPATH"/bin/*/nomount "$MODPATH"/bin/*/nm 2>/dev/null
 
-# Above the source, deliberately. customize.sh spends forty lines choosing the
-# last line ON screen - the right next step for the state this install actually
-# ended in, including "your kernel has no NoMount support, the module installs
-# but injects NOTHING". Printing an unqualified "- NoMount installed" after that
-# stapled a success line under every failure box. Only an abort() escaped it,
-# because abort exits. So say the narrow true thing first, and let customize.sh
-# have the last word.
 ui_print "- Unpacked via recovery"
 
-# Sourced, not exec'd, so customize.sh's abort() is this script's abort().
 if [ -f "$MODPATH/customize.sh" ]; then
     . "$MODPATH/customize.sh"
 else
-    # Not a warning to print past. customize.sh IS this install's verification and
-    # labelling: the sha256 manifest check, the "only one metamodule" refusal, and the
-    # explicit adb_data_file label on $NMDIR. Without it nothing verified the payload,
-    # nothing refused a second metamodule, and the state directory keeps the default
-    # system_file label that every app domain can read. A zip missing it is corrupt,
-    # so fail the install instead of reporting success.
     abort "! customize.sh is missing from this zip - the install cannot be verified or labelled. Re-download the zip."
 fi
 

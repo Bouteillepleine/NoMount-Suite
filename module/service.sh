@@ -1,7 +1,6 @@
 #!/system/bin/sh
 MODDIR="${0%/*}"
 NMLOG_TAG=service
-# shellcheck source=module/lib.sh
 . "$MODDIR/lib.sh" 2>/dev/null || {
     echo "nomount: lib.sh missing or unreadable at $MODDIR - the post-boot pass did not run; re-flash the zip" > /dev/kmsg 2>/dev/null
     exit 1
@@ -64,23 +63,6 @@ if [ -d "$_bh_dir" ] && [ -d /data/adb/modules/bindhosts ] &&
    [ ! -f /data/adb/modules/bindhosts/remove ] && [ -L /data/adb/metamodule ]; then
     if [ ! -e "$_bh_ovr" ] || grep -q 'NoMount Suite' "$_bh_ovr" 2>/dev/null; then
         cat > "$_bh_ovr.nm_new" <<'BHEOF'
-# Written by the NoMount Suite. Safe to delete.
-#
-# bindhosts mode 0 = ship system/etc/hosts as a normal module file and let the
-# metamodule serve it, with no mount of its own. bindhosts already prefers this
-# when it detects a nomount metamodule; its check looks for
-# /data/adb/modules/nomount and this Suite installs as meta-nomount, so it does
-# not match. Resolve the metamodule symlink instead.
-#
-# Conditional on our metamodule being live, not merely on one existing: the
-# sha256sums manifest is ours. Without that test a leftover copy of this file
-# would force mode 0 under a different metamodule after NoMount was removed.
-#
-# `-e`, not `-f`, on the disable flag: mount::guard_tripped tests Path::exists(),
-# so a `disabled` that is a directory makes every serving verb refuse while `-f`
-# reads false - bindhosts would then pick mode 0 ("the metamodule serves my
-# hosts file") on a device where nothing is being served, and adblocking is
-# silently off with no mount to replace it. Every read in module/*.sh is `-e`.
 _nm=$(readlink -f /data/adb/metamodule 2>/dev/null)
 if [ -n "$_nm" ] && [ -d "$_nm" ] && [ -f "$_nm/nomount.sha256sums" ] &&
    [ ! -f "$_nm/disable" ] && [ ! -f "$_nm/remove" ] &&
@@ -173,8 +155,6 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts
 fi
 
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/uidhide"; then
-    # Redacted: this output goes to nmlog -> /dev/kmsg, and `uid apply` names the hide-list
-    # entries and the packages they matched. Only the counts are used below.
     _bl=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _bl_rc=$?
     if [ "$_bl_rc" -eq 0 ]; then
@@ -317,7 +297,6 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     fi
     _mu=$(_health_get manager_umount | head -1)
     if [ "$_mu" = "on" ]; then
-        # shellcheck disable=SC1111  # typographic quotes on purpose: this names
         if [ "${_mnt:-0}" -gt 0 ]; then
             _muc=" · “kernel umount” ON (it hides our $_mnt bind(s))"
             _mul=", manager kernel_umount is ON (hides our $_mnt bind(s))"

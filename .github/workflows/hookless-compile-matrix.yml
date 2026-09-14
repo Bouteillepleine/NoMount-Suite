@@ -1,18 +1,6 @@
 name: NoMount hookless - compile-test matrix
 
-# Validates the hookless kernel patch (fs/nomount.c + fs/nomount.h) against the
-# canonical source tree for each of the 10 supported kernel versions.
-# Compile test (builds fs/nomount.o only), not a full device build
 
-# Restored 2026-09-14. It was deleted in c223943 together with build.yaml's call to it, which
-# left NOTHING compile-testing the engine that actually ships: the LKM branch's gate builds
-# engine v26 against this tree's v33, so it does not cover it either.
-#
-# It carries its own triggers again rather than being reusable-only. Being callable from
-# build.yaml was tidier in the Actions sidebar, but a workflow that is only reachable through
-# another one disappears silently the moment that call is removed - which is exactly what
-# happened. The `paths` filter keeps the cost where the tidiness argument was aiming: ten kernel
-# syncs run when the engine changes and never for a Rust-only or docs-only push.
 on:
   workflow_dispatch:
     inputs:
@@ -27,13 +15,6 @@ on:
       - 'hookless/**'
       - '.github/workflows/hookless-compile-matrix.yml'
   workflow_call:
-    # DECLARED, because the Select step below reads it. It used to read
-    # `github.event.inputs.only`, which is the dispatch payload of whatever event
-    # started the run - and this workflow lost its own `workflow_dispatch` when it
-    # became reusable. Nothing has declared an `only` input since, so that
-    # expression was permanently empty, `run=1` was unconditional, and the filter
-    # was dead code that still cost a step on all ten legs. A `workflow_call` input
-    # is the only thing a reusable workflow can actually be handed.
     inputs:
       only:
         description: 'Comma-separated kernel versions to compile (empty = all ten)'
@@ -45,11 +26,6 @@ jobs:
   compile:
     name: ${{ matrix.ver }}
     runs-on: ubuntu-24.04
-    # A compile of fs/nomount.o takes 1-3 minutes; anything near 20 is wedged,
-    # not slow. Without this the job inherits GitHub's 6-hour default, so one
-    # stuck version holds the run open until someone cancels by hand - which
-    # then reports the whole run as "cancelled" and hides whether the other
-    # versions actually passed. Fail it instead and rerun just that job.
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -96,20 +72,9 @@ jobs:
             kref: 'linux-6.18.y'
             tc: clang
     env:
-      # Toolchains are pinned via the pinned ubuntu-24.04 runner image
-      # (clang/lld/llvm 18, gcc-13). NB: the versioned llvm=-18 suffix is not
-      # understood by pre-6.1 kbuild (it then looks for a plain 'ld.lld'), so we
-      # use llvm=1 + the unversioned clang/lld/llvm packages across the matrix.
       CCACHE_MAXSIZE: '2G'
       CCACHE_DIR: /home/runner/.ccache
     steps:
-      # Through `env:`, never interpolated into the script body. This was the one
-      # place in the four workflows that dropped `${{ }}` straight into a `run:`
-      # line: the expression is substituted as text before bash parses anything, so
-      # a value carrying a quote or `$(...)` becomes shell rather than data. It was
-      # not reachable while the input did not exist - declaring it above is exactly
-      # what would have made it reachable, so it is fixed in the same commit.
-      # `env:` passes the value through the environment, where it is never parsed.
       - name: Select
         id: sel
         env:
@@ -125,7 +90,7 @@ jobs:
 
       - name: Checkout hookless (src + patches)
         if: steps.sel.outputs.run == '1'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: repo
 
@@ -138,17 +103,11 @@ jobs:
             build-essential git ca-certificates rsync ccache sparse \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           if [ "${{ matrix.tc }}" = "clang" ]; then
-            # unversioned packages -> clang/ld.lld/llvm-* 18 on ubuntu-24.04;
-            # Llvm=1 finds them by plain name (works on every kernel in the set).
             sudo apt-get install -y --no-install-recommends clang lld llvm
             clang --version | head -1
           else
-            # distro aarch64 gcc (gcc-13) - satisfies compiler-gcc.h >=5.1 (the AOSP
-            # gcc-4.9 prebuilt is gcc 4.9, rejected as too old).
             aarch64-linux-gnu-gcc --version | head -1
           fi
-          # ccache masquerade: make the compilers we invoke resolve to ccache
-          # (which then finds the real one further down PATH). No cc override needed.
           for n in clang clang++ gcc g++ cc c++ aarch64-linux-gnu-gcc aarch64-linux-gnu-g++; do
             sudo ln -sf /usr/bin/ccache "/usr/lib/ccache/$n"
           done
@@ -156,7 +115,7 @@ jobs:
 
       - name: Restore ccache
         if: steps.sel.outputs.run == '1'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ~/.ccache
           key: ccache-${{ matrix.ver }}-${{ github.run_id }}
@@ -166,7 +125,7 @@ jobs:
       - name: Restore kernel clone
         if: steps.sel.outputs.run == '1'
         id: kcache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ksrc
           key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
@@ -180,7 +139,7 @@ jobs:
 
       - name: Save kernel clone (pristine) on cache miss
         if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ksrc
           key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
@@ -191,11 +150,6 @@ jobs:
           set -e
           cd ksrc
           P="$GITHUB_WORKSPACE/repo/hookless/patches/nomount_kernel_integration.patch"
-          # git apply first, as a gate rather than as the applier: it does no
-          # fuzz, so a pass proves every hunk's context matched byte for byte on
-          # this tree, and it rejects a malformed hunk header outright. Five of
-          # the ten patches this replaced carried exactly such a header and went
-          # green for months because `patch --fuzz` accepted them.
           git apply -p1 --check "$P" || {
             echo "FATAL: the integration patch no longer applies cleanly to ${{ matrix.ver }}"; exit 1; }
           patch -p1 --forward --fuzz=3 < "$P"
@@ -214,14 +168,7 @@ jobs:
           else
             MAKEOPTS="ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
           fi
-          # persist for the advisory step (ccache is applied via the path masquerade)
           echo "MAKEOPTS=$MAKEOPTS" >> "$GITHUB_ENV"
-          # The integration patch is applied with --fuzz=3, so a hunk can land in
-          # the wrong place - and `make fs/nomount.o` builds the object from
-          # kbuild's single-target rule whether or not it is in obj-y. Verified:
-          # delete the obj- line and this job still exits 0 with a 763KB .o. So
-          # the compile proves nothing about the wiring; assert the wiring itself.
-          # (Same failure class already asserted for the task_mmu.c hunk below.)
           echo "== assert fs/Makefile + fs/Kconfig hunks applied =="
           grep -q 'obj-$(CONFIG_NOMOUNT) += nomount.o' fs/Makefile || {
             echo "FATAL: fs/Makefile hunk did not apply for ${{ matrix.ver }} -- nomount.o would never be linked"; exit 1; }
@@ -229,23 +176,6 @@ jobs:
             echo "FATAL: fs/Kconfig hunk did not apply for ${{ matrix.ver }}"; exit 1; }
 
           echo "== defconfig =="
-          # Plain `defconfig`, not gki_defconfig: the latter pulls in GKI's KMI
-          # machinery, and on android16-6.12 it enables gendwarfksyms, which needs
-          # <dwarf.h> from libdw-dev and failed the job for a reason unrelated to
-          # this driver.
-          #
-          # CONFIG_BOOT_CONFIG used to be forced on here, and its absence was a
-          # Fatal, because the engine carried `#ifdef CONFIG_BOOT_CONFIG` blocks
-          # for the /proc/bootconfig takeover - and the generic arm64 defconfig
-          # leaves that symbol unset, so those blocks had zero compile coverage on
-          # all ten versions. That cloak is gone: knob slots 0..3 are retired
-          # (nomount.h reserves them and says why), the driver names neither the
-          # symbol nor bootconfig anywhere, and the gate was asserting a config
-          # option no line of this engine reads. A gate over code that does not
-          # exist cannot fail usefully and can only fail spuriously - on a tree
-          # where the symbol is unselectable it would abort a perfectly good
-          # compile. Removed with the feature, along with the per-version matrix
-          # column that drove it.
           make $MAKEOPTS defconfig 2>&1 | tail -5
           ./scripts/config --file out/.config -e NOMOUNT
           make $MAKEOPTS olddefconfig 2>&1 | tail -5
@@ -256,11 +186,6 @@ jobs:
           echo "== compile fs/nomount.o =="
           make $MAKEOPTS fs/nomount.o 2>&1 | tee /tmp/nm_build.log
           ls -l out/fs/nomount.o && echo "COMPILE_OK ${{ matrix.ver }}"
-          # The maps-cloak consumer is mandatory on all ten versions: show_map_vma()
-          # reads inode->i_sb->s_dev/i_ino raw, so without the hunk an injected
-          # mapping reports the overlay-top dev. This used to be a soft "skipping"
-          # branch, which let a malformed hunk (bare @@ header) silently no-op on
-          # five versions while the job still went green - assert instead.
           echo "== assert task_mmu.c hook present =="
           grep -q 'vfs_map_meta_override' fs/proc/task_mmu.c || {
             echo "FATAL: integration patch did not apply its task_mmu.c hunk for ${{ matrix.ver }}"; exit 1; }
@@ -270,10 +195,6 @@ jobs:
           echo "== compile fs/proc/task_mmu.o =="
           make $MAKEOPTS fs/proc/task_mmu.o 2>&1 | tee /tmp/tm_build.log
           ls -l out/fs/proc/task_mmu.o && echo "TASK_MMU_OK ${{ matrix.ver }}"
-          # fs/proc/task_mmu.c names the maps-cloak global from the integration
-          # patch, so the two sides can only be kept in step by asserting the
-          # name - nothing links here, and an extern that resolves to nothing
-          # would not surface until a full vmlinux build.
           aarch64-linux-gnu-nm --defined-only out/fs/nomount.o | grep -q 'vfs_map_meta_override' || {
             echo "FATAL: the maps-cloak global is missing or renamed for ${{ matrix.ver }}"; exit 1; }
           ccache -s 2>/dev/null | grep -iE 'hit|miss' || true
@@ -281,18 +202,10 @@ jobs:
       - name: W=1 gate + sparse (advisory)
         if: steps.sel.outputs.run == '1' && steps.build.outcome == 'success'
         run: |
-          # pipefail, like the "Configure + compile" step above. Without it the
-          # exit status of `make ... | tee` is tee's, so a failed W=1 build could
-          # not be seen even if it were checked.
           set -o pipefail
           cd ksrc
           echo "== W=1 =="
           rm -f out/fs/nomount.o
-          # Not `|| true`. The bare `|| true` here reintroduced half of the defect
-          # the comment below describes: if the W=1 build errors out rather than
-          # warning, nm_w1.log holds `error:` lines and no `warning:` lines, the
-          # count is 0 and the gate passes green. Only `warning:` is ever counted,
-          # so the build failing has to fail the step itself.
           if ! make $MAKEOPTS W=1 fs/nomount.o 2>&1 | tee /tmp/nm_w1.log; then
             echo "FATAL: the W=1 build of fs/nomount.o failed for ${{ matrix.ver }}"
             exit 1
@@ -300,18 +213,9 @@ jobs:
           echo "== sparse C=2 (advisory) =="
           rm -f out/fs/nomount.o
           make $MAKEOPTS C=2 CHECK="sparse" fs/nomount.o 2>&1 | tee /tmp/nm_sparse.log || true
-          # Count only our file's diagnostics - the W=1/sparse build can drag in
-          # kernel-tree noise (arm64 vdso missing-prototypes, defconfig quirks)
-          # that is not ours and not actionable here.
           w=$(grep 'warning:' /tmp/nm_w1.log 2>/dev/null | grep -c 'nomount\.[ch]' || true)
           s=$(grep 'warning:\|error:' /tmp/nm_sparse.log 2>/dev/null | grep -c 'nomount\.[ch]' || true)
           echo "::notice::${{ matrix.ver }} (nomount.c only) - W=1 warnings: ${w:-0}, sparse notes: ${s:-0}"
-          # Sparse stays advisory (it is noisy against Android trees), but W=1 is a
-          # Gate. It used to be a bare ::notice:: on a continue-on-error step with
-          # KCFLAGS=-Wno-error inherited, so the number was computed and thrown
-          # away: a `set but not used` variable sat in nomount.c across releases
-          # with the one check that would have caught it reporting it to nobody.
-          # Baseline is 0 on every version - raise it only with a reason.
           W1_BASELINE=0
           if [ "${w:-0}" -gt "$W1_BASELINE" ]; then
             echo "== W=1 warnings in nomount.[ch] =="
@@ -322,14 +226,14 @@ jobs:
 
       - name: Save ccache
         if: ${{ always() && steps.sel.outputs.run == '1' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ~/.ccache
           key: ccache-${{ matrix.ver }}-${{ github.run_id }}
 
       - name: Upload logs
         if: ${{ always() && steps.sel.outputs.run == '1' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: log-${{ matrix.ver }}
           path: |
@@ -338,10 +242,3 @@ jobs:
             /tmp/nm_sparse.log
           if-no-files-found: ignore
 
-# NO `summary` job any more. It rendered a markdown grid of the ten legs by asking
-# the API for the job list that GitHub already prints directly above it - the same
-# information, one click away, restated. And because it was `needs: compile` it
-# became the last thing in the run, so release.yml's `publish` waited on it: in
-# v1.3.176 the build finished 18:56:26, `summary` did not get a runner until
-# 19:06:22, and the release took 13m12s instead of under three minutes. A
-# nice-to-have that gates a publish is not a nice-to-have.

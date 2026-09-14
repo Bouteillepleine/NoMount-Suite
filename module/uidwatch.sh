@@ -5,7 +5,6 @@
 
 MODDIR=/data/adb/modules/meta-nomount
 NMLOG_TAG=uidwatch
-# shellcheck source=module/lib.sh
 . "$MODDIR/lib.sh" 2>/dev/null || {
     echo "nomount: lib.sh missing or unreadable at $MODDIR - the package watcher cannot run; re-flash the zip" > /dev/kmsg 2>/dev/null
     exit 1
@@ -35,7 +34,6 @@ trap 'rm -f "$LOCK"' EXIT INT TERM
 
 sleep 3
 if _has_entries "$NMDIR/uidhide"; then
-    # Redacted: _out is logged to /dev/kmsg below, and `uid apply` names hide-list entries.
     _out=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _urc=$?
     if [ "$_urc" -eq 124 ]; then
