@@ -74,10 +74,6 @@ pub(crate) fn candidates(list: &str) -> Vec<PathBuf> {
     v
 }
 
-/// The cloak's own table is fixed at 128 entries (GH_MAX_UIDS) and it refuses a longer list,
-/// so the expansion below is capped rather than allowed to silently overflow.
-const GHOST_MAX_UIDS: usize = 128;
-
 /// Secondary users present on the device -- work profiles, clones, additional accounts.
 fn device_user_ids() -> Vec<u32> {
     let mut v = vec![0u32];
@@ -121,22 +117,6 @@ fn expand_ghost_uids(appids: &[u32], users: &[u32]) -> Vec<u32> {
         for a in appids {
             push(u * crate::blocklist::PER_USER_RANGE + a + SDKSANDBOX_OFF, &mut v);
         }
-    }
-    if v.len() > GHOST_MAX_UIDS {
-        // Silently dropping the tail would re-open the hole this expansion exists to close, on
-        // whichever profile sorts last. Each hidden app costs one slot per user profile plus one
-        // sandbox slot per profile, so the ceiling arrives fast on a device with clones.
-        eprintln!(
-            "nomount ghost: {} uid(s) needed for {} hidden app(s) across {} user profile(s), but \
-             the cloak holds {GHOST_MAX_UIDS} - dropping {}. Those processes stay hidden, but \
-             answer EROFS/EEXIST where an absent path would answer ENOENT. Hide fewer apps, or \
-             remove a user profile.",
-            v.len(),
-            appids.len(),
-            users.len(),
-            v.len() - GHOST_MAX_UIDS
-        );
-        v.truncate(GHOST_MAX_UIDS);
     }
     v
 }
@@ -389,6 +369,12 @@ pub fn sync_after_pass(nm: &Nm) {
 mod tests {
     use super::*;
 
+    /// GH_MAX_UIDS in the kernel's ghost.c. Nothing in the production path trims to it: a
+    /// cloak that normalises the uid dedupes the expansion as it stores it (measured on
+    /// device - 120 sent, 20 stored), and one that truly runs out answers ENOSPC, which
+    /// push() reports as a refusal.
+    const GHOST_MAX_UIDS: usize = 128;
+
     #[test]
     fn the_cloak_covers_every_uid_the_engine_hides_the_app_under() {
         // One hide-list entry, primary user plus a work profile.
@@ -403,14 +389,14 @@ mod tests {
         let solo = expand_ghost_uids(&[10384], &[0]);
         assert_eq!(solo, vec![10384, 20384]);
 
-        // The kernel table is 128 entries and refuses a longer list.
+        // Bare appids come first so that a kernel which does run out of room keeps the entries
+        // that matter. Nothing is pre-truncated: a normalising kernel dedupes the rest away, and
+        // one that cannot answers ENOSPC, which push() reports.
         let many: Vec<u32> = (10000..10200).collect();
-        assert_eq!(expand_ghost_uids(&many, &[0, 10]).len(), GHOST_MAX_UIDS);
-
-        // Primary-user appids come first, so a cap drops the speculative uids, not the real ones.
-        let capped = expand_ghost_uids(&many, &[0, 10]);
-        assert_eq!(capped[0], 10000);
-        assert!(capped.iter().take(GHOST_MAX_UIDS).all(|u| many.contains(u)));
+        let all = expand_ghost_uids(&many, &[0, 10]);
+        assert!(all.len() > GHOST_MAX_UIDS, "the expansion is not pre-trimmed");
+        assert_eq!(all[0], 10000, "primary-user appids lead");
+        assert!(all.iter().take(many.len()).all(|u| many.contains(u)));
     }
 
     #[test]
