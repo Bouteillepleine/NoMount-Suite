@@ -504,6 +504,10 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
                 "The folders holding your injected files would not open, so this was not tested.",
             );
         }
+        if targets.is_empty() {
+            return na(N_DINO_STAT, "no injected files to compare".into())
+                .meaning("Nothing here injects a file, so there is no identity to compare.");
+        }
         return na(
             N_DINO_STAT,
             "no injected file on a non-overlay filesystem to compare".into(),
@@ -1165,8 +1169,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             ),
             "those rules shadow a stock file, so the blocked reader is answered from the stock \
              file -- while the PackageManager parsed OUR copy and publishes its version and \
-             signature for that path, a disagreement the app can measure. Engine >= 17 keeps \
-             NM_FLAG_PUBLIC on a shadowed file; below that the kernel strips it",
+             signature for that path, a disagreement the app can measure",
         )
         .meaning(
             "A hidden app can open every file Android told it about, but for some of them it is \
@@ -1185,12 +1188,14 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         ),
         "the PackageManager names those paths to the app while open() answers ENOENT -- \
          an inconsistency no stock device has, and one that crashes RASP code that walks \
-         the package list (engine < 15 cannot express the opt-out; see NM_FLAG_PUBLIC)",
+         the package list",
     )
     .meaning(
         "A hidden app is being told those files do not exist, while Android tells it they do. \
          No ordinary device answers both ways about one file, and banking apps that walk the \
-         package list crash on it. Update the kernel, or stop hiding from that app.",
+         package list crash on it. Stop hiding from that app, or drop the rules that publish \
+         files to it. If your engine is too old to express the opt-out, the plan section says \
+         so and names the version.",
     )
     .owner("the kernel engine")
 }
