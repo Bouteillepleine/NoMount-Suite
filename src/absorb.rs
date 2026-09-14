@@ -781,8 +781,18 @@ fn umount_detach_in(pid: &str, p: &Path) -> bool {
 /// a live injection, so removing it changes nothing an app can read; every other disposition
 /// names a mount whose content the owning module is the only source of, and taking that away
 /// in a namespace the owner cannot see would break it with no way to notice.
-pub(crate) fn droppable_elsewhere(d: &Disposition) -> bool {
-    matches!(d, Disposition::Redundant)
+///
+/// Carries the same `my_*` refusal the in-namespace pass applies: at runtime a `my_*` mount is
+/// left alone because unmounting it without re-asserting the rule reverts the path to the stock
+/// file, and re-asserting one at runtime has rebooted a device. Zygote's namespace is the one
+/// every app inherits, so it is the last place to make that exception.
+pub(crate) fn droppable_elsewhere(
+    d: &Disposition,
+    target: &Path,
+    aliases: &[(PathBuf, PathBuf)],
+    early: bool,
+) -> bool {
+    matches!(d, Disposition::Redundant) && (early || runtime_droppable(target, aliases))
 }
 
 /// Fails closed: an unreadable mount table reads as "still mounted", so a path absorb cannot
@@ -1491,7 +1501,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         // own mount table no matter how clean ours is. Only a mount a live injection already
         // serves can be dropped from it: unmounting anything else would take away content the
         // owning module is the only source of.
-        if droppable_elsewhere(&e.mount.disposition) {
+        if droppable_elsewhere(&e.mount.disposition, &e.mount.target, &aliases, early) {
             if dry_run {
                 println!(
                     "would drop redundant mount {} in {} (already served by an injection)",
@@ -1825,15 +1835,47 @@ mod tests {
 
     #[test]
     fn only_an_already_injected_mount_may_be_unmounted_in_another_namespace() {
+        let plain = Path::new("/system/etc/f");
+        let no_aliases: &[(PathBuf, PathBuf)] = &[];
         // Redundant means a live injection already serves that path, so dropping the mount
         // changes nothing an app can read.
-        assert!(droppable_elsewhere(&Disposition::Redundant));
+        assert!(droppable_elsewhere(&Disposition::Redundant, plain, no_aliases, false));
         // Everything else is content the owning module is the only source of. Unmounting it
         // inside zygote's namespace would break the module where it cannot see why.
-        assert!(!droppable_elsewhere(&Disposition::Absorb));
-        assert!(!droppable_elsewhere(&Disposition::Leaking("whatever the reason")));
-        assert!(!droppable_elsewhere(&Disposition::Declined(Declined::MustBind)));
-        assert!(!droppable_elsewhere(&Disposition::Declined(Declined::Framework("zygisk_lsposed".to_string()))));
+        assert!(!droppable_elsewhere(&Disposition::Absorb, plain, no_aliases, false));
+        assert!(!droppable_elsewhere(&Disposition::Leaking("whatever the reason"), plain, no_aliases, false));
+        assert!(!droppable_elsewhere(&Disposition::Declined(Declined::MustBind), plain, no_aliases, false));
+        assert!(!droppable_elsewhere(&Disposition::Declined(Declined::Framework("zygisk_lsposed".to_string())), plain, no_aliases, false));
+    }
+
+    #[test]
+    fn my_partitions_are_never_dropped_from_another_namespace_at_runtime() {
+        let aliases = vec![(
+            PathBuf::from("/mnt/vendor/my_product"),
+            PathBuf::from("/my_product"),
+        )];
+        for target in [
+            Path::new("/my_product/media/bootanimation"),
+            Path::new("/mnt/vendor/my_product/media/bootanimation"),
+        ] {
+            // The in-namespace pass refuses these; zygote's namespace is inherited by every app,
+            // so it must refuse them too rather than being the one place the exception is made.
+            assert!(!runtime_droppable(target, &aliases));
+            assert!(
+                !droppable_elsewhere(&Disposition::Redundant, target, &aliases, false),
+                "a my_* mount was droppable from another namespace at runtime: {}",
+                target.display()
+            );
+            // The pre-zygote pass may still take them, exactly as in our own namespace.
+            assert!(droppable_elsewhere(&Disposition::Redundant, target, &aliases, true));
+        }
+        // An ordinary ROM path is still droppable at runtime; the refusal is my_*-specific.
+        assert!(droppable_elsewhere(
+            &Disposition::Redundant,
+            Path::new("/system/etc/f"),
+            &aliases,
+            false
+        ));
     }
 
     #[test]
