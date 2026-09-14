@@ -147,6 +147,18 @@ impl Fingerprint {
                 self.served_matches_rule.clone(),
             )
             .meaning("No rule had a comparable file at both ends, so this was not tested."),
+            // "I stopped at the cap" is not "I found something wrong". This used to fall through
+            // to Fail and told the user to delete a bind and reboot over a scan that simply ran
+            // out of budget.
+            s if s.starts_with("unchecked:over-cap") => mk(
+                "served bytes match the rule",
+                Verdict::Unmeasured,
+                self.served_matches_rule.clone(),
+            )
+            .meaning(
+                "There are more comparable rules than this check compares in one pass, so it \
+                 stopped early. Nothing was found wrong - it did not finish looking.",
+            ),
             other => mk("served bytes match the rule", Verdict::Fail, other.to_string())
                 .meaning(
                     "A path serves content its own rule does not name. Either two rules hit one \
@@ -307,7 +319,10 @@ fn head(path: &str, n: usize) -> Option<Vec<u8>> {
 
 fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     const CAP: usize = 20_000;
-    let comparable = rules.iter().filter(|r| r.uid == 0).count();
+    // Only a rule with a source has two ends to compare. Counting whiteouts and virtual dirs,
+    // which have none, inflated `comparable` past the cap and reported "did not finish looking"
+    // on a device where every comparable rule had in fact been checked.
+    let comparable = rules.iter().filter(|r| r.uid == 0 && r.source.is_some()).count();
     let mut checked = 0;
     for rule in rules.iter().filter(|r| r.uid == 0).take(CAP) {
         let Some(source) = rule.source.as_deref() else { continue };
@@ -410,9 +425,19 @@ fn fingerprint_text() -> Result<String> {
 pub fn run_verify() -> Result<()> {
     let saved = match fs::read_to_string(SNAPSHOT) {
         Ok(s) => s,
-        Err(_) => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("no snapshot yet - run `nomount snapshot` on a known-good boot first");
             return Ok(());
+        }
+        // A snapshot that exists but will not open is not the same as not having one. Saying
+        // "no snapshot yet" invited the user to take a fresh one, which overwrites the good
+        // baseline with the drifted state it was supposed to be compared against.
+        Err(e) => {
+            anyhow::bail!(
+                "{SNAPSHOT} exists but could not be read: {e}. NOT taking a new snapshot - that \
+                 would overwrite the baseline with the current state. Fix the permissions, or \
+                 delete the file if you mean to start over."
+            );
         }
     };
     let live = fingerprint_text()?;
@@ -423,10 +448,17 @@ pub fn run_verify() -> Result<()> {
     for l in &lines {
         println!("{l}");
     }
-    if lines.is_empty() {
-        println!("verify: live matches snapshot (no drift)");
+    let drifted = lines.iter().filter(|l| l.starts_with("DRIFT ")).count();
+    let skipped = lines.len() - drifted;
+    let tail = if skipped > 0 {
+        format!(" ({skipped} field(s) not compared - one side was not measured)")
     } else {
-        println!("verify: {} field(s) drifted from snapshot", lines.len());
+        String::new()
+    };
+    if drifted == 0 {
+        println!("verify: live matches snapshot (no drift){tail}");
+    } else {
+        println!("verify: {drifted} field(s) drifted from snapshot{tail}");
     }
     Ok(())
 }
@@ -442,12 +474,23 @@ fn drift_lines(saved: &str, live: &str) -> Vec<String> {
     let find = |set: &[(String, String)], key: &str| -> Option<String> {
         set.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     };
+    // A value that reads "unknown" or "unchecked" on either side says the probe did not run, not
+    // that the system changed. Painting those transitions as DRIFT told the user their device had
+    // drifted when the only thing that differed was whether a measurement happened.
+    let unmeasured = |v: &str| v == "unknown" || v.starts_with("unchecked");
     let mut out = Vec::new();
     for (k, lval) in &lv {
         let sval = find(&sv, k).unwrap_or_else(|| "<absent>".to_string());
-        if &sval != lval && !is_version_context(k, &sval, lval) {
-            out.push(format!("DRIFT {k}: snapshot={sval} -> live={lval}"));
+        if &sval == lval || is_version_context(k, &sval, lval) {
+            continue;
         }
+        if unmeasured(&sval) || unmeasured(lval) {
+            out.push(format!(
+                "not compared {k}: snapshot={sval} -> live={lval} (one side was not measured)"
+            ));
+            continue;
+        }
+        out.push(format!("DRIFT {k}: snapshot={sval} -> live={lval}"));
     }
     for (k, sval) in &sv {
         if find(&lv, k).is_none() && !is_version_context(k, sval, "<absent>") {
@@ -920,6 +963,39 @@ rules=3
             .unwrap_or_else(|| panic!("no check named {id}"))
             .verdict
             .tag()
+    }
+
+    #[test]
+    fn stopping_at_the_cap_is_unmeasured_not_a_failure() {
+        let mut fp = fp("v33", 257);
+        fp.served_matches_rule = "unchecked:over-cap(20000 of 20001)".into();
+        assert_eq!(
+            verdict_of(&fp, "served bytes match the rule"),
+            "UNMEASURED",
+            "running out of scan budget is not evidence that a path serves the wrong bytes, and \
+             the FAIL text told the user to delete a bind and reboot"
+        );
+
+        // A real mismatch must still fail.
+        fp.served_matches_rule = "drift:/system/etc/x(rule=/data/adb/modules/m/x bytes differ)".into();
+        assert_eq!(verdict_of(&fp, "served bytes match the rule"), "FAIL");
+    }
+
+    #[test]
+    fn a_field_that_was_not_measured_is_not_reported_as_drift() {
+        let saved = "rules=257\nserved_matches_rule=ok\nzero_mount=unknown\n";
+        let live = "rules=257\nserved_matches_rule=unchecked\nzero_mount=ok\n";
+        let lines = drift_lines(saved, live);
+        assert!(
+            lines.iter().all(|l| !l.starts_with("DRIFT ")),
+            "neither side changed state - one side simply was not measured: {lines:?}"
+        );
+        assert_eq!(lines.len(), 2, "but they are still reported, not hidden: {lines:?}");
+
+        // A genuine change is still drift.
+        let real = drift_lines("rules=257\n", "rules=12\n");
+        assert_eq!(real.len(), 1);
+        assert!(real[0].starts_with("DRIFT rules:"), "{real:?}");
     }
 
     #[test]
