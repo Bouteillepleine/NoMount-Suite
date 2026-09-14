@@ -1814,7 +1814,10 @@
       return;
     }
 
-    $("auditout").textContent = JSON.stringify(r, null, 1);
+    // runCheck does not set NM_REDACT_HIDE_LIST, so the raw report carries real appids. This
+    // pane is the one users screenshot and paste into a bug report, and copyReport already
+    // redacts on the way out - the same rule has to hold here.
+    $("auditout").textContent = redactUids(JSON.stringify(r, null, 1));
     age.style.display = "";
     age.textContent = "Checked " + (auAge(r.ts) || "now") + " · " +
       (r.sections && r.sections.length ? r.sections.join(" + ") : "unknown") + " · " +

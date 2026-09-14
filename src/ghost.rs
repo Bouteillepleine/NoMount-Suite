@@ -17,6 +17,7 @@ pub struct Summary {
     pub rejected_uids: usize,
     pub rejected_examples: Vec<String>,
     pub dump_failed: bool,
+    pub probe_failed: bool,
 }
 
 impl Summary {
@@ -318,7 +319,10 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
                 .filter(|(_, absent)| *absent)
                 .filter_map(|(p, _)| p.to_str().map(str::to_owned))
                 .collect(),
-            None => Vec::new(),
+            None => {
+                out.probe_failed = true;
+                Vec::new()
+            }
         },
         None => Vec::new(),
     };
@@ -344,6 +348,10 @@ pub fn run_sync(verbose: bool) -> Result<()> {
         Some(s) => {
             if let Some(w) = s.warning() {
                 println!("nomount ghost: {w}");
+            } else if s.probe_failed {
+                println!(
+                    "nomount ghost: the absence probe did not run, so no path could be judged ghostable - the cloak is left empty. This is not \"nothing to ghost\"."
+                );
             } else if !s.effective() {
                 println!(
                     "nomount ghost: inert -- {} path(s), {} uid(s) (both tables must be non-empty for any guard to fire)",
