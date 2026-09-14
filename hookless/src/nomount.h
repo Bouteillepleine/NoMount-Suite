@@ -28,10 +28,6 @@
 #define NM_FLAG_OVL_INO     (1 << 4)
 #define NM_FLAG_SHADOWS_STOCK (1 << 5)
 #define NM_FLAG_PUBLIC      (1 << 6)
-/* NM_FLAG_VIRTUAL_DIR is engine-only: the implicit parent dirs set it on their own
-   allocation. No client ever sends it, and accepting it off the wire let a caller mark a
-   real rule as a synthesized directory - which changes how it is served and makes it
-   prunable. */
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
 

@@ -1,6 +1,7 @@
 #include <linux/init.h>
 #include <linux/namei.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/atomic.h>
 #include <linux/cred.h>
 #include <linux/xattr.h>
@@ -1552,9 +1553,6 @@ static void nm_dir_size_fix(struct nm_inode_info *info, struct kstat *stat)
         return;
     nm_dir_deltas(info->dir_node, &nld, &delta);
     if (nld > 0) {
-        /* A directory's nlink is 2 plus its subdirectories. The synthesized ones were counted
-           here and then dropped, so a folder could list more subdirectories than its own nlink
-           admits to - a mismatch no real directory has. */
         u64 nl = (u64)stat->nlink + (u64)nld;
         stat->nlink = (nl > UINT_MAX) ? UINT_MAX : (unsigned int)nl;
     }
@@ -1861,10 +1859,6 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         };
         res = iterate_dir(real_file, &proxy_ctx.ctx);
         ctx->pos = proxy_ctx.ctx.pos;
-        /* `refused` means the caller's buffer would not take the entry we offered, not that the
-           real directory is finished. Treating that as EOF moved f_pos into the virtual cookie
-           band, so the next getdents64 resumed among the synthesized entries and the whole real
-           listing vanished - which a buffer too small for the first dirent triggers every time. */
         if (res < 0 || proxy_ctx.emitted > 0 || proxy_ctx.refused) return res;
         if (!dir_node) return res;
         nm_publish_real_eof(dir_node, ctx->pos);
@@ -2741,7 +2735,7 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
     }
 }
 
-#define NM_INO_SAMPLES 64
+#define NM_INO_SAMPLES 256
 #define NM_INO_POP_SAMPLES 256
 #define NM_INO_MINE    256
 #define NM_RANGE_SLOTS 8
@@ -2945,7 +2939,7 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     sc->overlay = dp.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC;
 #endif
     if (sc->overlay) {
-        sc->names = kzalloc(NM_INO_SAMPLES * (NAME_MAX + 1), GFP_KERNEL | __GFP_NOWARN);
+        sc->names = vzalloc(NM_INO_SAMPLES * (NAME_MAX + 1));
         if (!sc->names) { kfree(sc); path_put(&dp); return -ENOMEM; }
     }
 
@@ -2977,7 +2971,7 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     }
 
     if (sc->names)
-        kfree(sc->names);
+        vfree(sc->names);
     kfree(sc);
 
     return 0;
@@ -3702,10 +3696,6 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
             }
             hash_add_rcu(nomount_rules_ht, &irule->vpath_node, irule->v_hash);
         }
-        /* The implicit ancestors each took the previous one's dino as their parent; the deepest
-           of them is the target's parent, so prev_dino is what the target needs too. Without
-           this, nm_dirent_ino falls back to the directory's own v_ino and a directory-target
-           rule reports d_ino("..") == d_ino("."), which no real directory does. */
         if (!target_rule->v_pdino)
             target_rule->v_pdino = prev_dino;
     } else {
@@ -4337,9 +4327,6 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     if (err != 0) {
         if (victim) {
             hash_add_rcu(nomount_rules_ht, &victim->vpath_node, victim->v_hash);
-            /* The victim was unhashed above and is back now. A dump that walked this bucket in
-               between skipped it, and without a generation change its guard would report a
-               consistent listing that is missing a rule. */
             atomic_inc(&nm_rule_gen);
         }
         nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len, NULL);
@@ -4348,9 +4335,6 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
         return err;
     }
 
-    /* Bracket the publication. Bumping only afterwards left a window where a dump could emit
-       the new rule and still finish on the generation it started with, so its -EAGAIN never
-       fired. */
     atomic_inc(&nm_rule_gen);
     hash_add_rcu(nomount_rules_ht, &rule->vpath_node, rule->v_hash);
     atomic_inc(&nm_rule_gen);
@@ -4794,15 +4778,15 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
 
     switch (knob) {
     case NM_KNOB_VDIR_EROFS_SIZE:
-        WRITE_ONCE(nm_vdir_erofs_size, vlen > 0 && val[0] == '1');
+        if (vlen <= 0)
+            return 0;
+        WRITE_ONCE(nm_vdir_erofs_size, val[0] == '1');
         return 0;
     case NM_KNOB_HIDE_ISOLATED: {
         unsigned int pools;
 
-        if (vlen <= 0) {
-            WRITE_ONCE(nm_hide_isolated, NM_HIDE_APPZYGOTE | NM_HIDE_ISOLATED);
+        if (vlen <= 0)
             return 0;
-        }
         if (val[0] < '0' || val[0] > '3') return -EINVAL;
         pools = val[0] - '0';
         WRITE_ONCE(nm_hide_isolated, pools);
