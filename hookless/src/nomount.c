@@ -1539,7 +1539,19 @@ static void nm_dir_deltas(struct nomount_dir_node *d, int *nlink_d, s32 *size_d)
     *size_d = szd;
 }
 
-static void nm_dir_size_fix(struct nm_inode_info *info, struct kstat *stat)
+static void nm_dir_nlink_fix(struct kstat *stat, int nld)
+{
+    s64 nl;
+
+    if (!nld)
+        return;
+    nl = (s64)stat->nlink + (s64)nld;
+    if (nl < 2) nl = 2;
+    if (nl > (s64)UINT_MAX) nl = (s64)UINT_MAX;
+    stat->nlink = (unsigned int)nl;
+}
+
+static void nm_dir_stat_fix(struct nm_inode_info *info, struct kstat *stat)
 {
     int nld;
     s32 delta;
@@ -1549,14 +1561,13 @@ static void nm_dir_size_fix(struct nm_inode_info *info, struct kstat *stat)
         return;
     if (d_backing_inode(info->r_path.dentry)->i_sb->s_magic != EROFS_SUPER_MAGIC_V1)
         return;
-    if (stat->size <= 0 || stat->size >= 4096)
-        return;
+
     nm_dir_deltas(info->dir_node, &nld, &delta);
-    if (nld > 0) {
-        u64 nl = (u64)stat->nlink + (u64)nld;
-        stat->nlink = (nl > UINT_MAX) ? UINT_MAX : (unsigned int)nl;
-    }
+    nm_dir_nlink_fix(stat, nld);
+
     if (!delta)
+        return;
+    if (stat->size <= 0 || stat->size >= 4096)
         return;
     fixed = stat->size + delta;
     if (fixed <= 0 || fixed >= 4096)
@@ -1611,11 +1622,8 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
         goto out;
 
     nm_dir_deltas(d, &nld, &delta);
+    nm_dir_nlink_fix(stat, nld);
 
-    if (nld) {
-        if ((int)stat->nlink + nld >= 2)
-            stat->nlink = (unsigned int)((int)stat->nlink + nld);
-    }
     if (delta && inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 &&
         stat->size > 0 && stat->size < 4096) {
         loff_t fixed = stat->size + delta;
@@ -1713,7 +1721,7 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
         nm_mirror_stat(info, v_inode, stat);
         if (S_ISDIR(stat->mode)) {
             if (!nm_dsnap_size_fix(info, v_inode, stat))
-                nm_dir_size_fix(info, stat);
+                nm_dir_stat_fix(info, stat);
         } else {
             nm_mirror_blocks(info, stat);
         }
@@ -4335,7 +4343,6 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
         return err;
     }
 
-    atomic_inc(&nm_rule_gen);
     hash_add_rcu(nomount_rules_ht, &rule->vpath_node, rule->v_hash);
     atomic_inc(&nm_rule_gen);
 

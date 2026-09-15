@@ -252,7 +252,8 @@ static noinline int do_nm_cmd(int fd, int cmd, int atype, const void *data, int 
     res = nm_read(fd, mem);
     if (res < 0) return res;
 
-    if (res >= 16) {
+    if (res < 16) return NM_ERR_PROTO;
+    {
         unsigned int mlen = ((struct nlmsghdr *)mem->rx_buf)->nlmsg_len;
         if (mlen < 16 || mlen > (unsigned int)res) return NM_ERR_PROTO;
     }
