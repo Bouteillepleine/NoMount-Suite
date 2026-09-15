@@ -376,6 +376,7 @@ package_zip() {
         "$staging/webroot/index.html"
     if ! grep -q "const SUITE_PROFILE = \"${profile}\"" "$staging/webroot/index.html"; then
         echo "fatal: could not stamp SUITE_PROFILE into webroot/index.html" >&2
+        rm -rf "$staging"
         exit 1
     fi
     if ! grep -q "const SUITE_COMMIT = \"${BUILD_COMMIT}\"" "$staging/webroot/index.html"; then
@@ -386,6 +387,7 @@ package_zip() {
 
     mkdir -p "$staging/META-INF/com/google/android"
     cat > "$staging/META-INF/com/google/android/update-binary" << 'UPDATER'
+#!/sbin/sh
 
 OUTFD=/proc/self/fd/$2
 ZIPFILE="$3"
@@ -433,8 +435,14 @@ fi
 
 exit 0
 UPDATER
+    if ! head -n 1 "$staging/META-INF/com/google/android/update-binary" | grep -q '^#!'; then
+        echo "fatal: the generated update-binary has no shebang - recovery execv()s it, so the flash fails with ENOEXEC and no message." >&2
+        rm -rf "$staging"
+        exit 1
+    fi
     if ! sh -n "$staging/META-INF/com/google/android/update-binary"; then
         echo "fatal: the generated update-binary is not valid shell - the zip would fail at flash time, on device, with no way to see why." >&2
+        rm -rf "$staging"
         exit 1
     fi
     chmod 0755 "$staging/META-INF/com/google/android/update-binary"
