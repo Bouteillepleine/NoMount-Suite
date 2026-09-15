@@ -908,8 +908,7 @@ pub fn run_reload() -> Result<()> {
             if pm.len() > 3 { ", ..." } else { "" }
         );
         println!(
-            " \
-        PackageManager parsed the old bytes; its cache is dropped but only \
+            "         PackageManager parsed the old bytes; its cache is dropped but only \
              re-read at the next scan. Apps over these APKs can force-close until then."
         );
     }
