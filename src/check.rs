@@ -231,18 +231,24 @@ impl Report {
 
     pub fn verdict(&self) -> String {
         let t = self.tally();
+        let n = |n: usize| if n == 1 { "finding" } else { "findings" };
+        let open = t.fail + t.warn;
         if t.fail > 0 {
-            format!("{} check(s) FAILED", t.fail)
+            format!("{} {} worth reading", open, n(open))
         } else if t.reboot > 0 {
             format!("{} check(s) need a reboot to finish", t.reboot)
         } else if !t.complete() {
             format!(
                 "not fully measured ({} check(s) had nothing to look at{})",
                 t.unmeasured,
-                if t.warn > 0 { format!(", plus {} warning(s)", t.warn) } else { String::new() }
+                if t.warn > 0 {
+                    format!(", plus {} {}", t.warn, n(t.warn))
+                } else {
+                    String::new()
+                }
             )
         } else if t.warn > 0 {
-            format!("{} warning(s)", t.warn)
+            format!("{} {} worth reading", t.warn, n(t.warn))
         } else {
             "clean".to_string()
         }
@@ -463,15 +469,15 @@ mod tests {
 
         let v = r(vec![c("a", Verdict::Warn), c("b", Verdict::Unmeasured)]).verdict();
         assert!(v.starts_with("not fully measured"), "unmeasured must outrank warn: {v}");
-        assert!(v.contains("1 warning(s)"), "and must not hide the warning: {v}");
+        assert!(v.contains("1 finding"), "and must not hide the finding: {v}");
 
         let v = r(vec![c("a", Verdict::Warn), c("b", Verdict::Pass)]).verdict();
-        assert_eq!(v, "1 warning(s)");
+        assert_eq!(v, "1 finding worth reading");
         assert!(!v.contains("plan"), "a device tell is not a plan warning");
 
         assert!(r(vec![c("a", Verdict::Fail), c("b", Verdict::Unmeasured)])
             .verdict()
-            .contains("FAILED"));
+            .contains("finding"));
         assert_eq!(r(vec![c("a", Verdict::Pass)]).verdict(), "clean");
     }
 
@@ -507,7 +513,7 @@ mod tests {
         assert_eq!(order[0], "engine-responding");
         assert_eq!(order[1], "some-other-check");
         assert_eq!(order[3], "a-note");
-        assert_eq!(r.verdict(), "2 check(s) FAILED");
+        assert_eq!(r.verdict(), "2 findings worth reading");
     }
 
     #[test]
@@ -539,7 +545,7 @@ mod tests {
             checks: v,
         };
         assert_eq!(r(vec![c("a", Verdict::Note), c("b", Verdict::Pass)]).verdict(), "clean");
-        assert_eq!(r(vec![c("a", Verdict::Warn), c("b", Verdict::Pass)]).verdict(), "1 warning(s)");
+        assert_eq!(r(vec![c("a", Verdict::Warn), c("b", Verdict::Pass)]).verdict(), "1 finding worth reading");
         assert!(Tally::of(&[c("a", Verdict::Note)]).complete());
         assert_eq!(Tally::of(&[c("a", Verdict::Note)]).open_failures(), 0);
     }

@@ -86,7 +86,7 @@ if command -v ksud >/dev/null 2>&1; then
         _m=$(NM_P="/adb/modules/$mid" awk '$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}' \
              /proc/self/mountinfo 2>/dev/null); _m=${_m:-0}
         _badge="$_t · $_n served"
-        [ "${_m:-0}" -gt 0 ] && _badge="$_badge · ⚠ $_m mount(s)"
+        [ "${_m:-0}" -gt 0 ] && _badge="$_badge · ℹ $_m mount(s)"
         _orig=$(sed -n 's/^description=//p' "$d/module.prop" | head -1)
         KSU_MODULE="$mid" ksud module config set --temp override.description \
             "[NoMount · $_badge] $_orig" >/dev/null 2>&1
@@ -102,11 +102,11 @@ if command -v ksud >/dev/null 2>&1; then
     elif [ "$_pass_ran" = 0 ]; then
         _desc="⛔ the Suite could not start this boot - open the WebUI"
     elif [ "${_mrc:-0}" -ne 0 ]; then
-        _desc="⚠️ the mount pass FAILED (exit $_mrc) - open the WebUI"
+        _desc="ℹ️ the mount pass did not finish (exit $_mrc) - open the WebUI"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then
         _desc="✅ served, but the rule table could not be read this boot"
     elif [ "${_rules:-0}" = 0 ]; then
-        _desc="⚠️ ran, but no module had files to serve - open the WebUI"
+        _desc="ℹ️ ran, but no module had files to serve - open the WebUI"
     else
         _desc="✅ $_rules rules · $_rro RRO$_wof · $_mods modules · mountless"
     fi

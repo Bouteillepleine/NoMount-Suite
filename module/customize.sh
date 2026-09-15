@@ -186,7 +186,7 @@ set_perm "$NMDIR/absorb-skip.txt" 0 0 0600 u:object_r:adb_data_file:s0
 rm -f "$NMDIR/bootcount"
 
 if [ -e "$NMDIR/disabled" ]; then
-    ui_print "- ⚠️  The Suite is disabled on this device - it will inject nothing at boot."
+    ui_print "- ℹ️  The Suite is disabled on this device - it will inject nothing at boot."
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
 fi
 

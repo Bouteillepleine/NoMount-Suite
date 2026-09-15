@@ -1413,6 +1413,54 @@ mod tests {
     }
 
     #[test]
+    fn the_diagnostics_never_paint_a_warm_colour() {
+        let css = PAGE.split("</style>").next().unwrap_or("");
+        let controls = ["button.act.danger", ".blk .bx:hover", ".blk .bx.save:hover"];
+        for (label, needle) in [
+            ("amber", "251,191,36"),
+            ("red", "248,113,122"),
+            ("amber", "#fbbf24"),
+            ("red", "#f8717a"),
+            ("brown", "#a46a00"),
+            ("red", "#d23a44"),
+            ("amber", "#d9a441"),
+            ("amber", "#ffe6a8"),
+            ("brown", "#6b4d00"),
+            ("red", "210,58,68"),
+        ] {
+            for rule in css.split('}').filter(|l| l.contains(needle)) {
+                assert!(
+                    controls.iter().any(|c| rule.contains(c)),
+                    "a {label} literal is back outside a destructive control: {rule}"
+                );
+            }
+        }
+        for (var, decl) in [("--warn", "--warn:    var(--info)"), ("--bad", "--bad:     var(--info)")] {
+            assert_eq!(
+                css.matches(decl).count(),
+                2,
+                "{var} must resolve to --info in both themes, or a call site this test cannot \
+                 enumerate repaints amber"
+            );
+        }
+        assert!(
+            !PAGE.contains("needs attention") && !PAGE.contains("things need"),
+            "the findings list went back to grading the user"
+        );
+    }
+
+    #[test]
+    fn the_hero_and_the_report_count_the_same_findings() {
+        let body = PAGE.split("function checkAttention").nth(1).unwrap_or("");
+        let head = body.split("}").next().unwrap_or("");
+        assert!(
+            head.contains("(s.open_failures || 0) + (s.warn || 0)") && !head.contains("s.reboot"),
+            "open_failures already includes reboot, so adding it again counts a \
+             pending-reboot check twice on the Status hero: {head}"
+        );
+    }
+
+    #[test]
     fn the_sucompat_probe_greps_for_the_case_ksud_actually_prints() {
         assert!(
             PAGE.contains("grep su_compat | grep -q ENABLED"),

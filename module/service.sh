@@ -257,15 +257,15 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     elif [ "$(_health_get engine)" = "down" ]; then
         _health="⛔ your kernel has no NoMount driver - flash a NoMount kernel, then reboot"
     elif [ "${_rl_rc:-0}" -ne 0 ]; then
-        _health="⚠️ late module content may not be served - tap Reload in the WebUI"
+        _health="ℹ️ late module content may not be served - tap Reload in the WebUI"
     elif [ "$_consbad" = 1 ]; then
-        _health="⚠️ per-UID inconsistency - see the WebUI"
+        _health="ℹ️ per-UID inconsistency - see the WebUI"
     elif [ "${_err:-0}" -gt 0 ]; then
-        _health="⚠️ $_err error(s) - see the WebUI"
+        _health="ℹ️ $_err finding(s) - see the WebUI"
     elif [ -n "$_hv" ] && [ "$_hv" != "clean" ]; then
-        _health="⚠️ $_hv - see the WebUI"
+        _health="ℹ️ $_hv - see the WebUI"
     elif [ "${_wrn:-0}" -gt 0 ]; then
-        _health="$_wrn warning(s)"
+        _health="ℹ️ $_wrn finding(s) - see the WebUI"
     elif [ "${_unm:-0}" -gt 0 ]; then
         _health="not fully measured - see the WebUI"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then
@@ -290,7 +290,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
             _mstate="0 mounts"
         fi
     elif [ "$_fgn" -gt 0 ]; then
-        _mstate="⚠ $_fgn foreign mount(s)"
+        _mstate="ℹ $_fgn foreign mount(s)"
     elif [ "${_mnt:-0}" -gt 0 ]; then
         _mstate="$_mnt mount by design"
     else
@@ -312,7 +312,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     fi
     if [ "${_hookran:-1}" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then _mark="✅"
-    elif [ "${_rules:-0}" = 0 ]; then _mark="⚠️"
+    elif [ "${_rules:-0}" = 0 ]; then _mark="ℹ️"
     else _mark="✅"; fi
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ "${_nmlrc:-0}" -ne 0 ]; then

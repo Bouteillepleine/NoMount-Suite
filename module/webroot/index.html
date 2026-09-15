@@ -29,8 +29,12 @@
     --acc:     #7c9cff;
     --acc2:    #57e6c3;
     --ok:      #35d29a;
-    --warn:    #fbbf24;
-    --bad:     #f8717a;
+    --info:    #7c9cff;
+    --warn:    var(--info);
+    --bad:     var(--info);
+    --infobg1: rgba(124,156,255,0.15);
+    --infobg2: rgba(124,156,255,0.10);
+    --infobd:  rgba(124,156,255,0.42);
     --mono:    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     --radius:  20px;
     --shadow:  0 12px 34px rgba(0,0,0,0.42);
@@ -118,8 +122,9 @@
   .card-h h2 { margin: 0; font-size: 14px; font-weight: 680; letter-spacing: 0.2px; }
   .card-h .ic { width: 17px; height: 17px; color: var(--acc); flex: none; }
   .card-h .chip.ok   { background-color: rgba(53,210,154,0.15);  color: var(--ok); }
-  .card-h .chip.warn { background-color: rgba(251,191,36,0.15);  color: var(--warn); }
-  .card-h .chip.bad  { background-color: rgba(248,113,122,0.15); color: var(--bad); }
+  .card-h .chip.warn { background-color: var(--infobg1); color: var(--warn); }
+  .card-h .chip.bad  { background-color: var(--infobg1); color: var(--bad); }
+  .card-h .chip.info { background-color: var(--infobg1); color: var(--info); }
   .card-h .chip {
     margin-left: auto; font-size: 11px; font-weight: 680; letter-spacing: 0.2px; white-space: nowrap;
     color: var(--muted); background-color: var(--card2); border: 1px solid rgba(255,255,255,.10);
@@ -156,8 +161,9 @@
   .statusline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; background: var(--muted); transition: .3s; }
   .dot.ok   { background: var(--ok);   box-shadow: 0 0 13px var(--ok),   0 0 0 5px rgba(53,210,154,0.14); }
-  .dot.warn { background: var(--warn); box-shadow: 0 0 13px var(--warn), 0 0 0 5px rgba(251,191,36,0.14); }
-  .dot.bad  { background: var(--bad);  box-shadow: 0 0 13px var(--bad),  0 0 0 5px rgba(248,113,122,0.14); }
+  .dot.warn,
+  .dot.info { background: var(--info); box-shadow: 0 0 13px var(--info), 0 0 0 5px rgba(124,156,255,0.14); }
+  .dot.bad  { background: var(--info); box-shadow: 0 0 13px var(--info), 0 0 0 5px rgba(124,156,255,0.14); }
   .dot.off  { background: var(--muted); }
   .statusline .st { font-size: 19px; font-weight: 720; letter-spacing: -0.2px; }
   .statusline .sub { margin-left: auto; min-width: 0; font-size: 12px; color: var(--muted); text-align: right; line-height: 1.45; }
@@ -231,7 +237,8 @@
   .tag.su    { background: rgba(87,230,195,0.15);  color: var(--acc2); }
   .tag.suite { background: rgba(255,255,255,0.08); color: var(--txt); }
   .tag.off   { background: rgba(139,147,167,0.15); color: var(--muted); }
-  .tag.warn  { background: rgba(251,191,36,0.15);  color: var(--warn); }
+  .tag.warn,
+  .tag.info  { background: var(--infobg1); color: var(--info); }
   .tag.ok    { background: rgba(53,210,154,0.15);  color: var(--ok); }
   .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
 
@@ -290,16 +297,17 @@
   .healthline:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
   .hl-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
   .hl-dot.ok   { background: var(--ok); }
-  .hl-dot.warn { background: var(--warn); }
-  .hl-dot.bad  { background: var(--bad); }
+  .hl-dot.warn,
+  .hl-dot.info { background: var(--info); }
+  .hl-dot.bad  { background: var(--info); }
   .hl-txt { flex: 1 1 auto; min-width: 0; line-height: 1.4; }
   .hl-txt b { font-weight: 650; }
   .hl-txt .age { color: var(--muted); font-variant-numeric: tabular-nums; }
   .hl-go { flex: none; color: var(--muted); font-size: 17px; line-height: 1; }
-  .healthline.attn { border-color: rgba(251,191,36,.45); background: rgba(251,191,36,.08); }
-  html[data-theme="light"] .healthline.attn { background: rgba(251,191,36,.12); }
-  .healthline.attn.down { border-color: rgba(248,113,122,.45); background: rgba(248,113,122,.08); }
-  html[data-theme="light"] .healthline.attn.down { background: rgba(248,113,122,.10); }
+  .healthline.attn { border-color: var(--infobd); background: rgba(124,156,255,.08); }
+  html[data-theme="light"] .healthline.attn { background: rgba(124,156,255,.12); }
+  .healthline.attn.down { border-color: var(--infobd); background: rgba(124,156,255,.08); }
+  html[data-theme="light"] .healthline.attn.down { background: rgba(124,156,255,.12); }
 
   .backline {
     display: inline-flex; align-items: center; gap: 7px;
@@ -327,7 +335,7 @@
   }
   /* why a module is not served, on the row that names it */
   .mwhy { font-size: 11.5px; line-height: 1.45; color: var(--muted); margin-top: 5px; }
-  .mrow.unserved { border-color: rgba(251,191,36,.38); }
+  .mrow.unserved { border-color: rgba(124,156,255,.38); }
   .mmeta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .mmeta .files {
     font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-right: auto;
@@ -354,7 +362,8 @@
   .stealth-head { display: flex; align-items: center; gap: 11px; }
   .shield { width: 40px; height: 40px; border-radius: 12px; flex: none; display: grid; place-items: center; border: 1px solid var(--brd2); }
   .shield.clean { background: rgba(53,210,154,0.12); color: var(--ok); }
-  .shield.warn  { background: rgba(251,191,36,0.12); color: var(--warn); }
+  .shield.warn,
+  .shield.info  { background: var(--infobg2); color: var(--info); }
   .shield svg { width: 21px; height: 21px; }
   .stealth-head .t { font-size: 15px; font-weight: 700; }
   .stealth-head .d { font-size: 12px; color: var(--muted); margin-top: 2px; }
@@ -423,8 +432,8 @@
   .usr { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
   .rch { font-size: 10px; padding: 2px 7px; border-radius: 999px; white-space: nowrap;
          border: 1px solid var(--brd2); color: var(--dim); }
-  .rch.r-det { color: var(--bad);  border-color: rgba(248,113,122,0.42); }
-  .rch.r-qr  { color: var(--warn); border-color: rgba(251,191,36,0.42); }
+  .rch.r-det { color: var(--info); border-color: var(--infobd); }
+  .rch.r-qr  { color: var(--acc2); border-color: rgba(87,230,195,0.42); }
   .rch.r-su  { color: var(--acc2); border-color: rgba(87,230,195,0.36); }
   .usfoot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 11px; }
 
@@ -460,11 +469,11 @@
   .blk .bs { flex: 0 1 auto; min-width: 0; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
   .blk .bcov { font-size: 11px; line-height: 1.4; color: var(--dim); }
   .blk.live    .bs  { color: var(--acc2, #57e6c3); }
-  .blk.pending .dot, .blk.drift .dot { background: var(--warn, #d9a441); }
+  .blk.pending .dot, .blk.drift .dot { background: var(--info); }
   .blk.live .dot { background: var(--ok); }
   .blk.gone .dot { background: var(--faint); }
   .blk.unknown .dot { background: var(--faint); }
-  .blk.pending .bs,  .blk.drift .bs  { color: var(--warn, #d9a441); }
+  .blk.pending .bs,  .blk.drift .bs  { color: var(--info); }
   .blk .bx {
     flex: 0 0 auto; width: 38px; height: 38px; line-height: 36px; text-align: center;
     border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
@@ -475,7 +484,7 @@
   .blk .bx.save:hover { background: rgba(90,220,150,0.16); color: #57e6c3; }
   .blk .bx:disabled { opacity: 0.4; }
 
-  .banner { background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.3); color: #ffe6a8; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: block; line-height: 1.5; }
+  .banner { background: var(--infobg2); border: 1px solid var(--infobd); color: #cfdaff; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: block; line-height: 1.5; }
   .banner[hidden] { display: none; }
   .foot { text-align: center; color: var(--faint); font-size: 11px; margin-top: 16px; line-height: 1.7; }
 
@@ -517,14 +526,14 @@
   }
   #toast.show { opacity: 1; transform: translate(-50%, 0); }
   #toast.ok  { border-color: rgba(53,210,154,0.42); }
-  #toast.bad { border-color: rgba(248,113,122,0.42); }
+  #toast.bad { border-color: var(--infobd); }
   html[data-theme="light"] #toast {
     background: #ffffff; color: #101725;
     border-color: rgba(16,26,48,.12);
     box-shadow: 0 12px 30px rgba(20,32,64,.20), 0 2px 6px rgba(20,32,64,.10);
   }
   html[data-theme="light"] #toast.ok  { border-color: rgba(14,154,108,.45); }
-  html[data-theme="light"] #toast.bad { border-color: rgba(210,58,68,.45); }
+  html[data-theme="light"] #toast.bad { border-color: rgba(63,99,224,.45); }
 
   .cfwrap {
     position: fixed; inset: 0; z-index: 90; display: flex;
@@ -667,8 +676,12 @@
     --acc:     #3f63e0;
     --acc2:    #0f9e84;
     --ok:      #0e9a6c;
-    --warn:    #a46a00;
-    --bad:     #d23a44;
+    --info:    #3f63e0;
+    --warn:    var(--info);
+    --bad:     var(--info);
+    --infobg1: rgba(63,99,224,0.13);
+    --infobg2: rgba(63,99,224,0.09);
+    --infobd:  rgba(63,99,224,0.40);
     --shadow:  0 12px 30px rgba(20,32,64,0.13);
   }
   html[data-theme="light"] body { color: var(--txt); }
@@ -719,7 +732,7 @@
     background-image: linear-gradient(135deg, #0d1220, #2b3f96 60%, #0c7f6b);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-  html[data-theme="light"] .banner { color: #6b4d00; }
+  html[data-theme="light"] .banner { color: #1d2b52; }
   html[data-theme="light"] button.act.danger {
     color: #a3252e; border-color: rgba(210,58,68,0.40); background: rgba(210,58,68,0.08);
   }
@@ -1016,7 +1029,7 @@
   <div class="card collapsed" id="incidentcard" style="display:none">
     <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
-      <h2>Last incident</h2><span class="chip bad">guard tripped</span><span class="chev">›</span>
+      <h2>Last incident</h2><span class="chip info">guard tripped</span><span class="chev">›</span>
     </div>
     <p class="note">Recorded when the bootloop guard disabled the Suite, including the newest native crash and its abort message - which usually names the offending path. A saved record, not live state.</p>
     <pre class="rules" id="incidentout">...</pre>
@@ -1254,7 +1267,7 @@
         "Nothing is being injected. Prebuilt OnePlus kernels: " +
         "github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases · " +
         "source: github.com/Bouteillepleine/NoMount-Suite";
-      dot.className = "dot bad";
+      dot.className = "dot info";
       $("mRules").textContent = " - ";
       $("mOv").textContent = " - ";
       return 0;
@@ -1265,7 +1278,7 @@
       $("state").textContent = "Disabled";
       $("substate").textContent =
         "the bootloop guard tripped - re-arm it in Bootloop guard below, then reboot";
-      dot.className = "dot bad";
+      dot.className = "dot info";
       return d.rules;
     }
     $("state").textContent = "Active";
@@ -1285,11 +1298,11 @@
         bits.push(`${pending} planned file${pending > 1 ? "s" : ""} not served yet - press Reload`);
       }
       if (attn > 0) {
-        bits.push(`${attn} thing${attn > 1 ? "s need" : " needs"} attention - see Diagnostics`);
+        bits.push(`${attn} finding${attn > 1 ? "s" : ""} - see Diagnostics`);
       }
       $("substate").textContent = bits.length ? "modules injected · " + bits.join(" · ")
                                               : "modules injected";
-      dot.className = (pending > 0 || attn > 0) ? "dot warn" : "dot ok";
+      dot.className = pending > 0 ? "dot info" : "dot ok";
       return d.rules;
     }
     let ships = -1, planned = -1;
@@ -1309,10 +1322,10 @@
       // read - correctly painted amber, i.e. a known-bad device looked better than an
       // unknown one. Reachable from this page's own Clear rules button.
       $("substate").textContent = "no rules - " + ships + " planned file(s) unserved, re-apply";
-      dot.className = "dot warn";
+      dot.className = "dot info";
     } else {
       $("substate").textContent = "no rules";
-      dot.className = "dot warn";
+      dot.className = "dot info";
     }
     return d.rules;
   }
@@ -1400,22 +1413,22 @@
     ];
     if (rootNm > 0) {
       rows.push(appNm === 0 ? { k: "Real mounts", v: "root " + rootNm + " · apps 0 - hidden", t: "vfs" }
-              : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " - VISIBLE", t: "warn" }
+              : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " - VISIBLE", t: "info" }
               : { k: "Real mounts", v: "root " + rootNm + " · app-view n/a", t: "off" });
     } else {
-      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " finding" + (fmnt > 1 ? "s" : "") + " - open Check", t: "warn" }
+      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " finding" + (fmnt > 1 ? "s" : "") + " - open Check", t: "info" }
               : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
               : ourBinds > 0
                 ? { k: "Real mounts", v: ourBinds + " of ours · my_* bind" + (ourBinds > 1 ? "s" : ""),
-                    t: ourBindsWarn ? "warn" : "vfs" }
+                    t: ourBindsWarn ? "info" : "vfs" }
               : byDesign > 0
                 ? { k: "Real mounts", v: "none of ours · " + byDesign + " left by design", t: "vfs" }
                 : { k: "Real mounts", v: "none - pure Prism", t: "vfs" });
     }
     rows.push({ k: "Build keys",
                 v: fp === "" ? "n/a" : keyMatch ? keyMatch[0].replace(/^:|\/$/g, "") + " · tell" : "release-keys",
-                t: fp === "" ? "off" : keyMatch ? "warn" : "vfs" });
-    rows.push({ k: "SELinux", v: se || "n/a", t: seTell ? "warn" : (se ? "vfs" : "off") });
+                t: fp === "" ? "off" : keyMatch ? "info" : "vfs" });
+    rows.push({ k: "SELinux", v: se || "n/a", t: seTell ? "info" : (se ? "vfs" : "off") });
     $("posture").innerHTML = rows.map((x) =>
       `<div class="row"><span class="name">${x.k}</span><span class="tag ${x.t}">${esc(x.v)}</span></div>`
     ).join("");
@@ -1423,7 +1436,7 @@
     let told = false;
     const say = function (kind, title, desc, note) {
       if (tells.length && !told) {
-        kind = "warn";
+        kind = "info";
         note += " Also readable by a scanner, whatever the mount table says: " +
                 tells.map(esc).join(", ") + ".";
       }
@@ -1443,32 +1456,32 @@
       }
     };
     if (engineDown(CHECK)) {
-      say("warn", "The engine isn’t running", "nothing is being injected",
+      say("info", "The engine isn’t running", "nothing is being injected",
         "There are no mounts because there is nothing being served. This card cannot say " +
         "anything about how you look to an app until the engine answers - open " +
         "<b>Diagnostics</b>.");
     } else if (appNm > 0) {
-      say("warn", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
+      say("info", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
         "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
         "mountless</b> (Prism RRO) - if you see this, an older overlay build is still active; reboot.");
     } else if (fmnt > 0) {
       const owner = bad.map(function (c) { return c.owner; }).filter(Boolean).join(", ");
-      say("warn", "Something is mounting over the ROM",
+      say("info", "Something is mounting over the ROM",
         owner ? "from " + owner : fmnt + " finding(s) in the mount table",
         esc(bad.map(function (c) { return c.meaning || c.name; }).join(" ")) +
         " Open <b>Diagnostics</b> - it names each one, who caused it, and what " +
         "you can do about it.");
     } else if (ourBindsWarn) {
-      say("warn", "Our own my_* binds are visible",
+      say("info", "Our own my_* binds are visible",
         ourBinds + " real bind" + (ourBinds > 1 ? "s" : "") + " any app can read",
         esc((mrows[0] && (mrows[0].meaning || mrows[0].evidence)) || "") +
         " Open <b>Diagnostics</b>.");
     } else if (fmnt < 0) {
-      say("warn", "Mount posture not measured", "no check has read the mount table yet",
+      say("info", "Mount posture not measured", "no check has read the mount table yet",
         "Nothing has read the mount table here yet, so this says nothing either " +
         "way. Open <b>Diagnostics</b>.");
     } else if (appNm < 0 && rootNm > 0) {
-      say("warn", "App view unavailable", "could not measure what a non-root reader sees",
+      say("info", "App view unavailable", "could not measure what a non-root reader sees",
         "Couldn’t drop to a non-root uid to verify here, and root sees " + rootNm +
         " <code>nomount_*</code> mount(s).");
     } else if (rootNm > 0) {
@@ -1479,7 +1492,7 @@
         "sees everything.");
     } else if (tells.length) {
       told = true;
-      say("warn", "Residual tells present", tells.join(" · "),
+      say("info", "Residual tells present", tells.join(" · "),
         "Mount surface is clean, but a scanner can still read: " + tells.map(esc).join(", ") +
         ". These are properties and boot state, not mounts - nothing on this page changes them.");
     } else {
@@ -1528,7 +1541,7 @@
     }
     $("gchip").textContent = "boot " + (cr.errno !== 0 ? "?" : c === "" ? "0" : c) + "/3";
     if (disabled) {
-      $("gstate").textContent = "Tripped - disabled"; $("gdot").className = "dot bad"; $("rearm").style.display = "";
+      $("gstate").textContent = "Tripped - disabled"; $("gdot").className = "dot info"; $("rearm").style.display = "";
     } else {
       $("gstate").textContent = "Armed"; $("gdot").className = "dot ok"; $("rearm").style.display = "none";
     }
@@ -1677,7 +1690,7 @@
   }
 
   const VERDICT_LABEL = {
-    fail: "needs attention",
+    fail: "worth knowing",
     reboot: "reboot to finish",
     warn: "worth a look",
     unmeasured: "not measured",
@@ -1700,7 +1713,7 @@
   function checkAttention() {
     const s = CHECK && CHECK.summary;
     if (!s) return 0;
-    return (s.open_failures || 0) + (s.warn || 0) + (s.reboot || 0);
+    return (s.open_failures || 0) + (s.warn || 0);
   }
   function isShown(v) { return isAttention(v) || v === "unmeasured"; }
 
@@ -1725,7 +1738,7 @@
     // simply not run a check yet, and sent them to press a button that does not exist.
     if (engineDown(r) || guardTripped(r)) {
       el.classList.add("attn", "down");
-      dot.className = "hl-dot bad";
+      dot.className = "hl-dot info";
       txt.innerHTML = engineDown(r)
         ? "<b>The engine isn’t running</b> <span class=\"age\">· nothing is being injected</span>"
         : "<b>The bootloop guard tripped</b> <span class=\"age\">· the Suite disabled itself</span>";
@@ -1741,16 +1754,15 @@
     const unm = s.unmeasured || 0;
     const age = r.ts ? ' <span class="age">· checked ' + esc(auAge(r.ts)) + "</span>" : "";
     if (attn > 0) {
-      el.classList.add("attn");
-      dot.className = "hl-dot warn";
-      txt.innerHTML = "<b>" + attn + (attn > 1 ? " things need" : " thing needs") +
-                      " attention</b>" + age;
+      dot.className = "hl-dot ok";
+      txt.innerHTML = "<b>" + attn + (attn > 1 ? " findings" : " finding") +
+                      " worth reading</b>" + age;
     } else if (!ranSection(r, "device")) {
-      dot.className = "hl-dot warn";
+      dot.className = "hl-dot info";
       txt.innerHTML = "<b>Only your plan was checked</b> " +
                       "<span class=\"age\"> - tap to check the device too</span>";
     } else if (unm > 0 || s.complete === false) {
-      dot.className = "hl-dot warn";
+      dot.className = "hl-dot info";
       txt.innerHTML = "<b>Not fully checked yet</b> <span class=\"age\"> - " +
                       (unm || 1) + (unm === 1 ? " check" : " checks") +
                       " had nothing to look at</span>";
@@ -1810,7 +1822,7 @@
         ? '<div class="empty">No kernel driver, so there is nothing to check yet. Use <b>Copy report</b> to get the details for a bug report.</div>'
         : '<div class="empty">Not checked yet - press <b>Re-run</b>.</div>';
       chip.textContent = engineDown(r) ? "engine down" : "not checked";
-      chip.className = engineDown(r) ? "chip bad" : "chip warn";
+      chip.className = "chip info";
       age.style.display = "none";
       return;
     }
@@ -1829,11 +1841,14 @@
     const unmeasured = rows.filter(function (c) { return c.verdict === "unmeasured"; });
     const down = engineDown(r);
 
-    if (down) { chip.textContent = "engine down"; chip.className = "chip bad"; }
-    else if (guardTripped(r)) { chip.textContent = "guard tripped"; chip.className = "chip bad"; }
-    else if (attention.length) { chip.textContent = attention.length + " to look at"; chip.className = "chip warn"; }
-    else if (!ranSection(r, "device")) { chip.textContent = "plan only"; chip.className = "chip warn"; }
-    else if (unmeasured.length) { chip.textContent = unmeasured.length + " not measured"; chip.className = "chip warn"; }
+    if (down) { chip.textContent = "engine down"; chip.className = "chip info"; }
+    else if (guardTripped(r)) { chip.textContent = "guard tripped"; chip.className = "chip info"; }
+    else if (attention.length) {
+      chip.textContent = attention.length + (attention.length > 1 ? " findings" : " finding");
+      chip.className = "chip ok";
+    }
+    else if (!ranSection(r, "device")) { chip.textContent = "plan only"; chip.className = "chip info"; }
+    else if (unmeasured.length) { chip.textContent = unmeasured.length + " not measured"; chip.className = "chip info"; }
     else { chip.textContent = "all clear"; chip.className = "chip ok"; }
 
     const s = r.summary || {};
@@ -1858,9 +1873,9 @@
           ? "Nothing is being injected, so a clean result below says nothing about how you " +
             "look to an app."
           : "Re-arm it in Bootloop guard on Status, then reboot.") +
-        '</div><div class="fmeta"><span class="tag warn">' +
+        '</div><div class="fmeta"><span class="tag info">' +
         (down ? "engine down" : "guard tripped") + "</span></div></div>" +
-        group("Needs your attention", attention);
+        group("Worth knowing", attention);
       return;
     }
     if (!rows.length && ranSection(r, "device")) {
@@ -1870,36 +1885,36 @@
       return;
     }
 
-    sub.textContent = "Sorted by what needs you first. Everything that passed is left out.";
+    sub.textContent = "Everything that passed is left out. What is left is information about this device - the Suite is working, and nothing here has to be fixed for it to keep working.";
     let head = "";
     if (!ranSection(r, "device")) {
       head = '<div class="frow"><div class="fname">Only your plan was checked</div>' +
         '<div class="fmean">This report covers what your module set will do at the next boot. ' +
         "Nothing on the device itself was measured, so nothing here says whether what you " +
         "serve is detectable.</div>" +
-        '<div class="fmeta"><span class="tag warn">plan only</span>' +
+        '<div class="fmeta"><span class="tag info">plan only</span>' +
         '<button class="act" style="flex:none;min-width:0;padding:12px 16px;font-size:12.5px;margin-left:auto" ' +
         'onclick="runCheck(this)">Check the device</button></div></div>';
     }
     let unmHead = "";
     if (unmeasured.length || s.complete === false) {
       unmHead = '<div class="frow"><div class="fname">' +
-        (attention.length ? "Not a complete answer" : "This is not a clean result yet") + "</div>" +
+        (attention.length ? "Not a complete answer" : "Not everything could be measured") + "</div>" +
         '<div class="fmean">' + unmeasured.length + " check" +
         (unmeasured.length === 1 ? "" : "s") + " had nothing to look at when this ran, so " +
         (unmeasured.length === 1 ? "it is" : "they are") + " not " +
         (unmeasured.length === 1 ? "a pass" : "passes") + ". " +
         (attention.length
-          ? "Fix what is above first - several of these depend on it."
+          ? "Read what is above first - several of these depend on it."
           : "The usual reason is timing: the boot pass runs before any app has opened an " +
             "injected file, so the checks that need a running app cannot answer then. " +
             "Run them now that the device is up.") + "</div>" +
-        '<div class="fmeta"><span class="tag warn">not measured</span>' +
+        '<div class="fmeta"><span class="tag info">not measured</span>' +
         '<button class="act" style="flex:none;min-width:0;padding:12px 16px;font-size:12.5px;margin-left:auto" ' +
         'onclick="runCheck(this)">Run them now</button></div></div>';
     }
     list.innerHTML = head +
-      group("Needs your attention", attention) +
+      group("Worth knowing", attention) +
       (unmeasured.length ? '<div class="fgroup">Not measured <span class="cnt">' +
         unmeasured.length + "</span></div>" + unmHead + unmeasured.map(checkRow).join("")
         : unmHead);
@@ -1921,7 +1936,7 @@
       b.push('<div class="fmean"><b>Next:</b> reboot to finish this one.</div>');
     }
     if (c.owner) b.push('<div class="fowner">From: <b>' + esc(c.owner) + "</b></div>");
-    b.push('<div class="fmeta"><span class="tag ' + (c.verdict === "note" ? "off" : "warn") + '">' +
+    b.push('<div class="fmeta"><span class="tag ' + (c.verdict === "note" ? "off" : "info") + '">' +
            esc(verdictLabel(c)) + "</span>" +
            '<span class="tag off">' + esc(c.section || "") + "</span></div>");
     b.push('<details><summary>What was measured</summary><div class="ev">' +
@@ -2151,11 +2166,11 @@
       const vis = mnt < 0
         ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown - it is not a claim that it owns no mount">mounts unknown</span>`
         : mnt > 0
-        ? `<span class="tag warn" title="This module has ${mnt} mount(s) of its own in the mount table - visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
+        ? `<span class="tag info" title="This module has ${mnt} mount(s) of its own in the mount table - visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
         : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
       const uns = unservedBy[id];
       if (uns) {
-        label = "not served"; cls = "warn"; tip = "";
+        label = "not served"; cls = "info"; tip = "";
       }
       const why = uns
         ? `<div class="mwhy">${esc(uns.evidence || uns.meaning || "")}</div>`
@@ -2182,7 +2197,7 @@
     _paintRuleModuleBar(d.lines.filter((l) => !l.includes("(virtual dir)")));
   }
 
-  const _RM_PALETTE = ["#57e6c3", "#7c9cff", "#c792ea", "#fbbf24", "#f8717a", "#4fd1e0", "#9ccc65"];
+  const _RM_PALETTE = ["#57e6c3", "#7c9cff", "#c792ea", "#4fd1e0", "#9ccc65", "#a5b4fc", "#5eead4"];
   function _paintRuleModuleBar(lines) {
     const box = $("ruleModuleBar"); if (!box) return;
     if (!lines.length) { box.style.display = "none"; box.innerHTML = ""; return; }
@@ -2292,7 +2307,7 @@
       const path = l.split("\t")[0];
       const st = (l.split("\t")[1] || "").trim();
       const cls = /^hidden/.test(st) ? "vfs"
-        : /^not applied \(and no such path/.test(st) ? "off" : "warn";
+        : /^not applied \(and no such path/.test(st) ? "off" : "info";
       const hint = /^not applied - run/.test(st) ? "saved, not live yet - tap Reload on Status"
                  : /^applied, but still visible/.test(st) ? "the engine is not serving it - tap Reload on Status"
                  : /^not applied \(and no such path/.test(st) ? "this ROM has no such path - nothing to hide"
@@ -2413,7 +2428,7 @@
     const n = absorbable(CHECK);
     if (n < 0) { chip.textContent = " - "; chip.className = "chip"; return; }
     chip.textContent = n === 0 ? (ABSORBED_N > 0 ? "none left" : "none") : String(n);
-    chip.className = n === 0 ? "chip ok" : "chip warn";
+    chip.className = n === 0 ? "chip ok" : "chip info";
   }
 
   async function abScan(btn) {
@@ -2432,10 +2447,10 @@
         [/^would skip directory bind /, "off", "needs --include-dirs"],
         [/^would drop redundant mount /, "vfs", "already served"],
         [/^redundant /,               "vfs",  "already served"],
-        [/^would absorb /,            "warn", "would absorb"],
-        [/^would empty /,             "warn", "would empty"],
-        [/^nomount: LEAK /,           "warn", "absorb cannot fix"],
-        [/^nomount absorb: \d+ my_\* mount\(s\) deferred/, "warn", "deferred to next boot"],
+        [/^would absorb /,            "info", "would absorb"],
+        [/^would empty /,             "info", "would empty"],
+        [/^nomount: LEAK /,           "info", "absorb cannot fix"],
+        [/^nomount absorb: \d+ my_\* mount\(s\) deferred/, "info", "deferred to next boot"],
       ];
       const owner = (s) => {
         const m = s.match(/\/data\/adb\/modules(?:_update)?\/([^/]+)/);
@@ -2534,7 +2549,7 @@
         cands.map(l => {
           const p = l.split("\t")[0], why = l.split("\t")[1] || "";
           return `<div class="row"><span class="name mono" title="${esc(p)}">${esc(p)}</span>` +
-                 `<span class="tag warn" title="${esc(why)}">${esc(why.split(";")[0])}</span>` +
+                 `<span class="tag info" title="${esc(why)}">${esc(why.split(";")[0])}</span>` +
                  `<button class="bx" title="Hide this path" data-act="woadd" data-nmp="${esc(p)}">+</button></div>`;
         }).join("") +
         (notes ? `<div class="empty">${esc(notes)}</div>` : "");
