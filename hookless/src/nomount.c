@@ -2746,6 +2746,9 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
 #define NM_INO_SAMPLES 256
 #define NM_INO_POP_SAMPLES 256
 #define NM_INO_MINE    256
+#define NM_INO_SUB     256
+#define NM_INO_SUBDIRS 64
+#define NM_INO_SUBNAMES 64
 #define NM_RANGE_SLOTS 8
 
 struct nm_ino_pop {
@@ -2753,6 +2756,8 @@ struct nm_ino_pop {
     int n;
     u64 mine[NM_INO_MINE];
     int nmine;
+    u64 sub[NM_INO_SUB];
+    int nsub;
     u64 hw;
     dev_t dev;
 };
@@ -2846,6 +2851,8 @@ struct nm_ino_scan {
     struct nm_ino_pop *pop;
     char (*names)[NAME_MAX + 1];
     int n_names;
+    char (*dirs)[NAME_MAX + 1];
+    int n_dirs;
     char pathbuf[PATH_MAX];
 };
 
@@ -2856,6 +2863,18 @@ static struct file *nm_open_dir(struct path *p, const struct cred *caller)
     if (IS_ERR(f) && caller && caller != nm_root_cred)
         f = dentry_open(p, O_RDONLY | O_DIRECTORY | O_NOATIME, caller);
     return f;
+}
+
+static void nm_sub_insert(struct nm_ino_pop *pop, u64 ino)
+{
+    int i;
+
+    if (!ino || pop->nsub >= NM_INO_SUB)
+        return;
+    for (i = 0; i < pop->nsub; i++)
+        if (pop->sub[i] == ino)
+            return;
+    pop->sub[pop->nsub++] = ino;
 }
 
 static void nm_pop_insert(struct nm_ino_pop *pop, u64 ino)
@@ -2901,8 +2920,13 @@ static NM_ACTOR_RET nm_ino_actor(struct dir_context *ctx, const char *name,
     if (!s->overlay) {
         if (dt == DT_UNKNOWN)
             return NM_ACTOR_CONTINUE;
-        if ((dt == DT_DIR) == s->want_dir)
+        if ((dt == DT_DIR) == s->want_dir) {
             nm_pop_insert(s->pop, ino);
+        } else if (dt == DT_DIR && s->dirs && s->n_dirs < NM_INO_SUBDIRS) {
+            memcpy(s->dirs[s->n_dirs], name, namelen);
+            s->dirs[s->n_dirs][namelen] = '\0';
+            s->n_dirs++;
+        }
         return NM_ACTOR_CONTINUE;
     }
 
@@ -2914,16 +2938,78 @@ static NM_ACTOR_RET nm_ino_actor(struct dir_context *ctx, const char *name,
     return NM_ACTOR_CONTINUE;
 }
 
+struct nm_sub_scan {
+    struct dir_context ctx;
+    char (*names)[NAME_MAX + 1];
+    int n_names;
+};
+
+static NM_ACTOR_RET nm_sub_actor(struct dir_context *ctx, const char *name,
+                                 int namelen, loff_t off, u64 ino, unsigned int dt)
+{
+    struct nm_sub_scan *s = container_of(ctx, struct nm_sub_scan, ctx);
+
+    if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
+        return NM_ACTOR_CONTINUE;
+    if (s->n_names >= NM_INO_SUBNAMES)
+        return NM_ACTOR_CONTINUE;
+    memcpy(s->names[s->n_names], name, namelen);
+    s->names[s->n_names][namelen] = '\0';
+    s->n_names++;
+    return NM_ACTOR_CONTINUE;
+}
+
+static void nm_sub_collect(const char *dirpath, struct nm_ino_pop *pop,
+                           char (*names)[NAME_MAX + 1])
+{
+    struct nm_sub_scan sc;
+    struct path dp;
+    struct file *dir;
+    int i;
+
+    if (!names || pop->nsub >= NM_INO_SUB)
+        return;
+    if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
+        return;
+    memset(&sc, 0, sizeof(sc));
+    sc.names = names;
+    *((filldir_t *)&sc.ctx.actor) = nm_sub_actor;
+    dir = nm_open_dir(&dp, NULL);
+    path_put(&dp);
+    if (!IS_ERR(dir)) {
+        iterate_dir(dir, &sc.ctx);
+        fput(dir);
+    }
+    for (i = 0; i < sc.n_names && pop->nsub < NM_INO_SUB; i++) {
+        char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, names[i]);
+        struct path fp;
+        struct kstat fk;
+
+        if (!cp)
+            continue;
+        if (kern_path(cp, LOOKUP_FOLLOW, &fp) == 0) {
+            int r = nm_path_stat(&fp, &fk);
+
+            path_put(&fp);
+            if (r == 0 && !S_ISDIR(fk.mode))
+                nm_sub_insert(pop, fk.ino);
+        }
+        kfree(cp);
+    }
+}
+
 static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop *pop)
 {
     struct nm_ino_scan *sc;
     struct path dp;
     struct file *dir;
     const struct cred *old;
+    char (*subnames)[NAME_MAX + 1] = NULL;
     int i;
 
     pop->n = 0;
     pop->nmine = 0;
+    pop->nsub = 0;
     pop->hw = 0;
     pop->dev = 0;
     if (kern_path(dirpath, LOOKUP_FOLLOW, &dp) != 0)
@@ -2949,7 +3035,11 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     if (sc->overlay) {
         sc->names = vzalloc(NM_INO_SAMPLES * (NAME_MAX + 1));
         if (!sc->names) { kfree(sc); path_put(&dp); return -ENOMEM; }
+    } else if (!want_dir) {
+        sc->dirs = vzalloc(NM_INO_SUBDIRS * (NAME_MAX + 1));
     }
+    if (!want_dir)
+        subnames = vzalloc(NM_INO_SUBNAMES * (NAME_MAX + 1));
 
     *((filldir_t *)&sc->ctx.actor) = nm_ino_actor;
     old = override_creds(nm_root_cred);
@@ -2974,12 +3064,27 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
             path_put(&fp);
             if (r == 0 && (!!S_ISDIR(fk.mode) == want_dir))
                 nm_pop_insert(pop, fk.ino);
+            else if (r == 0 && !want_dir && S_ISDIR(fk.mode))
+                nm_sub_collect(cp, pop, subnames);
         }
         kfree(cp);
     }
 
+    for (i = 0; sc->dirs && i < sc->n_dirs && pop->nsub < NM_INO_SUB; i++) {
+        char *cp = kasprintf(GFP_KERNEL, "%s/%s", dirpath, sc->dirs[i]);
+
+        if (!cp)
+            continue;
+        nm_sub_collect(cp, pop, subnames);
+        kfree(cp);
+    }
+
+    if (subnames)
+        vfree(subnames);
     if (sc->names)
         vfree(sc->names);
+    if (sc->dirs)
+        vfree(sc->dirs);
     kfree(sc);
 
     return 0;
@@ -3234,6 +3339,9 @@ static bool nm_ino_taken(const struct nm_ino_pop *pop, u64 c)
             return true;
     for (i = 0; i < pop->nmine; i++)
         if (pop->mine[i] == c)
+            return true;
+    for (i = 0; i < pop->nsub; i++)
+        if (pop->sub[i] == c)
             return true;
     return false;
 }
