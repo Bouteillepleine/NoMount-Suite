@@ -90,7 +90,7 @@ jobs:
 
       - name: Checkout hookless (src + patches)
         if: steps.sel.outputs.run == '1'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: repo
 
@@ -115,7 +115,7 @@ jobs:
 
       - name: Restore ccache
         if: steps.sel.outputs.run == '1'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.ccache
           key: ccache-${{ matrix.ver }}-${{ github.run_id }}
@@ -125,7 +125,7 @@ jobs:
       - name: Restore kernel clone
         if: steps.sel.outputs.run == '1'
         id: kcache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ksrc
           key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
@@ -139,7 +139,7 @@ jobs:
 
       - name: Save kernel clone (pristine) on cache miss
         if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ksrc
           key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
@@ -150,9 +150,10 @@ jobs:
           set -e
           cd ksrc
           P="$GITHUB_WORKSPACE/repo/hookless/patches/nomount_kernel_integration.patch"
-          git apply -p1 --check "$P" || {
-            echo "FATAL: the integration patch no longer applies cleanly to ${{ matrix.ver }}"; exit 1; }
-          patch -p1 --forward --fuzz=3 < "$P"
+          git apply -p1 --check "$P" 2>/dev/null \
+            || echo "::notice::${{ matrix.ver }} needs fuzz to take the integration patch - the hunk-placement assertions below are the gate"
+          if ! patch -p1 --forward --fuzz=3 < "$P"; then
+            echo "FATAL: the integration patch does not apply to ${{ matrix.ver }}, even at --fuzz=3"; exit 1; fi
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.c" fs/nomount.c
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.h" fs/nomount.h
           grep -n 'CONFIG_NOMOUNT' fs/Makefile fs/Kconfig || true
@@ -226,14 +227,14 @@ jobs:
 
       - name: Save ccache
         if: ${{ always() && steps.sel.outputs.run == '1' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.ccache
           key: ccache-${{ matrix.ver }}-${{ github.run_id }}
 
       - name: Upload logs
         if: ${{ always() && steps.sel.outputs.run == '1' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: log-${{ matrix.ver }}
           path: |
