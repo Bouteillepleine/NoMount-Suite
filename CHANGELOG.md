@@ -13,6 +13,15 @@
 
 ## v1.3.181 - engine v33 (the engine fixes below need a kernel rebuild)
 
+- Detections are shown as information, not alarm. A finding never repaints the page: the status stays green with findings open, and nothing in the diagnostics uses amber, brown or red any more. Red is kept only on the buttons that destroy something, where it describes what the button does. The verdicts themselves are unchanged - the report, the exit code and the sort order still separate them - only the way they are presented.
+- Recovery flashing works again. The generated recovery installer had lost its `#!/sbin/sh` line to a comment strip, so recovery ran a file with no interpreter and the flash failed with no message on screen. The manager install path invokes it through `sh`, which is why nothing looked wrong. No published release ever carried this; it is now checked at packaging time.
+- Engine: an inode invented for an injected file no longer lands on one a file inside a subdirectory already holds. The placer knew only about the files sitting beside it, so two names on one filesystem could report the same inode while each claimed a single link - something nothing real does, and one pass over the partition finds it.
+- Engine: the directory link-count fix now covers every erofs directory rather than only small ones, and a hidden subdirectory no longer leaves the count too high.
+- Engine: one generation bump per change to the rule table, instead of two on the add path.
+- `nm` refuses a reply shorter than a netlink header rather than reading its length from whatever was in the buffer.
+- The status pane counted a pending-reboot check twice, so it could report more open findings than the report below it listed.
+- Build: every pinned CI action says which version its commit is again, and the engine compile matrix lets patch fuzz do its job instead of gating it away.
+
 - The existence cloak covered fewer processes than the hiding did. The engine normalises a uid before deciding (`uid % 100000`, plus the sdksandbox remap), so one hide-list entry covers an app in every work profile, clone and sandbox - but the cloak compared the raw uid, so those same processes were hidden and not absent: `stat` said ENOENT while `truncate` still answered EROFS. The cloak now normalises the same way. Until you flash a kernel carrying it, userspace expands the table instead, and says so if it runs out of room.
 - Engine: a `getdents64` whose buffer could not hold even the first entry was read as the end of the directory, which moved the offset into the synthesized range and dropped the whole real listing on the next call.
 - Engine: every change to the rule table now bumps the generation a `nm list` dump checks, including the path that puts a replaced rule back after a failure. A dump could previously finish claiming consistency while having skipped a rule.
