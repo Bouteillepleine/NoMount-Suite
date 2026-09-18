@@ -17,7 +17,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.33.3"
+#define NM_MODULE_VERSION "1.33.4"
 
 #define NOMOUNT_VERSION    33
 #define NOMOUNT_HASH_BITS  12

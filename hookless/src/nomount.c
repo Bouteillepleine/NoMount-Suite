@@ -3457,6 +3457,8 @@ static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
         return nm_place_ino(pop, spread);
 
     c = di->dmax;
+    if (di->amax > c)
+        c = di->amax;
     if (pop->hw > c)
         c = pop->hw;
     if (di->hw > c)
