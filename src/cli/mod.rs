@@ -180,13 +180,14 @@ and its sandbox.
         /// Show what the preset would add, and change nothing
         #[arg(long)]
         dry_run: bool,
-        /// Add the preset's glob patterns as well as its exact package names
+        /// Add ONLY the preset's glob patterns. Without this both the globs and the
+        /// exact package names are added.
         #[arg(long)]
         globs: bool,
     },
     /// Which isolated-process pools are hidden
     Isolated {
-        /// both | appzygote | platform | none; omit to print the current setting
+        /// both | appzygote | platform | off; omit to print the current setting
         mode: Option<String>,
     },
 }

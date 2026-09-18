@@ -690,6 +690,28 @@ mod tests {
     }
 
     #[test]
+    fn every_mode_the_help_offers_is_a_mode_the_parser_takes() {
+        let help = include_str!("mod.rs");
+        let line = help
+            .lines()
+            .find(|l| l.contains("omit to print the current setting"))
+            .expect("the Isolated help line moved");
+        let offered: Vec<&str> = line
+            .trim_start_matches("        /// ")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .split('|')
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .collect();
+        assert!(offered.len() >= 4, "the help line no longer lists the modes: {line}");
+        for w in offered {
+            assert!(parse_isolated_mode(w).is_some(), "--help offers '{w}', the parser refuses it");
+        }
+    }
+
+    #[test]
     fn a_uid_list_row_is_per_appid_and_the_exact_entry_wins() {
         let rows = [(Some(10438), true), (Some(10438), false), (Some(10471), false)];
         let w = list_winners(&rows);
