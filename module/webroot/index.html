@@ -886,9 +886,8 @@
       <button class="act" onclick="uidScan(this)">Scan for candidates</button>
       <button class="act" id="usShow" style="display:none" onclick="usToggle(this)">Show list</button>
       <button class="act" onclick="addGlobs(this)">Add detector globs</button>
-      <span class="presethint">Scan finds apps <b>installed here</b> worth hiding from and says why -
-        nothing is hidden until you pick it. The globs are the part a scan cannot give you: they keep
-        matching detectors installed later, or repackaged under a new name.</span>
+      <span class="presethint">Scan finds what is installed now; globs keep matching what
+        installs later.</span>
     </div>
     <div id="usList" class="uslist" style="display:none"></div>
 
@@ -897,6 +896,8 @@
     <details class="ndet">
       <summary>What hiding covers</summary>
       <p class="note">Shows the listed app the stock filesystem - no injected files, no hidden paths. One entry covers the app in every user, work profile and clone. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root and <code>su</code> are unaffected, and so is anything a system service reads on the app's behalf.</p>
+      <p class="note"><b>Scan</b> lists apps installed here worth hiding from and says why -
+        nothing is hidden until you pick it. It cannot cover what is not installed yet.</p>
       <p class="note">A <b>glob</b> covers a moving target: <code>*.duckdetector</code>,
         <code>me.garfieldhan.*</code> or <code>*chunqiu*</code> re-match on every apply, so a detector
         that reinstalls under a new package name stays hidden. Anchors go at the ends only, and a glob
@@ -2450,8 +2451,8 @@
     const rest = [];
     if (ABSORBED_N > 0) rest.push(ABSORBED_N + " absorbed");
     rest.push(unserved < 0 ? "coverage unchecked" : unserved + " unserved");
-    $("mMod").innerHTML = MOD_SERVED + ' <span class="unit">served</span>' +
-      "<small>" + rest.join(" · ") + "</small>";
+    $("mMod").innerHTML = MOD_SERVED +
+      "<small>served · " + rest.join(" · ") + "</small>";
   }
 
   async function refreshAbsorb() {
