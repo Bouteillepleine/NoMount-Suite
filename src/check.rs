@@ -232,11 +232,19 @@ impl Report {
     pub fn verdict(&self) -> String {
         let t = self.tally();
         let n = |n: usize| if n == 1 { "finding" } else { "findings" };
-        let open = t.fail + t.warn;
-        if t.fail > 0 {
-            format!("{} {} worth reading", open, n(open))
-        } else if t.reboot > 0 {
-            format!("{} check(s) need a reboot to finish", t.reboot)
+        let open = t.open_failures() + t.warn;
+        let unmeasured = if t.complete() {
+            String::new()
+        } else {
+            format!(", and {} check(s) had nothing to look at", t.unmeasured)
+        };
+        if t.fail > 0 || t.reboot > 0 {
+            let reboot = if t.reboot > 0 {
+                format!(" ({} need a reboot to finish)", t.reboot)
+            } else {
+                String::new()
+            };
+            format!("{} {} worth reading{reboot}{unmeasured}", open, n(open))
         } else if !t.complete() {
             format!(
                 "not fully measured ({} check(s) had nothing to look at{})",
@@ -475,9 +483,20 @@ mod tests {
         assert_eq!(v, "1 finding worth reading");
         assert!(!v.contains("plan"), "a device tell is not a plan warning");
 
-        assert!(r(vec![c("a", Verdict::Fail), c("b", Verdict::Unmeasured)])
-            .verdict()
-            .contains("finding"));
+        let v = r(vec![c("a", Verdict::Fail), c("b", Verdict::Unmeasured)]).verdict();
+        assert!(v.contains("finding"), "{v}");
+        assert!(
+            v.contains("nothing to look at"),
+            "a fail must not hide the unmeasured checks from the line service.sh logs: {v}"
+        );
+
+        let v = r(vec![c("a", Verdict::Reboot), c("b", Verdict::Warn)]).verdict();
+        assert!(
+            v.starts_with("2 findings worth reading"),
+            "the headline must count what the exit code counts (fail + reboot + warn): {v}"
+        );
+        assert!(v.contains("need a reboot to finish"), "{v}");
+
         assert_eq!(r(vec![c("a", Verdict::Pass)]).verdict(), "clean");
     }
 
