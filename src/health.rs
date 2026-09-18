@@ -198,14 +198,31 @@ fn read_cmd(prog: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-fn app_size(uid: u32, path: &str) -> String {
-    let quoted = format!("'{}'", path.replace('\'', "'\\''"));
-    let out = Command::new("su")
-        .args([&uid.to_string(), "-c", &format!("stat -c %s {quoted} 2>/dev/null")])
-        .output();
-    out.ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
+fn shq(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+fn app_sizes(uid: u32, paths: &[&str]) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if paths.is_empty() {
+        return out;
+    }
+    let args = paths.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ");
+    let Ok(o) = Command::new("su")
+        .args([&uid.to_string(), "-c", &format!("stat -c '%n %s' {args} 2>/dev/null")])
+        .output()
+    else {
+        return out;
+    };
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let Some(cut) = line.rfind(' ') else { continue };
+        let (name, size) = (&line[..cut], line[cut + 1..].trim());
+        if size.is_empty() || !size.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        out.insert(name.to_string(), size.to_string());
+    }
+    out
 }
 
 fn count_mounts_split() -> Option<(usize, usize)> {
@@ -243,7 +260,7 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
     const BUDGET: usize = 18;
     let mut buckets: std::collections::BTreeMap<(String, String), Vec<&Path>> =
         std::collections::BTreeMap::new();
-    for rule in rules.iter() {
+    for rule in rules.iter().filter(|r| r.uid == 0) {
         let Some(src) = rule.source.as_deref() else { continue };
         let partition = rule
             .target
@@ -276,7 +293,12 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
     if sample.is_empty() {
         return "unchecked".to_string();
     }
-    if app_size(PROBE_UID, "/system/build.prop").is_empty() {
+
+    const CANARY: &str = "/system/build.prop";
+    let mut batch: Vec<&str> = vec![CANARY];
+    batch.extend(sample.iter().filter_map(|t| t.to_str()));
+    let seen = app_sizes(PROBE_UID, &batch);
+    if !seen.contains_key(CANARY) {
         return "unchecked:probe-unavailable".to_string();
     }
 
@@ -286,10 +308,10 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
         let Some(root_sz) = root else { continue };
         let Some(target) = target.to_str() else { continue };
         checked += 1;
-        let app_sz = app_size(PROBE_UID, target);
+        let app_sz = seen.get(target).map(String::as_str).unwrap_or("");
         if app_sz != root_sz {
             return format!("mismatch:{target}(root={root_sz} app={})",
-                if app_sz.is_empty() { "ENOENT" } else { &app_sz });
+                if app_sz.is_empty() { "ENOENT" } else { app_sz });
         }
     }
     if checked == 0 {
@@ -324,7 +346,7 @@ fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     // on a device where every comparable rule had in fact been checked.
     let comparable = rules.iter().filter(|r| r.uid == 0 && r.source.is_some()).count();
     let mut checked = 0;
-    for rule in rules.iter().filter(|r| r.uid == 0).take(CAP) {
+    for rule in rules.iter().filter(|r| r.uid == 0 && r.source.is_some()).take(CAP) {
         let Some(source) = rule.source.as_deref() else { continue };
         let target = rule.target.as_path();
         let Ok(sm) = fs::metadata(source) else { continue };
