@@ -616,7 +616,7 @@
     position: relative; isolation: isolate;
     background: transparent; color: var(--muted);
     position: relative; z-index: 1;
-    min-width: 60px; height: 58px; padding: 0 12px;
+    min-width: 46px; height: 58px; padding: 0 8px;
     border-radius: 19px;
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
     font: 600 11px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -831,36 +831,9 @@
     <div class="list" id="posture"></div>
     <p class="note" id="stealthNote"></p>
   </div>
-  <div class="card">
-    <div class="card-h">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
-      <h2>Device</h2>
-    </div>
-    <div class="metrics">
-      <div class="metric"><div class="k">Model</div><div class="v" id="dModel" style="font-size:15px"> - </div></div>
-      <div class="metric"><div class="k">Android</div><div class="v" id="dAndroid" style="font-size:15px"> - </div></div>
-      <div class="metric"><div class="k">API level</div><div class="v" id="dApi" style="font-size:15px"> - </div></div>
-      <div class="metric"><div class="k">Kernel</div><div class="v" id="dKernel" style="font-size:11px;word-break:break-all;line-height:1.35"> - </div></div>
-    </div>
-  </div>
+  
 
-  <div class="card">
-    <div class="card-h">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
-      <h2>Bootloop guard</h2><span class="chip" id="gchip"> - </span>
-    </div>
-    <div class="statusline">
-      <span class="dot" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Checking...</span>
-      <span class="sub">trips at boot #3</span>
-    </div>
-    <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
-  </div>
-
-  <!-- The healthline above hides itself when there is nothing wrong, so this is
-       the way back to the report, the export and the incident record. -->
-  <button class="backline" onclick="openDetail()">
-    <span>Diagnostics</span><span class="bk-go" style="margin-left:auto">›</span>
-  </button>
+  
 
   </section>
 
@@ -951,23 +924,18 @@
       <input id="rulefilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
              placeholder="Filter by path or module..." oninput="filterRules()" />
       <button class="act" id="rulegroupBtn" style="flex:1 1 0" onclick="toggleRuleGroup(this)">Group by module</button>
+      <button class="act" id="rulefileBtn" style="flex:1 1 0" onclick="toggleFileView(this)">By file</button>
       <button class="act" style="flex:1 1 0" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
     </div>
     <pre class="rules" id="ruleslist" style="display:none">...</pre>
     <p class="note" id="rulecount" style="display:none"></p>
-  </div>
-
-  <div class="card">
-    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleFiles(this)">
-      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
-      <h2>Injected files</h2><span class="chip" id="vfscount">0</span><span class="chev">›</span>
-    </div>
     <div class="uidbar" id="vfsfilterbar" style="display:none;margin-bottom:11px">
       <input id="vfsfilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
              placeholder="Filter files..." oninput="renderFilesFull()" />
     </div>
     <div class="list" id="vfsdirs" style="display:none"></div>
     <div class="list" id="vfsfull" style="display:none"></div>
+    <span id="vfscount" hidden>0</span>
   </div>
 
   <div class="card collapsed" id="cardAbsorb">
@@ -1000,10 +968,6 @@
 
   <section class="tab" id="tab-diag">
 
-  <button class="backline" onclick="showTab('status',document.getElementById('nb-status'))">
-    <span class="bk-go">‹</span><span>Back to Status</span>
-  </button>
-
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
@@ -1031,6 +995,31 @@
         <pre class="rules" id="auditout">...</pre>
       </details>
     </details>
+  </div>
+
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
+      <h2>Device</h2>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="k">Model</div><div class="v" id="dModel" style="font-size:15px"> - </div></div>
+      <div class="metric"><div class="k">Android</div><div class="v" id="dAndroid" style="font-size:15px"> - </div></div>
+      <div class="metric"><div class="k">API level</div><div class="v" id="dApi" style="font-size:15px"> - </div></div>
+      <div class="metric"><div class="k">Kernel</div><div class="v" id="dKernel" style="font-size:11px;word-break:break-all;line-height:1.35"> - </div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
+      <h2>Bootloop guard</h2><span class="chip" id="gchip"> - </span>
+    </div>
+    <div class="statusline">
+      <span class="dot" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Checking...</span>
+      <span class="sub">trips at boot #3</span>
+    </div>
+    <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
   </div>
 
   <div class="card collapsed" id="incidentcard" style="display:none">
@@ -1071,6 +1060,10 @@
     <button class="navb" id="nb-rules" role="tab" aria-selected="false" onclick="showTab('rules',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <span>Rules</span>
+    </button>
+    <button class="navb" id="nb-diag" role="tab" aria-selected="false" onclick="showTab('diag',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v4l-5 9a4 4 0 0 0 3.5 5h9A4 4 0 0 0 20 16l-5-9V3"/><path d="M8 3h8"/></svg>
+      <span>Checks</span>
     </button>
   </div>
 </nav>
@@ -1636,7 +1629,7 @@
   }
 
   function openDetail() {
-    showTab("diag", null);
+    showTab("diag", document.getElementById("nb-diag"));
     if (!CHECK) runCheck(null);
   }
 
@@ -2627,13 +2620,18 @@
     setExp(h);
     $("modules").style.display = on ? "" : "none";
   }
-  function toggleFiles(h) {
-    const on = h.classList.toggle("open");
-    setExp(h);
-    $("vfsdirs").style.display = on ? "" : "none";
-    $("vfsfull").style.display = on ? "" : "none";
-    $("vfsfilterbar").style.display = on ? "" : "none";
-    if (on) renderFilesFull();
+  let _fileView = false;
+  function toggleFileView(btn) {
+    _fileView = !_fileView;
+    if (btn) btn.textContent = _fileView ? "By module" : "By file";
+    $("vfsdirs").style.display = _fileView ? "" : "none";
+    $("vfsfull").style.display = _fileView ? "" : "none";
+    $("vfsfilterbar").style.display = _fileView ? "" : "none";
+    $("ruleslist").style.display = _fileView ? "none" : "";
+    $("rulefilterbar").querySelector("#rulefilter").style.display = _fileView ? "none" : "";
+    const gb = $("rulegroupBtn");
+    if (gb) gb.style.display = _fileView ? "none" : "";
+    if (_fileView) renderFilesFull();
   }
 
   let rulesShown = false;
