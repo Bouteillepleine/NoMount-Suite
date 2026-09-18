@@ -1768,7 +1768,7 @@
                       " had nothing to look at</span>";
     } else {
       dot.className = "hl-dot ok";
-      txt.innerHTML = "<b>Nothing detectable</b>" + age;
+      txt.innerHTML = "<b>Nothing found</b>" + age;
     }
     el.style.display = "";
   }
@@ -1940,7 +1940,7 @@
            esc(verdictLabel(c)) + "</span>" +
            '<span class="tag off">' + esc(c.section || "") + "</span></div>");
     b.push('<details><summary>What was measured</summary><div class="ev">' +
-           esc(c.evidence || "(nothing recorded)") +
+           esc(redactUids(c.evidence || "(nothing recorded)")) +
            (c.oracle ? "\n\nhow an app would use it: " + esc(c.oracle) : "") +
            "</div></details>");
     b.push("</div>");

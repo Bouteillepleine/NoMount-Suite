@@ -65,6 +65,7 @@ if [ -d "$_bh_dir" ] && [ -d /data/adb/modules/bindhosts ] &&
    [ ! -f /data/adb/modules/bindhosts/remove ] && [ -L /data/adb/metamodule ]; then
     if [ ! -e "$_bh_ovr" ] || grep -q 'NoMount Suite' "$_bh_ovr" 2>/dev/null; then
         cat > "$_bh_ovr.nm_new" <<'BHEOF'
+# Written by the NoMount Suite. Safe to delete.
 _nm=$(readlink -f /data/adb/metamodule 2>/dev/null)
 if [ -n "$_nm" ] && [ -d "$_nm" ] && [ -f "$_nm/nomount.sha256sums" ] &&
    [ ! -f "$_nm/disable" ] && [ ! -f "$_nm/remove" ] &&
