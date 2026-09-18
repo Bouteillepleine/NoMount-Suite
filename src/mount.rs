@@ -1527,6 +1527,28 @@ mod tests {
     }
 
     #[test]
+    fn the_header_states_both_versions_and_can_say_an_update_is_staged() {
+        for id in ["\"ver\"", "\"hdreng\"", "\"vstage\""] {
+            assert!(
+                PAGE.contains(&format!("id={id}")),
+                "the header lost {id}; the version line is the only place the Suite and the \
+                 engine version are visible without scrolling to the footer"
+            );
+            assert!(
+                PAGE.contains(&format!("$({id})")),
+                "{id} is in the markup but nothing writes to it"
+            );
+        }
+        // The line is written to fit a phone at 363 dp; it ellipsises if it grows.
+        let staged = PAGE.split("id=\"vstage\"").nth(1).unwrap_or("");
+        let text = staged.split('>').nth(1).unwrap_or("").split('<').next().unwrap_or("").trim();
+        assert!(
+            !text.is_empty() && text.chars().count() <= 12,
+            "the staged marker got longer and will be cut off on a phone: {text:?}"
+        );
+    }
+
+    #[test]
     fn the_hero_and_the_report_count_the_same_findings() {
         let body = PAGE.split("function checkAttention").nth(1).unwrap_or("");
         let head = body.split("}").next().unwrap_or("");

@@ -68,17 +68,20 @@
     box-shadow: 0 8px 22px rgba(124,156,255,0.34);
   }
   .logo svg { width: 25px; height: 25px; }
+  .brand { min-width: 0; flex: 1 1 auto; }
   .brand h1 {
-    margin: 0; font-size: 22px; font-weight: 760; letter-spacing: -0.4px; line-height: 1.1;
+    margin: 0; font-size: 21px; font-weight: 760; letter-spacing: -0.4px; line-height: 1.15;
+    white-space: nowrap;
     background: linear-gradient(90deg, #fff, #bcc8ff);
     -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
   }
-  .brand p { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); letter-spacing: 0.2px; }
-  .hbtns { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-  .ver {
-    font-size: 12px; color: var(--muted); background: var(--card); border: 1px solid var(--brd);
-    padding: 6px 11px; border-radius: 999px; font-variant-numeric: tabular-nums;
+  .brand p {
+    margin: 2px 0 0; font-size: 11.5px; color: var(--muted); letter-spacing: 0.2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  .brand p .stage { color: var(--info); }
+  .hbtns { margin-left: auto; display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
+  .ver { font-variant-numeric: tabular-nums; }
   .iconbtn {
     width: 38px; height: 38px; border-radius: 12px; flex: none; display: grid; place-items: center;
     background: var(--card); border: 1px solid var(--brd); color: var(--txt); cursor: pointer;
@@ -757,10 +760,10 @@
     </div>
     <div class="brand">
       <h1>NoMount Suite</h1>
-      <p>Your modules, served with no mounts to find</p>
+      <p><span class="ver" id="ver">v...</span> · <span id="hdreng">engine ...</span><span
+        class="stage" id="vstage" hidden> · staged</span></p>
     </div>
     <div class="hbtns">
-      <span class="ver" id="ver">v...</span>
       <button class="iconbtn" id="themeBtn" onclick="toggleTheme()" title="Light / dark theme" aria-label="Toggle theme">
         <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2.4M12 19.2v2.4M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2.4 12h2.4M19.2 12h2.4M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7"/></svg>
         <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.4 8.4 0 1 0 10.5 10.5z"/></svg>
@@ -3111,7 +3114,9 @@
       "sed -n 's/^version=//p' /data/adb/modules_update/meta-nomount/module.prop 2>/dev/null"
     )).stdout.trim();
     const staged = !!pv;
-    $("ver").textContent = SUITE_VERSION + (staged ? " ·" : "");
+    $("ver").textContent = SUITE_VERSION;
+    $("hdreng").textContent = eng;
+    $("vstage").hidden = !staged;
     $("ver").title = staged
       ? pv + " is installed but not live yet - its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
       : "Suite " + SUITE_VERSION + " - " + eng + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
