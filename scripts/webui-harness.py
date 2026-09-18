@@ -74,7 +74,8 @@ COMMANDS = {
     "whiteoutlist": "NM_BIN=%s/nm %s/nomount whiteout list" % (BIN, BIN),
     "isolated": "NM_BIN=%s/nm %s/nomount uid isolated" % (BIN, BIN),
     "bootcount": "if [ -e /data/adb/nomount/bootcount ]; then cat /data/adb/nomount/bootcount; else echo 0; fi",
-    "modprop": "sed -n 's/^version=//p' /data/adb/modules/meta-nomount/module.prop",
+    "modprop": "sed -n 's/^version=//p' /data/adb/modules_update/meta-nomount/module.prop "
+               "2>/dev/null",
 }
 
 STUB = """
@@ -98,7 +99,7 @@ window.ksu = {
     else if (has('uid isolated')) key = 'isolated';
     else if (has('whiteout list')) key = 'whiteoutlist';
     else if (has('nomount/bootcount')) key = 'bootcount';
-    else if (has('meta-nomount/module.prop')) key = 'modprop';
+    else if (has('modules_update/meta-nomount/module.prop')) key = 'modprop';
     else if (has('pm list packages')) key = 'pkgs';
     else if (has('absorbed.list')) key = 'absorbedlist';
     else if (has('check --json')) key = 'check';
@@ -141,6 +142,13 @@ def capture():
         json.dump(fx, f)
     print("wrote %s -- contains package names and uids, do NOT commit" % FIXTURES)
 
+def suite_version():
+    with open(os.path.join(ROOT, "Cargo.toml"), encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("version"):
+                return line.split("=", 1)[1].strip().strip('"')
+    return "dev"
+
 def build(no_driver=False):
     with open(FIXTURES, encoding="utf-8") as f:
         fx = json.load(f)
@@ -149,6 +157,11 @@ def build(no_driver=False):
             fx[k] = {"out": "", "rc": 1}
     with open(os.path.join(ROOT, "module", "webroot", "index.html"), encoding="utf-8") as f:
         page = f.read()
+    page = page.replace(
+        'const SUITE_VERSION = "dev";',
+        'const SUITE_VERSION = "v%s";' % suite_version(),
+        1,
+    )
     stub = STUB.replace("__FIXTURES__", json.dumps(fx))
     dest = os.path.join(OUT, "webui-nodriver.html" if no_driver else "webui-harness.html")
     with open(dest, "w", encoding="utf-8", newline="\n") as f:
