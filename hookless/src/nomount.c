@@ -62,6 +62,15 @@ static int nm_read_secctx(struct inode *in, char *dst, u16 *dlen)
 #define NM_HIDE_ISOLATED    0x2
 static unsigned int nm_hide_isolated __read_mostly = NM_HIDE_APPZYGOTE | NM_HIDE_ISOLATED;
 
+static __always_inline unsigned int nm_appid_of(uid_t uid)
+{
+    unsigned int appid = uid % NM_PER_USER_RANGE;
+
+    if (appid >= NM_SDKSANDBOX_START && appid <= NM_SDKSANDBOX_END)
+        appid -= NM_SDKSANDBOX_OFF;
+    return appid;
+}
+
 static __always_inline bool nomount_is_uid_blocked(uid_t uid)
 {
     unsigned int appid, pools;
@@ -75,8 +84,7 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
     if ((pools & NM_HIDE_ISOLATED) &&
         appid >= NM_ISOLATED_START && appid <= NM_ISOLATED_END)
         return true;
-    if (appid >= NM_SDKSANDBOX_START && appid <= NM_SDKSANDBOX_END)
-        appid -= NM_SDKSANDBOX_OFF;
+    appid = nm_appid_of(uid);
     rcu_read_lock();
     is_blocked = (idr_find(&nomount_uid_idr, appid) != NULL);
     rcu_read_unlock();
@@ -200,6 +208,8 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_blksize = rule->v_blksize;
                 rule_info->v_cratio = rule->v_cratio;
                 rule_info->v_result_mask = rule->v_result_mask;
+                rule_info->v_dio_mem = rule->v_dio_mem;
+                rule_info->v_dio_off = rule->v_dio_off;
                 rule_info->v_cap = rule->v_cap;
                 rule_info->v_uid = rule->v_uid;
                 rule_info->v_gid = rule->v_gid;
@@ -295,6 +305,7 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
                                                  offset, fino, dt);
                     proxy->ctx.pos = proxy->orig_ctx->pos;
                     if (ret == NM_ACTOR_CONTINUE) proxy->emitted++;
+                    else proxy->refused = true;
                     return ret;
                 }
                 rcu_read_unlock();
@@ -434,6 +445,8 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     info->v_blksize = rule_info->v_blksize;
     info->v_cratio = rule_info->v_cratio;
     info->v_result_mask = rule_info->v_result_mask;
+    info->v_dio_mem = rule_info->v_dio_mem;
+    info->v_dio_off = rule_info->v_dio_off;
     info->v_cap = rule_info->v_cap;
 
     inode->i_private = info;
@@ -583,6 +596,7 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
     const struct file_operations *orig_fop;
     struct nomount_proxy_ctx proxy_ctx = {
         .ctx.actor = nomount_actor_proxy,
+        .refused = false,
     };
     int res = 0;
 
@@ -610,7 +624,7 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
 
     res = nm_call_iterate(file, &proxy_ctx.ctx, orig_fop);
     ctx->pos = proxy_ctx.ctx.pos;
-    if (res < 0 || proxy_ctx.emitted > 0) goto out;
+    if (res < 0 || proxy_ctx.emitted > 0 || proxy_ctx.refused) goto out;
 
     nm_publish_real_eof(pdir, ctx->pos);
     ctx->pos = nm_pack_pos(pdir, 0);
@@ -1494,12 +1508,18 @@ static int nm_dsnap_iterate(struct file *file, struct dir_context *ctx,
     return 0;
 }
 
+#if defined(STATX_DIOALIGN)
+#define NM_STATX_WANT (STATX_BASIC_STATS | STATX_DIOALIGN)
+#else
+#define NM_STATX_WANT (STATX_BASIC_STATS)
+#endif
+
 static int nm_path_stat(const struct path *p, struct kstat *st)
 {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
     return vfs_getattr_nosec((struct path *)p, st);
 #else
-    return vfs_getattr_nosec(p, st, STATX_BASIC_STATS, AT_STATX_SYNC_AS_STAT);
+    return vfs_getattr_nosec(p, st, NM_STATX_WANT, AT_STATX_SYNC_AS_STAT);
 #endif
 }
 
@@ -1661,7 +1681,10 @@ static void nm_mirror_stat(const struct nm_inode_info *info, struct inode *v_ino
     }
 #endif
 #ifdef STATX_DIOALIGN
-    if (!(stat->result_mask & STATX_DIOALIGN)) {
+    if (stat->result_mask & STATX_DIOALIGN) {
+        stat->dio_mem_align = info->v_dio_mem;
+        stat->dio_offset_align = info->v_dio_off;
+    } else {
         stat->dio_mem_align = 0;
         stat->dio_offset_align = 0;
     }
@@ -2000,6 +2023,8 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     ri.v_attr_mask  = info->v_attr_mask;
     ri.v_blksize    = info->v_blksize;
     ri.v_result_mask = info->v_result_mask;
+    ri.v_dio_mem = info->v_dio_mem;
+    ri.v_dio_off = info->v_dio_off;
     ri.v_cap   = info->v_cap;
     ri.v_uid   = info->v_uid;
     ri.v_gid   = info->v_gid;
@@ -3573,6 +3598,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     u32 anc_blksize = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
     u32 anc_result_mask = 0;
+    u32 anc_dio_mem = 0, anc_dio_off = 0;
     u64 anc_attributes = 0, anc_attr_mask = 0;
 #endif
     char anc_ctx[NM_CTX_MAX];
@@ -3659,6 +3685,10 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     anc_blksize = akst.blksize;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
                     anc_result_mask = akst.result_mask;
+#ifdef STATX_DIOALIGN
+                    anc_dio_mem = akst.dio_mem_align;
+                    anc_dio_off = akst.dio_offset_align;
+#endif
                     anc_attr_mask   = akst.attributes_mask;
                     anc_attributes  = akst.attributes & ~(u64)(
 #ifdef STATX_ATTR_MOUNT_ROOT
@@ -3806,6 +3836,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 irule->v_blksize = anc_blksize;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
                 irule->v_result_mask = anc_result_mask;
+                irule->v_dio_mem = anc_dio_mem;
+                irule->v_dio_off = anc_dio_off;
                 irule->v_attributes  = anc_attributes;
                 irule->v_attr_mask   = anc_attr_mask;
 #endif
@@ -4185,6 +4217,10 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_cratio = nm_size_ratio(kst.size, kst.blocks);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             rule->v_result_mask = kst.result_mask;
+#ifdef STATX_DIOALIGN
+            rule->v_dio_mem = kst.dio_mem_align;
+            rule->v_dio_off = kst.dio_offset_align;
+#endif
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             rule->v_attributes = kst.attributes;
@@ -4225,6 +4261,10 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_cratio     = nm_size_ratio(sib.size, sib.blocks);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             rule->v_result_mask = sib.result_mask;
+#ifdef STATX_DIOALIGN
+            rule->v_dio_mem = sib.dio_mem_align;
+            rule->v_dio_off = sib.dio_offset_align;
+#endif
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
             rule->v_attributes = sib.attributes;
@@ -4698,7 +4738,7 @@ static int nomount_nl_add_uid(struct nlattr **attrs)
     if (!attrs[NOMOUNT_ATTR_UID])
         return -EINVAL;
 
-    uid = nla_get_u32(attrs[NOMOUNT_ATTR_UID]) % NM_PER_USER_RANGE;
+    uid = nm_appid_of(nla_get_u32(attrs[NOMOUNT_ATTR_UID]));
 
     mutex_lock(&nomount_write_mutex);
     idr_preload(GFP_KERNEL);
@@ -4730,7 +4770,7 @@ static int nomount_nl_del_uid(struct nlattr **attrs)
     if (!attrs[NOMOUNT_ATTR_UID])
         return -EINVAL;
 
-    uid = nla_get_u32(attrs[NOMOUNT_ATTR_UID]) % NM_PER_USER_RANGE;
+    uid = nm_appid_of(nla_get_u32(attrs[NOMOUNT_ATTR_UID]));
 
     mutex_lock(&nomount_write_mutex);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)

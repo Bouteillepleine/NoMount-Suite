@@ -17,7 +17,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.33.2"
+#define NM_MODULE_VERSION "1.33.3"
 
 #define NOMOUNT_VERSION    33
 #define NOMOUNT_HASH_BITS  12
@@ -94,6 +94,7 @@ struct nm_inode_info {
     u32 v_blksize;
     u16 v_cratio;
     u32 v_result_mask;
+    u32 v_dio_mem, v_dio_off;
     u8  v_cap;
     kuid_t v_uid;
     kgid_t v_gid;
@@ -157,6 +158,7 @@ struct nomount_rule {
     u32 v_blksize;
     u16 v_cratio;
     u32 v_result_mask;
+    u32 v_dio_mem, v_dio_off;
     u8  v_cap;
     kuid_t v_uid;
     kgid_t v_gid;
@@ -195,6 +197,7 @@ struct nm_rule_info {
     u32 v_blksize;
     u16 v_cratio;
     u32 v_result_mask;
+    u32 v_dio_mem, v_dio_off;
     u8  v_cap;
     kuid_t v_uid;
     kgid_t v_gid;
