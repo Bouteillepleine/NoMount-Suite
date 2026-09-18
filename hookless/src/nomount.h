@@ -28,6 +28,7 @@
 #define NM_FLAG_OVL_INO     (1 << 4)
 #define NM_FLAG_SHADOWS_STOCK (1 << 5)
 #define NM_FLAG_PUBLIC      (1 << 6)
+#define NM_FLAG_STOCK_ONLY  (1 << 7)
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
 

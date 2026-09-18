@@ -1950,7 +1950,11 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
             ri.r_path.dentry = child;
             path_get(&ri.r_path);
             r_child = d_backing_inode(child);
-            ri.flags = info->flags & (NM_FLAG_HAVE_TIMES | NM_FLAG_OVL_INO | NM_FLAG_PUBLIC);
+            ri.flags = (info->flags & (NM_FLAG_OVL_INO | NM_FLAG_PUBLIC)) |
+                       NM_FLAG_SHADOWS_STOCK | NM_FLAG_STOCK_ONLY;
+            ri.s_path.mnt = stock->mnt;
+            ri.s_path.dentry = child;
+            path_get(&ri.s_path);
             if (r_child && S_ISDIR(r_child->i_mode))
                 ri.flags |= NM_FLAG_IS_DIR;
             new_inode = nomount_create_new_inode(dir->i_sb, &ri);
@@ -2202,6 +2206,15 @@ static inline int nm_reval_fresh(struct dentry *dentry, u32 gen)
     return 1;
 }
 
+static bool nm_stock_only_mismatch(struct dentry *dentry)
+{
+    struct inode *ino = dentry->d_inode;
+    struct nm_inode_info *ii = ino ? ino->i_private : NULL;
+
+    return ii && (ii->flags & NM_FLAG_STOCK_ONLY) &&
+           !nomount_is_uid_blocked(current_uid().val);
+}
+
 static bool nm_is_passthrough_child(struct inode *parent_dir, struct dentry *dentry)
 {
     const struct nm_inode_info *pinfo, *cinfo;
@@ -2245,6 +2258,9 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         if (nm_uid_hidden(rinfo->flags) &&
             (rinfo->flags & NM_FLAG_SHADOWS_STOCK) && !rinfo->s_path.dentry)
             return -ECHILD;
+        if ((rinfo->flags & NM_FLAG_STOCK_ONLY) &&
+            !nomount_is_uid_blocked(current_uid().val))
+            return -ECHILD;
         return 1;
     }
 
@@ -2273,6 +2289,8 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     rcu_read_unlock();
     if (!pdir) {
         if (injected) {
+            if (nm_stock_only_mismatch(dentry))
+                return 0;
             if (nm_is_passthrough_child(parent_dir, dentry))
                 return nm_reval_fresh(dentry, gen);
             return 0;
@@ -2304,9 +2322,13 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
             }
             return 1;
         }
+        if (injected && nm_stock_only_mismatch(dentry))
+            return 0;
         return injected ? nm_reval_fresh(dentry, gen) : nm_reval_stale(dentry);
     }
     nm_dir_node_put(pdir);
+    if (injected && nm_stock_only_mismatch(dentry))
+        return 0;
     if (injected && nm_is_passthrough_child(parent_dir, dentry))
         return nm_reval_fresh(dentry, gen);
     return nm_reval_stale(dentry);
@@ -3445,7 +3467,7 @@ static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
     return nm_ino_take(pop, c);
 }
 
-static unsigned long nm_place_any_ino(dev_t dev)
+static unsigned long nm_place_any_ino(dev_t dev, u64 spread)
 {
     struct nm_dev_ino *di = nm_dev_ino_get(dev, NULL);
     u64 c;
@@ -3455,7 +3477,7 @@ static unsigned long nm_place_any_ino(dev_t dev)
     c = di->amax;
     if (di->hw > c)
         c = di->hw;
-    c++;
+    c += 1 + (spread & 3);
     di->hw = c;
     return (unsigned long)c;
 }
@@ -3476,7 +3498,7 @@ static unsigned long nm_place_entry_ino(struct nm_ino_pop *pop, const char *pare
         return nm_place_ino(alt, spread);
     if (alt && alt->dev)
         dev = alt->dev;
-    return nm_place_any_ino(dev);
+    return nm_place_any_ino(dev, spread);
 }
 
 static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
