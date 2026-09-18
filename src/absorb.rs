@@ -1329,7 +1329,7 @@ struct TmpfsPass {
     declined: u32,
 }
 
-fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
+fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
     let mut st = TmpfsPass::default();
     let Ok(raw) = fs::read(MOUNTINFO) else { return st };
     let (skips, _) = skip_list();
@@ -1406,6 +1406,15 @@ fn absorb_rom_tmpfs(dry_run: bool) -> TmpfsPass {
                 continue;
             }
         }
+        if !early && !runtime_droppable(&target, &[]) {
+            eprintln!(
+                "nomount: deferring the tmpfs over {} to the early pass: it is on a my_* \
+                 partition, and unmounting one of those on a live system has rebooted a device",
+                target.display()
+            );
+            st.leaked += 1;
+            continue;
+        }
         if dry_run {
             println!("would empty {} mountlessly (tmpfs -> whiteout)", target.display());
             st.done += 1;
@@ -1471,7 +1480,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             println!("refreshed {repointed} app APK rule(s), dropped {stale} for an uninstalled app");
         }
     }
-    let tmpfs = absorb_rom_tmpfs(dry_run);
+    let tmpfs = absorb_rom_tmpfs(dry_run, early);
     let surveyed = survey()?;
     let rows = read_mountinfo(MOUNTINFO).unwrap_or_default();
     let aliases = mount_aliases(&rows);
