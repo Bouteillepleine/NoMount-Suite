@@ -23,7 +23,10 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 fn main() -> Result<()> {
-    unsafe { libc::umask(0o077) };
+    unsafe {
+        libc::umask(0o077);
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    };
 
     let cli = Cli::parse();
     let resync_ghost = cli::changes_ghost_inputs(&cli.command);

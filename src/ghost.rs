@@ -33,6 +33,13 @@ impl Summary {
                     .into(),
             );
         }
+        if self.probe_failed {
+            return Some(
+                "\u{26a0} ghost cloak: the absence probe would not run, so no path could be \
+                 cloaked - the path table is EMPTY and the existence oracles are open"
+                    .into(),
+            );
+        }
         let mut parts: Vec<String> = Vec::new();
         if self.rejected > 0 {
             parts.push(format!("{} of {} path(s)", self.rejected, self.ghostable));
