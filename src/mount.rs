@@ -1490,7 +1490,7 @@ mod tests {
     #[test]
     fn the_diagnostics_never_paint_a_warm_colour() {
         let css = PAGE.split("</style>").next().unwrap_or("");
-        let controls = ["button.act.danger", ".blk .bx:hover", ".blk .bx.save:hover"];
+        let controls = ["button.act.danger", ".bx:hover", ".bx.save:hover"];
         for (label, needle) in [
             ("amber", "251,191,36"),
             ("red", "248,113,122"),
@@ -1502,6 +1502,8 @@ mod tests {
             ("amber", "#ffe6a8"),
             ("brown", "#6b4d00"),
             ("red", "210,58,68"),
+            ("red", "#ff6b6b"),
+            ("red", "255,90,90"),
         ] {
             for rule in css.split('}').filter(|l| l.contains(needle)) {
                 assert!(

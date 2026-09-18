@@ -422,6 +422,7 @@
            background: var(--card2); border: 1px solid var(--brd2); cursor: pointer;
            transition: background .12s, border-color .12s; }
   .usrow:hover { border-color: var(--brd); }
+  .usrow:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
   .usrow.on { background: rgba(124,156,255,0.12); border-color: var(--acc); }
   .uscb { flex: 0 0 18px; width: 18px; height: 18px; border-radius: 6px; border: 1px solid var(--brd);
           display: flex; align-items: center; justify-content: center; font-size: 12px;
@@ -474,15 +475,16 @@
   .blk.gone .dot { background: var(--faint); }
   .blk.unknown .dot { background: var(--faint); }
   .blk.pending .bs,  .blk.drift .bs  { color: var(--info); }
-  .blk .bx {
+  .bx {
     flex: 0 0 auto; width: 38px; height: 38px; line-height: 36px; text-align: center;
     border: none; border-radius: 8px; cursor: pointer; font-size: 13px;
     background: rgba(255,255,255,0.06); color: var(--dim);
   }
-  .blk .bx:hover { background: rgba(255,90,90,0.16); color: #ff6b6b; }
-  html[data-theme="light"] .blk .bx { background: rgba(16,26,48,0.06); }
-  .blk .bx.save:hover { background: rgba(90,220,150,0.16); color: #57e6c3; }
-  .blk .bx:disabled { opacity: 0.4; }
+  .bx:hover { background: rgba(255,90,90,0.16); color: #ff6b6b; }
+  html[data-theme="light"] .bx { background: rgba(16,26,48,0.06); }
+  .bx.save:hover { background: rgba(90,220,150,0.16); color: #57e6c3; }
+  .bx:disabled { opacity: 0.4; }
+  .bx:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
 
   .banner { background: var(--infobg2); border: 1px solid var(--infobd); color: #cfdaff; padding: 12px 14px; border-radius: 13px; font-size: 12.5px; margin-bottom: 13px; display: block; line-height: 1.5; }
   .banner[hidden] { display: none; }
@@ -2339,6 +2341,12 @@
     return r;
   }
   async function woRemove(path, btn) {
+    if (!(await confirmAction(
+      "Stop hiding " + path + "?",
+      "That path becomes visible again to every app the moment it next looks, and the entry " +
+      "is removed from your list. A module that hid it will hide it again on the next boot; " +
+      "one you added by hand will not come back.",
+      "Stop hiding"))) return;
     const done = busy(btn);
     const r = await nm(`whiteout remove ${shq(path)}`);
     const txt = ((r.stdout || "") + (r.stderr || "")).trim();
@@ -2565,8 +2573,13 @@
     if (b.getAttribute("data-act") === "wodel") { woRemove(p, b); return; }
     const done = busy(b);
     const r = await woApply(p);
+    if (r.errno === 0) { RULES = null; PLAN_BY_MODULE = null; }
     done(); refreshWhiteouts();
-    if (r.errno === 0) { const row = b.closest(".row"); if (row) row.remove(); }
+    if (r.errno === 0) {
+      const row = b.closest(".row");
+      if (row) row.remove();
+      refreshStatus();
+    }
   });
 
   function renderFilesFull() {
@@ -2769,12 +2782,21 @@
     if (!UID_TARGET_RE.test(t)) { toast("That entry has characters nomount won't take", "bad"); return; }
     if (b.getAttribute("data-act") === "save") saveOne(t, b); else unblockOne(t, b);
   });
-  document.getElementById("usList").addEventListener("click", ev => {
-    const row = ev.target.closest("[data-act='uspick']");
+  function usPickFrom(row) {
     if (!row) return;
     const t = row.getAttribute("data-nmt") || "";
     if (!UID_TARGET_RE.test(t)) { toast("That entry has characters nomount won't take", "bad"); return; }
     usPick(t);
+  }
+  document.getElementById("usList").addEventListener("click", ev => {
+    usPickFrom(ev.target.closest("[data-act='uspick']"));
+  });
+  document.getElementById("usList").addEventListener("keydown", ev => {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    const row = ev.target.closest("[data-act='uspick']");
+    if (!row) return;
+    ev.preventDefault();
+    usPickFrom(row);
   });
   var _pkgsLoaded = false, _pkgs = [], _pkgSel = -1;
   async function loadPkgList() {
@@ -2937,7 +2959,9 @@
         const d = US_REASONS[r] || { label: r, cls: "" };
         return `<span class="rch ${d.cls}">${esc(d.label)}</span>`;
       }).join("");
-      return `<div class="usrow${e.pick ? " on" : ""}" data-act="uspick" data-nmt="${esc(pkg)}">
+      return `<div class="usrow${e.pick ? " on" : ""}" data-act="uspick" data-nmt="${esc(pkg)}"
+        role="checkbox" tabindex="0" aria-checked="${e.pick ? "true" : "false"}"
+        aria-label="${esc(pkg)}">
         <span class="uscb">${e.pick ? "✓" : ""}</span>
         <span class="usn">${esc(pkg)}</span>
         <span class="usr">${chips}</span>
