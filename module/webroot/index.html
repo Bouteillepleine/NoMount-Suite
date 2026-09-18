@@ -785,6 +785,11 @@
       <span class="st" id="state">Checking...</span>
       <span class="sub" id="substate"></span>
     </div>
+    <button class="healthline" id="healthline" onclick="openDetail()">
+      <span class="hl-dot" id="hlDot"></span>
+      <span class="hl-txt" id="hlTxt">Checking...</span>
+      <span class="hl-go">›</span>
+    </button>
     <div class="metrics">
       <div class="metric"><div class="k">Injection rules</div><div class="v" id="mRules"> - </div></div>
       <div class="metric"><div class="k">RRO overlays</div><div class="v" id="mOv"> - </div></div>
@@ -797,11 +802,6 @@
         <div class="v" id="mMod"> - </div>
       </div>
     </div>
-    <button class="healthline" id="healthline" onclick="openDetail()">
-      <span class="hl-dot" id="hlDot"></span>
-      <span class="hl-txt" id="hlTxt">Checking...</span>
-      <span class="hl-go">›</span>
-    </button>
     <div class="btns">
       <button class="act primary" onclick="reloadRules(this)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
