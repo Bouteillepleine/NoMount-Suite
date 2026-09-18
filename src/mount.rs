@@ -280,7 +280,7 @@ pub(crate) fn module_enabled(dir: &Path) -> bool {
         && !dir.join("skip_mount").exists()
 }
 
-fn load_blocklist() -> HashSet<String> {
+pub(crate) fn load_blocklist() -> HashSet<String> {
     let mut set: HashSet<String> = BUILTIN_BLOCKLIST.iter().map(|s| (*s).to_string()).collect();
     if let Ok(contents) = fs::read_to_string(BLOCKLIST_FILE) {
         for line in contents.lines() {
@@ -355,6 +355,9 @@ fn expand_replacement(
             Some(_) => {}
             None => {
                 if can_whiteout(&stock_child).is_err() {
+                    continue;
+                }
+                if path_is_representable(&stock_child).is_err() {
                     continue;
                 }
                 out.push(PlanEntry {
@@ -436,6 +439,11 @@ fn plan_tree(
                 "nomount: {module}: skipping {} - its name is not valid UTF-8",
                 source.display()
             );
+            refused.push(Refused {
+                module: module.to_string(),
+                target: source.clone(),
+                why: "its name is not valid UTF-8, so no rule can name it",
+            });
             continue;
         };
         let unrepresentable = path_is_representable(&target)
@@ -447,6 +455,15 @@ fn plan_tree(
                 "nomount: {module}: skipping {} - {what} {why}",
                 source.display()
             );
+            refused.push(Refused {
+                module: module.to_string(),
+                target: target.clone(),
+                why: if what == "target" {
+                    "the wire format cannot carry this target path"
+                } else {
+                    "the wire format cannot carry this source path"
+                },
+            });
             continue;
         }
         let name = entry.file_name();
@@ -460,6 +477,16 @@ fn plan_tree(
         } else if name == ".replace" {
             if let Some(parent) = target.parent() {
                 if can_whiteout(parent).is_err() {
+                    eprintln!(
+                        "nomount: {module}: skipping {} - {} may not be hidden",
+                        source.display(),
+                        parent.display()
+                    );
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: parent.to_path_buf(),
+                        why: "a .replace here would hide a path the Suite refuses to hide",
+                    });
                     continue;
                 }
                 if let Some(module_dir) = source.parent() {
@@ -468,6 +495,15 @@ fn plan_tree(
             }
         } else if is_whiteout_marker(&ft, &source) {
             if can_whiteout(&target).is_err() {
+                eprintln!(
+                    "nomount: {module}: skipping {} - it may not be hidden",
+                    target.display()
+                );
+                refused.push(Refused {
+                    module: module.to_string(),
+                    target: target.clone(),
+                    why: "the Suite refuses to hide this path",
+                });
                 continue;
             }
             out.push(PlanEntry {
@@ -487,6 +523,12 @@ fn plan_tree(
                         source.display(),
                         target.display()
                     );
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: target.clone(),
+                        why: "it is a symlink resolving outside /data/adb, so a non-root process \
+                              would control the bytes served there",
+                    });
                     continue;
                 }
                 if resolved.as_deref().map(Path::is_dir).unwrap_or(false) {
@@ -497,6 +539,12 @@ fn plan_tree(
                         source.display(),
                         target.display()
                     );
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: target.clone(),
+                        why: "it is a symlink to a directory, which would install a directory \
+                              rule at the partition root. Ship the files individually.",
+                    });
                     continue;
                 }
             }
@@ -524,6 +572,12 @@ fn plan_tree(
                          inject over a file)",
                         target.display()
                     );
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: target.clone(),
+                        why: "it resolves to a live directory, and injecting a file there would \
+                              mask the whole directory",
+                    });
                 }
                 Serve::Inject => out.push(PlanEntry {
                     module: module.to_string(),
@@ -955,7 +1009,28 @@ pub fn run_mount() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding - is the CONFIG_NOMOUNT kernel loaded?")?;
 
-    let (plan, skipped, _refused) = collect_plan()?;
+    let (mut plan, skipped, _refused) = collect_plan()?;
+
+    let durable: Vec<String> = crate::whiteout::read().context(
+        "cannot read the durable whiteout list - refusing to serve, because clearing the table \
+         and rebuilding without it would un-hide every path you asked to hide",
+    )?;
+    let planned: std::collections::HashSet<&Path> =
+        plan.iter().map(|e| e.target.as_path()).collect();
+    let extra: Vec<std::path::PathBuf> = durable
+        .iter()
+        .map(std::path::PathBuf::from)
+        .filter(|w| !planned.contains(w.as_path()))
+        .collect();
+    drop(planned);
+    for w in extra {
+        plan.push(PlanEntry {
+            module: "durable".to_string(),
+            target: w,
+            source: std::path::PathBuf::new(),
+            kind: PlanKind::Whiteout,
+        });
+    }
 
     let (plan, collisions) = dedupe_by_target(plan);
     for c in &collisions {
