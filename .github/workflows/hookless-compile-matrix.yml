@@ -177,10 +177,7 @@ jobs:
             echo "FATAL: fs/Kconfig hunk did not apply for ${{ matrix.ver }}"; exit 1; }
 
           echo "== defconfig =="
-          if ! make $MAKEOPTS gki_defconfig 2>&1 | tail -5; then
-            echo "::notice::${{ matrix.ver }} has no gki_defconfig, falling back to defconfig"
-            make $MAKEOPTS defconfig 2>&1 | tail -5
-          fi
+          make $MAKEOPTS defconfig 2>&1 | tail -5
           ./scripts/config --file out/.config -e NOMOUNT
           make $MAKEOPTS olddefconfig 2>&1 | tail -5
           grep -q '^CONFIG_NOMOUNT=y' out/.config || {
