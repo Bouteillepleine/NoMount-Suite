@@ -14,10 +14,10 @@ labels: bug
 *Developer tools* → *Export*.** Attach the folder it names.
 
 It writes a timestamped bundle to `/sdcard/Download` containing `check.txt`,
-the mount table, the live rules and `dmesg-nomount.txt`. **Anything that names
-the apps you hide is withheld automatically** when the destination is shared
-storage: the hide-list files, `spoof.conf` and `boot.log` are left out, and the
-bundle lists what it withheld. If your report is about boot behaviour we will
+the mount table and the live rules. **Anything that names the apps you hide is
+withheld automatically** when the destination is shared storage: the hide-list
+files, `spoof.conf` and `boot.log` are left out, and `dmesg-nomount.txt` is
+replaced by a stub. The bundle lists what it withheld. If your report is about boot behaviour we will
 probably need `boot.log` too - export to a private path instead
 (`nomount export /data/local/tmp/nm-report`) and share that bundle privately.
 

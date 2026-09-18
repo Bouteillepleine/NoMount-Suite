@@ -1,9 +1,12 @@
 # 🫥 NoMount Suite
 
-Loads root modules **without touching the mount table** - RRO theming overlays
+Loads root modules **without adding a mount for them** - RRO theming overlays
 included. No `overlayfs`, no `tmpfs`: files are served by redirecting VFS lookups
-in the kernel, so `/proc/mounts` shows the stock set and there is no mount gap
-for a scanner to find.
+in the kernel, so nothing the engine injects appears in `/proc/mounts`.
+
+On OnePlus/Oppo that is the whole mount table only if you opt in: the `my_*`
+partitions are served by a real bind by default (see below), and those rows *are*
+visible to any app. `nomount check` counts them and the WebUI names them.
 
 It is a metamodule: at boot it scans `/data/adb/modules/`, classifies every file
 and programs the kernel engine over netlink. No per-module setup. Only one
@@ -82,6 +85,36 @@ an unmeasured check is not a pass, and the report says so rather than rounding u
 
 Updating is the same flash: your hide list, whiteouts, absorbed rules and
 settings are preserved across an update, and restored if an install aborts.
+
+## If it does not boot
+
+The Suite counts boots. Three in a row that never reach `boot_completed` and it
+parks itself: it writes `/data/adb/nomount/disabled`, stops injecting, and
+records what happened in `/data/adb/nomount/incident.log`. So the usual answer
+is **let it boot twice more** - the third failure disarms it and the fourth boot
+comes up stock, with the incident waiting for you in the WebUI.
+
+If you would rather not wait, or the guard itself cannot run (a full `/data`
+stops it arming), disarm it by hand from recovery or `adb` in recovery:
+
+```sh
+mkdir -p /data/adb/nomount && touch /data/adb/nomount/disabled
+```
+
+That leaves the module installed and everything configured - clear the marker in
+the WebUI, or `rm /data/adb/nomount/disabled`, when you want it back. To remove
+the module outright instead:
+
+```sh
+touch /data/adb/modules/meta-nomount/remove
+```
+
+Your manager uninstalls it on the next boot. Neither route touches your hide
+list, whiteouts or settings.
+
+If the device does not boot far enough for either, flash the kernel you were on
+before - the Suite injects nothing without the Prism engine, so a stock kernel
+brings the device up with the module inert.
 
 ## Requirements
 
@@ -184,7 +217,7 @@ hidden-paths list.
 | `nomount uid apply [--early]` | Re-apply the hide list. |
 | `nomount uid preset [name] [--dry-run] [--globs]` | Add a curated preset; no argument lists what is available. |
 | `nomount uid isolated [mode]` | Which isolated-process pools are hidden. |
-| `nomount check [--plan] [--device] [--json] [--write]` | **The** diagnostic. `--plan` static (does the module set resolve into a bad rule?), `--device` measured (is what we serve detectable, and is it being served?); neither flag runs both. Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`, `N/A`, `NOTE` - "nothing to test" and "something stopped me testing" are deliberately different, and neither is a pass. Exits 1 on a FAIL. |
+| `nomount check [--plan] [--device] [--json] [--write]` | **The** diagnostic. `--plan` static (does the module set resolve into a bad rule?), `--device` measured (is what we serve detectable, and is it being served?); neither flag runs both. Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`, `N/A`, `NOTE` - "nothing to test" and "something stopped me testing" are deliberately different, and neither is a pass. Exits 1 on a FAIL or a REBOOT. |
 | `nomount plan` | Print what the mount pass would resolve to, without applying it. Read-only. |
 | `nomount snapshot` | Freeze the current fingerprint as a baseline. |
 | `nomount verify` | Diff live against that baseline and name what drifted. |

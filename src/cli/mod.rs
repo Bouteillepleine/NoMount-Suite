@@ -87,8 +87,9 @@ Exits 1 on a FAIL.
     /// Dump diagnostics to a folder for a bug report
     #[command(after_help = "\
 On shared storage (/sdcard) everything naming the apps you hide is withheld - the
-hide-list files, spoof.conf and boot.log - and the bundle says so. Export to a
-private path (e.g. /data/local/tmp/nm-report) to include them.")]
+hide-list files, spoof.conf, boot.log, and dmesg-nomount.txt is replaced by a stub -
+and the bundle says so. Export to a private path (e.g. /data/adb/nomount/report) to
+include them.")]
     Export {
         /// Where to write the bundle (default: a timestamped folder in /sdcard/Download)
         dir: Option<String>,
