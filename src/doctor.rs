@@ -858,8 +858,18 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     }
 
     {
+        let served_under: std::collections::HashSet<(&str, &Path)> = plan
+            .iter()
+            .flat_map(|e| {
+                let m = e.module.as_str();
+                e.target.ancestors().map(move |a| (m, a))
+            })
+            .collect();
         let mut by_module: HashMap<&str, Vec<&crate::mount::Refused>> = HashMap::new();
         for r in &refused {
+            if served_under.contains(&(r.module.as_str(), r.target.as_path())) {
+                continue;
+            }
             by_module.entry(r.module.as_str()).or_default().push(r);
         }
         let mut mods: Vec<&&str> = by_module.keys().collect();
@@ -1052,13 +1062,14 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
 
     let served_modules: std::collections::HashSet<&str> =
         plan.iter().map(|e| e.module.as_str()).collect();
+    let blocklisted = crate::mount::load_blocklist();
     if let Ok(rd) = std::fs::read_dir("/data/adb/modules") {
         let mut dirs: Vec<_> = rd.flatten().collect();
         dirs.sort_by_key(|d| d.file_name());
         for d in dirs {
             let mdir = d.path();
             let Some(id) = mdir.file_name().and_then(|n| n.to_str()) else { continue };
-            if id == "meta-nomount" || !mdir.is_dir() {
+            if id == "meta-nomount" || !mdir.is_dir() || blocklisted.contains(id) {
                 continue;
             }
             let markers: Vec<String> = ["disable", "remove", "skip_mount"]
