@@ -561,12 +561,12 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
         if injected.len() < 4 {
             continue;
         }
-        let mut stock_buckets: HashMap<u64, usize> = HashMap::new();
-        let mut ours_buckets: HashMap<u64, usize> = HashMap::new();
+        let mut stock_buckets: HashMap<(u64, u64), usize> = HashMap::new();
+        let mut ours_buckets: HashMap<(u64, u64), usize> = HashMap::new();
         for e in rd.flatten() {
             let p = e.path();
-            let Some(i) = ino_of(&p) else { continue };
-            let b = i / BUCKET;
+            let Some((dev, i)) = dev_ino_of(&p) else { continue };
+            let b = (dev, i / BUCKET);
             if injected.iter().any(|t| **t == p) || engine_dirs.contains(&p) {
                 *ours_buckets.entry(b).or_default() += 1;
             } else {
@@ -577,11 +577,11 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             continue;
         }
         examined += 1;
-        let mut bands: Vec<(&u64, &usize)> = ours_buckets.iter().collect();
+        let mut bands: Vec<(&(u64, u64), &usize)> = ours_buckets.iter().collect();
         bands.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
         for (b, n) in bands {
             if !stock_buckets.contains_key(b) && worst.as_ref().is_none_or(|w| *n > w.2) {
-                worst = Some((parent.to_string_lossy().into_owned(), *b, *n));
+                worst = Some((parent.to_string_lossy().into_owned(), b.1, *n));
             }
         }
     }
@@ -637,7 +637,9 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
     let mut outliers = Vec::new();
     let mut examined = 0usize;
     let mut unread = 0usize;
-    for parent in parents_of(targets) {
+    let subjects: Vec<PathBuf> =
+        targets.iter().chain(engine_dirs.iter()).cloned().collect();
+    for parent in parents_of(&subjects) {
         if fs_type(&parent) != "overlay" {
             continue;
         }
