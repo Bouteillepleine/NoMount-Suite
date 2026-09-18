@@ -177,11 +177,25 @@ jobs:
             echo "FATAL: fs/Kconfig hunk did not apply for ${{ matrix.ver }}"; exit 1; }
 
           echo "== defconfig =="
-          make $MAKEOPTS defconfig 2>&1 | tail -5
+          if ! make $MAKEOPTS gki_defconfig 2>&1 | tail -5; then
+            echo "::notice::${{ matrix.ver }} has no gki_defconfig, falling back to defconfig"
+            make $MAKEOPTS defconfig 2>&1 | tail -5
+          fi
           ./scripts/config --file out/.config -e NOMOUNT
           make $MAKEOPTS olddefconfig 2>&1 | tail -5
           grep -q '^CONFIG_NOMOUNT=y' out/.config || {
             echo "FATAL: CONFIG_NOMOUNT did not stick in .config for ${{ matrix.ver }}"; exit 1; }
+          # Every CONFIG_ symbol nomount.[ch] gates on must be SET in the config we
+          # compile, or that code has zero coverage behind a green check. Derive the
+          # list from the source so a new #ifdef cannot be added without coverage.
+          gates=$(grep -ohE '#if(def)?[^\n]*CONFIG_[A-Z0-9_]+' fs/nomount.c fs/nomount.h \
+                  | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u)
+          echo "engine config gates: ${gates:-none}"
+          for g in $gates; do
+            grep -q "^$g=y" out/.config || {
+              echo "FATAL: $g is gated in nomount.[ch] but not set for ${{ matrix.ver }} -- that code compiles nowhere"
+              exit 1; }
+          done
           echo "== prepare =="
           make $MAKEOPTS prepare 2>&1 | tail -20
           echo "== compile fs/nomount.o =="
