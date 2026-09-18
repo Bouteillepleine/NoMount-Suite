@@ -65,10 +65,20 @@ def case_pairs(rev):
     path, dels, adds, found = None, [], [], []
 
     def flush():
-        if path and path.endswith(CODE_EXT):
-            for old, new in zip(dels, adds):
-                if old != new and old.lower() == new.lower():
+        if not path or not path.endswith(CODE_EXT):
+            return
+        by_lower = {}
+        for new in adds:
+            by_lower.setdefault(new.lower(), []).append(new)
+        for old in dels:
+            bucket = by_lower.get(old.lower())
+            if not bucket:
+                continue
+            for i, new in enumerate(bucket):
+                if new != old:
                     found.append((path, old, new))
+                    bucket.pop(i)
+                    break
 
     for line in diff.split("\n"):
         if line.startswith("+++ b/"):
@@ -76,8 +86,7 @@ def case_pairs(rev):
             dels, adds = [], []
             path = line[6:]
         elif line.startswith("@@"):
-            flush()
-            dels, adds = [], []
+            pass
         elif line.startswith("-") and not line.startswith("---"):
             dels.append(line[1:])
         elif line.startswith("+") and not line.startswith("+++"):
@@ -151,7 +160,7 @@ CONT = re.compile(r"\\\s*\n\s*")
 ANCHOR = re.compile(r"^\^|\$$")
 UNESC = re.compile(r"\\(.)")
 META = re.compile(r"[\[\]()+*?|]")
-TESTMOD = re.compile(r"^#\[cfg\(test\)\]", re.M)
+TESTMOD = re.compile(r"^#\[cfg\(test\)\]\s*\n\s*mod\b", re.M)
 
 
 def needles():

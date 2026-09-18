@@ -55,9 +55,13 @@ import sys
 
 CODE_EXT = (".sh", ".rs", ".c", ".h", ".yml", ".yaml", ".patch", ".py", ".toml", ".json", ".html")
 
+CODE_NAMES = ("module.prop",)
+
 COMMENT = re.compile(r"^\s*(///|//|#|/\*|\*|--|<!--)")
 
 CAPS = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+
+CAMEL = re.compile(r"\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b")
 
 SKIP_MARKER = "[case-ok]"
 
@@ -73,7 +77,7 @@ def case_only_pairs(rev):
     found = []
 
     def flush():
-        if not path or not path.endswith(CODE_EXT):
+        if not path or not (path.endswith(CODE_EXT) or path.endswith(CODE_NAMES)):
             return
         by_lower = {}
         for new in adds:
@@ -94,8 +98,7 @@ def case_only_pairs(rev):
             dels, adds = [], []
             path = line[6:]
         elif line.startswith("@@"):
-            flush()
-            dels, adds = [], []
+            pass
         elif line.startswith("-") and not line.startswith("---"):
             dels.append(line[1:])
         elif line.startswith("+") and not line.startswith("+++"):
@@ -108,7 +111,10 @@ def hits_for(rev):
     for path, old, new in case_only_pairs(rev):
         if COMMENT.match(old):
             continue
-        lost = sorted(set(CAPS.findall(old)) - set(CAPS.findall(new)))
+        def tokens(t):
+            return set(CAPS.findall(t)) | set(CAMEL.findall(t))
+
+        lost = sorted(tokens(old) - tokens(new))
         if lost:
             out.append((path, lost, old.strip(), new.strip()))
     return out
