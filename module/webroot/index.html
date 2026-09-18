@@ -436,6 +436,7 @@
   .rch.r-det { color: var(--info); border-color: var(--infobd); }
   .rch.r-qr  { color: var(--acc2); border-color: rgba(87,230,195,0.42); }
   .rch.r-su  { color: var(--acc2); border-color: rgba(87,230,195,0.36); }
+  .rch.r-qa  { color: var(--dim); border-color: var(--brd2); }
   .usfoot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 11px; }
 
   .ndet { margin-top: 12px; }
@@ -1081,7 +1082,7 @@
   </div>
 </div>
 
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script>
   "use strict";
@@ -1096,16 +1097,28 @@
   function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
   document.getElementById("banner").hidden = !!(KSU && KSU.exec);
 
+  const EXEC_TIMEOUT_MS = 120000;
   function exec(cmd, opts = {}) {
     return new Promise((resolve) => {
       if (!KSU || !KSU.exec) { resolve({ errno: -1, stdout: "", stderr: "no webui env" }); return; }
       const name = "__nmcb" + (execId++);
-      window[name] = (errno, stdout, stderr) => {
+      let settled = false;
+      const finish = (r) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         delete window[name];
-        resolve({ errno: Number(errno), stdout: stdout || "", stderr: stderr || "" });
+        resolve(r);
       };
+      const timer = setTimeout(() => finish({
+        errno: -1, stdout: "",
+        stderr: "timed out after " + (EXEC_TIMEOUT_MS / 1000) +
+                "s - it may still be running; reopen this pane to see the result",
+      }), EXEC_TIMEOUT_MS);
+      window[name] = (errno, stdout, stderr) =>
+        finish({ errno: Number(errno), stdout: stdout || "", stderr: stderr || "" });
       try { KSU.exec(cmd, JSON.stringify(opts), name); }
-      catch (e) { delete window[name]; resolve({ errno: -1, stdout: "", stderr: String(e) }); }
+      catch (e) { finish({ errno: -1, stdout: "", stderr: String(e) }); }
     });
   }
 
@@ -1197,7 +1210,18 @@
       $("cfBody").textContent = body;
       yes.textContent = verb;
       wrap.hidden = false;
-      const onKey = function (e) { if (e.key === "Escape") done(false); };
+      const returnTo = document.activeElement;
+      const onKey = function (e) {
+        if (e.key === "Escape") { done(false); return; }
+        if (e.key !== "Tab") return;
+        e.preventDefault();
+        const first = no, last = yes;
+        const fwd = !e.shiftKey;
+        const next = document.activeElement === last ? (fwd ? first : no)
+                   : document.activeElement === first ? (fwd ? last : last)
+                   : first;
+        try { next.focus(); } catch (err) {}
+      };
       const onWrap = function (e) { if (e.target === wrap) done(false); };
       function done(v) {
         if (_cfClose !== done) return;
@@ -1205,6 +1229,7 @@
         wrap.hidden = true;
         yes.onclick = null; no.onclick = null; wrap.onclick = null;
         document.removeEventListener("keydown", onKey);
+        try { if (returnTo && returnTo.focus) returnTo.focus(); } catch (err) {}
         resolve(v);
       }
       _cfClose = done;
@@ -1777,6 +1802,7 @@
 
   let CHECK_RUNNING = false;
   async function runCheck(btn) {
+    if (CHECK_RUNNING) { toast("A check is already running", "info"); return; }
     const done = busy(btn, "Checking...");
     $("findlist").innerHTML = '<div class="empty">Checking...</div>';
     CHECK_RUNNING = true;
@@ -1788,8 +1814,7 @@
                  (((r0.stderr || "").trim().split("\n")[0]) || "no output"), "bad");
       renderCheck(CHECK);
       refreshStealth();
-    } finally { CHECK_RUNNING = false; }
-    done();
+    } finally { CHECK_RUNNING = false; done(); }
   }
 
   const CHECK_FRESH_SECS = 60;
@@ -3066,7 +3091,10 @@
     toast("Something went wrong reading the device - press refresh to try again. " +
           ((e && e.message) || e), "bad");
   }
+  let REFRESH_RUNNING = false;
   async function refreshAll(btn) {
+    if (REFRESH_RUNNING) return;
+    REFRESH_RUNNING = true;
     const ic = btn && btn.querySelector("svg");
     if (ic) ic.classList.add("spin");
     RULES = null;
