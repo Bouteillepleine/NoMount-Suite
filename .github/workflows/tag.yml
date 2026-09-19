@@ -1,0 +1,96 @@
+name: NoMount Suite - tag and release
+
+on:
+  push:
+    branches: [main]
+    paths: ['Cargo.toml']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run the gates and the build, but publish nothing"
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tag-and-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.gate.outputs.tag }}
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Decide whether this commit is a release
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          ver=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          case "$ver" in
+            ''|*[!0-9.]*)
+              echo "::error::Cargo.toml version '$ver' is not a plain dotted number"
+              exit 1
+              ;;
+          esac
+          tag="v${ver}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $ver -> $tag"
+
+          esc=${tag//./\\.}
+          if ! grep -qE "^## ${esc}([[:space:]]|$)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## ${tag}' section."
+            echo "::error::A release describes itself or it does not ship. Add the section and push again."
+            exit 1
+          fi
+          echo "CHANGELOG.md documents $tag"
+
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq '.sha' 2>/dev/null || true)
+          printf '%s' "$tag_sha" | grep -qE '^[0-9a-f]{40}$' || tag_sha=""
+          if [ -n "$tag_sha" ] && [ "$tag_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::$tag already exists at $tag_sha, but this commit is $GITHUB_SHA."
+            echo "::error::A published version is immutable. Bump Cargo.toml instead of moving the tag."
+            exit 1
+          fi
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "Release $tag already exists - nothing to do."
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "Release $tag does not exist yet - building it."
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### ${{ steps.gate.outputs.tag }}"
+            echo ""
+            if [ "${{ steps.gate.outputs.proceed }}" = "true" ]; then
+              echo "Gates passed - building and publishing."
+            else
+              echo "Already released - nothing to do."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.gate.outputs.tag }}
+      dry_run: ${{ inputs.dry_run || 'false' }}
