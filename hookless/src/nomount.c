@@ -1049,6 +1049,14 @@ static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 
     if (info && (info->v_cap & NM_CAP_KNOWN) && !(info->v_cap & NM_CAP_FSYNC))
         return -EINVAL;
+    /* Nothing was captured for this rule, so the guard above cannot fire and fsync
+     * falls through to the backing f2fs, which answers 0. erofs_file_fops has no
+     * .fsync at all, so the stock answer there is EINVAL with certainty. Scoped to
+     * erofs: on an overlay-presented path ovl_fsync returns 0 for a lower-only file,
+     * which is what forwarding already gives, and forcing EINVAL would be a new tell. */
+    if (info && !(info->v_cap & NM_CAP_KNOWN) &&
+        file_inode(file)->i_sb->s_magic == EROFS_SUPER_MAGIC_V1)
+        return -EINVAL;
     if (!real_file || !real_file->f_op->fsync) return -EINVAL;
     return real_file->f_op->fsync(real_file, start, end, datasync);
 }
