@@ -476,6 +476,13 @@ pub struct Candidate {
     pub redundant: bool,
 }
 
+pub(crate) fn under_surviving_mount<'a>(target: &Path, survivors: &[&'a Path]) -> Option<&'a Path> {
+    survivors
+        .iter()
+        .copied()
+        .find(|s| *s != target && target.starts_with(s))
+}
+
 pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
     Some(read_mountinfo(MOUNTINFO).ok()?.into_iter().map(|r| r.target).collect())
 }
@@ -1588,6 +1595,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     }
 
     let mut deferred = 0usize;
+    let mut left_mounted: Vec<PathBuf> = Vec::new();
     let cands: Vec<Candidate> = surveyed
         .into_iter()
         .filter(|s| match s.disposition {
@@ -1596,11 +1604,21 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                     true
                 } else {
                     deferred += 1;
+                    left_mounted.push(s.target.clone());
                     false
                 }
             }
-            Disposition::Redundant => early || runtime_droppable(&s.target, &aliases),
-            _ => false,
+            Disposition::Redundant => {
+                let take = early || runtime_droppable(&s.target, &aliases);
+                if !take {
+                    left_mounted.push(s.target.clone());
+                }
+                take
+            }
+            _ => {
+                left_mounted.push(s.target.clone());
+                false
+            }
         })
         .map(|s| Candidate {
             redundant: matches!(s.disposition, Disposition::Redundant),
@@ -1659,6 +1677,20 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         }
     };
     let mut dropped = 0u32;
+    let survives_pass = |c: &Candidate| -> bool {
+        if c.redundant {
+            return false;
+        }
+        if c.source.is_dir() && !include_dirs && !is_hiding_bind(&c.source) {
+            return true;
+        }
+        !c.source.exists()
+    };
+    let survivors: Vec<&Path> = left_mounted
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(cands.iter().filter(|c| survives_pass(c)).map(|c| c.target.as_path()))
+        .collect();
     let live_map = live_injects(&nm);
     let mut reasserted: HashSet<PathBuf> = HashSet::new();
     let mut fresh: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -1699,6 +1731,18 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 );
                 failed += 1;
             }
+            continue;
+        }
+        if let Some(anc) = under_surviving_mount(&c.target, &survivors) {
+            eprintln!(
+                "nomount: LEAK {} <- {} stays mounted: {} is a mount this pass does not take \
+                 down, so the rule would resolve through it and attach to the mounted tree \
+                 instead of the ROM",
+                c.target.display(),
+                c.source.display(),
+                anc.display()
+            );
+            leaking += 1;
             continue;
         }
         if dry_run {
@@ -2371,6 +2415,30 @@ mod tests {
                 "stock plumbing {t} must not be reported"
             );
         }
+    }
+
+    #[test]
+    fn a_target_under_a_bind_the_pass_keeps_is_refused() {
+        let keep = Path::new("/system/app/Foo");
+        let survivors = [keep];
+
+        assert_eq!(
+            under_surviving_mount(Path::new("/system/app/Foo/lib/arm64/x.so"), &survivors),
+            Some(keep),
+            "a file under a surviving directory bind must be refused"
+        );
+        assert!(
+            under_surviving_mount(keep, &survivors).is_none(),
+            "the surviving mount is not under itself"
+        );
+        assert!(
+            under_surviving_mount(Path::new("/system/app/Foobar/x.so"), &survivors).is_none(),
+            "starts_with compares components, so Foobar is not under Foo"
+        );
+        assert!(
+            under_surviving_mount(Path::new("/system/app/Foo/lib"), &[]).is_none(),
+            "no survivors means nothing is refused"
+        );
     }
 
     #[test]
