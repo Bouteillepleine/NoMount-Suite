@@ -11,6 +11,27 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.184 - engine v33 (the engine fix below needs a kernel rebuild)
+
+- Engine: a synthesized directory takes an inode above every inode the partition has shown, not just above its directories. On overlayfs those differ, and the old choice could land on a stock directory.
+- Checks is a tab of its own, and one Rules card shows the set by module or by file.
+
+## v1.3.183 - engine v33 (the engine fix below needs a kernel rebuild)
+
+- Engine: a hidden app gets the stock file under a stock-shadowing directory rule, and no other caller reuses that inode.
+- A wedged `exec` times out, a check and a refresh cannot double-fire, and the confirm dialog keeps focus.
+- The header fits a phone, and un-hiding a path asks first.
+- Build: the config gate is derived from the engine source, and the screenshots are the four panes that ship.
+
+## v1.3.182 - engine v33 (the engine fixes below need a kernel rebuild)
+
+- Engine: the mirrored stat carries the alignment erofs reports, so `statx` no longer named every injected file by one missing bit.
+- An inode band is a device and a range. The overlay check was comparing across devices, and passed a band that was entirely ours.
+- `check` is faster: one `su` answers for every sampled path.
+- The headline counts what the exit code counts, and never hides an unmeasured check.
+- The findings list redacts an appid like every other way out.
+- Build: the case gate sees a moved line, a camel-cased key and `module.prop`.
+
 ## v1.3.181 - engine v33 (the engine fixes below need a kernel rebuild)
 
 - Detections are shown as information, not alarm. A finding never repaints the page: the status stays green with findings open, and nothing in the diagnostics uses amber, brown or red any more. Red is kept only on the buttons that destroy something, where it describes what the button does. The verdicts themselves are unchanged - the report, the exit code and the sort order still separate them - only the way they are presented.
