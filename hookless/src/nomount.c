@@ -9,6 +9,7 @@
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/magic.h>
+#include <linux/mount.h>
 #include <linux/mm.h>
 #include <linux/huge_mm.h>
 #include <linux/hash.h>
@@ -36,6 +37,7 @@ static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mos
 static const struct cred *nm_root_cred;
 
 static void nm_dir_node_put(struct nomount_dir_node *dir_node);
+static void nomount_restore_dir_node(struct nomount_dir_node *dir_node);
 static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
 static int nm_read_secctx(struct inode *in, char *dst, u16 *dlen)
@@ -1660,7 +1662,8 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
         goto out;
 
     nm_dir_deltas(d, &nld, &delta);
-    nm_dir_nlink_fix(stat, nld);
+    if (stat->nlink != 1)
+        nm_dir_nlink_fix(stat, nld);
 
     if (delta && inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 &&
         stat->size > 0 && stat->size < 4096) {
@@ -1889,6 +1892,8 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
                     nm_dsnap_put(snap);
                     return res;
                 }
+                if (ctx->pos)
+                    return 0;
             }
         }
     }
@@ -2137,7 +2142,9 @@ static const char *nm_full_xattr_name(const struct nm_xattr_proxy *proxy,
     if (pfx && *pfx && strncmp(name, pfx, strlen(pfx)) != 0) {
         char *full = kasprintf(GFP_KERNEL, "%s%s", pfx, name);
 
-        if (full) { *allocp = full; return full; }
+        if (!full) return NULL;
+        *allocp = full;
+        return full;
     }
     return name;
 }
@@ -2157,11 +2164,13 @@ static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dent
         stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
             full = nm_full_xattr_name(proxy, name, &alloc);
+            if (unlikely(!full)) return -ENOMEM;
             r = vfs_getxattr(IDMAP_PATH(info->s_path) info->s_path.dentry, full, buffer, size);
             kfree(alloc);
             return r;
         }
         full = nm_full_xattr_name(proxy, name, &alloc);
+        if (unlikely(!full)) return -ENOMEM;
         if (!info->r_path.dentry) {
             r = -ENODATA;
             if (info->v_ctx_len && strcmp(full, "security.selinux") == 0) {
@@ -2195,6 +2204,7 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
 
             if (unlikely(stock)) {
                 full = nm_full_xattr_name(proxy, name, &alloc);
+                if (unlikely(!full)) return -ENOMEM;
                 r = vfs_setxattr(IDMAP_PATH(info->s_path) stock->dentry, full, buffer, size,
                                  flags);
                 kfree(alloc);
@@ -2203,7 +2213,12 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
         }
         if (unlikely(!info->r_path.dentry)) return -ENODATA;
         full = nm_full_xattr_name(proxy, name, &alloc);
-        r = vfs_setxattr(IDMAP_CALL info->r_path.dentry, full, buffer, size, flags);
+        if (unlikely(!full)) return -ENOMEM;
+        r = mnt_want_write(info->r_path.mnt);
+        if (!r) {
+            r = vfs_setxattr(IDMAP_CALL info->r_path.dentry, full, buffer, size, flags);
+            mnt_drop_write(info->r_path.mnt);
+        }
         kfree(alloc);
         return r;
     }
@@ -2482,6 +2497,25 @@ static void nomount_hijacked_put_super(struct super_block *sb)
 {
     struct nm_sop *nm_sop = __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
     void (*orig_put)(struct super_block *) = NULL;
+    struct nomount_rule *rule;
+    int bkt;
+
+    mutex_lock(&nomount_write_mutex);
+    hash_for_each(nomount_rules_ht, bkt, rule, vpath_node) {
+        struct nomount_dir_node *d;
+
+        d = rule->parent_dir;
+        if (d && !(d->_tag_ptr & 1UL) && d->dir_inode && d->dir_inode->i_sb == sb) {
+            nomount_restore_dir_node(d);
+            nm_dir_node_put(d);
+        }
+        d = rule->this_dir;
+        if (d && !(d->_tag_ptr & 1UL) && d->dir_inode && d->dir_inode->i_sb == sb) {
+            nomount_restore_dir_node(d);
+            nm_dir_node_put(d);
+        }
+    }
+    mutex_unlock(&nomount_write_mutex);
 
     if (nm_sop) {
         int i = 0;
