@@ -1387,6 +1387,21 @@ mod tests {
                  the LKM branch's gate builds a different engine version and does not cover it"
             );
         }
+        const GATE_SWEEP: &str = include_str!("../scripts/gate-sweep.sh");
+        for lit in [
+            "^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$",
+            r"IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+",
+            "(ifndef|![[:space:]]*defined)",
+        ] {
+            assert!(
+                ENGINE_MATRIX.contains(lit) && GATE_SWEEP.contains(lit),
+                "the derived config gate is two independent copies - one inline in the                  matrix, one in scripts/gate-sweep.sh - and they have drifted on {lit:?}.                  Only the script is tested, so a drifted matrix copy is an untested gate,                  which is how the original one came to catch 2 of 8 gating forms"
+            );
+        }
+        assert!(
+            BUILD_YAML.contains("scripts/gate-sweep.sh"),
+            "nothing runs the config-gate sweep any more, so its copy of the extractor is              unexercised and the matrix copy is pinned to an untested reference"
+        );
         assert!(
             ENGINE_MATRIX.contains("workflow_dispatch") && ENGINE_MATRIX.contains("push:"),
             "the engine matrix is reachable only through another workflow again. That is how it \

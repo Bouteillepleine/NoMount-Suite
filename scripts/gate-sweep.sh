@@ -90,14 +90,28 @@ fi
 
 SRC_C=${1:-hookless/src/nomount.c}
 SRC_H=${2:-hookless/src/nomount.h}
-if [ -f "$SRC_C" ] && [ -f "$SRC_H" ]; then
-    pos=$(extract_positive "$SRC_C" "$SRC_H" | tr '\n' ' ')
-    neg=$(extract_negative "$SRC_C" "$SRC_H" | tr '\n' ' ')
-    printf '\nengine positive gates: %s\nengine negative gates: %s\n' "${pos:-none}" "${neg:-none}"
-    if [ -z "$pos" ]; then
-        printf 'FAIL  the engine reports no positive gate at all - the matrix assertion would be vacuous\n'
-        fail=1
-    fi
+if [ ! -f "$SRC_C" ] || [ ! -f "$SRC_H" ]; then
+    printf 'FAIL  engine source not found (%s, %s)
+' "$SRC_C" "$SRC_H"
+    printf '        without it this script would assert only its own fixtures and exit 0,
+'
+    printf '        which is the vacuous gate it exists to prevent
+'
+    exit 1
+fi
+
+pos=$(extract_positive "$SRC_C" "$SRC_H" | tr '
+' ' ')
+neg=$(extract_negative "$SRC_C" "$SRC_H" | tr '
+' ' ')
+printf '
+engine positive gates: %s
+engine negative gates: %s
+' "${pos:-none}" "${neg:-none}"
+if [ -z "$pos" ]; then
+    printf 'FAIL  the engine reports no positive gate at all - the matrix assertion would be vacuous
+'
+    fail=1
 fi
 
 exit $fail
