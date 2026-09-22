@@ -295,6 +295,24 @@ package_zip() {
         cp "$src" "$staging/$script"
     done
 
+    # The loop above fatals on a name in SCRIPTS that is missing from module/. The
+    # reverse - a new module/*.sh nobody added to SCRIPTS - would ship a zip that
+    # installs and is quietly wrong: sha256sums derive from the staging tree so they
+    # cannot see an absence, customize.sh's set_perm calls are [ -f ] guarded, and
+    # CI lints a file that never reached the zip.
+    for src in "$MODULE_DIR"/*.sh; do
+        local base
+        base=$(basename "$src")
+        case " ${SCRIPTS[*]} " in
+            *" $base "*) ;;
+            *)
+                echo "fatal: module/$base exists but is not in SCRIPTS - it would ship missing" >&2
+                rm -rf "$staging"
+                exit 1
+                ;;
+        esac
+    done
+
     if [ ! -f "$MODULE_DIR/module.prop" ]; then
         echo "fatal: missing module.prop" >&2
         rm -rf "$staging"

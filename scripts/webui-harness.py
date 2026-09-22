@@ -157,6 +157,13 @@ def build(no_driver=False):
             fx[k] = {"out": "", "rc": 1}
     with open(os.path.join(ROOT, "module", "webroot", "index.html"), encoding="utf-8") as f:
         page = f.read()
+    # Both stamps are exact literals. If either anchor moves, str.replace silently
+    # does nothing, the harness renders `dev` where the shipped page renders a real
+    # version, and a version-rendering regression screenshots clean.
+    for anchor in ('const SUITE_VERSION = "dev";', "\n<script>\n"):
+        if page.count(anchor) != 1:
+            sys.exit("harness: anchor moved in index.html (%d matches): %r"
+                     % (page.count(anchor), anchor))
     page = page.replace(
         'const SUITE_VERSION = "dev";',
         'const SUITE_VERSION = "v%s";' % suite_version(),
