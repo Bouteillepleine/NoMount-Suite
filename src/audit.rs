@@ -647,28 +647,40 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
             unread += 1;
             continue;
         };
-        let mut stock_max = 0u64;
+        let mut stock_max: HashMap<u64, u64> = HashMap::new();
         let mut dirs = Vec::new();
         for e in rd.flatten() {
             let p = e.path();
-            if !p.is_dir() {
+            // is_dir and the inode must come from the SAME lstat. p.is_dir() follows
+            // symlinks while ino_of() does not, so a symlink-to-directory was admitted
+            // to the directory population carrying its own inode - and inside an overlay
+            // a non-directory gets pseudo_dev plus the raw lower inode, which is orders
+            // of magnitude above the merged-directory band and neutralises the threshold.
+            let Ok(md) = fs::symlink_metadata(&p) else { continue };
+            if !md.is_dir() {
                 continue;
             }
-            let Some(i) = ino_of(&p) else { continue };
-            let ours = engine_dirs.contains(&p);
-            if ours {
-                dirs.push((p, i));
-            } else if i > stock_max {
-                stock_max = i;
+            let (d, i) = {
+                use std::os::unix::fs::MetadataExt;
+                (md.dev(), md.ino())
+            };
+            if engine_dirs.contains(&p) {
+                dirs.push((p, d, i));
+            } else {
+                let cur = stock_max.entry(d).or_insert(0);
+                if i > *cur {
+                    *cur = i;
+                }
             }
         }
-        if stock_max == 0 || dirs.is_empty() {
+        if stock_max.is_empty() || dirs.is_empty() {
             continue;
         }
         examined += 1;
-        for (p, i) in dirs {
-            if i > stock_max.saturating_mul(8) {
-                outliers.push(format!("{} ino={i} (stock max here {stock_max})", p.display()));
+        for (p, d, i) in dirs {
+            let Some(&sm) = stock_max.get(&d) else { continue };
+            if sm > 0 && i > sm.saturating_mul(8) {
+                outliers.push(format!("{} ino={i} (stock max here {sm})", p.display()));
             }
         }
     }
