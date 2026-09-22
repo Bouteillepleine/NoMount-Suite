@@ -69,8 +69,19 @@ if command -v ksud >/dev/null 2>&1; then
         nmlog "guard is tripped - skipping per-module tagging (nothing is served)"
     else
     nm_rule_counts
+    _tagt0=$(date +%s 2>/dev/null)
+    case "$_tagt0" in ''|*[!0-9]*) _tagt0="" ;; esac
+    _tagcut=0
     for d in /data/adb/modules/*/; do
         [ -d "$d" ] || continue
+        if [ -n "$_tagt0" ] && [ "$_tagcut" = 0 ]; then
+            _tagnow=$(date +%s 2>/dev/null)
+            case "$_tagnow" in ''|*[!0-9]*) _tagnow=$_tagt0 ;; esac
+            if [ "$((_tagnow - _tagt0))" -ge 60 ]; then
+                _tagcut=1
+                nmlog "per-module tagging passed 60s - the rest keep their own description; nothing served is affected"
+            fi
+        fi
         d=${d%/}; mid=${d##*/}
         { [ "$mid" = "meta-nomount" ] || [ "$mid" = "kernelnosu" ]; } && continue
         { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && continue
@@ -87,8 +98,9 @@ if command -v ksud >/dev/null 2>&1; then
              /proc/self/mountinfo 2>/dev/null); _m=${_m:-0}
         _badge="$_t · $_n served"
         [ "${_m:-0}" -gt 0 ] && _badge="$_badge · ℹ $_m mount(s)"
+        [ "$_tagcut" = 1 ] && continue
         _orig=$(sed -n 's/^description=//p' "$d/module.prop" | head -1)
-        KSU_MODULE="$mid" ksud module config set --temp override.description \
+        KSU_MODULE="$mid" nmto 5 ksud module config set --temp override.description \
             "[NoMount · $_badge] $_orig" >/dev/null 2>&1
     done
     fi
