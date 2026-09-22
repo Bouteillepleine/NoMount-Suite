@@ -32,6 +32,15 @@
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
 
+/* kvzalloc arrived in 4.12 and kvcalloc in 4.18; kvfree predates both and copes
+ * with either allocator, so the fallbacks are safe to free with it. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
+#define kvzalloc(size, flags) kzalloc((size), (flags))
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)
+#define kvcalloc(n, size, flags) kcalloc((n), (size), (flags))
+#endif
+
 #define NM_BTIME_DECL(x) struct timespec64 x __maybe_unused = {0}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 #define NM_BTIME_COPY(d, s) ((d) = (s))

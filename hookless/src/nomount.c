@@ -185,13 +185,14 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
     struct nomount_child_node *child;
     bool found = false;
 
-    if (unlikely(!dir_node)) return false;
-    if (!(READ_ONCE(dir_node->bloom_mask) & (1ULL << (hash & 63)))) return false;
     rule_info->gen = (u32)atomic_read(&nm_rule_gen);
+    rule_info->this_dir = NULL;
     rule_info->r_path.dentry = NULL;
     rule_info->r_path.mnt = NULL;
     rule_info->s_path.dentry = NULL;
     rule_info->s_path.mnt = NULL;
+    if (unlikely(!dir_node)) return false;
+    if (!(READ_ONCE(dir_node->bloom_mask) & (1ULL << (hash & 63)))) return false;
 
     rcu_read_lock();
     hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
@@ -1080,7 +1081,7 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
         return si->i_op->listxattr(stock->dentry, buffer, size);
     }
     if (info->flags & NM_FLAG_VIRTUAL_DIR) {
-        if (!info->v_ctx_len) return -EOPNOTSUPP;
+        if (!info->v_ctx_len) return 0;
         if (!size) return sizeof(nm_selinux_name);
         if (size < sizeof(nm_selinux_name)) return -ERANGE;
         memcpy(buffer, nm_selinux_name, sizeof(nm_selinux_name));
@@ -1975,6 +1976,10 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
             ri.r_path.dentry = child;
             path_get(&ri.r_path);
             r_child = d_backing_inode(child);
+            if (r_child) {
+                ri.v_ino = r_child->i_ino;
+                ri.v_dev = r_child->i_sb->s_dev;
+            }
             ri.flags = (info->flags & (NM_FLAG_OVL_INO | NM_FLAG_PUBLIC)) |
                        NM_FLAG_SHADOWS_STOCK | NM_FLAG_STOCK_ONLY;
             ri.s_path.mnt = stock->mnt;
@@ -3057,7 +3062,9 @@ static NM_ACTOR_RET nm_ino_actor(struct dir_context *ctx, const char *name,
     struct nm_ino_scan *s = container_of(ctx, struct nm_ino_scan, ctx);
     int len;
 
-    if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
+    if (namelen <= 0 || namelen > NAME_MAX ||
+        (namelen == 1 && name[0] == '.') ||
+        (namelen == 2 && name[0] == '.' && name[1] == '.'))
         return NM_ACTOR_CONTINUE;
 
     len = nm_scan_path(s, name, namelen);
@@ -3298,7 +3305,9 @@ static NM_ACTOR_RET nm_dmax_actor(struct dir_context *ctx, const char *name,
     struct nm_dmax_scan *s = container_of(ctx, struct nm_dmax_scan, ctx);
     int idx;
 
-    if (namelen <= 0 || namelen > NAME_MAX || name[0] == '.')
+    if (namelen <= 0 || namelen > NAME_MAX ||
+        (namelen == 1 && name[0] == '.') ||
+        (namelen == 2 && name[0] == '.' && name[1] == '.'))
         return NM_ACTOR_CONTINUE;
 
     if (ino > s->amax)
@@ -3333,22 +3342,22 @@ static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max,
     int qhead = 0, qtail = 0, visited = 0, ret = 0, i, skip;
     int cap = NM_DMAX_DIRS;
 
-    queue = kcalloc(cap, sizeof(*queue), GFP_KERNEL | __GFP_NOWARN);
+    queue = kvcalloc(cap, sizeof(*queue), GFP_KERNEL | __GFP_NOWARN);
     if (!queue) {
         cap = NM_DMAX_DIRS_MIN;
-        queue = kcalloc(cap, sizeof(*queue), GFP_KERNEL | __GFP_NOWARN);
+        queue = kvcalloc(cap, sizeof(*queue), GFP_KERNEL | __GFP_NOWARN);
     }
     if (!queue)
         return -ENOMEM;
     sc = kzalloc(sizeof(*sc), GFP_KERNEL | __GFP_NOWARN);
     if (!sc) {
-        kfree(queue);
+        kvfree(queue);
         return -ENOMEM;
     }
-    sc->names = kzalloc(NM_DMAX_NAMES * (NAME_MAX + 1), GFP_KERNEL | __GFP_NOWARN);
+    sc->names = kvzalloc(NM_DMAX_NAMES * (NAME_MAX + 1), GFP_KERNEL | __GFP_NOWARN);
     if (!sc->names) {
         kfree(sc);
-        kfree(queue);
+        kvfree(queue);
         return -ENOMEM;
     }
     queue[qtail] = kstrdup(root, GFP_KERNEL);
@@ -3467,8 +3476,8 @@ out:
     any = sc->amax;
     for (i = 0; i < qtail; i++)
         kfree(queue[i]);
-    kfree(queue);
-    kfree(sc->names);
+    kvfree(queue);
+    kvfree(sc->names);
     kfree(sc);
     if (ret == 0 && !max)
         ret = -ENOENT;
@@ -3511,6 +3520,8 @@ static unsigned long nm_ino_take(struct nm_ino_pop *pop, u64 c)
 
 static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
 {
+    struct nm_dev_ino *di = nm_dev_ino_get(pop->dev, NULL);
+    u64 dhw = di ? di->hw : 0;
     int a, s;
 
     if (pop->n <= 0)
@@ -3531,6 +3542,8 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
 
         if (room > 64)
             room = 64;
+        if (i + 1 >= pop->n && base < dhw)
+            room = 1;
         for (s = 1; s < (int)room; s++) {
             u64 cand = base + 1 + ((spread + (u64)s) % (room > 1 ? room - 1 : 1));
 
@@ -3544,6 +3557,8 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
     {
         u64 c = pop->v[pop->n - 1] + 1;
 
+        if (c <= dhw)
+            c = dhw + 1;
         while (nm_ino_taken(pop, c))
             c++;
         return nm_ino_take(pop, c);
@@ -3776,7 +3791,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     NM_BTIME_COPY(anc_btime, ex->v_btime);
                     anc_ino = ex->v_ino; anc_blksize = ex->v_blksize;
                     anc_ovl = !!(ex->flags & NM_FLAG_OVL_INO);
-                    anc_dino = ex->v_dino;
+                    anc_dino = ex->v_dino ? ex->v_dino : ex->v_ino;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
                     anc_result_mask = ex->v_result_mask;
                     anc_attributes = ex->v_attributes;
@@ -4656,6 +4671,7 @@ static int __nomount_del_rule(const char *v_path, size_t v_len, unsigned int tar
     struct nomount_rule *rule;
     char *norm = NULL;
     int ret = -ENOENT;
+    int i;
     u32 hash;
 
     while (v_len > 1 && v_path[v_len - 1] == '/') v_len--;
@@ -4675,6 +4691,9 @@ static int __nomount_del_rule(const char *v_path, size_t v_len, unsigned int tar
                 break;
             }
             nm_detach_rule_locked(rule, r_victims, true);
+            nm_sib_cache_valid = false;
+            for (i = 0; i < NM_RANGE_SLOTS; i++)
+                nm_range_cache[i].valid = false;
             ret = 0;
             break;
         }
@@ -4811,7 +4830,7 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
         nm_free_rule(rule);
     }
 
-    return 0;
+    return busy ? -EBUSY : 0;
 }
 
 static int nomount_nl_clear_rules(void)
