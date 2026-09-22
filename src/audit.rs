@@ -561,13 +561,14 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
         if injected.len() < 4 {
             continue;
         }
+        let injected_set: HashSet<&Path> = injected.iter().map(|t| t.as_path()).collect();
         let mut stock_buckets: HashMap<(u64, u64), usize> = HashMap::new();
         let mut ours_buckets: HashMap<(u64, u64), usize> = HashMap::new();
         for e in rd.flatten() {
             let p = e.path();
             let Some((dev, i)) = dev_ino_of(&p) else { continue };
             let b = (dev, i / BUCKET);
-            if injected.iter().any(|t| **t == p) || engine_dirs.contains(&p) {
+            if injected_set.contains(p.as_path()) || engine_dirs.contains(&p) {
                 *ours_buckets.entry(b).or_default() += 1;
             } else {
                 *stock_buckets.entry(b).or_default() += 1;
@@ -1410,7 +1411,7 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .meaning(
             "No app you hid can learn about a file it cannot open. Some files answered open() \
-             without answering xattr, which leaks nothing.",
+             without answering xattr - the same disagreement, signs swapped.",
         );
     }
     pass(

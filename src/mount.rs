@@ -1120,7 +1120,11 @@ pub fn run_mount() -> Result<()> {
 
     let mut blocked: std::collections::HashSet<&Path> = std::collections::HashSet::new();
     for e in &plan {
-        served.insert(e.module.as_str());
+        // `durable` is the sentinel run_mount uses for whiteout rows read off disk, not
+        // an installed module; counting it inflates the boot line's module total.
+        if e.module != "durable" {
+            served.insert(e.module.as_str());
+        }
         if e.kind == PlanKind::Inject && !source_resolves(e) {
             st.failed += 1;
             continue;

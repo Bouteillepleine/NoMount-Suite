@@ -135,8 +135,9 @@ pub enum VfsAction {
     /// Flush every live rule (the boot pass puts them back on the next reboot)
     #[command(after_help = "\
 Nothing is served afterwards until the rules come back. `nomount mount` rebuilds them from
-the installed modules without a reboot; a reboot does the same. Your hide list, whiteouts
-and settings are untouched - this clears the engine's live table only.")]
+the installed modules without a reboot; a reboot does the same. Your hide list and settings
+are untouched; the durable whiteout list is kept on disk but stops being applied until the
+next `nomount mount`, so every path it hides is readable again until then.")]
     Clear,
     /// Show live rules
     List,

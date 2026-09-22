@@ -125,7 +125,7 @@ impl Fingerprint {
 
         out.push(match self.served_matches_rule.as_str() {
             "ok" => mk("served bytes match the rule", Verdict::Pass, self.served_matches_rule.clone())
-                .meaning("Every injected path serves the bytes its own rule names."),
+                .meaning("Every injected path serves a file of the size its rule names, and the same opening 4 KiB."),
             "unchecked:engine-list-failed" => mk(
                 "served bytes match the rule",
                 Verdict::Unmeasured,
