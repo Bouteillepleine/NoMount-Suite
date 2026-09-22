@@ -1563,8 +1563,18 @@ mod tests {
         std::fs::write(&f, b"x").unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
 
+        // Running as root, CAP_DAC_OVERRIDE defeats chmod 000 and `blocked` is false,
+        // so the whole body was skipped and this test asserted nothing while passing.
+        // Say so instead of reporting a green it did not earn.
         let blocked = getdents(&dir).is_none();
-        if blocked {
+        if !blocked {
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            eprintln!(
+                "SKIPPED an_unreadable_parent_is_unmeasured_not_not_applicable: this process                  can still read a 0o000 directory (running as root?), so the case under test                  cannot be produced here"
+            );
+            return;
+        }
+        {
             let c = check_dino_matches_stat(std::slice::from_ref(&f));
             assert_eq!(
                 c.verdict.tag(),

@@ -8,9 +8,9 @@ labels: bug
 
 <!-- What you saw, and what you expected instead. -->
 
-## Diagnostics
+## Checks
 
-**Easiest, no PC needed: open the module's WebUI, go to *Diagnostics* →
+**Easiest, no PC needed: open the module's WebUI, go to *Checks* →
 *Developer tools* → *Export*.** Attach the folder it names.
 
 It writes a timestamped bundle to `/sdcard/Download` containing `check.txt`,

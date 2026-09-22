@@ -971,7 +971,7 @@
   <div class="card">
     <div class="card-h">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
-      <h2>Diagnostics</h2><span class="chip" id="fchip"> - </span>
+      <h2>Checks</h2><span class="chip" id="fchip"> - </span>
     </div>
     <p class="note" id="fsub">What your module set will do at the next boot, and what apps can see on this device right now.</p>
     <div class="btns" style="flex-wrap:wrap">
@@ -1322,7 +1322,7 @@
         bits.push(`${pending} planned file${pending > 1 ? "s" : ""} not served yet - press Reload`);
       }
       if (attn > 0) {
-        bits.push(`${attn} finding${attn > 1 ? "s" : ""} - see Diagnostics`);
+        bits.push(`${attn} finding${attn > 1 ? "s" : ""} - see Checks`);
       }
       $("substate").textContent = bits.length ? "modules injected · " + bits.join(" · ")
                                               : "modules injected";
@@ -1483,7 +1483,7 @@
       say("info", "The engine isn’t running", "nothing is being injected",
         "There are no mounts because there is nothing being served. This card cannot say " +
         "anything about how you look to an app until the engine answers - open " +
-        "<b>Diagnostics</b>.");
+        "<b>Checks</b>.");
     } else if (appNm > 0) {
       say("info", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
         "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
@@ -1493,17 +1493,17 @@
       say("info", "Something is mounting over the ROM",
         owner ? "from " + owner : fmnt + " finding(s) in the mount table",
         esc(redactUids(bad.map(function (c) { return c.meaning || c.name; }).join(" "))) +
-        " Open <b>Diagnostics</b> - it names each one, who caused it, and what " +
+        " Open <b>Checks</b> - it names each one, who caused it, and what " +
         "you can do about it.");
     } else if (ourBindsWarn) {
       say("info", "Our own my_* binds are visible",
         ourBinds + " real bind" + (ourBinds > 1 ? "s" : "") + " any app can read",
         esc(redactUids((mrows[0] && (mrows[0].meaning || mrows[0].evidence)) || "")) +
-        " Open <b>Diagnostics</b>.");
+        " Open <b>Checks</b>.");
     } else if (fmnt < 0) {
       say("info", "Mount posture not measured", "no check has read the mount table yet",
         "Nothing has read the mount table here yet, so this says nothing either " +
-        "way. Open <b>Diagnostics</b>.");
+        "way. Open <b>Checks</b>.");
     } else if (appNm < 0 && rootNm > 0) {
       say("info", "App view unavailable", "could not measure what a non-root reader sees",
         "Couldn’t drop to a non-root uid to verify here, and root sees " + rootNm +

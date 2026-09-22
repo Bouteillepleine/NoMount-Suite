@@ -10,9 +10,9 @@ Two sweeps:
 
   (a) case   - every -/+ line pair in a commit range that is identical apart
                from letter case. scripts/case-sweep.py already does a narrowed
-               version (it fires only when an ALL-CAPS token is LOST, and its
-               CODE_EXT does not include .html, so it cannot see the WebUI at
-               all); this reports the whole class.
+               version (it fires only when a cased token is LOST - ALL-CAPS,
+               camelCase or PascalCase - though its CODE_EXT DOES include
+               .html and module.prop); this reports the whole class.
 
   (b) links  - every literal one file matches in another file's output.
                CONSUMERS  JS .indexOf/.includes/.startsWith/.endsWith/.split/

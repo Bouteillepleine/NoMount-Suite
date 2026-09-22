@@ -32,7 +32,7 @@ the bootloop guard exists to catch.
   <tr>
     <td align="center"><sub><b>Status</b><br>zero mounts, live counts</sub></td>
     <td align="center"><sub><b>Rules</b><br>what is served, per module</sub></td>
-    <td align="center"><sub><b>Diagnostics</b><br>one pass, plain verdicts</sub></td>
+    <td align="center"><sub><b>Checks</b><br>one pass, plain verdicts</sub></td>
     <td align="center"><sub><b>Duck Detector</b><br>0 danger, 0 warning</sub></td>
   </tr>
 </table>
@@ -254,7 +254,7 @@ the [engine compile matrix](.github/workflows/hookless-compile-matrix.yml), whic
 runs on every push touching `hookless/`. It says nothing about whether the device
 boots. A report either way is worth an issue.
 
-Tested another device or root manager? Open an issue - the WebUI's **Diagnostics
+Tested another device or root manager? Open an issue - the WebUI's **Checks
 → Developer tools → Export** button (or `nomount export` from a shell) produces a
 bundle with the hide list already redacted, which is the most useful thing to
 attach. A report that one of the untested managers works is as useful as a bug.

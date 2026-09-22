@@ -1395,6 +1395,22 @@ mod tests {
                  the LKM branch's gate builds a different engine version and does not cover it"
             );
         }
+        const README: &str = include_str!("../README.md");
+        const BUG_TEMPLATE: &str = include_str!("../.github/ISSUE_TEMPLATE/bug_report.md");
+        // The nav button's own label is the only name a reporter can actually tap. It was
+        // renamed to Checks in the four-tab restructure while the pane heading, the hero
+        // prose, the README and the issue template still said Diagnostics - so every
+        // "go to X -> Export" instruction named a tab that is not on screen.
+        assert!(
+            PAGE.contains("<span>Checks</span>"),
+            "the diagnostics tab's nav label changed; README and bug_report.md route              reporters to it by name and must be updated in the same commit"
+        );
+        for (what, doc) in [("README.md", README), ("bug_report.md", BUG_TEMPLATE)] {
+            assert!(
+                !doc.contains("Diagnostics*") && !doc.contains("**Diagnostics"),
+                "{what} still routes the Export instructions to a Diagnostics tab; the nav                  button says Checks"
+            );
+        }
         const GATE_SWEEP: &str = include_str!("../scripts/gate-sweep.sh");
         for lit in [
             "^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$",
