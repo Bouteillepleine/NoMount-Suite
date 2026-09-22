@@ -1019,6 +1019,13 @@ pub fn run_mount() -> Result<()> {
         plan.iter().map(|e| e.target.as_path()).collect();
     let extra: Vec<std::path::PathBuf> = durable
         .iter()
+        .filter(|w| match crate::whiteout::validate(w) {
+            Ok(()) => true,
+            Err(why) => {
+                eprintln!("nomount: durable whiteout skipped - {why}");
+                false
+            }
+        })
         .map(std::path::PathBuf::from)
         .filter(|w| !planned.contains(w.as_path()))
         .collect();
