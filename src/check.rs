@@ -433,12 +433,9 @@ pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()
     let _pass = crate::mount::pass_lock();
     let r = build(plan, device)?;
 
-    if json {
-        println!("{}", r.json());
-    } else {
-        print!("{}", r.text());
-    }
-
+    // Persist before printing. SIGPIPE is SIG_DFL, so a reader that closes early kills
+    // the process mid-print and --write never runs, silently leaving service.sh's
+    // health.txt stale while the check itself succeeded.
     if write {
         let _ = crate::statefile::write_atomic(CACHE, r.json());
         if want_device {
@@ -447,6 +444,12 @@ pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()
             body.push_str(&format!("ts={}\n", r.ts));
             let _ = crate::statefile::write_atomic(HEALTH, body);
         }
+    }
+
+    if json {
+        println!("{}", r.json());
+    } else {
+        print!("{}", r.text());
     }
 
     if r.tally().open_failures() > 0 {

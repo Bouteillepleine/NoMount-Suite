@@ -245,15 +245,24 @@ pub fn list() -> Result<()> {
         println!("no whiteouts configured");
         return Ok(());
     }
-    let live = live_whiteouts()?;
+    // The durable half is readable without the engine, and a kernel with no
+    // CONFIG_NOMOUNT is exactly when someone needs to see - and clear - this list.
+    let (live, engine_up) = match live_whiteouts() {
+        Ok(l) => (l, true),
+        Err(_) => (Default::default(), false),
+    };
     for e in &entries {
         let applied = live.contains(e);
         let present = Path::new(e).exists();
-        let state = match (applied, present) {
-            (true, false) => "hidden",
-            (true, true) => "applied, but still visible - the engine is not serving it",
-            (false, false) => "not applied (and no such path on this ROM)",
-            (false, true) => "not applied - run `nomount whiteout apply`",
+        let state = if !engine_up {
+            "not applied - the engine did not answer"
+        } else {
+            match (applied, present) {
+                (true, false) => "hidden",
+                (true, true) => "applied, but still visible - the engine is not serving it",
+                (false, false) => "not applied (and no such path on this ROM)",
+                (false, true) => "not applied - run `nomount whiteout apply`",
+            }
         };
         println!("{e}\t{state}");
     }

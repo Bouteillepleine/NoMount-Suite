@@ -438,6 +438,9 @@ pub fn run_snapshot() -> Result<()> {
 }
 
 fn fingerprint_text() -> Result<String> {
+    // A baseline sampled halfway through a mount/reload pass is wrong forever: every
+    // later `verify` compares against it and reports DRIFT.
+    let _pass = crate::mount::pass_lock();
     let r = crate::check::build(false, true)?;
     let mut body = r.fingerprint_text();
     let _ = writeln!(body, "ts={}", r.ts);

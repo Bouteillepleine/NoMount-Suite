@@ -1777,6 +1777,18 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             skipped_dirs += 1;
             continue;
         }
+        if c.source.join(".replace").exists() {
+            // The planner expands .replace into whiteouts for the stock siblings; absorb
+            // has no such step, so serving the module's files here brings back exactly
+            // the stock entries the marker exists to hide.
+            leaking += 1;
+            eprintln!(
+                "nomount: LEAK {} <- {} stays mounted: its source carries a .replace, and                  absorbing it would serve the module's files while the stock siblings it                  hides come back",
+                c.target.display(),
+                c.source.display()
+            );
+            continue;
+        }
         if !c.source.exists() {
             leaking += 1;
             eprintln!(

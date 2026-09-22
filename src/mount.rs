@@ -886,6 +886,11 @@ pub fn run_reload() -> Result<()> {
         }
     }
     for w in &durable_whiteouts {
+        // run_mount drops a durable row whose target the plan serves; reload applied it
+        // after the plan loop, so which of the two ran last decided what the path held.
+        if desired_hookless.contains_key(w.as_path()) {
+            continue;
+        }
         if crate::whiteout::validate(&w.to_string_lossy()).is_err() {
             eprintln!("nomount: skipping invalid whiteout entry {}", w.display());
             failed += 1;
@@ -1160,6 +1165,9 @@ pub fn run_mount() -> Result<()> {
                     applied_apks.push((e.target.clone(), e.source.clone()));
                 }
                 Ok(crate::bind::BindOutcome::AlreadyMounted) => {
+                    // Still a live row in every app's mountinfo, so it counts: the boot
+                    // line claimed `mountless` while binds.list rows were mounted.
+                    binds += 1;
                     applied_apks.push((e.target.clone(), e.source.clone()));
                 }
                 Err(_) => st.failed += 1,
