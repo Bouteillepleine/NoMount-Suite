@@ -54,8 +54,11 @@ jobs:
         run: |
           sudo apt-get install -y shellcheck >/dev/null 2>&1 || true
           shellcheck -x -s sh -S info -f gcc module/*.sh
-          shellcheck -s bash -S info -f gcc scripts/package.sh
+          shellcheck -s bash -S info -f gcc scripts/package.sh scripts/gate-sweep.sh
           shellcheck -s sh -S info -f gcc hookless/*.sh
+
+      - name: Engine config-gate sweep
+        run: bash scripts/gate-sweep.sh
 
       - name: Case-only-change sweep
         if: github.event_name == 'push'
