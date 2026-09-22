@@ -1157,20 +1157,19 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             .map(str::to_string)
             .collect();
         if !stale.is_empty() {
-            let names = if crate::blocklist::redact_hide_list() {
-                "names redacted".to_string()
-            } else {
-                stale.join(", ")
-            };
+            // Never spell the package names here. `check` does not set
+            // NM_REDACT_HIDE_LIST, so this text reaches audit.json and the WebUI's raw
+            // report verbatim, and redactUids is uid-shaped - it cannot catch a package
+            // name. The count is the actionable part; the file is named so you can read
+            // it yourself.
             f.push(Finding {
                 level: Level::Info,
                 check: "stale legacy blocklist entries",
                 detail: format!(
-                    "{} entry/entries in /data/adb/nomount/blocklist are hidden apps ({}). They moved \
+                    "{} entry/entries in /data/adb/nomount/blocklist are hidden apps. They moved \
                  to `uidhide` and do nothing here. Remove them if you want that file to mean only \
                  \"skip this module\".",
-                    stale.len(),
-                    names
+                    stale.len()
                 ),
             });
         }
