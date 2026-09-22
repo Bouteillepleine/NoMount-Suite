@@ -1492,13 +1492,13 @@
       const owner = bad.map(function (c) { return c.owner; }).filter(Boolean).join(", ");
       say("info", "Something is mounting over the ROM",
         owner ? "from " + owner : fmnt + " finding(s) in the mount table",
-        esc(bad.map(function (c) { return c.meaning || c.name; }).join(" ")) +
+        esc(redactUids(bad.map(function (c) { return c.meaning || c.name; }).join(" "))) +
         " Open <b>Diagnostics</b> - it names each one, who caused it, and what " +
         "you can do about it.");
     } else if (ourBindsWarn) {
       say("info", "Our own my_* binds are visible",
         ourBinds + " real bind" + (ourBinds > 1 ? "s" : "") + " any app can read",
-        esc((mrows[0] && (mrows[0].meaning || mrows[0].evidence)) || "") +
+        esc(redactUids((mrows[0] && (mrows[0].meaning || mrows[0].evidence)) || "")) +
         " Open <b>Diagnostics</b>.");
     } else if (fmnt < 0) {
       say("info", "Mount posture not measured", "no check has read the mount table yet",
@@ -1951,7 +1951,7 @@
     // the check's own name as the secondary technical label. Leading with "readdir ino vs stat
     // ino" told the reader nothing they could act on.
     if (c.meaning) {
-      b.push('<div class="fname">' + esc(c.meaning) + "</div>");
+      b.push('<div class="fname">' + esc(redactUids(c.meaning)) + "</div>");
       b.push('<div class="fmean">' + esc(c.name) + "</div>");
     } else {
       b.push('<div class="fname">' + esc(c.name) + "</div>");
@@ -2197,7 +2197,7 @@
         label = "not served"; cls = "info"; tip = "";
       }
       const why = uns
-        ? `<div class="mwhy">${esc(uns.evidence || uns.meaning || "")}</div>`
+        ? `<div class="mwhy">${esc(redactUids(uns.evidence || uns.meaning || ""))}</div>`
         : "";
       return `<div class="mrow${uns ? " unserved" : ""}"><div class="mname">${esc(id)}</div>${why}` +
              `<div class="mmeta">${files}${vis}<span class="tag ${cls}"${tip ? ` title="${esc(tip)}"` : ""}>${label}</span></div></div>`;
