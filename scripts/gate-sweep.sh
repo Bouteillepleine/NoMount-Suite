@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-set -u
+# The matrix step runs under `bash -e` with `set -o pipefail`, so this script does
+# too: every grep below may legitimately match nothing, and without `|| true` a
+# clean engine fails the leg before it compiles anything. That is not theoretical -
+# it is what shipping this without the flags did.
+set -euo pipefail
 
 extract_positive() {
     local cond ie all neg
-    cond=$(grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' "$@")
-    ie=$(grep -ohE 'IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+' "$@")
-    all=$(printf '%s\n%s\n' "$cond" "$ie" | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u)
+    cond=$(grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' "$@" || true)
+    ie=$(grep -ohE 'IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+' "$@" || true)
+    all=$(printf '%s\n%s\n' "$cond" "$ie" | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
     neg=$(printf '%s\n' "$cond" | grep -E '(ifndef|![[:space:]]*defined)' \
-          | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u)
+          | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
     [ -n "$all" ] || return 0
     if [ -n "$neg" ]; then
         comm -23 <(printf '%s\n' "$all") <(printf '%s\n' "$neg")
@@ -17,9 +21,9 @@ extract_positive() {
 }
 
 extract_negative() {
-    grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' "$@" \
-        | grep -E '(ifndef|![[:space:]]*defined)' \
-        | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u
+    grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' "$@" 2>/dev/null \
+        | { grep -E '(ifndef|![[:space:]]*defined)' || true; } \
+        | { grep -oE 'CONFIG_[A-Z0-9_]+' || true; } | sort -u
 }
 
 fail=0
@@ -64,6 +68,25 @@ EOF
 : > "$T/b.h"
 check "a file with no CONFIG_ gate yields none" \
       "$(extract_positive "$T/b.c" "$T/b.h" | tr '\n' ' ')" ""
+check "a file with no negative gate yields none" \
+      "$(extract_negative "$T/b.c" "$T/b.h" | tr '\n' ' ')" ""
+
+# The matrix step is `bash -e` + `set -o pipefail`. A grep that matches nothing
+# exits 1, so an extraction without `|| true` kills the leg before it compiles.
+# Run both extractors under those exact flags against a source with no gate at
+# all - the case the real engine hits today.
+if bash -euo pipefail -c "
+    $(declare -f extract_positive)
+    $(declare -f extract_negative)
+    extract_positive '$T/b.c' '$T/b.h' >/dev/null
+    extract_negative '$T/b.c' '$T/b.h' >/dev/null
+"; then
+    printf 'ok    extraction survives bash -e -o pipefail with zero matches\n'
+else
+    printf 'FAIL  extraction dies under bash -e -o pipefail when nothing matches\n'
+    printf '        this is exactly what turned all ten matrix legs red on 2026-09-22\n'
+    fail=1
+fi
 
 SRC_C=${1:-hookless/src/nomount.c}
 SRC_H=${2:-hookless/src/nomount.h}

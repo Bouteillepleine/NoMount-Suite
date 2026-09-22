@@ -193,12 +193,15 @@ jobs:
           # The whole conditional line is matched, not a CONFIG_-anchored prefix:
           # a bracket expression like [^\n] excludes the letter n and so can never
           # cross "defined" or "ndef". scripts/gate-sweep.sh pins this.
+          # Every grep here may legitimately match nothing, and this step runs under
+          # `bash -e` with `set -o pipefail`, so each needs `|| true` or a clean
+          # engine fails the leg before it compiles anything.
           cond=$(grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' \
-                 fs/nomount.c fs/nomount.h)
-          ie=$(grep -ohE 'IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+' fs/nomount.c fs/nomount.h)
-          all=$(printf '%s\n%s\n' "$cond" "$ie" | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u)
+                 fs/nomount.c fs/nomount.h || true)
+          ie=$(grep -ohE 'IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+' fs/nomount.c fs/nomount.h || true)
+          all=$(printf '%s\n%s\n' "$cond" "$ie" | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
           neg=$(printf '%s\n' "$cond" | grep -E '(ifndef|![[:space:]]*defined)' \
-                | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u)
+                | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
           if [ -n "$neg" ]; then
             gates=$(comm -23 <(printf '%s\n' "$all") <(printf '%s\n' "$neg"))
             echo "::notice::${{ matrix.ver }} negative-sense config gates (not asserted): $(echo $neg)"
