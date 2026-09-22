@@ -205,6 +205,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
                 rule_info->v_atime = rule->v_atime;
                 rule_info->v_mtime = rule->v_mtime;
                 rule_info->v_ctime = rule->v_ctime;
+                NM_BTIME_COPY(rule_info->v_btime, rule->v_btime);
                 rule_info->v_attributes = rule->v_attributes;
                 rule_info->v_attr_mask = rule->v_attr_mask;
                 rule_info->v_blksize = rule->v_blksize;
@@ -442,6 +443,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     info->v_atime = rule_info->v_atime;
     info->v_mtime = rule_info->v_mtime;
     info->v_ctime = rule_info->v_ctime;
+    NM_BTIME_COPY(info->v_btime, rule_info->v_btime);
     info->v_attributes = rule_info->v_attributes;
     info->v_attr_mask = rule_info->v_attr_mask;
     info->v_blksize = rule_info->v_blksize;
@@ -1520,8 +1522,12 @@ static int nm_dsnap_iterate(struct file *file, struct dir_context *ctx,
     return 0;
 }
 
-#if defined(STATX_DIOALIGN)
+#if defined(STATX_DIOALIGN) && defined(STATX_BTIME)
+#define NM_STATX_WANT (STATX_BASIC_STATS | STATX_DIOALIGN | STATX_BTIME)
+#elif defined(STATX_DIOALIGN)
 #define NM_STATX_WANT (STATX_BASIC_STATS | STATX_DIOALIGN)
+#elif defined(STATX_BTIME)
+#define NM_STATX_WANT (STATX_BASIC_STATS | STATX_BTIME)
 #else
 #define NM_STATX_WANT (STATX_BASIC_STATS)
 #endif
@@ -1687,7 +1693,9 @@ static void nm_mirror_stat(const struct nm_inode_info *info, struct inode *v_ino
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
     if (info->v_result_mask) stat->result_mask &= info->v_result_mask;
 #ifdef STATX_BTIME
-    if (!(stat->result_mask & STATX_BTIME)) {
+    if (stat->result_mask & STATX_BTIME) {
+        stat->btime = info->v_btime;
+    } else {
         stat->btime.tv_sec = 0;
         stat->btime.tv_nsec = 0;
     }
@@ -2035,6 +2043,7 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     ri.v_atime = info->v_atime;
     ri.v_mtime = info->v_mtime;
     ri.v_ctime = info->v_ctime;
+    NM_BTIME_COPY(ri.v_btime, info->v_btime);
     ri.v_attributes = info->v_attributes;
     ri.v_attr_mask  = info->v_attr_mask;
     ri.v_blksize    = info->v_blksize;
@@ -3681,6 +3690,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     kgid_t anc_gid = GLOBAL_ROOT_GID;
     umode_t anc_mode = 0755;
     struct timespec64 anc_atime = {0}, anc_mtime = {0}, anc_ctime = {0};
+    NM_BTIME_DECL(anc_btime);
     unsigned long anc_ino = 0;
     u32 anc_blksize = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
@@ -3729,6 +3739,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     anc_uid = ex->v_uid; anc_gid = ex->v_gid;
                     anc_mode = ex->v_mode ? ex->v_mode : 0755;
                     anc_atime = ex->v_atime; anc_mtime = ex->v_mtime; anc_ctime = ex->v_ctime;
+                    NM_BTIME_COPY(anc_btime, ex->v_btime);
                     anc_ino = ex->v_ino; anc_blksize = ex->v_blksize;
                     anc_ovl = !!(ex->flags & NM_FLAG_OVL_INO);
                     anc_dino = ex->v_dino;
@@ -3783,6 +3794,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 #endif
                                           STATX_ATTR_AUTOMOUNT);
 #endif
+                    NM_BTIME_COPY(anc_btime, akst.btime);
                     anc_atime = akst.atime;
                     anc_mtime = akst.mtime;
                     anc_ctime = akst.ctime;
@@ -3901,6 +3913,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 irule->v_atime = anc_atime;
                 irule->v_mtime = anc_mtime;
                 irule->v_ctime = anc_ctime;
+                NM_BTIME_COPY(irule->v_btime, anc_btime);
                 irule->v_ctx_len = anc_ctx_len;
                 if (anc_ctx_len) memcpy(irule->v_ctx, anc_ctx, anc_ctx_len + 1);
                 irule->v_cap = anc_cap;
@@ -4300,6 +4313,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_atime = kst.atime;
             rule->v_mtime = kst.mtime;
             rule->v_ctime = kst.ctime;
+            NM_BTIME_COPY(rule->v_btime, kst.btime);
             rule->v_blksize = kst.blksize;
             rule->v_cratio = nm_size_ratio(kst.size, kst.blocks);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
@@ -4344,6 +4358,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
             rule->v_atime = sib.atime;
             rule->v_mtime = sib.mtime;
             rule->v_ctime = sib.ctime;
+            NM_BTIME_COPY(rule->v_btime, sib.btime);
             rule->v_blksize    = sib.blksize;
             rule->v_cratio     = nm_size_ratio(sib.size, sib.blocks);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
@@ -4414,6 +4429,7 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
                             rule->v_atime = kst.atime;
                             rule->v_mtime = kst.mtime;
                             rule->v_ctime = kst.ctime;
+                            NM_BTIME_COPY(rule->v_btime, kst.btime);
                         }
                         path_put(&v_path_struct);
                     }

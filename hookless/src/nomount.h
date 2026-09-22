@@ -17,7 +17,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.33.5"
+#define NM_MODULE_VERSION "1.33.6"
 
 #define NOMOUNT_VERSION    33
 #define NOMOUNT_HASH_BITS  12
@@ -31,6 +31,13 @@
 #define NM_FLAG_STOCK_ONLY  (1 << 7)
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
+
+#define NM_BTIME_DECL(x) struct timespec64 x __maybe_unused = {0}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#define NM_BTIME_COPY(d, s) ((d) = (s))
+#else
+#define NM_BTIME_COPY(d, s) ((void)0)
+#endif
 
 #define NM_CAP_FSYNC        (1 << 0)
 #define NM_CAP_ODIRECT      (1 << 1)
@@ -92,6 +99,7 @@ struct nm_inode_info {
     u64 v_dino, v_pdino;
     dev_t v_dev, v_mapdev;
     struct timespec64 v_atime, v_mtime, v_ctime;
+    struct timespec64 v_btime;
     u64 v_attributes, v_attr_mask;
     u32 v_blksize;
     u16 v_cratio;
@@ -156,6 +164,7 @@ struct nomount_rule {
     dev_t v_dev;
     dev_t v_mapdev;
     struct timespec64 v_atime, v_mtime, v_ctime;
+    struct timespec64 v_btime;
     u64 v_attributes, v_attr_mask;
     u32 v_blksize;
     u16 v_cratio;
@@ -197,6 +206,7 @@ struct nm_rule_info {
     u64 v_dino, v_pdino;
     dev_t v_dev, v_mapdev;
     struct timespec64 v_atime, v_mtime, v_ctime;
+    struct timespec64 v_btime;
     u64 v_attributes, v_attr_mask;
     u32 v_blksize;
     u16 v_cratio;
