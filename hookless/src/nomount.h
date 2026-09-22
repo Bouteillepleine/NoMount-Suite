@@ -17,7 +17,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.33.4"
+#define NM_MODULE_VERSION "1.33.5"
 
 #define NOMOUNT_VERSION    33
 #define NOMOUNT_HASH_BITS  12
@@ -34,6 +34,7 @@
 
 #define NM_CAP_FSYNC        (1 << 0)
 #define NM_CAP_ODIRECT      (1 << 1)
+#define NM_CAP_THPMAP       (1 << 2)
 #define NM_CAP_KNOWN        (1 << 7)
 
 #define NM_LOG_TAG "NoMount: "
@@ -176,8 +177,10 @@ struct nomount_rule {
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 static const struct file_operations nm_file_fops_mmap_prepare;
+static const struct file_operations nm_file_fops_mmap_prepare_thp;
 #endif
 static const struct file_operations nm_file_fops;
+static const struct file_operations nm_file_fops_thp;
 static const struct inode_operations nm_file_iops;
 static const struct file_operations nm_dir_fops;
 static const struct inode_operations nm_dir_iops;

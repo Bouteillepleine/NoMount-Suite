@@ -9,6 +9,8 @@
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/magic.h>
+#include <linux/mm.h>
+#include <linux/huge_mm.h>
 #include <linux/hash.h>
 #include <linux/sort.h>
 #include <linux/sched.h>
@@ -489,13 +491,16 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
             inode->i_op = &nm_dir_iops;
             inode->i_fop = &nm_dir_fops;
         } else {
+            bool thp = (rule_info->v_cap & NM_CAP_KNOWN) &&
+                       (rule_info->v_cap & NM_CAP_THPMAP);
+
             inode->i_op = &nm_file_iops;
         #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
             if (!S_ISLNK(real_inode->i_mode) && real_inode->i_fop && real_inode->i_fop->mmap_prepare)
-                inode->i_fop = &nm_file_fops_mmap_prepare;
+                inode->i_fop = thp ? &nm_file_fops_mmap_prepare_thp : &nm_file_fops_mmap_prepare;
             else
         #endif
-                inode->i_fop = &nm_file_fops;
+                inode->i_fop = thp ? &nm_file_fops_thp : &nm_file_fops;
         }
         inode->i_mapping = real_inode->i_mapping;
         {
@@ -796,9 +801,7 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
         }
         default:       return -EINVAL;
         }
-        if (offset < 0) return -EINVAL;
-        file->f_pos = offset;
-        return offset;
+        return vfs_setpos(file, offset, file_inode(file)->i_sb->s_maxbytes);
     }
 
     if ((whence == SEEK_END || whence == SEEK_DATA || whence == SEEK_HOLE) &&
@@ -824,9 +827,17 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
         }
     }
 
-    real_file->f_pos = file->f_pos;
-    res = vfs_llseek(real_file, offset, whence);
-    file->f_pos = real_file->f_pos;
+    if (whence == SEEK_DATA || whence == SEEK_HOLE) {
+        real_file->f_pos = file->f_pos;
+        res = vfs_llseek(real_file, offset, whence);
+        file->f_pos = real_file->f_pos;
+        return res;
+    }
+
+    res = generic_file_llseek_size(file, offset, whence,
+                                   file_inode(file)->i_sb->s_maxbytes,
+                                   i_size_read(file_inode(file)));
+    if (res >= 0) real_file->f_pos = res;
 
     return res;
 }
@@ -1011,6 +1022,7 @@ static u8 nm_stock_caps(struct inode *ino)
 
     if (!ino) return 0;
     if (ino->i_fop && ino->i_fop->fsync) cap |= NM_CAP_FSYNC;
+    if (ino->i_fop && ino->i_fop->get_unmapped_area) cap |= NM_CAP_THPMAP;
     return cap;
 }
 
@@ -2352,7 +2364,45 @@ static const struct file_operations nm_file_fops_mmap_prepare = {
     .fallocate = nm_fallocate,
     .fsync = nm_fsync,
 };
+
+static const struct file_operations nm_file_fops_mmap_prepare_thp = {
+    .owner = THIS_MODULE,
+    .llseek = nm_llseek,
+    .open = nm_open,
+    .release = nm_release,
+    .read_iter = nm_read_iter,
+    .write_iter = nm_write_iter,
+    .mmap_prepare = nm_mmap_prepare,
+    .get_unmapped_area = thp_get_unmapped_area,
+    .unlocked_ioctl = nm_unlocked_ioctl,
+#ifdef CONFIG_COMPAT
+    .compat_ioctl = nm_compat_ioctl,
 #endif
+    .splice_read = nm_splice_read,
+    .splice_write = nm_splice_write,
+    .fallocate = nm_fallocate,
+    .fsync = nm_fsync,
+};
+#endif
+
+static const struct file_operations nm_file_fops_thp = {
+    .owner = THIS_MODULE,
+    .llseek = nm_llseek,
+    .open = nm_open,
+    .release = nm_release,
+    .read_iter = nm_read_iter,
+    .write_iter = nm_write_iter,
+    .mmap = nm_mmap,
+    .get_unmapped_area = thp_get_unmapped_area,
+    .unlocked_ioctl = nm_unlocked_ioctl,
+#ifdef CONFIG_COMPAT
+    .compat_ioctl = nm_compat_ioctl,
+#endif
+    .splice_read = nm_splice_read,
+    .splice_write = nm_splice_write,
+    .fallocate = nm_fallocate,
+    .fsync = nm_fsync,
+};
 
 static const struct file_operations nm_file_fops = {
     .owner = THIS_MODULE,
@@ -2513,10 +2563,18 @@ static inline int nomount_hijack_superblock(struct super_block *sb)
     return 0;
 }
 
+static inline bool nm_is_own_inode(const struct inode *inode)
+{
+    const struct inode_operations *iop = smp_load_acquire(&inode->i_op);
+
+    return iop == &nm_dir_iops || iop == &nm_file_iops;
+}
+
 static inline int nomount_hijack_virtual_parent(struct nomount_dir_node *dir_node, struct inode *inode)
 {
     struct nm_fop *nm_fop;
 
+    if (unlikely(nm_is_own_inode(inode))) return -EBUSY;
     if (unlikely(!inode->i_fop)) return 0;
     nm_fop = nm_get_fop(smp_load_acquire(&inode->i_fop));
     if (nm_fop) {
@@ -2554,6 +2612,7 @@ static inline int nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, st
     struct nm_iop *nm_iop;
 
     if (unlikely(!inode->i_op)) return 0;
+    if (unlikely(nm_is_own_inode(inode))) return -EBUSY;
     nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop, lookup, nomount_hijacked_lookup);
     if (nm_iop) {
         smp_store_release(&nm_iop->dir_node, dir_node);
@@ -3489,6 +3548,7 @@ static unsigned long nm_place_entry_ino(struct nm_ino_pop *pop, const char *pare
 {
     struct nm_ino_pop *alt;
     dev_t dev = pop ? pop->dev : 0;
+    unsigned long ino;
 
     if (is_dir)
         return pop ? nm_place_dir_ino(pop, spread) : 0;
@@ -3496,11 +3556,14 @@ static unsigned long nm_place_entry_ino(struct nm_ino_pop *pop, const char *pare
         return nm_place_ino(pop, spread);
 
     alt = nm_dir_ino_pop_cached(parent, true);
-    if (alt && alt->n)
-        return nm_place_ino(alt, spread);
     if (alt && alt->dev)
         dev = alt->dev;
-    return nm_place_any_ino(dev, spread);
+    ino = nm_place_any_ino(dev, spread);
+    if (ino)
+        return ino;
+    if (alt && alt->n)
+        return nm_place_ino(alt, spread);
+    return 0;
 }
 
 static struct nm_ino_pop *nm_real_ancestor_pop(const char *vpath)
