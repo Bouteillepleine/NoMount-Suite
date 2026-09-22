@@ -30,10 +30,17 @@ if [ -f "$LOCK" ]; then
         rm -f "$LOCK"
     fi
 fi
-( set -o noclobber; echo $$ > "$LOCK" ) 2>/dev/null || exit 0
+DIRTY=$NMDIR/.uidwatch.dirty
+( set -o noclobber; echo $$ > "$LOCK" ) 2>/dev/null || {
+    : > "$DIRTY" 2>/dev/null
+    exit 0
+}
 trap 'rm -f "$LOCK"' EXIT INT TERM
 
 sleep 3
+_rounds=0
+while :; do
+rm -f "$DIRTY" 2>/dev/null
 if _has_entries "$NMDIR/uidhide"; then
     _out=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _urc=$?
@@ -58,4 +65,11 @@ if _has_entries "$NMDIR/absorbed.list"; then
         nmlog "absorb after package change ($(printf '%s\n' "$_abs_all" | tail -1))"
     fi
 fi
+_rounds=$((_rounds + 1))
+[ -e "$DIRTY" ] || break
+if [ "$_rounds" -ge 3 ]; then
+    nmlog "package changes kept arriving while the hide list was being re-applied; stopping after $_rounds passes - the next package event or boot picks up the rest"
+    break
+fi
+done
 exit 0
