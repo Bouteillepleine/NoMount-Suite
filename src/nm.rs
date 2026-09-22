@@ -190,7 +190,7 @@ impl Nm {
                     failed.extend(chunk.iter().copied());
                     continue;
                 }
-                for (v, r) in chunk {
+                for (i, (v, r)) in chunk.iter().enumerate() {
                     match self.add_batch_coded(public, std::slice::from_ref(&(*v, *r))) {
                         Ok(_) => {}
                         Err(e) => {
@@ -209,6 +209,12 @@ impl Nm {
                             );
                             if Nm::engine_is_unreachable(e.code) {
                                 gave_up = true;
+                                failed.extend(chunk[i + 1..].iter().copied());
+                                eprintln!(
+                                    "nomount: the engine stopped answering mid-chunk - {} \
+                                     further rule(s) in it were never sent and are unserved.",
+                                    chunk.len() - i - 1
+                                );
                                 break;
                             }
                         }
