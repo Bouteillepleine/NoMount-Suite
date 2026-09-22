@@ -1395,6 +1395,34 @@ mod tests {
                  the LKM branch's gate builds a different engine version and does not cover it"
             );
         }
+        // The bindhosts marker is a three-way string contract: service.sh writes it,
+        // service.sh greps for it to decide whether the override is still ours, and
+        // uninstall.sh greps for it to decide whether removing it is safe. A comment
+        // strip already killed this line once; lowercase it in any one of the three and
+        // uninstalling NoMount leaves mode_override.sh behind forever, pinning bindhosts
+        // to mode 0.
+        // nm's exit codes are a contract: Nm::engine_is_unreachable abandons the rest
+        // of a mount pass on them. They were bare literals on both sides.
+        const NM_H: &str = include_str!("../userspace/src/nm.h");
+        for (name, value) in [("NM_EXIT_TIMEOUT", 5), ("NM_EXIT_NO_ENGINE", 2)] {
+            assert!(
+                NM_H.contains(&format!("#define {name}   {value}"))
+                    || NM_H.contains(&format!("#define {name} {value}")),
+                "userspace/src/nm.h no longer defines {name} as {value}, but src/nm.rs                  still branches on that number"
+            );
+        }
+        const UNINSTALL: &str = include_str!("../module/uninstall.sh");
+        const BH_MARKER: &str = "NoMount Suite";
+        assert!(
+            SERVICE.contains(&format!("# Written by the {BH_MARKER}. Safe to delete.")),
+            "service.sh no longer writes the bindhosts marker it and uninstall.sh both grep for"
+        );
+        for (what, src) in [("service.sh", SERVICE), ("uninstall.sh", UNINSTALL)] {
+            assert!(
+                src.contains(&format!("grep -q '{BH_MARKER}'")),
+                "{what} stopped matching the bindhosts marker; uninstall then leaves                  /data/adb/bindhosts/mode_override.sh behind and bindhosts stays on mode 0"
+            );
+        }
         const README: &str = include_str!("../README.md");
         const BUG_TEMPLATE: &str = include_str!("../.github/ISSUE_TEMPLATE/bug_report.md");
         // The nav button's own label is the only name a reporter can actually tap. It was

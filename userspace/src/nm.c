@@ -17,7 +17,7 @@ void c_main(long *sp) {
         print_err("nm: cannot open the NoMount netlink socket - this kernel has no NoMount "
                   "engine (CONFIG_NOMOUNT), or nm and the kernel were built with different "
                   "NOMOUNT_NL_PROTO values\n");
-        exit_code = 2; goto do_exit;
+        exit_code = NM_EXIT_NO_ENGINE; goto do_exit;
     }
     set_recv_timeout(fd);
 

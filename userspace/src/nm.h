@@ -94,7 +94,11 @@
 
 #define NM_ERR_TIMEOUT (-4096)
 
-#define NM_EXIT_TIMEOUT 5
+/* The exit codes src/nm.rs treats as "the engine is unreachable". Both sides
+ * must agree: Nm::engine_is_unreachable abandons the rest of a pass on these,
+ * and a silent drift makes it either give up early or retry a dead engine. */
+#define NM_EXIT_TIMEOUT   5
+#define NM_EXIT_NO_ENGINE 2
 
 struct nm_timeval { long tv_sec; long tv_usec; };
 
