@@ -3,7 +3,7 @@ name: NoMount Suite - tag and release
 on:
   push:
     branches: [main]
-    paths: ['Cargo.toml']
+    paths: ['Cargo.toml', 'CHANGELOG.md']
   workflow_dispatch:
     inputs:
       dry_run:
@@ -52,11 +52,23 @@ jobs:
           esc=${tag//./\\.}
           if ! grep -qE "^## ${esc}([[:space:]]|$)" CHANGELOG.md; then
             echo "::error::CHANGELOG.md has no '## ${tag}' section."
-            echo "::error::A release describes itself or it does not ship. Add the section and push again."
+            echo "::error::A release describes itself or it does not ship. Add the section and push again - CHANGELOG.md is in this workflow's paths filter, so that push re-triggers it."
             exit 1
           fi
           echo "CHANGELOG.md documents $tag"
 
+          # "Already released" is asked FIRST. The trigger is any Cargo.toml edit, not a
+          # version change, and every dependency here is pinned with '=' - so bumping a
+          # pinned dep on an already-released version is routine and must be a green
+          # no-op, not a red X telling the author to bump the version they did not change.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "Release $tag already exists - nothing to do."
+            exit 0
+          fi
+
+          # Only a tag that exists at another commit WITHOUT a release is the fatal case:
+          # that is a moved tag, not a re-run over a shipped version.
           tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq '.sha' 2>/dev/null || true)
           printf '%s' "$tag_sha" | grep -qE '^[0-9a-f]{40}$' || tag_sha=""
           if [ -n "$tag_sha" ] && [ "$tag_sha" != "$GITHUB_SHA" ]; then
@@ -65,13 +77,8 @@ jobs:
             exit 1
           fi
 
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "Release $tag already exists - nothing to do."
-          else
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-            echo "Release $tag does not exist yet - building it."
-          fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "Release $tag does not exist yet - building it."
 
       - name: Summary
         run: |
