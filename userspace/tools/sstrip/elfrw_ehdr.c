@@ -1,3 +1,9 @@
+/* elfrw_ehdr.c: Functions for the ELF header.
+ * Copyright (C) 2011 by Brian Raiter <breadbox@muppetlabs.com>
+ * License GPLv2+: GNU GPL version 2 or later.
+ * This is free software; you are free to change and redistribute it.
+ * There is NO WARRANTY, to the extent permitted by law.
+ */
 #include <stdio.h>
 #include <string.h>
 #include <elf.h>
