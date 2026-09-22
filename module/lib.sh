@@ -144,6 +144,7 @@ nm_fix_shell_tmp() {
 }
 
 nm_delink_ksud() {
+    [ -e "$NMDIR/disabled" ] && return 0
     _kd=/data/adb/ksud
     _ks=/data/adb/ksu/bin/ksu_susfs
     [ -f "$_kd" ] && [ -f "$_ks" ] || return 0
