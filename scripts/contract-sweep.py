@@ -61,7 +61,12 @@ def git(*args):
 
 
 def case_pairs(rev):
-    diff = git("show", "--format=", "--unified=0", "--no-color", rev)
+    # --find-renames is load-bearing: without it a delete+add pair lands in two
+    # separate windows and a case-only change that moves files is never compared.
+    # The explicit prefixes defeat a developer-local diff.noprefix, which otherwise
+    # leaves `path` None for every file and reports a silent all-clear.
+    diff = git("show", "--format=", "--unified=0", "--no-color", "--no-ext-diff",
+               "--find-renames=10%", "--src-prefix=a/", "--dst-prefix=b/", rev)
     path, dels, adds, found = None, [], [], []
 
     def flush():
@@ -81,10 +86,10 @@ def case_pairs(rev):
                     break
 
     for line in diff.split("\n"):
-        if line.startswith("+++ b/"):
+        if line.startswith("+++ "):
             flush()
             dels, adds = [], []
-            path = line[6:]
+            path = line[6:] if line.startswith("+++ b/") else None
         elif line.startswith("@@"):
             pass
         elif line.startswith("-") and not line.startswith("---"):
