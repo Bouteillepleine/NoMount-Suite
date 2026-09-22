@@ -24,11 +24,15 @@ A -/+ pair that differs ONLY in case, where all of:
 
   * the file is code (not .md, not documentation),
   * the removed line is not a comment,
-  * and an ALL-CAPS token present in the old line is absent from the new one.
+  * and a cased token present in the old line is absent from the new one, where a
+    cased token is ALL-CAPS (HEAD, ARCH), camelCase (updateJson) or PascalCase /
+    Capitalised (NoMount, Suite, Enforcing, Kconfig).
 
-That last clause is what keeps it quiet. Re-capitalising an English sentence inside
-a string does not lose an ALL-CAPS token, so it passes; turning HEAD into head, or
-ARCH into arch, does not.
+That last clause is what keeps it quiet: the -/+ pair must already differ in case
+alone, which is rare on its own, so only a deliberate re-casing reaches the token
+test at all. Until round 15 the token test had no PascalCase arm, so lowercasing
+`name=NoMount Suite` in module.prop - which `module/service.sh` and
+`module/uninstall.sh` both grep for - scored zero and reported clean.
 
 Measured before being made blocking, and re-measured after the round-12 repair of the two
 holes below (pairing by content rather than position, and admitting .html):
@@ -62,6 +66,8 @@ COMMENT = re.compile(r"^\s*(///|//|#|/\*|\*|--|<!--)")
 CAPS = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
 
 CAMEL = re.compile(r"\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b")
+
+PASCAL = re.compile(r"\b[A-Z][a-z0-9]+[A-Za-z0-9]*\b")
 
 SKIP_MARKER = "[case-ok]"
 
@@ -112,7 +118,7 @@ def hits_for(rev):
         if COMMENT.match(old):
             continue
         def tokens(t):
-            return set(CAPS.findall(t)) | set(CAMEL.findall(t))
+            return set(CAPS.findall(t)) | set(CAMEL.findall(t)) | set(PASCAL.findall(t))
 
         lost = sorted(tokens(old) - tokens(new))
         if lost:
