@@ -887,7 +887,7 @@ fn live_injects(nm: &Nm) -> LiveMap {
 }
 
 fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>,
-          live: &LiveMap) -> u32 {
+          live: &LiveMap, refused: &mut u32) -> u32 {
     let mut failed = 0u32;
     if source.is_dir() {
         let entries = match std::fs::read_dir(source) {
@@ -905,10 +905,13 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
             let child_src = e.path();
             let child_tgt = target.join(e.file_name());
             if ft.is_dir() {
-                failed += inject(nm, &child_src, &child_tgt, out, live);
+                failed += inject(nm, &child_src, &child_tgt, out, live, refused);
             } else if let Some(why) = crate::mount::absorb_refusal(&child_src) {
                 // A refusal, not a failure: the planner declines the same entry, so absorb
-                // says why and leaves it rather than counting it against the module.
+                // says why and leaves it rather than counting it against the module. It is
+                // still counted, because a bind whose entries are ALL refused served nothing
+                // and must not be mistaken for an empty one and whiteouted.
+                *refused += 1;
                 println!(
                     "nomount: not absorbing {} -> {} - {why}",
                     child_tgt.display(),
@@ -921,6 +924,7 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
             }
         }
     } else if let Some(why) = crate::mount::absorb_refusal(source) {
+        *refused += 1;
         println!(
             "nomount: not absorbing {} -> {} - {why}",
             target.display(),
@@ -1723,7 +1727,8 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             }
             dropped += 1;
             let mut refreshed = Vec::new();
-            let fails = inject(&nm, &c.source, &at, &mut refreshed, &live_map);
+            let mut refused = 0u32;
+            let fails = inject(&nm, &c.source, &at, &mut refreshed, &live_map, &mut refused);
             if fails > 0 {
                 eprintln!(
                     "nomount: {} unmounted but re-asserting {fails} of its rule(s) failed - that content may have reverted to the stock file",
@@ -1827,7 +1832,8 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             continue;
         }
         let before = fresh.len();
-        let fails = inject(&nm, &c.source, &c.target, &mut fresh, &live_map);
+        let mut refused = 0u32;
+        let fails = inject(&nm, &c.source, &c.target, &mut fresh, &live_map, &mut refused);
         let served = fresh.len() - before;
         if let Ok(all) = record.as_mut() {
             if served > 0 {
@@ -1835,6 +1841,17 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 all.sort();
                 set_absorbed_pairs(all);
             }
+        }
+        if served == 0 && fails == 0 && refused > 0 {
+            // Every entry was refused, so this bind never served anything. Whiteouting the
+            // target here would hide the whole ROM directory permanently - and the record
+            // re-applies it on every boot. Leak it instead and say so.
+            leaking += 1;
+            eprintln!(
+                "nomount: LEAK {} was unmounted but every entry in it was refused, so the                  stock content is visible there",
+                c.target.display()
+            );
+            continue;
         }
         if served == 0 && fails == 0 {
             // The unmount went through but nothing replaced it, so the target is showing the

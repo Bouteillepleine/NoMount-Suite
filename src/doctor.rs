@@ -867,7 +867,14 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             .collect();
         let mut by_module: HashMap<&str, Vec<&crate::mount::Refused>> = HashMap::new();
         for r in &refused {
-            if served_under.contains(&(r.module.as_str(), r.target.as_path())) {
+            // Only the convergence-symlink reason is explained by the module serving
+            // something at or below the path. Keyed on the ancestor closure alone this
+            // also swallowed the .replace-at-a-partition-root and inject-would-mask-dir
+            // refusals, which nothing else reports - the verdict then read clean while
+            // the module's content was unserved.
+            if r.why.starts_with("it is a symlink to a directory")
+                && served_under.contains(&(r.module.as_str(), r.target.as_path()))
+            {
                 continue;
             }
             by_module.entry(r.module.as_str()).or_default().push(r);

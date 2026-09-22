@@ -593,6 +593,17 @@ fn plan_tree(
 
 fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: &Path) -> bool {
     if !targets.contains(target) {
+        // The exact target carries no mount, but hiding a directory with a live mount
+        // underneath leaves that mount in every app's mountinfo with no path reaching it -
+        // the condition this function exists to prevent, one level down. Inject targets
+        // are files, so is_dir() keeps this off that path.
+        if target.is_dir() && targets.iter().any(|m| m != target && m.starts_with(target)) {
+            eprintln!(
+                "nomount: {} has a live mount under it; hiding it would strand that mount                  in mountinfo, so it is left unserved",
+                target.display()
+            );
+            return false;
+        }
         return true;
     }
     if crate::absorb::umount_detach(target) {

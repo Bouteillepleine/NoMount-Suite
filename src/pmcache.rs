@@ -134,7 +134,15 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     let mut lines = Vec::new();
 
     for (target, source) in served.iter().filter(|(t, _)| is_rom_apk(t)) {
-        let Some(id) = identity(source) else { continue };
+        let Some(id) = identity(source) else {
+            // A transient stat failure is not a change. Dropping the row makes the next
+            // pass see no previous identity, delete PM's cached parse and claim a reboot
+            // is needed for an APK that never moved.
+            if let Some(old) = previous.get(target) {
+                lines.push(format!("{}	{}", target.display(), old));
+            }
+            continue;
+        };
         let stale = previous.get(target).map(String::as_str) != Some(id.as_str());
         let (matched, removed) =
             if !seeding && stale { drop_entry(target, &cache) } else { (0, 0) };

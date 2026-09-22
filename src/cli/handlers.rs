@@ -43,6 +43,19 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
         VfsAction::Add { virtual_path, real_path } => {
             let virt = Path::new(&virtual_path);
             let real = Path::new(&real_path);
+            // is_partition_root counts the components as typed; nm does not normalise and
+            // the engine kern_path()s it, so `/product/../product` would walk past the
+            // guard and install the bare-partition-root rule that aborts forkSystemServer.
+            if !virt.is_absolute()
+                || virt
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                anyhow::bail!(
+                    "refusing {}: pass an absolute path with no '..' - this guard and the                      engine resolve a path differently, so only a resolved one is safe.",
+                    virt.display()
+                );
+            }
             if crate::mount::is_partition_root(virt) {
                 anyhow::bail!(
                     "refusing {}: a rule on a bare partition root masks every stock entry \
