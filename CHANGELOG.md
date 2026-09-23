@@ -11,6 +11,16 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.185 - engine v33 (the engine fixes below need a kernel rebuild)
+
+- Engine: `lseek`, `mmap` and `fsync` on an injected file answer like erofs, and an injected file carries its neighbours' creation time.
+- Engine: an unmounting superblock frees its directory nodes, a snapshot read stays in one offset space, and an xattr write takes the right mount.
+- Empty directory binds hide instead of injecting, and an all-refused bind is reported, not hidden.
+- Whiteouts, the pass lock and bind counts agree across boot, reload and mount; uninstall keeps `binds.list` if unbind fails.
+- Hide-list applies pick up package events, and every pane redacts the app a check names.
+- The Rules card collapses all six panes, and help text and counts match what runs.
+- Build: releases are tagged from Cargo.toml, and the config gate is pinned and tested.
+
 ## v1.3.184 - engine v33 (the engine fix below needs a kernel rebuild)
 
 - Engine: a synthesized directory takes an inode above every inode the partition has shown, not just above its directories. On overlayfs those differ, and the old choice could land on a stock directory.
