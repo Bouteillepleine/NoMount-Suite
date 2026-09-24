@@ -15,6 +15,7 @@ const SNAPSHOT: &str = "/data/adb/nomount/snapshot.txt";
 pub struct Fingerprint {
     version: String,
     uname: String,
+    kbuild: String,
     engine: String,
     rules: Option<usize>,
     whiteouts: Option<usize>,
@@ -33,6 +34,7 @@ impl Fingerprint {
         [
             ("version", self.version.clone()),
             ("uname", self.uname.clone()),
+            ("kbuild", self.kbuild.clone()),
             ("engine", self.engine.clone()),
             ("rules", unk(self.rules)),
             ("whiteouts", unk(self.whiteouts)),
@@ -404,6 +406,7 @@ pub fn gather() -> Fingerprint {
     Fingerprint {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uname: read_cmd("uname", &["-r"]),
+        kbuild: read_cmd("uname", &["-v"]),
         engine,
         rules,
         whiteouts,
@@ -503,9 +506,17 @@ fn drift_lines(saved: &str, live: &str) -> Vec<String> {
     // that the system changed. Painting those transitions as DRIFT told the user their device had
     // drifted when the only thing that differed was whether a measurement happened.
     let unmeasured = |v: &str| v == "unknown" || v.starts_with("unchecked");
+    let suite_moved = find(&sv, "version") != find(&lv, "version");
     let mut out = Vec::new();
     for (k, lval) in &lv {
-        let sval = find(&sv, k).unwrap_or_else(|| "<absent>".to_string());
+        let Some(sval) = find(&sv, k) else {
+            out.push(if suite_moved {
+                format!("not compared {k}: live={lval} (the snapshot predates this field)")
+            } else {
+                format!("DRIFT {k}: snapshot=<absent> -> live={lval}")
+            });
+            continue;
+        };
         if &sval == lval || is_version_context(k, &sval, lval) {
             continue;
         }
@@ -518,8 +529,12 @@ fn drift_lines(saved: &str, live: &str) -> Vec<String> {
         out.push(format!("DRIFT {k}: snapshot={sval} -> live={lval}"));
     }
     for (k, sval) in &sv {
-        if find(&lv, k).is_none() && !is_version_context(k, sval, "<absent>") {
-            out.push(format!("DRIFT {k}: snapshot={sval} -> live=<absent>"));
+        if find(&lv, k).is_none() {
+            out.push(if suite_moved {
+                format!("not compared {k}: snapshot={sval} (this Suite no longer records it)")
+            } else {
+                format!("DRIFT {k}: snapshot={sval} -> live=<absent>")
+            });
         }
     }
     out
@@ -895,6 +910,28 @@ rules=3
     }
 
     #[test]
+    fn a_field_a_newer_suite_added_is_not_drift() {
+        let saved = "version=1.3.185\nengine=v30\n";
+        let live = "version=1.3.186\nengine=v30\nkbuild=#1 SMP\n";
+        assert_eq!(
+            drift_lines(saved, live),
+            vec!["not compared kbuild: live=#1 SMP (the snapshot predates this field)"],
+            "adding a fingerprint field must not report drift on every existing install"
+        );
+    }
+
+    #[test]
+    fn a_field_missing_within_one_suite_version_is_still_drift() {
+        let saved = "version=1.3.185\nengine=v30\nmanager_umount=off\n";
+        let live = "version=1.3.185\nengine=v30\n";
+        assert_eq!(
+            drift_lines(saved, live),
+            vec!["DRIFT manager_umount: snapshot=off -> live=<absent>"],
+            "same Suite on both sides means a vanished field is a real regression"
+        );
+    }
+
+    #[test]
     fn drift_reports_a_field_only_live_has() {
         let saved = "engine=v30\n";
         let live = "engine=v30\nguard=armed\n";
@@ -968,6 +1005,7 @@ rules=3
         Fingerprint {
             version: "test".into(),
             uname: "test".into(),
+            kbuild: "test".into(),
             engine: engine.into(),
             rules: Some(rules),
             whiteouts: Some(0),
