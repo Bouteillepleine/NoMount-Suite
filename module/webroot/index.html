@@ -1979,14 +1979,16 @@
       const d = busy(btn, "Copying...");
       const e = await exec(
         'echo "$(getprop ro.product.marketname)|$(getprop ro.build.version.release)|' +
-        '$(getprop ro.build.id)|$(uname -r)"'
+        '$(getprop ro.build.id)|$(uname -r)|$(uname -v)|$(getprop ro.product.model)|' +
+        '$(lsmod 2>/dev/null | grep -c -i kernelsu)"'
       );
       const q = (e.stdout || "").trim().split("|");
       const t = [
         "NoMount Suite " + SUITE_VERSION +
           (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " - check",
-        "device: " + (q[0] || "?") + " · Android " + (q[1] || "?") + " · " + (q[2] || "?"),
-        "kernel: " + (q[3] || "?"),
+        "device: " + (q[0] || q[5] || "?") + " · Android " + (q[1] || "?") + " · " + (q[2] || "?"),
+        "kernel: " + (q[3] || "?") + (q[4] ? " · " + q[4] : ""),
+        "root: " + (q[6] && q[6] !== "0" ? "LKM - kernelsu.ko is loaded, so the running kernel is not a NoMount build" : "built into the kernel, or unknown"),
         "engine: not responding - no CONFIG_NOMOUNT kernel, so no check could run",
       ].join("\n");
       let copied = false;
@@ -2008,15 +2010,17 @@
     const done = busy(btn, "Copying...");
     const env = await exec(
       'echo "$(getprop ro.product.marketname)|$(getprop ro.build.version.release)|' +
-      '$(getprop ro.build.id)|$(uname -r)"'
+      '$(getprop ro.build.id)|$(uname -r)|$(uname -v)|$(getprop ro.product.model)|' +
+      '$(lsmod 2>/dev/null | grep -c -i kernelsu)"'
     );
     const p = (env.stdout || "").trim().split("|");
     const s = CHECK.summary || {};
     const lines = [
       "NoMount Suite " + (CHECK.suite || SUITE_VERSION) +
         (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " - check",
-      "device: " + (p[0] || "?") + " · Android " + (p[1] || "?") + " · " + (p[2] || "?"),
-      "kernel: " + (p[3] || "?"),
+      "device: " + (p[0] || p[5] || "?") + " · Android " + (p[1] || "?") + " · " + (p[2] || "?"),
+      "kernel: " + (p[3] || "?") + (p[4] ? " · " + p[4] : ""),
+      "root: " + (p[6] && p[6] !== "0" ? "LKM - kernelsu.ko is loaded, so the running kernel is not a NoMount build" : "built into the kernel, or unknown"),
       "engine: " + (CHECK.engine === null || CHECK.engine === undefined ? "not responding" : "v" + CHECK.engine),
       "sections: " + ((CHECK.sections || []).join(", ") || "?"),
       "rules: " + (CHECK.rules === null || CHECK.rules === undefined
