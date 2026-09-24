@@ -11,6 +11,13 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.186 - engine v33 (unchanged)
+
+- A kernel flashed from inside the root manager can leave the stock kernel running while root still works. The banner is spoofed to match stock, so nothing in the report gave that away and the engine looked broken. The report now says whether root is a loaded module, which settles it on sight.
+- `nm` prints the errno when it cannot open its netlink socket. It used to blame `CONFIG_NOMOUNT` for every failure, including a socket the kernel refused with the engine loaded and working.
+- The copied report carries the kernel build stamp, and names the device when the market name is empty.
+- `verify` no longer calls a field that a newer Suite added drift on every install. Within one Suite version a missing field is still drift.
+
 ## v1.3.185 - engine v33 (the engine fixes below need a kernel rebuild)
 
 - Engine: `lseek`, `mmap` and `fsync` on an injected file answer like erofs, and an injected file carries its neighbours' creation time.
