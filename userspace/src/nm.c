@@ -14,9 +14,21 @@ void c_main(long *sp) {
 
     int fd = sys3(SYS_SOCKET, AF_NETLINK, SOCK_RAW, NOMOUNT_NL_PROTO);
     if (fd < 0) {
-        print_err("nm: cannot open the NoMount netlink socket - this kernel has no NoMount "
-                  "engine (CONFIG_NOMOUNT), or nm and the kernel were built with different "
-                  "NOMOUNT_NL_PROTO values\n");
+        unsigned int sock_err = (unsigned int)-fd;
+        print_err("nm: cannot open the NoMount netlink socket on proto ");
+        print_num(2, NOMOUNT_NL_PROTO);
+        print_err(" (errno ");
+        print_num(2, sock_err);
+        print_err(") - ");
+        if (sock_err == 1 || sock_err == 13)
+            print_err("the socket was denied, so the engine may well be loaded; check SELinux "
+                      "for a denied netlink_socket create and the domain running nm\n");
+        else if (sock_err == 93 || sock_err == 97)
+            print_err("this kernel has no NoMount engine (CONFIG_NOMOUNT), nm and the kernel "
+                      "were built with different NOMOUNT_NL_PROTO values, or nm is not in the "
+                      "initial network namespace\n");
+        else
+            print_err("check dmesg for a nomount line at boot\n");
         exit_code = NM_EXIT_NO_ENGINE; goto do_exit;
     }
     set_recv_timeout(fd);
