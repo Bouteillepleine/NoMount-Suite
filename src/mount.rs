@@ -1559,9 +1559,18 @@ mod tests {
     // PAGE is the parts concatenated: add a part here when one is added to webroot,
     // or the assertions keep passing while covering less than they name.
     const PAGE_CSS: &str = include_str!("../module/webroot/css/app.css");
-    const PAGE_JS: &str = include_str!("../module/webroot/js/app.js");
-    const PAGE_PARTS: &[&str] = &[PAGE_HTML, PAGE_CSS, PAGE_JS];
-    static PAGE: LazyLock<String> = LazyLock::new(|| PAGE_PARTS.concat());
+    const PAGE_JS: &[&str] = &[
+        include_str!("../module/webroot/js/00-core.js"),
+        include_str!("../module/webroot/js/10-status.js"),
+        include_str!("../module/webroot/js/20-chrome.js"),
+        include_str!("../module/webroot/js/30-checks.js"),
+        include_str!("../module/webroot/js/40-rules.js"),
+        include_str!("../module/webroot/js/50-apps.js"),
+        include_str!("../module/webroot/js/60-boot.js"),
+    ];
+    const PAGE_PARTS: &[&str] = &[PAGE_HTML, PAGE_CSS];
+    static PAGE: LazyLock<String> =
+        LazyLock::new(|| PAGE_PARTS.concat() + &PAGE_JS.concat());
 
     // Only the stylesheet, never the markup or the script. Before the split that is
     // everything ahead of </style>; after it, a file with no </style> in it, which
@@ -1574,6 +1583,46 @@ mod tests {
     }
 
     const HARNESS_SRC: &str = include_str!("../scripts/webui-harness.py");
+
+    #[test]
+    fn every_webui_part_is_listed_by_index_html_and_every_listing_exists() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/module/webroot/js");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .expect("module/webroot/js must exist")
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".js"))
+            .collect();
+        on_disk.sort();
+        assert!(!on_disk.is_empty(), "no js parts found - the WebUI would not run");
+
+        let listed: Vec<String> = PAGE_HTML
+            .split("<script src=\"js/")
+            .skip(1)
+            .filter_map(|t| t.split('"').next())
+            .map(str::to_owned)
+            .collect();
+
+        for name in &on_disk {
+            assert!(
+                listed.contains(name),
+                "module/webroot/js/{name} is in the zip but index.html never loads it, so it \
+                 ships dead - add the <script src> or delete the file"
+            );
+        }
+        for name in &listed {
+            assert!(
+                on_disk.contains(name),
+                "index.html loads js/{name}, which does not exist - the pane it serves will \
+                 be inert with nothing in the log to say why"
+            );
+        }
+        assert_eq!(
+            PAGE_JS.len(),
+            on_disk.len(),
+            "PAGE_JS does not include every part in module/webroot/js, so the assertions \
+             below cover less of the WebUI than they appear to"
+        );
+    }
 
     #[test]
     fn the_webui_matches_the_strings_absorb_actually_prints() {
