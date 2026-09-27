@@ -5,15 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <!-- This page holds ksu.exec(), an arbitrary root shell, and renders values that come off the
      device. esc() on every one of them and shq() on every shell interpolation IS the defence;
-     the CSP below is the backstop for the one that gets missed. The script lives in js/ so that
-     backstop can be script-src 'self', which does not stop injected script reaching anywhere -
-     it stops injected script RUNNING. That is the whole reason the page is not one file: an
-     inline <script> cannot be served without 'unsafe-inline', and under 'unsafe-inline' a
-     missed esc() executes. style-src still carries 'unsafe-inline' for the style= attributes
-     the markup still uses; drop it the moment the last one is gone.
+     the CSP below is the backstop for the one that gets missed, and it is only worth the name
+     because neither script nor style is inline: under 'unsafe-inline' a CSP does NOT stop
+     injected script running, it only leaves it nowhere to send what it read. Under 'self' it
+     does not run, and injected markup cannot restyle the page either - which matters on a page
+     whose buttons wipe rules and re-arm a tripped guard, because moving a control under a
+     finger is enough. That is the whole reason the page is not one file.
+     Two rules keep it that way, both enforced in CI: nothing inline in this file, and every
+     computed width or colour set through the CSSOM, which CSP does not govern.
      Containment, never an excuse for a missing esc(). -->
 
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
 <title>NoMount Suite</title>
 <link rel="icon" type="image/png" href="icon.png" />
 <link rel="stylesheet" href="css/app.css" />
@@ -76,9 +78,9 @@
         Reload
       </button>
     </div>
-    <p class="note" style="margin:8px 2px 0">Installed or removed a module? Tap Reload - no reboot needed.</p>
-    <div class="btns" style="margin-top:9px">
-      <button class="act danger" style="flex:none;min-width:0;padding:9px 14px;font-size:12.5px" onclick="clearRules(this)">
+    <p class="note mt8x">Installed or removed a module? Tap Reload - no reboot needed.</p>
+    <div class="btns mt9">
+      <button class="act danger btn-tight" onclick="clearRules(this)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
         Clear rules
       </button>
@@ -125,12 +127,12 @@
 
     <div class="presetrow">
       <button class="act" onclick="uidScan(this)">Scan for candidates</button>
-      <button class="act" id="usShow" style="display:none" onclick="usToggle(this)">Show list</button>
+      <button class="act none" id="usShow" onclick="usToggle(this)">Show list</button>
       <button class="act" onclick="addGlobs(this)">Add detector globs</button>
       <span class="presethint">Scan finds what is installed now; globs keep matching what
         installs later.</span>
     </div>
-    <div id="usList" class="uslist" style="display:none"></div>
+    <div id="usList" class="uslist none"></div>
 
     <div id="blocked" class="blocklist"></div>
 
@@ -166,15 +168,15 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
       <h2>Hidden paths</h2><span class="chip" id="wochip"> - </span><span class="chev">›</span>
     </div>
-    <div id="wobody" style="display:none">
-      <p class="note" style="margin-top:0">Make a <b>stock ROM file</b> disappear - for paths that are themselves the tell, like <code>install-recovery.sh</code>. The list is saved and re-applied on every boot, in the same pass as the injections. Nothing is installed and nothing is mounted. <b>Scan</b> walks the ROM for files only a root setup leaves behind; on a mountless install it usually finds nothing, which is the correct answer - nothing is written to <code>/system</code>, so there is nothing on it to hide.</p>
+    <div id="wobody" class="none">
+      <p class="note mt0">Make a <b>stock ROM file</b> disappear - for paths that are themselves the tell, like <code>install-recovery.sh</code>. The list is saved and re-applied on every boot, in the same pass as the injections. Nothing is installed and nothing is mounted. <b>Scan</b> walks the ROM for files only a root setup leaves behind; on a mountless install it usually finds nothing, which is the correct answer - nothing is written to <code>/system</code>, so there is nothing on it to hide.</p>
       <div class="uidbar">
         <input id="woPath" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
                placeholder="/system/bin/install-recovery.sh" />
         <button class="act" onclick="woAdd(this)">Hide</button>
         <button class="act" onclick="woScan(this)">Scan this device</button>
       </div>
-      <div class="list" id="woFound" style="display:none"></div>
+      <div class="list none" id="woFound"></div>
       <div class="list" id="woList"></div>
     </div>
   </div>
@@ -186,23 +188,23 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <h2>Active rules</h2><span class="chip" id="rulechip"> - </span><span class="chev">›</span>
     </div>
-    <p class="note" id="rulebreak" style="margin-top:0"> - </p>
-    <div id="ruleModuleBar" style="display:none"></div>
-    <div class="uidbar" id="rulefilterbar" style="display:none">
+    <p class="note mt0" id="rulebreak"> - </p>
+    <div id="ruleModuleBar" class="none"></div>
+    <div class="uidbar none" id="rulefilterbar">
       <input id="rulefilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
              placeholder="Filter by path or module..." oninput="filterRules()" />
-      <button class="act" id="rulegroupBtn" style="flex:1 1 0" onclick="toggleRuleGroup(this)">Group by module</button>
-      <button class="act" id="rulefileBtn" style="flex:1 1 0" onclick="toggleFileView(this)">By file</button>
-      <button class="act" style="flex:1 1 0" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
+      <button class="act flex1" id="rulegroupBtn" onclick="toggleRuleGroup(this)">Group by module</button>
+      <button class="act flex1" id="rulefileBtn" onclick="toggleFileView(this)">By file</button>
+      <button class="act flex1" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
     </div>
-    <pre class="rules" id="ruleslist" style="display:none">...</pre>
-    <p class="note" id="rulecount" style="display:none"></p>
-    <div class="uidbar" id="vfsfilterbar" style="display:none;margin-bottom:11px">
+    <pre class="rules none" id="ruleslist">...</pre>
+    <p class="note none" id="rulecount"></p>
+    <div class="uidbar none mb11" id="vfsfilterbar">
       <input id="vfsfilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
              placeholder="Filter files..." oninput="renderFilesFull()" />
     </div>
-    <div class="list" id="vfsdirs" style="display:none"></div>
-    <div class="list" id="vfsfull" style="display:none"></div>
+    <div class="list none" id="vfsdirs"></div>
+    <div class="list none" id="vfsfull"></div>
     <span id="vfscount" hidden>0</span>
   </div>
 
@@ -212,15 +214,15 @@
       <h2>Absorbable mounts</h2><span class="chip" id="abchip"> - </span><span class="chev">›</span>
     </div>
     <div id="abbody">
-      <p class="note" style="margin-top:0">A module that <b>bind-mounts its own content</b> leaves a mount any scanner can read. Absorbing re-serves it as a Prism injection and unmounts the original - same content, no mount.</p>
+      <p class="note mt0">A module that <b>bind-mounts its own content</b> leaves a mount any scanner can read. Absorbing re-serves it as a Prism injection and unmounts the original - same content, no mount.</p>
       <p class="note"><b>This runs by itself</b>: once after every module's boot script, once more 45s later, and - only with the <code>my_hookless</code> trial on - before zygote too. The chip is what is left after that. The buttons are for a mount that shows up <i>later</i>, so you need not reboot. <b>Scan</b> only reports.</p>
       <p class="note">A Zygisk/Xposed hook framework's binds are never taken over: a broken hook fails at the next app install, not at boot.</p>
       <div class="uidbar">
-        <button class="act" style="flex:1 1 0" onclick="abScan(this)">Scan</button>
-        <button class="act danger" style="flex:1 1 0" onclick="abAbsorb(this)">Absorb</button>
+        <button class="act flex1" onclick="abScan(this)">Scan</button>
+        <button class="act danger flex1" onclick="abAbsorb(this)">Absorb</button>
       </div>
       <div class="list" id="abDone"></div>
-      <div class="list" id="abFound" style="display:none"></div>
+      <div class="list none" id="abFound"></div>
     </div>
   </div>
 
@@ -229,7 +231,7 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
       <h2>Modules</h2><span class="chip" id="modcount">0</span><span class="chev">›</span>
     </div>
-    <div class="list" id="modules" style="display:none"></div>
+    <div class="list none" id="modules"></div>
   </div>
 
   </section>
@@ -242,22 +244,22 @@
       <h2>Checks</h2><span class="chip" id="fchip"> - </span>
     </div>
     <p class="note" id="fsub">What your module set will do at the next boot, and what apps can see on this device right now.</p>
-    <div class="btns" style="flex-wrap:wrap">
+    <div class="btns wrap">
       <button class="act" onclick="runCheck(this)">Re-run</button>
       <button class="act" id="auCopy" onclick="copyReport(this)">Copy report</button>
     </div>
-    <div class="auage" id="auage" style="display:none"></div>
+    <div class="auage none" id="auage"></div>
     <div class="list" id="findlist"></div>
 
     <details class="ndet" id="devtools">
       <summary>Developer tools</summary>
-      <p class="note" style="margin-top:0"><b>Snapshot</b> freezes today’s fingerprint as the baseline, replacing any earlier one. <b>Verify</b> diffs the live system against it. <b>Export</b> writes a folder under <code>/sdcard/Download</code> with the check report, the fingerprint, the live rules and the mount table - attach the whole folder to a bug report. Anything naming the apps you hide is left out of a shared destination, the boot log included; the folder says so and tells you how to get the full set privately.</p>
-      <div class="btns" style="flex-wrap:wrap">
+      <p class="note mt0"><b>Snapshot</b> freezes today’s fingerprint as the baseline, replacing any earlier one. <b>Verify</b> diffs the live system against it. <b>Export</b> writes a folder under <code>/sdcard/Download</code> with the check report, the fingerprint, the live rules and the mount table - attach the whole folder to a bug report. Anything naming the apps you hide is left out of a shared destination, the boot log included; the folder says so and tells you how to get the full set privately.</p>
+      <div class="btns wrap">
         <button class="act" onclick="runSnapshot(this)">Snapshot</button>
         <button class="act" onclick="runVerify(this)">Verify</button>
         <button class="act" onclick="runExport(this)">Export</button>
       </div>
-      <pre class="rules" id="healthout" style="display:none">...</pre>
+      <pre class="rules none" id="healthout">...</pre>
       <details class="ndet">
         <summary>Raw report</summary>
         <pre class="rules" id="auditout">...</pre>
@@ -271,10 +273,10 @@
       <h2>Device</h2>
     </div>
     <div class="metrics">
-      <div class="metric"><div class="k">Model</div><div class="v" id="dModel" style="font-size:15px"> - </div></div>
-      <div class="metric"><div class="k">Android</div><div class="v" id="dAndroid" style="font-size:15px"> - </div></div>
-      <div class="metric"><div class="k">API level</div><div class="v" id="dApi" style="font-size:15px"> - </div></div>
-      <div class="metric"><div class="k">Kernel</div><div class="v" id="dKernel" style="font-size:11px;word-break:break-all;line-height:1.35"> - </div></div>
+      <div class="metric"><div class="k">Model</div><div class="v fs15" id="dModel"> - </div></div>
+      <div class="metric"><div class="k">Android</div><div class="v fs15" id="dAndroid"> - </div></div>
+      <div class="metric"><div class="k">API level</div><div class="v fs15" id="dApi"> - </div></div>
+      <div class="metric"><div class="k">Kernel</div><div class="v fspath" id="dKernel"> - </div></div>
     </div>
   </div>
 
@@ -284,13 +286,13 @@
       <h2>Bootloop guard</h2><span class="chip" id="gchip"> - </span>
     </div>
     <div class="statusline">
-      <span class="dot" id="gdot"></span><span class="st" id="gstate" style="font-size:16px">Checking...</span>
+      <span class="dot" id="gdot"></span><span class="st fs16" id="gstate">Checking...</span>
       <span class="sub">trips at boot #3</span>
     </div>
-    <div class="btns"><button class="act danger" id="rearm" onclick="rearm(this)" style="display:none">Re-arm &amp; enable</button></div>
+    <div class="btns"><button class="act danger none" id="rearm" onclick="rearm(this)">Re-arm &amp; enable</button></div>
   </div>
 
-  <div class="card collapsed" id="incidentcard" style="display:none">
+  <div class="card collapsed none" id="incidentcard">
     <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
       <h2>Last incident</h2><span class="chip info">guard tripped</span><span class="chev">›</span>
@@ -305,7 +307,7 @@
   <div class="foot">NoMount Suite · Prism engine via netlink <code>nm</code><br/><span id="footver"></span></div>
 </div>
 
-<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+<svg width="0" height="0" aria-hidden="true" focusable="false" class="abs">
   <defs>
     <linearGradient id="navGrad" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%"   stop-color="#a9c0ff"/>

@@ -309,7 +309,7 @@
       $("gchip").textContent = "?";
       $("gstate").textContent = "Unknown - could not read the guard";
       $("gdot").className = "dot";
-      $("rearm").style.display = "";
+      $("rearm").classList.remove("none");
       return;
     }
     const c = cr.errno === 0 ? cr.stdout.trim() : "";
@@ -323,8 +323,8 @@
     }
     $("gchip").textContent = "boot " + (cr.errno !== 0 ? "?" : c === "" ? "0" : c) + "/3";
     if (disabled) {
-      $("gstate").textContent = "Tripped - disabled"; $("gdot").className = "dot info"; $("rearm").style.display = "";
+      $("gstate").textContent = "Tripped - disabled"; $("gdot").className = "dot info"; $("rearm").classList.remove("none");
     } else {
-      $("gstate").textContent = "Armed"; $("gdot").className = "dot ok"; $("rearm").style.display = "none";
+      $("gstate").textContent = "Armed"; $("gdot").className = "dot ok"; $("rearm").classList.add("none");
     }
   }

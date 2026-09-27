@@ -252,8 +252,8 @@
   }
   function usToggle(btn) {
     usShown = !usShown;
-    $("usList").style.display = usShown ? "" : "none";
-    btn.style.display = "";
+    $("usList").classList.toggle("none", !(usShown));
+    btn.classList.remove("none");
     btn.textContent = usShown ? "Hide list" : "Show list";
   }
   function usPick(pkg) {
@@ -262,7 +262,7 @@
   }
   function usRender() {
     const box = $("usList");
-    $("usShow").style.display = US.size ? "" : "none";
+    $("usShow").classList.toggle("none", !(US.size));
     if (!US.size) {
       box.innerHTML = '<div class="blk-none">Nothing left to pick - scan again after installing apps.</div>';
       return;

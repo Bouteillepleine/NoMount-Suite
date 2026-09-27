@@ -84,7 +84,7 @@
   const _RM_PALETTE = ["#57e6c3", "#7c9cff", "#c792ea", "#4fd1e0", "#9ccc65", "#a5b4fc", "#5eead4"];
   function _paintRuleModuleBar(lines) {
     const box = $("ruleModuleBar"); if (!box) return;
-    if (!lines.length) { box.style.display = "none"; box.innerHTML = ""; return; }
+    if (!lines.length) { box.classList.add("none"); box.innerHTML = ""; return; }
     const counts = {};
     lines.forEach((l) => { const m = _ruleModule(l); counts[m] = (counts[m] || 0) + 1; });
     const entries = Object.keys(counts).map((k) => [k, counts[k]]).sort((a, b) => b[1] - a[1]);
@@ -94,16 +94,28 @@
     const rest = entries.slice(MAX);
     if (rest.length) shown.push(["other", rest.reduce((a, e) => a + e[1], 0), true]);
     const col = (e, i) => e[2] ? "var(--faint)" : _RM_PALETTE[i % _RM_PALETTE.length];
-    const seg = shown.map((e, i) =>
-      `<span style="width:${(e[1] / total * 100).toFixed(2)}%;background:${col(e, i)}" title="${esc(e[0])}: ${e[1]}"></span>`
+    const seg = shown.map((e) =>
+      `<span title="${esc(e[0])}: ${e[1]}"></span>`
     ).join("");
-    const legend = shown.map((e, i) => {
+    const legend = shown.map((e) => {
       const nm = e[2] ? `other (${rest.length} module${rest.length > 1 ? "s" : ""})` : e[0];
-      return `<span class="rmleg"><span class="rmsw" style="background:${col(e, i)}"></span>` +
+      return `<span class="rmleg"><span class="rmsw"></span>` +
              `<span class="rmname" title="${esc(nm)}">${esc(nm)}</span> <b>${e[1]}</b></span>`;
     }).join("");
-    box.style.display = "";
+    box.classList.remove("none");
     box.innerHTML = `<div class="rmbar">${seg}</div><div class="rmlegend">${legend}</div>`;
+    // A width and a palette entry are computed per module, so neither can live in
+    // the stylesheet, and a style= attribute is what style-src 'self' refuses. The
+    // CSSOM is not governed by CSP, so the same two declarations are set here.
+    const bars = box.querySelectorAll(".rmbar > span");
+    const swatches = box.querySelectorAll(".rmsw");
+    shown.forEach((e, i) => {
+      if (bars[i]) {
+        bars[i].style.width = `${(e[1] / total * 100).toFixed(2)}%`;
+        bars[i].style.background = col(e, i);
+      }
+      if (swatches[i]) swatches[i].style.background = col(e, i);
+    });
   }
 
   var _files = [];
@@ -130,17 +142,17 @@
     else box.innerHTML = keys.map((k) => {
       const e = dirs[k], ov = e.ov === e.n;
       return `<div class="row"><span class="name mono">${esc(k)}</span>` +
-        `<span class="sub" style="font-size:11px;color:var(--muted);margin-right:8px">${e.n} ` +
+        `<span class="sub hint-inline">${e.n} ` +
         `${ov ? "apk" : "file"}${e.n > 1 ? "s" : ""}</span>` +
         `<span class="tag ${ov ? "ov" : "vfs"}">${ov ? "RRO" : "Prism"}</span></div>`;
     }).join("");
-    if ($("vfsfull").style.display !== "none") renderFilesFull();
+    if (!$("vfsfull").classList.contains("none")) renderFilesFull();
   }
   const WO_PATH_RE = /^\/[^\x00-\x1f\x7f]+$/;
   function toggleWhiteouts(h) {
     const on = h.classList.toggle("open");
     setExp(h);
-    $("wobody").style.display = on ? "" : "none";
+    $("wobody").classList.toggle("none", !(on));
     if (on) refreshWhiteouts();
   }
   async function whiteoutSets() {
@@ -326,7 +338,7 @@
     const r = await nm("absorb --dry-run");
     const out = ((r.stdout || "") + (r.stderr || "")).trim();
     const box = $("abFound");
-    box.style.display = "";
+    box.classList.remove("none");
     const lines = out.split("\n").map(x => x.trim()).filter(Boolean);
     if (!lines.length) {
       box.innerHTML = '<div class="empty">No answer from absorb.</div>';
@@ -389,7 +401,7 @@
     const done = busy(btn, "Absorbing...");
     const r = await nm("absorb");
     const out = ((r.stdout || "") + (r.stderr || "")).trim();
-    $("abFound").style.display = "";
+    $("abFound").classList.remove("none");
     $("abFound").innerHTML = `<div class="empty">${esc(out || "(no output)")}</div>`;
     // The deferred line is printed before absorb decides whether anything else was taken, so it
     // can sit alongside a summary that absorbed plenty. Only say nothing was absorbed when the
@@ -417,7 +429,7 @@
     const done = busy(btn, "Scanning...");
     const r = await nm("whiteout suggest");
     if (r.errno !== 0) {
-      $("woFound").style.display = "";
+      $("woFound").classList.remove("none");
       $("woFound").innerHTML = '<div class="empty">Scan did not run - ' +
         esc((r.stderr || "").trim() || "the command failed") + "</div>";
       toast("Scan did not run", "bad");
@@ -429,7 +441,7 @@
     const cands = out.split("\n").map(x => x.trim()).filter(l => l.indexOf("\t") > 0);
     const notes = out.split("\n").map(x => x.trim())
       .filter(l => /^\(|^nothing to suggest/.test(l)).join(" ");
-    box.style.display = "";
+    box.classList.remove("none");
     if (!cands.length) {
       box.innerHTML = `<div class="empty">${esc(notes || "Nothing found.")}</div>`;
       toast("Nothing to hide on this device", "ok");
@@ -478,7 +490,7 @@
   function toggleModules(h) {
     const on = h.classList.toggle("open");
     setExp(h);
-    $("modules").style.display = on ? "" : "none";
+    $("modules").classList.toggle("none", !(on));
   }
   let rulesShown = false;
   let _fileView = false;
@@ -487,13 +499,13 @@
     if (btn) btn.textContent = _fileView ? "By module" : "By file";
     // Same six panes toggleRules drives; both must respect the collapse or switching
     // view while the card is shut reveals the list under a closed header.
-    $("vfsdirs").style.display = rulesShown && _fileView ? "" : "none";
-    $("vfsfull").style.display = rulesShown && _fileView ? "" : "none";
-    $("vfsfilterbar").style.display = rulesShown && _fileView ? "" : "none";
-    $("ruleslist").style.display = rulesShown && !_fileView ? "" : "none";
-    $("rulefilterbar").querySelector("#rulefilter").style.display = _fileView ? "none" : "";
+    $("vfsdirs").classList.toggle("none", !(rulesShown && _fileView));
+    $("vfsfull").classList.toggle("none", !(rulesShown && _fileView));
+    $("vfsfilterbar").classList.toggle("none", !(rulesShown && _fileView));
+    $("ruleslist").classList.toggle("none", !(rulesShown && !_fileView));
+    $("rulefilterbar").querySelector("#rulefilter").classList.toggle("none", !!(_fileView));
     const gb = $("rulegroupBtn");
-    if (gb) gb.style.display = _fileView ? "none" : "";
+    if (gb) gb.classList.toggle("none", !!(_fileView));
     if (_fileView) renderFilesFull();
   }
 
@@ -502,13 +514,13 @@
     if (!d.ok) {
       _rulesRaw = "";
       $("ruleslist").textContent = "unknown - the engine did not answer";
-      $("rulecount").style.display = "none";
+      $("rulecount").classList.add("none");
       return;
     }
     _rulesRaw = d.raw;
     if (!_rulesRaw) {
       $("ruleslist").textContent = "no rules";
-      $("rulecount").style.display = "none";
+      $("rulecount").classList.add("none");
       return;
     }
     filterRules();
@@ -516,15 +528,15 @@
   async function toggleRules(h) {
     rulesShown = h.classList.toggle("open");
     setExp(h);
-    $("rulefilterbar").style.display = rulesShown ? "" : "none";
-    $("rulecount").style.display = rulesShown ? "" : "none";
+    $("rulefilterbar").classList.toggle("none", !(rulesShown));
+    $("rulecount").classList.toggle("none", !(rulesShown));
     // The card has no id, so applyCardState's `.card.collapsed > :not(.card-h)` rule
     // never reaches these; visibility is only ever these explicit writes. Driving
     // three of the six left the By-file panes under a closed header.
-    $("ruleslist").style.display = rulesShown && !_fileView ? "" : "none";
-    $("vfsdirs").style.display = rulesShown && _fileView ? "" : "none";
-    $("vfsfull").style.display = rulesShown && _fileView ? "" : "none";
-    $("vfsfilterbar").style.display = rulesShown && _fileView ? "" : "none";
+    $("ruleslist").classList.toggle("none", !(rulesShown && !_fileView));
+    $("vfsdirs").classList.toggle("none", !(rulesShown && _fileView));
+    $("vfsfull").classList.toggle("none", !(rulesShown && _fileView));
+    $("vfsfilterbar").classList.toggle("none", !(rulesShown && _fileView));
     if (rulesShown) { $("ruleslist").textContent = "Loading..."; loadRules(); }
   }
 

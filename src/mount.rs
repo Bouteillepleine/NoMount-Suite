@@ -1584,6 +1584,73 @@ mod tests {
 
     const HARNESS_SRC: &str = include_str!("../scripts/webui-harness.py");
 
+    /// index.html with every <!-- --> removed, so a rule about the markup is not
+    /// satisfied or broken by prose describing it.
+    fn markup_without_comments() -> String {
+        let mut out = String::with_capacity(PAGE_HTML.len());
+        let mut rest = PAGE_HTML;
+        while let Some(a) = rest.find("<!--") {
+            out.push_str(&rest[..a]);
+            match rest[a..].find("-->") {
+                Some(b) => rest = &rest[a + b + 3..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn the_csp_still_refuses_inline_script_and_inline_style() {
+        let csp = PAGE_HTML
+            .split(r#"http-equiv="Content-Security-Policy" content=""#)
+            .nth(1)
+            .and_then(|t| t.split('"').next())
+            .expect("index.html must carry a CSP meta");
+        for directive in ["default-src 'none'", "script-src 'self'", "style-src 'self'"] {
+            assert!(
+                csp.contains(directive),
+                "the CSP lost {directive:?}: {csp}"
+            );
+        }
+        assert!(
+            !csp.contains("unsafe-inline") && !csp.contains("unsafe-eval"),
+            "the CSP allows inline again, so a missed esc() executes instead of being \
+             contained - the whole reason the script and the stylesheet are separate files: \
+             {csp}"
+        );
+
+        // The directives above are only true if nothing in the page needs them back.
+        let markup = markup_without_comments();
+        assert!(
+            !markup.contains("style=\""),
+            "a style= attribute is back in index.html; style-src 'self' silently drops it, so \
+             it renders unstyled. Add a class to css/app.css, or set it through the CSSOM"
+        );
+        assert!(
+            !markup.contains("<style"),
+            "an inline <style> block is back in index.html - it would not be applied"
+        );
+        for part in PAGE_JS {
+            assert!(
+                !part.contains("style=\""),
+                "a js/ part builds markup carrying a style= attribute. Injected through \
+                 innerHTML it is still parsed markup, so the CSP drops it and the element \
+                 renders unstyled: use a class, or assign .style.* on the element instead"
+            );
+        }
+        let inline_script = markup
+            .match_indices("<script")
+            .any(|(i, _)| !markup[i..].starts_with("<script src="));
+        assert!(
+            !inline_script,
+            "an inline <script> is back in index.html; under script-src 'self' it will not run"
+        );
+    }
+
     #[test]
     fn every_webui_part_is_listed_by_index_html_and_every_listing_exists() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/module/webroot/js");
