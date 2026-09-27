@@ -136,6 +136,10 @@ CONF="$NMDIR/spoof.conf"
 [ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
 
 [ -f "$MODPATH/lib.sh" ] && set_perm "$MODPATH/lib.sh" 0 0 0644
+# The WebUI is a directory tree now, not one file. The WebView reads it as the
+# manager's uid, so every directory has to stay searchable and every part
+# readable; an unsearchable css/ or js/ is a page that loads and does nothing.
+[ -d "$MODPATH/webroot" ] && set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644
 
 [ -f "$MODPATH/uninstall.sh" ] && set_perm "$MODPATH/uninstall.sh" 0 0 0755
 

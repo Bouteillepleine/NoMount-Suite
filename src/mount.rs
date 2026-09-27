@@ -1558,14 +1558,16 @@ mod tests {
     // The WebUI is more than one file. Every assertion below wants one haystack, so
     // PAGE is the parts concatenated: add a part here when one is added to webroot,
     // or the assertions keep passing while covering less than they name.
-    const PAGE_PARTS: &[&str] = &[PAGE_HTML];
+    const PAGE_CSS: &str = include_str!("../module/webroot/css/app.css");
+    const PAGE_JS: &str = include_str!("../module/webroot/js/app.js");
+    const PAGE_PARTS: &[&str] = &[PAGE_HTML, PAGE_CSS, PAGE_JS];
     static PAGE: LazyLock<String> = LazyLock::new(|| PAGE_PARTS.concat());
 
     // Only the stylesheet, never the markup or the script. Before the split that is
     // everything ahead of </style>; after it, a file with no </style> in it, which
     // the same split returns whole. Keeping the colour sweep off the JS matters:
     // a hex literal in a string would read as a warm colour in a rule.
-    const PAGE_CSS_SRC: &str = PAGE_HTML;
+    const PAGE_CSS_SRC: &str = PAGE_CSS;
 
     fn page_css() -> &'static str {
         PAGE_CSS_SRC.split("</style>").next().unwrap_or("")
