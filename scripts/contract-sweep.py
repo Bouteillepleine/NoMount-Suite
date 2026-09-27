@@ -16,12 +16,12 @@ Two sweeps:
 
   (b) links  - every literal one file matches in another file's output.
                CONSUMERS  JS .indexOf/.includes/.startsWith/.endsWith/.split/
-                          ===/.match/[/re/,...] in module/webroot/*.html; grep
+                          ===/.match/[/re/,...] in module/webroot/{*.html,js/*.js}; grep
                           patterns in module/*.sh, scripts/*.sh, hookless/*.sh;
                           Rust .contains/.starts_with/.ends_with/.strip_prefix
                           in src/**/*.rs outside #[cfg(test)].
                PRODUCERS  every src/**/*.rs, module/*.sh, scripts/*.sh,
-                          hookless/*.sh, module/webroot/*.html, module/*.prop,
+                          hookless/*.sh, module/webroot/{*.html,js/*.js}, module/*.prop,
                           userspace/src/*.c, hookless/src/*.c.
                Reports each consumer pattern no other file can produce.
 
@@ -137,12 +137,14 @@ def files(*globs):
     return sorted(set(out))
 
 
-CONSUMER_FILES = files("module/webroot/*.html", "module/*.sh", "scripts/*.sh",
+CONSUMER_FILES = files("module/webroot/*.html", "module/webroot/js/*.js",
+                       "module/*.sh", "scripts/*.sh",
                        "hookless/*.sh", "src/*.rs", "src/**/*.rs")
 
 PRODUCER_FILES = files("src/*.rs", "src/**/*.rs", "module/*.sh",
                        "scripts/*.sh", "hookless/*.sh",
-                       "module/webroot/*.html", "userspace/src/*.c",
+                       "module/webroot/*.html", "module/webroot/js/*.js",
+                       "userspace/src/*.c",
                        "hookless/src/*.c", "module/*.prop")
 
 JS_CALL = re.compile(

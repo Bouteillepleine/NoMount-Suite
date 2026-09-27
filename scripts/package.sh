@@ -381,24 +381,63 @@ package_zip() {
         exit 1
     fi
     cp -r "$MODULE_DIR/webroot" "$staging/webroot"
+
+    # Every css/ and js/ file index.html names must actually be in the zip. Nothing
+    # else catches a stale reference: the page still loads, the missing part simply
+    # never runs, and on a device that reads as a WebUI that came up blank.
+    missing=0
+    while IFS= read -r ref; do
+        case "$ref" in ''|*://*|data:*|'#'*) continue ;; esac
+        if [ ! -f "$staging/webroot/$ref" ]; then
+            echo "fatal: webroot/index.html references $ref, which is not in the zip." >&2
+            missing=$((missing + 1))
+        fi
+    done <<REFS
+$(grep -oE '(src|href)="[^"]+"' "$staging/webroot/index.html" | cut -d'"' -f2)
+REFS
+    if [ "$missing" -ne 0 ]; then
+        rm -rf "$staging"
+        exit 1
+    fi
+
+    # The three stamps live in whichever webroot file carries the constants - one
+    # inline <script> once, a js/ part after the split. Resolved by content rather
+    # than by name, and fatal unless exactly one file claims them, so a split that
+    # duplicates or loses the block cannot ship an unstamped page.
+    stamp_target=""
+    stamp_n=0
+    for f in "$staging/webroot/index.html" "$staging"/webroot/js/*.js; do
+        [ -f "$f" ] || continue
+        if grep -q "const SUITE_VERSION = " "$f"; then
+            stamp_target=$f
+            stamp_n=$((stamp_n + 1))
+        fi
+    done
+    if [ "$stamp_n" -ne 1 ]; then
+        echo "fatal: $stamp_n webroot files carry 'const SUITE_VERSION =' - expected exactly 1." >&2
+        rm -rf "$staging"
+        exit 1
+    fi
+    stamp_name=${stamp_target#"$staging/"}
+
     sed -i "s/const SUITE_VERSION = \"[^\"]*\"/const SUITE_VERSION = \"${VERSION}\"/" \
-        "$staging/webroot/index.html"
+        "$stamp_target"
     sed -i "s/const SUITE_COMMIT = \"[^\"]*\"/const SUITE_COMMIT = \"${BUILD_COMMIT}\"/" \
-        "$staging/webroot/index.html"
-    if ! grep -q "const SUITE_VERSION = \"${VERSION}\"" "$staging/webroot/index.html"; then
-        echo "fatal: could not stamp SUITE_VERSION into webroot/index.html" >&2
+        "$stamp_target"
+    if ! grep -q "const SUITE_VERSION = \"${VERSION}\"" "$stamp_target"; then
+        echo "fatal: could not stamp SUITE_VERSION into $stamp_name" >&2
         rm -rf "$staging"
         exit 1
     fi
     sed -i "s/const SUITE_PROFILE = \"[^\"]*\"/const SUITE_PROFILE = \"${profile}\"/" \
-        "$staging/webroot/index.html"
-    if ! grep -q "const SUITE_PROFILE = \"${profile}\"" "$staging/webroot/index.html"; then
-        echo "fatal: could not stamp SUITE_PROFILE into webroot/index.html" >&2
+        "$stamp_target"
+    if ! grep -q "const SUITE_PROFILE = \"${profile}\"" "$stamp_target"; then
+        echo "fatal: could not stamp SUITE_PROFILE into $stamp_name" >&2
         rm -rf "$staging"
         exit 1
     fi
-    if ! grep -q "const SUITE_COMMIT = \"${BUILD_COMMIT}\"" "$staging/webroot/index.html"; then
-        echo "fatal: could not stamp SUITE_COMMIT into webroot/index.html" >&2
+    if ! grep -q "const SUITE_COMMIT = \"${BUILD_COMMIT}\"" "$stamp_target"; then
+        echo "fatal: could not stamp SUITE_COMMIT into $stamp_name" >&2
         rm -rf "$staging"
         exit 1
     fi

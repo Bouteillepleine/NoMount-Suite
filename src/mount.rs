@@ -1229,6 +1229,7 @@ fn served_apks_applied(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
 
     #[test]
     fn a_path_the_wire_format_cannot_carry_is_refused() {
@@ -1359,12 +1360,15 @@ mod tests {
                  22 commits reached v1.3.180 ungated: {branches:?}"
             );
         }
-        assert!(
-            SWEEP.contains(".html"),
-            "case-sweep.py stopped covering .html, so module/webroot/index.html is outside the \
-             gate again - the file where `grep -q ENABLED` became `enabled` and where the \
-             `would DROP`/`would SKIP` classifiers were lowercased"
-        );
+        for ext in [".html", ".js", ".css"] {
+            assert!(
+                SWEEP.contains(ext),
+                "case-sweep.py stopped covering {ext}, so that part of module/webroot is outside \
+                 the gate again - index.html is where `grep -q ENABLED` became `enabled` and \
+                 where the `would DROP`/`would SKIP` classifiers were lowercased, and the js/ \
+                 files carry both of those classes of string now"
+            );
+        }
         assert!(
             !SWEEP.contains("zip(dels, adds)"),
             "case-sweep.py is pairing removed lines to added lines by position again. Any hunk \
@@ -1549,7 +1553,24 @@ mod tests {
         );
     }
 
-    const PAGE: &str = include_str!("../module/webroot/index.html");
+    const PAGE_HTML: &str = include_str!("../module/webroot/index.html");
+
+    // The WebUI is more than one file. Every assertion below wants one haystack, so
+    // PAGE is the parts concatenated: add a part here when one is added to webroot,
+    // or the assertions keep passing while covering less than they name.
+    const PAGE_PARTS: &[&str] = &[PAGE_HTML];
+    static PAGE: LazyLock<String> = LazyLock::new(|| PAGE_PARTS.concat());
+
+    // Only the stylesheet, never the markup or the script. Before the split that is
+    // everything ahead of </style>; after it, a file with no </style> in it, which
+    // the same split returns whole. Keeping the colour sweep off the JS matters:
+    // a hex literal in a string would read as a warm colour in a rule.
+    const PAGE_CSS_SRC: &str = PAGE_HTML;
+
+    fn page_css() -> &'static str {
+        PAGE_CSS_SRC.split("</style>").next().unwrap_or("")
+    }
+
     const HARNESS_SRC: &str = include_str!("../scripts/webui-harness.py");
 
     #[test]
@@ -1578,7 +1599,7 @@ mod tests {
 
     #[test]
     fn the_diagnostics_never_paint_a_warm_colour() {
-        let css = PAGE.split("</style>").next().unwrap_or("");
+        let css = page_css();
         let controls = ["button.act.danger", ".bx:hover", ".bx.save:hover"];
         for (label, needle) in [
             ("amber", "251,191,36"),

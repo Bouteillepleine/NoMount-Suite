@@ -9,12 +9,25 @@ and how the health line came to paint "Nothing detectable" in green directly
 under a card saying "No kernel driver".
 
 So: capture what each command really returns on a device, stub `ksu.exec` to
-replay it, and open the page in any browser. The page is unmodified -- the stub
-is prepended, nothing inside index.html is touched.
+replay it, and open the page in any browser. No line of the page's own code is
+rewritten -- the stub is prepended and the parts are inlined verbatim.
 
     python3 scripts/webui-harness.py capture   # needs adb + root; writes fixtures
     python3 scripts/webui-harness.py build     # writes target/webui-harness.html
     python3 scripts/webui-harness.py build --no-driver   # engine absent
+
+The shipped page is index.html plus the css/ and js/ files it references, and a
+browser opening target/webui-harness.html would resolve none of them. So build()
+ASSEMBLES: every <link rel=stylesheet> and <script src> index.html names is
+inlined, in page order, and the stub goes in ahead of the first script. Two
+consequences worth stating, because both would otherwise be silent:
+
+  * Inlining is exactly what the shipped CSP forbids, so the harness output
+    carries a relaxed CSP of its own. The harness therefore does NOT exercise the
+    real CSP - only a device, or a static read of index.html, does that.
+  * The parts are concatenated in the order index.html lists them. If a split
+    file is added to js/ and NOT referenced from index.html, it ships dead and
+    the harness renders without it; the reference is the manifest.
 
 PRIVACY. The captured fixtures include `pm list packages -3 -U`, i.e. the
 device's third-party packages and their uids -- the same secret `nomount export`
@@ -24,6 +37,7 @@ attached to a bug report.
 """
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -149,30 +163,69 @@ def suite_version():
                 return line.split("=", 1)[1].strip().strip('"')
     return "dev"
 
+WEBROOT = os.path.join(ROOT, "module", "webroot")
+
+LINK_RE = re.compile(r'[ \t]*<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>[ \t]*\n?')
+SRC_RE = re.compile(r'[ \t]*<script[^>]*\ssrc="([^"]+)"[^>]*>\s*</script>[ \t]*\n?')
+
+# The shipped CSP bans the inline script and inline style this harness is built
+# out of, so the assembled file needs its own. Kept as narrow as an inlined page
+# can be: still no connect-src and no form-action, so a harness page that renders
+# a string it should have escaped still cannot send it anywhere.
+HARNESS_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+               "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+CSP_RE = re.compile(r'(<meta http-equiv="Content-Security-Policy" content=")([^"]*)(")')
+
+# Anchored to line start on purpose. The head comment explaining the CSP contains
+# the literal <script> mid-line, and a plain search for it put the stub INSIDE that
+# comment - stubbing nothing, on a page that then rendered every card as a failure.
+TAG_RE = re.compile(r'^[ \t]*<script\b', re.M)
+
+
+def _part(rel):
+    path = os.path.join(WEBROOT, rel.replace("/", os.sep))
+    if not os.path.isfile(path):
+        sys.exit("harness: index.html references %s, which does not exist" % rel)
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def assemble():
+    """index.html with its css/ and js/ parts inlined, in the order it names them."""
+    with open(os.path.join(WEBROOT, "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    page = LINK_RE.sub(
+        lambda m: "<style>\n%s\n</style>\n" % _part(m.group(1)).rstrip("\n"), page)
+    page = SRC_RE.sub(
+        lambda m: "<script>\n%s\n</script>\n" % _part(m.group(1)).rstrip("\n"), page)
+    if not TAG_RE.search(page):
+        sys.exit("harness: assembled page has no <script> tag - nothing would run")
+    return page
+
+
 def build(no_driver=False):
     with open(FIXTURES, encoding="utf-8") as f:
         fx = json.load(f)
     if no_driver:
         for k in ("vfslist", "engver", "plan", "uidlist", "whiteoutlist", "isolated"):
             fx[k] = {"out": "", "rc": 1}
-    with open(os.path.join(ROOT, "module", "webroot", "index.html"), encoding="utf-8") as f:
-        page = f.read()
-    # Both stamps are exact literals. If either anchor moves, str.replace silently
-    # does nothing, the harness renders `dev` where the shipped page renders a real
+    page = assemble()
+    # The stamp is an exact literal. If the anchor moves, str.replace silently does
+    # nothing, the harness renders `dev` where the shipped page renders a real
     # version, and a version-rendering regression screenshots clean.
-    for anchor in ('const SUITE_VERSION = "dev";', "\n<script>\n"):
-        if page.count(anchor) != 1:
-            sys.exit("harness: anchor moved in index.html (%d matches): %r"
-                     % (page.count(anchor), anchor))
-    page = page.replace(
-        'const SUITE_VERSION = "dev";',
-        'const SUITE_VERSION = "v%s";' % suite_version(),
-        1,
-    )
+    anchor = 'const SUITE_VERSION = "dev";'
+    if page.count(anchor) != 1:
+        sys.exit("harness: anchor moved (%d matches): %r" % (page.count(anchor), anchor))
+    page = page.replace(anchor, 'const SUITE_VERSION = "v%s";' % suite_version(), 1)
+    if not CSP_RE.search(page):
+        sys.exit("harness: no CSP meta found - the shipped page must carry one")
+    page = CSP_RE.sub(lambda m: m.group(1) + HARNESS_CSP + m.group(3), page, count=1)
     stub = STUB.replace("__FIXTURES__", json.dumps(fx))
+    at = TAG_RE.search(page).start()
+    head, tail = page[:at], page[at:]
     dest = os.path.join(OUT, "webui-nodriver.html" if no_driver else "webui-harness.html")
     with open(dest, "w", encoding="utf-8", newline="\n") as f:
-        f.write(page.replace("\n<script>\n", stub + "\n<script>\n", 1))
+        f.write(head + stub + "\n" + tail)
     print("wrote %s" % dest)
 
 if __name__ == "__main__":

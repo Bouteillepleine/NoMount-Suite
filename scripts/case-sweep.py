@@ -46,6 +46,9 @@ holes below (pairing by content rather than position, and admitting .html):
 The two holes were: pairing removed lines to added lines BY POSITION, which an unbalanced
 hunk (any prose re-wrap) shifts out of alignment - the exact hunk shape a bulk rewrite makes;
 and omitting .html, which is where two of the four casualties named above actually landed.
+.js and .css are here for the same reason: the WebUI moved out of index.html into
+webroot/js and webroot/css, and a gate that still named only .html would have gone
+blind on 2000 lines of it without failing.
 
 Escape hatch
 ------------
@@ -57,7 +60,8 @@ import re
 import subprocess
 import sys
 
-CODE_EXT = (".sh", ".rs", ".c", ".h", ".yml", ".yaml", ".patch", ".py", ".toml", ".json", ".html")
+CODE_EXT = (".sh", ".rs", ".c", ".h", ".yml", ".yaml", ".patch", ".py", ".toml", ".json",
+            ".html", ".js", ".css")
 
 CODE_NAMES = ("module.prop",)
 
