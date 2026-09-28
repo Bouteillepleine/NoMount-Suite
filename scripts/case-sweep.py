@@ -73,9 +73,17 @@ PASCAL = re.compile(r"\b[A-Z][a-z0-9]+[A-Za-z0-9]*\b")
 SKIP_MARKER = "[case-ok]"
 
 def git(*args):
-    return subprocess.run(
+    p = subprocess.run(
         ["git", *args], capture_output=True, text=True, errors="replace"
-    ).stdout
+    )
+    if p.returncode != 0:
+        first = (p.stderr or "").strip().splitlines()
+        sys.exit(
+            "case-sweep: `git %s` exited %d, so the sweep cannot see what changed "
+            "and MUST NOT report clean: %s"
+            % (" ".join(args), p.returncode, first[0] if first else "no stderr")
+        )
+    return p.stdout
 
 def case_only_pairs(rev):
     """Yield (path, old, new) for -/+ lines in `rev` that differ only in case."""

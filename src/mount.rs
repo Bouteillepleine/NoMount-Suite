@@ -896,6 +896,10 @@ pub fn run_reload() -> Result<()> {
             failed += 1;
             continue;
         }
+        if !unmount_before_serving(&mounted, w) {
+            failed += 1;
+            continue;
+        }
         let live_rule = live.contains_key(&(w.clone(), 0));
         if live_rule && !w.exists() {
             continue;

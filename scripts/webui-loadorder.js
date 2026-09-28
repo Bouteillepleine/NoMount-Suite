@@ -81,9 +81,24 @@ for (const rel of srcs) {
   console.log('  loaded ' + rel);
 }
 
-const refErrs = seen.errors.filter((e) => /is not defined|before initialization/.test(e));
-if (refErrs.length) {
-  console.error('async load-order errors:\n  ' + refErrs.join('\n  '));
-  process.exit(1);
-}
-console.log('load order OK across ' + srcs.length + ' parts');
+// The boot chain in 60-boot.js is asynchronous, so a ReferenceError inside it
+// surfaces as an unhandledRejection on a LATER tick. Reading seen.errors in the
+// same tick as the last runInContext made this filter dead code: it always saw
+// an empty array. Give the loop turns to run, then judge.
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+(async () => {
+  for (let i = 0; i < 20; i++) {
+    await tick();
+  }
+  const refErrs = seen.errors.filter((e) =>
+    /is not defined|before initialization/.test(e));
+  if (refErrs.length) {
+    console.error('async load-order errors:');
+    for (const e of refErrs) {
+      console.error('  ' + e);
+    }
+    process.exit(1);
+  }
+  console.log('load order OK across ' + srcs.length + ' parts');
+})();
