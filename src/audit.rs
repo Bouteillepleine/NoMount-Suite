@@ -955,6 +955,17 @@ fn maps_pathname(rest: &str) -> Option<&str> {
     (!p.is_empty()).then_some(p)
 }
 
+/// The `dev` and `inode` columns of a /proc/<pid>/maps row, which
+/// `maps_pathname` skips over.
+fn maps_ino(rest: &str) -> Option<u64> {
+    let mut it = rest.split_whitespace();
+    it.next()?; // address range
+    it.next()?; // perms
+    it.next()?; // offset
+    it.next()?; // dev
+    it.next()?.parse::<u64>().ok()
+}
+
 fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
     if targets.is_empty() {
         return na(N_MAPS_DELETED, "no live rules".into())
@@ -966,6 +977,7 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             .meaning("The process list could not be read, so this was not tested.");
     };
     let mut hits: Vec<String> = Vec::new();
+    let mut ino_leaks: Vec<String> = Vec::new();
     let mut scanned = 0u32;
     let mut unread = 0u32;
     let mut mappers = 0u32;
@@ -997,10 +1009,48 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             if deleted && !hits.iter().any(|h| h.starts_with(path)) {
                 hits.push(format!("{path} (pid {pid})"));
             }
+            // The engine rewrites the dev/ino a mapping reports, from the kernel patch
+            // hunk into show_map_vma(). If that hunk is missing from a build, maps keeps
+            // the backing file's real inode while stat() answers with the engine's - and
+            // an app reads its OWN maps with no permission at all. A `(deleted)` row is
+            // the pending-reboot case handled below, so it is left out of this compare.
+            if !deleted {
+                if let (Some(mino), Ok(md)) = (maps_ino(rest), fs::metadata(path)) {
+                    use std::os::unix::fs::MetadataExt;
+                    if mino != 0
+                        && mino != md.ino()
+                        && !ino_leaks.iter().any(|h| h.starts_with(path))
+                    {
+                        ino_leaks.push(format!(
+                            "{path} (pid {pid}, maps ino {mino} vs stat {})",
+                            md.ino()
+                        ));
+                    }
+                }
+            }
         }
         if maps_one {
             mappers += 1;
         }
+    }
+    if !ino_leaks.is_empty() {
+        let shown = ino_leaks.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        return fail(
+            N_MAPS_DELETED,
+            format!(
+                "{} mapped injected file(s) report a different inode in /proc/<pid>/maps than \
+                 stat() does: {shown}",
+                ino_leaks.len()
+            ),
+            "an app reads its own /proc/self/maps and compares the inode there with stat() of \
+             the same path - no permission needed",
+        )
+        .meaning(
+            "This kernel serves injections but was built without the show_map_vma() hunk of \
+             the integration patch, so a mapping still reports the module file's inode while \
+             stat() reports the engine's. Rebuild the kernel with the patch applied.",
+        )
+        .owner("the kernel engine");
     }
     if hits.is_empty() {
         if scanned == 0 {
@@ -1552,6 +1602,21 @@ mod tests {
 
         assert_eq!(maps_pathname("7f8a00000-7f8a01000 rw-p 00000000 00:00 0 "), None);
         assert_eq!(maps_pathname("short line"), None);
+    }
+
+    #[test]
+    fn the_maps_inode_is_read_from_the_column_pathname_skips() {
+        let plain = "7f8a00000-7f8a01000 r--p 00000000 fe:29 1234    /product/app/Foo/Foo.apk";
+        assert_eq!(maps_ino(plain), Some(1234));
+
+        // a space in the pathname must not shift the inode column
+        let spaced = "7f8a00000-7f8a01000 r--p 00000000 fe:29 99  /product/app/My App/My App.apk";
+        assert_eq!(maps_ino(spaced), Some(99));
+        assert_eq!(maps_pathname(spaced), Some("/product/app/My App/My App.apk"));
+
+        // an anonymous mapping reports inode 0, which the check must not compare
+        assert_eq!(maps_ino("7f8a00000-7f8a01000 rw-p 00000000 00:00 0 "), Some(0));
+        assert_eq!(maps_ino("short line"), None);
     }
 
     #[test]
