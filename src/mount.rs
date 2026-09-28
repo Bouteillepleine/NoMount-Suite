@@ -1649,6 +1649,65 @@ mod tests {
             !inline_script,
             "an inline <script> is back in index.html; under script-src 'self' it will not run"
         );
+
+        // An on*= attribute is inline script too. This one is not theoretical: the
+        // split shipped with 47 of them still in place, the page rendered perfectly,
+        // and not one control did anything until they became data-act.
+        for (i, _) in markup.match_indices(" on") {
+            let tail = &markup[i + 3..];
+            let name: String = tail.chars().take_while(|c| c.is_ascii_lowercase()).collect();
+            if !name.is_empty() && tail[name.len()..].starts_with("=\"") {
+                panic!(
+                    "index.html carries an inline on{name}= handler. script-src 'self' blocks \
+                     it exactly as it blocks an inline <script>: the control will render and \
+                     do nothing. Give it data-act=\"<name>\" and add <name> to ACTIONS"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_data_act_in_the_markup_resolves_to_an_action() {
+        let boot = PAGE_JS
+            .last()
+            .expect("there must be a boot part");
+        let table = boot
+            .split("const ACTIONS = {")
+            .nth(1)
+            .and_then(|t| t.split("\n  };").next())
+            .expect("60-boot.js must define ACTIONS");
+        let defined: Vec<&str> = table
+            .lines()
+            .filter_map(|l| l.strip_prefix("    "))
+            .filter_map(|l| l.split(':').next())
+            .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            .collect();
+
+        let mut used = Vec::new();
+        for attr in ["data-act=\"", "data-act-input=\"", "data-act-key=\"",
+                     "data-act-focus=\"", "data-act-blur=\""] {
+            for part in PAGE_HTML.split(attr).skip(1) {
+                if let Some(v) = part.split('"').next() {
+                    used.push(v);
+                }
+            }
+        }
+        assert!(!used.is_empty(), "the markup names no actions at all");
+
+        for name in &used {
+            assert!(
+                defined.contains(name),
+                "index.html asks for the action {name:?}, which ACTIONS does not define, so \
+                 that control does nothing when tapped"
+            );
+        }
+        for name in &defined {
+            assert!(
+                used.contains(name),
+                "ACTIONS defines {name:?} and no control uses it - either the markup lost a \
+                 data-act or this entry is dead"
+            );
+        }
     }
 
     #[test]

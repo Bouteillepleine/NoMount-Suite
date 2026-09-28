@@ -34,11 +34,11 @@
         class="stage" id="vstage" hidden> · staged</span></p>
     </div>
     <div class="hbtns">
-      <button class="iconbtn" id="themeBtn" onclick="toggleTheme()" title="Light / dark theme" aria-label="Toggle theme">
+      <button class="iconbtn" id="themeBtn" data-act="toggleTheme" title="Light / dark theme" aria-label="Toggle theme">
         <svg class="ico-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2.4M12 19.2v2.4M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2.4 12h2.4M19.2 12h2.4M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7"/></svg>
         <svg class="ico-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.4 8.4 0 1 0 10.5 10.5z"/></svg>
       </button>
-      <button class="iconbtn" id="refreshBtn" onclick="refreshAll(this).catch(refreshFailed)" title="Refresh">
+      <button class="iconbtn" id="refreshBtn" data-act="refreshAllSafe" title="Refresh">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
       </button>
     </div>
@@ -55,7 +55,7 @@
       <span class="st" id="state">Checking...</span>
       <span class="sub" id="substate"></span>
     </div>
-    <button class="healthline" id="healthline" onclick="openDetail()">
+    <button class="healthline" id="healthline" data-act="openDetail">
       <span class="hl-dot" id="hlDot"></span>
       <span class="hl-txt" id="hlTxt">Checking...</span>
       <span class="hl-go">›</span>
@@ -65,22 +65,22 @@
       <div class="metric"><div class="k">RRO overlays</div><div class="v" id="mOv"> - </div></div>
       <div class="metric"><div class="k">Root · su</div><div class="v" id="mSu"> - </div></div>
       <div class="metric tap" role="button" tabindex="0"
-           onclick="showTab('rules',document.getElementById('nb-rules'))"
-           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}"
+           data-act="showTab" data-arg="rules" data-target="nb-rules"
+           data-act-key="activateOnEnter"
            title="Open Rules">
         <div class="k">Module coverage <span class="chev">›</span></div>
         <div class="v" id="mMod"> - </div>
       </div>
     </div>
     <div class="btns">
-      <button class="act primary" onclick="reloadRules(this)">
+      <button class="act primary" data-act="reloadRules">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
         Reload
       </button>
     </div>
     <p class="note mt8x">Installed or removed a module? Tap Reload - no reboot needed.</p>
     <div class="btns mt9">
-      <button class="act danger btn-tight" onclick="clearRules(this)">
+      <button class="act danger btn-tight" data-act="clearRules">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
         Clear rules
       </button>
@@ -88,7 +88,7 @@
   </div>
 
   <div class="card collapsed" id="cardPosture">
-    <div class="stealth-head card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
+    <div class="stealth-head card-h clp" role="button" tabindex="0" aria-expanded="false" data-act="toggleCard">
       <div class="shield" id="shield">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>
       </div>
@@ -110,7 +110,7 @@
   <section class="tab" id="tab-hiding">
 
   <div class="card" id="cardPerUID">
-    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" data-act="toggleCard">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
       <h2>Per-UID hiding</h2><span class="chip" id="uidchip"> - </span><span class="chev">›</span>
     </div>
@@ -118,17 +118,17 @@
       <div class="pkgwrap">
         <input id="uid" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
                placeholder="Package name, UID, or glob (*.duckdetector)"
-               oninput="pkgFilter()" onfocus="pkgFilter()" onblur="pkgBlur()" onkeydown="pkgKey(event)" />
+               data-act-input="pkgFilter" data-act-focus="pkgFilter" data-act-blur="pkgBlur" data-act-key="pkgKey" />
         <div id="pkgdd" class="pkgdd"></div>
       </div>
-      <button class="act" onclick="uidOp('block',this)">Hide</button>
-      <button class="act" onclick="uidOp('unblock',this)">Unhide</button>
+      <button class="act" data-act="uidOp" data-arg="block">Hide</button>
+      <button class="act" data-act="uidOp" data-arg="unblock">Unhide</button>
     </div>
 
     <div class="presetrow">
-      <button class="act" onclick="uidScan(this)">Scan for candidates</button>
-      <button class="act none" id="usShow" onclick="usToggle(this)">Show list</button>
-      <button class="act" onclick="addGlobs(this)">Add detector globs</button>
+      <button class="act" data-act="uidScan">Scan for candidates</button>
+      <button class="act none" id="usShow" data-act="usToggle">Show list</button>
+      <button class="act" data-act="addGlobs">Add detector globs</button>
       <span class="presethint">Scan finds what is installed now; globs keep matching what
         installs later.</span>
     </div>
@@ -150,10 +150,10 @@
     <div class="subsec">
       <div class="subsec-h">Isolated processes</div>
       <div class="seg" id="isoSeg" role="radiogroup" aria-label="Which isolated-process pools hiding covers">
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="both" onclick="setIsolated('both')">All</button>
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="appzygote" onclick="setIsolated('appzygote')">App-zygote</button>
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="platform" onclick="setIsolated('platform')">Platform</button>
-        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="off" onclick="setIsolated('off')">None</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="both" data-act="setIsolated" data-arg="both">All</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="appzygote" data-act="setIsolated" data-arg="appzygote">App-zygote</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="platform" data-act="setIsolated" data-arg="platform">Platform</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="off" data-act="setIsolated" data-arg="off">None</button>
       </div>
       <div class="segstate" id="isoState">Reading...</div>
       <details class="ndet">
@@ -164,7 +164,7 @@
   </div>
 
   <div class="card">
-    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleWhiteouts(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" data-act="toggleWhiteouts">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
       <h2>Hidden paths</h2><span class="chip" id="wochip"> - </span><span class="chev">›</span>
     </div>
@@ -173,8 +173,8 @@
       <div class="uidbar">
         <input id="woPath" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
                placeholder="/system/bin/install-recovery.sh" />
-        <button class="act" onclick="woAdd(this)">Hide</button>
-        <button class="act" onclick="woScan(this)">Scan this device</button>
+        <button class="act" data-act="woAdd">Hide</button>
+        <button class="act" data-act="woScan">Scan this device</button>
       </div>
       <div class="list none" id="woFound"></div>
       <div class="list" id="woList"></div>
@@ -184,7 +184,7 @@
   </section>
   <section class="tab" id="tab-rules">
   <div class="card">
-    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleRules(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" data-act="toggleRules">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <h2>Active rules</h2><span class="chip" id="rulechip"> - </span><span class="chev">›</span>
     </div>
@@ -192,16 +192,16 @@
     <div id="ruleModuleBar" class="none"></div>
     <div class="uidbar none" id="rulefilterbar">
       <input id="rulefilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
-             placeholder="Filter by path or module..." oninput="filterRules()" />
-      <button class="act flex1" id="rulegroupBtn" onclick="toggleRuleGroup(this)">Group by module</button>
-      <button class="act flex1" id="rulefileBtn" onclick="toggleFileView(this)">By file</button>
-      <button class="act flex1" onclick="document.getElementById('rulefilter').value='';filterRules()">Clear</button>
+             placeholder="Filter by path or module..." data-act-input="filterRules" />
+      <button class="act flex1" id="rulegroupBtn" data-act="toggleRuleGroup">Group by module</button>
+      <button class="act flex1" id="rulefileBtn" data-act="toggleFileView">By file</button>
+      <button class="act flex1" data-act="clearRuleFilter">Clear</button>
     </div>
     <pre class="rules none" id="ruleslist">...</pre>
     <p class="note none" id="rulecount"></p>
     <div class="uidbar none mb11" id="vfsfilterbar">
       <input id="vfsfilter" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
-             placeholder="Filter files..." oninput="renderFilesFull()" />
+             placeholder="Filter files..." data-act-input="renderFilesFull" />
     </div>
     <div class="list none" id="vfsdirs"></div>
     <div class="list none" id="vfsfull"></div>
@@ -209,7 +209,7 @@
   </div>
 
   <div class="card collapsed" id="cardAbsorb">
-    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" data-act="toggleCard">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v4"/><path d="M2 12h20v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"/><path d="M12 3v6"/><path d="M9 6l3 3 3-3"/></svg>
       <h2>Absorbable mounts</h2><span class="chip" id="abchip"> - </span><span class="chev">›</span>
     </div>
@@ -218,8 +218,8 @@
       <p class="note"><b>This runs by itself</b>: once after every module's boot script, once more 45s later, and - only with the <code>my_hookless</code> trial on - before zygote too. The chip is what is left after that. The buttons are for a mount that shows up <i>later</i>, so you need not reboot. <b>Scan</b> only reports.</p>
       <p class="note">A Zygisk/Xposed hook framework's binds are never taken over: a broken hook fails at the next app install, not at boot.</p>
       <div class="uidbar">
-        <button class="act flex1" onclick="abScan(this)">Scan</button>
-        <button class="act danger flex1" onclick="abAbsorb(this)">Absorb</button>
+        <button class="act flex1" data-act="abScan">Scan</button>
+        <button class="act danger flex1" data-act="abAbsorb">Absorb</button>
       </div>
       <div class="list" id="abDone"></div>
       <div class="list none" id="abFound"></div>
@@ -227,7 +227,7 @@
   </div>
 
   <div class="card">
-    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleModules(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" data-act="toggleModules">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
       <h2>Modules</h2><span class="chip" id="modcount">0</span><span class="chev">›</span>
     </div>
@@ -245,8 +245,8 @@
     </div>
     <p class="note" id="fsub">What your module set will do at the next boot, and what apps can see on this device right now.</p>
     <div class="btns wrap">
-      <button class="act" onclick="runCheck(this)">Re-run</button>
-      <button class="act" id="auCopy" onclick="copyReport(this)">Copy report</button>
+      <button class="act" data-act="runCheck">Re-run</button>
+      <button class="act" id="auCopy" data-act="copyReport">Copy report</button>
     </div>
     <div class="auage none" id="auage"></div>
     <div class="list" id="findlist"></div>
@@ -255,9 +255,9 @@
       <summary>Developer tools</summary>
       <p class="note mt0"><b>Snapshot</b> freezes today’s fingerprint as the baseline, replacing any earlier one. <b>Verify</b> diffs the live system against it. <b>Export</b> writes a folder under <code>/sdcard/Download</code> with the check report, the fingerprint, the live rules and the mount table - attach the whole folder to a bug report. Anything naming the apps you hide is left out of a shared destination, the boot log included; the folder says so and tells you how to get the full set privately.</p>
       <div class="btns wrap">
-        <button class="act" onclick="runSnapshot(this)">Snapshot</button>
-        <button class="act" onclick="runVerify(this)">Verify</button>
-        <button class="act" onclick="runExport(this)">Export</button>
+        <button class="act" data-act="runSnapshot">Snapshot</button>
+        <button class="act" data-act="runVerify">Verify</button>
+        <button class="act" data-act="runExport">Export</button>
       </div>
       <pre class="rules none" id="healthout">...</pre>
       <details class="ndet">
@@ -289,17 +289,17 @@
       <span class="dot" id="gdot"></span><span class="st fs16" id="gstate">Checking...</span>
       <span class="sub">trips at boot #3</span>
     </div>
-    <div class="btns"><button class="act danger none" id="rearm" onclick="rearm(this)">Re-arm &amp; enable</button></div>
+    <div class="btns"><button class="act danger none" id="rearm" data-act="rearm">Re-arm &amp; enable</button></div>
   </div>
 
   <div class="card collapsed none" id="incidentcard">
-    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)">
+    <div class="card-h clp" role="button" tabindex="0" aria-expanded="false" data-act="toggleCard">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
       <h2>Last incident</h2><span class="chip info">guard tripped</span><span class="chev">›</span>
     </div>
     <p class="note">Recorded when the bootloop guard disabled the Suite, including the newest native crash and its abort message - which usually names the offending path. A saved record, not live state.</p>
     <pre class="rules" id="incidentout">...</pre>
-    <div class="btns"><button class="act danger" onclick="clearIncident(this)">Clear incident</button></div>
+    <div class="btns"><button class="act danger" data-act="clearIncident">Clear incident</button></div>
   </div>
 
 </section>
@@ -319,19 +319,19 @@
 <nav class="navwrap" role="tablist" aria-label="Sections">
   <div class="nav">
     <span class="navpill noanim" id="navpill"></span>
-    <button class="navb on" id="nb-status" role="tab" aria-selected="true" onclick="showTab('status',this)">
+    <button class="navb on" id="nb-status" role="tab" aria-selected="true" data-act="showTab" data-arg="status">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3 7.5-7 9-4-1.5-7-4-7-9V7z"/></svg>
       <span>Status</span>
     </button>
-    <button class="navb" id="nb-hiding" role="tab" aria-selected="false" onclick="showTab('hiding',this)">
+    <button class="navb" id="nb-hiding" role="tab" aria-selected="false" data-act="showTab" data-arg="hiding">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 6.2A9.8 9.8 0 0 1 12 6c6 0 9 6 9 6a15 15 0 0 1-3 3.6"/><path d="M6.2 6.5A15 15 0 0 0 3 12s3 6 9 6a9.6 9.6 0 0 0 4.3-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/></svg>
       <span>Hiding</span>
     </button>
-    <button class="navb" id="nb-rules" role="tab" aria-selected="false" onclick="showTab('rules',this)">
+    <button class="navb" id="nb-rules" role="tab" aria-selected="false" data-act="showTab" data-arg="rules">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
       <span>Rules</span>
     </button>
-    <button class="navb" id="nb-diag" role="tab" aria-selected="false" onclick="showTab('diag',this)">
+    <button class="navb" id="nb-diag" role="tab" aria-selected="false" data-act="showTab" data-arg="diag">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v4l-5 9a4 4 0 0 0 3.5 5h9A4 4 0 0 0 20 16l-5-9V3"/><path d="M8 3h8"/></svg>
       <span>Checks</span>
     </button>

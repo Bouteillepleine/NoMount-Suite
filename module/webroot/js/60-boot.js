@@ -68,6 +68,74 @@
     }
   }
 
+  // Every control used to carry onclick="...". script-src 'self' blocks an inline
+  // event handler exactly as it blocks an inline <script>, so under the CSP that
+  // makes a missed esc() inert, those attributes were inert too: the page rendered
+  // and no button did anything. The markup now names an action, and the listeners
+  // below are the only thing that can run it - a name that is not in this table
+  // does nothing, so injected markup cannot reach a function either.
+  const ACTIONS = {
+    showTab: (el, ev, arg) => showTab(arg, el),
+    setIsolated: (el, ev, arg) => setIsolated(arg),
+    uidOp: (el, ev, arg) => uidOp(arg, el),
+    toggleTheme: () => toggleTheme(),
+    openDetail: () => openDetail(),
+    toggleCard: (el) => toggleCard(el),
+    toggleWhiteouts: (el) => toggleWhiteouts(el),
+    toggleRules: (el) => toggleRules(el),
+    toggleRuleGroup: (el) => toggleRuleGroup(el),
+    toggleModules: (el) => toggleModules(el),
+    toggleFileView: (el) => toggleFileView(el),
+    usToggle: (el) => usToggle(el),
+    uidScan: (el) => uidScan(el),
+    woScan: (el) => woScan(el),
+    woAdd: (el) => woAdd(el),
+    abScan: (el) => abScan(el),
+    abAbsorb: (el) => abAbsorb(el),
+    addGlobs: (el) => addGlobs(el),
+    runCheck: (el) => runCheck(el),
+    runVerify: (el) => runVerify(el),
+    runSnapshot: (el) => runSnapshot(el),
+    runExport: (el) => runExport(el),
+    copyReport: (el) => copyReport(el),
+    reloadRules: (el) => reloadRules(el),
+    clearRules: (el) => clearRules(el),
+    clearIncident: (el) => clearIncident(el),
+    rearm: (el) => rearm(el),
+    renderFilesFull: () => renderFilesFull(),
+    filterRules: () => filterRules(),
+    pkgFilter: () => pkgFilter(),
+    pkgBlur: () => pkgBlur(),
+    pkgKey: (el, ev) => pkgKey(ev),
+    refreshAllSafe: (el) => { refreshAll(el).catch(refreshFailed); },
+    clearRuleFilter: () => {
+      const f = $("rulefilter");
+      if (f) f.value = "";
+      filterRules();
+    },
+    activateOnEnter: (el, ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); el.click(); }
+    },
+  };
+
+  function _delegate(attr) {
+    return (ev) => {
+      const t = ev.target;
+      const src = t && t.closest ? t.closest("[" + attr + "]") : null;
+      if (!src) return;
+      const fn = ACTIONS[src.getAttribute(attr)];
+      if (!fn) return;
+      const to = src.getAttribute("data-target");
+      fn(to ? ($(to) || src) : src, ev, src.getAttribute("data-arg"));
+    };
+  }
+
+  document.addEventListener("click", _delegate("data-act"));
+  document.addEventListener("input", _delegate("data-act-input"));
+  document.addEventListener("keydown", _delegate("data-act-key"));
+  document.addEventListener("focusin", _delegate("data-act-focus"));
+  document.addEventListener("focusout", _delegate("data-act-blur"));
+
   (function restoreTab() {
     let t = null;
     try { t = sessionStorage.getItem("nm_tab"); } catch (e) {}
