@@ -219,6 +219,9 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
                     } else {
                         eprintln!("nomount: skipping hide-list glob {e:?}: {err:#}");
                     }
+                    // Pattern::parse deliberately keeps the entry OUT of {err}: the
+                    // redacting branch above prints {err} verbatim, and a glob is a
+                    // package name the user is hiding behind.
                     rep.skipped += 1;
                 }
             }

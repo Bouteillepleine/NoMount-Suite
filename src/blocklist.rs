@@ -52,12 +52,12 @@ impl Pattern {
         let stripped = e.trim_start_matches('*').trim_end_matches('*');
         if stripped.contains('*') {
             return Some(Err(anyhow::anyhow!(
-                "{e:?}: `*` is only allowed at the start and/or end"
+                "`*` is only allowed at the start and/or end"
             )));
         }
         if stripped.len() < MIN_PATTERN_LITERAL {
             return Some(Err(anyhow::anyhow!(
-                "{e:?}: needs at least {MIN_PATTERN_LITERAL} literal characters \
+                "needs at least {MIN_PATTERN_LITERAL} literal characters \
                  (a broader glob would hide injections from most of the device)"
             )));
         }
@@ -513,6 +513,24 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
     fn a_star_in_the_middle_is_refused_rather_than_half_honoured() {
         let parsed = Pattern::parse("com.*.detector").expect("is a glob");
         assert!(parsed.is_err());
+    }
+
+    /// The refusal reason is printed verbatim by the REDACTING branch in
+    /// cli/handlers.rs, so it must not name the entry. It used to be built as
+    /// "{e:?}: ..." , which made "skipping an invalid hide-list glob: ..." carry the
+    /// package glob the user is hiding behind - as revealing as the unredacted line.
+    #[test]
+    fn a_refusal_reason_never_names_the_entry_it_refused() {
+        for bad in ["*", "**", "*a*", "*abc*", "com.*.detector", "*mybank*x*"] {
+            let err = Pattern::parse(bad)
+                .expect("is a glob")
+                .expect_err("should be refused");
+            let text = format!("{err:#}");
+            assert!(
+                !text.contains(bad),
+                "the reason for refusing {bad:?} repeats it back: {text:?}"
+            );
+        }
     }
 
     #[test]
