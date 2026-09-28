@@ -231,7 +231,7 @@ fn app_sizes(uid: u32, paths: &[&str]) -> std::collections::HashMap<String, Stri
         return out;
     }
     let args = paths.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ");
-    let Ok(o) = Command::new("su")
+    let Ok(o) = Command::new("/system/bin/su")
         .args([&uid.to_string(), "-c", &format!("stat -c '%n %s' {args} 2>/dev/null")])
         .output()
     else {

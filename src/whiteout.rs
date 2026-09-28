@@ -286,7 +286,10 @@ pub fn apply() -> Result<()> {
         }
         match nm.whiteout(Path::new(&e)) {
             Ok(()) => ok += 1,
-            Err(_) => failed += 1,
+            Err(err) => {
+                failed += 1;
+                eprintln!("nomount: whiteout refused for {e}: {err:#}");
+            }
         }
     }
     println!("nomount whiteout: applied {ok}, failed {failed}");
@@ -304,18 +307,27 @@ fn injected_targets() -> Result<std::collections::HashSet<String>> {
         .collect())
 }
 
-fn app_can_see_raw(path: &str) -> bool {
+/// `None` means the probe could not be run at all, which is NOT the same as the app
+/// being unable to see the path. Folding the two together made the visibility filter
+/// suppress nothing while reporting nothing, on the one device where it mattered.
+fn app_can_see_probe(path: &str) -> Option<bool> {
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
-    std::process::Command::new("su")
+    // absolute, like manager.rs and absorb.rs: this runs as root, so resolving `su`
+    // through the inherited PATH is the wrong habit even where PATH is not writable
+    let out = std::process::Command::new("/system/bin/su")
         .args(["9999", "-c", &format!("ls -d {quoted}")])
         .output()
-        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(true)
+        .ok()?;
+    Some(out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+fn app_can_see_raw(path: &str) -> bool {
+    app_can_see_probe(path).unwrap_or(true)
 }
 
 fn probe_works() -> bool {
     static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *P.get_or_init(|| app_can_see_raw("/system/bin/sh"))
+    *P.get_or_init(|| app_can_see_probe("/system/bin/sh").unwrap_or(false))
 }
 
 pub struct Candidate {
