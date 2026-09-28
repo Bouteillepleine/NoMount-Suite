@@ -455,6 +455,11 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
     info->v_dio_mem = rule_info->v_dio_mem;
     info->v_dio_off = rule_info->v_dio_off;
     info->v_cap = rule_info->v_cap;
+    if (rule_info->flags & NM_FLAG_HAVE_VOWN) {
+        info->v_mode = rule_info->v_mode;
+        info->v_uid = rule_info->v_uid;
+        info->v_gid = rule_info->v_gid;
+    }
 
     inode->i_private = info;
     inode->i_ino = rule_info->v_ino;
@@ -490,6 +495,15 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         inode->i_blocks = real_inode->i_blocks;
         inode->i_uid = real_inode->i_uid;
         inode->i_gid = real_inode->i_gid;
+        /* A shadowing rule serves the module file's BYTES, not its ownership. Taking
+         * mode/uid/gid from the module file left one entry in a ROM directory whose
+         * owner did not match its neighbours, and made permission() disagree with the
+         * stock answer getattr gives a hidden caller. The type stays the real file's. */
+        if (rule_info->flags & NM_FLAG_HAVE_VOWN) {
+            inode->i_mode = (real_inode->i_mode & S_IFMT) | (rule_info->v_mode & 07777);
+            inode->i_uid = rule_info->v_uid;
+            inode->i_gid = rule_info->v_gid;
+        }
         nm_sync_inode_times(inode, real_inode);
        if (S_ISDIR(real_inode->i_mode)) {
             set_nlink(inode, real_inode->i_nlink);
@@ -1690,6 +1704,14 @@ static void nm_mirror_stat(const struct nm_inode_info *info, struct inode *v_ino
 {
     stat->ino = info->v_ino;
     stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
+    /* Mirrored on the inode too (see nomount_create_new_inode). Both have to move
+     * together: changing only the inode would make an ordinary caller's stat() report
+     * the module file while its open() was judged against the stock mode. */
+    if (info->flags & NM_FLAG_HAVE_VOWN) {
+        stat->mode = (stat->mode & S_IFMT) | (info->v_mode & 07777);
+        stat->uid = info->v_uid;
+        stat->gid = info->v_gid;
+    }
     if (info->flags & NM_FLAG_HAVE_TIMES) {
         stat->atime = info->v_atime;
         stat->mtime = info->v_mtime;
@@ -1820,10 +1842,28 @@ static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
     }
 
     if (likely(!err)) {
-        if (attr->ia_valid & ATTR_MODE) v_inode->i_mode = d_backing_inode(info->r_path.dentry)->i_mode;
-        if (attr->ia_valid & ATTR_UID)  v_inode->i_uid = d_backing_inode(info->r_path.dentry)->i_uid;
-        if (attr->ia_valid & ATTR_GID)  v_inode->i_gid = d_backing_inode(info->r_path.dentry)->i_gid;
-        nm_sync_inode_times(v_inode, d_backing_inode(info->r_path.dentry));
+        struct inode *bi = d_backing_inode(info->r_path.dentry);
+
+        /* An explicit chmod/chown is the caller overriding the mirrored stock owner,
+         * so it has to win on BOTH routes: take it onto the inode (permission) and
+         * into the mirrored values (getattr), or the two start disagreeing again in
+         * the opposite direction. */
+        if (attr->ia_valid & ATTR_MODE) {
+            v_inode->i_mode = bi->i_mode;
+            if (info->flags & NM_FLAG_HAVE_VOWN)
+                info->v_mode = bi->i_mode & 07777;
+        }
+        if (attr->ia_valid & ATTR_UID) {
+            v_inode->i_uid = bi->i_uid;
+            if (info->flags & NM_FLAG_HAVE_VOWN)
+                info->v_uid = bi->i_uid;
+        }
+        if (attr->ia_valid & ATTR_GID) {
+            v_inode->i_gid = bi->i_gid;
+            if (info->flags & NM_FLAG_HAVE_VOWN)
+                info->v_gid = bi->i_gid;
+        }
+        nm_sync_inode_times(v_inode, bi);
     }
     return err;
 }
@@ -4366,6 +4406,12 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
         if (nm_path_stat(&v_path_struct, &kst) == 0) {
             rule->v_ino = kst.ino;
             rule->v_dev = kst.dev;
+            if (!(rule->flags & NM_FLAG_VIRTUAL_DIR)) {
+                rule->v_mode = kst.mode & 07777;
+                rule->v_uid = kst.uid;
+                rule->v_gid = kst.gid;
+                rule->flags |= NM_FLAG_HAVE_VOWN;
+            }
             rule->flags |= NM_FLAG_HAVE_TIMES;
             rule->v_atime = kst.atime;
             rule->v_mtime = kst.mtime;

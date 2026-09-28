@@ -17,9 +17,9 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.33.7"
+#define NM_MODULE_VERSION "1.34.0"
 
-#define NOMOUNT_VERSION    33
+#define NOMOUNT_VERSION    34
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -29,6 +29,7 @@
 #define NM_FLAG_SHADOWS_STOCK (1 << 5)
 #define NM_FLAG_PUBLIC      (1 << 6)
 #define NM_FLAG_STOCK_ONLY  (1 << 7)
+#define NM_FLAG_HAVE_VOWN   (1 << 8)
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
 
