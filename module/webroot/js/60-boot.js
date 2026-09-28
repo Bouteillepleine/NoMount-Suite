@@ -68,12 +68,6 @@
     }
   }
 
-  // Every control used to carry onclick="...". script-src 'self' blocks an inline
-  // event handler exactly as it blocks an inline <script>, so under the CSP that
-  // makes a missed esc() inert, those attributes were inert too: the page rendered
-  // and no button did anything. The markup now names an action, and the listeners
-  // below are the only thing that can run it - a name that is not in this table
-  // does nothing, so injected markup cannot reach a function either.
   const ACTIONS = {
     showTab: (el, ev, arg) => showTab(arg, el),
     setIsolated: (el, ev, arg) => setIsolated(arg),

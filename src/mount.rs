@@ -1555,9 +1555,6 @@ mod tests {
 
     const PAGE_HTML: &str = include_str!("../module/webroot/index.html");
 
-    // The WebUI is more than one file. Every assertion below wants one haystack, so
-    // PAGE is the parts concatenated: add a part here when one is added to webroot,
-    // or the assertions keep passing while covering less than they name.
     const PAGE_CSS: &str = include_str!("../module/webroot/css/app.css");
     const PAGE_JS: &[&str] = &[
         include_str!("../module/webroot/js/00-core.js"),
@@ -1572,10 +1569,6 @@ mod tests {
     static PAGE: LazyLock<String> =
         LazyLock::new(|| PAGE_PARTS.concat() + &PAGE_JS.concat());
 
-    // Only the stylesheet, never the markup or the script. Before the split that is
-    // everything ahead of </style>; after it, a file with no </style> in it, which
-    // the same split returns whole. Keeping the colour sweep off the JS matters:
-    // a hex literal in a string would read as a warm colour in a rule.
     const PAGE_CSS_SRC: &str = PAGE_CSS;
 
     fn page_css() -> &'static str {
@@ -1584,8 +1577,6 @@ mod tests {
 
     const HARNESS_SRC: &str = include_str!("../scripts/webui-harness.py");
 
-    /// index.html with every <!-- --> removed, so a rule about the markup is not
-    /// satisfied or broken by prose describing it.
     fn markup_without_comments() -> String {
         let mut out = String::with_capacity(PAGE_HTML.len());
         let mut rest = PAGE_HTML;
@@ -1623,7 +1614,6 @@ mod tests {
              {csp}"
         );
 
-        // The directives above are only true if nothing in the page needs them back.
         let markup = markup_without_comments();
         assert!(
             !markup.contains("style=\""),
@@ -1650,9 +1640,6 @@ mod tests {
             "an inline <script> is back in index.html; under script-src 'self' it will not run"
         );
 
-        // An on*= attribute is inline script too. This one is not theoretical: the
-        // split shipped with 47 of them still in place, the page rendered perfectly,
-        // and not one control did anything until they became data-act.
         for (i, _) in markup.match_indices(" on") {
             let tail = &markup[i + 3..];
             let name: String = tail.chars().take_while(|c| c.is_ascii_lowercase()).collect();
@@ -1666,20 +1653,11 @@ mod tests {
         }
     }
 
-    /// Every u- utility class the page names must be defined in the stylesheet.
-    ///
-    /// This is here because the opposite shipped. The pass that removed the inline
-    /// style= attributes wrote the markup, hit an unmapped attribute in a js part,
-    /// and exited BEFORE appending the rules - so the page referenced fourteen
-    /// classes that did not exist. Nothing failed: the CSS parsed, the JS ran, the
-    /// tests passed, and on the device the cards lost their spacing and every
-    /// element that should have been hidden was on screen.
     #[test]
     fn every_utility_class_the_page_uses_has_a_rule() {
         let mut used: Vec<String> = Vec::new();
         let mut collect = |text: &str| {
             for (i, _) in text.match_indices("u-") {
-                // only at a token boundary: "su-perm" is a check id, not a class
                 let boundary = i == 0
                     || matches!(
                         text.as_bytes()[i - 1],

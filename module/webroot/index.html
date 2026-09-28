@@ -3,17 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<!-- This page holds ksu.exec(), an arbitrary root shell, and renders values that come off the
-     device. esc() on every one of them and shq() on every shell interpolation IS the defence;
-     the CSP below is the backstop for the one that gets missed, and it is only worth the name
-     because neither script nor style is inline: under 'unsafe-inline' a CSP does NOT stop
-     injected script running, it only leaves it nowhere to send what it read. Under 'self' it
-     does not run, and injected markup cannot restyle the page either - which matters on a page
-     whose buttons wipe rules and re-arm a tripped guard, because moving a control under a
-     finger is enough. That is the whole reason the page is not one file.
-     Two rules keep it that way, both enforced in CI: nothing inline in this file, and every
-     computed width or colour set through the CSSOM, which CSP does not govern.
-     Containment, never an excuse for a missing esc(). -->
+<!-- This page holds ksu.exec(), a root shell, and renders values off the device.
+     esc() on every one and shq() on every shell interpolation IS the defence.
+     The CSP is the backstop, and it only works because nothing here is inline:
+     no <script>, no style=, no on*= handler. Keep it that way. -->
 
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
 <title>NoMount Suite</title>

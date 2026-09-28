@@ -382,9 +382,6 @@ package_zip() {
     fi
     cp -r "$MODULE_DIR/webroot" "$staging/webroot"
 
-    # Every css/ and js/ file index.html names must actually be in the zip. Nothing
-    # else catches a stale reference: the page still loads, the missing part simply
-    # never runs, and on a device that reads as a WebUI that came up blank.
     missing=0
     while IFS= read -r ref; do
         case "$ref" in ''|*://*|data:*|'#'*) continue ;; esac
@@ -400,10 +397,6 @@ REFS
         exit 1
     fi
 
-    # The three stamps live in whichever webroot file carries the constants - one
-    # inline <script> once, a js/ part after the split. Resolved by content rather
-    # than by name, and fatal unless exactly one file claims them, so a split that
-    # duplicates or loses the block cannot ship an unstamped page.
     stamp_target=""
     stamp_n=0
     for f in "$staging/webroot/index.html" "$staging"/webroot/js/*.js; do

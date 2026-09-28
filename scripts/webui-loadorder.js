@@ -1,9 +1,3 @@
-// Load the webroot parts as separate classic scripts in ONE V8 context, in the
-// order index.html lists them. Top-level const/let land in the context's shared
-// global lexical scope, the same as in a browser, so a part that reads a binding
-// a LATER part declares throws ReferenceError here exactly as it would on device.
-// That is the one failure a by-concern split can introduce and a syntax check
-// cannot see.
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');

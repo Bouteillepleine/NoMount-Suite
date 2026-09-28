@@ -9,25 +9,13 @@ and how the health line came to paint "Nothing detectable" in green directly
 under a card saying "No kernel driver".
 
 So: capture what each command really returns on a device, stub `ksu.exec` to
-replay it, and open the page in any browser. No line of the page's own code is
-rewritten -- the stub is prepended and the parts are inlined verbatim.
+replay it, and open the page in any browser. The stub is prepended and the
+css/ and js/ parts are inlined verbatim, so the output is one file.
 
     python3 scripts/webui-harness.py capture   # needs adb + root; writes fixtures
     python3 scripts/webui-harness.py build     # writes target/webui-harness.html
     python3 scripts/webui-harness.py build --no-driver   # engine absent
 
-The shipped page is index.html plus the css/ and js/ files it references, and a
-browser opening target/webui-harness.html would resolve none of them. So build()
-ASSEMBLES: every <link rel=stylesheet> and <script src> index.html names is
-inlined, in page order, and the stub goes in ahead of the first script. Two
-consequences worth stating, because both would otherwise be silent:
-
-  * Inlining is exactly what the shipped CSP forbids, so the harness output
-    carries a relaxed CSP of its own. The harness therefore does NOT exercise the
-    real CSP - only a device, or a static read of index.html, does that.
-  * The parts are concatenated in the order index.html lists them. If a split
-    file is added to js/ and NOT referenced from index.html, it ships dead and
-    the harness renders without it; the reference is the manifest.
 
 PRIVACY. The captured fixtures include `pm list packages -3 -U`, i.e. the
 device's third-party packages and their uids -- the same secret `nomount export`
@@ -168,17 +156,10 @@ WEBROOT = os.path.join(ROOT, "module", "webroot")
 LINK_RE = re.compile(r'[ \t]*<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>[ \t]*\n?')
 SRC_RE = re.compile(r'[ \t]*<script[^>]*\ssrc="([^"]+)"[^>]*>\s*</script>[ \t]*\n?')
 
-# The shipped CSP bans the inline script and inline style this harness is built
-# out of, so the assembled file needs its own. Kept as narrow as an inlined page
-# can be: still no connect-src and no form-action, so a harness page that renders
-# a string it should have escaped still cannot send it anywhere.
 HARNESS_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
                "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 CSP_RE = re.compile(r'(<meta http-equiv="Content-Security-Policy" content=")([^"]*)(")')
 
-# Anchored to line start on purpose. The head comment explaining the CSP contains
-# the literal <script> mid-line, and a plain search for it put the stub INSIDE that
-# comment - stubbing nothing, on a page that then rendered every card as a failure.
 TAG_RE = re.compile(r'^[ \t]*<script\b', re.M)
 
 
@@ -210,9 +191,6 @@ def build(no_driver=False):
         for k in ("vfslist", "engver", "plan", "uidlist", "whiteoutlist", "isolated"):
             fx[k] = {"out": "", "rc": 1}
     page = assemble()
-    # The stamp is an exact literal. If the anchor moves, str.replace silently does
-    # nothing, the harness renders `dev` where the shipped page renders a real
-    # version, and a version-rendering regression screenshots clean.
     anchor = 'const SUITE_VERSION = "dev";'
     if page.count(anchor) != 1:
         sys.exit("harness: anchor moved (%d matches): %r" % (page.count(anchor), anchor))

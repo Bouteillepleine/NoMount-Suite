@@ -60,10 +60,6 @@ jobs:
       - name: Engine config-gate sweep
         run: bash scripts/gate-sweep.sh
 
-      # The WebUI is seven classic scripts sharing one global scope, and the order
-      # index.html lists them in is load-bearing. Syntax checks pass either way; this
-      # runs the parts in a bare V8 context, in that order, so a part reaching a
-      # binding a later part declares fails here instead of on a device.
       - name: WebUI load order
         run: node scripts/webui-loadorder.js
 

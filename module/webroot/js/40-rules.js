@@ -104,9 +104,6 @@
     }).join("");
     box.classList.remove("u-hide");
     box.innerHTML = `<div class="rmbar">${seg}</div><div class="rmlegend">${legend}</div>`;
-    // A width and a palette entry are computed per module, so neither can live in
-    // the stylesheet, and a style= attribute is what style-src 'self' refuses. The
-    // CSSOM is not governed by CSP, so the same two declarations are set here.
     const bars = box.querySelectorAll(".rmbar > span");
     const swatches = box.querySelectorAll(".rmsw");
     shown.forEach((e, i) => {

@@ -732,19 +732,7 @@
   html[data-theme="light"] .iconbtn .ico-moon { display: block; }
   html[data-theme="light"] .iconbtn .ico-sun  { display: none; }
 
-/* Utility classes replacing the style= attributes the markup used to carry, so the
-   CSP can say style-src 'self': under 'unsafe-inline' a missed esc() can restyle the
-   page, and restyling is enough to move a control under a finger. Each class holds
-   exactly the declarations its attribute held.
-   The u- prefix is not decoration. The first attempt used bare names and collided
-   with .wrap (the page container) and .none (the empty row in the package dropdown),
-   which laid container rules over cards and would have hidden that row.
-   Every declaration is !important for one reason: each replaces an inline style, and
-   an inline style outranks every normal rule in this file. Without it .u-path (0,1,0)
-   loses to .metric .v (0,2,0) and the kernel string renders at 21px over five lines,
-   which is exactly what shipped. The two !important rules already in this file
-   (.card.collapsed, prefers-reduced-motion) touch display and transition only, so
-   nothing here fights them. The show paths remove the class rather than override it. */
+/* These replace style= attributes, so they need !important to match it. */
   .u-hide { display: none !important; }
   .u-mb11 { margin-bottom: 11px !important; }
   .u-flex1 { flex: 1 1 0 !important; }

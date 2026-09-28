@@ -11,6 +11,14 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.187 - engine v33 (unchanged)
+
+- The WebUI is `index.html` plus `css/app.css` and seven `js/` parts, one per pane.
+- The CSP drops both `unsafe-inline` grants: injected script no longer runs, injected markup no longer restyles the page.
+- Controls name an action instead of carrying `onclick`, inline styles became classes, and computed widths and colours are set through the CSSOM.
+- Every card with a header retracts, and the headers answer Enter.
+- CI runs the parts in load order, and tests pin the CSP, the action table, the utility classes and the part list.
+
 ## v1.3.186 - engine v33 (unchanged)
 
 - A kernel flashed from inside the root manager can leave the stock kernel running while root still works. The banner is spoofed to match stock, so nothing in the report gave that away and the engine looked broken. The report now says whether root is a loaded module, which settles it on sight.
