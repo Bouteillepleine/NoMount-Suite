@@ -29,7 +29,9 @@
 #define NM_FLAG_SHADOWS_STOCK (1 << 5)
 #define NM_FLAG_PUBLIC      (1 << 6)
 #define NM_FLAG_STOCK_ONLY  (1 << 7)
-#define NM_FLAG_HAVE_VOWN   (1 << 8)
+/* Bits 0-7 only: nm_inode_info, nomount_rule_info and nomount_child_node all declare
+ * `u8 flags`, so a bit 8 is silently truncated on every copy out of nomount_rule
+ * (which is u32). Signal "the stock owner was captured" with v_mode != 0 instead. */
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
 
