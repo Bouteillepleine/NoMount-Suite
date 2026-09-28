@@ -140,7 +140,7 @@
     const head = '<div class="pkghead">' + matches.length + ' app' + (matches.length > 1 ? 's' : '') +
                  (q ? ' match' : '') + ' · type to filter</div>';
     d.innerHTML = head + matches.map(function (p) {
-      return '<div class="opt" data-nm="' + esc(p.name) + '" onmousedown="pkgPick(this)">' +
+      return '<div class="opt" data-nm="' + esc(p.name) + '" data-act-down="pkgPick">' +
              '<span class="pn">' + esc(p.name) + '</span>' +
              '<span class="pu">uid ' + esc(p.uid) + '</span></div>';
     }).join("");
@@ -289,7 +289,7 @@
     const n = [...US.values()].filter(function (e) { return e.pick; }).length;
     box.innerHTML = `<div class="blk-head">Candidates · ${US.size}</div>${rows}
       <div class="usfoot">
-        <button class="act primary" onclick="usApply(this)"${n ? "" : " disabled"}>Hide ${n} selected</button>
+        <button class="act primary" data-act="usApply"${n ? "" : " disabled"}>Hide ${n} selected</button>
         <span class="presethint">Picked by default: known detectors and apps that look for a root
           manager. Apps that merely request superuser are left unpicked - those are usually your own
           root tools, and hiding shows them the stock tree instead of your module content.</span>
@@ -353,10 +353,3 @@
   function setExp(h) {
     if (h) h.setAttribute("aria-expanded", h.classList.contains("open") ? "true" : "false");
   }
-  document.addEventListener("keydown", function (e) {
-    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
-    const h = e.target && e.target.closest && e.target.closest(".card-h.clp");
-    if (!h) return;
-    e.preventDefault();
-    h.click();
-  });

@@ -1556,6 +1556,15 @@ mod tests {
     const PAGE_HTML: &str = include_str!("../module/webroot/index.html");
 
     const PAGE_CSS: &str = include_str!("../module/webroot/css/app.css");
+    const JS_PARTS: &[&str] = &[
+        "js/00-core.js",
+        "js/10-status.js",
+        "js/20-chrome.js",
+        "js/30-checks.js",
+        "js/40-rules.js",
+        "js/50-apps.js",
+        "js/60-boot.js",
+    ];
     const PAGE_JS: &[&str] = &[
         include_str!("../module/webroot/js/00-core.js"),
         include_str!("../module/webroot/js/10-status.js"),
@@ -1640,15 +1649,23 @@ mod tests {
             "an inline <script> is back in index.html; under script-src 'self' it will not run"
         );
 
-        for (i, _) in markup.match_indices(" on") {
-            let tail = &markup[i + 3..];
-            let name: String = tail.chars().take_while(|c| c.is_ascii_lowercase()).collect();
-            if !name.is_empty() && tail[name.len()..].starts_with("=\"") {
-                panic!(
-                    "index.html carries an inline on{name}= handler. script-src 'self' blocks \
-                     it exactly as it blocks an inline <script>: the control will render and \
-                     do nothing. Give it data-act=\"<name>\" and add <name> to ACTIONS"
-                );
+        let mut sources: Vec<(&str, String)> = vec![("index.html", markup)];
+        for (i, part) in PAGE_JS.iter().enumerate() {
+            sources.push((JS_PARTS[i], (*part).to_string()));
+        }
+        for (who, text) in &sources {
+            for (i, _) in text.match_indices(" on") {
+                let tail = &text[i + 3..];
+                let name: String =
+                    tail.chars().take_while(|c| c.is_ascii_lowercase()).collect();
+                if !name.is_empty() && tail[name.len()..].starts_with("=\"") {
+                    panic!(
+                        "{who} carries an inline on{name}= handler. script-src 'self' blocks it \
+                         exactly as it blocks an inline <script>, and markup a js part builds \
+                         and assigns to innerHTML is still parsed markup: the control renders \
+                         and does nothing. Give it data-act=\"<name>\" and add <name> to ACTIONS"
+                    );
+                }
             }
         }
     }
@@ -1709,27 +1726,42 @@ mod tests {
             .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
             .collect();
 
-        let mut used = Vec::new();
-        for attr in ["data-act=\"", "data-act-input=\"", "data-act-key=\"",
-                     "data-act-focus=\"", "data-act-blur=\""] {
-            for part in PAGE_HTML.split(attr).skip(1) {
-                if let Some(v) = part.split('"').next() {
-                    used.push(v);
+        const ATTRS: [&str; 6] = ["data-act=\"", "data-act-input=\"", "data-act-key=\"",
+                                  "data-act-down=\"", "data-act-focus=\"",
+                                  "data-act-blur=\""];
+        let names = |text: &'static str| {
+            let mut out: Vec<&str> = Vec::new();
+            for attr in ATTRS {
+                for part in text.split(attr).skip(1) {
+                    if let Some(v) = part.split('"').next() {
+                        out.push(v);
+                    }
                 }
             }
-        }
-        assert!(!used.is_empty(), "the markup names no actions at all");
+            out
+        };
 
-        for name in &used {
+        // index.html is served straight to the page, so every action it names has to be
+        // in the global table. Markup a js part builds may instead be handled by one of
+        // the container delegates (#wobody, #blocked, #usList), which match the value
+        // themselves, so those names are checked the other way only.
+        let in_html = names(PAGE_HTML);
+        assert!(!in_html.is_empty(), "index.html names no actions at all");
+        for name in &in_html {
             assert!(
                 defined.contains(name),
                 "index.html asks for the action {name:?}, which ACTIONS does not define, so \
                  that control does nothing when tapped"
             );
         }
+
+        let mut anywhere = in_html;
+        for part in PAGE_JS {
+            anywhere.extend(names(part));
+        }
         for name in &defined {
             assert!(
-                used.contains(name),
+                anywhere.contains(name),
                 "ACTIONS defines {name:?} and no control uses it - either the markup lost a \
                  data-act or this entry is dead"
             );

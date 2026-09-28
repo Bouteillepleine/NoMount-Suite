@@ -247,7 +247,7 @@
         "serve is detectable.</div>" +
         '<div class="fmeta"><span class="tag info">plan only</span>' +
         '<button class="act u-btn-end" ' +
-        'onclick="runCheck(this)">Check the device</button></div></div>';
+        'data-act="runCheck">Check the device</button></div></div>';
     }
     let unmHead = "";
     if (unmeasured.length || s.complete === false) {
@@ -264,7 +264,7 @@
             "Run them now that the device is up.") + "</div>" +
         '<div class="fmeta"><span class="tag info">not measured</span>' +
         '<button class="act u-btn-end" ' +
-        'onclick="runCheck(this)">Run them now</button></div></div>';
+        'data-act="runCheck">Run them now</button></div></div>';
     }
     list.innerHTML = head +
       group("Worth knowing", attention) +
@@ -450,7 +450,7 @@
     if (el) {
       const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
       const off = ((dr && dr.stdout) || "").trim() === "1";
-      const btn = '<button class="act u-btn-mid" onclick="openDetail()">'
+      const btn = '<button class="act u-btn-mid" data-act="openDetail">'
         + 'See what happened</button>';
       el.hidden = false;
       el.innerHTML = off

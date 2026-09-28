@@ -81,6 +81,8 @@
     toggleModules: (el) => toggleModules(el),
     toggleFileView: (el) => toggleFileView(el),
     usToggle: (el) => usToggle(el),
+    usApply: (el) => usApply(el),
+    pkgPick: (el) => pkgPick(el),
     uidScan: (el) => uidScan(el),
     woScan: (el) => woScan(el),
     woAdd: (el) => woAdd(el),
@@ -125,6 +127,7 @@
   }
 
   document.addEventListener("click", _delegate("data-act"));
+  document.addEventListener("mousedown", _delegate("data-act-down"));
   document.addEventListener("input", _delegate("data-act-input"));
   document.addEventListener("keydown", _delegate("data-act-key"));
   document.addEventListener("focusin", _delegate("data-act-focus"));

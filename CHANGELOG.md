@@ -11,6 +11,12 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.188 - engine v33 (unchanged)
+
+- Fix: five controls did nothing under the new CSP, including Hide selected and the app picker.
+- Fix: Enter on a card header toggled it twice.
+- Tests now scan the js parts, not only index.html.
+
 ## v1.3.187 - engine v33 (unchanged)
 
 - WebUI split into `css/app.css` and seven `js/` parts.
