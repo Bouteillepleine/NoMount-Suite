@@ -123,7 +123,7 @@
       dot.className = "hl-dot ok";
       txt.innerHTML = "<b>Nothing found</b>" + age;
     }
-    el.classList.remove("none");
+    el.classList.remove("u-hide");
   }
 
   let CHECK_RUNNING = false;
@@ -168,7 +168,7 @@
     paintAbsorbChip();
     // Keep Copy report reachable when the engine is down. That is the state a bug report is
     // most needed in, and it is exactly the state that produces no report to gate the button on.
-    $("auCopy").classList.toggle("none", !((r || engineDown(r))));
+    $("auCopy").classList.toggle("u-hide", !((r || engineDown(r))));
 
     if (!r || !r.checks) {
       list.innerHTML = engineDown(r)
@@ -176,7 +176,7 @@
         : '<div class="empty">Not checked yet - press <b>Re-run</b>.</div>';
       chip.textContent = engineDown(r) ? "engine down" : "not checked";
       chip.className = "chip info";
-      age.classList.add("none");
+      age.classList.add("u-hide");
       return;
     }
 
@@ -184,7 +184,7 @@
     // pane is the one users screenshot and paste into a bug report, and copyReport already
     // redacts on the way out - the same rule has to hold here.
     $("auditout").textContent = redactUids(JSON.stringify(r, null, 1));
-    age.classList.remove("none");
+    age.classList.remove("u-hide");
     age.textContent = "Checked " + (auAge(r.ts) || "now") + " · " +
       (r.sections && r.sections.length ? r.sections.join(" + ") : "unknown") + " · " +
       (r.verdict || "");
@@ -246,7 +246,7 @@
         "Nothing on the device itself was measured, so nothing here says whether what you " +
         "serve is detectable.</div>" +
         '<div class="fmeta"><span class="tag info">plan only</span>' +
-        '<button class="act btn-end" ' +
+        '<button class="act u-btn-end" ' +
         'onclick="runCheck(this)">Check the device</button></div></div>';
     }
     let unmHead = "";
@@ -263,7 +263,7 @@
             "injected file, so the checks that need a running app cannot answer then. " +
             "Run them now that the device is up.") + "</div>" +
         '<div class="fmeta"><span class="tag info">not measured</span>' +
-        '<button class="act btn-end" ' +
+        '<button class="act u-btn-end" ' +
         'onclick="runCheck(this)">Run them now</button></div></div>';
     }
     list.innerHTML = head +
@@ -390,7 +390,7 @@
     }
   }
 
-  function _healthShow(txt) { const o = $("healthout"); o.classList.remove("none"); o.textContent = txt.trim() || "(no output)"; }
+  function _healthShow(txt) { const o = $("healthout"); o.classList.remove("u-hide"); o.textContent = txt.trim() || "(no output)"; }
 
   async function runSnapshot(btn) {
     const had = (await exec("[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0")).stdout.trim() === "1";
@@ -439,18 +439,18 @@
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
     if (!txt) {
-      card.classList.add("none");
+      card.classList.add("u-hide");
       const w = $("incwarn");
       if (w) w.hidden = true;
       return;
     }
-    card.classList.remove("none");
+    card.classList.remove("u-hide");
     $("incidentout").textContent = txt;
     const el = $("incwarn");
     if (el) {
       const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
       const off = ((dr && dr.stdout) || "").trim() === "1";
-      const btn = '<button class="act btn-mid" onclick="openDetail()">'
+      const btn = '<button class="act u-btn-mid" onclick="openDetail()">'
         + 'See what happened</button>';
       el.hidden = false;
       el.innerHTML = off

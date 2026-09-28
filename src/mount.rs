@@ -1666,6 +1666,54 @@ mod tests {
         }
     }
 
+    /// Every u- utility class the page names must be defined in the stylesheet.
+    ///
+    /// This is here because the opposite shipped. The pass that removed the inline
+    /// style= attributes wrote the markup, hit an unmapped attribute in a js part,
+    /// and exited BEFORE appending the rules - so the page referenced fourteen
+    /// classes that did not exist. Nothing failed: the CSS parsed, the JS ran, the
+    /// tests passed, and on the device the cards lost their spacing and every
+    /// element that should have been hidden was on screen.
+    #[test]
+    fn every_utility_class_the_page_uses_has_a_rule() {
+        let mut used: Vec<String> = Vec::new();
+        let mut collect = |text: &str| {
+            for (i, _) in text.match_indices("u-") {
+                // only at a token boundary: "su-perm" is a check id, not a class
+                let boundary = i == 0
+                    || matches!(
+                        text.as_bytes()[i - 1],
+                        b' ' | b'"' | b'\'' | b'\n' | b'\t'
+                    );
+                if !boundary {
+                    continue;
+                }
+                let name: String = text[i..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+                    .collect();
+                let name = name.trim_end_matches('-').to_string();
+                if name.len() > 2 && !used.contains(&name) {
+                    used.push(name);
+                }
+            }
+        };
+        collect(PAGE_HTML);
+        for part in PAGE_JS {
+            collect(part);
+        }
+        assert!(!used.is_empty(), "the page names no utility classes at all");
+
+        for name in &used {
+            assert!(
+                PAGE_CSS.contains(&format!(".{name} ")) || PAGE_CSS.contains(&format!(".{name}{{")),
+                "the page uses the class {name:?}, which css/app.css does not define. The \
+                 element renders unstyled and nothing else reports it - if it is a hide \
+                 class, whatever it was meant to hide is on screen right now"
+            );
+        }
+    }
+
     #[test]
     fn every_data_act_in_the_markup_resolves_to_an_action() {
         let boot = PAGE_JS

@@ -90,7 +90,7 @@
     } else {
       $("ruleslist").textContent = keep.join("\n");
     }
-    $("rulecount").classList.remove("none");
+    $("rulecount").classList.remove("u-hide");
     const vd = lines.filter(function (l) { return l.includes("(virtual dir)"); }).length;
     const wo = lines.filter(function (l) { return l.includes("(whiteout)"); }).length;
     $("rulecount").textContent = q

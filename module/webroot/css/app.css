@@ -731,3 +731,30 @@
   .iconbtn .ico-moon { display: none; }
   html[data-theme="light"] .iconbtn .ico-moon { display: block; }
   html[data-theme="light"] .iconbtn .ico-sun  { display: none; }
+
+/* Utility classes replacing the style= attributes the markup used to carry, so the
+   CSP can say style-src 'self': under 'unsafe-inline' a missed esc() can restyle the
+   page, and restyling is enough to move a control under a finger. Each class holds
+   exactly the declarations its attribute held.
+   The u- prefix is not decoration. The first attempt used bare names and collided
+   with .wrap (the page container) and .none (the empty row in the package dropdown),
+   which laid container rules over cards and would have hidden that row.
+   .u-hide is !important because it replaces an inline display:none, which outranked
+   every rule here; the show paths remove the class rather than overriding it. */
+  .u-hide { display: none !important; }
+  .u-mb11 { margin-bottom: 11px; }
+  .u-flex1 { flex: 1 1 0; }
+  .u-mt0 { margin-top: 0; }
+  .u-mt9 { margin-top: 9px; }
+  .u-m8x { margin: 8px 2px 0; }
+  .u-fs15 { font-size: 15px; }
+  .u-fs16 { font-size: 16px; }
+  .u-path { font-size: 11px; word-break: break-all; line-height: 1.35; }
+  .u-wrap { flex-wrap: wrap; }
+  .u-abs { position: absolute; }
+  .u-btn-tight { flex: none; min-width: 0; padding: 9px 14px; font-size: 12.5px; }
+  .u-btn-mid { flex: none; min-width: 0; padding: 11px 15px; font-size: 12px; margin-left: 8px; }
+  .u-btn-end {
+    flex: none; min-width: 0; padding: 12px 16px; font-size: 12.5px; margin-left: auto;
+  }
+  .u-hint { font-size: 11px; color: var(--muted); margin-right: 8px; }

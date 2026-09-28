@@ -59,7 +59,7 @@
                          refreshAbsorb(),
                          refreshModules(), refreshFiles(), refreshRuleSummary(),
                          refreshIncident(), refreshBlocked(), refreshIsolated(),
-                         $("wobody").classList.contains("none") ? woChipOnly() : refreshWhiteouts()]);
+                         $("wobody").classList.contains("u-hide") ? woChipOnly() : refreshWhiteouts()]);
       if (rulesShown) loadRules();
       loadPkgList();
     } finally {

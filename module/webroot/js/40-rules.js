@@ -84,7 +84,7 @@
   const _RM_PALETTE = ["#57e6c3", "#7c9cff", "#c792ea", "#4fd1e0", "#9ccc65", "#a5b4fc", "#5eead4"];
   function _paintRuleModuleBar(lines) {
     const box = $("ruleModuleBar"); if (!box) return;
-    if (!lines.length) { box.classList.add("none"); box.innerHTML = ""; return; }
+    if (!lines.length) { box.classList.add("u-hide"); box.innerHTML = ""; return; }
     const counts = {};
     lines.forEach((l) => { const m = _ruleModule(l); counts[m] = (counts[m] || 0) + 1; });
     const entries = Object.keys(counts).map((k) => [k, counts[k]]).sort((a, b) => b[1] - a[1]);
@@ -102,7 +102,7 @@
       return `<span class="rmleg"><span class="rmsw"></span>` +
              `<span class="rmname" title="${esc(nm)}">${esc(nm)}</span> <b>${e[1]}</b></span>`;
     }).join("");
-    box.classList.remove("none");
+    box.classList.remove("u-hide");
     box.innerHTML = `<div class="rmbar">${seg}</div><div class="rmlegend">${legend}</div>`;
     // A width and a palette entry are computed per module, so neither can live in
     // the stylesheet, and a style= attribute is what style-src 'self' refuses. The
@@ -142,17 +142,17 @@
     else box.innerHTML = keys.map((k) => {
       const e = dirs[k], ov = e.ov === e.n;
       return `<div class="row"><span class="name mono">${esc(k)}</span>` +
-        `<span class="sub hint-inline">${e.n} ` +
+        `<span class="sub u-hint">${e.n} ` +
         `${ov ? "apk" : "file"}${e.n > 1 ? "s" : ""}</span>` +
         `<span class="tag ${ov ? "ov" : "vfs"}">${ov ? "RRO" : "Prism"}</span></div>`;
     }).join("");
-    if (!$("vfsfull").classList.contains("none")) renderFilesFull();
+    if (!$("vfsfull").classList.contains("u-hide")) renderFilesFull();
   }
   const WO_PATH_RE = /^\/[^\x00-\x1f\x7f]+$/;
   function toggleWhiteouts(h) {
     const on = h.classList.toggle("open");
     setExp(h);
-    $("wobody").classList.toggle("none", !(on));
+    $("wobody").classList.toggle("u-hide", !(on));
     if (on) refreshWhiteouts();
   }
   async function whiteoutSets() {
@@ -338,7 +338,7 @@
     const r = await nm("absorb --dry-run");
     const out = ((r.stdout || "") + (r.stderr || "")).trim();
     const box = $("abFound");
-    box.classList.remove("none");
+    box.classList.remove("u-hide");
     const lines = out.split("\n").map(x => x.trim()).filter(Boolean);
     if (!lines.length) {
       box.innerHTML = '<div class="empty">No answer from absorb.</div>';
@@ -401,7 +401,7 @@
     const done = busy(btn, "Absorbing...");
     const r = await nm("absorb");
     const out = ((r.stdout || "") + (r.stderr || "")).trim();
-    $("abFound").classList.remove("none");
+    $("abFound").classList.remove("u-hide");
     $("abFound").innerHTML = `<div class="empty">${esc(out || "(no output)")}</div>`;
     // The deferred line is printed before absorb decides whether anything else was taken, so it
     // can sit alongside a summary that absorbed plenty. Only say nothing was absorbed when the
@@ -429,7 +429,7 @@
     const done = busy(btn, "Scanning...");
     const r = await nm("whiteout suggest");
     if (r.errno !== 0) {
-      $("woFound").classList.remove("none");
+      $("woFound").classList.remove("u-hide");
       $("woFound").innerHTML = '<div class="empty">Scan did not run - ' +
         esc((r.stderr || "").trim() || "the command failed") + "</div>";
       toast("Scan did not run", "bad");
@@ -441,7 +441,7 @@
     const cands = out.split("\n").map(x => x.trim()).filter(l => l.indexOf("\t") > 0);
     const notes = out.split("\n").map(x => x.trim())
       .filter(l => /^\(|^nothing to suggest/.test(l)).join(" ");
-    box.classList.remove("none");
+    box.classList.remove("u-hide");
     if (!cands.length) {
       box.innerHTML = `<div class="empty">${esc(notes || "Nothing found.")}</div>`;
       toast("Nothing to hide on this device", "ok");
@@ -490,7 +490,7 @@
   function toggleModules(h) {
     const on = h.classList.toggle("open");
     setExp(h);
-    $("modules").classList.toggle("none", !(on));
+    $("modules").classList.toggle("u-hide", !(on));
   }
   let rulesShown = false;
   let _fileView = false;
@@ -499,13 +499,13 @@
     if (btn) btn.textContent = _fileView ? "By module" : "By file";
     // Same six panes toggleRules drives; both must respect the collapse or switching
     // view while the card is shut reveals the list under a closed header.
-    $("vfsdirs").classList.toggle("none", !(rulesShown && _fileView));
-    $("vfsfull").classList.toggle("none", !(rulesShown && _fileView));
-    $("vfsfilterbar").classList.toggle("none", !(rulesShown && _fileView));
-    $("ruleslist").classList.toggle("none", !(rulesShown && !_fileView));
-    $("rulefilterbar").querySelector("#rulefilter").classList.toggle("none", !!(_fileView));
+    $("vfsdirs").classList.toggle("u-hide", !(rulesShown && _fileView));
+    $("vfsfull").classList.toggle("u-hide", !(rulesShown && _fileView));
+    $("vfsfilterbar").classList.toggle("u-hide", !(rulesShown && _fileView));
+    $("ruleslist").classList.toggle("u-hide", !(rulesShown && !_fileView));
+    $("rulefilterbar").querySelector("#rulefilter").classList.toggle("u-hide", !!(_fileView));
     const gb = $("rulegroupBtn");
-    if (gb) gb.classList.toggle("none", !!(_fileView));
+    if (gb) gb.classList.toggle("u-hide", !!(_fileView));
     if (_fileView) renderFilesFull();
   }
 
@@ -514,13 +514,13 @@
     if (!d.ok) {
       _rulesRaw = "";
       $("ruleslist").textContent = "unknown - the engine did not answer";
-      $("rulecount").classList.add("none");
+      $("rulecount").classList.add("u-hide");
       return;
     }
     _rulesRaw = d.raw;
     if (!_rulesRaw) {
       $("ruleslist").textContent = "no rules";
-      $("rulecount").classList.add("none");
+      $("rulecount").classList.add("u-hide");
       return;
     }
     filterRules();
@@ -528,15 +528,15 @@
   async function toggleRules(h) {
     rulesShown = h.classList.toggle("open");
     setExp(h);
-    $("rulefilterbar").classList.toggle("none", !(rulesShown));
-    $("rulecount").classList.toggle("none", !(rulesShown));
+    $("rulefilterbar").classList.toggle("u-hide", !(rulesShown));
+    $("rulecount").classList.toggle("u-hide", !(rulesShown));
     // The card has no id, so applyCardState's `.card.collapsed > :not(.card-h)` rule
     // never reaches these; visibility is only ever these explicit writes. Driving
     // three of the six left the By-file panes under a closed header.
-    $("ruleslist").classList.toggle("none", !(rulesShown && !_fileView));
-    $("vfsdirs").classList.toggle("none", !(rulesShown && _fileView));
-    $("vfsfull").classList.toggle("none", !(rulesShown && _fileView));
-    $("vfsfilterbar").classList.toggle("none", !(rulesShown && _fileView));
+    $("ruleslist").classList.toggle("u-hide", !(rulesShown && !_fileView));
+    $("vfsdirs").classList.toggle("u-hide", !(rulesShown && _fileView));
+    $("vfsfull").classList.toggle("u-hide", !(rulesShown && _fileView));
+    $("vfsfilterbar").classList.toggle("u-hide", !(rulesShown && _fileView));
     if (rulesShown) { $("ruleslist").textContent = "Loading..."; loadRules(); }
   }
 
