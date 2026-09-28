@@ -306,6 +306,13 @@ pub(crate) enum PlanKind {
     Bind,
 }
 
+/// Follows symlinks on purpose: the engine follows them too, so what decides this is
+/// what the target resolves to, not what sits at the name. A target that does not exist
+/// is not a mismatch - the module is adding something new.
+fn dir_over_stock_file(target: &Path) -> bool {
+    fs::metadata(target).map(|m| !m.is_dir()).unwrap_or(false)
+}
+
 pub(crate) struct Refused {
     pub module: String,
     pub target: PathBuf,
@@ -499,6 +506,24 @@ fn plan_tree(
         let name = name.to_string_lossy();
 
         if ft.is_dir() {
+            // A module directory over a stock FILE. The walk below would plan injects at
+            // paths under that file - targets that cannot exist, so nothing the module
+            // ships here is ever served. inject_would_mask_dir() catches the mirror case
+            // (a file over a stock directory); this side was planned and then silent.
+            if dir_over_stock_file(&target) {
+                eprintln!(
+                    "nomount: {module}: skipping {} - {} is a file in the stock tree, so \
+                     nothing under this directory can be served",
+                    source.display(),
+                    target.display()
+                );
+                refused.push(Refused {
+                    module: module.to_string(),
+                    target: target.clone(),
+                    why: "it is a directory over a stock file, so nothing under it can be served",
+                });
+                continue;
+            }
             if is_opaque_dir(&source) && can_whiteout(&target).is_ok() {
                 expand_replacement(module, &target, &source, &source, 0, out);
             }
@@ -1320,6 +1345,32 @@ mod tests {
             "the report must name the module: {:?}",
             collisions[0].losers
         );
+    }
+
+    #[test]
+    fn a_module_directory_over_a_stock_file_is_a_mismatch() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("f");
+        std::fs::write(&file, b"stock").unwrap();
+        let dir = d.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+
+        assert!(dir_over_stock_file(&file), "a stock file cannot hold children");
+        assert!(!dir_over_stock_file(&dir), "a stock directory is the normal case");
+        assert!(
+            !dir_over_stock_file(&d.path().join("absent")),
+            "a target that does not exist is a module adding something, not a mismatch"
+        );
+
+        #[cfg(unix)]
+        {
+            let link = d.path().join("l");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(
+                dir_over_stock_file(&link),
+                "the engine follows the link, so what it resolves to decides"
+            );
+        }
     }
 
     #[test]
