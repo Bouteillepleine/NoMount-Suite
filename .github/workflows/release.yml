@@ -40,6 +40,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-24.04
+    environment: release
     permissions:
       contents: write
     steps:
@@ -55,6 +56,13 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
+          if [ "${DRY_RUN:-}" != 'true' ] \
+             && [ "$GITHUB_REF" != "refs/heads/main" ] \
+             && [ "$GITHUB_REF" != "refs/tags/$TAG" ]; then
+            echo "FATAL: a real publish runs from main or from $TAG, not $GITHUB_REF." >&2
+            echo "       Re-run with the tag selected as the ref, or with dry_run." >&2
+            exit 1
+          fi
           zip=$(ls dist/00_NoMount-Module-*.zip | head -1)
           test -s "$zip"
           zipver="${zip##*00_NoMount-Module-}"

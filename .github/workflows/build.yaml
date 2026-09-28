@@ -11,6 +11,18 @@ on:
       - 'LICENSE'
       - '.gitattributes'
       - 'update.json'
+  pull_request:
+    branches: [prerelease, main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitattributes'
+      - 'update.json'
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
