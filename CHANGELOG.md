@@ -13,11 +13,10 @@
 
 ## v1.3.187 - engine v33 (unchanged)
 
-- The WebUI is `index.html` plus `css/app.css` and seven `js/` parts, one per pane.
-- The CSP drops both `unsafe-inline` grants: injected script no longer runs, injected markup no longer restyles the page.
-- Controls name an action instead of carrying `onclick`, inline styles became classes, and computed widths and colours are set through the CSSOM.
-- Every card with a header retracts, and the headers answer Enter.
-- CI runs the parts in load order, and tests pin the CSP, the action table, the utility classes and the part list.
+- WebUI split into `css/app.css` and seven `js/` parts.
+- CSP drops both `unsafe-inline` grants.
+- Controls carry `data-act`, not `onclick`; inline styles are classes.
+- Every card with a header retracts.
 
 ## v1.3.186 - engine v33 (unchanged)
 
