@@ -11,6 +11,15 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.189 - engine v33 (unchanged)
+
+- Absorb no longer unmounts a directory it cannot then hide.
+- The posture card re-counts mounts after Absorb instead of reusing the old number.
+- Checks stop reporting a pass for what they could not measure.
+- New check: a kernel built without the maps patch is now caught.
+- A replaced split APK no longer keeps serving its old parse.
+- A failed app scan keeps the previous cache.
+
 ## v1.3.188 - engine v33 (unchanged)
 
 - Fix: five controls did nothing under the new CSP, including Hide selected and the app picker.
