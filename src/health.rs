@@ -149,6 +149,27 @@ impl Fingerprint {
                 self.served_matches_rule.clone(),
             )
             .meaning("No rule had a comparable file at both ends, so this was not tested."),
+            s if s.starts_with("unchecked:unreadable") => mk(
+                "served bytes match the rule",
+                Verdict::Unmeasured,
+                self.served_matches_rule.clone(),
+            )
+            .meaning(
+                "A live rule named a source or a target that would not stat, so those paths \
+                 were not compared. A rule the engine holds but does not serve looks exactly \
+                 like this, so it is not a pass.",
+            ),
+            s if s.starts_with("ok:partial") => mk(
+                "served bytes match the rule",
+                Verdict::Pass,
+                self.served_matches_rule.clone(),
+            )
+            .meaning(
+                "Every injected path that could be compared serves a file of the size its rule \
+                 names. The count says how many of the live rules that was - the rest are not \
+                 regular files at both ends (a directory injection), so there is nothing to \
+                 compare there.",
+            ),
             // "I stopped at the cap" is not "I found something wrong". This used to fall through
             // to Fail and told the user to delete a bind and reboot over a scan that simply ran
             // out of budget.
@@ -348,14 +369,22 @@ fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     // on a device where every comparable rule had in fact been checked.
     let comparable = rules.iter().filter(|r| r.uid == 0 && r.source.is_some()).count();
     let mut checked = 0;
+    let mut bytes_checked = 0;
+    let mut unreadable = 0;
     for rule in rules.iter().filter(|r| r.uid == 0 && r.source.is_some()).take(CAP) {
         let Some(source) = rule.source.as_deref() else { continue };
         let target = rule.target.as_path();
-        let Ok(sm) = fs::metadata(source) else { continue };
+        let Ok(sm) = fs::metadata(source) else {
+            unreadable += 1;
+            continue;
+        };
         if !sm.is_file() {
             continue;
         }
-        let Ok(tm) = fs::metadata(target) else { continue };
+        let Ok(tm) = fs::metadata(target) else {
+            unreadable += 1;
+            continue;
+        };
         if !tm.is_file() {
             continue;
         }
@@ -368,14 +397,23 @@ fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
         let (Some(a), Some(b)) = (head(&ta, DRIFT_BYTES), head(&sa, DRIFT_BYTES)) else {
             continue;
         };
+        bytes_checked += 1;
         if a != b {
             return format!("drift:{target}(rule={source} bytes differ)");
         }
     }
-    if checked == 0 {
+    // A rule whose source or target will not stat is the "registered but not serving"
+    // case this probe exists to find, so it cannot be folded into the pass. A rule whose
+    // ends are not regular files (a directory injection) legitimately has nothing to
+    // compare, and is not a failure - hence two different words for two different skips.
+    if unreadable > 0 {
+        format!("unchecked:unreadable({unreadable} of {comparable})")
+    } else if checked == 0 {
         "unchecked".to_string()
     } else if comparable > CAP {
         format!("unchecked:over-cap({checked} of {comparable})")
+    } else if checked < comparable || bytes_checked < checked {
+        format!("ok:partial({checked} of {comparable}, bytes {bytes_checked})")
     } else {
         "ok".to_string()
     }
