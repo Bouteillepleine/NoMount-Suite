@@ -977,6 +977,10 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             .meaning("The process list could not be read, so this was not tested.");
     };
     let mut hits: Vec<String> = Vec::new();
+    // The bare paths behind `hits`, so dedupe and the pending-reboot test below compare
+    // whole paths. Prefix-matching a "<path> (pid N)" string let one path stand in for
+    // another that merely extends it, which downgraded a real FAIL to "reboot to finish".
+    let mut hit_paths: Vec<String> = Vec::new();
     let mut ino_leaks: Vec<String> = Vec::new();
     let mut scanned = 0u32;
     let mut unread = 0u32;
@@ -1006,7 +1010,8 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
                 continue;
             }
             maps_one = true;
-            if deleted && !hits.iter().any(|h| h.starts_with(path)) {
+            if deleted && !hit_paths.iter().any(|h| h == path) {
+                hit_paths.push(path.to_string());
                 hits.push(format!("{path} (pid {pid})"));
             }
             // The engine rewrites the dev/ino a mapping reports, from the kernel patch
@@ -1113,7 +1118,11 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             );
         }
     };
-    if !pending.is_empty() && hits.iter().all(|h| pending.iter().any(|p| h.starts_with(&*p.to_string_lossy()))) {
+    if !pending.is_empty()
+        && hit_paths
+            .iter()
+            .all(|h| pending.iter().any(|p| p.to_string_lossy() == h.as_str()))
+    {
         return reboot(
             N_MAPS_DELETED,
             format!("{} injected file(s) mapped as deleted: {shown} -- pending reboot after a rule change", hits.len()),
@@ -1451,18 +1460,23 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         );
     }
     if inverse > 0 {
-        return pass(
+        return soft(
             NAME,
             format!(
-                "{who}: no xattr answer without open() across {} injected file(s) \
-                 ({inverse} answered open() but not xattr)",
+                "{who}: {inverse} of {} injected file(s) opened for the app but refused to \
+                 answer xattr",
                 files.len()
             ),
+            "open() and the xattr surface disagree about the same file, so an app can tell an \
+             injected file from a stock one by asking twice",
         )
         .meaning(
-            "No app you hid can learn about a file it cannot open. Some files answered open() \
-             without answering xattr - the same disagreement, signs swapped.",
-        );
+            "Nothing was leaked in the direction that matters most - no app you hid learned \
+             about a file it could not open. But these files answered open() and then refused \
+             xattr, which is the same disagreement with the signs swapped, and a stock file \
+             never behaves that way. The two surfaces have to agree in both directions.",
+        )
+        .owner("the kernel engine");
     }
     pass(
         NAME,

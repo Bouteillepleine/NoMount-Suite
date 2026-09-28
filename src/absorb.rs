@@ -1187,6 +1187,16 @@ fn take_over_empty_dir(
     from: &str,
 ) -> bool {
     let t_str = target.to_string_lossy().into_owned();
+    // Ask whether we may hide this BEFORE unmounting it. can_whiteout refuses a bare
+    // partition root, and a tmpfs on one reaches here - so validating afterwards
+    // destroyed the module's hide and then declined to replace it, leaving the stock
+    // tree exposed for the rest of the session.
+    if let Err(e) = crate::whiteout::validate(&t_str) {
+        eprintln!(
+            "nomount: leaving the mount on {t_str} alone - it cannot be hidden afterwards: {e:#}"
+        );
+        return false;
+    }
     let was_durable = durable.contains(&t_str);
     let ours = was_durable || record.iter().any(|(t, _)| t == target);
     if ours {
@@ -1215,10 +1225,6 @@ fn take_over_empty_dir(
                 return false;
             }
         }
-    }
-    if let Err(e) = crate::whiteout::validate(&t_str) {
-        eprintln!("nomount: {t_str} unmounted but will not be hidden: {e:#}");
-        return false;
     }
     match nm.whiteout(target) {
         Ok(()) => {

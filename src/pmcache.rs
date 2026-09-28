@@ -55,6 +55,19 @@ fn cache_keys(target: &Path) -> Vec<String> {
     keys
 }
 
+/// True when `cache_keys` could not derive the directory (package) key, because the
+/// APK does not sit alone in its directory. AOSP caches a split package under the
+/// container's name, so for those a zero-match sweep has not proven anything.
+fn dir_key_withheld(target: &Path) -> bool {
+    let Some(dir) = target.parent() else { return false };
+    let apks = fs::read_dir(dir).ok().map(|rd| {
+        rd.filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "apk"))
+            .count()
+    });
+    apks != Some(1)
+}
+
 fn cache_files() -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for d in fs::read_dir(CACHE_DIR)? {
@@ -154,6 +167,22 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
                 "nomount: pmcache: {} cached parse(s) for {} would not delete - PM keeps \
                  serving its parse of the previous APK; retrying next pass",
                 matched - removed,
+                target.display()
+            );
+            if let Some(old) = previous.get(target) {
+                lines.push(format!("{}\t{}", target.display(), old));
+            }
+            continue;
+        }
+        // Nothing matched at all, and the package key was never derivable because the
+        // APK shares its directory. Recording the new identity here would mark the
+        // change done, so the next pass sees nothing stale and never retries - and PM
+        // keeps serving its parse of the previous APK forever, silently.
+        if matched == 0 && !seeding && stale && dir_key_withheld(target) {
+            eprintln!(
+                "nomount: pmcache: no cached parse matched {} and it shares its directory, \
+                 so the package key could not be derived - PM may still be serving the \
+                 previous APK; retrying next pass",
                 target.display()
             );
             if let Some(old) = previous.get(target) {
