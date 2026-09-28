@@ -377,10 +377,31 @@ pub(crate) struct Collision {
     pub losers: Vec<String>,
 }
 
+/// An Inject always beats a Whiteout for the same target, whoever claimed it last.
+///
+/// `.replace` expansion reads the directory as it looks NOW, and on any pass after the
+/// first that includes files another module has already injected - so a `.replace`
+/// module would emit a whiteout over a path somebody else serves. Letting sort order
+/// decide made that a coin toss, and because the whiteout then hid the file from the
+/// next pass's listing the two outcomes alternated boot to boot.
+fn beats(a: &PlanEntry, b: &PlanEntry) -> bool {
+    match (a.kind, b.kind) {
+        (PlanKind::Whiteout, PlanKind::Whiteout) => true,
+        (PlanKind::Whiteout, _) => false,
+        (_, PlanKind::Whiteout) => true,
+        _ => true,
+    }
+}
+
 pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Collision>) {
     let mut last: HashMap<PathBuf, usize> = HashMap::new();
     for (i, e) in plan.iter().enumerate() {
-        last.insert(e.target.clone(), i);
+        match last.get(&e.target) {
+            Some(&j) if !beats(e, &plan[j]) => {}
+            _ => {
+                last.insert(e.target.clone(), i);
+            }
+        }
     }
     if last.len() == plan.len() {
         return (plan, Vec::new());
@@ -398,9 +419,17 @@ pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Col
             continue;
         }
         if let Some(mut l) = losers.remove(&e.target) {
+            let self_claimed = l.iter().any(|m| m == &e.module);
             l.retain(|m| m != &e.module);
             l.sort_unstable();
             l.dedup();
+            if self_claimed {
+                // One module resolving to the same target twice - e.g. shipping both
+                // product/x and system/product/x, which resolve_target_path folds
+                // together. Silently keeping whichever sorted last served the wrong
+                // file whenever the two differed, with nothing said anywhere.
+                l.insert(0, format!("{} (a second claim of its own)", e.module));
+            }
             if !l.is_empty() {
                 collisions.push(Collision {
                     target: e.target.clone(),
@@ -1234,6 +1263,64 @@ fn served_apks_applied(
 mod tests {
     use super::*;
     use std::sync::LazyLock;
+
+    fn pe(module: &str, target: &str, kind: PlanKind) -> PlanEntry {
+        PlanEntry {
+            module: module.to_string(),
+            target: PathBuf::from(target),
+            source: PathBuf::from("/data/adb/modules/x/src"),
+            kind,
+        }
+    }
+
+    #[test]
+    fn an_inject_beats_a_whiteout_for_the_same_target_whoever_claimed_it_last() {
+        // `.replace` reads the live tree, so a module that sorts LAST can emit a
+        // whiteout over a path another module injects. Order must not decide this.
+        let (kept, _) = dedupe_by_target(vec![
+            pe("a_mod", "/product/etc/x", PlanKind::Inject),
+            pe("z_mod", "/product/etc/x", PlanKind::Whiteout),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kind, PlanKind::Inject, "the whiteout won, so the file vanishes");
+        assert_eq!(kept[0].module, "a_mod");
+
+        // and the same the other way round, so it is not just "first wins"
+        let (kept, _) = dedupe_by_target(vec![
+            pe("z_mod", "/product/etc/x", PlanKind::Whiteout),
+            pe("a_mod", "/product/etc/x", PlanKind::Inject),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kind, PlanKind::Inject);
+    }
+
+    #[test]
+    fn two_whiteouts_on_one_target_still_collapse_to_one() {
+        let (kept, _) = dedupe_by_target(vec![
+            pe("a_mod", "/product/etc/x", PlanKind::Whiteout),
+            pe("z_mod", "/product/etc/x", PlanKind::Whiteout),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kind, PlanKind::Whiteout);
+    }
+
+    #[test]
+    fn a_module_claiming_one_target_twice_is_reported_not_swallowed() {
+        // product/x and system/product/x fold to the same target. Keeping whichever
+        // sorted last served the wrong file when they differed, and said nothing.
+        let (kept, collisions) = dedupe_by_target(vec![
+            pe("one_mod", "/product/etc/x", PlanKind::Inject),
+            pe("one_mod", "/product/etc/x", PlanKind::Inject),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(collisions.len(), 1, "a module colliding with itself was dropped silently");
+        assert_eq!(collisions[0].winner, "one_mod");
+        assert!(
+            collisions[0].losers.iter().any(|l| l.contains("one_mod")),
+            "the report must name the module: {:?}",
+            collisions[0].losers
+        );
+    }
 
     #[test]
     fn a_path_the_wire_format_cannot_carry_is_refused() {
