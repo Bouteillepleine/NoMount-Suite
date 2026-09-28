@@ -1,6 +1,8 @@
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
@@ -34,14 +36,75 @@ impl Nm {
     const EXIT_TIMEOUT: i32 = 5;
     const EXIT_NO_ENGINE: i32 = 2;
 
+    const DEADLINE: Duration = Duration::from_secs(30);
+
     fn engine_is_unreachable(code: Option<i32>) -> bool {
         matches!(code, Some(Nm::EXIT_TIMEOUT) | Some(Nm::EXIT_NO_ENGINE))
     }
 
-    fn run_coded(&self, args: &[&str]) -> std::result::Result<String, NmErr> {
-        let out = Command::new(&self.bin)
+    /// `Command::output()` waits forever. nm bounds its own netlink round trip, so a call
+    /// that outlives DEADLINE is nm itself wedged rather than the engine being slow - and
+    /// these all run from post-fs-data, where waiting forever is a boot hang with nothing
+    /// on the console to say why.
+    fn output(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        self.output_within(args, Nm::DEADLINE)
+    }
+
+    fn output_within(
+        &self,
+        args: &[&str],
+        deadline: Duration,
+    ) -> std::io::Result<std::process::Output> {
+        let mut child = Command::new(&self.bin)
             .args(args)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let mut so = child.stdout.take();
+        let mut se = child.stderr.take();
+        let t_out = std::thread::spawn(move || {
+            let mut b = Vec::new();
+            if let Some(h) = so.as_mut() {
+                let _ = h.read_to_end(&mut b);
+            }
+            b
+        });
+        let t_err = std::thread::spawn(move || {
+            let mut b = Vec::new();
+            if let Some(h) = se.as_mut() {
+                let _ = h.read_to_end(&mut b);
+            }
+            b
+        });
+
+        let start = Instant::now();
+        let status = loop {
+            match child.try_wait()? {
+                Some(st) => break st,
+                None if start.elapsed() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("nm {} did not answer in {deadline:?}", args.join(" ")),
+                    ));
+                }
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
+
+        Ok(std::process::Output {
+            status,
+            stdout: t_out.join().unwrap_or_default(),
+            stderr: t_err.join().unwrap_or_default(),
+        })
+    }
+
+    fn run_coded(&self, args: &[&str]) -> std::result::Result<String, NmErr> {
+        let out = self
+            .output(args)
             .map_err(|e| NmErr { code: None, why: e.to_string() })?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
@@ -53,9 +116,8 @@ impl Nm {
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new(&self.bin)
-            .args(args)
-            .output()
+        let out = self
+            .output(args)
             .with_context(|| format!("exec {} {:?}", self.bin, args))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
@@ -136,8 +198,15 @@ impl Nm {
         self.run(&["l", "g"])
     }
 
-    pub fn ghost_present(&self) -> bool {
-        self.run(&["k", "g"]).is_ok()
+    /// `None` means nm could not be asked at all - it would not spawn, it was killed, or
+    /// the engine is unreachable. That is not the same answer as a kernel built without
+    /// the cloak, and reporting it as one let the caller skip the sync in silence.
+    pub fn ghost_present(&self) -> Option<bool> {
+        match self.run_coded(&["k", "g"]) {
+            Ok(_) => Some(true),
+            Err(e) if e.code.is_none() || Nm::engine_is_unreachable(e.code) => None,
+            Err(_) => Some(false),
+        }
     }
 
     pub fn ghost_ctl(&self, cmd: &str) -> Result<()> {
@@ -273,59 +342,77 @@ pub(crate) struct LiveRule {
 }
 
 pub(crate) fn parse_list(list: &str) -> Vec<LiveRule> {
-    list.lines()
+    parse_list_counted(list).0
+}
+
+/// The second half is the number of non-blank lines the parser could not read.
+/// Dropping those silently meant a listing whose shape the engine had changed came
+/// back short, and every caller downstream read the missing rules as rules gone.
+pub(crate) fn parse_list_counted(list: &str) -> (Vec<LiveRule>, usize) {
+    let mut dropped = 0usize;
+    let rules = list
+        .lines()
         .filter_map(|line| {
-            let uid: u32 = line
-                .split_once(" [UID:")
-                .and_then(|(_, r)| r.trim_start().trim_end_matches(']').trim().parse().ok())
-                .unwrap_or(0);
-            let mut l = line.split(" [UID:").next().unwrap_or(line).trim();
-            if l.is_empty() {
-                return None;
+            let parsed = parse_line(line);
+            if parsed.is_none() && !line.trim().is_empty() {
+                dropped += 1;
             }
-            let mut public = false;
-            let mut kind: Option<LiveKind> = None;
-            loop {
-                if let Some(rest) = l.strip_suffix(" (public)") {
-                    public = true;
-                    l = rest.trim_end();
-                } else if let Some(rest) = l.strip_suffix(" (whiteout)") {
-                    kind = Some(LiveKind::Whiteout);
-                    l = rest.trim_end();
-                } else if let Some(rest) = l.strip_suffix(" (virtual dir)") {
-                    kind = Some(LiveKind::VirtualDir);
-                    l = rest.trim_end();
-                } else {
-                    break;
-                }
-            }
-            if let Some(kind) = kind {
-                let target = l.trim();
-                if target.is_empty() {
-                    return None;
-                }
-                return Some(LiveRule {
-                    target: PathBuf::from(target),
-                    source: None,
-                    uid,
-                    kind,
-                    public,
-                });
-            }
-            let (t, s) = l.rsplit_once(" -> ")?;
-            let (t, s) = (t.trim(), s.trim());
-            if t.is_empty() || s.is_empty() {
-                return None;
-            }
-            Some(LiveRule {
-                target: PathBuf::from(t),
-                source: Some(PathBuf::from(s)),
-                uid,
-                kind: LiveKind::Inject,
-                public,
-            })
+            parsed
         })
-        .collect()
+        .collect();
+    (rules, dropped)
+}
+
+fn parse_line(line: &str) -> Option<LiveRule> {
+    let uid: u32 = line
+        .split_once(" [UID:")
+        .and_then(|(_, r)| r.trim_start().trim_end_matches(']').trim().parse().ok())
+        .unwrap_or(0);
+    let mut l = line.split(" [UID:").next().unwrap_or(line).trim();
+    if l.is_empty() {
+        return None;
+    }
+    let mut public = false;
+    let mut kind: Option<LiveKind> = None;
+    loop {
+        if let Some(rest) = l.strip_suffix(" (public)") {
+            public = true;
+            l = rest.trim_end();
+        } else if let Some(rest) = l.strip_suffix(" (whiteout)") {
+            kind = Some(LiveKind::Whiteout);
+            l = rest.trim_end();
+        } else if let Some(rest) = l.strip_suffix(" (virtual dir)") {
+            kind = Some(LiveKind::VirtualDir);
+            l = rest.trim_end();
+        } else {
+            break;
+        }
+    }
+    if let Some(kind) = kind {
+        let target = l.trim();
+        if target.is_empty() {
+            return None;
+        }
+        return Some(LiveRule {
+            target: PathBuf::from(target),
+            source: None,
+            uid,
+            kind,
+            public,
+        });
+    }
+    let (t, s) = l.rsplit_once(" -> ")?;
+    let (t, s) = (t.trim(), s.trim());
+    if t.is_empty() || s.is_empty() {
+        return None;
+    }
+    Some(LiveRule {
+        target: PathBuf::from(t),
+        source: Some(PathBuf::from(s)),
+        uid,
+        kind: LiveKind::Inject,
+        public,
+    })
 }
 
 #[cfg(test)]
@@ -393,6 +480,44 @@ mod tests {
         let p = parse_list("/product/z -> /data/adb/modules/M/z\n");
         assert!(!p[0].public);
         assert_eq!(p[0].uid, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wedged_nm_is_killed_rather_than_waited_on_forever() {
+        let nm = Nm { bin: "/bin/sleep".into() };
+        let start = Instant::now();
+        let e = nm
+            .output_within(&["30"], Duration::from_millis(200))
+            .expect_err("a sleeping child must not be waited out");
+        assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_answer_is_still_returned_whole() {
+        let nm = Nm { bin: "/bin/echo".into() };
+        let out = nm.output_within(&["hello"], Duration::from_secs(10)).expect("ran");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn a_line_the_parser_cannot_read_is_counted_not_just_dropped() {
+        let (v, unread) = parse_list_counted(
+            "/product/x -> /data/adb/modules/M/x\n\
+             \n\
+             /system/y {something the engine grew later}\n\
+             not a rule line\n",
+        );
+        assert_eq!(v.len(), 1);
+        assert_eq!(unread, 2, "the blank line must not count, the other two must");
+    }
+
+    #[test]
+    fn blank_lines_alone_are_never_counted_as_unreadable() {
+        assert_eq!(parse_list_counted("\n\n   \n\t\n").1, 0);
     }
 
     #[test]
