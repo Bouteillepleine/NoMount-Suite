@@ -2116,8 +2116,15 @@ mod tests {
     }
 
     fn test_base(tag: &str) -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        let base = PathBuf::from(home).join(format!(".nomount-test-{tag}"));
+        // Falling back rather than returning None: keying this on HOME alone meant that
+        // under `env -u HOME` (and on runners that do not set it) every .replace test
+        // returned before asserting anything and still reported green - which is the
+        // only coverage expand_replacement has.
+        let home = std::env::var("HOME")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let base = home.join(format!(".nomount-test-{tag}"));
         if can_whiteout(&base.join("probe")).is_err() {
             eprintln!("skipping: {} is not a whiteoutable base", base.display());
             return None;

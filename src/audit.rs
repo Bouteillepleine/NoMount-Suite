@@ -1581,11 +1581,23 @@ mod tests {
 
         let judged = check_inode_band(&targets, &[]);
         let skipped = check_inode_band(&targets, std::slice::from_ref(&vdir));
-        assert!(
-            skipped.verdict != Verdict::Fail,
+        // check_inode_band has no fail() arm at all, so asserting "not Fail" asserted
+        // nothing. What this test is for is that naming the synthesized directory
+        // removes it from the stock population, so assert that the two calls actually
+        // differ and that the excluded one has nothing left to compare.
+        assert_eq!(
+            skipped.verdict,
+            Verdict::NotApplicable,
+            "with the synthesized dir excluded there is no stock population to compare \
+             against, so the check has nothing to judge - got {:?} ({})",
+            skipped.verdict,
+            skipped.evidence
+        );
+        assert_ne!(
+            judged.verdict,
+            Verdict::Fail,
             "a directory with no ROM content must never FAIL the band check"
         );
-        let _ = judged;
     }
 
     #[test]
@@ -1677,6 +1689,44 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), n, "two checks share an id");
         assert_eq!(slug(N_ENGINE_LIVE), "engine-responding");
+    }
+
+    /// ALL_CHECK_NAMES is hand-written, and the uniqueness/slug gate iterates it rather
+    /// than the checks device_checks() builds - so a new check that someone forgets to
+    /// add is invisible to that gate, slug collision and all. Scan the source instead.
+    #[test]
+    fn every_check_name_constant_is_listed_in_all_check_names() {
+        const SRC: &str = include_str!("audit.rs");
+        let declared: Vec<&str> = SRC
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("pub(crate) const N_"))
+            .filter_map(|r| r.split(':').next())
+            .collect();
+        assert!(
+            declared.len() >= 14,
+            "the source scan found only {} check-name constants, so it is not matching \
+             the declarations any more",
+            declared.len()
+        );
+        let list = SRC
+            .split("ALL_CHECK_NAMES: [&str; ")
+            .nth(1)
+            .and_then(|t| t.split("];").next())
+            .expect("the ALL_CHECK_NAMES literal must be findable");
+        for name in &declared {
+            assert!(
+                list.contains(&format!("N_{name}")),
+                "N_{name} is a check-name constant that ALL_CHECK_NAMES does not list, so \
+                 the id-uniqueness gate never sees it"
+            );
+        }
+        assert_eq!(
+            declared.len(),
+            ALL_CHECK_NAMES.len(),
+            "{} check-name constants are declared but ALL_CHECK_NAMES holds {}",
+            declared.len(),
+            ALL_CHECK_NAMES.len()
+        );
     }
 
     #[test]

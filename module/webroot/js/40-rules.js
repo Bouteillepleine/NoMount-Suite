@@ -414,6 +414,7 @@
                 : "Absorbed, with my_* mounts deferred")
             : "Absorb complete",
           r.errno === 0 ? "ok" : "bad");
+    forgetStealthProbe();
     await runCheck(null);
     RULES = null;
     PLAN_BY_MODULE = null;

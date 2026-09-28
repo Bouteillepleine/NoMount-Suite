@@ -122,6 +122,11 @@
     $("dKernel").textContent = p[5] || " - ";
   }
   let STEALTH_PROBE = null;
+  // The probe counts real mounts, so anything that REMOVES one has to drop the memo
+  // or the posture card keeps reporting the mounts absorb just took away.
+  function forgetStealthProbe() {
+    STEALTH_PROBE = null;
+  }
   function stealthProbe() {
     if (STEALTH_PROBE) return STEALTH_PROBE;
     STEALTH_PROBE = (async function () {
