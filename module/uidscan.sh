@@ -74,6 +74,24 @@ printf '%s\n' "$PKGS" | tr '\n' '\0' | xargs -0 -P "$J" -n1 sh -c '
     fi
 
     [ -n "$reasons" ] && printf "%s\t%s\n" "$pkg" "$reasons"
-' _ | sort -u > "$CACHE.tmp" && mv -f "$CACHE.tmp" "$CACHE"
+    exit 0
+' _ > "$CACHE.raw" 2>/dev/null
+_xrc=$?
+sort -u "$CACHE.raw" > "$CACHE.tmp" 2>/dev/null
+rm -f "$CACHE.raw"
+
+# The status of a pipeline is its LAST stage, and `sort` succeeds on a truncated
+# file - so gating the publish on the pipeline meant an xargs that died mid-scan
+# overwrote a good cache with a short one. The child body now ends in `exit 0`
+# so a non-matching package is not itself a failure, and the scan's own status
+# decides whether the result is publishable.
+if [ "$_xrc" -ne 0 ]; then
+    rm -f "$CACHE.tmp"
+    echo "nomount scan: the scan exited $_xrc; keeping the previous cache" >&2
+    nmlog "scan: exited $_xrc - kept the previous cache rather than publishing a partial one"
+    cat "$CACHE" 2>/dev/null
+    exit 0
+fi
+mv -f "$CACHE.tmp" "$CACHE"
 
 cat "$CACHE"

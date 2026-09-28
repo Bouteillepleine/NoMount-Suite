@@ -26,7 +26,14 @@ if [ -f "$LOCK" ]; then
     _mt=$(stat -c %Y "$LOCK" 2>/dev/null || echo "$_now")
     case "$_mt" in ''|*[!0-9]*) _mt=$_now ;; esac
     _age=$(( _now - _mt ))
-    if [ "$_lp" = 0 ] || [ "$_age" -ge 180 ] || ! kill -0 "$_lp" 2>/dev/null; then
+    # Age ANDed with liveness, not ORed. A pass can legitimately run three rounds of
+    # two 60s timeouts, so 180s of age proves nothing on its own - and stealing a live
+    # holder's lock let two `uid apply` runs write the engine's uid table at once, then
+    # the first holder's EXIT trap deleted the second one's lock.
+    if [ "$_lp" = 0 ] || ! kill -0 "$_lp" 2>/dev/null; then
+        rm -f "$LOCK"
+    elif [ "$_age" -ge 900 ]; then
+        nmlog "uidwatch: pid $_lp has held the lock ${_age}s and is still alive - breaking it"
         rm -f "$LOCK"
     fi
 fi
@@ -40,6 +47,9 @@ trap 'rm -f "$LOCK"' EXIT INT TERM
 sleep 3
 _rounds=0
 while :; do
+# Keep the lock's mtime current so its age measures how long this round has run,
+# not how long ago the pass started.
+touch "$LOCK" 2>/dev/null
 rm -f "$DIRTY" 2>/dev/null
 if _has_entries "$NMDIR/uidhide"; then
     _out=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
