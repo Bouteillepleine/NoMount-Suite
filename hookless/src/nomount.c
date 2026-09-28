@@ -1941,8 +1941,18 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
                     nm_dsnap_put(snap);
                     return res;
                 }
-                if (ctx->pos)
+                /* No snapshot. At pos 0 the generic path below answers correctly, and a
+                 * directory that cannot be snapshotted at all fails here deterministically
+                 * (nm_dsnap_get caches !ok), so it never reaches this branch mid-listing.
+                 * Getting here with a position means a snapshot existed and a REBUILD then
+                 * failed - the saved pos is an nm_epack byte offset, which the generic path
+                 * below would read in the wrong space. Ending the listing is the only
+                 * answer that cannot emit wrong entries, but it is a short read, so say so
+                 * rather than letting a truncated directory pass for a complete one. */
+                if (ctx->pos) {
+                    nm_warn_once("a directory listing was cut short: the dirent snapshot could not be rebuilt mid-read (low memory). Re-run the listing.\n");
                     return 0;
+                }
             }
         }
     }
