@@ -4,10 +4,16 @@ use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
+fn is_whiteout_node(ft: &fs::FileType, rdev: u64) -> bool {
+    ft.is_char_device() && rdev == 0
+}
+
 fn is_whiteout_marker(ft: &fs::FileType, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     ft.is_char_device()
-        && fs::symlink_metadata(path).map(|m| m.rdev() == 0).unwrap_or(false)
+        && fs::symlink_metadata(path)
+            .map(|m| is_whiteout_node(&m.file_type(), m.rdev()))
+            .unwrap_or(false)
 }
 
 fn is_opaque_dir(p: &Path) -> bool {
@@ -1643,9 +1649,9 @@ mod tests {
             label.split('.').nth(1).and_then(|m| m.parse::<u32>().ok()),
             Some(wire),
             "NM_MODULE_VERSION ({label}) and NOMOUNT_VERSION ({wire}) have drifted. The label is \
-             what the kernel builders scrape to name a released kernel, nothing in this repo \
-             reads it, and the comment that stated this invariant was deleted by the comment \
-             strip - so only this test can catch it"
+             what the kernel builders scrape to name a released kernel and what the engine \
+             reports as its build string, and the comment that stated this invariant was \
+             deleted by the comment strip - so only this test can catch it"
         );
         const ENGINE_MATRIX: &str = include_str!("../.github/workflows/hookless-compile-matrix.yml");
         for ver in ["4.9", "4.14", "4.19", "5.4", "5.10", "5.15", "6.1", "6.6", "6.12", "6.18"] {
@@ -2265,7 +2271,7 @@ mod tests {
 
     #[test]
     fn replace_expands_to_the_unshipped_entries_only() {
-        let Some(base) = test_base("replace-expand") else { return };
+        let base = test_base("replace-expand");
         let stock = base.join("stock");
         let module = base.join("module");
 
@@ -2295,7 +2301,7 @@ mod tests {
 
     #[test]
     fn replace_expands_against_the_stock_listing_not_the_engine_edited_one() {
-        let Some(base) = test_base("replace-stock-view") else { return };
+        let base = test_base("replace-stock-view");
         let stock = base.join("stock");
         let module = base.join("module");
         fs::create_dir_all(stock.join("vdir")).unwrap();
@@ -2331,7 +2337,7 @@ mod tests {
 
     #[test]
     fn replace_does_not_descend_where_the_module_ships_a_file() {
-        let Some(base) = test_base("replace-file-over-dir") else { return };
+        let base = test_base("replace-file-over-dir");
         let stock = base.join("stock");
         let module = base.join("module");
         fs::create_dir_all(stock.join("thing")).unwrap();
@@ -2348,7 +2354,7 @@ mod tests {
 
     #[test]
     fn replace_on_a_directory_the_rom_does_not_have_is_a_no_op() {
-        let Some(base) = test_base("replace-absent") else { return };
+        let base = test_base("replace-absent");
         let module = base.join("module");
         fs::create_dir_all(&module).unwrap();
         fs::write(module.join("mine.xml"), b"mine").unwrap();
@@ -2388,7 +2394,7 @@ mod tests {
 
     #[test]
     fn replace_expansion_stops_at_the_depth_guard() {
-        let Some(base) = test_base("replace-depth") else { return };
+        let base = test_base("replace-depth");
         let stock = base.join("stock");
         let mut d = stock.clone();
         let module = base.join("module");
@@ -2408,41 +2414,57 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    fn test_base(tag: &str) -> Option<PathBuf> {
-        // Falling back rather than returning None: keying this on HOME alone meant that
-        // under `env -u HOME` (and on runners that do not set it) every .replace test
-        // returned before asserting anything and still reported green - which is the
-        // only coverage expand_replacement has.
-        let home = std::env::var("HOME")
-            .ok()
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let base = home.join(format!(".nomount-test-{tag}"));
-        if can_whiteout(&base.join("probe")).is_err() {
-            eprintln!("skipping: {} is not a whiteoutable base", base.display());
-            return None;
-        }
+    fn test_base(tag: &str) -> PathBuf {
+        let candidates = [
+            std::env::var_os("HOME").map(PathBuf::from),
+            Some(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target"))),
+        ];
+        let base = candidates
+            .into_iter()
+            .flatten()
+            .map(|d| d.join(format!(".nomount-test-{tag}")))
+            .find(|b| can_whiteout(&b.join("probe")).is_ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "neither HOME nor {}/target is a directory can_whiteout accepts, so the \
+                     .replace tests have nowhere to build a stock tree - refusing to pass \
+                     without asserting anything",
+                    env!("CARGO_MANIFEST_DIR")
+                )
+            });
         let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).ok()?;
-        Some(base)
+        fs::create_dir_all(&base).unwrap();
+        base
     }
 
     #[test]
     fn only_a_zero_zero_char_device_is_a_whiteout_marker() {
-        let real = Path::new("/dev/null");
-        if let Ok(md) = fs::symlink_metadata(real) {
-            assert!(md.file_type().is_char_device(), "/dev/null should be a char device");
-            assert!(
-                !is_whiteout_marker(&md.file_type(), real),
-                "/dev/null has a non-zero rdev and is not a deletion marker"
-            );
-        }
-        let Some(base) = test_base("whiteout-marker") else { return };
-        let f = base.join("plain");
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("plain");
         fs::write(&f, b"x").unwrap();
-        let md = fs::symlink_metadata(&f).unwrap();
-        assert!(!is_whiteout_marker(&md.file_type(), &f));
-        let _ = fs::remove_dir_all(&base);
+        let plain = fs::symlink_metadata(&f).unwrap();
+        assert!(!is_whiteout_marker(&plain.file_type(), &f));
+        assert!(!is_whiteout_node(&plain.file_type(), 0), "a regular file is never a marker");
+
+        let null = fs::symlink_metadata("/dev/null").expect("/dev/null must exist");
+        assert!(null.file_type().is_char_device(), "/dev/null should be a char device");
+        assert_ne!(null.rdev(), 0);
+        assert!(
+            !is_whiteout_marker(&null.file_type(), Path::new("/dev/null")),
+            "/dev/null has a non-zero rdev and is not a deletion marker"
+        );
+        assert!(
+            is_whiteout_node(&null.file_type(), 0),
+            "a character device numbered 0:0 is the deletion marker"
+        );
+
+        let node = d.path().join("gone");
+        let c = std::ffi::CString::new(node.as_os_str().as_encoded_bytes()).unwrap();
+        if unsafe { libc::mknod(c.as_ptr(), libc::S_IFCHR | 0o600, 0) } == 0 {
+            let md = fs::symlink_metadata(&node).unwrap();
+            assert!(is_whiteout_marker(&md.file_type(), &node), "a real 0:0 node was not recognised");
+        }
     }
 
     #[test]
