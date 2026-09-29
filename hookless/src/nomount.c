@@ -770,6 +770,13 @@ static int nm_open(struct inode *inode, struct file *file)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
     if (unlikely(info->v_cap & NM_CAP_ODIRECT))
         file->f_mode |= FMODE_CAN_ODIRECT;
+#else
+    if (unlikely((file->f_flags & O_DIRECT) && (info->v_cap & NM_CAP_KNOWN) &&
+                 !(info->v_cap & NM_CAP_ODIRECT))) {
+        fput(real_file);
+        file->private_data = NULL;
+        return -EINVAL;
+    }
 #endif
     return 0;
 }
@@ -856,7 +863,7 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
 
     res = generic_file_llseek_size(file, offset, whence,
                                    file_inode(file)->i_sb->s_maxbytes,
-                                   i_size_read(file_inode(file)));
+                                   i_size_read(file_inode(real_file)));
     if (res >= 0) real_file->f_pos = res;
 
     return res;
@@ -884,6 +891,21 @@ static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
     struct file *real_file = iocb->ki_filp->private_data;
 
     if (!real_file || !real_file->f_op->read_iter) return -EINVAL;
+    if (unlikely(iocb->ki_flags & IOCB_DIRECT)) {
+        struct inode *vi = file_inode(iocb->ki_filp);
+
+        if (vi->i_sb != file_inode(real_file)->i_sb) {
+            struct nm_inode_info *info = vi->i_private;
+            unsigned int bs = (info && info->v_dio_off) ? info->v_dio_off :
+                              (vi->i_sb->s_blocksize ? vi->i_sb->s_blocksize : 4096);
+            unsigned int mask = bs - 1;
+
+            if (!iov_iter_count(to))
+                return 0;
+            if ((iocb->ki_pos | iov_iter_count(to) | iov_iter_alignment(to)) & mask)
+                return -EINVAL;
+        }
+    }
     return nm_forward_iter(iocb, to, real_file, false);
 }
 
@@ -1007,14 +1029,16 @@ static u16 nm_size_ratio(loff_t size, blkcnt_t blocks)
 
 static void nm_mirror_blocks(const struct nm_inode_info *info, struct kstat *stat)
 {
-    u64 want;
+    u64 want, rup, cap;
 
-    if (!info->v_cratio || stat->size < 8192)
+    if (!info->v_cratio || stat->size < 4096)
         return;
     want = div64_u64((u64)stat->size * info->v_cratio, 1024);
     want = (want + 4095) & ~4095ULL;
-    if (want >= (u64)stat->size)
-        want = ((u64)stat->size) & ~4095ULL;
+    rup = ((u64)stat->size + 4095) & ~4095ULL;
+    cap = rup > 4096 ? rup - 4096 : 0;
+    if (want > cap)
+        want = cap;
     if (!want)
         return;
     stat->blocks = (blkcnt_t)(want >> 9);
@@ -1022,12 +1046,7 @@ static void nm_mirror_blocks(const struct nm_inode_info *info, struct kstat *sta
 
 static int nomount_hijacked_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
-    struct inode *inode = d_backing_inode(dentry);
     struct nm_sop *nm_sop;
-
-    if (inode && (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) &&
-        unlikely(nm_hidden_from_caller(inode->i_private)))
-        return -ENOENT;
 
     nm_sop = __get_nm(smp_load_acquire(&dentry->d_sb->s_op), struct nm_sop, fake_sop,
                       destroy_inode, nomount_hijacked_destroy_inode);
@@ -1095,7 +1114,6 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
     struct path *stock;
 
     if (unlikely(!info)) return -EOPNOTSUPP;
-    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     stock = nm_stock_for_caller(info);
     if (unlikely(stock)) {
         struct inode *si = d_backing_inode(stock->dentry);
@@ -1769,7 +1787,6 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
     (void)query_flags;
 #endif
     if (unlikely(!info)) return -EIO;
-    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     {
         struct path *stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
@@ -1916,7 +1933,6 @@ static int nm_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
     struct inode *real_inode;
 
     if (unlikely(!info)) return -EOPNOTSUPP;
-    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     if (unlikely((info->flags & NM_FLAG_VIRTUAL_DIR) || !info->r_path.dentry))
         return -EOPNOTSUPP;
     {
@@ -2244,7 +2260,6 @@ static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dent
         int r;
 
         if (unlikely(!info)) return -ENODATA;
-        if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
         stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
             full = nm_full_xattr_name(proxy, name, &alloc);
@@ -4307,6 +4322,8 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                         fctxlen = 0;
                     fmapdev = nm_stock_map_dev(fp.dentry);
                     fcap = nm_stock_caps(d_backing_inode(fp.dentry));
+                    if (nm_stock_takes_odirect(&fp))
+                        fcap |= NM_CAP_ODIRECT;
                 }
                 path_put(&fp);
                 if (r == 0 && (pass == 1 ||
