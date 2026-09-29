@@ -29,17 +29,10 @@
 #define NM_FLAG_SHADOWS_STOCK (1 << 5)
 #define NM_FLAG_PUBLIC      (1 << 6)
 #define NM_FLAG_STOCK_ONLY  (1 << 7)
-/* Bit 8 and up need a `flags` field WIDER than u8 in every struct the value is copied
- * through. nomount_rule, nm_inode_info and nomount_child_node all held u8 and dropped
- * bit 8 in silence (only nm_rule_info, the short-lived copy, was u32); the three hold
- * u16 now. None of them crosses to userspace, and NM_FLAGS_USER_MASK keeps bit 8 out
- * of a client's reach regardless. */
 #define NM_FLAG_HAVE_VOWN   (1 << 8)
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
 
-/* kvzalloc arrived in 4.12 and kvcalloc in 4.18; kvfree predates both and copes
- * with either allocator, so the fallbacks are safe to free with it. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
 #define kvzalloc(size, flags) kzalloc((size), (flags))
 #endif
@@ -328,8 +321,6 @@ enum {
     NOMOUNT_ATTR_UID,
     NOMOUNT_ATTR_VERSION,
     NOMOUNT_ATTR_PAYLOAD,
-    /* Appended, never inserted: an older nm looks attributes up by number and
-     * ignores what it does not know, so the version reply stays readable both ways. */
     NOMOUNT_ATTR_MODVER,
     __NOMOUNT_ATTR_MAX,
 };

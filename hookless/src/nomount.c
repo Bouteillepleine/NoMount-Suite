@@ -496,10 +496,6 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         inode->i_blocks = real_inode->i_blocks;
         inode->i_uid = real_inode->i_uid;
         inode->i_gid = real_inode->i_gid;
-        /* A shadowing rule serves the module file's BYTES, not its ownership. Taking
-         * mode/uid/gid from the module file left one entry in a ROM directory whose
-         * owner did not match its neighbours, and made permission() disagree with the
-         * stock answer getattr gives a hidden caller. The type stays the real file's. */
         if (rule_info->flags & NM_FLAG_HAVE_VOWN) {
             inode->i_mode = (real_inode->i_mode & S_IFMT) | (rule_info->v_mode & 07777);
             inode->i_uid = rule_info->v_uid;
@@ -1083,11 +1079,6 @@ static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 
     if (info && (info->v_cap & NM_CAP_KNOWN) && !(info->v_cap & NM_CAP_FSYNC))
         return -EINVAL;
-    /* Nothing was captured for this rule, so the guard above cannot fire and fsync
-     * falls through to the backing f2fs, which answers 0. erofs_file_fops has no
-     * .fsync at all, so the stock answer there is EINVAL with certainty. Scoped to
-     * erofs: on an overlay-presented path ovl_fsync returns 0 for a lower-only file,
-     * which is what forwarding already gives, and forcing EINVAL would be a new tell. */
     if (info && !(info->v_cap & NM_CAP_KNOWN) &&
         file_inode(file)->i_sb->s_magic == EROFS_SUPER_MAGIC_V1)
         return -EINVAL;
@@ -1734,9 +1725,6 @@ static void nm_mirror_stat(const struct nm_inode_info *info, struct inode *v_ino
 {
     stat->ino = info->v_ino;
     stat->dev = info->v_dev ? info->v_dev : v_inode->i_sb->s_dev;
-    /* Mirrored on the inode too (see nomount_create_new_inode). Both have to move
-     * together: changing only the inode would make an ordinary caller's stat() report
-     * the module file while its open() was judged against the stock mode. */
     if (info->flags & NM_FLAG_HAVE_VOWN) {
         stat->mode = (stat->mode & S_IFMT) | (info->v_mode & 07777);
         stat->uid = info->v_uid;
@@ -1873,10 +1861,6 @@ static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
     if (likely(!err)) {
         struct inode *bi = d_backing_inode(info->r_path.dentry);
 
-        /* An explicit chmod/chown is the caller overriding the mirrored stock owner,
-         * so it has to win on BOTH routes: take it onto the inode (permission) and
-         * into the mirrored values (getattr), or the two start disagreeing again in
-         * the opposite direction. */
         if (attr->ia_valid & ATTR_MODE) {
             v_inode->i_mode = bi->i_mode;
             if (info->flags & NM_FLAG_HAVE_VOWN)
@@ -5158,9 +5142,6 @@ static int nomount_nl_get_version(struct sk_buff *req, struct nlmsghdr *req_nlh)
         return -EMSGSIZE;
     }
 
-    /* NOMOUNT_VERSION is the wire protocol and only moves when the protocol does, so
-     * two kernels that differ in behaviour can both answer 34. This carries the build
-     * string, which is the only thing that separates them from userspace. */
     if (nla_put_string(msg, NOMOUNT_ATTR_MODVER, NM_MODULE_VERSION)) {
         nlmsg_free(msg);
         return -EMSGSIZE;
