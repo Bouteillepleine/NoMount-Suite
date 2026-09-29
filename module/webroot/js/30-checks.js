@@ -126,21 +126,32 @@
     el.classList.remove("u-hide");
   }
 
-  let CHECK_RUNNING = false;
+  let CHECK_RUNNING = null;
+  let CHECK_AGAIN = false;
   async function runCheck(btn) {
-    if (CHECK_RUNNING) { toast("A check is already running", "info"); return; }
     const done = busy(btn, "Checking...");
-    $("findlist").innerHTML = '<div class="empty">Checking...</div>';
-    CHECK_RUNNING = true;
+    if (CHECK_RUNNING) CHECK_AGAIN = true;
+    else CHECK_RUNNING = checkLoop(checkPass);
+    try { await CHECK_RUNNING; } finally { done(); }
+  }
+  async function checkLoop(pass) {
     try {
-      const r0 = await nm("check --json --write");
-      const rep = parseJson(r0);
-      if (rep) CHECK = rep;
-      else toast("Check did not run - " +
-                 (((r0.stderr || "").trim().split("\n")[0]) || "no output"), "bad");
-      renderCheck(CHECK);
-      refreshStealth(); refreshStatus(); paintModuleMetric();
-    } finally { CHECK_RUNNING = false; done(); }
+      do {
+        CHECK_AGAIN = false;
+        await pass();
+        pass = checkPass;
+      } while (CHECK_AGAIN);
+    } finally { CHECK_RUNNING = null; CHECK_AGAIN = false; }
+  }
+  async function checkPass() {
+    $("findlist").innerHTML = '<div class="empty">Checking...</div>';
+    const r0 = await nm("check --json --write");
+    const rep = parseJson(r0);
+    if (rep) CHECK = rep;
+    else toast("Check did not run - " +
+               (((r0.stderr || "").trim().split("\n")[0]) || "no output"), "bad");
+    renderCheck(CHECK);
+    refreshStealth(); refreshStatus(); paintModuleMetric();
   }
 
   const CHECK_FRESH_SECS = 60;
@@ -149,12 +160,15 @@
     const ts = CHECK && typeof CHECK.ts === "number" ? CHECK.ts : 0;
     const fresh = ts && (Math.floor(Date.now() / 1000) - ts) < CHECK_FRESH_SECS;
     if (fresh && ranSection(CHECK, "device")) return;
-    CHECK_RUNNING = true;
+    CHECK_RUNNING = checkLoop(autoPass);
+    await CHECK_RUNNING;
+  }
+  async function autoPass() {
     try {
       const r = parseJson(await nm("check --json --write"));
       if (r) { CHECK = r; renderCheck(CHECK); refreshStealth(); refreshStatus(); paintModuleMetric(); }
     } catch (e) {
-    } finally { CHECK_RUNNING = false; }
+    }
   }
 
   async function loadCheckCache() {
