@@ -1042,7 +1042,12 @@ static void nm_mirror_blocks(const struct nm_inode_info *info, struct kstat *sta
 
 static int nomount_hijacked_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
+    struct inode *inode = d_backing_inode(dentry);
     struct nm_sop *nm_sop;
+
+    if (inode && (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) &&
+        unlikely(nm_hidden_from_caller(inode->i_private)))
+        return -ENOENT;
 
     nm_sop = __get_nm(smp_load_acquire(&dentry->d_sb->s_op), struct nm_sop, fake_sop,
                       destroy_inode, nomount_hijacked_destroy_inode);
@@ -1105,6 +1110,7 @@ static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
     struct path *stock;
 
     if (unlikely(!info)) return -EOPNOTSUPP;
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     stock = nm_stock_for_caller(info);
     if (unlikely(stock)) {
         struct inode *si = d_backing_inode(stock->dentry);
@@ -1775,6 +1781,7 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
     (void)query_flags;
 #endif
     if (unlikely(!info)) return -EIO;
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     {
         struct path *stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
@@ -1917,6 +1924,7 @@ static int nm_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
     struct inode *real_inode;
 
     if (unlikely(!info)) return -EOPNOTSUPP;
+    if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
     if (unlikely((info->flags & NM_FLAG_VIRTUAL_DIR) || !info->r_path.dentry))
         return -EOPNOTSUPP;
     {
@@ -2244,6 +2252,7 @@ static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dent
         int r;
 
         if (unlikely(!info)) return -ENODATA;
+        if (unlikely(nm_hidden_from_caller(info))) return -ENOENT;
         stock = nm_stock_for_caller(info);
         if (unlikely(stock)) {
             full = nm_full_xattr_name(proxy, name, &alloc);
