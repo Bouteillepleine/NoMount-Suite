@@ -175,6 +175,23 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
     Serve::Inject
 }
 
+const BOOT_CRITICAL_PARTITIONS: &[&str] = &["system", "system_ext", "vendor", "odm", "product"];
+const BOOT_CRITICAL_DIRS: &[&str] = &["bin", "lib", "lib64", "framework", "etc", "apex"];
+const ZYGOTE_BINARIES: &[&str] = &["app_process", "app_process32", "app_process64"];
+
+fn is_boot_critical(target: &Path) -> bool {
+    let parts: Vec<&str> = target
+        .components()
+        .skip(1)
+        .map(|c| c.as_os_str().to_str().unwrap_or(""))
+        .collect();
+    match parts.as_slice() {
+        [part, dir] => BOOT_CRITICAL_PARTITIONS.contains(part) && BOOT_CRITICAL_DIRS.contains(dir),
+        ["system", "bin", name] => name.starts_with("linker") || ZYGOTE_BINARIES.contains(name),
+        _ => false,
+    }
+}
+
 pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     let Some(root) = target.components().nth(1).and_then(|c| c.as_os_str().to_str()) else {
         return Err("not a path under a partition");
@@ -184,6 +201,10 @@ pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     }
     if is_partition_root(target) {
         return Err("a bare partition root (masking one bootloops zygote)");
+    }
+    if is_boot_critical(target) {
+        return Err("a path init, the linker or zygote cannot start without (masking it bootloops \
+                    the device)");
     }
     Ok(())
 }
@@ -2306,6 +2327,54 @@ mod tests {
         assert!(can_whiteout(Path::new("/data/adb/modules/x")).is_err());
         assert!(can_whiteout(Path::new("/apex/com.android.art/x")).is_err());
         assert!(can_whiteout(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn whiteout_refuses_what_init_the_linker_and_zygote_need() {
+        for p in [
+            "/system/bin",
+            "/system/bin/",
+            "/system/bin/.",
+            "/system/lib",
+            "/system/lib64",
+            "/system/framework",
+            "/system/etc",
+            "/system/apex",
+            "/system/bin/linker",
+            "/system/bin/linker64",
+            "/system/bin/linker_hwasan64",
+            "/system/bin/app_process",
+            "/system/bin/app_process32",
+            "/system/bin/app_process64",
+            "/system_ext/lib64",
+            "/system_ext/framework",
+            "/vendor/bin",
+            "/vendor/lib",
+            "/vendor/lib64",
+            "/vendor/etc",
+            "/odm/lib64",
+            "/product/framework",
+        ] {
+            assert!(can_whiteout(Path::new(p)).is_err(), "{p} must be refused");
+            assert!(crate::whiteout::validate(p).is_err(), "{p}: whiteout add must refuse it too");
+        }
+        for p in [
+            "/system/app/Foo",
+            "/system/priv-app/Foo",
+            "/product/app/Foo",
+            "/product/priv-app/Foo",
+            "/product/overlay/Foo.apk",
+            "/system/bin/install-recovery.sh",
+            "/system/bin/app_process_xposed64",
+            "/system/etc/hosts",
+            "/system/etc/permissions",
+            "/system/framework/foo.jar",
+            "/vendor/etc/foo.conf",
+            "/my_product/etc",
+            "/system/vendor",
+        ] {
+            assert!(can_whiteout(Path::new(p)).is_ok(), "{p} is an ordinary debloat target");
+        }
     }
 
     #[test]
