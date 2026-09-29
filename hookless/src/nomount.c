@@ -3305,11 +3305,12 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
             path_put(&fp);
             if (r == 0 && (!!S_ISDIR(fk.mode) == want_dir)) {
                 if (!want_dir) {
-                    if (!report_dev && fk.dev != dir_dev) {
+                    if (fk.dev != dir_dev && !report_dev) {
                         report_dev = fk.dev;
                         pop->dev = fk.dev;
+                        pop->n = 0;
                     }
-                    if (!report_dev || fk.dev != report_dev) {
+                    if (report_dev ? fk.dev != report_dev : fk.dev != dir_dev) {
                         kfree(cp);
                         continue;
                     }
