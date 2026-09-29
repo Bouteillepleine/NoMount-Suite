@@ -76,9 +76,12 @@ if [ ! -d "$MODPATH/bin/${_abi}" ]; then
     ui_print "*********************************************************"
 fi
 if [ -x "$_nm" ]; then
-    _ev=$("$_nm" v 2>/dev/null | tr -dc '0-9')
+    _evl=$("$_nm" v 2>/dev/null | head -n 1)
+    _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
+    _eb=""
+    case "$_evl" in *" "*) _eb=${_evl#* }; _eb=${_eb%% *} ;; esac
     if [ -n "$_ev" ]; then
-        ui_print "- Prism engine: v${_ev} (responding)"
+        ui_print "- Prism engine: v${_ev} (${_eb:+build $_eb, }responding)"
     else
         ui_print "*********************************************************"
         ui_print "! The kernel's NoMount engine did not answer."
