@@ -17,7 +17,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.34.0"
+#define NM_MODULE_VERSION "1.34.1"
 
 #define NOMOUNT_VERSION    34
 #define NOMOUNT_HASH_BITS  12
@@ -29,9 +29,12 @@
 #define NM_FLAG_SHADOWS_STOCK (1 << 5)
 #define NM_FLAG_PUBLIC      (1 << 6)
 #define NM_FLAG_STOCK_ONLY  (1 << 7)
-/* Bits 0-7 only: nm_inode_info, nomount_rule_info and nomount_child_node all declare
- * `u8 flags`, so a bit 8 is silently truncated on every copy out of nomount_rule
- * (which is u32). Signal "the stock owner was captured" with v_mode != 0 instead. */
+/* Bit 8 and up need a `flags` field WIDER than u8 in every struct the value is copied
+ * through. nomount_rule, nm_inode_info and nomount_child_node all held u8 and dropped
+ * bit 8 in silence (only nm_rule_info, the short-lived copy, was u32); the three hold
+ * u16 now. None of them crosses to userspace, and NM_FLAGS_USER_MASK keeps bit 8 out
+ * of a client's reach regardless. */
+#define NM_FLAG_HAVE_VOWN   (1 << 8)
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
 
@@ -121,7 +124,7 @@ struct nm_inode_info {
     kuid_t v_uid;
     kgid_t v_gid;
     umode_t v_mode;
-    u8 flags;
+    u16 flags;
     u32 gen;
     struct nm_dsnap *dsnap;
     spinlock_t dsnap_lock;
@@ -141,7 +144,7 @@ struct nomount_child_node {
     u64 fake_ino;
     int id;
     u8 d_type;
-    u8 flags;
+    u16 flags;
     u16 name_len;
     struct nomount_rule *rule;
 
@@ -190,7 +193,7 @@ struct nomount_rule {
     u16 v_ctx_len;
     u32 v_hash;
     u16 v_len;
-    u8  flags;
+    u16 flags;
     unsigned int target_uid;
 
     char paths[]; 
