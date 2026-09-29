@@ -532,6 +532,7 @@ enum Hold {
     Unread,
     Above(PathBuf),
     Stacked(usize),
+    Covered(PathBuf),
     Inside(PathBuf),
 }
 
@@ -547,9 +548,13 @@ impl Hold {
                 a.display()
             ),
             Hold::Stacked(n) => format!(
-                "{n} mount(s) on that path are not all this bind, and an unmount pops whichever \
-                 is on top, so it would take down a mount absorb does not own or uncover one it \
-                 cannot serve"
+                "{n} mount(s) on that path are not all binds this pass absorbs, and an unmount \
+                 pops whichever is on top, so it would take down a mount absorb does not own or \
+                 uncover one it cannot serve"
+            ),
+            Hold::Covered(top) => format!(
+                "{} is mounted over it on the same path and takes the whole stack",
+                top.display()
             ),
             Hold::Inside(b) => format!(
                 "{} is mounted inside it, and unmounting it would take that mount down \
@@ -565,14 +570,26 @@ fn unmounts_needed(
     target: &Path,
     source: &Path,
     served_at: &Path,
+    binds: &HashSet<(PathBuf, PathBuf)>,
 ) -> Result<usize, Hold> {
     if let Some(a) = foreign_ancestor(rows, served_at) {
         return Err(Hold::Above(a));
     }
     let roots = fs_roots(rows);
     let here: Vec<&MountRow> = rows.iter().filter(|r| r.target == target).collect();
-    if here.iter().any(|r| source_of(r, &roots).as_deref() != Some(source)) {
+    let Some(top) = here.iter().find(|r| !here.iter().any(|o| o.parent == r.id)).or(here.last())
+    else {
+        return Ok(0);
+    };
+    let absorbed_here = |r: &MountRow| {
+        source_of(r, &roots).is_some_and(|s| binds.contains(&(target.to_path_buf(), s)))
+    };
+    if !here.iter().all(|r| absorbed_here(r)) {
         return Err(Hold::Stacked(here.len()));
+    }
+    match source_of(top, &roots) {
+        Some(s) if s != source => return Err(Hold::Covered(s)),
+        _ => {}
     }
     match mounted_inside(rows, target) {
         Some(b) => Err(Hold::Inside(b)),
@@ -580,9 +597,14 @@ fn unmounts_needed(
     }
 }
 
-fn live_unmounts_needed(target: &Path, source: &Path, served_at: &Path) -> Result<usize, Hold> {
+fn live_unmounts_needed(
+    target: &Path,
+    source: &Path,
+    served_at: &Path,
+    binds: &HashSet<(PathBuf, PathBuf)>,
+) -> Result<usize, Hold> {
     match read_mountinfo(MOUNTINFO) {
-        Ok(rows) => unmounts_needed(&rows, target, source, served_at),
+        Ok(rows) => unmounts_needed(&rows, target, source, served_at, binds),
         Err(_) => Err(Hold::Unread),
     }
 }
@@ -1747,7 +1769,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     }
 
     let mut deferred = 0usize;
-    let mut same_bind: HashSet<(PathBuf, PathBuf)> = HashSet::new();
+    let mut binds: HashSet<(PathBuf, PathBuf)> = HashSet::new();
     let cands: Vec<Candidate> = surveyed
         .into_iter()
         .filter(|s| match s.disposition {
@@ -1767,7 +1789,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             target: s.target,
             source: s.source,
         })
-        .filter(|c| same_bind.insert((c.target.clone(), c.source.clone())))
+        .filter(|c| binds.insert((c.target.clone(), c.source.clone())))
         .collect();
     if deferred > 0 {
         println!(
@@ -1822,13 +1844,28 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     let (mut dropped, mut held) = (0u32, 0u32);
     let live_map = live_injects(&nm);
     let mut reasserted: HashSet<PathBuf> = HashSet::new();
+    let mut stacks: HashSet<PathBuf> = HashSet::new();
     let mut fresh: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut record = read_absorbed_pairs();
     for c in &cands {
+        if stacks.contains(&c.target) {
+            held += 1;
+            continue;
+        }
         let is_dir_bind = c.source.is_dir();
         let at = if c.redundant { servable(&c.target, &aliases) } else { c.target.clone() };
-        let pops = match live_unmounts_needed(&c.target, &c.source, &at) {
+        let pops = match live_unmounts_needed(&c.target, &c.source, &at, &binds) {
             Ok(n) => n,
+            Err(h @ Hold::Covered(_)) => {
+                println!(
+                    "leaving {} <- {} mounted for now: {}",
+                    c.target.display(),
+                    c.source.display(),
+                    h.why()
+                );
+                held += 1;
+                continue;
+            }
             Err(h) => {
                 eprintln!(
                     "nomount: LEAK {} <- {} stays mounted: {}",
@@ -1841,6 +1878,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 continue;
             }
         };
+        if pops > 1 {
+            stacks.insert(c.target.clone());
+        }
         if c.redundant {
             if dry_run {
                 println!(
@@ -2604,11 +2644,19 @@ mod tests {
             .unwrap_or_default()
     }
 
+    fn every_bind(rows: &[MountRow]) -> HashSet<(PathBuf, PathBuf)> {
+        let roots = fs_roots(rows);
+        rows.iter()
+            .filter_map(|r| source_of(r, &roots).map(|s| (r.target.clone(), s)))
+            .collect()
+    }
+
     fn held_by(rows: &[MountRow], target: &str) -> Option<PathBuf> {
         let t = Path::new(target);
-        match unmounts_needed(rows, t, &source_at(rows, t), t) {
+        match unmounts_needed(rows, t, &source_at(rows, t), t, &every_bind(rows)) {
             Err(Hold::Above(p)) | Err(Hold::Inside(p)) => Some(p),
             Err(Hold::Stacked(n)) => panic!("{target} is not stacked, got {n}"),
+            Err(Hold::Covered(p)) => panic!("{target} is not covered, got {}", p.display()),
             Err(Hold::Unread) => panic!("a parsed table is never unread"),
             Ok(_) => None,
         }
@@ -2677,7 +2725,7 @@ mod tests {
         let mut taken: Vec<PathBuf> = Vec::new();
         for t in &order {
             let src = source_at(&rows, t);
-            if unmounts_needed(&rows, t, &src, t).is_ok() {
+            if unmounts_needed(&rows, t, &src, t, &every_bind(&rows)).is_ok() {
                 rows.retain(|r| r.target != *t);
                 taken.push(t.clone());
             }
@@ -2734,11 +2782,18 @@ mod tests {
         );
         let target = Path::new("/mnt/vendor/my_product/media/b");
         let src = source_at(&rows, target);
+        let binds = every_bind(&rows);
         assert!(
-            matches!(unmounts_needed(&rows, target, &src, Path::new("/my_product/media/b")), Ok(1)),
+            matches!(
+                unmounts_needed(&rows, target, &src, Path::new("/my_product/media/b"), &binds),
+                Ok(1)
+            ),
             "/mnt is a stock tmpfs, but the rule lands on the /my_product twin"
         );
-        assert!(matches!(unmounts_needed(&rows, target, &src, target), Err(Hold::Above(_))));
+        assert!(matches!(
+            unmounts_needed(&rows, target, &src, target, &binds),
+            Err(Hold::Above(_))
+        ));
     }
 
     #[test]
@@ -2763,49 +2818,69 @@ mod tests {
     }
 
     #[test]
-    fn only_a_stack_made_entirely_of_this_bind_is_unmounted() {
+    fn a_stack_is_unmounted_only_when_every_mount_in_it_is_absorbed_this_pass() {
         let hosts = Path::new("/system/etc/hosts");
         let mine = PathBuf::from("/data/adb/modules/x/hosts");
-        let theirs = PathBuf::from("/data/adb/modules/zygisk_fw/hosts");
-        let count = |extra: &str, src: &Path| unmounts_needed(&table(extra), hosts, src, hosts);
+        let other = PathBuf::from("/data/adb/modules/y/system/etc/hosts");
+        let declined = PathBuf::from("/data/adb/modules/zygisk_fw/hosts");
+        let binds: HashSet<(PathBuf, PathBuf)> =
+            [mine.clone(), other.clone()].into_iter().map(|s| (hosts.to_path_buf(), s)).collect();
+        let count =
+            |extra: &str, src: &Path| unmounts_needed(&table(extra), hosts, src, hosts, &binds);
+        let row = |id: u32, parent: u32, src: &Path| {
+            format!(
+                "{id} {parent} 254:78 /{} /system/etc/hosts rw - f2fs /dev/block/dm-78 rw\n",
+                src.strip_prefix("/data").unwrap().display()
+            )
+        };
 
-        let alone = "900 58 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw\n";
-        assert!(matches!(count(alone, &mine), Ok(1)));
+        let alone = row(900, 58, &mine);
+        assert!(matches!(count(&alone, &mine), Ok(1)));
         assert!(
-            matches!(count(alone, &theirs), Err(Hold::Stacked(1))),
-            "the one mount there is not this bind any more"
+            matches!(count(&row(900, 58, &declined), &mine), Err(Hold::Stacked(1))),
+            "the one mount there is not a bind this pass absorbs"
         );
 
-        let declined_on_top = "900 58 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
-901 900 254:78 /adb/modules/zygisk_fw/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
-";
+        let declined_on_top = row(900, 58, &mine) + &row(901, 900, &declined);
         assert!(
-            matches!(count(declined_on_top, &mine), Err(Hold::Stacked(2))),
+            matches!(count(&declined_on_top, &mine), Err(Hold::Stacked(2))),
             "the unmount would pop the declined mount on top"
         );
-        let declined_below = "900 58 254:78 /adb/modules/zygisk_fw/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
-901 900 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
-";
+        let declined_below = row(900, 58, &declined) + &row(901, 900, &mine);
         assert!(
-            matches!(count(declined_below, &mine), Err(Hold::Stacked(2))),
+            matches!(count(&declined_below, &mine), Err(Hold::Stacked(2))),
             "popping the visible mount would uncover the declined one and nothing could be served"
         );
 
-        let twice = "900 58 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
-901 900 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
-";
+        let twice = row(900, 58, &mine) + &row(901, 900, &mine);
         assert!(
-            matches!(count(twice, &mine), Ok(2)),
+            matches!(count(&twice, &mine), Ok(2)),
             "the same bind made twice is popped twice, so the target really comes free"
+        );
+
+        let two_modules = row(900, 58, &mine) + &row(901, 900, &other);
+        assert!(
+            matches!(count(&two_modules, &mine), Err(Hold::Covered(ref s)) if *s == other),
+            "the lower bind is invisible and is taken with the one over it"
+        );
+        assert!(
+            matches!(count(&two_modules, &other), Ok(2)),
+            "the visible bind pops the whole stack and is the one served, as before"
+        );
+        let listed_upside_down = row(901, 900, &other) + &row(900, 58, &mine);
+        assert!(
+            matches!(count(&listed_upside_down, &other), Ok(2)),
+            "the top is found by parent id, not by the order the table lists it"
         );
 
         let over_stock = table(
             "900 149 254:78 /adb/modules/x/product/app /product/app rw - f2fs /dev/block/dm-78 rw\n",
         );
         let app = Path::new("/product/app");
+        let src = PathBuf::from("/data/adb/modules/x/product/app");
         assert!(
             matches!(
-                unmounts_needed(&over_stock, app, Path::new("/data/adb/modules/x/product/app"), app),
+                unmounts_needed(&over_stock, app, &src, app, &every_bind(&over_stock)),
                 Err(Hold::Stacked(2))
             ),
             "a bind over a stock mount would uncover the stock overlay, not the ROM directory"
