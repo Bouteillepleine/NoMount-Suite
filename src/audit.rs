@@ -546,9 +546,35 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     }
 }
 
+fn band_evidence(groups: &[(String, u64, u64, usize)]) -> String {
+    const SHOWN: usize = 10;
+    let total: usize = groups.iter().map(|g| g.3).sum();
+    let mut sorted: Vec<&(String, u64, u64, usize)> = groups.iter().collect();
+    sorted.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2))));
+    let mut by_dir: Vec<(&str, Vec<String>)> = Vec::new();
+    for (dir, dev, b, n) in sorted.iter().take(SHOWN) {
+        let item = format!("{n} in dev {dev} {b}M");
+        match by_dir.iter_mut().find(|(d, _)| d == dir) {
+            Some((_, items)) => items.push(item),
+            None => by_dir.push((dir.as_str(), vec![item])),
+        }
+    }
+    let listed: Vec<String> =
+        by_dir.iter().map(|(d, items)| format!("{d}: {}", items.join(", "))).collect();
+    let mut s = format!(
+        "{total} injected inode(s) in {} all-ours bucket(s), no stock there - {}",
+        groups.len(),
+        listed.join("; ")
+    );
+    if groups.len() > SHOWN {
+        s.push_str(&format!("; +{} more bucket(s)", groups.len() - SHOWN));
+    }
+    s
+}
+
 fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     const BUCKET: u64 = 1_000_000;
-    let mut worst: Option<(String, u64, usize)> = None;
+    let mut groups: Vec<(String, u64, u64, usize)> = Vec::new();
     let mut examined = 0usize;
     let mut unread = 0usize;
     for parent in parents_of(targets) {
@@ -578,11 +604,10 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             continue;
         }
         examined += 1;
-        let mut bands: Vec<(&(u64, u64), &usize)> = ours_buckets.iter().collect();
-        bands.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        for (b, n) in bands {
-            if !stock_buckets.contains_key(b) && worst.as_ref().is_none_or(|w| *n > w.2) {
-                worst = Some((parent.to_string_lossy().into_owned(), b.1, *n));
+        let dir = parent.to_string_lossy().into_owned();
+        for (&(dev, b), &n) in &ours_buckets {
+            if !stock_buckets.contains_key(&(dev, b)) {
+                groups.push((dir.clone(), dev, b, n));
             }
         }
     }
@@ -603,7 +628,7 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
              yours is.",
         );
     }
-    if worst.is_none() && unread > 0 {
+    if groups.is_empty() && unread > 0 {
         return unmeasured(
             N_INODE_BAND,
             format!(
@@ -615,23 +640,23 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             "{unread} folder(s) would not open, so they were not checked. What was read looks fine."
         ));
     }
-    match worst {
-        None => pass(
+    if groups.is_empty() {
+        return pass(
             N_INODE_BAND,
             format!("{examined} directory(ies): every injected inode shares a bucket with stock"),
         )
-        .meaning("Injected files sit in the same numeric range as the ROM's own files."),
-        Some((dir, b, n)) => soft(
-            N_INODE_BAND,
-            format!("{dir}: {n} injected inode(s) alone in the {}M bucket, no stock there", b),
-            "bucket every inode in a directory and the all-ours band names the injections",
-        )
-        .meaning(
-            "Injected files carry ID numbers from a range the ROM never uses. Grouping a folder's \
-             files by that number yields one group that is entirely yours.",
-        )
-        .owner("the kernel engine"),
+        .meaning("Injected files sit in the same numeric range as the ROM's own files.");
     }
+    soft(
+        N_INODE_BAND,
+        band_evidence(&groups),
+        "bucket every inode in a directory and the all-ours band names the injections",
+    )
+    .meaning(
+        "Injected files carry ID numbers from a range the ROM never uses. Grouping a folder's \
+         files by device and that number yields groups that are entirely yours.",
+    )
+    .owner("the kernel engine")
 }
 
 fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
@@ -1606,6 +1631,32 @@ mod tests {
             Verdict::Fail,
             "a directory with no ROM content must never FAIL the band check"
         );
+    }
+
+    #[test]
+    fn the_inode_band_note_counts_every_all_ours_bucket() {
+        let d = "/product/overlay".to_string();
+        let groups = vec![
+            (d.clone(), 35, 80, 35),
+            (d.clone(), 35, 81, 24),
+            (d.clone(), 35, 82, 2),
+            (d.clone(), 35, 83, 17),
+            (d.clone(), 27, 83, 2),
+        ];
+        assert_eq!(
+            band_evidence(&groups),
+            "80 injected inode(s) in 5 all-ours bucket(s), no stock there - /product/overlay: \
+             35 in dev 35 80M, 24 in dev 35 81M, 17 in dev 35 83M, 2 in dev 27 83M, \
+             2 in dev 35 82M"
+        );
+
+        let mut many: Vec<(String, u64, u64, usize)> =
+            (0..12).map(|b| ("/product/app".to_string(), 7, b, 1)).collect();
+        many.push(("/system/app".to_string(), 9, 3, 5));
+        let got = band_evidence(&many);
+        assert!(got.starts_with("17 injected inode(s) in 13 all-ours bucket(s)"), "{got}");
+        assert!(got.contains("/system/app: 5 in dev 9 3M; /product/app: 1 in dev 7 0M"), "{got}");
+        assert!(got.ends_with("; +3 more bucket(s)"), "{got}");
     }
 
     #[test]
