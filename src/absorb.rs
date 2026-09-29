@@ -1483,6 +1483,7 @@ fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
         }
     };
     let durable = crate::whiteout::read().unwrap_or_default();
+    let table = parse_mountinfo_bytes(&raw);
     let mut seen: HashSet<PathBuf> = HashSet::new();
     for target in raw
         .split(|b| *b == b'\n')
@@ -1541,6 +1542,17 @@ fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
                 "nomount: deferring the tmpfs over {} to the early pass: it is on a my_* \
                  partition, and unmounting one of those on a live system has rebooted a device",
                 target.display()
+            );
+            st.leaked += 1;
+            continue;
+        }
+        if let Some(a) = foreign_ancestor(&table, &target) {
+            eprintln!(
+                "nomount: LEAK the tmpfs over {} stays mounted: {} is mounted above it, so the \
+                 whiteout would resolve through that mount and land on the mounted tree instead \
+                 of the ROM",
+                target.display(),
+                a.display()
             );
             st.leaked += 1;
             continue;
@@ -2710,6 +2722,27 @@ mod tests {
             "/mnt is a stock tmpfs, but the rule lands on the /my_product twin"
         );
         assert!(matches!(unmounts_needed(&rows, target, &src, target), Err(Hold::Above(_))));
+    }
+
+    #[test]
+    fn a_rom_tmpfs_under_a_live_bind_is_not_whiteouted_through_it() {
+        let extra = "900 149 254:78 /adb/modules/m/app/Foo /product/app/Foo rw - f2fs /dev/block/dm-78 rw
+951 900 0:131 / /product/app/Foo/oat rw - tmpfs tmpfs rw
+952 149 0:132 / /product/app/Bar rw - tmpfs tmpfs rw
+";
+        let rows = table(extra);
+        let targets: Vec<PathBuf> = extra.lines().filter_map(rom_tmpfs_target).collect();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(
+            foreign_ancestor(&rows, &targets[0]),
+            Some(PathBuf::from("/product/app/Foo")),
+            "the whiteout would land on the module's /data inode"
+        );
+        assert_eq!(
+            foreign_ancestor(&rows, &targets[1]),
+            None,
+            "a tmpfs is not its own ancestor, and the stock overlay above it is the ROM"
+        );
     }
 
     #[test]
