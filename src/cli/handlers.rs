@@ -68,7 +68,8 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
                     .any(|c| matches!(c, std::path::Component::ParentDir))
             {
                 anyhow::bail!(
-                    "refusing {}: pass an absolute path with no '..' - this guard and the                      engine resolve a path differently, so only a resolved one is safe.",
+                    "refusing {}: pass an absolute path with no '..' - this guard and the \
+                     engine resolve a path differently, so only a resolved one is safe.",
                     virt.display()
                 );
             }

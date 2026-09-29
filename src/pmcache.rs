@@ -165,7 +165,7 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
             // pass see no previous identity, delete PM's cached parse and claim a reboot
             // is needed for an APK that never moved.
             if let Some(old) = previous.get(target) {
-                lines.push(format!("{}	{}", target.display(), old));
+                lines.push(format!("{}\t{}", target.display(), old));
             }
             continue;
         };

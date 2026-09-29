@@ -736,7 +736,8 @@ pub(crate) fn unmount_before_serving(
         // are files, so is_dir() keeps this off that path.
         if target.is_dir() && targets.iter().any(|m| m != target && m.starts_with(target)) {
             eprintln!(
-                "nomount: {} has a live mount under it; hiding it would strand that mount                  in mountinfo, so it is left unserved",
+                "nomount: {} has a live mount under it; hiding it would strand that mount \
+                 in mountinfo, so it is left unserved",
                 target.display()
             );
             return false;
@@ -1668,7 +1669,8 @@ mod tests {
             assert!(
                 NM_H.contains(&format!("#define {name}   {value}"))
                     || NM_H.contains(&format!("#define {name} {value}")),
-                "userspace/src/nm.h no longer defines {name} as {value}, but src/nm.rs                  still branches on that number"
+                "userspace/src/nm.h no longer defines {name} as {value}, but src/nm.rs \
+                 still branches on that number"
             );
         }
         const UNINSTALL: &str = include_str!("../module/uninstall.sh");
@@ -1680,7 +1682,8 @@ mod tests {
         for (what, src) in [("service.sh", SERVICE), ("uninstall.sh", UNINSTALL)] {
             assert!(
                 src.contains(&format!("grep -q '{BH_MARKER}'")),
-                "{what} stopped matching the bindhosts marker; uninstall then leaves                  /data/adb/bindhosts/mode_override.sh behind and bindhosts stays on mode 0"
+                "{what} stopped matching the bindhosts marker; uninstall then leaves \
+                 /data/adb/bindhosts/mode_override.sh behind and bindhosts stays on mode 0"
             );
         }
         const README: &str = include_str!("../README.md");
@@ -1691,12 +1694,14 @@ mod tests {
         // "go to X -> Export" instruction named a tab that is not on screen.
         assert!(
             PAGE.contains("<span>Checks</span>"),
-            "the diagnostics tab's nav label changed; README and bug_report.md route              reporters to it by name and must be updated in the same commit"
+            "the diagnostics tab's nav label changed; README and bug_report.md route \
+             reporters to it by name and must be updated in the same commit"
         );
         for (what, doc) in [("README.md", README), ("bug_report.md", BUG_TEMPLATE)] {
             assert!(
                 !doc.contains("Diagnostics*") && !doc.contains("**Diagnostics"),
-                "{what} still routes the Export instructions to a Diagnostics tab; the nav                  button says Checks"
+                "{what} still routes the Export instructions to a Diagnostics tab; the nav \
+                 button says Checks"
             );
         }
         const GATE_SWEEP: &str = include_str!("../scripts/gate-sweep.sh");
@@ -1707,12 +1712,16 @@ mod tests {
         ] {
             assert!(
                 ENGINE_MATRIX.contains(lit) && GATE_SWEEP.contains(lit),
-                "the derived config gate is two independent copies - one inline in the                  matrix, one in scripts/gate-sweep.sh - and they have drifted on {lit:?}.                  Only the script is tested, so a drifted matrix copy is an untested gate,                  which is how the original one came to catch 2 of 8 gating forms"
+                "the derived config gate is two independent copies - one inline in the \
+                 matrix, one in scripts/gate-sweep.sh - and they have drifted on {lit:?}. \
+                 Only the script is tested, so a drifted matrix copy is an untested gate, \
+                 which is how the original one came to catch 2 of 8 gating forms"
             );
         }
         assert!(
             BUILD_YAML.contains("scripts/gate-sweep.sh"),
-            "nothing runs the config-gate sweep any more, so its copy of the extractor is              unexercised and the matrix copy is pinned to an untested reference"
+            "nothing runs the config-gate sweep any more, so its copy of the extractor is \
+             unexercised and the matrix copy is pinned to an untested reference"
         );
         assert!(
             ENGINE_MATRIX.contains("workflow_dispatch") && ENGINE_MATRIX.contains("push:"),
