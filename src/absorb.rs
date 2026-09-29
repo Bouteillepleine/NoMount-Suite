@@ -717,9 +717,9 @@ fn label_apk_readable(p: &Path) -> bool {
     true
 }
 
-pub fn reapply_absorbed(nm: &Nm) -> u32 {
+pub fn reapply_absorbed(nm: &Nm, early: bool) -> u32 {
     match read_absorbed_pairs() {
-        Ok(p) => reapply_absorbed_pairs(nm, &p),
+        Ok(p) => reapply_pairs(nm, &p, early),
         Err(e) => {
             eprintln!(
                 "nomount: could not read {ABSORBED_LIST} ({e}) -- no recorded APK rule was \
@@ -731,6 +731,14 @@ pub fn reapply_absorbed(nm: &Nm) -> u32 {
 }
 
 pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
+    reapply_pairs(nm, pairs, true)
+}
+
+fn reassertable_now(target: &Path, early: bool) -> bool {
+    early || runtime_droppable(target, &[])
+}
+
+fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> u32 {
     let Ok(live) = nm.list() else {
         eprintln!(
             "nomount: cannot enumerate live rules - skipping the absorbed-rule re-serve this \
@@ -764,6 +772,15 @@ pub fn reapply_absorbed_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)]) -> u32 {
             }
         }
         if live_targets.contains(target) {
+            continue;
+        }
+        if !reassertable_now(target, early) {
+            eprintln!(
+                "nomount: not re-serving {} at runtime - it is on a my_* partition, and \
+                 re-asserting one of those on a live system has rebooted a device; the next \
+                 boot re-serves it before zygote starts",
+                target.display()
+            );
             continue;
         }
         if still_mounted(target) {
@@ -1613,7 +1630,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     }
 
     if !dry_run {
-        let reserved = reapply_absorbed(&nm);
+        let reserved = reapply_absorbed(&nm, early);
         if reserved > 0 {
             println!("re-served {reserved} recorded APK rule(s)");
         }
@@ -2953,6 +2970,18 @@ mod tests {
         ));
         assert!(runtime_droppable(Path::new("/system/etc/f"), &aliases));
         assert!(runtime_droppable(Path::new("/product/media/x.zip"), &[]));
+    }
+
+    #[test]
+    fn a_recorded_my_rule_is_re_served_only_before_zygote() {
+        let my = Path::new("/my_bigball/app/Foo/Foo.apk");
+        assert!(!reassertable_now(my, false), "the runtime absorb must not re-assert a my_* rule");
+        assert!(reassertable_now(my, true), "the pre-zygote passes still re-serve it");
+        assert!(reassertable_now(Path::new("/product/app/Foo/Foo.apk"), false));
+        assert!(reassertable_now(
+            Path::new("/data/app/~~a==/com.foo-b==/base.apk"),
+            false
+        ));
     }
 
     #[test]
