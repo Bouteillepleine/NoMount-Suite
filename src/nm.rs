@@ -681,6 +681,97 @@ mod tests {
     }
 
     #[test]
+    fn nms_exit_codes_and_what_rust_reads_into_them_agree_both_ways() {
+        const NM_H: &str = include_str!("../userspace/src/nm.h");
+        const NM_C: &str = include_str!("../userspace/src/nm.c");
+        let define = |name: &str| -> i32 {
+            NM_H.lines()
+                .find_map(|l| {
+                    let mut w = l.split_whitespace();
+                    if w.next() != Some("#define") || w.next() != Some(name) {
+                        return None;
+                    }
+                    w.next()?.parse().ok()
+                })
+                .unwrap_or_else(|| panic!("userspace/src/nm.h no longer defines {name} as a number"))
+        };
+        let named = [
+            ("NM_EXIT_TIMEOUT", Nm::EXIT_TIMEOUT),
+            ("NM_EXIT_NO_ENGINE", Nm::EXIT_NO_ENGINE),
+        ];
+        for (name, rust) in named {
+            assert_eq!(define(name), rust, "userspace/src/nm.h's {name} and src/nm.rs disagree");
+        }
+
+        assert_eq!(
+            NM_C.matches("SYS_EXIT").count(),
+            1,
+            "nm.c exits somewhere other than its one exit_code path, which this pin cannot see"
+        );
+        assert!(NM_C.contains("sys1(SYS_EXIT, exit_code)"));
+        assert!(
+            NM_H.lines().filter(|l| l.contains("SYS_EXIT")).all(|l| l.trim_start().starts_with("#define")),
+            "nm.h exits on its own, which this pin cannot see"
+        );
+
+        let mut literal = std::collections::BTreeSet::new();
+        let mut used = std::collections::BTreeSet::new();
+        for (i, _) in NM_C.match_indices("exit_code") {
+            let raw = &NM_C[i + "exit_code".len()..];
+            if raw.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let after = raw.trim_start();
+            let (or, rhs) = if let Some(r) = after.strip_prefix("|=") {
+                (true, r)
+            } else if after.starts_with("==") {
+                continue;
+            } else if let Some(r) = after.strip_prefix('=') {
+                (false, r)
+            } else {
+                continue;
+            };
+            let rhs = rhs.split(';').next().unwrap_or_default().trim();
+            if let Ok(n) = rhs.parse::<i32>() {
+                assert!(!or, "nm.c ORs {n} into its exit code");
+                literal.insert(n);
+            } else if let Some(&(name, _)) = named.iter().find(|(n, _)| *n == rhs) {
+                assert!(!or, "nm.c ORs {name} into its exit code");
+                used.insert(name);
+            } else if rhs == "(rc < 0)" {
+                literal.insert(1);
+                if !or {
+                    literal.insert(0);
+                }
+            } else {
+                panic!("nm.c sets its exit code from `{rhs}`, which this pin cannot resolve");
+            }
+        }
+
+        for (name, rust) in named {
+            assert!(
+                used.contains(name),
+                "nm.c never exits with {name}, but src/nm.rs still reads {rust} as the engine \
+                 being unreachable"
+            );
+        }
+        for c in &literal {
+            assert!(
+                !Nm::engine_is_unreachable(Some(*c)),
+                "nm.c exits {c} for something other than an unreachable engine, and src/nm.rs \
+                 reads {c} as the engine being unreachable"
+            );
+        }
+        for c in 0..=255 {
+            assert_eq!(
+                Nm::engine_is_unreachable(Some(c)),
+                named.iter().any(|&(_, v)| v == c),
+                "src/nm.rs reads exit {c} differently from what nm.h says it means"
+            );
+        }
+    }
+
+    #[test]
     fn a_line_the_parser_cannot_read_is_counted_not_just_dropped() {
         let (v, unread) = parse_list_counted(
             "/product/x -> /data/adb/modules/M/x\n\
