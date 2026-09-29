@@ -68,6 +68,19 @@ fn dir_key_withheld(target: &Path) -> bool {
     apks != Some(1)
 }
 
+fn retry_unproven_change(
+    target: &Path,
+    previous: Option<&String>,
+    id: &str,
+    matched: usize,
+    seeding: bool,
+) -> bool {
+    matched == 0
+        && !seeding
+        && previous.is_some_and(|old| old != id)
+        && dir_key_withheld(target)
+}
+
 fn cache_files() -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for d in fs::read_dir(CACHE_DIR)? {
@@ -152,7 +165,7 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
             // pass see no previous identity, delete PM's cached parse and claim a reboot
             // is needed for an APK that never moved.
             if let Some(old) = previous.get(target) {
-                lines.push(format!("{}	{}", target.display(), old));
+                lines.push(format!("{}\t{}", target.display(), old));
             }
             continue;
         };
@@ -178,7 +191,7 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
         // APK shares its directory. Recording the new identity here would mark the
         // change done, so the next pass sees nothing stale and never retries - and PM
         // keeps serving its parse of the previous APK forever, silently.
-        if matched == 0 && !seeding && stale && dir_key_withheld(target) {
+        if retry_unproven_change(target, previous.get(target), &id, matched, seeding) {
             eprintln!(
                 "nomount: pmcache: no cached parse matched {} and it shares its directory, \
                  so the package key could not be derived - PM may still be serving the \
@@ -391,5 +404,38 @@ mod tests {
         fs::write(shared.join("B.apk"), b"x").unwrap();
         assert_eq!(cache_keys(&shared.join("A.apk")), vec!["A.apk-".to_string()]);
         let _ = fs::remove_dir_all(std::env::temp_dir().join("nm-pmcache-test"));
+    }
+
+    #[test]
+    fn a_new_apk_in_a_shared_directory_is_recorded_not_retried() {
+        let d = tempfile::tempdir().unwrap();
+        let shared = d.path().join("overlay");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("Old.apk"), b"x").unwrap();
+        fs::write(shared.join("New.apk"), b"x").unwrap();
+        let apk = shared.join("New.apk");
+        let now = "200\t7".to_string();
+        let before = "100\t7".to_string();
+
+        assert!(
+            !retry_unproven_change(&apk, None, &now, 0, false),
+            "no previous identity: PM never parsed an earlier APK here, so recording it is right; \
+             withholding it made the late reload delete PM's fresh parse and ask for a reboot"
+        );
+        assert!(
+            retry_unproven_change(&apk, Some(&before), &now, 0, false),
+            "a real change whose package key could not be derived is still retried"
+        );
+        assert!(!retry_unproven_change(&apk, Some(&now), &now, 0, false), "unchanged");
+        assert!(!retry_unproven_change(&apk, Some(&before), &now, 1, false), "a parse was dropped");
+        assert!(!retry_unproven_change(&apk, Some(&before), &now, 0, true), "seeding adopts");
+
+        let own = d.path().join("app/Foo");
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("Foo.apk"), b"x").unwrap();
+        assert!(
+            !retry_unproven_change(&own.join("Foo.apk"), Some(&before), &now, 0, false),
+            "a dedicated directory's key is derivable, so zero matches means nothing was cached"
+        );
     }
 }
