@@ -4577,16 +4577,20 @@ static bool nm_target_too_shallow(const char *p, u16 len)
     u16 i = 0;
 
     while (i < len) {
+        u16 start;
+
         while (i < len && p[i] == '/')
             i++;
         if (i >= len)
             break;
-        if (++comps >= 2)
-            return false;
+        start = i;
         while (i < len && p[i] != '/')
             i++;
+        if (p[start] == '.' && (i - start == 1 || (i - start == 2 && p[start + 1] == '.')))
+            return true;
+        comps++;
     }
-    return true;
+    return comps < 2;
 }
 
 static bool nm_vpath_in_pm_scandir(const struct nomount_rule *rule)
