@@ -24,48 +24,63 @@
     toast("Something went wrong reading the device - press refresh to try again. " +
           ((e && e.message) || e), "bad");
   }
-  let REFRESH_RUNNING = false;
+  let REFRESH_RUNNING = null;
+  let REFRESH_AGAIN = false;
   async function refreshAll(btn) {
-    if (REFRESH_RUNNING) return;
-    REFRESH_RUNNING = true;
     const ic = btn && btn.querySelector("svg");
     if (ic) ic.classList.add("spin");
+    if (REFRESH_RUNNING) REFRESH_AGAIN = true;
+    else REFRESH_RUNNING = refreshLoop();
     try {
-      RULES = null;
-      PLAN_BY_MODULE = null;
-      STEALTH_PROBE = null;
-      await loadCheckCache();
-      const ev = await engineVersion();
-      const eng = ev ? ("engine v" + ev) : "engine offline";
-      // A pending update lives in modules_update and swaps in on the next reboot; its presence IS
-      // the signal, including a same-version reinstall carrying new code. This used to read the
-      // LIVE module.prop, whose version package.sh stamps from the same value as SUITE_VERSION,
-      // so the two could never differ and the indicator was permanently off.
-      const pv = (await exec(
-        "sed -n 's/^version=//p' /data/adb/modules_update/meta-nomount/module.prop 2>/dev/null"
-      )).stdout.trim();
-      const staged = !!pv;
-      $("ver").textContent = SUITE_VERSION;
-      $("hdreng").textContent = eng;
-      $("vstage").hidden = !staged;
-      $("ver").title = staged
-        ? pv + " is installed but not live yet - its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
-        : "Suite " + SUITE_VERSION + " - " + eng + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
-      const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
-      const prof = (SUITE_PROFILE && SUITE_PROFILE !== "release") ? " · " + SUITE_PROFILE + " build" : "";
-      $("footver").textContent = "Suite " + suiteId + prof + " · " + eng +
-        (staged ? " · " + pv + " staged - reboot to activate" : "");
-      await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
-                         refreshAbsorb(),
-                         refreshModules(), refreshFiles(), refreshRuleSummary(),
-                         refreshIncident(), refreshBlocked(), refreshIsolated(),
-                         $("wobody").classList.contains("u-hide") ? woChipOnly() : refreshWhiteouts()]);
-      if (rulesShown) loadRules();
-      loadPkgList();
+      await REFRESH_RUNNING;
     } finally {
       if (ic) ic.classList.remove("spin");
-      REFRESH_RUNNING = false;
     }
+  }
+  async function refreshLoop() {
+    try {
+      do {
+        REFRESH_AGAIN = false;
+        await refreshPass();
+      } while (REFRESH_AGAIN);
+    } finally {
+      REFRESH_RUNNING = null;
+      REFRESH_AGAIN = false;
+    }
+  }
+  async function refreshPass() {
+    RULES = null;
+    PLAN_BY_MODULE = null;
+    STEALTH_PROBE = null;
+    await loadCheckCache();
+    const ev = await engineVersion();
+    const eng = ev ? ("engine v" + ev.proto) : "engine offline";
+    const engFull = ev && ev.build ? eng + " (" + ev.build + ")" : eng;
+    // A pending update lives in modules_update and swaps in on the next reboot; its presence IS
+    // the signal, including a same-version reinstall carrying new code. This used to read the
+    // LIVE module.prop, whose version package.sh stamps from the same value as SUITE_VERSION,
+    // so the two could never differ and the indicator was permanently off.
+    const pv = (await exec(
+      "sed -n 's/^version=//p' /data/adb/modules_update/meta-nomount/module.prop 2>/dev/null"
+    )).stdout.trim();
+    const staged = !!pv;
+    $("ver").textContent = SUITE_VERSION;
+    $("hdreng").textContent = eng;
+    $("vstage").hidden = !staged;
+    $("ver").title = staged
+      ? pv + " is installed but not live yet - its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
+      : "Suite " + SUITE_VERSION + " - " + engFull + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
+    const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
+    const prof = (SUITE_PROFILE && SUITE_PROFILE !== "release") ? " · " + SUITE_PROFILE + " build" : "";
+    $("footver").textContent = "Suite " + suiteId + prof + " · " + engFull +
+      (staged ? " · " + pv + " staged - reboot to activate" : "");
+    await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
+                       refreshAbsorb(),
+                       refreshModules(), refreshFiles(), refreshRuleSummary(),
+                       refreshIncident(), refreshBlocked(), refreshIsolated(),
+                       $("wobody").classList.contains("u-hide") ? woChipOnly() : refreshWhiteouts()]);
+    if (rulesShown) loadRules();
+    loadPkgList();
   }
 
   const ACTIONS = {
