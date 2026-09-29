@@ -2393,7 +2393,12 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
     rcu_read_unlock();
     if (!pdir) {
         if (injected) {
+            struct nm_inode_info *ii = dentry->d_inode->i_private;
+
             if (nm_stock_only_mismatch(dentry))
+                return 0;
+            if (ii && nm_uid_hidden(ii->flags) &&
+                (ii->flags & NM_FLAG_SHADOWS_STOCK) && !ii->s_path.dentry)
                 return 0;
             if (nm_is_passthrough_child(parent_dir, dentry))
                 return nm_reval_fresh(dentry, gen);
