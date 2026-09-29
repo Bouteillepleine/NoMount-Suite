@@ -56,12 +56,24 @@ impl Nm {
         args: &[&str],
         deadline: Duration,
     ) -> std::io::Result<std::process::Output> {
-        let mut child = Command::new(&self.bin)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let spawn = || {
+            Command::new(&self.bin)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        };
+        let mut tries = 0;
+        let mut child = loop {
+            match spawn() {
+                Err(e) if e.raw_os_error() == Some(26) && tries < 20 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                r => break r?,
+            }
+        };
 
         let by = Instant::now() + deadline;
         let mut so = child.stdout.take();
