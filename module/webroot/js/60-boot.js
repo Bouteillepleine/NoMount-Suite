@@ -36,7 +36,8 @@
       STEALTH_PROBE = null;
       await loadCheckCache();
       const ev = await engineVersion();
-      const eng = ev ? ("engine v" + ev) : "engine offline";
+      const eng = ev ? ("engine v" + ev.proto) : "engine offline";
+      const engFull = ev && ev.build ? eng + " (" + ev.build + ")" : eng;
       // A pending update lives in modules_update and swaps in on the next reboot; its presence IS
       // the signal, including a same-version reinstall carrying new code. This used to read the
       // LIVE module.prop, whose version package.sh stamps from the same value as SUITE_VERSION,
@@ -50,10 +51,10 @@
       $("vstage").hidden = !staged;
       $("ver").title = staged
         ? pv + " is installed but not live yet - its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
-        : "Suite " + SUITE_VERSION + " - " + eng + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
+        : "Suite " + SUITE_VERSION + " - " + engFull + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
       const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
       const prof = (SUITE_PROFILE && SUITE_PROFILE !== "release") ? " · " + SUITE_PROFILE + " build" : "";
-      $("footver").textContent = "Suite " + suiteId + prof + " · " + eng +
+      $("footver").textContent = "Suite " + suiteId + prof + " · " + engFull +
         (staged ? " · " + pv + " staged - reboot to activate" : "");
       await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
                          refreshAbsorb(),

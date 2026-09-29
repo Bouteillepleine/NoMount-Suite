@@ -45,8 +45,8 @@
   async function nmc() { return (await bin()).replace(/nomount$/, "nm"); }
   async function engineVersion() {
     const r = await exec(shq(await nmc()) + " v 2>/dev/null");
-    const v = (r.stdout || "").trim();
-    return /^\d+$/.test(v) ? v : "";
+    const t = (r.stdout || "").trim().split(/\s+/);
+    return /^\d+$/.test(t[0]) ? { proto: t[0], build: t[1] || "" } : null;
   }
 
   let PLAN_BY_MODULE = null;
