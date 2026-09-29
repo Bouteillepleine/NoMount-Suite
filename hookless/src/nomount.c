@@ -883,6 +883,21 @@ static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
     struct file *real_file = iocb->ki_filp->private_data;
 
     if (!real_file || !real_file->f_op->read_iter) return -EINVAL;
+    if (unlikely(iocb->ki_flags & IOCB_DIRECT)) {
+        struct inode *vi = file_inode(iocb->ki_filp);
+
+        if (vi->i_sb != file_inode(real_file)->i_sb) {
+            struct nm_inode_info *info = vi->i_private;
+            unsigned int bs = (info && info->v_dio_off) ? info->v_dio_off :
+                              (vi->i_sb->s_blocksize ? vi->i_sb->s_blocksize : 4096);
+            unsigned int mask = bs - 1;
+
+            if (!iov_iter_count(to))
+                return 0;
+            if ((iocb->ki_pos | iov_iter_count(to) | iov_iter_alignment(to)) & mask)
+                return -EINVAL;
+        }
+    }
     return nm_forward_iter(iocb, to, real_file, false);
 }
 
@@ -4249,6 +4264,8 @@ static int nm_scan_dir_for_file(const char *dirpath, struct kstat *out,
                         fctxlen = 0;
                     fmapdev = nm_stock_map_dev(fp.dentry);
                     fcap = nm_stock_caps(d_backing_inode(fp.dentry));
+                    if (nm_stock_takes_odirect(&fp))
+                        fcap |= NM_CAP_ODIRECT;
                 }
                 path_put(&fp);
                 if (r == 0 && (pass == 1 ||
