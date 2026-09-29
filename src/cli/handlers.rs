@@ -33,6 +33,22 @@ fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -
     }
 }
 
+fn still_covered_by(entries: &[String], installed: &[(String, u32)], id: u32) -> Option<String> {
+    entries
+        .iter()
+        .find(|e| {
+            let glob = blocklist::is_pattern(e);
+            blocklist::expand(e, installed)
+                .map(|hits| {
+                    hits.iter().any(|(_, u)| {
+                        appid(*u) == id && !(glob && *u < blocklist::FIRST_APP_APPID)
+                    })
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+}
+
 fn pass_guard() -> Option<crate::mount::PassLock> {
     crate::mount::pass_lock()
 }
@@ -450,13 +466,29 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                              be asked which appids it is hiding - it may still be hidden"
                         )
                     })?;
+                    let survivors = blocklist::read().with_context(|| {
+                        format!(
+                            "{target} was removed from the hide list, but the rest of the list \
+                             could not be read to check that no other entry still hides uid {uid} \
+                             - it is left hidden"
+                        )
+                    })?;
+                    let installed = blocklist::installed_packages().unwrap_or_default();
                     let was_live = live.iter().any(|u| appid(*u) == appid(uid));
-                    if was_live {
+                    let kept = if was_live {
+                        still_covered_by(&survivors, &installed, appid(uid))
+                    } else {
+                        None
+                    };
+                    if was_live && kept.is_none() {
                         nm.uid_unblock(uid)?;
                     }
                     let mut retired_old = false;
                     if let Some(old) = cached {
-                        if old != uid && live.iter().any(|u| appid(*u) == old) {
+                        if old != uid
+                            && live.iter().any(|u| appid(*u) == old)
+                            && still_covered_by(&survivors, &installed, old).is_none()
+                        {
                             nm.uid_unblock(old).with_context(|| {
                                 format!(
                                     "{target}: appid {old} is still hidden and nothing on disk \
@@ -468,8 +500,21 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                             retired_old = true;
                         }
                     }
-                    let unhid = was_live || retired_old;
-                    println!("{}", unblock_message(&target, Some(uid), existed, unhid));
+                    match kept {
+                        Some(other) => println!(
+                            "ok: {target} {} - uid {uid} stays hidden, because {other} still \
+                             covers it",
+                            if existed {
+                                "removed from the hide list"
+                            } else {
+                                "was not in the hide list"
+                            }
+                        ),
+                        None => {
+                            let unhid = was_live || retired_old;
+                            println!("{}", unblock_message(&target, Some(uid), existed, unhid));
+                        }
+                    }
                 }
                 Resolved::NotInstalled => {
                     let mut unhid = false;
@@ -480,7 +525,17 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                                  not be asked whether appid {old} is still hidden"
                             )
                         })?;
-                        if live.iter().any(|u| appid(*u) == old) {
+                        let survivors = blocklist::read().with_context(|| {
+                            format!(
+                                "{target} was removed from the hide list, but the rest of the \
+                                 list could not be read to check that no other entry still hides \
+                                 appid {old} - it is left hidden"
+                            )
+                        })?;
+                        let installed = blocklist::installed_packages().unwrap_or_default();
+                        if live.iter().any(|u| appid(*u) == old)
+                            && still_covered_by(&survivors, &installed, old).is_none()
+                        {
                             nm.uid_unblock(old).with_context(|| {
                                 format!(
                                     "{target}: appid {old} is still hidden and nothing on disk \
@@ -738,6 +793,39 @@ mod tests {
         assert_eq!(list_winners(&[(Some(1), false), (Some(1), true)])[&1], 0);
         assert_eq!(list_winners(&[(Some(1), true), (Some(1), true)])[&1], 0);
         assert!(list_winners(&[(None, true), (None, false)]).is_empty());
+    }
+
+    #[test]
+    fn unblock_leaves_an_appid_another_surviving_entry_still_hides() {
+        let installed = vec![
+            ("com.x.detector".to_string(), 10500),
+            ("com.other.app".to_string(), 10600),
+            ("com.otherx.sys".to_string(), 1000),
+        ];
+        let e = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+
+        assert_eq!(
+            still_covered_by(&e(&["10500", "com.other*"]), &installed, 10500).as_deref(),
+            Some("10500"),
+            "a numeric entry for the same appid survives the package entry's removal"
+        );
+        assert_eq!(
+            still_covered_by(&e(&["1010500"]), &installed, 10500).as_deref(),
+            Some("1010500"),
+            "a secondary user's uid is the same appid"
+        );
+        assert_eq!(
+            still_covered_by(&e(&["com.x.*"]), &installed, 10500).as_deref(),
+            Some("com.x.*"),
+            "a glob that still matches the package keeps it hidden"
+        );
+        assert_eq!(
+            still_covered_by(&e(&["com.otherx*"]), &installed, 1000),
+            None,
+            "a glob hit below the app range is never applied, so it covers nothing"
+        );
+        assert_eq!(still_covered_by(&e(&["com.other*"]), &installed, 10500), None);
+        assert_eq!(still_covered_by(&[], &installed, 10500), None);
     }
 
     #[test]
