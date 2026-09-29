@@ -1362,7 +1362,7 @@ static bool nm_dsnap_fresh(const struct nm_dsnap *s, struct inode *bi)
 }
 
 static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *bi,
-                                      unsigned int blocksize)
+                                      unsigned int blocksize, bool *transient)
 {
     struct nm_dsnap_walk b = { .ctx.actor = nm_dsnap_actor };
     struct nm_epack pk = { .blocksize = blocksize, .full = 0, .used = 0, .slot = 0 };
@@ -1374,7 +1374,7 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
     bool cannot_build = false;
 
     s = kzalloc(sizeof(*s), GFP_NOFS | __GFP_NOWARN);
-    if (!s) return NULL;
+    if (!s) { *transient = true; return NULL; }
     atomic_set(&s->refcount, 1);
     mt = nm_inode_mtime(bi);
     s->stamp_size = i_size_read(bi);
@@ -1383,13 +1383,15 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
 
     b.ent = kmalloc_array(NM_DSNAP_MAX_ENTS, sizeof(*b.ent), GFP_NOFS | __GFP_NOWARN);
     b.names = kmalloc(NM_DSNAP_MAX_BYTES, GFP_NOFS | __GFP_NOWARN);
-    if (!b.ent || !b.names) { cannot_build = true; goto out; }
+    if (!b.ent || !b.names) { cannot_build = true; *transient = true; goto out; }
 
     old = override_creds(nm_root_cred);
     dir = dentry_open(&info->r_path, O_RDONLY | O_DIRECTORY | O_NOATIME, nm_root_cred);
     if (!IS_ERR(dir)) {
-        if (iterate_dir(dir, &b.ctx) < 0)
+        if (iterate_dir(dir, &b.ctx) < 0) {
             cannot_build = true;
+            *transient = true;
+        }
         fput(dir);
     } else {
         nm_warn_once("cannot open a dir-target's backing directory (relabel the module tree); serving it unmodified\n");
@@ -1403,7 +1405,7 @@ static struct nm_dsnap *nm_dsnap_make(struct nm_inode_info *info, struct inode *
 
     s->ent = kmalloc_array(b.n + 1, sizeof(*s->ent), GFP_NOFS | __GFP_NOWARN);
     s->names = kmalloc(b.nbytes + 1, GFP_NOFS | __GFP_NOWARN);
-    if (!s->ent || !s->names) { cannot_build = true; goto out; }
+    if (!s->ent || !s->names) { cannot_build = true; *transient = true; goto out; }
 
     nm_epack_step(&pk, 1);
     nm_epack_step(&pk, 2);
@@ -1430,11 +1432,13 @@ out:
     return s;
 }
 
-static struct nm_dsnap *nm_dsnap_get(struct nm_inode_info *info, unsigned int blocksize)
+static struct nm_dsnap *nm_dsnap_get_ex(struct nm_inode_info *info, unsigned int blocksize,
+                                        bool *transient)
 {
     struct nm_dsnap *s, *stale;
     struct inode *bi;
 
+    *transient = false;
     if (!info || !info->r_path.dentry) return NULL;
     if (info->flags & NM_FLAG_VIRTUAL_DIR) return NULL;
     if (info->dir_node && !idr_is_empty(&info->dir_node->children_idr)) return NULL;
@@ -1451,7 +1455,7 @@ static struct nm_dsnap *nm_dsnap_get(struct nm_inode_info *info, unsigned int bl
     }
     spin_unlock(&info->dsnap_lock);
 
-    s = nm_dsnap_make(info, bi, blocksize);
+    s = nm_dsnap_make(info, bi, blocksize, transient);
     if (!s) return NULL;
 
     spin_lock(&info->dsnap_lock);
@@ -1463,6 +1467,13 @@ static struct nm_dsnap *nm_dsnap_get(struct nm_inode_info *info, unsigned int bl
 
     if (!s->ok) { nm_dsnap_put(s); return NULL; }
     return s;
+}
+
+static struct nm_dsnap *nm_dsnap_get(struct nm_inode_info *info, unsigned int blocksize)
+{
+    bool transient;
+
+    return nm_dsnap_get_ex(info, blocksize, &transient);
 }
 
 static void nm_dsnap_drop(struct nm_inode_info *info)
@@ -1935,22 +1946,15 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
             if (real_file && !(info->flags & NM_FLAG_VIRTUAL_DIR) &&
                 info->r_path.dentry &&
                 real_file->f_path.dentry == info->r_path.dentry) {
-                struct nm_dsnap *snap = nm_dsnap_get(info, sb->s_blocksize);
+                bool transient;
+                struct nm_dsnap *snap = nm_dsnap_get_ex(info, sb->s_blocksize, &transient);
 
                 if (snap) {
                     res = nm_dsnap_iterate(file, ctx, info, snap, sb->s_blocksize);
                     nm_dsnap_put(snap);
                     return res;
                 }
-                /* No snapshot. At pos 0 the generic path below answers correctly, and a
-                 * directory that cannot be snapshotted at all fails here deterministically
-                 * (nm_dsnap_get caches !ok), so it never reaches this branch mid-listing.
-                 * Getting here with a position means a snapshot existed and a REBUILD then
-                 * failed - the saved pos is an nm_epack byte offset, which the generic path
-                 * below would read in the wrong space. Ending the listing is the only
-                 * answer that cannot emit wrong entries, but it is a short read, so say so
-                 * rather than letting a truncated directory pass for a complete one. */
-                if (ctx->pos) {
+                if (ctx->pos && transient) {
                     nm_warn_once("a directory listing was cut short: the dirent snapshot could not be rebuilt mid-read (low memory). Re-run the listing.\n");
                     return 0;
                 }
