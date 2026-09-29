@@ -1877,7 +1877,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             // the stock entries the marker exists to hide.
             leaking += 1;
             eprintln!(
-                "nomount: LEAK {} <- {} stays mounted: its source carries a .replace, and                  absorbing it would serve the module's files while the stock siblings it                  hides come back",
+                "nomount: LEAK {} <- {} stays mounted: its source carries a .replace, and \
+                 absorbing it would serve the module's files while the stock siblings it \
+                 hides come back",
                 c.target.display(),
                 c.source.display()
             );
@@ -1956,7 +1958,8 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             // re-applies it on every boot. Leak it instead and say so.
             leaking += 1;
             eprintln!(
-                "nomount: LEAK {} was unmounted but every entry in it was refused, so the                  stock content is visible there",
+                "nomount: LEAK {} was unmounted but every entry in it was refused, so the \
+                 stock content is visible there",
                 c.target.display()
             );
             continue;
