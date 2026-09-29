@@ -17,7 +17,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.34.1"
+#define NM_MODULE_VERSION "1.34.2"
 
 #define NOMOUNT_VERSION    34
 #define NOMOUNT_HASH_BITS  12
@@ -328,6 +328,9 @@ enum {
     NOMOUNT_ATTR_UID,
     NOMOUNT_ATTR_VERSION,
     NOMOUNT_ATTR_PAYLOAD,
+    /* Appended, never inserted: an older nm looks attributes up by number and
+     * ignores what it does not know, so the version reply stays readable both ways. */
+    NOMOUNT_ATTR_MODVER,
     __NOMOUNT_ATTR_MAX,
 };
 

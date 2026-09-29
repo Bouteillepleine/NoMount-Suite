@@ -186,7 +186,9 @@ void c_main(long *sp) {
         if (vlen_rx >= 16 && vh->nlmsg_len <= (unsigned int)vlen_rx) {
             unsigned int *ver = get_attr(mem.rx_buf, 5, 4);
             if (ver) {
+                char *modver = get_attr_str(mem.rx_buf, 7);
                 print_uint(*ver);
+                if (modver) { print_str(" "); print_str(modver); }
                 print_str("\n");
                 exit_code = 0; goto do_exit;
             }

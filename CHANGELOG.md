@@ -11,6 +11,11 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.191 - engine v34
+
+- `nm v` prints the engine build after the protocol number.
+- The engine check names that build, so two v34 kernels are told apart.
+
 ## v1.3.190 - engine v34
 
 - An injected file now keeps the stock file's owner and mode.

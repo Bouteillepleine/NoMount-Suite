@@ -1334,12 +1334,20 @@ fn check_no_foreign_rom_mount() -> Check {
 
 fn check_engine_live() -> Check {
     const NAME: &str = N_ENGINE_LIVE;
-    match Nm::new().version() {
-        Ok(v) => pass(NAME, format!("Prism engine v{v} answered over netlink"))
-            .meaning(format!(
-                "The kernel engine is running (v{v}). This is what serves your modules with no \
-                 mounts."
-            )),
+    match Nm::new().version_full() {
+        // v{v} is the wire protocol and only moves when the protocol does, so it cannot
+        // tell two engine builds apart. The build string can, when the kernel sends one.
+        Ok((v, build)) => pass(
+            NAME,
+            match &build {
+                Some(b) => format!("Prism engine v{v} (build {b}) answered over netlink"),
+                None => format!("Prism engine v{v} answered over netlink"),
+            },
+        )
+        .meaning(format!(
+            "The kernel engine is running (v{v}). This is what serves your modules with no \
+             mounts."
+        )),
         Err(e) => fail(
             NAME,
             format!("nm could not get a version from the engine: {e:#}"),

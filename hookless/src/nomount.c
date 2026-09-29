@@ -5079,6 +5079,14 @@ static int nomount_nl_get_version(struct sk_buff *req, struct nlmsghdr *req_nlh)
         return -EMSGSIZE;
     }
 
+    /* NOMOUNT_VERSION is the wire protocol and only moves when the protocol does, so
+     * two kernels that differ in behaviour can both answer 34. This carries the build
+     * string, which is the only thing that separates them from userspace. */
+    if (nla_put_string(msg, NOMOUNT_ATTR_MODVER, NM_MODULE_VERSION)) {
+        nlmsg_free(msg);
+        return -EMSGSIZE;
+    }
+
     nlmsg_end(msg, hdr);
     return nlmsg_unicast(nm_nl_sk, msg, portid);
 }
@@ -5090,6 +5098,7 @@ static const struct nla_policy nomount_genl_policy[__NOMOUNT_ATTR_MAX] = {
     [NOMOUNT_ATTR_UID]          = { .type = NLA_U32 },
     [NOMOUNT_ATTR_VERSION]      = { .type = NLA_U32 },
     [NOMOUNT_ATTR_PAYLOAD]      = { .type = NLA_BINARY },
+    [NOMOUNT_ATTR_MODVER]       = { .type = NLA_NUL_STRING, .len = 31 },
 };
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)

@@ -137,10 +137,23 @@ impl Nm {
     }
 
     pub fn version(&self) -> Result<u32> {
-        self.run(&["v"])?
-            .trim()
+        Ok(self.version_full()?.0)
+    }
+
+    /// The second half is the engine's build string, which a kernel older than this
+    /// attribute does not send. It exists because NOMOUNT_VERSION is the wire protocol:
+    /// it only moves when the protocol does, so two kernels that behave differently can
+    /// both answer 34, and from userspace nothing else tells them apart.
+    pub fn version_full(&self) -> Result<(u32, Option<String>)> {
+        let out = self.run(&["v"])?;
+        let mut parts = out.split_ascii_whitespace();
+        let proto = parts
+            .next()
+            .unwrap_or_default()
             .parse::<u32>()
-            .context("nm v: non-numeric version (engine not responding?)")
+            .context("nm v: non-numeric version (engine not responding?)")?;
+        let build = parts.next().filter(|s| !s.is_empty()).map(str::to_string);
+        Ok((proto, build))
     }
 
     pub fn add(&self, virtual_path: &Path, real: &Path) -> Result<()> {
@@ -480,6 +493,32 @@ mod tests {
         let p = parse_list("/product/z -> /data/adb/modules/M/z\n");
         assert!(!p[0].public);
         assert_eq!(p[0].uid, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_version_reply_carries_the_build_string_when_the_kernel_sends_one() {
+        // `nm v` printed one field before the build string existed, and a kernel that
+        // predates the attribute still prints one. Both have to keep parsing.
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let stub = |name: &str, line: &str| {
+            let f = d.path().join(name);
+            std::fs::write(&f, format!("#!/bin/sh\necho '{line}'\n")).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Nm { bin: f.to_string_lossy().into_owned() }
+        };
+
+        let nm = stub("old", "34");
+        assert_eq!(nm.version_full().unwrap(), (34, None), "an older kernel, one field");
+
+        let nm = stub("new", "34 1.34.1");
+        assert_eq!(
+            nm.version_full().unwrap(),
+            (34, Some("1.34.1".into())),
+            "a kernel that sends the build string"
+        );
+        assert_eq!(nm.version().unwrap(), 34, "the protocol number is unaffected");
     }
 
     #[cfg(unix)]
