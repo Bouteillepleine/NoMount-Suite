@@ -38,6 +38,7 @@ static const struct cred *nm_root_cred;
 
 static void nm_dir_node_put(struct nomount_dir_node *dir_node);
 static void nomount_restore_dir_node(struct nomount_dir_node *dir_node);
+static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule);
 static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
 static int nm_read_secctx(struct inode *in, char *dst, u16 *dlen)
@@ -2568,15 +2569,8 @@ static void nomount_hijacked_put_super(struct super_block *sb)
         struct nomount_dir_node *d;
 
         d = rule->parent_dir;
-        if (d && !(d->_tag_ptr & 1UL) && d->dir_inode && d->dir_inode->i_sb == sb) {
-            nomount_restore_dir_node(d);
-            nm_dir_node_put(d);
-        }
-        d = rule->this_dir;
-        if (d && !(d->_tag_ptr & 1UL) && d->dir_inode && d->dir_inode->i_sb == sb) {
-            nomount_restore_dir_node(d);
-            nm_dir_node_put(d);
-        }
+        if (d && !(d->_tag_ptr & 1UL) && d->dir_inode && d->dir_inode->i_sb == sb)
+            __nomount_delete_child_locked(d, rule);
     }
     mutex_unlock(&nomount_write_mutex);
 
