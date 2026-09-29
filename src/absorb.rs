@@ -145,9 +145,12 @@ pub(crate) fn is_skipped(src: &Path, target: &Path, skips: &[String]) -> bool {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MountRow {
+    pub id: String,
+    pub parent: String,
     pub dev: String,
     pub root: String,
     pub target: PathBuf,
+    pub fstype: String,
 }
 
 pub(crate) fn read_mountinfo(path: &str) -> std::io::Result<Vec<MountRow>> {
@@ -163,10 +166,20 @@ pub(crate) fn parse_mountinfo_bytes(body: &[u8]) -> Vec<MountRow> {
             continue;
         }
         let Ok(dev) = std::str::from_utf8(f[2]) else { continue };
+        let fstype = f
+            .iter()
+            .skip(6)
+            .position(|x| *x == b"-")
+            .and_then(|i| f.get(i + 7))
+            .map(|t| String::from_utf8_lossy(t).into_owned())
+            .unwrap_or_default();
         out.push(MountRow {
+            id: String::from_utf8_lossy(f[0]).into_owned(),
+            parent: String::from_utf8_lossy(f[1]).into_owned(),
             dev: dev.to_string(),
             root: String::from_utf8_lossy(&unescape_bytes(f[3])).into_owned(),
             target: PathBuf::from(std::ffi::OsString::from_vec(unescape_bytes(f[4]))),
+            fstype,
         });
     }
     out
@@ -476,11 +489,83 @@ pub struct Candidate {
     pub redundant: bool,
 }
 
-pub(crate) fn under_surviving_mount<'a>(target: &Path, survivors: &[&'a Path]) -> Option<&'a Path> {
-    survivors
-        .iter()
-        .copied()
-        .find(|s| *s != target && target.starts_with(s))
+fn foreign_mount(r: &MountRow) -> bool {
+    r.target.components().count() > 1
+        && ((r.root != "/" && Path::new(&r.root) != r.target)
+            || is_loop_dev(&r.dev)
+            || r.fstype == "tmpfs")
+}
+
+fn foreign_ancestor(rows: &[MountRow], at: &Path) -> Option<PathBuf> {
+    rows.iter()
+        .find(|r| r.target != at && at.starts_with(&r.target) && foreign_mount(r))
+        .map(|r| r.target.clone())
+}
+
+fn mounted_inside(rows: &[MountRow], target: &Path) -> Option<PathBuf> {
+    let here: HashSet<&str> =
+        rows.iter().filter(|r| r.target == target).map(|r| r.id.as_str()).collect();
+    if here.is_empty() {
+        return None;
+    }
+    let parent_of: HashMap<&str, &str> =
+        rows.iter().map(|r| (r.id.as_str(), r.parent.as_str())).collect();
+    rows.iter()
+        .filter(|r| r.target != target)
+        .find(|r| {
+            let mut p = r.parent.as_str();
+            for _ in 0..rows.len() {
+                if here.contains(p) {
+                    return true;
+                }
+                match parent_of.get(p) {
+                    Some(&next) if next != p => p = next,
+                    _ => return false,
+                }
+            }
+            false
+        })
+        .map(|r| r.target.clone())
+}
+
+enum Hold {
+    Unread,
+    Above(PathBuf),
+    Inside(PathBuf),
+}
+
+impl Hold {
+    fn why(&self) -> String {
+        match self {
+            Hold::Unread => "the mount table cannot be read, so absorb cannot tell what the rule \
+                             would resolve through"
+                .to_string(),
+            Hold::Above(a) => format!(
+                "{} is mounted above it, so the rule would resolve through that mount and \
+                 attach to the mounted tree instead of the ROM",
+                a.display()
+            ),
+            Hold::Inside(b) => format!(
+                "{} is mounted inside it, and unmounting it would take that mount down \
+                 unserved",
+                b.display()
+            ),
+        }
+    }
+}
+
+fn unmount_hold(rows: &[MountRow], target: &Path, served_at: &Path) -> Option<Hold> {
+    if let Some(a) = foreign_ancestor(rows, served_at) {
+        return Some(Hold::Above(a));
+    }
+    mounted_inside(rows, target).map(Hold::Inside)
+}
+
+fn live_hold(target: &Path, served_at: &Path) -> Option<Hold> {
+    match read_mountinfo(MOUNTINFO) {
+        Ok(rows) => unmount_hold(&rows, target, served_at),
+        Err(_) => Some(Hold::Unread),
+    }
 }
 
 pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
@@ -1605,7 +1690,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     }
 
     let mut deferred = 0usize;
-    let mut left_mounted: Vec<PathBuf> = Vec::new();
     let cands: Vec<Candidate> = surveyed
         .into_iter()
         .filter(|s| match s.disposition {
@@ -1614,21 +1698,11 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                     true
                 } else {
                     deferred += 1;
-                    left_mounted.push(s.target.clone());
                     false
                 }
             }
-            Disposition::Redundant => {
-                let take = early || runtime_droppable(&s.target, &aliases);
-                if !take {
-                    left_mounted.push(s.target.clone());
-                }
-                take
-            }
-            _ => {
-                left_mounted.push(s.target.clone());
-                false
-            }
+            Disposition::Redundant => early || runtime_droppable(&s.target, &aliases),
+            _ => false,
         })
         .map(|s| Candidate {
             redundant: matches!(s.disposition, Disposition::Redundant),
@@ -1686,27 +1760,25 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             None
         }
     };
-    let mut dropped = 0u32;
-    let survives_pass = |c: &Candidate| -> bool {
-        if c.redundant {
-            return false;
-        }
-        if c.source.is_dir() && !include_dirs && !is_hiding_bind(&c.source) {
-            return true;
-        }
-        !c.source.exists()
-    };
-    let survivors: Vec<&Path> = left_mounted
-        .iter()
-        .map(PathBuf::as_path)
-        .chain(cands.iter().filter(|c| survives_pass(c)).map(|c| c.target.as_path()))
-        .collect();
+    let (mut dropped, mut held) = (0u32, 0u32);
     let live_map = live_injects(&nm);
     let mut reasserted: HashSet<PathBuf> = HashSet::new();
     let mut fresh: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut record = read_absorbed_pairs();
     for c in &cands {
         let is_dir_bind = c.source.is_dir();
+        let at = if c.redundant { servable(&c.target, &aliases) } else { c.target.clone() };
+        if let Some(h) = live_hold(&c.target, &at) {
+            eprintln!(
+                "nomount: LEAK {} <- {} stays mounted: {}",
+                c.target.display(),
+                c.source.display(),
+                h.why()
+            );
+            leaking += 1;
+            held += 1;
+            continue;
+        }
         if c.redundant {
             if dry_run {
                 println!(
@@ -1727,7 +1799,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 failed += 1;
                 continue;
             }
-            let at = servable(&c.target, &aliases);
             if !reasserted.insert(at.clone()) {
                 continue;
             }
@@ -1742,18 +1813,6 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 );
                 failed += 1;
             }
-            continue;
-        }
-        if let Some(anc) = under_surviving_mount(&c.target, &survivors) {
-            eprintln!(
-                "nomount: LEAK {} <- {} stays mounted: {} is a mount this pass does not take \
-                 down, so the rule would resolve through it and attach to the mounted tree \
-                 instead of the ROM",
-                c.target.display(),
-                c.source.display(),
-                anc.display()
-            );
-            leaking += 1;
             continue;
         }
         if dry_run {
@@ -1938,7 +1997,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     if dry_run {
         println!(
             "nomount absorb: {} mount(s) would be absorbed, {} ROM director(ies) emptied mountlessly, {skipped_dirs} directory bind(s) skipped{drops}{leaks}{defer} (dry run)",
-            cands.len() as u32 - skipped_dirs - dropped - would_empty,
+            cands.len() as u32 - skipped_dirs - dropped - would_empty - held,
             tmpfs.done + would_empty
         );
     } else {
@@ -2452,28 +2511,153 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_target_under_a_bind_the_pass_keeps_is_refused() {
-        let keep = Path::new("/system/app/Foo");
-        let survivors = [keep];
+    const STOCK: &str = "\
+58 57 254:23 / / ro,relatime shared:1 - erofs /dev/block/dm-23 ro
+70 58 254:25 / /product ro,relatime shared:11 - erofs /dev/block/dm-25 ro
+72 58 254:26 / /vendor ro,relatime shared:13 - erofs /dev/block/dm-26 ro
+76 58 254:30 / /my_product ro,relatime shared:17 - erofs /dev/block/dm-30 ro
+149 70 0:47 / /product/app ro,noatime shared:47 - overlay overlay-overlay ro
+188 72 259:34 / /vendor/firmware_mnt ro,relatime shared:54 - vfat /dev/block/sde50 ro
+64 58 0:22 / /mnt rw,nosuid shared:5 - tmpfs tmpfs rw
+90 64 254:30 / /mnt/vendor/my_product ro,relatime shared:17 - erofs /dev/block/dm-30 ro
+205 58 254:78 / /data rw,nosuid,nodev,noatime shared:2 - f2fs /dev/block/dm-78 rw
+";
 
+    fn table(extra: &str) -> Vec<MountRow> {
+        parse_mountinfo(&format!("{STOCK}{extra}"))
+    }
+
+    fn held_by(rows: &[MountRow], target: &str) -> Option<PathBuf> {
+        match unmount_hold(rows, Path::new(target), Path::new(target)) {
+            Some(Hold::Above(p)) | Some(Hold::Inside(p)) => Some(p),
+            Some(Hold::Unread) => panic!("a parsed table is never unread"),
+            None => None,
+        }
+    }
+
+    #[test]
+    fn the_mount_id_parent_and_fs_type_are_parsed() {
+        let rows = table("");
+        let app = rows.iter().find(|r| r.target == Path::new("/product/app")).unwrap();
+        assert_eq!((app.id.as_str(), app.parent.as_str()), ("149", "70"));
+        assert_eq!(app.fstype, "overlay");
+        let mnt = rows.iter().find(|r| r.target == Path::new("/mnt")).unwrap();
+        assert_eq!(mnt.fstype, "tmpfs", "optional fields before the separator do not shift it");
+        let short = parse_mountinfo("1 1 0:1 / /x rw");
+        assert_eq!(short[0].fstype, "", "a row with no separator has no fs type, not a panic");
+    }
+
+    #[test]
+    fn stock_mounts_above_a_target_do_not_hold_it() {
+        let rows = table(
+            "900 149 254:78 /adb/modules/m/app/Foo.apk /product/app/Foo/Foo.apk rw - f2fs /dev/block/dm-78 rw
+901 188 254:78 /adb/modules/m/mcfg_sw /vendor/firmware_mnt/image/mcfg_sw rw - f2fs /dev/block/dm-78 rw
+",
+        );
+        assert_eq!(held_by(&rows, "/product/app/Foo/Foo.apk"), None, "overlayfs and erofs are the ROM");
+        assert_eq!(held_by(&rows, "/vendor/firmware_mnt/image/mcfg_sw"), None, "a stock vfat is the ROM");
+    }
+
+    #[test]
+    fn a_file_bind_under_a_live_directory_bind_is_held_and_so_is_the_directory() {
+        let rows = table(
+            "900 149 254:78 /adb/modules/m/tree/product/app/Dialer /product/app/Dialer rw - f2fs /dev/block/dm-78 rw
+901 900 254:78 /adb/modules/m/override/Dialer.apk /product/app/Dialer/Dialer.apk rw - f2fs /dev/block/dm-78 rw
+",
+        );
         assert_eq!(
-            under_surviving_mount(Path::new("/system/app/Foo/lib/arm64/x.so"), &survivors),
-            Some(keep),
-            "a file under a surviving directory bind must be refused"
+            held_by(&rows, "/product/app/Dialer/Dialer.apk"),
+            Some(PathBuf::from("/product/app/Dialer")),
+            "the rule would resolve through the directory bind onto the module's /data inode"
         );
+        assert_eq!(
+            held_by(&rows, "/product/app/Dialer"),
+            Some(PathBuf::from("/product/app/Dialer/Dialer.apk")),
+            "a lazy unmount of the directory would take the file bind down unserved"
+        );
+        assert_eq!(
+            held_by(&rows, "/product/app/Dialers/x.apk"),
+            None,
+            "components, not string prefixes: Dialers is not under Dialer"
+        );
+    }
+
+    #[test]
+    fn the_hold_follows_the_live_table_not_a_list_made_before_the_pass() {
+        let extra = "900 149 254:78 /adb/modules/a/system/app/Foo /product/app/Foo rw - f2fs /dev/block/dm-78 rw
+901 900 254:78 /adb/modules/b/Foo.apk /product/app/Foo/Foo.apk rw - f2fs /dev/block/dm-78 rw
+902 149 254:78 /adb/modules/c/Bar.apk /product/app/Bar/Bar.apk rw - f2fs /dev/block/dm-78 rw
+";
+        let mut rows = table(extra);
+        let mut order: Vec<PathBuf> = rows
+            .iter()
+            .filter(|r| r.root.starts_with("/adb/modules/"))
+            .map(|r| r.target.clone())
+            .collect();
+        order.sort_by_key(|t| std::cmp::Reverse(t.components().count()));
+        let mut taken: Vec<PathBuf> = Vec::new();
+        for t in &order {
+            if unmount_hold(&rows, t, t).is_none() {
+                rows.retain(|r| r.target != *t);
+                taken.push(t.clone());
+            }
+        }
+        assert_eq!(
+            taken,
+            vec![PathBuf::from("/product/app/Bar/Bar.apk")],
+            "the deeper bind is held by the live bind above it, and that bind by the one inside it"
+        );
+        assert!(rows.iter().any(|r| r.target == Path::new("/product/app/Foo")));
+        assert!(rows.iter().any(|r| r.target == Path::new("/product/app/Foo/Foo.apk")));
+
+        let mut rows = table(extra);
+        rows.retain(|r| r.target != Path::new("/product/app/Foo"));
+        assert_eq!(
+            held_by(&rows, "/product/app/Foo/Foo.apk"),
+            None,
+            "once the directory bind is gone from the table, the file under it is free"
+        );
+    }
+
+    #[test]
+    fn a_tmpfs_an_image_or_a_rom_subtree_above_a_target_holds_it() {
+        let rows = table(
+            "950 70 0:130 / /product/media rw - tmpfs tmpfs rw
+951 950 254:78 /adb/modules/m/boot.zip /product/media/boot.zip rw - f2fs /dev/block/dm-78 rw
+960 70 7:12 / /product/priv-app/Img ro - ext4 /dev/block/loop12 ro
+961 960 254:78 /adb/modules/m/a.apk /product/priv-app/Img/a.apk rw - f2fs /dev/block/dm-78 rw
+970 58 254:26 /etc/foo /system/etc/foo ro - erofs /dev/block/dm-26 ro
+971 970 254:78 /adb/modules/m/bar /system/etc/foo/bar rw - f2fs /dev/block/dm-78 rw
+",
+        );
+        assert_eq!(held_by(&rows, "/product/media/boot.zip"), Some(PathBuf::from("/product/media")));
+        assert_eq!(held_by(&rows, "/product/priv-app/Img/a.apk"), Some(PathBuf::from("/product/priv-app/Img")));
+        assert_eq!(held_by(&rows, "/system/etc/foo/bar"), Some(PathBuf::from("/system/etc/foo")));
+    }
+
+    #[test]
+    fn a_partition_bound_onto_its_own_path_is_not_foreign() {
+        let rows = parse_mountinfo(
+            "1 0 253:0 / /system_root ro - ext4 /dev/block/dm-0 ro
+2 1 253:0 /system /system ro - ext4 /dev/block/dm-0 ro
+3 1 254:78 / /data rw - f2fs /dev/block/dm-78 rw
+4 2 254:78 /adb/modules/m/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw",
+        );
+        assert_eq!(held_by(&rows, "/system/etc/hosts"), None);
+    }
+
+    #[test]
+    fn a_redundant_bind_is_judged_where_its_rule_is_served() {
+        let rows = table(
+            "910 90 254:78 /adb/modules/m/media/b /mnt/vendor/my_product/media/b rw - f2fs /dev/block/dm-78 rw
+",
+        );
+        let target = Path::new("/mnt/vendor/my_product/media/b");
         assert!(
-            under_surviving_mount(keep, &survivors).is_none(),
-            "the surviving mount is not under itself"
+            unmount_hold(&rows, target, Path::new("/my_product/media/b")).is_none(),
+            "/mnt is a stock tmpfs, but the rule lands on the /my_product twin"
         );
-        assert!(
-            under_surviving_mount(Path::new("/system/app/Foobar/x.so"), &survivors).is_none(),
-            "starts_with compares components, so Foobar is not under Foo"
-        );
-        assert!(
-            under_surviving_mount(Path::new("/system/app/Foo/lib"), &[]).is_none(),
-            "no survivors means nothing is refused"
-        );
+        assert!(matches!(unmount_hold(&rows, target, target), Some(Hold::Above(_))));
     }
 
     #[test]
