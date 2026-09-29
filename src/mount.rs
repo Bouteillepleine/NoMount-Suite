@@ -2075,6 +2075,12 @@ mod tests {
                  page a fixture the page's own command would never have produced"
             );
         }
+        let mounts = r#"mnt=$(NM_P="/adb/modules/$id" awk \'$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); "#;
+        assert!(
+            PAGE.contains(mounts) && HARNESS_SRC.contains(mounts),
+            "the page's per-module mount count and webui-harness.py's `modules` command have \
+             drifted, so the harness replays counts the page's own command would not produce"
+        );
     }
 
     fn entry(module: &str, target: &str, source: &str) -> PlanEntry {
