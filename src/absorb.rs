@@ -1325,9 +1325,15 @@ fn take_over_empty_dir(
                  {from}, so it should stop hiding when that does"
             ),
             Err(e) => {
+                let rehidden = nm.whiteout(target).is_ok();
                 eprintln!(
                     "nomount: {t_str} is still in whiteouts.txt ({e:#}) - not recording it \
-                     in absorb's list too, because a path on both lists is hidden forever"
+                     in absorb's list too, because a path on both lists is hidden forever; {}",
+                    if rehidden {
+                        "its durable whiteout is back in place"
+                    } else {
+                        "re-applying its durable whiteout failed too, so it is visible this session"
+                    }
                 );
                 return false;
             }
