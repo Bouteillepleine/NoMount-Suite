@@ -1,7 +1,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -37,9 +37,10 @@ impl Nm {
     const EXIT_NO_ENGINE: i32 = 2;
 
     const DEADLINE: Duration = Duration::from_secs(30);
+    const KILL_GRACE: Duration = Duration::from_millis(500);
 
     fn engine_is_unreachable(code: Option<i32>) -> bool {
-        matches!(code, Some(Nm::EXIT_TIMEOUT) | Some(Nm::EXIT_NO_ENGINE))
+        matches!(code, None | Some(Nm::EXIT_TIMEOUT) | Some(Nm::EXIT_NO_ENGINE))
     }
 
     /// `Command::output()` waits forever. nm bounds its own netlink round trip, so a call
@@ -62,13 +63,16 @@ impl Nm {
             .stderr(Stdio::piped())
             .spawn()?;
 
+        let by = Instant::now() + deadline;
         let mut so = child.stdout.take();
         let mut se = child.stderr.take();
+        let (eof_tx, eof_rx) = std::sync::mpsc::channel();
         let t_out = std::thread::spawn(move || {
             let mut b = Vec::new();
             if let Some(h) = so.as_mut() {
                 let _ = h.read_to_end(&mut b);
             }
+            let _ = eof_tx.send(());
             b
         });
         let t_err = std::thread::spawn(move || {
@@ -79,20 +83,18 @@ impl Nm {
             b
         });
 
-        let start = Instant::now();
-        let status = loop {
-            match child.try_wait()? {
-                Some(st) => break st,
-                None if start.elapsed() >= deadline => {
-                    let _ = child.kill();
+        let _ = eof_rx.recv_timeout(by.saturating_duration_since(Instant::now()));
+        let Some(status) = reap_by(&mut child, by)? else {
+            let _ = child.kill();
+            if !matches!(reap_by(&mut child, Instant::now() + Nm::KILL_GRACE), Ok(Some(_))) {
+                std::thread::spawn(move || {
                     let _ = child.wait();
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!("nm {} did not answer in {deadline:?}", args.join(" ")),
-                    ));
-                }
-                None => std::thread::sleep(Duration::from_millis(20)),
+                });
             }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("nm {} did not answer in {deadline:?}", args.join(" ")),
+            ));
         };
 
         Ok(std::process::Output {
@@ -217,7 +219,7 @@ impl Nm {
     pub fn ghost_present(&self) -> Option<bool> {
         match self.run_coded(&["k", "g"]) {
             Ok(_) => Some(true),
-            Err(e) if e.code.is_none() || Nm::engine_is_unreachable(e.code) => None,
+            Err(e) if Nm::engine_is_unreachable(e.code) => None,
             Err(_) => Some(false),
         }
     }
@@ -249,9 +251,15 @@ const ADD_BATCH_PAIRS: usize = 31;
 
 impl Nm {
     pub fn add_many<'a>(&self, pairs: &[(&'a Path, &'a Path)]) -> Vec<(&'a Path, &'a Path)> {
-        let mut failed = Vec::new();
+        let (pairs, mut failed): (Vec<_>, Vec<_>) = pairs
+            .iter()
+            .copied()
+            .partition(|(v, r)| v.to_str().is_some() && r.to_str().is_some());
+        for (v, _) in &failed {
+            eprintln!("nomount: rule refused for {}: non-UTF8 path", v.display());
+        }
         let mut gave_up = false;
-        for (public, group) in batch_groups(pairs, crate::pmcache::is_pm_published) {
+        for (public, group) in batch_groups(&pairs, crate::pmcache::is_pm_published) {
             for chunk in group.chunks(ADD_BATCH_PAIRS) {
                 if gave_up {
                     failed.extend(chunk.iter().copied());
@@ -337,6 +345,21 @@ fn add_argv<'a>(public: bool, virtual_path: &'a str, real: &'a str) -> Vec<&'a s
 fn path_str(p: &Path) -> Result<&str> {
     p.to_str()
         .with_context(|| format!("non-UTF8 path: {}", p.display()))
+}
+
+fn reap_by(child: &mut Child, by: Instant) -> std::io::Result<Option<ExitStatus>> {
+    let mut nap = Duration::from_micros(100);
+    loop {
+        if let Some(st) = child.try_wait()? {
+            return Ok(Some(st));
+        }
+        let now = Instant::now();
+        if now >= by {
+            return Ok(None);
+        }
+        std::thread::sleep(nap.min(by - now));
+        nap = (nap * 2).min(Duration::from_millis(20));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -523,6 +546,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn nm_verify_reads_the_protocol_number_in_both_version_formats() {
+        use std::os::unix::fs::PermissionsExt;
+        const VERIFY: &str = include_str!("../hookless/nm-verify.sh");
+        let mut head = String::new();
+        for l in VERIFY.lines() {
+            head.push_str(l);
+            head.push('\n');
+            if l.trim() == "esac" {
+                break;
+            }
+        }
+        assert!(head.ends_with("esac\n"), "nm-verify.sh no longer gates on the version reply");
+        let nm_line = head
+            .lines()
+            .find(|l| l.starts_with("NM="))
+            .expect("nm-verify.sh no longer sets NM")
+            .to_string();
+        let d = tempfile::tempdir().unwrap();
+        let run = |reply: &str| {
+            let stub = d.path().join("nm");
+            std::fs::write(&stub, format!("#!/bin/sh\nprintf '%s' '{reply}'\n")).unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let script = head.replacen(&nm_line, &format!("NM='{}'", stub.display()), 1)
+                + "echo \"VER=$VER\"\n";
+            let out = Command::new("sh").arg("-c").arg(&script).output().unwrap();
+            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+
+        let (rc, out) = run("34\n");
+        assert_eq!(rc, Some(0), "an engine without the build string: {out}");
+        assert!(out.contains("VER=34\n"), "{out}");
+
+        let (rc, out) = run("34 1.34.2\n");
+        assert_eq!(rc, Some(0), "an engine that sends the build string: {out}");
+        assert!(out.contains("VER=34\n"), "{out}");
+        assert!(out.contains("1.34.2"), "the build string is not shown: {out}");
+
+        let (rc, out) = run("");
+        assert_eq!(rc, Some(1), "no answer must still be fatal: {out}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_wedged_nm_is_killed_rather_than_waited_on_forever() {
         let nm = Nm { bin: "/bin/sleep".into() };
         let start = Instant::now();
@@ -534,12 +600,175 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn logging_stub(d: &Path, tail: &str) -> (Nm, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = d.join("calls");
+        let f = d.join("nm");
+        std::fs::write(&f, format!("#!/bin/sh\necho \"$*\" >> '{}'\n{tail}\n", log.display())).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (Nm { bin: f.to_string_lossy().into_owned() }, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_nm_that_never_exits_with_a_code_is_unreachable_to_add_many_as_to_ghost_present() {
+        let d = tempfile::tempdir().unwrap();
+        let (nm, log) = logging_stub(d.path(), "kill -KILL $$");
+        assert_eq!(nm.ghost_present(), None);
+        std::fs::remove_file(&log).unwrap();
+
+        let src = Path::new("/data/adb/modules/M/x");
+        let a = Path::new("/system/lib64/a.so");
+        let b = Path::new("/system/lib64/b.so");
+        let c = Path::new("/system/etc/c.conf");
+        let failed = nm.add_many(&[(a, src), (b, src), (c, src)]);
+        assert_eq!(failed, vec![(a, src), (b, src), (c, src)]);
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.lines().count(), 1, "a killed batch was retried rule by rule: {calls:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_is_refused_alone_and_the_rest_are_still_sent() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().unwrap();
+        let (nm, log) = logging_stub(d.path(), "exit 0");
+        let src = Path::new("/data/adb/modules/M/x");
+        let a = Path::new("/system/lib64/a.so");
+        let bad = Path::new(std::ffi::OsStr::from_bytes(b"/system/lib64/\xff.so"));
+        let c = Path::new("/system/etc/c.conf");
+        let failed = nm.add_many(&[(a, src), (bad, src), (c, src)]);
+        assert_eq!(failed, vec![(bad, src)]);
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.lines().count(), 1, "{calls:?}");
+        assert!(calls.contains("/system/lib64/a.so") && calls.contains("/system/etc/c.conf"), "{calls:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_quick_nm_is_not_held_back_by_the_deadline_poll() {
+        let nm = Nm { bin: "/bin/sleep".into() };
+        let fastest = (0..20)
+            .map(|_| {
+                let t = Instant::now();
+                nm.output_within(&["0.003"], Duration::from_secs(10)).expect("ran");
+                t.elapsed()
+            })
+            .min()
+            .unwrap();
+        assert!(fastest < Duration::from_millis(15), "{fastest:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_nm_that_closes_stdout_before_exiting_is_still_waited_for() {
+        let nm = Nm { bin: "/bin/sh".into() };
+        let t = Instant::now();
+        let out = nm
+            .output_within(&["-c", "exec >&-; sleep 0.3; exit 7"], Duration::from_secs(10))
+            .expect("ran");
+        assert_eq!(out.status.code(), Some(7));
+        assert!(t.elapsed() >= Duration::from_millis(300), "{:?}", t.elapsed());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_prompt_answer_is_still_returned_whole() {
         let nm = Nm { bin: "/bin/echo".into() };
         let out = nm.output_within(&["hello"], Duration::from_secs(10)).expect("ran");
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn nms_exit_codes_and_what_rust_reads_into_them_agree_both_ways() {
+        const NM_H: &str = include_str!("../userspace/src/nm.h");
+        const NM_C: &str = include_str!("../userspace/src/nm.c");
+        let define = |name: &str| -> i32 {
+            NM_H.lines()
+                .find_map(|l| {
+                    let mut w = l.split_whitespace();
+                    if w.next() != Some("#define") || w.next() != Some(name) {
+                        return None;
+                    }
+                    w.next()?.parse().ok()
+                })
+                .unwrap_or_else(|| panic!("userspace/src/nm.h no longer defines {name} as a number"))
+        };
+        let named = [
+            ("NM_EXIT_TIMEOUT", Nm::EXIT_TIMEOUT),
+            ("NM_EXIT_NO_ENGINE", Nm::EXIT_NO_ENGINE),
+        ];
+        for (name, rust) in named {
+            assert_eq!(define(name), rust, "userspace/src/nm.h's {name} and src/nm.rs disagree");
+        }
+
+        assert_eq!(
+            NM_C.matches("SYS_EXIT").count(),
+            1,
+            "nm.c exits somewhere other than its one exit_code path, which this pin cannot see"
+        );
+        assert!(NM_C.contains("sys1(SYS_EXIT, exit_code)"));
+        assert!(
+            NM_H.lines().filter(|l| l.contains("SYS_EXIT")).all(|l| l.trim_start().starts_with("#define")),
+            "nm.h exits on its own, which this pin cannot see"
+        );
+
+        let mut literal = std::collections::BTreeSet::new();
+        let mut used = std::collections::BTreeSet::new();
+        for (i, _) in NM_C.match_indices("exit_code") {
+            let raw = &NM_C[i + "exit_code".len()..];
+            if raw.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let after = raw.trim_start();
+            let (or, rhs) = if let Some(r) = after.strip_prefix("|=") {
+                (true, r)
+            } else if after.starts_with("==") {
+                continue;
+            } else if let Some(r) = after.strip_prefix('=') {
+                (false, r)
+            } else {
+                continue;
+            };
+            let rhs = rhs.split(';').next().unwrap_or_default().trim();
+            if let Ok(n) = rhs.parse::<i32>() {
+                assert!(!or, "nm.c ORs {n} into its exit code");
+                literal.insert(n);
+            } else if let Some(&(name, _)) = named.iter().find(|(n, _)| *n == rhs) {
+                assert!(!or, "nm.c ORs {name} into its exit code");
+                used.insert(name);
+            } else if rhs == "(rc < 0)" {
+                literal.insert(1);
+                if !or {
+                    literal.insert(0);
+                }
+            } else {
+                panic!("nm.c sets its exit code from `{rhs}`, which this pin cannot resolve");
+            }
+        }
+
+        for (name, rust) in named {
+            assert!(
+                used.contains(name),
+                "nm.c never exits with {name}, but src/nm.rs still reads {rust} as the engine \
+                 being unreachable"
+            );
+        }
+        for c in &literal {
+            assert!(
+                !Nm::engine_is_unreachable(Some(*c)),
+                "nm.c exits {c} for something other than an unreachable engine, and src/nm.rs \
+                 reads {c} as the engine being unreachable"
+            );
+        }
+        for c in 0..=255 {
+            assert_eq!(
+                Nm::engine_is_unreachable(Some(c)),
+                named.iter().any(|&(_, v)| v == c),
+                "src/nm.rs reads exit {c} differently from what nm.h says it means"
+            );
+        }
     }
 
     #[test]

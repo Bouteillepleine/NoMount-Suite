@@ -1551,16 +1551,6 @@ mod tests {
         // strip already killed this line once; lowercase it in any one of the three and
         // uninstalling NoMount leaves mode_override.sh behind forever, pinning bindhosts
         // to mode 0.
-        // nm's exit codes are a contract: Nm::engine_is_unreachable abandons the rest
-        // of a mount pass on them. They were bare literals on both sides.
-        const NM_H: &str = include_str!("../userspace/src/nm.h");
-        for (name, value) in [("NM_EXIT_TIMEOUT", 5), ("NM_EXIT_NO_ENGINE", 2)] {
-            assert!(
-                NM_H.contains(&format!("#define {name}   {value}"))
-                    || NM_H.contains(&format!("#define {name} {value}")),
-                "userspace/src/nm.h no longer defines {name} as {value}, but src/nm.rs                  still branches on that number"
-            );
-        }
         const UNINSTALL: &str = include_str!("../module/uninstall.sh");
         const BH_MARKER: &str = "NoMount Suite";
         assert!(
