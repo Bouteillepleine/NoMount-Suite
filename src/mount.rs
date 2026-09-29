@@ -471,6 +471,12 @@ fn beats(a: &PlanEntry, b: &PlanEntry) -> bool {
     }
 }
 
+fn same_rule(a: &PlanEntry, b: &PlanEntry) -> bool {
+    a.module == b.module
+        && a.kind == b.kind
+        && (a.kind == PlanKind::Whiteout || a.source == b.source)
+}
+
 pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Collision>) {
     let mut last: HashMap<PathBuf, usize> = HashMap::new();
     for (i, e) in plan.iter().enumerate() {
@@ -486,9 +492,11 @@ pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Col
     }
     let mut losers: HashMap<PathBuf, Vec<String>> = HashMap::new();
     for (i, e) in plan.iter().enumerate() {
-        if last.get(&e.target) != Some(&i) {
-            losers.entry(e.target.clone()).or_default().push(e.module.clone());
+        let Some(&w) = last.get(&e.target) else { continue };
+        if w == i || same_rule(e, &plan[w]) {
+            continue;
         }
+        losers.entry(e.target.clone()).or_default().push(e.module.clone());
     }
     let mut collisions: Vec<Collision> = Vec::new();
     let mut kept = Vec::with_capacity(last.len());
@@ -1415,8 +1423,8 @@ mod tests {
         // product/x and system/product/x fold to the same target. Keeping whichever
         // sorted last served the wrong file when they differed, and said nothing.
         let (kept, collisions) = dedupe_by_target(vec![
-            pe("one_mod", "/product/etc/x", PlanKind::Inject),
-            pe("one_mod", "/product/etc/x", PlanKind::Inject),
+            entry("one_mod", "/product/etc/x", "/data/adb/modules/one_mod/product/etc/x"),
+            entry("one_mod", "/product/etc/x", "/data/adb/modules/one_mod/system/product/etc/x"),
         ]);
         assert_eq!(kept.len(), 1);
         assert_eq!(collisions.len(), 1, "a module colliding with itself was dropped silently");
@@ -1426,6 +1434,27 @@ mod tests {
             "the report must name the module: {:?}",
             collisions[0].losers
         );
+    }
+
+    #[test]
+    fn a_module_expanding_one_directory_twice_is_not_a_collision() {
+        let mut outer = pe("m", "/system/etc/permissions/a.xml", PlanKind::Whiteout);
+        outer.source = PathBuf::from("/data/adb/modules/m/system/etc/.replace");
+        let mut inner = pe("m", "/system/etc/permissions/a.xml", PlanKind::Whiteout);
+        inner.source = PathBuf::from("/data/adb/modules/m/system/etc/permissions/.replace");
+        let (kept, collisions) = dedupe_by_target(vec![outer, inner]);
+        assert_eq!(kept.len(), 1);
+        assert!(
+            collisions.is_empty(),
+            "nested .replace (or .replace plus the opaque xattr) plans the same hide twice; \
+             that is one rule, not a module colliding with itself"
+        );
+
+        let (_, collisions) = dedupe_by_target(vec![
+            pe("m", "/system/etc/x", PlanKind::Whiteout),
+            pe("m", "/system/etc/x", PlanKind::Inject),
+        ]);
+        assert_eq!(collisions.len(), 1, "a hide and a serve from one module still differ");
     }
 
     #[test]
