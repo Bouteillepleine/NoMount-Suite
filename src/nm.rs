@@ -1,7 +1,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -37,9 +37,10 @@ impl Nm {
     const EXIT_NO_ENGINE: i32 = 2;
 
     const DEADLINE: Duration = Duration::from_secs(30);
+    const KILL_GRACE: Duration = Duration::from_millis(500);
 
     fn engine_is_unreachable(code: Option<i32>) -> bool {
-        matches!(code, Some(Nm::EXIT_TIMEOUT) | Some(Nm::EXIT_NO_ENGINE))
+        matches!(code, None | Some(Nm::EXIT_TIMEOUT) | Some(Nm::EXIT_NO_ENGINE))
     }
 
     /// `Command::output()` waits forever. nm bounds its own netlink round trip, so a call
@@ -85,7 +86,11 @@ impl Nm {
                 Some(st) => break st,
                 None if start.elapsed() >= deadline => {
                     let _ = child.kill();
-                    let _ = child.wait();
+                    if !matches!(reap_by(&mut child, Instant::now() + Nm::KILL_GRACE), Ok(Some(_))) {
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                        });
+                    }
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         format!("nm {} did not answer in {deadline:?}", args.join(" ")),
@@ -217,7 +222,7 @@ impl Nm {
     pub fn ghost_present(&self) -> Option<bool> {
         match self.run_coded(&["k", "g"]) {
             Ok(_) => Some(true),
-            Err(e) if e.code.is_none() || Nm::engine_is_unreachable(e.code) => None,
+            Err(e) if Nm::engine_is_unreachable(e.code) => None,
             Err(_) => Some(false),
         }
     }
@@ -249,9 +254,15 @@ const ADD_BATCH_PAIRS: usize = 31;
 
 impl Nm {
     pub fn add_many<'a>(&self, pairs: &[(&'a Path, &'a Path)]) -> Vec<(&'a Path, &'a Path)> {
-        let mut failed = Vec::new();
+        let (pairs, mut failed): (Vec<_>, Vec<_>) = pairs
+            .iter()
+            .copied()
+            .partition(|(v, r)| v.to_str().is_some() && r.to_str().is_some());
+        for (v, _) in &failed {
+            eprintln!("nomount: rule refused for {}: non-UTF8 path", v.display());
+        }
         let mut gave_up = false;
-        for (public, group) in batch_groups(pairs, crate::pmcache::is_pm_published) {
+        for (public, group) in batch_groups(&pairs, crate::pmcache::is_pm_published) {
             for chunk in group.chunks(ADD_BATCH_PAIRS) {
                 if gave_up {
                     failed.extend(chunk.iter().copied());
@@ -337,6 +348,21 @@ fn add_argv<'a>(public: bool, virtual_path: &'a str, real: &'a str) -> Vec<&'a s
 fn path_str(p: &Path) -> Result<&str> {
     p.to_str()
         .with_context(|| format!("non-UTF8 path: {}", p.display()))
+}
+
+fn reap_by(child: &mut Child, by: Instant) -> std::io::Result<Option<ExitStatus>> {
+    let mut nap = Duration::from_micros(100);
+    loop {
+        if let Some(st) = child.try_wait()? {
+            return Ok(Some(st));
+        }
+        let now = Instant::now();
+        if now >= by {
+            return Ok(None);
+        }
+        std::thread::sleep(nap.min(by - now));
+        nap = (nap * 2).min(Duration::from_millis(20));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -574,6 +600,51 @@ mod tests {
             .expect_err("a sleeping child must not be waited out");
         assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+    }
+
+    #[cfg(unix)]
+    fn logging_stub(d: &Path, tail: &str) -> (Nm, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = d.join("calls");
+        let f = d.join("nm");
+        std::fs::write(&f, format!("#!/bin/sh\necho \"$*\" >> '{}'\n{tail}\n", log.display())).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (Nm { bin: f.to_string_lossy().into_owned() }, log)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_nm_that_never_exits_with_a_code_is_unreachable_to_add_many_as_to_ghost_present() {
+        let d = tempfile::tempdir().unwrap();
+        let (nm, log) = logging_stub(d.path(), "kill -KILL $$");
+        assert_eq!(nm.ghost_present(), None);
+        std::fs::remove_file(&log).unwrap();
+
+        let src = Path::new("/data/adb/modules/M/x");
+        let a = Path::new("/system/lib64/a.so");
+        let b = Path::new("/system/lib64/b.so");
+        let c = Path::new("/system/etc/c.conf");
+        let failed = nm.add_many(&[(a, src), (b, src), (c, src)]);
+        assert_eq!(failed, vec![(a, src), (b, src), (c, src)]);
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.lines().count(), 1, "a killed batch was retried rule by rule: {calls:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_is_refused_alone_and_the_rest_are_still_sent() {
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().unwrap();
+        let (nm, log) = logging_stub(d.path(), "exit 0");
+        let src = Path::new("/data/adb/modules/M/x");
+        let a = Path::new("/system/lib64/a.so");
+        let bad = Path::new(std::ffi::OsStr::from_bytes(b"/system/lib64/\xff.so"));
+        let c = Path::new("/system/etc/c.conf");
+        let failed = nm.add_many(&[(a, src), (bad, src), (c, src)]);
+        assert_eq!(failed, vec![(bad, src)]);
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(calls.lines().count(), 1, "{calls:?}");
+        assert!(calls.contains("/system/lib64/a.so") && calls.contains("/system/etc/c.conf"), "{calls:?}");
     }
 
     #[cfg(unix)]
