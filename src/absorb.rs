@@ -531,6 +531,7 @@ fn mounted_inside(rows: &[MountRow], target: &Path) -> Option<PathBuf> {
 enum Hold {
     Unread,
     Above(PathBuf),
+    Stacked(usize),
     Inside(PathBuf),
 }
 
@@ -545,6 +546,11 @@ impl Hold {
                  attach to the mounted tree instead of the ROM",
                 a.display()
             ),
+            Hold::Stacked(n) => format!(
+                "{n} mount(s) on that path are not all this bind, and an unmount pops whichever \
+                 is on top, so it would take down a mount absorb does not own or uncover one it \
+                 cannot serve"
+            ),
             Hold::Inside(b) => format!(
                 "{} is mounted inside it, and unmounting it would take that mount down \
                  unserved",
@@ -554,17 +560,30 @@ impl Hold {
     }
 }
 
-fn unmount_hold(rows: &[MountRow], target: &Path, served_at: &Path) -> Option<Hold> {
+fn unmounts_needed(
+    rows: &[MountRow],
+    target: &Path,
+    source: &Path,
+    served_at: &Path,
+) -> Result<usize, Hold> {
     if let Some(a) = foreign_ancestor(rows, served_at) {
-        return Some(Hold::Above(a));
+        return Err(Hold::Above(a));
     }
-    mounted_inside(rows, target).map(Hold::Inside)
+    let roots = fs_roots(rows);
+    let here: Vec<&MountRow> = rows.iter().filter(|r| r.target == target).collect();
+    if here.iter().any(|r| source_of(r, &roots).as_deref() != Some(source)) {
+        return Err(Hold::Stacked(here.len()));
+    }
+    match mounted_inside(rows, target) {
+        Some(b) => Err(Hold::Inside(b)),
+        None => Ok(here.len()),
+    }
 }
 
-fn live_hold(target: &Path, served_at: &Path) -> Option<Hold> {
+fn live_unmounts_needed(target: &Path, source: &Path, served_at: &Path) -> Result<usize, Hold> {
     match read_mountinfo(MOUNTINFO) {
-        Ok(rows) => unmount_hold(&rows, target, served_at),
-        Err(_) => Some(Hold::Unread),
+        Ok(rows) => unmounts_needed(&rows, target, source, served_at),
+        Err(_) => Err(Hold::Unread),
     }
 }
 
@@ -1270,6 +1289,7 @@ fn take_over_empty_dir(
     durable: &[String],
     boot: &str,
     from: &str,
+    pops: usize,
 ) -> bool {
     let t_str = target.to_string_lossy().into_owned();
     // Ask whether we may hide this BEFORE unmounting it. can_whiteout refuses a bare
@@ -1287,7 +1307,9 @@ fn take_over_empty_dir(
     if ours {
         let _ = nm.del(target);
     }
-    let _ = umount_detach(target);
+    for _ in 0..pops {
+        let _ = umount_detach(target);
+    }
     if still_mounted(target) {
         eprintln!(
             "nomount: {} still has a mount on it after the unmount - leaving it for the \
@@ -1523,7 +1545,7 @@ fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
             continue;
         }
         seen.insert(target.clone());
-        if take_over_empty_dir(&nm, &target, &mut record, &durable, &boot, "a tmpfs") {
+        if take_over_empty_dir(&nm, &target, &mut record, &durable, &boot, "a tmpfs", 1) {
             st.done += 1;
         } else {
             st.failed += 1;
@@ -1690,6 +1712,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     }
 
     let mut deferred = 0usize;
+    let mut same_bind: HashSet<(PathBuf, PathBuf)> = HashSet::new();
     let cands: Vec<Candidate> = surveyed
         .into_iter()
         .filter(|s| match s.disposition {
@@ -1709,6 +1732,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             target: s.target,
             source: s.source,
         })
+        .filter(|c| same_bind.insert((c.target.clone(), c.source.clone())))
         .collect();
     if deferred > 0 {
         println!(
@@ -1768,17 +1792,20 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     for c in &cands {
         let is_dir_bind = c.source.is_dir();
         let at = if c.redundant { servable(&c.target, &aliases) } else { c.target.clone() };
-        if let Some(h) = live_hold(&c.target, &at) {
-            eprintln!(
-                "nomount: LEAK {} <- {} stays mounted: {}",
-                c.target.display(),
-                c.source.display(),
-                h.why()
-            );
-            leaking += 1;
-            held += 1;
-            continue;
-        }
+        let pops = match live_unmounts_needed(&c.target, &c.source, &at) {
+            Ok(n) => n,
+            Err(h) => {
+                eprintln!(
+                    "nomount: LEAK {} <- {} stays mounted: {}",
+                    c.target.display(),
+                    c.source.display(),
+                    h.why()
+                );
+                leaking += 1;
+                held += 1;
+                continue;
+            }
+        };
         if c.redundant {
             if dry_run {
                 println!(
@@ -1789,7 +1816,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 dropped += 1;
                 continue;
             }
-            let _ = umount_detach(&c.target);
+            for _ in 0..pops {
+                let _ = umount_detach(&c.target);
+            }
             if still_mounted(&c.target) {
                 eprintln!(
                     "nomount: redundant {} still has a mount on it after the unmount - \
@@ -1890,7 +1919,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 continue;
             }
             if take_over_empty_dir(
-                &nm, &c.target, record, durable, boot, "an empty directory bind",
+                &nm, &c.target, record, durable, boot, "an empty directory bind", pops,
             ) {
                 emptied += 1;
             } else {
@@ -1898,7 +1927,9 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             }
             continue;
         }
-        let _ = umount_detach(&c.target);
+        for _ in 0..pops {
+            let _ = umount_detach(&c.target);
+        }
         if still_mounted(&c.target) {
             eprintln!(
                 "nomount: {} still has a mount on it after the unmount - leaving it for the \
@@ -1938,7 +1969,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 Some((rec, durable, boot))
                     if crate::mount::path_is_representable(&c.target).is_ok() =>
                 {
-                    take_over_empty_dir(&nm, &c.target, rec, durable, boot, "an empty directory bind")
+                    take_over_empty_dir(&nm, &c.target, rec, durable, boot, "an empty directory bind", 1)
                 }
                 _ => false,
             };
@@ -2527,11 +2558,21 @@ mod tests {
         parse_mountinfo(&format!("{STOCK}{extra}"))
     }
 
+    fn source_at(rows: &[MountRow], target: &Path) -> PathBuf {
+        let roots = fs_roots(rows);
+        rows.iter()
+            .filter(|r| r.target == target)
+            .find_map(|r| source_of(r, &roots))
+            .unwrap_or_default()
+    }
+
     fn held_by(rows: &[MountRow], target: &str) -> Option<PathBuf> {
-        match unmount_hold(rows, Path::new(target), Path::new(target)) {
-            Some(Hold::Above(p)) | Some(Hold::Inside(p)) => Some(p),
-            Some(Hold::Unread) => panic!("a parsed table is never unread"),
-            None => None,
+        let t = Path::new(target);
+        match unmounts_needed(rows, t, &source_at(rows, t), t) {
+            Err(Hold::Above(p)) | Err(Hold::Inside(p)) => Some(p),
+            Err(Hold::Stacked(n)) => panic!("{target} is not stacked, got {n}"),
+            Err(Hold::Unread) => panic!("a parsed table is never unread"),
+            Ok(_) => None,
         }
     }
 
@@ -2597,7 +2638,8 @@ mod tests {
         order.sort_by_key(|t| std::cmp::Reverse(t.components().count()));
         let mut taken: Vec<PathBuf> = Vec::new();
         for t in &order {
-            if unmount_hold(&rows, t, t).is_none() {
+            let src = source_at(&rows, t);
+            if unmounts_needed(&rows, t, &src, t).is_ok() {
                 rows.retain(|r| r.target != *t);
                 taken.push(t.clone());
             }
@@ -2653,11 +2695,64 @@ mod tests {
 ",
         );
         let target = Path::new("/mnt/vendor/my_product/media/b");
+        let src = source_at(&rows, target);
         assert!(
-            unmount_hold(&rows, target, Path::new("/my_product/media/b")).is_none(),
+            matches!(unmounts_needed(&rows, target, &src, Path::new("/my_product/media/b")), Ok(1)),
             "/mnt is a stock tmpfs, but the rule lands on the /my_product twin"
         );
-        assert!(matches!(unmount_hold(&rows, target, target), Some(Hold::Above(_))));
+        assert!(matches!(unmounts_needed(&rows, target, &src, target), Err(Hold::Above(_))));
+    }
+
+    #[test]
+    fn only_a_stack_made_entirely_of_this_bind_is_unmounted() {
+        let hosts = Path::new("/system/etc/hosts");
+        let mine = PathBuf::from("/data/adb/modules/x/hosts");
+        let theirs = PathBuf::from("/data/adb/modules/zygisk_fw/hosts");
+        let count = |extra: &str, src: &Path| unmounts_needed(&table(extra), hosts, src, hosts);
+
+        let alone = "900 58 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw\n";
+        assert!(matches!(count(alone, &mine), Ok(1)));
+        assert!(
+            matches!(count(alone, &theirs), Err(Hold::Stacked(1))),
+            "the one mount there is not this bind any more"
+        );
+
+        let declined_on_top = "900 58 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
+901 900 254:78 /adb/modules/zygisk_fw/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
+";
+        assert!(
+            matches!(count(declined_on_top, &mine), Err(Hold::Stacked(2))),
+            "the unmount would pop the declined mount on top"
+        );
+        let declined_below = "900 58 254:78 /adb/modules/zygisk_fw/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
+901 900 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
+";
+        assert!(
+            matches!(count(declined_below, &mine), Err(Hold::Stacked(2))),
+            "popping the visible mount would uncover the declined one and nothing could be served"
+        );
+
+        let twice = "900 58 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
+901 900 254:78 /adb/modules/x/hosts /system/etc/hosts rw - f2fs /dev/block/dm-78 rw
+";
+        assert!(
+            matches!(count(twice, &mine), Ok(2)),
+            "the same bind made twice is popped twice, so the target really comes free"
+        );
+
+        let over_stock = table(
+            "900 149 254:78 /adb/modules/x/product/app /product/app rw - f2fs /dev/block/dm-78 rw\n",
+        );
+        let app = Path::new("/product/app");
+        assert!(
+            matches!(
+                unmounts_needed(&over_stock, app, Path::new("/data/adb/modules/x/product/app"), app),
+                Err(Hold::Stacked(2))
+            ),
+            "a bind over a stock mount would uncover the stock overlay, not the ROM directory"
+        );
+
+        assert!(matches!(count("", &mine), Ok(0)), "nothing mounted there means nothing to pop");
     }
 
     #[test]
