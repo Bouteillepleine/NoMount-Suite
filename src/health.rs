@@ -274,6 +274,13 @@ fn count_mounts_split() -> Option<(usize, usize)> {
 
 const PROBE_UID: u32 = 2000;
 
+fn others_can_search_to(target: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    target.ancestors().skip(1).filter(|d| !d.as_os_str().is_empty()).all(|d| {
+        fs::metadata(d).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o001 != 0)
+    })
+}
+
 fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<bool>) -> String {
     match probe_uid_hidden {
         Some(true) => return "unchecked:probe-uid-hidden".to_string(),
@@ -301,8 +308,11 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
         let mut progressed = false;
         for targets in buckets.values() {
             if let Some(t) = targets.get(i) {
-                sample.push(t);
                 progressed = true;
+                if !others_can_search_to(t) {
+                    continue;
+                }
+                sample.push(t);
                 if sample.len() >= BUDGET {
                     break 'outer;
                 }
@@ -1220,6 +1230,35 @@ rules=3
         let got = resolve_existing_prefix(&link.join("nm-diag-1").join("x"));
         let want = std::fs::canonicalize(&real).unwrap().join("nm-diag-1").join("x");
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_target_shell_cannot_reach_is_not_sampled_by_the_canary() {
+        use std::os::unix::fs::PermissionsExt;
+        let set = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let d = tempfile::tempdir().unwrap();
+        set(d.path(), 0o755);
+        let open = d.path().join("etc");
+        let locked = d.path().join("firmware_mnt");
+        let inner = locked.join("image");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::create_dir_all(&inner).unwrap();
+        let reachable = open.join("hosts");
+        let behind = inner.join("modem.mbn");
+        std::fs::write(&reachable, b"x").unwrap();
+        std::fs::write(&behind, b"x").unwrap();
+        set(&locked, 0o550);
+        set(&inner, 0o755);
+
+        assert!(others_can_search_to(&reachable));
+        assert!(!others_can_search_to(&behind), "a dr-xr-x--- ancestor blocks uid 2000 like any app");
+        assert!(!others_can_search_to(&d.path().join("gone").join("x")));
+
+        set(&locked, 0o551);
+        assert!(others_can_search_to(&behind));
+        set(&locked, 0o755);
     }
 
     #[test]
