@@ -114,7 +114,7 @@ static __always_inline bool nm_uid_hidden(u32 flags)
 
 static __always_inline bool nm_child_visible(const struct nomount_child_node *child)
 {
-    return child && nm_rule_visible(child->rule) && !nm_uid_hidden(child->flags);
+    return child && nm_rule_visible(READ_ONCE(child->rule)) && !nm_uid_hidden(child->flags);
 }
 
 #define __get_nm(ptr, type, member, field, hook_func) ({ \
@@ -173,7 +173,7 @@ static __always_inline bool nm_name_has_hidden_uid_rule(struct nomount_dir_node 
     rcu_read_lock();
     hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
-            found = child->rule && !nm_child_visible(child);
+            found = READ_ONCE(child->rule) && !nm_child_visible(child);
             break;
         }
     }
@@ -198,7 +198,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
     rcu_read_lock();
     hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
         if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
-            struct nomount_rule *rule = child->rule;
+            struct nomount_rule *rule = smp_load_acquire(&child->rule);
             if (nm_rule_visible(rule)) {
                 rule_info->flags = rule->flags;
                 rule_info->v_ino = rule->v_ino;
@@ -2904,11 +2904,11 @@ static int __nomount_inject_child_locked(struct nomount_dir_node *dir_node, stru
             memcmp(child->name, name, name_len) == 0) {
             if (child->rule && child->rule != rule)
                 child->rule->parent_dir = NULL;
-            child->flags = rule->flags;
-            child->rule = rule;
-            rule->parent_dir = dir_node;
-            child->d_type = (rule->flags & NM_FLAG_IS_DIR) ? DT_DIR : DT_REG;
+            WRITE_ONCE(child->flags, rule->flags);
+            WRITE_ONCE(child->d_type, (rule->flags & NM_FLAG_IS_DIR) ? DT_DIR : DT_REG);
             WRITE_ONCE(child->fake_ino, rule->v_dino ? rule->v_dino : rule->v_ino);
+            smp_store_release(&child->rule, rule);
+            rule->parent_dir = dir_node;
             if (rule->flags & NM_FLAG_PUBLIC)
                 WRITE_ONCE(dir_node->has_public, true);
             return 0;
