@@ -3212,6 +3212,28 @@ static void nm_sub_collect(const char *dirpath, struct nm_ino_pop *pop,
     }
 }
 
+static void nm_mark_injected_taken(const char *dirpath, struct nm_ino_pop *pop)
+{
+    struct nomount_rule *r;
+    size_t dlen = strlen(dirpath);
+    int bkt;
+
+    hash_for_each(nomount_rules_ht, bkt, r, vpath_node) {
+        const char *vp = nm_get_vpath(r);
+        const char *slash = strrchr(vp, '/');
+        size_t plen;
+
+        if (!slash)
+            continue;
+        plen = (slash == vp) ? 1 : (size_t)(slash - vp);
+        if (plen != dlen)
+            continue;
+        if (plen == 1 ? (dirpath[0] != '/') : (memcmp(vp, dirpath, plen) != 0))
+            continue;
+        nm_sub_insert(pop, r->v_ino);
+    }
+}
+
 static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop *pop)
 {
     struct nm_ino_scan *sc;
@@ -3234,6 +3256,7 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
         if (nm_path_stat(&dp, &dk) == 0)
             pop->dev = dk.dev;
     }
+    nm_mark_injected_taken(dirpath, pop);
     sc = kzalloc(sizeof(*sc), GFP_KERNEL | __GFP_NOWARN);
     if (!sc) { path_put(&dp); return -ENOMEM; }
 
