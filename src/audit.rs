@@ -1183,6 +1183,19 @@ fn hidden_uid_label(appid: u32, redact: bool) -> String {
     }
 }
 
+fn size_and_ends(mut f: fs::File) -> Option<(u64, Vec<u8>)> {
+    use std::io::{Read, Seek, SeekFrom};
+    const END: u64 = 4096;
+    let len = f.metadata().ok()?.len();
+    let mut bytes = Vec::new();
+    (&mut f).take(END).read_to_end(&mut bytes).ok()?;
+    if len > END {
+        f.seek(SeekFrom::Start(len.saturating_sub(END).max(END))).ok()?;
+        f.take(END).read_to_end(&mut bytes).ok()?;
+    }
+    Some((len, bytes))
+}
+
 fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     const NAME: &str = N_PM_OPEN;
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
@@ -1206,22 +1219,23 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         return na(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()))
             .meaning("You have not hidden any apps yet, so there is nothing to test here. Hide one and this check starts running.");
     };
-    let readable: Vec<&&PathBuf> = apks.iter().filter(|p| fs::File::open(p).is_ok()).collect();
+    let readable: Vec<(&PathBuf, (u64, Vec<u8>))> = apks
+        .iter()
+        .filter_map(|p| fs::File::open(p).ok().and_then(size_and_ends).map(|s| (*p, s)))
+        .collect();
     if readable.is_empty() {
         return unmeasured(NAME, format!("{} PM-published file rule(s), none readable as root", apks.len()))
             .meaning("None of the published files could be opened even as root, so the question this check asks could not be put.");
     }
-    let ours: Vec<u64> =
-        readable.iter().map(|p| fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(0)).collect();
 
     let counts = probe_as_uid(appid, || {
         let (mut denied, mut mismatched, mut other) = (0u32, 0u32, 0u32);
-        for (p, &our_len) in readable.iter().zip(ours.iter()) {
+        for (p, ours) in &readable {
             match fs::File::open(p.as_path()) {
-                Ok(_) => match fs::metadata(p.as_path()).map(|m| m.len()) {
-                    Ok(n) if n != our_len => mismatched += 1,
-                    Ok(_) => {}
-                    Err(_) => other += 1,
+                Ok(f) => match size_and_ends(f) {
+                    Some(theirs) if theirs != *ours => mismatched += 1,
+                    Some(_) => {}
+                    None => other += 1,
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => denied += 1,
                 Err(_) => other += 1,
@@ -1252,11 +1266,15 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     if denied == 0 && mismatched == 0 {
         return pass(
             NAME,
-            format!("{who} opened all {tested} PM-published rule target(s), same bytes we serve"),
+            format!(
+                "{who} opened all {tested} PM-published rule target(s): same size, first and \
+                 last 4 KiB as the copy we serve"
+            ),
         )
         .meaning(
-            "A hidden app can still open every file Android told it about, with the same bytes. \
-             This is what stops hiding from crashing apps.",
+            "A hidden app can still open every file Android told it about, and gets a file of \
+             the same size whose first and last 4 KiB match your module's. This is what stops \
+             hiding from crashing apps.",
         );
     }
     if denied == 0 {
@@ -1264,7 +1282,8 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             NAME,
             format!(
                 "{who} opened all {tested} PM-published rule target(s) it could test but \
-                 {mismatched} differed in size from the copy we serve"
+                 {mismatched} differed in size or in their first or last 4 KiB from the copy we \
+                 serve"
             ),
             "those rules shadow a stock file, so the blocked reader is answered from the stock \
              file -- while the PackageManager parsed OUR copy and publishes its version and \
@@ -1283,7 +1302,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         format!(
             "{who} was answered ENOENT on {denied} of {tested} PM-published rule target(s)\
              {}",
-            if mismatched > 0 { format!(", and {mismatched} more differed in size") } else { String::new() }
+            if mismatched > 0 { format!(", and {mismatched} more differed in size or content") } else { String::new() }
         ),
         "the PackageManager names those paths to the app while open() answers ENOENT -- \
          an inconsistency no stock device has, and one that crashes RASP code that walks \
@@ -1900,6 +1919,29 @@ mod tests {
             "must not claim root could not open files that do not exist: {}",
             c.meaning
         );
+    }
+
+    #[test]
+    fn the_pm_open_probe_compares_bytes_not_only_the_size() {
+        let d = tempfile::tempdir().unwrap();
+        let read = |name: &str, body: &[u8]| {
+            let p = d.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            size_and_ends(std::fs::File::open(&p).unwrap()).unwrap()
+        };
+        let ours: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let mut stock = ours.clone();
+        *stock.last_mut().unwrap() ^= 0xff;
+        assert_ne!(read("ours.apk", &ours), read("stock.apk", &stock), "same size, other bytes");
+        let mut head = ours.clone();
+        head[0] ^= 0xff;
+        assert_ne!(read("ours.apk", &ours), read("head.apk", &head));
+        assert_eq!(read("a.apk", &ours), read("b.apk", &ours));
+
+        let (len, bytes) = read("small", b"abc");
+        assert_eq!((len, bytes.as_slice()), (3, &b"abc"[..]));
+        let mid: Vec<u8> = (0..5000u32).map(|i| (i % 7) as u8).collect();
+        assert_eq!(read("mid", &mid), (5000, mid.clone()), "no byte is read twice");
     }
 
     #[test]
