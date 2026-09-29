@@ -3241,6 +3241,8 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     struct file *dir;
     const struct cred *old;
     char (*subnames)[NAME_MAX + 1] = NULL;
+    dev_t dir_dev = 0;
+    dev_t report_dev = 0;
     int i;
 
     pop->n = 0;
@@ -3253,8 +3255,10 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
     {
         struct kstat dk;
 
-        if (nm_path_stat(&dp, &dk) == 0)
+        if (nm_path_stat(&dp, &dk) == 0) {
+            dir_dev = dk.dev;
             pop->dev = dk.dev;
+        }
     }
     nm_mark_injected_taken(dirpath, pop);
     sc = kzalloc(sizeof(*sc), GFP_KERNEL | __GFP_NOWARN);
@@ -3299,9 +3303,19 @@ static int nm_dir_ino_pop(const char *dirpath, bool want_dir, struct nm_ino_pop 
             int r = nm_path_stat(&fp, &fk);
 
             path_put(&fp);
-            if (r == 0 && (!!S_ISDIR(fk.mode) == want_dir))
+            if (r == 0 && (!!S_ISDIR(fk.mode) == want_dir)) {
+                if (!want_dir) {
+                    if (!report_dev && fk.dev != dir_dev) {
+                        report_dev = fk.dev;
+                        pop->dev = fk.dev;
+                    }
+                    if (!report_dev || fk.dev != report_dev) {
+                        kfree(cp);
+                        continue;
+                    }
+                }
                 nm_pop_insert(pop, fk.ino);
-            else if (r == 0 && !want_dir && S_ISDIR(fk.mode))
+            } else if (r == 0 && !want_dir && S_ISDIR(fk.mode))
                 nm_sub_collect(cp, pop, subnames);
         }
         kfree(cp);
@@ -3355,8 +3369,7 @@ static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_d
     sl->valid = false;
     if (nm_dir_ino_pop(dirpath, want_dir, &sl->pop) != 0)
         return NULL;
-    if (want_dir)
-        nm_dev_ino_get(sl->pop.dev, dirpath);
+    nm_dev_ino_get(sl->pop.dev, dirpath);
 
     sl->hash = h;
     sl->len = (u16)len;
