@@ -458,7 +458,7 @@
     done();
   }
   document.getElementById("wobody").addEventListener("click", async ev => {
-    const b = ev.target.closest("button[data-act]");
+    const b = ev.target.closest('button[data-act="wodel"], button[data-act="woadd"]');
     if (!b) return;
     const p = b.getAttribute("data-nmp") || "";
     if (!WO_PATH_RE.test(p)) { toast("That path has characters nomount won't take", "bad"); return; }
