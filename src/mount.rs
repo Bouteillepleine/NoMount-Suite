@@ -292,6 +292,7 @@ fn source_resolves(e: &PlanEntry) -> bool {
 
 fn resolved_source_is_untrusted(resolved: &Path) -> bool {
     (resolved.starts_with("/data/") && !resolved.starts_with("/data/adb/"))
+        || resolved.starts_with("/data_mirror")
         || crate::health::is_shared_storage(resolved)
 }
 
@@ -2551,6 +2552,9 @@ mod tests {
             "/mnt/expand/abcd/x.apk",
             "/mnt/user/0/emulated/0/x.apk",
             "/mnt/runtime/write/emulated/0/x.apk",
+            "/data_mirror/data_ce/null/0/com.some.app/files/foo.conf",
+            "/data_mirror/data_de/null/0/com.some.app/x",
+            "/data_mirror/cur_profiles/0/com.some.app/primary.prof",
         ] {
             assert!(resolved_source_is_untrusted(Path::new(bad)), "must refuse: {bad}");
         }
