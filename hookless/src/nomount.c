@@ -769,6 +769,13 @@ static int nm_open(struct inode *inode, struct file *file)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
     if (unlikely(info->v_cap & NM_CAP_ODIRECT))
         file->f_mode |= FMODE_CAN_ODIRECT;
+#else
+    if (unlikely((file->f_flags & O_DIRECT) && (info->v_cap & NM_CAP_KNOWN) &&
+                 !(info->v_cap & NM_CAP_ODIRECT))) {
+        fput(real_file);
+        file->private_data = NULL;
+        return -EINVAL;
+    }
 #endif
     return 0;
 }
