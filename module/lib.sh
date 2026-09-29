@@ -217,6 +217,7 @@ nm_rule_counts() {
 
 nm_early_absorb() {
     [ -e "$NMDIR/disabled" ] && return 0
+    nm_guard_armed || return 0
     [ -x "$BIN" ] || return 0
     [ -f "$NMDIR/my_hookless" ] || return 0
     _ea=$(nmto 60 "$BIN" absorb --early 2>&1)
@@ -247,6 +248,7 @@ nm_guard_bump() {
         nmlog "⛔ cannot write $NMDIR/bootcount - the bootloop guard cannot arm, so nothing is being injected this boot. /data being full is the usual cause; free space and reboot."
         return 3
     fi
+    cat /proc/sys/kernel/random/boot_id > "$NMDIR/guard.ts" 2>/dev/null
     sync 2>/dev/null
 
     if [ -e "$NMDIR/disabled" ]; then
@@ -272,6 +274,12 @@ nm_guard_bump() {
         nm_incident_tombstone
     } > "$NMDIR/incident.log" 2>/dev/null
     return 2
+}
+
+nm_guard_armed() {
+    _gab=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    [ -n "$_gab" ] || return 0
+    [ "$(cat "$NMDIR/guard.ts" 2>/dev/null)" = "$_gab" ]
 }
 
 nm_incident_missing_binary() {

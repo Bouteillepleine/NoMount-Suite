@@ -41,6 +41,8 @@ _bootid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 if [ -n "$_bootid" ]; then
     [ "$(cat "$NMDIR/mountpass.ts" 2>/dev/null)" = "$_bootid" ] || _hookran=0
 fi
+_armed=1
+nm_guard_armed || _armed=0
 if [ "$_hookran" = 0 ]; then
     nmlog "⛔ the mount pass never ran this boot - nothing was injected. On KernelSU this means the manager has no metamodule support (metamount.sh is never invoked); on Magisk it means post-fs-data.sh did not run."
     {
@@ -86,7 +88,11 @@ BHEOF
 fi
 unset _bh_dir _bh_ovr _bh_rc
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
+if [ "$_armed" = 0 ] && [ ! -e "$NMDIR/disabled" ]; then
+    nmlog "⛔ the bootloop guard did not arm this boot - the post-boot reload, absorb, whiteouts, hide list and ghost sync are skipped too, so nothing is injected without a counter to stop a panic loop"
+fi
+
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     _rl_all=$(nmto 60 "$BIN" reload 2>&1)
     _rl_rc=$?
     _rl=$(_rl_summary "$_rl_all")
@@ -99,7 +105,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     fi
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     _ab_all=$(nmto 90 "$BIN" absorb 2>&1)
     _ab_rc=$?
     nmlog_absorb_notes "$_ab_all"
@@ -144,6 +150,7 @@ else
     nmlog "boot_completed never set - leaving guard counter armed"
 fi
 
+if [ "$_armed" = 1 ]; then
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts.txt"; then
     _wo_all=$(nmto 30 "$BIN" whiteout apply 2>&1)
     _wo_rc=$?
@@ -155,8 +162,9 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts
     fi
     unset _wo_all _wo_rc _wo_last
 fi
+fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/uidhide"; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] && _has_entries "$NMDIR/uidhide"; then
     _bl=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _bl_rc=$?
     if [ "$_bl_rc" -eq 0 ]; then
@@ -169,7 +177,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/uidhide";
     unset _bl _bl_rc
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     _gh=$(nmto 60 "$BIN" ghost sync 2>&1)
     _gh_rc=$?
     if [ "$_gh_rc" -eq 124 ]; then
@@ -182,7 +190,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     unset _gh _gh_rc
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] \
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
     inotifyd "$MODDIR/uidwatch.sh" /data/system:cewDMmynd >/dev/null 2>&1 &
     nmlog "hide-list package watcher started"
@@ -253,7 +261,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         ok|unchecked*|"") _consbad=0 ;;
         *) _consbad=1 ;;
     esac
-    if [ "${_hookran:-1}" = 0 ]; then
+    if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ]; then
         _health="⛔ mount pass never ran - see the WebUI"
     elif [ "$(_health_get engine)" = "down" ]; then
         _health="⛔ your kernel has no NoMount driver - flash a NoMount kernel, then reboot"
@@ -311,7 +319,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         _muc=""
         _mul=""
     fi
-    if [ "${_hookran:-1}" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
+    if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then _mark="✅"
     elif [ "${_rules:-0}" = 0 ]; then _mark="ℹ️"
     else _mark="✅"; fi

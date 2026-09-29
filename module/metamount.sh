@@ -64,44 +64,17 @@ if nm_guard_bump "ksu/apatch metamount path"; then
 fi
 
 if command -v ksud >/dev/null 2>&1; then
-    _vf=""; _ov=""; _nmods=0
-    if [ -e "$NMDIR/disabled" ]; then
-        nmlog "guard is tripped - skipping per-module tagging (nothing is served)"
-    else
+    _nmods=0
+    if [ ! -e "$NMDIR/disabled" ]; then
     nm_rule_counts
-    _tagt0=$(date +%s 2>/dev/null)
-    case "$_tagt0" in ''|*[!0-9]*) _tagt0="" ;; esac
-    _tagcut=0
     for d in /data/adb/modules/*/; do
         [ -d "$d" ] || continue
-        if [ -n "$_tagt0" ] && [ "$_tagcut" = 0 ]; then
-            _tagnow=$(date +%s 2>/dev/null)
-            case "$_tagnow" in ''|*[!0-9]*) _tagnow=$_tagt0 ;; esac
-            if [ "$((_tagnow - _tagt0))" -ge 60 ]; then
-                _tagcut=1
-                nmlog "per-module tagging passed 60s - the rest keep their own description; nothing served is affected"
-            fi
-        fi
         d=${d%/}; mid=${d##*/}
         { [ "$mid" = "meta-nomount" ] || [ "$mid" = "kernelnosu" ]; } && continue
         { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && continue
         _sum=$(NM_MID="$mid" awk -F'\t' '$1==ENVIRON["NM_MID"]{print;exit}' "$NMDIR/modules.tsv" 2>/dev/null)
         [ -z "$_sum" ] && continue
-        _o=$(printf '%s' "$_sum" | cut -f3)
-        _v=$(printf '%s' "$_sum" | cut -f4)
-        if [ "$_o" = 1 ] && [ "$_v" = 1 ]; then _t="vfs + overlay"; _ov="$_ov $mid";
-        elif [ "$_o" = 1 ]; then _t="overlay"; _ov="$_ov $mid";
-        else _t="vfs"; _vf="$_vf $mid"; fi
         _nmods=$((_nmods + 1))
-        _n=$(_nmcount -F "/data/adb/modules/$mid/")
-        _m=$(NM_P="/adb/modules/$mid" awk '$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}' \
-             /proc/self/mountinfo 2>/dev/null); _m=${_m:-0}
-        _badge="$_t · $_n served"
-        [ "${_m:-0}" -gt 0 ] && _badge="$_badge · ℹ $_m mount(s)"
-        [ "$_tagcut" = 1 ] && continue
-        _orig=$(sed -n 's/^description=//p' "$d/module.prop" | head -1)
-        KSU_MODULE="$mid" nmto 5 ksud module config set --temp override.description \
-            "[NoMount · $_badge] $_orig" >/dev/null 2>&1
     done
     fi
 
