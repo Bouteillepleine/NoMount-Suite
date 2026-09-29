@@ -666,7 +666,10 @@ fn plan_tree(
     Ok(())
 }
 
-fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: &Path) -> bool {
+pub(crate) fn unmount_before_serving(
+    targets: &std::collections::HashSet<PathBuf>,
+    target: &Path,
+) -> bool {
     if !targets.contains(target) {
         // The exact target carries no mount, but hiding a directory with a live mount
         // underneath leaves that mount in every app's mountinfo with no path reaching it -
@@ -849,6 +852,11 @@ fn prune_order(live: &HashMap<(PathBuf, u32), LiveRule>) -> Vec<&(PathBuf, u32)>
     stale
 }
 
+fn durable_not_planned(durable: Vec<PathBuf>, plan: &[PlanEntry]) -> Vec<PathBuf> {
+    let planned: HashSet<&Path> = plan.iter().map(|e| e.target.as_path()).collect();
+    durable.into_iter().filter(|w| !planned.contains(w.as_path())).collect()
+}
+
 fn prunable(
     target: &Path,
     uid: u32,
@@ -897,11 +905,16 @@ pub fn run_reload() -> Result<()> {
     let live_txt = nm.list().context("nm list failed during reload")?;
     let live = parse_live_rules(&live_txt);
 
-    let durable_whiteouts: HashSet<PathBuf> = crate::whiteout::read()
-        .context("cannot read the durable whiteout list - refusing to reload, because an empty list here would prune every whiteout")?
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
+    let durable_whiteouts: HashSet<PathBuf> = durable_not_planned(
+        crate::whiteout::read()
+            .context("cannot read the durable whiteout list - refusing to reload, because an empty list here would prune every whiteout")?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        &plan,
+    )
+    .into_iter()
+    .collect();
     let mut absorbed = crate::absorb::read_absorbed_targets()
         .context("cannot read the absorbed-rule record - refusing to reload, because an empty record here would prune every absorbed rule")?;
     absorbed.extend(
@@ -961,11 +974,6 @@ pub fn run_reload() -> Result<()> {
         }
     }
     for w in &durable_whiteouts {
-        // run_mount drops a durable row whose target the plan serves; reload applied it
-        // after the plan loop, so which of the two ran last decided what the path held.
-        if desired_hookless.contains_key(w.as_path()) {
-            continue;
-        }
         if crate::whiteout::validate(&w.to_string_lossy()).is_err() {
             eprintln!("nomount: skipping invalid whiteout entry {}", w.display());
             failed += 1;
@@ -1110,9 +1118,7 @@ pub fn run_mount() -> Result<()> {
         "cannot read the durable whiteout list - refusing to serve, because clearing the table \
          and rebuilding without it would un-hide every path you asked to hide",
     )?;
-    let planned: std::collections::HashSet<&Path> =
-        plan.iter().map(|e| e.target.as_path()).collect();
-    let extra: Vec<std::path::PathBuf> = durable
+    let valid: Vec<PathBuf> = durable
         .iter()
         .filter(|w| match crate::whiteout::validate(w) {
             Ok(()) => true,
@@ -1121,11 +1127,9 @@ pub fn run_mount() -> Result<()> {
                 false
             }
         })
-        .map(std::path::PathBuf::from)
-        .filter(|w| !planned.contains(w.as_path()))
+        .map(PathBuf::from)
         .collect();
-    drop(planned);
-    for w in extra {
+    for w in durable_not_planned(valid, &plan) {
         plan.push(PlanEntry {
             module: "durable".to_string(),
             target: w,
@@ -2375,6 +2379,29 @@ mod tests {
         ] {
             assert!(can_whiteout(Path::new(p)).is_ok(), "{p} is an ordinary debloat target");
         }
+    }
+
+    #[test]
+    fn a_durable_whiteout_yields_to_every_kind_the_plan_serves() {
+        let plan = vec![
+            pe("m", "/product/overlay/Foo.apk", PlanKind::Inject),
+            pe("m", "/my_product/app/Foo/Foo.apk", PlanKind::Bind),
+            pe("m", "/system/app/Gone", PlanKind::Whiteout),
+        ];
+        let durable: Vec<PathBuf> = [
+            "/product/overlay/Foo.apk",
+            "/my_product/app/Foo/Foo.apk",
+            "/system/app/Gone",
+            "/system/etc/tell.conf",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(
+            durable_not_planned(durable, &plan),
+            vec![PathBuf::from("/system/etc/tell.conf")],
+            "mount and reload must drop the same rows, binds included"
+        );
     }
 
     #[test]

@@ -269,12 +269,50 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
+fn served_targets(list: &str, binds: &[(PathBuf, PathBuf)]) -> std::collections::HashSet<PathBuf> {
+    crate::nm::parse_list(list)
+        .into_iter()
+        .filter(|r| r.kind == crate::nm::LiveKind::Inject && r.uid == 0)
+        .map(|r| r.target)
+        .chain(binds.iter().map(|(t, _)| t.clone()))
+        .collect()
+}
+
 pub fn apply() -> Result<()> {
+    let _pass = crate::mount::pass_lock();
     let nm = Nm::new();
-    let (mut ok, mut failed) = (0u32, 0u32);
-    for e in read()? {
+    let entries = read()?;
+    if entries.is_empty() {
+        println!("nomount whiteout: applied 0, failed 0");
+        return Ok(());
+    }
+    let binds = crate::bind::tracked_result().context(
+        "cannot read binds.list - refusing to hide, because a my_* bind the Suite serves would \
+         be unmounted and hidden instead of left to the module",
+    )?;
+    let served = served_targets(
+        &nm.list().context(
+            "cannot read the engine's rule set - refusing to hide, because a path a module \
+             injects would be replaced by its whiteout",
+        )?,
+        &binds,
+    );
+    let mounted = crate::absorb::mounted_targets().context(
+        "cannot read /proc/self/mountinfo - refusing to hide, because assuming \"nothing is \
+         mounted\" hides live mounts and strands each one in mountinfo until reboot",
+    )?;
+    let (mut ok, mut failed, mut yielded) = (0u32, 0u32, 0u32);
+    for e in entries {
         if validate(&e).is_err() {
             eprintln!("nomount: skipping invalid whiteout entry {e:?}");
+            failed += 1;
+            continue;
+        }
+        if served.contains(Path::new(&e)) {
+            yielded += 1;
+            continue;
+        }
+        if !crate::mount::unmount_before_serving(&mounted, Path::new(&e)) {
             failed += 1;
             continue;
         }
@@ -292,7 +330,14 @@ pub fn apply() -> Result<()> {
             }
         }
     }
-    println!("nomount whiteout: applied {ok}, failed {failed}");
+    if yielded > 0 {
+        println!(
+            "nomount whiteout: applied {ok}, failed {failed}, {yielded} left to the module \
+             serving the same path"
+        );
+    } else {
+        println!("nomount whiteout: applied {ok}, failed {failed}");
+    }
     if failed > 0 {
         anyhow::bail!("{failed} of {} whiteout(s) could not be applied (applied {ok})", ok + failed);
     }
@@ -417,6 +462,24 @@ pub fn suggest() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_leaves_a_path_to_the_injection_or_bind_serving_it() {
+        let list = "/product/overlay/Foo.apk -> /data/adb/modules/m/product/overlay/Foo.apk (public)\n\
+                    /system/etc/gone (whiteout)\n\
+                    /system/etc/x -> /data/adb/modules/m/system/etc/x [UID: 10123]\n\
+                    /system/etc/vd (virtual dir)\n";
+        let binds = vec![(
+            PathBuf::from("/my_product/app/Foo/Foo.apk"),
+            PathBuf::from("/data/adb/modules/m/my_product/app/Foo/Foo.apk"),
+        )];
+        let served = served_targets(list, &binds);
+        assert!(served.contains(Path::new("/product/overlay/Foo.apk")), "inject wins, as in mount and reload");
+        assert!(served.contains(Path::new("/my_product/app/Foo/Foo.apk")), "a my_* bind wins too");
+        assert!(!served.contains(Path::new("/system/etc/gone")), "a live whiteout is not a server");
+        assert!(!served.contains(Path::new("/system/etc/x")), "a per-uid rule does not collide with a uid-0 hide");
+        assert!(!served.contains(Path::new("/system/etc/vd")));
+    }
 
     #[test]
     fn parse_strips_comments_blanks_and_dedups() {
