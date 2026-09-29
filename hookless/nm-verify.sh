@@ -3,8 +3,10 @@ NM=/data/adb/modules/meta-nomount/bin/arm64-v8a/nm
 [ -x "$NM" ] || { echo "fatal: nm client not found at $NM"; exit 1; }
 
 MIN_VER=14
-VER=$("$NM" v 2>/dev/null)
-echo "engine version : ${VER:-<no answer>}"
+VOUT=$("$NM" v 2>/dev/null)
+VER=${VOUT%% *}
+BUILD=${VOUT#"$VER"}; BUILD=${BUILD# }
+echo "engine version : ${VER:-<no answer>}${BUILD:+ (build $BUILD)}"
 case "$VER" in
     ''|*[!0-9]*)
         echo "fatal: the engine did not answer a version - is this a CONFIG_NOMOUNT kernel?"

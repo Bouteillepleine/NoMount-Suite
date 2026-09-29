@@ -523,6 +523,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn nm_verify_reads_the_protocol_number_in_both_version_formats() {
+        use std::os::unix::fs::PermissionsExt;
+        const VERIFY: &str = include_str!("../hookless/nm-verify.sh");
+        let mut head = String::new();
+        for l in VERIFY.lines() {
+            head.push_str(l);
+            head.push('\n');
+            if l.trim() == "esac" {
+                break;
+            }
+        }
+        assert!(head.ends_with("esac\n"), "nm-verify.sh no longer gates on the version reply");
+        let nm_line = head
+            .lines()
+            .find(|l| l.starts_with("NM="))
+            .expect("nm-verify.sh no longer sets NM")
+            .to_string();
+        let d = tempfile::tempdir().unwrap();
+        let run = |reply: &str| {
+            let stub = d.path().join("nm");
+            std::fs::write(&stub, format!("#!/bin/sh\nprintf '%s' '{reply}'\n")).unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let script = head.replacen(&nm_line, &format!("NM='{}'", stub.display()), 1)
+                + "echo \"VER=$VER\"\n";
+            let out = Command::new("sh").arg("-c").arg(&script).output().unwrap();
+            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+
+        let (rc, out) = run("34\n");
+        assert_eq!(rc, Some(0), "an engine without the build string: {out}");
+        assert!(out.contains("VER=34\n"), "{out}");
+
+        let (rc, out) = run("34 1.34.2\n");
+        assert_eq!(rc, Some(0), "an engine that sends the build string: {out}");
+        assert!(out.contains("VER=34\n"), "{out}");
+        assert!(out.contains("1.34.2"), "the build string is not shown: {out}");
+
+        let (rc, out) = run("");
+        assert_eq!(rc, Some(1), "no answer must still be fatal: {out}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_wedged_nm_is_killed_rather_than_waited_on_forever() {
         let nm = Nm { bin: "/bin/sleep".into() };
         let start = Instant::now();
