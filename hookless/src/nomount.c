@@ -855,7 +855,7 @@ static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
 
     res = generic_file_llseek_size(file, offset, whence,
                                    file_inode(file)->i_sb->s_maxbytes,
-                                   i_size_read(file_inode(file)));
+                                   i_size_read(file_inode(real_file)));
     if (res >= 0) real_file->f_pos = res;
 
     return res;
