@@ -46,8 +46,12 @@ _stamp_saved="$(mktemp -d)"
 cp "$PROJECT_ROOT/Cargo.toml"   "$_stamp_saved/Cargo.toml"
 cp "$MODULE_DIR/module.prop"    "$_stamp_saved/module.prop"
 [ -f "$PROJECT_ROOT/Cargo.lock" ] && cp "$PROJECT_ROOT/Cargo.lock" "$_stamp_saved/Cargo.lock"
+_staging_active=""
 _unstamp() {
     local rc=$?
+    # the staging tree used to be removed only on the paths that exit deliberately, so
+    # any failure set -e caught - or any ^C - left a full copy of the module in /tmp
+    [ -n "$_staging_active" ] && rm -rf "$_staging_active"
     if [ "$rc" -ne 0 ] && [ -f "$_stamp_saved/Cargo.toml" ]; then
         cp "$_stamp_saved/Cargo.toml" "$PROJECT_ROOT/Cargo.toml"
         cp "$_stamp_saved/module.prop" "$MODULE_DIR/module.prop"
@@ -57,6 +61,8 @@ _unstamp() {
     rm -rf "$_stamp_saved"
 }
 trap _unstamp EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 sed -i "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$PROJECT_ROOT/Cargo.toml"
 
@@ -143,6 +149,15 @@ if [ -n "$_dirt" ]; then
 fi
 unset _dirt
 
+# mtime alone says nothing useful: a checkout, a copy or a touch moves it without the
+# source changing, and `git checkout` of an OLDER nm.c leaves the binary looking fresh
+# while it was built from something else entirely. Where a build recorded this stamp we
+# trust it instead; a binary from CI has no stamp, so mtime still decides there.
+nm_srcsum() {
+    cat "$PROJECT_ROOT/userspace/src/nm.c" "$PROJECT_ROOT/userspace/src/nm.h" \
+        | sha256sum | cut -d" " -f1
+}
+
 build_nm() {
     local zig cc
     zig="$(command -v zig || true)"
@@ -181,6 +196,9 @@ build_nm() {
             "$PROJECT_ROOT/target/aarch64-linux-android/${profile}/nm"
     done
     rm -f "$PROJECT_ROOT/nm-arm64"
+    for profile in debug release; do
+        nm_srcsum > "$PROJECT_ROOT/target/aarch64-linux-android/${profile}/nm.srcsum"
+    done
     echo "==> nm built from source ($(wc -c < "$PROJECT_ROOT/target/aarch64-linux-android/release/nm") bytes)"
     return 0
 }
@@ -281,6 +299,7 @@ package_zip() {
     local out_path="$RELEASE_DIR/$profile/$out_name"
     local staging
     staging="$(mktemp -d)"
+    _staging_active="$staging"
 
     echo ""
     echo "==> Packaging $profile: $out_name"
@@ -346,20 +365,26 @@ package_zip() {
             }
         fi
 
-        local nm_cand nm_stale=""
+        local nm_cand nm_stale="" want_sum
+        want_sum="$(nm_srcsum)"
         for nm_cand in "$PROJECT_ROOT/target/$target/$target_subdir/nm" \
                        "$MODULE_DIR/bin/$abi/nm"; do
             [ -f "$nm_cand" ] || continue
-            if [ "$PROJECT_ROOT/userspace/src/nm.c" -nt "$nm_cand" ] \
+            if [ -f "$nm_cand.srcsum" ]; then
+                if [ "$(cat "$nm_cand.srcsum")" != "$want_sum" ]; then
+                    nm_stale="${nm_stale}${nm_stale:+, }$nm_cand (built from other sources)"
+                    continue
+                fi
+            elif [ "$PROJECT_ROOT/userspace/src/nm.c" -nt "$nm_cand" ] \
                || [ "$PROJECT_ROOT/userspace/src/nm.h" -nt "$nm_cand" ]; then
-                nm_stale="${nm_stale}${nm_stale:+, }$nm_cand"
+                nm_stale="${nm_stale}${nm_stale:+, }$nm_cand (older than the source)"
                 continue
             fi
             cp "$nm_cand" "$staging/bin/$abi/nm"; found_nm=$((found_nm + 1))
             break
         done
         if [ ! -f "$staging/bin/$abi/nm" ] && [ -n "$nm_stale" ]; then
-            echo "fatal: every nm candidate for $abi predates userspace/src/nm.[ch]:" >&2
+            echo "fatal: no nm candidate for $abi matches userspace/src/nm.[ch]:" >&2
             echo "         $nm_stale" >&2
             echo "       Re-run with --build (zig 0.14.x, or the NDK's clang), or take" >&2
             echo "       the binary from CI. Packaging the old one would ship an nm that" >&2
@@ -457,6 +482,15 @@ set_perm() {
     else
         chcon u:object_r:system_file:s0 "$1" 2>/dev/null
     fi
+    return 0
+}
+set_perm_recursive() {
+    find "$1" -type d 2>/dev/null | while IFS= read -r _spr; do
+        set_perm "$_spr" "$2" "$3" "$4" "$6"
+    done
+    find "$1" -type f -o -type l 2>/dev/null | while IFS= read -r _spr; do
+        set_perm "$_spr" "$2" "$3" "$5" "$6"
+    done
     return 0
 }
 

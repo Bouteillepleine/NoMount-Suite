@@ -43,8 +43,7 @@ COMMANDS = {
     "audit": "cat /data/adb/nomount/audit.json",
     "modules": (
         'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; id=$(basename "$d"); '
-        'mnt=$(awk -v m="$id" \'$4 ~ "/adb/modules/" m "(/|$)" {n++} END{print n+0}\' '
-        "/proc/self/mountinfo 2>/dev/null); "
+        'mnt=$(NM_P="/adb/modules/$id" awk \'$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); '
         '[ "$id" = meta-nomount ] && { echo "$id|suite|$mnt"; continue; }; '
         '[ "$id" = kernelnosu ] && { echo "$id|su|$mnt"; continue; }; '
         'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } '

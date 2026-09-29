@@ -18,6 +18,7 @@ pub struct Summary {
     pub rejected_examples: Vec<String>,
     pub dump_failed: bool,
     pub probe_failed: bool,
+    pub cloak_unknown: bool,
 }
 
 impl Summary {
@@ -26,6 +27,13 @@ impl Summary {
     }
 
     fn warning(&self) -> Option<String> {
+        if self.cloak_unknown {
+            return Some(
+                "\u{26a0} ghost cloak: nm would not answer, so whether this kernel has the \
+                 cloak at all is unknown - nothing was synced this pass"
+                    .into(),
+            );
+        }
         if self.dump_failed {
             return Some(
                 "⚠ ghost cloak: could not read the engine's live state - both tables CLEARED, \
@@ -270,8 +278,13 @@ fn push(nm: &Nm, kind: char, items: &[String], out: &mut Summary) {
 }
 
 pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
-    if !nm.ghost_present() {
-        return Ok(None);
+    match nm.ghost_present() {
+        Some(true) => {}
+        // a kernel built without the cloak: nothing to sync and nothing to say
+        Some(false) => return Ok(None),
+        None => {
+            return Ok(Some(Summary { cloak_unknown: true, ..Summary::default() }));
+        }
     }
     let mut out = Summary::default();
 

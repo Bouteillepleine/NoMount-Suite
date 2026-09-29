@@ -1288,7 +1288,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             });
         }
         if let Ok(list) = listed {
-            let live = crate::nm::parse_list(&list);
+            let (live, unread) = crate::nm::parse_list_counted(&list);
+            if unread > 0 {
+                // Every check below treats a rule missing from `live` as a rule the engine
+                // no longer holds. A line the parser cannot read looks exactly the same,
+                // so say so rather than letting it read as a rule that went away.
+                f.push(Finding {
+                    level: Level::Unmeasured,
+                    check: "live rules partly unreadable",
+                    detail: format!(
+                        "{unread} line(s) of the engine's listing did not parse, so the \
+                         comparisons below may report rules as missing that are in fact \
+                         held. Usually this means the engine is newer than this suite."
+                    ),
+                });
+            }
             let durable: Option<HashSet<PathBuf>> = crate::whiteout::read()
                 .ok()
                 .map(|v| v.into_iter().map(PathBuf::from).collect());

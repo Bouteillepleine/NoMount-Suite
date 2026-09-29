@@ -59,7 +59,7 @@
 
   function openDetail() {
     showTab("diag", document.getElementById("nb-diag"));
-    if (!CHECK) runCheck(null);
+    if (!CHECK && !CHECK_RUNNING) runCheck(null);
   }
 
   let _rulesRaw = "";

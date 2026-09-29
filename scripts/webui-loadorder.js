@@ -81,10 +81,12 @@ for (const rel of srcs) {
   console.log('  loaded ' + rel);
 }
 
-// The boot chain in 60-boot.js is asynchronous, so a ReferenceError inside it
-// surfaces as an unhandledRejection on a LATER tick. Reading seen.errors in the
-// same tick as the last runInContext made this filter dead code: it always saw
-// an empty array. Give the loop turns to run, then judge.
+if (typeof ctx.toast !== 'function') {
+  console.error('no toast() after loading every part - the boot chain has nothing to report through');
+  process.exit(1);
+}
+ctx.toast = (msg) => seen.errors.push('toast: ' + msg);
+
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 (async () => {

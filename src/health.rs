@@ -231,7 +231,7 @@ fn app_sizes(uid: u32, paths: &[&str]) -> std::collections::HashMap<String, Stri
         return out;
     }
     let args = paths.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ");
-    let Ok(o) = Command::new("su")
+    let Ok(o) = Command::new("/system/bin/su")
         .args([&uid.to_string(), "-c", &format!("stat -c '%n %s' {args} 2>/dev/null")])
         .output()
     else {
@@ -274,6 +274,13 @@ fn count_mounts_split() -> Option<(usize, usize)> {
 
 const PROBE_UID: u32 = 2000;
 
+fn others_can_search_to(target: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    target.ancestors().skip(1).filter(|d| !d.as_os_str().is_empty()).all(|d| {
+        fs::metadata(d).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o001 != 0)
+    })
+}
+
 fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<bool>) -> String {
     match probe_uid_hidden {
         Some(true) => return "unchecked:probe-uid-hidden".to_string(),
@@ -301,8 +308,11 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
         let mut progressed = false;
         for targets in buckets.values() {
             if let Some(t) = targets.get(i) {
-                sample.push(t);
                 progressed = true;
+                if !others_can_search_to(t) {
+                    continue;
+                }
+                sample.push(t);
                 if sample.len() >= BUDGET {
                     break 'outer;
                 }
@@ -647,6 +657,75 @@ pub(crate) fn is_shared_storage(p: &Path) -> bool {
     SHARED_ROOTS.iter().any(|r| p.starts_with(r))
 }
 
+const SHELL_TMP: &str = "/data/local/tmp";
+const SHELL_ID: u32 = 2000;
+
+fn app_readable_why(p: &Path) -> Option<&'static str> {
+    if is_shared_storage(p) {
+        Some("is shared storage, readable by any app with a storage permission")
+    } else if p.starts_with(SHELL_TMP) {
+        Some(
+            "is under /data/local/tmp, where any app can look up a name (the bundle itself is \
+             readable only by shell, uid 2000, so adb pull works)",
+        )
+    } else {
+        None
+    }
+}
+
+fn is_for_shell(resolved: &Path, literal: &Path) -> bool {
+    !is_shared_storage(resolved) && (resolved.starts_with(SHELL_TMP) || literal.starts_with(SHELL_TMP))
+}
+
+fn resolve_existing_prefix(p: &Path) -> PathBuf {
+    for a in p.ancestors() {
+        let probe = if a.as_os_str().is_empty() { Path::new(".") } else { a };
+        if let Ok(r) = fs::canonicalize(probe) {
+            return r.join(p.strip_prefix(a).unwrap_or(Path::new("")));
+        }
+    }
+    p.to_path_buf()
+}
+
+fn create_export_dir(out: &Path, private: bool, owner: Option<(u32, u32)>) -> std::io::Result<()> {
+    if !private {
+        return fs::create_dir_all(out);
+    }
+    use std::os::unix::fs::DirBuilderExt;
+    let missing: Vec<PathBuf> = out
+        .ancestors()
+        .take_while(|a| !a.as_os_str().is_empty() && fs::symlink_metadata(a).is_err())
+        .map(Path::to_path_buf)
+        .collect();
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(out)?;
+    if let Some((uid, gid)) = owner {
+        for d in &missing {
+            std::os::unix::fs::lchown(d, Some(uid), Some(gid))?;
+        }
+    }
+    Ok(())
+}
+
+fn write_export_file(
+    path: &Path,
+    content: &str,
+    private: bool,
+    owner: Option<(u32, u32)>,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(if private { 0o600 } else { 0o644 })
+        .open(path)?;
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
+    }
+    f.write_all(content.as_bytes())
+}
+
 fn base_unusable(base: &Path) -> Option<String> {
     for p in base.ancestors() {
         if p.as_os_str().is_empty() {
@@ -662,7 +741,7 @@ fn base_unusable(base: &Path) -> Option<String> {
                  started by `su` from adb does not always share -- mkdir then answers \
                  EEXIST for the symlink itself, which reads as \"File exists\" for a \
                  directory that does not exist. Pass a real path instead: \
-                 nomount export /data/local/tmp",
+                 nomount export /data/adb/nomount/report",
                 p.display(),
                 t.display()
             ));
@@ -690,17 +769,20 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     if let Some(why) = base_unusable(Path::new(&base)) {
         anyhow::bail!("cannot export to {base}: {why}");
     }
-    fs::create_dir_all(&out).with_context(|| format!("create {out}"))?;
+    let resolved = resolve_existing_prefix(Path::new(&out));
+    let public = app_readable_why(&resolved).or_else(|| app_readable_why(Path::new(&out)));
+    let shared = public.is_some();
+    let for_shell = is_for_shell(&resolved, Path::new(&out));
+    let private = !shared || for_shell;
+    let owner = for_shell.then_some((SHELL_ID, SHELL_ID));
+    create_export_dir(Path::new(&out), private, owner).with_context(|| format!("create {out}"))?;
 
     let nm = Nm::new();
     let write = |name: &str, content: &str| {
-        if let Err(e) = fs::write(format!("{out}/{name}"), content) {
+        if let Err(e) = write_export_file(&Path::new(&out).join(name), content, private, owner) {
             eprintln!("nomount: export: could not write {name}: {e} - this diagnostic is incomplete");
         }
     };
-
-    let resolved = fs::canonicalize(&out).unwrap_or_else(|_| PathBuf::from(&out));
-    let shared = is_shared_storage(&resolved) || is_shared_storage(Path::new(&out));
 
     let fingerprint = fingerprint_text().unwrap_or_else(|e| format!("(fingerprint failed: {e:#})\n"));
     let fingerprint =
@@ -768,7 +850,7 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         }
     }
     println!("exported to {out}");
-    if shared {
+    if let Some(why) = public {
         let left_out = if withheld.is_empty() {
             String::new()
         } else {
@@ -778,12 +860,11 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
             )
         };
         println!(
-            "note: {left_out}{out} is shared storage, readable by any app with a storage \
-             permission, so the hide list was kept out of it: rules.txt UID suffixes, the \
-             check report's hide-list names, any package name left in blocklist and any \
-             /data/app path in the fingerprint, the rule list, the check report and \
+            "note: {left_out}{out} {why}, so the hide list was kept out of it: rules.txt UID \
+             suffixes, the check report's hide-list names, any package name left in blocklist \
+             and any /data/app path in the fingerprint, the rule list, the check report and \
              mountinfo were redacted in place. Pass a private path for the unredacted \
-             bundle: nomount export /data/adb/nomount"
+             bundle: nomount export /data/adb/nomount/report"
         );
     }
     Ok(())
@@ -794,7 +875,7 @@ fn dmesg_section(shared: bool, dmesg: &str) -> (String, bool) {
         return (
             "(left out - the kernel ring carries the Suite's own boot log, which can name the \
              apps you are hiding from. For this file, re-run to a private path: \
-             nomount export /data/adb/nomount)\n"
+             nomount export /data/adb/nomount/report)\n"
                 .to_string(),
             true,
         );
@@ -1125,6 +1206,125 @@ rules=3
         ] {
             assert!(!is_shared_storage(Path::new(p)), "{p} is not shared storage");
         }
+    }
+
+    #[test]
+    fn data_local_tmp_is_redacted_like_shared_storage() {
+        for p in [
+            "/data/local/tmp/nm-diag-1",
+            "/data/local/tmp/nm-report/nm-diag-1",
+            "/sdcard/Download/nm-diag-1",
+            "/storage/emulated/0/Download/nm-diag-1",
+        ] {
+            assert!(app_readable_why(Path::new(p)).is_some(), "{p} is readable by apps");
+        }
+        for p in ["/data/adb/nomount/report/nm-diag-1", "/data/localx/tmp/x", "/data/local/tmpx/y"] {
+            assert!(app_readable_why(Path::new(p)).is_none(), "{p} is private");
+        }
+        let why = app_readable_why(Path::new("/data/local/tmp/nm-diag-1")).unwrap();
+        assert!(!why.contains("shared storage"), "{why}");
+
+        let p = Path::new;
+        assert!(is_for_shell(p("/data/local/tmp/nm-diag-1"), p("/data/local/tmp/nm-diag-1")));
+        assert!(is_for_shell(p("/data/local/tmp/x/nm-diag-1"), p("/tmp-link/nm-diag-1")));
+        assert!(!is_for_shell(p("/storage/emulated/0/x"), p("/data/local/tmp/sd/x")));
+        assert!(!is_for_shell(p("/sdcard/Download/x"), p("/sdcard/Download/x")));
+        assert!(!is_for_shell(p("/data/adb/nomount/report/x"), p("/data/adb/nomount/report/x")));
+    }
+
+    #[test]
+    fn the_export_advice_never_points_at_an_app_readable_path() {
+        const SRC: &str = include_str!("health.rs");
+        let body = SRC.split("#[cfg(test)]").next().unwrap();
+        let bad = ["nomount export", "/data/local", "/tmp"].concat();
+        assert!(!body.contains(&bad), "the advice must not recommend an app-readable path");
+        assert!(body.contains("nomount export /data/adb/nomount/report"));
+    }
+
+    #[test]
+    fn a_private_export_is_root_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("report").join("nm-diag-1");
+        create_export_dir(&out, true, None).unwrap();
+        let f = out.join("uidhide");
+        write_export_file(&f, "com.example.bank\n", true, None).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&out), 0o700, "the bundle folder must not be traversable by apps");
+        assert_eq!(mode(out.parent().unwrap()), 0o700);
+        assert_eq!(mode(&f), 0o600, "the bundle files must not be readable by apps");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "com.example.bank\n");
+
+        write_export_file(&f, "x", true, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "x", "a rewrite truncates");
+    }
+
+    #[test]
+    fn a_shell_export_hands_only_the_folders_it_created_to_shell() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let me = unsafe { (libc::getuid(), libc::getgid()) };
+        let d = tempfile::tempdir().unwrap();
+        let pre = d.path().join("tmp");
+        std::fs::create_dir(&pre).unwrap();
+        std::fs::set_permissions(&pre, std::fs::Permissions::from_mode(0o771)).unwrap();
+        let out = pre.join("nm-report").join("nm-diag-1");
+        create_export_dir(&out, true, Some(me)).unwrap();
+        let f = out.join("rules.txt");
+        write_export_file(&f, "r\n", true, Some(me)).unwrap();
+        let md = |p: &Path| std::fs::metadata(p).unwrap();
+        for p in [out.as_path(), out.parent().unwrap()] {
+            assert_eq!(md(p).permissions().mode() & 0o777, 0o700, "{}", p.display());
+            assert_eq!((md(p).uid(), md(p).gid()), me, "{}", p.display());
+        }
+        assert_eq!(md(&f).permissions().mode() & 0o777, 0o600);
+        assert_eq!((md(&f).uid(), md(&f).gid()), me);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "r\n");
+        assert_eq!(
+            md(&pre).permissions().mode() & 0o777,
+            0o771,
+            "a folder that was already there is left alone"
+        );
+    }
+
+    #[test]
+    fn a_destination_that_does_not_exist_yet_resolves_through_its_parent() {
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let got = resolve_existing_prefix(&link.join("nm-diag-1").join("x"));
+        let want = std::fs::canonicalize(&real).unwrap().join("nm-diag-1").join("x");
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_target_shell_cannot_reach_is_not_sampled_by_the_canary() {
+        use std::os::unix::fs::PermissionsExt;
+        let set = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let d = tempfile::tempdir().unwrap();
+        set(d.path(), 0o755);
+        let open = d.path().join("etc");
+        let locked = d.path().join("firmware_mnt");
+        let inner = locked.join("image");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::create_dir_all(&inner).unwrap();
+        let reachable = open.join("hosts");
+        let behind = inner.join("modem.mbn");
+        std::fs::write(&reachable, b"x").unwrap();
+        std::fs::write(&behind, b"x").unwrap();
+        set(&locked, 0o550);
+        set(&inner, 0o755);
+
+        assert!(others_can_search_to(&reachable));
+        assert!(!others_can_search_to(&behind), "a dr-xr-x--- ancestor blocks uid 2000 like any app");
+        assert!(!others_can_search_to(&d.path().join("gone").join("x")));
+
+        set(&locked, 0o551);
+        assert!(others_can_search_to(&behind));
+        set(&locked, 0o755);
     }
 
     #[test]

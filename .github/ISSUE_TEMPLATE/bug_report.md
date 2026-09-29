@@ -18,8 +18,8 @@ the mount table and the live rules. **Anything that names the apps you hide is
 withheld automatically** when the destination is shared storage: the hide-list
 files, `spoof.conf` and `boot.log` are left out, and `dmesg-nomount.txt` is
 replaced by a stub. The bundle lists what it withheld. If your report is about boot behaviour we will
-probably need `boot.log` too - export to a private path instead
-(`nomount export /data/local/tmp/nm-report`) and share that bundle privately.
+probably need `boot.log` too - run `nomount export /data/adb/nomount/report`, copy it off with
+`adb exec-out su -c "tar -C /data/adb/nomount/report -cf - ." > report.tar` (never via /sdcard, which apps can read) and share that privately.
 
 From a root shell instead - note `nomount` is **not on `PATH`**, it ships inside
 the module:

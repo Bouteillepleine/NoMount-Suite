@@ -11,6 +11,21 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.191 - engine v34
+
+- `nm v` prints the engine build after the protocol number.
+- The engine check names that build, so two v34 kernels are told apart.
+
+## v1.3.190 - engine v34
+
+- An injected file now keeps the stock file's owner and mode.
+- A `.replace` module no longer hides a file another module serves.
+- A module folder over a stock file is refused, not silently dropped.
+- A directory listing cut short by low memory says so.
+- Whiteouts that the engine refuses now name the path and the reason.
+- An `nm` call that wedges can no longer hang the boot.
+- A redacted hide-list glob is no longer printed in the refusal.
+
 ## v1.3.189 - engine v33 (unchanged)
 
 - Absorb no longer unmounts a directory it cannot then hide.

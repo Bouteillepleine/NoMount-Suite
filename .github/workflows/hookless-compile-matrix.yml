@@ -14,6 +14,11 @@ on:
     paths:
       - 'hookless/**'
       - '.github/workflows/hookless-compile-matrix.yml'
+  pull_request:
+    branches: [prerelease, main]
+    paths:
+      - 'hookless/**'
+      - '.github/workflows/hookless-compile-matrix.yml'
   workflow_call:
     inputs:
       only:
@@ -24,6 +29,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: hookless-matrix-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   compile:

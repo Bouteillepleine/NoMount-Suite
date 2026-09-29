@@ -17,9 +17,9 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.33.7"
+#define NM_MODULE_VERSION "1.34.4"
 
-#define NOMOUNT_VERSION    33
+#define NOMOUNT_VERSION    34
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -29,11 +29,10 @@
 #define NM_FLAG_SHADOWS_STOCK (1 << 5)
 #define NM_FLAG_PUBLIC      (1 << 6)
 #define NM_FLAG_STOCK_ONLY  (1 << 7)
+#define NM_FLAG_HAVE_VOWN   (1 << 8)
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
 
-/* kvzalloc arrived in 4.12 and kvcalloc in 4.18; kvfree predates both and copes
- * with either allocator, so the fallbacks are safe to free with it. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
 #define kvzalloc(size, flags) kzalloc((size), (flags))
 #endif
@@ -118,7 +117,7 @@ struct nm_inode_info {
     kuid_t v_uid;
     kgid_t v_gid;
     umode_t v_mode;
-    u8 flags;
+    u16 flags;
     u32 gen;
     struct nm_dsnap *dsnap;
     spinlock_t dsnap_lock;
@@ -138,7 +137,7 @@ struct nomount_child_node {
     u64 fake_ino;
     int id;
     u8 d_type;
-    u8 flags;
+    u16 flags;
     u16 name_len;
     struct nomount_rule *rule;
 
@@ -187,7 +186,7 @@ struct nomount_rule {
     u16 v_ctx_len;
     u32 v_hash;
     u16 v_len;
-    u8  flags;
+    u16 flags;
     unsigned int target_uid;
 
     char paths[]; 
@@ -322,6 +321,7 @@ enum {
     NOMOUNT_ATTR_UID,
     NOMOUNT_ATTR_VERSION,
     NOMOUNT_ATTR_PAYLOAD,
+    NOMOUNT_ATTR_MODVER,
     __NOMOUNT_ATTR_MAX,
 };
 

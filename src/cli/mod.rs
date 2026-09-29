@@ -86,10 +86,12 @@ Exits 1 on a FAIL.
     Verify,
     /// Dump diagnostics to a folder for a bug report
     #[command(after_help = "\
-On shared storage (/sdcard) everything naming the apps you hide is withheld - the
-hide-list files, spoof.conf, boot.log, and dmesg-nomount.txt is replaced by a stub -
-and the bundle says so. Export to a private path (e.g. /data/adb/nomount/report) to
-include them.")]
+On shared storage (/sdcard) and under /data/local/tmp everything naming the apps you
+hide is withheld - the hide-list files, spoof.conf, boot.log, and dmesg-nomount.txt is
+replaced by a stub - and the bundle says so. Under /data/local/tmp the bundle belongs to
+shell (uid 2000, folder 0700, files 0600), so adb pull works and apps cannot read it.
+Export to a private path (e.g. /data/adb/nomount/report) to include them; that bundle is
+root-only.")]
     Export {
         /// Where to write the bundle (default: a timestamped folder in /sdcard/Download)
         dir: Option<String>,
