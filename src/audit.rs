@@ -1461,13 +1461,17 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         Err(e) => return e.into_check(NAME),
     };
     let who = hidden_uid_label(appid, crate::blocklist::redact_hide_list());
+    xattr_verdict(&who, files.len(), leaked, inverse, denied)
+}
+
+fn xattr_verdict(who: &str, files: usize, leaked: u32, inverse: u32, denied: u32) -> Check {
+    const NAME: &str = N_XATTR_HIDDEN;
     if leaked > 0 {
         return fail(
             NAME,
             format!(
-                "{who} was denied open() on {leaked} of {} injected file(s) but still got an \
-                 xattr answer for them",
-                files.len()
+                "{who} was denied open() on {leaked} of {files} injected file(s) but still got \
+                 an xattr answer for them"
             ),
             "the xattr surface is not applying the per-UID decision that open() is. \
              nm_listxattr() and nm_xattr_get() must both return -ENOENT to a caller \
@@ -1480,25 +1484,12 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .owner("the kernel engine");
     }
-    if denied == 0 {
-        return unmeasured(
-            NAME,
-            format!(
-                "{who}: no injected file was hidden from this app across {} sampled - nothing for the open()-vs-xattr disagreement to appear on",
-                files.len()
-            ),
-        )
-        .meaning(
-            "Every injected file opened for the app you hid, so the inconsistency this looks for could not have shown up. Not tested.",
-        );
-    }
     if inverse > 0 {
         return soft(
             NAME,
             format!(
-                "{who}: {inverse} of {} injected file(s) opened for the app but refused to \
-                 answer xattr",
-                files.len()
+                "{who}: {inverse} of {files} injected file(s) opened for the app but refused \
+                 to answer xattr"
             ),
             "open() and the xattr surface disagree about the same file, so an app can tell an \
              injected file from a stock one by asking twice",
@@ -1511,11 +1502,21 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .owner("the kernel engine");
     }
+    if denied == 0 {
+        return unmeasured(
+            NAME,
+            format!(
+                "{who}: no injected file was hidden from this app across {files} sampled - nothing for the open()-vs-xattr disagreement to appear on"
+            ),
+        )
+        .meaning(
+            "Every injected file opened for the app you hid, so the inconsistency this looks for could not have shown up. Not tested.",
+        );
+    }
     pass(
         NAME,
         format!(
-            "{who}: {denied} of {} injected file(s) were hidden, and none of them answered xattr either",
-            files.len()
+            "{who}: {denied} of {files} injected file(s) were hidden, and none of them answered xattr either"
         ),
     )
     .meaning("Every file hidden from an app you hid stayed hidden on the xattr surface too.")
@@ -1899,6 +1900,19 @@ mod tests {
             "must not claim root could not open files that do not exist: {}",
             c.meaning
         );
+    }
+
+    #[test]
+    fn a_measured_xattr_disagreement_is_reported_even_when_nothing_was_hidden() {
+        let who = "uid 10384 (hidden)";
+        let c = xattr_verdict(who, 40, 0, 3, 0);
+        assert_eq!(c.verdict.tag(), "NOTE", "{}", c.evidence);
+        assert!(c.evidence.contains("3 of 40"), "{}", c.evidence);
+
+        assert_eq!(xattr_verdict(who, 40, 0, 0, 0).verdict.tag(), "UNMEASURED");
+        assert_eq!(xattr_verdict(who, 40, 0, 0, 5).verdict.tag(), "PASS");
+        assert_eq!(xattr_verdict(who, 40, 0, 2, 5).verdict.tag(), "NOTE");
+        assert_eq!(xattr_verdict(who, 40, 1, 2, 5).verdict.tag(), "FAIL");
     }
 
     #[test]
