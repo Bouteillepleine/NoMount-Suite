@@ -546,9 +546,35 @@ fn check_dino_matches_stat(targets: &[PathBuf]) -> Check {
     }
 }
 
+fn band_evidence(groups: &[(String, u64, u64, usize)]) -> String {
+    const SHOWN: usize = 10;
+    let total: usize = groups.iter().map(|g| g.3).sum();
+    let mut sorted: Vec<&(String, u64, u64, usize)> = groups.iter().collect();
+    sorted.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2))));
+    let mut by_dir: Vec<(&str, Vec<String>)> = Vec::new();
+    for (dir, dev, b, n) in sorted.iter().take(SHOWN) {
+        let item = format!("{n} in dev {dev} {b}M");
+        match by_dir.iter_mut().find(|(d, _)| d == dir) {
+            Some((_, items)) => items.push(item),
+            None => by_dir.push((dir.as_str(), vec![item])),
+        }
+    }
+    let listed: Vec<String> =
+        by_dir.iter().map(|(d, items)| format!("{d}: {}", items.join(", "))).collect();
+    let mut s = format!(
+        "{total} injected inode(s) in {} all-ours bucket(s), no stock there - {}",
+        groups.len(),
+        listed.join("; ")
+    );
+    if groups.len() > SHOWN {
+        s.push_str(&format!("; +{} more bucket(s)", groups.len() - SHOWN));
+    }
+    s
+}
+
 fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     const BUCKET: u64 = 1_000_000;
-    let mut worst: Option<(String, u64, usize)> = None;
+    let mut groups: Vec<(String, u64, u64, usize)> = Vec::new();
     let mut examined = 0usize;
     let mut unread = 0usize;
     for parent in parents_of(targets) {
@@ -578,11 +604,10 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             continue;
         }
         examined += 1;
-        let mut bands: Vec<(&(u64, u64), &usize)> = ours_buckets.iter().collect();
-        bands.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        for (b, n) in bands {
-            if !stock_buckets.contains_key(b) && worst.as_ref().is_none_or(|w| *n > w.2) {
-                worst = Some((parent.to_string_lossy().into_owned(), b.1, *n));
+        let dir = parent.to_string_lossy().into_owned();
+        for (&(dev, b), &n) in &ours_buckets {
+            if !stock_buckets.contains_key(&(dev, b)) {
+                groups.push((dir.clone(), dev, b, n));
             }
         }
     }
@@ -603,7 +628,7 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
              yours is.",
         );
     }
-    if worst.is_none() && unread > 0 {
+    if groups.is_empty() && unread > 0 {
         return unmeasured(
             N_INODE_BAND,
             format!(
@@ -615,27 +640,28 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             "{unread} folder(s) would not open, so they were not checked. What was read looks fine."
         ));
     }
-    match worst {
-        None => pass(
+    if groups.is_empty() {
+        return pass(
             N_INODE_BAND,
             format!("{examined} directory(ies): every injected inode shares a bucket with stock"),
         )
-        .meaning("Injected files sit in the same numeric range as the ROM's own files."),
-        Some((dir, b, n)) => soft(
-            N_INODE_BAND,
-            format!("{dir}: {n} injected inode(s) alone in the {}M bucket, no stock there", b),
-            "bucket every inode in a directory and the all-ours band names the injections",
-        )
-        .meaning(
-            "Injected files carry ID numbers from a range the ROM never uses. Grouping a folder's \
-             files by that number yields one group that is entirely yours.",
-        )
-        .owner("the kernel engine"),
+        .meaning("Injected files sit in the same numeric range as the ROM's own files.");
     }
+    soft(
+        N_INODE_BAND,
+        band_evidence(&groups),
+        "bucket every inode in a directory and the all-ours band names the injections",
+    )
+    .meaning(
+        "Injected files carry ID numbers from a range the ROM never uses. Grouping a folder's \
+         files by device and that number yields groups that are entirely yours.",
+    )
+    .owner("the kernel engine")
 }
 
 fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
+    let mut unranged = Vec::new();
     let mut examined = 0usize;
     let mut unread = 0usize;
     let subjects: Vec<PathBuf> =
@@ -677,14 +703,44 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
         if stock_max.is_empty() || dirs.is_empty() {
             continue;
         }
-        examined += 1;
+        let mut ranged = false;
         for (p, d, i) in dirs {
-            let Some(&sm) = stock_max.get(&d) else { continue };
+            let Some(&sm) = stock_max.get(&d) else {
+                unranged.push(format!("{} dev {d}", p.display()));
+                continue;
+            };
+            ranged = true;
             if sm > 0 && i > sm.saturating_mul(8) {
                 outliers.push(format!("{} ino={i} (stock max here {sm})", p.display()));
             }
         }
+        if ranged {
+            examined += 1;
+        }
     }
+    overlay_dir_verdict(examined, unread, &outliers, &unranged)
+}
+
+fn overlay_dir_verdict(
+    examined: usize,
+    unread: usize,
+    outliers: &[String],
+    unranged: &[String],
+) -> Check {
+    const SHOWN: usize = 5;
+    let unranged_list = || {
+        let mut s = unranged.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+        if unranged.len() > SHOWN {
+            s.push_str(&format!(", +{} more", unranged.len() - SHOWN));
+        }
+        s
+    };
+    let unranged_meaning = |k: usize| {
+        format!(
+            "{k} folder(s) the Suite created report a device none of the ROM's folders beside \
+             them use, so there was no stock range to compare them with and they were not checked."
+        )
+    };
     if examined == 0 {
         if unread > 0 {
             return unmeasured(
@@ -692,6 +748,18 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
                 format!("{unread} overlay directory(ies) could not be read"),
             )
             .meaning("The folders this needed to read would not open, so this was not tested.");
+        }
+        if !unranged.is_empty() {
+            return unmeasured(
+                N_OVERLAY_DIR_INO,
+                format!(
+                    "{} synthesized dir(s) on a device no stock dir beside them uses, so none \
+                     could be compared: {}",
+                    unranged.len(),
+                    unranged_list()
+                ),
+            )
+            .meaning(format!("{} This was not tested.", unranged_meaning(unranged.len())));
         }
         return na(
             N_OVERLAY_DIR_INO,
@@ -702,17 +770,29 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
              have none.",
         );
     }
-    if outliers.is_empty() && unread > 0 {
+    if outliers.is_empty() && (unread > 0 || !unranged.is_empty()) {
+        let mut skipped = Vec::new();
+        let mut why = Vec::new();
+        if unread > 0 {
+            skipped.push(format!("{unread} could not be read"));
+            why.push(format!("{unread} folder(s) would not open, so they were not checked."));
+        }
+        if !unranged.is_empty() {
+            skipped.push(format!(
+                "{} synthesized dir(s) had no stock dir on their device to compare with ({})",
+                unranged.len(),
+                unranged_list()
+            ));
+            why.push(unranged_meaning(unranged.len()));
+        }
         return unmeasured(
             N_OVERLAY_DIR_INO,
             format!(
-                "{examined} overlay dir(s) clean, but {unread} could not be read and were not \
-                 checked"
+                "{examined} overlay dir(s) clean, but {} and were not checked",
+                skipped.join(" and ")
             ),
         )
-        .meaning(format!(
-            "{unread} folder(s) would not open, so they were not checked. What was read looks fine."
-        ));
+        .meaning(format!("{} What was read looks fine.", why.join(" ")));
     }
     if outliers.is_empty() {
         pass(
@@ -1158,6 +1238,19 @@ fn hidden_uid_label(appid: u32, redact: bool) -> String {
     }
 }
 
+fn size_and_ends(mut f: fs::File) -> Option<(u64, Vec<u8>)> {
+    use std::io::{Read, Seek, SeekFrom};
+    const END: u64 = 4096;
+    let len = f.metadata().ok()?.len();
+    let mut bytes = Vec::new();
+    (&mut f).take(END).read_to_end(&mut bytes).ok()?;
+    if len > END {
+        f.seek(SeekFrom::Start(len.saturating_sub(END).max(END))).ok()?;
+        f.take(END).read_to_end(&mut bytes).ok()?;
+    }
+    Some((len, bytes))
+}
+
 fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     const NAME: &str = N_PM_OPEN;
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
@@ -1181,22 +1274,23 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         return na(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()))
             .meaning("You have not hidden any apps yet, so there is nothing to test here. Hide one and this check starts running.");
     };
-    let readable: Vec<&&PathBuf> = apks.iter().filter(|p| fs::File::open(p).is_ok()).collect();
+    let readable: Vec<(&PathBuf, (u64, Vec<u8>))> = apks
+        .iter()
+        .filter_map(|p| fs::File::open(p).ok().and_then(size_and_ends).map(|s| (*p, s)))
+        .collect();
     if readable.is_empty() {
         return unmeasured(NAME, format!("{} PM-published file rule(s), none readable as root", apks.len()))
             .meaning("None of the published files could be opened even as root, so the question this check asks could not be put.");
     }
-    let ours: Vec<u64> =
-        readable.iter().map(|p| fs::metadata(p.as_path()).map(|m| m.len()).unwrap_or(0)).collect();
 
     let counts = probe_as_uid(appid, || {
         let (mut denied, mut mismatched, mut other) = (0u32, 0u32, 0u32);
-        for (p, &our_len) in readable.iter().zip(ours.iter()) {
+        for (p, ours) in &readable {
             match fs::File::open(p.as_path()) {
-                Ok(_) => match fs::metadata(p.as_path()).map(|m| m.len()) {
-                    Ok(n) if n != our_len => mismatched += 1,
-                    Ok(_) => {}
-                    Err(_) => other += 1,
+                Ok(f) => match size_and_ends(f) {
+                    Some(theirs) if theirs != *ours => mismatched += 1,
+                    Some(_) => {}
+                    None => other += 1,
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => denied += 1,
                 Err(_) => other += 1,
@@ -1227,11 +1321,15 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
     if denied == 0 && mismatched == 0 {
         return pass(
             NAME,
-            format!("{who} opened all {tested} PM-published rule target(s), same bytes we serve"),
+            format!(
+                "{who} opened all {tested} PM-published rule target(s): same size, first and \
+                 last 4 KiB as the copy we serve"
+            ),
         )
         .meaning(
-            "A hidden app can still open every file Android told it about, with the same bytes. \
-             This is what stops hiding from crashing apps.",
+            "A hidden app can still open every file Android told it about, and gets a file of \
+             the same size whose first and last 4 KiB match your module's. This is what stops \
+             hiding from crashing apps.",
         );
     }
     if denied == 0 {
@@ -1239,7 +1337,8 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             NAME,
             format!(
                 "{who} opened all {tested} PM-published rule target(s) it could test but \
-                 {mismatched} differed in size from the copy we serve"
+                 {mismatched} differed in size or in their first or last 4 KiB from the copy we \
+                 serve"
             ),
             "those rules shadow a stock file, so the blocked reader is answered from the stock \
              file -- while the PackageManager parsed OUR copy and publishes its version and \
@@ -1258,7 +1357,7 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         format!(
             "{who} was answered ENOENT on {denied} of {tested} PM-published rule target(s)\
              {}",
-            if mismatched > 0 { format!(", and {mismatched} more differed in size") } else { String::new() }
+            if mismatched > 0 { format!(", and {mismatched} more differed in size or content") } else { String::new() }
         ),
         "the PackageManager names those paths to the app while open() answers ENOENT -- \
          an inconsistency no stock device has, and one that crashes RASP code that walks \
@@ -1436,13 +1535,17 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         Err(e) => return e.into_check(NAME),
     };
     let who = hidden_uid_label(appid, crate::blocklist::redact_hide_list());
+    xattr_verdict(&who, files.len(), leaked, inverse, denied)
+}
+
+fn xattr_verdict(who: &str, files: usize, leaked: u32, inverse: u32, denied: u32) -> Check {
+    const NAME: &str = N_XATTR_HIDDEN;
     if leaked > 0 {
         return fail(
             NAME,
             format!(
-                "{who} was denied open() on {leaked} of {} injected file(s) but still got an \
-                 xattr answer for them",
-                files.len()
+                "{who} was denied open() on {leaked} of {files} injected file(s) but still got \
+                 an xattr answer for them"
             ),
             "the xattr surface is not applying the per-UID decision that open() is. \
              nm_listxattr() and nm_xattr_get() must both return -ENOENT to a caller \
@@ -1455,25 +1558,12 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .owner("the kernel engine");
     }
-    if denied == 0 {
-        return unmeasured(
-            NAME,
-            format!(
-                "{who}: no injected file was hidden from this app across {} sampled - nothing for the open()-vs-xattr disagreement to appear on",
-                files.len()
-            ),
-        )
-        .meaning(
-            "Every injected file opened for the app you hid, so the inconsistency this looks for could not have shown up. Not tested.",
-        );
-    }
     if inverse > 0 {
         return soft(
             NAME,
             format!(
-                "{who}: {inverse} of {} injected file(s) opened for the app but refused to \
-                 answer xattr",
-                files.len()
+                "{who}: {inverse} of {files} injected file(s) opened for the app but refused \
+                 to answer xattr"
             ),
             "open() and the xattr surface disagree about the same file, so an app can tell an \
              injected file from a stock one by asking twice",
@@ -1486,11 +1576,21 @@ fn check_xattr_agrees_when_hidden(targets: &[PathBuf]) -> Check {
         )
         .owner("the kernel engine");
     }
+    if denied == 0 {
+        return unmeasured(
+            NAME,
+            format!(
+                "{who}: no injected file was hidden from this app across {files} sampled - nothing for the open()-vs-xattr disagreement to appear on"
+            ),
+        )
+        .meaning(
+            "Every injected file opened for the app you hid, so the inconsistency this looks for could not have shown up. Not tested.",
+        );
+    }
     pass(
         NAME,
         format!(
-            "{who}: {denied} of {} injected file(s) were hidden, and none of them answered xattr either",
-            files.len()
+            "{who}: {denied} of {files} injected file(s) were hidden, and none of them answered xattr either"
         ),
     )
     .meaning("Every file hidden from an app you hid stayed hidden on the xattr surface too.")
@@ -1606,6 +1706,32 @@ mod tests {
             Verdict::Fail,
             "a directory with no ROM content must never FAIL the band check"
         );
+    }
+
+    #[test]
+    fn the_inode_band_note_counts_every_all_ours_bucket() {
+        let d = "/product/overlay".to_string();
+        let groups = vec![
+            (d.clone(), 35, 80, 35),
+            (d.clone(), 35, 81, 24),
+            (d.clone(), 35, 82, 2),
+            (d.clone(), 35, 83, 17),
+            (d.clone(), 27, 83, 2),
+        ];
+        assert_eq!(
+            band_evidence(&groups),
+            "80 injected inode(s) in 5 all-ours bucket(s), no stock there - /product/overlay: \
+             35 in dev 35 80M, 24 in dev 35 81M, 17 in dev 35 83M, 2 in dev 27 83M, \
+             2 in dev 35 82M"
+        );
+
+        let mut many: Vec<(String, u64, u64, usize)> =
+            (0..12).map(|b| ("/product/app".to_string(), 7, b, 1)).collect();
+        many.push(("/system/app".to_string(), 9, 3, 5));
+        let got = band_evidence(&many);
+        assert!(got.starts_with("17 injected inode(s) in 13 all-ours bucket(s)"), "{got}");
+        assert!(got.contains("/system/app: 5 in dev 9 3M; /product/app: 1 in dev 7 0M"), "{got}");
+        assert!(got.ends_with("; +3 more bucket(s)"), "{got}");
     }
 
     #[test]
@@ -1848,6 +1974,66 @@ mod tests {
             "must not claim root could not open files that do not exist: {}",
             c.meaning
         );
+    }
+
+    #[test]
+    fn a_synthesized_dir_with_no_stock_dir_on_its_device_is_not_a_pass() {
+        let off = vec!["/product/overlay/Vdir dev 35".to_string()];
+        let c = overlay_dir_verdict(1, 0, &[], &off);
+        assert_eq!(c.verdict.tag(), "UNMEASURED", "{}", c.evidence);
+        assert!(c.evidence.contains("/product/overlay/Vdir dev 35"), "{}", c.evidence);
+
+        let c = overlay_dir_verdict(0, 0, &[], &off);
+        assert_eq!(c.verdict.tag(), "UNMEASURED", "compared nothing, but there was a subject");
+
+        assert_eq!(overlay_dir_verdict(1, 0, &[], &[]).verdict.tag(), "PASS");
+        assert_eq!(overlay_dir_verdict(0, 0, &[], &[]).verdict.tag(), "N/A");
+        let hit = vec!["/product/overlay/V ino=83232001 (stock max here 26)".to_string()];
+        assert_eq!(overlay_dir_verdict(1, 0, &hit, &off).verdict.tag(), "NOTE");
+        assert_eq!(
+            overlay_dir_verdict(2, 1, &[], &[]).evidence,
+            "2 overlay dir(s) clean, but 1 could not be read and were not checked"
+        );
+
+        let many: Vec<String> = (0..7).map(|i| format!("/product/overlay/V{i} dev 35")).collect();
+        let c = overlay_dir_verdict(0, 0, &[], &many);
+        assert!(c.evidence.ends_with("/product/overlay/V4 dev 35, +2 more"), "{}", c.evidence);
+    }
+
+    #[test]
+    fn the_pm_open_probe_compares_bytes_not_only_the_size() {
+        let d = tempfile::tempdir().unwrap();
+        let read = |name: &str, body: &[u8]| {
+            let p = d.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            size_and_ends(std::fs::File::open(&p).unwrap()).unwrap()
+        };
+        let ours: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let mut stock = ours.clone();
+        *stock.last_mut().unwrap() ^= 0xff;
+        assert_ne!(read("ours.apk", &ours), read("stock.apk", &stock), "same size, other bytes");
+        let mut head = ours.clone();
+        head[0] ^= 0xff;
+        assert_ne!(read("ours.apk", &ours), read("head.apk", &head));
+        assert_eq!(read("a.apk", &ours), read("b.apk", &ours));
+
+        let (len, bytes) = read("small", b"abc");
+        assert_eq!((len, bytes.as_slice()), (3, &b"abc"[..]));
+        let mid: Vec<u8> = (0..5000u32).map(|i| (i % 7) as u8).collect();
+        assert_eq!(read("mid", &mid), (5000, mid.clone()), "no byte is read twice");
+    }
+
+    #[test]
+    fn a_measured_xattr_disagreement_is_reported_even_when_nothing_was_hidden() {
+        let who = "uid 10384 (hidden)";
+        let c = xattr_verdict(who, 40, 0, 3, 0);
+        assert_eq!(c.verdict.tag(), "NOTE", "{}", c.evidence);
+        assert!(c.evidence.contains("3 of 40"), "{}", c.evidence);
+
+        assert_eq!(xattr_verdict(who, 40, 0, 0, 0).verdict.tag(), "UNMEASURED");
+        assert_eq!(xattr_verdict(who, 40, 0, 0, 5).verdict.tag(), "PASS");
+        assert_eq!(xattr_verdict(who, 40, 0, 2, 5).verdict.tag(), "NOTE");
+        assert_eq!(xattr_verdict(who, 40, 1, 2, 5).verdict.tag(), "FAIL");
     }
 
     #[test]
