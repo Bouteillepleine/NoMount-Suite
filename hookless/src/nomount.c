@@ -3624,6 +3624,8 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
     if (pop->nmine >= NM_INO_MINE) {
         u64 c = pop->hw + 1;
 
+        if (c <= dhw)
+            c = dhw + 1;
         while (nm_ino_taken(pop, c))
             c++;
         return nm_ino_take(pop, c);
