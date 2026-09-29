@@ -63,13 +63,16 @@ impl Nm {
             .stderr(Stdio::piped())
             .spawn()?;
 
+        let by = Instant::now() + deadline;
         let mut so = child.stdout.take();
         let mut se = child.stderr.take();
+        let (eof_tx, eof_rx) = std::sync::mpsc::channel();
         let t_out = std::thread::spawn(move || {
             let mut b = Vec::new();
             if let Some(h) = so.as_mut() {
                 let _ = h.read_to_end(&mut b);
             }
+            let _ = eof_tx.send(());
             b
         });
         let t_err = std::thread::spawn(move || {
@@ -80,24 +83,18 @@ impl Nm {
             b
         });
 
-        let start = Instant::now();
-        let status = loop {
-            match child.try_wait()? {
-                Some(st) => break st,
-                None if start.elapsed() >= deadline => {
-                    let _ = child.kill();
-                    if !matches!(reap_by(&mut child, Instant::now() + Nm::KILL_GRACE), Ok(Some(_))) {
-                        std::thread::spawn(move || {
-                            let _ = child.wait();
-                        });
-                    }
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!("nm {} did not answer in {deadline:?}", args.join(" ")),
-                    ));
-                }
-                None => std::thread::sleep(Duration::from_millis(20)),
+        let _ = eof_rx.recv_timeout(by.saturating_duration_since(Instant::now()));
+        let Some(status) = reap_by(&mut child, by)? else {
+            let _ = child.kill();
+            if !matches!(reap_by(&mut child, Instant::now() + Nm::KILL_GRACE), Ok(Some(_))) {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
             }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("nm {} did not answer in {deadline:?}", args.join(" ")),
+            ));
         };
 
         Ok(std::process::Output {
@@ -645,6 +642,33 @@ mod tests {
         let calls = std::fs::read_to_string(&log).unwrap();
         assert_eq!(calls.lines().count(), 1, "{calls:?}");
         assert!(calls.contains("/system/lib64/a.so") && calls.contains("/system/etc/c.conf"), "{calls:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_quick_nm_is_not_held_back_by_the_deadline_poll() {
+        let nm = Nm { bin: "/bin/sleep".into() };
+        let fastest = (0..20)
+            .map(|_| {
+                let t = Instant::now();
+                nm.output_within(&["0.003"], Duration::from_secs(10)).expect("ran");
+                t.elapsed()
+            })
+            .min()
+            .unwrap();
+        assert!(fastest < Duration::from_millis(15), "{fastest:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_nm_that_closes_stdout_before_exiting_is_still_waited_for() {
+        let nm = Nm { bin: "/bin/sh".into() };
+        let t = Instant::now();
+        let out = nm
+            .output_within(&["-c", "exec >&-; sleep 0.3; exit 7"], Duration::from_secs(10))
+            .expect("ran");
+        assert_eq!(out.status.code(), Some(7));
+        assert!(t.elapsed() >= Duration::from_millis(300), "{:?}", t.elapsed());
     }
 
     #[cfg(unix)]
