@@ -657,14 +657,24 @@ pub(crate) fn is_shared_storage(p: &Path) -> bool {
     SHARED_ROOTS.iter().any(|r| p.starts_with(r))
 }
 
+const SHELL_TMP: &str = "/data/local/tmp";
+const SHELL_ID: u32 = 2000;
+
 fn app_readable_why(p: &Path) -> Option<&'static str> {
     if is_shared_storage(p) {
         Some("is shared storage, readable by any app with a storage permission")
-    } else if p.starts_with("/data/local/tmp") {
-        Some("is under /data/local/tmp, where any app can open a file whose path it can guess")
+    } else if p.starts_with(SHELL_TMP) {
+        Some(
+            "is under /data/local/tmp, where any app can look up a name (the bundle itself is \
+             readable only by shell, uid 2000, so adb pull works)",
+        )
     } else {
         None
     }
+}
+
+fn is_for_shell(resolved: &Path, literal: &Path) -> bool {
+    !is_shared_storage(resolved) && (resolved.starts_with(SHELL_TMP) || literal.starts_with(SHELL_TMP))
 }
 
 fn resolve_existing_prefix(p: &Path) -> PathBuf {
@@ -677,24 +687,43 @@ fn resolve_existing_prefix(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
-fn create_export_dir(out: &Path, private: bool) -> std::io::Result<()> {
+fn create_export_dir(out: &Path, private: bool, owner: Option<(u32, u32)>) -> std::io::Result<()> {
     if !private {
         return fs::create_dir_all(out);
     }
     use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(out)
+    let missing: Vec<PathBuf> = out
+        .ancestors()
+        .take_while(|a| !a.as_os_str().is_empty() && fs::symlink_metadata(a).is_err())
+        .map(Path::to_path_buf)
+        .collect();
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(out)?;
+    if let Some((uid, gid)) = owner {
+        for d in &missing {
+            std::os::unix::fs::lchown(d, Some(uid), Some(gid))?;
+        }
+    }
+    Ok(())
 }
 
-fn write_export_file(path: &Path, content: &str, private: bool) -> std::io::Result<()> {
+fn write_export_file(
+    path: &Path,
+    content: &str,
+    private: bool,
+    owner: Option<(u32, u32)>,
+) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new()
+    let mut f = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(if private { 0o600 } else { 0o644 })
-        .open(path)?
-        .write_all(content.as_bytes())
+        .open(path)?;
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
+    }
+    f.write_all(content.as_bytes())
 }
 
 fn base_unusable(base: &Path) -> Option<String> {
@@ -743,11 +772,14 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     let resolved = resolve_existing_prefix(Path::new(&out));
     let public = app_readable_why(&resolved).or_else(|| app_readable_why(Path::new(&out)));
     let shared = public.is_some();
-    create_export_dir(Path::new(&out), !shared).with_context(|| format!("create {out}"))?;
+    let for_shell = is_for_shell(&resolved, Path::new(&out));
+    let private = !shared || for_shell;
+    let owner = for_shell.then_some((SHELL_ID, SHELL_ID));
+    create_export_dir(Path::new(&out), private, owner).with_context(|| format!("create {out}"))?;
 
     let nm = Nm::new();
     let write = |name: &str, content: &str| {
-        if let Err(e) = write_export_file(&Path::new(&out).join(name), content, !shared) {
+        if let Err(e) = write_export_file(&Path::new(&out).join(name), content, private, owner) {
             eprintln!("nomount: export: could not write {name}: {e} - this diagnostic is incomplete");
         }
     };
@@ -1191,6 +1223,13 @@ rules=3
         }
         let why = app_readable_why(Path::new("/data/local/tmp/nm-diag-1")).unwrap();
         assert!(!why.contains("shared storage"), "{why}");
+
+        let p = Path::new;
+        assert!(is_for_shell(p("/data/local/tmp/nm-diag-1"), p("/data/local/tmp/nm-diag-1")));
+        assert!(is_for_shell(p("/data/local/tmp/x/nm-diag-1"), p("/tmp-link/nm-diag-1")));
+        assert!(!is_for_shell(p("/storage/emulated/0/x"), p("/data/local/tmp/sd/x")));
+        assert!(!is_for_shell(p("/sdcard/Download/x"), p("/sdcard/Download/x")));
+        assert!(!is_for_shell(p("/data/adb/nomount/report/x"), p("/data/adb/nomount/report/x")));
     }
 
     #[test]
@@ -1207,17 +1246,44 @@ rules=3
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let out = d.path().join("report").join("nm-diag-1");
-        create_export_dir(&out, true).unwrap();
+        create_export_dir(&out, true, None).unwrap();
         let f = out.join("uidhide");
-        write_export_file(&f, "com.example.bank\n", true).unwrap();
+        write_export_file(&f, "com.example.bank\n", true, None).unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&out), 0o700, "the bundle folder must not be traversable by apps");
         assert_eq!(mode(out.parent().unwrap()), 0o700);
         assert_eq!(mode(&f), 0o600, "the bundle files must not be readable by apps");
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "com.example.bank\n");
 
-        write_export_file(&f, "x", true).unwrap();
+        write_export_file(&f, "x", true, None).unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "x", "a rewrite truncates");
+    }
+
+    #[test]
+    fn a_shell_export_hands_only_the_folders_it_created_to_shell() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let me = unsafe { (libc::getuid(), libc::getgid()) };
+        let d = tempfile::tempdir().unwrap();
+        let pre = d.path().join("tmp");
+        std::fs::create_dir(&pre).unwrap();
+        std::fs::set_permissions(&pre, std::fs::Permissions::from_mode(0o771)).unwrap();
+        let out = pre.join("nm-report").join("nm-diag-1");
+        create_export_dir(&out, true, Some(me)).unwrap();
+        let f = out.join("rules.txt");
+        write_export_file(&f, "r\n", true, Some(me)).unwrap();
+        let md = |p: &Path| std::fs::metadata(p).unwrap();
+        for p in [out.as_path(), out.parent().unwrap()] {
+            assert_eq!(md(p).permissions().mode() & 0o777, 0o700, "{}", p.display());
+            assert_eq!((md(p).uid(), md(p).gid()), me, "{}", p.display());
+        }
+        assert_eq!(md(&f).permissions().mode() & 0o777, 0o600);
+        assert_eq!((md(&f).uid(), md(&f).gid()), me);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "r\n");
+        assert_eq!(
+            md(&pre).permissions().mode() & 0o777,
+            0o771,
+            "a folder that was already there is left alone"
+        );
     }
 
     #[test]
