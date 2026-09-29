@@ -2018,6 +2018,10 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     struct dentry *child, *res;
     struct inode *new_inode, *r_child;
     u32 gen = (u32)atomic_read(&nm_rule_gen);
+    bool own_stock = false;
+    umode_t s_mode = 0;
+    kuid_t s_uid = GLOBAL_ROOT_UID;
+    kgid_t s_gid = GLOBAL_ROOT_GID;
 
     {
         struct path *stock = nm_stock_for_caller(info);
@@ -2101,6 +2105,12 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
                     ri.s_path.mnt = info->s_path.mnt;
                     ri.s_path.dentry = schild;
                     path_get(&ri.s_path);
+                    if (!S_ISDIR(si->i_mode) && r_child && !S_ISDIR(r_child->i_mode)) {
+                        own_stock = true;
+                        s_mode = si->i_mode & 07777;
+                        s_uid = si->i_uid;
+                        s_gid = si->i_gid;
+                    }
                 }
             }
             dput(schild);
@@ -2127,6 +2137,12 @@ static struct dentry *nm_dir_child_lookup(struct inode *dir, struct nm_inode_inf
     ri.v_uid   = info->v_uid;
     ri.v_gid   = info->v_gid;
     ri.v_mode  = info->v_mode;
+    if (own_stock) {
+        ri.v_mode = s_mode;
+        ri.v_uid = s_uid;
+        ri.v_gid = s_gid;
+        ri.flags |= NM_FLAG_HAVE_VOWN;
+    }
     ri.v_ctx_len = info->v_ctx_len;
     if (info->v_ctx_len)
         memcpy(ri.v_ctx, info->v_ctx, info->v_ctx_len + 1);
