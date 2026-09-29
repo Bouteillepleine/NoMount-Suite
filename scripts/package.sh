@@ -484,6 +484,15 @@ set_perm() {
     fi
     return 0
 }
+set_perm_recursive() {
+    find "$1" -type d 2>/dev/null | while IFS= read -r _spr; do
+        set_perm "$_spr" "$2" "$3" "$4" "$6"
+    done
+    find "$1" -type f -o -type l 2>/dev/null | while IFS= read -r _spr; do
+        set_perm "$_spr" "$2" "$3" "$5" "$6"
+    done
+    return 0
+}
 
 MODPATH="${MODPATH:-/data/adb/modules_update/meta-nomount}"
 rm -rf "$MODPATH"
