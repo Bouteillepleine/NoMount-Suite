@@ -1028,14 +1028,16 @@ static u16 nm_size_ratio(loff_t size, blkcnt_t blocks)
 
 static void nm_mirror_blocks(const struct nm_inode_info *info, struct kstat *stat)
 {
-    u64 want;
+    u64 want, rup, cap;
 
-    if (!info->v_cratio || stat->size < 8192)
+    if (!info->v_cratio || stat->size < 4096)
         return;
     want = div64_u64((u64)stat->size * info->v_cratio, 1024);
     want = (want + 4095) & ~4095ULL;
-    if (want >= (u64)stat->size)
-        want = ((u64)stat->size) & ~4095ULL;
+    rup = ((u64)stat->size + 4095) & ~4095ULL;
+    cap = rup > 4096 ? rup - 4096 : 0;
+    if (want > cap)
+        want = cap;
     if (!want)
         return;
     stat->blocks = (blkcnt_t)(want >> 9);
