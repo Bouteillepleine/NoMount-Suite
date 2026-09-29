@@ -661,6 +661,7 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
 
 fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
+    let mut unranged = Vec::new();
     let mut examined = 0usize;
     let mut unread = 0usize;
     let subjects: Vec<PathBuf> =
@@ -702,14 +703,44 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
         if stock_max.is_empty() || dirs.is_empty() {
             continue;
         }
-        examined += 1;
+        let mut ranged = false;
         for (p, d, i) in dirs {
-            let Some(&sm) = stock_max.get(&d) else { continue };
+            let Some(&sm) = stock_max.get(&d) else {
+                unranged.push(format!("{} dev {d}", p.display()));
+                continue;
+            };
+            ranged = true;
             if sm > 0 && i > sm.saturating_mul(8) {
                 outliers.push(format!("{} ino={i} (stock max here {sm})", p.display()));
             }
         }
+        if ranged {
+            examined += 1;
+        }
     }
+    overlay_dir_verdict(examined, unread, &outliers, &unranged)
+}
+
+fn overlay_dir_verdict(
+    examined: usize,
+    unread: usize,
+    outliers: &[String],
+    unranged: &[String],
+) -> Check {
+    const SHOWN: usize = 5;
+    let unranged_list = || {
+        let mut s = unranged.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+        if unranged.len() > SHOWN {
+            s.push_str(&format!(", +{} more", unranged.len() - SHOWN));
+        }
+        s
+    };
+    let unranged_meaning = |k: usize| {
+        format!(
+            "{k} folder(s) the Suite created report a device none of the ROM's folders beside \
+             them use, so there was no stock range to compare them with and they were not checked."
+        )
+    };
     if examined == 0 {
         if unread > 0 {
             return unmeasured(
@@ -717,6 +748,18 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
                 format!("{unread} overlay directory(ies) could not be read"),
             )
             .meaning("The folders this needed to read would not open, so this was not tested.");
+        }
+        if !unranged.is_empty() {
+            return unmeasured(
+                N_OVERLAY_DIR_INO,
+                format!(
+                    "{} synthesized dir(s) on a device no stock dir beside them uses, so none \
+                     could be compared: {}",
+                    unranged.len(),
+                    unranged_list()
+                ),
+            )
+            .meaning(format!("{} This was not tested.", unranged_meaning(unranged.len())));
         }
         return na(
             N_OVERLAY_DIR_INO,
@@ -727,17 +770,29 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
              have none.",
         );
     }
-    if outliers.is_empty() && unread > 0 {
+    if outliers.is_empty() && (unread > 0 || !unranged.is_empty()) {
+        let mut skipped = Vec::new();
+        let mut why = Vec::new();
+        if unread > 0 {
+            skipped.push(format!("{unread} could not be read"));
+            why.push(format!("{unread} folder(s) would not open, so they were not checked."));
+        }
+        if !unranged.is_empty() {
+            skipped.push(format!(
+                "{} synthesized dir(s) had no stock dir on their device to compare with ({})",
+                unranged.len(),
+                unranged_list()
+            ));
+            why.push(unranged_meaning(unranged.len()));
+        }
         return unmeasured(
             N_OVERLAY_DIR_INO,
             format!(
-                "{examined} overlay dir(s) clean, but {unread} could not be read and were not \
-                 checked"
+                "{examined} overlay dir(s) clean, but {} and were not checked",
+                skipped.join(" and ")
             ),
         )
-        .meaning(format!(
-            "{unread} folder(s) would not open, so they were not checked. What was read looks fine."
-        ));
+        .meaning(format!("{} What was read looks fine.", why.join(" ")));
     }
     if outliers.is_empty() {
         pass(
@@ -1919,6 +1974,30 @@ mod tests {
             "must not claim root could not open files that do not exist: {}",
             c.meaning
         );
+    }
+
+    #[test]
+    fn a_synthesized_dir_with_no_stock_dir_on_its_device_is_not_a_pass() {
+        let off = vec!["/product/overlay/Vdir dev 35".to_string()];
+        let c = overlay_dir_verdict(1, 0, &[], &off);
+        assert_eq!(c.verdict.tag(), "UNMEASURED", "{}", c.evidence);
+        assert!(c.evidence.contains("/product/overlay/Vdir dev 35"), "{}", c.evidence);
+
+        let c = overlay_dir_verdict(0, 0, &[], &off);
+        assert_eq!(c.verdict.tag(), "UNMEASURED", "compared nothing, but there was a subject");
+
+        assert_eq!(overlay_dir_verdict(1, 0, &[], &[]).verdict.tag(), "PASS");
+        assert_eq!(overlay_dir_verdict(0, 0, &[], &[]).verdict.tag(), "N/A");
+        let hit = vec!["/product/overlay/V ino=83232001 (stock max here 26)".to_string()];
+        assert_eq!(overlay_dir_verdict(1, 0, &hit, &off).verdict.tag(), "NOTE");
+        assert_eq!(
+            overlay_dir_verdict(2, 1, &[], &[]).evidence,
+            "2 overlay dir(s) clean, but 1 could not be read and were not checked"
+        );
+
+        let many: Vec<String> = (0..7).map(|i| format!("/product/overlay/V{i} dev 35")).collect();
+        let c = overlay_dir_verdict(0, 0, &[], &many);
+        assert!(c.evidence.ends_with("/product/overlay/V4 dev 35, +2 more"), "{}", c.evidence);
     }
 
     #[test]
