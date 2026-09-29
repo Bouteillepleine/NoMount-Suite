@@ -347,12 +347,58 @@ pub(crate) struct PlanEntry {
     pub kind: PlanKind,
 }
 
+#[derive(Default)]
+pub(crate) struct EngineEdits {
+    hidden: HashMap<PathBuf, Vec<std::ffi::OsString>>,
+    synthesized: HashSet<PathBuf>,
+}
+
+impl EngineEdits {
+    pub(crate) fn from_list(list: &str) -> Self {
+        let mut edits = Self::default();
+        for r in crate::nm::parse_list(list) {
+            if r.uid != 0 {
+                continue;
+            }
+            match r.kind {
+                crate::nm::LiveKind::Whiteout => {
+                    if let (Some(dir), Some(name)) = (r.target.parent(), r.target.file_name()) {
+                        edits.hidden.entry(dir.to_path_buf()).or_default().push(name.to_os_string());
+                    }
+                }
+                crate::nm::LiveKind::VirtualDir => {
+                    edits.synthesized.insert(r.target);
+                }
+                crate::nm::LiveKind::Inject => {}
+            }
+        }
+        edits
+    }
+
+    fn stock_listing(&self, dir: &Path) -> Option<Vec<(std::ffi::OsString, bool)>> {
+        let mut names: Vec<(std::ffi::OsString, bool)> = fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .filter(|e| !self.synthesized.contains(&dir.join(e.file_name())))
+            .map(|e| (e.file_name(), e.file_type().map(|t| t.is_dir()).unwrap_or(false)))
+            .collect();
+        for name in self.hidden.get(dir).into_iter().flatten() {
+            if !names.iter().any(|(n, _)| n == name) {
+                names.push((name.clone(), false));
+            }
+        }
+        names.sort();
+        Some(names)
+    }
+}
+
 fn expand_replacement(
     module: &str,
     stock_dir: &Path,
     module_dir: &Path,
     marker: &Path,
     depth: u32,
+    edits: &EngineEdits,
     out: &mut Vec<PlanEntry>,
 ) {
     if depth > 16 {
@@ -362,23 +408,26 @@ fn expand_replacement(
         );
         return;
     }
-    let stock_entries = match fs::read_dir(stock_dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Some(entries) = edits.stock_listing(stock_dir) else {
+        return;
     };
-    let mut entries: Vec<_> = stock_entries.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let name = entry.file_name();
+    for (name, stock_is_dir) in entries {
         let stock_child = stock_dir.join(&name);
         let module_child = module_dir.join(&name);
 
         let shipped = fs::symlink_metadata(&module_child).ok();
-        let stock_is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
         match shipped {
             Some(m) if m.is_dir() && stock_is_dir => {
-                expand_replacement(module, &stock_child, &module_child, marker, depth + 1, out);
+                expand_replacement(
+                    module,
+                    &stock_child,
+                    &module_child,
+                    marker,
+                    depth + 1,
+                    edits,
+                    out,
+                );
             }
             Some(_) => {}
             None => {
@@ -476,6 +525,7 @@ fn plan_tree(
     module: &str,
     module_root: &Path,
     dir: &Path,
+    edits: &EngineEdits,
     out: &mut Vec<PlanEntry>,
     refused: &mut Vec<Refused>,
 ) -> std::io::Result<()> {
@@ -546,9 +596,9 @@ fn plan_tree(
                 continue;
             }
             if is_opaque_dir(&source) && can_whiteout(&target).is_ok() {
-                expand_replacement(module, &target, &source, &source, 0, out);
+                expand_replacement(module, &target, &source, &source, 0, edits, out);
             }
-            plan_tree(module, module_root, &source, out, refused)?;
+            plan_tree(module, module_root, &source, edits, out, refused)?;
         } else if name == ".replace" {
             if let Some(parent) = target.parent() {
                 if can_whiteout(parent).is_err() {
@@ -565,7 +615,7 @@ fn plan_tree(
                     continue;
                 }
                 if let Some(module_dir) = source.parent() {
-                    expand_replacement(module, parent, module_dir, &source, 0, out);
+                    expand_replacement(module, parent, module_dir, &source, 0, edits, out);
                 }
             }
         } else if is_whiteout_marker(&ft, &source) {
@@ -722,6 +772,11 @@ fn warn_whiteout_hole(target: &Path, module: &str) {
 }
 
 pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
+    let edits = Nm::new().list().map(|l| EngineEdits::from_list(&l)).unwrap_or_default();
+    collect_plan_with(&edits)
+}
+
+fn collect_plan_with(edits: &EngineEdits) -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
     let blocklist = load_blocklist();
     let mut plan = Vec::new();
     let mut refused: Vec<Refused> = Vec::new();
@@ -772,7 +827,7 @@ pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
                     }
                     continue;
                 }
-                plan_tree(&id, &mdir, &e.path(), &mut plan, &mut refused).with_context(|| {
+                plan_tree(&id, &mdir, &e.path(), edits, &mut plan, &mut refused).with_context(|| {
                     format!(
                         "cannot walk {}/{name} -- refusing to return a partial plan, because \
                          `reload` diffs it against the live rules and would prune every rule \
@@ -873,7 +928,10 @@ pub fn run_reload() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding - is the CONFIG_NOMOUNT kernel loaded?")?;
 
-    let (plan, skipped, _refused) = collect_plan()?;
+    let live_txt = nm.list().context("nm list failed during reload")?;
+    let live = parse_live_rules(&live_txt);
+
+    let (plan, skipped, _refused) = collect_plan_with(&EngineEdits::from_list(&live_txt))?;
     let (plan, collisions) = dedupe_by_target(plan);
     for c in &collisions {
         eprintln!(
@@ -901,9 +959,6 @@ pub fn run_reload() -> Result<()> {
             }
         }
     }
-
-    let live_txt = nm.list().context("nm list failed during reload")?;
-    let live = parse_live_rules(&live_txt);
 
     let durable_whiteouts: HashSet<PathBuf> = durable_not_planned(
         crate::whiteout::read()
@@ -2187,7 +2242,7 @@ mod tests {
         fs::write(module.join("sub/d.xml"), b"mine").unwrap();
 
         let mut out = Vec::new();
-        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &mut out);
+        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &EngineEdits::default(), &mut out);
         let mut got: Vec<String> =
             out.iter().map(|e| e.target.strip_prefix(&stock).unwrap().display().to_string()).collect();
         got.sort();
@@ -2195,6 +2250,42 @@ mod tests {
         assert_eq!(got, vec!["b.xml".to_string(), "extra".to_string(), "sub/c.xml".to_string()]);
         assert!(out.iter().all(|e| e.kind == PlanKind::Whiteout));
         assert!(out.iter().all(|e| e.target != stock));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn replace_expands_against_the_stock_listing_not_the_engine_edited_one() {
+        let Some(base) = test_base("replace-stock-view") else { return };
+        let stock = base.join("stock");
+        let module = base.join("module");
+        fs::create_dir_all(stock.join("vdir")).unwrap();
+        fs::write(stock.join("a.xml"), b"stock").unwrap();
+        fs::create_dir_all(&module).unwrap();
+
+        let list = format!(
+            "{s}/b.xml (whiteout)\n{s}/vdir (virtual dir)\n{s}/c.xml (whiteout) [UID: 10123]\n",
+            s = stock.display()
+        );
+        let mut out = Vec::new();
+        expand_replacement(
+            "m",
+            &stock,
+            &module,
+            &module.join(".replace"),
+            0,
+            &EngineEdits::from_list(&list),
+            &mut out,
+        );
+        let mut got: Vec<String> =
+            out.iter().map(|e| e.target.strip_prefix(&stock).unwrap().display().to_string()).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["a.xml".to_string(), "b.xml".to_string()],
+            "b.xml is hidden by the previous pass and must stay planned, or reload prunes it; \
+             vdir exists only because the engine made it"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -2210,7 +2301,7 @@ mod tests {
         fs::write(module.join("thing"), b"mine").unwrap();
 
         let mut out = Vec::new();
-        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &mut out);
+        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &EngineEdits::default(), &mut out);
         assert!(out.is_empty(), "expected no whiteouts, got {} entries", out.len());
 
         let _ = fs::remove_dir_all(&base);
@@ -2224,7 +2315,7 @@ mod tests {
         fs::write(module.join("mine.xml"), b"mine").unwrap();
 
         let mut out = Vec::new();
-        expand_replacement("m", &base.join("no-such-stock"), &module, &module.join(".replace"), 0, &mut out);
+        expand_replacement("m", &base.join("no-such-stock"), &module, &module.join(".replace"), 0, &EngineEdits::default(), &mut out);
         assert!(out.is_empty());
 
         let _ = fs::remove_dir_all(&base);
@@ -2272,7 +2363,7 @@ mod tests {
         fs::create_dir_all(&m).unwrap();
 
         let mut out = Vec::new();
-        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &mut out);
+        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &EngineEdits::default(), &mut out);
         assert!(out.iter().all(|e| !e.target.ends_with("deep.xml")));
 
         let _ = fs::remove_dir_all(&base);
