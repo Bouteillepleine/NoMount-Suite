@@ -35,6 +35,15 @@ pub const RULES: &[&str] = &["/data/adb/"];
 pub struct Summary {
     pub programmed: usize,
     pub rejected: Vec<String>,
+    /// The engine answered, and answered that it has no pathhide knob. That is
+    /// every kernel built before the cloak existed, which is most of them: the
+    /// engine ships in the kernel, so a module update alone never adds it. It
+    /// is a statement about the kernel, not a fault, and nothing a detector can
+    /// use against the user -- so it reads as plain information.
+    pub cloak_absent: bool,
+    /// The engine did not answer at all. Unlike the above this is a real
+    /// problem, because it means nm could not reach an engine that should be
+    /// there.
     pub cloak_unknown: bool,
 }
 
@@ -47,6 +56,11 @@ impl Summary {
     }
 
     pub fn line(&self) -> String {
+        if self.cloak_absent {
+            return "maps cloak: this kernel has no pathhide knob, so there is nothing to \
+                    program - the engine ships in the kernel, not in this module"
+                .into();
+        }
         if self.cloak_unknown {
             return "\u{26a0} maps cloak: nm would not answer, so whether this kernel carries \
                     pathhide at all is unknown - nothing was programmed this pass"
@@ -74,7 +88,11 @@ pub fn sync(nm: &Nm) -> Summary {
     let mut s = Summary::default();
 
     match nm.pathhide_present() {
-        None | Some(false) => {
+        Some(false) => {
+            s.cloak_absent = true;
+            return s;
+        }
+        None => {
             s.cloak_unknown = true;
             return s;
         }
@@ -135,5 +153,22 @@ mod tests {
 
         let s = Summary { programmed: 1, ..Default::default() };
         assert!(s.effective());
+    }
+
+    /// A kernel predating the cloak is the common case, not a fault: the engine
+    /// ships in the kernel, so anyone who updates only the module lands here.
+    /// Warning them about a capability their kernel never had, that no detector
+    /// can use against them, is noise they cannot act on.
+    #[test]
+    fn a_kernel_without_pathhide_is_stated_plainly_not_warned_about() {
+        let s = Summary { cloak_absent: true, ..Default::default() };
+        assert!(!s.effective());
+        let line = s.line();
+        assert!(!line.contains('\u{26a0}'), "absence must not render as a warning: {line}");
+        assert!(!line.contains("unknown"), "the engine answered, so nothing is unknown: {line}");
+
+        // The genuinely unreachable case keeps its warning.
+        let s = Summary { cloak_unknown: true, ..Default::default() };
+        assert!(s.line().contains('\u{26a0}'));
     }
 }
