@@ -151,7 +151,7 @@ void c_main(long *sp) {
         int vlen = 0;
 
         static const struct { const char *name; int knob; } nm_knobs[] = {
-            { "d", 4 }, { "i", 5 }, { "g", 7 },
+            { "d", 4 }, { "i", 5 }, { "p", 6 }, { "g", 7 },
         };
         if (p_count < 1) { print_err("nm: missing knob\n"); exit_code = 3; goto do_exit; }
         for (unsigned int ki = 0; ki < sizeof(nm_knobs) / sizeof(nm_knobs[0]); ki++) {
@@ -199,18 +199,19 @@ void c_main(long *sp) {
         exit_code = 1; goto do_exit;
 
     } else if (cmd == 'l') {
-        int is_uids = 0, is_gh = 0;
+        int is_uids = 0, is_gh = 0, is_ph = 0;
         for (int i = 0; i < p_count; i++) {
             const char *a = p_args[i];
             if (a[0] && !a[1]) {
                 if (a[0] == 'u') { is_uids = 1; continue; }
                 if (a[0] == 'g') { is_gh = 1; continue; }
+                if (a[0] == 'p') { is_ph = 1; continue; }
             }
             print_err("nm: unknown list option\n");
             exit_code = 3; goto do_exit;
         }
 
-        int target_cmd = is_gh ? 11 : is_uids ? 8 : 7;
+        int target_cmd = is_gh ? 11 : is_ph ? 10 : is_uids ? 8 : 7;
         int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
         int first = 1;
         if (nm_timed_out(len)) goto do_timeout;

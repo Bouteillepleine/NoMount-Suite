@@ -31,6 +31,12 @@
 extern int ghost_ctl(const char *buf, size_t count) __attribute__((weak));
 extern int ghost_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
 
+/* pathhide_get_rule() refuses an outsz under PH_RULE_LEN, so 128 is a floor,
+ * not a preference. */
+#define NM_PATHHIDE_RULE_MAX 128
+extern int pathhide_ctl(const char *buf, size_t count) __attribute__((weak));
+extern int pathhide_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
+
 static atomic_t nm_rule_gen = ATOMIC_INIT(0);
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
 static struct kmem_cache *nm_iop_cachep __read_mostly, *nm_fop_cachep __read_mostly;
@@ -5130,6 +5136,31 @@ static int nomount_nl_dump_ghost(struct sk_buff *skb, struct netlink_callback *c
     return skb->len;
 }
 
+static int nomount_nl_dump_pathhide(struct sk_buff *skb, struct netlink_callback *cb)
+{
+    char rule[NM_PATHHIDE_RULE_MAX];
+    int idx = cb->args[0];
+    void *hdr;
+
+    if (!pathhide_get_rule)
+        return 0;
+
+    while (pathhide_get_rule(idx, rule, sizeof(rule)) > 0) {
+        rule[sizeof(rule) - 1] = '\0';
+        hdr = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
+                        NM_CMD_TO_TYPE(NM_CMD_GET_PATHHIDE), 0, NLM_F_MULTI);
+        if (!hdr) break;
+        if (nla_put_string(skb, NOMOUNT_ATTR_VIRTUAL_PATH, rule)) {
+            nlmsg_cancel(skb, hdr);
+            break;
+        }
+        nlmsg_end(skb, hdr);
+        idx++;
+    }
+    cb->args[0] = idx;
+    return skb->len;
+}
+
 static int nomount_nl_get_version(struct sk_buff *req, struct nlmsghdr *req_nlh)
 {
     u32 portid = NETLINK_CB(req).portid;
@@ -5184,11 +5215,13 @@ static int nm_nl_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
     if (!netlink_capable(skb, CAP_SYS_ADMIN))
         return -EPERM;
 
-    if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS || cmd == NM_CMD_GET_GHOST) {
+    if (cmd == NM_CMD_GET_LIST || cmd == NM_CMD_GET_UIDS ||
+        cmd == NM_CMD_GET_GHOST || cmd == NM_CMD_GET_PATHHIDE) {
         struct netlink_dump_control c = {
-            .dump = cmd == NM_CMD_GET_LIST ? nomount_nl_dump_rules
-                  : cmd == NM_CMD_GET_UIDS ? nomount_nl_dump_uids
-                                           : nomount_nl_dump_ghost,
+            .dump = cmd == NM_CMD_GET_LIST  ? nomount_nl_dump_rules
+                  : cmd == NM_CMD_GET_UIDS  ? nomount_nl_dump_uids
+                  : cmd == NM_CMD_GET_GHOST ? nomount_nl_dump_ghost
+                                            : nomount_nl_dump_pathhide,
             .min_dump_alloc = 2 * PATH_MAX + 512,
         };
         return netlink_dump_start(nm_nl_sk, skb, nlh, &c);
@@ -5252,6 +5285,12 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
         if (vlen == 0)
             return 0;
         return ghost_ctl(val, vlen);
+    case NM_KNOB_PATHHIDE:
+        if (!pathhide_ctl)
+            return -EINVAL;
+        if (vlen == 0)
+            return 0;
+        return pathhide_ctl(val, vlen);
     default:
         return -EINVAL;
     }

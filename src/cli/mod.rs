@@ -101,6 +101,11 @@ root-only.")]
         #[command(subcommand)]
         action: GhostAction,
     },
+    /// The maps cloak: keep the root stack's own libraries out of app mapping lists
+    Pathhide {
+        #[command(subcommand)]
+        action: PathhideAction,
+    },
     /// Unmount the real binds recorded in binds.list (the my_* ones)
     Unbind,
     /// Print the version
@@ -112,6 +117,14 @@ pub enum GhostAction {
     /// Work out which injected-only paths can be made to look absent, and program them
     Sync,
     /// Show what the cloak currently covers
+    List,
+}
+
+#[derive(Subcommand)]
+pub enum PathhideAction {
+    /// Program the rule set that keeps the root stack out of app mapping lists
+    Sync,
+    /// Show what the maps cloak currently covers
     List,
 }
 

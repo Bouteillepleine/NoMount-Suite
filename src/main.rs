@@ -7,6 +7,7 @@ mod cli;
 mod dirshape;
 mod doctor;
 mod ghost;
+mod pathhide;
 mod health;
 mod json;
 mod manager;
@@ -67,6 +68,13 @@ fn main() -> Result<()> {
             cli::GhostAction::Sync => ghost::run_sync(true),
             cli::GhostAction::List => {
                 print!("{}", nm::Nm::new().ghost_list()?);
+                Ok(())
+            }
+        },
+        Commands::Pathhide { action } => match action {
+            cli::PathhideAction::Sync => pathhide::run_sync(true),
+            cli::PathhideAction::List => {
+                print!("{}", nm::Nm::new().pathhide_list()?);
                 Ok(())
             }
         },
