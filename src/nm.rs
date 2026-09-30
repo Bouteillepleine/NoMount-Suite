@@ -240,6 +240,26 @@ impl Nm {
         self.run(&["k", "g", cmd]).map(drop)
     }
 
+    pub fn pathhide_list(&self) -> Result<String> {
+        self.run(&["l", "p"])
+    }
+
+    /// Same three-way answer as [`Nm::ghost_present`]: `None` is "could not ask",
+    /// which is not the same as a kernel built without the cloak.
+    pub fn pathhide_present(&self) -> Option<bool> {
+        match self.run_coded(&["k", "p"]) {
+            Ok(_) => Some(true),
+            Err(e) if Nm::engine_is_unreachable(e.code) => None,
+            Err(_) => Some(false),
+        }
+    }
+
+    /// One rule per call: the engine length-checks each write against
+    /// PH_RULE_LEN, unlike ghost_ctl()'s multi-token buffer.
+    pub fn pathhide_ctl(&self, cmd: &str) -> Result<()> {
+        self.run(&["k", "p", cmd]).map(drop)
+    }
+
     fn add_batch_coded(
         &self,
         public: bool,

@@ -190,6 +190,26 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     unset _gh _gh_rc
 fi
 
+# The maps cloak. Separate from ghost on purpose: ghost covers paths the Suite
+# itself injects, this covers what a Zygisk implementation dlopen()s into an app
+# (/data/adb/modules/<mod>/...), which shows up in that app's OWN mapping list.
+# A kernel without the pathhide knob answers "unknown knob" and the sync reports
+# the cloak as unavailable rather than failing the boot.
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
+    _ph=$(nmto 60 "$BIN" pathhide sync 2>&1)
+    _ph_rc=$?
+    if [ "$_ph_rc" -eq 124 ]; then
+        nmlog "⚠ pathhide sync timed out after 60s - the root stack stays visible in app mapping lists this boot"
+    elif [ "$_ph_rc" -ne 0 ]; then
+        nmlog "⚠ pathhide sync FAILED (rc=$_ph_rc): $(printf '%s
+' "$_ph" | tail -1)"
+    elif [ -n "$_ph" ]; then
+        nmlog "$(printf '%s
+' "$_ph" | tail -1)"
+    fi
+    unset _ph _ph_rc
+fi
+
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
     inotifyd "$MODDIR/uidwatch.sh" /data/system:cewDMmynd >/dev/null 2>&1 &
