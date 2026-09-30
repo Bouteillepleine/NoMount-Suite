@@ -242,7 +242,7 @@ void c_main(long *sp) {
                     goto list_done;
                 }
 
-                if (is_gh) {
+                if (is_gh || is_ph) {
                     char *rule = get_attr_str(msg, 1);
                     if (rule) { print_str(rule); print_str("\n"); }
                 } else if (is_uids) {
