@@ -11,6 +11,11 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.192 - engine v34
+
+- The maps cloak is programmed at boot, on kernels that carry it.
+- `nm list p` prints the cloak's rules.
+
 ## v1.3.191 - engine v34
 
 - `nm v` prints the engine build after the protocol number.
