@@ -102,6 +102,19 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
     return is_blocked;
 }
 
+/* The same answer, callable from outside this translation unit, so _ghost's uid
+ * half can stop being a replica of this one. ghost.c weak-externs it, so a
+ * kernel without nomount still links and a kernel with it can no longer
+ * disagree with us about the isolated pools or about nm_hide_isolated -- which
+ * it did: the cloak carried the appid list and neither pool, so an isolated
+ * child of a hidden app was answered by our ops and by none of its guards.
+ * Nothing else should call this; it is deliberately not in nomount.h.
+ */
+bool nm_uid_blocked(uid_t uid)
+{
+    return nomount_is_uid_blocked(uid);
+}
+
 static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
 {
     unsigned int target;
