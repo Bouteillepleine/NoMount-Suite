@@ -353,23 +353,38 @@ nm_zr_fp() {
         | sha256sum 2>/dev/null | cut -d' ' -f1
 }
 
-# A payload the device can never load must not be planted in the ROM: the file
-# name IS its ABI, and an x86_64 ELF sitting in /system/lib64 on an arm64-only
-# device is a louder anomaly than the mapping this redirect removes.
-nm_zr_abi_ok() {
-    case ",$_zabilist," in
-        *",$1,"*) return 0 ;;
+# A library the device can never load must not be planted in the ROM: an x86_64
+# ELF sitting in /system/lib64 on an arm64-only device is a louder anomaly than
+# the mapping this redirect removes.
+#
+# Read it out of the ELF header rather than guessing from the path. The ABI is in
+# the file name for a zygisk payload (arm64-v8a.so) but in a directory for a
+# module-private one (lib/arm64-v8a/libfoo.so) and implied by the directory for
+# lib64/libbar.so -- three spellings, and a wrong guess plants an unloadable
+# file. e_ident[4] is the class (1=32, 2=64) and e_machine at offset 18 is the
+# architecture, little-endian.
+#
+# Echoes the ROM lib dir for a library this device can load, nothing otherwise.
+nm_zr_elf_libdir() {
+    _ze=$(od -An -tx1 -j0 -N20 "$1" 2>/dev/null | tr -d ' \n')
+    [ -n "$_ze" ] || return 1
+    case "$_ze" in 7f454c46*) ;; *) return 1 ;; esac
+    _zcls=$(printf '%s' "$_ze" | cut -c9-10)
+    _zmach=$(printf '%s' "$_ze" | cut -c37-40)
+    # od zero-pads each byte, so the class reads 01/02 and not 1/2.
+    case "$_zcls:$_zmach" in
+        02:b700) printf '%s' "$_zarch64" ;;   # aarch64
+        01:2800) printf '%s' "$_zarch32" ;;   # arm
+        *)       return 1 ;;                  # x86, x86_64, anything else
     esac
-    return 1
 }
 
+# Stable across boots so nothing churns, and keyed on the module plus the path
+# inside it so two libraries from one module cannot collide.
 nm_zr_rom_path() {
-    _zh=$(printf '%s/%s' "$1" "$2" | sha256sum 2>/dev/null | cut -c1-12)
+    _zh=$(printf '%s!%s' "$1" "$2" | sha256sum 2>/dev/null | cut -c1-12)
     [ -n "$_zh" ] || return 1
-    case "$2" in
-        *64*) printf '/system/lib64/lib%s.so' "$_zh" ;;
-        *)    printf '/system/lib/lib%s.so'   "$_zh" ;;
-    esac
+    printf '%s/lib%s.so' "$3" "$_zh"
 }
 
 # Undo everything a previous boot left behind, whatever state it is in.
@@ -418,25 +433,46 @@ nm_zr_stage() {
     nm_zr_restore
     nm_zr_enabled || { rm -f "$NMDIR/.zr-public.$$" 2>/dev/null; nm_zr_public_rewrite; return 0; }
 
-    _zabilist=$(getprop ro.product.cpu.abilist 2>/dev/null)
-    [ -n "$_zabilist" ] || _zabilist=$(getprop ro.product.cpu.abi 2>/dev/null)
-    [ -n "$_zabilist" ] || return 0
+    # Where a redirected library lands, per ELF class. Empty means this device
+    # cannot load that class at all, and nm_zr_elf_libdir() then refuses it.
+    _zarch64=""; _zarch32=""
+    case ",$(getprop ro.product.cpu.abilist 2>/dev/null)$(getprop ro.product.cpu.abi 2>/dev/null)," in
+        *arm64-v8a*) _zarch64=/system/lib64 ;;
+    esac
+    case ",$(getprop ro.product.cpu.abilist 2>/dev/null)," in
+        *armeabi*) _zarch32=/system/lib ;;
+    esac
+    [ -n "$_zarch64" ] || [ -n "$_zarch32" ] || return 0
 
     : > "$NMDIR/.zr-public.$$" 2>/dev/null || return 0
     : > "$NM_ZR_STATE" 2>/dev/null || { rm -f "$NMDIR/.zr-public.$$"; return 0; }
     chmod 0600 "$NM_ZR_STATE" 2>/dev/null
 
-    for _zso in /data/adb/modules/*/zygisk/*.so; do
+    # Piped into `while read` rather than a for loop so a module directory with a
+    # space in its name cannot split a path. Everything the body changes is a
+    # file, so running in a subshell costs nothing.
+    find /data/adb/modules -name '*.so' -type f 2>/dev/null | while IFS= read -r _zso; do
         [ -f "$_zso" ] || continue
-        case "$_zso" in *'*'*) continue ;; esac
         [ -L "$_zso" ] && continue
-        _zmid=${_zso#/data/adb/modules/}; _zmid=${_zmid%%/*}
+        _zrel=${_zso#/data/adb/modules/}
+        _zmid=${_zrel%%/*}
+        _zrel=${_zrel#"$_zmid"/}
         [ "$_zmid" = meta-nomount ] && continue
         { [ -f "/data/adb/modules/$_zmid/disable" ] || [ -f "/data/adb/modules/$_zmid/remove" ] \
           || [ -f "/data/adb/modules/$_zmid/skip_mount" ]; } && continue
-        _zabi=${_zso##*/}; _zabi=${_zabi%.so}
-        nm_zr_abi_ok "$_zabi" || continue
-        _zrom=$(nm_zr_rom_path "$_zmid" "$_zabi") || continue
+        # Already inside a tree the boot pass serves: its maps line names the ROM
+        # path as it stands, so redirecting it would be a second copy of a file
+        # that is not leaking.
+        case "/$_zrel" in
+            /system/*|/system_ext/*|/product/*|/vendor/*|/odm/*|/my_*/*) continue ;;
+        esac
+        # The Zygisk implementation's own loader goes into zygote, not into an
+        # app. Getting that one wrong costs the boot rather than a module, so it
+        # stays where it is and the maps cloak keeps covering it.
+        case "${_zso##*/}" in libzygisk*.so) continue ;; esac
+        _zlibdir=$(nm_zr_elf_libdir "$_zso") || continue
+        [ -n "$_zlibdir" ] || continue
+        _zrom=$(nm_zr_rom_path "$_zmid" "$_zrel" "$_zlibdir") || continue
         _zdir=/data/adb/modules/$_zmid${_zrom%/*}
         _zmat="$_zdir/${_zrom##*/}"
         mkdir -p "$_zdir" 2>/dev/null || continue
@@ -449,7 +485,7 @@ nm_zr_stage() {
     done
     nm_zr_public_rewrite
     rm -f "$NMDIR/.zr-public.$$" 2>/dev/null
-    unset _zso _zmid _zabi _zrom _zdir _zmat _zabilist
+    unset _zso _zrel _zmid _zrom _zdir _zmat _zlibdir _zarch64 _zarch32
 }
 
 nm_zr_commit() {
