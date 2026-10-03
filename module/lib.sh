@@ -295,3 +295,189 @@ nm_incident_missing_binary() {
         echo "note=reinstall the module zip; a partial/permission-stripped extraction is the usual cause"
     } > "$NMDIR/incident.log" 2>/dev/null
 }
+
+# ---------------------------------------------------------------------------
+# Zygisk library redirect
+#
+# A Zygisk implementation dlopen()s each enabled module's payload into app
+# processes straight out of /data/adb, so that path lands in the app's OWN
+# mapping list. The maps cloak answers that by deleting the line, and the hole
+# it leaves is its own tell: on OP15 6.12.58, MAP_FIXED_NOREPLACE answers
+# -EEXIST on the hidden range, reading the range returns an ELF header, and
+# VmRSS minus smaps_rollup Rss is non-zero where no stock device produces that.
+# None of it is closeable by rewriting what maps prints, because the leak is the
+# mapped bytes, not the line.
+#
+# So serve the payload from a ROM path instead and leave a symlink behind. The
+# loader opens the name it always did, the mapping names an ordinary system
+# library, dev/ino match a stat() of it, and the bytes ARE that file's. Nothing
+# needs hiding, so no hole exists to find.
+#
+# Three phases, around nm_mount_pass(), because each one depends on the last:
+#
+#   stage   hardlink the payload into the module's own system/lib64 tree and
+#           declare the ROM path in public.txt. The original is NOT touched, so
+#           a failure here or in the mount pass costs nothing.
+#   (mount) the boot pass walks module trees and serves the new path. It reads
+#           public.txt at add time, which is why staging has to come first --
+#           that is what makes the rule `(public)` and so invisible to
+#           `ghost sync`. Without it a blocked app would have the library
+#           mapped while stat() of the same path answered ENOENT, which is a
+#           sharper tell than the hole this replaces.
+#   commit  read the ROM path back, compare it against the payload, and only
+#           then replace the payload with a symlink to it.
+#
+# Every boot restores first and redirects second, so a boot where the engine
+# never came up leaves the real files in place rather than a dangling link.
+# The loader's own library is deliberately NOT redirected: it is loaded into
+# zygote, and getting it wrong costs the boot rather than a module.
+# ---------------------------------------------------------------------------
+
+NM_ZR_STATE="$NMDIR/zygisk-redirect.list"
+NM_ZR_PUBLIC="$NMDIR/public.txt"
+NM_ZR_BEGIN="# >>> nomount zygisk-redirect (managed; edits here are lost)"
+NM_ZR_END="# <<< nomount zygisk-redirect"
+
+nm_zr_enabled() {
+    [ -e "$NMDIR/no-zygisk-redirect" ] && return 1
+    [ -e "$NMDIR/disabled" ] && return 1
+    return 0
+}
+
+# size + sha256 of the first and last 64 KiB. Enough to catch a truncated or
+# wrong-file serve without reading a megabyte twice on every boot.
+nm_zr_fp() {
+    [ -f "$1" ] || { echo "-"; return 0; }
+    printf '%s:' "$(stat -c %s "$1" 2>/dev/null)"
+    { head -c 65536 "$1"; tail -c 65536 "$1"; } 2>/dev/null \
+        | sha256sum 2>/dev/null | cut -d' ' -f1
+}
+
+# A payload the device can never load must not be planted in the ROM: the file
+# name IS its ABI, and an x86_64 ELF sitting in /system/lib64 on an arm64-only
+# device is a louder anomaly than the mapping this redirect removes.
+nm_zr_abi_ok() {
+    case ",$_zabilist," in
+        *",$1,"*) return 0 ;;
+    esac
+    return 1
+}
+
+nm_zr_rom_path() {
+    _zh=$(printf '%s/%s' "$1" "$2" | sha256sum 2>/dev/null | cut -c1-12)
+    [ -n "$_zh" ] || return 1
+    case "$2" in
+        *64*) printf '/system/lib64/lib%s.so' "$_zh" ;;
+        *)    printf '/system/lib/lib%s.so'   "$_zh" ;;
+    esac
+}
+
+# Undo everything a previous boot left behind, whatever state it is in.
+nm_zr_restore() {
+    [ -f "$NM_ZR_STATE" ] || return 0
+    while IFS='	' read -r _zrom _zreal _zmat; do
+        [ -n "$_zreal" ] || continue
+        if [ -L "$_zreal" ]; then
+            rm -f "$_zreal" 2>/dev/null
+            [ -f "$_zreal.nmsrc" ] && mv -f "$_zreal.nmsrc" "$_zreal" 2>/dev/null
+        elif [ -f "$_zreal" ] && [ -f "$_zreal.nmsrc" ]; then
+            # the module was reinstalled under us; its own file wins
+            rm -f "$_zreal.nmsrc" 2>/dev/null
+        fi
+        [ -n "$_zmat" ] && rm -f "$_zmat" 2>/dev/null
+    done < "$NM_ZR_STATE"
+    rm -f "$NM_ZR_STATE" 2>/dev/null
+    # and drop the managed block: a declaration naming paths nothing serves any
+    # more is stale state, and stale state is what every other bug this file
+    # guards against started as.
+    rm -f "$NMDIR/.zr-public.$$" 2>/dev/null
+    nm_zr_public_rewrite
+    unset _zrom _zreal _zmat
+}
+
+nm_zr_public_rewrite() {
+    _zp="$NM_ZR_PUBLIC"
+    _zt="$NMDIR/.public.txt.$$"
+    : > "$_zt" || return 1
+    if [ -f "$_zp" ]; then
+        awk -v b="$NM_ZR_BEGIN" -v e="$NM_ZR_END" \
+            'index($0,b)==1{skip=1;next} index($0,e)==1{skip=0;next} !skip' \
+            "$_zp" >> "$_zt" 2>/dev/null
+    fi
+    if [ -s "$NMDIR/.zr-public.$$" ]; then
+        printf '%s\n' "$NM_ZR_BEGIN" >> "$_zt"
+        cat "$NMDIR/.zr-public.$$" >> "$_zt"
+        printf '%s\n' "$NM_ZR_END" >> "$_zt"
+    fi
+    chmod 0600 "$_zt" 2>/dev/null
+    mv -f "$_zt" "$_zp" 2>/dev/null
+    unset _zp _zt
+}
+
+nm_zr_stage() {
+    nm_zr_restore
+    nm_zr_enabled || { rm -f "$NMDIR/.zr-public.$$" 2>/dev/null; nm_zr_public_rewrite; return 0; }
+
+    _zabilist=$(getprop ro.product.cpu.abilist 2>/dev/null)
+    [ -n "$_zabilist" ] || _zabilist=$(getprop ro.product.cpu.abi 2>/dev/null)
+    [ -n "$_zabilist" ] || return 0
+
+    : > "$NMDIR/.zr-public.$$" 2>/dev/null || return 0
+    : > "$NM_ZR_STATE" 2>/dev/null || { rm -f "$NMDIR/.zr-public.$$"; return 0; }
+    chmod 0600 "$NM_ZR_STATE" 2>/dev/null
+
+    for _zso in /data/adb/modules/*/zygisk/*.so; do
+        [ -f "$_zso" ] || continue
+        case "$_zso" in *'*'*) continue ;; esac
+        [ -L "$_zso" ] && continue
+        _zmid=${_zso#/data/adb/modules/}; _zmid=${_zmid%%/*}
+        [ "$_zmid" = meta-nomount ] && continue
+        { [ -f "/data/adb/modules/$_zmid/disable" ] || [ -f "/data/adb/modules/$_zmid/remove" ] \
+          || [ -f "/data/adb/modules/$_zmid/skip_mount" ]; } && continue
+        _zabi=${_zso##*/}; _zabi=${_zabi%.so}
+        nm_zr_abi_ok "$_zabi" || continue
+        _zrom=$(nm_zr_rom_path "$_zmid" "$_zabi") || continue
+        _zdir=/data/adb/modules/$_zmid${_zrom%/*}
+        _zmat="$_zdir/${_zrom##*/}"
+        mkdir -p "$_zdir" 2>/dev/null || continue
+        rm -f "$_zmat" 2>/dev/null
+        # hardlink, not a copy: same filesystem, so the bytes cannot drift and
+        # a module update leaves a stale link we drop on the next restore.
+        ln "$_zso" "$_zmat" 2>/dev/null || cp -f "$_zso" "$_zmat" 2>/dev/null || continue
+        printf '%s\n' "$_zrom" >> "$NMDIR/.zr-public.$$"
+        printf '%s\t%s\t%s\n' "$_zrom" "$_zso" "$_zmat" >> "$NM_ZR_STATE"
+    done
+    nm_zr_public_rewrite
+    rm -f "$NMDIR/.zr-public.$$" 2>/dev/null
+    unset _zso _zmid _zabi _zrom _zdir _zmat _zabilist
+}
+
+nm_zr_commit() {
+    [ -f "$NM_ZR_STATE" ] || return 0
+    nm_zr_enabled || { nm_zr_restore; return 0; }
+    _zok=0; _zno=0
+    while IFS='	' read -r _zrom _zreal _zmat; do
+        if [ -z "$_zrom" ] || [ -z "$_zreal" ]; then continue; fi
+        [ -f "$_zreal" ] || { _zno=$((_zno + 1)); continue; }
+        if [ "$(nm_zr_fp "$_zrom")" != "$(nm_zr_fp "$_zreal")" ]; then
+            rm -f "$_zmat" 2>/dev/null
+            _zno=$((_zno + 1))
+            continue
+        fi
+        if mv -f "$_zreal" "$_zreal.nmsrc" 2>/dev/null; then
+            if ln -s "$_zrom" "$_zreal" 2>/dev/null; then
+                _zok=$((_zok + 1))
+            else
+                mv -f "$_zreal.nmsrc" "$_zreal" 2>/dev/null
+                rm -f "$_zmat" 2>/dev/null
+                _zno=$((_zno + 1))
+            fi
+        else
+            _zno=$((_zno + 1))
+        fi
+    done < "$NM_ZR_STATE"
+    if [ "$_zok" -gt 0 ] || [ "$_zno" -gt 0 ]; then
+        nmlog "zygisk redirect: $_zok library(ies) now served from the ROM$([ "$_zno" -gt 0 ] && echo ", $_zno left in /data/adb (served path did not read back)")"
+    fi
+    unset _zok _zno _zrom _zreal _zmat
+}

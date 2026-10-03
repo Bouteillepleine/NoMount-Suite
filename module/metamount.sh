@@ -57,7 +57,12 @@ if nm_guard_bump "ksu/apatch metamount path"; then
     nm_fix_shell_tmp
 
     if [ -x "$BIN" ]; then
+        # stage before the pass so the ROM paths are in public.txt when the rules
+        # are added, commit after so nothing is symlinked at a path the pass did
+        # not actually serve.
+        nm_zr_stage
         nm_mount_pass
+        nm_zr_commit
     else
         nm_incident_missing_binary "ksu/apatch metamount path"
     fi
