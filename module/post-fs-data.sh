@@ -34,9 +34,7 @@ chmod 0600 "$NMDIR/.mount.lock" 2>/dev/null
 if nm_guard_bump "magisk post-fs-data path"; then
     nm_fix_shell_tmp
     if [ -x "$BIN" ]; then
-        nm_zr_stage
         nm_mount_pass
-        nm_zr_commit
 
         nm_early_absorb
     else
