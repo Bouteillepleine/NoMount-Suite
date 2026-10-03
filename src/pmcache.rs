@@ -1,11 +1,13 @@
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const CACHE_DIR: &str = "/data/system/package_cache";
 const STATE: &str = "/data/adb/nomount/apkstate.list";
 const PENDING: &str = "/data/adb/nomount/pm-reboot.list";
+const DECLARED: &str = "/data/adb/nomount/public.txt";
 
 const ROM_ROOTS: &[&str] = &[
     "/system/", "/system_ext/", "/product/", "/vendor/", "/odm/", "/my_product/", "/my_region/",
@@ -30,6 +32,51 @@ pub fn is_pm_published(target: &Path) -> bool {
         .nth(2)
         .and_then(|c| c.as_os_str().to_str())
         .is_some_and(|d| PM_SCAN_DIRS.contains(&d))
+}
+
+/// One absolute path per line, `#` starts a comment.
+fn parse_declared(body: &str) -> HashSet<String> {
+    body.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|p| p.starts_with('/'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Paths declared as must-stay-visible in `public.txt`.
+///
+/// Read once. A missing file is the normal case and means nothing is declared;
+/// a file that exists but will not read is reported, because quietly treating a
+/// declared path as hideable is the one outcome this list exists to prevent.
+fn declared_public() -> &'static HashSet<String> {
+    static SET: OnceLock<HashSet<String>> = OnceLock::new();
+    SET.get_or_init(|| match fs::read_to_string(DECLARED) {
+        Ok(body) => parse_declared(&body),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+        Err(e) => {
+            eprintln!(
+                "nomount: {DECLARED} exists but will not read ({e}) - every path it names is \
+                 treated as hideable this pass, which is the inconsistency it exists to prevent"
+            );
+            HashSet::new()
+        }
+    })
+}
+
+/// Must this target stay visible to every uid, hidden app or not?
+///
+/// `is_pm_published()` answers it structurally: the PackageManager advertises
+/// everything under app/priv-app/overlay, so denying one of those to an app that
+/// was told it exists is an inconsistency no stock device produces, and RASP code
+/// walking the package list crashes on it.
+///
+/// A library a Zygisk loader has already mapped into the app is in exactly that
+/// position -- `/proc/self/maps` names it, so the app has been told it exists --
+/// but it lives under lib64/, which no structural rule reaches. Hence the
+/// declared half: same question, same answer, one more way to say it.
+pub fn is_public(target: &Path) -> bool {
+    is_pm_published(target)
+        || target.to_str().is_some_and(|s| declared_public().contains(s))
 }
 
 pub fn is_rom_apk(target: &Path) -> bool {
@@ -277,6 +324,26 @@ pub fn clear_pending() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parse_declared_takes_absolute_paths_and_drops_comments() {
+        let set = parse_declared(
+            "# a comment\n/system/lib64/libfoo.so\n  /product/lib64/libbar.so  # trailing\n\nrelative/no\n",
+        );
+        assert!(set.contains("/system/lib64/libfoo.so"));
+        assert!(set.contains("/product/lib64/libbar.so"), "leading/trailing space is trimmed");
+        assert!(!set.contains("relative/no"), "only absolute paths count");
+        assert_eq!(set.len(), 2, "comments and blank lines contribute nothing");
+    }
+
+    #[test]
+    fn a_lib_is_not_structurally_public_but_can_be_declared() {
+        // lib64 is not a PM scan dir, which is the whole reason the declared
+        // half exists: nothing structural can reach a mapped library.
+        assert!(!is_pm_published(Path::new("/system/lib64/libfoo.so")));
+        assert!(is_pm_published(Path::new("/product/overlay/Foo.apk")));
+        assert!(parse_declared("/system/lib64/libfoo.so\n").contains("/system/lib64/libfoo.so"));
+    }
     use super::*;
 
     #[test]

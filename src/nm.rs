@@ -171,7 +171,7 @@ impl Nm {
     }
 
     pub fn add(&self, virtual_path: &Path, real: &Path) -> Result<()> {
-        let public = crate::pmcache::is_pm_published(virtual_path);
+        let public = crate::pmcache::is_public(virtual_path);
         self.run(&add_argv(public, path_str(virtual_path)?, path_str(real)?))
             .map(drop)
     }
@@ -291,7 +291,7 @@ impl Nm {
             eprintln!("nomount: rule refused for {}: non-UTF8 path", v.display());
         }
         let mut gave_up = false;
-        for (public, group) in batch_groups(&pairs, crate::pmcache::is_pm_published) {
+        for (public, group) in batch_groups(&pairs, crate::pmcache::is_public) {
             for chunk in group.chunks(ADD_BATCH_PAIRS) {
                 if gave_up {
                     failed.extend(chunk.iter().copied());
