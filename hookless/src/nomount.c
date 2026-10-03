@@ -103,13 +103,21 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
 }
 
 /* The same answer, callable from outside this translation unit, so _ghost's uid
- * half can stop being a replica of this one. ghost.c weak-externs it, so a
+ * half can stop being a replica of this one.
+ *
+ * The prototype sits here rather than in nomount.h because the only consumer is
+ * a weak extern in fs/proc/ghost.c, which declares it itself -- there is no
+ * header the two share, and putting it in ours would invite callers that should
+ * not exist. It still has to be declared: a bare definition trips
+ * -Wmissing-prototypes and sparse's "should it be static?", and the hookless
+ * compile matrix fails on any warning naming nomount.[ch]. ghost.c weak-externs it, so a
  * kernel without nomount still links and a kernel with it can no longer
  * disagree with us about the isolated pools or about nm_hide_isolated -- which
  * it did: the cloak carried the appid list and neither pool, so an isolated
  * child of a hidden app was answered by our ops and by none of its guards.
  * Nothing else should call this; it is deliberately not in nomount.h.
  */
+bool nm_uid_blocked(uid_t uid);
 bool nm_uid_blocked(uid_t uid)
 {
     return nomount_is_uid_blocked(uid);
