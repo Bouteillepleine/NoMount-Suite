@@ -225,11 +225,22 @@ hidden-paths list.
 | `nomount unbind` | Unmount the real binds recorded in `binds.list` (the `my_*` ones). A bind that will not come down keeps its row so a later pass retries it, and the command exits 1. |
 | `nomount version` | Print the version. |
 
-Two files under `/data/adb/nomount/` are hand-edited rather than driven by a
+Three files under `/data/adb/nomount/` are hand-edited rather than driven by a
 command, one entry per line: `blocklist` (module ids the boot pass must not
-inject - the way to park one misbehaving module without uninstalling it) and
+inject - the way to park one misbehaving module without uninstalling it),
 `absorb-skip.txt` (mounts `absorb` must leave alone; the installer seeds it with
-an explanation in its own header).
+an explanation in its own header) and `public.txt` (absolute ROM paths that must
+stay visible to every uid, hidden app or not).
+
+`public.txt` is the hand-written half of a question the boot pass usually answers
+by itself: the PackageManager advertises everything under `app/`, `priv-app/` and
+`overlay/`, so denying one of those to an app that was told it exists is an
+inconsistency no stock device produces. Something that is *mapped* into an app is
+in the same position - `/proc/self/maps` has already named it - but a library
+lives under `lib64/`, which no structural rule reaches. List it here and the rule
+is served `(public)`, which keeps `ghost sync` from cloaking it. Nothing else
+changes: the file is read once per run, a missing file means nothing is declared,
+and a file that exists but will not read is reported rather than ignored.
 
 ## Compatibility
 
