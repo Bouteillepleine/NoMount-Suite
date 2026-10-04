@@ -47,7 +47,7 @@ on:
       only:
         description: "Comma-separated KMIs (empty = all). e.g. android15-6.6"
         required: false
-        default: ''
+        default: 'android12-5.10'
       variant_ref:
         description: "Branch holding kpm/ (this file lives on main; the code does not)"
         required: false
@@ -59,7 +59,7 @@ on:
       kp_ref:
         description: "KernelPatch ref (empty = the pinned commit below)"
         required: false
-        default: '72a904c412754e25f54353c30f31f5c884ed0673'
+        default: 'main'
 
 permissions:
   contents: read
@@ -216,7 +216,7 @@ jobs:
           #     drifting SDK moves the gate under the build.
           #   * `clone -b` takes a branch or a tag, never a commit sha, so pinning had
           #     to become clone-then-checkout.
-          ref="${KP_REF:-72a904c412754e25f54353c30f31f5c884ed0673}"
+          ref="${KP_REF:-main}"
           git clone --filter=blob:none --no-checkout "$repo" /tmp/kp
           git -C /tmp/kp checkout -q "$ref" || {
             echo "::error::KernelPatch ref $ref not found in $repo"; exit 1; }
