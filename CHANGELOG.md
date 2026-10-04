@@ -11,6 +11,16 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.196 - engine v34 (unchanged)
+
+- The WebUI is rebuilt: Status leads with one verdict, every pane groups its cards
+  under a heading, and the light theme is derived from the same colours as the dark one
+  instead of being written out rule by rule.
+- A card now opens with one line; the longer explanation is folded behind a disclosure.
+- The hide list puts each app's uid on its own line, under the package name.
+- A path can be declared must-stay-visible in `public.txt`, instead of only being
+  inferred from the package manager.
+
 ## v1.3.192 - engine v34
 
 - The maps cloak is programmed at boot, on kernels that carry it.
