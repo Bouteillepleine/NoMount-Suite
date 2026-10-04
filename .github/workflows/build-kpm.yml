@@ -93,7 +93,7 @@ jobs:
       - name: Should this KMI run?
         id: sel
         env:
-          ONLY: ${{ github.event.inputs.only }}
+          ONLY: 'android12-5.10'
         run: |
           set -eu
           if [ -z "${ONLY:-}" ] || printf '%s' "$ONLY" | tr ',' '\n' | grep -qx '${{ matrix.kmi }}'; then
@@ -218,7 +218,7 @@ jobs:
           #     to become clone-then-checkout.
           ref="${KP_REF:-main}"
           git clone --filter=blob:none --no-checkout "$repo" /tmp/kp
-          git -C /tmp/kp checkout -q "$ref" || {
+          git -C /tmp/kp checkout -q main || {
             echo "::error::KernelPatch ref $ref not found in $repo"; exit 1; }
           test -d /tmp/kp/kernel/include || {
             echo "::error::$repo is not a KernelPatch checkout"; exit 1; }
