@@ -15,6 +15,17 @@ css/ and js/ parts are inlined verbatim, so the output is one file.
     python3 scripts/webui-harness.py capture   # needs adb + root; writes fixtures
     python3 scripts/webui-harness.py build     # writes target/webui-harness.html
     python3 scripts/webui-harness.py build --no-driver   # engine absent
+    python3 scripts/webui-harness.py shoot     # writes target/shots/*.png, every tab x theme
+
+SHOOT renders at a REAL phone width, which is harder than it looks. Chrome's
+`--window-size` is not the CSS viewport: a host at 125% display scaling lays the page
+out at ~476px and then crops the capture to the 412 you asked for, so a layout that
+fits looks like it overflows and a layout that overflows looks fine. Nothing in the
+PNG says which happened. So the page is loaded inside a FIXED-WIDTH IFRAME on a host
+page and the host is what gets shot: the iframe is a real 412px layout viewport
+whatever the window does, `position: fixed` (the capsule bar) anchors to it, and the
+screenshot cannot disagree with the layout. Width/height are flags, not constants,
+because the next phone will not be 412 either.
 
 
 PRIVACY. The captured fixtures include `pm list packages -3 -U`, i.e. the
@@ -27,6 +38,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -205,12 +217,129 @@ def build(no_driver=False):
         f.write(head + stub + "\n" + tail)
     print("wrote %s" % dest)
 
+SHOTS = os.path.join(OUT, "shots")
+
+# Every pane, by the id showTab() takes - "diag" is the Checks tab.
+TABS = ("status", "hiding", "rules", "diag")
+
+# Appended to the built page so one screenshot can be a specific pane in a specific
+# theme. Only cards that START collapsed are opened: clicking every .card-h.clp
+# collapses the ones that were already open, which silently shoots the wrong state.
+DRIVER = """
+<script>
+setTimeout(function () {
+  try { applyTheme(%(theme)r); } catch (e) {}
+  try { showTab(%(tab)r, document.getElementById('nb-%(tab)s')); } catch (e) {}
+  if (%(expand)s) {
+    document.querySelectorAll('#tab-%(tab)s .card.collapsed > .card-h.clp')
+      .forEach(function (h) { h.click(); });
+  }
+}, %(settle)d);
+</script>
+"""
+
+HOST = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>%(name)s</title>
+<style>html,body{margin:0;background:#0d0f14}
+iframe{width:%(w)dpx;height:%(h)dpx;border:0;display:block}</style></head>
+<body><iframe src="%(page)s"></iframe></body></html>
+"""
+
+
+def find_chrome():
+    """A headless Chrome, preferring a native one; on WSL the Windows build is normal."""
+    env = os.environ.get("CHROME")
+    if env:
+        return env
+    for c in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
+        p = shutil.which(c)
+        if p:
+            return p
+    for p in ("/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+              "/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"):
+        if os.path.isfile(p):
+            return p
+    sys.exit("shoot: no Chrome found. Install chromium, or set CHROME=/path/to/chrome.")
+
+
+def shoot(argv):
+    def flag(name, default):
+        return int(argv[argv.index(name) + 1]) if name in argv else default
+    width, height = flag("--width", 412), flag("--height", 1860)
+    settle = flag("--settle", 900)
+    tabs = [t for t in TABS if ("--tab" not in argv or argv[argv.index("--tab") + 1] == t)]
+    themes = ["dark", "light"]
+    if "--theme" in argv:
+        themes = [argv[argv.index("--theme") + 1]]
+    expand = "--collapsed" not in argv
+
+    build(False)
+    with open(os.path.join(OUT, "webui-harness.html"), encoding="utf-8") as f:
+        page = f.read()
+
+    chrome = find_chrome()
+    win = chrome.endswith(".exe")
+    # A Windows Chrome cannot read a WSL path reliably, so stage into its own temp dir
+    # and copy the PNGs back. A native Chrome renders straight out of target/shots.
+    if win:
+        tmp = os.path.join(os.path.expanduser("~"), ".cache", "nm-shoot")
+        base = os.environ.get("LOCALAPPDATA_WSL", "/mnt/c/Users/%s/AppData/Local/Temp"
+                              % os.environ.get("WINUSER", os.environ.get("USER", "")))
+        work = os.path.join(base, "nm-webui-shots")
+        if not os.path.isdir(os.path.dirname(work)):
+            sys.exit("shoot: %s does not exist; set WINUSER or LOCALAPPDATA_WSL" % base)
+    else:
+        work = SHOTS
+    os.makedirs(work, exist_ok=True)
+    os.makedirs(SHOTS, exist_ok=True)
+
+    made = []
+    for tab in tabs:
+        for theme in themes:
+            name = "%s-%s" % ("checks" if tab == "diag" else tab, theme)
+            driver = DRIVER % {"tab": tab, "theme": theme,
+                               "expand": "true" if expand else "false", "settle": settle}
+            pagefile = "nm-%s.html" % name
+            with open(os.path.join(work, pagefile), "w", encoding="utf-8", newline="\n") as f:
+                f.write(page.replace("</body>", driver + "</body>"))
+            hostfile = "host-%s.html" % name
+            with open(os.path.join(work, hostfile), "w", encoding="utf-8", newline="\n") as f:
+                f.write(HOST % {"name": name, "page": pagefile, "w": width, "h": height})
+
+            png = os.path.join(work, "%s.png" % name)
+            if win:
+                src = subprocess.run(["wslpath", "-w", os.path.join(work, hostfile)],
+                                     capture_output=True, text=True).stdout.strip()
+                out = subprocess.run(["wslpath", "-w", png],
+                                     capture_output=True, text=True).stdout.strip()
+                url = "file:///" + src.replace("\\", "/")
+            else:
+                url, out = "file://" + os.path.join(work, hostfile), png
+            subprocess.run([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+                            "--allow-file-access-from-files",
+                            "--virtual-time-budget=%d" % (settle + 5000),
+                            "--window-size=%d,%d" % (width + 48, height + 40),
+                            "--screenshot=%s" % out, url],
+                           capture_output=True)
+            if not os.path.isfile(png):
+                sys.exit("shoot: chrome wrote no PNG for %s" % name)
+            dest = os.path.join(SHOTS, "%s.png" % name)
+            if os.path.abspath(png) != os.path.abspath(dest):
+                shutil.copyfile(png, dest)
+            made.append(dest)
+            print("  %-16s %s" % (name, dest))
+    print("%d shot(s) at %dx%d -- the iframe is the viewport, not the window"
+          % (len(made), width, height))
+
+
 if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else "build"
     if what == "capture":
         capture()
     elif what == "build":
         build("--no-driver" in sys.argv)
+    elif what == "shoot":
+        shoot(sys.argv[2:])
     else:
         print(__doc__)
         sys.exit(2)
