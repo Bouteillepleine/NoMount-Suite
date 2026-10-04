@@ -770,6 +770,8 @@
     --acc2:    #0f9e84;
     --ok:      #0e9a6c;
     --info:    #3f63e0;
+    --warn:    var(--info);
+    --bad:     var(--info);
     --infobg1: rgba(63,99,224,0.13);
     --infobg2: rgba(63,99,224,0.09);
     --infobd:  rgba(63,99,224,0.40);
