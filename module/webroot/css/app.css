@@ -88,19 +88,19 @@
   header {
     position: sticky; top: 0; z-index: 20;
     display: flex; align-items: center; gap: 13px;
-    padding: max(18px, env(safe-area-inset-top)) 19px 14px;
+    padding: max(14px, env(safe-area-inset-top)) 19px 12px;
     margin: 0 -16px 4px;
     background: linear-gradient(180deg, var(--surf) 62%, rgba(15,18,23,0));
   }
   .logo {
-    width: 40px; height: 40px; border-radius: 14px; flex: none; display: grid; place-items: center;
+    width: 36px; height: 36px; border-radius: 12px; flex: none; display: grid; place-items: center;
     background: var(--grad);
     box-shadow: 0 8px 20px rgba(124,156,255,0.30);
   }
-  .logo svg { width: 23px; height: 23px; }
+  .logo svg { width: 21px; height: 21px; }
   .brand { min-width: 0; flex: 1 1 auto; }
   .brand h1 {
-    margin: 0; font-size: 27px; font-weight: 430; letter-spacing: -0.3px; line-height: 1.1;
+    margin: 0; font-size: 21px; font-weight: 520; letter-spacing: -0.25px; line-height: 1.15;
     white-space: nowrap; color: var(--on);
   }
   .brand p {
@@ -111,7 +111,7 @@
   .hbtns { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
   .ver { font-variant-numeric: tabular-nums; }
   .iconbtn {
-    width: 42px; height: 42px; border-radius: 50%; flex: none; display: grid; place-items: center;
+    width: 38px; height: 38px; border-radius: 50%; flex: none; display: grid; place-items: center;
     background: var(--sc-hi); border: 0; color: var(--onv); cursor: pointer;
     transition: transform .1s, background .2s, color .2s;
   }
@@ -167,7 +167,7 @@
 
   /* ---------- hero: the one gradient-skinned surface ---------- */
   .card.hero {
-    padding: 21px 20px 19px; overflow: hidden;
+    padding: 17px 16px 15px; overflow: hidden;
     border-radius: 30px 30px 30px 10px;
     background: linear-gradient(145deg, rgba(124,156,255,0.20), rgba(87,230,195,0.09) 72%, rgba(87,230,195,0.05));
   }
@@ -196,7 +196,7 @@
 
   /* in the hero the same markup is the verdict: squircle badge, display headline */
   .card.hero .statusline .dot {
-    width: 44px; height: 44px; border-radius: 15px; box-shadow: none;
+    width: 38px; height: 38px; border-radius: 13px; box-shadow: none;
     background: rgba(255,255,255,0.06); border: 1px solid var(--outlv);
   }
   .card.hero .statusline .dot.ok   { background: rgba(87,230,195,0.16);  border-color: rgba(87,230,195,0.34); }
@@ -205,7 +205,7 @@
   .card.hero .statusline .dot.bad  { background: rgba(169,192,255,0.16); border-color: rgba(169,192,255,0.34); }
   .card.hero .statusline .dot.off  { background: rgba(255,255,255,0.05); border-color: var(--outlv); }
   .card.hero .statusline .dot { display: grid; place-items: center; color: var(--outl); }
-  .card.hero .statusline .dot svg { width: 24px; height: 24px; }
+  .card.hero .statusline .dot svg { width: 21px; height: 21px; }
   .card.hero .statusline .dot.ok { color: var(--sec); }
   .card.hero .statusline .dot.warn,
   .card.hero .statusline .dot.info,
@@ -214,22 +214,22 @@
   .card.hero .statusline .dot svg { display: block; }
   .card.hero .statusline .st {
     flex: 1 1 auto; min-width: 0;
-    font-size: 25px; font-weight: 450; letter-spacing: -0.4px; line-height: 1.15;
+    font-size: 22px; font-weight: 480; letter-spacing: -0.35px; line-height: 1.15;
     background-image: linear-gradient(100deg, #ffffff, #d6e2ff 48%, #9df0dc);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
   .card.hero .statusline .sub {
-    flex: 1 0 100%; margin-left: 0; margin-top: 7px; min-width: 0;
-    font-size: 13.5px; color: #c6d2e8; line-height: 1.5; text-align: left;
+    flex: 1 0 100%; margin-left: 0; margin-top: 5px; min-width: 0;
+    font-size: 12.5px; color: #c6d2e8; line-height: 1.45; text-align: left;
   }
 
   /* ---------- metric tiles ---------- */
-  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
-  .metric { background: var(--sc-hi); border: 0; border-radius: 18px; padding: 13px 14px; }
+  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .metric { background: var(--sc-hi); border: 0; border-radius: 16px; padding: 11px 12px; }
   .card.hero .metric { background: rgba(255,255,255,0.06); }
   .metric .k { font-size: 11px; color: var(--onv); letter-spacing: 0.04em; }
   .metric .v {
-    font-size: 25px; font-weight: 600; margin-top: 5px; letter-spacing: -1px;
+    font-size: 22px; font-weight: 600; margin-top: 4px; letter-spacing: -0.8px;
     font-family: var(--mono); font-variant-numeric: tabular-nums;
   }
   .card.hero .metric:first-child .v {
@@ -242,7 +242,7 @@
   /* its own line, or a 25px figure and a 12px qualifier share a baseline and
      "4 served" reads as one run-on value */
   .metric .v small {
-    display: block; margin-top: 3px; font-size: 12px; font-weight: 500;
+    display: block; margin-top: 2px; font-size: 11.5px; font-weight: 500;
     color: var(--onv); letter-spacing: 0;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
@@ -251,7 +251,7 @@
   #mSu { font-size: 17px; letter-spacing: -0.2px; }
 
   /* ---------- buttons ---------- */
-  .btns { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 16px; }
+  .btns { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 13px; }
   button.act {
     appearance: none; border: 0; cursor: pointer; color: var(--on);
     background: var(--sc-hi); padding: 12px 18px; border-radius: 16px;
@@ -350,7 +350,7 @@
   /* ---------- health line ---------- */
   .healthline {
     display: flex; align-items: center; gap: 10px; width: 100%;
-    margin: 15px 0 0; padding: 12px 14px; border-radius: 16px;
+    margin: 12px 0 0; padding: 11px 13px; border-radius: 15px;
     border: 1px solid transparent; background: rgba(255,255,255,0.06);
     color: var(--on); font: inherit; font-size: 13px; text-align: left;
     cursor: pointer; -webkit-tap-highlight-color: transparent;
@@ -403,7 +403,7 @@
      and the auto-margin above still pushed the tags to mid-row */
   .mmeta .files:empty { margin-right: 0; }
 
-  .note { color: var(--onv); font-size: 12.5px; line-height: 1.55; margin: 13px 0 0; }
+  .note { color: var(--onv); font-size: 12.5px; line-height: 1.5; margin: 11px 0 0; }
   code { font-family: var(--mono); background: rgba(255,255,255,0.07); padding: 1px 6px; border-radius: 6px; font-size: 11.5px; }
 
   pre.rules {
