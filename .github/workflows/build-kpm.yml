@@ -1,6 +1,6 @@
 name: NoMount KPM — build a KernelPatch module
 
-# Builds kpm/ into one nomount-<kmi>.kpm per GKI KMI generation.
+# Builds kpm/ into one nomount-<kmi>.kpm per GKI KMI generation test.
 #
 # WHY PER KMI, AND WHY IN THE DDK CONTAINERS -- a correctness argument here, not
 # just a speed one.
