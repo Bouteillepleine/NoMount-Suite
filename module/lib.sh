@@ -88,6 +88,8 @@ _rl_summary() {
 
 _has_entries() { [ -s "$1" ] && grep -qE '^[[:space:]]*[^[:space:]#]' "$1" 2>/dev/null; }
 
+_follow_ksu() { grep -qiE '^[[:space:]]*follow_ksu_denylist[[:space:]]*=[[:space:]]*(1|true|yes|on)[[:space:]]*$' "$NMDIR/uidhide.conf" 2>/dev/null; }
+
 nm_boot_log_rotate() {
     [ -e "$BOOTLOG" ] && [ ! -f "$BOOTLOG" ] && rm -rf "$BOOTLOG" 2>/dev/null
     [ -f "$BOOTLOG" ] && tail -n 400 "$BOOTLOG" > "$BOOTLOG.tmp" 2>/dev/null \

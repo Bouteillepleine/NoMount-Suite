@@ -143,6 +143,21 @@
     </details>
 
     <div class="subsec">
+      <div class="subsec-h">KernelSU DenyList</div>
+      <div class="seg" id="ksuSeg" role="radiogroup" aria-label="Whether the hide list follows KernelSU's DenyList">
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="on" data-act="setKsuSource" data-arg="on">Follow</button>
+        <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="off" data-act="setKsuSource" data-arg="off">Ignore</button>
+      </div>
+      <div class="segstate" id="ksuState">Reading...</div>
+      <details class="ndet">
+        <summary>Why this isn't automatic</summary>
+        <p class="note">A magic-mount or overlay metamodule hands the kernel its mountpoints and KernelSU unmounts them per app, so it follows the DenyList for free. The Suite serves injections, which are not mounts - there is nothing to unmount, so a DenyList entry does nothing on its own. <b>Follow</b> makes the Suite ask the kernel per app instead and hide from whoever the DenyList covers: the global default, per-app profiles and root grants all included.</p>
+        <p class="note">⚠ If KernelSU's global <b>Umount modules by default</b> is on, the DenyList covers every app without a profile of its own - following it then hides your modules from effectively everything. The switch refuses that unless you really mean it.</p>
+        <p class="note">The hide list above keeps working alongside this; it is an extra source, not a replacement.</p>
+      </details>
+    </div>
+
+    <div class="subsec">
       <div class="subsec-h">Isolated processes</div>
       <div class="seg" id="isoSeg" role="radiogroup" aria-label="Which isolated-process pools hiding covers">
         <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="both" data-act="setIsolated" data-arg="both">All</button>

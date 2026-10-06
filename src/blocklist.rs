@@ -371,31 +371,122 @@ pub fn cache_forget(entry: &str) {
 
 pub const DEFAULT_HIDE_ISOLATED: u32 = 3;
 
+/// Keys the Suite writes to `uidhide.conf`. A read-modify-write keeps the others,
+/// so setting one knob cannot silently reset another.
+pub const KSU_KEY_PREFIX: &str = "ksu:";
+
+fn conf_value(raw: &str, key: &str) -> Option<String> {
+    raw.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(key)
+            .and_then(|r| r.strip_prefix('='))
+            .map(|v| v.trim().to_string())
+    })
+}
+
+fn conf_read() -> String {
+    fs::read_to_string(CONF_PATH).unwrap_or_default()
+}
+
+fn parse_hide_isolated(raw: &str) -> u32 {
+    conf_value(raw, "hide_isolated")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|n| *n <= 3)
+        .unwrap_or(DEFAULT_HIDE_ISOLATED)
+}
+
+fn parse_follow_ksu(raw: &str) -> bool {
+    conf_value(raw, "follow_ksu_denylist")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 pub fn hide_isolated() -> u32 {
-    let Ok(raw) = fs::read_to_string(CONF_PATH) else { return DEFAULT_HIDE_ISOLATED };
-    for line in raw.lines() {
-        if let Some(v) = line.trim().strip_prefix("hide_isolated=") {
-            if let Ok(n) = v.trim().parse::<u32>() {
-                if n <= 3 {
-                    return n;
-                }
-            }
-        }
-    }
-    DEFAULT_HIDE_ISOLATED
+    parse_hide_isolated(&conf_read())
+}
+
+pub fn follow_ksu_denylist() -> bool {
+    parse_follow_ksu(&conf_read())
+}
+
+fn write_conf(isolated: u32, follow_ksu: bool) -> Result<()> {
+    crate::statefile::write_atomic(
+        CONF_PATH,
+        format!(
+            "# NoMount per-UID hiding settings\nhide_isolated={isolated}\n\
+             follow_ksu_denylist={}\n",
+            u8::from(follow_ksu)
+        ),
+    )
+    .context("write uidhide.conf")
 }
 
 pub fn set_hide_isolated(mode: u32) -> Result<()> {
-    crate::statefile::write_atomic(
-        CONF_PATH,
-        format!("# NoMount per-UID hiding settings\nhide_isolated={mode}\n"),
-    )
-    .context("write uidhide.conf")
+    let raw = conf_read();
+    write_conf(mode, parse_follow_ksu(&raw))
+}
+
+pub fn set_follow_ksu_denylist(on: bool) -> Result<()> {
+    let raw = conf_read();
+    write_conf(parse_hide_isolated(&raw), on)
+}
+
+pub fn ksu_pkg(key: &str) -> Option<&str> {
+    key.strip_prefix(KSU_KEY_PREFIX)
+}
+
+/// The apps KernelSU says to umount modules for, keyed so they cannot collide with a
+/// hide-list entry. `None` means the kernel did not answer: the caller must treat that
+/// as unread and retire nothing, never as an empty DenyList.
+pub fn ksu_denylist(installed: &[(String, u32)]) -> Option<Vec<(String, u32)>> {
+    if !crate::ksu::available() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (pkg, uid) in installed {
+        if *uid < FIRST_APP_APPID {
+            continue;
+        }
+        if crate::ksu::uid_should_umount(*uid)? {
+            out.push((format!("{KSU_KEY_PREFIX}{pkg}"), *uid));
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setting_one_conf_knob_keeps_the_other() {
+        let raw = "# NoMount per-UID hiding settings\nhide_isolated=1\nfollow_ksu_denylist=1\n";
+        assert_eq!(parse_hide_isolated(raw), 1);
+        assert!(parse_follow_ksu(raw));
+        // An absent key is the default, not a parse failure of the whole file.
+        assert_eq!(parse_hide_isolated("follow_ksu_denylist=1\n"), DEFAULT_HIDE_ISOLATED);
+        assert!(!parse_follow_ksu("hide_isolated=0\n"));
+    }
+
+    #[test]
+    fn the_ksu_knob_takes_words_and_digits_and_defaults_off() {
+        for on in ["1", "true", "yes", "on", "ON", "True"] {
+            assert!(parse_follow_ksu(&format!("follow_ksu_denylist={on}\n")), "{on}");
+        }
+        for off in ["0", "false", "no", "off", "", "maybe"] {
+            assert!(!parse_follow_ksu(&format!("follow_ksu_denylist={off}\n")), "{off}");
+        }
+        assert!(!parse_follow_ksu(""));
+    }
+
+    #[test]
+    fn a_ksu_key_cannot_be_mistaken_for_a_package_entry() {
+        let key = format!("{KSU_KEY_PREFIX}com.example.app");
+        assert_eq!(ksu_pkg(&key), Some("com.example.app"));
+        assert_eq!(ksu_pkg("com.example.app"), None);
+        // The prefix carries a ':', which check_entry refuses to store in the hide list.
+        assert!(Pattern::parse(&key).is_none());
+    }
 
     #[test]
     fn reading_for_a_report_never_creates_the_hide_list() {

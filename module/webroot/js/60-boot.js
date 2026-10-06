@@ -78,6 +78,7 @@
                        refreshAbsorb(),
                        refreshModules(), refreshFiles(), refreshRuleSummary(),
                        refreshIncident(), refreshBlocked(), refreshIsolated(),
+                       refreshKsuSource(),
                        $("wobody").classList.contains("u-hide") ? woChipOnly() : refreshWhiteouts()]);
     if (rulesShown) loadRules();
     loadPkgList();
@@ -86,6 +87,7 @@
   const ACTIONS = {
     showTab: (el, ev, arg) => showTab(arg, el),
     setIsolated: (el, ev, arg) => setIsolated(arg),
+    setKsuSource: (el, ev, arg) => setKsuSource(arg),
     uidOp: (el, ev, arg) => uidOp(arg, el),
     toggleTheme: () => toggleTheme(),
     openDetail: () => openDetail(),

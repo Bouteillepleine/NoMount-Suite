@@ -207,6 +207,58 @@
     }
   }
 
+  function ksuPaint(state, note, bad) {
+    const seg = $("ksuSeg"), st = $("ksuState");
+    const known = state === "on" || state === "off";
+    seg.classList.toggle("unknown", !known);
+    seg.querySelectorAll(".seg-b").forEach(function (b) {
+      const on = known && b.dataset.v === state;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-checked", on ? "true" : "false");
+    });
+    st.textContent = note || "";
+    st.classList.toggle("bad", !!bad);
+  }
+  async function refreshKsuSource() {
+    const r = await nm("uid ksu");
+    if (r.errno !== 0) {
+      ksuPaint(null, "Could not read the saved setting.", true);
+      return;
+    }
+    const out = r.stdout || "";
+    const on = /follow KernelSU DenyList\s+on/.test(out);
+    if (/KernelSU driver\s+no answer/.test(out)) {
+      ksuPaint(on ? "on" : "off",
+               on ? "Followed, but no KernelSU driver answered - nothing it covers is hidden, and nothing is un-hidden either."
+                  : "No KernelSU driver answered, so there is no DenyList to follow.",
+               on);
+      return;
+    }
+    const cov = out.match(/DenyList covers\s+(\d+) of (\d+)/);
+    const dflt = /umount modules by default"?\s+ON/.test(out);
+    let note = cov ? `Covers ${cov[1]} of ${cov[2]} installed apps.` : "";
+    if (dflt) note += " ⚠ KernelSU's global umount-by-default is ON, so that is every app without its own profile.";
+    ksuPaint(on ? "on" : "off", note.trim(), on && dflt);
+  }
+  async function setKsuSource(state) {
+    const seg = $("ksuSeg");
+    const btns = Array.prototype.slice.call(seg.querySelectorAll(".seg-b"));
+    btns.forEach(function (b) { b.disabled = true; });
+    try {
+      const r = await nm(`uid ksu ${state}`);
+      if (r.errno === 0) {
+        toast((r.stdout || "").replace(/^ok:/, "").trim() || "Updated", "ok");
+        await refreshKsuSource();
+        await refreshBlocked();
+      } else {
+        toast((r.stderr || "error").split("\n")[0], "bad");
+        await refreshKsuSource();
+      }
+    } finally {
+      btns.forEach(function (b) { b.disabled = false; });
+    }
+  }
+
   const US = new Map();
   let usShown = false;
   const US_REASONS = {

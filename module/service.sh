@@ -164,7 +164,8 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts
 fi
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] && _has_entries "$NMDIR/uidhide"; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
+   && { _has_entries "$NMDIR/uidhide" || _follow_ksu; }; then
     _bl=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _bl_rc=$?
     if [ "$_bl_rc" -eq 0 ]; then
@@ -214,6 +215,12 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
     inotifyd "$MODDIR/uidwatch.sh" /data/system:cewDMmynd >/dev/null 2>&1 &
     nmlog "hide-list package watcher started"
+    # Started regardless of the knob: uidwatch.sh drops .allowlist events while it is
+    # off, so turning it on takes effect without a reboot.
+    if [ -d /data/adb/ksu ]; then
+        inotifyd "$MODDIR/uidwatch.sh" /data/adb/ksu:cewDMmynd >/dev/null 2>&1 &
+        nmlog "KernelSU DenyList watcher started"
+    fi
 fi
 
 if [ ! -x "$BIN" ]; then
@@ -298,13 +305,13 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     elif [ "${_unm:-0}" -gt 0 ]; then
         _health="not fully measured - see the WebUI"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then
-        _health="serving normally - the rule count just could not be read"
+        _health="serving, rule count unreadable"
     elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
         _health="healthy"
     elif [ "${_docok:-0}" = 1 ]; then
-        _health="health unknown - no record this boot"
+        _health="health unknown (no record)"
     else
-        _health="health unknown - plan check did not finish"
+        _health="health unknown (check incomplete)"
     fi
     _fgn=$(_health_get mounts_foreign)
     case "$_fgn" in
@@ -314,7 +321,7 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     esac
     if [ -z "$_fgn" ]; then
         if [ "${_mnt:-0}" -gt 0 ]; then
-            _mstate="$_mnt mount(s), origin unmeasured"
+            _mstate="$_mnt mount(s), origin unknown"
         else
             _mstate="0 mounts"
         fi
@@ -329,10 +336,10 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     if [ "$_mu" = "on" ]; then
         # shellcheck disable=SC1111  # typographic quotes on purpose: this names
         if [ "${_mnt:-0}" -gt 0 ]; then
-            _muc=" · “kernel umount” ON (it hides our $_mnt bind(s))"
+            _muc=" · “kernel umount” ON (hides our $_mnt bind(s))"
             _mul=", manager kernel_umount is ON (hides our $_mnt bind(s))"
         else
-            _muc=" · “kernel umount” ON (nothing here to unmount)"
+            _muc=" · “kernel umount” ON (nothing to unmount)"
             _mul=", manager kernel_umount is ON (nothing here to unmount)"
         fi
     else

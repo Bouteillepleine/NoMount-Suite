@@ -214,6 +214,27 @@ fn parse_line(l: &str) -> Option<(PathBuf, PathBuf, String)> {
     Some((PathBuf::from(t), PathBuf::from(s), lbl.to_string()))
 }
 
+/// Hand our real mounts to KernelSU's try-umount list, so the DenyList unmounts them
+/// per app exactly as it does for a magic-mount or overlay metamodule. The injections
+/// are not mounts and are unaffected; `nomount uid ksu` covers those.
+pub fn register_try_umount() -> (usize, usize) {
+    if !crate::ksu::available() {
+        return (0, 0);
+    }
+    let mut done = 0;
+    let mut failed = 0;
+    for (target, _) in tracked() {
+        match crate::ksu::umount_list_add(&target, libc::MNT_DETACH as u32) {
+            Ok(()) => done += 1,
+            Err(e) => {
+                failed += 1;
+                eprintln!("nomount: {e:#}");
+            }
+        }
+    }
+    (done, failed)
+}
+
 pub fn tracked() -> Vec<(PathBuf, PathBuf)> {
     tracked_full().into_iter().map(|(t, s, _)| (t, s)).collect()
 }

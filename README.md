@@ -214,6 +214,7 @@ hidden-paths list.
 | `nomount uid list` | Who is hidden. |
 | `nomount uid apply [--early]` | Re-apply the hide list. |
 | `nomount uid preset [name] [--dry-run] [--globs]` | Add a curated preset; no argument lists what is available. |
+| `nomount uid ksu [on\|off] [--force]` | Follow KernelSU's DenyList as a hide-list source; no argument shows what it covers. |
 | `nomount uid isolated [mode]` | Which isolated-process pools are hidden. |
 | `nomount check [--plan] [--device] [--json] [--write]` | **The** diagnostic. `--plan` static (does the module set resolve into a bad rule?), `--device` measured (is what we serve detectable, and is it being served?); neither flag runs both. Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`, `N/A`, `NOTE` - "nothing to test" and "something stopped me testing" are deliberately different, and neither is a pass. Exits 1 on a FAIL or a REBOOT. |
 | `nomount plan` | Print what the mount pass would resolve to, without applying it. Read-only. |

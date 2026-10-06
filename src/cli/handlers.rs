@@ -34,6 +34,9 @@ fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -
 }
 
 fn still_covered_by(entries: &[String], installed: &[(String, u32)], id: u32) -> Option<String> {
+    if blocklist::follow_ksu_denylist() && crate::ksu::uid_should_umount(id) == Some(true) {
+        return Some("the KernelSU DenyList".to_string());
+    }
     entries
         .iter()
         .find(|e| {
@@ -187,18 +190,43 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             return rep;
         }
     };
-    if entries.is_empty() && cache.is_empty() {
+    let follow_ksu = blocklist::follow_ksu_denylist();
+    if entries.is_empty() && cache.is_empty() && !follow_ksu {
         return rep;
     }
     let mut live = nm.uid_list_live().unwrap_or_default();
 
     let installed = if early { None } else { blocklist::installed_packages() };
-    let can_retire = !early && installed.is_some();
+    let mut can_retire = !early && installed.is_some();
     let installed = installed.unwrap_or_default();
     if !early && !can_retire {
         rep.failed += 1;
     }
     let mut desired: BTreeMap<String, u32> = BTreeMap::new();
+
+    // The early pass cannot resolve packages, so it leans on the cache for these too.
+    if follow_ksu && !early {
+        if !crate::ksu::available() {
+            can_retire = false;
+            eprintln!(
+                "nomount: the hide list is set to follow KernelSU's DenyList, but no KernelSU \
+                 driver answered - the apps it covers are left exactly as they are. Turn it off \
+                 with `nomount uid ksu off` if this kernel has no KernelSU."
+            );
+        } else {
+            match blocklist::ksu_denylist(&installed) {
+                Some(hits) => desired.extend(hits),
+                None => {
+                    can_retire = false;
+                    rep.failed += 1;
+                    eprintln!(
+                        "nomount: KernelSU answered for some apps and then stopped - the \
+                         DenyList is treated as unread, so nothing it covers is un-hidden"
+                    );
+                }
+            }
+        }
+    }
 
     for e in &entries {
         if blocklist::is_pattern(e) {
@@ -320,6 +348,47 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
     }
 
     rep
+}
+
+fn report_ksu_source(nm: &Nm) -> Result<()> {
+    let following = blocklist::follow_ksu_denylist();
+    println!(
+        "follow KernelSU DenyList\t{}",
+        if following { "on" } else { "off" }
+    );
+    let Some(info) = crate::ksu::info() else {
+        println!("KernelSU driver\tno answer - nothing to follow");
+        return Ok(());
+    };
+    println!("KernelSU driver\tversion {} · uapi {}", info.version, info.uapi_version);
+    match crate::ksu::global_umount_default() {
+        Some(true) => println!(
+            "global \"umount modules by default\"\tON - covers every app without its own profile"
+        ),
+        Some(false) => println!("global \"umount modules by default\"\toff"),
+        None => println!("global \"umount modules by default\"\tunreadable"),
+    }
+    let installed = blocklist::installed_packages();
+    let total = installed.as_ref().map(|v| v.len()).unwrap_or(0);
+    match blocklist::ksu_denylist(&installed.unwrap_or_default()) {
+        Some(hits) => {
+            println!("DenyList covers\t{} of {total} installed package(s)", hits.len());
+            if following {
+                let live = nm.uid_list_live().unwrap_or_default();
+                for (key, uid) in &hits {
+                    let pkg = blocklist::ksu_pkg(key).unwrap_or(key.as_str());
+                    let state = if live.iter().any(|u| appid(*u) == appid(*uid)) {
+                        "live"
+                    } else {
+                        "not applied"
+                    };
+                    println!("  {pkg}\tuid {uid} · {state}");
+                }
+            }
+        }
+        None => println!("DenyList covers\tunreadable"),
+    }
+    Ok(())
 }
 
 fn parse_isolated_mode(s: &str) -> Option<u32> {
@@ -635,6 +704,30 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     text,
                 });
             }
+            if blocklist::follow_ksu_denylist() {
+                match blocklist::ksu_denylist(&installed) {
+                    Some(hits) => {
+                        for (key, uid) in hits {
+                            let pkg =
+                                blocklist::ksu_pkg(&key).unwrap_or(key.as_str()).to_string();
+                            let text = format!(
+                                "{pkg}\tvia KernelSU DenyList · uid {uid} · {}",
+                                state_of(uid)
+                            );
+                            lines.push(Line {
+                                appid: Some(appid(uid)),
+                                glob: true,
+                                entry: "KernelSU DenyList".to_string(),
+                                name: pkg,
+                                text,
+                            });
+                        }
+                    }
+                    None => println!(
+                        "KernelSU DenyList\tfollowed, but the kernel did not answer this time"
+                    ),
+                }
+            }
             let winner =
                 list_winners(&lines.iter().map(|l| (l.appid, l.glob)).collect::<Vec<_>>());
             for (i, l) in lines.iter().enumerate() {
@@ -729,6 +822,50 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 bail!("{} preset entr(ies) could not be applied", rep.failed);
             }
         }
+        UidAction::Ksu { state, force } => {
+            let on = match state.as_deref().map(str::trim) {
+                None => {
+                    report_ksu_source(&nm)?;
+                    return Ok(());
+                }
+                Some(s) => match s.to_ascii_lowercase().as_str() {
+                    "on" | "1" | "true" | "yes" | "enable" => true,
+                    "off" | "0" | "false" | "no" | "disable" => false,
+                    _ => bail!("unknown state '{s}' - use on | off, or omit it to see the state"),
+                },
+            };
+            if on {
+                if !crate::ksu::available() {
+                    bail!(
+                        "no KernelSU driver answered, so there is no DenyList to follow. If this \
+                         kernel does have KernelSU, run this as root."
+                    );
+                }
+                if crate::ksu::global_umount_default() == Some(true) && !force {
+                    bail!(
+                        "KernelSU's global \"Umount modules by default\" is ON, which means its \
+                         DenyList covers every app that has no profile of its own. Following it \
+                         would hide the Suite's injections from effectively every app on the \
+                         device - your modules would stop reaching all of them. Turn that switch \
+                         off in the manager and profile the apps you actually want hidden from, \
+                         or pass --force if you really mean every app."
+                    );
+                }
+            }
+            blocklist::set_follow_ksu_denylist(on)?;
+            let _pass = pass_guard();
+            let rep = reapply_blocklist(&nm, false);
+            println!(
+                "ok: KernelSU DenyList {} · now hiding {}, retired {}{}",
+                if on { "followed" } else { "no longer followed" },
+                rep.hidden,
+                rep.retired,
+                rep.fail_note()
+            );
+            if rep.failed > 0 {
+                bail!("{} hide-list entr(ies) could not be applied", rep.failed);
+            }
+        }
         UidAction::Isolated { mode } => match mode {
             None => println!("{}", isolated_mode_name(blocklist::hide_isolated())),
             Some(m) => {
@@ -766,7 +903,7 @@ mod tests {
         let help = include_str!("mod.rs");
         let line = help
             .lines()
-            .find(|l| l.contains("omit to print the current setting"))
+            .find(|l| l.contains("appzygote") && l.contains("omit to print the current setting"))
             .expect("the Isolated help line moved");
         let offered: Vec<&str> = line
             .trim_start_matches("        /// ")

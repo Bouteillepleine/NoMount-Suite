@@ -320,25 +320,18 @@ impl Incompat {
     fn explain(self) -> &'static str {
         match self {
             Incompat::RomWrite =>
-                "NoMount serves ROM paths by read-only redirection, so this write goes \
-                 nowhere the module can read back and will fail silently. Expect that \
-                 feature of the module not to work.",
+                "ROM paths are served read-only, so this write fails silently. Expect that \
+                 feature not to work.",
             Incompat::MagiskMirror =>
-                "there is no Magisk mirror on KernelSU -- no /sbin/.magisk and no magisk \
-                 binary -- so this read returns nothing, with or without NoMount. This is \
-                 a Magisk-only module running on KSU, not something NoMount broke.",
+                "KernelSU has no Magisk mirror, so this read returns nothing with or without \
+                 NoMount.",
             Incompat::ImageBacked =>
-                "no path redirection can make a block device appear, so the engine cannot \
-                 serve this. The module keeps its own mount; the mount checks will report \
-                 it, and that report is correct rather than a leak.",
+                "redirection cannot make a block device appear, so the module keeps its own \
+                 mount and the mount checks report it correctly.",
             Incompat::SelfMount =>
-                "this module mounts its own content over a ROM path instead of shipping a \
-                 tree, so for part of every boot the mount is real and readable by any app. \
-                 absorb re-serves it as an injection and unmounts it automatically -- two \
-                 passes on a stock KernelSU device, both after zygote has started, so there \
-                 is a window early in each boot where the mount is still there. Named here \
-                 because the module depends on absorb running: if absorb is disabled or \
-                 times out, this is one of the mounts that stays visible.",
+                "mounts over a ROM path instead of shipping a tree, so the mount is real and \
+                 app-readable until absorb re-serves it (after zygote). If absorb is off or \
+                 times out, it stays visible.",
         }
     }
 }
@@ -659,10 +652,8 @@ fn reached_only_if_sourced(script: &str) -> &'static str {
     if ENTRY_SCRIPTS.contains(&script) {
         return "";
     }
-    " NB: this line is in a helper the module SOURCES, not in a script the manager \
-     runs, so it only takes effect if the entry script reaches the `.` that pulls \
-     it in -- a mode switch or a capability test can leave it dead. Check the \
-     module's own config before acting on this."
+    " NB: the module SOURCES this helper rather than the manager running it, so it may \
+     never run - check the module's config first."
 }
 
 fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
@@ -1041,18 +1032,15 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             check: "my_* served by injection",
             detail: if writers.is_empty() {
                 format!(
-                    "my_* partitions are served by injection instead of a real bind, so they \
-                     add no mounts. Nothing in any installed module's top-level scripts \
-                     mentions the marker, so it is probably your own opt-in - a module could \
-                     still be writing it from a helper script. Remove {} to go back to binds.",
+                    "my_* is served by injection, so it adds no mounts. No module's entry \
+                     script writes the marker, so it is probably your own opt-in. Remove {} \
+                     for binds.",
                     crate::mount::MY_HOOKLESS_MARKER
                 )
             } else {
                 format!(
-                    "my_* partitions are served by injection instead of a real bind, so they \
-                     add no mounts. The Suite never writes the marker - {} did, which is how a \
-                     module keeps its own my_* content off the mount table. Remove {} to go \
-                     back to binds; {}.",
+                    "my_* is served by injection, so it adds no mounts. {} wrote the marker, \
+                     not the Suite. Remove {} for binds; {}.",
                     writers
                         .iter()
                         .map(|(id, file)| format!("{id} ({file})"))
@@ -1174,8 +1162,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 check: "stale legacy blocklist entries",
                 detail: format!(
                     "{} entry/entries in /data/adb/nomount/blocklist are hidden apps. They moved \
-                 to `uidhide` and do nothing here. Remove them if you want that file to mean only \
-                 \"skip this module\".",
+                 to `uidhide` and do nothing here; remove them.",
                     stale.len()
                 ),
             });
@@ -1188,25 +1175,20 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Info,
             check: "manager kernel umount ON",
             detail: match crate::bind::tracked_result() {
-                Ok(v) if v.is_empty() => "your manager's \"Kernel umount\" is ON. Nothing the \
-                     Suite serves on this device is a mount, so it has nothing to unmount. Hide \
-                     per app with `nomount uid block <pkg>`."
+                Ok(v) if v.is_empty() => "\"Kernel umount\" is ON but nothing here is a mount, \
+                     so it has nothing to unmount. Hide per app with `nomount uid block <pkg>`."
                     .to_string(),
                 Ok(v) => {
                     let binds = v.len();
                     format!(
-                        "your manager's \"Kernel umount\" is ON, and this device has {binds} \
-                         bind mount(s) of ours - my_* is served by a real bind unless the \
-                         my_hookless trial is on. The switch does hide those from an app's \
-                         mount table, and it is the only thing that does; it cannot touch the \
-                         injections, which are not mounts."
+                        "\"Kernel umount\" is ON and this device has {binds} bind mount(s) of \
+                         ours. It does hide those from an app's mount table; it cannot touch \
+                         the injections, which are not mounts."
                     )
                 }
                 Err(e) => format!(
-                    "your manager's \"Kernel umount\" is ON. Whether this device carries bind \
-                     mounts of ours could not be read ({} - {e}), so it is unknown whether the \
-                     switch has anything to unmount here. Either way it cannot touch the \
-                     injections, which are not mounts.",
+                    "\"Kernel umount\" is ON; whether we have any bind mounts could not be read \
+                     ({} - {e}). Either way it cannot touch the injections.",
                     crate::bind::BINDS_LIST
                 ),
             },
@@ -1218,25 +1200,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Info,
             check: "manager kernel umount unknown",
             detail: match crate::bind::tracked_result() {
-                Ok(v) if v.is_empty() => "your manager's \"Kernel umount\" could not be read, so \
-                     it is UNKNOWN rather than off. Nothing the Suite serves on this device is a \
-                     mount, so it has nothing to unmount either way."
+                Ok(v) if v.is_empty() => "\"Kernel umount\" could not be read, so it is UNKNOWN \
+                     rather than off. Nothing here is a mount, so it has nothing to unmount \
+                     either way."
                     .to_string(),
                 Ok(v) => {
                     let binds = v.len();
                     format!(
-                        "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN \
-                         rather than off - and this device has {binds} bind mount(s) of ours \
-                         (my_* is served by a real bind unless the my_hookless trial is on). \
-                         That switch is the only thing that hides those from an app's mount \
-                         table, so it is worth checking in your manager."
+                        "\"Kernel umount\" could not be read, so it is UNKNOWN rather than off - \
+                         and this device has {binds} bind mount(s) of ours. It is the only thing \
+                         that hides those from an app's mount table; worth checking."
                     )
                 }
                 Err(e) => format!(
-                    "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN rather \
-                     than off, and neither could this device's bind record ({} - {e}), so \
-                     whether there is anything for it to unmount is unknown too. The injections \
-                     are unaffected either way; they are not mounts.",
+                    "\"Kernel umount\" could not be read, and neither could our bind record ({} \
+                     - {e}). The injections are unaffected either way.",
                     crate::bind::BINDS_LIST
                 ),
             },
@@ -1246,6 +1224,52 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let nm = Nm::new();
     let engine = nm.version().ok();
     let live_ok = engine.is_some();
+
+    let follow_ksu = crate::blocklist::follow_ksu_denylist();
+    let ksu_default = crate::ksu::global_umount_default();
+    if follow_ksu && !crate::ksu::available() {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "KernelSU DenyList followed but unreadable",
+            detail: "set to follow KernelSU's DenyList, but no driver answered, so it is \
+                 treated as unread: nothing is hidden or un-hidden by it. `nomount uid ksu off` \
+                 if this kernel has no KernelSU."
+                .to_string(),
+        });
+    } else if follow_ksu && ksu_default == Some(true) {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "KernelSU umount-by-default ON while followed",
+            detail: "following the DenyList while KernelSU's global \"umount modules by \
+                 default\" is ON means hiding from every app without its own profile - your \
+                 modules reach none of them. Turn that switch off, or `nomount uid ksu off`."
+                .to_string(),
+        });
+    } else if !follow_ksu && crate::ksu::available() {
+        let covered = crate::blocklist::installed_packages()
+            .and_then(|i| crate::blocklist::ksu_denylist(&i))
+            .map(|h| h.len());
+        if covered.unwrap_or(0) > 0 || ksu_default == Some(true) {
+            f.push(Finding {
+                level: Level::Info,
+                check: "KernelSU DenyList not followed",
+                detail: format!(
+                    "KernelSU's DenyList covers {} app(s){} - the Suite ignores it, \
+                     injections are not mounts. `nomount uid ksu on` follows it.",
+                    covered
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "an unknown number of".into()),
+                    if ksu_default == Some(true) {
+                        " (global umount-by-default is ON, so every app without its own \
+                         profile)"
+                    } else {
+                        ""
+                    }
+                ),
+            });
+        }
+    }
+
     let mut hide_list_unreadable = false;
     let hidden_apps = match crate::blocklist::read_for_report() {
         Ok(v) => v,
@@ -1511,13 +1535,13 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         },
                         detail: if unknown > 0 {
                             format!(
-                                "{absent} of {attempted} sampled path(s) look exactly like a path that never \
-             existed, to {who} - but {unknown} could not be probed, so this is not a complete answer"
+                                "{absent} of {attempted} sampled path(s) look exactly like paths that never \
+             existed, to {who}, but {unknown} could not be probed - not a complete answer"
                             )
                         } else {
                             format!(
-                                "{absent} of {} hidden path(s) sampled: each looks exactly like a path that never \
-             existed, to {who}. Measured here, not assumed from the build.",
+                                "{absent} of {} sampled hidden path(s) look exactly like paths that never \
+             existed, to {who}. Measured, not assumed.",
                                 gpaths.len()
                             )
                         },
@@ -1573,9 +1597,9 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 level: if mode == 0 { Level::Warn } else { Level::Info },
                 check: "isolated-process pools",
                 detail: match mode {
-                    0 => "hiding covers neither isolated pool. A hidden app can read through its own isolated child and see every injection, which is the leak the pools exist to close. `nomount uid isolated both` unless you specifically want the other side of this trade."
+                    0 => "Neither isolated pool is hidden, so a hidden app can read through its own isolated child. `nomount uid isolated both` closes that."
                         .to_string(),
-                    3 => "hiding covers both isolated pools (the default): a hidden app cannot read through its own isolated child, but an unblocked app can tell its own view apart from its isolated child's and prove injection that way. `nomount uid isolated none` takes the other side of the trade."
+                    3 => "Both isolated pools hidden (default). The trade: an unhidden app can tell its own view from its isolated child's. `nomount uid isolated none` takes the other side."
                         .to_string(),
                     m => format!(
                         "hiding covers {} only. Same trade as the default, on one pool.",

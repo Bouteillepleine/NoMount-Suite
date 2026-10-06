@@ -12,6 +12,7 @@ Start here:
   nomount check              is anything wrong, and is what I serve detectable?
   nomount reload             pick up a module you just installed, without rebooting
   nomount uid block <pkg>    hide everything the Suite serves from one app
+  nomount uid ksu on         hide from whoever KernelSU's DenyList covers
 
 The boot scripts run `mount`, `absorb`, `reload` and `ghost sync` themselves;
 you rarely need those by hand."
@@ -201,6 +202,26 @@ and its sandbox.
         #[arg(long)]
         globs: bool,
     },
+    /// Follow KernelSU's DenyList (App Profile "Umount modules") as a hide-list source
+    #[command(alias = "denylist", after_help = "\
+The Suite has no mounts to unmount, so it cannot inherit KernelSU's DenyList the way
+a magic-mount or overlay metamodule does. Turning this on makes it ask the kernel per
+app instead (`UID_SHOULD_UMOUNT`), and hide its injections from whoever the DenyList
+covers - the global default, per-app profiles and root grants all included.
+
+The hide list keeps working alongside it; this is an extra source, not a replacement.
+
+  nomount uid ksu          what the DenyList covers right now
+  nomount uid ksu on       follow it
+  nomount uid ksu off      stop following it")]
+    Ksu {
+        /// on | off; omit to show what the DenyList covers
+        state: Option<String>,
+        /// Follow the DenyList even when KernelSU's global "umount modules by default"
+        /// is on, which makes it cover every app without a profile of its own
+        #[arg(long)]
+        force: bool,
+    },
     /// Which isolated-process pools are hidden
     Isolated {
         /// both | appzygote | platform | off; omit to print the current setting
@@ -252,6 +273,7 @@ pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
             UidAction::Block { .. }
                 | UidAction::Unblock { .. }
                 | UidAction::Apply { .. }
+                | UidAction::Ksu { state: Some(_), .. }
                 | UidAction::Preset { name: Some(_), dry_run: false, .. }
         ),
         Commands::Vfs { action } => matches!(

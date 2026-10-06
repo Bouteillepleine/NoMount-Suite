@@ -1116,6 +1116,8 @@ pub fn run_reload() -> Result<()> {
         }
     }
 
+    crate::bind::register_try_umount();
+
     let pm = crate::pmcache::sync(&served_apks_applied(
         &applied_apks,
         &crate::absorb::absorbed_pairs(),
@@ -1334,12 +1336,21 @@ pub fn run_mount() -> Result<()> {
         }
     }
     let tmpfs_hidden = crate::absorb::reapply_tmpfs_whiteouts(&nm);
+    let (ksu_umount, _) = crate::bind::register_try_umount();
 
     let pm = crate::pmcache::sync(&served_apks_applied(&applied_apks, &recorded));
     crate::pmcache::clear_pending();
 
     let modules = served.len();
-    let surface = if binds > 0 { "hookless + my_* bind" } else { "mountless (RRO via hookless)" };
+    let surface = if binds > 0 {
+        if ksu_umount > 0 {
+            "hookless + my_* bind (DenyList-unmountable)"
+        } else {
+            "hookless + my_* bind"
+        }
+    } else {
+        "mountless (RRO via hookless)"
+    };
 
     println!(
         "nomount(suite): {modules} modules | {} rules, {} whiteouts, {binds} my_* binds, {} failed, \

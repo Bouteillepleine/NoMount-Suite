@@ -10,6 +10,7 @@ mod ghost;
 mod pathhide;
 mod health;
 mod json;
+mod ksu;
 mod manager;
 mod mount;
 mod nm;

@@ -1,5 +1,8 @@
 #!/system/bin/sh
-[ "$3" = "packages.list" ] || exit 0
+case "$3" in
+    packages.list|.allowlist) ;;
+    *) exit 0 ;;
+esac
 
 [ -n "$(printf %s "$1" | tr -d "ar0xo")" ] || exit 0
 
@@ -12,7 +15,11 @@ NMLOG_TAG=uidwatch
 }
 [ -e "$NMDIR/disabled" ] && exit 0
 
-_has_entries "$NMDIR/uidhide" || _has_entries "$NMDIR/absorbed.list" || exit 0
+if [ "$3" = ".allowlist" ]; then
+    _follow_ksu || exit 0
+else
+    _has_entries "$NMDIR/uidhide" || _follow_ksu || _has_entries "$NMDIR/absorbed.list" || exit 0
+fi
 
 nm_set_bin
 [ -x "$BIN" ] || exit 0
@@ -51,7 +58,7 @@ while :; do
 # not how long ago the pass started.
 touch "$LOCK" 2>/dev/null
 rm -f "$DIRTY" 2>/dev/null
-if _has_entries "$NMDIR/uidhide"; then
+if _has_entries "$NMDIR/uidhide" || _follow_ksu; then
     _out=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _urc=$?
     if [ "$_urc" -eq 124 ]; then
@@ -59,7 +66,7 @@ if _has_entries "$NMDIR/uidhide"; then
     elif [ "$_urc" -ne 0 ]; then
         nmlog "⚠ hide list apply after package change FAILED (exit $_urc) - apps you expect to be hidden are not ($_out)"
     else
-        nmlog "hide list re-applied after package change ($_out)"
+        nmlog "hide list re-applied after $3 change ($_out)"
     fi
 fi
 
