@@ -33,6 +33,7 @@ const UMOUNT_ADD: u8 = 1;
 /// No app profile can be keyed on an isolated-pool uid, so the verdict for it is
 /// the global "umount modules by default" setting.
 const UNPROFILED_UID: u32 = 99_999;
+const _: () = assert!(UNPROFILED_UID > 19_999, "the probe uid must be outside the app appid range");
 
 pub const MAX_UMOUNT_PATH: usize = 255;
 
@@ -162,10 +163,5 @@ mod tests {
         assert_eq!(GET_INFO_LEGACY, 0x8000_4B02);
         assert_eq!(UID_SHOULD_UMOUNT, 0xC000_4B09);
         assert_eq!(ADD_TRY_UMOUNT, 0x4000_4B12);
-    }
-
-    #[test]
-    fn the_global_default_probe_stays_out_of_the_app_appid_range() {
-        assert!(UNPROFILED_UID > 19_999);
     }
 }
