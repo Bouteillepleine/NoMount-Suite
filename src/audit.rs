@@ -299,12 +299,9 @@ fn check_zero_mount() -> Check {
         )
         .oracle(oracle)
         .meaning(format!(
-            "Your hook framework keeps {} bind mount(s) of its own, and the Suite leaves them \
-             alone on purpose - absorbing one would break Zygisk/Xposed hooking, and that shows \
-             up hours later during an app install rather than at boot. Nothing is wrong here and \
-             nothing needs fixing. Worth knowing only if you are hiding from one specific app: \
-             these are real mounts, so unlike anything the engine serves, your manager's \"umount \
-             modules\" for that app does take them out of its view.",
+            "Your hook framework keeps {} bind mount(s); the Suite leaves them alone because \
+             absorbing one breaks Zygisk/Xposed. Unlike injections, your manager's \"umount \
+             modules\" does take these out of a hidden app's view.",
             by_design.len()
         ))
         .owner({
@@ -653,8 +650,8 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
         "bucket every inode in a directory and the all-ours band names the injections",
     )
     .meaning(
-        "Injected files carry ID numbers from a range the ROM never uses. Grouping a folder's \
-         files by device and that number yields groups that are entirely yours.",
+        "Injected files carry inode numbers from a band the ROM never uses, so grouping a \
+         folder by device and inode yields all-ours buckets.",
     )
     .owner("the kernel engine")
 }
@@ -807,8 +804,8 @@ fn overlay_dir_verdict(
             "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
         )
         .meaning(
-            "Folders the Suite created carry ID numbers far outside the ROM's range, so one \
-             filtered search returns exactly those folders.",
+            "Folders the Suite created carry inode numbers far outside the ROM's range, so one \
+             filtered find returns exactly them.",
         )
         .owner("the kernel engine")
     }

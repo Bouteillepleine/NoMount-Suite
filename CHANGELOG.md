@@ -11,6 +11,17 @@
 > WebUI rather than silently doing nothing, so you can see exactly what a kernel
 > update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
 
+## v1.3.197 - engine v34 (unchanged)
+
+- The hide list can follow KernelSU's DenyList: `nomount uid ksu on`, or the switch in
+  Apps. It asks the kernel per app, so per-app profiles, root grants and the global
+  default all count. Refused while KernelSU's global umount-by-default is on, which
+  would cover every app. The hide list still works alongside it.
+- Our real `my_*` binds are registered with KernelSU's try-umount list, so the DenyList
+  unmounts them per app as it does for a mount-based metamodule.
+- `uidhide.conf` no longer loses one knob when the other is written.
+- `check` notes and the module card are shorter.
+
 ## v1.3.196 - engine v34 (unchanged)
 
 - The WebUI is rebuilt: Status leads with one verdict, every pane groups its cards

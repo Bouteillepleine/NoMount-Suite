@@ -81,17 +81,17 @@ if command -v ksud >/dev/null 2>&1; then
     _mods=${_nmods:-0}
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ -e "$NMDIR/disabled" ]; then
-        _desc="⛔ disabled - bootloop guard tripped, open the WebUI"
+        _desc="⛔ disabled - bootloop guard tripped, see the WebUI"
     elif [ "${_driver_ok:-1}" = 0 ]; then
-        _desc="⛔ your kernel has no NoMount driver - flash a NoMount kernel, then reboot"
+        _desc="⛔ no NoMount driver - flash a NoMount kernel and reboot"
     elif [ "$_pass_ran" = 0 ]; then
-        _desc="⛔ the Suite could not start this boot - open the WebUI"
+        _desc="⛔ could not start this boot - see the WebUI"
     elif [ "${_mrc:-0}" -ne 0 ]; then
-        _desc="ℹ️ the mount pass did not finish (exit $_mrc) - open the WebUI"
+        _desc="ℹ️ mount pass unfinished (exit $_mrc) - see the WebUI"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then
-        _desc="✅ served, but the rule table could not be read this boot"
+        _desc="✅ served, rule table unreadable"
     elif [ "${_rules:-0}" = 0 ]; then
-        _desc="ℹ️ ran, but no module had files to serve - open the WebUI"
+        _desc="ℹ️ ran, no module had files to serve"
     else
         _desc="✅ $_rules rules · $_rro RRO$_wof · $_mods modules · mountless"
     fi
