@@ -133,13 +133,9 @@
 
     <details class="ndet">
       <summary>What hiding covers</summary>
-      <p class="note">Shows the listed app the stock filesystem - no injected files, no hidden paths. One entry covers the app in every user, work profile and clone. Use a <b>package name</b>: it survives a reinstall, a raw UID doesn't. Root and <code>su</code> are unaffected, and so is anything a system service reads on the app's behalf.</p>
-      <p class="note"><b>Scan</b> lists apps installed here worth hiding from and says why -
-        nothing is hidden until you pick it. It cannot cover what is not installed yet.</p>
-      <p class="note">A <b>glob</b> covers a moving target: <code>*.duckdetector</code>,
-        <code>me.garfieldhan.*</code> or <code>*chunqiu*</code> re-match on every apply, so a detector
-        that reinstalls under a new package name stays hidden. Anchors go at the ends only, and a glob
-        needs at least four literal characters.</p>
+      <p class="note">Shows the app the stock filesystem. Use a <b>package name</b>, not a UID.</p>
+      <p class="note"><b>Scan</b> suggests; you pick.</p>
+      <p class="note"><b>Globs</b>: <code>*.duckdetector</code>. Ends only, 4+ literals.</p>
     </details>
 
     <div class="subsec">
@@ -150,10 +146,10 @@
       </div>
       <div class="segstate" id="ksuState">Reading...</div>
       <details class="ndet">
-        <summary>Why this isn't automatic</summary>
-        <p class="note">A magic-mount or overlay metamodule hands the kernel its mountpoints and KernelSU unmounts them per app, so it follows the DenyList for free. The Suite serves injections, which are not mounts - there is nothing to unmount, so a DenyList entry does nothing on its own. <b>Follow</b> makes the Suite ask the kernel per app instead and hide from whoever the DenyList covers: the global default, per-app profiles and root grants all included.</p>
-        <p class="note">⚠ If KernelSU's global <b>Umount modules by default</b> is on, the DenyList covers every app without a profile of its own - following it then hides your modules from effectively everything. The switch refuses that unless you really mean it.</p>
-        <p class="note">The hide list above keeps working alongside this; it is an extra source, not a replacement.</p>
+        <summary>Why not automatic</summary>
+        <p class="note">Injections aren't mounts, so the DenyList does nothing alone. <b>Follow</b> asks the kernel per app.</p>
+        <p class="note">⚠ Global <b>umount by default</b> makes this cover nearly every app. Refused unless forced.</p>
+        <p class="note">Extra source; the list above still applies.</p>
       </details>
     </div>
 
@@ -167,8 +163,8 @@
       </div>
       <div class="segstate" id="isoState">Reading...</div>
       <details class="ndet">
-        <summary>Why this trades one tell for another</summary>
-        <p class="note">An isolated process's UID says nothing about which app started it, so hiding from one app means hiding from <i>every</i> isolated process. That closes the hole where a hidden app probes through a helper - but while it's on, an app that <b>isn't</b> hidden can spot the difference between its own view and its helper's. Both pools are covered by default.</p>
+        <summary>The trade-off</summary>
+        <p class="note">Isolated UIDs don't name their app, so one hidden app hides all. Unhidden apps can spot that.</p>
       </details>
     </div>
   </div>
@@ -183,8 +179,8 @@
       <p class="note u-mt0">Make a <b>stock ROM file</b> disappear - for a path that is itself the tell, like <code>install-recovery.sh</code>.</p>
       <details class="ndet">
         <summary>How this works</summary>
-        <p class="note">The list is saved and re-applied on every boot, in the same pass as the injections. Nothing is installed and nothing is mounted.</p>
-        <p class="note"><b>Scan</b> walks the ROM for files only a root setup leaves behind. On a mountless install it usually finds nothing, which is the correct answer - nothing is written to <code>/system</code>, so there is nothing on it to hide.</p>
+        <p class="note">Re-applied every boot. Nothing installed or mounted.</p>
+        <p class="note"><b>Scan</b> finds root leftovers in the ROM. Mountless finds none - correct.</p>
       </details>
       <div class="uidbar">
         <input id="woPath" type="text" autocapitalize="off" autocomplete="off" spellcheck="false"
@@ -233,11 +229,11 @@
     </div>
     <div id="abbody">
       <p class="note u-mt0">A module that <b>bind-mounts its own content</b> leaves a mount any scanner can read. Absorbing re-serves it as a Prism injection and unmounts the original - same content, no mount.</p>
-      <p class="note">This runs by itself; the chip is what is left. The buttons are for a mount that shows up later. <b>Scan</b> only reports.</p>
+      <p class="note">Automatic; the chip is the result. Buttons handle late mounts.</p>
       <details class="ndet">
-        <summary>When it runs, and what it skips</summary>
-        <p class="note">Once after every module's boot script, once more 45s later, and - only with the <code>my_hookless</code> trial on - before zygote too. The buttons exist so a late mount needs no reboot.</p>
-        <p class="note">A Zygisk/Xposed hook framework's binds are never taken over: a broken hook fails at the next app install, not at boot.</p>
+        <summary>When it runs</summary>
+        <p class="note">After each boot script, again at 45s; pre-zygote with <code>my_hookless</code>.</p>
+        <p class="note">Hook-framework binds are never taken over.</p>
       </details>
       <div class="uidbar">
         <button class="act u-flex1" data-act="abScan">Scan</button>
@@ -278,9 +274,9 @@
       <summary>Developer tools</summary>
       <p class="note u-mt0"><b>Snapshot</b> freezes today’s fingerprint as the baseline. <b>Verify</b> diffs the live system against it. <b>Export</b> writes a bug-report folder to <code>/sdcard/Download</code>.</p>
       <details class="ndet">
-        <summary>What Export writes, and what it leaves out</summary>
-        <p class="note">The check report, the fingerprint, the live rules and the mount table - attach the whole folder.</p>
-        <p class="note">Anything naming the apps you hide is left out of a shared destination, the boot log included; the folder says so and tells you how to get the full set privately.</p>
+        <summary>What Export writes</summary>
+        <p class="note">Report, fingerprint, rules, mount table. Attach the folder.</p>
+        <p class="note">Hidden app names are omitted when sharing.</p>
       </details>
       <div class="btns u-wrap">
         <button class="act" data-act="runSnapshot">Snapshot</button>
@@ -326,7 +322,7 @@
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
       <h2>Last incident</h2><span class="chip info">guard tripped</span><span class="chev">›</span>
     </div>
-    <p class="note">Recorded when the bootloop guard disabled the Suite, including the newest native crash and its abort message - which usually names the offending path. A saved record, not live state.</p>
+    <p class="note">Saved when the bootloop guard fired. Not live state.</p>
     <pre class="rules" id="incidentout">...</pre>
     <div class="btns"><button class="act danger" data-act="clearIncident">Clear incident</button></div>
   </div>
