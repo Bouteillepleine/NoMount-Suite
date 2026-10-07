@@ -1,33 +1,37 @@
 # 🫥 NoMount Suite
 
-> **Beta.** It works at the kernel VFS layer, and the whole point of this stage
-> is getting it to stable. What moves it there is reports from setups outside
-> the tested set - a different device, a different root manager, a module that
-> behaves oddly. `nomount export` produces the bundle for that, hide list
-> already redacted.
+> **Beta.** What moves it to stable is reports from setups outside the tested
+> set: a different phone, a different root manager, a module that behaves oddly.
+> `nomount export` produces the bundle for that, hide list already redacted.
 
-Loads root modules **without touching the mount table** - RRO theming overlays
-included. No `overlayfs`, no `tmpfs`, no bind mounts: `/proc/mounts` stays 100%
-stock, so there is no mount gap for a scanner to find.
+Loads root modules without adding a mount for them, RRO theming overlays
+included. No `overlayfs`, no `tmpfs` — the kernel redirects VFS lookups, so
+nothing the engine injects shows up in `/proc/mounts`.
 
-It is a metamodule: at boot it scans `/data/adb/modules/`, classifies every file
-and programs the kernel engine over netlink. No per-module setup. Only one
-metamodule can be active, so it refuses to install alongside another.
+One exception, on OnePlus/Oppo: the `my_*` partitions get a real bind mount by
+default, because a hookless injection there trips zygote's FD allowlist and
+bootloops the phone. Those rows are visible to any app. `nomount check` counts
+them, the WebUI names them, and the `my_hookless` trial drops them if you'll
+take the risk.
+
+It's a metamodule. At boot it scans `/data/adb/modules/`, classifies every file
+and programs the kernel engine over netlink; there's no per-module setup. Only
+one metamodule can be active, so it refuses to install next to another.
 
 <table>
   <tr>
     <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/status.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/status.jpg" width="155" alt="Status"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/modules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/modules.jpg" width="155" alt="Modules"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/hiding.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/hiding.jpg" width="155" alt="Hiding"></a></td>
     <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/rules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/rules.jpg" width="155" alt="Rules"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/check.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/check.jpg" width="155" alt="Check"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/diagnostics.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/diagnostics.jpg" width="155" alt="Checks"></a></td>
     <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/duckdetector.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/duckdetector.jpg" width="155" alt="Duck Detector"></a></td>
   </tr>
   <tr>
-    <td align="center"><sub><b>Status</b><br>zero mounts, live counts</sub></td>
-    <td align="center"><sub><b>Modules</b><br>what is served, and how</sub></td>
-    <td align="center"><sub><b>Rules</b><br>per-module rule breakdown</sub></td>
-    <td align="center"><sub><b>Check</b><br>one diagnostic, plain verdicts</sub></td>
-    <td align="center"><sub><b>Duck Detector</b><br>0 danger, 0 warning</sub></td>
+    <td align="center"><sub><b>Status</b></sub></td>
+    <td align="center"><sub><b>Hiding</b></sub></td>
+    <td align="center"><sub><b>Rules</b></sub></td>
+    <td align="center"><sub><b>Checks</b></sub></td>
+    <td align="center"><sub><b>Duck Detector</b></sub></td>
   </tr>
 </table>
 
