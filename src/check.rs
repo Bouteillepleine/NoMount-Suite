@@ -329,7 +329,7 @@ impl Report {
         } else {
             let _ = writeln!(
                 s,
-                "nomount check: plan section only - the device's own checks were not run\n"
+                "nomount check: plan section only; the device's own checks were not run\n"
             );
         }
         for c in &self.checks {
@@ -363,7 +363,7 @@ impl Report {
                 String::new()
             } else {
                 format!(
-                    " - incomplete: {} check(s) were not measured, so this is not a clean result",
+                    "; incomplete: {} check(s) were not measured, so this is not a clean result",
                     t.unmeasured
                 )
             }
@@ -373,7 +373,7 @@ impl Report {
             let _ = writeln!(s, "note: a pending-reboot check is still detectable until you reboot.");
         }
         if t.unmeasured > 0 {
-            let _ = writeln!(s, "note: an unmeasured check was not verified - it is not a pass.");
+            let _ = writeln!(s, "note: an unmeasured check was not verified. It is not a pass.");
         }
         s
     }

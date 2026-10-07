@@ -8,8 +8,8 @@
     if (op === "unblock" && !(await confirmAction(
       "Stop hiding " + v + "?",
       v.indexOf("*") >= 0
-        ? "That entry is a pattern. Every app it matches stops being hidden - now, and any that " +
-          "install later - and the pattern itself is deleted from your list."
+        ? "That entry is a pattern. Every app it matches stops being hidden, including any that " +
+          "install later, and the pattern itself is deleted from your list."
         : "This app sees your injected files again the moment it next looks, and the entry is " +
           "removed from your list.",
       "Stop hiding"))) return;
@@ -38,7 +38,7 @@
     const uc = $("uidchip");
     if (none && uc) uc.textContent = "0";
     if (none) {
-      box.innerHTML = `<div class="blk-none">No per-UID hiding active - no apps hidden.</div>`;
+      box.innerHTML = `<div class="blk-none">No per-UID hiding active. No apps hidden.</div>`;
       return;
     }
     const rows = lines.map(l => {
@@ -56,7 +56,7 @@
       const viaM = s.match(/^via (\S+)/);
       const target = viaM ? viaM[1]
         : (/^uid \d+$/.test(name) ? (uidM ? uidM[1] : name) : name);
-      const xTitle = viaM ? `Remove ${viaM[1]} - the rule hiding this app` : "Unhide";
+      const xTitle = viaM ? `Remove ${viaM[1]}, the rule hiding this app` : "Unhide";
       const actionable = UID_TARGET_RE.test(target);
       const covIdx = s.indexOf(" \u00b7 also covered by ");
       const sHead = covIdx === -1 ? s : s.slice(0, covIdx);
@@ -181,7 +181,7 @@
   }
   async function refreshIsolated() {
     if (!(await ruleDump()).ok) {
-      isoPaint(null, "Engine not responding - this is the saved policy, not what the kernel is doing.", true);
+      isoPaint(null, "Engine not responding. This is the saved policy, not what the kernel is doing.", true);
       return;
     }
     const r = await nm("uid isolated");
@@ -286,7 +286,7 @@
     const r = await exec("sh /data/adb/modules/meta-nomount/uidscan.sh");
     if (r.errno !== 0) {
       done();
-      toast("Scan did not run - " +
+      toast("Scan did not run: " +
             (((r.stderr || "").trim().split("\n")[0]) || "the script failed"), "bad");
       return;
     }
@@ -300,7 +300,7 @@
     done();
     if (!usShown) usToggle($("usShow"));
     usRender();
-    const note = degraded ? " (by manifest only - the detector name list was unavailable)" : "";
+    const note = degraded ? " (by manifest only; the detector name list was unavailable)" : "";
     toast(
       US.size ? `${US.size} candidate(s)${note}` : `Nothing worth hiding found${note}`,
       US.size ? "ok" : ""
@@ -320,7 +320,7 @@
     const box = $("usList");
     $("usShow").classList.toggle("u-hide", !(US.size));
     if (!US.size) {
-      box.innerHTML = '<div class="blk-none">Nothing left to pick - scan again after installing apps.</div>';
+      box.innerHTML = '<div class="blk-none">Nothing left to pick. Scan again after installing apps.</div>';
       return;
     }
     const order = ["detector", "queries-root", "su-perm", "queries-all"];
@@ -387,8 +387,8 @@
     if (!(await confirmAction(
       "Stop hiding " + target + "?",
       target.indexOf("*") >= 0
-        ? "That entry is a pattern. Every app it matches stops being hidden - now, and any that " +
-          "install later - and the pattern itself is deleted from your list."
+        ? "That entry is a pattern. Every app it matches stops being hidden, including any that " +
+          "install later, and the pattern itself is deleted from your list."
         : "This app sees your injected files again the moment it next looks, and the entry is " +
           "removed from your list.",
       "Stop hiding"))) return;

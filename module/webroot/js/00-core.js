@@ -26,7 +26,7 @@
       const timer = setTimeout(() => finish({
         errno: -1, stdout: "",
         stderr: "timed out after " + (EXEC_TIMEOUT_MS / 1000) +
-                "s - it may still be running; reopen this pane to see the result",
+                "s. It may still be running; reopen this pane to see the result",
       }), EXEC_TIMEOUT_MS);
       window[name] = (errno, stdout, stderr) =>
         finish({ errno: Number(errno), stdout: stdout || "", stderr: stderr || "" });
@@ -84,7 +84,7 @@
   function failText(r, fallback) {
     const e = ((r && r.stderr) || "").trim();
     if (/bootloop guard has parked the Suite/.test(e)) {
-      return "Blocked - the bootloop guard disabled the Suite, so nothing is injected. " +
+      return "Blocked. The bootloop guard disabled the Suite, so nothing is injected. " +
              "Open Status to find out why, then clear it and reboot.";
     }
     return "Failed: " + ((fallback || "").trim() || e || "error");

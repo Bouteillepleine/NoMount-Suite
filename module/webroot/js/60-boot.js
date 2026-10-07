@@ -21,7 +21,7 @@
   function refreshFailed(e) {
     const ic = document.querySelector("#refreshBtn svg");
     if (ic) ic.classList.remove("spin");
-    toast("Something went wrong reading the device - press refresh to try again. " +
+    toast("Something went wrong reading the device. Press refresh to try again. " +
           ((e && e.message) || e), "bad");
   }
   let REFRESH_RUNNING = null;
@@ -68,12 +68,12 @@
     $("hdreng").textContent = eng;
     $("vstage").hidden = !staged;
     $("ver").title = staged
-      ? pv + " is installed but not live yet - its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
-      : "Suite " + SUITE_VERSION + " - " + engFull + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
+      ? pv + " is installed but not live yet: its files are in modules_update and swap in on the next reboot. This page, and everything it reports, is still " + SUITE_VERSION + "."
+      : "Suite " + SUITE_VERSION + " · " + engFull + ". Two independent numbers: the engine is in the kernel, the Suite is this module.";
     const suiteId = SUITE_VERSION + (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "");
     const prof = (SUITE_PROFILE && SUITE_PROFILE !== "release") ? " · " + SUITE_PROFILE + " build" : "";
     $("footver").textContent = "Suite " + suiteId + prof + " · " + engFull +
-      (staged ? " · " + pv + " staged - reboot to activate" : "");
+      (staged ? " · " + pv + " staged, reboot to activate" : "");
     await Promise.all([refreshStatus(), refreshDevice(), refreshStealth(), refreshGuard(),
                        refreshAbsorb(),
                        refreshModules(), refreshFiles(), refreshRuleSummary(),

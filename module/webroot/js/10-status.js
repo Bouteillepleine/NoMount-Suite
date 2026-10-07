@@ -45,7 +45,7 @@
     if (!d.ok) {
       $("state").textContent = "No kernel driver";
       $("substate").textContent =
-        "this kernel was not built with NoMount - flash one that was, then reboot. " +
+        "this kernel was not built with NoMount. Flash one that was, then reboot. " +
         "Nothing is being injected. Prebuilt OnePlus kernels: " +
         "github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases · " +
         "source: github.com/Bouteillepleine/NoMount-Suite";
@@ -59,7 +59,7 @@
     if (GUARD_TRIPPED === true) {
       $("state").textContent = "Disabled";
       $("substate").textContent =
-        "the bootloop guard tripped - re-arm it in Bootloop guard below, then reboot";
+        "the bootloop guard tripped. Re-arm it in Bootloop guard below, then reboot";
       dot.className = "dot info";
       return d.rules;
     }
@@ -77,10 +77,10 @@
       const attn = checkAttention();
       const bits = [];
       if (pending > 0) {
-        bits.push(`${pending} planned file${pending > 1 ? "s" : ""} not served yet - press Reload`);
+        bits.push(`${pending} planned file${pending > 1 ? "s" : ""} not served yet. Press Reload`);
       }
       if (attn > 0) {
-        bits.push(`${attn} finding${attn > 1 ? "s" : ""} - see Checks`);
+        bits.push(`${attn} finding${attn > 1 ? "s" : ""} · see Checks`);
       }
       $("substate").textContent = bits.length ? "modules injected · " + bits.join(" · ")
                                               : "modules injected";
@@ -95,15 +95,15 @@
     if (gen !== STATUS_GEN) return d.rules;
     if (ships === 0) {
       $("substate").textContent = planned > 0
-        ? "nothing to inject - this device's module content is served by real binds"
-        : "nothing to inject - no module provides files";
+        ? "nothing to inject: this device's module content is served by real binds"
+        : "nothing to inject: no module provides files";
       dot.className = "dot ok";
     } else if (ships > 0) {
       // The plan ships files and the engine holds nothing: measured, and NOT healthy. This
       // painted green while the `ships === -1` case below - where the plan could not even be
       // read - correctly painted amber, i.e. a known-bad device looked better than an
       // unknown one. Reachable from this page's own Clear rules button.
-      $("substate").textContent = "no rules - " + ships + " planned file(s) unserved, re-apply";
+      $("substate").textContent = "no rules: " + ships + " planned file(s) unserved, re-apply";
       dot.className = "dot info";
     } else {
       $("substate").textContent = "no rules";
@@ -199,18 +199,18 @@
         : { k: "Root · su", v: "external", t: "off" },
     ];
     if (rootNm > 0) {
-      rows.push(appNm === 0 ? { k: "Real mounts", v: "root " + rootNm + " · apps 0 - hidden", t: "vfs" }
-              : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " - VISIBLE", t: "info" }
+      rows.push(appNm === 0 ? { k: "Real mounts", v: "root " + rootNm + " · apps 0, hidden", t: "vfs" }
+              : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " · VISIBLE", t: "info" }
               : { k: "Real mounts", v: "root " + rootNm + " · app-view n/a", t: "off" });
     } else {
-      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " finding" + (fmnt > 1 ? "s" : "") + " - open Check", t: "info" }
+      rows.push(fmnt > 0 ? { k: "Real mounts", v: fmnt + " finding" + (fmnt > 1 ? "s" : "") + " · open Check", t: "info" }
               : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
               : ourBinds > 0
                 ? { k: "Real mounts", v: ourBinds + " of ours · my_* bind" + (ourBinds > 1 ? "s" : ""),
                     t: ourBindsWarn ? "info" : "vfs" }
               : byDesign > 0
                 ? { k: "Real mounts", v: "none of ours · " + byDesign + " left by design", t: "vfs" }
-                : { k: "Real mounts", v: "none - pure Prism", t: "vfs" });
+                : { k: "Real mounts", v: "none, pure Prism", t: "vfs" });
     }
     rows.push({ k: "Build keys",
                 v: fp === "" ? "n/a" : keyMatch ? keyMatch[0].replace(/^:|\/$/g, "") + " · tell" : "release-keys",
@@ -245,18 +245,18 @@
     if (engineDown(CHECK)) {
       say("info", "The engine isn’t running", "nothing is being injected",
         "There are no mounts because there is nothing being served. This card cannot say " +
-        "anything about how you look to an app until the engine answers - open " +
+        "anything about how you look to an app until the engine answers. Open " +
         "<b>Checks</b>.");
     } else if (appNm > 0) {
       say("info", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
         "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +
-        "mountless</b> (Prism RRO) - if you see this, an older overlay build is still active; reboot.");
+        "mountless</b> (Prism RRO). If you see this, an older overlay build is still active; reboot.");
     } else if (fmnt > 0) {
       const owner = bad.map(function (c) { return c.owner; }).filter(Boolean).join(", ");
       say("info", "Something is mounting over the ROM",
         owner ? "from " + owner : fmnt + " finding(s) in the mount table",
         esc(redactUids(bad.map(function (c) { return c.meaning || c.name; }).join(" "))) +
-        " Open <b>Checks</b> - it names each one, who caused it, and what " +
+        " Open <b>Checks</b>: it names each one, who caused it, and what " +
         "you can do about it.");
     } else if (ourBindsWarn) {
       say("info", "Our own my_* binds are visible",
@@ -272,7 +272,7 @@
         "Couldn’t drop to a non-root uid to verify here, and root sees " + rootNm +
         " <code>nomount_*</code> mount(s).");
     } else if (rootNm > 0) {
-      say("clean", "Clean - nothing visible to apps",
+      say("clean", "Clean · nothing visible to apps",
         rootNm + " mount" + (rootNm > 1 ? "s" : "") + " hidden from non-root",
         "Injections are mountless and su is sucompat. Any remaining <code>nomount_*</code> mount " +
         "is kernel-hidden from non-root readers of <code>/proc/*/mountinfo</code>; root still " +
@@ -281,10 +281,10 @@
       told = true;
       say("info", "Residual tells present", tells.join(" · "),
         "Mount surface is clean, but a scanner can still read: " + tells.map(esc).join(", ") +
-        ". These are properties and boot state, not mounts - nothing on this page changes them.");
+        ". These are properties and boot state, not mounts; nothing on this page changes them.");
     } else {
       const how =
-        "Injections and RRO overlays are both Prism - <b>no overlayfs</b>, no tmpfs - and su is " +
+        "Injections and RRO overlays are both Prism (<b>no overlayfs</b>, no tmpfs) and su is " +
         "sucompat. Root and apps see the <b>same</b> mount table, so there is no gap to flag.";
       if (ourBinds > 0) {
         const them = ourBinds > 1 ? "them" : "it";
@@ -295,12 +295,12 @@
           them + ". Default here, nothing broken.");
       } else if (byDesign > 0) {
         say("clean", "Mountless · " + byDesign + " mount" + (byDesign > 1 ? "s" : "") + " by design",
-          "the Suite adds none it can avoid - " + byDesign + " left in place on purpose",
+          "the Suite adds none it can avoid; " + byDesign + " left in place on purpose",
           how + " What is left is a hook framework's own bind, which <code>absorb</code> never " +
           "takes over: a broken hook fails at the next app install, not at boot. Apps can see " +
           (byDesign > 1 ? "them" : "it") + ".");
       } else {
-        say("clean", "Fully mountless", "zero mounts - nothing to hide", how);
+        say("clean", "Fully mountless", "zero mounts, nothing to hide", how);
       }
     }
   }
@@ -312,7 +312,7 @@
     const dr = await exec("[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0");
     if (dr.errno !== 0) {
       $("gchip").textContent = "?";
-      $("gstate").textContent = "Unknown - could not read the guard";
+      $("gstate").textContent = "Unknown · could not read the guard";
       $("gdot").className = "dot";
       $("rearm").classList.remove("u-hide");
       return;
@@ -328,7 +328,7 @@
     }
     $("gchip").textContent = "boot " + (cr.errno !== 0 ? "?" : c === "" ? "0" : c) + "/3";
     if (disabled) {
-      $("gstate").textContent = "Tripped - disabled"; $("gdot").className = "dot info"; $("rearm").classList.remove("u-hide");
+      $("gstate").textContent = "Tripped · disabled"; $("gdot").className = "dot info"; $("rearm").classList.remove("u-hide");
     } else {
       $("gstate").textContent = "Armed"; $("gdot").className = "dot ok"; $("rearm").classList.add("u-hide");
     }

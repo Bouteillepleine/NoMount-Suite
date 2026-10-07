@@ -99,7 +99,7 @@
     }
     if (!r || !r.summary) {
       dot.className = "hl-dot";
-      txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\"> - tap to run a check</span>";
+      txt.innerHTML = "<b>Not checked yet</b> <span class=\"age\">· tap to run a check</span>";
       return;
     }
     const s = r.summary;
@@ -113,10 +113,10 @@
     } else if (!ranSection(r, "device")) {
       dot.className = "hl-dot info";
       txt.innerHTML = "<b>Only your plan was checked</b> " +
-                      "<span class=\"age\"> - tap to check the device too</span>";
+                      "<span class=\"age\">· tap to check the device too</span>";
     } else if (unm > 0 || s.complete === false) {
       dot.className = "hl-dot info";
-      txt.innerHTML = "<b>Not fully checked yet</b> <span class=\"age\"> - " +
+      txt.innerHTML = "<b>Not fully checked yet</b> <span class=\"age\">· " +
                       (unm || 1) + (unm === 1 ? " check" : " checks") +
                       " had nothing to look at</span>";
     } else {
@@ -148,7 +148,7 @@
     const r0 = await nm("check --json --write");
     const rep = parseJson(r0);
     if (rep) CHECK = rep;
-    else toast("Check did not run - " +
+    else toast("Check did not run: " +
                (((r0.stderr || "").trim().split("\n")[0]) || "no output"), "bad");
     renderCheck(CHECK);
     refreshStealth(); refreshStatus(); paintModuleMetric();
@@ -187,7 +187,7 @@
     if (!r || !r.checks) {
       list.innerHTML = engineDown(r)
         ? '<div class="empty">No kernel driver, so there is nothing to check yet. Use <b>Copy report</b> to get the details for a bug report.</div>'
-        : '<div class="empty">Not checked yet - press <b>Re-run</b>.</div>';
+        : '<div class="empty">Not checked yet. Press <b>Re-run</b>.</div>';
       chip.textContent = engineDown(r) ? "engine down" : "not checked";
       chip.className = "chip info";
       age.classList.add("u-hide");
@@ -252,7 +252,7 @@
       return;
     }
 
-    sub.textContent = "Everything that passed is left out. What is left is information about this device - the Suite is working, and nothing here has to be fixed for it to keep working.";
+    sub.textContent = "Everything that passed is left out. What remains is information about this device; none of it has to be fixed.";
     let head = "";
     if (!ranSection(r, "device")) {
       head = '<div class="frow"><div class="fname">Only your plan was checked</div>' +
@@ -272,7 +272,7 @@
         (unmeasured.length === 1 ? "it is" : "they are") + " not " +
         (unmeasured.length === 1 ? "a pass" : "passes") + ". " +
         (attention.length
-          ? "Read what is above first - several of these depend on it."
+          ? "Read what is above first; several of these depend on it."
           : "The usual reason is timing: the boot pass runs before any app has opened an " +
             "injected file, so the checks that need a running app cannot answer then. " +
             "Run them now that the device is up.") + "</div>" +
@@ -328,11 +328,11 @@
       const q = (e.stdout || "").trim().split("|");
       const t = [
         "NoMount Suite " + SUITE_VERSION +
-          (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " - check",
+          (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " · check",
         "device: " + (q[0] || q[5] || "?") + " · Android " + (q[1] || "?") + " · " + (q[2] || "?"),
         "kernel: " + (q[3] || "?") + (q[4] ? " · " + q[4] : ""),
-        "root: " + (q[6] && q[6] !== "0" ? "LKM - kernelsu.ko is loaded, so the running kernel is not a NoMount build" : "built into the kernel, or unknown"),
-        "engine: not responding - no CONFIG_NOMOUNT kernel, so no check could run",
+        "root: " + (q[6] && q[6] !== "0" ? "LKM: kernelsu.ko is loaded, so the running kernel is not a NoMount build" : "built into the kernel, or unknown"),
+        "engine: not responding, no CONFIG_NOMOUNT kernel, so no check could run",
       ].join("\n");
       let copied = false;
       try {
@@ -346,7 +346,7 @@
         const dd = $("auditout").closest("details");
         if (dd) dd.open = true;
         $("devtools").open = true;
-        toast("Clipboard unavailable - the report is in Raw report, ready to select.");
+        toast("Clipboard unavailable. The report is in Raw report, ready to select.");
       }
       return;
     }
@@ -360,10 +360,10 @@
     const s = CHECK.summary || {};
     const lines = [
       "NoMount Suite " + (CHECK.suite || SUITE_VERSION) +
-        (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " - check",
+        (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " · check",
       "device: " + (p[0] || p[5] || "?") + " · Android " + (p[1] || "?") + " · " + (p[2] || "?"),
       "kernel: " + (p[3] || "?") + (p[4] ? " · " + p[4] : ""),
-      "root: " + (p[6] && p[6] !== "0" ? "LKM - kernelsu.ko is loaded, so the running kernel is not a NoMount build" : "built into the kernel, or unknown"),
+      "root: " + (p[6] && p[6] !== "0" ? "LKM: kernelsu.ko is loaded, so the running kernel is not a NoMount build" : "built into the kernel, or unknown"),
       "engine: " + (CHECK.engine === null || CHECK.engine === undefined ? "not responding" : "v" + CHECK.engine),
       "sections: " + ((CHECK.sections || []).join(", ") || "?"),
       "rules: " + (CHECK.rules === null || CHECK.rules === undefined
@@ -400,7 +400,7 @@
       const d = $("auditout").closest("details");
       if (d) d.open = true;
       $("devtools").open = true;
-      toast("Clipboard unavailable - the report is in Raw report, ready to select.");
+      toast("Clipboard unavailable. The report is in Raw report, ready to select.");
     }
   }
 
@@ -411,8 +411,8 @@
     if (had && !(await confirmAction(
       "Replace the saved baseline?",
       "Verify compares this device against the snapshot you took when you were happy with it. " +
-      "A new one overwrites that reference with today's state - including anything that has " +
-      "drifted since - and the old baseline cannot be recovered.",
+      "A new one overwrites that reference with today's state, including anything that has " +
+      "drifted since. The old baseline cannot be recovered.",
       "Replace"))) return;
     const done = busy(btn, "Saving...");
     const r = await nm("snapshot");
@@ -426,10 +426,10 @@
     const txt = (r.stdout || "") + (r.stderr || "");
     _healthShow(txt);
     if (r.errno !== 0 || !txt.trim()) toast("Verify did not run", "bad");
-    else if (/DRIFT/.test(txt)) toast("Drift from snapshot - see output", "bad");
-    else if (/no snapshot yet/.test(txt)) toast("No baseline yet - take a snapshot first", "");
+    else if (/DRIFT/.test(txt)) toast("Drift from snapshot · see output", "bad");
+    else if (/no snapshot yet/.test(txt)) toast("No baseline yet. Take a snapshot first", "");
     else if (/no drift/.test(txt)) toast("Matches snapshot", "ok");
-    else toast("Verify gave no verdict - see output", "");
+    else toast("Verify gave no verdict · see output", "");
     done();
   }
   async function runExport(btn) {
