@@ -4,7 +4,7 @@ case "$3" in
     *) exit 0 ;;
 esac
 
-[ -n "$(printf %s "$1" | tr -d "ar0xo")" ] || exit 0
+[ -n "$(printf %s "$1" | tr -d x)" ] || exit 0
 
 MODDIR=/data/adb/modules/meta-nomount
 NMLOG_TAG=uidwatch
@@ -45,6 +45,16 @@ if [ -f "$LOCK" ]; then
     fi
 fi
 DIRTY=$NMDIR/.uidwatch.dirty
+DIGEST=$NMDIR/.uidwatch.digest
+_SUM=$(command -v sha256sum 2>/dev/null || command -v md5sum 2>/dev/null)
+# packages.list is rewritten byte-identically on every PMS commit; gate on the real inputs.
+_uw_digest() {
+    [ -n "$_SUM" ] || return 0
+    for _f in "$NMDIR/uidhide" "$NMDIR/uidhide.conf" "$NMDIR/absorbed.list" \
+              /data/system/packages.list /data/adb/ksu/.allowlist; do
+        [ -f "$_f" ] && "$_SUM" "$_f" 2>/dev/null
+    done
+}
 ( set -o noclobber; echo $$ > "$LOCK" ) 2>/dev/null || {
     : > "$DIRTY" 2>/dev/null
     exit 0
@@ -58,13 +68,18 @@ while :; do
 # not how long ago the pass started.
 touch "$LOCK" 2>/dev/null
 rm -f "$DIRTY" 2>/dev/null
+_cur=$(_uw_digest)
+if [ -z "$_cur" ] || [ "$_cur" != "$(cat "$DIGEST" 2>/dev/null)" ]; then
+_ok=1
 if _has_entries "$NMDIR/uidhide" || _follow_ksu; then
     _out=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _urc=$?
     if [ "$_urc" -eq 124 ]; then
         nmlog "⚠ hide list apply after package change timed out after 60s - apps you expect to be hidden are not"
+        _ok=0
     elif [ "$_urc" -ne 0 ]; then
         nmlog "⚠ hide list apply after package change FAILED (exit $_urc) - apps you expect to be hidden are not ($_out)"
+        _ok=0
     else
         nmlog "hide list re-applied after $3 change ($_out)"
     fi
@@ -76,11 +91,15 @@ if _has_entries "$NMDIR/absorbed.list"; then
     nmlog_absorb_notes "$_abs_all"
     if [ "$_abs_rc" -eq 124 ]; then
         nmlog "absorb after package change timed out after 60s"
+        _ok=0
     elif [ "$_abs_rc" -ne 0 ]; then
         nmlog "⚠ absorb after package change FAILED (exit $_abs_rc) - foreign mounts may still be visible: $(printf '%s\n' "$_abs_all" | tail -1)"
+        _ok=0
     else
         nmlog "absorb after package change ($(printf '%s\n' "$_abs_all" | tail -1))"
     fi
+fi
+[ "$_ok" = 1 ] && [ -n "$_cur" ] && printf '%s\n' "$_cur" > "$DIGEST" 2>/dev/null
 fi
 _rounds=$((_rounds + 1))
 [ -e "$DIRTY" ] || break
