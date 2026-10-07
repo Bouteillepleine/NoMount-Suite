@@ -1,39 +1,40 @@
 # 🫥 NoMount Suite
 
-Loads root modules **without adding a mount for them** - RRO theming overlays
-included. No `overlayfs`, no `tmpfs`: files are served by redirecting VFS lookups
-in the kernel, so nothing the engine injects appears in `/proc/mounts`.
+Loads root modules without adding a mount for them, RRO theming overlays
+included. No `overlayfs`, no `tmpfs`. The kernel redirects VFS lookups instead,
+so nothing the engine injects shows up in `/proc/mounts`.
 
-On OnePlus/Oppo that is the whole mount table only if you opt in: the `my_*`
-partitions are served by a real bind by default (see below), and those rows *are*
-visible to any app. `nomount check` counts them and the WebUI names them.
+One exception, on OnePlus/Oppo. The `my_*` partitions get a real bind mount,
+because a hookless injection there trips zygote's FD allowlist and bootloops the
+phone. Those rows are visible to any app. `nomount check` counts them, the WebUI
+names them, and the `my_hookless` trial drops them if you'll take the risk.
 
-It is a metamodule: at boot it scans `/data/adb/modules/`, classifies every file
-and programs the kernel engine over netlink. No per-module setup. Only one
-metamodule can be active, so it refuses to install alongside another.
+A metamodule: at boot it scans `/data/adb/modules/`, classifies every file and
+programs the kernel engine over netlink. No per-module setup. Only one
+metamodule can be active, so it won't install next to another.
 
 > **This needs a custom kernel.** NoMount is two halves: the **Prism** kernel
-> driver and this module. On a stock kernel the module installs, reports, and
-> injects not one file - the installer says so rather than reporting success.
+> driver and this module. On a stock kernel the module installs and injects
+> nothing. The installer tells you so.
 
-One exception to zero mounts: OnePlus/Oppo `my_*` partitions are served by a real
-bind mount, because a hookless injection there trips zygote's FD allowlist and
-bootloops the device. Those binds are visible to any app. `nomount check` counts
-them and the WebUI names them; the `my_hookless` trial removes them at the risk
-the bootloop guard exists to catch.
+> **Beta.** What moves it to stable is reports from outside the tested set: a
+> different phone, a different root manager, a module that behaves oddly.
+> `nomount export` makes the bundle for that, hide list already redacted.
 
 <table>
   <tr>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/status.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/status.jpg" width="165" alt="Status"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/rules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/rules.jpg" width="165" alt="Rules"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/diagnostics.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/diagnostics.jpg" width="165" alt="Diagnostics"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/duckdetector.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/duckdetector.jpg" width="165" alt="Duck Detector"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/status.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/status.jpg" width="155" alt="Status"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/hiding.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/hiding.jpg" width="155" alt="Hiding"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/rules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/rules.jpg" width="155" alt="Rules"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/diagnostics.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/diagnostics.jpg" width="155" alt="Checks"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/duckdetector.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/duckdetector.jpg" width="155" alt="Duck Detector"></a></td>
   </tr>
   <tr>
-    <td align="center"><sub><b>Status</b><br>zero mounts, live counts</sub></td>
-    <td align="center"><sub><b>Rules</b><br>what is served, per module</sub></td>
-    <td align="center"><sub><b>Checks</b><br>one pass, plain verdicts</sub></td>
-    <td align="center"><sub><b>Duck Detector</b><br>0 danger, 0 warning</sub></td>
+    <td align="center"><sub><b>Status</b></sub></td>
+    <td align="center"><sub><b>Hiding</b></sub></td>
+    <td align="center"><sub><b>Rules</b></sub></td>
+    <td align="center"><sub><b>Checks</b></sub></td>
+    <td align="center"><sub><b>Duck Detector</b></sub></td>
   </tr>
 </table>
 
@@ -43,214 +44,148 @@ the bootloop guard exists to catch.
 
 | | |
 | :--- | :--- |
-| **OnePlus** | Prebuilt kernels from [`OnePlus-ReSukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases), [`OnePlus-KsuNext_NMS`](https://github.com/Bouteillepleine/OnePlus-KsuNext_NMS/releases) or [`OnePlus-SukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-SukiSu_NMS/releases) - pick the one matching the root manager you want. |
-| **Anything else** | Build your own with `CONFIG_NOMOUNT=y`. The driver and its integration patch are in [`hookless/`](hookless/); nothing in them is vendor- or SoC-specific. |
-| **Cannot rebuild?** | See [Out-of-tree variants](#out-of-tree-variants) - untested on hardware. |
+| **OnePlus** | Prebuilt kernels from [`OnePlus-ReSukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases), [`OnePlus-KsuNext_NMS`](https://github.com/Bouteillepleine/OnePlus-KsuNext_NMS/releases) or [`OnePlus-SukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-SukiSu_NMS/releases). Pick the one matching your root manager. |
+| **Anything else** | Build with `CONFIG_NOMOUNT=y`. The driver and its integration patch are in [`hookless/`](hookless/), nothing in them vendor- or SoC-specific. |
+| **Can't rebuild?** | See [Out-of-tree variants](#out-of-tree-variants) (untested on hardware). |
 
-Already on a NoMount kernel? `zcat /proc/config.gz | grep NOMOUNT` should print
-`CONFIG_NOMOUNT=y`. If it errors instead, your kernel simply does not publish its
-config - not the same as "not set". Flash the zip and read the install screen,
-which probes the engine directly.
+`zcat /proc/config.gz | grep NOMOUNT` should print `CONFIG_NOMOUNT=y`. If it
+errors, your kernel just doesn't publish its config. Flash the zip and read the
+install screen, which probes the engine.
 
-**2. Install the module.** Download
+**2. Install the module.** Flash
 [the latest release](https://github.com/Bouteillepleine/NoMount-Suite/releases/latest)
-and flash the zip from your manager (*Modules → Install from storage*), or:
+from your manager (*Modules → Install from storage*), or:
 
 ```sh
 ksud module install /sdcard/Download/00_NoMount-Module-vX.Y.Z.zip
 ```
 
-The installer verifies the zip against a bundled `sha256` manifest, refuses to
-sit alongside another metamodule, and probes the engine so you find out at
-install time whether the kernel has it. From recovery that probe cannot answer,
-which it also says.
+It verifies the zip against a bundled `sha256` manifest, refuses to sit beside
+another metamodule, and probes the engine. From recovery it can't probe, and says
+so.
 
-**3. Reboot.** Module content is served from the first boot pass onwards.
+**3. Reboot.** Content is served from the first boot pass onwards.
 
-**4. Check it worked.** The WebUI opens on Status. Same answers from a root shell
-- but `nomount` is **not on `PATH`**: it ships inside the module, so set this up
-once per shell first.
+**4. Check it worked.** The WebUI opens on Status. `nomount` isn't on `PATH`, so
+for a root shell:
 
 ```sh
 alias nomount=/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount
 
-nomount check      # one diagnostic - verdict, and what was measured
+nomount check      # verdict, and what was measured
 nomount vfs list   # every rule the engine is serving
 ```
 
-A clean result is `verdict: clean` with zero failures **and zero unmeasured** -
-an unmeasured check is not a pass, and the report says so rather than rounding up.
+A clean result is `verdict: clean`, zero failures **and zero unmeasured**. An
+unmeasured check isn't a pass.
 
-Updating is the same flash: your hide list, whiteouts, absorbed rules and
-settings are preserved across an update, and restored if an install aborts.
+Updating is the same flash. Hide list, whiteouts, absorbed rules and settings
+survive it, and come back if an install aborts.
 
-## If it does not boot
+## If it doesn't boot
 
-The Suite counts boots. Three in a row that never reach `boot_completed` and it
-parks itself: it writes `/data/adb/nomount/disabled`, stops injecting, and
-records what happened in `/data/adb/nomount/incident.log`. So the usual answer
-is **let it boot twice more** - the third failure disarms it and the fourth boot
-comes up stock, with the incident waiting for you in the WebUI.
+The Suite counts boots. Three that never reach `boot_completed` and it parks
+itself: writes `/data/adb/nomount/disabled`, stops injecting, logs the incident
+to `/data/adb/nomount/incident.log`. So the usual answer is **let it boot twice
+more** — the third failure disarms it, the fourth comes up stock.
 
-If you would rather not wait, or the guard itself cannot run (a full `/data`
-stops it arming), disarm it by hand from recovery or `adb` in recovery:
+To disarm it yourself, from recovery or `adb` in recovery:
 
 ```sh
 mkdir -p /data/adb/nomount && touch /data/adb/nomount/disabled
 ```
 
-That leaves the module installed and everything configured - clear the marker in
-the WebUI, or `rm /data/adb/nomount/disabled`, when you want it back. To remove
-the module outright instead:
+Everything stays installed and configured. Clear the marker in the WebUI when you
+want it back. To remove the module instead:
 
 ```sh
 touch /data/adb/modules/meta-nomount/remove
 ```
 
 Your manager uninstalls it on the next boot. Neither route touches your hide
-list, whiteouts or settings.
-
-If the device does not boot far enough for either, flash the kernel you were on
-before - the Suite injects nothing without the Prism engine, so a stock kernel
-brings the device up with the module inert.
+list, whiteouts or settings. If the phone won't boot far enough for either, flash
+the kernel you were on before: without the Prism engine the Suite injects
+nothing.
 
 ## Requirements
 
-- **arm64** device; the zip ships an `arm64-v8a` binary only.
+- **arm64**. The zip ships an `arm64-v8a` binary only.
 - A kernel with the **Prism** engine (`CONFIG_NOMOUNT=y`), source in
-  [`hookless/`](hookless/). Flash the engine and this Suite as a set. The Suite
-  tolerates an older engine and says which capability is missing (`nomount check`
-  names the version and the consequence), but a change to the *wire protocol*
-  itself is not a version difference it can report - it reads as "engine not
-  responding" with nothing to say why.
+  [`hookless/`](hookless/). Flash the engine and the Suite as a set. The Suite
+  runs on an older engine and `nomount check` names what is missing; a wire
+  protocol change just reads as "engine not responding".
 - **KernelSU**, **SukiSU** or **ReSukiSU** (metamodule hook), or **Magisk**
-  (`post-fs-data`). Everything here was measured on ReSukiSU; the Magisk and
-  APatch code paths exist and run, but nobody has reported back from either, so
-  treat them as unverified rather than supported.
-- SUSFS is not needed for the ordinary case - nothing the engine serves is a
-  mount. The `my_*` binds above are the exception: they are ordinary mounts, on
-  by default, and SUSFS or your manager's "umount modules" switch can hide them.
-  The two coexist fine.
+  (`post-fs-data`). Everything here was measured on ReSukiSU. The Magisk and
+  APatch paths run, but nobody has reported back, so treat them as unverified.
+- SUSFS isn't needed; nothing the engine serves is a mount. The `my_*` binds are
+  the exception, and SUSFS or your manager's "umount modules" switch hides them.
 
-## Repository layout
+## Layout
 
-Both halves live here, because they are flashed as a pair and a mismatched pair
-is the one failure neither half can explain.
+Both halves live here, because a mismatched pair is the one failure neither half
+can explain.
 
 | Path | What it is |
 | :--- | :--- |
-| `src/` | The Rust metamodule and CLI (`nomount`) - the boot pass, the reconcile, the diagnostics. |
+| `src/` | The Rust metamodule and CLI (`nomount`): boot pass, reconcile, diagnostics. |
 | `hookless/` | The **Prism** kernel engine: `src/nomount.c` and the integration patch. |
-| `userspace/` | `nm`, the freestanding netlink client the Suite shells out to. No libc; ~4 KB. |
-| `module/` | What ships in the zip: boot scripts, the installer, and the WebUI. |
+| `userspace/` | `nm`, the freestanding netlink client. No libc, ~4 KB. |
+| `module/` | What ships in the zip: boot scripts, installer, WebUI. |
 | `scripts/` | `package.sh`, which builds and assembles the zip. |
 
 ## Building
 
 CI builds the zip on every push to `main` or `prerelease` and publishes it on a
-`v*` tag, so you rarely need to. Pushes that touch `hookless/` also run the
-ten-version engine compile matrix. Locally:
+`v*` tag, so you rarely need to. Locally:
 
-```
+```sh
 cargo test && cargo clippy --all-targets -- -D warnings
 ANDROID_NDK_HOME=/path/to/ndk scripts/package.sh --build --version vX.Y.Z
 ```
 
-The Android NDK is required for the Rust cross-compile. `nm` is built from
-source too - by `zig cc` if zig is on `PATH` (what CI uses), otherwise by the
-NDK's own clang. If neither is available, `package.sh` falls back to a prebuilt,
-but only one newer than `userspace/src/nm.[ch]`; otherwise it errors rather than
-packaging a stale binary.
+The NDK does the Rust cross-compile. `nm` is built from source too, by `zig cc`
+if zig is on `PATH`, otherwise by the NDK's clang. With neither, `package.sh`
+falls back to a prebuilt newer than `userspace/src/nm.[ch]`, or errors.
 
-## Out-of-tree variants
-
-The supported build is in-tree: `CONFIG_NOMOUNT=y`, compiled into the kernel.
-Two other ways to load the same engine live on their own branches, for cases
-where you cannot rebuild the kernel. Both `#include` `hookless/src/nomount.c`
-rather than copying it, so neither diverges in *source*, but each branch carries
-its own revision of it and they do fall behind - check `NOMOUNT_VERSION` in
-`hookless/src/nomount.h` on the branch before trusting one. Both carry the
-`/proc/<pid>/maps` spoof (through kprobes in the LKM, KernelPatch hooks
-in the KPM).
-
-| | branch | `/proc/modules` | maps spoof | kernels |
-| :--- | :--- | :--- | :--- | :--- |
-| **in-tree** | `main` | absent | yes | 4.9 - 6.18 |
-| **KPM** (KernelPatch/APatch) | [`KPM`](../../tree/KPM) | absent | yes | 6 KMIs, 5.10 - 6.6 |
-| **LKM** (loadable module) | [`LKM`](../../tree/LKM) | **listed** | yes | 4.9 - 6.18 |
-
-Neither has been loaded on a device. They compile, and CI proves that much and no
-more - read each branch's `README.md`, which says what it costs before it says
-anything else. The `LKM` branch's **Build** workflow produces the module zip with
-one `nomount-<kmi>.ko` per GKI KMI generation plus a loader; note that a module
-is portable across a *KMI generation*, not a kernel version, and vermagic must
-still match at load, so check `modinfo nomount.ko` against `cat /proc/version`.
+Pushes touching `hookless/` run the ten-version engine compile matrix.
 
 ## Commands
 
-Every command below is the module's own binary at
-`/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount` - use the alias from
-**Install** step 4, or type the full path. The WebUI covers the same ground with
-no shell at all: status, modules, rules, per-app hiding, and the durable
-hidden-paths list.
+Use the alias from **Install** step 4. The WebUI covers the same ground without a
+shell.
 
 | Command | Description |
 | :--- | :--- |
-| `nomount mount` | The boot pass: classify enabled modules and route them into Prism injections. Run by the boot scripts. |
-| `nomount reload` | Reconcile live rules to the current module set, delta only. Use after installing or removing a module instead of rebooting. |
-| `nomount absorb [--dry-run] [--include-dirs] [--early]` | Take over bind mounts other modules made: re-serve each as an injection, then unmount it. Runs itself every boot. |
-| `nomount vfs add <virtual> <real>` | Inject `real` at `virtual`. |
-| `nomount vfs del <virtual>` | Remove one rule. |
-| `nomount vfs whiteout <path>` | Make a path appear absent (this rule only). |
-| `nomount vfs list` | Show live rules. |
-| `nomount vfs clear` | Flush every rule. |
-| `nomount whiteout add <path> [--force]` | Hide a path now and on every boot. `--force` only silences the "leaves a measurable hole" note; nothing is refused on that ground. |
-| `nomount whiteout remove <path>` | Stop hiding it. |
-| `nomount whiteout list` | The durable list, and whether each entry is applied. |
-| `nomount whiteout apply` | Re-apply the whole list. |
-| `nomount whiteout suggest` | Propose paths on this device worth hiding. |
-| `nomount uid block <pkg\|uid\|glob> [--force]` | Hide everything the Suite serves from an app. Matches on appid, so it covers clones and work profiles. |
-| `nomount uid unblock <pkg\|uid>` | Stop hiding from it. |
-| `nomount uid list` | Who is hidden. |
-| `nomount uid apply [--early]` | Re-apply the hide list. |
-| `nomount uid preset [name] [--dry-run] [--globs]` | Add a curated preset; no argument lists what is available. |
-| `nomount uid ksu [on\|off] [--force]` | Follow KernelSU's DenyList as a hide-list source; no argument shows what it covers. |
-| `nomount uid isolated [mode]` | Which isolated-process pools are hidden. |
-| `nomount check [--plan] [--device] [--json] [--write]` | **The** diagnostic. `--plan` static (does the module set resolve into a bad rule?), `--device` measured (is what we serve detectable, and is it being served?); neither flag runs both. Verdicts are `FAIL`, `REBOOT`, `UNMEASURED`, `WARN`, `PASS`, `N/A`, `NOTE` - "nothing to test" and "something stopped me testing" are deliberately different, and neither is a pass. Exits 1 on a FAIL or a REBOOT. |
-| `nomount plan` | Print what the mount pass would resolve to, without applying it. Read-only. |
-| `nomount snapshot` | Freeze the current fingerprint as a baseline. |
-| `nomount verify` | Diff live against that baseline and name what drifted. |
+| `nomount check` | The diagnostic. `--plan` is static (does the module set resolve into a bad rule?), `--device` is measured (is what we serve detectable?). Neither flag runs both. Exits 1 on a `FAIL` or a `REBOOT`. |
+| `nomount reload` | Reconcile live rules to the current module set, delta only. Use it after installing a module instead of rebooting. |
+| `nomount vfs list` | Every live rule. `vfs add`, `del`, `whiteout` and `clear` edit them for this boot. |
+| `nomount whiteout add <path>` | Hide a path now and on every boot. With `remove`, `list`, `apply` and `suggest`. |
+| `nomount uid block <pkg\|uid\|glob>` | Hide everything the Suite serves from an app. Matches on appid, so clones and work profiles count. With `unblock`, `list`, `apply` and `isolated`. |
+| `nomount uid preset [name]` | Add a curated preset; no argument lists them. `uid ksu on` follows KernelSU's DenyList instead. |
+| `nomount absorb [--dry-run]` | Take over bind mounts other modules made: re-serve each as an injection, then unmount it. Runs every boot. |
 | `nomount export [dir]` | Dump diagnostics to a folder; the hide list is redacted on shared storage. |
-| `nomount ghost sync` | Re-arm the existence cloak: work out which injected-only paths can be made to look absent to a hidden app, and program them. Run by the boot scripts. |
-| `nomount ghost list` | Show what the cloak currently covers. |
-| `nomount unbind` | Unmount the real binds recorded in `binds.list` (the `my_*` ones). A bind that will not come down keeps its row so a later pass retries it, and the command exits 1. |
-| `nomount version` | Print the version. |
+| `nomount unbind` | Unmount the real `my_*` binds recorded in `binds.list`. |
 
-Three files under `/data/adb/nomount/` are hand-edited rather than driven by a
-command, one entry per line: `blocklist` (module ids the boot pass must not
-inject - the way to park one misbehaving module without uninstalling it),
-`absorb-skip.txt` (mounts `absorb` must leave alone; the installer seeds it with
-an explanation in its own header) and `public.txt` (absolute ROM paths that must
-stay visible to every uid, hidden app or not).
+`mount`, `ghost sync`, `plan`, `snapshot`, `verify` and `version` are run by the
+boot scripts or there for debugging. `nomount --help` documents every flag.
 
-`public.txt` is the hand-written half of a question the boot pass usually answers
-by itself: the PackageManager advertises everything under `app/`, `priv-app/` and
-`overlay/`, so denying one of those to an app that was told it exists is an
-inconsistency no stock device produces. Something that is *mapped* into an app is
-in the same position - `/proc/self/maps` has already named it - but a library
-lives under `lib64/`, which no structural rule reaches. List it here and the rule
-is served `(public)`, which keeps `ghost sync` from cloaking it. Nothing else
-changes: the file is read once per run, a missing file means nothing is declared,
-and a file that exists but will not read is reported rather than ignored.
+Three files under `/data/adb/nomount/` are hand-edited, one entry per line.
+`blocklist` parks a module without uninstalling it. `absorb-skip.txt` is mounts
+`absorb` must leave alone. `public.txt` is ROM paths that stay visible to every
+uid, hidden app or not.
+
+The boot pass works most of `public.txt` out by itself: denying an app a path the
+PackageManager already advertised is an inconsistency no stock device produces. A
+library mapped into an app is the same case, but it lives under `lib64/`, where no
+structural rule reaches it. List it and the rule is served `(public)`, which keeps
+`ghost sync` off it.
 
 ## Compatibility
 
-The engine builds on all ten kernel versions - 4.9, 4.14, 4.19, 5.4, 5.10, 5.15,
-6.1, 6.6, 6.12 and 6.18 - and none of it is OnePlus-specific: it is ordinary VFS
-code, no vendor hooks, no SoC assumptions. The table names OnePlus devices only
-because those are the kernels anyone has *built and booted*. What differs between
-the rows is not whether the engine builds, but whether anyone has booted it on a
-phone.
+The engine builds on all ten kernel versions from 4.9 to 6.18. None of it is
+OnePlus-specific: ordinary VFS code, no vendor hooks, no SoC assumptions. The
+table names OnePlus devices because those are the kernels anyone has booted. I
+only own a OnePlus 15, so every other row came from testers.
 
 | Kernel | Tested on | Status |
 | :--- | :--- | :--- |
@@ -259,49 +194,45 @@ phone.
 | 5.15 | **OnePlus 11** | ✅ Booted |
 | 6.6 | **OnePlus 13 / 13T**, Ace 5 Pro, ... (18 models) | ✅ Booted |
 | 5.10 | Ace 2, Ace 2V, Nord 3, ... (6 models) | ✅ Booted |
-| 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these - other vendors do | 🧩 Compiled, not tested |
+| 4.9 · 4.14 · 4.19 · 5.4 · 6.18 | no OnePlus ships these; other vendors do | Compiled, not tested |
 
-"Compiled" means `fs/nomount.o` built against that version's canonical tree by
-the [engine compile matrix](.github/workflows/hookless-compile-matrix.yml), which
-runs on every push touching `hookless/`. It says nothing about whether the device
-boots. A report either way is worth an issue.
+"Compiled" means `fs/nomount.o` built against that version's canonical tree by the
+[compile matrix](.github/workflows/hookless-compile-matrix.yml). It says nothing
+about whether a phone boots, so a report either way is worth an issue, as is one
+about another device or root manager. Attach what **Checks → Developer tools →
+Export** writes; the hide list in it is already redacted.
 
-Tested another device or root manager? Open an issue - the WebUI's **Checks
-→ Developer tools → Export** button (or `nomount export` from a shell) produces a
-bundle with the hide list already redacted, which is the most useful thing to
-attach. A report that one of the untested managers works is as useful as a bug.
+## Out-of-tree variants
 
-## License and origin
+The supported build is in-tree. Two other ways to load the same engine live on
+their own branches, for when you can't rebuild: [`KPM`](../../tree/KPM)
+(KernelPatch/APatch, 5.10 to 6.6) and [`LKM`](../../tree/LKM) (4.9 to 6.18, and it
+shows up in `/proc/modules`). Each pins its own revision of
+`hookless/src/nomount.c` and they do fall behind, so check `NOMOUNT_VERSION`
+first.
 
-GPL-3.0. See [LICENSE](LICENSE).
+Neither has been loaded on a phone. They compile, and that is all CI proves. Read
+the branch README, which leads with what it costs.
 
-This is a modified derivative of
-**[maxsteeel/nomount](https://github.com/maxsteeel/nomount)**, and remains under
-its GPL-3.0 licence. The Suite and the Prism engine it drives are a rewrite: the
-original `/dev/nomount` char device and its ioctl control plane are gone,
-replaced by a per-inode ops hijack with a netlink control plane, and RRO overlays
-are injected hooklessly rather than mounted.
+## License and credits
 
-## Special thanks
+GPL-3.0, see [LICENSE](LICENSE). A modified derivative of
+**[maxsteeel/nomount](https://github.com/maxsteeel/nomount)**, under the same
+licence. The Suite and the Prism engine are a rewrite: the `/dev/nomount` char
+device and its ioctl control plane are gone, replaced by a per-inode ops hijack
+over netlink, and RRO overlays are injected hooklessly.
 
-- **[maxsteeel/nomount](https://github.com/maxsteeel/nomount)** - the original this is built on.
-- **[HymoFS](https://github.com/Anatdx/HymoFS)** - inspiration for the VFS approach.
-- **[A7mdwassa](https://github.com/A7mdwassa)** - tester and contributor.
-- **[ZQZCC](https://github.com/ZQZCC)** - WebUI MD3-style design.
-- **[backslashxx](https://github.com/backslashxx)** - code optimization.
-- **[KernelSU](https://github.com/tiann/KernelSU)** & **SukiSU-Ultra** - root solution and metamodule framework.
-- **[SUSFS](https://gitlab.com/simonpunk/susfs4ksu)** - the stealth layer.
-- **All testers** - thanks for making this project more stable!
+- **[maxsteeel/nomount](https://github.com/maxsteeel/nomount)** — the original this is built on.
+- **[HymoFS](https://github.com/Anatdx/HymoFS)** — inspiration for the VFS approach.
+- **[A7mdwassa](https://github.com/A7mdwassa)** — tester and contributor.
+- **[ZQZCC](https://github.com/ZQZCC)** — WebUI MD3-style design.
+- **[backslashxx](https://github.com/backslashxx)** — code optimization.
+- **[KernelSU](https://github.com/tiann/KernelSU)** & **SukiSU-Ultra** — root solution and metamodule framework.
+- **[SUSFS](https://gitlab.com/simonpunk/susfs4ksu)** — the stealth layer.
+- All testers: thanks for making this thing more stable.
 
 ## Disclaimer
 
-A kernel modification tool for research and development. Modifying kernel
-behaviour carries real risk, including instability and data loss. The developers
-are not responsible for bricked devices or thermonuclear war.
-
----
-
-> **Beta.** It works at the kernel VFS layer, and the whole point of this stage
-> is getting it to stable. What moves it there is reports from setups outside
-> the tested set - a different device, a different root manager, a module that
-> behaves oddly.
+A kernel modification tool, for research and development. Modifying kernel
+behaviour carries real risk, including instability and data loss. I'm not
+responsible for bricked devices.

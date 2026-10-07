@@ -44,6 +44,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: nomount-release-zip
@@ -102,22 +107,35 @@ jobs:
           fi
 
           echo "publishing $TAG <- $zip ($(stat -c %s "$zip") bytes)"
-          cat > /tmp/notes.md <<'NOTES'
-          > **The Suite and the Prism engine update separately.**
-          >
-          > The engine is compiled into the kernel (`CONFIG_NOMOUNT=y`); the Suite is this
-          > module. Installing this update does **not** move the engine - for that you flash
-          > a kernel built from the matching `hookless/` source.
-          >
-          > The Suite is built to run on an older engine, so this is normal rather than a
-          > fault. Anything that needs a newer one is **named** by `nomount check` and by the
-          > WebUI instead of silently doing nothing, so you can see what a kernel update would
-          > buy you. The footer shows both numbers - `Suite vX · engine vY`.
-          NOTES
+          # Release notes = this tag's CHANGELOG section, engine note as a footer.
+          head=$(awk -v tag="$TAG" 'BEGIN{gsub(/\./,"\\.",tag)}
+            $0 ~ "^## "tag"($| )" {sub(/^## /,""); print; exit}' CHANGELOG.md)
+          body=$(awk -v tag="$TAG" 'BEGIN{gsub(/\./,"\\.",tag)}
+            $0 ~ "^## "tag"($| )" {hit=1; next}
+            hit && /^## / {exit}
+            hit && NF == 0 && !started {next}
+            hit {started = 1; print}' CHANGELOG.md)
+          if [ -z "$body" ]; then
+            echo "::warning::CHANGELOG.md has no section for $TAG - publishing the footer alone"
+          fi
+          {
+            if [ -n "$head" ]; then printf '**%s**\n\n' "$head"; fi
+            if [ -n "$body" ]; then printf '%s\n' "$body"; fi
+            cat <<'FOOTER'
+
+          > **The Suite and the engine update separately.** The engine is compiled into
+          > the kernel (`CONFIG_NOMOUNT=y`); this zip is the Suite, and installing it
+          > doesn't move the engine. For that, flash a kernel built from the matching
+          > `hookless/` source. The Suite runs on an older engine, and `nomount check`
+          > names anything that needs a newer one. The WebUI footer shows both,
+          > `Suite vX · engine vY`.
+          FOOTER
+          } > /tmp/notes.md
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $TAG already exists - replacing its asset in place"
+            echo "release $TAG already exists: replacing its asset and notes in place"
             gh release upload "$TAG" "$zip" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/notes.md
           else
             gh release create "$TAG" "$zip" \
               --repo "$GITHUB_REPOSITORY" \

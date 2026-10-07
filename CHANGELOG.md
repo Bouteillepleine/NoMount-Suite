@@ -1,17 +1,12 @@
 # Changelog
 
-> **The Suite and the Prism engine update separately.**
->
-> The engine is compiled into the kernel (`CONFIG_NOMOUNT=y`); the Suite is this
-> module. Installing a Suite update does **not** move the engine - for that you
-> flash a kernel built from the matching `hookless/` source.
->
-> That is normal, not a fault: the Suite is built to run on an older engine.
-> Anything that needs a newer one is **named** by `nomount check` and by the
-> WebUI rather than silently doing nothing, so you can see exactly what a kernel
-> update would buy you. The footer shows both numbers - `Suite vX · engine vY`.
+> **The Suite and the engine update separately.** The engine is compiled into the
+> kernel (`CONFIG_NOMOUNT=y`); the Suite is this module, and installing a Suite
+> update doesn't move the engine. For that, flash a kernel built from the matching
+> `hookless/` source. The Suite runs on an older engine, and `nomount check` names
+> anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
-## v1.3.197 - engine v34 (unchanged)
+## v1.3.197 — engine v34 (unchanged)
 
 - The hide list can follow KernelSU's DenyList: `nomount uid ksu on`, or the switch in
   Apps. It asks the kernel per app, so per-app profiles, root grants and the global
@@ -22,7 +17,7 @@
 - `uidhide.conf` no longer loses one knob when the other is written.
 - `check` notes and the module card are shorter.
 
-## v1.3.196 - engine v34 (unchanged)
+## v1.3.196 — engine v34 (unchanged)
 
 - The WebUI is rebuilt: Status leads with one verdict, every pane groups its cards
   under a heading, and the light theme is derived from the same colours as the dark one
@@ -32,17 +27,17 @@
 - A path can be declared must-stay-visible in `public.txt`, instead of only being
   inferred from the package manager.
 
-## v1.3.192 - engine v34
+## v1.3.192 — engine v34
 
 - The maps cloak is programmed at boot, on kernels that carry it.
 - `nm list p` prints the cloak's rules.
 
-## v1.3.191 - engine v34
+## v1.3.191 — engine v34
 
 - `nm v` prints the engine build after the protocol number.
 - The engine check names that build, so two v34 kernels are told apart.
 
-## v1.3.190 - engine v34
+## v1.3.190 — engine v34
 
 - An injected file now keeps the stock file's owner and mode.
 - A `.replace` module no longer hides a file another module serves.
@@ -52,7 +47,7 @@
 - An `nm` call that wedges can no longer hang the boot.
 - A redacted hide-list glob is no longer printed in the refusal.
 
-## v1.3.189 - engine v33 (unchanged)
+## v1.3.189 — engine v33 (unchanged)
 
 - Absorb no longer unmounts a directory it cannot then hide.
 - The posture card re-counts mounts after Absorb instead of reusing the old number.
@@ -61,27 +56,27 @@
 - A replaced split APK no longer keeps serving its old parse.
 - A failed app scan keeps the previous cache.
 
-## v1.3.188 - engine v33 (unchanged)
+## v1.3.188 — engine v33 (unchanged)
 
 - Fix: five controls did nothing under the new CSP, including Hide selected and the app picker.
 - Fix: Enter on a card header toggled it twice.
 - Tests now scan the js parts, not only index.html.
 
-## v1.3.187 - engine v33 (unchanged)
+## v1.3.187 — engine v33 (unchanged)
 
 - WebUI split into `css/app.css` and seven `js/` parts.
 - CSP drops both `unsafe-inline` grants.
 - Controls carry `data-act`, not `onclick`; inline styles are classes.
 - Every card with a header retracts.
 
-## v1.3.186 - engine v33 (unchanged)
+## v1.3.186 — engine v33 (unchanged)
 
 - A kernel flashed from inside the root manager can leave the stock kernel running while root still works. The banner is spoofed to match stock, so nothing in the report gave that away and the engine looked broken. The report now says whether root is a loaded module, which settles it on sight.
 - `nm` prints the errno when it cannot open its netlink socket. It used to blame `CONFIG_NOMOUNT` for every failure, including a socket the kernel refused with the engine loaded and working.
 - The copied report carries the kernel build stamp, and names the device when the market name is empty.
 - `verify` no longer calls a field that a newer Suite added drift on every install. Within one Suite version a missing field is still drift.
 
-## v1.3.185 - engine v33 (the engine fixes below need a kernel rebuild)
+## v1.3.185 — engine v33 (the engine fixes below need a kernel rebuild)
 
 - Engine: `lseek`, `mmap` and `fsync` on an injected file answer like erofs, and an injected file carries its neighbours' creation time.
 - Engine: an unmounting superblock frees its directory nodes, a snapshot read stays in one offset space, and an xattr write takes the right mount.
@@ -91,19 +86,19 @@
 - The Rules card collapses all six panes, and help text and counts match what runs.
 - Build: releases are tagged from Cargo.toml, and the config gate is pinned and tested.
 
-## v1.3.184 - engine v33 (the engine fix below needs a kernel rebuild)
+## v1.3.184 — engine v33 (the engine fix below needs a kernel rebuild)
 
 - Engine: a synthesized directory takes an inode above every inode the partition has shown, not just above its directories. On overlayfs those differ, and the old choice could land on a stock directory.
 - Checks is a tab of its own, and one Rules card shows the set by module or by file.
 
-## v1.3.183 - engine v33 (the engine fix below needs a kernel rebuild)
+## v1.3.183 — engine v33 (the engine fix below needs a kernel rebuild)
 
 - Engine: a hidden app gets the stock file under a stock-shadowing directory rule, and no other caller reuses that inode.
 - A wedged `exec` times out, a check and a refresh cannot double-fire, and the confirm dialog keeps focus.
 - The header fits a phone, and un-hiding a path asks first.
 - Build: the config gate is derived from the engine source, and the screenshots are the four panes that ship.
 
-## v1.3.182 - engine v33 (the engine fixes below need a kernel rebuild)
+## v1.3.182 — engine v33 (the engine fixes below need a kernel rebuild)
 
 - Engine: the mirrored stat carries the alignment erofs reports, so `statx` no longer named every injected file by one missing bit.
 - An inode band is a device and a range. The overlay check was comparing across devices, and passed a band that was entirely ours.
@@ -112,23 +107,23 @@
 - The findings list redacts an appid like every other way out.
 - Build: the case gate sees a moved line, a camel-cased key and `module.prop`.
 
-## v1.3.181 - engine v33 (the engine fixes below need a kernel rebuild)
+## v1.3.181 — engine v33 (the engine fixes below need a kernel rebuild)
 
-- Detections are shown as information, not alarm. A finding never repaints the page: the status stays green with findings open, and nothing in the diagnostics uses amber, brown or red any more. Red is kept only on the buttons that destroy something, where it describes what the button does. The verdicts themselves are unchanged - the report, the exit code and the sort order still separate them - only the way they are presented.
+- Detections are shown as information, not alarm. A finding never repaints the page: the status stays green with findings open, and nothing in the diagnostics uses amber, brown or red any more. Red is kept only on the buttons that destroy something, where it describes what the button does. The verdicts themselves are unchanged, and the report, the exit code and the sort order still separate them. Only the presentation changed.
 - Recovery flashing works again. The generated recovery installer had lost its `#!/sbin/sh` line to a comment strip, so recovery ran a file with no interpreter and the flash failed with no message on screen. The manager install path invokes it through `sh`, which is why nothing looked wrong. No published release ever carried this; it is now checked at packaging time.
-- Engine: an inode invented for an injected file no longer lands on one a file inside a subdirectory already holds. The placer knew only about the files sitting beside it, so two names on one filesystem could report the same inode while each claimed a single link - something nothing real does, and one pass over the partition finds it.
+- Engine: an inode invented for an injected file no longer lands on one a file inside a subdirectory already holds. The placer knew only about the files sitting beside it, so two names on one filesystem could report the same inode while each claimed a single link, something nothing real does and one pass over the partition finds.
 - Engine: the directory link-count fix now covers every erofs directory rather than only small ones, and a hidden subdirectory no longer leaves the count too high.
 - Engine: one generation bump per change to the rule table, instead of two on the add path.
 - `nm` refuses a reply shorter than a netlink header rather than reading its length from whatever was in the buffer.
 - The status pane counted a pending-reboot check twice, so it could report more open findings than the report below it listed.
 - Build: every pinned CI action says which version its commit is again, and the engine compile matrix lets patch fuzz do its job instead of gating it away.
 
-- The existence cloak covered fewer processes than the hiding did. The engine normalises a uid before deciding (`uid % 100000`, plus the sdksandbox remap), so one hide-list entry covers an app in every work profile, clone and sandbox - but the cloak compared the raw uid, so those same processes were hidden and not absent: `stat` said ENOENT while `truncate` still answered EROFS. The cloak now normalises the same way. Until you flash a kernel carrying it, userspace expands the table instead, and says so if it runs out of room.
+- The existence cloak covered fewer processes than the hiding did. The engine normalises a uid before deciding (`uid % 100000`, plus the sdksandbox remap), so one hide-list entry covers an app in every work profile, clone and sandbox. The cloak compared the raw uid, though, so those same processes were hidden and not absent: `stat` said ENOENT while `truncate` still answered EROFS. The cloak now normalises the same way. Until you flash a kernel carrying it, userspace expands the table instead, and says so if it runs out of room.
 - Engine: a `getdents64` whose buffer could not hold even the first entry was read as the end of the directory, which moved the offset into the synthesized range and dropped the whole real listing on the next call.
 - Engine: every change to the rule table now bumps the generation a `nm list` dump checks, including the path that puts a replaced rule back after a failure. A dump could previously finish claiming consistency while having skipped a rule.
-- Engine: `NM_FLAG_VIRTUAL_DIR` is no longer accepted from userspace - no client sends it, and the engine's own directories set it themselves.
+- Engine: `NM_FLAG_VIRTUAL_DIR` is no longer accepted from userspace: no client sends it, and the engine's own directories set it themselves.
 - Engine: a directory that gains synthesized subdirectories reports the matching link count instead of the stock one.
-- Absorb no longer drops a redundant `my_*` mount from another namespace at runtime. The in-namespace pass has always refused that - re-asserting a `my_*` rule on a live system has rebooted a device - and the cross-namespace pass was not applying the same rule.
+- Absorb no longer drops a redundant `my_*` mount from another namespace at runtime. The in-namespace pass has always refused that, because re-asserting a `my_*` rule on a live system has rebooted a device, and the cross-namespace pass was not applying the same rule.
 - Absorb refuses the entries the planner refuses: `.replace` markers, whiteout markers, and symlinks resolving somewhere a non-root process could write.
 - A failed install no longer deletes your settings. `customize.sh` removed the stash whether or not the copy succeeded, and said nothing when it had not.
 - Verdicts say what they measured. Not finishing a scan, an unreadable mount table, an unreadable namespace, an unreadable pending-reboot list and a failed absence probe were each reported as a clean or failed result; all of them now read as not measured.
@@ -138,45 +133,45 @@
 - The status pane says what it found: a healthy device gets its verdict and a freshness stamp back, findings lead with plain English, and the wrong-kernel first run can produce a bug report instead of pointing at a button that does not exist.
 - Build: the release gate escapes the version it greps for, refuses to ship an unknown commit stamp, and parses the generated installer before packaging it. A non-release build now says so in the footer.
 
-## v1.3.180 - engine v33 (unchanged)
+## v1.3.180 — engine v33 (unchanged)
 
-- Absorb can now drop a mount from zygote's namespace, which is the one every app inherits: a module that binds with `nsenter` put its mount in every app's table however clean ours was. Only a mount a live injection already serves is dropped - anything else is content the owning module is the only source of - and an app already running keeps the copy it forked with until it is restarted.
+- Absorb can now drop a mount from zygote's namespace, which is the one every app inherits: a module that binds with `nsenter` put its mount in every app's table however clean ours was. Only a mount a live injection already serves is dropped, since anything else is content the owning module is the only source of. An app already running keeps the copy it forked with until it is restarted.
 - A hiding bind no longer waits for `--include-dirs`. That flag guards a directory bind whose listing an injection would snapshot; a bind carrying no files has no listing to snapshot, so the boot passes take it like any other mount. A debloater that re-creates its binds every boot is now clean without anyone running a command.
 
-## v1.3.179 - engine v33 (unchanged)
+## v1.3.179 — engine v33 (unchanged)
 
-- `absorb --include-dirs` un-debloated a device. A bind whose source carries no files is hiding what the ROM ships there, not serving anything; absorb unmounted it, injected the nothing it contained, and reported success while every hidden app came back. Such a bind is now emptied mountlessly - unmount, then whiteout - on the same record that already expires a module tmpfs, so uninstalling the module still restores the directory.
+- `absorb --include-dirs` un-debloated a device. A bind whose source carries no files is hiding what the ROM ships there, not serving anything; absorb unmounted it, injected the nothing it contained, and reported success while every hidden app came back. Such a bind is now emptied mountlessly (unmount, then whiteout) on the same record that already expires a module tmpfs, so uninstalling the module still restores the directory.
 - Absorb will not report a mount absorbed when it served no rule: if nothing replaced the mount it just removed, it hides the directory instead, and says so when it cannot.
 
-## v1.3.178 - engine v33
+## v1.3.178 — engine v33
 
 - Engine v33: synthesized inodes now sit above the partition maximum, so an injected file can no longer land on a shipped file's inode; the range is read with the caller's credentials when the kernel domain cannot read it.
-- Status leads with module coverage - served, absorbed, and what the Suite is not serving, with the reason on the row. Notes are gone from the WebUI, Check is Diagnostics off the main path, and Absorb sits with Rules as Absorbable mounts.
+- Status leads with module coverage: served, absorbed, and what the Suite is not serving, with the reason on the row. Notes are gone from the WebUI, Check is Diagnostics off the main path, and Absorb sits with Rules as Absorbable mounts.
 - A comment sweep had quietly broken the build stamp, the su source line, Absorb's Scan tags and the WebUI harness. All four are fixed, and tests now read both ends of anything a sweep can rewrite.
 - `whiteout add --force` never refused anything; its help said it did.
 
-## v1.3.176 - engine v32 (unchanged)
+## v1.3.176 — engine v32 (unchanged)
 
 - Two layout fixes to the Hidden apps list, both introduced by v1.3.174.
 
-## v1.3.174 - engine v32
+## v1.3.174 — engine v32
 
 - The hide list was still reaching shared storage, one file over.
 - The status card said "clean" while the engine was down.
 - An unexpected value blanked the whole app.
 - Warnings you cannot act on are no longer warnings.
 
-## v1.3.173 - engine v31 (unchanged)
+## v1.3.173 — engine v31 (unchanged)
 
 - A hook framework's own mounts are information, not a warning.
 
-## v1.3.172 - engine v31 (unchanged)
+## v1.3.172 — engine v31 (unchanged)
 
 - A version bump could not be built.
 - "will bite later" was the old ladder talking.
 - The nav bar covered the last thing you were reading.
 
-## v1.3.171 - engine v31
+## v1.3.171 — engine v31
 
 - The wrong-kernel card could never fire.
 - One `:` could kill the boot script.
@@ -187,19 +182,19 @@
 - The report says what it measured.
 - `nomount` is not a command.
 
-## v1.3.170 - engine v30 (unchanged)
+## v1.3.170 — engine v30 (unchanged)
 
 - Absorbed rows survived their module's uninstall forever.
 
-## v1.3.169 - engine v30 (unchanged)
+## v1.3.169 — engine v30 (unchanged)
 
 - "Other modules' mounts: none", directly above "Already absorbed · 2".
 
-## v1.3.168 - engine v30 (unchanged)
+## v1.3.168 — engine v30 (unchanged)
 
 - The same fix, in the copy that mattered.
 
-## v1.3.167 - engine v30 (unchanged)
+## v1.3.167 — engine v30 (unchanged)
 
 - "Hidden paths: 0 - Nothing hidden", with two ROM directories hidden.
 - The inode-collision check went UNMEASURED once a module was absorbed.
@@ -207,55 +202,55 @@
 - Module content: nothing to inject, correctly.
 - The runtime binds (issue #14).
 
-## v1.3.166 - engine v30 (unchanged)
+## v1.3.166 — engine v30 (unchanged)
 
-- `lseek(SEEK_DATA)` on a synthesized directory - fixed and boot-verified.
+- `lseek(SEEK_DATA)` on a synthesized directory: fixed and boot-verified.
 
-## v1.3.165 - engine v30 (unchanged)
+## v1.3.165 — engine v30 (unchanged)
 
 - The engine fix is boot-verified.
 - ...and this check now says what it measured.
 
-## v1.3.164 - engine v30 (unchanged)
+## v1.3.164 — engine v30 (unchanged)
 
 - New check: every synthesized directory shares an inode with a real.
 
-## v1.3.163 - engine v30 (unchanged)
+## v1.3.163 — engine v30 (unchanged)
 
 - "Real mounts: none" sat directly under "1 mount by design".
 
-## v1.3.162 - engine v30 (unchanged)
+## v1.3.162 — engine v30 (unchanged)
 
 - The Rules tab counted 260 while every other surface said 257.
 - The panes the harness had not walked.
 
-## v1.3.161 - engine v30 (unchanged)
+## v1.3.161 — engine v30 (unchanged)
 
 - A device that had switched itself off said "Active", in green.
 - ...and a stale paint could overwrite the fix.
 - How both were found.
 
-## v1.3.160 - engine v30 (unchanged)
+## v1.3.160 — engine v30 (unchanged)
 
 - The two halves of the front page can no longer disagree about the engine.
-- `scripts/webui-harness.py` - the WebUI can be run outside a phone.
+- `scripts/webui-harness.py`: the WebUI can be run outside a phone.
 
-## v1.3.159 - engine v30 (unchanged)
+## v1.3.159 — engine v30 (unchanged)
 
 - Verified: the Magisk entry point.
 
-## v1.3.158 - engine v30 (unchanged)
+## v1.3.158 — engine v30 (unchanged)
 
 - A nested RRO was badged as a plain file redirect.
 - Found by the category harness, which is the point.
 
-## v1.3.157 - engine v30 (unchanged)
+## v1.3.157 — engine v30 (unchanged)
 
 - The card now says when a module is installed but not served.
 - `mounts ?` → `mounts unknown`.
 - Measured, not changed.
 
-## v1.3.156 - engine v30 (unchanged)
+## v1.3.156 — engine v30 (unchanged)
 
 - An unreadable `apkstate.list` invalidated PM's parse of every injected APK.
 - A re-absorbed target kept the source it was first absorbed.
@@ -264,29 +259,29 @@
 - `MIN_PATTERN_LITERAL` counts bytes, not characters.
 - `metamount`'s flock and `is_hook_framework`.
 
-## v1.3.155 - engine v30 (unchanged)
+## v1.3.155 — engine v30 (unchanged)
 
 - ksud is answered from every exit, not four of them.
 - the uidwatch reaper tests death, not age.
 
-## v1.3.154 - engine v30 (unchanged)
+## v1.3.154 — engine v30 (unchanged)
 
 - `uid unblock` reported a removal it had not made.
 - `nomount uid preset` with no name re-derived both kernel cloak tables.
 - `boot.log` was unreachable from the app.
 
-## v1.3.153 - engine v30 (unchanged)
+## v1.3.153 — engine v30 (unchanged)
 
 - `File injections: mountless`.
 - The unmeasured arm asserted the answer.
 - Two packaging fallbacks.
 
-## v1.3.152 - engine v30 (unchanged)
+## v1.3.152 — engine v30 (unchanged)
 
 - One bootloop guard, not two.
 - `NM_MY_HOOKLESS` is gone.
 
-## v1.3.151 - engine v30 (unchanged)
+## v1.3.151 — engine v30 (unchanged)
 
 - One content walk, not four.
 - One probe harness, not three.
@@ -294,18 +289,18 @@
 - A second `statfs` decode and a second `0xE0F5E1E2`.
 - Two of the three renderers of `ghost::Summary`.
 
-## v1.3.150 - engine v30 (unchanged)
+## v1.3.150 — engine v30 (unchanged)
 
 - The boot path deleted the one sentence that explains.
 - A successful mount pass left no durable record.
 - The WebUI's dead end.
 - The readme never mentioned `CONFIG_NOMOUNT` on the first screen.
 
-## v1.3.149 - engine v30 (unchanged)
+## v1.3.149 — engine v30 (unchanged)
 
-- ### Fixed - Repairs a defect introduced in v1.3.148: the two hidden-app probes had their pipe sizes crossed.
+- ### Fixed: Repairs a defect introduced in v1.3.148: the two hidden-app probes had their pipe sizes crossed.
 
-## v1.3.148 - engine v30 (unchanged)
+## v1.3.148 — engine v30 (unchanged)
 
 - The manager card said `healthy` while `check` reported FAILED.
 - An unreadable mount table rendered as a clean mount posture.
@@ -316,7 +311,7 @@
 - Two scans reported a green "nothing found" when they had not run.
 - Re-arming the guard left "Nothing is being injected" on screen.
 
-## v1.3.147 - engine v30 (unchanged)
+## v1.3.147 — engine v30 (unchanged)
 
 - A corrupted download uninstalled the Suite you already had.
 - One `mkdir` permanently disarmed the bootloop guard.
@@ -326,23 +321,23 @@
 - `run_mount` stole other modules' `my_*` binds.
 - Three "only copy" records could be lost.
 
-## v1.3.146 - engine v30 (unchanged)
+## v1.3.146 — engine v30 (unchanged)
 
 - The notes, held to the same rule.
 
-## v1.3.145 - engine v30 (unchanged)
+## v1.3.145 — engine v30 (unchanged)
 
 - The rest of the plan section, audited against the same rule.
 
-## v1.3.144 - engine v30 (unchanged)
+## v1.3.144 — engine v30 (unchanged)
 
 - The Suite reports what a detector can see, and stops there.
 
-## v1.3.143 - engine v30 (unchanged)
+## v1.3.143 — engine v30 (unchanged)
 
 - "Delete the marker" told you the wrong thing about when it comes back.
 
-## v1.3.142 - engine v30 (unchanged)
+## v1.3.142 — engine v30 (unchanged)
 
 - The manager card counted whiteouts as rules; nothing else did.
 - A whiteout-only module was reported as contributing nothing.
@@ -353,7 +348,7 @@
 - The Magisk boot path wrote a poorer incident record than the KSU.
 - The manager card is one short line.
 
-## v1.3.141 - engine v30 (unchanged)
+## v1.3.141 — engine v30 (unchanged)
 
 - The incompatibility lint was blind to every `my_*` partition.
 - `my_hookless` was read as intent whoever created.
@@ -364,29 +359,29 @@
 - An update threw away `absorbed-tmpfs.list` and `apkstate.list`.
 - A module deleting ROM content was invisible if the line started with `rm`.
 
-## v1.3.140 - engine v30 (unchanged)
+## v1.3.140 — engine v30 (unchanged)
 
 - `updateJson`, so a manager can offer the update in-app.
 
-## v1.3.139 - engine v30 (unchanged)
+## v1.3.139 — engine v30 (unchanged)
 
 - A copy out of a ROM partition was reported as a write into.
 
-## v1.3.138 - engine v30 (unchanged)
+## v1.3.138 — engine v30 (unchanged)
 
-- ### Fixed - The incompatibility scanner never read the helper scripts its entry points source.
+- ### Fixed: The incompatibility scanner never read the helper scripts its entry points source.
 
-## v1.3.137 - engine v30 (unchanged)
+## v1.3.137 — engine v30 (unchanged)
 
 - `bind-mounts its own content`, a fourth module-incompatibility finding.
 - The record of what absorb already took over is now visible.
 - Recorded rows from uninstalled modules were never retired.
 
-## v1.3.136 - engine v30 (unchanged)
+## v1.3.136 — engine v30 (unchanged)
 
-- ### Fixed - `nomount check --json` writes operational warnings to stdout ahead of the document.
+- ### Fixed: `nomount check --json` writes operational warnings to stdout ahead of the document.
 
-## v1.3.135 - v1.3.126 - engine v30 (unchanged)
+## v1.3.135 – v1.3.126 — engine v30 (unchanged)
 
 - The WebUI is organised by task instead of by data model.
 - The hero verdict re-checks when the page opens.
@@ -395,7 +390,7 @@
 - A card for the mounts other modules make.
 - The six collapsible card headers were `<div onclick>`.
 
-## v1.3.125 - engine v30 (unchanged)
+## v1.3.125 — engine v30 (unchanged)
 
 - The `_ghost` tables were populated once per boot and never re-synced.
 - The mount pass did one `fork`+`exec` of `nm` per rule.
@@ -406,32 +401,32 @@
 - `nomount check` reports the isolated-process pool setting.
 - `nomount ghost sync` and `nomount ghost list`.
 
-## v1.3.124 - engine v30 (unchanged)
+## v1.3.124 — engine v30 (unchanged)
 
 - An image-backed module is a note now, not a warning.
 
-## v1.3.123 - engine v30 (unchanged)
+## v1.3.123 — engine v30 (unchanged)
 
-- ### Fixed - An incompatibility was reported against the wrong line - a probe instead of the use.
+- ### Fixed: An incompatibility was reported against the wrong line, a probe instead of the use.
 
-## v1.3.122 - engine v30 (unchanged)
+## v1.3.122 — engine v30 (unchanged)
 
 - `check`: "xattr agrees with open for a hidden app".
 - `verify` could not see a field that disappeared, and had no test at all.
 
-## v1.3.121 - engine v30 (unchanged)
+## v1.3.121 — engine v30 (unchanged)
 
 - The kernel's `_ghost` dump trusted another repository for a NUL.
 - A redaction test stopped claiming coverage it could not have.
 
-## v1.3.120 - engine v30 (unchanged)
+## v1.3.120 — engine v30 (unchanged)
 
 - A shared `nomount export` published an appid off the hide list.
 - Every state file except `binds.list` was a non-atomic `fs::write`.
 - `service.sh` validated the boot epoch's two inputs concatenated.
 - `package.sh` never enforced the versionCode field widths it reasons about.
 
-## v1.3.119 - engine v30
+## v1.3.119 — engine v30
 
 - An app update permanently killed the absorbed-APK record.
 - The Hidden paths card is back in the WebUI.
@@ -442,18 +437,18 @@
 - doctor kept its own `is_partition_root`.
 - Two hand-rolled `nm list` parsers survived in `whiteout.rs`.
 
-## v1.3.118 - engine v29
+## v1.3.118 — engine v29
 
 - `nomount export` published a hidden app's appid to shared storage.
 - An image mounted over the ROM passed every mount check.
-- `uidwatch.sh` - the one entry point without the house guards.
+- `uidwatch.sh`: the one entry point without the house guards.
 - `nm_dsnap_make()` cached "could not ask" as a verdict.
 - `nomount_hijack_superblock()` could not report failure.
 - `absorb::refresh_app_apks()` re-implemented the one `nm list` parser.
 - The last unquoted expansions in the module scripts.
 - One `lib.sh`, sourced by all five entry points.
 
-## v1.3.95 - v1.3.117
+## v1.3.95 – v1.3.117
 
 - WebUI "Tools" tab.
 - `pathhide`, end to end.
@@ -511,7 +506,7 @@
 - The posture shield contradicted the audit.
 - The ghost path populator split rule paths on spaces.
 
-## v1.3.48 - v1.3.65
+## v1.3.48 – v1.3.65
 
 - Engine floor rose to v26.
 - The existence cloak went live.
@@ -619,8 +614,8 @@
 
 ## v1.2.0
 
-- `nomount absorb` - take over bind mounts other modules made.
-- `nomount whiteout` - durable whiteouts.
+- `nomount absorb`: take over bind mounts other modules made.
+- `nomount whiteout`: durable whiteouts.
 - `/my_*` content is always served.
 - `doctor` gained an informational level.
 - Boot-time root code execution via the state directory.
@@ -691,7 +686,7 @@
 
 - False "per-UID inconsistency" on the manager card at boot.
 
-## v2.1.0 - superseded engine (historical)
+## v2.1.0 — superseded engine (historical)
 
 - Mountless VFS redirection.
 - Hybrid RRO overlay support.
