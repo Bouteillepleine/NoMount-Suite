@@ -229,15 +229,19 @@
     const on = /follow KernelSU DenyList\s+on/.test(out);
     if (/KernelSU driver\s+no answer/.test(out)) {
       ksuPaint(on ? "on" : "off",
-               on ? "Followed, but no KernelSU driver answered - nothing it covers is hidden, and nothing is un-hidden either."
-                  : "No KernelSU driver answered, so there is no DenyList to follow.",
+               on ? "Followed, but no driver answered." : "No KernelSU driver.",
                on);
       return;
     }
     const cov = out.match(/DenyList covers\s+(\d+) of (\d+)/);
     const dflt = /umount modules by default"?\s+ON/.test(out);
-    let note = cov ? `Covers ${cov[1]} of ${cov[2]} installed apps.` : "";
-    if (dflt) note += " ⚠ KernelSU's global umount-by-default is ON, so that is every app without its own profile.";
+    let note = "";
+    if (cov) {
+      note = on
+        ? `Hiding from ${cov[1]} of ${cov[2]} apps.`
+        : `${cov[1]} of ${cov[2]} apps listed, not followed.`;
+    }
+    if (dflt) note += " ⚠ Global umount-by-default is on.";
     ksuPaint(on ? "on" : "off", note.trim(), on && dflt);
   }
   async function setKsuSource(state) {
