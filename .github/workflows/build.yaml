@@ -217,9 +217,21 @@ jobs:
           done
 
       - name: Setup zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1 (newest; still declares node20 upstream)
-        with:
-          version: 0.14.1
+        env:
+          ZIG_VERSION: 0.14.1
+          ZIG_SHA256: 24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c
+        run: |
+          set -euo pipefail
+          # Was mlugg/setup-zig. Its newest release is also its main branch and still
+          # declares node20, so every build carried a deprecation annotation with no
+          # version to move to. The tarball needs no action, and the hash is pinned.
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$RUNNER_TEMP/zig.tar.xz" "$url"
+          echo "${ZIG_SHA256}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/zig/zig" version
 
       - name: Build nm (freestanding netlink client)
         run: |
