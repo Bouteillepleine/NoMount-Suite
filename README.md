@@ -1,16 +1,14 @@
 # 🫥 NoMount Suite
 
-Loads root modules **without touching the mount table** - RRO theming overlays
-included. No `overlayfs`, no `tmpfs`: files are served by redirecting VFS lookups
-in the kernel, so `/proc/mounts` shows the stock set and there is no mount gap
-for a scanner to find.
+Loads root modules without adding a mount for them, RRO theming overlays
+included. No `overlayfs`, no `tmpfs` — the kernel redirects VFS lookups, so
+nothing the engine injects shows up in `/proc/mounts`.
 
-One exception: OnePlus/Oppo `my_*` partitions are served by a
-real bind mount, because a hookless injection there trips zygote's FD allowlist
-and bootloops the device. If a module of yours ships `my_*` content, those binds
-are in the mount table and an app can read them. `nomount check` counts them and
-the WebUI names them; the `my_hookless` trial removes them at the risk the
-bootloop guard exists to catch.
+One exception, on OnePlus/Oppo: the `my_*` partitions get a real bind mount by
+default, because a hookless injection there trips zygote's FD allowlist and
+bootloops the phone. Those rows are visible to any app. `nomount check` counts
+them, the WebUI names them, and the `my_hookless` trial drops them if you'll
+take the risk.
 
 ### Before you download
 
@@ -39,18 +37,18 @@ metamodule can be active, so it refuses to install alongside another.
 
 <table>
   <tr>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/status.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/status.jpg" width="155" alt="Status"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/modules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/modules.jpg" width="155" alt="Modules"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/rules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/rules.jpg" width="155" alt="Rules"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/check.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/check.jpg" width="155" alt="Check"></a></td>
-    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/duckdetector.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/duckdetector.jpg" width="155" alt="Duck Detector"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/status.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/status.jpg" width="165" alt="Status"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/hiding.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/hiding.jpg" width="165" alt="Hiding"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/rules.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/rules.jpg" width="165" alt="Rules"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/diagnostics.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/diagnostics.jpg" width="165" alt="Checks"></a></td>
+    <td align="center"><a href="https://github.com/Bouteillepleine/NoMount-Suite/blob/main/docs/screenshots/duckdetector.jpg"><img src="https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/docs/screenshots/duckdetector.jpg" width="165" alt="Duck Detector"></a></td>
   </tr>
   <tr>
-    <td align="center"><sub><b>Status</b><br>zero mounts, live counts</sub></td>
-    <td align="center"><sub><b>Modules</b><br>what is served, and how</sub></td>
-    <td align="center"><sub><b>Rules</b><br>per-module rule breakdown</sub></td>
-    <td align="center"><sub><b>Check</b><br>one diagnostic, plain verdicts</sub></td>
-    <td align="center"><sub><b>Duck Detector</b><br>0 danger, 0 warning</sub></td>
+    <td align="center"><sub><b>Status</b></sub></td>
+    <td align="center"><sub><b>Hiding</b></sub></td>
+    <td align="center"><sub><b>Rules</b></sub></td>
+    <td align="center"><sub><b>Checks</b></sub></td>
+    <td align="center"><sub><b>Duck Detector</b></sub></td>
   </tr>
 </table>
 
