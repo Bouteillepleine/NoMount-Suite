@@ -6,6 +6,11 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.198 — engine v34 (unchanged)
+
+- The WebUI and the check notes read in shorter sentences. Nothing behaves differently.
+- The installer and the WebUI name the renamed `OnePlus-BakaSu_NMS` prebuilts.
+
 ## v1.3.197 — engine v34 (unchanged)
 
 - The hide list can follow KernelSU's DenyList: `nomount uid ksu on`, or the switch in

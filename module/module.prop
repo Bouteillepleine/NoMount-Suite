@@ -1,7 +1,7 @@
 id=meta-nomount
 name=NoMount Suite
-version=v1.3.197
-versionCode=103197
+version=v1.3.198
+versionCode=103198
 author=XxxY
 description=Mountless module loading - hookless VFS + RRO, no overlayfs or tmpfs. 🫥
 updateJson=https://raw.githubusercontent.com/Bouteillepleine/NoMount-Suite/main/update.json
