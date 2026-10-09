@@ -1,9 +1,9 @@
-name: NoMount KPM — build a KernelPatch module
+name: build KPM
 
 # Builds kpm/ into one nomount-<kmi>.kpm per GKI KMI generation test.
 #
 # WHY PER KMI, AND WHY IN THE DDK CONTAINERS -- a correctness argument here, not
-# just a speed one test.
+# just a speed one.
 #
 # The engine half of a .kpm is compiled against real kernel headers because it
 # dereferences struct inode, dentry and super_block. Those layouts depend on the
@@ -93,7 +93,7 @@ jobs:
       - name: Should this KMI run?
         id: sel
         env:
-          ONLY: 'android12-5.10'
+          ONLY: ${{ github.event.inputs.only }}
         run: |
           set -eu
           if [ -z "${ONLY:-}" ] || printf '%s' "$ONLY" | tr ',' '\n' | grep -qx '${{ matrix.kmi }}'; then
@@ -218,7 +218,7 @@ jobs:
           #     to become clone-then-checkout.
           ref="${KP_REF:-main}"
           git clone --filter=blob:none --no-checkout "$repo" /tmp/kp
-          git -C /tmp/kp checkout -q main || {
+          git -C /tmp/kp checkout -q "$ref" || {
             echo "::error::KernelPatch ref $ref not found in $repo"; exit 1; }
           test -d /tmp/kp/kernel/include || {
             echo "::error::$repo is not a KernelPatch checkout"; exit 1; }
