@@ -209,7 +209,7 @@ elif [ -z "$_ev" ] && [ "$_booted" != "1" ]; then
     ui_print "- next step: reboot, then open the WebUI - it says whether your kernel has it."
 elif [ -z "$_ev" ]; then
     ui_print "- next step: flash a kernel built with CONFIG_NOMOUNT, then reboot."
-    ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases"
+    ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases"
     ui_print "  Until you do, this module is installed and doing nothing."
 else
     ui_print "- next step: clear the disable flag (see above), then reboot."

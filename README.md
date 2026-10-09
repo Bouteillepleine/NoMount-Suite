@@ -44,7 +44,7 @@ metamodule can be active, so it won't install next to another.
 
 | | |
 | :--- | :--- |
-| **OnePlus** | Prebuilt kernels from [`OnePlus-ReSukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases), [`OnePlus-KsuNext_NMS`](https://github.com/Bouteillepleine/OnePlus-KsuNext_NMS/releases) or [`OnePlus-SukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-SukiSu_NMS/releases). Pick the one matching your root manager. |
+| **OnePlus** | Prebuilt kernels from [`OnePlus-BakaSu_NMS`](https://github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases), [`OnePlus-KsuNext_NMS`](https://github.com/Bouteillepleine/OnePlus-KsuNext_NMS/releases) or [`OnePlus-SukiSu_NMS`](https://github.com/Bouteillepleine/OnePlus-SukiSu_NMS/releases). Pick the one matching your root manager. |
 | **Anything else** | Build with `CONFIG_NOMOUNT=y`. The driver and its integration patch are in [`hookless/`](hookless/), nothing in them vendor- or SoC-specific. |
 | **Can't rebuild?** | See [Out-of-tree variants](#out-of-tree-variants) (untested on hardware). |
 
@@ -114,9 +114,10 @@ nothing.
   [`hookless/`](hookless/). Flash the engine and the Suite as a set. The Suite
   runs on an older engine and `nomount check` names what is missing; a wire
   protocol change just reads as "engine not responding".
-- **KernelSU**, **SukiSU** or **ReSukiSU** (metamodule hook), or **Magisk**
-  (`post-fs-data`). Everything here was measured on ReSukiSU. The Magisk and
-  APatch paths run, but nobody has reported back, so treat them as unverified.
+- **KernelSU** or a fork of it (SukiSU, ReSukiSU, BakaSU) through the
+  metamodule hook, or **Magisk** (`post-fs-data`). Everything here was measured
+  on ReSukiSU. The Magisk and APatch paths run, but nobody has reported back, so
+  treat them as unverified.
 - SUSFS isn't needed; nothing the engine serves is a mount. The `my_*` binds are
   the exception, and SUSFS or your manager's "umount modules" switch hides them.
 

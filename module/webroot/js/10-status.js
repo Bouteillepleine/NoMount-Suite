@@ -47,7 +47,7 @@
       $("substate").textContent =
         "this kernel was not built with NoMount. Flash one that was, then reboot. " +
         "Nothing is being injected. Prebuilt OnePlus kernels: " +
-        "github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases · " +
+        "github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases · " +
         "source: github.com/Bouteillepleine/NoMount-Suite";
       dot.className = "dot info";
       $("mRules").textContent = " - ";
