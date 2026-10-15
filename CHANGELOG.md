@@ -6,6 +6,11 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.199 — engine v34 (unchanged)
+
+- A second zip, `01_NoMount-Module-LKM`, carries the engine as a loadable module for a
+  kernel without NoMount built in. `00_NoMount-Module` is unchanged.
+
 ## v1.3.198 — engine v34 (unchanged)
 
 - The WebUI and the check notes read in shorter sentences. Nothing behaves differently.

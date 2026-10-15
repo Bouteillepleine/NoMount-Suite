@@ -123,12 +123,10 @@ jobs:
             if [ -n "$body" ]; then printf '%s\n' "$body"; fi
             cat <<'FOOTER'
 
-            > **Which zip?** `00_NoMount-Module` is the one almost everyone wants: for a
-            > kernel with NoMount built in, which is every kernel the OnePlus builders
-            > ship. It is also what the in-app updater installs.
+            > **Which zip?** `00_NoMount-Module` for a kernel with NoMount built in -
+            > every kernel the OnePlus builders ship, and what the in-app updater takes.
             > `01_NoMount-Module-LKM` is the same Suite plus the engine as a loadable
-            > module, for a kernel that does not have it built in. The installer says so
-            > either way, and `nomount check` tells you whether anything is being served.
+            > module, for a kernel without it.
             >
             > **The Suite and the engine update separately.** Installing the Suite does
             > not move a built-in engine; flash a kernel built from the matching
