@@ -6,6 +6,13 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.200 — engine v34 (unchanged)
+
+- Reload picks up a module that was updated in place, without a reboot. KernelSU's new hot
+  install replaces the module's directory, so the files a rule serves are new while its path
+  reads the same — Reload was reporting nothing to do and the old version kept being served
+  until the next boot. It now re-points those rules, without dropping them in the meantime.
+
 ## v1.3.199 — engine v34 (unchanged)
 
 - A second zip, `01_NoMount-Module-LKM`, carries the engine as a loadable module for a
