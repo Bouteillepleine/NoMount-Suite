@@ -107,7 +107,7 @@ jobs:
           fi
 
           echo "publishing $TAG <- $zip ($(stat -c %s "$zip") bytes)"
-          # Release notes = this tag's CHANGELOG section, engine note as a footer.
+          # Release notes = this tag's CHANGELOG section, nothing else.
           head=$(awk -v tag="$TAG" 'BEGIN{gsub(/\./,"\\.",tag)}
             $0 ~ "^## "tag"($| )" {sub(/^## /,""); print; exit}' CHANGELOG.md)
           body=$(awk -v tag="$TAG" 'BEGIN{gsub(/\./,"\\.",tag)}
@@ -116,24 +116,11 @@ jobs:
             hit && NF == 0 && !started {next}
             hit {started = 1; print}' CHANGELOG.md)
           if [ -z "$body" ]; then
-            echo "::warning::CHANGELOG.md has no section for $TAG - publishing the footer alone"
+            echo "::warning::CHANGELOG.md has no section for $TAG - the release notes will be empty"
           fi
           {
             if [ -n "$head" ]; then printf '**%s**\n\n' "$head"; fi
             if [ -n "$body" ]; then printf '%s\n' "$body"; fi
-            cat <<'FOOTER'
-
-            > **Which zip?** `00_NoMount-Module` for a kernel with NoMount built in -
-            > every kernel the OnePlus builders ship, and what the in-app updater takes.
-            > `01_NoMount-Module-LKM` is the same Suite plus the engine as a loadable
-            > module, for a kernel without it.
-            >
-            > **The Suite and the engine update separately.** Installing the Suite does
-            > not move a built-in engine; flash a kernel built from the matching
-            > `hookless/` source for that. The Suite runs on an older engine, and
-            > `nomount check` names anything that needs a newer one. The WebUI footer
-            > shows both, `Suite vX · engine vY`.
-          FOOTER
           } > /tmp/notes.md
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -148,8 +135,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "NoMount Suite $TAG" \
-              --notes-file /tmp/notes.md \
-              --generate-notes
+              --notes-file /tmp/notes.md
           fi
 
       - name: Point update.json at this release
