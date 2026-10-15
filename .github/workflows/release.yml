@@ -121,6 +121,7 @@ jobs:
           {
             if [ -n "$head" ]; then printf '**%s**\n\n' "$head"; fi
             if [ -n "$body" ]; then printf '%s\n' "$body"; fi
+            printf '\n> `00_NoMount-Module` for a kernel with NoMount built in, `01_NoMount-Module-LKM` for one without.\n'
           } > /tmp/notes.md
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
