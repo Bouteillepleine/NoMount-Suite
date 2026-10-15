@@ -207,12 +207,13 @@ mkdir -p "$RELEASE_DIR/debug" "$RELEASE_DIR/release"
 
 if [ "$CLEAN" = true ]; then
     echo "==> Cleaning old releases"
-    rm -f "$RELEASE_DIR"/debug/00_NoMount-Module-*.zip "$RELEASE_DIR"/release/00_NoMount-Module-*.zip
+    rm -f "$RELEASE_DIR"/debug/0*_NoMount-Module-*.zip "$RELEASE_DIR"/release/0*_NoMount-Module-*.zip
 fi
 
 SCRIPTS=(
     customize.sh
     lib.sh
+    lkm-load.sh
     metamount.sh
     post-fs-data.sh
     post-mount.sh
@@ -289,13 +290,19 @@ verify_binary_version() {
 
 package_zip() {
     local profile="$1"
+    local variant="${2:-lite}"
     local target_subdir="debug"
     [ "$profile" = "release" ] && target_subdir="release"
 
     local suffix=""
     [ "$profile" = "debug" ] && suffix="-debug"
 
+    # Two variants. "lite" carries no engine modules: it is for a kernel with
+    # NoMount built in, which is every kernel the three OnePlus builders ship,
+    # and those builders match the 00_NoMount-Module-*.zip name - so the LKM
+    # one is deliberately named 01_* to stay out of their way.
     local out_name="00_NoMount-Module-${VERSION}${suffix}.zip"
+    [ "$variant" = "lkm" ] && out_name="01_NoMount-Module-LKM-${VERSION}${suffix}.zip"
     local out_path="$RELEASE_DIR/$profile/$out_name"
     local staging
     staging="$(mktemp -d)"
@@ -398,6 +405,45 @@ package_zip() {
         echo "fatal: [$profile] nomount ${found_nomount}/${want}, nm ${found_nm}/${want}" >&2
         rm -rf "$staging"
         exit 1
+    fi
+
+    if [ "$variant" = "lkm" ]; then
+    local lkm_src=""
+    if [ -d "$MODULE_DIR/lkm" ]; then
+        lkm_src="$MODULE_DIR/lkm"
+    elif [ -d "$PROJECT_ROOT/staging/lkm" ]; then
+        lkm_src="$PROJECT_ROOT/staging/lkm"
+    fi
+    if [ -n "$lkm_src" ]; then
+        n_ko=$(find "$lkm_src" -name 'nomount-*.ko' | wc -l)
+        if [ "$n_ko" -gt 0 ]; then
+            mkdir -p "$staging/lkm"
+            cp "$lkm_src"/nomount-*.ko "$staging/lkm/"
+            echo "    lkm: $n_ko module(s) -> $(find "$staging/lkm" -name 'nomount-*.ko' -printf '%f ')"
+        else
+            echo "    lkm: directory present but empty - zip carries NO engine modules"
+        fi
+    else
+        echo "    lkm: none bundled - this zip needs a kernel with CONFIG_NOMOUNT=y"
+    fi
+
+    else
+        echo "    lkm: omitted (lite) - for a kernel that has NoMount built in"
+    fi
+
+    # ko-loader ships in BOTH variants. Lite carries no engine module, but it
+    # still honours one dropped at $NM_LKM_DEVICE_KO, and that module may have
+    # been built against a different point release - ko-loader is what makes it
+    # load anyway, by rewriting vermagic to the string the kernel asks for.
+    local loader_src=""
+    for _c in "$MODULE_DIR/bin/ko-loader-arm64" "$PROJECT_ROOT/staging/ko-loader-arm64"; do
+        [ -f "$_c" ] && { loader_src="$_c"; break; }
+    done
+    if [ -n "$loader_src" ]; then
+        install -m 0755 "$loader_src" "$staging/loader"
+        echo "    loader: $(basename "$loader_src")"
+    else
+        echo "    loader: none - module loading falls back to ksud insmod / insmod"
     fi
 
     if [ ! -f "$MODULE_DIR/webroot/index.html" ]; then
@@ -585,13 +631,16 @@ if [ "$BUILD" = true ]; then
     build_rust "release"
 fi
 
-package_zip "debug"
-package_zip "release"
+package_zip "debug"   lite
+package_zip "release" lite
+package_zip "debug"   lkm
+package_zip "release" lkm
 
 echo ""
 echo "==> Build complete"
 echo "    Debug:   $RELEASE_DIR/debug/00_NoMount-Module-${VERSION}-debug.zip"
 echo "    Release: $RELEASE_DIR/release/00_NoMount-Module-${VERSION}.zip"
+echo "    LKM:     $RELEASE_DIR/release/01_NoMount-Module-LKM-${VERSION}.zip"
 
 if [ "$DEPLOY" = true ]; then
     if [ "$DEPLOY_PROFILE" = "release" ]; then

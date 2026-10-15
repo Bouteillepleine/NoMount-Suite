@@ -4,7 +4,7 @@ on:
   workflow_call:
   workflow_dispatch:
   push:
-    branches: [prerelease, main]
+    branches: [prerelease, main, lkm-port]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -12,7 +12,7 @@ on:
       - '.gitattributes'
       - 'update.json'
   pull_request:
-    branches: [prerelease, main]
+    branches: [prerelease, main, lkm-port]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -68,6 +68,9 @@ jobs:
           shellcheck -x -s sh -S info -f gcc module/*.sh
           shellcheck -s bash -S info -f gcc scripts/package.sh scripts/gate-sweep.sh
           shellcheck -s sh -S info -f gcc hookless/*.sh
+
+      - name: Module shell tests
+        run: sh tests/lkm-load.sh
 
       - name: Engine config-gate sweep
         run: bash scripts/gate-sweep.sh
@@ -187,8 +190,67 @@ jobs:
           path: target/${{ matrix.target }}/${{ matrix.profile }}/nomount
           retention-days: 1
 
+  kmi-modules:
+    name: ko ${{ matrix.kmi }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { kmi: android12-5.10, tag: '20251104' }
+          - { kmi: android13-5.10, tag: '20251104' }
+          - { kmi: android13-5.15, tag: '20251104' }
+          - { kmi: android14-5.15, tag: '20251104' }
+          - { kmi: android14-6.1,  tag: '20251104' }
+          - { kmi: android15-6.6,  tag: '20251104' }
+          - { kmi: android16-6.12, tag: '20251104' }
+          - { kmi: android17-6.18, tag: '20260828' }
+    container:
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-${{ matrix.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        run: |
+          set -eu
+          test -s "$KDIR/Module.symvers" || {
+            echo "::error::no Module.symvers in the DDK tree"; exit 1; }
+          make -j"$(nproc)" -C "$KDIR" ARCH=arm64 CC=clang \
+               M="$GITHUB_WORKSPACE/lkm" modules
+          install -Dm644 lkm/nomount.ko "out/nomount-${{ matrix.kmi }}.ko"
+          llvm-strip -d "out/nomount-${{ matrix.kmi }}.ko" || true
+          ls -l "out/nomount-${{ matrix.kmi }}.ko"
+
+      - name: Relocations the arm64 module loader cannot apply
+        run: |
+          set -eu
+          KO="out/nomount-${{ matrix.kmi }}.ko"
+          for c in llvm-readelf readelf; do
+            command -v "$c" >/dev/null 2>&1 && { RE="$c"; break; }
+          done
+          [ -n "${RE:-}" ] || { echo "no readelf in this image"; exit 1; }
+          ALLOW='^R_AARCH64_(NONE|ABS(64|32|16)|PREL(64|32|16)|MOVW_UABS_G[0-3](_NC)?|MOVW_SABS_G[0-2]|MOVW_PREL_G[0-3](_NC)?|LD_PREL_LO19|ADR_PREL_LO21|ADR_PREL_PG_HI21(_NC)?|ADD_ABS_LO12_NC|LDST(8|16|32|64|128)_ABS_LO12_NC|TSTBR14|CONDBR19|JUMP26|CALL26)$'
+          # -W matters: without it readelf truncates R_AARCH64_LD64_GOT_LO12_NC
+          # to "R_AARCH64_LD64_GO", which no longer contains the string GOT.
+          BAD=$("$RE" -rW "$KO" | awk '/^0/{print $3}' | sort -u | grep -vE "$ALLOW" || true)
+          [ -z "$BAD" ] && { echo "all relocation types are ones the loader applies"; exit 0; }
+          echo "::error::$KO carries relocations the arm64 module loader cannot apply - it would fail insmod"
+          echo "$BAD"
+          for t in $BAD; do
+            "$RE" -rW "$KO" | awk -v t="$t" '$3==t && NF>=5 {print "  " t "  " $5}' | sort -u
+          done
+          exit 1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ko-${{ matrix.kmi }}
+          path: out/nomount-${{ matrix.kmi }}.ko
+          if-no-files-found: error
+          retention-days: 1
+
   package:
-    needs: [build, test]
+    needs: [build, test, kmi-modules]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -216,6 +278,15 @@ jobs:
             done
           done
 
+      - name: Stage the engine modules
+        run: |
+          set -eu
+          mkdir -p module/lkm
+          find artifacts -name 'nomount-*.ko' -exec cp {} module/lkm/ \;
+          n=$(find module/lkm -name 'nomount-*.ko' | wc -l)
+          find module/lkm -name 'nomount-*.ko' -printf '  %f  %s bytes\n' | sort
+          [ "$n" -eq 8 ] || { echo "::error::expected 8 engine modules, got $n"; exit 1; }
+
       - name: Setup zig
         env:
           ZIG_VERSION: 0.14.1
@@ -232,6 +303,17 @@ jobs:
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/zig/zig" version
+
+      - name: Build ko-loader
+        run: |
+          set -eu
+          git clone https://github.com/maxsteeel/ko-loader /tmp/kol
+          git -C /tmp/kol checkout -q af7fb29222377181220d9814f46b6a8b12cb770c
+          make -C /tmp/kol TARGET=aarch64-linux
+          make -C userspace/tools/sstrip
+          userspace/tools/sstrip/sstrip -z /tmp/kol/lkmloader
+          install -Dm755 /tmp/kol/lkmloader module/bin/ko-loader-arm64
+          file module/bin/ko-loader-arm64
 
       - name: Build nm (freestanding netlink client)
         run: |
@@ -259,11 +341,15 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nomount-release-zip
-          path: release/release/00_NoMount-Module-*.zip
+          path: |
+            release/release/00_NoMount-Module-*.zip
+            release/release/01_NoMount-Module-LKM-*.zip
           retention-days: 30
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nomount-debug-zip
-          path: release/debug/00_NoMount-Module-*.zip
+          path: |
+            release/debug/00_NoMount-Module-*.zip
+            release/debug/01_NoMount-Module-LKM-*.zip
           retention-days: 7

@@ -1,0 +1,9 @@
+# Out-of-tree kbuild leaves its objects in the module directory.
+*.o
+*.ko
+*.mod
+*.mod.c
+*.symvers
+*.order
+.*.cmd
+.tmp_versions/

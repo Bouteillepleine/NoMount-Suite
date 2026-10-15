@@ -10,12 +10,12 @@ on:
         required: false
         default: ''
   push:
-    branches: [prerelease, main]
+    branches: [prerelease, main, LKM]
     paths:
       - 'hookless/**'
       - '.github/workflows/hookless-compile-matrix.yml'
   pull_request:
-    branches: [prerelease, main]
+    branches: [prerelease, main, LKM]
     paths:
       - 'hookless/**'
       - '.github/workflows/hookless-compile-matrix.yml'
@@ -234,6 +234,19 @@ jobs:
           awk '/^(static )?[a-zA-Z_].*\(/{last=$0} /vfs_map_meta_override\(inode/{print last; found=1; exit}
                END{ if(!found) exit 1 }' fs/proc/task_mmu.c | grep -q 'show_map_vma' || {
             echo "FATAL: task_mmu.c hunk applied OUTSIDE show_map_vma for ${{ matrix.ver }} (fuzzy misplacement)"; exit 1; }
+          echo "== assert xattr.c hook present =="
+          grep -q 'nm_inode_hidden_from_caller' fs/xattr.c || {
+            echo "FATAL: integration patch did not apply its fs/xattr.c hunk for ${{ matrix.ver }} -- a hidden app could still read security.selinux"; exit 1; }
+          awk '
+            /error = security_inode_getxattr\(dentry, name\)/ { a=NR }
+            /XATTR_SECURITY_PREFIX,/                          { if (a && !c) c=NR }
+            /nm_inode_hidden_from_caller\(inode\)/            { if (a && !b) b=NR }
+            END { exit !(a && b && c && a < b && b < c) }' fs/xattr.c || {
+            echo "FATAL: the fs/xattr.c guard is not between security_inode_getxattr() and the security.* branch for ${{ matrix.ver }} -- there it never runs for security.selinux"; exit 1; }
+          echo "== compile fs/xattr.o =="
+          make $MAKEOPTS fs/xattr.o 2>&1 | tail -5
+          ls -l out/fs/xattr.o && echo "XATTR_OK ${{ matrix.ver }}"
+
           echo "== compile fs/proc/task_mmu.o =="
           make $MAKEOPTS fs/proc/task_mmu.o 2>&1 | tee /tmp/tm_build.log
           ls -l out/fs/proc/task_mmu.o && echo "TASK_MMU_OK ${{ matrix.ver }}"

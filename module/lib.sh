@@ -119,6 +119,31 @@ nm_set_bin() {
     export NM_BIN
 }
 
+# Load the engine module on a kernel that does not carry NoMount built in.
+# This is called from post-fs-data.sh BEFORE the metamodule early-exit, because
+# post-fs-data.sh runs for every enabled module while metamount.sh only runs if
+# we own the metamodule slot - loading there would leave the engine down
+# whenever something else owns it. Safe to call twice: it probes first.
+nm_lkm_boot_load() {
+    [ -f "$MODDIR/lkm-load.sh" ] || return 0
+    nm_set_bin
+    NM_LKM_SAY=:
+    NM_LKM_NM="$NM_BIN"
+    NM_LKM_LOADER="$MODDIR/loader"
+    export NM_LKM_SAY NM_LKM_NM NM_LKM_LOADER
+    chmod 0755 "$NM_LKM_NM" "$NM_LKM_LOADER" 2>/dev/null
+    # shellcheck source=module/lkm-load.sh
+    . "$MODDIR/lkm-load.sh" 2>/dev/null || return 0
+
+    nm_lkm_probe && return 0
+    if nm_lkm_load_best "$MODDIR/lkm"; then
+        nmlog "engine module loaded from ${NM_LKM_SOURCE:-?} ($(uname -r))"
+        nm_lkm_prune "$MODDIR/lkm"
+    elif [ -d "$MODDIR/lkm" ] || [ -f "${NM_LKM_DEVICE_KO:-/data/adb/nomount/nomount.ko}" ]; then
+        nmlog "⛔ no engine module loads on $(uname -r) - nothing will be injected this boot"
+    fi
+}
+
 nm_fix_shell_tmp() {
     _fst=$(grep "^[ 	]*fix_shell_tmp[ 	]*=" "$NMDIR/spoof.conf" 2>/dev/null \
            | tail -n 1 | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
