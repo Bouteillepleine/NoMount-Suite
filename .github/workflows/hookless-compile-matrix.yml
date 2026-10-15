@@ -10,12 +10,12 @@ on:
         required: false
         default: ''
   push:
-    branches: [prerelease, main, lkm-port]
+    branches: [prerelease, main]
     paths:
       - 'hookless/**'
       - '.github/workflows/hookless-compile-matrix.yml'
   pull_request:
-    branches: [prerelease, main, lkm-port]
+    branches: [prerelease, main]
     paths:
       - 'hookless/**'
       - '.github/workflows/hookless-compile-matrix.yml'

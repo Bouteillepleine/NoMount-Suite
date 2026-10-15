@@ -2,7 +2,7 @@ name: NoMount LKM - out-of-tree build
 
 on:
   push:
-    branches: [lkm-port]
+    branches: [main]
     paths:
       - 'lkm/**'
       - 'hookless/src/**'

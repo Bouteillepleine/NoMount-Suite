@@ -4,7 +4,7 @@ on:
   workflow_call:
   workflow_dispatch:
   push:
-    branches: [prerelease, main, lkm-port]
+    branches: [prerelease, main]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -12,7 +12,7 @@ on:
       - '.gitattributes'
       - 'update.json'
   pull_request:
-    branches: [prerelease, main, lkm-port]
+    branches: [prerelease, main]
     paths-ignore:
       - '**.md'
       - 'docs/**'
