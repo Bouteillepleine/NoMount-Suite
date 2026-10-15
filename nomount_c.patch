@@ -1,0 +1,28 @@
+diff --git a/hookless/src/nomount.c b/hookless/src/nomount.c
+index 778f47e..aa3f852 100644
+--- a/hookless/src/nomount.c
++++ b/hookless/src/nomount.c
+@@ -5384,6 +5384,23 @@ void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
+     *ino = info->v_ino;
+ }
+ 
++/* vfs_getxattr() hands security.* to the LSM before the filesystem handlers,
++ * and xattr_permission() lets security.* reads past without calling
++ * inode_permission(), so neither nm_xattr_get() nor nm_inode_permission() is
++ * consulted for that one name and a hidden caller still gets a context back.
++ * Both builds close it by asking this, from the two places they can reach:
++ * in-tree the integration patch calls it inside vfs_getxattr(), out-of-tree
++ * nm_xattr_guard.c kretprobes the same function. */
++bool nm_inode_hidden_from_caller(const struct inode *inode);
++bool nm_inode_hidden_from_caller(const struct inode *inode)
++{
++    if (unlikely(!inode))
++        return false;
++    if (inode->i_op != &nm_file_iops && inode->i_op != &nm_dir_iops)
++        return false;
++    return nm_hidden_from_caller(inode->i_private);
++}
++
+ static void __exit nomount_exit(void)
+ {
+ 

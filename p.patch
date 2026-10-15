@@ -1,0 +1,35 @@
+diff --git a/.github/workflows/build-lkm.yml b/.github/workflows/build-lkm.yml
+index 1f8b20e..3dd00ac 100644
+--- a/.github/workflows/build-lkm.yml
++++ b/.github/workflows/build-lkm.yml
+@@ -121,6 +121,30 @@ jobs:
+           make -C ksrc $MAKEOPTS KBUILD_MODPOST_WARN=1 \
+             M="$PWD/repo/lkm" modules 2>&1 | tee /tmp/lkm-${{ matrix.ver }}.log
+ 
++      - name: Did it actually compile?
++        if: steps.sel.outputs.run == '1'
++        run: |
++          # "Build the module" is continue-on-error on purpose: with no Module.symvers
++          # it is EXPECTED to fail at modpost with unresolved symbols, and the symbol
++          # gate below exists to read exactly that. The cost is that a real compile
++          # error looks the same to the job, and the gate then parses an empty log and
++          # reports "all 0 symbols exported" - a green run for a module that does not
++          # build. Compiler diagnostics are distinguishable from modpost's, so fail on
++          # those specifically.
++          log=/tmp/lkm-${{ matrix.ver }}.log
++          if grep -qE '^[^ ]+\.[ch]:[0-9]+:[0-9]+: (error|fatal error):' "$log"; then
++            echo "::error::the module did not compile on ${{ matrix.ver }}"
++            grep -E '^[^ ]+\.[ch]:[0-9]+:[0-9]+: (error|fatal error):' "$log" | head -20
++            {
++              echo "### ${{ matrix.ver }}: COMPILE ERROR"
++              echo '```'
++              grep -E '^[^ ]+\.[ch]:[0-9]+:[0-9]+: (error|fatal error):' "$log" | head -20
++              echo '```'
++            } >> "$GITHUB_STEP_SUMMARY"
++            exit 1
++          fi
++          echo "no compiler diagnostics; any modpost failure is the expected one"
++
+       - name: Relocations the arm64 module loader cannot apply
+         if: steps.sel.outputs.run == '1'
+         run: |

@@ -1,0 +1,253 @@
+name: NoMount LKM - out-of-tree build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lkm/**'
+      - 'hookless/src/**'
+      - '.github/workflows/build-lkm.yml'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Comma-separated versions (empty = all). e.g. 4.9,6.12"
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: LKM-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.ver }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { ver: '4.9',  kref: 'deprecated/android-4.9-q',       tc: gcc   }
+          - { ver: '4.14', kref: 'deprecated/android-4.14-stable', tc: gcc   }
+          - { ver: '4.19', kref: 'deprecated/android-4.19-stable', tc: gcc   }
+          - { ver: '5.4',  kref: 'android11-5.4',                  tc: clang }
+          - { ver: '5.10', kref: 'android12-5.10',                 tc: clang }
+          - { ver: '5.15', kref: 'android13-5.15',                 tc: clang }
+          - { ver: '6.1',  kref: 'android14-6.1',                  tc: clang }
+          - { ver: '6.6',  kref: 'android15-6.6',                  tc: clang }
+          - { ver: '6.12', kref: 'android16-6.12',                 tc: clang }
+          - { ver: '6.18', kref: 'linux-6.18.y',                   tc: clang }
+    steps:
+      - name: Should this version run?
+        id: sel
+        run: |
+          only="${{ github.event.inputs.only }}"
+          if [ -z "$only" ] || printf '%s' "$only" | tr ',' '\n' | grep -qx "${{ matrix.ver }}"; then
+            echo "run=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=0" >> "$GITHUB_OUTPUT"; echo "skipped ${{ matrix.ver }}"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.sel.outputs.run == '1'
+        with:
+          path: repo
+
+      - name: Install toolchain
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev build-essential rsync \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu >/dev/null
+          if [ "${{ matrix.tc }}" = "clang" ]; then
+            sudo apt-get install -y --no-install-recommends clang lld llvm >/dev/null
+            clang --version | head -1
+          else
+            aarch64-linux-gnu-gcc --version | head -1
+          fi
+
+      - name: Restore kernel clone
+        id: kcache
+        if: steps.sel.outputs.run == '1'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ksrc
+          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v2
+
+      - name: Clone kernel source on cache miss
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          git clone --depth 1 -b "${{ matrix.kref }}" \
+            "$( [ "${{ matrix.ver }}" = "6.18" ] \
+                && echo https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+                || echo https://android.googlesource.com/kernel/common )" ksrc
+          echo "Kernel: $(head -3 ksrc/Makefile | tr '\n' ' ')"
+
+      - name: Save kernel clone
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ksrc
+          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v2
+
+      - name: Prepare kernel for external modules
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -euxo pipefail
+          cd ksrc
+          if [ "${{ matrix.tc }}" = "clang" ]; then
+            M="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          else
+            M="ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          fi
+          echo "MAKEOPTS=$M" >> "$GITHUB_ENV"
+          make $M defconfig
+          ./scripts/config --enable CONFIG_KPROBES --enable CONFIG_MODULES
+          make $M olddefconfig
+          make $M -j"$(nproc)" modules_prepare
+
+      - name: Build the module
+        id: build
+        if: steps.sel.outputs.run == '1'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          make -C ksrc $MAKEOPTS KBUILD_MODPOST_WARN=1 \
+            M="$PWD/repo/lkm" modules 2>&1 | tee /tmp/lkm-${{ matrix.ver }}.log
+
+      - name: Did it actually compile?
+        if: steps.sel.outputs.run == '1'
+        run: |
+          # "Build the module" is continue-on-error on purpose: with no Module.symvers
+          # it is EXPECTED to fail at modpost with unresolved symbols, and the symbol
+          # gate below exists to read exactly that. The cost is that a real compile
+          # error looks the same to the job, and the gate then parses an empty log and
+          # reports "all 0 symbols exported" - a green run for a module that does not
+          # build. Compiler diagnostics are distinguishable from modpost's, so fail on
+          # those specifically.
+          log=/tmp/lkm-${{ matrix.ver }}.log
+          if grep -qE '^[^ ]+\.[ch]:[0-9]+:[0-9]+: (error|fatal error):' "$log"; then
+            echo "::error::the module did not compile on ${{ matrix.ver }}"
+            grep -E '^[^ ]+\.[ch]:[0-9]+:[0-9]+: (error|fatal error):' "$log" | head -20
+            {
+              echo "### ${{ matrix.ver }}: COMPILE ERROR"
+              echo '```'
+              grep -E '^[^ ]+\.[ch]:[0-9]+:[0-9]+: (error|fatal error):' "$log" | head -20
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "no compiler diagnostics; any modpost failure is the expected one"
+
+      - name: Relocations the arm64 module loader cannot apply
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -o pipefail
+          KO="$PWD/repo/lkm/nomount.ko"
+          if [ ! -f "$KO" ]; then
+            echo "no .ko was produced - the build step above is the failure, not this one"
+            exit 0
+          fi
+
+          for c in llvm-readelf aarch64-linux-gnu-readelf readelf; do
+            command -v "$c" >/dev/null 2>&1 && { RE="$c"; break; }
+          done
+          [ -n "$RE" ] || { echo "no readelf on this runner"; exit 1; }
+
+          # arch/arm64/kernel/module.c applies exactly this set. Anything outside it - GOT,
+          # TLS, PLT - LINKS FINE and only fails later inside init_module() with
+          # "unsupported RELA relocation", so a green build step proves nothing here.
+          ALLOW='^R_AARCH64_(NONE|ABS(64|32|16)|PREL(64|32|16)|MOVW_UABS_G[0-3](_NC)?|MOVW_SABS_G[0-2]|MOVW_PREL_G[0-3](_NC)?|LD_PREL_LO19|ADR_PREL_LO21|ADR_PREL_PG_HI21(_NC)?|ADD_ABS_LO12_NC|LDST(8|16|32|64|128)_ABS_LO12_NC|TSTBR14|CONDBR19|JUMP26|CALL26)$'
+
+          # -W is load-bearing: without it readelf truncates R_AARCH64_LD64_GOT_LO12_NC to
+          # "R_AARCH64_LD64_GO", which no longer contains the string GOT.
+          "$RE" -rW "$KO" | awk '/^0/{print $3}' | sort | uniq -c | sort -rn > /tmp/reloc-${{ matrix.ver }}.txt
+          BAD=$("$RE" -rW "$KO" | awk '/^0/{print $3}' | sort -u | grep -vE "$ALLOW" || true)
+
+          {
+            echo "### ${{ matrix.ver }} relocations"
+            echo '```'
+            cat /tmp/reloc-${{ matrix.ver }}.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$BAD" ]; then
+            echo "every relocation type is one the arm64 module loader applies"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "[OK] all relocation types are applied by arch/arm64/kernel/module.c" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "These relocation types are NOT applied by the arm64 module loader."
+          echo "The .ko links, but insmod fails with 'unsupported RELA relocation'."
+          echo "$BAD"
+          echo
+          echo "Symbols responsible:"
+          for t in $BAD; do
+            "$RE" -rW "$KO" | awk -v t="$t" '$3==t && NF>=5 {print "  " t "  " $5}' | sort -u
+          done
+          {
+            echo ""
+            echo "[FAIL] relocation types the arm64 module loader cannot apply:"
+            echo '```'
+            echo "$BAD"
+            for t in $BAD; do
+              "$RE" -rW "$KO" | awk -v t="$t" '$3==t && NF>=5 {print "  " t "  " $5}' | sort -u
+            done
+            echo '```'
+            echo "A weak *undefined* symbol is the usual cause: clang cannot use adrp+add for"
+            echo "an address that may be 0, so it emits a GOT-indirect reference instead."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Symbols the kernel does not export (the real gate)
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -o pipefail
+          log=/tmp/lkm-${{ matrix.ver }}.log
+          out=/tmp/redirects-${{ matrix.ver }}.txt
+
+          grep -oE '"[a-zA-Z_][a-zA-Z0-9_]*" \[' "$log" | tr -d '"[ ' | sort -u > /tmp/undef.txt || true
+          grep -rhoE '\bEXPORT_SYMBOL(_GPL|_NS|_NS_GPL)?\(\s*[a-zA-Z_][a-zA-Z0-9_]*' ksrc \
+            --include='*.c' --include='*.h' 2>/dev/null \
+            | sed 's/.*(\s*//' | sort -u > /tmp/exported.txt || true
+          comm -23 /tmp/undef.txt /tmp/exported.txt > "$out" || true
+
+          u=$(grep -c . /tmp/undef.txt || true)
+          e=$(grep -c . /tmp/exported.txt || true)
+          r=$(grep -c . "$out" || true)
+
+          {
+            echo "### ${{ matrix.ver }} (${{ matrix.tc }})"
+            echo "- unresolved at modpost: **$u** (no Module.symvers at this stage - expected)"
+            echo "- exported by this kernel: $e"
+            echo "- **needing a kallsyms redirect: $r**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$r" -eq 0 ]; then
+            echo "All $u unresolved symbols are exported by this kernel."
+            echo "The module links cleanly against a fully built tree; no shim needed."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ every unresolved symbol is exported - links against a built tree, no shim needed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "These are NOT exported and need an NM_SYM() entry in lkm/nm_oot.h:"
+            cat "$out"
+            { echo '```'; cat "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.sel.outputs.run == '1'
+        with:
+          name: lkm-gate-log-${{ matrix.ver }}
+          path: |
+            /tmp/lkm-${{ matrix.ver }}.log
+            /tmp/redirects-${{ matrix.ver }}.txt
+          retention-days: 7
+          if-no-files-found: ignore

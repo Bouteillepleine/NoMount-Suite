@@ -123,21 +123,28 @@ jobs:
             if [ -n "$body" ]; then printf '%s\n' "$body"; fi
             cat <<'FOOTER'
 
-          > **The Suite and the engine update separately.** The engine is compiled into
-          > the kernel (`CONFIG_NOMOUNT=y`); this zip is the Suite, and installing it
-          > doesn't move the engine. For that, flash a kernel built from the matching
-          > `hookless/` source. The Suite runs on an older engine, and `nomount check`
-          > names anything that needs a newer one. The WebUI footer shows both,
-          > `Suite vX · engine vY`.
+            > **Which zip?** `00_NoMount-Module` for a kernel with NoMount built in -
+            > every kernel the OnePlus builders ship, and what the in-app updater takes.
+            > `01_NoMount-Module-LKM` is the same Suite plus the engine as a loadable
+            > module, for a kernel without it.
+            >
+            > **The Suite and the engine update separately.** Installing the Suite does
+            > not move a built-in engine; flash a kernel built from the matching
+            > `hookless/` source for that. The Suite runs on an older engine, and
+            > `nomount check` names anything that needs a newer one. The WebUI footer
+            > shows both, `Suite vX · engine vY`.
           FOOTER
           } > /tmp/notes.md
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "release $TAG already exists: replacing its asset and notes in place"
             gh release upload "$TAG" "$zip" --repo "$GITHUB_REPOSITORY" --clobber
+            lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1 || true)
+            [ -n "$lkmzip" ] && gh release upload "$TAG" "$lkmzip" --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/notes.md
           else
-            gh release create "$TAG" "$zip" \
+            lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1 || true)
+            gh release create "$TAG" "$zip" ${lkmzip:+"$lkmzip"} \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "NoMount Suite $TAG" \
