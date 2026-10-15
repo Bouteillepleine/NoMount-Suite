@@ -16,6 +16,7 @@ mod mount;
 mod nm;
 mod pmcache;
 mod presets;
+mod rulestate;
 mod statefile;
 mod whiteout;
 
