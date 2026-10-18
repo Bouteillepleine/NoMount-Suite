@@ -16,11 +16,40 @@
     }
     document.documentElement.setAttribute("data-theme", t);
   })();
+  // Same IIFE position as the theme, and for the same reason: set before the first
+  // paint or the bar renders as a capsule and then jumps to a dock.
+  (function initNav() {
+    let v = null;
+    try { v = localStorage.getItem("nm_nav"); } catch (e) {}
+    document.documentElement.setAttribute("data-nav", v === "capsule" ? "capsule" : "dock");
+  })();
+
+  function navStyle() {
+    return document.documentElement.getAttribute("data-nav") === "capsule" ? "capsule" : "dock";
+  }
+  function syncNavSeg() {
+    const seg = document.getElementById("navSeg");
+    if (!seg) return;
+    const cur = navStyle();
+    seg.querySelectorAll(".seg-b").forEach(function (b) {
+      const on = b.getAttribute("data-v") === cur;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-checked", on ? "true" : "false");
+    });
+  }
+  function setNav(v) {
+    const nav = v === "capsule" ? "capsule" : "dock";
+    document.documentElement.setAttribute("data-nav", nav);
+    try { localStorage.setItem("nm_nav", nav); } catch (e) {}
+    syncNavSeg();
+    movePill(false);
+  }
 
   function movePill(animate) {
     const pill = document.getElementById("navpill");
     const btn = document.querySelector(".navb.on");
     if (!pill || !btn) return;
+    if (navStyle() === "dock") { pill.style.opacity = "0"; return; }
     if (animate === false) pill.classList.add("noanim");
     pill.style.width = btn.offsetWidth + "px";
     pill.style.height = btn.offsetHeight + "px";

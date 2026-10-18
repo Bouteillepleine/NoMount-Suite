@@ -90,6 +90,7 @@
     setKsuSource: (el, ev, arg) => setKsuSource(arg),
     uidOp: (el, ev, arg) => uidOp(arg, el),
     toggleTheme: () => toggleTheme(),
+    setNav: (el, ev, arg) => setNav(arg),
     openDetail: () => openDetail(),
     toggleCard: (el) => toggleCard(el),
     toggleWhiteouts: (el) => toggleWhiteouts(el),
@@ -155,6 +156,7 @@
     try { t = sessionStorage.getItem("nm_tab"); } catch (e) {}
     if (t && document.getElementById("tab-" + t)) showTab(t, document.getElementById("nb-" + t));
   })();
+  syncNavSeg();
   movePill(false);
   window.addEventListener("load", function () { movePill(false); });
 
