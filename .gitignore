@@ -31,3 +31,11 @@
 # quietly bring the problem back.
 /.zig-cache/
 /zig-cache/
+
+# Python bytecode from the helper scripts. Two of these were COMMITTED once
+# (eae5476), which is the same class of mistake as the entries above: a .pyc is
+# regenerated on import, and as a TRACKED file it then shows up modified -- which
+# `package.sh`'s +dirty exclusion list does not filter, so every local build after
+# an import would stamp the zip +dirty.
+__pycache__/
+*.pyc

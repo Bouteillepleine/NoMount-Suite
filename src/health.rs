@@ -1,4 +1,3 @@
-//! Runtime health: the regression canary that would have caught the d_drop bug on the
 
 use std::fmt::Write as _;
 use std::fs;
@@ -13,10 +12,10 @@ use crate::nm::Nm;
 const NM_DIR: &str = "/data/adb/nomount";
 const SNAPSHOT: &str = "/data/adb/nomount/snapshot.txt";
 
-/// One line-based `key=value` fingerprint of the live system
 pub struct Fingerprint {
     version: String,
     uname: String,
+    kbuild: String,
     engine: String,
     rules: Option<usize>,
     whiteouts: Option<usize>,
@@ -30,12 +29,12 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
-    /// The flat key=value document `health.txt` and `snapshot.txt` are made of
     pub fn facts(&self) -> Vec<crate::check::Fact> {
         let unk = |v: Option<usize>| v.map_or_else(|| "unknown".to_string(), |n| n.to_string());
         [
             ("version", self.version.clone()),
             ("uname", self.uname.clone()),
+            ("kbuild", self.kbuild.clone()),
             ("engine", self.engine.clone()),
             ("rules", unk(self.rules)),
             ("whiteouts", unk(self.whiteouts)),
@@ -52,7 +51,6 @@ impl Fingerprint {
         .collect()
     }
 
-    /// The verdicts those facts imply, as ordinary checks
     pub fn checks(&self) -> Vec<Check> {
         let mk = |name: &'static str, v: Verdict, ev: String| {
             Check::new(Section::Device, slug(name), name, v, ev)
@@ -129,7 +127,7 @@ impl Fingerprint {
 
         out.push(match self.served_matches_rule.as_str() {
             "ok" => mk("served bytes match the rule", Verdict::Pass, self.served_matches_rule.clone())
-                .meaning("Every injected path serves the bytes its own rule names."),
+                .meaning("Every injected path serves a file of the size its rule names, and the same opening 4 KiB."),
             "unchecked:engine-list-failed" => mk(
                 "served bytes match the rule",
                 Verdict::Unmeasured,
@@ -151,16 +149,49 @@ impl Fingerprint {
                 self.served_matches_rule.clone(),
             )
             .meaning("No rule had a comparable file at both ends, so this was not tested."),
+            s if s.starts_with("unchecked:unreadable") => mk(
+                "served bytes match the rule",
+                Verdict::Unmeasured,
+                self.served_matches_rule.clone(),
+            )
+            .meaning(
+                "A live rule named a source or a target that would not stat, so those paths \
+                 were not compared. A rule the engine holds but does not serve looks exactly \
+                 like this, so it is not a pass.",
+            ),
+            s if s.starts_with("ok:partial") => mk(
+                "served bytes match the rule",
+                Verdict::Pass,
+                self.served_matches_rule.clone(),
+            )
+            .meaning(
+                "Every injected path that could be compared serves a file of the size its rule \
+                 names. The count says how many of the live rules that was - the rest are not \
+                 regular files at both ends (a directory injection), so there is nothing to \
+                 compare there.",
+            ),
+            // "I stopped at the cap" is not "I found something wrong". This used to fall through
+            // to Fail and told the user to delete a bind and reboot over a scan that simply ran
+            // out of budget.
+            s if s.starts_with("unchecked:over-cap") => mk(
+                "served bytes match the rule",
+                Verdict::Unmeasured,
+                self.served_matches_rule.clone(),
+            )
+            .meaning(
+                "There are more comparable rules than this check compares in one pass, so it \
+                 stopped early. Nothing was found wrong - it did not finish looking.",
+            ),
             other => mk("served bytes match the rule", Verdict::Fail, other.to_string())
                 .meaning(
                     "A path serves content its own rule does not name. Either two rules hit one \
                      target, or the rule was registered while another module's `mount --bind` \
-                     owned that path and never took effect. A bind made at post-fs-data is \
-                     already handled: the pre-zygote absorb pass drops it and re-asserts the \
-                     rule underneath, so this points at a bind that appeared after boot - \
-                     absorb leaves those alone on my_*, because re-asserting there on a live \
-                     system has rebooted a device. Delete that bind from the owning module \
-                     and reboot.",
+                     owned that path and never took effect. The post-boot absorb pass drops \
+                     such a bind and re-asserts the rule underneath - and the pre-zygote pass \
+                     does it before zygote when the my_hookless trial is on - so seeing this \
+                     after boot means absorb could not take it. On my_* it never will: \
+                     re-asserting there on a live system has rebooted a device. Delete that \
+                     bind from the owning module and reboot.",
                 )
                 .owner("the mount pass"),
         });
@@ -190,18 +221,33 @@ fn read_cmd(prog: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// Size a normal (non-root) app sees for `path`, via `su <uid> -c stat`
-fn app_size(uid: u32, path: &str) -> String {
-    let quoted = format!("'{}'", path.replace('\'', "'\\''"));
-    let out = Command::new("su")
-        .args([&uid.to_string(), "-c", &format!("stat -c %s {quoted} 2>/dev/null")])
-        .output();
-    out.ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
+fn shq(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
 }
 
-/// How many mounts are backed by module content
+fn app_sizes(uid: u32, paths: &[&str]) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if paths.is_empty() {
+        return out;
+    }
+    let args = paths.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ");
+    let Ok(o) = Command::new("/system/bin/su")
+        .args([&uid.to_string(), "-c", &format!("stat -c '%n %s' {args} 2>/dev/null")])
+        .output()
+    else {
+        return out;
+    };
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let Some(cut) = line.rfind(' ') else { continue };
+        let (name, size) = (&line[..cut], line[cut + 1..].trim());
+        if size.is_empty() || !size.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        out.insert(name.to_string(), size.to_string());
+    }
+    out
+}
+
 fn count_mounts_split() -> Option<(usize, usize)> {
     let Ok(body) = fs::read_to_string("/proc/self/mountinfo") else { return None };
     let rows = crate::absorb::parse_mountinfo(&body);
@@ -226,10 +272,15 @@ fn count_mounts_split() -> Option<(usize, usize)> {
     Some((total, by_design))
 }
 
-/// The unprivileged uid the consistency canary probes as (`shell`)
 const PROBE_UID: u32 = 2000;
 
-/// The Narcissus canary: sample a few injected files and confirm a normal app (uid 2000,
+fn others_can_search_to(target: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    target.ancestors().skip(1).filter(|d| !d.as_os_str().is_empty()).all(|d| {
+        fs::metadata(d).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o001 != 0)
+    })
+}
+
 fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<bool>) -> String {
     match probe_uid_hidden {
         Some(true) => return "unchecked:probe-uid-hidden".to_string(),
@@ -239,7 +290,7 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
     const BUDGET: usize = 18;
     let mut buckets: std::collections::BTreeMap<(String, String), Vec<&Path>> =
         std::collections::BTreeMap::new();
-    for rule in rules.iter() {
+    for rule in rules.iter().filter(|r| r.uid == 0) {
         let Some(src) = rule.source.as_deref() else { continue };
         let partition = rule
             .target
@@ -257,8 +308,11 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
         let mut progressed = false;
         for targets in buckets.values() {
             if let Some(t) = targets.get(i) {
-                sample.push(t);
                 progressed = true;
+                if !others_can_search_to(t) {
+                    continue;
+                }
+                sample.push(t);
                 if sample.len() >= BUDGET {
                     break 'outer;
                 }
@@ -272,7 +326,12 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
     if sample.is_empty() {
         return "unchecked".to_string();
     }
-    if app_size(PROBE_UID, "/system/build.prop").is_empty() {
+
+    const CANARY: &str = "/system/build.prop";
+    let mut batch: Vec<&str> = vec![CANARY];
+    batch.extend(sample.iter().filter_map(|t| t.to_str()));
+    let seen = app_sizes(PROBE_UID, &batch);
+    if !seen.contains_key(CANARY) {
         return "unchecked:probe-unavailable".to_string();
     }
 
@@ -282,10 +341,10 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
         let Some(root_sz) = root else { continue };
         let Some(target) = target.to_str() else { continue };
         checked += 1;
-        let app_sz = app_size(PROBE_UID, target);
+        let app_sz = seen.get(target).map(String::as_str).unwrap_or("");
         if app_sz != root_sz {
             return format!("mismatch:{target}(root={root_sz} app={})",
-                if app_sz.is_empty() { "ENOENT" } else { &app_sz });
+                if app_sz.is_empty() { "ENOENT" } else { app_sz });
         }
     }
     if checked == 0 {
@@ -295,7 +354,6 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
     }
 }
 
-/// How much of a file to compare when sizes match
 const DRIFT_BYTES: usize = 4096;
 
 fn head(path: &str, n: usize) -> Option<Vec<u8>> {
@@ -314,18 +372,29 @@ fn head(path: &str, n: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Does what the engine serves at each target match the source its own rule names?
 fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
     const CAP: usize = 20_000;
+    // Only a rule with a source has two ends to compare. Counting whiteouts and virtual dirs,
+    // which have none, inflated `comparable` past the cap and reported "did not finish looking"
+    // on a device where every comparable rule had in fact been checked.
+    let comparable = rules.iter().filter(|r| r.uid == 0 && r.source.is_some()).count();
     let mut checked = 0;
-    for rule in rules.iter().take(CAP) {
+    let mut bytes_checked = 0;
+    let mut unreadable = 0;
+    for rule in rules.iter().filter(|r| r.uid == 0 && r.source.is_some()).take(CAP) {
         let Some(source) = rule.source.as_deref() else { continue };
         let target = rule.target.as_path();
-        let Ok(sm) = fs::metadata(source) else { continue };
+        let Ok(sm) = fs::metadata(source) else {
+            unreadable += 1;
+            continue;
+        };
         if !sm.is_file() {
             continue;
         }
-        let Ok(tm) = fs::metadata(target) else { continue };
+        let Ok(tm) = fs::metadata(target) else {
+            unreadable += 1;
+            continue;
+        };
         if !tm.is_file() {
             continue;
         }
@@ -338,12 +407,23 @@ fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
         let (Some(a), Some(b)) = (head(&ta, DRIFT_BYTES), head(&sa, DRIFT_BYTES)) else {
             continue;
         };
+        bytes_checked += 1;
         if a != b {
             return format!("drift:{target}(rule={source} bytes differ)");
         }
     }
-    if checked == 0 {
+    // A rule whose source or target will not stat is the "registered but not serving"
+    // case this probe exists to find, so it cannot be folded into the pass. A rule whose
+    // ends are not regular files (a directory injection) legitimately has nothing to
+    // compare, and is not a failure - hence two different words for two different skips.
+    if unreadable > 0 {
+        format!("unchecked:unreadable({unreadable} of {comparable})")
+    } else if checked == 0 {
         "unchecked".to_string()
+    } else if comparable > CAP {
+        format!("unchecked:over-cap({checked} of {comparable})")
+    } else if checked < comparable || bytes_checked < checked {
+        format!("ok:partial({checked} of {comparable}, bytes {bytes_checked})")
     } else {
         "ok".to_string()
     }
@@ -374,6 +454,7 @@ pub fn gather() -> Fingerprint {
     Fingerprint {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uname: read_cmd("uname", &["-r"]),
+        kbuild: read_cmd("uname", &["-v"]),
         engine,
         rules,
         whiteouts,
@@ -399,7 +480,6 @@ pub fn gather() -> Fingerprint {
     }
 }
 
-/// `nomount snapshot` - freeze the current fingerprint as the known-good baseline
 pub fn run_snapshot() -> Result<()> {
     let body = fingerprint_text()?;
     crate::statefile::write_atomic(SNAPSHOT, &body).context("write snapshot.txt")?;
@@ -408,21 +488,32 @@ pub fn run_snapshot() -> Result<()> {
     Ok(())
 }
 
-/// The live fingerprint as `health.txt`/`snapshot.txt` text, stamped
 fn fingerprint_text() -> Result<String> {
+    // A baseline sampled halfway through a mount/reload pass is wrong forever: every
+    // later `verify` compares against it and reports DRIFT.
+    let _pass = crate::mount::pass_lock();
     let r = crate::check::build(false, true)?;
     let mut body = r.fingerprint_text();
     let _ = writeln!(body, "ts={}", r.ts);
     Ok(body)
 }
 
-/// `nomount verify` - diff the live fingerprint against the saved snapshot and name every
 pub fn run_verify() -> Result<()> {
     let saved = match fs::read_to_string(SNAPSHOT) {
         Ok(s) => s,
-        Err(_) => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("no snapshot yet - run `nomount snapshot` on a known-good boot first");
             return Ok(());
+        }
+        // A snapshot that exists but will not open is not the same as not having one. Saying
+        // "no snapshot yet" invited the user to take a fresh one, which overwrites the good
+        // baseline with the drifted state it was supposed to be compared against.
+        Err(e) => {
+            anyhow::bail!(
+                "{SNAPSHOT} exists but could not be read: {e}. NOT taking a new snapshot - that \
+                 would overwrite the baseline with the current state. Fix the permissions, or \
+                 delete the file if you mean to start over."
+            );
         }
     };
     let live = fingerprint_text()?;
@@ -433,15 +524,21 @@ pub fn run_verify() -> Result<()> {
     for l in &lines {
         println!("{l}");
     }
-    if lines.is_empty() {
-        println!("verify: live matches snapshot (no drift)");
+    let drifted = lines.iter().filter(|l| l.starts_with("DRIFT ")).count();
+    let skipped = lines.len() - drifted;
+    let tail = if skipped > 0 {
+        format!(" ({skipped} field(s) not compared - one side was not measured)")
     } else {
-        println!("verify: {} field(s) drifted from snapshot", lines.len());
+        String::new()
+    };
+    if drifted == 0 {
+        println!("verify: live matches snapshot (no drift){tail}");
+    } else {
+        println!("verify: {drifted} field(s) drifted from snapshot{tail}");
     }
     Ok(())
 }
 
-/// Every field that moved between two fingerprints, as the lines `verify` prints
 fn drift_lines(saved: &str, live: &str) -> Vec<String> {
     let kv = |txt: &str| -> Vec<(String, String)> {
         txt.lines()
@@ -453,34 +550,68 @@ fn drift_lines(saved: &str, live: &str) -> Vec<String> {
     let find = |set: &[(String, String)], key: &str| -> Option<String> {
         set.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     };
+    // A value that reads "unknown" or "unchecked" on either side says the probe did not run, not
+    // that the system changed. Painting those transitions as DRIFT told the user their device had
+    // drifted when the only thing that differed was whether a measurement happened.
+    let unmeasured = |v: &str| v == "unknown" || v.starts_with("unchecked");
+    let suite_moved = find(&sv, "version") != find(&lv, "version");
     let mut out = Vec::new();
     for (k, lval) in &lv {
-        let sval = find(&sv, k).unwrap_or_else(|| "<absent>".to_string());
-        if &sval != lval && !is_version_context(k, &sval, lval) {
-            out.push(format!("DRIFT {k}: snapshot={sval} -> live={lval}"));
+        let Some(sval) = find(&sv, k) else {
+            out.push(if suite_moved {
+                format!("not compared {k}: live={lval} (the snapshot predates this field)")
+            } else {
+                format!("DRIFT {k}: snapshot=<absent> -> live={lval}")
+            });
+            continue;
+        };
+        if &sval == lval || is_version_context(k, &sval, lval) {
+            continue;
         }
+        if unmeasured(&sval) || unmeasured(lval) {
+            out.push(format!(
+                "not compared {k}: snapshot={sval} -> live={lval} (one side was not measured)"
+            ));
+            continue;
+        }
+        out.push(format!("DRIFT {k}: snapshot={sval} -> live={lval}"));
     }
     for (k, sval) in &sv {
-        if find(&lv, k).is_none() && !is_version_context(k, sval, "<absent>") {
-            out.push(format!("DRIFT {k}: snapshot={sval} -> live=<absent>"));
+        if find(&lv, k).is_none() {
+            out.push(if suite_moved {
+                format!("not compared {k}: snapshot={sval} (this Suite no longer records it)")
+            } else {
+                format!("DRIFT {k}: snapshot={sval} -> live=<absent>")
+            });
         }
     }
     out
 }
 
-/// Is this pair the user's own version move rather than drift?
 fn is_version_context(key: &str, sval: &str, lval: &str) -> bool {
     let version_shaped = |v: &str| {
         v.strip_prefix('v').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
     };
+    let parts = |v: &str| -> Option<Vec<u64>> {
+        let v = v.trim().trim_start_matches('v');
+        if v.is_empty() {
+            return None;
+        }
+        v.split('.').map(|p| p.parse::<u64>().ok()).collect()
+    };
+    let moved_forward = |a: &str, b: &str| -> bool {
+        match (parts(a), parts(b)) {
+            (Some(x), Some(y)) => y >= x,
+            _ => false,
+        }
+    };
     match key {
-        "version" => true,
-        "engine" => version_shaped(sval) && version_shaped(lval),
+        "version" => moved_forward(sval, lval),
+        "engine" => version_shaped(sval) && version_shaped(lval) && moved_forward(sval, lval),
         _ => false,
     }
 }
 
-/// The one sentence that says the comparison spans two versions, or `None` when it does not
 fn version_context(saved: &str, live: &str) -> Option<String> {
     let get = |txt: &str, key: &str| -> Option<String> {
         txt.lines()
@@ -509,8 +640,7 @@ fn version_context(saved: &str, live: &str) -> Option<String> {
     ))
 }
 
-/// Every root under which a destination is readable by any app holding a storage
-const SHARED_ROOTS: &[&str] = &[
+pub(crate) const SHARED_ROOTS: &[&str] = &[
     "/sdcard",
     "/storage",
     "/mnt/sdcard",
@@ -523,12 +653,79 @@ const SHARED_ROOTS: &[&str] = &[
     "/mnt/expand",
 ];
 
-/// Is `p` inside a shared volume?
-fn is_shared_storage(p: &Path) -> bool {
+pub(crate) fn is_shared_storage(p: &Path) -> bool {
     SHARED_ROOTS.iter().any(|r| p.starts_with(r))
 }
 
-/// Why the export destination's parent cannot hold a new directory, or `None` when nothing
+const SHELL_TMP: &str = "/data/local/tmp";
+const SHELL_ID: u32 = 2000;
+
+fn app_readable_why(p: &Path) -> Option<&'static str> {
+    if is_shared_storage(p) {
+        Some("is shared storage, readable by any app with a storage permission")
+    } else if p.starts_with(SHELL_TMP) {
+        Some(
+            "is under /data/local/tmp, where any app can look up a name (the bundle itself is \
+             readable only by shell, uid 2000, so adb pull works)",
+        )
+    } else {
+        None
+    }
+}
+
+fn is_for_shell(resolved: &Path, literal: &Path) -> bool {
+    !is_shared_storage(resolved) && (resolved.starts_with(SHELL_TMP) || literal.starts_with(SHELL_TMP))
+}
+
+fn resolve_existing_prefix(p: &Path) -> PathBuf {
+    for a in p.ancestors() {
+        let probe = if a.as_os_str().is_empty() { Path::new(".") } else { a };
+        if let Ok(r) = fs::canonicalize(probe) {
+            return r.join(p.strip_prefix(a).unwrap_or(Path::new("")));
+        }
+    }
+    p.to_path_buf()
+}
+
+fn create_export_dir(out: &Path, private: bool, owner: Option<(u32, u32)>) -> std::io::Result<()> {
+    if !private {
+        return fs::create_dir_all(out);
+    }
+    use std::os::unix::fs::DirBuilderExt;
+    let missing: Vec<PathBuf> = out
+        .ancestors()
+        .take_while(|a| !a.as_os_str().is_empty() && fs::symlink_metadata(a).is_err())
+        .map(Path::to_path_buf)
+        .collect();
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(out)?;
+    if let Some((uid, gid)) = owner {
+        for d in &missing {
+            std::os::unix::fs::lchown(d, Some(uid), Some(gid))?;
+        }
+    }
+    Ok(())
+}
+
+fn write_export_file(
+    path: &Path,
+    content: &str,
+    private: bool,
+    owner: Option<(u32, u32)>,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(if private { 0o600 } else { 0o644 })
+        .open(path)?;
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
+    }
+    f.write_all(content.as_bytes())
+}
+
 fn base_unusable(base: &Path) -> Option<String> {
     for p in base.ancestors() {
         if p.as_os_str().is_empty() {
@@ -544,7 +741,7 @@ fn base_unusable(base: &Path) -> Option<String> {
                  started by `su` from adb does not always share -- mkdir then answers \
                  EEXIST for the symlink itself, which reads as \"File exists\" for a \
                  directory that does not exist. Pass a real path instead: \
-                 nomount export /data/local/tmp",
+                 nomount export /data/adb/nomount/report",
                 p.display(),
                 t.display()
             ));
@@ -556,7 +753,6 @@ fn base_unusable(base: &Path) -> Option<String> {
     None
 }
 
-/// `nomount export [dir]` - dump diagnostics to a timestamped, stealth-named folder
 pub fn run_export(dir: Option<String>) -> Result<()> {
     let ts = read_cmd("date", &["+%Y%m%d-%H%M%S"]);
     let ts = if ts.is_empty() {
@@ -573,17 +769,20 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
     if let Some(why) = base_unusable(Path::new(&base)) {
         anyhow::bail!("cannot export to {base}: {why}");
     }
-    fs::create_dir_all(&out).with_context(|| format!("create {out}"))?;
+    let resolved = resolve_existing_prefix(Path::new(&out));
+    let public = app_readable_why(&resolved).or_else(|| app_readable_why(Path::new(&out)));
+    let shared = public.is_some();
+    let for_shell = is_for_shell(&resolved, Path::new(&out));
+    let private = !shared || for_shell;
+    let owner = for_shell.then_some((SHELL_ID, SHELL_ID));
+    create_export_dir(Path::new(&out), private, owner).with_context(|| format!("create {out}"))?;
 
     let nm = Nm::new();
     let write = |name: &str, content: &str| {
-        if let Err(e) = fs::write(format!("{out}/{name}"), content) {
+        if let Err(e) = write_export_file(&Path::new(&out).join(name), content, private, owner) {
             eprintln!("nomount: export: could not write {name}: {e} - this diagnostic is incomplete");
         }
     };
-
-    let resolved = fs::canonicalize(&out).unwrap_or_else(|_| PathBuf::from(&out));
-    let shared = is_shared_storage(&resolved) || is_shared_storage(Path::new(&out));
 
     let fingerprint = fingerprint_text().unwrap_or_else(|e| format!("(fingerprint failed: {e:#})\n"));
     let fingerprint =
@@ -651,7 +850,7 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
         }
     }
     println!("exported to {out}");
-    if shared {
+    if let Some(why) = public {
         let left_out = if withheld.is_empty() {
             String::new()
         } else {
@@ -661,24 +860,22 @@ pub fn run_export(dir: Option<String>) -> Result<()> {
             )
         };
         println!(
-            "note: {left_out}{out} is shared storage, readable by any app with a storage \
-             permission, so the hide list was kept out of it: rules.txt UID suffixes, the \
-             check report's hide-list names, any package name left in blocklist and any \
-             /data/app path in the fingerprint, the rule list, the check report and \
+            "note: {left_out}{out} {why}, so the hide list was kept out of it: rules.txt UID \
+             suffixes, the check report's hide-list names, any package name left in blocklist \
+             and any /data/app path in the fingerprint, the rule list, the check report and \
              mountinfo were redacted in place. Pass a private path for the unredacted \
-             bundle: nomount export /data/adb/nomount"
+             bundle: nomount export /data/adb/nomount/report"
         );
     }
     Ok(())
 }
 
-/// What `dmesg-nomount.txt` carries, and whether the bundle's closing note must name it as
 fn dmesg_section(shared: bool, dmesg: &str) -> (String, bool) {
     if shared && !dmesg.is_empty() {
         return (
             "(left out - the kernel ring carries the Suite's own boot log, which can name the \
              apps you are hiding from. For this file, re-run to a private path: \
-             nomount export /data/adb/nomount)\n"
+             nomount export /data/adb/nomount/report)\n"
                 .to_string(),
             true,
         );
@@ -694,7 +891,6 @@ fn dmesg_section(shared: bool, dmesg: &str) -> (String, bool) {
     (dmesg.to_string(), false)
 }
 
-/// The rule dump, filtered for a shared destination
 fn redact_rules_for_shared(rules: &str) -> String {
     rules
         .lines()
@@ -704,7 +900,6 @@ fn redact_rules_for_shared(rules: &str) -> String {
         .join("\n")
 }
 
-/// One exported state file, filtered for a shared destination
 fn redact_for_shared(name: &str, body: &str) -> String {
     let keep_installed = |l: &&str| -> bool {
         let t = l.trim();
@@ -727,7 +922,6 @@ fn redact_for_shared(name: &str, body: &str) -> String {
     }
 }
 
-/// [`redact_app_paths`] over a whole document, trailing newline kept
 fn redact_app_paths_doc(body: &str) -> String {
     if !body.contains("/data/app/") {
         return body.to_string();
@@ -739,7 +933,6 @@ fn redact_app_paths_doc(body: &str) -> String {
     s
 }
 
-/// One `key=value` fingerprint line with any `/data/app/...` path blanked
 fn redact_app_paths(line: &str) -> String {
     if !line.contains("/data/app/") {
         return line.to_string();
@@ -761,7 +954,32 @@ fn redact_app_paths(line: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The export destination's parent, judged in the three states that matter
+    #[test]
+    fn a_version_that_went_backwards_is_drift_not_context() {
+        assert!(is_version_context("engine", "v30", "v32"), "forward is the user's own update");
+        assert!(is_version_context("engine", "v32", "v32"), "unchanged is not drift");
+        assert!(!is_version_context("engine", "v32", "v20"), "an engine DOWNGRADE is drift");
+        assert!(!is_version_context("engine", "v30", "down"), "a dead engine is drift");
+
+        assert!(is_version_context("version", "1.3.163", "1.3.176"), "Suite forward");
+        assert!(!is_version_context("version", "1.3.176", "1.3.163"), "Suite DOWNGRADE is drift");
+        assert!(!is_version_context("version", "1.3.176", "garbage"), "unparseable is drift");
+
+        let drifted = drift_lines("engine=v32
+rules=3
+", "engine=v20
+rules=3
+");
+        assert_eq!(drifted.len(), 1, "{drifted:?}");
+        assert!(drifted[0].contains("engine"), "{drifted:?}");
+        assert!(
+            version_context("engine=v32
+", "engine=v20
+").is_none(),
+            "a downgrade must not be excused in the note either"
+        );
+    }
+
     #[test]
     fn an_unresolvable_export_base_is_named_instead_of_reported_as_existing() {
         use std::os::unix::fs::symlink;
@@ -795,7 +1013,6 @@ mod tests {
         assert!(base_unusable(&f).is_some_and(|w| w.contains("not a directory")));
     }
 
-    /// `verify` had NO test proving it detects anything: the comparison lived inside a
     #[test]
     fn drift_names_a_changed_field() {
         let saved = "engine=v30\nrules=257\nblocked=19\nts=1\n";
@@ -804,7 +1021,6 @@ mod tests {
         assert_eq!(d, vec!["DRIFT rules: snapshot=257 -> live=260"]);
     }
 
-    /// `ts` moves on every call by construction
     #[test]
     fn drift_ignores_the_timestamp() {
         let saved = "engine=v30\nrules=257\nts=1788327280\n";
@@ -812,7 +1028,28 @@ mod tests {
         assert!(drift_lines(saved, live).is_empty(), "ts must not count as drift");
     }
 
-    /// A field the live fingerprint gained
+    #[test]
+    fn a_field_a_newer_suite_added_is_not_drift() {
+        let saved = "version=1.3.185\nengine=v30\n";
+        let live = "version=1.3.186\nengine=v30\nkbuild=#1 SMP\n";
+        assert_eq!(
+            drift_lines(saved, live),
+            vec!["not compared kbuild: live=#1 SMP (the snapshot predates this field)"],
+            "adding a fingerprint field must not report drift on every existing install"
+        );
+    }
+
+    #[test]
+    fn a_field_missing_within_one_suite_version_is_still_drift() {
+        let saved = "version=1.3.185\nengine=v30\nmanager_umount=off\n";
+        let live = "version=1.3.185\nengine=v30\n";
+        assert_eq!(
+            drift_lines(saved, live),
+            vec!["DRIFT manager_umount: snapshot=off -> live=<absent>"],
+            "same Suite on both sides means a vanished field is a real regression"
+        );
+    }
+
     #[test]
     fn drift_reports_a_field_only_live_has() {
         let saved = "engine=v30\n";
@@ -820,7 +1057,6 @@ mod tests {
         assert_eq!(drift_lines(saved, live), vec!["DRIFT guard: snapshot=<absent> -> live=armed"]);
     }
 
-    /// A field the snapshot has and live no longer emits
     #[test]
     fn drift_reports_a_field_the_snapshot_had_and_live_lost() {
         let saved = "engine=v30\nmanager_umount=off\n";
@@ -832,7 +1068,6 @@ mod tests {
         );
     }
 
-    /// Identical inputs are the pass case, and it must survive key REORDERING -- the
     #[test]
     fn drift_is_empty_for_the_same_fingerprint_in_any_order() {
         let saved = "engine=v30\nrules=257\nguard=armed\nts=1\n";
@@ -840,7 +1075,6 @@ mod tests {
         assert!(drift_lines(saved, live).is_empty());
     }
 
-    /// Several fields at once, both directions in one comparison
     #[test]
     fn drift_reports_every_moved_field_not_just_the_first() {
         let saved = "engine=v30\nrules=257\nmanager_umount=off\n";
@@ -852,7 +1086,6 @@ mod tests {
         assert!(d.iter().any(|l| l.contains("guard") && l.contains("<absent>")));
     }
 
-    /// A Suite update and an engine update are the two things a user does ON purpose, and
     #[test]
     fn drift_says_nothing_about_the_users_own_update() {
         let saved = "version=1.3.163\nengine=v30\nrules=257\nguard=armed\nts=1\n";
@@ -877,7 +1110,6 @@ mod tests {
         assert!(d.iter().any(|l| l.starts_with("DRIFT guard:")));
     }
 
-    /// ...but `engine=down` is not a version move
     #[test]
     fn an_engine_that_stopped_answering_is_still_drift() {
         let saved = "version=1.3.163\nengine=v30\n";
@@ -892,6 +1124,7 @@ mod tests {
         Fingerprint {
             version: "test".into(),
             uname: "test".into(),
+            kbuild: "test".into(),
             engine: engine.into(),
             rules: Some(rules),
             whiteouts: Some(0),
@@ -905,7 +1138,6 @@ mod tests {
         }
     }
 
-    /// The verdict tag, not the enum: `Verdict` deliberately derives only what its ordering
     fn verdict_of(fp: &Fingerprint, id: &str) -> &'static str {
         fp.checks()
             .into_iter()
@@ -915,7 +1147,39 @@ mod tests {
             .tag()
     }
 
-    /// The spellings a raw `String::starts_with` on the caller's argument could not see
+    #[test]
+    fn stopping_at_the_cap_is_unmeasured_not_a_failure() {
+        let mut fp = fp("v33", 257);
+        fp.served_matches_rule = "unchecked:over-cap(20000 of 20001)".into();
+        assert_eq!(
+            verdict_of(&fp, "served bytes match the rule"),
+            "UNMEASURED",
+            "running out of scan budget is not evidence that a path serves the wrong bytes, and \
+             the FAIL text told the user to delete a bind and reboot"
+        );
+
+        // A real mismatch must still fail.
+        fp.served_matches_rule = "drift:/system/etc/x(rule=/data/adb/modules/m/x bytes differ)".into();
+        assert_eq!(verdict_of(&fp, "served bytes match the rule"), "FAIL");
+    }
+
+    #[test]
+    fn a_field_that_was_not_measured_is_not_reported_as_drift() {
+        let saved = "rules=257\nserved_matches_rule=ok\nzero_mount=unknown\n";
+        let live = "rules=257\nserved_matches_rule=unchecked\nzero_mount=ok\n";
+        let lines = drift_lines(saved, live);
+        assert!(
+            lines.iter().all(|l| !l.starts_with("DRIFT ")),
+            "neither side changed state - one side simply was not measured: {lines:?}"
+        );
+        assert_eq!(lines.len(), 2, "but they are still reported, not hidden: {lines:?}");
+
+        // A genuine change is still drift.
+        let real = drift_lines("rules=257\n", "rules=12\n");
+        assert_eq!(real.len(), 1);
+        assert!(real[0].starts_with("DRIFT rules:"), "{real:?}");
+    }
+
     #[test]
     fn every_spelling_of_shared_storage_is_recognised() {
         for p in [
@@ -931,7 +1195,6 @@ mod tests {
         }
     }
 
-    /// ...and the other direction: a raw prefix has no notion of a path boundary, so it called
     #[test]
     fn private_destinations_are_not_mistaken_for_shared_ones() {
         for p in [
@@ -945,7 +1208,125 @@ mod tests {
         }
     }
 
-    /// "Nothing to test" is only honest while the engine is answering
+    #[test]
+    fn data_local_tmp_is_redacted_like_shared_storage() {
+        for p in [
+            "/data/local/tmp/nm-diag-1",
+            "/data/local/tmp/nm-report/nm-diag-1",
+            "/sdcard/Download/nm-diag-1",
+            "/storage/emulated/0/Download/nm-diag-1",
+        ] {
+            assert!(app_readable_why(Path::new(p)).is_some(), "{p} is readable by apps");
+        }
+        for p in ["/data/adb/nomount/report/nm-diag-1", "/data/localx/tmp/x", "/data/local/tmpx/y"] {
+            assert!(app_readable_why(Path::new(p)).is_none(), "{p} is private");
+        }
+        let why = app_readable_why(Path::new("/data/local/tmp/nm-diag-1")).unwrap();
+        assert!(!why.contains("shared storage"), "{why}");
+
+        let p = Path::new;
+        assert!(is_for_shell(p("/data/local/tmp/nm-diag-1"), p("/data/local/tmp/nm-diag-1")));
+        assert!(is_for_shell(p("/data/local/tmp/x/nm-diag-1"), p("/tmp-link/nm-diag-1")));
+        assert!(!is_for_shell(p("/storage/emulated/0/x"), p("/data/local/tmp/sd/x")));
+        assert!(!is_for_shell(p("/sdcard/Download/x"), p("/sdcard/Download/x")));
+        assert!(!is_for_shell(p("/data/adb/nomount/report/x"), p("/data/adb/nomount/report/x")));
+    }
+
+    #[test]
+    fn the_export_advice_never_points_at_an_app_readable_path() {
+        const SRC: &str = include_str!("health.rs");
+        let body = SRC.split("#[cfg(test)]").next().unwrap();
+        let bad = ["nomount export", "/data/local", "/tmp"].concat();
+        assert!(!body.contains(&bad), "the advice must not recommend an app-readable path");
+        assert!(body.contains("nomount export /data/adb/nomount/report"));
+    }
+
+    #[test]
+    fn a_private_export_is_root_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("report").join("nm-diag-1");
+        create_export_dir(&out, true, None).unwrap();
+        let f = out.join("uidhide");
+        write_export_file(&f, "com.example.bank\n", true, None).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&out), 0o700, "the bundle folder must not be traversable by apps");
+        assert_eq!(mode(out.parent().unwrap()), 0o700);
+        assert_eq!(mode(&f), 0o600, "the bundle files must not be readable by apps");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "com.example.bank\n");
+
+        write_export_file(&f, "x", true, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "x", "a rewrite truncates");
+    }
+
+    #[test]
+    fn a_shell_export_hands_only_the_folders_it_created_to_shell() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let me = unsafe { (libc::getuid(), libc::getgid()) };
+        let d = tempfile::tempdir().unwrap();
+        let pre = d.path().join("tmp");
+        std::fs::create_dir(&pre).unwrap();
+        std::fs::set_permissions(&pre, std::fs::Permissions::from_mode(0o771)).unwrap();
+        let out = pre.join("nm-report").join("nm-diag-1");
+        create_export_dir(&out, true, Some(me)).unwrap();
+        let f = out.join("rules.txt");
+        write_export_file(&f, "r\n", true, Some(me)).unwrap();
+        let md = |p: &Path| std::fs::metadata(p).unwrap();
+        for p in [out.as_path(), out.parent().unwrap()] {
+            assert_eq!(md(p).permissions().mode() & 0o777, 0o700, "{}", p.display());
+            assert_eq!((md(p).uid(), md(p).gid()), me, "{}", p.display());
+        }
+        assert_eq!(md(&f).permissions().mode() & 0o777, 0o600);
+        assert_eq!((md(&f).uid(), md(&f).gid()), me);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "r\n");
+        assert_eq!(
+            md(&pre).permissions().mode() & 0o777,
+            0o771,
+            "a folder that was already there is left alone"
+        );
+    }
+
+    #[test]
+    fn a_destination_that_does_not_exist_yet_resolves_through_its_parent() {
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let got = resolve_existing_prefix(&link.join("nm-diag-1").join("x"));
+        let want = std::fs::canonicalize(&real).unwrap().join("nm-diag-1").join("x");
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_target_shell_cannot_reach_is_not_sampled_by_the_canary() {
+        use std::os::unix::fs::PermissionsExt;
+        let set = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let d = tempfile::tempdir().unwrap();
+        set(d.path(), 0o755);
+        let open = d.path().join("etc");
+        let locked = d.path().join("firmware_mnt");
+        let inner = locked.join("image");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::create_dir_all(&inner).unwrap();
+        let reachable = open.join("hosts");
+        let behind = inner.join("modem.mbn");
+        std::fs::write(&reachable, b"x").unwrap();
+        std::fs::write(&behind, b"x").unwrap();
+        set(&locked, 0o550);
+        set(&inner, 0o755);
+
+        assert!(others_can_search_to(&reachable));
+        assert!(!others_can_search_to(&behind), "a dr-xr-x--- ancestor blocks uid 2000 like any app");
+        assert!(!others_can_search_to(&d.path().join("gone").join("x")));
+
+        set(&locked, 0o551);
+        assert!(others_can_search_to(&behind));
+        set(&locked, 0o755);
+    }
+
     #[test]
     fn zero_rules_is_only_not_applicable_when_the_engine_answered() {
         let up = fp("v26", 0);
@@ -983,7 +1364,6 @@ mod tests {
         assert_eq!(verdict_of(&bad, "per-UID consistency canary"), "FAIL");
     }
 
-    /// The export's shared-storage filter, on the two files that keep their place in the
     #[test]
     fn a_shared_export_filters_the_files_it_still_includes() {
         let body = "# a comment\n\ncom.example.bank\nsome_module_id\n";
@@ -994,7 +1374,6 @@ mod tests {
         assert_eq!(redact_for_shared("incident.log", body), body);
     }
 
-    /// An absorbed patched APK's path names which app on this phone is patched
     #[test]
     fn a_shared_export_keeps_data_app_paths_out_of_the_fingerprint() {
         let line = "served_matches_rule=drift:/data/app/~~aB1/com.mybank.app-x9/base.apk\
@@ -1014,7 +1393,6 @@ mod tests {
         assert!(redact_for_shared("health.txt", doc).contains("rules=257"));
     }
 
-    /// The kernel ring republishes, verbatim, the file `boot.log` is withheld to keep private
     #[test]
     fn a_shared_export_keeps_the_kernel_ring_out_of_the_bundle() {
         let ring = "[1.0] nomount: *.bank matches com.mybank.app (appid 10231, below the app \
@@ -1035,7 +1413,6 @@ mod tests {
         }
     }
 
-    /// The rule dump and the check report both name an absorbed APK's path, and the round-8
     #[test]
     fn a_shared_export_keeps_data_app_paths_out_of_the_rule_list_and_the_report() {
         let dump = "/system/etc/hosts -> /data/adb/modules/M/system/etc/hosts\n\
@@ -1064,7 +1441,6 @@ mod tests {
         assert!(!redact_for_shared("incident.log", inc).contains("com.mybank.app"));
     }
 
-    /// The three shapes this module's own parser got wrong before it was deleted
     #[test]
     fn the_shared_parser_survives_the_three_shapes_the_local_one_mangled() {
         let list = "/system/etc/a -> b -> /data/adb/modules/M/system/etc/ab\n\

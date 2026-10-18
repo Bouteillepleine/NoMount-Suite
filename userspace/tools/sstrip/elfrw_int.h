@@ -11,21 +11,13 @@
 #include <elf.h>
 #include "elfrw.h"
 
-/* Internal shared variables.
- */
 extern unsigned char _elfrw_native_data;
 extern unsigned char _elfrw_current_class;
 extern unsigned char _elfrw_current_data;
 extern unsigned char _elfrw_current_version;
 
-/* Macros that encapsulate the commonly needed tests.
- */
 #define native_form() (_elfrw_native_data == _elfrw_current_data)
 #define is64bit_form() (_elfrw_current_class == ELFCLASS64)
-
-/*
- * Endianness-swapping functions.
- */
 
 static inline unsigned short rev2(unsigned short in)
 {

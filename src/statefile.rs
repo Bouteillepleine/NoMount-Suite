@@ -1,11 +1,9 @@
-//! Crash-safe replacement of the state files under `/data/adb/nomount`
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-/// Replace `path` with `body`, atomically, mode 0600
 pub(crate) fn write_atomic(path: impl AsRef<Path>, body: impl AsRef<[u8]>) -> std::io::Result<()> {
     let path = path.as_ref();
     let dir = path.parent().unwrap_or_else(|| Path::new("/"));
@@ -64,7 +62,6 @@ mod tests {
         assert_eq!(fs::read_to_string(&p).unwrap(), "/system/etc/x\n");
     }
 
-    /// The temp must not survive a successful write: a leftover beside the hide list is
     #[test]
     fn leaves_no_temp_behind() {
         let d = tempdir();
@@ -81,7 +78,6 @@ mod tests {
         assert_eq!(fs::read_to_string(&p).unwrap(), "b\n");
     }
 
-    /// An empty body is a legitimate state ("nothing is hidden"), and must land as an empty
     #[test]
     fn an_empty_body_is_a_write_not_a_no_op() {
         let d = tempdir();
@@ -91,7 +87,6 @@ mod tests {
         assert_eq!(fs::read_to_string(&p).unwrap(), "");
     }
 
-    /// The update stash: `uninstall.sh` saves, `customize.sh` restores, and the two lists must
     #[test]
     fn the_stash_and_restore_lists_name_the_same_files() {
         let saved = stash_list(include_str!("../module/uninstall.sh"));
@@ -108,8 +103,12 @@ mod tests {
             "uidhide",
             "uidhide.conf",
             "uidhide.cache",
+            "blocklist",
             "my_hookless",
+            "absorb-skip.txt",
             "whiteouts.txt",
+            "snapshot.txt",
+            "spoof.conf",
             "absorbed.list",
             "absorbed-tmpfs.list",
             "binds.list",
@@ -119,7 +118,6 @@ mod tests {
         }
     }
 
-    /// Pull the `for _f in
     fn stash_list(script: &str) -> Vec<String> {
         let mut acc = String::new();
         let mut collecting = false;

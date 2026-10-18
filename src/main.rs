@@ -7,13 +7,16 @@ mod cli;
 mod dirshape;
 mod doctor;
 mod ghost;
+mod pathhide;
 mod health;
 mod json;
+mod ksu;
 mod manager;
 mod mount;
 mod nm;
 mod pmcache;
 mod presets;
+mod rulestate;
 mod statefile;
 mod whiteout;
 
@@ -23,7 +26,10 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 fn main() -> Result<()> {
-    unsafe { libc::umask(0o077) };
+    unsafe {
+        libc::umask(0o077);
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    };
 
     let cli = Cli::parse();
     let resync_ghost = cli::changes_ghost_inputs(&cli.command);
@@ -67,6 +73,23 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Commands::Pathhide { action } => match action {
+            cli::PathhideAction::Sync => pathhide::run_sync(true),
+            cli::PathhideAction::List => {
+                print!("{}", nm::Nm::new().pathhide_list()?);
+                Ok(())
+            }
+        },
+        Commands::Unbind => {
+            if bind::teardown_all() {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "at least one recorded bind could not be umounted; its row is kept in \
+                     binds.list so a later pass can retry it"
+                )
+            }
+        }
         Commands::Version => {
             println!("nomount v{}", env!("CARGO_PKG_VERSION"));
             Ok(())

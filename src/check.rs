@@ -1,10 +1,8 @@
-//! `nomount check` - the one diagnostic verb, and the one shape it answers in
 
 use anyhow::Result;
 
 use crate::json::J;
 
-/// Where a check comes from, and therefore what its answer depends on
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Plan,
@@ -20,8 +18,7 @@ impl Section {
     }
 }
 
-/// The single verdict
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verdict {
     Fail,
     Reboot,
@@ -55,7 +52,6 @@ impl Verdict {
             Verdict::Note => "NOTE",
         }
     }
-    /// The coarse axis the one findings list sorts and colours on
     pub fn severity(self) -> &'static str {
         match self {
             Verdict::Fail | Verdict::Reboot | Verdict::Warn => "attention",
@@ -66,20 +62,14 @@ impl Verdict {
     }
 }
 
-/// One answer, whichever section produced it
 pub struct Check {
-    /// Stable slug
     pub id: String,
     pub name: String,
     pub section: Section,
     pub verdict: Verdict,
-    /// What was actually read
     pub evidence: String,
-    /// One line in the reader's terms, on every verdict
     pub meaning: String,
-    /// What an attacker would do with a failure
     pub oracle: Option<String>,
-    /// Who caused this: a module id, the kernel, the root manager, the user's own configuration
     pub owner: Option<String>,
 }
 
@@ -129,7 +119,6 @@ impl Check {
     }
 }
 
-/// Turn a display name into a stable id: lowercase, non-alphanumerics collapsed to single
 pub fn slug(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut hyphen = false;
@@ -152,7 +141,6 @@ pub fn slug(name: &str) -> String {
     }
 }
 
-/// Counts, one per verdict
 pub struct Tally {
     pub fail: usize,
     pub reboot: usize,
@@ -179,11 +167,9 @@ impl Tally {
         }
         t
     }
-    /// Findings the reader still has to act on
     pub fn open_failures(&self) -> usize {
         self.fail + self.reboot
     }
-    /// Did every check that could apply actually get measured?
     pub fn complete(&self) -> bool {
         self.unmeasured == 0
     }
@@ -202,10 +188,8 @@ impl Tally {
     }
 }
 
-/// One `key=value` row of the fingerprint, or of the plan counts
 pub type Fact = (String, String);
 
-/// A count that may not have been taken
 fn num_or_null(n: Option<usize>) -> J {
     match n {
         Some(v) => J::Num(v as i64),
@@ -213,11 +197,10 @@ fn num_or_null(n: Option<usize>) -> J {
     }
 }
 
-/// Everything one run of `nomount check` produced
 pub struct Report {
     pub ts: i64,
+    pub sections: Vec<Section>,
     pub engine: Option<u32>,
-    /// Live rules, and the directories holding them
     pub rules: Option<usize>,
     pub directories: Option<usize>,
     pub facts: Vec<Fact>,
@@ -232,7 +215,6 @@ impl Report {
         Tally::of(&self.checks)
     }
 
-    /// Worst first, then by section, then by name - a stable order, so two runs of the same
     pub fn sort(&mut self) {
         self.checks.sort_by(|a, b| {
             let key = |c: &Check| {
@@ -247,27 +229,39 @@ impl Report {
         });
     }
 
-    /// The one-line verdict, in the reader's terms
     pub fn verdict(&self) -> String {
         let t = self.tally();
-        if t.fail > 0 {
-            format!("{} check(s) FAILED", t.fail)
-        } else if t.reboot > 0 {
-            format!("{} check(s) need a reboot to finish", t.reboot)
+        let n = |n: usize| if n == 1 { "finding" } else { "findings" };
+        let open = t.open_failures() + t.warn;
+        let unmeasured = if t.complete() {
+            String::new()
+        } else {
+            format!(", and {} check(s) had nothing to look at", t.unmeasured)
+        };
+        if t.fail > 0 || t.reboot > 0 {
+            let reboot = if t.reboot > 0 {
+                format!(" ({} need a reboot to finish)", t.reboot)
+            } else {
+                String::new()
+            };
+            format!("{} {} worth reading{reboot}{unmeasured}", open, n(open))
         } else if !t.complete() {
             format!(
                 "not fully measured ({} check(s) had nothing to look at{})",
                 t.unmeasured,
-                if t.warn > 0 { format!(", plus {} warning(s)", t.warn) } else { String::new() }
+                if t.warn > 0 {
+                    format!(", plus {} {}", t.warn, n(t.warn))
+                } else {
+                    String::new()
+                }
             )
         } else if t.warn > 0 {
-            format!("{} warning(s)", t.warn)
+            format!("{} {} worth reading", t.warn, n(t.warn))
         } else {
             "clean".to_string()
         }
     }
 
-    /// `health.txt` / `snapshot.txt`: the facts as key=value, one per line
     pub fn fingerprint_text(&self) -> String {
         let mut s = String::new();
         for (k, v) in &self.facts {
@@ -295,13 +289,7 @@ impl Report {
             ("directories", num_or_null(self.directories)),
             (
                 "sections",
-                J::Arr(
-                    [Section::Plan, Section::Device]
-                        .into_iter()
-                        .filter(|x| self.ran(*x))
-                        .map(|x| J::s(x.slug()))
-                        .collect(),
-                ),
+                J::Arr(self.sections.iter().map(|x| J::s(x.slug())).collect()),
             ),
             ("verdict", J::s(self.verdict())),
             ("summary", self.tally().json()),
@@ -319,12 +307,10 @@ impl Report {
         .render()
     }
 
-    /// Did this run include the given section?
     pub fn ran(&self, section: Section) -> bool {
-        self.checks.iter().any(|c| c.section == section)
+        self.sections.contains(&section)
     }
 
-    /// The human report
     pub fn text(&self) -> String {
         use std::fmt::Write as _;
         let mut s = String::new();
@@ -343,7 +329,7 @@ impl Report {
         } else {
             let _ = writeln!(
                 s,
-                "nomount check: plan section only - the device's own checks were not run\n"
+                "nomount check: plan section only; the device's own checks were not run\n"
             );
         }
         for c in &self.checks {
@@ -377,7 +363,7 @@ impl Report {
                 String::new()
             } else {
                 format!(
-                    " - incomplete: {} check(s) were not measured, so this is not a clean result",
+                    "; incomplete: {} check(s) were not measured, so this is not a clean result",
                     t.unmeasured
                 )
             }
@@ -387,7 +373,7 @@ impl Report {
             let _ = writeln!(s, "note: a pending-reboot check is still detectable until you reboot.");
         }
         if t.unmeasured > 0 {
-            let _ = writeln!(s, "note: an unmeasured check was not verified - it is not a pass.");
+            let _ = writeln!(s, "note: an unmeasured check was not verified. It is not a pass.");
         }
         s
     }
@@ -400,7 +386,6 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Build a report over the requested sections
 pub fn build(plan: bool, device: bool) -> Result<Report> {
     let (plan, device) = if !plan && !device { (true, true) } else { (plan, device) };
     let mut checks: Vec<Check> = Vec::new();
@@ -426,22 +411,31 @@ pub fn build(plan: bool, device: bool) -> Result<Report> {
         }
     }
 
-    let mut r = Report { ts: now_secs(), engine, rules, directories, facts, checks };
+    let mut sections = Vec::new();
+    if plan {
+        sections.push(Section::Plan);
+    }
+    if device {
+        sections.push(Section::Device);
+    }
+    let mut r = Report { ts: now_secs(), sections, engine, rules, directories, facts, checks };
     r.sort();
     Ok(r)
 }
 
-/// `nomount check [--plan] [--device] [--json] [--write]`
 pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()> {
     let want_device = device || !plan;
+    // Serialise against the passes that change what we are about to measure. The boot script's
+    // settle canary can run for ~450s while the detached T+45s reload/absorb pass is still
+    // going, and a check sampling the engine mid-reload reports an inconsistency that is really
+    // just a half-applied pass. pass_lock waits 25s and then proceeds anyway, so a stuck pass
+    // delays the diagnosis rather than blocking it.
+    let _pass = crate::mount::pass_lock();
     let r = build(plan, device)?;
 
-    if json {
-        println!("{}", r.json());
-    } else {
-        print!("{}", r.text());
-    }
-
+    // Persist before printing. SIGPIPE is SIG_DFL, so a reader that closes early kills
+    // the process mid-print and --write never runs, silently leaving service.sh's
+    // health.txt stale while the check itself succeeded.
     if write {
         let _ = crate::statefile::write_atomic(CACHE, r.json());
         if want_device {
@@ -450,6 +444,12 @@ pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()
             body.push_str(&format!("ts={}\n", r.ts));
             let _ = crate::statefile::write_atomic(HEALTH, body);
         }
+    }
+
+    if json {
+        println!("{}", r.json());
+    } else {
+        print!("{}", r.text());
     }
 
     if r.tally().open_failures() > 0 {
@@ -466,11 +466,11 @@ mod tests {
         Check::new(Section::Device, id, id, v, "evidence")
     }
 
-    /// The one-line verdict is the only string `health.txt` carries and `service.sh` puts on
     #[test]
     fn the_verdict_line_ranks_and_names_what_it_counts() {
         let r = |v: Vec<Check>| Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: None,
             rules: None,
             directories: None,
@@ -480,19 +480,29 @@ mod tests {
 
         let v = r(vec![c("a", Verdict::Warn), c("b", Verdict::Unmeasured)]).verdict();
         assert!(v.starts_with("not fully measured"), "unmeasured must outrank warn: {v}");
-        assert!(v.contains("1 warning(s)"), "and must not hide the warning: {v}");
+        assert!(v.contains("1 finding"), "and must not hide the finding: {v}");
 
         let v = r(vec![c("a", Verdict::Warn), c("b", Verdict::Pass)]).verdict();
-        assert_eq!(v, "1 warning(s)");
+        assert_eq!(v, "1 finding worth reading");
         assert!(!v.contains("plan"), "a device tell is not a plan warning");
 
-        assert!(r(vec![c("a", Verdict::Fail), c("b", Verdict::Unmeasured)])
-            .verdict()
-            .contains("FAILED"));
+        let v = r(vec![c("a", Verdict::Fail), c("b", Verdict::Unmeasured)]).verdict();
+        assert!(v.contains("finding"), "{v}");
+        assert!(
+            v.contains("nothing to look at"),
+            "a fail must not hide the unmeasured checks from the line service.sh logs: {v}"
+        );
+
+        let v = r(vec![c("a", Verdict::Reboot), c("b", Verdict::Warn)]).verdict();
+        assert!(
+            v.starts_with("2 findings worth reading"),
+            "the headline must count what the exit code counts (fail + reboot + warn): {v}"
+        );
+        assert!(v.contains("need a reboot to finish"), "{v}");
+
         assert_eq!(r(vec![c("a", Verdict::Pass)]).verdict(), "clean");
     }
 
-    /// The distinction the whole `Unmeasured` state exists for, now on the one enum: an
     #[test]
     fn unmeasured_is_neither_a_failure_nor_a_clean_result() {
         let t = Tally::of(&[c("a", Verdict::Pass), c("b", Verdict::Unmeasured)]);
@@ -504,11 +514,11 @@ mod tests {
         assert!(w.complete());
     }
 
-    /// Worst first, and a dead engine ahead of everything: with it down, every other row
     #[test]
     fn a_dead_engine_sorts_above_every_other_failure() {
         let mut r = Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: None,
             rules: None,
             directories: None,
@@ -525,13 +535,14 @@ mod tests {
         assert_eq!(order[0], "engine-responding");
         assert_eq!(order[1], "some-other-check");
         assert_eq!(order[3], "a-note");
-        assert_eq!(r.verdict(), "2 check(s) FAILED");
+        assert_eq!(r.verdict(), "2 findings worth reading");
     }
 
     #[test]
     fn a_run_with_nothing_open_but_something_unmeasured_is_not_clean() {
         let r = Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: Some(18),
             rules: Some(3),
             directories: Some(1),
@@ -542,13 +553,13 @@ mod tests {
         assert!(r.json().contains("\"complete\":false"));
     }
 
-    /// A note is not something to act on; a warning is
     #[test]
     fn a_note_is_information_and_a_warning_is_attention() {
         assert_eq!(Verdict::Note.severity(), "info");
         assert_eq!(Verdict::Warn.severity(), "attention");
         let r = |v: Vec<Check>| Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: None,
             rules: None,
             directories: None,
@@ -556,16 +567,16 @@ mod tests {
             checks: v,
         };
         assert_eq!(r(vec![c("a", Verdict::Note), c("b", Verdict::Pass)]).verdict(), "clean");
-        assert_eq!(r(vec![c("a", Verdict::Warn), c("b", Verdict::Pass)]).verdict(), "1 warning(s)");
+        assert_eq!(r(vec![c("a", Verdict::Warn), c("b", Verdict::Pass)]).verdict(), "1 finding worth reading");
         assert!(Tally::of(&[c("a", Verdict::Note)]).complete());
         assert_eq!(Tally::of(&[c("a", Verdict::Note)]).open_failures(), 0);
     }
 
-    /// A count nobody measured must not print as a zero somebody did
     #[test]
     fn an_unread_rule_list_prints_as_unread_not_as_zero() {
         let r = Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: Some(30),
             rules: None,
             directories: None,
@@ -580,6 +591,7 @@ mod tests {
 
         let ok = Report {
             ts: 0,
+            sections: vec![Section::Device],
             engine: Some(30),
             rules: Some(3),
             directories: Some(1),
@@ -590,7 +602,6 @@ mod tests {
         assert!(ok.json().contains("\"rules\":3"), "{}", ok.json());
     }
 
-    /// ids are derived, so a check cannot ship without one - the gap that left every doctor
     #[test]
     fn slugs_are_stable_and_never_empty() {
         assert_eq!(slug("PM-published files open for a hidden app"), "pm-published-files-open-for-a-hidden-app");
@@ -599,11 +610,39 @@ mod tests {
         assert_eq!(slug("///"), "unnamed-check");
     }
 
-    /// health.txt has exactly one renderer now
+    #[test]
+    fn a_section_that_found_nothing_still_reports_as_having_run() {
+        let clean_plan = Report {
+            ts: 0,
+            sections: vec![Section::Plan, Section::Device],
+            engine: Some(32),
+            rules: Some(3),
+            directories: Some(1),
+            facts: Vec::new(),
+            checks: vec![c("a", Verdict::Pass)],
+        };
+        assert!(clean_plan.ran(Section::Plan), "it ran; it just had nothing to say");
+        assert!(clean_plan.ran(Section::Device));
+        assert!(clean_plan.json().contains(r#""sections":["plan","device"]"#), "{}", clean_plan.json());
+
+        let device_only = Report {
+            ts: 0,
+            sections: vec![Section::Device],
+            engine: Some(32),
+            rules: Some(3),
+            directories: Some(1),
+            facts: Vec::new(),
+            checks: vec![c("a", Verdict::Pass)],
+        };
+        assert!(!device_only.ran(Section::Plan), "this one really was skipped");
+        assert!(device_only.json().contains(r#""sections":["device"]"#), "{}", device_only.json());
+    }
+
     #[test]
     fn the_fingerprint_renders_as_key_equals_value() {
         let r = Report {
             ts: 7,
+            sections: vec![Section::Device],
             engine: Some(18),
             rules: None,
             directories: None,

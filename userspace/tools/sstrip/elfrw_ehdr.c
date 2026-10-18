@@ -9,11 +9,6 @@
 #include <elf.h>
 #include "elfrw_int.h"
 
-/*
- * Reading and writing the ELF header. elfrw_read_Ehdr() is unique in
- * that it also automatically initializes the elfrw settings.
- */
-
 int elfrw_read_Ehdr(FILE *fp, Elf64_Ehdr *in)
 {
     int r;

@@ -1,4 +1,3 @@
-/* nm.c - NoMount CLI Userspace Tool */
 #include "nm.h"
 
 __attribute__((noreturn, used))
@@ -15,10 +14,22 @@ void c_main(long *sp) {
 
     int fd = sys3(SYS_SOCKET, AF_NETLINK, SOCK_RAW, NOMOUNT_NL_PROTO);
     if (fd < 0) {
-        print_err("nm: cannot open the NoMount netlink socket - this kernel has no NoMount "
-                  "engine (CONFIG_NOMOUNT), or nm and the kernel were built with different "
-                  "NOMOUNT_NL_PROTO values\n");
-        exit_code = 2; goto do_exit;
+        unsigned int sock_err = (unsigned int)-fd;
+        print_err("nm: cannot open the NoMount netlink socket on proto ");
+        print_num(2, NOMOUNT_NL_PROTO);
+        print_err(" (errno ");
+        print_num(2, sock_err);
+        print_err(") - ");
+        if (sock_err == 1 || sock_err == 13)
+            print_err("the socket was denied, so the engine may well be loaded; check SELinux "
+                      "for a denied netlink_socket create and the domain running nm\n");
+        else if (sock_err == 93 || sock_err == 97)
+            print_err("this kernel has no NoMount engine (CONFIG_NOMOUNT), nm and the kernel "
+                      "were built with different NOMOUNT_NL_PROTO values, or nm is not in the "
+                      "initial network namespace\n");
+        else
+            print_err("check dmesg for a nomount line at boot\n");
+        exit_code = NM_EXIT_NO_ENGINE; goto do_exit;
     }
     set_recv_timeout(fd);
 
@@ -140,7 +151,7 @@ void c_main(long *sp) {
         int vlen = 0;
 
         static const struct { const char *name; int knob; } nm_knobs[] = {
-            { "d", 4 }, { "i", 5 }, { "g", 7 },
+            { "d", 4 }, { "i", 5 }, { "p", 6 }, { "g", 7 },
         };
         if (p_count < 1) { print_err("nm: missing knob\n"); exit_code = 3; goto do_exit; }
         for (unsigned int ki = 0; ki < sizeof(nm_knobs) / sizeof(nm_knobs[0]); ki++) {
@@ -175,7 +186,9 @@ void c_main(long *sp) {
         if (vlen_rx >= 16 && vh->nlmsg_len <= (unsigned int)vlen_rx) {
             unsigned int *ver = get_attr(mem.rx_buf, 5, 4);
             if (ver) {
+                char *modver = get_attr_str(mem.rx_buf, 7);
                 print_uint(*ver);
+                if (modver) { print_str(" "); print_str(modver); }
                 print_str("\n");
                 exit_code = 0; goto do_exit;
             }
@@ -186,18 +199,19 @@ void c_main(long *sp) {
         exit_code = 1; goto do_exit;
 
     } else if (cmd == 'l') {
-        int is_uids = 0, is_gh = 0;
+        int is_uids = 0, is_gh = 0, is_ph = 0;
         for (int i = 0; i < p_count; i++) {
             const char *a = p_args[i];
             if (a[0] && !a[1]) {
                 if (a[0] == 'u') { is_uids = 1; continue; }
                 if (a[0] == 'g') { is_gh = 1; continue; }
+                if (a[0] == 'p') { is_ph = 1; continue; }
             }
             print_err("nm: unknown list option\n");
             exit_code = 3; goto do_exit;
         }
 
-        int target_cmd = is_gh ? 11 : is_uids ? 8 : 7;
+        int target_cmd = is_gh ? 11 : is_ph ? 10 : is_uids ? 8 : 7;
         int len = do_nm_cmd(fd,target_cmd, 0, (void *)0, 0, 0x301, &mem);
         int first = 1;
         if (nm_timed_out(len)) goto do_timeout;
@@ -209,7 +223,14 @@ void c_main(long *sp) {
             for (struct nlmsghdr *msg = (void *)mem.rx_buf;
                     len >= 16 && msg->nlmsg_len >= 16 && msg->nlmsg_len <= (unsigned int)len;
                     len -= msg->nlmsg_len, msg = (void *)((char *)msg + msg->nlmsg_len)) {
-                if (msg->nlmsg_type == 3) goto list_done;
+                if (msg->nlmsg_type == 3) {
+                    if (msg->nlmsg_len >= 20 && *(int *)((char *)msg + 16)) {
+                        print_refused("this dump at its end", *(int *)((char *)msg + 16));
+                        print_err("nm: the rule list above is INCOMPLETE\n");
+                        exit_code = 4;
+                    }
+                    goto list_done;
+                }
                 if (msg->nlmsg_type == 2) {
                     if (msg->nlmsg_len < 20) {
                         print_err("nm: the kernel ended this dump with a truncated error reply\n");
@@ -221,7 +242,7 @@ void c_main(long *sp) {
                     goto list_done;
                 }
 
-                if (is_gh) {
+                if (is_gh || is_ph) {
                     char *rule = get_attr_str(msg, 1);
                     if (rule) { print_str(rule); print_str("\n"); }
                 } else if (is_uids) {

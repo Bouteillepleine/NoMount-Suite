@@ -10,8 +10,9 @@ mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 
 nm_boot_log_rotate
 
-rm -f "$NMDIR/.uidwatch.lock" 2>/dev/null
+rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" 2>/dev/null
 nm_consume_stash
+nm_lkm_boot_load
 if [ -n "$KSU" ] || [ -n "$APATCH" ]; then
     nmlog "KSU/APatch detected - the metamodule hook (metamount.sh) owns this boot"
     exit 0
@@ -24,6 +25,12 @@ nm_state_dir_repair
 
 nm_set_bin
 chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
+
+if ! ( : >> "$NMDIR/.mount.lock" ) 2>/dev/null; then
+    nmlog "⛔ cannot write $NMDIR - the bootloop guard cannot arm; nothing was injected this boot"
+    exit 0
+fi
+chmod 0600 "$NMDIR/.mount.lock" 2>/dev/null
 
 if nm_guard_bump "magisk post-fs-data path"; then
     nm_fix_shell_tmp

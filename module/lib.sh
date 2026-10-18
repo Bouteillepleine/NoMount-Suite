@@ -11,8 +11,7 @@ nmlog() {
 }
 
 nmlog_absorb_notes() {
-    printf '%s
-' "$1" | grep -i 'uninstalled module' | while IFS= read -r _l; do
+    printf '%s\n' "$1" | grep -i 'uninstalled module' | while IFS= read -r _l; do
         [ -n "$_l" ] && nmlog "$_l"
     done
 }
@@ -53,23 +52,43 @@ nm_consume_stash() {
     _bak=/data/adb/nomount.bak
     [ -d "$_bak" ] || { unset _bak; return 0; }
     _rn=0
+    _fail=0
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
-        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || { rm -f "$NMDIR/$_f" 2>/dev/null; continue; }
-        chmod 0600 "$NMDIR/$_f" 2>/dev/null
-        chcon u:object_r:adb_data_file:s0 "$NMDIR/$_f" 2>/dev/null
-        _rn=$((_rn + 1))
+        if cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null; then
+            chmod 0600 "$NMDIR/$_f" 2>/dev/null
+            chcon u:object_r:adb_data_file:s0 "$NMDIR/$_f" 2>/dev/null
+            _rn=$((_rn + 1))
+        else
+            rm -f "$NMDIR/$_f" 2>/dev/null
+            _fail=$((_fail + 1))
+        fi
     done
-    [ "$_rn" -gt 0 ] && nmlog "restored $_rn setting(s) from a stash left by an unfinished install"
-    rm -rf "$_bak" 2>/dev/null
-    unset _bak _rn _f
+    if [ "$_rn" -gt 0 ]; then
+        nmlog "restored $_rn setting(s) from a stash left by an unfinished install"
+    fi
+    if [ "$_fail" -eq 0 ]; then
+        rm -rf "$_bak" 2>/dev/null
+    else
+        nmlog "⚠ $_fail stashed setting(s) could not be restored - KEEPING $_bak so they are not lost; free some space and reboot"
+    fi
+    unset _bak _rn _fail _f
     return 0
 }
 
+_rl_summary() {
+    _rls=$(printf '%s\n' "$1" | grep -m1 '^nomount reload:')
+    [ -n "$_rls" ] || _rls=$(printf '%s\n' "$1" | tail -1)
+    printf '%s' "$_rls"
+    unset _rls
+}
+
 _has_entries() { [ -s "$1" ] && grep -qE '^[[:space:]]*[^[:space:]#]' "$1" 2>/dev/null; }
+
+_follow_ksu() { grep -qiE '^[[:space:]]*follow_ksu_denylist[[:space:]]*=[[:space:]]*(1|true|yes|on)[[:space:]]*$' "$NMDIR/uidhide.conf" 2>/dev/null; }
 
 nm_boot_log_rotate() {
     [ -e "$BOOTLOG" ] && [ ! -f "$BOOTLOG" ] && rm -rf "$BOOTLOG" 2>/dev/null
@@ -100,6 +119,31 @@ nm_set_bin() {
     export NM_BIN
 }
 
+# Load the engine module on a kernel that does not carry NoMount built in.
+# This is called from post-fs-data.sh BEFORE the metamodule early-exit, because
+# post-fs-data.sh runs for every enabled module while metamount.sh only runs if
+# we own the metamodule slot - loading there would leave the engine down
+# whenever something else owns it. Safe to call twice: it probes first.
+nm_lkm_boot_load() {
+    [ -f "$MODDIR/lkm-load.sh" ] || return 0
+    nm_set_bin
+    NM_LKM_SAY=:
+    NM_LKM_NM="$NM_BIN"
+    NM_LKM_LOADER="$MODDIR/loader"
+    export NM_LKM_SAY NM_LKM_NM NM_LKM_LOADER
+    chmod 0755 "$NM_LKM_NM" "$NM_LKM_LOADER" 2>/dev/null
+    # shellcheck source=module/lkm-load.sh
+    . "$MODDIR/lkm-load.sh" 2>/dev/null || return 0
+
+    nm_lkm_probe && return 0
+    if nm_lkm_load_best "$MODDIR/lkm"; then
+        nmlog "engine module loaded from ${NM_LKM_SOURCE:-?} ($(uname -r))"
+        nm_lkm_prune "$MODDIR/lkm"
+    elif [ -d "$MODDIR/lkm" ] || [ -f "${NM_LKM_DEVICE_KO:-/data/adb/nomount/nomount.ko}" ]; then
+        nmlog "⛔ no engine module loads on $(uname -r) - nothing will be injected this boot"
+    fi
+}
+
 nm_fix_shell_tmp() {
     _fst=$(grep "^[ 	]*fix_shell_tmp[ 	]*=" "$NMDIR/spoof.conf" 2>/dev/null \
            | tail -n 1 | sed "s/^[^=]*=//; s/[ 	]#.*//; s/[\"' 	]//g")
@@ -127,6 +171,7 @@ nm_fix_shell_tmp() {
 }
 
 nm_delink_ksud() {
+    [ -e "$NMDIR/disabled" ] && return 0
     _kd=/data/adb/ksud
     _ks=/data/adb/ksu/bin/ksu_susfs
     [ -f "$_kd" ] && [ -f "$_ks" ] || return 0
@@ -184,12 +229,22 @@ nm_rule_counts() {
     _nmcount() { [ -z "$_NMLIST" ] && { echo 0; return; }; printf '%s\n' "$_NMLIST" | grep -c "$@"; }
     _rules=$(_nmcount -v -c -E '\(virtual dir\)|\(whiteout\)')
     _wo=$(_nmcount -c '(whiteout)')
-    _rro=$(_nmcount '/overlay/[^ ]*\.apk')
+    _rro=$(printf '%s\n' "$_NMLIST" | awk '
+        /\(whiteout\)|\(virtual dir\)/ { next }
+        {
+            t = $0
+            sub(/[ \t]+\[UID:[ \t]*[0-9]+\][ \t]*$/, "", t)
+            sub(/ \(public\)$/, "", t)
+            sub(/ -> .*$/, "", t)
+            if (t ~ /\/overlay\/[^ ]*\.apk$/) n++
+        }
+        END { print n+0 }')
     return 0
 }
 
 nm_early_absorb() {
     [ -e "$NMDIR/disabled" ] && return 0
+    nm_guard_armed || return 0
     [ -x "$BIN" ] || return 0
     [ -f "$NMDIR/my_hookless" ] || return 0
     _ea=$(nmto 60 "$BIN" absorb --early 2>&1)
@@ -216,8 +271,11 @@ nm_guard_bump() {
     case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
     COUNT=$((COUNT + 1))
     echo "$COUNT" > "$NMDIR/bootcount"
-    [ "$(cat "$NMDIR/bootcount" 2>/dev/null)" = "$COUNT" ] \
-        || nmlog "⚠ cannot write $NMDIR/bootcount - the bootloop guard is not arming this boot"
+    if [ "$(cat "$NMDIR/bootcount" 2>/dev/null)" != "$COUNT" ]; then
+        nmlog "⛔ cannot write $NMDIR/bootcount - the bootloop guard cannot arm, so nothing is being injected this boot. /data being full is the usual cause; free space and reboot."
+        return 3
+    fi
+    cat /proc/sys/kernel/random/boot_id > "$NMDIR/guard.ts" 2>/dev/null
     sync 2>/dev/null
 
     if [ -e "$NMDIR/disabled" ]; then
@@ -243,6 +301,12 @@ nm_guard_bump() {
         nm_incident_tombstone
     } > "$NMDIR/incident.log" 2>/dev/null
     return 2
+}
+
+nm_guard_armed() {
+    _gab=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    [ -n "$_gab" ] || return 0
+    [ "$(cat "$NMDIR/guard.ts" 2>/dev/null)" = "$_gab" ]
 }
 
 nm_incident_missing_binary() {

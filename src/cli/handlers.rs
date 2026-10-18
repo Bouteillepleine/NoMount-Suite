@@ -7,7 +7,6 @@ use super::{UidAction, VfsAction};
 use crate::blocklist::{self, appid, Resolved};
 use crate::nm::Nm;
 
-/// What `uid unblock` actually did, in words
 fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -> String {
     match (uid, existed, unhid) {
         (Some(uid), true, true) => format!("ok: {target} (uid {uid}) unhidden"),
@@ -34,7 +33,25 @@ fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -
     }
 }
 
-/// Serialise a verb's kernel mutation against the mount pass
+fn still_covered_by(entries: &[String], installed: &[(String, u32)], id: u32) -> Option<String> {
+    if blocklist::follow_ksu_denylist() && crate::ksu::uid_should_umount(id) == Some(true) {
+        return Some("the KernelSU DenyList".to_string());
+    }
+    entries
+        .iter()
+        .find(|e| {
+            let glob = blocklist::is_pattern(e);
+            blocklist::expand(e, installed)
+                .map(|hits| {
+                    hits.iter().any(|(_, u)| {
+                        appid(*u) == id && !(glob && *u < blocklist::FIRST_APP_APPID)
+                    })
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+}
+
 fn pass_guard() -> Option<crate::mount::PassLock> {
     crate::mount::pass_lock()
 }
@@ -45,6 +62,20 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
         VfsAction::Add { virtual_path, real_path } => {
             let virt = Path::new(&virtual_path);
             let real = Path::new(&real_path);
+            // is_partition_root counts the components as typed; nm does not normalise and
+            // the engine kern_path()s it, so `/product/../product` would walk past the
+            // guard and install the bare-partition-root rule that aborts forkSystemServer.
+            if !virt.is_absolute()
+                || virt
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                anyhow::bail!(
+                    "refusing {}: pass an absolute path with no '..' - this guard and the \
+                     engine resolve a path differently, so only a resolved one is safe.",
+                    virt.display()
+                );
+            }
             if crate::mount::is_partition_root(virt) {
                 anyhow::bail!(
                     "refusing {}: a rule on a bare partition root masks every stock entry \
@@ -59,15 +90,10 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             }
             if real.is_dir() {
                 anyhow::bail!(
-                    concat!(
-                        "{} is a directory.
-",
-                        "A directory rule hides every stock entry under its target, and its
-",
-                        "children report the source filesystem's block counts, which a single
-",
-                        "stat separates from stock. Add the files individually instead."
-                    ),
+                    "{} is a directory. A directory rule hides every stock entry under its \
+                     target, and its children report the source filesystem's block counts, \
+                     which a single stat separates from stock. Add the files individually \
+                     instead.",
                     real.display()
                 );
             }
@@ -113,13 +139,11 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
     Ok(())
 }
 
-/// Outcome of one re-apply pass
 pub struct ApplyReport {
     pub hidden: u32,
     pub skipped: u32,
     pub failed: u32,
     pub retired: u32,
-    /// Entries that named an app this device does not have installed
     pub not_installed: u32,
 }
 
@@ -129,7 +153,27 @@ impl ApplyReport {
     }
 }
 
-/// Re-assert the persistent hide list (and the isolated-pool policy) against the kernel
+/// Retire one appid the hide list no longer wants hidden.
+///
+/// The engine answers -ENOENT for an appid it is not currently hiding, which `nm` reports as a
+/// non-zero exit. An entry whose package has since been uninstalled -- or anything that cleared
+/// the IDR, `nomount vfs clear` included -- is therefore already retired, not a failure. Counting
+/// it as one raised "those apps are not hidden" on a healthy device, and because the caller only
+/// rewrites the resolved-appid mirror when `failed == 0`, the stale entry survived and the same
+/// false alarm repeated on every `uid apply` until the next reboot.
+fn retire_appid(nm: &Nm, live: &mut Vec<u32>, rep: &mut ApplyReport, old: u32) {
+    if !live.iter().any(|u| appid(*u) == old) {
+        rep.retired += 1;
+        return;
+    }
+    if nm.uid_unblock(old).is_ok() {
+        live.retain(|u| appid(*u) != old);
+        rep.retired += 1;
+    } else {
+        rep.failed += 1;
+    }
+}
+
 pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
     let mut rep = ApplyReport { hidden: 0, skipped: 0, failed: 0, retired: 0, not_installed: 0 };
 
@@ -146,18 +190,43 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             return rep;
         }
     };
-    if entries.is_empty() && cache.is_empty() {
+    let follow_ksu = blocklist::follow_ksu_denylist();
+    if entries.is_empty() && cache.is_empty() && !follow_ksu {
         return rep;
     }
     let mut live = nm.uid_list_live().unwrap_or_default();
 
     let installed = if early { None } else { blocklist::installed_packages() };
-    let can_retire = !early && installed.is_some();
+    let mut can_retire = !early && installed.is_some();
     let installed = installed.unwrap_or_default();
     if !early && !can_retire {
         rep.failed += 1;
     }
     let mut desired: BTreeMap<String, u32> = BTreeMap::new();
+
+    // The early pass cannot resolve packages, so it leans on the cache for these too.
+    if follow_ksu && !early {
+        if !crate::ksu::available() {
+            can_retire = false;
+            eprintln!(
+                "nomount: the hide list is set to follow KernelSU's DenyList, but no KernelSU \
+                 driver answered - the apps it covers are left exactly as they are. Turn it off \
+                 with `nomount uid ksu off` if this kernel has no KernelSU."
+            );
+        } else {
+            match blocklist::ksu_denylist(&installed) {
+                Some(hits) => desired.extend(hits),
+                None => {
+                    can_retire = false;
+                    rep.failed += 1;
+                    eprintln!(
+                        "nomount: KernelSU answered for some apps and then stopped - the \
+                         DenyList is treated as unread, so nothing it covers is un-hidden"
+                    );
+                }
+            }
+        }
+    }
 
     for e in &entries {
         if blocklist::is_pattern(e) {
@@ -171,10 +240,18 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
                     }
                     for (pkg, uid) in hits {
                         if uid < blocklist::FIRST_APP_APPID {
-                            eprintln!(
-                                "nomount: {e} matches {pkg} (appid {uid}, below the app range) - \
-                                 not hiding from it; add it explicitly with `uid block --force`"
-                            );
+                            if blocklist::redact_hide_list() {
+                                eprintln!(
+                                    "nomount: a hide-list glob matches a package whose appid \
+                                     {uid} is below the app range - not hiding from it"
+                                );
+                            } else {
+                                eprintln!(
+                                    "nomount: {e} matches {pkg} (appid {uid}, below the app \
+                                     range) - not hiding from it; add it explicitly with \
+                                     `uid block --force`"
+                                );
+                            }
                             rep.skipped += 1;
                             continue;
                         }
@@ -182,7 +259,14 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
                     }
                 }
                 Err(err) => {
-                    eprintln!("nomount: skipping hide-list glob {e:?}: {err:#}");
+                    if blocklist::redact_hide_list() {
+                        eprintln!("nomount: skipping an invalid hide-list glob: {err:#}");
+                    } else {
+                        eprintln!("nomount: skipping hide-list glob {e:?}: {err:#}");
+                    }
+                    // Pattern::parse deliberately keeps the entry OUT of {err}: the
+                    // redacting branch above prints {err} verbatim, and a glob is a
+                    // package name the user is hiding behind.
                     rep.skipped += 1;
                 }
             }
@@ -200,7 +284,11 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             }
             Ok(Resolved::NotInstalled) => rep.not_installed += 1,
             Err(err) => {
-                eprintln!("nomount: skipping hide-list entry {e:?}: {err:#}");
+                if blocklist::redact_hide_list() {
+                    eprintln!("nomount: skipping an unresolvable hide-list entry: {err:#}");
+                } else {
+                    eprintln!("nomount: skipping hide-list entry {e:?}: {err:#}");
+                }
                 rep.skipped += 1;
             }
         }
@@ -217,12 +305,7 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
         if can_retire {
             if let Some(old) = cache.get(key) {
                 if *old != uid && !desired.values().any(|v| *v == *old) {
-                    if nm.uid_unblock(*old).is_ok() {
-                        live.retain(|u| appid(*u) != *old);
-                        rep.retired += 1;
-                    } else {
-                        rep.failed += 1;
-                    }
+                    retire_appid(nm, &mut live, &mut rep, *old);
                 }
             }
         }
@@ -250,20 +333,64 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             if desired.values().any(|v| *v == *old) {
                 continue;
             }
-            if nm.uid_unblock(*old).is_ok() {
-                live.retain(|u| appid(*u) != *old);
-                rep.retired += 1;
-            } else {
-                rep.failed += 1;
-            }
+            retire_appid(nm, &mut live, &mut rep, *old);
         }
-        blocklist::cache_replace(&desired);
+        if rep.failed == 0 {
+            blocklist::cache_replace(&desired);
+        } else {
+            eprintln!(
+                "nomount: {} hide-list entr(ies) could not be applied, so the resolved-appid \
+                 mirror is left as it was - rewriting it now would lose the record of an appid \
+                 the kernel is still hiding",
+                rep.failed
+            );
+        }
     }
 
     rep
 }
 
-/// `both | appzygote | platform | off` <-> the kernel's pool bitmask
+fn report_ksu_source(nm: &Nm) -> Result<()> {
+    let following = blocklist::follow_ksu_denylist();
+    println!(
+        "follow KernelSU DenyList\t{}",
+        if following { "on" } else { "off" }
+    );
+    let Some(info) = crate::ksu::info() else {
+        println!("KernelSU driver\tno answer - nothing to follow");
+        return Ok(());
+    };
+    println!("KernelSU driver\tversion {} · uapi {}", info.version, info.uapi_version);
+    match crate::ksu::global_umount_default() {
+        Some(true) => println!(
+            "global \"umount modules by default\"\tON - covers every app without its own profile"
+        ),
+        Some(false) => println!("global \"umount modules by default\"\toff"),
+        None => println!("global \"umount modules by default\"\tunreadable"),
+    }
+    let installed = blocklist::installed_packages();
+    let total = installed.as_ref().map(|v| v.len()).unwrap_or(0);
+    match blocklist::ksu_denylist(&installed.unwrap_or_default()) {
+        Some(hits) => {
+            println!("DenyList covers\t{} of {total} installed package(s)", hits.len());
+            if following {
+                let live = nm.uid_list_live().unwrap_or_default();
+                for (key, uid) in &hits {
+                    let pkg = blocklist::ksu_pkg(key).unwrap_or(key.as_str());
+                    let state = if live.iter().any(|u| appid(*u) == appid(*uid)) {
+                        "live"
+                    } else {
+                        "not applied"
+                    };
+                    println!("  {pkg}\tuid {uid} · {state}");
+                }
+            }
+        }
+        None => println!("DenyList covers\tunreadable"),
+    }
+    Ok(())
+}
+
 fn parse_isolated_mode(s: &str) -> Option<u32> {
     match s.trim().to_ascii_lowercase().as_str() {
         "both" | "all" | "3" => Some(3),
@@ -274,7 +401,6 @@ fn parse_isolated_mode(s: &str) -> Option<u32> {
     }
 }
 
-/// Which `uid list` row speaks for each appid: the first exact row if there is one, else
 fn list_winners(rows: &[(Option<u32>, bool)]) -> BTreeMap<u32, usize> {
     let mut winner: BTreeMap<u32, usize> = BTreeMap::new();
     for (i, (appid, glob)) in rows.iter().enumerate() {
@@ -322,6 +448,15 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 }
                 let installed = blocklist::installed_packages().unwrap_or_default();
                 let hits = blocklist::expand(&target, &installed)?;
+                const GLOB_HIT_CEILING: usize = 24;
+                if hits.len() > GLOB_HIT_CEILING && !force {
+                    bail!(
+                        "{target} matches {} installed package(s). A glob this broad hides \
+                         your module content from all of them, RRO overlays included, and is \
+                         almost always a typo. Narrow it, or pass --force if you mean it.",
+                        hits.len()
+                    );
+                }
                 if let Some((pkg, uid)) = hits.iter().find(|(_, u)| *u < blocklist::FIRST_APP_APPID)
                 {
                     bail!(
@@ -401,13 +536,29 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                              be asked which appids it is hiding - it may still be hidden"
                         )
                     })?;
+                    let survivors = blocklist::read().with_context(|| {
+                        format!(
+                            "{target} was removed from the hide list, but the rest of the list \
+                             could not be read to check that no other entry still hides uid {uid} \
+                             - it is left hidden"
+                        )
+                    })?;
+                    let installed = blocklist::installed_packages().unwrap_or_default();
                     let was_live = live.iter().any(|u| appid(*u) == appid(uid));
-                    if was_live {
+                    let kept = if was_live {
+                        still_covered_by(&survivors, &installed, appid(uid))
+                    } else {
+                        None
+                    };
+                    if was_live && kept.is_none() {
                         nm.uid_unblock(uid)?;
                     }
                     let mut retired_old = false;
                     if let Some(old) = cached {
-                        if old != uid && live.iter().any(|u| appid(*u) == old) {
+                        if old != uid
+                            && live.iter().any(|u| appid(*u) == old)
+                            && still_covered_by(&survivors, &installed, old).is_none()
+                        {
                             nm.uid_unblock(old).with_context(|| {
                                 format!(
                                     "{target}: appid {old} is still hidden and nothing on disk \
@@ -419,8 +570,21 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                             retired_old = true;
                         }
                     }
-                    let unhid = was_live || retired_old;
-                    println!("{}", unblock_message(&target, Some(uid), existed, unhid));
+                    match kept {
+                        Some(other) => println!(
+                            "ok: {target} {} - uid {uid} stays hidden, because {other} still \
+                             covers it",
+                            if existed {
+                                "removed from the hide list"
+                            } else {
+                                "was not in the hide list"
+                            }
+                        ),
+                        None => {
+                            let unhid = was_live || retired_old;
+                            println!("{}", unblock_message(&target, Some(uid), existed, unhid));
+                        }
+                    }
                 }
                 Resolved::NotInstalled => {
                     let mut unhid = false;
@@ -431,7 +595,17 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                                  not be asked whether appid {old} is still hidden"
                             )
                         })?;
-                        if live.iter().any(|u| appid(*u) == old) {
+                        let survivors = blocklist::read().with_context(|| {
+                            format!(
+                                "{target} was removed from the hide list, but the rest of the \
+                                 list could not be read to check that no other entry still hides \
+                                 appid {old} - it is left hidden"
+                            )
+                        })?;
+                        let installed = blocklist::installed_packages().unwrap_or_default();
+                        if live.iter().any(|u| appid(*u) == old)
+                            && still_covered_by(&survivors, &installed, old).is_none()
+                        {
                             nm.uid_unblock(old).with_context(|| {
                                 format!(
                                     "{target}: appid {old} is still hidden and nothing on disk \
@@ -530,6 +704,30 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     text,
                 });
             }
+            if blocklist::follow_ksu_denylist() {
+                match blocklist::ksu_denylist(&installed) {
+                    Some(hits) => {
+                        for (key, uid) in hits {
+                            let pkg =
+                                blocklist::ksu_pkg(&key).unwrap_or(key.as_str()).to_string();
+                            let text = format!(
+                                "{pkg}\tvia KernelSU DenyList · uid {uid} · {}",
+                                state_of(uid)
+                            );
+                            lines.push(Line {
+                                appid: Some(appid(uid)),
+                                glob: true,
+                                entry: "KernelSU DenyList".to_string(),
+                                name: pkg,
+                                text,
+                            });
+                        }
+                    }
+                    None => println!(
+                        "KernelSU DenyList\tfollowed, but the kernel did not answer this time"
+                    ),
+                }
+            }
             let winner =
                 list_winners(&lines.iter().map(|l| (l.appid, l.glob)).collect::<Vec<_>>());
             for (i, l) in lines.iter().enumerate() {
@@ -624,6 +822,50 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 bail!("{} preset entr(ies) could not be applied", rep.failed);
             }
         }
+        UidAction::Ksu { state, force } => {
+            let on = match state.as_deref().map(str::trim) {
+                None => {
+                    report_ksu_source(&nm)?;
+                    return Ok(());
+                }
+                Some(s) => match s.to_ascii_lowercase().as_str() {
+                    "on" | "1" | "true" | "yes" | "enable" => true,
+                    "off" | "0" | "false" | "no" | "disable" => false,
+                    _ => bail!("unknown state '{s}' - use on | off, or omit it to see the state"),
+                },
+            };
+            if on {
+                if !crate::ksu::available() {
+                    bail!(
+                        "no KernelSU driver answered, so there is no DenyList to follow. If this \
+                         kernel does have KernelSU, run this as root."
+                    );
+                }
+                if crate::ksu::global_umount_default() == Some(true) && !force {
+                    bail!(
+                        "KernelSU's global \"Umount modules by default\" is ON, which means its \
+                         DenyList covers every app that has no profile of its own. Following it \
+                         would hide the Suite's injections from effectively every app on the \
+                         device - your modules would stop reaching all of them. Turn that switch \
+                         off in the manager and profile the apps you actually want hidden from, \
+                         or pass --force if you really mean every app."
+                    );
+                }
+            }
+            blocklist::set_follow_ksu_denylist(on)?;
+            let _pass = pass_guard();
+            let rep = reapply_blocklist(&nm, false);
+            println!(
+                "ok: KernelSU DenyList {} · now hiding {}, retired {}{}",
+                if on { "followed" } else { "no longer followed" },
+                rep.hidden,
+                rep.retired,
+                rep.fail_note()
+            );
+            if rep.failed > 0 {
+                bail!("{} hide-list entr(ies) could not be applied", rep.failed);
+            }
+        }
         UidAction::Isolated { mode } => match mode {
             None => println!("{}", isolated_mode_name(blocklist::hide_isolated())),
             Some(m) => {
@@ -656,7 +898,28 @@ mod tests {
         assert_eq!(parse_isolated_mode("sometimes"), None);
     }
 
-    /// One row per appid, and the exact entry is the one that speaks
+    #[test]
+    fn every_mode_the_help_offers_is_a_mode_the_parser_takes() {
+        let help = include_str!("mod.rs");
+        let line = help
+            .lines()
+            .find(|l| l.contains("appzygote") && l.contains("omit to print the current setting"))
+            .expect("the Isolated help line moved");
+        let offered: Vec<&str> = line
+            .trim_start_matches("        /// ")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .split('|')
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .collect();
+        assert!(offered.len() >= 4, "the help line no longer lists the modes: {line}");
+        for w in offered {
+            assert!(parse_isolated_mode(w).is_some(), "--help offers '{w}', the parser refuses it");
+        }
+    }
+
     #[test]
     fn a_uid_list_row_is_per_appid_and_the_exact_entry_wins() {
         let rows = [(Some(10438), true), (Some(10438), false), (Some(10471), false)];
@@ -670,7 +933,39 @@ mod tests {
         assert!(list_winners(&[(None, true), (None, false)]).is_empty());
     }
 
-    /// `uid unblock` must not report a removal it did not make
+    #[test]
+    fn unblock_leaves_an_appid_another_surviving_entry_still_hides() {
+        let installed = vec![
+            ("com.x.detector".to_string(), 10500),
+            ("com.other.app".to_string(), 10600),
+            ("com.otherx.sys".to_string(), 1000),
+        ];
+        let e = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+
+        assert_eq!(
+            still_covered_by(&e(&["10500", "com.other*"]), &installed, 10500).as_deref(),
+            Some("10500"),
+            "a numeric entry for the same appid survives the package entry's removal"
+        );
+        assert_eq!(
+            still_covered_by(&e(&["1010500"]), &installed, 10500).as_deref(),
+            Some("1010500"),
+            "a secondary user's uid is the same appid"
+        );
+        assert_eq!(
+            still_covered_by(&e(&["com.x.*"]), &installed, 10500).as_deref(),
+            Some("com.x.*"),
+            "a glob that still matches the package keeps it hidden"
+        );
+        assert_eq!(
+            still_covered_by(&e(&["com.otherx*"]), &installed, 1000),
+            None,
+            "a glob hit below the app range is never applied, so it covers nothing"
+        );
+        assert_eq!(still_covered_by(&e(&["com.other*"]), &installed, 10500), None);
+        assert_eq!(still_covered_by(&[], &installed, 10500), None);
+    }
+
     #[test]
     fn unblock_reports_both_halves_of_what_it_did() {
         let listed_and_hiding = unblock_message("com.a", Some(10123), true, true);

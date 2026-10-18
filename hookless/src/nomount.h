@@ -17,9 +17,9 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.32.0"
+#define NM_MODULE_VERSION "1.34.5"
 
-#define NOMOUNT_VERSION    32
+#define NOMOUNT_VERSION    34
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -28,11 +28,28 @@
 #define NM_FLAG_OVL_INO     (1 << 4)
 #define NM_FLAG_SHADOWS_STOCK (1 << 5)
 #define NM_FLAG_PUBLIC      (1 << 6)
-#define NM_FLAGS_USER_MASK  (NM_FLAG_VIRTUAL_DIR | NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
+#define NM_FLAG_STOCK_ONLY  (1 << 7)
+#define NM_FLAG_HAVE_VOWN   (1 << 8)
+#define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
+#define kvzalloc(size, flags) kzalloc((size), (flags))
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)
+#define kvcalloc(n, size, flags) kcalloc((n), (size), (flags))
+#endif
+
+#define NM_BTIME_DECL(x) struct timespec64 x __maybe_unused = {0}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#define NM_BTIME_COPY(d, s) ((d) = (s))
+#else
+#define NM_BTIME_COPY(d, s) ((void)0)
+#endif
 
 #define NM_CAP_FSYNC        (1 << 0)
 #define NM_CAP_ODIRECT      (1 << 1)
+#define NM_CAP_THPMAP       (1 << 2)
 #define NM_CAP_KNOWN        (1 << 7)
 
 #define NM_LOG_TAG "NoMount: "
@@ -90,15 +107,17 @@ struct nm_inode_info {
     u64 v_dino, v_pdino;
     dev_t v_dev, v_mapdev;
     struct timespec64 v_atime, v_mtime, v_ctime;
+    struct timespec64 v_btime;
     u64 v_attributes, v_attr_mask;
     u32 v_blksize;
     u16 v_cratio;
     u32 v_result_mask;
+    u32 v_dio_mem, v_dio_off;
     u8  v_cap;
     kuid_t v_uid;
     kgid_t v_gid;
     umode_t v_mode;
-    u8 flags;
+    u16 flags;
     u32 gen;
     struct nm_dsnap *dsnap;
     spinlock_t dsnap_lock;
@@ -118,7 +137,7 @@ struct nomount_child_node {
     u64 fake_ino;
     int id;
     u8 d_type;
-    u8 flags;
+    u16 flags;
     u16 name_len;
     struct nomount_rule *rule;
 
@@ -153,10 +172,12 @@ struct nomount_rule {
     dev_t v_dev;
     dev_t v_mapdev;
     struct timespec64 v_atime, v_mtime, v_ctime;
+    struct timespec64 v_btime;
     u64 v_attributes, v_attr_mask;
     u32 v_blksize;
     u16 v_cratio;
     u32 v_result_mask;
+    u32 v_dio_mem, v_dio_off;
     u8  v_cap;
     kuid_t v_uid;
     kgid_t v_gid;
@@ -165,7 +186,7 @@ struct nomount_rule {
     u16 v_ctx_len;
     u32 v_hash;
     u16 v_len;
-    u8  flags;
+    u16 flags;
     unsigned int target_uid;
 
     char paths[]; 
@@ -173,8 +194,10 @@ struct nomount_rule {
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 static const struct file_operations nm_file_fops_mmap_prepare;
+static const struct file_operations nm_file_fops_mmap_prepare_thp;
 #endif
 static const struct file_operations nm_file_fops;
+static const struct file_operations nm_file_fops_thp;
 static const struct inode_operations nm_file_iops;
 static const struct file_operations nm_dir_fops;
 static const struct inode_operations nm_dir_iops;
@@ -191,10 +214,12 @@ struct nm_rule_info {
     u64 v_dino, v_pdino;
     dev_t v_dev, v_mapdev;
     struct timespec64 v_atime, v_mtime, v_ctime;
+    struct timespec64 v_btime;
     u64 v_attributes, v_attr_mask;
     u32 v_blksize;
     u16 v_cratio;
     u32 v_result_mask;
+    u32 v_dio_mem, v_dio_off;
     u8  v_cap;
     kuid_t v_uid;
     kgid_t v_gid;
@@ -271,7 +296,7 @@ enum {
     NM_CMD_GET_LIST,
     NM_CMD_GET_UIDS,
     NM_CMD_SET_KNOB,
-    NM_CMD_RESERVED_10,
+    NM_CMD_GET_PATHHIDE,
     NM_CMD_GET_GHOST,
     __NM_CMD_MAX,
 };
@@ -283,7 +308,7 @@ enum {
     NM_KNOB_RESERVED_3,
     NM_KNOB_VDIR_EROFS_SIZE,
     NM_KNOB_HIDE_ISOLATED,
-    NM_KNOB_RESERVED_6,
+    NM_KNOB_PATHHIDE,
     NM_KNOB_GHOST,
     __NM_KNOB_MAX,
 };
@@ -296,6 +321,7 @@ enum {
     NOMOUNT_ATTR_UID,
     NOMOUNT_ATTR_VERSION,
     NOMOUNT_ATTR_PAYLOAD,
+    NOMOUNT_ATTR_MODVER,
     __NOMOUNT_ATTR_MAX,
 };
 

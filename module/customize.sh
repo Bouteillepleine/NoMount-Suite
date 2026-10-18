@@ -21,10 +21,17 @@ if [ -f "$SUMS" ]; then
         fi
         unset _sumout
     else
-        ui_print "- sha256sum unavailable; skipping integrity check"
+        ui_print "! sha256sum is missing from this recovery - the payload was NOT verified."
+        ui_print "! Installing unverified. If this zip came from anywhere but the official"
+        ui_print "! release page, cancel and re-flash from a full Android boot instead."
     fi
 else
-    ui_print "- No sha256 manifest bundled; skipping integrity check"
+    ui_print "*********************************************************"
+    ui_print "! No sha256 manifest in this zip - it cannot be verified."
+    ui_print "! Every official build ships one, so this zip is corrupt,"
+    ui_print "! truncated, or was repacked. Re-download it."
+    ui_print "*********************************************************"
+    abort "- Aborting install: no integrity manifest"
 fi
 
 for mp in /data/adb/modules/*/module.prop; do
@@ -68,17 +75,40 @@ if [ ! -d "$MODPATH/bin/${_abi}" ]; then
     ui_print "! boot, silently. NoMount is arm64-v8a only."
     ui_print "*********************************************************"
 fi
+NM_LKM_SAY=ui_print
+NM_LKM_NM="$_nm"
+NM_LKM_LOADER="$MODPATH/loader"
+export NM_LKM_SAY NM_LKM_NM NM_LKM_LOADER
+# shellcheck source=module/lkm-load.sh
+[ -f "$MODPATH/lkm-load.sh" ] && . "$MODPATH/lkm-load.sh"
+[ -f "$NM_LKM_LOADER" ] && chmod 0755 "$NM_LKM_LOADER" 2>/dev/null
+
 if [ -x "$_nm" ]; then
-    _ev=$("$_nm" v 2>/dev/null | tr -dc '0-9')
+    _evl=$("$_nm" v 2>/dev/null | head -n 1)
+    _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
+    _eb=""
+    case "$_evl" in *" "*) _eb=${_evl#* }; _eb=${_eb%% *} ;; esac
     if [ -n "$_ev" ]; then
-        ui_print "- Prism engine: v${_ev} (responding)"
+        ui_print "- Prism engine: v${_ev} (${_eb:+build $_eb, }responding)"
+        if ! lsmod 2>/dev/null | grep -q "^nomount"; then
+            ui_print "- Built into the kernel - dropping the bundled modules."
+            rm -rf "$MODPATH/lkm" "$MODPATH/loader"
+        fi
+    elif command -v nm_lkm_load_best >/dev/null 2>&1 \
+         && { nm_lkm_load_best "$MODPATH/lkm" || nm_lkm_probe; }; then
+        _evl=$("$_nm" v 2>/dev/null | head -n 1)
+        _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
+        ui_print "- Prism engine: v${_ev} (module loaded, no reboot needed)"
+        nm_lkm_prune "$MODPATH/lkm"
     else
         ui_print "*********************************************************"
-        ui_print "! The kernel's NoMount engine did not answer."
-        ui_print "! From recovery this is normal - it will work after boot."
-        ui_print "! On a running system it means this kernel has no NoMount"
-        ui_print "! support: the module installs but injects nothing."
-        ui_print "! Flash a NoMount-enabled kernel, then reboot."
+        ui_print "! The kernel's NoMount engine did not answer, and no"
+        ui_print "! bundled module loads on it either."
+        ui_print "!   kernel: $(uname -r)"
+        ui_print "! From recovery this is normal - there is no running kernel"
+        ui_print "! to load into. Reboot, then reinstall to find out."
+        ui_print "! Otherwise: flash a NoMount-enabled kernel, or drop a"
+        ui_print "! matching nomount.ko at /data/adb/nomount/nomount.ko."
         ui_print "*********************************************************"
     fi
 else
@@ -98,19 +128,29 @@ set_perm "$NMDIR" 0 0 0700 u:object_r:adb_data_file:s0
 _bak=/data/adb/nomount.bak
 if [ -d "$_bak" ]; then
     _rn=0
+    _fail=0
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
-        cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null || { rm -f "$NMDIR/$_f" 2>/dev/null; continue; }
-        set_perm "$NMDIR/$_f" 0 0 0600 u:object_r:adb_data_file:s0
-        _rn=$((_rn + 1))
+        if cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null; then
+            set_perm "$NMDIR/$_f" 0 0 0600 u:object_r:adb_data_file:s0
+            _rn=$((_rn + 1))
+        else
+            rm -f "$NMDIR/$_f" 2>/dev/null
+            _fail=$((_fail + 1))
+        fi
     done
     unset _f
     [ "$_rn" -gt 0 ] && ui_print "- Restored $_rn setting(s) kept from your previous install"
-    rm -rf "$_bak"
-    unset _rn
+    if [ "$_fail" -eq 0 ]; then
+        rm -rf "$_bak"
+    else
+        ui_print "- ! $_fail setting(s) could not be restored; keeping $_bak"
+        ui_print "  Free some space and reboot - they are recovered on the next boot."
+    fi
+    unset _rn _fail
 fi
 unset _bak
 CONF="$NMDIR/spoof.conf"
@@ -119,6 +159,7 @@ CONF="$NMDIR/spoof.conf"
 [ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
 
 [ -f "$MODPATH/lib.sh" ] && set_perm "$MODPATH/lib.sh" 0 0 0644
+[ -d "$MODPATH/webroot" ] && set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644
 
 [ -f "$MODPATH/uninstall.sh" ] && set_perm "$MODPATH/uninstall.sh" 0 0 0755
 
@@ -142,8 +183,22 @@ if [ ! -f "$NMDIR/absorb-skip.txt" ]; then
         echo "# Why these are skipped: the bind is installed by native daemon code"
         echo "# and the failure mode is silent and delayed - dex2oat runs during"
         echo "# dexopt on app install, not at boot, so a broken hook shows up hours"
-        echo "# later as \"modules stopped applying to new apps\". Delete a line to"
-        echo "# absorb it once you have tested your fork."
+        echo "# later as \"modules stopped applying to new apps\"."
+        echo "#"
+        echo "# How matching works:"
+        echo "#  - A path is a plain string prefix, not a path-component match. That"
+        echo "#    is deliberate: /apex/com.android.art/bin/dex2oat also covers"
+        echo "#    dex2oat64. It also means /product/app/Foo covers FooBar - use the"
+        echo "#    longest path that is unambiguous."
+        echo "#  - If any one mount of a module matches a path here, ALL of that"
+        echo "#    module's mounts are left alone, not just that one."
+        echo "#  - A module id does NOT apply to a tmpfs mounted over the ROM: a"
+        echo "#    tmpfs has no module source in the mount table, so use a path for"
+        echo "#    those."
+        echo "#"
+        echo "# The four paths below are ALSO built into the binary. Deleting them"
+        echo "# here does nothing; they stay skipped either way. Lines you add"
+        echo "# yourself can be deleted normally."
         echo "/apex/com.android.art/bin/dex2oat"
         echo "/apex/com.android.runtime/bin/dex2oat"
         echo "/system/bin/dex2oat"
@@ -155,7 +210,7 @@ set_perm "$NMDIR/absorb-skip.txt" 0 0 0600 u:object_r:adb_data_file:s0
 rm -f "$NMDIR/bootcount"
 
 if [ -e "$NMDIR/disabled" ]; then
-    ui_print "- ⚠️  The Suite is disabled on this device - it will inject nothing at boot."
+    ui_print "- ℹ️  The Suite is disabled on this device - it will inject nothing at boot."
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
 fi
 
@@ -174,7 +229,7 @@ elif [ -z "$_ev" ] && [ "$_booted" != "1" ]; then
     ui_print "- next step: reboot, then open the WebUI - it says whether your kernel has it."
 elif [ -z "$_ev" ]; then
     ui_print "- next step: flash a kernel built with CONFIG_NOMOUNT, then reboot."
-    ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases"
+    ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases"
     ui_print "  Until you do, this module is installed and doing nothing."
 else
     ui_print "- next step: clear the disable flag (see above), then reboot."

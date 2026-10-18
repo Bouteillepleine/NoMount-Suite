@@ -1,4 +1,3 @@
-//! Persistent, package-name-aware UID block list
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -6,46 +5,35 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-/// Source of truth for the persistent hide list
 pub const BLOCKLIST_PATH: &str = "/data/adb/nomount/uidhide";
 
-/// Where this list used to live - the same file `mount.rs` reads as the list of module ids
 const LEGACY_PATH: &str = "/data/adb/nomount/blocklist";
 
-/// Resolved appids, mirrored from the last successful resolve
 const CACHE_PATH: &str = "/data/adb/nomount/uidhide.cache";
 
-/// Feature settings that must be re-asserted after every reboot / `nm clear`
 const CONF_PATH: &str = "/data/adb/nomount/uidhide.conf";
 
-/// Android's canonical package→UID map
 const PACKAGES_LIST: &str = "/data/system/packages.list";
 
 const MODULES_DIR: &str = "/data/adb/modules";
 
-/// Android packs (user, appid) into a uid
 pub const PER_USER_RANGE: u32 = 100_000;
 
-/// Below this is the platform (root, system_server, shell, radio...)
 pub const FIRST_APP_APPID: u32 = 10_000;
 
-/// Normalise a raw UID to the appid the kernel matches on
 pub fn appid(uid: u32) -> u32 {
     uid % PER_USER_RANGE
 }
 
-/// Must this run withhold which apps are hidden?
 pub fn redact_hide_list() -> bool {
     std::env::var_os("NM_REDACT_HIDE_LIST").is_some()
 }
 
-/// What an entry resolved to, for display in `uid list`
 pub enum Resolved {
     Uid(u32),
     NotInstalled,
 }
 
-/// Resolve a hide-list target to an appid
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
     Prefix(String),
@@ -53,11 +41,9 @@ pub enum Pattern {
     Contains(String),
 }
 
-/// Shortest literal a glob may carry
 pub const MIN_PATTERN_LITERAL: usize = 4;
 
 impl Pattern {
-    /// Parse a glob
     pub fn parse(entry: &str) -> Option<Result<Pattern>> {
         let e = entry.trim();
         if !e.contains('*') {
@@ -66,12 +52,12 @@ impl Pattern {
         let stripped = e.trim_start_matches('*').trim_end_matches('*');
         if stripped.contains('*') {
             return Some(Err(anyhow::anyhow!(
-                "{e:?}: `*` is only allowed at the start and/or end"
+                "`*` is only allowed at the start and/or end"
             )));
         }
         if stripped.len() < MIN_PATTERN_LITERAL {
             return Some(Err(anyhow::anyhow!(
-                "{e:?}: needs at least {MIN_PATTERN_LITERAL} literal characters \
+                "needs at least {MIN_PATTERN_LITERAL} literal characters \
                  (a broader glob would hide injections from most of the device)"
             )));
         }
@@ -93,18 +79,15 @@ impl Pattern {
     }
 }
 
-/// Every installed package and its appid, from `packages.list`
 pub fn installed_packages() -> Option<Vec<(String, u32)>> {
     installed_from(&fs::read_to_string(PACKAGES_LIST).ok()?)
 }
 
-/// Pure half of [`installed_packages`]: `None` when the body yields no packages, which on
 fn installed_from(list: &str) -> Option<Vec<(String, u32)>> {
     let parsed = parse_installed(list);
     if parsed.is_empty() { None } else { Some(parsed) }
 }
 
-/// Pure: `packages.list` body -> (package, appid)
 fn parse_installed(list: &str) -> Vec<(String, u32)> {
     let mut out = Vec::new();
     for line in list.lines() {
@@ -120,7 +103,6 @@ fn parse_installed(list: &str) -> Vec<(String, u32)> {
     out
 }
 
-/// Resolve an exact entry against an already-loaded package map
 pub fn resolve_in(target: &str, installed: &[(String, u32)]) -> Result<Resolved> {
     let t = target.trim();
     if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
@@ -133,7 +115,6 @@ pub fn resolve_in(target: &str, installed: &[(String, u32)]) -> Result<Resolved>
     }
 }
 
-/// Expand one hide-list entry into the concrete `(package, appid)` pairs it covers
 pub fn expand(entry: &str, installed: &[(String, u32)]) -> Result<Vec<(String, u32)>> {
     let e = entry.trim();
     if let Some(pat) = Pattern::parse(e) {
@@ -150,7 +131,6 @@ pub fn expand(entry: &str, installed: &[(String, u32)]) -> Result<Vec<(String, u
     }
 }
 
-/// True if the entry is a glob (well-formed or not) rather than a package/UID
 pub fn is_pattern(entry: &str) -> bool {
     entry.contains('*')
 }
@@ -167,7 +147,6 @@ pub fn resolve(target: &str) -> Result<Resolved> {
     }
 }
 
-/// Resolve preferring the cache, for the early-boot pass
 pub fn resolve_early(target: &str, cache: &BTreeMap<String, u32>) -> Result<Resolved> {
     if let Some(uid) = cache.get(target.trim()) {
         return Ok(Resolved::Uid(*uid));
@@ -175,12 +154,10 @@ pub fn resolve_early(target: &str, cache: &BTreeMap<String, u32>) -> Result<Reso
     resolve(target)
 }
 
-/// Reverse of `uid_for_package`: the first package owning `uid`, for labelling a UID the
 pub fn package_for_uid(uid: u32) -> Option<String> {
     parse_package_for_uid(&fs::read_to_string(PACKAGES_LIST).ok()?, uid)
 }
 
-/// Pure: first package owning `uid` in a `packages.list` body (col0=pkg, col1=uid)
 fn parse_package_for_uid(list: &str, uid: u32) -> Option<String> {
     for line in list.lines() {
         let mut cols = line.split(' ');
@@ -192,7 +169,6 @@ fn parse_package_for_uid(list: &str, uid: u32) -> Option<String> {
     None
 }
 
-/// Look up a package's UID in `packages.list`
 fn uid_for_package(pkg: &str) -> Result<Option<u32>> {
     let list = match fs::read_to_string(PACKAGES_LIST) {
         Ok(s) => s,
@@ -201,7 +177,6 @@ fn uid_for_package(pkg: &str) -> Result<Option<u32>> {
     Ok(parse_uid_for_package(&list, pkg))
 }
 
-/// Pure: the UID for `pkg` in a `packages.list` body
 fn parse_uid_for_package(list: &str, pkg: &str) -> Option<u32> {
     for line in list.lines() {
         let mut cols = line.split(' ');
@@ -214,7 +189,6 @@ fn parse_uid_for_package(list: &str, pkg: &str) -> Option<u32> {
     None
 }
 
-/// One-time split of the shared `blocklist` file, run while the new file is absent
 fn migrate_legacy() {
     if Path::new(BLOCKLIST_PATH).exists() {
         return;
@@ -231,18 +205,38 @@ fn migrate_legacy() {
     let _ = write_lines(BLOCKLIST_PATH, &apps);
 }
 
-/// Read the persistent hide list: trimmed, comment- and blank-stripped, order preserved,
-pub fn read() -> Result<Vec<String>> {
-    migrate_legacy();
+fn load(migrate: bool) -> Result<Vec<String>> {
+    if migrate {
+        migrate_legacy();
+    }
     let raw = match fs::read_to_string(BLOCKLIST_PATH) {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Nothing migrated yet: read the legacy file in place rather than writing one, so a
+            // report still sees the real hide list without changing anything.
+            return match fs::read_to_string(LEGACY_PATH) {
+                Ok(legacy) => Ok(parse_blocklist(&legacy)
+                    .into_iter()
+                    .filter(|e| !Path::new(MODULES_DIR).join(e).is_dir())
+                    .collect()),
+                Err(_) => Ok(Vec::new()),
+            };
+        }
         Err(e) => return Err(e).context("read hide list"),
     };
     Ok(parse_blocklist(&raw))
 }
 
-/// Pure: trimmed, comment/blank-stripped, order-preserved, deduplicated
+pub fn read() -> Result<Vec<String>> {
+    load(true)
+}
+
+/// For the diagnostics. `check` is a read-only verb and used to create the hide-list file as a
+/// side effect of looking at it, through the legacy migration hidden inside `read`.
+pub fn read_for_report() -> Result<Vec<String>> {
+    load(false)
+}
+
 fn parse_blocklist(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -257,7 +251,6 @@ fn parse_blocklist(raw: &str) -> Vec<String> {
     out
 }
 
-/// Atomic
 fn write_lines(path: &str, entries: &[String]) -> Result<()> {
     let mut body = String::new();
     for e in entries {
@@ -267,12 +260,10 @@ fn write_lines(path: &str, entries: &[String]) -> Result<()> {
     crate::statefile::write_atomic(path, body).with_context(|| format!("write {path}"))
 }
 
-/// Persist the list (LF-terminated, one entry per line)
 fn write(entries: &[String]) -> Result<()> {
     write_lines(BLOCKLIST_PATH, entries)
 }
 
-/// Refuse an entry the very next [`read`] would throw away
 fn check_entry(e: &str) -> Result<()> {
     if e.is_empty() || e.starts_with('#') || e.contains(['\n', '\r', '\t']) {
         anyhow::bail!(
@@ -283,7 +274,6 @@ fn check_entry(e: &str) -> Result<()> {
     Ok(())
 }
 
-/// Add many entries in one read-modify-write
 pub fn add_many(entries: &[String]) -> Result<usize> {
     let _pass = crate::mount::pass_lock();
     let mut list = read()?;
@@ -303,12 +293,10 @@ pub fn add_many(entries: &[String]) -> Result<usize> {
     Ok(added)
 }
 
-/// Replace the whole resolved-appid mirror in one write
 pub fn cache_replace(map: &BTreeMap<String, u32>) {
     cache_write(map);
 }
 
-/// Add an entry (no-op if already present)
 pub fn add(entry: &str) -> Result<bool> {
     let _pass = crate::mount::pass_lock();
     let e = entry.trim().to_string();
@@ -322,7 +310,6 @@ pub fn add(entry: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Remove an entry (no-op if absent)
 pub fn remove(entry: &str) -> Result<bool> {
     let _pass = crate::mount::pass_lock();
     let e = entry.trim();
@@ -337,7 +324,6 @@ pub fn remove(entry: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Read the `entry<tab>appid` mirror
 pub fn cache_read() -> BTreeMap<String, u32> {
     let mut map = BTreeMap::new();
     let Ok(raw) = fs::read_to_string(CACHE_PATH) else { return map };
@@ -359,10 +345,16 @@ fn cache_write(map: &BTreeMap<String, u32>) {
         body.push_str(&v.to_string());
         body.push('\n');
     }
-    let _ = crate::statefile::write_atomic(CACHE_PATH, body);
+    // Swallowing this silently staled the resolved-appid mirror: the next early-boot pass
+    // reads the old file, re-applies stale appids, and nothing ever said the write failed.
+    if let Err(e) = crate::statefile::write_atomic(CACHE_PATH, body) {
+        eprintln!(
+            "nomount: could not update {CACHE_PATH} ({e}) - the resolved-appid mirror is stale, \
+             so an early-boot pass may re-apply the previous appids until this is fixed"
+        );
+    }
 }
 
-/// Record `entry -> appid` for the next early-boot pass
 pub fn cache_put(entry: &str, uid: u32) {
     let mut map = cache_read();
     if map.insert(entry.trim().to_string(), appid(uid)) != Some(appid(uid)) {
@@ -370,7 +362,6 @@ pub fn cache_put(entry: &str, uid: u32) {
     }
 }
 
-/// Drop an entry from the mirror (unhidden, or its package went away)
 pub fn cache_forget(entry: &str) {
     let mut map = cache_read();
     if map.remove(entry.trim()).is_some() {
@@ -378,36 +369,141 @@ pub fn cache_forget(entry: &str) {
     }
 }
 
-/// Which isolated-process pools the kernel hides from: 1 = app-zygote pool, 2 = platform
 pub const DEFAULT_HIDE_ISOLATED: u32 = 3;
 
-/// Read the persisted isolated-pool policy (default when unset/garbled)
-pub fn hide_isolated() -> u32 {
-    let Ok(raw) = fs::read_to_string(CONF_PATH) else { return DEFAULT_HIDE_ISOLATED };
-    for line in raw.lines() {
-        if let Some(v) = line.trim().strip_prefix("hide_isolated=") {
-            if let Ok(n) = v.trim().parse::<u32>() {
-                if n <= 3 {
-                    return n;
-                }
-            }
-        }
-    }
-    DEFAULT_HIDE_ISOLATED
+/// Keys the Suite writes to `uidhide.conf`. A read-modify-write keeps the others,
+/// so setting one knob cannot silently reset another.
+pub const KSU_KEY_PREFIX: &str = "ksu:";
+
+fn conf_value(raw: &str, key: &str) -> Option<String> {
+    raw.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(key)
+            .and_then(|r| r.strip_prefix('='))
+            .map(|v| v.trim().to_string())
+    })
 }
 
-/// Persist the isolated-pool policy so `apply` can re-assert it after a reboot or a `nm
-pub fn set_hide_isolated(mode: u32) -> Result<()> {
+fn conf_read() -> String {
+    fs::read_to_string(CONF_PATH).unwrap_or_default()
+}
+
+fn parse_hide_isolated(raw: &str) -> u32 {
+    conf_value(raw, "hide_isolated")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|n| *n <= 3)
+        .unwrap_or(DEFAULT_HIDE_ISOLATED)
+}
+
+fn parse_follow_ksu(raw: &str) -> bool {
+    conf_value(raw, "follow_ksu_denylist")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+pub fn hide_isolated() -> u32 {
+    parse_hide_isolated(&conf_read())
+}
+
+pub fn follow_ksu_denylist() -> bool {
+    parse_follow_ksu(&conf_read())
+}
+
+fn write_conf(isolated: u32, follow_ksu: bool) -> Result<()> {
     crate::statefile::write_atomic(
         CONF_PATH,
-        format!("# NoMount per-UID hiding settings\nhide_isolated={mode}\n"),
+        format!(
+            "# NoMount per-UID hiding settings\nhide_isolated={isolated}\n\
+             follow_ksu_denylist={}\n",
+            u8::from(follow_ksu)
+        ),
     )
     .context("write uidhide.conf")
+}
+
+pub fn set_hide_isolated(mode: u32) -> Result<()> {
+    let raw = conf_read();
+    write_conf(mode, parse_follow_ksu(&raw))
+}
+
+pub fn set_follow_ksu_denylist(on: bool) -> Result<()> {
+    let raw = conf_read();
+    write_conf(parse_hide_isolated(&raw), on)
+}
+
+pub fn ksu_pkg(key: &str) -> Option<&str> {
+    key.strip_prefix(KSU_KEY_PREFIX)
+}
+
+/// The apps KernelSU says to umount modules for, keyed so they cannot collide with a
+/// hide-list entry. `None` means the kernel did not answer: the caller must treat that
+/// as unread and retire nothing, never as an empty DenyList.
+pub fn ksu_denylist(installed: &[(String, u32)]) -> Option<Vec<(String, u32)>> {
+    if !crate::ksu::available() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (pkg, uid) in installed {
+        if *uid < FIRST_APP_APPID {
+            continue;
+        }
+        if crate::ksu::uid_should_umount(*uid)? {
+            out.push((format!("{KSU_KEY_PREFIX}{pkg}"), *uid));
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setting_one_conf_knob_keeps_the_other() {
+        let raw = "# NoMount per-UID hiding settings\nhide_isolated=1\nfollow_ksu_denylist=1\n";
+        assert_eq!(parse_hide_isolated(raw), 1);
+        assert!(parse_follow_ksu(raw));
+        // An absent key is the default, not a parse failure of the whole file.
+        assert_eq!(parse_hide_isolated("follow_ksu_denylist=1\n"), DEFAULT_HIDE_ISOLATED);
+        assert!(!parse_follow_ksu("hide_isolated=0\n"));
+    }
+
+    #[test]
+    fn the_ksu_knob_takes_words_and_digits_and_defaults_off() {
+        for on in ["1", "true", "yes", "on", "ON", "True"] {
+            assert!(parse_follow_ksu(&format!("follow_ksu_denylist={on}\n")), "{on}");
+        }
+        for off in ["0", "false", "no", "off", "", "maybe"] {
+            assert!(!parse_follow_ksu(&format!("follow_ksu_denylist={off}\n")), "{off}");
+        }
+        assert!(!parse_follow_ksu(""));
+    }
+
+    #[test]
+    fn a_ksu_key_cannot_be_mistaken_for_a_package_entry() {
+        let key = format!("{KSU_KEY_PREFIX}com.example.app");
+        assert_eq!(ksu_pkg(&key), Some("com.example.app"));
+        assert_eq!(ksu_pkg("com.example.app"), None);
+        // The prefix carries a ':', which check_entry refuses to store in the hide list.
+        assert!(Pattern::parse(&key).is_none());
+    }
+
+    #[test]
+    fn reading_for_a_report_never_creates_the_hide_list() {
+        // check is read-only; the legacy migration used to run inside read() and write the
+        // file as a side effect of diagnosing it.
+        let src = include_str!("blocklist.rs");
+        let body = src.split("pub fn read_for_report").nth(1).unwrap();
+        let first = body.split("}
+").next().unwrap();
+        assert!(
+            first.contains("load(false)"),
+            "read_for_report must not migrate: {first}"
+        );
+        let rd = src.split("pub fn read()").nth(1).unwrap().split("}
+").next().unwrap();
+        assert!(rd.contains("load(true)"), "read() still migrates for the mutating verbs");
+    }
 
     const LIST: &str = "com.foo 10123 0 /data/user/0/com.foo default none 0 34 1 @null\n\
 me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 35 1 @null\n";
@@ -495,7 +591,6 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
         assert!(!pat("*chunqiu*").matches("com.google.android.gms"));
     }
 
-    /// The guard that stops a typo hiding injections from the whole device
     #[test]
     fn globs_that_are_too_broad_are_refused() {
         for bad in ["*", "**", "*a*", "*ab*", "*abc*", "a*"] {
@@ -509,6 +604,24 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
     fn a_star_in_the_middle_is_refused_rather_than_half_honoured() {
         let parsed = Pattern::parse("com.*.detector").expect("is a glob");
         assert!(parsed.is_err());
+    }
+
+    /// The refusal reason is printed verbatim by the REDACTING branch in
+    /// cli/handlers.rs, so it must not name the entry. It used to be built as
+    /// "{e:?}: ..." , which made "skipping an invalid hide-list glob: ..." carry the
+    /// package glob the user is hiding behind - as revealing as the unredacted line.
+    #[test]
+    fn a_refusal_reason_never_names_the_entry_it_refused() {
+        for bad in ["*", "**", "*a*", "*abc*", "com.*.detector", "*mybank*x*"] {
+            let err = Pattern::parse(bad)
+                .expect("is a glob")
+                .expect_err("should be refused");
+            let text = format!("{err:#}");
+            assert!(
+                !text.contains(bad),
+                "the reason for refusing {bad:?} repeats it back: {text:?}"
+            );
+        }
     }
 
     #[test]
@@ -528,7 +641,6 @@ me.garfieldhan.holmes 10471 0 /data/user/0/me.garfieldhan.holmes default 3003 0 
         assert!(expand("*", &installed).is_err());
     }
 
-    /// The gate that stops a bad read being read as "every app was uninstalled"
     #[test]
     fn resolve_in_agrees_with_resolve_without_touching_the_disk() {
         let installed = vec![("com.a".to_string(), 10123u32), ("com.b".to_string(), 10456)];

@@ -1,4 +1,3 @@
-//! The plan section of `nomount check` - lint the mount plan before a reboot turns a bad
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -10,7 +9,6 @@ use crate::check::{slug, Check, Section, Verdict};
 use crate::mount::{collect_plan, is_partition_root, PlanEntry, PlanKind};
 use crate::nm::{LiveRule, Nm};
 
-/// Partitions whose file descriptors zygote will accept across `forkSystemServer`
 const ZYGOTE_FD_ALLOWLISTED: &[&str] = &[
     "system", "product", "vendor", "system_ext", "odm", "apex", "oem",
 ];
@@ -30,7 +28,6 @@ struct Finding {
     detail: String,
 }
 
-/// This file's three levels, onto the one shared verdict
 fn verdict_of(level: &Level) -> Verdict {
     match level {
         Level::Error => Verdict::Fail,
@@ -41,10 +38,9 @@ fn verdict_of(level: &Level) -> Verdict {
     }
 }
 
-/// Who a doctor finding is about, where the check name makes it recoverable
 fn owner_of(f: &Finding) -> Option<String> {
     const PER_MODULE: &[&str] = &[
-        "partition-root target",
+        "module entry refused",
         "no such partition",
         "whiteout leaves a measurable hole",
         "wide replacement expansion",
@@ -65,7 +61,6 @@ fn owner_of(f: &Finding) -> Option<String> {
     }
 }
 
-/// What a hidden caller sees at a ghosted path
 #[derive(PartialEq)]
 enum GhostSeen {
     Absent,
@@ -74,7 +69,6 @@ enum GhostSeen {
     Unknown,
 }
 
-/// Become `uid` in a forked child and look at `path`
 fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     use std::os::unix::ffi::OsStrExt;
     let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -86,10 +80,14 @@ fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     const ABSENT: u32 = 0;
     const VISIBLE: u32 = 1;
     const XLEAK: u32 = 2;
+    const UNKNOWN: u32 = 3;
     let seen = crate::audit::probe_as_uid(uid, || unsafe {
         let mut st: libc::stat = std::mem::zeroed();
-        if libc::stat(cpath.as_ptr(), &mut st) == 0 {
+        if libc::lstat(cpath.as_ptr(), &mut st) == 0 {
             return [VISIBLE];
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+            return [UNKNOWN];
         }
         let mut buf = [0u8; 256];
         let n = libc::lgetxattr(
@@ -108,7 +106,6 @@ fn ghost_seen_by(uid: u32, path: &Path) -> GhostSeen {
     }
 }
 
-/// How a finding names a uid that came off the hide list
 fn hidden_uid_label(uid: u32, redact: bool) -> String {
     if redact {
         "a hidden app".to_string()
@@ -117,7 +114,6 @@ fn hidden_uid_label(uid: u32, redact: bool) -> String {
     }
 }
 
-/// Split `nm l g` output into its two tables
 fn parse_ghost_tables(txt: &str) -> (Vec<PathBuf>, Vec<u32>) {
     let mut paths = Vec::new();
     let mut uids = Vec::new();
@@ -142,7 +138,6 @@ fn partition_of(p: &Path) -> Option<String> {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
 }
 
-/// Does the engine actually hold the rules the plan describes - and nothing else?
 fn reconcile_plan_and_live(
     plan: &[PlanEntry],
     live: &[LiveRule],
@@ -265,7 +260,7 @@ fn reconcile_plan_and_live(
         }
         None => {
             out.push(Finding {
-                level: Level::Info,
+                level: Level::Unmeasured,
                 check: "live rules not fully accounted for",
                 detail: "the durable whiteout list or the absorbed-rule record could not be \
                          read, so live rules were checked for missing entries only -- an extra \
@@ -278,7 +273,6 @@ fn reconcile_plan_and_live(
     out
 }
 
-/// One `.replace` marker or opaque dir expands into a whiteout per stock entry the module
 fn expansions_by_marker(plan: &[PlanEntry]) -> Vec<(&Path, &str, usize)> {
     let mut by: HashMap<&Path, (&str, usize)> = HashMap::new();
     for e in plan.iter().filter(|e| e.kind == PlanKind::Whiteout) {
@@ -291,7 +285,6 @@ fn expansions_by_marker(plan: &[PlanEntry]) -> Vec<(&Path, &str, usize)> {
     v
 }
 
-/// Report threshold for one marker's expansion
 fn expansion_level(count: usize) -> Option<Level> {
     match count {
         0..=49 => None,
@@ -299,7 +292,6 @@ fn expansion_level(count: usize) -> Option<Level> {
     }
 }
 
-/// A way a module can be incompatible with this environment, and why
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Incompat {
     RomWrite,
@@ -309,7 +301,6 @@ enum Incompat {
 }
 
 impl Incompat {
-    /// How loud this kind is, and why they are not all the same
     fn level(self) -> Level {
         match self {
             Incompat::RomWrite | Incompat::MagiskMirror => Level::Warn,
@@ -329,29 +320,22 @@ impl Incompat {
     fn explain(self) -> &'static str {
         match self {
             Incompat::RomWrite =>
-                "NoMount serves ROM paths by read-only redirection, so this write goes \
-                 nowhere the module can read back and will fail silently. Expect that \
-                 feature of the module not to work.",
+                "ROM paths are served read-only, so this write fails silently. Expect that \
+                 feature not to work.",
             Incompat::MagiskMirror =>
-                "there is no Magisk mirror on KernelSU -- no /sbin/.magisk and no magisk \
-                 binary -- so this read returns nothing, with or without NoMount. This is \
-                 a Magisk-only module running on KSU, not something NoMount broke.",
+                "KernelSU has no Magisk mirror, so this read returns nothing with or without \
+                 NoMount.",
             Incompat::ImageBacked =>
-                "no path redirection can make a block device appear, so the engine cannot \
-                 serve this. The module keeps its own mount; the mount checks will report \
-                 it, and that report is correct rather than a leak.",
+                "redirection cannot make a block device appear, so the module keeps its own \
+                 mount and the mount checks report it correctly.",
             Incompat::SelfMount =>
-                "this module mounts its own content over a ROM path instead of shipping a \
-                 tree, so for part of every boot the mount is real and readable by any app. \
-                 absorb re-serves it as an injection and unmounts it -- automatically, four \
-                 times per boot -- so nothing needs doing. Named here because the module \
-                 depends on absorb running: if absorb is disabled or times out, this is one \
-                 of the mounts that stays visible.",
+                "mounts over a ROM path instead of shipping a tree, so the mount is real and \
+                 app-readable until absorb re-serves it (after zygote). If absorb is off or \
+                 times out, it stays visible.",
         }
     }
 }
 
-/// Scan enabled modules' scripts for the three incompatibilities above
 fn rom_path_vars(script: &str) -> std::collections::HashMap<String, String> {
     const PARTS: &[&str] = crate::pmcache::ROM_PARTITIONS;
     let mut out = std::collections::HashMap::new();
@@ -373,7 +357,6 @@ fn rom_path_vars(script: &str) -> std::collections::HashMap<String, String> {
     out
 }
 
-/// Substitute `$NAME` / `${NAME}` for the ROM paths [`rom_path_vars`] found
 fn expand_rom_vars(line: &str, vars: &std::collections::HashMap<String, String>) -> String {
     let mut names: Vec<&String> = vars.keys().collect();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
@@ -385,9 +368,17 @@ fn expand_rom_vars(line: &str, vars: &std::collections::HashMap<String, String>)
     acc
 }
 
-/// Which incompatibility, if any, one line of a module script announces
 fn classify_incompat_line(t: &str) -> Option<Incompat> {
     const PARTS: &[&str] = crate::pmcache::ROM_PARTITIONS;
+    let t = match t.find(" #") {
+        Some(at)
+            if t[..at].matches('"').count().is_multiple_of(2)
+                && t[..at].matches('\'').count().is_multiple_of(2) =>
+        {
+            t[..at].trim_end()
+        }
+        _ => t,
+    };
     let probeless = {
         let mut acc = t.to_string();
         for pfx in ["command -v ", "command -V ", "which ", "type -p ", "hash "] {
@@ -409,14 +400,80 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
         None => false,
     };
     let removes = t.starts_with("rm ") || t.contains(" rm ");
-    if ((removes || ["cp ", "mv ", "ln ", "touch "].iter().any(|v| t.contains(v)))
+    let writes_otherwise = ["mkdir ", "sed -i", "install ", "dd "]
+        .iter()
+        .any(|v| t.starts_with(v) || t.contains(&format!(" {v}")));
+    let redirects_into_rom = t.match_indices('>').any(|(at, _)| {
+        let rest = t[at + 1..].trim_start_matches('>').trim_start();
+        let tok = rest.split_whitespace().next().unwrap_or("");
+        PARTS.iter().any(|p| tok.starts_with(&format!("/{p}/")))
+    });
+    let uses_an_image_tool = {
+        let in_command_context = |hay: &str| -> Vec<bool> {
+            let (mut dq, mut sq, mut depth) = (false, false, 0usize);
+            let b: Vec<char> = hay.chars().collect();
+            let mut out = Vec::with_capacity(b.len());
+            let mut i = 0;
+            while i < b.len() {
+                out.push(!(dq || sq) || depth > 0);
+                match b[i] {
+                    '\\' => {
+                        out.push(!(dq || sq) || depth > 0);
+                        i += 2;
+                        continue;
+                    }
+                    '\'' if !dq => sq = !sq,
+                    '"' if !sq => dq = !dq,
+                    '$' if !sq && b.get(i + 1) == Some(&'(') => depth += 1,
+                    ')' if !sq && depth > 0 => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+            out.resize(b.len() + 1, !(dq || sq) || depth > 0);
+            out
+        };
+        let ctx = in_command_context(&probeless);
+        let at_word_start = |hay: &str, needle: &str| {
+            hay.match_indices(needle).any(|(at, _)| {
+                let char_idx = hay[..at].chars().count();
+                if !ctx.get(char_idx).copied().unwrap_or(true) {
+                    return false;
+                }
+                at == 0
+                    || hay[..at].chars().next_back().is_some_and(|c| {
+                        c.is_whitespace() || c == '(' || c == ';' || c == '`' || c == '/'
+                    })
+            })
+        };
+        ["losetup", "mount -o loop", "mkfs.ext4", "chroot ", "proot ", "nsenter", "unshare "]
+            .iter()
+            .any(|n| at_word_start(&probeless, n))
+    };
+    let binds_without_a_later_umount = {
+        let last_bind = ["--bind", "--rbind", "-o bind", "-o rbind", "-t overlay"]
+            .iter()
+            .filter_map(|m| probeless.rfind(m))
+            .max();
+        match (last_bind, probeless.rfind("umount")) {
+            (Some(b), Some(u)) => u < b,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    };
+    let writes_into_rom = redirects_into_rom
+        || ((removes || writes_otherwise
+            || ["cp ", "mv ", "ln ", "touch "].iter().any(|v| t.contains(v)))
         && !rom_is_source
         && PARTS.iter().any(|p| t.contains(&format!(" /{p}/"))))
         || (t.contains("remount")
             && PARTS.iter().any(|p| {
-                t.contains(&format!(" /{p} ")) || t.ends_with(&format!(" /{p}"))
-            }))
-    {
+                t.contains(&format!(" /{p} "))
+                    || t.contains(&format!(" /{p}/ "))
+                    || t.ends_with(&format!(" /{p}"))
+                    || t.ends_with(&format!(" /{p}/"))
+            }));
+    if writes_into_rom {
         Some(Incompat::RomWrite)
     } else if t.contains(".magisk/mirror/")
         || (t.contains("MAGISKTMP") && t.contains("/mirror/"))
@@ -424,16 +481,9 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
         || t.contains("mirror/vendor")
     {
         Some(Incompat::MagiskMirror)
-    } else if probeless.contains("losetup")
-        || probeless.contains("mount -o loop")
-        || probeless.contains("mkfs.ext4")
-        || probeless.contains("chroot ")
-        || probeless.contains("proot ")
-        || probeless.contains("nsenter")
-        || probeless.contains("unshare ")
-    {
+    } else if uses_an_image_tool {
         Some(Incompat::ImageBacked)
-    } else if !probeless.contains("umount")
+    } else if binds_without_a_later_umount
         && (probeless.contains("--bind")
             || probeless.contains("--rbind")
             || probeless.contains("-o bind")
@@ -456,7 +506,6 @@ fn classify_incompat_line(t: &str) -> Option<Incompat> {
     }
 }
 
-/// Module-local scripts an entry script pulls in, as relative paths
 fn sourced_scripts(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in body.lines() {
@@ -496,7 +545,6 @@ fn sourced_scripts(body: &str) -> Vec<String> {
     out
 }
 
-/// Installed modules whose scripts write the `my_hookless` marker
 fn my_hookless_writers() -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir("/data/adb/modules") else { return out };
@@ -529,7 +577,6 @@ fn my_hookless_writers() -> Vec<(String, String)> {
     out
 }
 
-/// When a deleted `my_hookless` marker would come back
 fn marker_returns_when(files: &[String]) -> &'static str {
     if files.iter().any(|f| ENTRY_SCRIPTS.contains(&f.as_str())) {
         "it is written from a boot script, so it returns on the next boot"
@@ -539,7 +586,6 @@ fn marker_returns_when(files: &[String]) -> &'static str {
     }
 }
 
-/// Why a module that ships ROM content is contributing nothing, or `None` if there is
 fn unserved_reason(markers: &[String], served: bool) -> Option<&'static str> {
     if served || markers.iter().any(|m| m == "disable" || m == "remove") {
         return None;
@@ -551,7 +597,6 @@ fn unserved_reason(markers: &[String], served: bool) -> Option<&'static str> {
     }
 }
 
-/// Files a module ships under a real ROM partition, and which partitions
 fn module_rom_files(mdir: &Path) -> (usize, Vec<String>) {
     let mut n = 0usize;
     let mut parts: Vec<String> = Vec::new();
@@ -574,7 +619,6 @@ fn module_rom_files(mdir: &Path) -> (usize, Vec<String>) {
     (n, parts)
 }
 
-/// Bounded recursive file count
 fn count_files(dir: &Path, depth: usize) -> usize {
     if depth > 12 {
         return 0;
@@ -596,25 +640,20 @@ fn count_files(dir: &Path, depth: usize) -> usize {
     n
 }
 
-/// Can a live rule of this kind reach zygote's FD-allowlist trap at all?
 fn fd_note_applies(kind: crate::nm::LiveKind) -> bool {
     kind == crate::nm::LiveKind::Inject
 }
 
-/// The five scripts a manager runs directly
 const ENTRY_SCRIPTS: [&str; 5] = [
     "post-fs-data.sh", "service.sh", "boot-completed.sh", "post-mount.sh", "customize.sh",
 ];
 
-/// The sentence to append when the evidence line lives in a sourced helper rather than in
 fn reached_only_if_sourced(script: &str) -> &'static str {
     if ENTRY_SCRIPTS.contains(&script) {
         return "";
     }
-    " NB: this line is in a helper the module SOURCES, not in a script the manager \
-     runs, so it only takes effect if the entry script reaches the `.` that pulls \
-     it in -- a mode switch or a capability test can leave it dead. Check the \
-     module's own config before acting on this."
+    " NB: the module SOURCES this helper rather than the manager running it, so it may \
+     never run. Check the module's config first."
 }
 
 fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
@@ -678,7 +717,6 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
     out
 }
 
-/// First filesystem image found in a module tree, as a module-relative path
 fn find_shipped_image(
     root: &std::path::Path,
     dir: &std::path::Path,
@@ -717,7 +755,6 @@ fn find_shipped_image(
     None
 }
 
-/// The subject a finding is about: the first token of its detail
 fn subject_of(f: &Finding) -> Option<&str> {
     fn trim(t: &str) -> &str {
         t.trim_end_matches([',', ':', '.'])
@@ -735,7 +772,6 @@ fn subject_of(f: &Finding) -> Option<&str> {
         .find(|t| t.starts_with('/') && t.len() > 1 && t.len() <= 128)
 }
 
-/// Turn plan findings into checks, giving each one an id nothing else in the report shares
 fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     findings
@@ -765,10 +801,9 @@ fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
         .collect()
 }
 
-/// Every plan-side check, plus the counts the report carries as facts
 pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let mut f: Vec<Finding> = Vec::new();
-    let (plan, skipped) = collect_plan()?;
+    let (plan, skipped, refused) = collect_plan()?;
 
     let mut by_target: HashMap<&Path, Vec<&str>> = HashMap::new();
     let mut holes: HashMap<&str, Vec<&Path>> = HashMap::new();
@@ -777,19 +812,6 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             .entry(e.target.as_path())
             .or_default()
             .push(e.module.as_str());
-
-        if is_partition_root(&e.target) {
-            f.push(Finding {
-                level: Level::Error,
-                check: "partition-root target",
-                detail: format!(
-                    "{} would {} all of {}",
-                    e.module,
-                    if e.kind == PlanKind::Whiteout { "hide" } else { "replace" },
-                    e.target.display()
-                ),
-            });
-        }
 
         if e.kind == PlanKind::Whiteout && crate::mount::whiteout_leaves_hole(&e.target) {
             holes.entry(e.module.as_str()).or_default().push(e.target.as_path());
@@ -804,7 +826,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     format!(
                         "{} -> {} is a symlink to {dest}, which does not exist. Injection \
                          serves a link's target, so this produces no rule and the path \
-                         never appears - an installer that symlinks before its target \
+                         never appears: an installer that symlinks before its target \
                          lands hits this",
                         e.target.display(),
                         e.source.display(),
@@ -823,6 +845,52 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     detail: format!("{} targets /{} which does not exist", e.module, part),
                 });
             }
+        }
+    }
+
+    {
+        let served_under: std::collections::HashSet<(&str, &Path)> = plan
+            .iter()
+            .flat_map(|e| {
+                let m = e.module.as_str();
+                e.target.ancestors().map(move |a| (m, a))
+            })
+            .collect();
+        let mut by_module: HashMap<&str, Vec<&crate::mount::Refused>> = HashMap::new();
+        for r in &refused {
+            // Only the convergence-symlink reason is explained by the module serving
+            // something at or below the path. Keyed on the ancestor closure alone this
+            // also swallowed the .replace-at-a-partition-root and inject-would-mask-dir
+            // refusals, which nothing else reports - the verdict then read clean while
+            // the module's content was unserved.
+            if r.why.starts_with("it is a symlink to a directory")
+                && served_under.contains(&(r.module.as_str(), r.target.as_path()))
+            {
+                continue;
+            }
+            by_module.entry(r.module.as_str()).or_default().push(r);
+        }
+        let mut mods: Vec<&&str> = by_module.keys().collect();
+        mods.sort_unstable();
+        for m in mods {
+            let rs = &by_module[*m];
+            let shown: Vec<String> = rs
+                .iter()
+                .take(3)
+                .map(|r| format!("{} ({})", r.target.display(), r.why))
+                .collect();
+            let more = rs.len().saturating_sub(shown.len());
+            f.push(Finding {
+                level: Level::Warn,
+                check: "module entry refused",
+                detail: format!(
+                    "{m}: {} entr(ies) the planner refused, so that content is not served and \
+                     nothing else reports it. {}{}",
+                    rs.len(),
+                    shown.join(", "),
+                    if more > 0 { format!(", and {more} more") } else { String::new() }
+                ),
+            });
         }
     }
 
@@ -946,10 +1014,13 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Info,
             check: "directory holds only injected files",
             detail: format!(
-                "{list}. Injected files take inode numbers from a band the ROM never \
-                 allocates, so a directory holding several of them and no stock file is \
-                 one cluster that is entirely yours. Ship into a directory that already \
-                 has stock content and it disappears."
+                "{list}. Injected files normally take their inode numbers from the gaps \
+                 between the stock files sitting beside them, which is what makes them \
+                 blend in -- but that needs stock files in the same directory to borrow \
+                 gaps from. A directory holding only injected files has none, so its \
+                 inodes come from above the partition's high-water mark instead and form \
+                 one contiguous run. Ship into a directory that already has stock content \
+                 and it disappears."
             ),
         });
     }
@@ -961,18 +1032,15 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             check: "my_* served by injection",
             detail: if writers.is_empty() {
                 format!(
-                    "my_* partitions are served by injection instead of a real bind, so they \
-                     add no mounts. Nothing in any installed module's top-level scripts \
-                     mentions the marker, so it is probably your own opt-in - a module could \
-                     still be writing it from a helper script. Remove {} to go back to binds.",
+                    "my_* is served by injection, so it adds no mounts. No module's entry \
+                     script writes the marker, so it is probably your own opt-in. Remove {} \
+                     for binds.",
                     crate::mount::MY_HOOKLESS_MARKER
                 )
             } else {
                 format!(
-                    "my_* partitions are served by injection instead of a real bind, so they \
-                     add no mounts. The Suite never writes the marker - {} did, which is how a \
-                     module keeps its own my_* content off the mount table. Remove {} to go \
-                     back to binds; {}.",
+                    "my_* is served by injection, so it adds no mounts. {} wrote the marker, \
+                     not the Suite. Remove {} for binds; {}.",
                     writers
                         .iter()
                         .map(|(id, file)| format!("{id} ({file})"))
@@ -989,13 +1057,14 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
 
     let served_modules: std::collections::HashSet<&str> =
         plan.iter().map(|e| e.module.as_str()).collect();
+    let blocklisted = crate::mount::load_blocklist();
     if let Ok(rd) = std::fs::read_dir("/data/adb/modules") {
         let mut dirs: Vec<_> = rd.flatten().collect();
         dirs.sort_by_key(|d| d.file_name());
         for d in dirs {
             let mdir = d.path();
             let Some(id) = mdir.file_name().and_then(|n| n.to_str()) else { continue };
-            if id == "meta-nomount" || !mdir.is_dir() {
+            if id == "meta-nomount" || !mdir.is_dir() || blocklisted.contains(id) {
                 continue;
             }
             let markers: Vec<String> = ["disable", "remove", "skip_mount"]
@@ -1071,7 +1140,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
 
     if let (Ok(raw), Ok(hide)) = (
         std::fs::read_to_string("/data/adb/nomount/blocklist"),
-        crate::blocklist::read(),
+        crate::blocklist::read_for_report(),
     ) {
         let hidden: std::collections::HashSet<String> = hide.into_iter().collect();
         let stale: Vec<String> = raw
@@ -1083,20 +1152,18 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             .map(str::to_string)
             .collect();
         if !stale.is_empty() {
-            let names = if crate::blocklist::redact_hide_list() {
-                "names redacted".to_string()
-            } else {
-                stale.join(", ")
-            };
+            // Never spell the package names here. `check` does not set
+            // NM_REDACT_HIDE_LIST, so this text reaches audit.json and the WebUI's raw
+            // report verbatim, and redactUids is uid-shaped - it cannot catch a package
+            // name. The count is the actionable part; the file is named so you can read
+            // it yourself.
             f.push(Finding {
                 level: Level::Info,
                 check: "stale legacy blocklist entries",
                 detail: format!(
-                    "{} entry/entries in /data/adb/nomount/blocklist are hidden apps ({}). They moved \
-                 to `uidhide` and do nothing here. Remove them if you want that file to mean only \
-                 \"skip this module\".",
-                    stale.len(),
-                    names
+                    "{} entry/entries in /data/adb/nomount/blocklist are hidden apps. They moved \
+                 to `uidhide` and do nothing here; remove them.",
+                    stale.len()
                 ),
             });
         }
@@ -1108,25 +1175,20 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Info,
             check: "manager kernel umount ON",
             detail: match crate::bind::tracked_result() {
-                Ok(v) if v.is_empty() => "your manager's \"Kernel umount\" is ON. Nothing the \
-                     Suite serves on this device is a mount, so it has nothing to unmount. Hide \
-                     per app with `nomount uid block <pkg>`."
+                Ok(v) if v.is_empty() => "\"Kernel umount\" is ON but nothing here is a mount, \
+                     so it has nothing to unmount. Hide per app with `nomount uid block <pkg>`."
                     .to_string(),
                 Ok(v) => {
                     let binds = v.len();
                     format!(
-                        "your manager's \"Kernel umount\" is ON, and this device has {binds} \
-                         bind mount(s) of ours - my_* is served by a real bind unless the \
-                         my_hookless trial is on. The switch does hide those from an app's \
-                         mount table, and it is the only thing that does; it cannot touch the \
-                         injections, which are not mounts."
+                        "\"Kernel umount\" is ON and this device has {binds} bind mount(s) of \
+                         ours. It does hide those from an app's mount table; it cannot touch \
+                         the injections, which are not mounts."
                     )
                 }
                 Err(e) => format!(
-                    "your manager's \"Kernel umount\" is ON. Whether this device carries bind \
-                     mounts of ours could not be read ({} - {e}), so it is unknown whether the \
-                     switch has anything to unmount here. Either way it cannot touch the \
-                     injections, which are not mounts.",
+                    "\"Kernel umount\" is ON; whether we have any bind mounts could not be read \
+                     ({}: {e}). Either way it cannot touch the injections.",
                     crate::bind::BINDS_LIST
                 ),
             },
@@ -1138,25 +1200,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Info,
             check: "manager kernel umount unknown",
             detail: match crate::bind::tracked_result() {
-                Ok(v) if v.is_empty() => "your manager's \"Kernel umount\" could not be read, so \
-                     it is UNKNOWN rather than off. Nothing the Suite serves on this device is a \
-                     mount, so it has nothing to unmount either way."
+                Ok(v) if v.is_empty() => "\"Kernel umount\" could not be read, so it is UNKNOWN \
+                     rather than off. Nothing here is a mount, so it has nothing to unmount \
+                     either way."
                     .to_string(),
                 Ok(v) => {
                     let binds = v.len();
                     format!(
-                        "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN \
-                         rather than off - and this device has {binds} bind mount(s) of ours \
-                         (my_* is served by a real bind unless the my_hookless trial is on). \
-                         That switch is the only thing that hides those from an app's mount \
-                         table, so it is worth checking in your manager."
+                        "\"Kernel umount\" could not be read, so it is UNKNOWN rather than off, \
+                         and this device has {binds} bind mount(s) of ours. It is the only thing \
+                         that hides those from an app's mount table; worth checking."
                     )
                 }
                 Err(e) => format!(
-                    "your manager's \"Kernel umount\" could not be read, so it is UNKNOWN rather \
-                     than off, and neither could this device's bind record ({} - {e}), so \
-                     whether there is anything for it to unmount is unknown too. The injections \
-                     are unaffected either way; they are not mounts.",
+                    "\"Kernel umount\" could not be read, and neither could our bind record ({}: \
+                     {e}). The injections are unaffected either way.",
                     crate::bind::BINDS_LIST
                 ),
             },
@@ -1166,9 +1224,57 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let nm = Nm::new();
     let engine = nm.version().ok();
     let live_ok = engine.is_some();
-    let hidden_apps = match crate::blocklist::read() {
+
+    let follow_ksu = crate::blocklist::follow_ksu_denylist();
+    let ksu_default = crate::ksu::global_umount_default();
+    if follow_ksu && !crate::ksu::available() {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "KernelSU DenyList followed but unreadable",
+            detail: "set to follow KernelSU's DenyList, but no driver answered, so it is \
+                 treated as unread: nothing is hidden or un-hidden by it. `nomount uid ksu off` \
+                 if this kernel has no KernelSU."
+                .to_string(),
+        });
+    } else if follow_ksu && ksu_default == Some(true) {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "KernelSU umount-by-default ON while followed",
+            detail: "following the DenyList while KernelSU's global \"umount modules by \
+                 default\" is ON means hiding from every app without its own profile; your \
+                 modules reach none of them. Turn that switch off, or `nomount uid ksu off`."
+                .to_string(),
+        });
+    } else if !follow_ksu && crate::ksu::available() {
+        let covered = crate::blocklist::installed_packages()
+            .and_then(|i| crate::blocklist::ksu_denylist(&i))
+            .map(|h| h.len());
+        if covered.unwrap_or(0) > 0 || ksu_default == Some(true) {
+            f.push(Finding {
+                level: Level::Info,
+                check: "KernelSU DenyList not followed",
+                detail: format!(
+                    "KernelSU's DenyList covers {} app(s){}; the Suite ignores it, \
+                     injections are not mounts. `nomount uid ksu on` follows it.",
+                    covered
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "an unknown number of".into()),
+                    if ksu_default == Some(true) {
+                        " (global umount-by-default is ON, so every app without its own \
+                         profile)"
+                    } else {
+                        ""
+                    }
+                ),
+            });
+        }
+    }
+
+    let mut hide_list_unreadable = false;
+    let hidden_apps = match crate::blocklist::read_for_report() {
         Ok(v) => v,
         Err(e) => {
+            hide_list_unreadable = true;
             f.push(Finding {
                 level: Level::Unmeasured,
                 check: "hide list not readable",
@@ -1206,15 +1312,35 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             });
         }
         if let Ok(list) = listed {
-            let live = crate::nm::parse_list(&list);
+            let (live, unread) = crate::nm::parse_list_counted(&list);
+            if unread > 0 {
+                // Every check below treats a rule missing from `live` as a rule the engine
+                // no longer holds. A line the parser cannot read looks exactly the same,
+                // so say so rather than letting it read as a rule that went away.
+                f.push(Finding {
+                    level: Level::Unmeasured,
+                    check: "live rules partly unreadable",
+                    detail: format!(
+                        "{unread} line(s) of the engine's listing did not parse, so the \
+                         comparisons below may report rules as missing that are in fact \
+                         held. Usually this means the engine is newer than this suite."
+                    ),
+                });
+            }
             let durable: Option<HashSet<PathBuf>> = crate::whiteout::read()
                 .ok()
                 .map(|v| v.into_iter().map(PathBuf::from).collect());
             let absorbed: Option<HashSet<PathBuf>> =
-                crate::absorb::read_absorbed_targets().ok().map(|mut a| {
-                    a.extend(crate::absorb::absorbed_tmpfs_targets());
-                    a
-                });
+                match (
+                    crate::absorb::read_absorbed_targets(),
+                    crate::absorb::read_absorbed_tmpfs_targets(),
+                ) {
+                    (Ok(mut a), Ok(t)) => {
+                        a.extend(t);
+                        Some(a)
+                    }
+                    _ => None,
+                };
             f.extend(reconcile_plan_and_live(
                 &plan,
                 &live,
@@ -1250,7 +1376,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                                 level: Level::Error,
                                 check: "not FD-allowlisted",
                                 detail: format!(
-                                    "{} lives on /{part} - an overlay APK here aborts forkSystemServer",
+                                    "{} lives on /{part}: an overlay APK here aborts forkSystemServer",
                                     target.display()
                                 ),
                             });
@@ -1294,7 +1420,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         });
     }
 
-    if live_ok && !hidden_apps.is_empty() && pm_rules > 0 && (15..18).contains(&engine_v) {
+    if live_ok && !hidden_apps.is_empty() && pm_rules > 0 && (15..17).contains(&engine_v) {
         f.push(Finding {
             level: Level::Warn,
             check: "engine strips the opt-out from a replaced PM-published file",
@@ -1320,6 +1446,19 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         }
         if let Ok(txt) = &listed {
             let (gpaths, guids) = parse_ghost_tables(txt);
+            if !txt.trim().is_empty() && gpaths.is_empty() && guids.is_empty() {
+                f.push(Finding {
+                    level: Level::Unmeasured,
+                    check: "ghost cloak list could not be parsed",
+                    detail: format!(
+                        "the engine answered `nm l g` with {} byte(s), but no line matched the \
+                         expected `p /abs/path` or `u <uid>` grammar, so the existence cloak was \
+                         not tested. The kernel's ghost_get_rule() has probably changed format. \
+                         This is not a pass.",
+                        txt.trim().len()
+                    ),
+                });
+            }
             if let (Some(&uid), false) = (guids.first(), gpaths.is_empty()) {
                 const SAMPLE: usize = 16;
                 let attempted = gpaths.len().min(SAMPLE);
@@ -1345,7 +1484,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         level: Level::Error,
                         check: "ghost cloak over-reaches",
                         detail: format!(
-                            "{} of {checked} sampled path(s) are still visible to {who} - they \
+                            "{} of {checked} sampled path(s) are still visible to {who}: they \
                  answer \"exists\" and \"does not exist\" at once, which is louder than the leak \
                  this closes. Re-run the mount pass: {}",
                             visible.len(),
@@ -1358,10 +1497,22 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         level: Level::Warn,
                         check: "ghost cloak compiled in but not effective",
                         detail: format!(
-                            "{} of {checked} sampled path(s) hide from `stat` but still leak their label - \
+                            "{} of {checked} sampled path(s) hide from `stat` but still leak their label; \
                  the guards are compiled in and not firing on this kernel: {}",
                             leaked.len(),
                             name(&leaked)
+                        ),
+                    });
+                }
+                if unknown > 0 && !(visible.is_empty() && leaked.is_empty()) {
+                    f.push(Finding {
+                        level: Level::Unmeasured,
+                        check: "ghost cloak only partly sampled",
+                        detail: format!(
+                            "{unknown} of {attempted} sampled path(s) could not be probed at \
+                             all, so the finding(s) above speak for {} path(s), not the whole \
+                             sample",
+                            attempted - unknown
                         ),
                     });
                 }
@@ -1371,7 +1522,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         check: "ghost cloak not verified",
                         detail: format!(
                             "none of the {attempted} sampled path(s) could be probed (the test process \
-             could not run), so the cloak was not tested on this kernel - this is not a pass"
+             could not run), so the cloak was not tested on this kernel. This is not a pass"
                         ),
                     });
                 } else if visible.is_empty() && leaked.is_empty() {
@@ -1384,23 +1535,33 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         },
                         detail: if unknown > 0 {
                             format!(
-                                "{absent} of {attempted} sampled path(s) look exactly like a path that never \
-             existed, to {who} - but {unknown} could not be probed, so this is not a complete answer"
+                                "{absent} of {attempted} sampled path(s) look exactly like paths that never \
+             existed, to {who}, but {unknown} could not be probed: not a complete answer"
                             )
                         } else {
                             format!(
-                                "{absent} of {} hidden path(s) sampled: each looks exactly like a path that never \
-             existed, to {who}. Measured here, not assumed from the build.",
+                                "{absent} of {} sampled hidden path(s) look exactly like paths that never \
+             existed, to {who}. Measured, not assumed.",
                                 gpaths.len()
                             )
                         },
                     });
                 }
             } else {
-                let nothing_hidden = hidden_apps.is_empty();
-                let nothing_injected = !plan.iter().any(|e| e.kind == PlanKind::Inject);
+                let nothing_hidden = hidden_apps.is_empty() && !hide_list_unreadable;
+                // Live rules count, not just the plan: an injection absorbed from another module
+                // or added by hand is served without ever appearing in the plan, and calling that
+                // "nothing to inject" reported N/A on a device that had plenty to cloak.
+                let nothing_injected =
+                    !plan.iter().any(|e| e.kind == PlanKind::Inject) && gpaths.is_empty();
                 f.push(Finding {
-                    level: if nothing_hidden || nothing_injected {
+                    // The level has to follow the same reasoning as the text below it. An
+                    // unreadable hide list used to print "not a pass, and not a nothing-to-test
+                    // either" while being graded NotApplicable - which is not counted as
+                    // unmeasured, so the report still claimed to be complete.
+                    level: if hide_list_unreadable {
+                        Level::Unmeasured
+                    } else if nothing_hidden || nothing_injected {
                         Level::NotApplicable
                     } else {
                         Level::Unmeasured
@@ -1408,12 +1569,16 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     check: "ghost cloak not populated",
                     detail: if nothing_hidden {
                         "nothing is hidden on this device, so the existence cloak has nothing \
-                         to guard - it is only armed for apps on the hide list. Nothing to test."
+                         to guard: it is only armed for apps on the hide list. Nothing to test."
+                            .to_string()
+                    } else if hide_list_unreadable {
+                        "the hide list could not be read, so whether anything should be cloaked \
+                         is unknown: not a pass, and not a \"nothing to test\" either."
                             .to_string()
                     } else {
                         format!(
                             "the engine returned {} hidden path(s) and {} hidden uid(s); both tables must be \
-             non-empty for any guard to fire, so nothing was tested - a kernel built without _ghost \
+             non-empty for any guard to fire, so nothing was tested; a kernel built without _ghost \
              answers exactly the same way",
                             gpaths.len(),
                             guids.len()
@@ -1432,9 +1597,9 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 level: if mode == 0 { Level::Warn } else { Level::Info },
                 check: "isolated-process pools",
                 detail: match mode {
-                    0 => "hiding covers neither isolated pool. A hidden app can read through its own isolated child and see every injection, which is the leak the pools exist to close. `nomount uid isolated both` unless you specifically want the other side of this trade."
+                    0 => "Neither isolated pool is hidden, so a hidden app can read through its own isolated child. `nomount uid isolated both` closes that."
                         .to_string(),
-                    3 => "hiding covers both isolated pools (the default): a hidden app cannot read through its own isolated child, but an unblocked app can tell its own view apart from its isolated child's and prove injection that way. `nomount uid isolated none` takes the other side of the trade."
+                    3 => "Both isolated pools hidden (default). The trade: an unhidden app can tell its own view from its isolated child's. `nomount uid isolated none` takes the other side."
                         .to_string(),
                     m => format!(
                         "hiding covers {} only. Same trade as the default, on one pool.",
@@ -1471,7 +1636,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 Level::Info,
                 "module mount left by design",
                 format!(
-                    "{} <- {} - {id} is a hook framework; absorb leaves it alone",
+                    "{} <- {}: {id} is a hook framework; absorb leaves it alone",
                     s.target.display(),
                     s.source.display()
                 ),
@@ -1519,7 +1684,19 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 Level::Warn,
                 "module mount not absorbed",
                 format!(
-                    "{} <- {} is still a real mount and visible to any app, but its content is already served by live injections, so the mount is redundant - `nomount absorb` just unmounts it. The owning module is bind-mounting content NoMount already injects; dropping that bind from its post-fs-data.sh stops it coming back at boot",
+                    "{} <- {} is still a real mount and visible to any app, but its content is already served by live injections, so the mount is redundant; `nomount absorb` just unmounts it. The owning module is bind-mounting content NoMount already injects; dropping that bind from its post-fs-data.sh stops it coming back at boot",
+                    s.target.display(),
+                    s.source.display()
+                ),
+            ),
+            crate::absorb::Disposition::Absorb if crate::absorb::is_hiding_bind(&s.source) => (
+                Level::Warn,
+                "module mount not absorbed",
+                format!(
+                    "{} <- {} is a directory bind that carries no files, so it is hiding \
+                     what the ROM ships there rather than serving anything. Absorb empties the \
+                     directory mountlessly instead of unmounting it (automatically, on every \
+                     pass), so this is only still here if absorb has not run since the bind was",
                     s.target.display(),
                     s.source.display()
                 ),
@@ -1530,7 +1707,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 format!(
                     "{} <- {} is a directory bind, still a real mount and visible to any \
                      app. A plain `nomount absorb` skips it, because injecting a directory \
-                     snapshots its listing and would miss files the module adds later - \
+                     snapshots its listing and would miss files the module adds later; \
                      `nomount absorb --include-dirs` takes it anyway",
                     s.target.display(),
                     s.source.display()
@@ -1541,7 +1718,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 "module mount not absorbed",
                 format!(
                     "{} <- {} is still a real mount and visible to any app, and nothing \
-                     declined it - run `nomount absorb` (it runs at boot, so this usually \
+                     declined it. Run `nomount absorb` (it runs at boot, so this usually \
                      means it failed)",
                     s.target.display(),
                     s.source.display()
@@ -1551,7 +1728,21 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         f.push(Finding { level, check, detail });
     }
 
-    for e in crate::absorb::survey_elsewhere() {
+    let elsewhere = match crate::absorb::survey_elsewhere_checked() {
+        Some(v) => v,
+        None => {
+            f.push(Finding {
+                level: Level::Unmeasured,
+                check: "foreign mount in another namespace",
+                detail: "our own mount namespace could not be read, so no other process's \
+                         mount table could be compared against it. Whether another namespace \
+                         carries a mount this one cannot see was not established."
+                    .to_string(),
+            });
+            Vec::new()
+        }
+    };
+    for e in elsewhere {
         f.push(Finding {
             level: Level::Warn,
             check: "foreign mount in another namespace",
@@ -1574,7 +1765,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Info,
             check: "whiteout leaves a measurable hole",
             detail: format!(
-                "{module}: {} path(s) the engine cannot fully mask - their folder spans several \
+                "{module}: {} path(s) the engine cannot fully mask: their folder spans several \
                  blocks, so its size still counts the hidden entry. An app that checks the \
                  folder's size can tell something was removed from it. There is nothing to \
                  fix: the module works, and refusing to hide these would break it. {}{}",
@@ -1592,7 +1783,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             check: "wide replacement expansion",
             detail: format!(
                 "{module}: {} expands to {count} hides, one per ROM entry it does not ship. \
-                 Correct, but a lot from one marker - narrow it if it was meant to cover less.",
+                 Correct, but a lot from one marker; narrow it if it was meant to cover less.",
                 marker.display()
             ),
         });
@@ -1617,7 +1808,6 @@ mod tests {
     use super::*;
     use crate::nm::LiveKind;
 
-    /// The three incompatibilities are not equally loud, and the axis is not fixability - none
     #[test]
     fn only_the_silently_broken_kinds_are_loud() {
         assert_eq!(Incompat::RomWrite.level(), Level::Warn);
@@ -1627,7 +1817,6 @@ mod tests {
         assert_eq!(verdict_of(&Level::Warn).severity(), "attention");
     }
 
-    /// The exact line that produced a false "image-backed or chroot module" on a OnePlus
     #[test]
     fn a_capability_probe_is_not_an_image_backed_module() {
         assert_eq!(
@@ -1646,7 +1835,6 @@ mod tests {
         }
     }
 
-    /// The five entry scripts are not where the mounts always are
     #[test]
     fn a_sourced_helper_is_followed() {
         assert_eq!(sourced_scripts(". $MODDIR/sh/compatible.sh"), vec!["sh/compatible.sh"]);
@@ -1659,7 +1847,6 @@ source $MODPATH/a.sh"),
         );
     }
 
-    /// The reference must not be able to walk the scanner out of the module, and must not fire
     #[test]
     fn sourced_scripts_stays_inside_the_module() {
         for quiet in [
@@ -1673,7 +1860,6 @@ source $MODPATH/a.sh"),
         }
     }
 
-    /// A module that bind-mounts its own content over the ROM is the family absorb exists for,
     #[test]
     fn a_module_that_binds_over_the_rom_is_named() {
         for real in [
@@ -1690,7 +1876,6 @@ source $MODPATH/a.sh"),
         }
     }
 
-    /// Re-Malwack binds through a variable, so the mount line alone carries no ROM path
     #[test]
     fn a_bind_through_a_variable_is_resolved() {
         let script = concat!(
@@ -1716,7 +1901,6 @@ source $MODPATH/a.sh"),
         );
     }
 
-    /// Longest-name-first, or `$hosts` eats the front of `$hosts_file`
     #[test]
     fn overlapping_variable_names_expand_longest_first() {
         let vars = rom_path_vars("hosts=/system/etc/hosts
@@ -1728,7 +1912,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// The FD-allowlist tally counts injected files, and says so in its own text
     #[test]
     fn the_fd_allowlist_tally_counts_only_injects() {
         assert!(fd_note_applies(crate::nm::LiveKind::Inject));
@@ -1742,7 +1925,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// A layout-convergence symlink is not shipped content
     #[test]
     fn a_convergence_symlink_is_not_counted_as_shipped_content() {
         use std::os::unix::fs::symlink;
@@ -1766,7 +1948,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// A dangling link is content the module meant to ship, so it still counts --
     #[test]
     fn a_dangling_symlink_still_counts_as_shipped_content() {
         use std::os::unix::fs::symlink;
@@ -1776,7 +1957,6 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(count_files(&d.path().join("product"), 0), 1);
     }
 
-    /// Evidence found in a sourced helper is conditional, and must not be stated as fact
     #[test]
     fn a_hit_inside_a_sourced_helper_is_marked_conditional() {
         for entry in ENTRY_SCRIPTS {
@@ -1794,7 +1974,34 @@ hosts_file=/system/etc/hosts.d/x
         }
     }
 
-    /// The kernel-umount note must depend on whether we actually made binds
+    #[test]
+    fn the_ghost_table_parser_separates_empty_from_unparseable() {
+        let (p, u) = parse_ghost_tables("u 10123
+p /system/app/Foo/Foo.apk
+p /product/x.apk
+");
+        assert_eq!(u, vec![10123]);
+        assert_eq!(p.len(), 2, "both p-lines parse");
+
+        let (p, u) = parse_ghost_tables("");
+        assert!(p.is_empty() && u.is_empty(), "empty input yields empty tables");
+
+        let drift = "path=/system/app/Foo/Foo.apk
+uid=10123
+";
+        let (p, u) = parse_ghost_tables(drift);
+        assert!(
+            p.is_empty() && u.is_empty(),
+            "drifted grammar parses to nothing - the caller cannot tell this from 'no ghosts' \
+             without checking the raw text, and doctor.rs does"
+        );
+        assert!(!drift.trim().is_empty(), "...and the raw text is what distinguishes them");
+
+        let (p, _) = parse_ghost_tables("p not/absolute
+");
+        assert!(p.is_empty(), "only absolute paths are accepted");
+    }
+
     #[test]
     fn the_kernel_umount_note_depends_on_whether_binds_exist() {
         let src = include_str!("doctor.rs");
@@ -1806,8 +2013,14 @@ hosts_file=/system/etc/hosts.d/x
             .expect("finding gone or renamed");
         let end = unknown_at
             + src[unknown_at..]
-                .find("---- live checks")
-                .expect("the live-checks divider moved; re-bound this test");
+                .find("    let nm = Nm::new();")
+                .expect("the statement after the umount findings moved; re-bind this test");
+        assert!(
+            end - unknown_at < 4_000,
+            "the 'unknown' block measured {} bytes - that is the whole function again, not one \
+             finding, so the assertions below prove nothing",
+            end - unknown_at
+        );
         for (what, block) in [("ON", &src[at..unknown_at]), ("unknown", &src[unknown_at..end])] {
             assert!(
                 block.contains("crate::bind::tracked_result()"),
@@ -1828,7 +2041,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// The rule: the Suite warns about what a detector can see, or about the user's own
     #[test]
     fn findings_no_detector_can_see_are_notes() {
         let src = include_str!("doctor.rs");
@@ -1849,7 +2061,6 @@ hosts_file=/system/etc/hosts.d/x
         }
     }
 
-    /// "Delete the marker" is only actionable if the report says when it comes back, and that
     #[test]
     fn when_the_my_hookless_marker_comes_back_depends_on_the_writer() {
         assert!(
@@ -1872,14 +2083,12 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// A module switched ON whose content reaches nothing
     #[test]
     fn a_module_that_ships_content_and_serves_nothing_is_named() {
         assert_eq!(unserved_reason(&["skip_mount".into()], false), Some("skip_mount"));
         assert_eq!(unserved_reason(&[], false), Some("none"));
     }
 
-    /// The user turning a module OFF is not a finding - content not being served is the entire
     #[test]
     fn a_disabled_or_served_module_is_not_a_finding() {
         assert_eq!(unserved_reason(&["disable".into()], false), None);
@@ -1889,7 +2098,6 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(unserved_reason(&["skip_mount".into(), "remove".into()], false), None);
     }
 
-    /// The `my_*` partitions, which this whole chain could not see
     #[test]
     fn my_partitions_are_not_invisible() {
         assert_eq!(
@@ -1915,7 +2123,6 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(vars.get("boot_dir").map(String::as_str), Some("/my_product/media/bootanimation"));
     }
 
-    /// Widening the list must not make `/system_ext/` match `system`, or a partition name
     #[test]
     fn a_wider_partition_list_does_not_over_match() {
         for quiet in [
@@ -1932,7 +2139,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// Every way this arm could over-count, on the same evidence the arms above were narrowed
     #[test]
     fn self_mount_does_not_over_count() {
         for quiet in [
@@ -1949,11 +2155,41 @@ hosts_file=/system/etc/hosts.d/x
         }
     }
 
-    /// ORDER: an nsenter-replicated bind stays ImageBacked
+    #[test]
+    fn the_incompat_scanner_sees_what_it_missed_and_stops_accusing_what_it_should_not() {
+        let real = "umount /system/etc/hosts 2>/dev/null; mount --bind $MODDIR/hosts /system/etc/hosts";
+        assert_eq!(classify_incompat_line(real), Some(Incompat::SelfMount), "missed: {real}");
+        for real in [
+            "mkdir -p /system/etc/foo",
+            "echo 1 > /system/etc/foo",
+            "printf 'x' >> /system/build.prop",
+            "sed -i s/a/b/ /system/build.prop",
+            "install -m 644 $MODDIR/x /system/etc/x",
+            "mount -o remount,rw /system/",
+        ] {
+            assert_eq!(classify_incompat_line(real), Some(Incompat::RomWrite), "missed: {real}");
+        }
+
+        for quiet in [
+            r#"cp "$MODDIR/foo" "$TMPDIR/foo"   # replaces /system/etc/foo"#,
+            r#"ui_print "nsenter is not available""#,
+            r#"echo "run losetup first""#,
+        ] {
+            assert_eq!(classify_incompat_line(quiet), None, "over-counted: {quiet}");
+        }
+
+        for real in [
+            "/system/bin/nsenter --mount=/proc/1/ns/mnt sh",
+            "LOOP=\"$(/system/bin/losetup -sf \"$F\")\"",
+        ] {
+            assert_eq!(classify_incompat_line(real), Some(Incompat::ImageBacked), "missed: {real}");
+        }
+    }
+
     #[test]
     fn an_nsenter_replicated_bind_stays_image_backed() {
         assert_eq!(
-            classify_incompat_line("nsenter -t 1 -m - mount --bind $MODDIR/etc /system/etc"),
+            classify_incompat_line("nsenter -t 1 -m -- mount --bind $MODDIR/etc /system/etc"),
             Some(Incompat::ImageBacked)
         );
         assert_eq!(
@@ -1964,7 +2200,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// The two genuine reports from that same device must still fire - the fix must not buy
     #[test]
     fn real_image_backed_modules_are_still_named() {
         assert_eq!(
@@ -1980,7 +2215,6 @@ hosts_file=/system/etc/hosts.d/x
         }
     }
 
-    /// Probe and use on one line is still a use - the probe expression is removed, the line is
     #[test]
     fn probing_then_using_on_one_line_still_counts() {
         assert_eq!(
@@ -1989,7 +2223,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// Every `explain()` arm is one line, because check.rs renders it as one (`
     #[test]
     fn no_explanation_carries_a_raw_newline() {
         for k in [
@@ -2008,7 +2241,6 @@ hosts_file=/system/etc/hosts.d/x
         }
     }
 
-    /// Deleting ROM content is the loudest thing the RomWrite arm reports, and the commonest
     #[test]
     fn rm_is_seen_at_the_start_of_a_line_and_after_a_word() {
         assert_eq!(
@@ -2025,7 +2257,6 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(classify_incompat_line("rm -rf /data/adb/foo"), None);
     }
 
-    /// The two precision fixes this chain already carried, pinned now that they are reachable:
     #[test]
     fn the_older_precision_fixes_still_hold() {
         assert_eq!(classify_incompat_line("set_perm /system/bin/foo 0 0 0755"), None);
@@ -2039,7 +2270,6 @@ hosts_file=/system/etc/hosts.d/x
         );
     }
 
-    /// A BACKUP out of the ROM is a read, whatever it copies into
     #[test]
     fn copying_out_of_the_rom_is_not_a_rom_write() {
         assert_eq!(
@@ -2068,7 +2298,6 @@ hosts_file=/system/etc/hosts.d/x
         }
     }
 
-    /// Whiteouts are grouped by the marker that produced them, so one `.replace` reads as one
     #[test]
     fn expansions_are_grouped_by_their_marker() {
         let mut plan = vec![
@@ -2100,7 +2329,6 @@ hosts_file=/system/etc/hosts.d/x
         }
     }
 
-    /// The gap this check closes
     #[test]
     fn a_plan_and_a_rule_set_that_disagree_are_a_finding() {
         let plan = vec![
@@ -2120,7 +2348,6 @@ hosts_file=/system/etc/hosts.d/x
         assert!(!checks.contains(&"live rule disagrees with the plan"), "{checks:?}");
     }
 
-    /// The three exemptions reload's prune pass makes, made here too
     #[test]
     fn durable_absorbed_and_per_uid_rules_are_not_unexplained() {
         let plan = vec![inj("m", "/system/etc/a", "/data/adb/modules/m/system/etc/a")];
@@ -2139,7 +2366,6 @@ hosts_file=/system/etc/hosts.d/x
         assert!(f.is_empty(), "{:?}", f.iter().map(|x| x.detail.as_str()).collect::<Vec<_>>());
     }
 
-    /// A source that moved between modules is the dangerous shape: the rule count still
     #[test]
     fn a_live_rule_naming_another_source_is_an_error() {
         let plan = vec![inj("winner", "/system/etc/a", "/data/adb/modules/winner/system/etc/a")];
@@ -2152,19 +2378,22 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(f[0].level, Level::Error);
     }
 
-    /// An unreadable exemption list must not turn every whiteout on the device into an
     #[test]
-    fn an_unreadable_exemption_list_reports_nothing_extra() {
+    fn an_unreadable_exemption_list_is_unmeasured_not_clean() {
         let plan: Vec<PlanEntry> = Vec::new();
         let live = crate::nm::parse_list("/system/etc/hidden (whiteout)
 ");
         let f = reconcile_plan_and_live(&plan, &live, None, None);
-        assert_eq!(f.len(), 1);
+        assert_eq!(f.len(), 1, "no extra-rule accusation may be made: {:?}", f[0].detail);
         assert_eq!(f[0].check, "live rules not fully accounted for");
-        assert_eq!(f[0].level, Level::Info);
+        assert_eq!(f[0].level, Level::Unmeasured);
+        assert_eq!(
+            verdict_of(&f[0].level),
+            Verdict::Unmeasured,
+            "and it must reach the report as Unmeasured, so `complete()` goes false"
+        );
     }
 
-    /// A report, never a cap and never an alarm: nothing is ever withheld, and no count makes
     #[test]
     fn expansion_levels_escalate_but_never_refuse() {
         assert_eq!(expansion_level(1), None);
@@ -2176,7 +2405,6 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(expansion_level(20_000), Some(Level::Info), "no count is an alarm");
     }
 
-    /// A shipped image is reported module-relative, as its doc promises
     #[test]
     fn a_shipped_image_is_named_relative_to_its_module() {
         let base = std::env::temp_dir().join("nm-doctor-img-test");
@@ -2190,7 +2418,6 @@ hosts_file=/system/etc/hosts.d/x
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// No two checks in one report may share an id
     #[test]
     fn plan_findings_never_share_an_id() {
         let f = vec![
@@ -2249,7 +2476,6 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(checks[1].name, "module mount left by design");
     }
 
-    /// The subject is the first token, which is where every repeatable plan finding puts the
     #[test]
     fn a_findings_subject_is_the_head_of_its_detail() {
         let f = |d: &str| Finding { level: Level::Info, check: "c", detail: d.to_string() };
@@ -2264,7 +2490,6 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(subject_of(&f("")), None);
     }
 
-    /// The ghost-cloak probe is the third reader of the hide list in a report that `nomount
     #[test]
     fn redaction_covers_the_doctor_readers() {
         assert_eq!(hidden_uid_label(10422, false), "hidden uid 10422");
@@ -2287,7 +2512,6 @@ hosts_file=/system/etc/hosts.d/x
         assert_eq!(partition_of(Path::new("/")), None);
     }
 
-    /// Kept after the local copy was deleted, because it is this file's callers that depend on
     #[test]
     fn is_partition_root_only_for_bare_roots() {
         assert!(is_partition_root(Path::new("/product")));
@@ -2297,7 +2521,6 @@ hosts_file=/system/etc/hosts.d/x
         assert!(!is_partition_root(Path::new("/product/overlay/x.apk")));
     }
 
-    /// The parser itself, and its suffix-peeling, now live with the client that produces the
     #[test]
     fn parse_live_still_yields_the_rows_the_checks_read() {
         let v = crate::nm::parse_list(

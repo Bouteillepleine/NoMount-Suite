@@ -1,4 +1,3 @@
-//! Persistent whiteouts - hide stock ROM files that are themselves the tell
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,12 +8,10 @@ use crate::nm::Nm;
 
 pub const WHITEOUT_PATH: &str = "/data/adb/nomount/whiteouts.txt";
 
-/// Statfs magic of the directory holding `target`
 fn parent_fs_magic(target: &Path) -> Option<i64> {
     crate::dirshape::fs_magic(target.parent().unwrap_or(Path::new("/")))
 }
 
-/// Does hiding `target` leave evidence in its PARENT's metadata?
 pub(crate) fn measurable_hole(target: &Path) -> bool {
     if parent_fs_magic(target) != Some(crate::dirshape::EROFS_MAGIC) {
         return false;
@@ -27,13 +24,11 @@ pub(crate) fn measurable_hole(target: &Path) -> bool {
     engine_predates_v13()
 }
 
-/// Cached: `measurable_hole` runs once per whiteout, and every call used to fork `nm v`
 fn engine_predates_v13() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| crate::nm::Nm::new().version().map(|v| v < 13).unwrap_or(true))
 }
 
-/// How a filename is matched
 enum Match {
     Exact(&'static str),
     Prefix(&'static str),
@@ -50,7 +45,6 @@ impl Match {
     }
 }
 
-/// What the scan looks for, and why each one is a tell
 const PATTERNS: &[(Match, &str)] = &[
     (Match::Prefix("install-recovery"), "recovery-restore script; a classic root-check target"),
     (Match::Exact("daemonsu"), "SuperSU daemon binary"),
@@ -67,7 +61,6 @@ const PATTERNS: &[(Match, &str)] = &[
     (Match::Suffix("SuperSUDaemon"), "SuperSU init.d hook"),
 ];
 
-/// Directories the scan reads
 const SCAN_DIRS: &[&str] = &[
     "/system/bin", "/system/xbin", "/system/sbin", "/system/etc", "/system/etc/init",
     "/system/etc/init.d", "/system/addon.d", "/system/framework", "/system/lib",
@@ -75,12 +68,10 @@ const SCAN_DIRS: &[&str] = &[
     "/product/etc/init", "/system_ext/bin", "/system_ext/etc/init",
 ];
 
-/// A path that stats but cannot be opened is not a real file - it is fabricated at the
 fn is_real_file(p: &Path) -> bool {
     p.is_file() && fs::File::open(p).is_ok()
 }
 
-/// Read the persisted list: trimmed, comment- and blank-stripped, deduplicated
 pub fn read() -> Result<Vec<String>> {
     let raw = match fs::read_to_string(WHITEOUT_PATH) {
         Ok(s) => s,
@@ -90,7 +81,6 @@ pub fn read() -> Result<Vec<String>> {
     Ok(parse(&raw))
 }
 
-/// Mirror the engine's `nm_norm_vpath`: collapse runs of `/`, drop a trailing one
 fn norm(p: &str) -> String {
     let mut out = String::with_capacity(p.len());
     for c in p.chars() {
@@ -105,7 +95,6 @@ fn norm(p: &str) -> String {
     out
 }
 
-/// Pure: trimmed, normalised, comment/blank-stripped, order-preserving, deduplicated
 fn parse(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -130,7 +119,6 @@ fn write(entries: &[String]) -> Result<()> {
     crate::statefile::write_atomic(WHITEOUT_PATH, body).context("write whiteouts.txt")
 }
 
-/// A path is only worth whiting out if it is absolute, currently exists, and is not a
 pub(crate) fn validate(p: &str) -> Result<()> {
     let path = Path::new(p);
     if !path.is_absolute() {
@@ -148,7 +136,6 @@ pub(crate) fn validate(p: &str) -> Result<()> {
     Ok(())
 }
 
-/// The gate applied to the resolved path, kept pure so it can be tested without a ROM to
 fn resolved_is_allowed(literal: &Path, resolved: &Path) -> std::result::Result<(), String> {
     if resolved == literal {
         return Ok(());
@@ -198,13 +185,23 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     }
 }
 
-/// Take the pass lock and remove
 pub fn remove(target: &str) -> Result<()> {
     let _pass = crate::mount::pass_lock();
     remove_locked(target)
 }
 
-/// `remove`, for a caller that already holds `mount::pass_lock()`
+pub(crate) fn forget_locked(target: &str) -> Result<bool> {
+    let t = norm(target.trim());
+    let mut list = read()?;
+    let before = list.len();
+    list.retain(|x| *x != t);
+    if list.len() == before {
+        return Ok(false);
+    }
+    write(&list)?;
+    Ok(true)
+}
+
 pub(crate) fn remove_locked(target: &str) -> Result<()> {
     let normalised = norm(target.trim());
     let t = normalised.as_str();
@@ -228,14 +225,12 @@ pub(crate) fn remove_locked(target: &str) -> Result<()> {
     }
 }
 
-/// The engine's live rule set, or an error saying we could not read it
 fn live_rules() -> Result<Vec<crate::nm::LiveRule>> {
     Ok(crate::nm::parse_list(&Nm::new().list().context(
         "cannot read the engine's rule set, so nothing can be said about which entries are applied",
     )?))
 }
 
-/// Targets the engine is currently whiting out, from `nm list`
 fn live_whiteouts() -> Result<std::collections::HashSet<String>> {
     Ok(live_rules()?
         .into_iter()
@@ -250,28 +245,74 @@ pub fn list() -> Result<()> {
         println!("no whiteouts configured");
         return Ok(());
     }
-    let live = live_whiteouts()?;
+    // The durable half is readable without the engine, and a kernel with no
+    // CONFIG_NOMOUNT is exactly when someone needs to see - and clear - this list.
+    let (live, engine_up) = match live_whiteouts() {
+        Ok(l) => (l, true),
+        Err(_) => (Default::default(), false),
+    };
     for e in &entries {
         let applied = live.contains(e);
         let present = Path::new(e).exists();
-        let state = match (applied, present) {
-            (true, false) => "hidden",
-            (true, true) => "applied, but still visible - the engine is not serving it",
-            (false, false) => "not applied (and no such path on this ROM)",
-            (false, true) => "not applied - run `nomount whiteout apply`",
+        let state = if !engine_up {
+            "not applied - the engine did not answer"
+        } else {
+            match (applied, present) {
+                (true, false) => "hidden",
+                (true, true) => "applied, but still visible - the engine is not serving it",
+                (false, false) => "not applied (and no such path on this ROM)",
+                (false, true) => "not applied - run `nomount whiteout apply`",
+            }
         };
         println!("{e}\t{state}");
     }
     Ok(())
 }
 
-/// Re-apply the whole list
+fn served_targets(list: &str, binds: &[(PathBuf, PathBuf)]) -> std::collections::HashSet<PathBuf> {
+    crate::nm::parse_list(list)
+        .into_iter()
+        .filter(|r| r.kind == crate::nm::LiveKind::Inject && r.uid == 0)
+        .map(|r| r.target)
+        .chain(binds.iter().map(|(t, _)| t.clone()))
+        .collect()
+}
+
 pub fn apply() -> Result<()> {
+    let _pass = crate::mount::pass_lock();
     let nm = Nm::new();
-    let (mut ok, mut failed) = (0u32, 0u32);
-    for e in read()? {
+    let entries = read()?;
+    if entries.is_empty() {
+        println!("nomount whiteout: applied 0, failed 0");
+        return Ok(());
+    }
+    let binds = crate::bind::tracked_result().context(
+        "cannot read binds.list - refusing to hide, because a my_* bind the Suite serves would \
+         be unmounted and hidden instead of left to the module",
+    )?;
+    let served = served_targets(
+        &nm.list().context(
+            "cannot read the engine's rule set - refusing to hide, because a path a module \
+             injects would be replaced by its whiteout",
+        )?,
+        &binds,
+    );
+    let mounted = crate::absorb::mounted_targets().context(
+        "cannot read /proc/self/mountinfo - refusing to hide, because assuming \"nothing is \
+         mounted\" hides live mounts and strands each one in mountinfo until reboot",
+    )?;
+    let (mut ok, mut failed, mut yielded) = (0u32, 0u32, 0u32);
+    for e in entries {
         if validate(&e).is_err() {
             eprintln!("nomount: skipping invalid whiteout entry {e:?}");
+            failed += 1;
+            continue;
+        }
+        if served.contains(Path::new(&e)) {
+            yielded += 1;
+            continue;
+        }
+        if !crate::mount::unmount_before_serving(&mounted, Path::new(&e)) {
             failed += 1;
             continue;
         }
@@ -283,17 +324,26 @@ pub fn apply() -> Result<()> {
         }
         match nm.whiteout(Path::new(&e)) {
             Ok(()) => ok += 1,
-            Err(_) => failed += 1,
+            Err(err) => {
+                failed += 1;
+                eprintln!("nomount: whiteout refused for {e}: {err:#}");
+            }
         }
     }
-    println!("nomount whiteout: applied {ok}, failed {failed}");
+    if yielded > 0 {
+        println!(
+            "nomount whiteout: applied {ok}, failed {failed}, {yielded} left to the module \
+             serving the same path"
+        );
+    } else {
+        println!("nomount whiteout: applied {ok}, failed {failed}");
+    }
     if failed > 0 {
         anyhow::bail!("{failed} of {} whiteout(s) could not be applied (applied {ok})", ok + failed);
     }
     Ok(())
 }
 
-/// Targets NoMount is currently serving
 fn injected_targets() -> Result<std::collections::HashSet<String>> {
     Ok(live_rules()?
         .into_iter()
@@ -302,31 +352,35 @@ fn injected_targets() -> Result<std::collections::HashSet<String>> {
         .collect())
 }
 
-/// Can an ordinary, non-root-granted app see this path at all?
-fn app_can_see_raw(path: &str) -> bool {
+/// `None` means the probe could not be run at all, which is NOT the same as the app
+/// being unable to see the path. Folding the two together made the visibility filter
+/// suppress nothing while reporting nothing, on the one device where it mattered.
+fn app_can_see_probe(path: &str) -> Option<bool> {
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
-    std::process::Command::new("su")
+    // absolute, like manager.rs and absorb.rs: this runs as root, so resolving `su`
+    // through the inherited PATH is the wrong habit even where PATH is not writable
+    let out = std::process::Command::new("/system/bin/su")
         .args(["9999", "-c", &format!("ls -d {quoted}")])
         .output()
-        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(true)
+        .ok()?;
+    Some(out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
 }
 
-/// Does the visibility probe work at all on this device?
+fn app_can_see_raw(path: &str) -> bool {
+    app_can_see_probe(path).unwrap_or(true)
+}
+
 fn probe_works() -> bool {
     static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *P.get_or_init(|| app_can_see_raw("/system/bin/sh"))
+    *P.get_or_init(|| app_can_see_probe("/system/bin/sh").unwrap_or(false))
 }
 
-/// One thing the scan found worth hiding
 pub struct Candidate {
     pub path: String,
     pub why: &'static str,
-    /// Hiding it still leaves the parent's size and link count counting it
     pub hole: bool,
 }
 
-/// Walk the ROM for files that only a root setup leaves behind
 pub fn scan() -> Result<(Vec<Candidate>, usize, usize)> {
     let have = read().unwrap_or_default();
     let injected = injected_targets()?;
@@ -373,7 +427,6 @@ pub fn scan() -> Result<(Vec<Candidate>, usize, usize)> {
     Ok((out, invisible, ours))
 }
 
-/// `nomount whiteout suggest` - scan this device and propose what it finds
 pub fn suggest() -> Result<()> {
     let (found, invisible, ours) = scan()?;
     for c in &found {
@@ -411,12 +464,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn apply_leaves_a_path_to_the_injection_or_bind_serving_it() {
+        let list = "/product/overlay/Foo.apk -> /data/adb/modules/m/product/overlay/Foo.apk (public)\n\
+                    /system/etc/gone (whiteout)\n\
+                    /system/etc/x -> /data/adb/modules/m/system/etc/x [UID: 10123]\n\
+                    /system/etc/vd (virtual dir)\n";
+        let binds = vec![(
+            PathBuf::from("/my_product/app/Foo/Foo.apk"),
+            PathBuf::from("/data/adb/modules/m/my_product/app/Foo/Foo.apk"),
+        )];
+        let served = served_targets(list, &binds);
+        assert!(served.contains(Path::new("/product/overlay/Foo.apk")), "inject wins, as in mount and reload");
+        assert!(served.contains(Path::new("/my_product/app/Foo/Foo.apk")), "a my_* bind wins too");
+        assert!(!served.contains(Path::new("/system/etc/gone")), "a live whiteout is not a server");
+        assert!(!served.contains(Path::new("/system/etc/x")), "a per-uid rule does not collide with a uid-0 hide");
+        assert!(!served.contains(Path::new("/system/etc/vd")));
+    }
+
+    #[test]
     fn parse_strips_comments_blanks_and_dedups() {
         let raw = "# hdr\n\n/system/bin/x\n  /system/bin/y  \n/system/bin/x\n";
         assert_eq!(parse(raw), vec!["/system/bin/x".to_string(), "/system/bin/y".to_string()]);
     }
 
-    /// The false positive that made a substring sweep useless: "ksu" is inside `cksum`, and
     #[test]
     fn patterns_are_anchored_and_miss_stock_binaries() {
         for stock in ["cksum", "debuggerd", "sh", "linker64", "app_process64", "toybox"] {
@@ -442,7 +512,6 @@ mod tests {
         assert!(validate("/system/bin/install-recovery.sh").is_ok());
     }
 
-    /// The durable list may not name a path the module plan would refuse
     #[test]
     fn refuses_every_root_the_module_plan_refuses() {
         for p in [
@@ -473,7 +542,6 @@ mod tests {
         }
     }
 
-    /// `..` must not be a way around the partition-root refusal
     #[test]
     fn a_symlink_that_resolves_to_a_partition_root_is_refused() {
         for (lit, real) in [
@@ -513,7 +581,6 @@ mod tests {
         assert!(validate("/system/bin/install-recovery.sh").is_ok());
     }
 
-    /// A whiteout target is the second door into the rule table, and it did not ask the
     #[test]
     fn a_whiteout_target_the_wire_format_cannot_carry_is_refused() {
         for bad in [
@@ -536,7 +603,6 @@ mod tests {
         assert!(validate("/system/etc/A [UID] B").is_ok());
     }
 
-    /// The engine normalises the vpath and `nm list` prints the normalised spelling, so the
     #[test]
     fn norm_mirrors_the_engines_vpath_normalisation() {
         assert_eq!(norm("/product/app/AIMemory/"), "/product/app/AIMemory");
@@ -548,7 +614,6 @@ mod tests {
         assert_eq!(norm("/product/app/Foo (2)/x.apk"), "/product/app/Foo (2)/x.apk");
     }
 
-    /// ...and the durable file is healed on read, so an entry an older Suite already wrote
     #[test]
     fn parse_normalises_and_collapses_the_two_spellings() {
         let raw = "/product/app/Foo/\n/product/app/Foo\n/system//bin//x\n";

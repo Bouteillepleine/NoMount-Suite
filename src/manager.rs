@@ -1,11 +1,8 @@
-//! What the root manager is configured to do about module mounts
 
-/// Is there a KernelSU-family manager here at all?
 pub fn ksu_manager_present() -> bool {
     std::path::Path::new("/data/adb/ksu").is_dir()
 }
 
-/// `ksud feature get kernel_umount` -> Some(true) when enabled
 pub fn kernel_umount_enabled() -> Option<bool> {
     let out = std::process::Command::new("/data/adb/ksu/bin/ksud")
         .args(["feature", "get", "kernel_umount"])

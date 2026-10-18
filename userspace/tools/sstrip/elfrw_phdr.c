@@ -8,10 +8,6 @@
 #include <elf.h>
 #include "elfrw_int.h"
 
-/*
- * Reading and writing program header table entries.
- */
-
 int elfrw_read_Phdr(FILE *fp, Elf64_Phdr *in)
 {
     int r;

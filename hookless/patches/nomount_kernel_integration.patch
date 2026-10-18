@@ -35,8 +35,16 @@ A hunk with no trailing context is not an option anywhere here: `git apply`
 reads one as "this hunk ends at EOF" and refuses to match it mid-file.
 
 Apply with `patch -p1` from the kernel tree root, then drop fs/nomount.c and
-fs/nomount.h in beside it. The compile matrix asserts per version that all
-three hunks landed and that the task_mmu.c one is inside show_map_vma().
+fs/nomount.h in beside it.
+
+This patch IS checked. .github/workflows/hookless-compile-matrix.yml applies it
+with `patch -p1 --fuzz=3` on all ten kernels and FATALs if any of the four hunks
+fails to land: the fs/Makefile obj line, the fs/Kconfig stanza, the
+vfs_map_meta_override() call, which it asserts sits inside show_map_vma() rather
+than merely somewhere in task_mmu.c, and the nm_inode_hidden_from_caller() call,
+asserted the same way against vfs_getxattr(). That last assertion is the one that caught
+five patches carrying malformed hunk headers after months of green. No hand check
+is needed after applying; read the matrix run instead.
 
 diff --git a/fs/Kconfig b/fs/Kconfig
 --- a/fs/Kconfig
@@ -79,3 +87,20 @@ diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
 +#endif
  		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
  	}
+
+diff --git a/fs/xattr.c b/fs/xattr.c
+--- a/fs/xattr.c
++++ b/fs/xattr.c
+@@ -439,6 +439,12 @@
+ 	if (error)
+ 		return error;
+ 
++#ifdef CONFIG_NOMOUNT
++	{ extern bool nm_inode_hidden_from_caller(const struct inode *);
++	  if (nm_inode_hidden_from_caller(inode))
++		  return -ENOENT; }
++#endif
++
+ 	if (!strncmp(name, XATTR_SECURITY_PREFIX,
+ 				XATTR_SECURITY_PREFIX_LEN)) {
+ 		const char *suffix = name + XATTR_SECURITY_PREFIX_LEN;

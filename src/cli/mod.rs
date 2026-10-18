@@ -6,7 +6,16 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "nomount",
     version = env!("CARGO_PKG_VERSION"),
-    about = "NoMount Suite metamodule + CLI for the Prism VFS engine (nm netlink)"
+    about = "NoMount Suite metamodule + CLI for the Prism VFS engine (nm netlink)",
+    after_help = "\
+Start here:
+  nomount check              is anything wrong, and is what I serve detectable?
+  nomount reload             pick up a module you just installed, without rebooting
+  nomount uid block <pkg>    hide everything the Suite serves from one app
+  nomount uid ksu on         hide from whoever KernelSU's DenyList covers
+
+The boot scripts run `mount`, `absorb`, `reload` and `ghost sync` themselves;
+you rarely need those by hand."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -15,117 +24,234 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// The boot pass: classify enabled modules and route them into Prism injections
     Mount,
+    /// Live engine rules - add, remove or inspect one injection at a time
     Vfs {
         #[command(subcommand)]
         action: VfsAction,
     },
+    /// The per-app hide list: who cannot see what the Suite serves
     Uid {
         #[command(subcommand)]
         action: UidAction,
     },
+    /// Take over bind mounts other modules made: re-serve each as an injection, then unmount it
+    #[command(after_help = "Runs itself every boot. `--dry-run` first if you want to see the plan.")]
     Absorb {
-        /// Report what would be absorbed without changing anything
+        /// Show what would be absorbed, dropped or left alone; change nothing
         #[arg(long)]
         dry_run: bool,
-        /// Also absorb directory binds
+        /// Also absorb whole-directory binds, not just file binds
         #[arg(long)]
         include_dirs: bool,
-        /// Pre-zygote pass
+        /// The pre-zygote pass: may take my_* mounts, which the runtime pass refuses
         #[arg(long)]
         early: bool,
     },
+    /// The durable hide-a-path list, re-applied on every boot
     Whiteout {
         #[command(subcommand)]
         action: WhiteoutAction,
     },
+    /// THE diagnostic: is anything wrong, and is what the Suite serves detectable?
+    #[command(after_help = "\
+Verdicts: FAIL, REBOOT, UNMEASURED, WARN, PASS, N/A, NOTE. \"nothing to test\" and
+\"something stopped me testing\" are deliberately different, and neither is a pass.
+Exits 1 on a FAIL.
+
+  nomount check              both sections
+  nomount check --device     only what can be measured on this device
+  nomount check --json       machine-readable, for a script or a bug report")]
     Check {
-        /// Only the static half: does the module set resolve into a bad rule?
+        /// Static only: does the module set resolve into a bad rule?
         #[arg(long)]
         plan: bool,
-        /// Only the measured half: is what we serve detectable on this device, and is it being
+        /// Measured only: is what we serve detectable, and is it actually being served?
         #[arg(long)]
         device: bool,
-        /// Emit one JSON object instead of prose
+        /// Emit the report as JSON on stdout
         #[arg(long)]
         json: bool,
-        /// Also cache to /data/adb/nomount/audit.json, and (unless --plan) write the fingerprint
+        /// Also write the report to /data/adb/nomount for the WebUI to read
         #[arg(long)]
         write: bool,
     },
+    /// Print what the mount pass would resolve to, without applying it
     Plan,
+    /// Reconcile live rules to the current module set, delta only - use after installing a module
     Reload,
+    /// Freeze the current fingerprint as the baseline `verify` compares against
     Snapshot,
+    /// Diff live against the snapshot baseline and name what drifted
     Verify,
+    /// Dump diagnostics to a folder for a bug report
+    #[command(after_help = "\
+On shared storage (/sdcard) and under /data/local/tmp everything naming the apps you
+hide is withheld - the hide-list files, spoof.conf, boot.log, and dmesg-nomount.txt is
+replaced by a stub - and the bundle says so. Under /data/local/tmp the bundle belongs to
+shell (uid 2000, folder 0700, files 0600), so adb pull works and apps cannot read it.
+Export to a private path (e.g. /data/adb/nomount/report) to include them; that bundle is
+root-only.")]
     Export {
+        /// Where to write the bundle (default: a timestamped folder in /sdcard/Download)
         dir: Option<String>,
     },
+    /// The existence cloak: make injected-only paths look absent, not merely unreadable
     Ghost {
         #[command(subcommand)]
         action: GhostAction,
     },
+    /// The maps cloak: keep the root stack's own libraries out of app mapping lists
+    Pathhide {
+        #[command(subcommand)]
+        action: PathhideAction,
+    },
+    /// Unmount the real binds recorded in binds.list (the my_* ones)
+    Unbind,
+    /// Print the version
     Version,
 }
 
 #[derive(Subcommand)]
 pub enum GhostAction {
+    /// Work out which injected-only paths can be made to look absent, and program them
     Sync,
+    /// Show what the cloak currently covers
+    List,
+}
+
+#[derive(Subcommand)]
+pub enum PathhideAction {
+    /// Program the rule set that keeps the root stack out of app mapping lists
+    Sync,
+    /// Show what the maps cloak currently covers
     List,
 }
 
 #[derive(Subcommand)]
 pub enum VfsAction {
-    Add { virtual_path: String, real_path: String },
-    Del { virtual_path: String },
-    Whiteout { path: String },
+    /// Serve the contents of <REAL_PATH> at <VIRTUAL_PATH>
+    Add {
+        /// The ROM path an app will read
+        virtual_path: String,
+        /// The file that actually gets served, normally under /data/adb
+        real_path: String,
+    },
+    /// Remove one live rule
+    Del {
+        /// The ROM path whose rule to drop
+        virtual_path: String,
+    },
+    /// Make a path appear absent - this rule only, not the durable list
+    Whiteout {
+        /// The ROM path to hide
+        path: String,
+    },
+    /// Flush every live rule (the boot pass puts them back on the next reboot)
+    #[command(after_help = "\
+Nothing is served afterwards until the rules come back. `nomount mount` rebuilds them from
+the installed modules without a reboot; a reboot does the same. Your hide list and settings
+are untouched; the durable whiteout list is kept on disk but stops being applied until the
+next `nomount mount`, so every path it hides is readable again until then.")]
     Clear,
+    /// Show live rules
     List,
 }
 
 #[derive(Subcommand)]
 pub enum UidAction {
+    /// Hide everything the Suite serves from an app
+    #[command(alias = "hide", after_help = "\
+Matches on appid, so one entry covers the app in every user profile, its clones
+and its sandbox.
+
+  nomount uid block com.example.app
+  nomount uid block 'com.example.*'      a glob; refused if it is dangerously broad")]
     Block {
+        /// A package name, a numeric uid, or a glob over package names
         target: String,
-        /// Allow a platform appid (< 10000: root, system_server, shell ...)
+        /// Override the two refusals: a glob that matches far more packages than expected,
+        /// and a target below the app range (1000 system_server, 2000 shell, 0 root)
         #[arg(long)]
         force: bool,
     },
-    Unblock { target: String },
+    /// Stop hiding from an app
+    #[command(alias = "unhide")]
+    Unblock {
+        /// A package name or numeric uid
+        target: String,
+    },
+    /// Who is hidden
     List,
+    /// Re-apply the hide list (run automatically when a package is installed or removed)
     Apply {
-        /// Early-boot pass: resolve from the cached appid mirror first, so it works at
+        /// The pre-zygote pass
         #[arg(long)]
         early: bool,
     },
+    /// Add a curated set of known detectors to the hide list
     Preset {
+        /// Which preset; omit to list what is available
         name: Option<String>,
-        /// Print what would be added without touching the list
+        /// Show what the preset would add, and change nothing
         #[arg(long)]
         dry_run: bool,
-        /// Only the glob rules, not the exact package names
+        /// Add ONLY the preset's glob patterns. Without this both the globs and the
+        /// exact package names are added.
         #[arg(long)]
         globs: bool,
     },
+    /// Follow KernelSU's DenyList (App Profile "Umount modules") as a hide-list source
+    #[command(alias = "denylist", after_help = "\
+The Suite has no mounts to unmount, so it cannot inherit KernelSU's DenyList the way
+a magic-mount or overlay metamodule does. Turning this on makes it ask the kernel per
+app instead (`UID_SHOULD_UMOUNT`), and hide its injections from whoever the DenyList
+covers - the global default, per-app profiles and root grants all included.
+
+The hide list keeps working alongside it; this is an extra source, not a replacement.
+
+  nomount uid ksu          what the DenyList covers right now
+  nomount uid ksu on       follow it
+  nomount uid ksu off      stop following it")]
+    Ksu {
+        /// on | off; omit to show what the DenyList covers
+        state: Option<String>,
+        /// Follow the DenyList even when KernelSU's global "umount modules by default"
+        /// is on, which makes it cover every app without a profile of its own
+        #[arg(long)]
+        force: bool,
+    },
+    /// Which isolated-process pools are hidden
     Isolated {
+        /// both | appzygote | platform | off; omit to print the current setting
         mode: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 pub enum WhiteoutAction {
+    /// Hide a path now and on every boot
     Add {
+        /// The ROM path to hide
         path: String,
-        /// Hide it anyway on a filesystem where the hole is measurable (see the refusal message)
+        /// Silence the "leaves a measurable hole" note; nothing is refused on that ground
         #[arg(long)]
         force: bool,
     },
-    Remove { path: String },
+    /// Stop hiding a path
+    Remove {
+        /// The ROM path to stop hiding
+        path: String,
+    },
+    /// The durable list, and whether each entry is currently applied
     List,
+    /// Re-apply the whole list
     Apply,
+    /// Propose paths on this device worth hiding
     Suggest,
 }
 
-/// Would this verb put injection state into the engine?
 pub fn serves_injections(cmd: &Commands) -> bool {
     match cmd {
         Commands::Mount | Commands::Reload => true,
@@ -140,7 +266,6 @@ pub fn serves_injections(cmd: &Commands) -> bool {
     }
 }
 
-/// Does this verb change the state the kernel's `_ghost` tables are derived from?
 pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
     match cmd {
         Commands::Uid { action } => matches!(
@@ -148,6 +273,7 @@ pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
             UidAction::Block { .. }
                 | UidAction::Unblock { .. }
                 | UidAction::Apply { .. }
+                | UidAction::Ksu { state: Some(_), .. }
                 | UidAction::Preset { name: Some(_), dry_run: false, .. }
         ),
         Commands::Vfs { action } => matches!(
@@ -170,7 +296,6 @@ pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
 mod tests {
     use super::*;
 
-    /// The verbs the bootloop guard has to hold off: each ends with more being served than
     #[test]
     fn every_serving_verb_is_refused_while_the_guard_is_tripped() {
         for c in [
@@ -188,7 +313,6 @@ mod tests {
         }
     }
 
-    /// ...and the guard must not block its own recovery
     #[test]
     fn the_guard_never_blocks_diagnosis_or_removal() {
         for c in [
@@ -219,7 +343,6 @@ mod tests {
         }
     }
 
-    /// The verbs that move an input
     #[test]
     fn every_mutating_verb_resyncs_the_cloak() {
         for c in [
@@ -248,7 +371,6 @@ mod tests {
         }
     }
 
-    /// A verb that promises to change nothing must not fork a probe child and rewrite two
     #[test]
     fn read_only_and_self_syncing_verbs_do_not() {
         for c in [

@@ -1,32 +1,27 @@
-//! PackageManager's on-disk parse cache
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const CACHE_DIR: &str = "/data/system/package_cache";
-/// Last-served identity per ROM APK: `target \t mtime \t size`
 const STATE: &str = "/data/adb/nomount/apkstate.list";
-/// APKs invalidated after pm had already parsed them - cured by a reboot
 const PENDING: &str = "/data/adb/nomount/pm-reboot.list";
+const DECLARED: &str = "/data/adb/nomount/public.txt";
 
-/// ROM partitions whose APKs pm parses at scan time
 const ROM_ROOTS: &[&str] = &[
     "/system/", "/system_ext/", "/product/", "/vendor/", "/odm/", "/my_product/", "/my_region/",
     "/my_stock/", "/my_company/", "/my_carrier/", "/my_engineering/", "/my_heytap/", "/my_preload/",
 ];
 
-/// ROM partition names, for anything that needs "is this path on the ROM" rather than
 pub const ROM_PARTITIONS: &[&str] = &[
     "system", "system_ext", "product", "vendor", "odm",
     "my_product", "my_region", "my_stock", "my_company", "my_carrier", "my_engineering",
     "my_heytap", "my_preload", "my_bigball", "my_manifest", "my_reserve",
 ];
 
-/// The directory names pm actually scans for packages
 const PM_SCAN_DIRS: &[&str] = &["app", "priv-app", "overlay", "app-ext", "priv-app-ext"];
 
-/// Any file inside a directory pm scans, i.e
 pub fn is_pm_published(target: &Path) -> bool {
     let s = target.to_string_lossy();
     if !ROM_ROOTS.iter().any(|r| s.starts_with(r)) {
@@ -39,12 +34,55 @@ pub fn is_pm_published(target: &Path) -> bool {
         .is_some_and(|d| PM_SCAN_DIRS.contains(&d))
 }
 
-/// A ROM APK PM parses at scan time
+/// One absolute path per line, `#` starts a comment.
+fn parse_declared(body: &str) -> HashSet<String> {
+    body.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|p| p.starts_with('/'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Paths declared as must-stay-visible in `public.txt`.
+///
+/// Read once. A missing file is the normal case and means nothing is declared;
+/// a file that exists but will not read is reported, because quietly treating a
+/// declared path as hideable is the one outcome this list exists to prevent.
+fn declared_public() -> &'static HashSet<String> {
+    static SET: OnceLock<HashSet<String>> = OnceLock::new();
+    SET.get_or_init(|| match fs::read_to_string(DECLARED) {
+        Ok(body) => parse_declared(&body),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+        Err(e) => {
+            eprintln!(
+                "nomount: {DECLARED} exists but will not read ({e}) - every path it names is \
+                 treated as hideable this pass, which is the inconsistency it exists to prevent"
+            );
+            HashSet::new()
+        }
+    })
+}
+
+/// Must this target stay visible to every uid, hidden app or not?
+///
+/// `is_pm_published()` answers it structurally: the PackageManager advertises
+/// everything under app/priv-app/overlay, so denying one of those to an app that
+/// was told it exists is an inconsistency no stock device produces, and RASP code
+/// walking the package list crashes on it.
+///
+/// A library a Zygisk loader has already mapped into the app is in exactly that
+/// position -- `/proc/self/maps` names it, so the app has been told it exists --
+/// but it lives under lib64/, which no structural rule reaches. Hence the
+/// declared half: same question, same answer, one more way to say it.
+pub fn is_public(target: &Path) -> bool {
+    is_pm_published(target)
+        || target.to_str().is_some_and(|s| declared_public().contains(s))
+}
+
 pub fn is_rom_apk(target: &Path) -> bool {
     target.extension().is_some_and(|e| e == "apk") && is_pm_published(target)
 }
 
-/// The cache-entry prefixes pm may use for this APK
 fn cache_keys(target: &Path) -> Vec<String> {
     let mut keys = Vec::new();
     if let Some(file) = target.file_name() {
@@ -64,7 +102,32 @@ fn cache_keys(target: &Path) -> Vec<String> {
     keys
 }
 
-/// Every file in the cache, flattened, read once per pass
+/// True when `cache_keys` could not derive the directory (package) key, because the
+/// APK does not sit alone in its directory. AOSP caches a split package under the
+/// container's name, so for those a zero-match sweep has not proven anything.
+fn dir_key_withheld(target: &Path) -> bool {
+    let Some(dir) = target.parent() else { return false };
+    let apks = fs::read_dir(dir).ok().map(|rd| {
+        rd.filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "apk"))
+            .count()
+    });
+    apks != Some(1)
+}
+
+fn retry_unproven_change(
+    target: &Path,
+    previous: Option<&String>,
+    id: &str,
+    matched: usize,
+    seeding: bool,
+) -> bool {
+    matched == 0
+        && !seeding
+        && previous.is_some_and(|old| old != id)
+        && dir_key_withheld(target)
+}
+
 fn cache_files() -> std::io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for d in fs::read_dir(CACHE_DIR)? {
@@ -75,7 +138,6 @@ fn cache_files() -> std::io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Drop every cached parse for `target` out of `cache`
 fn drop_entry(target: &Path, cache: &[PathBuf]) -> (usize, usize) {
     let keys = cache_keys(target);
     if keys.is_empty() {
@@ -95,7 +157,6 @@ fn drop_entry(target: &Path, cache: &[PathBuf]) -> (usize, usize) {
     (matched, removed)
 }
 
-/// What we last served for a target, as recorded by [`sync`]
 fn read_state() -> Option<HashMap<PathBuf, String>> {
     let txt = match fs::read_to_string(STATE) {
         Ok(t) => t,
@@ -112,14 +173,12 @@ fn read_state() -> Option<HashMap<PathBuf, String>> {
     )
 }
 
-/// mtime+size of the file actually being served
 fn identity(source: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     let m = fs::metadata(source).ok()?;
     Some(format!("{}\t{}", m.mtime(), m.size()))
 }
 
-/// Invalidate PM's cached parse for every ROM APK whose served bytes changed since the
 pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     let (previous, seeding) = match read_state() {
         Some(p) => (p, !Path::new(STATE).exists()),
@@ -148,7 +207,15 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     let mut lines = Vec::new();
 
     for (target, source) in served.iter().filter(|(t, _)| is_rom_apk(t)) {
-        let Some(id) = identity(source) else { continue };
+        let Some(id) = identity(source) else {
+            // A transient stat failure is not a change. Dropping the row makes the next
+            // pass see no previous identity, delete PM's cached parse and claim a reboot
+            // is needed for an APK that never moved.
+            if let Some(old) = previous.get(target) {
+                lines.push(format!("{}\t{}", target.display(), old));
+            }
+            continue;
+        };
         let stale = previous.get(target).map(String::as_str) != Some(id.as_str());
         let (matched, removed) =
             if !seeding && stale { drop_entry(target, &cache) } else { (0, 0) };
@@ -160,6 +227,22 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
                 "nomount: pmcache: {} cached parse(s) for {} would not delete - PM keeps \
                  serving its parse of the previous APK; retrying next pass",
                 matched - removed,
+                target.display()
+            );
+            if let Some(old) = previous.get(target) {
+                lines.push(format!("{}\t{}", target.display(), old));
+            }
+            continue;
+        }
+        // Nothing matched at all, and the package key was never derivable because the
+        // APK shares its directory. Recording the new identity here would mark the
+        // change done, so the next pass sees nothing stale and never retries - and PM
+        // keeps serving its parse of the previous APK forever, silently.
+        if retry_unproven_change(target, previous.get(target), &id, matched, seeding) {
+            eprintln!(
+                "nomount: pmcache: no cached parse matched {} and it shares its directory, \
+                 so the package key could not be derived - PM may still be serving the \
+                 previous APK; retrying next pass",
                 target.display()
             );
             if let Some(old) = previous.get(target) {
@@ -193,7 +276,6 @@ pub fn sync(served: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     changed
 }
 
-/// Record APKs invalidated while pm was already running: their parse is only rebuilt at
 pub fn add_pending(targets: &[PathBuf]) {
     if targets.is_empty() {
         return;
@@ -221,7 +303,6 @@ pub fn add_pending(targets: &[PathBuf]) {
     }
 }
 
-/// The accumulated reboot-required set, error-preserving
 fn pending_result() -> std::io::Result<Vec<PathBuf>> {
     match fs::read_to_string(PENDING) {
         Ok(t) => Ok(t.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect()),
@@ -230,34 +311,47 @@ fn pending_result() -> std::io::Result<Vec<PathBuf>> {
     }
 }
 
-/// The accumulated reboot-required set, best effort
-pub fn pending() -> Vec<PathBuf> {
-    pending_result().unwrap_or_else(|e| {
-        eprintln!(
-            "nomount: pmcache: {PENDING} exists but could not be read ({e}) - the \
-             reboot-required list may be incomplete"
-        );
-        Vec::new()
-    })
+/// `Err` when the list exists but will not open, which is NOT the same as "nothing is
+/// pending" - the caller that cannot tell them apart blames the kernel for a reboot it
+/// simply could not see was due.
+pub fn pending() -> std::io::Result<Vec<PathBuf>> {
+    pending_result()
 }
 
-/// Called from the boot pass: PM re-parses this boot, so anything recorded by an earlier
 pub fn clear_pending() {
     let _ = fs::remove_file(PENDING);
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parse_declared_takes_absolute_paths_and_drops_comments() {
+        let set = parse_declared(
+            "# a comment\n/system/lib64/libfoo.so\n  /product/lib64/libbar.so  # trailing\n\nrelative/no\n",
+        );
+        assert!(set.contains("/system/lib64/libfoo.so"));
+        assert!(set.contains("/product/lib64/libbar.so"), "leading/trailing space is trimmed");
+        assert!(!set.contains("relative/no"), "only absolute paths count");
+        assert_eq!(set.len(), 2, "comments and blank lines contribute nothing");
+    }
+
+    #[test]
+    fn a_lib_is_not_structurally_public_but_can_be_declared() {
+        // lib64 is not a PM scan dir, which is the whole reason the declared
+        // half exists: nothing structural can reach a mapped library.
+        assert!(!is_pm_published(Path::new("/system/lib64/libfoo.so")));
+        assert!(is_pm_published(Path::new("/product/overlay/Foo.apk")));
+        assert!(parse_declared("/system/lib64/libfoo.so\n").contains("/system/lib64/libfoo.so"));
+    }
     use super::*;
 
-    /// A my_* APK is bind-served, and a bind swaps the parsed bytes too - it must be tracked
     #[test]
     fn my_partition_apks_are_tracked() {
         assert!(is_rom_apk(Path::new("/my_product/app/Foo/Foo.apk")));
         assert!(is_rom_apk(Path::new("/my_stock/priv-app/Bar/Bar.apk")));
     }
 
-    /// `ROM_PARTITIONS` must cover every root `ROM_ROOTS` names, or the lint that asks "is
     #[test]
     fn rom_partitions_cover_every_pm_scan_root() {
         for r in ROM_ROOTS {
@@ -281,7 +375,6 @@ mod tests {
         assert!(!is_rom_apk(Path::new("/data/adb/nomount/apks/youtube-patched.apk")));
     }
 
-    /// A file on a ROM partition that pm does not scan must not be treated as one it does:
     #[test]
     fn files_outside_a_pm_scan_dir_stay_hidden() {
         for p in [
@@ -307,7 +400,6 @@ mod tests {
         assert!(!is_rom_apk(Path::new("/product/priv-app/Mms/lib/arm64/libjni.so")));
     }
 
-    /// Both layouts pm uses, measured on OP15: `Contacts-16-...` for a dir it owns,
     #[test]
     fn the_kernel_carries_the_same_pm_scan_lists() {
         let src = std::fs::read_to_string("hookless/src/nomount.c").expect(
@@ -379,5 +471,38 @@ mod tests {
         fs::write(shared.join("B.apk"), b"x").unwrap();
         assert_eq!(cache_keys(&shared.join("A.apk")), vec!["A.apk-".to_string()]);
         let _ = fs::remove_dir_all(std::env::temp_dir().join("nm-pmcache-test"));
+    }
+
+    #[test]
+    fn a_new_apk_in_a_shared_directory_is_recorded_not_retried() {
+        let d = tempfile::tempdir().unwrap();
+        let shared = d.path().join("overlay");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("Old.apk"), b"x").unwrap();
+        fs::write(shared.join("New.apk"), b"x").unwrap();
+        let apk = shared.join("New.apk");
+        let now = "200\t7".to_string();
+        let before = "100\t7".to_string();
+
+        assert!(
+            !retry_unproven_change(&apk, None, &now, 0, false),
+            "no previous identity: PM never parsed an earlier APK here, so recording it is right; \
+             withholding it made the late reload delete PM's fresh parse and ask for a reboot"
+        );
+        assert!(
+            retry_unproven_change(&apk, Some(&before), &now, 0, false),
+            "a real change whose package key could not be derived is still retried"
+        );
+        assert!(!retry_unproven_change(&apk, Some(&now), &now, 0, false), "unchanged");
+        assert!(!retry_unproven_change(&apk, Some(&before), &now, 1, false), "a parse was dropped");
+        assert!(!retry_unproven_change(&apk, Some(&before), &now, 0, true), "seeding adopts");
+
+        let own = d.path().join("app/Foo");
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("Foo.apk"), b"x").unwrap();
+        assert!(
+            !retry_unproven_change(&own.join("Foo.apk"), Some(&before), &now, 0, false),
+            "a dedicated directory's key is derivable, so zero matches means nothing was cached"
+        );
     }
 }

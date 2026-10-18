@@ -1,18 +1,21 @@
-//! Metamodule mount pass for the NoMount Suite
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-/// Magisk's whiteout marker is a 0:0 char device - both halves of that
+fn is_whiteout_node(ft: &fs::FileType, rdev: u64) -> bool {
+    ft.is_char_device() && rdev == 0
+}
+
 fn is_whiteout_marker(ft: &fs::FileType, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     ft.is_char_device()
-        && fs::symlink_metadata(path).map(|m| m.rdev() == 0).unwrap_or(false)
+        && fs::symlink_metadata(path)
+            .map(|m| is_whiteout_node(&m.file_type(), m.rdev()))
+            .unwrap_or(false)
 }
 
-/// Does this directory carry overlayfs's `trusted.overlay.opaque=y`?
 fn is_opaque_dir(p: &Path) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -34,24 +37,18 @@ use anyhow::{Context, Result};
 use crate::nm::Nm;
 
 pub(crate) const MODULES_DIR: &str = "/data/adb/modules";
-/// Serialises the whole-engine passes (`mount`, `reload`, `absorb`) against each other
 const PASS_LOCK: &str = "/data/adb/nomount/pass.lock";
 
-/// RAII holder for the pass lock; the flock releases when it drops
 pub(crate) struct PassLock(std::fs::File);
 
-/// How long a pass will wait for another pass before giving up and running unserialised
 pub(crate) const PASS_LOCK_WAIT: u64 = 25;
 
-/// Take the process-wide pass lock
 pub const DISABLED_MARKER: &str = "/data/adb/nomount/disabled";
 
-/// Has the bootloop guard parked the Suite?
 pub fn guard_tripped() -> bool {
     Path::new(DISABLED_MARKER).exists()
 }
 
-/// Timing out and proceeding unserialised is the lesser evil: the passes are idempotent,
 pub(crate) fn pass_lock() -> Option<PassLock> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
@@ -101,14 +98,17 @@ const NON_PARTITION_ROOTS: &[&str] = &[
     "postinstall", "second_stage_resources", "bin", "sbin", "d",
 ];
 
-/// Discovery: should we walk a top-level module dir `<name>`?
 fn is_partition_dir(name: &str) -> bool {
-    !name.is_empty()
-        && !NON_PARTITION_ROOTS.contains(&name)
-        && Path::new(&format!("/{name}")).is_dir()
+    is_real_partition(name)
 }
 
-/// Canonicalization: is `<name>` a real separate partition, so `system/<name>/...` should
+fn is_root_symlink(name: &str) -> bool {
+    !name.is_empty()
+        && fs::symlink_metadata(format!("/{name}"))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+}
+
 fn is_real_partition(name: &str) -> bool {
     !name.is_empty()
         && !NON_PARTITION_ROOTS.contains(&name)
@@ -117,7 +117,6 @@ fn is_real_partition(name: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Resolve a module-relative path to its absolute target
 fn resolve_target_path(relative: &Path) -> Option<PathBuf> {
     let s = relative.to_str()?;
     if s.is_empty() {
@@ -132,7 +131,6 @@ fn resolve_target_path(relative: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(format!("/{s}")))
 }
 
-/// A target on an OnePlus/Oppo `my_*` partition, which must be served by a real bind (see
 fn is_my_partition(target: &Path) -> bool {
     target
         .components()
@@ -142,20 +140,16 @@ fn is_my_partition(target: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// EXPERIMENTAL: route `my_*` targets through hookless inject instead of a real bind
 fn my_hookless_enabled() -> bool {
     Path::new(MY_HOOKLESS_MARKER).exists()
 }
 
-/// The `my_*` injection trial's opt-in marker
 pub const MY_HOOKLESS_MARKER: &str = "/data/adb/nomount/my_hookless";
 
-/// True if `target` is a partition root (`/product`, `/system`, `/vendor`, ...) rather
 pub(crate) fn is_partition_root(target: &Path) -> bool {
     target.components().skip(1).count() <= 1
 }
 
-/// How a target may be served - the single answer both the native module plan and `absorb`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Serve {
     Inject,
@@ -187,7 +181,23 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
     Serve::Inject
 }
 
-/// May a whiteout be applied to `target`?
+const BOOT_CRITICAL_PARTITIONS: &[&str] = &["system", "system_ext", "vendor", "odm", "product"];
+const BOOT_CRITICAL_DIRS: &[&str] = &["bin", "lib", "lib64", "framework", "etc", "apex"];
+const ZYGOTE_BINARIES: &[&str] = &["app_process", "app_process32", "app_process64"];
+
+fn is_boot_critical(target: &Path) -> bool {
+    let parts: Vec<&str> = target
+        .components()
+        .skip(1)
+        .map(|c| c.as_os_str().to_str().unwrap_or(""))
+        .collect();
+    match parts.as_slice() {
+        [part, dir] => BOOT_CRITICAL_PARTITIONS.contains(part) && BOOT_CRITICAL_DIRS.contains(dir),
+        ["system", "bin", name] => name.starts_with("linker") || ZYGOTE_BINARIES.contains(name),
+        _ => false,
+    }
+}
+
 pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     let Some(root) = target.components().nth(1).and_then(|c| c.as_os_str().to_str()) else {
         return Err("not a path under a partition");
@@ -198,20 +208,21 @@ pub(crate) fn can_whiteout(target: &Path) -> Result<(), &'static str> {
     if is_partition_root(target) {
         return Err("a bare partition root (masking one bootloops zygote)");
     }
+    if is_boot_critical(target) {
+        return Err("a path init, the linker or zygote cannot start without (masking it bootloops \
+                    the device)");
+    }
     Ok(())
 }
 
-/// A leaf inject must land on a file (or on nothing - a synthesized virtual entry)
 fn inject_would_mask_dir(target: &Path) -> bool {
     target.is_dir()
 }
 
-/// Must this target be unmounted before we serve it?
 pub(crate) fn needs_unmount_before_serving(kind: PlanKind) -> bool {
     matches!(kind, PlanKind::Inject | PlanKind::Whiteout)
 }
 
-/// The order the engine must be fed: every inject, then every whiteout, each in plan order
 pub(crate) fn apply_order(plan: &[PlanEntry]) -> Vec<&PlanEntry> {
     plan.iter()
         .filter(|e| e.kind == PlanKind::Inject)
@@ -219,7 +230,6 @@ pub(crate) fn apply_order(plan: &[PlanEntry]) -> Vec<&PlanEntry> {
         .collect()
 }
 
-/// Is this path representable in the engine's wire format?
 pub(crate) fn path_is_representable(p: &Path) -> Result<(), &'static str> {
     let Some(s) = p.to_str() else {
         return Err("its name is not valid UTF-8, which the rule format cannot carry");
@@ -248,14 +258,48 @@ pub(crate) fn path_is_representable(p: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Can this entry actually produce a rule?
+/// Why a module-tree entry must not become a plain injection rule.
+///
+/// plan_tree applies these when it builds a plan from a module's tree. absorb::inject walks a
+/// mounted source directly and reached add_repointing without them, so a tree carrying any of
+/// these produced a rule the planner exists to refuse -- most seriously a symlink resolving
+/// into a world-writable place (under /data but not /data/adb, or shared storage), where a
+/// non-root process would control the bytes served at a ROM path.
+pub(crate) fn absorb_refusal(source: &Path) -> Option<&'static str> {
+    let Ok(md) = fs::symlink_metadata(source) else {
+        return Some("its type could not be read");
+    };
+    let ft = md.file_type();
+    if source.file_name().map(|n| n == ".replace").unwrap_or(false) {
+        return Some("it is a .replace marker - a directive that only means something inside a \
+                     module tree, and would otherwise be served as a literal file at a ROM path");
+    }
+    if is_whiteout_marker(&ft, source) {
+        return Some("it is a character-device whiteout marker, which only means something \
+                     inside a module tree");
+    }
+    if ft.is_symlink() {
+        let resolved = fs::canonicalize(source).ok();
+        if resolved.as_deref().map(resolved_source_is_untrusted).unwrap_or(false) {
+            return Some("it is a symlink resolving into a world-writable location; the engine \
+                         follows it, so a non-root process would control the bytes served");
+        }
+        if resolved.as_deref().map(Path::is_dir).unwrap_or(false) {
+            return Some("it is a symlink to a directory, which the engine follows, so this \
+                         would install a directory rule");
+        }
+    }
+    None
+}
+
 fn source_resolves(e: &PlanEntry) -> bool {
     e.kind != PlanKind::Inject || e.source.exists()
 }
 
-/// Would serving this resolved source hand a non-root process control of the bytes a ROM
 fn resolved_source_is_untrusted(resolved: &Path) -> bool {
-    resolved.starts_with("/data/") && !resolved.starts_with("/data/adb/")
+    (resolved.starts_with("/data/") && !resolved.starts_with("/data/adb/"))
+        || resolved.starts_with("/data_mirror")
+        || crate::health::is_shared_storage(resolved)
 }
 
 pub(crate) fn module_enabled(dir: &Path) -> bool {
@@ -264,7 +308,7 @@ pub(crate) fn module_enabled(dir: &Path) -> bool {
         && !dir.join("skip_mount").exists()
 }
 
-fn load_blocklist() -> HashSet<String> {
+pub(crate) fn load_blocklist() -> HashSet<String> {
     let mut set: HashSet<String> = BUILTIN_BLOCKLIST.iter().map(|s| (*s).to_string()).collect();
     if let Ok(contents) = fs::read_to_string(BLOCKLIST_FILE) {
         for line in contents.lines() {
@@ -283,7 +327,6 @@ struct Stats {
     whiteouts: u32,
 }
 
-/// What the Suite intends to do for one module entry
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PlanKind {
     Inject,
@@ -291,7 +334,19 @@ pub(crate) enum PlanKind {
     Bind,
 }
 
-/// One intended operation, resolved but not yet applied
+/// Follows symlinks on purpose: the engine follows them too, so what decides this is
+/// what the target resolves to, not what sits at the name. A target that does not exist
+/// is not a mismatch - the module is adding something new.
+fn dir_over_stock_file(target: &Path) -> bool {
+    fs::metadata(target).map(|m| !m.is_dir()).unwrap_or(false)
+}
+
+pub(crate) struct Refused {
+    pub module: String,
+    pub target: PathBuf,
+    pub why: &'static str,
+}
+
 pub(crate) struct PlanEntry {
     pub module: String,
     pub target: PathBuf,
@@ -299,13 +354,58 @@ pub(crate) struct PlanEntry {
     pub kind: PlanKind,
 }
 
-/// Expand a "replace this directory" marker into rules the engine actually has
+#[derive(Default)]
+pub(crate) struct EngineEdits {
+    hidden: HashMap<PathBuf, Vec<std::ffi::OsString>>,
+    synthesized: HashSet<PathBuf>,
+}
+
+impl EngineEdits {
+    pub(crate) fn from_list(list: &str) -> Self {
+        let mut edits = Self::default();
+        for r in crate::nm::parse_list(list) {
+            if r.uid != 0 {
+                continue;
+            }
+            match r.kind {
+                crate::nm::LiveKind::Whiteout => {
+                    if let (Some(dir), Some(name)) = (r.target.parent(), r.target.file_name()) {
+                        edits.hidden.entry(dir.to_path_buf()).or_default().push(name.to_os_string());
+                    }
+                }
+                crate::nm::LiveKind::VirtualDir => {
+                    edits.synthesized.insert(r.target);
+                }
+                crate::nm::LiveKind::Inject => {}
+            }
+        }
+        edits
+    }
+
+    fn stock_listing(&self, dir: &Path) -> Option<Vec<(std::ffi::OsString, bool)>> {
+        let mut names: Vec<(std::ffi::OsString, bool)> = fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .filter(|e| !self.synthesized.contains(&dir.join(e.file_name())))
+            .map(|e| (e.file_name(), e.file_type().map(|t| t.is_dir()).unwrap_or(false)))
+            .collect();
+        for name in self.hidden.get(dir).into_iter().flatten() {
+            if !names.iter().any(|(n, _)| n == name) {
+                names.push((name.clone(), false));
+            }
+        }
+        names.sort();
+        Some(names)
+    }
+}
+
 fn expand_replacement(
     module: &str,
     stock_dir: &Path,
     module_dir: &Path,
     marker: &Path,
     depth: u32,
+    edits: &EngineEdits,
     out: &mut Vec<PlanEntry>,
 ) {
     if depth > 16 {
@@ -315,27 +415,33 @@ fn expand_replacement(
         );
         return;
     }
-    let stock_entries = match fs::read_dir(stock_dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Some(entries) = edits.stock_listing(stock_dir) else {
+        return;
     };
-    let mut entries: Vec<_> = stock_entries.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let name = entry.file_name();
+    for (name, stock_is_dir) in entries {
         let stock_child = stock_dir.join(&name);
         let module_child = module_dir.join(&name);
 
         let shipped = fs::symlink_metadata(&module_child).ok();
-        let stock_is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
         match shipped {
             Some(m) if m.is_dir() && stock_is_dir => {
-                expand_replacement(module, &stock_child, &module_child, marker, depth + 1, out);
+                expand_replacement(
+                    module,
+                    &stock_child,
+                    &module_child,
+                    marker,
+                    depth + 1,
+                    edits,
+                    out,
+                );
             }
             Some(_) => {}
             None => {
                 if can_whiteout(&stock_child).is_err() {
+                    continue;
+                }
+                if path_is_representable(&stock_child).is_err() {
                     continue;
                 }
                 out.push(PlanEntry {
@@ -349,27 +455,54 @@ fn expand_replacement(
     }
 }
 
-/// One target claimed by more than one module: the winner, and who it beat
 pub(crate) struct Collision {
     pub target: PathBuf,
     pub winner: String,
     pub losers: Vec<String>,
 }
 
-/// Collapse entries claiming the same target, keeping the last
+/// An Inject always beats a Whiteout for the same target, whoever claimed it last.
+///
+/// `.replace` expansion reads the directory as it looks NOW, and on any pass after the
+/// first that includes files another module has already injected - so a `.replace`
+/// module would emit a whiteout over a path somebody else serves. Letting sort order
+/// decide made that a coin toss, and because the whiteout then hid the file from the
+/// next pass's listing the two outcomes alternated boot to boot.
+fn beats(a: &PlanEntry, b: &PlanEntry) -> bool {
+    match (a.kind, b.kind) {
+        (PlanKind::Whiteout, PlanKind::Whiteout) => true,
+        (PlanKind::Whiteout, _) => false,
+        (_, PlanKind::Whiteout) => true,
+        _ => true,
+    }
+}
+
+fn same_rule(a: &PlanEntry, b: &PlanEntry) -> bool {
+    a.module == b.module
+        && a.kind == b.kind
+        && (a.kind == PlanKind::Whiteout || a.source == b.source)
+}
+
 pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Collision>) {
     let mut last: HashMap<PathBuf, usize> = HashMap::new();
     for (i, e) in plan.iter().enumerate() {
-        last.insert(e.target.clone(), i);
+        match last.get(&e.target) {
+            Some(&j) if !beats(e, &plan[j]) => {}
+            _ => {
+                last.insert(e.target.clone(), i);
+            }
+        }
     }
     if last.len() == plan.len() {
         return (plan, Vec::new());
     }
     let mut losers: HashMap<PathBuf, Vec<String>> = HashMap::new();
     for (i, e) in plan.iter().enumerate() {
-        if last.get(&e.target) != Some(&i) {
-            losers.entry(e.target.clone()).or_default().push(e.module.clone());
+        let Some(&w) = last.get(&e.target) else { continue };
+        if w == i || same_rule(e, &plan[w]) {
+            continue;
         }
+        losers.entry(e.target.clone()).or_default().push(e.module.clone());
     }
     let mut collisions: Vec<Collision> = Vec::new();
     let mut kept = Vec::with_capacity(last.len());
@@ -378,9 +511,17 @@ pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Col
             continue;
         }
         if let Some(mut l) = losers.remove(&e.target) {
+            let self_claimed = l.iter().any(|m| m == &e.module);
             l.retain(|m| m != &e.module);
             l.sort_unstable();
             l.dedup();
+            if self_claimed {
+                // One module resolving to the same target twice - e.g. shipping both
+                // product/x and system/product/x, which resolve_target_path folds
+                // together. Silently keeping whichever sorted last served the wrong
+                // file whenever the two differed, with nothing said anywhere.
+                l.insert(0, format!("{} (a second claim of its own)", e.module));
+            }
             if !l.is_empty() {
                 collisions.push(Collision {
                     target: e.target.clone(),
@@ -395,12 +536,15 @@ pub(crate) fn dedupe_by_target(plan: Vec<PlanEntry>) -> (Vec<PlanEntry>, Vec<Col
     (kept, collisions)
 }
 
-/// Recursively resolve a module subtree rooted at `dir` into plan entries
-fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEntry>) {
-    let mut entries: Vec<_> = match fs::read_dir(dir) {
-        Ok(e) => e.flatten().collect(),
-        Err(_) => return,
-    };
+fn plan_tree(
+    module: &str,
+    module_root: &Path,
+    dir: &Path,
+    edits: &EngineEdits,
+    out: &mut Vec<PlanEntry>,
+    refused: &mut Vec<Refused>,
+) -> std::io::Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(dir)?.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let ft = match entry.file_type() {
@@ -417,6 +561,11 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                 "nomount: {module}: skipping {} - its name is not valid UTF-8",
                 source.display()
             );
+            refused.push(Refused {
+                module: module.to_string(),
+                target: source.clone(),
+                why: "its name is not valid UTF-8, so no rule can name it",
+            });
             continue;
         };
         let unrepresentable = path_is_representable(&target)
@@ -428,27 +577,73 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                 "nomount: {module}: skipping {} - {what} {why}",
                 source.display()
             );
+            refused.push(Refused {
+                module: module.to_string(),
+                target: target.clone(),
+                why: if what == "target" {
+                    "the wire format cannot carry this target path"
+                } else {
+                    "the wire format cannot carry this source path"
+                },
+            });
             continue;
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
         if ft.is_dir() {
-            if is_opaque_dir(&source) && can_whiteout(&target).is_ok() {
-                expand_replacement(module, &target, &source, &source, 0, out);
+            // A module directory over a stock FILE. The walk below would plan injects at
+            // paths under that file - targets that cannot exist, so nothing the module
+            // ships here is ever served. inject_would_mask_dir() catches the mirror case
+            // (a file over a stock directory); this side was planned and then silent.
+            if dir_over_stock_file(&target) {
+                eprintln!(
+                    "nomount: {module}: skipping {} - {} is a file in the stock tree, so \
+                     nothing under this directory can be served",
+                    source.display(),
+                    target.display()
+                );
+                refused.push(Refused {
+                    module: module.to_string(),
+                    target: target.clone(),
+                    why: "it is a directory over a stock file, so nothing under it can be served",
+                });
+                continue;
             }
-            plan_tree(module, module_root, &source, out);
+            if is_opaque_dir(&source) && can_whiteout(&target).is_ok() {
+                expand_replacement(module, &target, &source, &source, 0, edits, out);
+            }
+            plan_tree(module, module_root, &source, edits, out, refused)?;
         } else if name == ".replace" {
             if let Some(parent) = target.parent() {
                 if can_whiteout(parent).is_err() {
+                    eprintln!(
+                        "nomount: {module}: skipping {} - {} may not be hidden",
+                        source.display(),
+                        parent.display()
+                    );
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: parent.to_path_buf(),
+                        why: "a .replace here would hide a path the Suite refuses to hide",
+                    });
                     continue;
                 }
                 if let Some(module_dir) = source.parent() {
-                    expand_replacement(module, parent, module_dir, &source, 0, out);
+                    expand_replacement(module, parent, module_dir, &source, 0, edits, out);
                 }
             }
         } else if is_whiteout_marker(&ft, &source) {
             if can_whiteout(&target).is_err() {
+                eprintln!(
+                    "nomount: {module}: skipping {} - it may not be hidden",
+                    target.display()
+                );
+                refused.push(Refused {
+                    module: module.to_string(),
+                    target: target.clone(),
+                    why: "the Suite refuses to hide this path",
+                });
                 continue;
             }
             out.push(PlanEntry {
@@ -458,23 +653,49 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                 kind: PlanKind::Whiteout,
             });
         } else {
-            if ft.is_symlink()
-                && fs::canonicalize(&source)
-                    .map(|r| resolved_source_is_untrusted(&r))
-                    .unwrap_or(false)
-            {
-                eprintln!(
-                    "nomount: {module}: skipping {} - it is a symlink resolving outside \
-                     /data/adb; the engine follows it, so a non-root process would control \
-                     the bytes served at {}",
-                    source.display(),
-                    target.display()
-                );
-                continue;
+            if ft.is_symlink() {
+                let resolved = fs::canonicalize(&source).ok();
+                if resolved.as_deref().map(resolved_source_is_untrusted).unwrap_or(false) {
+                    eprintln!(
+                        "nomount: {module}: skipping {} - it is a symlink resolving outside \
+                         /data/adb; the engine follows it, so a non-root process would control \
+                         the bytes served at {}",
+                        source.display(),
+                        target.display()
+                    );
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: target.clone(),
+                        why: "it is a symlink resolving outside /data/adb, so a non-root process \
+                              would control the bytes served there",
+                    });
+                    continue;
+                }
+                if resolved.as_deref().map(Path::is_dir).unwrap_or(false) {
+                    eprintln!(
+                        "nomount: {module}: skipping {} - it is a symlink to a directory, which \
+                         the engine follows, so this would install a directory rule at {}. \
+                         Ship the files individually.",
+                        source.display(),
+                        target.display()
+                    );
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: target.clone(),
+                        why: "it is a symlink to a directory, which would install a directory \
+                              rule at the partition root. Ship the files individually.",
+                    });
+                    continue;
+                }
             }
             match serve_mode(&target) {
                 Serve::Refuse(why) => {
                     eprintln!("nomount: {module}: skipping {} - {why}", target.display());
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: target.clone(),
+                        why,
+                    });
                 }
                 Serve::Bind => {
                     out.push(PlanEntry {
@@ -491,6 +712,12 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
                          inject over a file)",
                         target.display()
                     );
+                    refused.push(Refused {
+                        module: module.to_string(),
+                        target: target.clone(),
+                        why: "it resolves to a live directory, and injecting a file there would \
+                              mask the whole directory",
+                    });
                 }
                 Serve::Inject => out.push(PlanEntry {
                     module: module.to_string(),
@@ -501,11 +728,26 @@ fn plan_tree(module: &str, module_root: &Path, dir: &Path, out: &mut Vec<PlanEnt
             }
         }
     }
+    Ok(())
 }
 
-/// Drop any mount sitting on a target we are about to serve
-fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: &Path) -> bool {
+pub(crate) fn unmount_before_serving(
+    targets: &std::collections::HashSet<PathBuf>,
+    target: &Path,
+) -> bool {
     if !targets.contains(target) {
+        // The exact target carries no mount, but hiding a directory with a live mount
+        // underneath leaves that mount in every app's mountinfo with no path reaching it -
+        // the condition this function exists to prevent, one level down. Inject targets
+        // are files, so is_dir() keeps this off that path.
+        if target.is_dir() && targets.iter().any(|m| m != target && m.starts_with(target)) {
+            eprintln!(
+                "nomount: {} has a live mount under it; hiding it would strand that mount \
+                 in mountinfo, so it is left unserved",
+                target.display()
+            );
+            return false;
+        }
         return true;
     }
     if crate::absorb::umount_detach(target) {
@@ -522,7 +764,6 @@ fn unmount_before_serving(targets: &std::collections::HashSet<PathBuf>, target: 
     gone
 }
 
-/// Does applying this whiteout leave a measurable hole?
 pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
     if !crate::whiteout::measurable_hole(target) {
         return false;
@@ -534,7 +775,6 @@ pub(crate) fn whiteout_leaves_hole(target: &Path) -> bool {
     !forced.contains(target)
 }
 
-/// Warn (only) when a whiteout will leave a measurable hole
 fn warn_whiteout_hole(target: &Path, module: &str) {
     if whiteout_leaves_hole(target) {
         eprintln!(
@@ -547,10 +787,15 @@ fn warn_whiteout_hole(target: &Path, module: &str) {
     }
 }
 
-/// Build the full plan for every enabled, non-blocklisted module
-pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
+pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
+    let edits = Nm::new().list().map(|l| EngineEdits::from_list(&l)).unwrap_or_default();
+    collect_plan_with(&edits)
+}
+
+fn collect_plan_with(edits: &EngineEdits) -> Result<(Vec<PlanEntry>, u32, Vec<Refused>)> {
     let blocklist = load_blocklist();
     let mut plan = Vec::new();
+    let mut refused: Vec<Refused> = Vec::new();
     let mut skipped = 0u32;
     let dirs = fs::read_dir(MODULES_DIR)
         .with_context(|| format!("cannot enumerate {MODULES_DIR} -- refusing to treat that as \"no modules installed\", which would clear every rule"))?;
@@ -589,18 +834,31 @@ pub(crate) fn collect_plan() -> Result<(Vec<PlanEntry>, u32)> {
                     continue;
                 };
                 if !is_partition_dir(name) {
+                    if is_root_symlink(name) {
+                        eprintln!(
+                            "nomount: {id}: skipping {name}/ - /{name} is a symlink, not a \
+                             partition. Ship this content under the partition it resolves to \
+                             (usually system/{name}/) so it lands on one target rather than two."
+                        );
+                    }
                     continue;
                 }
-                plan_tree(&id, &mdir, &e.path(), &mut plan);
+                plan_tree(&id, &mdir, &e.path(), edits, &mut plan, &mut refused).with_context(|| {
+                    format!(
+                        "cannot walk {}/{name} -- refusing to return a partial plan, because \
+                         `reload` diffs it against the live rules and would prune every rule \
+                         this module owns as an intentional unload",
+                        mdir.display()
+                    )
+                })?;
             }
         }
     }
-    Ok((plan, skipped))
+    Ok((plan, skipped, refused))
 }
 
-/// Print the resolved plan without applying it: target, kind, source, module
 pub fn run_plan() -> Result<()> {
-    let (plan, skipped) = collect_plan()?;
+    let (plan, skipped, refused) = collect_plan()?;
     let (plan, _) = dedupe_by_target(plan);
     for e in &plan {
         let k = match e.kind {
@@ -617,6 +875,14 @@ pub fn run_plan() -> Result<()> {
         };
         println!("{k:8} {} <- {} [{}]{note}", e.target.display(), e.source.display(), e.module);
     }
+    for r in &refused {
+        println!(
+            "REFUSED  {} <- (nothing) [{}]  << {}",
+            r.target.display(),
+            r.module,
+            r.why
+        );
+    }
     let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
     let dead = plan.iter().filter(|e| !source_resolves(e)).count();
     let declined = plan.iter()
@@ -625,17 +891,18 @@ pub fn run_plan() -> Result<()> {
     let mut extra = String::new();
     if dead > 0 { extra.push_str(&format!(", {dead} unservable")); }
     if declined > 0 { extra.push_str(&format!(", {declined} whiteout(s) leaving a measurable hole")); }
+    if !refused.is_empty() {
+        extra.push_str(&format!(", {} refused", refused.len()));
+    }
     println!("({} entries: {} binds, {skipped} blocklisted{extra})", plan.len(), binds);
     Ok(())
 }
 
-/// A live leaf rule from `nm list`
 enum LiveRule {
     Inject(PathBuf),
     Whiteout,
 }
 
-/// The live leaf rules the reconcile diffs against, keyed by (target, UID): injects and
 fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
     crate::nm::parse_list(list)
         .into_iter()
@@ -650,14 +917,17 @@ fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
         .collect()
 }
 
-/// The order stale rules must be deleted in: deepest first, then path, then uid
 fn prune_order(live: &HashMap<(PathBuf, u32), LiveRule>) -> Vec<&(PathBuf, u32)> {
     let mut stale: Vec<&(PathBuf, u32)> = live.keys().collect();
     stale.sort_by_key(|(t, uid)| (std::cmp::Reverse(t.components().count()), t.clone(), *uid));
     stale
 }
 
-/// May the reconcile drop this live rule?
+fn durable_not_planned(durable: Vec<PathBuf>, plan: &[PlanEntry]) -> Vec<PathBuf> {
+    let planned: HashSet<&Path> = plan.iter().map(|e| e.target.as_path()).collect();
+    durable.into_iter().filter(|w| !planned.contains(w.as_path())).collect()
+}
+
 fn prunable(
     target: &Path,
     uid: u32,
@@ -668,14 +938,19 @@ fn prunable(
     uid == 0 && !wanted && !durable_whiteouts.contains(target) && !absorbed.contains(target)
 }
 
-/// `nomount reload`: gap-free hot load/unload
 pub fn run_reload() -> Result<()> {
     let _pass = pass_lock();
     let nm = Nm::new();
     nm.version()
         .context("hookless NoMount engine not responding - is the CONFIG_NOMOUNT kernel loaded?")?;
 
-    let (plan, skipped) = collect_plan()?;
+    let live_txt = nm.list().context("nm list failed during reload")?;
+    let live = parse_live_rules(&live_txt);
+    // What the engine was last given per target: a source path can be unchanged
+    // while the file behind it is not, and the live rule text cannot show that.
+    let last_served = crate::rulestate::read();
+
+    let (plan, skipped, _refused) = collect_plan_with(&EngineEdits::from_list(&live_txt))?;
     let (plan, collisions) = dedupe_by_target(plan);
     for c in &collisions {
         eprintln!(
@@ -704,14 +979,16 @@ pub fn run_reload() -> Result<()> {
         }
     }
 
-    let live_txt = nm.list().context("nm list failed during reload")?;
-    let live = parse_live_rules(&live_txt);
-
-    let durable_whiteouts: HashSet<PathBuf> = crate::whiteout::read()
-        .context("cannot read the durable whiteout list - refusing to reload, because an empty list here would prune every whiteout")?
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
+    let durable_whiteouts: HashSet<PathBuf> = durable_not_planned(
+        crate::whiteout::read()
+            .context("cannot read the durable whiteout list - refusing to reload, because an empty list here would prune every whiteout")?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        &plan,
+    )
+    .into_iter()
+    .collect();
     let mut absorbed = crate::absorb::read_absorbed_targets()
         .context("cannot read the absorbed-rule record - refusing to reload, because an empty record here would prune every absorbed rule")?;
     absorbed.extend(
@@ -728,7 +1005,9 @@ pub fn run_reload() -> Result<()> {
         let t = e.target.as_path();
         let up_to_date = match live.get(&(t.to_path_buf(), 0)) {
             Some(LiveRule::Inject(src)) => {
-                e.kind == PlanKind::Inject && src.as_path() == e.source.as_path()
+                e.kind == PlanKind::Inject
+                    && src.as_path() == e.source.as_path()
+                    && !crate::rulestate::is_stale(&last_served, t, &e.source)
             }
             Some(LiveRule::Whiteout) => e.kind == PlanKind::Whiteout,
             None => false,
@@ -748,9 +1027,6 @@ pub fn run_reload() -> Result<()> {
             continue;
         }
         let existed = live.contains_key(&(t.to_path_buf(), 0));
-        if existed {
-            let _ = nm.del(&e.target);
-        }
         let r = match e.kind {
             PlanKind::Inject => nm.add(&e.target, &e.source),
             PlanKind::Whiteout => {
@@ -776,6 +1052,10 @@ pub fn run_reload() -> Result<()> {
     for w in &durable_whiteouts {
         if crate::whiteout::validate(&w.to_string_lossy()).is_err() {
             eprintln!("nomount: skipping invalid whiteout entry {}", w.display());
+            failed += 1;
+            continue;
+        }
+        if !unmount_before_serving(&mounted, w) {
             failed += 1;
             continue;
         }
@@ -841,6 +1121,10 @@ pub fn run_reload() -> Result<()> {
         }
     }
 
+    crate::bind::register_try_umount();
+
+    crate::rulestate::write(&injected_pairs(&plan, &applied_apks));
+
     let pm = crate::pmcache::sync(&served_apks_applied(
         &applied_apks,
         &crate::absorb::absorbed_pairs(),
@@ -869,10 +1153,8 @@ pub fn run_reload() -> Result<()> {
     Ok(())
 }
 
-/// Metamodule entry point (`nomount mount`): rebuild rules from the current set of enabled
 pub(crate) const MODULE_SUMMARY: &str = "/data/adb/nomount/modules.tsv";
 
-/// Publish the per-module breakdown of a plan
 fn write_module_summary(plan: &[PlanEntry]) -> std::io::Result<()> {
     use std::collections::BTreeMap;
     let mut per: BTreeMap<&str, (usize, bool, bool)> = BTreeMap::new();
@@ -899,7 +1181,6 @@ fn write_module_summary(plan: &[PlanEntry]) -> std::io::Result<()> {
     crate::statefile::write_atomic(std::path::Path::new(MODULE_SUMMARY), &body)
 }
 
-/// Is this target served as an RRO overlay rather than a file redirect?
 fn is_rro_apk(target: &std::path::Path) -> bool {
     target.extension().is_some_and(|e| e == "apk")
         && target.components().any(|c| c.as_os_str() == "overlay")
@@ -911,7 +1192,31 @@ pub fn run_mount() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding - is the CONFIG_NOMOUNT kernel loaded?")?;
 
-    let (plan, skipped) = collect_plan()?;
+    let (mut plan, skipped, _refused) = collect_plan()?;
+
+    let durable: Vec<String> = crate::whiteout::read().context(
+        "cannot read the durable whiteout list - refusing to serve, because clearing the table \
+         and rebuilding without it would un-hide every path you asked to hide",
+    )?;
+    let valid: Vec<PathBuf> = durable
+        .iter()
+        .filter(|w| match crate::whiteout::validate(w) {
+            Ok(()) => true,
+            Err(why) => {
+                eprintln!("nomount: durable whiteout skipped - {why}");
+                false
+            }
+        })
+        .map(PathBuf::from)
+        .collect();
+    for w in durable_not_planned(valid, &plan) {
+        plan.push(PlanEntry {
+            module: "durable".to_string(),
+            target: w,
+            source: std::path::PathBuf::new(),
+            kind: PlanKind::Whiteout,
+        });
+    }
 
     let (plan, collisions) = dedupe_by_target(plan);
     for c in &collisions {
@@ -978,7 +1283,11 @@ pub fn run_mount() -> Result<()> {
 
     let mut blocked: std::collections::HashSet<&Path> = std::collections::HashSet::new();
     for e in &plan {
-        served.insert(e.module.as_str());
+        // `durable` is the sentinel run_mount uses for whiteout rows read off disk, not
+        // an installed module; counting it inflates the boot line's module total.
+        if e.module != "durable" {
+            served.insert(e.module.as_str());
+        }
         if e.kind == PlanKind::Inject && !source_resolves(e) {
             st.failed += 1;
             continue;
@@ -1023,6 +1332,9 @@ pub fn run_mount() -> Result<()> {
                     applied_apks.push((e.target.clone(), e.source.clone()));
                 }
                 Ok(crate::bind::BindOutcome::AlreadyMounted) => {
+                    // Still a live row in every app's mountinfo, so it counts: the boot
+                    // line claimed `mountless` while binds.list rows were mounted.
+                    binds += 1;
                     applied_apks.push((e.target.clone(), e.source.clone()));
                 }
                 Err(_) => st.failed += 1,
@@ -1031,12 +1343,23 @@ pub fn run_mount() -> Result<()> {
         }
     }
     let tmpfs_hidden = crate::absorb::reapply_tmpfs_whiteouts(&nm);
+    let (ksu_umount, _) = crate::bind::register_try_umount();
+
+    crate::rulestate::write(&injected_pairs(&plan, &applied_apks));
 
     let pm = crate::pmcache::sync(&served_apks_applied(&applied_apks, &recorded));
     crate::pmcache::clear_pending();
 
     let modules = served.len();
-    let surface = if binds > 0 { "hookless + my_* bind" } else { "mountless (RRO via hookless)" };
+    let surface = if binds > 0 {
+        if ksu_umount > 0 {
+            "hookless + my_* bind (DenyList-unmountable)"
+        } else {
+            "hookless + my_* bind"
+        }
+    } else {
+        "mountless (RRO via hookless)"
+    };
 
     println!(
         "nomount(suite): {modules} modules | {} rules, {} whiteouts, {binds} my_* binds, {} failed, \
@@ -1065,7 +1388,21 @@ pub fn run_mount() -> Result<()> {
     Ok(())
 }
 
-/// Same filter, but over pairs that were actually applied rather than planned
+/// The inject half of what was applied -- the pairs whose backing identity a
+/// later reload compares against. A bind is reconciled on (target, source)
+/// already, and a whiteout has no backing file.
+fn injected_pairs(
+    plan: &[PlanEntry],
+    applied: &[(PathBuf, PathBuf)],
+) -> Vec<(PathBuf, PathBuf)> {
+    let injects: HashSet<&Path> = plan
+        .iter()
+        .filter(|e| e.kind == PlanKind::Inject)
+        .map(|e| e.target.as_path())
+        .collect();
+    applied.iter().filter(|(t, _)| injects.contains(t.as_path())).cloned().collect()
+}
+
 fn served_apks_applied(
     applied: &[(PathBuf, PathBuf)],
     absorbed: &[(PathBuf, PathBuf)],
@@ -1081,8 +1418,113 @@ fn served_apks_applied(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
 
-    /// A path the wire format cannot carry must never reach the engine
+    fn pe(module: &str, target: &str, kind: PlanKind) -> PlanEntry {
+        PlanEntry {
+            module: module.to_string(),
+            target: PathBuf::from(target),
+            source: PathBuf::from("/data/adb/modules/x/src"),
+            kind,
+        }
+    }
+
+    #[test]
+    fn an_inject_beats_a_whiteout_for_the_same_target_whoever_claimed_it_last() {
+        // `.replace` reads the live tree, so a module that sorts LAST can emit a
+        // whiteout over a path another module injects. Order must not decide this.
+        let (kept, _) = dedupe_by_target(vec![
+            pe("a_mod", "/product/etc/x", PlanKind::Inject),
+            pe("z_mod", "/product/etc/x", PlanKind::Whiteout),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kind, PlanKind::Inject, "the whiteout won, so the file vanishes");
+        assert_eq!(kept[0].module, "a_mod");
+
+        // and the same the other way round, so it is not just "first wins"
+        let (kept, _) = dedupe_by_target(vec![
+            pe("z_mod", "/product/etc/x", PlanKind::Whiteout),
+            pe("a_mod", "/product/etc/x", PlanKind::Inject),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kind, PlanKind::Inject);
+    }
+
+    #[test]
+    fn two_whiteouts_on_one_target_still_collapse_to_one() {
+        let (kept, _) = dedupe_by_target(vec![
+            pe("a_mod", "/product/etc/x", PlanKind::Whiteout),
+            pe("z_mod", "/product/etc/x", PlanKind::Whiteout),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kind, PlanKind::Whiteout);
+    }
+
+    #[test]
+    fn a_module_claiming_one_target_twice_is_reported_not_swallowed() {
+        // product/x and system/product/x fold to the same target. Keeping whichever
+        // sorted last served the wrong file when they differed, and said nothing.
+        let (kept, collisions) = dedupe_by_target(vec![
+            entry("one_mod", "/product/etc/x", "/data/adb/modules/one_mod/product/etc/x"),
+            entry("one_mod", "/product/etc/x", "/data/adb/modules/one_mod/system/product/etc/x"),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(collisions.len(), 1, "a module colliding with itself was dropped silently");
+        assert_eq!(collisions[0].winner, "one_mod");
+        assert!(
+            collisions[0].losers.iter().any(|l| l.contains("one_mod")),
+            "the report must name the module: {:?}",
+            collisions[0].losers
+        );
+    }
+
+    #[test]
+    fn a_module_expanding_one_directory_twice_is_not_a_collision() {
+        let mut outer = pe("m", "/system/etc/permissions/a.xml", PlanKind::Whiteout);
+        outer.source = PathBuf::from("/data/adb/modules/m/system/etc/.replace");
+        let mut inner = pe("m", "/system/etc/permissions/a.xml", PlanKind::Whiteout);
+        inner.source = PathBuf::from("/data/adb/modules/m/system/etc/permissions/.replace");
+        let (kept, collisions) = dedupe_by_target(vec![outer, inner]);
+        assert_eq!(kept.len(), 1);
+        assert!(
+            collisions.is_empty(),
+            "nested .replace (or .replace plus the opaque xattr) plans the same hide twice; \
+             that is one rule, not a module colliding with itself"
+        );
+
+        let (_, collisions) = dedupe_by_target(vec![
+            pe("m", "/system/etc/x", PlanKind::Whiteout),
+            pe("m", "/system/etc/x", PlanKind::Inject),
+        ]);
+        assert_eq!(collisions.len(), 1, "a hide and a serve from one module still differ");
+    }
+
+    #[test]
+    fn a_module_directory_over_a_stock_file_is_a_mismatch() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("f");
+        std::fs::write(&file, b"stock").unwrap();
+        let dir = d.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+
+        assert!(dir_over_stock_file(&file), "a stock file cannot hold children");
+        assert!(!dir_over_stock_file(&dir), "a stock directory is the normal case");
+        assert!(
+            !dir_over_stock_file(&d.path().join("absent")),
+            "a target that does not exist is a module adding something, not a mismatch"
+        );
+
+        #[cfg(unix)]
+        {
+            let link = d.path().join("l");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(
+                dir_over_stock_file(&link),
+                "the engine follows the link, so what it resolves to decides"
+            );
+        }
+    }
+
     #[test]
     fn a_path_the_wire_format_cannot_carry_is_refused() {
         let forge = Path::new("/system/etc/A\n/data/app/~~AA==/com.victim-BB==/base.apk");
@@ -1121,7 +1563,6 @@ mod tests {
         }
     }
 
-    /// Only injects and whiteouts get unmounted first; a bind does not
     #[test]
     fn only_engine_served_kinds_are_unmounted_first() {
         assert!(needs_unmount_before_serving(PlanKind::Inject));
@@ -1132,7 +1573,6 @@ mod tests {
         );
     }
 
-    /// Every inject before every whiteout, plan order preserved within each
     #[test]
     fn injects_are_applied_before_whiteouts_in_plan_order() {
         let mut plan = vec![
@@ -1157,11 +1597,9 @@ mod tests {
         );
     }
 
-    /// The shell entry points, read by the drift tests below
     const LIB: &str = include_str!("../module/lib.sh");
     const SERVICE: &str = include_str!("../module/service.sh");
 
-    /// The manager card must count rules the way every other surface does
     #[test]
     fn the_manager_card_excludes_whiteouts_from_its_rule_count() {
         let line = LIB
@@ -1183,7 +1621,213 @@ mod tests {
 
     const METAMOUNT_SRC: &str = include_str!("../module/metamount.sh");
 
-    /// The manager card must consult the verdict, not just log it
+    #[test]
+    fn the_case_sweep_gate_is_wired_into_ci() {
+        const BUILD_YAML: &str = include_str!("../.github/workflows/build.yaml");
+        const SWEEP: &str = include_str!("../scripts/case-sweep.py");
+
+        assert!(
+            BUILD_YAML.contains("scripts/case-sweep.py"),
+            "build.yaml no longer invokes scripts/case-sweep.py - the case-only gate is off, \
+             and the bulk-rewrite class it catches (HEAD -> head, ARCH -> arch) is silent"
+        );
+        assert!(
+            BUILD_YAML.contains("fetch-depth: 0"),
+            "the sweep diffs the pushed range, so the test job's checkout needs full history; \
+             with the default depth-1 checkout it has no predecessor to diff and checks nothing"
+        );
+        assert!(
+            SWEEP.contains(r#"SKIP_MARKER = "[case-ok]""#),
+            "case-sweep.py's escape-hatch marker changed; the failure message it prints and \
+             this contract must name the same string"
+        );
+        let branches = BUILD_YAML
+            .lines()
+            .find(|l| l.trim_start().starts_with("branches:"))
+            .unwrap_or("")
+            .to_string();
+        for branch in ["prerelease", "main"] {
+            assert!(
+                branches.contains(branch),
+                "build.yaml's push trigger does not name `{branch}`, so pushes to it run no \
+                 tests, no shellcheck and no case sweep. Listing prerelease alone is how 13 of \
+                 22 commits reached v1.3.180 ungated: {branches:?}"
+            );
+        }
+        for ext in [".html", ".js", ".css"] {
+            assert!(
+                SWEEP.contains(ext),
+                "case-sweep.py stopped covering {ext}, so that part of module/webroot is outside \
+                 the gate again - index.html is where `grep -q ENABLED` became `enabled` and \
+                 where the `would DROP`/`would SKIP` classifiers were lowercased, and the js/ \
+                 files carry both of those classes of string now"
+            );
+        }
+        assert!(
+            !SWEEP.contains("zip(dels, adds)"),
+            "case-sweep.py is pairing removed lines to added lines by position again. Any hunk \
+             that adds a different number of lines than it removes - every prose re-wrap, which \
+             is the shape a bulk rewrite makes - shifts the pairs and hides the damage"
+        );
+        const NOMOUNT_H: &str = include_str!("../hookless/src/nomount.h");
+        let wire = NOMOUNT_H
+            .lines()
+            .find_map(|l| l.strip_prefix("#define NOMOUNT_VERSION"))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .expect("nomount.h no longer defines NOMOUNT_VERSION");
+        let label = NOMOUNT_H
+            .lines()
+            .find_map(|l| l.strip_prefix("#define NM_MODULE_VERSION"))
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .expect("nomount.h no longer defines NM_MODULE_VERSION");
+        assert_eq!(
+            label.split('.').nth(1).and_then(|m| m.parse::<u32>().ok()),
+            Some(wire),
+            "NM_MODULE_VERSION ({label}) and NOMOUNT_VERSION ({wire}) have drifted. The label is \
+             what the kernel builders scrape to name a released kernel and what the engine \
+             reports as its build string, and the comment that stated this invariant was \
+             deleted by the comment strip - so only this test can catch it"
+        );
+        const ENGINE_MATRIX: &str = include_str!("../.github/workflows/hookless-compile-matrix.yml");
+        for ver in ["4.9", "4.14", "4.19", "5.4", "5.10", "5.15", "6.1", "6.6", "6.12", "6.18"] {
+            assert!(
+                ENGINE_MATRIX.contains(&format!("ver: '{ver}'")),
+                "the engine compile matrix no longer covers {ver}. c223943 deleted this whole \
+                 workflow and nothing compile-tested the shipped engine until it was restored; \
+                 the LKM branch's gate builds a different engine version and does not cover it"
+            );
+        }
+        // The bindhosts marker is a three-way string contract: service.sh writes it,
+        // service.sh greps for it to decide whether the override is still ours, and
+        // uninstall.sh greps for it to decide whether removing it is safe. A comment
+        // strip already killed this line once; lowercase it in any one of the three and
+        // uninstalling NoMount leaves mode_override.sh behind forever, pinning bindhosts
+        // to mode 0.
+        const UNINSTALL: &str = include_str!("../module/uninstall.sh");
+        const BH_MARKER: &str = "NoMount Suite";
+        assert!(
+            SERVICE.contains(&format!("# Written by the {BH_MARKER}. Safe to delete.")),
+            "service.sh no longer writes the bindhosts marker it and uninstall.sh both grep for"
+        );
+        for (what, src) in [("service.sh", SERVICE), ("uninstall.sh", UNINSTALL)] {
+            assert!(
+                src.contains(&format!("grep -q '{BH_MARKER}'")),
+                "{what} stopped matching the bindhosts marker; uninstall then leaves \
+                 /data/adb/bindhosts/mode_override.sh behind and bindhosts stays on mode 0"
+            );
+        }
+        const README: &str = include_str!("../README.md");
+        const BUG_TEMPLATE: &str = include_str!("../.github/ISSUE_TEMPLATE/bug_report.md");
+        // The nav button's own label is the only name a reporter can actually tap. It was
+        // renamed to Checks in the four-tab restructure while the pane heading, the hero
+        // prose, the README and the issue template still said Diagnostics - so every
+        // "go to X -> Export" instruction named a tab that is not on screen.
+        assert!(
+            PAGE.contains("<span>Checks</span>"),
+            "the diagnostics tab's nav label changed; README and bug_report.md route \
+             reporters to it by name and must be updated in the same commit"
+        );
+        for (what, doc) in [("README.md", README), ("bug_report.md", BUG_TEMPLATE)] {
+            assert!(
+                !doc.contains("Diagnostics*") && !doc.contains("**Diagnostics"),
+                "{what} still routes the Export instructions to a Diagnostics tab; the nav \
+                 button says Checks"
+            );
+        }
+        const GATE_SWEEP: &str = include_str!("../scripts/gate-sweep.sh");
+        for lit in [
+            "^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$",
+            r"IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+",
+            "(ifndef|![[:space:]]*defined)",
+        ] {
+            assert!(
+                ENGINE_MATRIX.contains(lit) && GATE_SWEEP.contains(lit),
+                "the derived config gate is two independent copies - one inline in the \
+                 matrix, one in scripts/gate-sweep.sh - and they have drifted on {lit:?}. \
+                 Only the script is tested, so a drifted matrix copy is an untested gate, \
+                 which is how the original one came to catch 2 of 8 gating forms"
+            );
+        }
+        assert!(
+            BUILD_YAML.contains("scripts/gate-sweep.sh"),
+            "nothing runs the config-gate sweep any more, so its copy of the extractor is \
+             unexercised and the matrix copy is pinned to an untested reference"
+        );
+        assert!(
+            ENGINE_MATRIX.contains("workflow_dispatch") && ENGINE_MATRIX.contains("push:"),
+            "the engine matrix is reachable only through another workflow again. That is how it \
+             vanished: removing one `uses:` line silently took all ten versions with it"
+        );
+        assert!(
+            BUILD_YAML.contains("git describe --tags --abbrev=0"),
+            "the tag-push fallback is gone. A tag push reports an all-zero `before`, so without \
+             a previous-tag fallback the sweep checks the tag commit alone and every other \
+             commit in the release ships unswept"
+        );
+    }
+
+    #[test]
+    fn the_webui_harness_still_has_its_stub_and_replays_every_command() {
+        const HARNESS: &str = include_str!("../scripts/webui-harness.py");
+
+        assert!(
+            HARNESS.contains("\nSTUB = \"\"\""),
+            "webui-harness.py references STUB but no longer defines it - `build` cannot run. \
+             Recover it with: git show <before-the-strip>:scripts/webui-harness.py"
+        );
+
+        let block = |head: &str, end: &str| -> &str {
+            let at = HARNESS.find(head).unwrap_or_else(|| panic!("{head} is gone or renamed"));
+            let rest = &HARNESS[at + head.len()..];
+            &rest[..rest.find(end).expect("unterminated block")]
+        };
+        let commands = block("COMMANDS = {", "\n}");
+        let stub = block("STUB = \"\"\"", "\"\"\"");
+
+        let keys: Vec<&str> = commands
+            .lines()
+            .map(str::trim)
+            .filter_map(|l| l.strip_prefix('"'))
+            .filter_map(|l| l.split_once("\":"))
+            .map(|(k, _)| k)
+            .collect();
+        assert!(keys.len() > 10, "COMMANDS parsed as {} keys - the parser has drifted", keys.len());
+        for k in keys {
+            assert!(
+                stub.contains(&format!("key = '{k}'")),
+                "COMMANDS has {k:?} and the stub has no branch for it, so the page gets rc=1 \
+                 for that command and renders its unreadable path instead of the captured one"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_ci_toolchain_pins_agree() {
+        const BUILD_YAML: &str = include_str!("../.github/workflows/build.yaml");
+        let pins: Vec<&str> = BUILD_YAML
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("toolchain:"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            pins.len(),
+            2,
+            "expected exactly two pinned `toolchain:` values (host test job, cross build job), \
+             got {pins:?} - a job added or removed without pinning floats on whatever stable \
+             was released that morning"
+        );
+        assert_eq!(
+            pins[0], pins[1],
+            "the two CI jobs pin different rustc versions ({pins:?}) - the binary that ships \
+             would be built by a compiler the tests never ran under"
+        );
+        assert!(
+            pins[0].chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "the pin must be an exact version, not a floating channel like `stable`: {:?}",
+            pins[0]
+        );
+    }
+
     #[test]
     fn the_manager_card_consults_the_check_verdict() {
         let uses: Vec<&str> = SERVICE
@@ -1200,6 +1844,394 @@ mod tests {
         );
     }
 
+    const PAGE_HTML: &str = include_str!("../module/webroot/index.html");
+
+    const PAGE_CSS: &str = include_str!("../module/webroot/css/app.css");
+    const JS_PARTS: &[&str] = &[
+        "js/00-core.js",
+        "js/10-status.js",
+        "js/20-chrome.js",
+        "js/30-checks.js",
+        "js/40-rules.js",
+        "js/50-apps.js",
+        "js/60-boot.js",
+    ];
+    const PAGE_JS: &[&str] = &[
+        include_str!("../module/webroot/js/00-core.js"),
+        include_str!("../module/webroot/js/10-status.js"),
+        include_str!("../module/webroot/js/20-chrome.js"),
+        include_str!("../module/webroot/js/30-checks.js"),
+        include_str!("../module/webroot/js/40-rules.js"),
+        include_str!("../module/webroot/js/50-apps.js"),
+        include_str!("../module/webroot/js/60-boot.js"),
+    ];
+    const PAGE_PARTS: &[&str] = &[PAGE_HTML, PAGE_CSS];
+    static PAGE: LazyLock<String> =
+        LazyLock::new(|| PAGE_PARTS.concat() + &PAGE_JS.concat());
+
+    const PAGE_CSS_SRC: &str = PAGE_CSS;
+
+    fn page_css() -> &'static str {
+        PAGE_CSS_SRC.split("</style>").next().unwrap_or("")
+    }
+
+    const HARNESS_SRC: &str = include_str!("../scripts/webui-harness.py");
+
+    fn markup_without_comments() -> String {
+        let mut out = String::with_capacity(PAGE_HTML.len());
+        let mut rest = PAGE_HTML;
+        while let Some(a) = rest.find("<!--") {
+            out.push_str(&rest[..a]);
+            match rest[a..].find("-->") {
+                Some(b) => rest = &rest[a + b + 3..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn the_csp_still_refuses_inline_script_and_inline_style() {
+        let csp = PAGE_HTML
+            .split(r#"http-equiv="Content-Security-Policy" content=""#)
+            .nth(1)
+            .and_then(|t| t.split('"').next())
+            .expect("index.html must carry a CSP meta");
+        for directive in ["default-src 'none'", "script-src 'self'", "style-src 'self'"] {
+            assert!(
+                csp.contains(directive),
+                "the CSP lost {directive:?}: {csp}"
+            );
+        }
+        assert!(
+            !csp.contains("unsafe-inline") && !csp.contains("unsafe-eval"),
+            "the CSP allows inline again, so a missed esc() executes instead of being \
+             contained - the whole reason the script and the stylesheet are separate files: \
+             {csp}"
+        );
+
+        let markup = markup_without_comments();
+        assert!(
+            !markup.contains("style=\""),
+            "a style= attribute is back in index.html; style-src 'self' silently drops it, so \
+             it renders unstyled. Add a class to css/app.css, or set it through the CSSOM"
+        );
+        assert!(
+            !markup.contains("<style"),
+            "an inline <style> block is back in index.html - it would not be applied"
+        );
+        for part in PAGE_JS {
+            assert!(
+                !part.contains("style=\""),
+                "a js/ part builds markup carrying a style= attribute. Injected through \
+                 innerHTML it is still parsed markup, so the CSP drops it and the element \
+                 renders unstyled: use a class, or assign .style.* on the element instead"
+            );
+        }
+        let inline_script = markup
+            .match_indices("<script")
+            .any(|(i, _)| !markup[i..].starts_with("<script src="));
+        assert!(
+            !inline_script,
+            "an inline <script> is back in index.html; under script-src 'self' it will not run"
+        );
+
+        let mut sources: Vec<(&str, String)> = vec![("index.html", markup)];
+        for (i, part) in PAGE_JS.iter().enumerate() {
+            sources.push((JS_PARTS[i], (*part).to_string()));
+        }
+        for (who, text) in &sources {
+            for (i, _) in text.match_indices(" on") {
+                let tail = &text[i + 3..];
+                let name: String =
+                    tail.chars().take_while(|c| c.is_ascii_lowercase()).collect();
+                if !name.is_empty() && tail[name.len()..].starts_with("=\"") {
+                    panic!(
+                        "{who} carries an inline on{name}= handler. script-src 'self' blocks it \
+                         exactly as it blocks an inline <script>, and markup a js part builds \
+                         and assigns to innerHTML is still parsed markup: the control renders \
+                         and does nothing. Give it data-act=\"<name>\" and add <name> to ACTIONS"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_utility_class_the_page_uses_has_a_rule() {
+        let mut used: Vec<String> = Vec::new();
+        let mut collect = |text: &str| {
+            for (i, _) in text.match_indices("u-") {
+                let boundary = i == 0
+                    || matches!(
+                        text.as_bytes()[i - 1],
+                        b' ' | b'"' | b'\'' | b'\n' | b'\t'
+                    );
+                if !boundary {
+                    continue;
+                }
+                let name: String = text[i..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+                    .collect();
+                let name = name.trim_end_matches('-').to_string();
+                if name.len() > 2 && !used.contains(&name) {
+                    used.push(name);
+                }
+            }
+        };
+        collect(PAGE_HTML);
+        for part in PAGE_JS {
+            collect(part);
+        }
+        assert!(!used.is_empty(), "the page names no utility classes at all");
+
+        for name in &used {
+            assert!(
+                PAGE_CSS.contains(&format!(".{name} ")) || PAGE_CSS.contains(&format!(".{name}{{")),
+                "the page uses the class {name:?}, which css/app.css does not define. The \
+                 element renders unstyled and nothing else reports it - if it is a hide \
+                 class, whatever it was meant to hide is on screen right now"
+            );
+        }
+    }
+
+    #[test]
+    fn every_data_act_in_the_markup_resolves_to_an_action() {
+        let boot = PAGE_JS
+            .last()
+            .expect("there must be a boot part");
+        let table = boot
+            .split("const ACTIONS = {")
+            .nth(1)
+            .and_then(|t| t.split("\n  };").next())
+            .expect("60-boot.js must define ACTIONS");
+        let defined: Vec<&str> = table
+            .lines()
+            .filter_map(|l| l.strip_prefix("    "))
+            .filter_map(|l| l.split(':').next())
+            .filter(|k| !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_'))
+            .collect();
+
+        const ATTRS: [&str; 6] = ["data-act=\"", "data-act-input=\"", "data-act-key=\"",
+                                  "data-act-down=\"", "data-act-focus=\"",
+                                  "data-act-blur=\""];
+        let names = |text: &'static str| {
+            let mut out: Vec<&str> = Vec::new();
+            for attr in ATTRS {
+                for part in text.split(attr).skip(1) {
+                    if let Some(v) = part.split('"').next() {
+                        out.push(v);
+                    }
+                }
+            }
+            out
+        };
+
+        // index.html is served straight to the page, so every action it names has to be
+        // in the global table. Markup a js part builds may instead be handled by one of
+        // the container delegates (#wobody, #blocked, #usList), which match the value
+        // themselves, so those names are checked the other way only.
+        let in_html = names(PAGE_HTML);
+        assert!(!in_html.is_empty(), "index.html names no actions at all");
+        for name in &in_html {
+            assert!(
+                defined.contains(name),
+                "index.html asks for the action {name:?}, which ACTIONS does not define, so \
+                 that control does nothing when tapped"
+            );
+        }
+
+        let mut anywhere = in_html;
+        for part in PAGE_JS {
+            anywhere.extend(names(part));
+        }
+        for name in &defined {
+            assert!(
+                anywhere.contains(name),
+                "ACTIONS defines {name:?} and no control uses it - either the markup lost a \
+                 data-act or this entry is dead"
+            );
+        }
+    }
+
+    #[test]
+    fn every_webui_part_is_listed_by_index_html_and_every_listing_exists() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/module/webroot/js");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .expect("module/webroot/js must exist")
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".js"))
+            .collect();
+        on_disk.sort();
+        assert!(!on_disk.is_empty(), "no js parts found - the WebUI would not run");
+
+        let listed: Vec<String> = PAGE_HTML
+            .split("<script src=\"js/")
+            .skip(1)
+            .filter_map(|t| t.split('"').next())
+            .map(str::to_owned)
+            .collect();
+
+        for name in &on_disk {
+            assert!(
+                listed.contains(name),
+                "module/webroot/js/{name} is in the zip but index.html never loads it, so it \
+                 ships dead - add the <script src> or delete the file"
+            );
+        }
+        for name in &listed {
+            assert!(
+                on_disk.contains(name),
+                "index.html loads js/{name}, which does not exist - the pane it serves will \
+                 be inert with nothing in the log to say why"
+            );
+        }
+        assert_eq!(
+            PAGE_JS.len(),
+            on_disk.len(),
+            "PAGE_JS does not include every part in module/webroot/js, so the assertions \
+             below cover less of the WebUI than they appear to"
+        );
+    }
+
+    #[test]
+    fn the_webui_matches_the_strings_absorb_actually_prints() {
+        const ABSORB: &str = include_str!("absorb.rs");
+        for (matcher, producer) in [
+            (r#"[/^would skip directory bind /"#, r#""would skip directory bind {} <- {}"#),
+            (r#"[/^would drop redundant mount /"#, r#""would drop redundant mount {} <- {}"#),
+            (r#"[/^would absorb /"#, r#""would absorb {} <- {}""#),
+            (r#"[/^would empty /"#, r#""would empty {} mountlessly"#),
+            (r#"[/^redundant /"#, r#""redundant {} <- {}"#),
+            (r#"[/^nomount: LEAK /"#, r#""nomount: LEAK "#),
+        ] {
+            assert!(
+                PAGE.contains(matcher),
+                "index.html no longer carries the matcher {matcher} - if absorb's wording moved, \
+                 move the matcher with it rather than deleting this row"
+            );
+            assert!(
+                ABSORB.contains(producer),
+                "absorb.rs no longer prints {producer}, but index.html still matches on it: \
+                 the Absorb scan card will render that line untagged"
+            );
+        }
+    }
+
+    #[test]
+    fn the_diagnostics_never_paint_a_warm_colour() {
+        let css = page_css();
+        let controls = ["button.act.danger", ".bx:hover", ".bx.save:hover"];
+        for (label, needle) in [
+            ("amber", "251,191,36"),
+            ("red", "248,113,122"),
+            ("amber", "#fbbf24"),
+            ("red", "#f8717a"),
+            ("brown", "#a46a00"),
+            ("red", "#d23a44"),
+            ("amber", "#d9a441"),
+            ("amber", "#ffe6a8"),
+            ("brown", "#6b4d00"),
+            ("red", "210,58,68"),
+            ("red", "#ff6b6b"),
+            ("red", "255,90,90"),
+        ] {
+            for rule in css.split('}').filter(|l| l.contains(needle)) {
+                assert!(
+                    controls.iter().any(|c| rule.contains(c)),
+                    "a {label} literal is back outside a destructive control: {rule}"
+                );
+            }
+        }
+        for (var, decl) in [("--warn", "--warn:    var(--info)"), ("--bad", "--bad:     var(--info)")] {
+            assert_eq!(
+                css.matches(decl).count(),
+                2,
+                "{var} must resolve to --info in both themes, or a call site this test cannot \
+                 enumerate repaints amber"
+            );
+        }
+        assert!(
+            !PAGE.contains("needs attention") && !PAGE.contains("things need"),
+            "the findings list went back to grading the user"
+        );
+    }
+
+    #[test]
+    fn the_header_states_both_versions_and_can_say_an_update_is_staged() {
+        for id in ["\"ver\"", "\"hdreng\"", "\"vstage\""] {
+            assert!(
+                PAGE.contains(&format!("id={id}")),
+                "the header lost {id}; the version line is the only place the Suite and the \
+                 engine version are visible without scrolling to the footer"
+            );
+            assert!(
+                PAGE.contains(&format!("$({id})")),
+                "{id} is in the markup but nothing writes to it"
+            );
+        }
+        // The line is written to fit a phone at 363 dp; it ellipsises if it grows.
+        let staged = PAGE.split("id=\"vstage\"").nth(1).unwrap_or("");
+        let text = staged.split('>').nth(1).unwrap_or("").split('<').next().unwrap_or("").trim();
+        assert!(
+            !text.is_empty() && text.chars().count() <= 12,
+            "the staged marker got longer and will be cut off on a phone: {text:?}"
+        );
+    }
+
+    #[test]
+    fn the_hero_and_the_report_count_the_same_findings() {
+        let body = PAGE.split("function checkAttention").nth(1).unwrap_or("");
+        let head = body.split("}").next().unwrap_or("");
+        assert!(
+            head.contains("(s.open_failures || 0) + (s.warn || 0)") && !head.contains("s.reboot"),
+            "open_failures already includes reboot, so adding it again counts a \
+             pending-reboot check twice on the Status hero: {head}"
+        );
+    }
+
+    #[test]
+    fn the_sucompat_probe_greps_for_the_case_ksud_actually_prints() {
+        assert!(
+            PAGE.contains("grep su_compat | grep -q ENABLED"),
+            "index.html's sucompat probe must grep for ENABLED, the spelling ksud emits"
+        );
+        assert!(
+            !PAGE.contains("grep -q enabled"),
+            "a lowercase `enabled` grep never matches ksud's output"
+        );
+    }
+
+    #[test]
+    fn the_harness_runs_the_same_probes_the_page_does() {
+        for frag in [
+            r#"grep su_compat "#,
+            r#"| grep -q ENABLED && echo 1 || echo 0)"; "#,
+            r#"echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; "#,
+            r#"echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; "#,
+            r#"echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; "#,
+            r#"echo "se=$(getenforce 2>/dev/null)""#,
+        ] {
+            assert!(PAGE.contains(frag), "index.html's stealth probe lost: {frag:?}");
+            assert!(
+                HARNESS_SRC.contains(frag),
+                "webui-harness.py's `stealth` command lost {frag:?}, so the harness feeds the \
+                 page a fixture the page's own command would never have produced"
+            );
+        }
+        let mounts = r#"mnt=$(NM_P="/adb/modules/$id" awk \'$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); "#;
+        assert!(
+            PAGE.contains(mounts) && HARNESS_SRC.contains(mounts),
+            "the page's per-module mount count and webui-harness.py's `modules` command have \
+             drifted, so the harness replays counts the page's own command would not produce"
+        );
+    }
+
     fn entry(module: &str, target: &str, source: &str) -> PlanEntry {
         PlanEntry {
             module: module.to_string(),
@@ -1209,7 +2241,6 @@ mod tests {
         }
     }
 
-    /// Two modules claiming one target must produce exactly one applied rule
     #[test]
     fn dedupe_keeps_the_last_claim() {
         let plan = vec![
@@ -1226,7 +2257,6 @@ mod tests {
         assert_eq!(collisions[0].losers, vec!["a_mod".to_string()]);
     }
 
-    /// An uncontested plan must pass through untouched - no reordering, no allocation of a
     #[test]
     fn dedupe_is_a_noop_without_collisions() {
         let plan = vec![
@@ -1240,7 +2270,6 @@ mod tests {
         assert_eq!(kept[1].module, "b");
     }
 
-    /// `/product/product/...` is the installer nesting `system/product` inside an existing
     #[test]
     fn serve_mode_refuses_repeated_partition_name() {
         assert!(matches!(
@@ -1255,7 +2284,6 @@ mod tests {
         assert_eq!(serve_mode(Path::new("/system/etc/system/x")), Serve::Inject);
     }
 
-    /// The whole point of `serve_mode` is that absorb gets the same answer this file acts on,
     #[test]
     fn serve_mode_refuses_what_plan_tree_refuses() {
         assert_eq!(serve_mode(Path::new("/system/bin/x")), Serve::Inject);
@@ -1271,10 +2299,9 @@ mod tests {
         assert!(can_whiteout(Path::new("/d/tracing/x")).is_err());
     }
 
-    /// `.replace` must hide the stock entries the module does not ship, and leave the ones it
     #[test]
     fn replace_expands_to_the_unshipped_entries_only() {
-        let Some(base) = test_base("replace-expand") else { return };
+        let base = test_base("replace-expand");
         let stock = base.join("stock");
         let module = base.join("module");
 
@@ -1290,7 +2317,7 @@ mod tests {
         fs::write(module.join("sub/d.xml"), b"mine").unwrap();
 
         let mut out = Vec::new();
-        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &mut out);
+        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &EngineEdits::default(), &mut out);
         let mut got: Vec<String> =
             out.iter().map(|e| e.target.strip_prefix(&stock).unwrap().display().to_string()).collect();
         got.sort();
@@ -1302,10 +2329,45 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// A stock directory the module replaces with a file of the same name is not recursed
+    #[test]
+    fn replace_expands_against_the_stock_listing_not_the_engine_edited_one() {
+        let base = test_base("replace-stock-view");
+        let stock = base.join("stock");
+        let module = base.join("module");
+        fs::create_dir_all(stock.join("vdir")).unwrap();
+        fs::write(stock.join("a.xml"), b"stock").unwrap();
+        fs::create_dir_all(&module).unwrap();
+
+        let list = format!(
+            "{s}/b.xml (whiteout)\n{s}/vdir (virtual dir)\n{s}/c.xml (whiteout) [UID: 10123]\n",
+            s = stock.display()
+        );
+        let mut out = Vec::new();
+        expand_replacement(
+            "m",
+            &stock,
+            &module,
+            &module.join(".replace"),
+            0,
+            &EngineEdits::from_list(&list),
+            &mut out,
+        );
+        let mut got: Vec<String> =
+            out.iter().map(|e| e.target.strip_prefix(&stock).unwrap().display().to_string()).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["a.xml".to_string(), "b.xml".to_string()],
+            "b.xml is hidden by the previous pass and must stay planned, or reload prunes it; \
+             vdir exists only because the engine made it"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn replace_does_not_descend_where_the_module_ships_a_file() {
-        let Some(base) = test_base("replace-file-over-dir") else { return };
+        let base = test_base("replace-file-over-dir");
         let stock = base.join("stock");
         let module = base.join("module");
         fs::create_dir_all(stock.join("thing")).unwrap();
@@ -1314,31 +2376,55 @@ mod tests {
         fs::write(module.join("thing"), b"mine").unwrap();
 
         let mut out = Vec::new();
-        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &mut out);
+        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &EngineEdits::default(), &mut out);
         assert!(out.is_empty(), "expected no whiteouts, got {} entries", out.len());
 
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// No stock directory to replace: the module's content is served on its own and the engine
     #[test]
     fn replace_on_a_directory_the_rom_does_not_have_is_a_no_op() {
-        let Some(base) = test_base("replace-absent") else { return };
+        let base = test_base("replace-absent");
         let module = base.join("module");
         fs::create_dir_all(&module).unwrap();
         fs::write(module.join("mine.xml"), b"mine").unwrap();
 
         let mut out = Vec::new();
-        expand_replacement("m", &base.join("no-such-stock"), &module, &module.join(".replace"), 0, &mut out);
+        expand_replacement("m", &base.join("no-such-stock"), &module, &module.join(".replace"), 0, &EngineEdits::default(), &mut out);
         assert!(out.is_empty());
 
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// A tree deeper than the guard stops instead of walking forever
+    #[test]
+    fn absorb_refuses_the_entries_the_planner_refuses() {
+        let d = tempfile::tempdir().unwrap();
+
+        let plain = d.path().join("libfoo.so");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(absorb_refusal(&plain).is_none(), "an ordinary file must still be absorbed");
+
+        let repl = d.path().join(".replace");
+        std::fs::write(&repl, b"").unwrap();
+        assert!(absorb_refusal(&repl).is_some(), ".replace would be served as a literal file");
+
+        // The untrusted set is "under /data but not /data/adb", plus shared storage - those are
+        // the places a non-root process can write. A tempdir is none of them, so the predicate
+        // is exercised directly rather than through a symlink a test cannot plant under /data.
+        assert!(resolved_source_is_untrusted(Path::new("/data/local/tmp/evil.so")));
+        assert!(resolved_source_is_untrusted(Path::new("/data/media/0/evil.so")));
+        assert!(!resolved_source_is_untrusted(Path::new("/data/adb/modules/m/lib.so")));
+
+        let dirlink = d.path().join("dirlink");
+        std::os::unix::fs::symlink(d.path(), &dirlink).unwrap();
+        assert!(absorb_refusal(&dirlink).is_some(), "a symlink to a directory must be refused");
+
+        assert!(absorb_refusal(&d.path().join("nope")).is_some(), "a missing source is refused");
+    }
+
     #[test]
     fn replace_expansion_stops_at_the_depth_guard() {
-        let Some(base) = test_base("replace-depth") else { return };
+        let base = test_base("replace-depth");
         let stock = base.join("stock");
         let mut d = stock.clone();
         let module = base.join("module");
@@ -1352,45 +2438,65 @@ mod tests {
         fs::create_dir_all(&m).unwrap();
 
         let mut out = Vec::new();
-        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &mut out);
+        expand_replacement("m", &stock, &module, &module.join(".replace"), 0, &EngineEdits::default(), &mut out);
         assert!(out.iter().all(|e| !e.target.ends_with("deep.xml")));
 
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// Somewhere `can_whiteout` accepts (not /tmp, whose root is non-partition)
-    fn test_base(tag: &str) -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        let base = PathBuf::from(home).join(format!(".nomount-test-{tag}"));
-        if can_whiteout(&base.join("probe")).is_err() {
-            eprintln!("skipping: {} is not a whiteoutable base", base.display());
-            return None;
-        }
+    fn test_base(tag: &str) -> PathBuf {
+        let candidates = [
+            std::env::var_os("HOME").map(PathBuf::from),
+            Some(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target"))),
+        ];
+        let base = candidates
+            .into_iter()
+            .flatten()
+            .map(|d| d.join(format!(".nomount-test-{tag}")))
+            .find(|b| can_whiteout(&b.join("probe")).is_ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "neither HOME nor {}/target is a directory can_whiteout accepts, so the \
+                     .replace tests have nowhere to build a stock tree - refusing to pass \
+                     without asserting anything",
+                    env!("CARGO_MANIFEST_DIR")
+                )
+            });
         let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).ok()?;
-        Some(base)
+        fs::create_dir_all(&base).unwrap();
+        base
     }
 
-    /// Only a 0:0 char device is Magisk's whiteout marker
     #[test]
     fn only_a_zero_zero_char_device_is_a_whiteout_marker() {
-        let real = Path::new("/dev/null");
-        if let Ok(md) = fs::symlink_metadata(real) {
-            assert!(md.file_type().is_char_device(), "/dev/null should be a char device");
-            assert!(
-                !is_whiteout_marker(&md.file_type(), real),
-                "/dev/null has a non-zero rdev and is not a deletion marker"
-            );
-        }
-        let Some(base) = test_base("whiteout-marker") else { return };
-        let f = base.join("plain");
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("plain");
         fs::write(&f, b"x").unwrap();
-        let md = fs::symlink_metadata(&f).unwrap();
-        assert!(!is_whiteout_marker(&md.file_type(), &f));
-        let _ = fs::remove_dir_all(&base);
+        let plain = fs::symlink_metadata(&f).unwrap();
+        assert!(!is_whiteout_marker(&plain.file_type(), &f));
+        assert!(!is_whiteout_node(&plain.file_type(), 0), "a regular file is never a marker");
+
+        let null = fs::symlink_metadata("/dev/null").expect("/dev/null must exist");
+        assert!(null.file_type().is_char_device(), "/dev/null should be a char device");
+        assert_ne!(null.rdev(), 0);
+        assert!(
+            !is_whiteout_marker(&null.file_type(), Path::new("/dev/null")),
+            "/dev/null has a non-zero rdev and is not a deletion marker"
+        );
+        assert!(
+            is_whiteout_node(&null.file_type(), 0),
+            "a character device numbered 0:0 is the deletion marker"
+        );
+
+        let node = d.path().join("gone");
+        let c = std::ffi::CString::new(node.as_os_str().as_encoded_bytes()).unwrap();
+        if unsafe { libc::mknod(c.as_ptr(), libc::S_IFCHR | 0o600, 0) } == 0 {
+            let md = fs::symlink_metadata(&node).unwrap();
+            assert!(is_whiteout_marker(&md.file_type(), &node), "a real 0:0 node was not recognised");
+        }
     }
 
-    /// A whiteout is a d_drop, not a serve, so it is allowed wherever the path itself is ours
     #[test]
     fn whiteout_allowed_on_my_partitions() {
         assert!(can_whiteout(Path::new("/my_stock/app/OplusOperationManual")).is_ok());
@@ -1399,7 +2505,6 @@ mod tests {
         assert!(can_whiteout(Path::new("/system/priv-app/Foo")).is_ok());
     }
 
-    /// The refusals that do carry over from `serve_mode`: a bare partition root masks every
     #[test]
     fn whiteout_refuses_partition_roots_and_non_rom() {
         assert!(can_whiteout(Path::new("/my_stock")).is_err());
@@ -1410,7 +2515,77 @@ mod tests {
         assert!(can_whiteout(Path::new("/")).is_err());
     }
 
-    /// A Reload used to delete every durable whiteout and every absorbed rule, because neither
+    #[test]
+    fn whiteout_refuses_what_init_the_linker_and_zygote_need() {
+        for p in [
+            "/system/bin",
+            "/system/bin/",
+            "/system/bin/.",
+            "/system/lib",
+            "/system/lib64",
+            "/system/framework",
+            "/system/etc",
+            "/system/apex",
+            "/system/bin/linker",
+            "/system/bin/linker64",
+            "/system/bin/linker_hwasan64",
+            "/system/bin/app_process",
+            "/system/bin/app_process32",
+            "/system/bin/app_process64",
+            "/system_ext/lib64",
+            "/system_ext/framework",
+            "/vendor/bin",
+            "/vendor/lib",
+            "/vendor/lib64",
+            "/vendor/etc",
+            "/odm/lib64",
+            "/product/framework",
+        ] {
+            assert!(can_whiteout(Path::new(p)).is_err(), "{p} must be refused");
+            assert!(crate::whiteout::validate(p).is_err(), "{p}: whiteout add must refuse it too");
+        }
+        for p in [
+            "/system/app/Foo",
+            "/system/priv-app/Foo",
+            "/product/app/Foo",
+            "/product/priv-app/Foo",
+            "/product/overlay/Foo.apk",
+            "/system/bin/install-recovery.sh",
+            "/system/bin/app_process_xposed64",
+            "/system/etc/hosts",
+            "/system/etc/permissions",
+            "/system/framework/foo.jar",
+            "/vendor/etc/foo.conf",
+            "/my_product/etc",
+            "/system/vendor",
+        ] {
+            assert!(can_whiteout(Path::new(p)).is_ok(), "{p} is an ordinary debloat target");
+        }
+    }
+
+    #[test]
+    fn a_durable_whiteout_yields_to_every_kind_the_plan_serves() {
+        let plan = vec![
+            pe("m", "/product/overlay/Foo.apk", PlanKind::Inject),
+            pe("m", "/my_product/app/Foo/Foo.apk", PlanKind::Bind),
+            pe("m", "/system/app/Gone", PlanKind::Whiteout),
+        ];
+        let durable: Vec<PathBuf> = [
+            "/product/overlay/Foo.apk",
+            "/my_product/app/Foo/Foo.apk",
+            "/system/app/Gone",
+            "/system/etc/tell.conf",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(
+            durable_not_planned(durable, &plan),
+            vec![PathBuf::from("/system/etc/tell.conf")],
+            "mount and reload must drop the same rows, binds included"
+        );
+    }
+
     #[test]
     fn reload_never_prunes_durable_or_absorbed_rules() {
         let durable: HashSet<PathBuf> = ["/system/etc/tell.conf"].iter().map(PathBuf::from).collect();
@@ -1423,7 +2598,6 @@ mod tests {
         assert!(prunable(Path::new("/system/app/Gone.apk"), 0, false, &durable, &absorbed));
     }
 
-    /// A per-UID rule is not the module plan's to prune, and `nm del` (always uid 0) could not
     #[test]
     fn reload_never_prunes_per_uid_rules() {
         let none = HashSet::new();
@@ -1433,7 +2607,6 @@ mod tests {
         assert!(!prunable(t, 1000, false, &none, &none));
     }
 
-    /// A stale directory rule must be deleted after the rules underneath it
     #[test]
     fn stale_rules_are_pruned_deepest_first() {
         let live = parse_live_rules(
@@ -1456,7 +2629,6 @@ mod tests {
         );
     }
 
-    /// An inject source that resolves somewhere a non-root process can rewrite is refused: the
     #[test]
     fn an_inject_source_resolving_into_app_writable_data_is_untrusted() {
         for bad in [
@@ -1464,6 +2636,15 @@ mod tests {
             "/data/media/0/Download/x.apk",
             "/data/data/com.evil/files/payload",
             "/data/app/~~AA==/com.evil-BB==/base.apk",
+            "/storage/emulated/0/Download/x.apk",
+            "/sdcard/Download/x.apk",
+            "/mnt/media_rw/1234-5678/x.apk",
+            "/mnt/expand/abcd/x.apk",
+            "/mnt/user/0/emulated/0/x.apk",
+            "/mnt/runtime/write/emulated/0/x.apk",
+            "/data_mirror/data_ce/null/0/com.some.app/files/foo.conf",
+            "/data_mirror/data_de/null/0/com.some.app/x",
+            "/data_mirror/cur_profiles/0/com.some.app/primary.prof",
         ] {
             assert!(resolved_source_is_untrusted(Path::new(bad)), "must refuse: {bad}");
         }
@@ -1474,6 +2655,8 @@ mod tests {
             "/system/etc/x",
             "/my_product/app/Foo/Foo.apk",
             "/database/x",
+            "/storageroom/x",
+            "/data/adb/modules/M/system/etc/x",
         ] {
             assert!(!resolved_source_is_untrusted(Path::new(ok)), "must accept: {ok}");
         }
@@ -1488,7 +2671,6 @@ mod tests {
         assert!(m.contains_key(&(PathBuf::from("/d"), 0)));
     }
 
-    /// Both RRO layouts count as an overlay
     #[test]
     fn both_rro_layouts_are_overlays() {
         assert!(is_rro_apk(Path::new("/product/overlay/Foo.apk")), "flat");

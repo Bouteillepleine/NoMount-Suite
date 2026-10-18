@@ -28,7 +28,7 @@ _health_get() {
 
 i=0
 booted=0
-while [ "$i" -lt 120 ]; do
+while [ "$i" -lt 450 ]; do
     if [ "$(getprop sys.boot_completed)" = "1" ]; then booted=1; break; fi
     sleep 2
     i=$((i + 1))
@@ -41,6 +41,8 @@ _bootid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 if [ -n "$_bootid" ]; then
     [ "$(cat "$NMDIR/mountpass.ts" 2>/dev/null)" = "$_bootid" ] || _hookran=0
 fi
+_armed=1
+nm_guard_armed || _armed=0
 if [ "$_hookran" = 0 ]; then
     nmlog "⛔ the mount pass never ran this boot - nothing was injected. On KernelSU this means the manager has no metamodule support (metamount.sh is never invoked); on Magisk it means post-fs-data.sh did not run."
     {
@@ -54,9 +56,10 @@ if [ "$_hookran" = 0 ]; then
     } > "$NMDIR/incident.log" 2>/dev/null
 fi
 
-nm_fix_shell_tmp
-
-nm_delink_ksud service
+if [ ! -e "$NMDIR/disabled" ]; then
+    nm_fix_shell_tmp
+    nm_delink_ksud service
+fi
 
 _bh_dir=/data/adb/bindhosts
 _bh_ovr="$_bh_dir/mode_override.sh"
@@ -65,22 +68,6 @@ if [ -d "$_bh_dir" ] && [ -d /data/adb/modules/bindhosts ] &&
     if [ ! -e "$_bh_ovr" ] || grep -q 'NoMount Suite' "$_bh_ovr" 2>/dev/null; then
         cat > "$_bh_ovr.nm_new" <<'BHEOF'
 # Written by the NoMount Suite. Safe to delete.
-#
-# bindhosts mode 0 = ship system/etc/hosts as a normal module file and let the
-# metamodule serve it, with no mount of its own. bindhosts already prefers this
-# when it detects a nomount metamodule; its check looks for
-# /data/adb/modules/nomount and this Suite installs as meta-nomount, so it does
-# not match. Resolve the metamodule symlink instead.
-#
-# Conditional on our metamodule being live, not merely on one existing: the
-# sha256sums manifest is ours. Without that test a leftover copy of this file
-# would force mode 0 under a different metamodule after NoMount was removed.
-#
-# `-e`, not `-f`, on the disable flag: mount::guard_tripped tests Path::exists(),
-# so a `disabled` that is a directory makes every serving verb refuse while `-f`
-# reads false - bindhosts would then pick mode 0 ("the metamodule serves my
-# hosts file") on a device where nothing is being served, and adblocking is
-# silently off with no mount to replace it. Every read in module/*.sh is `-e`.
 _nm=$(readlink -f /data/adb/metamodule 2>/dev/null)
 if [ -n "$_nm" ] && [ -d "$_nm" ] && [ -f "$_nm/nomount.sha256sums" ] &&
    [ ! -f "$_nm/disable" ] && [ ! -f "$_nm/remove" ] &&
@@ -101,10 +88,14 @@ BHEOF
 fi
 unset _bh_dir _bh_ovr _bh_rc
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
+if [ "$_armed" = 0 ] && [ ! -e "$NMDIR/disabled" ]; then
+    nmlog "⛔ the bootloop guard did not arm this boot - the post-boot reload, absorb, whiteouts, hide list and ghost sync are skipped too, so nothing is injected without a counter to stop a panic loop"
+fi
+
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     _rl_all=$(nmto 60 "$BIN" reload 2>&1)
     _rl_rc=$?
-    _rl=$(printf '%s\n' "$_rl_all" | tail -1)
+    _rl=$(_rl_summary "$_rl_all")
     if [ "$_rl_rc" -eq 124 ]; then
         nmlog "post-boot reload timed out after 60s - late module content may be unserved"
     elif [ "$_rl_rc" -ne 0 ]; then
@@ -114,7 +105,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     fi
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     _ab_all=$(nmto 90 "$BIN" absorb 2>&1)
     _ab_rc=$?
     nmlog_absorb_notes "$_ab_all"
@@ -128,20 +119,20 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
     fi
     (
         sleep 45
+        [ -e "$NMDIR/disabled" ] && exit 0
         _rl2_all=$(nmto 60 "$BIN" reload 2>&1)
         _rl2_rc=$?
         if [ "$_rl2_rc" -eq 124 ]; then
             nmlog "late reload pass timed out after 60s"
         elif [ "$_rl2_rc" -ne 0 ]; then
-            nmlog "⚠ late reload pass FAILED (exit $_rl2_rc): $(printf '%s\n' "$_rl2_all" | tail -1)"
+            nmlog "⚠ late reload pass FAILED (exit $_rl2_rc): $(_rl_summary "$_rl2_all")"
         else
-            nmlog "late reload pass: $(printf '%s\n' "$_rl2_all" | tail -1)"
+            nmlog "late reload pass: $(_rl_summary "$_rl2_all")"
         fi
         _ab2_all=$(nmto 90 "$BIN" absorb 2>&1)
         _ab2_rc=$?
         nmlog_absorb_notes "$_ab2_all"
-        _ab2=$(printf '%s
-' "$_ab2_all" | tail -1)
+        _ab2=$(printf '%s\n' "$_ab2_all" | tail -1)
         if [ "$_ab2_rc" -eq 124 ]; then
             nmlog "late absorb pass timed out after 90s"
         elif [ "$_ab2_rc" -ne 0 ]; then
@@ -159,11 +150,11 @@ else
     nmlog "boot_completed never set - leaving guard counter armed"
 fi
 
+if [ "$_armed" = 1 ]; then
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts.txt"; then
     _wo_all=$(nmto 30 "$BIN" whiteout apply 2>&1)
     _wo_rc=$?
-    _wo_last=$(printf '%s
-' "$_wo_all" | tail -1)
+    _wo_last=$(printf '%s\n' "$_wo_all" | tail -1)
     if [ "$_wo_rc" -ne 0 ]; then
         nmlog "⚠ whiteout apply FAILED (exit $_wo_rc) - hidden paths are still visible: $_wo_last"
     else
@@ -171,9 +162,11 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && _has_entries "$NMDIR/whiteouts
     fi
     unset _wo_all _wo_rc _wo_last
 fi
+fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
-    _bl=$(nmto 60 "$BIN" uid apply 2>&1)
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
+   && { _has_entries "$NMDIR/uidhide" || _follow_ksu; }; then
+    _bl=$(export NM_REDACT_HIDE_LIST=1; nmto 60 "$BIN" uid apply 2>&1)
     _bl_rc=$?
     if [ "$_bl_rc" -eq 0 ]; then
         nmlog "hide list re-applied ($_bl)"
@@ -185,25 +178,49 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ -s "$NMDIR/uidhide" ]; then
     unset _bl _bl_rc
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     _gh=$(nmto 60 "$BIN" ghost sync 2>&1)
     _gh_rc=$?
     if [ "$_gh_rc" -eq 124 ]; then
         nmlog "⚠ ghost sync timed out after 60s - the existence oracles stay open this boot"
     elif [ "$_gh_rc" -ne 0 ]; then
-        nmlog "⚠ ghost sync FAILED (rc=$_gh_rc): $(printf '%s
-' "$_gh" | tail -1)"
+        nmlog "⚠ ghost sync FAILED (rc=$_gh_rc): $(printf '%s\n' "$_gh" | tail -1)"
     elif [ -n "$_gh" ]; then
-        nmlog "$(printf '%s
-' "$_gh" | tail -1)"
+        nmlog "$(printf '%s\n' "$_gh" | tail -1)"
     fi
     unset _gh _gh_rc
 fi
 
-if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] \
+# The maps cloak. Separate from ghost on purpose: ghost covers paths the Suite
+# itself injects, this covers what a Zygisk implementation dlopen()s into an app
+# (/data/adb/modules/<mod>/...), which shows up in that app's OWN mapping list.
+# A kernel without the pathhide knob answers "unknown knob" and the sync reports
+# the cloak as unavailable rather than failing the boot.
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
+    _ph=$(nmto 60 "$BIN" pathhide sync 2>&1)
+    _ph_rc=$?
+    if [ "$_ph_rc" -eq 124 ]; then
+        nmlog "⚠ pathhide sync timed out after 60s - the root stack stays visible in app mapping lists this boot"
+    elif [ "$_ph_rc" -ne 0 ]; then
+        nmlog "⚠ pathhide sync FAILED (rc=$_ph_rc): $(printf '%s
+' "$_ph" | tail -1)"
+    elif [ -n "$_ph" ]; then
+        nmlog "$(printf '%s
+' "$_ph" | tail -1)"
+    fi
+    unset _ph _ph_rc
+fi
+
+if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
-    inotifyd "$MODDIR/uidwatch.sh" /data/system >/dev/null 2>&1 &
+    inotifyd "$MODDIR/uidwatch.sh" /data/system:cewDMmynd >/dev/null 2>&1 &
     nmlog "hide-list package watcher started"
+    # Started regardless of the knob: uidwatch.sh drops .allowlist events while it is
+    # off, so turning it on takes effect without a reboot.
+    if [ -d /data/adb/ksu ]; then
+        inotifyd "$MODDIR/uidwatch.sh" /data/adb/ksu:cewDMmynd >/dev/null 2>&1 &
+        nmlog "KernelSU DenyList watcher started"
+    fi
 fi
 
 if [ ! -x "$BIN" ]; then
@@ -240,7 +257,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
         rm -f "$NMDIR/audit.json"
         nmlog "⚠ check timed out after 60s - dropped the stale cache; the WebUI will show no verdict"
     elif [ -s "$NMDIR/audit.json" ]; then
-        nmlog "check cached - one or more findings are open (see the Detection audit card)"
+        nmlog "check cached - one or more findings are open (see the Diagnostics card)"
     else
         rm -f "$NMDIR/audit.json"
         nmlog "⚠ check did not complete - the WebUI will show no cached verdict"
@@ -271,35 +288,45 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
         ok|unchecked*|"") _consbad=0 ;;
         *) _consbad=1 ;;
     esac
-    if [ "${_hookran:-1}" = 0 ]; then
+    if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ]; then
         _health="⛔ mount pass never ran - see the WebUI"
     elif [ "$(_health_get engine)" = "down" ]; then
         _health="⛔ your kernel has no NoMount driver - flash a NoMount kernel, then reboot"
     elif [ "${_rl_rc:-0}" -ne 0 ]; then
-        _health="⚠️ late module content may not be served - tap Reload in the WebUI"
+        _health="ℹ️ late module content may not be served - tap Reload in the WebUI"
     elif [ "$_consbad" = 1 ]; then
-        _health="⚠️ per-UID inconsistency - see the WebUI"
+        _health="ℹ️ per-UID inconsistency - see the WebUI"
     elif [ "${_err:-0}" -gt 0 ]; then
-        _health="⚠️ $_err error(s) - see the WebUI"
+        _health="ℹ️ $_err finding(s) - see the WebUI"
     elif [ -n "$_hv" ] && [ "$_hv" != "clean" ]; then
-        _health="⚠️ $_hv - see the WebUI"
+        _health="ℹ️ $_hv - see the WebUI"
     elif [ "${_wrn:-0}" -gt 0 ]; then
-        _health="$_wrn warning(s)"
+        _health="ℹ️ $_wrn finding(s) - see the WebUI"
     elif [ "${_unm:-0}" -gt 0 ]; then
         _health="not fully measured - see the WebUI"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then
-        _health="serving normally - the rule count just could not be read"
+        _health="serving, rule count unreadable"
     elif [ "${_docok:-0}" = 1 ] && [ "${_hfresh:-0}" = 1 ]; then
         _health="healthy"
     elif [ "${_docok:-0}" = 1 ]; then
-        _health="health unknown - no record this boot"
+        _health="health unknown (no record)"
     else
-        _health="health unknown - plan check did not finish"
+        _health="health unknown (check incomplete)"
     fi
     _fgn=$(_health_get mounts_foreign)
-    case "$_fgn" in ''|*[!0-9]*) _fgn=$_mnt ;; esac
-    if [ "${_fgn:-0}" -gt 0 ]; then
-        _mstate="⚠ $_fgn foreign mount(s)"
+    case "$_fgn" in
+        ''|*[!0-9]*)
+            _fgn=""
+            ;;
+    esac
+    if [ -z "$_fgn" ]; then
+        if [ "${_mnt:-0}" -gt 0 ]; then
+            _mstate="$_mnt mount(s), origin unknown"
+        else
+            _mstate="0 mounts"
+        fi
+    elif [ "$_fgn" -gt 0 ]; then
+        _mstate="ℹ $_fgn foreign mount(s)"
     elif [ "${_mnt:-0}" -gt 0 ]; then
         _mstate="$_mnt mount by design"
     else
@@ -309,19 +336,19 @@ if command -v ksud >/dev/null 2>&1 && [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" 
     if [ "$_mu" = "on" ]; then
         # shellcheck disable=SC1111  # typographic quotes on purpose: this names
         if [ "${_mnt:-0}" -gt 0 ]; then
-            _muc=" · “kernel umount” ON (it hides our $_mnt bind(s))"
+            _muc=" · “kernel umount” ON (hides our $_mnt bind(s))"
             _mul=", manager kernel_umount is ON (hides our $_mnt bind(s))"
         else
-            _muc=" · “kernel umount” ON (nothing here to unmount)"
+            _muc=" · “kernel umount” ON (nothing to unmount)"
             _mul=", manager kernel_umount is ON (nothing here to unmount)"
         fi
     else
         _muc=""
         _mul=""
     fi
-    if [ "${_hookran:-1}" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
+    if [ "${_hookran:-1}" = 0 ] || [ "$_armed" = 0 ] || [ "$(_health_get engine)" = "down" ]; then _mark="⛔"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then _mark="✅"
-    elif [ "${_rules:-0}" = 0 ]; then _mark="⚠️"
+    elif [ "${_rules:-0}" = 0 ]; then _mark="ℹ️"
     else _mark="✅"; fi
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ "${_nmlrc:-0}" -ne 0 ]; then

@@ -21,7 +21,7 @@ nm_state_dir_repair
 
 nm_boot_log_rotate
 
-rm -f "$NMDIR/.uidwatch.lock" 2>/dev/null
+rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" 2>/dev/null
 
 nm_consume_stash
 
@@ -42,7 +42,7 @@ if ! command -v flock >/dev/null 2>&1; then
 elif ! ls /proc/self/fd/9 >/dev/null 2>&1; then
     nmlog "fd 9 is close-on-exec in this shell, so flock cannot use it - mount pass running without a single-run guard"
 else
-    flock -n 9 || exit 0
+    flock -n 9 || { _nm_notified=1; exit 0; }
 fi
 
 nm_set_bin
@@ -64,10 +64,8 @@ if nm_guard_bump "ksu/apatch metamount path"; then
 fi
 
 if command -v ksud >/dev/null 2>&1; then
-    _vf=""; _ov=""
-    if [ -e "$NMDIR/disabled" ]; then
-        nmlog "guard is tripped - skipping per-module tagging (nothing is served)"
-    else
+    _nmods=0
+    if [ ! -e "$NMDIR/disabled" ]; then
     nm_rule_counts
     for d in /data/adb/modules/*/; do
         [ -d "$d" ] || continue
@@ -76,39 +74,24 @@ if command -v ksud >/dev/null 2>&1; then
         { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && continue
         _sum=$(NM_MID="$mid" awk -F'\t' '$1==ENVIRON["NM_MID"]{print;exit}' "$NMDIR/modules.tsv" 2>/dev/null)
         [ -z "$_sum" ] && continue
-        _o=$(printf '%s' "$_sum" | cut -f3)
-        _v=$(printf '%s' "$_sum" | cut -f4)
-        if [ "$_o" = 1 ] && [ "$_v" = 1 ]; then _t="vfs + overlay"; _ov="$_ov $mid";
-        elif [ "$_o" = 1 ]; then _t="overlay"; _ov="$_ov $mid";
-        else _t="vfs"; _vf="$_vf $mid"; fi
-        _n=$(_nmcount -F "/data/adb/modules/$mid/")
-        _m=$(NM_P="/adb/modules/$mid" awk '$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}' \
-             /proc/self/mountinfo 2>/dev/null); _m=${_m:-0}
-        _badge="$_t · $_n served"
-        [ "${_m:-0}" -gt 0 ] && _badge="$_badge · ⚠ $_m mount(s)"
-        _orig=$(sed -n 's/^description=//p' "$d/module.prop" | head -1)
-        KSU_MODULE="$mid" ksud module config set --temp override.description \
-            "[NoMount · $_badge] $_orig" >/dev/null 2>&1
+        _nmods=$((_nmods + 1))
     done
     fi
 
-    _mods=0
-    set -f
-    for _x in $_vf $_ov; do _mods=$((_mods + 1)); done
-    set +f
+    _mods=${_nmods:-0}
     [ "${_wo:-0}" -gt 0 ] 2>/dev/null && _wof=" · $_wo hidden" || _wof=""
     if [ -e "$NMDIR/disabled" ]; then
-        _desc="⛔ disabled - bootloop guard tripped, open the WebUI"
+        _desc="⛔ disabled - bootloop guard tripped, see the WebUI"
     elif [ "${_driver_ok:-1}" = 0 ]; then
-        _desc="⛔ your kernel has no NoMount driver - flash a NoMount kernel, then reboot"
+        _desc="⛔ no NoMount driver - flash a NoMount kernel and reboot"
     elif [ "$_pass_ran" = 0 ]; then
-        _desc="⛔ the Suite could not start this boot - open the WebUI"
+        _desc="⛔ could not start this boot - see the WebUI"
     elif [ "${_mrc:-0}" -ne 0 ]; then
-        _desc="⚠️ the mount pass FAILED (exit $_mrc) - open the WebUI"
+        _desc="ℹ️ mount pass unfinished (exit $_mrc) - see the WebUI"
     elif [ "${_nmlrc:-0}" -ne 0 ]; then
-        _desc="✅ served, but the rule table could not be read this boot"
+        _desc="✅ served, rule table unreadable"
     elif [ "${_rules:-0}" = 0 ]; then
-        _desc="⚠️ ran, but no module had files to serve - open the WebUI"
+        _desc="ℹ️ ran, no module had files to serve"
     else
         _desc="✅ $_rules rules · $_rro RRO$_wof · $_mods modules · mountless"
     fi
