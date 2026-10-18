@@ -33,8 +33,6 @@ extern int ghost_ctl(const char *buf, size_t count) __attribute__((weak));
 extern int ghost_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
 #endif
 
-/* pathhide_get_rule() refuses an outsz under PH_RULE_LEN, so 128 is a floor,
- * not a preference. */
 #define NM_PATHHIDE_RULE_MAX 128
 #ifndef NM_OOT_COMPANION_STUBS
 extern int pathhide_ctl(const char *buf, size_t count) __attribute__((weak));
@@ -106,21 +104,6 @@ static __always_inline bool nomount_is_uid_blocked(uid_t uid)
     return is_blocked;
 }
 
-/* The same answer, callable from outside this translation unit, so _ghost's uid
- * half can stop being a replica of this one.
- *
- * The prototype sits here rather than in nomount.h because the only consumer is
- * a weak extern in fs/proc/ghost.c, which declares it itself -- there is no
- * header the two share, and putting it in ours would invite callers that should
- * not exist. It still has to be declared: a bare definition trips
- * -Wmissing-prototypes and sparse's "should it be static?", and the hookless
- * compile matrix fails on any warning naming nomount.[ch]. ghost.c weak-externs it, so a
- * kernel without nomount still links and a kernel with it can no longer
- * disagree with us about the isolated pools or about nm_hide_isolated -- which
- * it did: the cloak carried the appid list and neither pool, so an isolated
- * child of a hidden app was answered by our ops and by none of its guards.
- * Nothing else should call this; it is deliberately not in nomount.h.
- */
 bool nm_uid_blocked(uid_t uid);
 bool nm_uid_blocked(uid_t uid)
 {
@@ -5384,13 +5367,6 @@ void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
     *ino = info->v_ino;
 }
 
-/* vfs_getxattr() hands security.* to the LSM before the filesystem handlers,
- * and xattr_permission() lets security.* reads past without calling
- * inode_permission(), so neither nm_xattr_get() nor nm_inode_permission() is
- * consulted for that one name and a hidden caller still gets a context back.
- * Both builds close it by asking this, from the two places they can reach:
- * in-tree the integration patch calls it inside vfs_getxattr(), out-of-tree
- * nm_xattr_guard.c kretprobes the same function. */
 bool nm_inode_hidden_from_caller(const struct inode *inode);
 bool nm_inode_hidden_from_caller(const struct inode *inode)
 {
