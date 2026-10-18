@@ -2,8 +2,7 @@
 
 Loads root modules without mounting anything, RRO overlays included. No
 `overlayfs`, no `tmpfs`: the **Prism** kernel engine redirects VFS lookups, so
-nothing shows up in `/proc/mounts`. It is a metamodule, so it can't sit beside
-another one.
+nothing shows up in `/proc/mounts`. It is a metamodule.
 
 > **Beta.** Reports from other phones, managers and odd modules move it to
 > stable. `nomount export` builds the bundle, hide list redacted.
