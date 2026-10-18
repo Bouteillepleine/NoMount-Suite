@@ -6,7 +6,7 @@ import os
 
 DATA = {'init_net'}
 
-WEAK = {'ghost_ctl', 'ghost_get_rule'}
+WEAK = {'ghost_ctl', 'ghost_get_rule', 'pathhide_ctl', 'pathhide_get_rule'}
 
 LOCAL = {
     'memcpy', 'memset', 'memcmp',

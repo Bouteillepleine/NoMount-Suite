@@ -21,5 +21,7 @@
 
 #define ghost_ctl (*nm_w_ghost_ctl)
 #define ghost_get_rule (*nm_w_ghost_get_rule)
+#define pathhide_ctl (*nm_w_pathhide_ctl)
+#define pathhide_get_rule (*nm_w_pathhide_get_rule)
 
 #endif
