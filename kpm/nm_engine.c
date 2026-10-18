@@ -109,11 +109,15 @@ char *strrchr(const char *s, int c)
 
 int (*nm_w_ghost_ctl)(const char *buf, size_t count);
 int (*nm_w_ghost_get_rule)(int idx, char *out, size_t outsz);
+int (*nm_w_pathhide_ctl)(const char *buf, size_t count);
+int (*nm_w_pathhide_get_rule)(int idx, char *out, size_t outsz);
 
 long nm_engine_init(void)
 {
 	nm_w_ghost_ctl = (typeof(nm_w_ghost_ctl))nm_kpm_sym[NMS_ghost_ctl];
 	nm_w_ghost_get_rule = (typeof(nm_w_ghost_get_rule))nm_kpm_sym[NMS_ghost_get_rule];
+	nm_w_pathhide_ctl = (typeof(nm_w_pathhide_ctl))nm_kpm_sym[NMS_pathhide_ctl];
+	nm_w_pathhide_get_rule = (typeof(nm_w_pathhide_get_rule))nm_kpm_sym[NMS_pathhide_get_rule];
 
 	return nomount_init();
 }
