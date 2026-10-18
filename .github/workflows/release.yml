@@ -158,7 +158,7 @@ jobs:
             "  \"version\": \"$TAG\"," \
             "  \"versionCode\": $vcode," \
             "  \"zipUrl\": \"$base/releases/download/$TAG/$(basename "$zip")\"," \
-            "  \"changelog\": \"$raw/CHANGELOG.md\"" \
+            "  \"changelog\": \"$raw/docs/changelog-latest.md\"" \
             '}' > /tmp/update.json
           cat /tmp/update.json
 
@@ -170,9 +170,14 @@ jobs:
             exit 0
           fi
           cp /tmp/update.json /tmp/mainwt/update.json
+          # The manager fetches `changelog` and shows it verbatim, so it gets THIS
+          # version's section only -- the same /tmp/notes.md the release notes use,
+          # not the whole history of CHANGELOG.md.
+          mkdir -p /tmp/mainwt/docs
+          cp /tmp/notes.md /tmp/mainwt/docs/changelog-latest.md
           cd /tmp/mainwt
-          git add update.json
-          if git diff --cached --quiet -- update.json; then
+          git add update.json docs/changelog-latest.md
+          if git diff --cached --quiet -- update.json docs/changelog-latest.md; then
             echo "update.json already current -- nothing to commit."
             exit 0
           fi
