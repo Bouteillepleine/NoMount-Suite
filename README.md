@@ -4,11 +4,6 @@ Loads root modules without adding a mount for them, RRO theming overlays
 included. No `overlayfs`, no `tmpfs`. The kernel redirects VFS lookups instead,
 so nothing the engine injects shows up in `/proc/mounts`.
 
-One exception, on OnePlus/Oppo. The `my_*` partitions get a real bind mount,
-because a hookless injection there trips zygote's FD allowlist and bootloops the
-phone. Those rows are visible to any app. `nomount check` counts them, the WebUI
-names them, and the `my_hookless` trial drops them if you'll take the risk.
-
 A metamodule: at boot it scans `/data/adb/modules/`, classifies every file and
 programs the kernel engine over netlink. No per-module setup. Only one
 metamodule can be active, so it won't install next to another.
