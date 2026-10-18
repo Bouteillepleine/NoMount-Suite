@@ -10,7 +10,7 @@ Unlike the LKM it does not appear in `/proc/modules`.
   all CI proves.
 - **Not in the releases.** Build it from Actions with
   *NoMount KPM - build a KernelPatch module*.
-- **Behind `main`.** It wraps engine `1.32.0`; `main` is at `1.34.5`.
+- **Tracks `main`.** It wraps the same engine, `1.34.5`; `git merge main` refreshes it.
 
 How it loads and what it costs: [`kpm/README.md`](kpm/README.md). Install,
 commands and everything else: the [main README](../../tree/main#readme).

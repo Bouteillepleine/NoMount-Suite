@@ -25,12 +25,12 @@ build; see the repository root readme.
 ## Status
 
 **Builds for every supported KMI; never loaded on hardware.** The engine it wraps
-is `../hookless/src/nomount.c` at `NM_MODULE_VERSION 1.32.0` - the same one the
+is `../hookless/src/nomount.c` at `NM_MODULE_VERSION 1.34.5` - the same one the
 in-tree build and the Suite ship, included rather than copied so it cannot drift.
 
 That only holds within a branch. This branch is the whole repository plus
-`kpm/`, so it has to be refreshed from `main` or the .kpm wraps an old engine -
-it had drifted to 1.26.0/Suite 1.3.117. `KPM_VERSION` is no longer written down
+`kpm/`, so it has to be refreshed from `main` or the .kpm wraps an old engine.
+`main` is a parent of this branch, so `git merge main` refreshes it. `KPM_VERSION` is no longer written down
 either: the Makefile reads `NM_MODULE_VERSION` out of the header.
 
 CI builds a `nomount-<kmi>.kpm` for each GKI KMI generation up to 6.6, inside the
