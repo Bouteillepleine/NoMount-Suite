@@ -12,7 +12,7 @@
       'echo "$id|$st|$mnt"; done'
     ));
     if (r.errno !== 0) {
-      box.innerHTML = '<div class="empty">Unknown - the module list could not be read.</div>';
+      box.innerHTML = '<div class="empty">Unknown: the module list could not be read.</div>';
       $("modcount").textContent = "?"; $("mMod").textContent = "?";
       return;
     }
@@ -44,13 +44,13 @@
       else if (plan.overlay) { label = "overlay"; cls = "ov"; served++; showCnt = true; }
       else if (plan.vfs) { label = "vfs"; cls = "vfs"; served++; showCnt = true; }
       else if (plan.bind) { label = "bind"; cls = "off"; served++; showCnt = true;
-                            tip = "Served by a real bind mount, not an injection - a my_* target is bound unless the my_hookless trial is on."; }
-      else { label = "nothing to inject"; cls = "off"; tip = "This module ships no files the Suite can serve - scripts, zygisk, binaries, or an empty partition directory."; }
+                            tip = "Served by a real bind mount, not an injection: a my_* target is bound unless the my_hookless trial is on."; }
+      else { label = "nothing to inject"; cls = "off"; tip = "This module ships no files the Suite can serve: scripts, zygisk, binaries, or an empty partition directory."; }
       const files = (showCnt && cnt > 0) ? `<span class="files">${cnt} file${cnt > 1 ? "s" : ""}</span>` : `<span class="files"></span>`;
       const vis = mnt < 0
-        ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown - it is not a claim that it owns no mount">mounts unknown</span>`
+        ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown. Not a claim that it owns no mount">mounts unknown</span>`
         : mnt > 0
-        ? `<span class="tag info" title="This module has ${mnt} mount(s) of its own in the mount table - visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
+        ? `<span class="tag info" title="This module has ${mnt} mount(s) of its own in the mount table, visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
         : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
       const uns = unservedBy[id];
       if (uns) {
@@ -76,7 +76,7 @@
     const rro = d.rro.length, vfs = d.injects.length - rro;
     $("rulechip").textContent = d.injects.length;
     $("rulebreak").textContent = d.injects.length
-      ? `${vfs} file redirect${vfs === 1 ? "" : "s"} · ${rro} RRO overlay APK${rro === 1 ? "" : "s"} - all Prism, no mounts`
+      ? `${vfs} file redirect${vfs === 1 ? "" : "s"} · ${rro} RRO overlay APK${rro === 1 ? "" : "s"}, all Prism, no mounts`
       : "No rules active.";
     _paintRuleModuleBar(d.lines.filter((l) => !l.includes("(virtual dir)")));
   }
@@ -175,7 +175,7 @@
     const w = await whiteoutSets();
     if (!w.ok) {
       $("wochip").textContent = "?";
-      box.innerHTML = '<div class="empty">Unknown - the list could not be read.</div>';
+      box.innerHTML = '<div class="empty">Unknown: the list could not be read.</div>';
       return;
     }
     const lines = w.durable;
@@ -183,7 +183,7 @@
     const autoHtml = auto.map((p) =>
       `<div class="row abrow"><span class="ab-main">` +
       `<div class="ab-path">${esc(p)}</div>` +
-      `<div class="ab-why">managed automatically - it goes when the module that asked for it goes</div>` +
+      `<div class="ab-why">managed automatically; it goes when the module that asked for it goes</div>` +
       `</span><span class="tag vfs">from a module</span></div>`).join("");
 
     if (!lines.length) {
@@ -201,9 +201,9 @@
       const st = (l.split("\t")[1] || "").trim();
       const cls = /^hidden/.test(st) ? "vfs"
         : /^not applied \(and no such path/.test(st) ? "off" : "info";
-      const hint = /^not applied - run/.test(st) ? "saved, not live yet - tap Reload on Status"
-                 : /^applied, but still visible/.test(st) ? "the engine is not serving it - tap Reload on Status"
-                 : /^not applied \(and no such path/.test(st) ? "this ROM has no such path - nothing to hide"
+      const hint = /^not applied - run/.test(st) ? "saved, not live yet · tap Reload on Status"
+                 : /^applied, but still visible/.test(st) ? "the engine is not serving it · tap Reload on Status"
+                 : /^not applied \(and no such path/.test(st) ? "this ROM has no such path · nothing to hide"
                  : "";
       const tag = /^not applied \(/.test(st) ? "not applied" : st.split(" - ")[0];
       return `<div class="row abrow"><span class="ab-main">` +
@@ -280,7 +280,7 @@
         return `<div class="row abrow"><span class="ab-main">` +
                `<div class="ab-path">${esc(tgt)}</div>` +
                `<div class="ab-why">from ${esc(owner(src))}` +
-               (live ? "" : " - module no longer installed") + `</div>` +
+               (live ? "" : " · module no longer installed") + `</div>` +
                `</span><span class="tag ${live ? "vfs" : "off"}">` +
                (live ? "absorbed" : "stale entry") + `</span></div>`;
       }).join("");
@@ -410,7 +410,7 @@
     toast(r.errno !== 0 ? failText(r)
           : deferred
             ? (absorbedNone
-                ? "Deferred - my_* mounts cannot be absorbed while Android is running"
+                ? "Deferred: my_* mounts cannot be absorbed while Android is running"
                 : "Absorbed, with my_* mounts deferred")
             : "Absorb complete",
           r.errno === 0 ? "ok" : "bad");
@@ -428,7 +428,7 @@
     const r = await nm("whiteout suggest");
     if (r.errno !== 0) {
       $("woFound").classList.remove("u-hide");
-      $("woFound").innerHTML = '<div class="empty">Scan did not run - ' +
+      $("woFound").innerHTML = '<div class="empty">Scan did not run: ' +
         esc((r.stderr || "").trim() || "the command failed") + "</div>";
       toast("Scan did not run", "bad");
       done();
@@ -511,7 +511,7 @@
     const d = await ruleDump();
     if (!d.ok) {
       _rulesRaw = "";
-      $("ruleslist").textContent = "unknown - the engine did not answer";
+      $("ruleslist").textContent = "unknown: the engine did not answer";
       $("rulecount").classList.add("u-hide");
       return;
     }
@@ -552,14 +552,14 @@
     const w = $("incwarn");
     if (w && r.errno === 0 && /REBOOT REQUIRED/.test(out)) {
       w.hidden = false;
-      w.innerHTML = "⚠️ A system APK changed - <b>reboot to finish</b>. " +
+      w.innerHTML = "⚠️ A system APK changed. <b>reboot to finish</b>. " +
         "Until then, apps over those APKs can force-close.";
     }
   }
   async function clearRules(btn) {
     if (!(await confirmAction(
       "Clear every injection rule?",
-      "Every file your modules add disappears straight away - apps go back to seeing the stock " +
+      "Every file your modules add disappears straight away; apps go back to seeing the stock " +
       "ROM, and anything relying on an injected file may misbehave until you put them back. " +
       "Nothing is uninstalled: Reload, or a reboot, restores all of it.",
       "Clear rules"))) return;
@@ -567,7 +567,7 @@
     const r = await nm("vfs clear");
     if (r.errno === 0) toast((r.stdout || "").replace(/^ok\b\s*/, "Rules cleared ").trim() || "Rules cleared", "ok");
     else toast(/could not be re-applied/.test(r.stderr || "")
-                 ? "Rules cleared - but the hide list could not be re-applied: those apps are not hidden"
+                 ? "Rules cleared, but the hide list could not be re-applied: those apps are not hidden"
                  : failText(r), "bad");
     RULES = null;
     PLAN_BY_MODULE = null;
@@ -577,12 +577,12 @@
   async function rearm(btn) {
     if (!(await confirmAction(
       "Re-arm the bootloop guard?",
-      "This deletes the record of the boot that failed, including the crash log - which is the " +
+      "This deletes the record of the boot that failed, including the crash log, which is the " +
       "only copy and usually names the file that caused it. Read or copy it first. The Suite " +
       "stays off until you reboot.",
       "Delete and re-arm"))) return;
     btn.disabled = true;
     await exec("rm -rf /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
-    toast("Guard re-armed - reboot to re-enable", "ok");
+    toast("Guard re-armed · reboot to re-enable", "ok");
     btn.disabled = false; refreshGuard(); refreshIncident();
   }

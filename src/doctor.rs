@@ -653,7 +653,7 @@ fn reached_only_if_sourced(script: &str) -> &'static str {
         return "";
     }
     " NB: the module SOURCES this helper rather than the manager running it, so it may \
-     never run - check the module's config first."
+     never run. Check the module's config first."
 }
 
 fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
@@ -826,7 +826,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     format!(
                         "{} -> {} is a symlink to {dest}, which does not exist. Injection \
                          serves a link's target, so this produces no rule and the path \
-                         never appears - an installer that symlinks before its target \
+                         never appears: an installer that symlinks before its target \
                          lands hits this",
                         e.target.display(),
                         e.source.display(),
@@ -1188,7 +1188,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 }
                 Err(e) => format!(
                     "\"Kernel umount\" is ON; whether we have any bind mounts could not be read \
-                     ({} - {e}). Either way it cannot touch the injections.",
+                     ({}: {e}). Either way it cannot touch the injections.",
                     crate::bind::BINDS_LIST
                 ),
             },
@@ -1207,14 +1207,14 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 Ok(v) => {
                     let binds = v.len();
                     format!(
-                        "\"Kernel umount\" could not be read, so it is UNKNOWN rather than off - \
+                        "\"Kernel umount\" could not be read, so it is UNKNOWN rather than off, \
                          and this device has {binds} bind mount(s) of ours. It is the only thing \
                          that hides those from an app's mount table; worth checking."
                     )
                 }
                 Err(e) => format!(
-                    "\"Kernel umount\" could not be read, and neither could our bind record ({} \
-                     - {e}). The injections are unaffected either way.",
+                    "\"Kernel umount\" could not be read, and neither could our bind record ({}: \
+                     {e}). The injections are unaffected either way.",
                     crate::bind::BINDS_LIST
                 ),
             },
@@ -1241,7 +1241,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Warn,
             check: "KernelSU umount-by-default ON while followed",
             detail: "following the DenyList while KernelSU's global \"umount modules by \
-                 default\" is ON means hiding from every app without its own profile - your \
+                 default\" is ON means hiding from every app without its own profile; your \
                  modules reach none of them. Turn that switch off, or `nomount uid ksu off`."
                 .to_string(),
         });
@@ -1254,7 +1254,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 level: Level::Info,
                 check: "KernelSU DenyList not followed",
                 detail: format!(
-                    "KernelSU's DenyList covers {} app(s){} - the Suite ignores it, \
+                    "KernelSU's DenyList covers {} app(s){}; the Suite ignores it, \
                      injections are not mounts. `nomount uid ksu on` follows it.",
                     covered
                         .map(|n| n.to_string())
@@ -1376,7 +1376,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                                 level: Level::Error,
                                 check: "not FD-allowlisted",
                                 detail: format!(
-                                    "{} lives on /{part} - an overlay APK here aborts forkSystemServer",
+                                    "{} lives on /{part}: an overlay APK here aborts forkSystemServer",
                                     target.display()
                                 ),
                             });
@@ -1484,7 +1484,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         level: Level::Error,
                         check: "ghost cloak over-reaches",
                         detail: format!(
-                            "{} of {checked} sampled path(s) are still visible to {who} - they \
+                            "{} of {checked} sampled path(s) are still visible to {who}: they \
                  answer \"exists\" and \"does not exist\" at once, which is louder than the leak \
                  this closes. Re-run the mount pass: {}",
                             visible.len(),
@@ -1497,7 +1497,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         level: Level::Warn,
                         check: "ghost cloak compiled in but not effective",
                         detail: format!(
-                            "{} of {checked} sampled path(s) hide from `stat` but still leak their label - \
+                            "{} of {checked} sampled path(s) hide from `stat` but still leak their label; \
                  the guards are compiled in and not firing on this kernel: {}",
                             leaked.len(),
                             name(&leaked)
@@ -1522,7 +1522,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         check: "ghost cloak not verified",
                         detail: format!(
                             "none of the {attempted} sampled path(s) could be probed (the test process \
-             could not run), so the cloak was not tested on this kernel - this is not a pass"
+             could not run), so the cloak was not tested on this kernel. This is not a pass"
                         ),
                     });
                 } else if visible.is_empty() && leaked.is_empty() {
@@ -1536,7 +1536,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                         detail: if unknown > 0 {
                             format!(
                                 "{absent} of {attempted} sampled path(s) look exactly like paths that never \
-             existed, to {who}, but {unknown} could not be probed - not a complete answer"
+             existed, to {who}, but {unknown} could not be probed: not a complete answer"
                             )
                         } else {
                             format!(
@@ -1569,16 +1569,16 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     check: "ghost cloak not populated",
                     detail: if nothing_hidden {
                         "nothing is hidden on this device, so the existence cloak has nothing \
-                         to guard - it is only armed for apps on the hide list. Nothing to test."
+                         to guard: it is only armed for apps on the hide list. Nothing to test."
                             .to_string()
                     } else if hide_list_unreadable {
                         "the hide list could not be read, so whether anything should be cloaked \
-                         is unknown - not a pass, and not a \"nothing to test\" either."
+                         is unknown: not a pass, and not a \"nothing to test\" either."
                             .to_string()
                     } else {
                         format!(
                             "the engine returned {} hidden path(s) and {} hidden uid(s); both tables must be \
-             non-empty for any guard to fire, so nothing was tested - a kernel built without _ghost \
+             non-empty for any guard to fire, so nothing was tested; a kernel built without _ghost \
              answers exactly the same way",
                             gpaths.len(),
                             guids.len()
@@ -1636,7 +1636,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 Level::Info,
                 "module mount left by design",
                 format!(
-                    "{} <- {} - {id} is a hook framework; absorb leaves it alone",
+                    "{} <- {}: {id} is a hook framework; absorb leaves it alone",
                     s.target.display(),
                     s.source.display()
                 ),
@@ -1684,7 +1684,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 Level::Warn,
                 "module mount not absorbed",
                 format!(
-                    "{} <- {} is still a real mount and visible to any app, but its content is already served by live injections, so the mount is redundant - `nomount absorb` just unmounts it. The owning module is bind-mounting content NoMount already injects; dropping that bind from its post-fs-data.sh stops it coming back at boot",
+                    "{} <- {} is still a real mount and visible to any app, but its content is already served by live injections, so the mount is redundant; `nomount absorb` just unmounts it. The owning module is bind-mounting content NoMount already injects; dropping that bind from its post-fs-data.sh stops it coming back at boot",
                     s.target.display(),
                     s.source.display()
                 ),
@@ -1695,8 +1695,8 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 format!(
                     "{} <- {} is a directory bind that carries no files, so it is hiding \
                      what the ROM ships there rather than serving anything. Absorb empties the \
-                     directory mountlessly instead of unmounting it - automatically, on every \
-                     pass - so this is only still here if absorb has not run since the bind was",
+                     directory mountlessly instead of unmounting it (automatically, on every \
+                     pass), so this is only still here if absorb has not run since the bind was",
                     s.target.display(),
                     s.source.display()
                 ),
@@ -1707,7 +1707,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 format!(
                     "{} <- {} is a directory bind, still a real mount and visible to any \
                      app. A plain `nomount absorb` skips it, because injecting a directory \
-                     snapshots its listing and would miss files the module adds later - \
+                     snapshots its listing and would miss files the module adds later; \
                      `nomount absorb --include-dirs` takes it anyway",
                     s.target.display(),
                     s.source.display()
@@ -1718,7 +1718,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                 "module mount not absorbed",
                 format!(
                     "{} <- {} is still a real mount and visible to any app, and nothing \
-                     declined it - run `nomount absorb` (it runs at boot, so this usually \
+                     declined it. Run `nomount absorb` (it runs at boot, so this usually \
                      means it failed)",
                     s.target.display(),
                     s.source.display()
@@ -1765,7 +1765,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             level: Level::Info,
             check: "whiteout leaves a measurable hole",
             detail: format!(
-                "{module}: {} path(s) the engine cannot fully mask - their folder spans several \
+                "{module}: {} path(s) the engine cannot fully mask: their folder spans several \
                  blocks, so its size still counts the hidden entry. An app that checks the \
                  folder's size can tell something was removed from it. There is nothing to \
                  fix: the module works, and refusing to hide these would break it. {}{}",
@@ -1783,7 +1783,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
             check: "wide replacement expansion",
             detail: format!(
                 "{module}: {} expands to {count} hides, one per ROM entry it does not ship. \
-                 Correct, but a lot from one marker - narrow it if it was meant to cover less.",
+                 Correct, but a lot from one marker; narrow it if it was meant to cover less.",
                 marker.display()
             ),
         });

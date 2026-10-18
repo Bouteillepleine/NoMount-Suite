@@ -946,6 +946,9 @@ pub fn run_reload() -> Result<()> {
 
     let live_txt = nm.list().context("nm list failed during reload")?;
     let live = parse_live_rules(&live_txt);
+    // What the engine was last given per target: a source path can be unchanged
+    // while the file behind it is not, and the live rule text cannot show that.
+    let last_served = crate::rulestate::read();
 
     let (plan, skipped, _refused) = collect_plan_with(&EngineEdits::from_list(&live_txt))?;
     let (plan, collisions) = dedupe_by_target(plan);
@@ -1002,7 +1005,9 @@ pub fn run_reload() -> Result<()> {
         let t = e.target.as_path();
         let up_to_date = match live.get(&(t.to_path_buf(), 0)) {
             Some(LiveRule::Inject(src)) => {
-                e.kind == PlanKind::Inject && src.as_path() == e.source.as_path()
+                e.kind == PlanKind::Inject
+                    && src.as_path() == e.source.as_path()
+                    && !crate::rulestate::is_stale(&last_served, t, &e.source)
             }
             Some(LiveRule::Whiteout) => e.kind == PlanKind::Whiteout,
             None => false,
@@ -1117,6 +1122,8 @@ pub fn run_reload() -> Result<()> {
     }
 
     crate::bind::register_try_umount();
+
+    crate::rulestate::write(&injected_pairs(&plan, &applied_apks));
 
     let pm = crate::pmcache::sync(&served_apks_applied(
         &applied_apks,
@@ -1338,6 +1345,8 @@ pub fn run_mount() -> Result<()> {
     let tmpfs_hidden = crate::absorb::reapply_tmpfs_whiteouts(&nm);
     let (ksu_umount, _) = crate::bind::register_try_umount();
 
+    crate::rulestate::write(&injected_pairs(&plan, &applied_apks));
+
     let pm = crate::pmcache::sync(&served_apks_applied(&applied_apks, &recorded));
     crate::pmcache::clear_pending();
 
@@ -1377,6 +1386,21 @@ pub fn run_mount() -> Result<()> {
     }
     crate::ghost::sync_after_pass(&nm);
     Ok(())
+}
+
+/// The inject half of what was applied -- the pairs whose backing identity a
+/// later reload compares against. A bind is reconciled on (target, source)
+/// already, and a whiteout has no backing file.
+fn injected_pairs(
+    plan: &[PlanEntry],
+    applied: &[(PathBuf, PathBuf)],
+) -> Vec<(PathBuf, PathBuf)> {
+    let injects: HashSet<&Path> = plan
+        .iter()
+        .filter(|e| e.kind == PlanKind::Inject)
+        .map(|e| e.target.as_path())
+        .collect();
+    applied.iter().filter(|(t, _)| injects.contains(t.as_path())).cloned().collect()
 }
 
 fn served_apks_applied(

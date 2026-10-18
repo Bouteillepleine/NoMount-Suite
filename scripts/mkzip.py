@@ -26,6 +26,8 @@ def is_executable(rel):
         or rel.startswith("bin/")
         or "/bin/" in rel
         or rel.endswith("/update-binary")
+        # the ko-loader, used to insmod the engine module when ksud cannot
+        or rel == "loader"
     )
 
 count = 0

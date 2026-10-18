@@ -75,6 +75,14 @@ if [ ! -d "$MODPATH/bin/${_abi}" ]; then
     ui_print "! boot, silently. NoMount is arm64-v8a only."
     ui_print "*********************************************************"
 fi
+NM_LKM_SAY=ui_print
+NM_LKM_NM="$_nm"
+NM_LKM_LOADER="$MODPATH/loader"
+export NM_LKM_SAY NM_LKM_NM NM_LKM_LOADER
+# shellcheck source=module/lkm-load.sh
+[ -f "$MODPATH/lkm-load.sh" ] && . "$MODPATH/lkm-load.sh"
+[ -f "$NM_LKM_LOADER" ] && chmod 0755 "$NM_LKM_LOADER" 2>/dev/null
+
 if [ -x "$_nm" ]; then
     _evl=$("$_nm" v 2>/dev/null | head -n 1)
     _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
@@ -82,13 +90,25 @@ if [ -x "$_nm" ]; then
     case "$_evl" in *" "*) _eb=${_evl#* }; _eb=${_eb%% *} ;; esac
     if [ -n "$_ev" ]; then
         ui_print "- Prism engine: v${_ev} (${_eb:+build $_eb, }responding)"
+        if ! lsmod 2>/dev/null | grep -q "^nomount"; then
+            ui_print "- Built into the kernel - dropping the bundled modules."
+            rm -rf "$MODPATH/lkm" "$MODPATH/loader"
+        fi
+    elif command -v nm_lkm_load_best >/dev/null 2>&1 \
+         && { nm_lkm_load_best "$MODPATH/lkm" || nm_lkm_probe; }; then
+        _evl=$("$_nm" v 2>/dev/null | head -n 1)
+        _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
+        ui_print "- Prism engine: v${_ev} (module loaded, no reboot needed)"
+        nm_lkm_prune "$MODPATH/lkm"
     else
         ui_print "*********************************************************"
-        ui_print "! The kernel's NoMount engine did not answer."
-        ui_print "! From recovery this is normal - it will work after boot."
-        ui_print "! On a running system it means this kernel has no NoMount"
-        ui_print "! support: the module installs but injects nothing."
-        ui_print "! Flash a NoMount-enabled kernel, then reboot."
+        ui_print "! The kernel's NoMount engine did not answer, and no"
+        ui_print "! bundled module loads on it either."
+        ui_print "!   kernel: $(uname -r)"
+        ui_print "! From recovery this is normal - there is no running kernel"
+        ui_print "! to load into. Reboot, then reinstall to find out."
+        ui_print "! Otherwise: flash a NoMount-enabled kernel, or drop a"
+        ui_print "! matching nomount.ko at /data/adb/nomount/nomount.ko."
         ui_print "*********************************************************"
     fi
 else
@@ -209,7 +229,7 @@ elif [ -z "$_ev" ] && [ "$_booted" != "1" ]; then
     ui_print "- next step: reboot, then open the WebUI - it says whether your kernel has it."
 elif [ -z "$_ev" ]; then
     ui_print "- next step: flash a kernel built with CONFIG_NOMOUNT, then reboot."
-    ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-ReSukiSu_NMS/releases"
+    ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases"
     ui_print "  Until you do, this module is installed and doing nothing."
 else
     ui_print "- next step: clear the disable flag (see above), then reboot."

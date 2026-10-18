@@ -10,8 +10,9 @@ mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 
 nm_boot_log_rotate
 
-rm -f "$NMDIR/.uidwatch.lock" 2>/dev/null
+rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" 2>/dev/null
 nm_consume_stash
+nm_lkm_boot_load
 if [ -n "$KSU" ] || [ -n "$APATCH" ]; then
     nmlog "KSU/APatch detected - the metamodule hook (metamount.sh) owns this boot"
     exit 0
