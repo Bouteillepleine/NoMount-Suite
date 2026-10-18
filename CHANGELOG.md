@@ -8,15 +8,8 @@
 
 ## v1.3.201 — engine v34 (unchanged)
 
-- The bottom bar is now a dock: it sits on the edge of the screen, keeps its labels, and
-  marks the active pane with a pill behind the icon. The floating capsule is still here —
-  Checks › Appearance switches between the two, and the choice is remembered.
-
-- The module rows line up. What a module contributes reads on the left, whether that is a
-  file count or `nothing to inject`; the chips are right-aligned with `mountless` last, so
-  they form a column instead of a ragged edge. `mountless` is also quiet now: it is the
-  normal state and was on nearly every row, which made the one module that does own a
-  mount harder to spot than the ones that don't.
+- New dock bottom bar. The floating capsule is still there, under Checks › Appearance.
+- Module rows line up, and `mountless` is quiet so a module that owns a mount stands out.
 
 ## v1.3.200 — engine v34 (unchanged)
 
