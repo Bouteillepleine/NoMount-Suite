@@ -1,9 +1,9 @@
 name: NoMount KPM — build a KernelPatch module
 
-# Builds kpm/ into one nomount-<kmi>.kpm per GKI KMI generation.
+# Builds kpm/ into one nomount-<kmi>.kpm per GKI KMI generation test.
 #
 # WHY PER KMI, AND WHY IN THE DDK CONTAINERS -- a correctness argument here, not
-# just a speed one.
+# just a speed one test.
 #
 # The engine half of a .kpm is compiled against real kernel headers because it
 # dereferences struct inode, dentry and super_block. Those layouts depend on the
@@ -47,7 +47,7 @@ on:
       only:
         description: "Comma-separated KMIs (empty = all). e.g. android15-6.6"
         required: false
-        default: ''
+        default: 'android12-5.10'
       variant_ref:
         description: "Branch holding kpm/ (this file lives on main; the code does not)"
         required: false
@@ -59,7 +59,7 @@ on:
       kp_ref:
         description: "KernelPatch ref (empty = the pinned commit below)"
         required: false
-        default: '72a904c412754e25f54353c30f31f5c884ed0673'
+        default: 'main'
 
 permissions:
   contents: read
@@ -93,7 +93,7 @@ jobs:
       - name: Should this KMI run?
         id: sel
         env:
-          ONLY: ${{ github.event.inputs.only }}
+          ONLY: 'android12-5.10'
         run: |
           set -eu
           if [ -z "${ONLY:-}" ] || printf '%s' "$ONLY" | tr ',' '\n' | grep -qx '${{ matrix.kmi }}'; then
@@ -216,9 +216,9 @@ jobs:
           #     drifting SDK moves the gate under the build.
           #   * `clone -b` takes a branch or a tag, never a commit sha, so pinning had
           #     to become clone-then-checkout.
-          ref="${KP_REF:-72a904c412754e25f54353c30f31f5c884ed0673}"
+          ref="${KP_REF:-main}"
           git clone --filter=blob:none --no-checkout "$repo" /tmp/kp
-          git -C /tmp/kp checkout -q "$ref" || {
+          git -C /tmp/kp checkout -q main || {
             echo "::error::KernelPatch ref $ref not found in $repo"; exit 1; }
           test -d /tmp/kp/kernel/include || {
             echo "::error::$repo is not a KernelPatch checkout"; exit 1; }
