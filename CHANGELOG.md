@@ -6,6 +6,11 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.202 — engine v34 (unchanged)
+
+- A third bottom bar: **Compact**, a short floating pill with icons only. Checks › Appearance
+  picks between Dock, Capsule and Compact.
+
 ## v1.3.201 — engine v34 (unchanged)
 
 - New dock bottom bar. The floating capsule is still there, under Checks › Appearance.
