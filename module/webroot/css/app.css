@@ -947,6 +947,40 @@
     background: linear-gradient(135deg, rgba(63,99,224,.16), rgba(15,158,132,.13));
   }
 
+  /* =========================================================================
+     COMPACT -- the third bar: a short floating pill, icons only, the active one
+     carried by a filled circular badge. The glass surface, border and shadow are
+     the capsule's; only the shape, the metrics and the marker change. The label
+     stays in the DOM and is merely hidden from sight, so a button keeps its
+     accessible name with nothing drawn.
+     ========================================================================= */
+  html[data-nav="compact"] .navwrap { padding: 0 16px calc(15px + env(safe-area-inset-bottom)); }
+  html[data-nav="compact"] .nav { border-radius: 999px; padding: 6px; gap: 2px; }
+  html[data-nav="compact"] .nav::before { display: none; }
+  html[data-nav="compact"] .navpill { display: none; }
+  html[data-nav="compact"] .navb {
+    position: relative; flex: 0 0 auto; width: 56px; min-width: 0; height: 48px;
+    padding: 0; gap: 0; border-radius: 999px;
+  }
+  html[data-nav="compact"] .navb span {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; white-space: nowrap; clip-path: inset(50%); border: 0;
+  }
+  html[data-nav="compact"] .navb::before {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%;
+    background: var(--grad);
+    opacity: 0; transform: scale(.4);
+    transition: opacity .2s cubic-bezier(.2,0,0,1),
+                transform .22s cubic-bezier(.22,1.4,.4,1);
+  }
+  html[data-nav="compact"] .navb.on::before { opacity: 1; transform: none; }
+  html[data-nav="compact"] .navb svg { position: relative; z-index: 1; filter: none; }
+  /* on a filled badge the icon flips to the colour that sits on the accent,
+     the same pairing the primary button uses, in either theme */
+  html[data-nav="compact"] .navb.on svg { stroke: var(--on-pri); transform: none; filter: none; }
+  html[data-nav="compact"] .wrap { padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
+
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
   /* ---------- utilities (deliberate, not a dumping ground) ---------- */
