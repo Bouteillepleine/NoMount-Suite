@@ -143,6 +143,30 @@ fn expand_ghost_uids(appids: &[u32], users: &[u32]) -> Vec<u32> {
 /// mirror of whatever filters package visibility for those callers, and the Suite
 /// has no way to read that from another module. An absent or empty file clears the
 /// kernel table, so removing the file turns the concealment off.
+/// Extra paths to cloak from the callers we hide from, beyond the ones the
+/// sync derives from injected rules.
+///
+/// The derived set only covers paths the Suite serves, so it cannot reach a
+/// socket or a node the system owns -- `/dev/socket/adbd` being the case that
+/// motivated this: an app that sees it while `init.svc.adbd` reads stopped has
+/// caught the spoof, because init unlinks that socket before publishing that
+/// value. Hand-maintained, one absolute path per line, `#` comments. These are
+/// pushed as-is: the absence probe judges injected paths, and a path the Suite
+/// does not serve has nothing to probe.
+pub const EXTRA_PATHS: &str = "/data/adb/nomount/ghostpaths";
+
+fn extra_paths() -> Vec<String> {
+    match std::fs::read_to_string(EXTRA_PATHS) {
+        // '@name' is an abstract socket, not a path; the kernel takes both in
+        // this list and only the socket guard ever looks the '@' form up.
+        Ok(raw) => parse_conceal(&raw)
+            .into_iter()
+            .filter(|p| p.starts_with('/') || p.starts_with('@'))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 pub const CONCEAL_PATH: &str = "/data/adb/nomount/uidconceal";
 
 fn parse_conceal(raw: &str) -> Vec<String> {
@@ -383,7 +407,13 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
     };
     out.ghostable = ghostable.len();
 
-    push(nm, 'p', &ghostable, &mut out);
+    let mut paths = ghostable;
+    for e in extra_paths() {
+        if !paths.contains(&e) {
+            paths.push(e);
+        }
+    }
+    push(nm, 'p', &paths, &mut out);
     let uid_strs: Vec<String> = uids.iter().map(u32::to_string).collect();
     push(nm, 'u', &uid_strs, &mut out);
     let conceal: Vec<String> = conceal_uids().iter().map(u32::to_string).collect();
