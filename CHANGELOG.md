@@ -6,6 +6,14 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.203 — engine v34 (unchanged)
+
+- `uidconceal`: apps on this list read as idle to the callers already hidden from —
+  `getpriority` answers `-ESRCH`, the same as a user owning no task.
+- `ghostpaths`: extra cloak entries beside the synced ones — absolute paths, and `@name`
+  for abstract sockets, which refuse with `-ECONNREFUSED`.
+- Both need a kernel built with the `_ghost` patches; the LKM build cannot carry them.
+
 ## v1.3.202 — engine v34 (unchanged)
 
 - A third bottom bar: **Compact**, a short floating pill with icons only. Checks › Appearance
