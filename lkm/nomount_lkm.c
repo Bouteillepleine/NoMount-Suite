@@ -1,6 +1,7 @@
 #include "nm_oot.h"
 #include "nm_maps_spoof.h"
 #include "nm_xattr_guard.h"
+#include "nm_mount_filter.h"
 #include "nm_hide.h"
 
 /* The engine declares the ghost/pathhide companion hooks weak-undefined so an
@@ -24,6 +25,7 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz);
 			return rc;					\
 		nm_maps_spoof_init();					\
 		nm_xattr_guard_init();					\
+		nm_mount_filter_init();					\
 		nm_module_hide();					\
 		return 0;						\
 	}								\
@@ -33,6 +35,7 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz);
 #define module_exit(fn)							\
 	static void __exit nm_lkm_exit(void)				\
 	{								\
+		nm_mount_filter_exit();					\
 		nm_xattr_guard_exit();					\
 		nm_maps_spoof_exit();					\
 		fn();							\
