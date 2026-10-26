@@ -210,7 +210,68 @@ static int nm_gp_upa_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
+/* The uid sweep.
+ *
+ * The detector calls getpriority(PRIO_USER, uid) across all 10000 app uids and
+ * looks for one that owns running tasks while PackageManager shows no package
+ * for it. That pair is the whole tell, and it needs no filesystem at all, which
+ * is why none of the path guards above touch it.
+ *
+ * In tree this is a patch inside SYSCALL_DEFINE2(getpriority) that jumps to
+ * out_unlock for a concealed uid, leaving the -ESRCH the syscall starts with,
+ * so the uid reads as idle rather than as refused. Out of tree the arm64
+ * syscall wrapper takes a single pt_regs pointer and unpacks the real arguments
+ * from it, so the entry handler reads `which` and `who` out of that inner
+ * struct and the return handler writes the same -ESRCH.
+ *
+ * setpriority is guarded too: it answers the same question, and leaving it open
+ * would hand back exactly what getpriority no longer gives.
+ */
+#define NM_GP_PRIO_USER 2
+
+static int nm_gp_prio_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
+	struct pt_regs *args = (struct pt_regs *)regs->regs[0];
+	int which, who;
+
+	ctx->hide = false;
+	if (!args)
+		return 0;
+
+	which = (int)args->regs[0];
+	who = (int)args->regs[1];
+	if (which != NM_GP_PRIO_USER || !who)
+		return 0;
+
+	ctx->hide = ghost_uid_task_hidden((u32)who);
+	return 0;
+}
+
+static int nm_gp_prio_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
+
+	if (ctx->hide)
+		regs->regs[0] = (unsigned long)(long)-ESRCH;
+	return 0;
+}
+
 static struct kretprobe nm_gp_krp[] = {
+	{
+		.kp.symbol_name = "__arm64_sys_getpriority",
+		.entry_handler  = nm_gp_prio_entry,
+		.handler        = nm_gp_prio_ret,
+		.data_size      = sizeof(struct nm_gp_ctx),
+		.maxactive      = 64,
+	},
+	{
+		.kp.symbol_name = "__arm64_sys_setpriority",
+		.entry_handler  = nm_gp_prio_entry,
+		.handler        = nm_gp_prio_ret,
+		.data_size      = sizeof(struct nm_gp_ctx),
+		.maxactive      = 64,
+	},
 	{
 		.kp.symbol_name = "user_path_at",
 		.entry_handler  = nm_gp_upa_entry,
@@ -249,6 +310,8 @@ static struct kretprobe nm_gp_krp[] = {
 };
 
 static const char * const nm_gp_surface[] = {
+	"a concealed uid still reports running tasks to getpriority()",
+	"a concealed uid still reports running tasks to setpriority()",
 	"a hidden path still resolves for access(), open() and getxattr()",
 	"a hidden path still answers stat() instead of reporting it is absent",
 	"a hidden path still answers stat() on the no-security path",
