@@ -8,6 +8,7 @@ struct path;
 struct vfsmount;
 
 bool ghost_hidden_path(const struct path *path);
+bool ghost_name_ignorable(const char *p);
 bool ghost_hidden_mount(struct vfsmount *mnt);
 
 bool ghost_abstract_hidden(const char *name, int len);
