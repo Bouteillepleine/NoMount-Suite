@@ -36,7 +36,20 @@
  * still links and falls back to the table below -- the same arrangement the
  * engine already uses in the other direction for ghost_ctl().
  */
+#ifdef MODULE
+/* Out of tree the engine is in this same module, so the symbol is always
+ * there and the weak form only costs: clang cannot reach a possibly-zero
+ * address with adrp+add, so it emits R_AARCH64_ADR_GOT_PAGE, which
+ * arch/arm64/kernel/module.c does not apply - the .ko links and insmod then
+ * fails with "unsupported RELA relocation". Taking the address once keeps
+ * the "is it linked" tests below reading a pointer rather than a constant,
+ * and a pointer initialiser is a plain ABS64 the loader does apply. */
+extern bool nm_uid_blocked(uid_t uid);
+static bool (* const nm_uid_blocked_ptr)(uid_t uid) = nm_uid_blocked;
+#define nm_uid_blocked nm_uid_blocked_ptr
+#else
 extern bool nm_uid_blocked(uid_t uid) __attribute__((weak));
+#endif
 
 #define GH_RULE_LEN	192
 #define GH_MAX_UIDS	128
