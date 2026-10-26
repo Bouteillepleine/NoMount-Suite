@@ -279,30 +279,6 @@ static int nm_gp_prio_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
  * above never saw these at all. struct filename keeps the resolved name in its
  * first member, which is where the entry handler reads it.
  */
-static const char * const nm_gp_ignorable[] = {
-	"\xc2\xad",		/* U+00AD soft hyphen */
-	"\xcd\x8f",		/* U+034F combining grapheme joiner */
-	"\xe1\xa0\x8e",		/* U+180E Mongolian vowel separator */
-	"\xe2\x80\x8b",		/* U+200B zero width space */
-	"\xe2\x80\x8c",		/* U+200C zero width non-joiner */
-	"\xe2\x80\x8d",		/* U+200D zero width joiner */
-	"\xe2\x81\xa0",		/* U+2060 word joiner */
-	"\xef\xbb\xbf",		/* U+FEFF zero width no-break space */
-};
-
-static bool nm_gp_has_ignorable(const char *name)
-{
-	size_t i;
-
-	if (!name)
-		return false;
-
-	for (i = 0; i < ARRAY_SIZE(nm_gp_ignorable); i++)
-		if (strstr(name, nm_gp_ignorable[i]))
-			return true;
-	return false;
-}
-
 static int nm_gp_open_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
@@ -314,7 +290,7 @@ static int nm_gp_open_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	if (!nm_uid_blocked(from_kuid(&init_user_ns, current_uid())))
 		return 0;
 
-	ctx->hide = nm_gp_has_ignorable(*fname);
+	ctx->hide = ghost_name_ignorable(*fname);
 	return 0;
 }
 
