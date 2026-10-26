@@ -112,6 +112,10 @@ struct nm_gp_ctx {
 	bool hide;
 };
 
+struct nm_gp_upa_ctx {
+	struct path *out;
+};
+
 static int nm_gp_stat_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
@@ -163,7 +167,57 @@ static int nm_gp_sock_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
+/* One probe for every path-based syscall.
+ *
+ * In tree, _ghost needs a separate patch per syscall - access, open, readlink,
+ * chmod, chown, rename, link, truncate, utimes and the four xattr entry points
+ * - because each tests a struct path that lives on its own stack. A kretprobe
+ * cannot reach a local, so none of those sites is reachable from a module.
+ *
+ * They all reach their path the same way: user_path_at() fills the caller's
+ * struct path, whose address is the fourth argument. Probing that one function
+ * covers the whole family at once, and covers the paths the stat guards cannot
+ * see - a stat guard never runs for access(), and that is what still finds a
+ * concealed app's storage directory after the name-variant trick.
+ *
+ * Only a successful resolution is rewritten, so the reference being dropped is
+ * one user_path_at() just took on a dentry it found hashed in the dcache.
+ * Dropping it leaves the dentry in the LRU rather than killing it, so this does
+ * not reach the iput() path that can sleep; a failed lookup returns non-zero
+ * and is left alone, which is where the negative dentries would be. Leaking the
+ * reference instead is not an option: it pins the mount forever.
+ */
+static int nm_gp_upa_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_gp_upa_ctx *ctx = (struct nm_gp_upa_ctx *)ri->data;
+
+	ctx->out = (struct path *)regs->regs[3];
+	return 0;
+}
+
+static int nm_gp_upa_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_gp_upa_ctx *ctx = (struct nm_gp_upa_ctx *)ri->data;
+	struct path *path = ctx->out;
+
+	if ((long)regs->regs[0] != 0 || !path)
+		return 0;
+
+	if (ghost_hidden_path(path) || nm_gp_owner_concealed(path)) {
+		path_put(path);
+		regs->regs[0] = (unsigned long)(long)-ENOENT;
+	}
+	return 0;
+}
+
 static struct kretprobe nm_gp_krp[] = {
+	{
+		.kp.symbol_name = "user_path_at",
+		.entry_handler  = nm_gp_upa_entry,
+		.handler        = nm_gp_upa_ret,
+		.data_size      = sizeof(struct nm_gp_upa_ctx),
+		.maxactive      = 64,
+	},
 	{
 		.kp.symbol_name = "vfs_getattr",
 		.entry_handler  = nm_gp_stat_entry,
@@ -195,6 +249,7 @@ static struct kretprobe nm_gp_krp[] = {
 };
 
 static const char * const nm_gp_surface[] = {
+	"a hidden path still resolves for access(), open() and getxattr()",
 	"a hidden path still answers stat() instead of reporting it is absent",
 	"a hidden path still answers stat() on the no-security path",
 	"a hidden path answers EACCES instead of ENOENT when SELinux denies it",
