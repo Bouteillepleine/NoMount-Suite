@@ -5,10 +5,17 @@
  * return value. Both ghost predicates already gate themselves on an empty rule
  * table and on the calling uid, so there is nothing to test before calling them.
  *
- * vfs_statx() is inlined on 6.12 and absent from kallsyms, so the stat guard
- * probes vfs_getattr() instead - vfs_statx() calls it and passes the same
- * struct path in the first argument. The cost is that this is a far hotter
- * path than vfs_statx(): every stat on the system now carries a kretprobe.
+ * The stat guard probes BOTH vfs_getattr() and vfs_getattr_nosec(), because
+ * which of them the stat path actually reaches depends on what the compiler
+ * inlined. Measured on 6.12.69 with a kretprobe on each: vfs_getattr() took 0
+ * hits from a stat while vfs_getattr_nosec() took 473, every one of them
+ * reported as "vfs_fstatat+0xac <- vfs_getattr_nosec" - vfs_getattr() had been
+ * inlined into vfs_fstatat(), leaving the out-of-line copy that kallsyms still
+ * exports with no caller on that path. Probing only the exported name looked
+ * correct, registered without error and never fired once. Both are probed
+ * because the inlining decision differs across the kernels this module is
+ * built for, and both take the same struct path in the first argument. The
+ * cost is that these are hot: every stat on the system carries a kretprobe.
  *
  * unix_find_other() rather than unix_stream_connect(): a kretprobe runs after
  * the body, and rewriting unix_stream_connect()'s return would leave a
@@ -111,6 +118,13 @@ static struct kretprobe nm_gp_krp[] = {
 		.maxactive      = 64,
 	},
 	{
+		.kp.symbol_name = "vfs_getattr_nosec",
+		.entry_handler  = nm_gp_stat_entry,
+		.handler        = nm_gp_stat_ret,
+		.data_size      = sizeof(struct nm_gp_ctx),
+		.maxactive      = 64,
+	},
+	{
 		.kp.symbol_name = "unix_find_other",
 		.entry_handler  = nm_gp_sock_entry,
 		.handler        = nm_gp_sock_ret,
@@ -121,6 +135,7 @@ static struct kretprobe nm_gp_krp[] = {
 
 static const char * const nm_gp_surface[] = {
 	"a hidden path still answers stat() instead of reporting it is absent",
+	"a hidden path still answers stat() on the no-security path",
 	"a hidden abstract socket still answers connect() instead of refusing it",
 };
 
