@@ -772,6 +772,25 @@ fn subject_of(f: &Finding) -> Option<&str> {
         .find(|t| t.starts_with('/') && t.len() > 1 && t.len() <= 128)
 }
 
+/// Is the engine the loadable-module build rather than a patched kernel?
+///
+/// `_ghost` cannot exist in an LKM: ghost.c is `obj-y` in fs/proc and its guards
+/// are source patches into namei.c/open.c/stat.c/xattr.c, so lkm/nomount_lkm.c
+/// declares `ghost_ctl`/`ghost_get_rule` NULL on purpose. Asking the cloak about
+/// itself there can only ever answer "not tested", every single run, with nothing
+/// the user could do about it -- the cloak is not missing by accident, it was
+/// never part of this build. A finding nobody can act on is noise, and noise is
+/// what makes real findings easy to miss, so the whole ghost section is skipped
+/// here and left fully intact for the kernels that do carry it.
+fn engine_is_lkm() -> bool {
+    std::fs::read_to_string("/proc/modules")
+        .map(|s| {
+            s.lines()
+                .any(|l| l.split_whitespace().next() == Some("nomount"))
+        })
+        .unwrap_or(false)
+}
+
 fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     findings
@@ -1433,7 +1452,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         });
     }
 
-    if live_ok && engine_v >= 26 {
+    if live_ok && engine_v >= 26 && !engine_is_lkm() {
         let listed = nm.ghost_list();
         if let Err(e) = &listed {
             f.push(Finding {
