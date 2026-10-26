@@ -46,6 +46,7 @@ elif [ -d /data/adb/nomount ]; then
         chcon u:object_r:adb_data_file:s0 "$_bak" 2>/dev/null
         for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
                   absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
+                  uidconceal ghostpaths \
                   absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
             [ -e "/data/adb/nomount/$_f" ] || continue
             if cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null; then

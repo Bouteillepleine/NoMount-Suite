@@ -1,16 +1,24 @@
 #include "nm_oot.h"
 #include "nm_maps_spoof.h"
 #include "nm_xattr_guard.h"
+#include "nm_mount_filter.h"
+#include "nm_ghost_probes.h"
 #include "nm_hide.h"
 
 /* The engine declares the ghost/pathhide companion hooks weak-undefined so an
  * unpatched kernel leaves them NULL. arm64 compiles a weak undefined symbol to
  * R_AARCH64_ADR_GOT_PAGE, which the module loader does not implement, so
- * out-of-tree they become module-local NULL pointers: same absent-companion
- * path, and the reference is to a local variable rather than the GOT. */
+ * out-of-tree they become module-local pointers: same absent-companion path
+ * for pathhide, and the reference is to a local variable rather than the GOT.
+ *
+ * ghost.c IS compiled into this module, so its two hooks point at forwarders
+ * rather than being NULL. They stay pointers because the engine tests them as
+ * pointers; naming the functions directly would make that test a constant. */
 #define NM_OOT_COMPANION_STUBS 1
-static int (* const ghost_ctl)(const char *buf, size_t count);
-static int (* const ghost_get_rule)(int idx, char *out, size_t outsz);
+static int (* const ghost_ctl)(const char *buf, size_t count) =
+	nm_ghost_ctl_fwd;
+static int (* const ghost_get_rule)(int idx, char *out, size_t outsz) =
+	nm_ghost_get_rule_fwd;
 static int (* const pathhide_ctl)(const char *buf, size_t count);
 static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz);
 
@@ -24,6 +32,8 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz);
 			return rc;					\
 		nm_maps_spoof_init();					\
 		nm_xattr_guard_init();					\
+		nm_mount_filter_init();					\
+		nm_ghost_probes_init();					\
 		nm_module_hide();					\
 		return 0;						\
 	}								\
@@ -33,6 +43,8 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz);
 #define module_exit(fn)							\
 	static void __exit nm_lkm_exit(void)				\
 	{								\
+		nm_ghost_probes_exit();					\
+		nm_mount_filter_exit();					\
 		nm_xattr_guard_exit();					\
 		nm_maps_spoof_exit();					\
 		fn();							\

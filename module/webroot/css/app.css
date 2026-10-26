@@ -309,6 +309,9 @@
   .tag.warn,
   .tag.info  { background: var(--pri-c);  color: var(--on-pri-c); }
   .tag.ok    { background: var(--sec-c);  color: var(--on-sec-c); }
+  /* the row's normal state: present, readable, and not competing with the
+     exception beside it */
+  .tag.quiet { background: transparent; padding-left: 0; padding-right: 0; color: var(--onv); }
   .empty { color: var(--onv); font-size: 13px; padding: 10px 2px; }
 
   /* ---------- finding rows ---------- */
@@ -395,13 +398,15 @@
   .mwhy { font-size: 12px; line-height: 1.45; color: var(--onv); margin-top: 5px; }
   .mrow.unserved { box-shadow: inset 0 0 0 1px var(--infobd); }
   .mmeta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  /* The left slot takes the row's leftover width, empty or not, so the chips are
+     right-aligned on every row and the last chip forms a column. */
   .mmeta .files {
-    font-size: 11px; color: var(--onv); font-variant-numeric: tabular-nums; margin-right: auto;
+    flex: 1 1 auto; min-width: 0; white-space: nowrap;
+    font-size: 11px; color: var(--onv); font-variant-numeric: tabular-nums;
     font-family: var(--mono);
   }
-  /* "nothing to inject" / "skipped" modules get <span class="files"></span> with no text,
-     and the auto-margin above still pushed the tags to mid-row */
-  .mmeta .files:empty { margin-right: 0; }
+  /* a status word is prose, not a count */
+  .mmeta .files.status { font-family: inherit; font-size: 11.5px; }
 
   .note { color: var(--onv); font-size: 12.5px; line-height: 1.5; margin: 11px 0 0; }
   code { font-family: var(--mono); background: rgba(255,255,255,0.07); padding: 1px 6px; border-radius: 6px; font-size: 11.5px; }
@@ -887,6 +892,94 @@
     background-image: linear-gradient(135deg, #17307f, #0a5f4f);
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
+
+  /* =========================================================================
+     DOCK -- the default bar. Edge-anchored and flat, with one pill per item
+     behind the icon instead of a single pill that travels: the pill is a
+     ::before on the button, so nothing has to be measured and movePill() never
+     runs. The capsule above is the other half of the user-facing switch and is
+     left intact; every rule here is scoped to html[data-nav="dock"] and wins on
+     source order, not on weight.
+     ========================================================================= */
+  html[data-nav="dock"] .navwrap { padding: 0; }
+  html[data-nav="dock"] .nav {
+    flex: 1; width: 100%; max-width: none; gap: 0;
+    padding: 8px 4px calc(8px + env(safe-area-inset-bottom));
+    justify-content: space-around;
+    border: 0; border-top: 1px solid var(--outlv); border-radius: 0;
+    background: var(--sc-low);
+    box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  html[data-nav="dock"] .nav::before { display: none; }
+  html[data-nav="dock"] .navpill { display: none; }
+  /* Two rows, the first exactly as tall as the pill, so the pill shares a cell
+     with the icon and can never reach the label. Absolute positioning was wrong
+     here: the icon is centred by the flexbox but the pill was pinned to the top
+     of the button, so any text scaling slid the label up under it. */
+  html[data-nav="dock"] .navb {
+    display: grid; grid-template-columns: 1fr; grid-template-rows: 30px auto;
+    align-content: center; justify-items: center; row-gap: 5px;
+    flex: 1; min-width: 0; height: auto; min-height: 56px;
+    padding: 5px 0 4px; gap: 5px 0; border-radius: 0;
+  }
+  html[data-nav="dock"] .navb::before {
+    content: ""; grid-area: 1 / 1; align-self: center;
+    width: 56px; max-width: 100%; height: 30px; border-radius: 999px;
+    border: 1px solid rgba(124,156,255,.48);
+    background: linear-gradient(135deg, rgba(124,156,255,.42), rgba(87,230,195,.26));
+    opacity: 0; transform: scaleX(.35);
+    transition: opacity .2s cubic-bezier(.2,0,0,1), transform .2s cubic-bezier(.2,0,0,1);
+  }
+  html[data-nav="dock"] .navb.on::before { opacity: 1; transform: none; }
+  html[data-nav="dock"] .navb svg {
+    grid-area: 1 / 1; align-self: center; z-index: 1; filter: none;
+  }
+  html[data-nav="dock"] .navb.on svg { transform: none; filter: none; }
+  html[data-nav="dock"] .navb span { grid-area: 2 / 1; margin-top: 0; font-size: 11.5px; }
+  /* the bar is taller than the capsule and no longer floats over a gap */
+  html[data-nav="dock"] .wrap { padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
+
+  html[data-theme="light"][data-nav="dock"] .nav {
+    background: var(--sc-low); border-top: 1px solid var(--outlv); box-shadow: none;
+  }
+  html[data-theme="light"][data-nav="dock"] .navb::before {
+    border-color: rgba(63,99,224,.30);
+    background: linear-gradient(135deg, rgba(63,99,224,.16), rgba(15,158,132,.13));
+  }
+
+  /* =========================================================================
+     COMPACT -- the third bar: a short floating pill, icons only, the active one
+     carried by a filled circular badge. The glass surface, border and shadow are
+     the capsule's; only the shape, the metrics and the marker change. The label
+     stays in the DOM and is merely hidden from sight, so a button keeps its
+     accessible name with nothing drawn.
+     ========================================================================= */
+  html[data-nav="compact"] .navwrap { padding: 0 16px calc(15px + env(safe-area-inset-bottom)); }
+  html[data-nav="compact"] .nav { border-radius: 999px; padding: 6px; gap: 2px; }
+  html[data-nav="compact"] .nav::before { display: none; }
+  html[data-nav="compact"] .navpill { display: none; }
+  html[data-nav="compact"] .navb {
+    position: relative; flex: 0 0 auto; width: 56px; min-width: 0; height: 48px;
+    padding: 0; gap: 0; border-radius: 999px;
+  }
+  html[data-nav="compact"] .navb span {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; white-space: nowrap; clip-path: inset(50%); border: 0;
+  }
+  html[data-nav="compact"] .navb::before {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%;
+    background: var(--grad);
+    opacity: 0; transform: scale(.4);
+    transition: opacity .2s cubic-bezier(.2,0,0,1),
+                transform .22s cubic-bezier(.22,1.4,.4,1);
+  }
+  html[data-nav="compact"] .navb.on::before { opacity: 1; transform: none; }
+  html[data-nav="compact"] .navb svg { position: relative; z-index: 1; filter: none; }
+  /* on a filled badge the icon flips to the colour that sits on the accent,
+     the same pairing the primary button uses, in either theme */
+  html[data-nav="compact"] .navb.on svg { stroke: var(--on-pri); transform: none; filter: none; }
+  html[data-nav="compact"] .wrap { padding-bottom: calc(104px + env(safe-area-inset-bottom)); }
 
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 

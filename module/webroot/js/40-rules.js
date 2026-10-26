@@ -46,12 +46,24 @@
       else if (plan.bind) { label = "bind"; cls = "off"; served++; showCnt = true;
                             tip = "Served by a real bind mount, not an injection: a my_* target is bound unless the my_hookless trial is on."; }
       else { label = "nothing to inject"; cls = "off"; tip = "This module ships no files the Suite can serve: scripts, zygisk, binaries, or an empty partition directory."; }
-      const files = (showCnt && cnt > 0) ? `<span class="files">${cnt} file${cnt > 1 ? "s" : ""}</span>` : `<span class="files"></span>`;
+      // A module that contributes nothing says so in the left slot, where a file
+      // count would be. As a chip it sat where `mountless` sits on every other
+      // row, and the column stopped being a column.
+      const quiet = label === "skipped" || label === "nothing to inject";
+      const files = (showCnt && cnt > 0)
+        ? `<span class="files">${cnt} file${cnt > 1 ? "s" : ""}</span>`
+        : quiet
+        ? `<span class="files status"${tip ? ` title="${esc(tip)}"` : ""}>${label}</span>`
+        : `<span class="files"></span>`;
+      // Mountless is the normal state and is on nearly every row, so it is the
+      // quiet one: owning a mount is the exception and keeps the colour. It is
+      // also LAST, because the chips are right-aligned and only a chip of the
+      // same width on every row lines them up.
       const vis = mnt < 0
         ? `<span class="tag off" title="The mount table could not be read, so this module's visibility is unknown. Not a claim that it owns no mount">mounts unknown</span>`
         : mnt > 0
         ? `<span class="tag info" title="This module has ${mnt} mount(s) of its own in the mount table, visible to a scanner">${mnt} mount${mnt > 1 ? "s" : ""}</span>`
-        : `<span class="tag ok" title="Nothing this module owns appears in the mount table">mountless</span>`;
+        : `<span class="tag quiet" title="Nothing this module owns appears in the mount table">mountless</span>`;
       const uns = unservedBy[id];
       if (uns) {
         label = "not served"; cls = "info"; tip = "";
@@ -59,8 +71,11 @@
       const why = uns
         ? `<div class="mwhy">${esc(redactUids(uns.evidence || uns.meaning || ""))}</div>`
         : "";
+      const kind = quiet
+        ? ""
+        : `<span class="tag ${cls}"${tip ? ` title="${esc(tip)}"` : ""}>${label}</span>`;
       return `<div class="mrow${uns ? " unserved" : ""}"><div class="mname">${esc(id)}</div>${why}` +
-             `<div class="mmeta">${files}${vis}<span class="tag ${cls}"${tip ? ` title="${esc(tip)}"` : ""}>${label}</span></div></div>`;
+             `<div class="mmeta">${files}${kind}${vis}</div></div>`;
     }).join("");
     MOD_SERVED = served;
     paintModuleMetric();

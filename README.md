@@ -43,7 +43,7 @@ nomount check      # want: verdict: clean, 0 failed, 0 unmeasured
 Needs arm64 and KernelSU (or a fork) or Magisk. SUSFS is not needed. Updates
 are the same flash and keep your settings.
 
-## If it doesn't boot
+## Safe Guard boot
 
 Let it boot twice more: after three failed boots the Suite parks itself. To
 park it by hand from recovery:

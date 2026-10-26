@@ -6,6 +6,24 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.203 — engine v34 (unchanged)
+
+- `uidconceal`: apps on this list read as idle to the callers already hidden from —
+  `getpriority` answers `-ESRCH`, the same as a user owning no task.
+- `ghostpaths`: extra cloak entries beside the synced ones — absolute paths, and `@name`
+  for abstract sockets, which refuse with `-ECONNREFUSED`.
+- Both need a kernel built with the `_ghost` patches; the LKM build cannot carry them.
+
+## v1.3.202 — engine v34 (unchanged)
+
+- A third bottom bar: **Compact**, a short floating pill with icons only. Checks › Appearance
+  picks between Dock, Capsule and Compact.
+
+## v1.3.201 — engine v34 (unchanged)
+
+- New dock bottom bar. The floating capsule is still there, under Checks › Appearance.
+- Module rows line up, and `mountless` is quiet so a module that owns a mount stands out.
+
 ## v1.3.200 — engine v34 (unchanged)
 
 - Reload picks up a module that was updated in place, without a reboot. KernelSU's new hot

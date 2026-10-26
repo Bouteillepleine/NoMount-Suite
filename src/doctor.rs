@@ -772,6 +772,7 @@ fn subject_of(f: &Finding) -> Option<&str> {
         .find(|t| t.starts_with('/') && t.len() > 1 && t.len() <= 128)
 }
 
+
 fn to_checks(findings: Vec<Finding>) -> Vec<Check> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     findings
@@ -1433,7 +1434,7 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         });
     }
 
-    if live_ok && engine_v >= 26 {
+    if live_ok && engine_v >= 26 && nm.ghost_present() != Some(false) {
         let listed = nm.ghost_list();
         if let Err(e) = &listed {
             f.push(Finding {

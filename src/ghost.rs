@@ -13,6 +13,7 @@ pub struct Summary {
     pub ghostable: usize,
     pub paths: usize,
     pub uids: usize,
+    pub cuids: usize,
     pub rejected: usize,
     pub rejected_uids: usize,
     pub rejected_examples: Vec<String>,
@@ -136,6 +137,82 @@ fn expand_ghost_uids(appids: &[u32], users: &[u32]) -> Vec<u32> {
     v
 }
 
+/// The packages whose tasks must look idle to the callers we already hide from.
+///
+/// Hand-maintained, one entry per line, same grammar as the hide list: it is the
+/// mirror of whatever filters package visibility for those callers, and the Suite
+/// has no way to read that from another module. An absent or empty file clears the
+/// kernel table, so removing the file turns the concealment off.
+/// Extra paths to cloak from the callers we hide from, beyond the ones the
+/// sync derives from injected rules.
+///
+/// The derived set only covers paths the Suite serves, so it cannot reach a
+/// socket or a node the system owns -- `/dev/socket/adbd` being the case that
+/// motivated this: an app that sees it while `init.svc.adbd` reads stopped has
+/// caught the spoof, because init unlinks that socket before publishing that
+/// value. Hand-maintained, one absolute path per line, `#` comments. These are
+/// pushed as-is: the absence probe judges injected paths, and a path the Suite
+/// does not serve has nothing to probe.
+pub const EXTRA_PATHS: &str = "/data/adb/nomount/ghostpaths";
+
+fn extra_paths() -> Vec<String> {
+    match std::fs::read_to_string(EXTRA_PATHS) {
+        // '@name' is an abstract socket, not a path; the kernel takes both in
+        // this list and only the socket guard ever looks the '@' form up.
+        Ok(raw) => parse_conceal(&raw)
+            .into_iter()
+            .filter(|p| p.starts_with('/') || p.starts_with('@'))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+pub const CONCEAL_PATH: &str = "/data/adb/nomount/uidconceal";
+
+fn parse_conceal(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn conceal_entries() -> Vec<String> {
+    match std::fs::read_to_string(CONCEAL_PATH) {
+        Ok(raw) => parse_conceal(&raw),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Resolve the conceal list to every raw uid the kernel will be asked about.
+///
+/// Expanded through the same path as the hide list: getpriority(PRIO_USER) is
+/// asked about a raw uid, so an appid-only table would leave the app visible in
+/// every secondary profile and in its sandbox.
+fn conceal_uids() -> Vec<u32> {
+    let entries = conceal_entries();
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let Some(installed) = crate::blocklist::installed_packages() else {
+        return Vec::new();
+    };
+    let mut appids: Vec<u32> = Vec::new();
+    for e in &entries {
+        if let Ok(hits) = crate::blocklist::expand(e, &installed) {
+            for (_, uid) in hits {
+                let a = crate::blocklist::appid(uid);
+                if a != 0 && !appids.contains(&a) {
+                    appids.push(a);
+                }
+            }
+        }
+    }
+    appids.sort_unstable();
+    appids.dedup();
+    expand_ghost_uids(&appids, &device_user_ids())
+}
+
 fn ghost_uids(live: &[u32]) -> Vec<u32> {
     let mut appids: Vec<u32> = live
         .iter()
@@ -231,6 +308,7 @@ fn push(nm: &Nm, kind: char, items: &[String], out: &mut Summary) {
         if nm.ghost_ctl(&cmd).is_ok() {
             match kind {
                 'p' => out.paths += chunk.len(),
+                'c' => out.cuids += chunk.len(),
                 _ => out.uids += chunk.len(),
             }
         } else {
@@ -238,6 +316,7 @@ fn push(nm: &Nm, kind: char, items: &[String], out: &mut Summary) {
                 let _ = nm.ghost_ctl(&format!("{kind}-"));
                 match kind {
                     'p' => out.paths = 0,
+                    'c' => out.cuids = 0,
                     _ => out.uids = 0,
                 }
             }
@@ -328,9 +407,17 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
     };
     out.ghostable = ghostable.len();
 
-    push(nm, 'p', &ghostable, &mut out);
+    let mut paths = ghostable;
+    for e in extra_paths() {
+        if !paths.contains(&e) {
+            paths.push(e);
+        }
+    }
+    push(nm, 'p', &paths, &mut out);
     let uid_strs: Vec<String> = uids.iter().map(u32::to_string).collect();
     push(nm, 'u', &uid_strs, &mut out);
+    let conceal: Vec<String> = conceal_uids().iter().map(u32::to_string).collect();
+    push(nm, 'c', &conceal, &mut out);
     Ok(Some(out))
 }
 
@@ -362,6 +449,12 @@ pub fn run_sync(verbose: bool) -> Result<()> {
                     "nomount ghost: {} of {} rule target(s) ghosted, {} uid(s)",
                     s.paths, s.candidates, s.uids
                 );
+                if s.cuids > 0 {
+                    println!(
+                        "nomount ghost: {} uid(s) concealed from those callers (tasks read idle)",
+                        s.cuids
+                    );
+                }
             }
             Ok(())
         }
@@ -394,6 +487,12 @@ mod tests {
     /// device - 120 sent, 20 stored), and one that truly runs out answers ENOSPC, which
     /// push() reports as a refusal.
     const GHOST_MAX_UIDS: usize = 128;
+
+    #[test]
+    fn the_conceal_list_ignores_blanks_and_comments() {
+        let got = parse_conceal("\n# a note\n  com.one  \n\n#\ncom.two\n");
+        assert_eq!(got, vec!["com.one".to_string(), "com.two".to_string()]);
+    }
 
     #[test]
     fn the_cloak_covers_every_uid_the_engine_hides_the_app_under() {
