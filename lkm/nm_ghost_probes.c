@@ -46,6 +46,10 @@
 #include <linux/net.h>
 #include <linux/un.h>
 #include <net/sock.h>
+#include <linux/cred.h>
+#include <linux/uidgid.h>
+#include <linux/user_namespace.h>
+#include <linux/dcache.h>
 
 #include "ghost.h"
 #include "nm_ghost_probes.h"
@@ -64,6 +68,46 @@ int nm_ghost_get_rule_fwd(int idx, char *out, size_t outsz)
 	return ghost_get_rule(idx, out, outsz);
 }
 
+bool nm_uid_blocked(uid_t uid);
+
+/* Hide by OWNER, not by name.
+ *
+ * A path rule cannot close this one. The detector finds a concealed app's
+ * /sdcard/Android/data/<pkg> by appending zero-width or ignorable code points
+ * to the package name: the name still resolves, but it is no longer the string
+ * any rule was written against, and ghost matches the rendered path exactly or
+ * by prefix. Every variant is a fresh miss and there are unboundedly many.
+ *
+ * The inode does not vary. Concealing every inode a concealed uid owns closes
+ * the whole family at once, and the table it needs is already live - userspace
+ * programs ghost_cuids for the getpriority guard, and nothing else reads it.
+ *
+ * The caller is never hidden from itself: a uid that appears on both lists has
+ * to keep reaching its own files.
+ */
+static bool nm_gp_owner_concealed(const struct path *path)
+{
+	struct inode *inode;
+	u32 caller, owner;
+
+	if (!path || !path->dentry)
+		return false;
+
+	caller = from_kuid(&init_user_ns, current_uid());
+	if (!nm_uid_blocked(caller))
+		return false;
+
+	inode = d_backing_inode(path->dentry);
+	if (!inode)
+		return false;
+
+	owner = from_kuid(&init_user_ns, inode->i_uid);
+	if (owner == caller)
+		return false;
+
+	return ghost_uid_concealed(owner);
+}
+
 struct nm_gp_ctx {
 	bool hide;
 };
@@ -71,8 +115,9 @@ struct nm_gp_ctx {
 static int nm_gp_stat_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
+	const struct path *path = (const struct path *)regs->regs[0];
 
-	ctx->hide = ghost_hidden_path((const struct path *)regs->regs[0]);
+	ctx->hide = ghost_hidden_path(path) || nm_gp_owner_concealed(path);
 	return 0;
 }
 
