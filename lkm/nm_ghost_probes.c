@@ -17,6 +17,15 @@
  * built for, and both take the same struct path in the first argument. The
  * cost is that these are hot: every stat on the system carries a kretprobe.
  *
+ * security_inode_getattr() is probed for the same reason one step earlier.
+ * vfs_getattr() runs it before vfs_getattr_nosec() and returns immediately if
+ * it refuses, so a caller SELinux already denies never reaches the other two
+ * guards and keeps getting EACCES where it should get ENOENT. Measured on the
+ * device: a shell uid that SELinux permits was answered "does not exist" by
+ * the nosec guard, while the detector, which SELinux denies, still read
+ * "Permission denied" for the same path - and EACCES on a path the caller is
+ * told does not exist elsewhere is itself the contradiction being closed.
+ *
  * unix_find_other() rather than unix_stream_connect(): a kretprobe runs after
  * the body, and rewriting unix_stream_connect()'s return would leave a
  * connection established and the peer notified while telling the caller it was
@@ -125,6 +134,13 @@ static struct kretprobe nm_gp_krp[] = {
 		.maxactive      = 64,
 	},
 	{
+		.kp.symbol_name = "security_inode_getattr",
+		.entry_handler  = nm_gp_stat_entry,
+		.handler        = nm_gp_stat_ret,
+		.data_size      = sizeof(struct nm_gp_ctx),
+		.maxactive      = 64,
+	},
+	{
 		.kp.symbol_name = "unix_find_other",
 		.entry_handler  = nm_gp_sock_entry,
 		.handler        = nm_gp_sock_ret,
@@ -136,6 +152,7 @@ static struct kretprobe nm_gp_krp[] = {
 static const char * const nm_gp_surface[] = {
 	"a hidden path still answers stat() instead of reporting it is absent",
 	"a hidden path still answers stat() on the no-security path",
+	"a hidden path answers EACCES instead of ENOENT when SELinux denies it",
 	"a hidden abstract socket still answers connect() instead of refusing it",
 };
 
