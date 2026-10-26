@@ -6,6 +6,12 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.204 — engine v34 (unchanged)
+
+- Module-rooted binds no longer appear in any mount table.
+- A path carrying a zero-width or ignorable code point is refused for a hidden caller — closes an `Android/data` bypass. The built-in engine needs a kernel rebuild for this one.
+- `uidconceal` and `ghostpaths` survive a module update.
+
 ## v1.3.203 — engine v34 (unchanged)
 
 - `uidconceal`: apps on this list read as idle to the callers already hidden from —
