@@ -231,6 +231,53 @@ static int nm_ph_pmd_pre(struct kprobe *p, struct pt_regs *regs)
 	return 1;
 }
 
+/* The maps line itself.
+ *
+ * Dropping the derived readers above is pointless on its own: in tree the
+ * mapping's line never appears in the first place, because show_map(),
+ * show_smap() and show_numa_map() each `return 0` for a hidden vma before
+ * emitting anything. Measured on CPH2745 with only the three guards above
+ * armed: a file under /data/adb read as a hole in pagemap and -ENOMEM to
+ * mincore while its path was still right there in /proc/self/maps - the loud
+ * surface open and the quiet ones closed, which is the wrong way round.
+ *
+ * All three have the same shape - (struct seq_file *m, void *v) returning int,
+ * with the vma in x1 - so one handler covers them, and it is the same early
+ * return the pagemap arm uses: 0 into x0, pc to x30, return non-zero. Their
+ * addresses are taken by a seq_operations, so none of them can be inlined away.
+ *
+ * Not covered, because neither is a plain early return: show_smaps_rollup(),
+ * which `continue`s inside its own vma loop, and query_matching_vma(), which
+ * jumps to its skip label. The PROCMAP_QUERY ioctl and smaps_rollup therefore
+ * still see a hidden mapping in this build. /proc/<pid>/map_files is untouched
+ * too - in tree that is three edits in fs/proc/base.c.
+ */
+static int nm_ph_show_pre(struct kprobe *p, struct pt_regs *regs)
+{
+	struct vm_area_struct *vma = (struct vm_area_struct *)regs->regs[1];
+
+	if (!nm_ph_vma_hidden(vma))
+		return 0;
+
+	regs->regs[0] = 0;
+	instruction_pointer_set(regs, procedure_link_pointer(regs));
+	return 1;
+}
+
+static struct kprobe nm_ph_kp_show[] = {
+	{ .symbol_name = "show_map",      .pre_handler = nm_ph_show_pre },
+	{ .symbol_name = "show_smap",     .pre_handler = nm_ph_show_pre },
+	{ .symbol_name = "show_numa_map", .pre_handler = nm_ph_show_pre },
+};
+
+static const char * const nm_ph_show_surface[] = {
+	"a hidden mapping still has its line in /proc/<pid>/maps",
+	"a hidden mapping still has its line in /proc/<pid>/smaps",
+	"a hidden mapping still has its line in /proc/<pid>/numa_maps",
+};
+
+static bool nm_ph_show_armed[ARRAY_SIZE(nm_ph_kp_show)];
+
 static struct kretprobe nm_ph_krp[] = {
 	{
 		.kp.symbol_name = "__arm64_sys_mincore",
@@ -285,10 +332,29 @@ static void nm_ph_arm_pagemap(void)
 	nm_ph_pmd_armed = true;
 }
 
+/* Every surface this build could close, including the one it cannot: the
+ * accounting arm has no mechanism here, so it is counted and never armed. */
+#define NM_PH_SURFACES \
+	(ARRAY_SIZE(nm_ph_krp) + ARRAY_SIZE(nm_ph_kp_show) + 2)
+
 int nm_pathhide_probes_init(void)
 {
 	size_t i;
 	int armed = 0;
+
+	for (i = 0; i < ARRAY_SIZE(nm_ph_kp_show); i++) {
+		int rc = register_kprobe(&nm_ph_kp_show[i]);
+
+		if (rc) {
+			nm_ph_show_armed[i] = false;
+			pr_warn("nomount: pathhide guard: cannot probe %s (%d). %s.\n",
+				nm_ph_kp_show[i].symbol_name, rc,
+				nm_ph_show_surface[i]);
+			continue;
+		}
+		nm_ph_show_armed[i] = true;
+		armed++;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(nm_ph_krp); i++) {
 		int rc = register_kretprobe(&nm_ph_krp[i]);
@@ -316,13 +382,20 @@ int nm_pathhide_probes_init(void)
 	/* The count is deliberately out of a total that includes the arm this
 	 * build does not have, so the line reads as short rather than complete. */
 	pr_info("nomount: pathhide guards active (%d/%zu surfaces, accounting unavailable)\n",
-		armed, ARRAY_SIZE(nm_ph_krp) + 1);
+		armed, (size_t)NM_PH_SURFACES);
 	return 0;
 }
 
 void nm_pathhide_probes_exit(void)
 {
 	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(nm_ph_kp_show); i++) {
+		if (!nm_ph_show_armed[i])
+			continue;
+		nm_ph_show_armed[i] = false;
+		unregister_kprobe(&nm_ph_kp_show[i]);
+	}
 
 	if (nm_ph_pmd_armed) {
 		nm_ph_pmd_armed = false;
