@@ -63,8 +63,9 @@ three of the four readers are closed.
 | `/proc/<pid>/maps` | `show_map()` returns 0 | kprobe on `show_map`, same early return |
 | `/proc/<pid>/smaps` | `show_smap()` returns 0 | kprobe on `show_smap` |
 | `/proc/<pid>/numa_maps` | `show_numa_map()` returns 0 | kprobe on `show_numa_map` |
+| `/proc/<pid>/map_files/` link | `map_files_get_link()` skips a hidden vma | kretprobe, `path_put` + `-ENOENT` |
+| `/proc/<pid>/map_files/` entries | not instantiated, skipped in readdir | **absent** - the address range still lists |
 | `smaps_rollup`, `PROCMAP_QUERY` | `continue` / `goto skip_vma` | **absent** - neither is a plain early return |
-| `/proc/<pid>/map_files/` | three edits in `fs/proc/base.c` | **absent** |
 | `/proc/<pid>/pagemap` | `pagemap_pmd_range()` returns `pagemap_pte_hole()` | kprobe on `pagemap_pmd_range`, returning the kernel's own `pagemap_pte_hole()` result |
 | `PAGEMAP_SCAN` | `pagemap_scan_test_walk()` returns 1 | kretprobe rewrites the return to 1 |
 | `mincore(2)` | `do_mincore()` returns `-ENOMEM` | kretprobe on `__arm64_sys_mincore` rewrites the return to `-ENOMEM` |
@@ -109,6 +110,23 @@ to run and much easier to get subtly wrong - a count that drifts produces
 impossible values, which the in-tree `pathhide.c` comments at length about
 avoiding. Until one exists, an LKM user's `VmSize` still counts what their
 `maps` does not, and the module says so on load.
+
+**Readers that still disagree.** Hiding the maps line without hiding
+`map_files` was measured on CPH2745 to produce exactly the contradiction the
+in-tree `pathhide.c` comments warn about: adbd read `maps=0 map_files=3`,
+zygiskd64 `maps=0 map_files=6`. A cloak whose two views disagree is a louder
+signal than the leak it replaced, which is why in tree the maps hunk and the
+three `fs/proc/base.c` hunks land in one change. The link guard closes the path
+half of that.
+
+What remains: a `map_files` entry still exists under its address range, because
+readdir emits entries through `proc_fill_cache()` with no per-entry hook a
+kretprobe can fail - so an address present there and absent from `maps` is
+still visible, though the path behind it is not. `smaps_rollup`'s totals also
+still include hidden vmas. Both are weaker than a path string, and both want
+the same process-context mechanism the accounting arm needs.
+`tests/lkm-pathhide.sh` checks the maps/map_files agreement directly and fails
+if they diverge.
 
 Two symbols `pathhide.c` reaches for are absent from some trimmed KMIs:
 `backing_file_user_path`, via `file_user_path()` on 6.7+, and

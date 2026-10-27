@@ -1,14 +1,18 @@
 #!/system/bin/sh
-# Does a mapping pathhide hides stay hidden from pagemap and mincore too?
+# Does a mapping pathhide hides stay hidden from every reader, and do those
+# readers agree with each other?
 #
-# Unlike lkm-load.sh next to it, this one does not run on the host: the
-# guards are kprobes, so the only place they can be observed is a device
-# with the module loaded and a kernel that has no NoMount built in.
+# Unlike lkm-load.sh next to it, this one does not run on the host: the guards
+# are kprobes, so the only place they can be observed is a device with the
+# module loaded and a kernel that has no NoMount built in.
 #
-# The numbers it is checking against are not invented. Measured on CPH2745,
-# 6.12.69, with the IN-TREE build serving as the reference - a 4-page mapping
-# of a file under /data/adb, against an identical control under
-# /data/local/tmp:
+# It maps two identical files - a control under /data/local/tmp and a subject
+# under /data/adb, which the shipped rule set covers - and asks each reader
+# about both. The control is what proves the probe works: if the control comes
+# back hidden, the test is broken, not the cloak.
+#
+# The numbers it checks against are not invented. Measured on CPH2745, 6.12.69,
+# with the IN-TREE build as the reference, on a 4-page mapping:
 #
 #              control    subject
 #   maps       1          0
@@ -18,37 +22,31 @@
 #   statm      2167232    2167228            <- 4 pages
 #
 # The first three are what this LKM build reproduces. The last two are the
-# accounting arm it does not have, so the subject's vmsize and statm will read
-# the same as the control here, and the script says so rather than failing.
+# accounting arm it does not have, so the subject's vmsize and statm read the
+# same as the control here and the script says so rather than failing.
 #
-# The shipped rule set covers /data/adb/, so this maps two identical files -
-# a control under /data/local/tmp and a subject under /data/adb - and asks
-# each of the three readers what it sees. Needs root, the module loaded, and
-# tests/pathhide-probe built for the device:
+# No nm client is needed: the rules are programmed by the Suite's own service
+# at boot, and the module reports on load whether the knob exists at all.
 #
-#   clang --target=aarch64-linux-android31 -O2 -static tests/pathhide-probe.c -o pathhide-probe
+# Build the probe for the device first:
+#   clang --target=aarch64-linux-android31 -O2 -static \
+#         tests/pathhide-probe.c -o pathhide-probe
 #
 # Run as:  sh lkm-pathhide.sh /data/local/tmp/pathhide-probe
 
 PROBE=${1:-/data/local/tmp/pathhide-probe}
-NM=${NM:-/data/adb/modules/meta-nomount/bin/arm64-v8a/nm}
 CTL=/data/local/tmp/ph-control.bin
 SUBJ=/data/adb/ph-subject.bin
 fail=0
 
 [ "$(id -u)" = 0 ] || { echo "fatal: needs root"; exit 1; }
 [ -x "$PROBE" ] || { echo "fatal: no probe at $PROBE (see header)"; exit 1; }
-lsmod | grep -q '^nomount' || { echo "fatal: nomount not loaded"; exit 1; }
 
-dmesg | grep -oE 'pathhide guard[s]?[:a-z ]*\(.*|pathhide guard: cannot probe .*' | tail -3
+dmesg | grep -o 'pathhide guards active.*' | tail -1
+dmesg | grep -o 'pathhide guard: cannot probe.*' | tail -3
 
-if [ -x "$NM" ]; then
-	[ -n "$("$NM" pathhide list 2>/dev/null)" ] || "$NM" pathhide sync >/dev/null 2>&1
-	rules=$("$NM" pathhide list 2>/dev/null)
-	[ -n "$rules" ] || { echo "SKIP: no pathhide rules programmed (engine has no knob?)"; exit 0; }
-	echo "rules    : $(echo "$rules" | tr '\n' ' ')"
-else
-	echo "SKIP: no nm client at $NM, cannot confirm rules are programmed"
+if ! dmesg | grep -q 'pathhide guards active'; then
+	echo "SKIP: this engine has no pathhide guards - nothing to test"
 	exit 0
 fi
 
@@ -56,23 +54,23 @@ cleanup() { rm -f "$CTL" "$SUBJ"; }
 trap cleanup EXIT
 
 dd if=/dev/urandom of="$CTL" bs=4096 count=4 2>/dev/null
-cp "$CTL" "$SUBJ" || { echo "fatal: cannot write $SUBJ"; exit 1; }
+cp "$CTL" "$SUBJ" 2>/dev/null || { echo "fatal: cannot write $SUBJ"; exit 1; }
 
 field() { echo "$1" | sed -n "s/^$2  *//p"; }
 
 ctl=$("$PROBE" "$CTL" ph-control.bin)
 subj=$("$PROBE" "$SUBJ" ph-subject.bin)
-echo "-- control (not covered by a rule) --"; echo "$ctl"
+echo "-- control (no rule covers it) --"; echo "$ctl"
 echo "-- subject (under /data/adb) --"; echo "$subj"
 
-[ "$(field "$ctl" maps)" = 1 ] || { echo "FAIL control: probe cannot see its own mapping"; exit 1; }
+[ "$(field "$ctl" maps)" = 1 ]    || { echo "FAIL control: cannot see its own mapping"; exit 1; }
 [ "$(field "$ctl" mincore)" = ok ] || { echo "FAIL control: mincore already failing"; exit 1; }
 [ "$(field "$ctl" pagemap)" -gt 0 ] || { echo "FAIL control: pagemap already empty"; exit 1; }
-echo "ok   control visible to all three readers"
+echo "ok   control is visible to all three readers"
 
 [ "$(field "$subj" maps)" = 0 ] \
-	&& echo "ok   maps   : path gone" \
-	|| { echo "FAIL maps   : path still rendered"; fail=1; }
+	&& echo "ok   maps   : line gone" \
+	|| { echo "FAIL maps   : line still rendered"; fail=1; }
 
 case "$(field "$subj" mincore)" in
 *"annot allocate memory"*|*"ut of memory"*)
@@ -87,10 +85,30 @@ else
 	echo "FAIL pagemap: $(field "$subj" pagemap) non-zero entries remain"; fail=1
 fi
 
+# The readers must agree with each other. A mapping that maps denies while
+# map_files resolves it to a path is a louder signal than either leak alone.
+echo "-- do the readers agree? --"
+mf=0
+for p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+	[ -r "/proc/$p/maps" ] || continue
+	n=$(ls -l "/proc/$p/map_files" 2>/dev/null | grep -c '/data/adb')
+	m=$(grep -c '/data/adb' "/proc/$p/maps" 2>/dev/null)
+	if [ "${n:-0}" != "0" ] && [ "${m:-0}" = "0" ]; then
+		echo "  contradiction: pid $p maps=0 map_files=$n"
+		mf=$((mf + 1))
+	fi
+done
+if [ "$mf" = 0 ]; then
+	echo "ok   map_files: agrees with maps"
+else
+	echo "FAIL map_files: $mf process(es) where map_files resolves what maps denies"
+	fail=1
+fi
+
 echo "KNOWN accounting: VmSize/VmPeak/statm still count the hidden mapping."
-echo "      The module reports this itself as 'accounting unavailable'."
-echo "      The accounting guard is not shipped in the LKM build - lkm/README.md"
-echo "      says why. control statm=$(field "$ctl" statm) subject statm=$(field "$subj" statm)"
+echo "      control statm=$(field "$ctl" statm) subject statm=$(field "$subj" statm)"
+echo "KNOWN smaps_rollup totals and PROCMAP_QUERY still include it, and"
+echo "      map_files still lists the address range even when the path is gone."
 
 dmesg | tail -40 | grep -qiE 'BUG:|Call trace:|Unable to handle kernel' && {
 	echo "FAIL kernel complained while the guards ran"; fail=1; }
