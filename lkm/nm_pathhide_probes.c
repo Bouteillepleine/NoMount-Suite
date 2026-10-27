@@ -69,20 +69,32 @@
  * vmas come and go so the read path is O(1). Until one of those exists, an LKM
  * user's VmSize still counts what their maps does not.
  */
+#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/kprobes.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
-#include <linux/pagewalk.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
-#include <linux/version.h>
 #include <linux/path.h>
 #include <linux/dcache.h>
 #include <linux/limits.h>
 #include <linux/percpu.h>
 #include <linux/string.h>
+
+/* struct mm_walk lived in linux/mm.h until 5.4 split the page-walk interface
+ * into its own header. The three gcc kernels in the build matrix predate that
+ * split, so including it unconditionally is a fatal error there. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+#include <linux/pagewalk.h>
+#endif
+
+/* __nocfi exists only where CFI_CLANG does. On a kernel without it there is no
+ * indirect-call check to suppress, so the attribute is simply not needed. */
+#ifndef __nocfi
+#define __nocfi
+#endif
 
 #include <asm/ptrace.h>
 
