@@ -83,12 +83,44 @@
 #include <linux/percpu.h>
 #include <linux/string.h>
 
-/* struct mm_walk lived in linux/mm.h until 5.4 split the page-walk interface
- * into its own header. The three gcc kernels in the build matrix predate that
- * split, so including it unconditionally is a fatal error there. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+/* pathhide.c is vendored byte-identical from the in-tree tree, which targets
+ * 5.10 and newer: it calls mmap_read_lock_killable(), added upstream in 5.8 and
+ * backported into Android's 5.4. The three gcc kernels in the compile matrix -
+ * 4.9, 4.14, 4.19 - have none of it, and linux/pagewalk.h does not exist there
+ * either, the page-walk interface having been split out of linux/mm.h in 5.4.
+ * Editing the vendored file to paper over that is not an option, so below 5.4
+ * the guards are not built at all: the Makefile drops pathhide.o and this file
+ * compiles to the four stubs the engine and nomount_lkm.c need. No module the
+ * Suite ships targets those kernels - they are in the compile gate only.
+ */
+#define NM_PH_SUPPORTED (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
+
+#if !NM_PH_SUPPORTED
+
+int nm_pathhide_ctl_fwd(const char *buf, size_t count)
+{
+	return -EOPNOTSUPP;
+}
+
+int nm_pathhide_get_rule_fwd(int idx, char *out, size_t outsz)
+{
+	return -EOPNOTSUPP;
+}
+
+int nm_pathhide_probes_init(void)
+{
+	pr_info("nomount: pathhide guards unavailable: this kernel predates the "
+		"page-walk and mmap-lock interfaces the cloak is written against\n");
+	return 0;
+}
+
+void nm_pathhide_probes_exit(void)
+{
+}
+
+#else
+
 #include <linux/pagewalk.h>
-#endif
 
 /* __nocfi exists only where CFI_CLANG does. On a kernel without it there is no
  * indirect-call check to suppress, so the attribute is simply not needed. */
@@ -552,3 +584,5 @@ void nm_pathhide_probes_exit(void)
 		unregister_kretprobe(&nm_ph_krp[i]);
 	}
 }
+
+#endif /* NM_PH_SUPPORTED */
