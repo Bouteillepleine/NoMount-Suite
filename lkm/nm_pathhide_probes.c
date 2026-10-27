@@ -84,16 +84,26 @@
 #include <linux/string.h>
 
 /* pathhide.c is vendored byte-identical from the in-tree tree, which targets
- * 5.10 and newer: it calls mmap_read_lock_killable(), added upstream in 5.8 and
- * backported into Android's 5.4. The three gcc kernels in the compile matrix -
- * 4.9, 4.14, 4.19 - have none of it, and linux/pagewalk.h does not exist there
- * either, the page-walk interface having been split out of linux/mm.h in 5.4.
- * Editing the vendored file to paper over that is not an option, so below 5.4
- * the guards are not built at all: the Makefile drops pathhide.o and this file
- * compiles to the four stubs the engine and nomount_lkm.c need. No module the
- * Suite ships targets those kernels - they are in the compile gate only.
+ * 5.10 and newer, and 5.10 is where this builds from.
+ *
+ * Below it, three separate things break. linux/pagewalk.h does not exist until
+ * 5.4, the page-walk interface having been split out of linux/mm.h. The
+ * vendored pathhide.c calls mmap_read_lock_killable(), upstream in 5.8 and
+ * backported into Android's 5.4. And pagemap_pte_hole() only grew its `depth`
+ * argument around 5.7 - before that it takes three arguments, so the call in
+ * nm_ph_hole() would put walk in the wrong register and hand the kernel a
+ * garbage pointer. That last one compiles cleanly either way, because the
+ * symbol arrives from kallsyms through a prototype of our own, which is what
+ * makes it worth gating on rather than discovering.
+ *
+ * In tree there is no pagemap patch below 5.10 for the same reason, and no
+ * module the Suite ships targets anything older - the kmi-modules matrix
+ * starts at android12-5.10. 4.9/4.14/4.19/5.4 exist in the compile gate only.
+ * Editing the vendored file to paper over any of this is not an option, so
+ * below 5.10 the guards are not built: the Makefile drops pathhide.o and this
+ * file compiles to the four stubs the engine and nomount_lkm.c need.
  */
-#define NM_PH_SUPPORTED (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
+#define NM_PH_SUPPORTED (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
 
 #if !NM_PH_SUPPORTED
 
