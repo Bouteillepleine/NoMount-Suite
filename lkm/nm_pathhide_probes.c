@@ -78,6 +78,11 @@
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/version.h>
+#include <linux/path.h>
+#include <linux/dcache.h>
+#include <linux/limits.h>
+#include <linux/percpu.h>
+#include <linux/string.h>
 
 #include <asm/ptrace.h>
 
@@ -278,6 +283,102 @@ static const char * const nm_ph_show_surface[] = {
 
 static bool nm_ph_show_armed[ARRAY_SIZE(nm_ph_kp_show)];
 
+/* /proc/<pid>/map_files, which is what makes hiding the maps line honest.
+ *
+ * Measured on CPH2745 with the maps arm above but nothing here: adbd read
+ * maps=0 map_files=3, zygiskd64 read maps=0 map_files=6. Every process that
+ * maps something under a rule had maps deny what map_files listed. A cloak
+ * whose two views contradict each other is a worse signal than the leak it
+ * replaced - the in-tree comment in pathhide.c makes exactly this point about
+ * impossible values, and in tree the maps hunk and the three fs/proc/base.c
+ * hunks land in the same change for this reason.
+ *
+ * map_files_get_link(dentry, path) is where the symlink's target is resolved:
+ * it fills the caller's struct path from the vma's file and returns 0. The
+ * same kretprobe shape nm_gp_upa_ret() uses applies - stash the path at entry,
+ * and on a successful return drop the reference and answer -ENOENT instead.
+ * The reference being dropped is one the function itself just took on a dentry
+ * the vma pins, so this does not reach the iput() path that can sleep.
+ *
+ * It needs a path-based test rather than pathhide_match_file(), which takes a
+ * struct file. Rather than reach into pathhide.c - vendored byte-identical and
+ * not ours to edit - the rules are read back through its own
+ * pathhide_get_rule() and matched here, which is the same substring test on
+ * the same strings.
+ *
+ * What this does NOT do: the entries themselves still exist, named by address
+ * range, because readdir emits them through proc_fill_cache() with no per-entry
+ * hook a kretprobe can fail. So an address present in map_files and absent from
+ * maps is still visible; the path behind it is not.
+ */
+/* pathhide_get_rule() refuses an outsz under its own PH_RULE_LEN, which the
+ * header does not export, so 128 is a floor - the same constant and the same
+ * reasoning as NM_PATHHIDE_RULE_MAX in the engine. */
+#define NM_PH_RULE_MAX 128
+
+static char __percpu *nm_ph_linkbuf;
+
+static bool nm_ph_path_hidden(const struct path *path)
+{
+	char rule[NM_PH_RULE_MAX];
+	char *buf, *p;
+	bool hit = false;
+	int i;
+
+	if (!path || !path->dentry || !nm_ph_linkbuf)
+		return false;
+
+	buf = get_cpu_ptr(nm_ph_linkbuf);
+	p = d_path(path, buf, PATH_MAX);
+	if (!IS_ERR(p)) {
+		for (i = 0; pathhide_get_rule(i, rule, sizeof(rule)) > 0; i++) {
+			if (strstr(p, rule)) {
+				hit = true;
+				break;
+			}
+		}
+	}
+	put_cpu_ptr(nm_ph_linkbuf);
+
+	return hit;
+}
+
+struct nm_ph_link_ctx {
+	struct path *path;
+};
+
+static int nm_ph_link_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_ph_link_ctx *ctx = (struct nm_ph_link_ctx *)ri->data;
+
+	ctx->path = (struct path *)regs->regs[1];
+	return 0;
+}
+
+static int nm_ph_link_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_ph_link_ctx *ctx = (struct nm_ph_link_ctx *)ri->data;
+
+	if ((long)regs->regs[0] != 0 || !ctx->path)
+		return 0;
+	if (!nm_ph_path_hidden(ctx->path))
+		return 0;
+
+	path_put(ctx->path);
+	regs->regs[0] = (unsigned long)(long)-ENOENT;
+	return 0;
+}
+
+static struct kretprobe nm_ph_krp_link = {
+	.kp.symbol_name = "map_files_get_link",
+	.entry_handler  = nm_ph_link_entry,
+	.handler        = nm_ph_link_ret,
+	.data_size      = sizeof(struct nm_ph_link_ctx),
+	.maxactive      = 64,
+};
+
+static bool nm_ph_link_armed;
+
 static struct kretprobe nm_ph_krp[] = {
 	{
 		.kp.symbol_name = "__arm64_sys_mincore",
@@ -335,12 +436,32 @@ static void nm_ph_arm_pagemap(void)
 /* Every surface this build could close, including the one it cannot: the
  * accounting arm has no mechanism here, so it is counted and never armed. */
 #define NM_PH_SURFACES \
-	(ARRAY_SIZE(nm_ph_krp) + ARRAY_SIZE(nm_ph_kp_show) + 2)
+	(ARRAY_SIZE(nm_ph_krp) + ARRAY_SIZE(nm_ph_kp_show) + 3)
 
 int nm_pathhide_probes_init(void)
 {
 	size_t i;
 	int armed = 0;
+	int rc;
+
+	nm_ph_linkbuf = __alloc_percpu(PATH_MAX, __alignof__(char));
+	if (!nm_ph_linkbuf) {
+		pr_warn("nomount: pathhide guard: no percpu path buffer. "
+			"/proc/<pid>/map_files still resolves a hidden mapping "
+			"to its path.\n");
+	} else {
+		rc = register_kretprobe(&nm_ph_krp_link);
+		if (rc) {
+			pr_warn("nomount: pathhide guard: cannot probe "
+				"map_files_get_link (%d). /proc/<pid>/map_files "
+				"still resolves a hidden mapping to its path.\n", rc);
+			free_percpu(nm_ph_linkbuf);
+			nm_ph_linkbuf = NULL;
+		} else {
+			nm_ph_link_armed = true;
+			armed++;
+		}
+	}
 
 	for (i = 0; i < ARRAY_SIZE(nm_ph_kp_show); i++) {
 		int rc = register_kprobe(&nm_ph_kp_show[i]);
@@ -389,6 +510,15 @@ int nm_pathhide_probes_init(void)
 void nm_pathhide_probes_exit(void)
 {
 	size_t i;
+
+	if (nm_ph_link_armed) {
+		nm_ph_link_armed = false;
+		unregister_kretprobe(&nm_ph_krp_link);
+	}
+	if (nm_ph_linkbuf) {
+		free_percpu(nm_ph_linkbuf);
+		nm_ph_linkbuf = NULL;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(nm_ph_kp_show); i++) {
 		if (!nm_ph_show_armed[i])
