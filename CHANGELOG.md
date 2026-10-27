@@ -8,7 +8,7 @@
 
 ## Unreleased
 
-- The LKM hides from pagemap and mincore too, not just from maps.
+- The LKM keeps a hidden mapping out of maps, smaps, pagemap and mincore.
 
 ## v1.3.204 — engine v34 (unchanged)
 

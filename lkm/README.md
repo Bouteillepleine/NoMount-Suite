@@ -52,7 +52,7 @@ and maps un-spoofed, rather than failing to load.
 versions and links against all eight KMI export tables; whether the spoof
 produces the right bytes on a running phone is untested.
 
-**3. The maps cloak is here, minus its accounting arm.** `pathhide` keeps the
+**3. The maps cloak is here, minus its accounting arm and two vma walkers.** `pathhide` keeps the
 root stack's own libraries out of an app's `/proc/<pid>/maps`. Dropping the line
 is not the whole job: the mapping is still there, so the same gap is readable
 three more ways. `pathhide.c` is compiled in verbatim, the way `ghost.c` is, and
@@ -60,7 +60,11 @@ three of the four readers are closed.
 
 | reader | in-tree | here |
 | :--- | :--- | :--- |
-| `/proc/<pid>/maps` | `pathhide_match_file()` in `show_map_vma()` | same test, from the engine |
+| `/proc/<pid>/maps` | `show_map()` returns 0 | kprobe on `show_map`, same early return |
+| `/proc/<pid>/smaps` | `show_smap()` returns 0 | kprobe on `show_smap` |
+| `/proc/<pid>/numa_maps` | `show_numa_map()` returns 0 | kprobe on `show_numa_map` |
+| `smaps_rollup`, `PROCMAP_QUERY` | `continue` / `goto skip_vma` | **absent** - neither is a plain early return |
+| `/proc/<pid>/map_files/` | three edits in `fs/proc/base.c` | **absent** |
 | `/proc/<pid>/pagemap` | `pagemap_pmd_range()` returns `pagemap_pte_hole()` | kprobe on `pagemap_pmd_range`, returning the kernel's own `pagemap_pte_hole()` result |
 | `PAGEMAP_SCAN` | `pagemap_scan_test_walk()` returns 1 | kretprobe rewrites the return to 1 |
 | `mincore(2)` | `do_mincore()` returns `-ENOMEM` | kretprobe on `__arm64_sys_mincore` rewrites the return to `-ENOMEM` |
