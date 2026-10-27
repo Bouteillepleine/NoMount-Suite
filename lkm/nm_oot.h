@@ -7,6 +7,9 @@
 
 unsigned long nm_oot_lookup(const char *name);
 
+/* Same lookup, without the error log: for a symbol a guard can do without. */
+unsigned long nm_oot_lookup_opt(const char *name);
+
 int nm_oot_resolve_all(void);
 
 #define NM_SYM(name, ret, params, args)                       \

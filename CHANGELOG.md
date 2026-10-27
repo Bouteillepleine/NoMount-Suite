@@ -6,6 +6,10 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## Unreleased
+
+- The LKM hides from pagemap and mincore too, not just from maps.
+
 ## v1.3.204 — engine v34 (unchanged)
 
 - Module-rooted binds no longer appear in any mount table.
