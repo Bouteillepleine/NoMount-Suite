@@ -5,6 +5,22 @@
 # guards are kprobes, so the only place they can be observed is a device
 # with the module loaded and a kernel that has no NoMount built in.
 #
+# The numbers it is checking against are not invented. Measured on CPH2745,
+# 6.12.69, with the IN-TREE build serving as the reference - a 4-page mapping
+# of a file under /data/adb, against an identical control under
+# /data/local/tmp:
+#
+#              control    subject
+#   maps       1          0
+#   mincore    ok         Out of memory      <- bionic's spelling of ENOMEM
+#   pagemap    4          0
+#   vmsize     8668928    8668912            <- 16 kB, the 4 hidden pages
+#   statm      2167232    2167228            <- 4 pages
+#
+# The first three are what this LKM build reproduces. The last two are the
+# accounting arm it does not have, so the subject's vmsize and statm will read
+# the same as the control here, and the script says so rather than failing.
+#
 # The shipped rule set covers /data/adb/, so this maps two identical files -
 # a control under /data/local/tmp and a subject under /data/adb - and asks
 # each of the three readers what it sees. Needs root, the module loaded, and
