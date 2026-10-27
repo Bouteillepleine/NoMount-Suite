@@ -136,8 +136,14 @@ if [ -z "$BUILD_COMMIT" ]; then
         exit 1
     fi
 fi
+# module/lkm/nomount-*.ko are the per-KMI engine modules the LKM zip bundles.
+# The build stages them into the tracked module/lkm/ directory immediately
+# before packaging, so they are always untracked at this point and every zip
+# this pipeline has ever produced was stamped +dirty for them alone - the
+# released v1.3.204 included. They are build output being placed where it
+# belongs, not a modified checkout, so they do not count as dirt.
 _dirt="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
-          | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop)$' || true)"
+          | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop|module/lkm/nomount-[^/]*\.ko)$' || true)"
 if [ -n "$_dirt" ]; then
     BUILD_COMMIT="${BUILD_COMMIT}+dirty"
 fi
