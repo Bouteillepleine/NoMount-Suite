@@ -32,14 +32,18 @@ static int nm_bootstrap_kln(void)
 }
 #endif
 
-unsigned long nm_oot_lookup(const char *name)
+unsigned long nm_oot_lookup_opt(const char *name)
 {
-    unsigned long addr;
-
     if (!nm_kln && nm_bootstrap_kln() < 0)
         return 0;
 
-    addr = nm_kln(name);
+    return nm_kln(name);
+}
+
+unsigned long nm_oot_lookup(const char *name)
+{
+    unsigned long addr = nm_oot_lookup_opt(name);
+
     if (!addr)
         pr_err("nomount: kernel symbol '%s' not found. The engine calls it and "
                "this kernel does not export it, so the module cannot load "
