@@ -363,7 +363,23 @@ fn expand_rom_vars(line: &str, vars: &std::collections::HashMap<String, String>)
     let mut acc = line.to_string();
     for n in names {
         let v = &vars[n];
-        acc = acc.replace(&format!("${{{n}}}"), v).replace(&format!("${n}"), v);
+        acc = acc.replace(&format!("${{{n}}}"), v);
+        // A bare $NAME ends where a name character stops, so $F must not eat the
+        // F of $FI_DEX. Without this a one-letter variable rewrites every longer
+        // name sharing its prefix and the line reads as a ROM path.
+        let pat = format!("${n}");
+        let mut out = String::with_capacity(acc.len());
+        let mut rest = acc.as_str();
+        while let Some(at) = rest.find(&pat) {
+            let after = &rest[at + pat.len()..];
+            let continues =
+                matches!(after.chars().next(), Some(c) if c.is_ascii_alphanumeric() || c == '_');
+            out.push_str(&rest[..at]);
+            out.push_str(if continues { pat.as_str() } else { v.as_str() });
+            rest = after;
+        }
+        out.push_str(rest);
+        acc = out;
     }
     acc
 }
@@ -2535,5 +2551,36 @@ uid=10123
         assert!(v[0].public);
         assert_eq!(v[1].kind, LiveKind::Whiteout);
         assert_eq!(v[1].source, None);
+    }
+
+    #[test]
+    fn a_short_var_does_not_eat_a_longer_name_sharing_its_prefix() {
+        let script = concat!(
+            "F=\"/my_product/etc/extension/$CC/appfeature.country.dynamic_features.xml\"\n",
+            "FI_DEX=\"$MODDIR/ForceInstall.dex\"\n",
+            "FI_PKGS=\"com.android.mms\"\n",
+        );
+        let vars = rom_path_vars(script);
+        assert!(vars.contains_key("F"), "precondition: F is a ROM path var");
+
+        let line = r#"FI_OUT=$(CLASSPATH="$FI_DEX" app_process /system/bin ForceInstall install $FI_PKGS 2>&1)"#;
+        let expanded = expand_rom_vars(line, &vars);
+        assert!(expanded.contains("$FI_DEX"), "$FI_DEX must survive: {expanded}");
+        assert!(expanded.contains("$FI_PKGS"), "$FI_PKGS must survive: {expanded}");
+        assert_eq!(
+            classify_incompat_line(&expanded),
+            None,
+            "app_process nice-name dir is not a ROM write"
+        );
+
+        // a real use of the short var still expands
+        assert_eq!(
+            expand_rom_vars("rm -f $F", &vars),
+            "rm -f /my_product/etc/extension/$CC/appfeature.country.dynamic_features.xml"
+        );
+        assert_eq!(
+            expand_rom_vars("rm -f ${F}", &vars),
+            "rm -f /my_product/etc/extension/$CC/appfeature.country.dynamic_features.xml"
+        );
     }
 }
