@@ -336,6 +336,8 @@
               data-act="setNav" data-arg="capsule">Capsule</button>
       <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="compact"
               data-act="setNav" data-arg="compact">Compact</button>
+      <button type="button" class="seg-b" role="radio" aria-checked="false" data-v="liquid"
+              data-act="setNav" data-arg="liquid">Liquid</button>
     </div>
   </details>
 
@@ -356,6 +358,25 @@
       <stop offset="55%"  stop-color="#3f63e0"/>
       <stop offset="100%" stop-color="#0f9e84"/>
     </linearGradient>
+    <filter id="nmlens" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB">
+      <feColorMatrix in="SourceGraphic" type="saturate" values="1.5" result="vib"/>
+      <feGaussianBlur in="vib" stdDeviation="2.5" result="soft"/>
+      <feImage id="nmlensmap" preserveAspectRatio="none" result="map"
+               href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNoaGgAAAMEAYFL09IQAAAAAElFTkSuQmCC"/>
+      <feDisplacementMap in="soft" in2="map" scale="48" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <filter id="nmlens2" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB">
+      <feImage id="nmlens2map" preserveAspectRatio="none" result="map"
+               href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNoaGgAAAMEAYFL09IQAAAAAElFTkSuQmCC"/>
+      <feDisplacementMap in="SourceGraphic" in2="map" scale="31" xChannelSelector="R" yChannelSelector="G" result="r"/>
+      <feDisplacementMap in="SourceGraphic" in2="map" scale="28" xChannelSelector="R" yChannelSelector="G" result="g"/>
+      <feDisplacementMap in="SourceGraphic" in2="map" scale="25" xChannelSelector="R" yChannelSelector="G" result="b"/>
+      <feColorMatrix in="r" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="rr"/>
+      <feColorMatrix in="g" type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0" result="gg"/>
+      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0" result="bb"/>
+      <feComposite in="rr" in2="gg" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="rg"/>
+      <feComposite in="rg" in2="bb" operator="arithmetic" k1="0" k2="1" k3="1" k4="0"/>
+    </filter>
   </defs>
 </svg>
 <nav class="navwrap" role="tablist" aria-label="Sections">
