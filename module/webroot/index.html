@@ -368,14 +368,7 @@
     <filter id="nmlens2" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB">
       <feImage id="nmlens2map" preserveAspectRatio="none" result="map"
                href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNoaGgAAAMEAYFL09IQAAAAAElFTkSuQmCC"/>
-      <feDisplacementMap in="SourceGraphic" in2="map" scale="31" xChannelSelector="R" yChannelSelector="G" result="r"/>
-      <feDisplacementMap in="SourceGraphic" in2="map" scale="28" xChannelSelector="R" yChannelSelector="G" result="g"/>
-      <feDisplacementMap in="SourceGraphic" in2="map" scale="25" xChannelSelector="R" yChannelSelector="G" result="b"/>
-      <feColorMatrix in="r" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="rr"/>
-      <feColorMatrix in="g" type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0" result="gg"/>
-      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0" result="bb"/>
-      <feComposite in="rr" in2="gg" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="rg"/>
-      <feComposite in="rg" in2="bb" operator="arithmetic" k1="0" k2="1" k3="1" k4="0"/>
+      <feDisplacementMap in="SourceGraphic" in2="map" scale="28" xChannelSelector="R" yChannelSelector="G"/>
     </filter>
   </defs>
 </svg>
