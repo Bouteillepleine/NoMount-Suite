@@ -6,11 +6,7 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
-## v1.3.206 — engine v34 (unchanged)
-
-- A fourth bottom bar: **Liquid**, SukiSU's liquid glass. A refracting pill that slides, presses and drags between tabs. Checks › Appearance.
-
-## v1.3.205 — engine v34 (unchanged)
+## Unreleased
 
 - The LKM keeps a hidden mapping out of maps, smaps, pagemap and mincore.
 
