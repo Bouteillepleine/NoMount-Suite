@@ -128,6 +128,12 @@ bool ghost_uid_concealed(u32 uid)
 	int i, n = smp_load_acquire(&ghost_ncuids);
 	u32 appid = ghost_appid(uid);
 
+	/* Same clamp as ghost_uid_in_table(). The count is only ever raised under
+	 * ghost_mutex behind a bound check, so this cannot fire -- it is here so
+	 * that a torn or future-miscounted read walks the array and not past it.
+	 */
+	if (n > GH_MAX_UIDS)
+		n = GH_MAX_UIDS;
 	for (i = 0; i < n; i++) {
 		u32 e = READ_ONCE(ghost_cuids[i]);
 
