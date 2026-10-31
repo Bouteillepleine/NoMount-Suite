@@ -50,12 +50,12 @@ pub(crate) fn probe_as_uid<const N: usize>(
     }
     if pid == 0 {
         unsafe { libc::close(rd) };
+        // The child says "I could not become that uid" by exiting NOT_DROPPED and
+        // writing nothing, rather than by putting u32::MAX in the first slot: a
+        // probe is free to count u32::MAX of something, and in band that answer
+        // was indistinguishable from the failure.
         if uid == 0 {
-            unsafe {
-                let sentinel = [u32::MAX; N];
-                libc::write(wr, sentinel.as_ptr().cast(), width);
-                libc::_exit(0)
-            }
+            unsafe { libc::_exit(EXIT_NOT_DROPPED) }
         }
         let dropped = unsafe {
             libc::getuid() == uid
@@ -63,12 +63,10 @@ pub(crate) fn probe_as_uid<const N: usize>(
                     && libc::setresgid(uid, uid, uid) == 0
                     && libc::setresuid(uid, uid, uid) == 0)
         };
-        let mut out = if dropped { probe() } else { [0u32; N] };
         if !dropped {
-            if let Some(first) = out.first_mut() {
-                *first = u32::MAX;
-            }
+            unsafe { libc::_exit(EXIT_NOT_DROPPED) }
         }
+        let out = probe();
         unsafe {
             libc::write(wr, out.as_ptr().cast(), width);
             libc::_exit(0)
@@ -80,14 +78,19 @@ pub(crate) fn probe_as_uid<const N: usize>(
     unsafe { libc::close(rd) };
     let mut status = 0i32;
     unsafe { libc::waitpid(pid, &mut status, 0) };
+    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == EXIT_NOT_DROPPED {
+        return Err(ProbeFail::NotDropped);
+    }
     if got != width as isize {
         return Err(ProbeFail::Silent);
     }
-    if out.first().copied() == Some(u32::MAX) {
-        return Err(ProbeFail::NotDropped);
-    }
     Ok(out)
 }
+
+/// Exit code for "could not take on that uid". Any other non-zero exit, or a
+/// signal, leaves `got` short and reads as `Silent`, which is what a child that
+/// died inside the probe deserves.
+const EXIT_NOT_DROPPED: libc::c_int = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProbeFail {
@@ -1656,6 +1659,10 @@ mod tests {
         let me = unsafe { libc::getuid() };
         assert_eq!(probe_as_uid(me, || [7u32]), Ok([7]));
         assert_eq!(probe_as_uid(me, || [1u32, 2, 3]), Ok([1, 2, 3]));
+        // u32::MAX used to be the in-band "could not drop" sentinel, so a probe
+        // that legitimately answered it was reported as unmeasured.
+        assert_eq!(probe_as_uid(me, || [u32::MAX]), Ok([u32::MAX]));
+        assert_eq!(probe_as_uid(me, || [u32::MAX, 1]), Ok([u32::MAX, 1]));
     }
 
     #[test]
