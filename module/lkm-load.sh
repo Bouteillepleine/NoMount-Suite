@@ -12,9 +12,17 @@ nm_lkm_probe() {
 nm_lkm_kver() { uname -r | cut -d. -f1,2; }
 nm_lkm_akver() { uname -r | grep -oE 'android[0-9]+' | head -1; }
 
+nm_lkm_echo() {
+	[ -n "$1" ] || return 0
+	printf '%s\n' "$1" | while IFS= read -r _line; do
+		[ -n "$_line" ] && $NM_LKM_SAY "    $_line"
+	done
+}
+
 nm_lkm_insert() {
 	_ko="$1"
 	[ -f "$_ko" ] || return 1
+	_out=""
 
 	if command -v ksud >/dev/null 2>&1 &&
 	   ksud -h 2>&1 | grep -qE '(^|[[:space:]])insmod([[:space:]]|$)'; then
@@ -25,16 +33,22 @@ nm_lkm_insert() {
 	fi
 
 	if [ -x "$NM_LKM_LOADER" ]; then
-		if "$NM_LKM_LOADER" "$_ko" >/dev/null 2>&1 && nm_lkm_probe; then
+		# ko-loader is the only step that can rewrite vermagic, so its output is
+		# the one line that explains why a module did or did not go in. Throwing
+		# it away left an install log with two "trying" lines and no reason.
+		if _out=$("$NM_LKM_LOADER" "$_ko" 2>&1) && nm_lkm_probe; then
+			nm_lkm_echo "$_out"
 			return 0
 		fi
+		nm_lkm_echo "$_out"
 		rmmod nomount 2>/dev/null
 	fi
 
 	if command -v insmod >/dev/null 2>&1; then
-		if insmod "$_ko" >/dev/null 2>&1 && nm_lkm_probe; then
+		if _out=$(insmod "$_ko" 2>&1) && nm_lkm_probe; then
 			return 0
 		fi
+		nm_lkm_echo "$_out"
 		rmmod nomount 2>/dev/null
 	fi
 
