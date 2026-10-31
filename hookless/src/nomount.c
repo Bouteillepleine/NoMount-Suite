@@ -3553,6 +3553,11 @@ static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max,
         struct path dp;
         struct file *dir;
 
+        /* Up to NM_DMAX_DIRS directories, each a kern_path() and a getattr, all
+         * under nomount_write_mutex on the rule-add path. The inner re-read loop
+         * already yields; this is the loop that does the walking. */
+        cond_resched();
+
         if (++visited > cap) {
             ret = -E2BIG;
             break;
