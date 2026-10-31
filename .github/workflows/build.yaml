@@ -219,7 +219,11 @@ jobs:
           make -j"$(nproc)" -C "$KDIR" ARCH=arm64 CC=clang \
                M="$GITHUB_WORKSPACE/lkm" modules
           install -Dm644 lkm/nomount.ko "out/nomount-${{ matrix.kmi }}.ko"
-          llvm-strip -d "out/nomount-${{ matrix.kmi }}.ko" || true
+          # -d leaves .BTF behind, and a module carrying BTF that does not match the
+          # running kernel's base BTF is rejected on kernels built with
+          # CONFIG_DEBUG_INFO_BTF_MODULES. Drop the section outright: nothing at
+          # runtime reads it, and ko-loader can only rewrite vermagic, not BTF.
+          llvm-strip --strip-unneeded -R .BTF "out/nomount-${{ matrix.kmi }}.ko" || true
           ls -l "out/nomount-${{ matrix.kmi }}.ko"
 
       - name: Relocations the arm64 module loader cannot apply

@@ -235,4 +235,21 @@ elif [ -z "$_ev" ]; then
 else
     ui_print "- next step: clear the disable flag (see above), then reboot."
 fi
+
+# The manager prints "Module installed successfully!" after this, which is true of
+# the files and says nothing about the engine. A reader who sees that under a green
+# "Flash success" reasonably concludes NoMount is working. Make the real state the
+# last thing we print, so the two cannot be read as agreeing.
+if [ -z "$_ev" ]; then
+    ui_print "*********************************************************"
+    if [ "$_booted" != "1" ]; then
+        ui_print "! INSTALLED - engine state UNKNOWN (no running kernel to"
+        ui_print "! ask). Reboot and re-check before relying on it."
+    else
+        ui_print "! INSTALLED BUT INACTIVE - nothing will be injected on"
+        ui_print "! this kernel. See the next step above."
+    fi
+    ui_print "! Any success line below refers to the files, not the engine."
+    ui_print "*********************************************************"
+fi
 unset _booted
