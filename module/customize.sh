@@ -84,23 +84,46 @@ export NM_LKM_SAY NM_LKM_NM NM_LKM_LOADER
 [ -f "$MODPATH/lkm-load.sh" ] && . "$MODPATH/lkm-load.sh"
 [ -f "$NM_LKM_LOADER" ] && chmod 0755 "$NM_LKM_LOADER" 2>/dev/null
 
+# _eng, not _ev: the engine can be up while its version is unreadable, and the
+# messages at the end of this file are about whether anything will be injected,
+# not about whether we could read a number.
+_eng=0
+_lrc=1
 if [ -x "$_nm" ]; then
     _evl=$("$_nm" v 2>/dev/null | head -n 1)
     _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
     _eb=""
     case "$_evl" in *" "*) _eb=${_evl#* }; _eb=${_eb%% *} ;; esac
-    if [ -n "$_ev" ]; then
-        ui_print "- Prism engine: v${_ev} (${_eb:+build $_eb, }responding)"
-        if ! lsmod 2>/dev/null | grep -q "^nomount"; then
-            ui_print "- Built into the kernel - dropping the bundled modules."
-            rm -rf "$MODPATH/lkm" "$MODPATH/loader"
+    if [ -z "$_ev" ] && command -v nm_lkm_load_best >/dev/null 2>&1; then
+        nm_lkm_load_best "$MODPATH/lkm"; _lrc=$?
+        if [ "$_lrc" = 0 ] || [ "$_lrc" = 2 ]; then
+            nm_lkm_prune "$MODPATH/lkm"
+            _evl=$("$_nm" v 2>/dev/null | head -n 1)
+            _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
         fi
-    elif command -v nm_lkm_load_best >/dev/null 2>&1 \
-         && { nm_lkm_load_best "$MODPATH/lkm" || nm_lkm_probe; }; then
-        _evl=$("$_nm" v 2>/dev/null | head -n 1)
-        _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
-        ui_print "- Prism engine: v${_ev} (module loaded, no reboot needed)"
-        nm_lkm_prune "$MODPATH/lkm"
+    fi
+    if [ -n "$_ev" ]; then
+        _eng=1
+        if [ "$_lrc" = 0 ]; then
+            ui_print "- Prism engine: v${_ev} (module loaded, no reboot needed)"
+        else
+            ui_print "- Prism engine: v${_ev} (${_eb:+build $_eb, }responding)"
+        fi
+        # The bundled modules are NOT dropped here any more. That used to happen
+        # whenever lsmod showed no nomount line, read as "the engine is built
+        # into the kernel" - but the module takes itself OUT of /proc/modules by
+        # default, so a device already running the LKM looked built-in and had
+        # its only fallback deleted. There is no sound lsmod test while the
+        # module hides itself, and a few MB left in place costs nothing.
+    elif [ "$_lrc" = 2 ]; then
+        _eng=1
+        ui_print "*********************************************************"
+        ui_print "! The engine module LOADED (from ${NM_LKM_SOURCE:-?}) but the"
+        ui_print "! probe did not answer, so its version is unknown."
+        ui_print "! Your KERNEL is not the problem. bin/${_abi}/nm is missing,"
+        ui_print "! built for another ABI, or lost its executable bit."
+        ui_print "! Re-flash this zip; do not reflash the kernel."
+        ui_print "*********************************************************"
     else
         ui_print "*********************************************************"
         ui_print "! The kernel's NoMount engine did not answer, and no"
@@ -217,7 +240,7 @@ if [ -e "$NMDIR/disabled" ]; then
 fi
 
 _booted=$(getprop sys.boot_completed 2>/dev/null)
-if [ -n "$_ev" ] && [ ! -e "$NMDIR/disabled" ]; then
+if [ "$_eng" = 1 ] && [ ! -e "$NMDIR/disabled" ]; then
     ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
     ui_print "- next step: reboot. Nothing is served until you do."
 elif [ ! -d "$MODPATH/bin/${_abi}" ]; then
@@ -226,10 +249,10 @@ elif [ ! -d "$MODPATH/bin/${_abi}" ]; then
 elif [ ! -x "$_nm" ]; then
     ui_print "- next step: re-flash this zip. The engine could not be probed (see above),"
     ui_print "  so we cannot tell you whether your kernel has NoMount."
-elif [ -z "$_ev" ] && [ "$_booted" != "1" ]; then
+elif [ "$_eng" != 1 ] && [ "$_booted" != "1" ]; then
     ui_print "- Installed from recovery, where the engine cannot answer."
     ui_print "- next step: reboot, then open the WebUI - it says whether your kernel has it."
-elif [ -z "$_ev" ]; then
+elif [ "$_eng" != 1 ]; then
     ui_print "- next step: flash a kernel built with CONFIG_NOMOUNT, then reboot."
     ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases"
     ui_print "  Until you do, this module is installed and doing nothing."
@@ -241,7 +264,7 @@ fi
 # the files and says nothing about the engine. A reader who sees that under a green
 # "Flash success" reasonably concludes NoMount is working. Make the real state the
 # last thing we print, so the two cannot be read as agreeing.
-if [ -z "$_ev" ]; then
+if [ "$_eng" != 1 ]; then
     ui_print "*********************************************************"
     if [ "$_booted" != "1" ]; then
         ui_print "! INSTALLED - engine state UNKNOWN (no running kernel to"
@@ -253,4 +276,4 @@ if [ -z "$_ev" ]; then
     ui_print "! Any success line below refers to the files, not the engine."
     ui_print "*********************************************************"
 fi
-unset _booted
+unset _booted _eng _lrc
