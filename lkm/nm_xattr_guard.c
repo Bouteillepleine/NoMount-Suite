@@ -55,12 +55,16 @@ static int nm_xg_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
+/* See the maxactive note in nm_ghost_probes.c: past it the kernel runs neither
+ * handler and the guard fails open. vfs_getxattr() carries every getxattr on the
+ * system and reads from disk, so it gets the hot budget.
+ */
 static struct kretprobe nm_xg_krp = {
 	.kp.symbol_name = "vfs_getxattr",
 	.entry_handler  = nm_xg_entry,
 	.handler        = nm_xg_ret,
 	.data_size      = sizeof(struct nm_xg_ctx),
-	.maxactive      = 64,
+	.maxactive      = 512,
 };
 
 static bool nm_xg_armed;

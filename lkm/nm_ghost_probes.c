@@ -310,62 +310,82 @@ static int nm_gp_open_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
+/* maxactive is the number of concurrent in-flight calls a kretprobe can shadow.
+ * Past it the kernel increments rp->nmissed and runs NEITHER handler, so the
+ * function returns unmodified and a hidden path resolves normally -- the guard
+ * fails OPEN, and silently, because nmissed is only legible through
+ * /sys/kernel/debug/kprobes/list, which is not mounted on a phone.
+ *
+ * The default is max(10, 2 * NR_CPUS). That is sized for a function that
+ * returns promptly; do_filp_open(), user_path_at() and the two getattr paths
+ * all sleep on disk, so the number of tasks inside one of them at once is
+ * bounded by runnable tasks, not by cores. 64 per core on an 8-core target is
+ * the budget here: ~512 shadow records of sizeof(struct kretprobe_instance) +
+ * data_size each, a few hundred KB across the hot probes and permanently
+ * allocated. That is the right trade against a cloak that opens under load.
+ *
+ * The cold probes keep the smaller number: a mount table is read rarely and
+ * mincore()/PAGEMAP_SCAN rarer still.
+ */
+#define NM_GP_MAXACTIVE_HOT  512
+#define NM_GP_MAXACTIVE_COLD 64
+
 static struct kretprobe nm_gp_krp[] = {
 	{
 		.kp.symbol_name = "do_filp_open",
 		.entry_handler  = nm_gp_open_entry,
 		.handler        = nm_gp_open_ret,
 		.data_size      = sizeof(struct nm_gp_ctx),
-		.maxactive      = 64,
+		.maxactive      = NM_GP_MAXACTIVE_HOT,
 	},
 	{
 		.kp.symbol_name = "__arm64_sys_getpriority",
 		.entry_handler  = nm_gp_prio_entry,
 		.handler        = nm_gp_prio_ret,
 		.data_size      = sizeof(struct nm_gp_ctx),
-		.maxactive      = 64,
+		.maxactive      = NM_GP_MAXACTIVE_COLD,
 	},
 	{
 		.kp.symbol_name = "__arm64_sys_setpriority",
 		.entry_handler  = nm_gp_prio_entry,
 		.handler        = nm_gp_prio_ret,
 		.data_size      = sizeof(struct nm_gp_ctx),
-		.maxactive      = 64,
+		.maxactive      = NM_GP_MAXACTIVE_COLD,
 	},
 	{
 		.kp.symbol_name = "user_path_at",
 		.entry_handler  = nm_gp_upa_entry,
 		.handler        = nm_gp_upa_ret,
 		.data_size      = sizeof(struct nm_gp_upa_ctx),
-		.maxactive      = 64,
+		.maxactive      = NM_GP_MAXACTIVE_HOT,
 	},
 	{
 		.kp.symbol_name = "vfs_getattr",
 		.entry_handler  = nm_gp_stat_entry,
 		.handler        = nm_gp_stat_ret,
 		.data_size      = sizeof(struct nm_gp_ctx),
-		.maxactive      = 64,
+		.maxactive      = NM_GP_MAXACTIVE_HOT,
 	},
 	{
 		.kp.symbol_name = "vfs_getattr_nosec",
 		.entry_handler  = nm_gp_stat_entry,
 		.handler        = nm_gp_stat_ret,
 		.data_size      = sizeof(struct nm_gp_ctx),
-		.maxactive      = 64,
+		.maxactive      = NM_GP_MAXACTIVE_HOT,
 	},
 	{
 		.kp.symbol_name = "security_inode_getattr",
 		.entry_handler  = nm_gp_stat_entry,
 		.handler        = nm_gp_stat_ret,
 		.data_size      = sizeof(struct nm_gp_ctx),
-		.maxactive      = 64,
+		.maxactive      = NM_GP_MAXACTIVE_HOT,
 	},
 	{
 		.kp.symbol_name = "unix_find_other",
 		.entry_handler  = nm_gp_sock_entry,
 		.handler        = nm_gp_sock_ret,
 		.data_size      = sizeof(struct nm_gp_ctx),
-		.maxactive      = 64,
+		.maxactive      = NM_GP_MAXACTIVE_COLD,
 	},
 };
 
