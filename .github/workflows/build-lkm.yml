@@ -233,6 +233,23 @@ jobs:
           grep -rhoE '\bEXPORT_SYMBOL(_GPL|_NS|_NS_GPL)?\(\s*[a-zA-Z_][a-zA-Z0-9_]*' ksrc \
             --include='*.c' --include='*.h' 2>/dev/null \
             | sed 's/.*(\s*//' | sort -u > /tmp/exported.txt || true
+          # arm64 exports its out-of-line LL/SC atomics through __LL_SC_EXPORT(x),
+          # which pastes its argument: the source reads __LL_SC_EXPORT(atomic_##op),
+          # so no concrete symbol name exists anywhere to grep for and the exported
+          # list above cannot hold them. Where that macro is present - 4.9 through
+          # 4.19; the atomics were reworked in 5.0 and it is gone - a __ll_sc_*
+          # reference IS satisfied by the kernel and is not a missing export. This
+          # only became visible when the undefined list stopped being the ten names
+          # modpost prints before it gives up.
+          if grep -rqE '__LL_SC_EXPORT\(' ksrc --include='*.h' --include='*.c' 2>/dev/null; then
+            n_llsc=$(grep -c '^__ll_sc_' /tmp/undef.txt || true)
+            if [ "${n_llsc:-0}" -gt 0 ]; then
+              grep -v '^__ll_sc_' /tmp/undef.txt > /tmp/undef.keep || true
+              mv /tmp/undef.keep /tmp/undef.txt
+              echo "note: $n_llsc __ll_sc_* atomic helper(s) are exported via __LL_SC_EXPORT in this tree"
+            fi
+          fi
+
           comm -23 /tmp/undef.txt /tmp/exported.txt > "$out" || true
 
           u=$(grep -c . /tmp/undef.txt || true)
