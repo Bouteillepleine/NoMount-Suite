@@ -61,22 +61,40 @@ static bool ph_match_str(const char *path)
 
 static DEFINE_PER_CPU(char [PATH_MAX], ph_pathbuf);
 
-bool pathhide_match_file(struct file *file)
+/* The rendering and the rule scan in one place, so a caller that has a path but
+ * no file cannot end up matching a different string with a different loop.
+ * /proc/<pid>/map_files is such a caller: map_files_get_link() hands back a
+ * struct path, and out of tree the guard over it used to render and scan on its
+ * own - two copies of the same substring test, free to drift apart, which is the
+ * one thing a cloak with two views must not do.
+ */
+bool pathhide_match_path(const struct path *path)
 {
 	char (*bufp)[PATH_MAX];
 	char *p;
 	bool hit = false;
 
-	if (!file || !READ_ONCE(ph_nrules))
+	if (!path || !path->dentry || !READ_ONCE(ph_nrules))
 		return false;
 
 	bufp = get_cpu_ptr(&ph_pathbuf);
-	p = d_path(PH_FILE_PATH(file), *bufp, PATH_MAX);
+	p = d_path(path, *bufp, PATH_MAX);
 	if (!IS_ERR(p))
 		hit = ph_match_str(p);
 	put_cpu_ptr(&ph_pathbuf);
 
 	return hit;
+}
+
+bool pathhide_match_file(struct file *file)
+{
+	if (!file)
+		return false;
+
+	/* file_user_path() on 6.7+, so an overlay mapping is matched on the path
+	 * the reader sees rather than the backing one. A caller holding only a
+	 * path cannot make that distinction and does not try to. */
+	return pathhide_match_path(PH_FILE_PATH(file));
 }
 
 static bool ph_rule_sane(const char *s)
