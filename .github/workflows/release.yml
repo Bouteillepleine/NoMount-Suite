@@ -124,15 +124,27 @@ jobs:
             printf '\n> `00_NoMount-Module` for a kernel with NoMount built in, `01_NoMount-Module-LKM` for one without.\n'
           } > /tmp/notes.md
 
+          # A hash published OUTSIDE the zip. nomount.sha256sums travels inside it,
+          # and a repack can regenerate it, so it proves the download is whole and
+          # says nothing about where it came from. This does.
+          ( cd dist && sha256sum *.zip ) > /tmp/SHA256SUMS
+          cat /tmp/SHA256SUMS
+          {
+            printf '\n```\n'
+            cat /tmp/SHA256SUMS
+            printf '```\n'
+          } >> /tmp/notes.md
+
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "release $TAG already exists: replacing its asset and notes in place"
             gh release upload "$TAG" "$zip" --repo "$GITHUB_REPOSITORY" --clobber
             lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1 || true)
             [ -n "$lkmzip" ] && gh release upload "$TAG" "$lkmzip" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$TAG" /tmp/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/notes.md
           else
             lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1 || true)
-            gh release create "$TAG" "$zip" ${lkmzip:+"$lkmzip"} \
+            gh release create "$TAG" "$zip" ${lkmzip:+"$lkmzip"} /tmp/SHA256SUMS \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "NoMount Suite $TAG" \

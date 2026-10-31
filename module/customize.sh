@@ -7,11 +7,12 @@ if [ -f "$SUMS" ]; then
     if command -v sha256sum >/dev/null 2>&1; then
         _sumout=$(cd "$MODPATH" && sha256sum -c "$SUMS" 2>&1)
         if [ $? -eq 0 ]; then
-            ui_print "- Integrity check passed ($(wc -l < "$SUMS") files)"
+            ui_print "- Payload intact - $(wc -l < "$SUMS") files match the manifest"
         else
             ui_print "*********************************************************"
             ui_print "! Integrity check FAILED - a file does not match its hash."
-            ui_print "! This zip is corrupted or was modified. Re-download it."
+            ui_print "! This zip is damaged or was repacked. Re-download it from"
+            ui_print "! the official release page."
             ui_print "! What sha256sum -c reported:"
             printf '%s\n' "$_sumout" | grep -v ': OK$' | head -n 8 | while IFS= read -r _l; do
                 ui_print "!   $_l"
