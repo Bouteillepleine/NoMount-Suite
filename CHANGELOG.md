@@ -6,6 +6,56 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.207 — engine v34 (the engine fixes below need a kernel rebuild)
+
+- The LKM's path and stat guards no longer fail open under load: the kretprobes that
+  carry them have room for 64 concurrent calls per core, not 8.
+- `unbind` restores a SELinux label longer than 256 bytes instead of writing the
+  `adb_data_file` default over it.
+- The package watcher no longer removes a lock another watcher owns.
+- `boot.log` survives a rotation a full `/data` could not write.
+- The LKM no longer calls `path_put()` from a kretprobe handler. Dropping the last
+  reference there can sleep, and the dentries these two guards fire for are the
+  ones `dput()` kills rather than keeps, so it could.
+- `/proc/<pid>/maps` and `/proc/<pid>/map_files` are matched by one renderer and
+  one rule scan instead of two copies of the same substring test.
+- A path carrying any Unicode default-ignorable code point is refused for a hidden
+  caller, not just the eight that had been seen in use. The built-in engine needs a
+  kernel rebuild for this one.
+- The maps spoof parks the answer rather than a pointer to the inode it came from.
+- Uninstalling clears the engine's rule table, so it takes effect without a reboot,
+  and it keeps `binds.list` when it could not find a binary to unbind with.
+- An engine module that loads but whose `nm` probe does not answer says so, instead
+  of reporting that no module loads on this kernel.
+- Installing no longer deletes the bundled engine modules. It decided they were
+  surplus from `lsmod` showing nothing, which is also what a loaded-and-hidden
+  module shows.
+- The engine module is loaded on the metamodule path too, so its ordering against
+  `post-fs-data.sh` no longer decides whether the first boot serves anything.
+- The LKM symbol gate reads the module instead of the modpost log, which stops
+  after ten warnings - it had been checking ten symbols of a hundred and more.
+- A hiding LKM build no longer writes its own name to the kernel log on the way
+  up. It did that for every arm, a moment before unlinking itself from
+  `/proc/modules`. Warnings still print; `hide=0` prints everything.
+- The subtree scan that places an injected inode can be preempted, instead of
+  walking up to 8192 directories without yielding. The built-in engine needs a
+  kernel rebuild for this one.
+- The engine declares its write on the mount it writes to. Nothing changes on a
+  read-only stock mount, which is every rule today. The built-in engine needs a
+  kernel rebuild for this one.
+- Releases publish `SHA256SUMS`. The install log says the payload is intact rather
+  than unmodified, because the manifest ships inside the zip it checks.
+- `hookless/README.md` names what the four integration hunks cover and what they
+  do not.
+
+## v1.3.206 — engine v34 (unchanged)
+
+- Bundled engine modules ship without `.BTF`; some kernels reject it.
+- `ko-loader` output reaches the install log instead of being dropped.
+- A self-mount with a runtime target is seen, not just a literal path.
+- A self-mount note no longer promises absorb will take it over.
+- Install ends on `INSTALLED BUT INACTIVE` when no engine answers and no bundled module loads.
+
 ## v1.3.205 — engine v34 (unchanged)
 
 - The LKM keeps a hidden mapping out of maps, smaps, pagemap and mincore.
@@ -23,6 +73,8 @@
 - `ghostpaths`: extra cloak entries beside the synced ones — absolute paths, and `@name`
   for abstract sockets, which refuse with `-ECONNREFUSED`.
 - Both need a kernel built with the `_ghost` patches; the LKM build cannot carry them.
+  (Not true from v1.3.204 on: the LKM compiles `ghost.c` in and reaches the same
+  guards through kretprobes.)
 
 ## v1.3.202 — engine v34 (unchanged)
 

@@ -16,10 +16,13 @@ check() {
 	fi
 }
 
-# $1 = space-separated list of basenames that "load"; everything else fails.
+# $1 = basenames that load and probe (rc 0).
+# $2 = basenames that load but whose probe does not answer (rc 2).
+# Anything else does not load (rc 1).
 setup() {
 	rm -rf "$WORK/lkm" "$WORK/dev"; mkdir -p "$WORK/lkm" "$WORK/dev"
 	LOADABLE=" $1 "
+	UNCONFIRMED=" ${2:-} "
 	NM_LKM_DEVICE_KO="$WORK/dev/nomount.ko"
 	NM_LKM_SAY=:
 	. "$HERE/module/lkm-load.sh"
@@ -30,6 +33,7 @@ setup() {
 	nm_lkm_insert() {
 		PICKED=$(basename "$1")
 		case "$LOADABLE" in *" $PICKED "*) return 0;; esac
+		case "$UNCONFIRMED" in *" $PICKED "*) return 2;; esac
 		PICKED=; return 1
 	}
 	PICKED=; NM_LKM_SOURCE=
@@ -77,6 +81,21 @@ setup ""
 mk "$WORK/dev/nomount.ko"; mk "$WORK/lkm/nomount-android16-6.12.ko"
 if nm_lkm_load_best "$WORK/lkm" >/dev/null 2>&1; then r=0; else r=1; fi
 check "nothing loadable returns non-zero" "$r" "1"
+
+# "It went in but the probe did not answer" is a different answer from "nothing
+# went in", and the callers print different things for them: one says the engine
+# is up and the nm binary is not, the other says to reflash the kernel.
+setup "" "nomount.ko"
+mk "$WORK/dev/nomount.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null 2>&1; r=$?
+check "a load the probe cannot confirm returns 2, not 1" "$r" "2"
+check "...and still records where it came from" "$NM_LKM_SOURCE" "device"
+
+setup "" "nomount-android16-6.12.ko"
+mk "$WORK/dev/nomount.ko"; mk "$WORK/lkm/nomount-android16-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null 2>&1; r=$?
+check "an unloadable device .ko still falls through to a bundled one" "$r" "2"
+check "...and names the bundled source" "$NM_LKM_SOURCE" "bundled"
 
 setup "nomount.ko"
 mk "$WORK/dev/nomount.ko"; mk "$WORK/lkm/nomount-android16-6.12.ko"

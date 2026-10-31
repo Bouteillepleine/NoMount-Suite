@@ -83,6 +83,8 @@
 #include <linux/percpu.h>
 #include <linux/string.h>
 
+#include "nm_hide.h"
+
 /* pathhide.c is vendored byte-identical from the in-tree tree, which targets
  * 5.10 and newer, and 5.10 is where this builds from.
  *
@@ -119,8 +121,8 @@ int nm_pathhide_get_rule_fwd(int idx, char *out, size_t outsz)
 
 int nm_pathhide_probes_init(void)
 {
-	pr_info("nomount: pathhide guards unavailable: this kernel predates the "
-		"page-walk and mmap-lock interfaces the cloak is written against\n");
+	nm_say("nomount: pathhide guards unavailable: this kernel predates the "
+	       "page-walk and mmap-lock interfaces the cloak is written against\n");
 	return 0;
 }
 
@@ -141,6 +143,7 @@ void nm_pathhide_probes_exit(void)
 #include <asm/ptrace.h>
 
 #include "nm_oot.h"
+#include "nm_defer.h"
 #include "pathhide.h"
 #include "nm_pathhide_probes.h"
 
@@ -350,53 +353,31 @@ static bool nm_ph_show_armed[ARRAY_SIZE(nm_ph_kp_show)];
  * map_files_get_link(dentry, path) is where the symlink's target is resolved:
  * it fills the caller's struct path from the vma's file and returns 0. The
  * same kretprobe shape nm_gp_upa_ret() uses applies - stash the path at entry,
- * and on a successful return drop the reference and answer -ENOENT instead.
- * The reference being dropped is one the function itself just took on a dentry
- * the vma pins, so this does not reach the iput() path that can sleep.
+ * and on a successful return release the reference and answer -ENOENT instead.
+ * It cannot be released from here: map_files_get_link() drops mmap_read_lock
+ * before returning, so the reference it took is the only one left if the vma has
+ * gone, and dput() on the last one can sleep. It goes to nm_path_put_deferred()
+ * like the user_path_at() guard's does.
  *
  * It needs a path-based test rather than pathhide_match_file(), which takes a
- * struct file. Rather than reach into pathhide.c - vendored byte-identical and
- * not ours to edit - the rules are read back through its own
- * pathhide_get_rule() and matched here, which is the same substring test on
- * the same strings.
+ * struct file. That used to be a second render-and-scan here, reading the rules
+ * back through pathhide_get_rule() - "the same substring test on the same
+ * strings", which is exactly the arrangement that stops being true the first
+ * time one of the two is changed. pathhide.c now exports the renderer itself as
+ * pathhide_match_path(), and both arms go through it.
+ *
+ * One difference the shared matcher cannot remove: show_map_vma() renders
+ * file_user_path(), while map_files_get_link() fills its path from
+ * vma->vm_file->f_path. For a FMODE_BACKING mapping - an overlayfs one - those
+ * are genuinely different paths in the kernel, before any rule is consulted. The
+ * rules this cloak carries name /data/adb, which is f2fs and never overlayed, so
+ * the two agree in practice; they are not guaranteed to agree in principle.
  *
  * What this does NOT do: the entries themselves still exist, named by address
  * range, because readdir emits them through proc_fill_cache() with no per-entry
  * hook a kretprobe can fail. So an address present in map_files and absent from
  * maps is still visible; the path behind it is not.
  */
-/* pathhide_get_rule() refuses an outsz under its own PH_RULE_LEN, which the
- * header does not export, so 128 is a floor - the same constant and the same
- * reasoning as NM_PATHHIDE_RULE_MAX in the engine. */
-#define NM_PH_RULE_MAX 128
-
-static char __percpu *nm_ph_linkbuf;
-
-static bool nm_ph_path_hidden(const struct path *path)
-{
-	char rule[NM_PH_RULE_MAX];
-	char *buf, *p;
-	bool hit = false;
-	int i;
-
-	if (!path || !path->dentry || !nm_ph_linkbuf)
-		return false;
-
-	buf = get_cpu_ptr(nm_ph_linkbuf);
-	p = d_path(path, buf, PATH_MAX);
-	if (!IS_ERR(p)) {
-		for (i = 0; pathhide_get_rule(i, rule, sizeof(rule)) > 0; i++) {
-			if (strstr(p, rule)) {
-				hit = true;
-				break;
-			}
-		}
-	}
-	put_cpu_ptr(nm_ph_linkbuf);
-
-	return hit;
-}
-
 struct nm_ph_link_ctx {
 	struct path *path;
 };
@@ -415,10 +396,11 @@ static int nm_ph_link_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 	if ((long)regs->regs[0] != 0 || !ctx->path)
 		return 0;
-	if (!nm_ph_path_hidden(ctx->path))
+	if (!pathhide_match_path(ctx->path))
+		return 0;
+	if (!nm_path_put_deferred(ctx->path))
 		return 0;
 
-	path_put(ctx->path);
 	regs->regs[0] = (unsigned long)(long)-ENOENT;
 	return 0;
 }
@@ -498,23 +480,14 @@ int nm_pathhide_probes_init(void)
 	int armed = 0;
 	int rc;
 
-	nm_ph_linkbuf = __alloc_percpu(PATH_MAX, __alignof__(char));
-	if (!nm_ph_linkbuf) {
-		pr_warn("nomount: pathhide guard: no percpu path buffer. "
-			"/proc/<pid>/map_files still resolves a hidden mapping "
-			"to its path.\n");
+	rc = register_kretprobe(&nm_ph_krp_link);
+	if (rc) {
+		pr_warn("nomount: pathhide guard: cannot probe map_files_get_link "
+			"(%d). /proc/<pid>/map_files still resolves a hidden mapping "
+			"to its path.\n", rc);
 	} else {
-		rc = register_kretprobe(&nm_ph_krp_link);
-		if (rc) {
-			pr_warn("nomount: pathhide guard: cannot probe "
-				"map_files_get_link (%d). /proc/<pid>/map_files "
-				"still resolves a hidden mapping to its path.\n", rc);
-			free_percpu(nm_ph_linkbuf);
-			nm_ph_linkbuf = NULL;
-		} else {
-			nm_ph_link_armed = true;
-			armed++;
-		}
+		nm_ph_link_armed = true;
+		armed++;
 	}
 
 	for (i = 0; i < ARRAY_SIZE(nm_ph_kp_show); i++) {
@@ -556,7 +529,7 @@ int nm_pathhide_probes_init(void)
 
 	/* The count is deliberately out of a total that includes the arm this
 	 * build does not have, so the line reads as short rather than complete. */
-	pr_info("nomount: pathhide guards active (%d/%zu surfaces, accounting unavailable)\n",
+	nm_say("nomount: pathhide guards active (%d/%zu surfaces, accounting unavailable)\n",
 		armed, (size_t)NM_PH_SURFACES);
 	return 0;
 }
@@ -569,11 +542,6 @@ void nm_pathhide_probes_exit(void)
 		nm_ph_link_armed = false;
 		unregister_kretprobe(&nm_ph_krp_link);
 	}
-	if (nm_ph_linkbuf) {
-		free_percpu(nm_ph_linkbuf);
-		nm_ph_linkbuf = NULL;
-	}
-
 	for (i = 0; i < ARRAY_SIZE(nm_ph_kp_show); i++) {
 		if (!nm_ph_show_armed[i])
 			continue;

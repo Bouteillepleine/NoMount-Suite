@@ -5,6 +5,7 @@
 #include "nm_ghost_probes.h"
 #include "nm_pathhide_probes.h"
 #include "nm_hide.h"
+#include "nm_defer.h"
 
 /* The engine declares the ghost/pathhide companion hooks weak-undefined so an
  * unpatched kernel leaves them NULL. arm64 compiles a weak undefined symbol to
@@ -53,6 +54,7 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz) =
 		nm_mount_filter_exit();					\
 		nm_xattr_guard_exit();					\
 		nm_maps_spoof_exit();					\
+		nm_defer_exit();					\
 		fn();							\
 	}								\
 	void cleanup_module(void) __attribute__((alias("nm_lkm_exit")))

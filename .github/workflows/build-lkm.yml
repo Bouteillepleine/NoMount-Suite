@@ -210,10 +210,26 @@ jobs:
         if: steps.sel.outputs.run == '1'
         run: |
           set -o pipefail
-          log=/tmp/lkm-${{ matrix.ver }}.log
           out=/tmp/redirects-${{ matrix.ver }}.txt
+          KO="$PWD/repo/lkm/nomount.ko"
 
-          grep -oE '"[a-zA-Z_][a-zA-Z0-9_]*" \[' "$log" | tr -d '"[ ' | sort -u > /tmp/undef.txt || true
+          # Read the undefined symbols out of the .ko, NOT out of the modpost log.
+          # modpost stops after ten warnings ("suppressed N unresolved symbol
+          # warnings because there were too many"), so the log holds ten names out
+          # of a hundred and more - and this gate then reported every one of them
+          # exported and printed the full count beside it. A green run for a module
+          # with an unexportable symbol in the ninety it never looked at.
+          if [ ! -f "$KO" ]; then
+            echo "::error::no .ko to read symbols from - this gate cannot run, so it is not passing"
+            echo "### ${{ matrix.ver }}: NO MODULE - symbol gate could not run" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          for c in llvm-nm aarch64-linux-gnu-nm nm; do
+            command -v "$c" >/dev/null 2>&1 && { NM="$c"; break; }
+          done
+          [ -n "$NM" ] || { echo "::error::no nm on this runner"; exit 1; }
+
+          "$NM" -u "$KO" | awk 'NF {print $NF}' | sort -u > /tmp/undef.txt
           grep -rhoE '\bEXPORT_SYMBOL(_GPL|_NS|_NS_GPL)?\(\s*[a-zA-Z_][a-zA-Z0-9_]*' ksrc \
             --include='*.c' --include='*.h' 2>/dev/null \
             | sed 's/.*(\s*//' | sort -u > /tmp/exported.txt || true
@@ -225,13 +241,13 @@ jobs:
 
           {
             echo "### ${{ matrix.ver }} (${{ matrix.tc }})"
-            echo "- unresolved at modpost: **$u** (no Module.symvers at this stage - expected)"
+            echo "- undefined in nomount.ko: **$u** (no Module.symvers at this stage - expected)"
             echo "- exported by this kernel: $e"
             echo "- **needing a kallsyms redirect: $r**"
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$r" -eq 0 ]; then
-            echo "All $u unresolved symbols are exported by this kernel."
+            echo "All $u undefined symbols are exported by this kernel."
             echo "The module links cleanly against a fully built tree; no shim needed."
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "✅ every unresolved symbol is exported - links against a built tree, no shim needed" >> "$GITHUB_STEP_SUMMARY"

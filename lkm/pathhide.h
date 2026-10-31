@@ -6,8 +6,10 @@
 
 struct file;
 struct mm_struct;
+struct path;
 
 bool pathhide_match_file(struct file *file);
+bool pathhide_match_path(const struct path *path);
 unsigned long pathhide_hidden_vm_pages(struct mm_struct *mm);
 
 int pathhide_ctl(const char *buf, size_t count);

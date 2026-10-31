@@ -43,6 +43,7 @@
 #include <linux/string.h>
 #include <linux/err.h>
 
+#include "nm_hide.h"
 #include "nm_mount_filter.h"
 
 /* The engine's own "do we hide from this caller" predicate, the same one the
@@ -157,7 +158,7 @@ int nm_mount_filter_init(void)
 		return -ENOENT;
 	}
 
-	pr_info("nomount: mount filter active (%d/%zu surfaces)\n",
+	nm_say("nomount: mount filter active (%d/%zu surfaces)\n",
 		armed, ARRAY_SIZE(nm_mf_krp));
 	return 0;
 }

@@ -59,7 +59,11 @@ _uw_digest() {
     : > "$DIRTY" 2>/dev/null
     exit 0
 }
-trap 'rm -f "$LOCK"' EXIT INT TERM
+# Only our own lock. Two watchers that both saw the same stale lock both remove
+# it, and the second removal can land after the first has already re-created it -
+# at which point an unconditional trap deleted a lock belonging to a live holder
+# and let two `uid apply` runs write the engine's uid table at once.
+trap '[ "$(cat "$LOCK" 2>/dev/null)" = "$$" ] && rm -f "$LOCK"' EXIT INT TERM
 
 sleep 3
 _rounds=0

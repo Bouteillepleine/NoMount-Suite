@@ -14,6 +14,16 @@ greps `/proc/modules` finds it in one read, with no analysis and no root. The
 in-tree build has no such surface: the engine is part of the kernel image and
 appears nowhere as a discrete object.
 
+`nm_hide.c` takes the module out of `/proc/modules`, `/sys/module` and
+`/proc/kallsyms` once it is up, which closes those three for every reader
+including root, at the cost of `rmmod` no longer being able to find it
+(`insmod nomount.ko hide=0` keeps it listed and unloadable). The guards print
+their "armed" lines only on a `hide=0` build, because on a hiding one those
+lines put the module's name in the kernel ring buffer a moment before it
+unlinks itself - three readers closed and a fourth left open. Warnings still
+print either way: they fire when an arm did NOT come up, and then the name in
+the log is what lets you find out why.
+
 You can rename the module, and the name is the only thing renaming changes. A
 scanner that lists modules and compares against a known-good set for the device
 still sees one that should not be there.
@@ -32,8 +42,18 @@ kprobes instead - `nm_maps_spoof.c`:
 
 | probe | what it has | what it does |
 | :--- | :--- | :--- |
-| `show_map_vma(m, vma)` | the VMA, and through `vm_file->f_inode` the inode `vfs_map_meta_override()` needs - it tests `i_op` against NoMount's vtables and reads `i_private` | records the inode for this task |
+| `show_map_vma(m, vma)` | the VMA, and through `vm_file->f_inode` the inode `vfs_map_meta_override()` needs - it tests `i_op` against NoMount's vtables and reads `i_private` | calls it there, where the VMA still pins the inode, and records the **answer** against this `seq_file` |
 | `show_vma_header_prefix(..., dev, ino)` | `dev` in `x5`, `ino` in `x6` | consumes the record and rewrites both registers |
+
+What is parked between the two is the dev/ino pair, not a pointer to the inode
+it came from, and the key is the `seq_file` being rendered rather than the task.
+The first version stored the inode and keyed on `current`: a slot is only ever
+cleared by the probe that consumes it, so a tree that inlined its own copy of
+`show_vma_header_prefix()` would fill the table and never drain it, and a later
+read would match a recycled `task_struct` and dereference an inode that had been
+freed. Resolving at note time means the consuming side dereferences nothing, so
+a stale slot is at worst a wrong line. A slot older than a jiffy is reclaimable,
+so a table that does fill drains itself instead of wedging.
 
 It takes two because neither function has both halves. The decision itself is
 not reimplemented: both variants call the same `vfs_map_meta_override()`.
@@ -63,7 +83,7 @@ three of the four readers are closed.
 | `/proc/<pid>/maps` | `show_map()` returns 0 | kprobe on `show_map`, same early return |
 | `/proc/<pid>/smaps` | `show_smap()` returns 0 | kprobe on `show_smap` |
 | `/proc/<pid>/numa_maps` | `show_numa_map()` returns 0 | kprobe on `show_numa_map` |
-| `/proc/<pid>/map_files/` link | `map_files_get_link()` skips a hidden vma | kretprobe, `path_put` + `-ENOENT` |
+| `/proc/<pid>/map_files/` link | `map_files_get_link()` skips a hidden vma | kretprobe, deferred `path_put` + `-ENOENT` (see `nm_defer.c`) |
 | `/proc/<pid>/map_files/` entries | not instantiated, skipped in readdir | **absent** - the address range still lists |
 | `smaps_rollup`, `PROCMAP_QUERY` | `continue` / `goto skip_vma` | **absent** - neither is a plain early return |
 | `/proc/<pid>/pagemap` | `pagemap_pmd_range()` returns `pagemap_pte_hole()` | kprobe on `pagemap_pmd_range`, returning the kernel's own `pagemap_pte_hole()` result |
@@ -149,7 +169,7 @@ If you *can* build the kernel, build it in-tree. See the repository root readme.
 | | surface it adds |
 | :--- | :--- |
 | **in-tree** (`CONFIG_NOMOUNT=y`) | none - this is the supported build |
-| **KPM** (`../kpm/`) | a KernelPatch module; no `lsmod` entry, and it has the same maps spoof via KernelPatch hooks. Capped at kernel 6.6 and older by KernelPatch itself |
+| **KPM** (`kpm/`, on the `KPM` branch - not on `main`) | a KernelPatch module; no `lsmod` entry, and the same maps spoof through KernelPatch hooks. Capped at kernel 6.6 and older by KernelPatch itself, and it bootlooped every OP15 ReSukiSU build it was tried on. Listed for completeness; it is not a recommendation, and the branch is parked |
 | **LKM** (here) | `/proc/modules` - the maps spoof works, via kprobes |
 
 ## Building

@@ -93,8 +93,17 @@ _follow_ksu() { grep -qiE '^[[:space:]]*follow_ksu_denylist[[:space:]]*=[[:space
 
 nm_boot_log_rotate() {
     [ -e "$BOOTLOG" ] && [ ! -f "$BOOTLOG" ] && rm -rf "$BOOTLOG" 2>/dev/null
-    [ -f "$BOOTLOG" ] && tail -n 400 "$BOOTLOG" > "$BOOTLOG.tmp" 2>/dev/null \
-        && mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
+    # Only swap in a rotation that wrote something. On a full /data `tail` can
+    # leave an empty file behind, and moving that over the log threw away the one
+    # record that says why the previous boot went wrong - at exactly the moment
+    # someone needs it. A short write still swaps; an empty one no longer does.
+    if [ -s "$BOOTLOG" ]; then
+        if tail -n 400 "$BOOTLOG" > "$BOOTLOG.tmp" 2>/dev/null && [ -s "$BOOTLOG.tmp" ]; then
+            mv -f "$BOOTLOG.tmp" "$BOOTLOG" 2>/dev/null
+        else
+            rm -f "$BOOTLOG.tmp" 2>/dev/null
+        fi
+    fi
     touch "$BOOTLOG" 2>/dev/null || return 0
     chmod 0600 "$BOOTLOG" 2>/dev/null
     return 0
@@ -137,12 +146,18 @@ nm_lkm_boot_load() {
     . "$MODDIR/lkm-load.sh" 2>/dev/null || return 0
 
     nm_lkm_probe && return 0
-    if nm_lkm_load_best "$MODDIR/lkm"; then
+    nm_lkm_load_best "$MODDIR/lkm"
+    _lrc=$?
+    if [ "$_lrc" = 0 ]; then
         nmlog "engine module loaded from ${NM_LKM_SOURCE:-?} ($(uname -r))"
+        nm_lkm_prune "$MODDIR/lkm"
+    elif [ "$_lrc" = 2 ]; then
+        nmlog "⚠ engine module loaded from ${NM_LKM_SOURCE:-?} but $NM_BIN did not answer - the ENGINE IS UP; the probe binary is missing, built for another ABI, or not executable. Do not reflash the kernel."
         nm_lkm_prune "$MODDIR/lkm"
     elif [ -d "$MODDIR/lkm" ] || [ -f "${NM_LKM_DEVICE_KO:-/data/adb/nomount/nomount.ko}" ]; then
         nmlog "⛔ no engine module loads on $(uname -r) - nothing will be injected this boot"
     fi
+    unset _lrc
 }
 
 nm_fix_shell_tmp() {

@@ -128,6 +128,12 @@ bool ghost_uid_concealed(u32 uid)
 	int i, n = smp_load_acquire(&ghost_ncuids);
 	u32 appid = ghost_appid(uid);
 
+	/* Same clamp as ghost_uid_in_table(). The count is only ever raised under
+	 * ghost_mutex behind a bound check, so this cannot fire -- it is here so
+	 * that a torn or future-miscounted read walks the array and not past it.
+	 */
+	if (n > GH_MAX_UIDS)
+		n = GH_MAX_UIDS;
 	for (i = 0; i < n; i++) {
 		u32 e = READ_ONCE(ghost_cuids[i]);
 
@@ -205,7 +211,7 @@ static bool ghost_path_rcu(const char *path, size_t plen)
 	return false;
 }
 
-/* Unicode default-ignorable code points, as UTF-8.
+/* Unicode default-ignorable code points.
  *
  * Measured on OP15: a caller refused /sdcard/Android/data with EACCES retried
  * the same component with one of these appended, and THAT open succeeded -
@@ -214,28 +220,103 @@ static bool ghost_path_rcu(const char *path, size_t plen)
  * and no rule text can enumerate them. Refusing the class is what closes it:
  * nothing on a real device needs a zero-width joiner in a path, so for a caller
  * we already hide from, such a path is answered the way a missing one is.
+ *
+ * This used to be eight UTF-8 strings matched with strstr(), which is a list and
+ * not a class: the eight were the ones the detector had been seen using, and
+ * U+FE0F or a tag character walked straight past them. The ranges below are
+ * Default_Ignorable_Code_Point from DerivedCoreProperties in full, so there is
+ * nothing left in the class to move to. The original eight - U+00AD, U+034F,
+ * U+180E, U+200B, U+200C, U+200D, U+2060, U+FEFF - are all still covered.
+ *
+ * U+2066..U+2069 are included although they are NOT in the class. They are the
+ * bidi isolates, they render as nothing, and they serve this bypass exactly as
+ * the ignorables do; leaving them out on a technicality would be leaving the
+ * door open on purpose.
+ *
+ * Deliberately NOT "refuse every non-ASCII byte". That would close the class and
+ * then some: an app whose own files are named in Arabic or Thai would stop being
+ * able to reach them, which is a visible break traded for nothing - these are
+ * code points with no glyph, and there is no legitimate path that needs one.
  */
-static const char * const ghost_ignorable[] = {
-	"\xc2\xad",		/* U+00AD soft hyphen */
-	"\xcd\x8f",		/* U+034F combining grapheme joiner */
-	"\xe1\xa0\x8e",		/* U+180E Mongolian vowel separator */
-	"\xe2\x80\x8b",		/* U+200B zero width space */
-	"\xe2\x80\x8c",		/* U+200C zero width non-joiner */
-	"\xe2\x80\x8d",		/* U+200D zero width joiner */
-	"\xe2\x81\xa0",		/* U+2060 word joiner */
-	"\xef\xbb\xbf",		/* U+FEFF zero width no-break space */
+static const struct { u32 lo, hi; } ghost_ignorable[] = {
+	{ 0x00AD,  0x00AD  },	/* SOFT HYPHEN */
+	{ 0x034F,  0x034F  },	/* COMBINING GRAPHEME JOINER */
+	{ 0x061C,  0x061C  },	/* ARABIC LETTER MARK */
+	{ 0x115F,  0x1160  },	/* HANGUL CHOSEONG/JUNGSEONG FILLER */
+	{ 0x17B4,  0x17B5  },	/* KHMER VOWEL INHERENT AQ, AA */
+	{ 0x180B,  0x180F  },	/* MONGOLIAN FVS1-4 and VOWEL SEPARATOR */
+	{ 0x200B,  0x200F  },	/* ZWSP, ZWNJ, ZWJ, LRM, RLM */
+	{ 0x202A,  0x202E  },	/* LRE, RLE, PDF, LRO, RLO */
+	{ 0x2060,  0x2064  },	/* WORD JOINER .. INVISIBLE PLUS */
+	{ 0x2065,  0x2065  },	/* reserved */
+	{ 0x2066,  0x2069  },	/* LRI, RLI, FSI, PDI - not in the class; see above */
+	{ 0x206A,  0x206F  },	/* deprecated format controls */
+	{ 0x3164,  0x3164  },	/* HANGUL FILLER */
+	{ 0xFE00,  0xFE0F  },	/* VARIATION SELECTOR-1 .. 16 */
+	{ 0xFEFF,  0xFEFF  },	/* ZERO WIDTH NO-BREAK SPACE */
+	{ 0xFFA0,  0xFFA0  },	/* HALFWIDTH HANGUL FILLER */
+	{ 0xFFF0,  0xFFF8  },	/* reserved */
+	{ 0x1BCA0, 0x1BCA3 },	/* SHORTHAND FORMAT CONTROLS */
+	{ 0x1D173, 0x1D17A },	/* MUSICAL SYMBOL BEGIN/END BEAM .. PHRASE */
+	{ 0xE0000, 0xE0FFF },	/* TAGS, VARIATION SELECTORS SUPPLEMENT, reserved */
 };
+
+/* One code point, or 0 for a byte that cannot start a valid sequence. Always
+ * advances, so the scan terminates on malformed input; a truncated sequence
+ * stops at the NUL because that byte fails the continuation test, so this never
+ * reads past the terminator.
+ */
+static u32 ghost_utf8_next(const char **pp)
+{
+	const unsigned char *b = (const unsigned char *)*pp;
+	u32 c = b[0];
+	int need, i;
+
+	if (c < 0x80) {
+		*pp = (const char *)(b + 1);
+		return c;
+	} else if ((c & 0xE0) == 0xC0) {
+		need = 1; c &= 0x1F;
+	} else if ((c & 0xF0) == 0xE0) {
+		need = 2; c &= 0x0F;
+	} else if ((c & 0xF8) == 0xF0) {
+		need = 3; c &= 0x07;
+	} else {
+		*pp = (const char *)(b + 1);
+		return 0;
+	}
+
+	for (i = 1; i <= need; i++) {
+		if ((b[i] & 0xC0) != 0x80) {
+			*pp = (const char *)(b + 1);
+			return 0;
+		}
+		c = (c << 6) | (b[i] & 0x3F);
+	}
+	*pp = (const char *)(b + need + 1);
+	return c;
+}
 
 bool ghost_name_ignorable(const char *p)
 {
-	int i;
-
 	if (!p)
 		return false;
 
-	for (i = 0; i < (int)ARRAY_SIZE(ghost_ignorable); i++)
-		if (strstr(p, ghost_ignorable[i]))
-			return true;
+	while (*p) {
+		u32 c = ghost_utf8_next(&p);
+		int i;
+
+		/* Every ignorable is above U+007F, and a real path is nearly all
+		 * ASCII, so this is the branch that runs. */
+		if (c < 0x80)
+			continue;
+		for (i = 0; i < (int)ARRAY_SIZE(ghost_ignorable); i++) {
+			if (c < ghost_ignorable[i].lo)
+				break;	/* table is sorted; no later range can match */
+			if (c <= ghost_ignorable[i].hi)
+				return true;
+		}
+	}
 	return false;
 }
 

