@@ -1874,9 +1874,21 @@ static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
         battr.ia_valid &= ~ATTR_FILE;
         battr.ia_file = NULL;
 
+        /* The write lands on the BACKING mount, and that is not the mount the
+         * VFS counted before calling here -- it counted the virtual path's.
+         * Unreachable while every rule shadows a read-only stock mount, because
+         * the syscall is refused with -EROFS long before this; a rule over a
+         * writable mount would otherwise write through a frozen or
+         * read-only-remounted filesystem. Taken outside inode_lock, which is
+         * the order every in-tree caller of notify_change() uses.
+         */
+        err = mnt_want_write(info->r_path.mnt);
+        if (unlikely(err))
+            return err;
         inode_lock(d_backing_inode(info->r_path.dentry));
         err = notify_change(IDMAP_CALL info->r_path.dentry, &battr, NULL);
         inode_unlock(d_backing_inode(info->r_path.dentry));
+        mnt_drop_write(info->r_path.mnt);
     }
 
     if (likely(!err)) {
@@ -2311,8 +2323,13 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
             if (unlikely(stock)) {
                 full = nm_full_xattr_name(proxy, name, &alloc);
                 if (unlikely(!full)) return -ENOMEM;
-                r = vfs_setxattr(IDMAP_PATH(info->s_path) stock->dentry, full, buffer, size,
-                                 flags);
+                /* Same reason as the r_path arm below, which already does this. */
+                r = mnt_want_write(info->s_path.mnt);
+                if (!r) {
+                    r = vfs_setxattr(IDMAP_PATH(info->s_path) stock->dentry, full, buffer,
+                                     size, flags);
+                    mnt_drop_write(info->s_path.mnt);
+                }
                 kfree(alloc);
                 return r;
             }
