@@ -32,21 +32,30 @@
 
 static char ph_rules[PH_MAX_RULES][PH_RULE_LEN];
 static int  ph_nrules;
+/* irqsave, not plain spin_lock: out of tree the readers below are reached from
+ * kprobe handlers, which on arm64 run through el1_dbg() with interrupts disabled
+ * and never restore DAIF_PROCCTX. A lock class taken both with interrupts on
+ * (pathhide_ctl) and with them off is an inconsistent state lockdep reports on a
+ * CONFIG_PROVE_LOCKING kernel, and the kprobes documentation asks for irqsave in
+ * a handler regardless. In tree every caller is in process context and the saved
+ * flags cost one register.
+ */
 static DEFINE_SPINLOCK(ph_lock);
 
 static bool ph_match_str(const char *path)
 {
+	unsigned long flags;
 	bool hit = false;
 	int i;
 
-	spin_lock(&ph_lock);
+	spin_lock_irqsave(&ph_lock, flags);
 	for (i = 0; i < ph_nrules; i++) {
 		if (strstr(path, ph_rules[i])) {
 			hit = true;
 			break;
 		}
 	}
-	spin_unlock(&ph_lock);
+	spin_unlock_irqrestore(&ph_lock, flags);
 	return hit;
 }
 
@@ -203,6 +212,7 @@ static int ph_del_locked(const char *s)
 int pathhide_ctl(const char *buf, size_t count)
 {
 	char line[PH_RULE_LEN + 1];
+	unsigned long flags;
 	const char *s;
 	size_t n = count;
 	int ret;
@@ -219,9 +229,9 @@ int pathhide_ctl(const char *buf, size_t count)
 		return 0;
 
 	if (line[0] == '-' && line[1] == '\0') {
-		spin_lock(&ph_lock);
+		spin_lock_irqsave(&ph_lock, flags);
 		WRITE_ONCE(ph_nrules, 0);
-		spin_unlock(&ph_lock);
+		spin_unlock_irqrestore(&ph_lock, flags);
 		return 0;
 	}
 
@@ -234,39 +244,41 @@ int pathhide_ctl(const char *buf, size_t count)
 	if (strlen(s) >= PH_RULE_LEN)
 		return -ENAMETOOLONG;
 
-	spin_lock(&ph_lock);
+	spin_lock_irqsave(&ph_lock, flags);
 	if (line[0] == '~')
 		ret = ph_del_locked(s);
 	else
 		ret = ph_add_locked(s);
-	spin_unlock(&ph_lock);
+	spin_unlock_irqrestore(&ph_lock, flags);
 	return ret;
 }
 
 int pathhide_get_rule(int idx, char *out, size_t outsz)
 {
+	unsigned long flags;
 	int len = 0;
 
 	if (!out || outsz < PH_RULE_LEN || idx < 0)
 		return -EINVAL;
-	spin_lock(&ph_lock);
+	spin_lock_irqsave(&ph_lock, flags);
 	if (idx < ph_nrules) {
 		strscpy(out, ph_rules[idx], outsz);
 		len = strlen(out);
 	}
-	spin_unlock(&ph_lock);
+	spin_unlock_irqrestore(&ph_lock, flags);
 	return len;
 }
 
 #ifdef PH_ENABLE_PROC
 static int ph_seq_show(struct seq_file *m, void *v)
 {
+	unsigned long flags;
 	int i;
 
-	spin_lock(&ph_lock);
+	spin_lock_irqsave(&ph_lock, flags);
 	for (i = 0; i < ph_nrules; i++)
 		seq_printf(m, "%s\n", ph_rules[i]);
-	spin_unlock(&ph_lock);
+	spin_unlock_irqrestore(&ph_lock, flags);
 	return 0;
 }
 
