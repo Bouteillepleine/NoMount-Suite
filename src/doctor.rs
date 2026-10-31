@@ -330,8 +330,9 @@ impl Incompat {
                  mount and the mount checks report it correctly.",
             Incompat::SelfMount =>
                 "mounts over a ROM path instead of shipping a tree, so the mount is real and \
-                 app-readable until absorb re-serves it (after zygote). If absorb is off or \
-                 times out, it stays visible.",
+                 app-readable. Absorb can take it over after zygote only when the mount has a \
+                 source it can read; a tmpfs serving content has nothing to re-serve, and that \
+                 one stays visible for as long as the module is installed.",
         }
     }
 }
@@ -363,9 +364,92 @@ fn expand_rom_vars(line: &str, vars: &std::collections::HashMap<String, String>)
     let mut acc = line.to_string();
     for n in names {
         let v = &vars[n];
-        acc = acc.replace(&format!("${{{n}}}"), v).replace(&format!("${n}"), v);
+        acc = acc.replace(&format!("${{{n}}}"), v);
+        // A bare $NAME ends where a name character stops, so $F must not eat the
+        // F of $FI_DEX. Without this a one-letter variable rewrites every longer
+        // name sharing its prefix and the line reads as a ROM path.
+        let pat = format!("${n}");
+        let mut out = String::with_capacity(acc.len());
+        let mut rest = acc.as_str();
+        while let Some(at) = rest.find(&pat) {
+            let after = &rest[at + pat.len()..];
+            let continues =
+                matches!(after.chars().next(), Some(c) if c.is_ascii_alphanumeric() || c == '_');
+            out.push_str(&rest[..at]);
+            out.push_str(if continues { pat.as_str() } else { v.as_str() });
+            rest = after;
+        }
+        out.push_str(rest);
+        acc = out;
     }
     acc
+}
+
+/// `/odm/etc/foo` yes, `/data/adb/asb/odm_patched` no. A ROM root only counts when it
+/// starts a path component and ends one, or the scratch directories modules name after
+/// a partition would read as the partition itself.
+fn mentions_rom_root(t: &str) -> bool {
+    const PARTS: &[&str] = crate::pmcache::ROM_PARTITIONS;
+    let b = t.as_bytes();
+    PARTS.iter().any(|p| {
+        let needle = format!("/{p}");
+        t.match_indices(&needle).any(|(at, _)| {
+            let before = at == 0 || !(b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_');
+            let after = matches!(b.get(at + needle.len()), None | Some(b'/' | b'"' | b'\'' | b' '));
+            before && after
+        })
+    })
+}
+
+/// The per-line classifier needs a literal ROM path on the mount line. Real modules
+/// rarely write one: `mount --bind "$upper" "$target"` inside a `find` loop, or
+/// `mount --bind "$1" "$2"` in a helper, resolves only at runtime, so a module that
+/// mounts over half of /odm reads as mounting nothing at all.
+///
+/// Fall back to the script as a whole. An un-umounted bind whose target cannot be
+/// resolved, in a script that names a ROM partition somewhere else, is the same
+/// finding with its evidence one line further away - so report the mount line and
+/// let the reader judge. Requiring the ROM mention keeps a module that binds purely
+/// inside /data out of it.
+fn unresolved_rom_self_mount(body: &str, vars: &HashMap<String, String>) -> Option<String> {
+    const BINDS: &[&str] = &["--bind", "--rbind", "-o bind", "-o rbind", "-t overlay"];
+    let mut candidate: Option<String> = None;
+    let mut names_rom = false;
+    for line in body.lines() {
+        let t = line.trim();
+        if t.starts_with('#') || t.is_empty() {
+            continue;
+        }
+        if mentions_rom_root(t) {
+            names_rom = true;
+        }
+        if candidate.is_some() || t.contains("command -v") {
+            continue;
+        }
+        // Already visible to the line classifier: leave it to say so.
+        if classify_incompat_line(&expand_rom_vars(t, vars)).is_some() {
+            continue;
+        }
+        let Some(bind_at) = BINDS.iter().filter_map(|m| t.rfind(m)).max() else { continue };
+        if t.rfind("umount").is_some_and(|u| u > bind_at) {
+            continue;
+        }
+        let mounts = t.match_indices("mount").any(|(at, _)| {
+            at == 0 || !(b_at(t, at - 1).is_ascii_alphanumeric() || b_at(t, at - 1) == b'_')
+        });
+        if mounts {
+            candidate = Some(t.chars().take(90).collect());
+        }
+    }
+    if names_rom {
+        candidate
+    } else {
+        None
+    }
+}
+
+fn b_at(s: &str, i: usize) -> u8 {
+    s.as_bytes()[i]
 }
 
 fn classify_incompat_line(t: &str) -> Option<Incompat> {
@@ -704,6 +788,12 @@ fn scan_module_incompat() -> Vec<(String, String, Incompat, String)> {
                             t.chars().take(90).collect(),
                         ));
                     }
+                }
+            }
+            if !seen.contains(&Incompat::SelfMount) {
+                if let Some(evidence) = unresolved_rom_self_mount(&body, &vars) {
+                    seen.push(Incompat::SelfMount);
+                    out.push((id.clone(), script.to_string(), Incompat::SelfMount, evidence));
                 }
             }
         }
@@ -1878,6 +1968,62 @@ source $MODPATH/a.sh"),
     }
 
     #[test]
+    fn a_runtime_target_still_reads_as_a_self_mount() {
+        // aw882xx-enhance: the target comes out of a find loop, so no ROM path is
+        // ever written on the mount line.
+        let aw = concat!(
+            "ANY_DIR=\"/dev/anyfs\"\n",
+            "overlay_mount_file() {\n",
+            "    local target=\"$1\"\n",
+            "    local upper=\"$ANY_DIR/upper$target\"\n",
+            "    mount --bind \"$upper\" \"$target\"\n",
+            "}\n",
+            "wait_for_path \"/odm/etc\"\n",
+        );
+        // AutoSystemBoost: the bind is a two-argument helper, and the only literal
+        // ROM path in the file is a case pattern.
+        let asb = concat!(
+            "_bind() { mount --bind \"$1\" \"$2\"; }\n",
+            "case \"$1\" in\n",
+            "  */odm/etc/camera/*) _rel=\"${1#*/odm/etc/camera/}\" ;;\n",
+            "esac\n",
+        );
+        for (name, body) in [("aw882xx-enhance", aw), ("AutoSystemBoost", asb)] {
+            assert!(
+                unresolved_rom_self_mount(body, &HashMap::new()).is_some(),
+                "missed the runtime-target self-mount in {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unresolved_bind_outside_the_rom_is_not_a_self_mount() {
+        for (why, body) in [
+            ("binds only inside /data", "mount --bind /data/adb/foo /data/local/tmp/bar\n"),
+            (
+                "a scratch dir named after a partition is not that partition",
+                "mount --bind \"$a\" \"$b\"\nPATCHED=/data/adb/asb/odm_patched\n",
+            ),
+            ("the bind is a probe it undoes", "mount --bind /x /y && umount /y\necho /odm\n"),
+            ("no mount at all", "echo \"--bind\" >/odm/nope\n"),
+        ] {
+            assert_eq!(
+                unresolved_rom_self_mount(body, &HashMap::new()),
+                None,
+                "false positive: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partition_lookalike_directory_is_not_a_rom_root() {
+        assert!(mentions_rom_root("cp x /odm/etc/y"));
+        assert!(mentions_rom_root("wait_for_path \"/odm\""));
+        assert!(!mentions_rom_root("d=/data/adb/asb/odm_patched"));
+        assert!(!mentions_rom_root("d=/data/vendor_de/x"));
+    }
+
+    #[test]
     fn a_bind_through_a_variable_is_resolved() {
         let script = concat!(
             "#!/system/bin/sh
@@ -2535,5 +2681,36 @@ uid=10123
         assert!(v[0].public);
         assert_eq!(v[1].kind, LiveKind::Whiteout);
         assert_eq!(v[1].source, None);
+    }
+
+    #[test]
+    fn a_short_var_does_not_eat_a_longer_name_sharing_its_prefix() {
+        let script = concat!(
+            "F=\"/my_product/etc/extension/$CC/appfeature.country.dynamic_features.xml\"\n",
+            "FI_DEX=\"$MODDIR/ForceInstall.dex\"\n",
+            "FI_PKGS=\"com.android.mms\"\n",
+        );
+        let vars = rom_path_vars(script);
+        assert!(vars.contains_key("F"), "precondition: F is a ROM path var");
+
+        let line = r#"FI_OUT=$(CLASSPATH="$FI_DEX" app_process /system/bin ForceInstall install $FI_PKGS 2>&1)"#;
+        let expanded = expand_rom_vars(line, &vars);
+        assert!(expanded.contains("$FI_DEX"), "$FI_DEX must survive: {expanded}");
+        assert!(expanded.contains("$FI_PKGS"), "$FI_PKGS must survive: {expanded}");
+        assert_eq!(
+            classify_incompat_line(&expanded),
+            None,
+            "app_process nice-name dir is not a ROM write"
+        );
+
+        // a real use of the short var still expands
+        assert_eq!(
+            expand_rom_vars("rm -f $F", &vars),
+            "rm -f /my_product/etc/extension/$CC/appfeature.country.dynamic_features.xml"
+        );
+        assert_eq!(
+            expand_rom_vars("rm -f ${F}", &vars),
+            "rm -f /my_product/etc/extension/$CC/appfeature.country.dynamic_features.xml"
+        );
     }
 }
