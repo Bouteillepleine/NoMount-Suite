@@ -34,6 +34,9 @@
   `post-fs-data.sh` no longer decides whether the first boot serves anything.
 - The LKM symbol gate reads the module instead of the modpost log, which stops
   after ten warnings - it had been checking ten symbols of a hundred and more.
+- The LKM resolves `kallsyms_lookup_name` by kprobe on every kernel. Below 5.7 it
+  took the address directly, which android-4.19-stable does not export at all - so
+  that build could never have linked there. Found by the gate above.
 - A hiding LKM build no longer writes its own name to the kernel log on the way
   up. It did that for every arm, a moment before unlinking itself from
   `/proc/modules`. Warnings still print; `hide=0` prints everything.

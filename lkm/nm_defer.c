@@ -63,8 +63,18 @@ struct nm_defer_slot {
 
 static struct nm_defer_slot nm_defer_slots[NM_DEFER_SLOTS];
 static LLIST_HEAD(nm_defer_pending);
-static atomic_t nm_defer_cursor = ATOMIC_INIT(0);
-static atomic_long_t nm_defer_overflow = ATOMIC_LONG_INIT(0);
+
+/* A hint, not a count: it only picks where the scan starts, so two CPUs that
+ * read the same value just begin at the same slot and one of them loses a
+ * cmpxchg. Plain reads and writes rather than an atomic keep the out-of-line
+ * atomic helpers out of the module - which matters on the trees that reach them
+ * through __LL_SC_EXPORT, where the symbol gate cannot see the export. */
+static unsigned int nm_defer_cursor;
+
+/* Diagnostic only, and atomic_t is wide enough: a pool this size does not
+ * overflow four billion times, and if it did the number has already made its
+ * point. */
+static atomic_t nm_defer_overflow = ATOMIC_INIT(0);
 
 static void nm_defer_drain(struct work_struct *w)
 {
@@ -88,15 +98,17 @@ static DECLARE_DELAYED_WORK(nm_defer_work, nm_defer_drain);
 
 bool nm_path_put_deferred(struct path *path)
 {
-	int start, i;
+	unsigned int start;
+	int i;
 
 	if (!path || !path->dentry)
 		return false;
 
-	start = atomic_inc_return(&nm_defer_cursor);
+	start = READ_ONCE(nm_defer_cursor);
+	WRITE_ONCE(nm_defer_cursor, start + 1);
 	for (i = 0; i < NM_DEFER_SLOTS; i++) {
 		struct nm_defer_slot *s =
-			&nm_defer_slots[(unsigned int)(start + i) % NM_DEFER_SLOTS];
+			&nm_defer_slots[(start + (unsigned int)i) % NM_DEFER_SLOTS];
 
 		if (atomic_cmpxchg(&s->busy, 0, 1) != 0)
 			continue;
@@ -109,13 +121,13 @@ bool nm_path_put_deferred(struct path *path)
 		return true;
 	}
 
-	atomic_long_inc(&nm_defer_overflow);
+	atomic_inc(&nm_defer_overflow);
 	return false;
 }
 
 unsigned long nm_defer_overflows(void)
 {
-	return (unsigned long)atomic_long_read(&nm_defer_overflow);
+	return (unsigned long)(unsigned int)atomic_read(&nm_defer_overflow);
 }
 
 void nm_defer_exit(void)
