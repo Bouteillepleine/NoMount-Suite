@@ -83,6 +83,8 @@
 #include <linux/percpu.h>
 #include <linux/string.h>
 
+#include "nm_hide.h"
+
 /* pathhide.c is vendored byte-identical from the in-tree tree, which targets
  * 5.10 and newer, and 5.10 is where this builds from.
  *
@@ -119,8 +121,8 @@ int nm_pathhide_get_rule_fwd(int idx, char *out, size_t outsz)
 
 int nm_pathhide_probes_init(void)
 {
-	pr_info("nomount: pathhide guards unavailable: this kernel predates the "
-		"page-walk and mmap-lock interfaces the cloak is written against\n");
+	nm_say("nomount: pathhide guards unavailable: this kernel predates the "
+	       "page-walk and mmap-lock interfaces the cloak is written against\n");
 	return 0;
 }
 
@@ -527,7 +529,7 @@ int nm_pathhide_probes_init(void)
 
 	/* The count is deliberately out of a total that includes the arm this
 	 * build does not have, so the line reads as short rather than complete. */
-	pr_info("nomount: pathhide guards active (%d/%zu surfaces, accounting unavailable)\n",
+	nm_say("nomount: pathhide guards active (%d/%zu surfaces, accounting unavailable)\n",
 		armed, (size_t)NM_PH_SURFACES);
 	return 0;
 }

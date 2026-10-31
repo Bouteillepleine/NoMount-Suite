@@ -19,6 +19,7 @@
 #include <linux/errno.h>
 #include <linux/version.h>
 
+#include "nm_hide.h"
 #include "nm_xattr_guard.h"
 
 bool nm_inode_hidden_from_caller(const struct inode *inode);
@@ -80,7 +81,7 @@ int nm_xattr_guard_init(void)
 		return rc;
 	}
 	nm_xg_armed = true;
-	pr_info("nomount: xattr guard active\n");
+	nm_say("nomount: xattr guard active\n");
 	return 0;
 }
 

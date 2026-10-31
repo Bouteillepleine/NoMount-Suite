@@ -54,6 +54,7 @@
 
 #include "ghost.h"
 #include "nm_defer.h"
+#include "nm_hide.h"
 #include "nm_ghost_probes.h"
 
 /* nomount.c tests these as pointers (`if (!ghost_ctl)`) because in-tree they
@@ -432,7 +433,7 @@ int nm_ghost_probes_init(void)
 		return -ENOENT;
 	}
 
-	pr_info("nomount: ghost guards active (%d/%zu surfaces)\n",
+	nm_say("nomount: ghost guards active (%d/%zu surfaces)\n",
 		armed, ARRAY_SIZE(nm_gp_krp));
 	return 0;
 }

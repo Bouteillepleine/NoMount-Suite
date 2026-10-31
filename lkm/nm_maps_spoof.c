@@ -7,6 +7,7 @@
 #include <linux/spinlock.h>
 #include <linux/jiffies.h>
 
+#include "nm_hide.h"
 #include "nm_maps_spoof.h"
 
 void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
@@ -202,7 +203,7 @@ int nm_maps_spoof_init(void)
 	}
 
 	nm_maps_armed = true;
-	pr_info("nomount: maps spoof active\n");
+	nm_say("nomount: maps spoof active\n");
 	return 0;
 }
 
