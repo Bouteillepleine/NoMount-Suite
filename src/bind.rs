@@ -52,14 +52,40 @@ fn mount_state(target: &Path) -> Option<bool> {
         .map(|s| crate::absorb::parse_mountinfo(&s).iter().any(|r| r.target == target))
 }
 
+/// Ask for the length, then read. The fixed 256-byte buffer this replaces did not
+/// truncate a longer label -- `lgetxattr` answers ERANGE instead, which read back
+/// as "this file has no label", after which `restore_source_label` wrote the
+/// hardcoded `adb_data_file` default over the real one on unbind. Two tries,
+/// because the label can grow between the sizing call and the read.
+fn lgetxattr_vec(c: &CString) -> std::io::Result<Vec<u8>> {
+    let name = SELINUX_XATTR.as_ptr() as *const libc::c_char;
+    for _ in 0..2 {
+        let want = unsafe { libc::lgetxattr(c.as_ptr(), name, std::ptr::null_mut(), 0) };
+        if want < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut buf = vec![0u8; want as usize];
+        let got = unsafe {
+            libc::lgetxattr(c.as_ptr(), name, buf.as_mut_ptr().cast(), buf.len())
+        };
+        if got >= 0 {
+            buf.truncate(got as usize);
+            return Ok(buf);
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::ERANGE) {
+            return Err(e);
+        }
+    }
+    Err(std::io::Error::from_raw_os_error(libc::ERANGE))
+}
+
 fn read_selinux(p: &Path) -> Option<Vec<u8>> {
     let c = cstr(p).ok()?;
-    let mut buf = [0u8; 256];
-    let n = unsafe {
-        libc::lgetxattr(c.as_ptr(), SELINUX_XATTR.as_ptr() as *const libc::c_char,
-                        buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-    };
-    if n <= 0 { None } else { Some(buf[..n as usize].to_vec()) }
+    let label = lgetxattr_vec(&c).ok()?;
+    // An absent and an empty label both read as "nothing to restore", which is
+    // what the fixed-buffer version did for n <= 0.
+    if label.is_empty() { None } else { Some(label) }
 }
 
 fn restore_selinux(p: &Path, label: &[u8]) {
@@ -85,15 +111,16 @@ fn label_to_restore(lbl: &str) -> &str {
 fn mirror_selinux(source: &Path, target: &Path) -> Result<()> {
     let (sc, tc) = (cstr(source)?, cstr(target)?);
     let name = SELINUX_XATTR.as_ptr() as *const libc::c_char;
-    let mut buf = [0u8; 256];
-    let n = unsafe {
-        libc::lgetxattr(tc.as_ptr(), name, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-    };
-    if n <= 0 {
-        bail!("read selinux label of {}", target.display());
+    // The errno is in the message because ENODATA (the ROM path carries no label)
+    // and EACCES (we cannot read it) want different answers from the reader, and
+    // the bare "read selinux label of X" said neither.
+    let label = lgetxattr_vec(&tc)
+        .map_err(|e| anyhow::anyhow!("read selinux label of {}: {e}", target.display()))?;
+    if label.is_empty() {
+        bail!("read selinux label of {}: it has none", target.display());
     }
     let r = unsafe {
-        libc::lsetxattr(sc.as_ptr(), name, buf.as_ptr() as *const libc::c_void, n as usize, 0)
+        libc::lsetxattr(sc.as_ptr(), name, label.as_ptr().cast(), label.len(), 0)
     };
     if r != 0 {
         bail!("set selinux label on {}: {}", source.display(), std::io::Error::last_os_error());
