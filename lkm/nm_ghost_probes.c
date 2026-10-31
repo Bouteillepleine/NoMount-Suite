@@ -53,6 +53,7 @@
 #include <linux/dcache.h>
 
 #include "ghost.h"
+#include "nm_defer.h"
 #include "nm_ghost_probes.h"
 
 /* nomount.c tests these as pointers (`if (!ghost_ctl)`) because in-tree they
@@ -181,12 +182,14 @@ static int nm_gp_sock_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
  * see - a stat guard never runs for access(), and that is what still finds a
  * concealed app's storage directory after the name-variant trick.
  *
- * Only a successful resolution is rewritten, so the reference being dropped is
- * one user_path_at() just took on a dentry it found hashed in the dcache.
- * Dropping it leaves the dentry in the LRU rather than killing it, so this does
- * not reach the iput() path that can sleep; a failed lookup returns non-zero
- * and is left alone, which is where the negative dentries would be. Leaking the
- * reference instead is not an option: it pins the mount forever.
+ * Only a successful resolution is rewritten; a failed lookup returns non-zero and
+ * is left alone, which is where the negative dentries would be.
+ *
+ * The reference user_path_at() took cannot be dropped from a kretprobe handler -
+ * nm_defer.c sets out why, and the dentries this fires for are exactly the ones
+ * dput() kills rather than retains - so it is handed to nm_path_put_deferred()
+ * and released in process context. Leaking it instead is not an option: it pins
+ * the mount forever.
  */
 static int nm_gp_upa_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
@@ -205,7 +208,10 @@ static int nm_gp_upa_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 		return 0;
 
 	if (ghost_hidden_path(path) || nm_gp_owner_concealed(path)) {
-		path_put(path);
+		/* A full pool means the path stays the caller's: answer the lookup
+		 * normally rather than put a reference from here. */
+		if (!nm_path_put_deferred(path))
+			return 0;
 		regs->regs[0] = (unsigned long)(long)-ENOENT;
 	}
 	return 0;

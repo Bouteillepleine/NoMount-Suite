@@ -141,6 +141,7 @@ void nm_pathhide_probes_exit(void)
 #include <asm/ptrace.h>
 
 #include "nm_oot.h"
+#include "nm_defer.h"
 #include "pathhide.h"
 #include "nm_pathhide_probes.h"
 
@@ -350,9 +351,11 @@ static bool nm_ph_show_armed[ARRAY_SIZE(nm_ph_kp_show)];
  * map_files_get_link(dentry, path) is where the symlink's target is resolved:
  * it fills the caller's struct path from the vma's file and returns 0. The
  * same kretprobe shape nm_gp_upa_ret() uses applies - stash the path at entry,
- * and on a successful return drop the reference and answer -ENOENT instead.
- * The reference being dropped is one the function itself just took on a dentry
- * the vma pins, so this does not reach the iput() path that can sleep.
+ * and on a successful return release the reference and answer -ENOENT instead.
+ * It cannot be released from here: map_files_get_link() drops mmap_read_lock
+ * before returning, so the reference it took is the only one left if the vma has
+ * gone, and dput() on the last one can sleep. It goes to nm_path_put_deferred()
+ * like the user_path_at() guard's does.
  *
  * It needs a path-based test rather than pathhide_match_file(), which takes a
  * struct file. Rather than reach into pathhide.c - vendored byte-identical and
@@ -417,8 +420,9 @@ static int nm_ph_link_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 		return 0;
 	if (!nm_ph_path_hidden(ctx->path))
 		return 0;
+	if (!nm_path_put_deferred(ctx->path))
+		return 0;
 
-	path_put(ctx->path);
 	regs->regs[0] = (unsigned long)(long)-ENOENT;
 	return 0;
 }

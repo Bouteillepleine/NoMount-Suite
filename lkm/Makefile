@@ -5,7 +5,7 @@
 # The engine lives in ../hookless/src and is included by nomount_lkm.c rather
 # than copied, so -I has to reach it for nomount.h.
 obj-m += nomount.o
-nomount-y := nomount_lkm.o nm_oot.o nm_maps_spoof.o nm_xattr_guard.o nm_mount_filter.o nm_ghost_probes.o ghost.o nm_pathhide_probes.o nm_hide.o
+nomount-y := nomount_lkm.o nm_oot.o nm_defer.o nm_maps_spoof.o nm_xattr_guard.o nm_mount_filter.o nm_ghost_probes.o ghost.o nm_pathhide_probes.o nm_hide.o
 
 # pathhide.c is vendored byte-identical from the in-tree tree, which targets
 # 5.10 and newer, which is also where pagemap_pte_hole() has the argument list
