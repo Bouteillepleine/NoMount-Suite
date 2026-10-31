@@ -7,7 +7,21 @@
 
 static unsigned long (*nm_kln)(const char *name);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
+/* The kprobe route on every kernel, not only 5.7 and newer.
+ *
+ * There used to be a second arm below 5.7 that took the address of
+ * kallsyms_lookup_name directly, on the grounds that the export was still there
+ * - 5.7 is where upstream removed it. That is not true of every tree: on
+ * android-4.19-stable the function is defined in kernel/kallsyms.c and carries
+ * no EXPORT_SYMBOL at all, so the module referenced a symbol that tree does not
+ * export and could never have linked against a fully built 4.19. It went
+ * unnoticed because the symbol gate read the ten names modpost prints before it
+ * suppresses the rest, and this was never among them.
+ *
+ * Nothing is lost by dropping that arm. Every guard in this module is a kprobe,
+ * so CONFIG_KPROBES is already a hard requirement rather than a nicety, and the
+ * message below is the one a kernel without it already got.
+ */
 static int nm_bootstrap_kln(void)
 {
     struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
@@ -24,13 +38,6 @@ static int nm_bootstrap_kln(void)
     unregister_kprobe(&kp);
     return nm_kln ? 0 : -ENOENT;
 }
-#else
-static int nm_bootstrap_kln(void)
-{
-    nm_kln = (void *)kallsyms_lookup_name;
-    return 0;
-}
-#endif
 
 unsigned long nm_oot_lookup_opt(const char *name)
 {
