@@ -51,6 +51,15 @@ _driver_ok=1
 
 chmod 0755 "$BIN" "$NM_BIN" 2>/dev/null
 
+# Also here, not only in post-fs-data.sh. That file loads the engine before its
+# own KSU early-exit, which is the right place IF the manager runs module
+# post-fs-data.sh scripts before handing the metamodule slot to this script. If
+# it runs them after, the mount pass below goes ahead with no engine and the
+# boot serves nothing until service.sh's post-boot reload. Costs one probe:
+# nm_lkm_boot_load returns immediately when the engine already answers, and this
+# is inside the flock guard so only one instance can reach it.
+nm_lkm_boot_load
+
 nm_delink_ksud "susfs-action guard"
 
 if nm_guard_bump "ksu/apatch metamount path"; then
