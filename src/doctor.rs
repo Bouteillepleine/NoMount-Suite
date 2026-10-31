@@ -330,8 +330,9 @@ impl Incompat {
                  mount and the mount checks report it correctly.",
             Incompat::SelfMount =>
                 "mounts over a ROM path instead of shipping a tree, so the mount is real and \
-                 app-readable until absorb re-serves it (after zygote). If absorb is off or \
-                 times out, it stays visible.",
+                 app-readable. Absorb can take it over after zygote only when the mount has a \
+                 source it can read; a tmpfs serving content has nothing to re-serve, and that \
+                 one stays visible for as long as the module is installed.",
         }
     }
 }
