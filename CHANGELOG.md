@@ -6,7 +6,7 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
-## Unreleased
+## v1.3.207 — engine v34 (the engine fixes below need a kernel rebuild)
 
 - The LKM's path and stat guards no longer fail open under load: the kretprobes that
   carry them have room for 64 concurrent calls per core, not 8.
@@ -27,6 +27,16 @@
   and it keeps `binds.list` when it could not find a binary to unbind with.
 - An engine module that loads but whose `nm` probe does not answer says so, instead
   of reporting that no module loads on this kernel.
+- The lite zip says it carries no engine module, and names the LKM zip. It bundles
+  none by design, so "no bundled module loads on it either" read as a verdict on
+  the kernel and sent people to reflash one.
+- A netlink socket that was *denied* is told apart from one the kernel does not
+  have. `nm` already reported the difference and the installer discarded it, so an
+  SELinux denial was answered with "flash a kernel built with CONFIG_NOMOUNT".
+- Another metamodule is recognised when its `module.prop` says `metamodule=true`,
+  not only `1`. The manager accepts either spelling, so the guard had been blind to
+  the one upstream NoMount uses, and two installed at once is silent - whichever
+  was flashed last takes the role and the loser's `metamount.sh` is never called.
 - Installing no longer deletes the bundled engine modules. It decided they were
   surplus from `lsmod` showing nothing, which is also what a loaded-and-hidden
   module shows.
