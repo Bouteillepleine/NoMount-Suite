@@ -37,9 +37,12 @@
 - The LKM resolves `kallsyms_lookup_name` by kprobe on every kernel. Below 5.7 it
   took the address directly, which android-4.19-stable does not export at all - so
   that build could never have linked there. Found by the gate above.
-- A hiding LKM build no longer writes its own name to the kernel log on the way
-  up. It did that for every arm, a moment before unlinking itself from
-  `/proc/modules`. Warnings still print; `hide=0` prints everything.
+- Neither build writes the module's name to the kernel log any more. The LKM's
+  guards printed their "armed" lines a moment before unlinking the module from
+  `/proc/modules`, and the Suite's own boot logging went to `/dev/kmsg` on every
+  boot of both builds. `boot.log` carries the same lines; `touch
+  /data/adb/nomount/kmsg` puts them back in dmesg, and `hide=0` restores the
+  kernel-side ones.
 - The subtree scan that places an injected inode can be preempted, instead of
   walking up to 8192 directories without yielding. The built-in engine needs a
   kernel rebuild for this one.

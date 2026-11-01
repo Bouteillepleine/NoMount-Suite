@@ -35,6 +35,7 @@
 # Run as:  sh lkm-pathhide.sh /data/local/tmp/pathhide-probe
 
 PROBE=${1:-/data/local/tmp/pathhide-probe}
+BIN=${2:-/data/adb/modules/meta-nomount/bin/arm64-v8a/nomount}
 CTL=/data/local/tmp/ph-control.bin
 SUBJ=/data/adb/ph-subject.bin
 fail=0
@@ -42,13 +43,29 @@ fail=0
 [ "$(id -u)" = 0 ] || { echo "fatal: needs root"; exit 1; }
 [ -x "$PROBE" ] || { echo "fatal: no probe at $PROBE (see header)"; exit 1; }
 
-dmesg | grep -o 'pathhide guards active.*' | tail -1
-dmesg | grep -o 'pathhide guard: cannot probe.*' | tail -3
-
-if ! dmesg | grep -q 'pathhide guards active'; then
-	echo "SKIP: this engine has no pathhide guards - nothing to test"
+# Ask the Suite whether the cloak is programmed. NOT dmesg.
+#
+# This gate used to be `dmesg | grep -q 'pathhide guards active'`. That line only
+# ever existed on an LKM build, and it is deliberately silent on one that hides
+# itself - so the gate matched nothing, the script exited 0, and a run that had
+# tested nothing read as a pass. The rule table answers the same way on both
+# builds, and an engine without the knob answers nothing at all.
+rules=$("$BIN" pathhide list 2>/dev/null | grep -c '^/')
+if [ "${rules:-0}" = 0 ]; then
+	echo "SKIP: no pathhide rule is programmed - either an engine without the"
+	echo "      knob, or the boot-time sync has not run. Nothing to test."
 	exit 0
 fi
+
+# A hidden LKM takes its own symbols out of kallsyms, so finding the engine
+# there means the engine is part of the kernel image.
+if grep -qE ' (vfs_map_meta_override|nm_uid_blocked)$' /proc/kallsyms 2>/dev/null; then
+	VARIANT=in-tree
+else
+	VARIANT=lkm
+fi
+echo "variant: $VARIANT - pathhide rules programmed: $rules"
+dmesg | grep -o 'pathhide guard[s]* .*' | tail -3
 
 cleanup() { rm -f "$CTL" "$SUBJ"; }
 trap cleanup EXIT
@@ -105,10 +122,26 @@ else
 	fail=1
 fi
 
-echo "KNOWN accounting: VmSize/VmPeak/statm still count the hidden mapping."
-echo "      control statm=$(field "$ctl" statm) subject statm=$(field "$subj" statm)"
-echo "KNOWN smaps_rollup totals and PROCMAP_QUERY still include it, and"
-echo "      map_files still lists the address range even when the path is gone."
+echo "-- accounting (VmSize / statm) --"
+cv=$(field "$ctl" vmsize);  sv=$(field "$subj" vmsize)
+cs=$(field "$ctl" statm);   ss=$(field "$subj" statm)
+if [ "$VARIANT" = in-tree ]; then
+	# task_mem() and task_statm() subtract pathhide_hidden_vm_pages(mm), so a
+	# four-page mapping costs 16 kB of VmSize and 4 pages of statm.
+	if [ "${cv:-0}" -gt "${sv:-0}" ] && [ "${cs:-0}" -gt "${ss:-0}" ]; then
+		echo "ok   accounting: subject is $((cv - sv)) kB / $((cs - ss)) page(s) smaller"
+	else
+		echo "FAIL accounting: an in-tree build subtracts the hidden pages, but"
+		echo "     control vmsize=$cv statm=$cs / subject vmsize=$sv statm=$ss"
+		fail=1
+	fi
+else
+	echo "KNOWN accounting: this build has no accounting arm, so VmSize and statm"
+	echo "      still count the hidden mapping - control vmsize=$cv statm=$cs,"
+	echo "      subject vmsize=$sv statm=$ss"
+	echo "KNOWN smaps_rollup totals and PROCMAP_QUERY still include it, and"
+	echo "      map_files still lists the address range even when the path is gone."
+fi
 
 dmesg | tail -40 | grep -qiE 'BUG:|Call trace:|Unable to handle kernel' && {
 	echo "FAIL kernel complained while the guards ran"; fail=1; }
