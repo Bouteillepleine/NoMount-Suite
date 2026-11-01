@@ -6,7 +6,7 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
-## v1.3.207 — engine v34 (the engine fixes below need a kernel rebuild)
+## Unreleased
 
 - The LKM's path and stat guards no longer fail open under load: the kretprobes that
   carry them have room for 64 concurrent calls per core, not 8.
