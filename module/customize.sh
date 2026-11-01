@@ -42,7 +42,14 @@ for mp in /data/adb/modules/*/module.prop; do
     [ "$id" = "meta-nomount" ] && continue
     [ -f "$mdir/remove" ] && continue
     [ -f "$mdir/disable" ] && continue
-    if grep -q '^metamodule=1' "$mp"; then
+    # Mirror ksud's is_metamodule() (trim, then "1" or a case-insensitive
+    # "true") rather than prefix-matching "metamodule=1". maxsteeel/nomount
+    # writes metamodule=true, so the one metamodule likely to sit beside ours
+    # was the one this guard could not see - and two installed at once is
+    # silent: ksud points /data/adb/metamodule at whichever was flashed last
+    # and never calls the loser's metamount.sh. The old pattern also tripped
+    # on metamodule=10, which ksud does not count as one.
+    if grep -qiE '^metamodule[[:space:]]*=[[:space:]]*(1|true)[[:space:]]*$' "$mp"; then
         other="$(grep '^name=' "$mp" | head -n1 | cut -d= -f2-)"
         ui_print "*********************************************************"
         ui_print "! Another metamodule is already installed:"
