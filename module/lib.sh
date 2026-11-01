@@ -5,8 +5,21 @@ umask 077
 NMDIR=/data/adb/nomount
 BOOTLOG="$NMDIR/boot.log"
 
+# The boot log always; /dev/kmsg only if asked for.
+#
+# The kernel ring buffer is the one place the Suite was still writing its own
+# name on every boot. The engine goes to some trouble to avoid that - a built-in
+# engine is no discrete object at all, and the LKM unlinks itself from
+# /proc/modules, /sys/module and /proc/kallsyms - and then this put
+# "nomount: ..." into dmesg regardless, on both builds. dmesg_restrict keeps
+# apps out, so it is a thin surface rather than an open one, but it is one, and
+# $BOOTLOG already carries the same lines with timestamps and a tag.
+#
+# Opt back in with:  touch /data/adb/nomount/kmsg
 nmlog() {
-    echo "nomount: $*" > /dev/kmsg 2>/dev/null
+    if [ -e "$NMDIR/kmsg" ]; then
+        echo "nomount: $*" > /dev/kmsg 2>/dev/null
+    fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') [${NMLOG_TAG:-nomount}] $*" >> "$BOOTLOG" 2>/dev/null
 }
 

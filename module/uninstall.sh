@@ -10,8 +10,11 @@ case "$0" in
     *)   MODDIR=/data/adb/modules/meta-nomount ;;
 esac
 _bak=/data/adb/nomount.bak
+# Same gate as lib.sh's nmlog: the boot log always, /dev/kmsg only on request.
 _nmlog() {
-    echo "nomount: $*" > /dev/kmsg 2>/dev/null
+    if [ -e /data/adb/nomount/kmsg ]; then
+        echo "nomount: $*" > /dev/kmsg 2>/dev/null
+    fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') [uninstall] $*" >> /data/adb/nomount/boot.log 2>/dev/null
 }
 _ran=0
