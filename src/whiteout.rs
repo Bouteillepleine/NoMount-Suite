@@ -359,8 +359,12 @@ fn app_can_see_probe(path: &str) -> Option<bool> {
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     // absolute, like manager.rs and absorb.rs: this runs as root, so resolving `su`
     // through the inherited PATH is the wrong habit even where PATH is not writable
+    // `ls` absolute and PATH explicit for the same reason as health.rs: with an empty
+    // caller environment ksud's `su` leaves the child only /data/adb/ksu/bin on PATH, and
+    // a bare `ls` exits 127 - which this would have read as "the app cannot see it".
     let out = std::process::Command::new("/system/bin/su")
-        .args(["9999", "-c", &format!("ls -d {quoted}")])
+        .env("PATH", "/system/bin:/system/xbin:/vendor/bin")
+        .args(["9999", "-c", &format!("/system/bin/ls -d {quoted}")])
         .output()
         .ok()?;
     Some(out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())

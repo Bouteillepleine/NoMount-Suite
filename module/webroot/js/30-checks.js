@@ -143,13 +143,61 @@
       } while (CHECK_AGAIN);
     } finally { CHECK_RUNNING = null; CHECK_AGAIN = false; }
   }
-  async function checkPass() {
-    $("findlist").innerHTML = '<div class="empty">Checking...</div>';
+  // This pane's exec is a root shell spawned by an app, so it inherits that app's seccomp
+  // filter - and the filter denies setgroups, which the four checks that take on an app's
+  // uid cannot do without. Run in here, they measure nothing and leave one SIGSYS
+  // tombstone each, and a tap replaced a clean report with "not fully measured (4
+  // checks)". service.sh leaves a watcher running under init with no filter: ask that,
+  // and only fall back to running the check in here when it is not alive.
+  const CHECK_REQ = "/data/adb/nomount/request/check";
+  const CHECK_CACHE = "/data/adb/nomount/audit.json";
+  const CHECK_WAIT_MS = 500, CHECK_WAIT_TRIES = 40;
+
+  // Absolute toybox paths, not bare names: this pane's exec environment is the one whose
+  // missing PATH made `su 2000 -c stat` exit 127 and report the canary as unmeasurable.
+  // A bare `cat` here would fail the same way and silently disable the watcher path.
+  async function watcherAlive() {
+    const r = await exec('p=$(/system/bin/cat /data/adb/nomount/.checkwatch.pid 2>/dev/null); ' +
+                         'case "$p" in ""|*[!0-9]*) exit 0 ;; esac; [ -d /proc/$p ] && echo 1');
+    return (r.stdout || "").trim() === "1";
+  }
+  async function readCheckCache() {
+    return parseJson(await exec("/system/bin/cat " + CHECK_CACHE + " 2>/dev/null"));
+  }
+  async function checkViaWatcher() {
+    if (!(await watcherAlive())) return null;
+    // Baseline off the FILE, not off CHECK: on a first open CHECK is null, and any
+    // pre-existing report would then satisfy "newer" before the watcher had run at all.
+    const prev = await readCheckCache();
+    const before = (prev && typeof prev.ts === "number") ? prev.ts : 0;
+    if ((await exec("/system/bin/touch " + CHECK_REQ)).errno !== 0) return null;
+    for (let i = 0; i < CHECK_WAIT_TRIES; i++) {
+      await new Promise((r) => setTimeout(r, CHECK_WAIT_MS));
+      const rep = await readCheckCache();
+      if (rep && typeof rep.ts === "number" && rep.ts > before && ranSection(rep, "device")) {
+        return rep;
+      }
+    }
+    return null;
+  }
+  // The report to display, preferring one that could actually measure.
+  async function runCheck() {
+    const viaWatcher = await checkViaWatcher();
+    if (viaWatcher) return viaWatcher;
     const r0 = await nm("check --json --write");
     const rep = parseJson(r0);
-    if (rep) CHECK = rep;
-    else toast("Check did not run: " +
-               (((r0.stderr || "").trim().split("\n")[0]) || "no output"), "bad");
+    if (!rep) return { error: ((r0.stderr || "").trim().split("\n")[0]) || "no output" };
+    // This run could not measure and so left a better report on disk: show that one. Its
+    // own ts drives the age line, which then says when it was measured rather than now.
+    if (rep.cache_kept_ts) return (await readCheckCache()) || rep;
+    return rep;
+  }
+
+  async function checkPass() {
+    $("findlist").innerHTML = '<div class="empty">Checking...</div>';
+    const rep = await runCheck();
+    if (rep && !rep.error) CHECK = rep;
+    else toast("Check did not run: " + ((rep && rep.error) || "no output"), "bad");
     renderCheck(CHECK);
     refreshStealth(); refreshStatus(); paintModuleMetric();
   }
@@ -165,14 +213,16 @@
   }
   async function autoPass() {
     try {
-      const r = parseJson(await nm("check --json --write"));
-      if (r) { CHECK = r; renderCheck(CHECK); refreshStealth(); refreshStatus(); paintModuleMetric(); }
+      const r = await runCheck();
+      if (r && !r.error) {
+        CHECK = r; renderCheck(CHECK); refreshStealth(); refreshStatus(); paintModuleMetric();
+      }
     } catch (e) {
     }
   }
 
   async function loadCheckCache() {
-    CHECK = parseJson(await exec("cat /data/adb/nomount/audit.json 2>/dev/null"));
+    CHECK = await readCheckCache();
     renderCheck(CHECK);
   }
 
@@ -449,7 +499,7 @@
   }
 
   async function refreshIncident() {
-    const r = await exec("cat /data/adb/nomount/incident.log 2>/dev/null");
+    const r = await exec("/system/bin/cat /data/adb/nomount/incident.log 2>/dev/null");
     const txt = (r.stdout || "").trim();
     const card = $("incidentcard");
     if (!txt) {
@@ -482,7 +532,7 @@
       "Delete"))) return;
     { const el = $("incwarn"); if (el) el.hidden = true; }
     btn.disabled = true;
-    await exec("rm -f /data/adb/nomount/incident.log");
+    await exec("/system/bin/rm -f /data/adb/nomount/incident.log");
     toast("Incident record cleared", "ok");
     btn.disabled = false; refreshIncident();
   }

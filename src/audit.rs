@@ -30,10 +30,40 @@ fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Reboot, evidence).oracle(oracle)
 }
 
+/// `Seccomp:` from `/proc/self/status`: 0 = no filter, 1 = strict, 2 = filter.
+pub(crate) fn own_seccomp_mode() -> Option<u32> {
+    seccomp_mode_from_status(&fs::read_to_string("/proc/self/status").ok()?)
+}
+
+fn seccomp_mode_from_status(status: &str) -> Option<u32> {
+    status.lines().find_map(|l| l.strip_prefix("Seccomp:")).and_then(|v| v.trim().parse().ok())
+}
+
+/// One sentence naming why no uid-dropping probe can run in this process, or `None`
+/// when one can. A seccomp filter survives both `fork()` and `exec()`, and Android's
+/// app filter allows neither `setgroups` nor `setresuid`, so a root shell spawned by an
+/// app - the manager's WebUI - cannot take on another uid by any route, its own `su`
+/// included (ksud drops uid in userspace).
+pub(crate) fn probe_blocked_reason() -> Option<String> {
+    match own_seccomp_mode() {
+        Some(mode) if mode != 0 => Some(format!(
+            "This run carries an app's seccomp filter (Seccomp mode {mode}) and so cannot drop \
+             uid at all: the manager's WebUI runs commands from a root shell spawned by an app, \
+             which inherits that app's filter. Run `nomount check` from a terminal instead."
+        )),
+        _ => None,
+    }
+}
+
 pub(crate) fn probe_as_uid<const N: usize>(
     uid: u32,
     probe: impl FnOnce() -> [u32; N],
 ) -> Result<[u32; N], ProbeFail> {
+    // Ask before forking. Under an inherited app filter the child is killed by SIGSYS on
+    // its first `setgroups`, which measures nothing and leaves one tombstone per probe.
+    if let Some(mode) = own_seccomp_mode().filter(|m| *m != 0) {
+        return Err(ProbeFail::Filtered(mode));
+    }
     let width = std::mem::size_of::<[u32; N]>();
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
@@ -81,6 +111,9 @@ pub(crate) fn probe_as_uid<const N: usize>(
     if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == EXIT_NOT_DROPPED {
         return Err(ProbeFail::NotDropped);
     }
+    if libc::WIFSIGNALED(status) {
+        return Err(ProbeFail::Killed(libc::WTERMSIG(status)));
+    }
     if got != width as isize {
         return Err(ProbeFail::Silent);
     }
@@ -98,23 +131,51 @@ pub(crate) enum ProbeFail {
     Start,
     Silent,
     NotDropped,
+    /// This process carries a seccomp filter, so it cannot drop uid. Carries the mode.
+    Filtered(u32),
+    /// The child died on a signal - SIGSYS means seccomp refused a syscall it needed.
+    Killed(libc::c_int),
 }
 
 impl ProbeFail {
     fn into_check(self, name: &'static str) -> Check {
-        let (evidence, meaning) = match self {
-            Self::Setup => ("pipe() failed", "The probe could not be set up, so this was not tested."),
-            Self::Start => ("fork() failed", "The probe could not be started, so this was not tested."),
+        let (evidence, meaning): (String, &'static str) = match self {
+            Self::Setup => (
+                "pipe() failed".into(),
+                "The probe could not be set up, so this was not tested.",
+            ),
+            Self::Start => (
+                "fork() failed".into(),
+                "The probe could not be started, so this was not tested.",
+            ),
             Self::Silent => (
-                "probe child said nothing",
+                "probe child said nothing".into(),
                 "The probe exited without answering, so this was not tested.",
             ),
             Self::NotDropped => (
-                "could not drop to the hidden app's uid",
+                "could not drop to the hidden app's uid".into(),
                 "The probe could not take on the hidden app's identity, so this was not tested.",
             ),
+            Self::Filtered(mode) => (
+                format!("not run: seccomp mode {mode} here, so this process cannot drop uid"),
+                "This report was written by a root shell that carries an app's seccomp filter - \
+                 the manager's WebUI runs commands that way. The filter survives fork and exec \
+                 and allows neither setgroups nor setresuid, so no uid-dropping probe can run \
+                 here and none was attempted. Run `nomount check` from a terminal, or read the \
+                 report the boot pass writes: both run unfiltered and do measure this.",
+            ),
+            Self::Killed(sig) if sig == libc::SIGSYS => (
+                "probe child killed by SIGSYS - seccomp refused a syscall it needed".into(),
+                "The probe child was killed for calling a syscall its seccomp filter does not \
+                 allow, so this was not tested. Taking on another uid needs setgroups and \
+                 setresuid, which Android's app filter denies.",
+            ),
+            Self::Killed(sig) => (
+                format!("probe child killed by signal {sig}"),
+                "The probe child died before answering, so this was not tested.",
+            ),
         };
-        unmeasured(name, evidence.into()).meaning(meaning)
+        unmeasured(name, evidence).meaning(meaning)
     }
 }
 
@@ -1666,6 +1727,43 @@ mod tests {
     }
 
     #[test]
+    fn the_seccomp_field_is_read_and_not_confused_with_the_filter_count() {
+        // Seccomp_filters sorts next to Seccomp and is a different number: reading the
+        // wrong one would call an unfiltered process filtered, or the reverse.
+        let st = "Name:\tnomount\nSeccomp:\t2\nSeccomp_filters:\t1\nSpeculation_Store_Bypass:\tthread vulnerable\n";
+        assert_eq!(seccomp_mode_from_status(st), Some(2));
+        assert_eq!(
+            seccomp_mode_from_status("Seccomp_filters:\t1\nSeccomp:\t0\n"),
+            Some(0)
+        );
+        // No field at all is "do not know", which must not read as "filtered".
+        assert_eq!(seccomp_mode_from_status("Name:\tnomount\n"), None);
+        assert_eq!(seccomp_mode_from_status("Seccomp:\t\n"), None);
+    }
+
+    #[test]
+    fn a_filtered_run_says_why_it_measured_nothing_rather_than_going_silent() {
+        // The WebUI execs us from an app-spawned root shell, which carries that app's
+        // seccomp filter; the filter survives fork and exec and denies setgroups, so no
+        // uid-dropping probe can run. Reported as "probe child said nothing", that cost
+        // a long hunt - the text has to name the cause and the way round it.
+        let c = ProbeFail::Filtered(2).into_check(N_PM_OPEN);
+        assert_eq!(c.verdict, Verdict::Unmeasured);
+        assert!(c.evidence.contains("seccomp mode 2"), "{}", c.evidence);
+        assert!(!c.evidence.contains("said nothing"), "{}", c.evidence);
+        assert!(c.meaning.contains("WebUI"), "{}", c.meaning);
+        assert!(c.meaning.contains("from a terminal"), "{}", c.meaning);
+
+        // And a child that was killed anyway names the signal rather than silence.
+        let k = ProbeFail::Killed(libc::SIGSYS).into_check(N_PM_OPEN);
+        assert_eq!(k.verdict, Verdict::Unmeasured);
+        assert!(k.evidence.contains("SIGSYS"), "{}", k.evidence);
+        let other = ProbeFail::Killed(libc::SIGKILL).into_check(N_PM_OPEN);
+        assert!(other.evidence.contains("signal 9"), "{}", other.evidence);
+        assert!(!other.evidence.contains("SIGSYS"), "{}", other.evidence);
+    }
+
+    #[test]
     fn redaction_covers_the_pm_open_probe() {
         assert_eq!(hidden_uid_label(10422, false), "uid 10422 (hidden)");
         assert_eq!(hidden_uid_label(10422, true), "a hidden app");
@@ -1918,6 +2016,7 @@ mod tests {
         assert_eq!(by_design.verdict.tag(), "NOTE");
         assert_eq!(by_design.verdict.severity(), "info");
         let r = crate::check::Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![crate::check::Section::Device],
             engine: Some(31),

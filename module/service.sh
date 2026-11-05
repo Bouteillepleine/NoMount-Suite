@@ -221,6 +221,18 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
         inotifyd "$MODDIR/uidwatch.sh" /data/adb/ksu:cewDMmynd >/dev/null 2>&1 &
         nmlog "KernelSU DenyList watcher started"
     fi
+    # Lets the WebUI have a check run OUTSIDE its own context. Its exec inherits the
+    # manager app's seccomp filter, which denies setgroups, so four device checks cannot
+    # run there at all; this watcher is reparented to init and carries no filter. Its own
+    # directory, not $NMDIR, so the Suite's own writes do not spawn a handler per event.
+    if [ -f "$MODDIR/checkwatch.sh" ]; then
+        mkdir -p "$NMDIR/request" 2>/dev/null
+        chmod 700 "$NMDIR/request" 2>/dev/null
+        rm -f "$NMDIR/request"/* 2>/dev/null
+        inotifyd "$MODDIR/checkwatch.sh" "$NMDIR/request":cn >/dev/null 2>&1 &
+        echo $! > "$NMDIR/.checkwatch.pid" 2>/dev/null
+        nmlog "check-on-request watcher started (pid $(cat "$NMDIR/.checkwatch.pid" 2>/dev/null))"
+    fi
 fi
 
 if [ ! -x "$BIN" ]; then
@@ -239,6 +251,10 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
             break
         fi
         case "$_cons" in
+            # probe-unavailable is the one unchecked value a retry can clear: it means the
+            # probe machinery itself did not answer, not that there was nothing to sample.
+            # Treating it as settled is why every boot logged "settle tries=0".
+            unchecked:probe-unavailable) ;;
             ok|unchecked*|"") break ;;
         esac
         _try=$((_try + 1))

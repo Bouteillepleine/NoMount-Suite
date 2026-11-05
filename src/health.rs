@@ -93,6 +93,17 @@ impl Fingerprint {
                 "The unprivileged probe could not run at all (`su 2000 -c stat` returned nothing \
                  for a stock ROM file), so nothing was compared and this was not tested.",
             ),
+            "unchecked:seccomp-filtered" => mk(
+                "per-UID consistency canary",
+                Verdict::Unmeasured,
+                self.consistency.clone(),
+            )
+            .meaning(
+                "This run carries an app's seccomp filter - the manager's WebUI runs commands \
+                 that way - and the filter allows neither setgroups nor setresuid, so nothing \
+                 here can take on an app's uid and no comparison was attempted. Run \
+                 `nomount check` from a terminal, or read the report the boot pass writes.",
+            ),
             "unchecked:engine-list-failed" => mk(
                 "per-UID consistency canary",
                 Verdict::Unmeasured,
@@ -231,8 +242,17 @@ fn app_sizes(uid: u32, paths: &[&str]) -> std::collections::HashMap<String, Stri
         return out;
     }
     let args = paths.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ");
+    // Absolute `stat`, and a PATH of our own: ksud's `su` gives the child
+    // `PATH=/data/adb/ksu/bin` alone when the caller's environment is empty, which is
+    // how the manager's WebUI execs us - a bare `stat` then exits 127 with no output and
+    // the canary reads as "probe unavailable" when nothing is actually wrong.
     let Ok(o) = Command::new("/system/bin/su")
-        .args([&uid.to_string(), "-c", &format!("stat -c '%n %s' {args} 2>/dev/null")])
+        .env("PATH", "/system/bin:/system/xbin:/vendor/bin")
+        .args([
+            &uid.to_string(),
+            "-c",
+            &format!("/system/bin/stat -c '%n %s' {args} 2>/dev/null"),
+        ])
         .output()
     else {
         return out;
@@ -286,6 +306,11 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
         Some(true) => return "unchecked:probe-uid-hidden".to_string(),
         None => return "unchecked:probe-uid-unknown".to_string(),
         Some(false) => {}
+    }
+    // `su <uid>` drops uid in userspace, so an inherited app seccomp filter kills it the
+    // same way it kills an in-process probe. Say so instead of spawning a doomed child.
+    if crate::audit::own_seccomp_mode().is_some_and(|m| m != 0) {
+        return "unchecked:seccomp-filtered".to_string();
     }
     const BUDGET: usize = 18;
     let mut buckets: std::collections::BTreeMap<(String, String), Vec<&Path>> =

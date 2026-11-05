@@ -1611,10 +1611,18 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     f.push(Finding {
                         level: Level::Unmeasured,
                         check: "ghost cloak not verified",
-                        detail: format!(
-                            "none of the {attempted} sampled path(s) could be probed (the test process \
-             could not run), so the cloak was not tested on this kernel. This is not a pass"
-                        ),
+                        detail: {
+                            // Appended as its own sentence, not folded into the parenthesis:
+                            // nesting it there made the one line that has to be read unreadable.
+                            let why = crate::audit::probe_blocked_reason()
+                                .map(|r| format!(" {r}"))
+                                .unwrap_or_default();
+                            format!(
+                                "none of the {attempted} sampled path(s) could be probed (the test \
+             process could not run), so the cloak was not tested on this kernel. This is not a \
+             pass.{why}"
+                            )
+                        },
                     });
                 } else if visible.is_empty() && leaked.is_empty() {
                     f.push(Finding {
