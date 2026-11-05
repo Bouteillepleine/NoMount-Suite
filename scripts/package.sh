@@ -217,6 +217,7 @@ if [ "$CLEAN" = true ]; then
 fi
 
 SCRIPTS=(
+    checkwatch.sh
     customize.sh
     lib.sh
     lkm-load.sh
