@@ -6,6 +6,14 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.208 — engine v34 (unchanged)
+
+- `nomount check` from the WebUI could not run the four checks that need an app's uid
+  — it crashed once per check instead. It now says why, and runs them through a
+  watcher that can.
+- A check that measured nothing no longer overwrites one that measured everything.
+- The `su` probes use absolute paths, so they work when the caller has no `PATH`.
+
 ## v1.3.207 — engine v34 (the engine fixes below need a kernel rebuild)
 
 - The LKM's path and stat guards no longer fail open under load: the kretprobes that
