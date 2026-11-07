@@ -183,6 +183,18 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
 
 const BOOT_CRITICAL_PARTITIONS: &[&str] = &["system", "system_ext", "vendor", "odm", "product"];
 const BOOT_CRITICAL_DIRS: &[&str] = &["bin", "lib", "lib64", "framework", "etc", "apex"];
+/// The subset of those where nothing INSIDE may be made absent either, at any depth.
+///
+/// A shared library or an apex payload is replaced by injecting over it, never by hiding
+/// it, and hiding one does not break a feature -- it stops the device booting.
+///
+/// `bin`, `etc` and `framework` stay out deliberately. The first two are what this
+/// mechanism is for (`/system/bin/install-recovery.sh`, `/vendor/etc/foo.conf`), and
+/// `/system/framework` holds OEM jars that debloating legitimately removes -- pinned by
+/// whiteout_refuses_what_init_the_linker_and_zygote_need. Note that leaves the core jars
+/// in that directory acceptable to whiteout; refusing those needs a name list, not a
+/// subtree rule.
+const BOOT_CRITICAL_SUBTREES: &[&str] = &["lib", "lib64", "apex"];
 const ZYGOTE_BINARIES: &[&str] = &["app_process", "app_process32", "app_process64"];
 
 fn is_boot_critical(target: &Path) -> bool {
@@ -193,7 +205,18 @@ fn is_boot_critical(target: &Path) -> bool {
         .collect();
     match parts.as_slice() {
         [part, dir] => BOOT_CRITICAL_PARTITIONS.contains(part) && BOOT_CRITICAL_DIRS.contains(dir),
+        // The arm above matches EXACTLY two components, so everything one level deeper
+        // fell straight through to false: `/system/lib64/libc.so` was accepted, written to
+        // whiteouts.txt and re-applied on every boot, which costs three failed boots
+        // before the guard parks the Suite and leaves recovery as the only way back.
+        [part, dir, ..]
+            if BOOT_CRITICAL_PARTITIONS.contains(part) && BOOT_CRITICAL_SUBTREES.contains(dir) =>
+        {
+            true
+        }
         ["system", "bin", name] => name.starts_with("linker") || ZYGOTE_BINARIES.contains(name),
+        // The linker reads these before anything links; an absent one is a dead boot.
+        ["system", "etc", name] => name.starts_with("ld.config"),
         _ => false,
     }
 }

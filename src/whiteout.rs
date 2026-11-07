@@ -547,6 +547,38 @@ mod tests {
     }
 
     #[test]
+    fn a_file_inside_a_boot_critical_directory_is_refused_not_just_the_directory() {
+        // The directory arm matched exactly two components, so each of these was accepted,
+        // written to whiteouts.txt and re-applied every boot: three failed boots, then the
+        // guard parks the Suite and recovery is the only way back.
+        for p in [
+            "/system/lib64/libc.so",
+            "/system/lib/libdl.so",
+            "/system/apex/com.android.runtime/apex_manifest.pb",
+            "/vendor/lib64/hw/anything.so",
+            "/system_ext/lib64/libx.so",
+            "/system/etc/ld.config.txt",
+            "/system/etc/ld.config.arm64.txt",
+        ] {
+            assert!(validate(p).is_err(), "{p} must be refused");
+            assert!(
+                crate::mount::can_whiteout(Path::new(p)).is_err(),
+                "{p}: the two predicates must agree"
+            );
+        }
+        // ...while the directories these sit beside stay whiteoutable, which is the
+        // whole point of the mechanism.
+        for p in [
+            "/system/etc/hosts",
+            "/system/etc/init/some-module.rc",
+            "/vendor/etc/foo.conf",
+            "/system/bin/install-recovery.sh",
+        ] {
+            assert!(crate::mount::can_whiteout(Path::new(p)).is_ok(), "{p} must stay allowed");
+        }
+    }
+
+    #[test]
     fn a_symlink_that_resolves_to_a_partition_root_is_refused() {
         for (lit, real) in [
             ("/system/vendor", "/vendor"),

@@ -46,10 +46,30 @@ fn cstr(p: &Path) -> Result<CString> {
 
 /// `None` when the mount table could not be read at all. The two callers want opposite
 /// defaults for that case, so neither gets to inherit a silent one.
+///
+/// Reads bytes rather than a String: one mount point anywhere on the device with a
+/// non-UTF-8 byte in it made `read_to_string` fail, and this answer `None`, for every
+/// call -- which `apply` reads as "not mounted" and binds a second time on top.
 fn mount_state(target: &Path) -> Option<bool> {
-    fs::read_to_string("/proc/self/mountinfo")
-        .ok()
-        .map(|s| crate::absorb::parse_mountinfo(&s).iter().any(|r| r.target == target))
+    let body = fs::read("/proc/self/mountinfo").ok()?;
+    Some(crate::absorb::parse_mountinfo_bytes(&body).iter().any(|r| r.target == target))
+}
+
+/// Is the mount already at `target` the one we would have made -- does it come from
+/// `source`?
+///
+/// `mount_state` only asks whether SOMETHING is mounted there. Recording a binds.list row
+/// on that basis claims a mount the Suite did not make, and the next pass's `teardown_all`
+/// then MNT_DETACHes it and reports success: the path reverts to stock, our content is
+/// never served, and nothing records what was destroyed. `None` means the table could not
+/// be read, which is not a licence to claim it either.
+fn mount_here_is_ours(target: &Path, source: &Path) -> Option<bool> {
+    let body = fs::read("/proc/self/mountinfo").ok()?;
+    let rows = crate::absorb::parse_mountinfo_bytes(&body);
+    let roots = crate::absorb::fs_roots(&rows);
+    // The last row at a path is the one a lookup resolves to.
+    let top = rows.iter().rfind(|r| r.target == target)?;
+    Some(crate::absorb::source_of(top, &roots).as_deref() == Some(source))
 }
 
 /// Ask for the length, then read. The fixed 256-byte buffer this replaces did not
@@ -150,6 +170,21 @@ pub fn apply(source: &Path, target: &Path) -> Result<BindOutcome> {
     // Unknown reads as "not mounted" here: binding again over our own bind is recoverable,
     // refusing to bind because we could not look is not.
     if mount_state(target).unwrap_or(false) {
+        // Something is mounted here -- but is it OURS? Claiming it otherwise writes a
+        // binds.list row for a mount another module made, and teardown_all takes that row
+        // at its word on the next pass. Refusing costs this one bind; claiming it costs
+        // whoever owns the mount their content, irreversibly, with no record.
+        match mount_here_is_ours(target, source) {
+            Some(true) => {}
+            Some(false) => bail!(
+                "{t} already carries a mount from somewhere else; binding over it or \
+                 recording it as ours would take down content this Suite did not serve"
+            ),
+            None => bail!(
+                "{t} is mounted but the mount table could not be read, so whether it is \
+                 ours is unknown; not claiming it"
+            ),
+        }
         // Still record it. The mount exists either way, and a bind with no row in binds.list is
         // one `unbind` cannot take down and `check` cannot account for - the row is how the
         // Suite knows this mount is its own.
@@ -384,6 +419,36 @@ pub fn teardown_all() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mount_from_somewhere_else_is_not_ours_to_claim() {
+        // /data is the fs root for 254:6, so a row's `root` field resolves against it.
+        let mi = concat!(
+            "20 1 254:6 / /data rw - ext4 /dev/block/dm-9 rw\n",
+            "40 20 254:6 /adb/modules/mine/system/etc/hosts /system/etc/hosts rw - ext4 /dev/block/dm-9 rw\n",
+            "41 20 254:6 /adb/modules/theirs/system/etc/motd /system/etc/motd rw - ext4 /dev/block/dm-9 rw\n",
+        );
+        let rows = crate::absorb::parse_mountinfo_bytes(mi.as_bytes());
+        let roots = crate::absorb::fs_roots(&rows);
+        let resolved = |t: &str| -> Option<std::path::PathBuf> {
+            crate::absorb::source_of(rows.iter().rfind(|r| r.target == Path::new(t))?, &roots)
+        };
+
+        // Ours: the row at the target resolves back to the source we were going to bind.
+        assert_eq!(
+            resolved("/system/etc/hosts").as_deref(),
+            Some(Path::new("/data/adb/modules/mine/system/etc/hosts"))
+        );
+        // Another module's bind at a path we also want. `mount_state` cannot tell these
+        // apart -- it only asks whether SOMETHING is mounted -- and recording a row for
+        // this one hands it to teardown_all to detach on the next pass.
+        assert_ne!(
+            resolved("/system/etc/motd").as_deref(),
+            Some(Path::new("/data/adb/modules/mine/system/etc/motd"))
+        );
+        // Nothing mounted there at all.
+        assert!(rows.iter().rfind(|r| r.target == Path::new("/system/etc/issue")).is_none());
+    }
 
     #[test]
     fn a_binds_list_row_round_trips_through_parse_line() {
