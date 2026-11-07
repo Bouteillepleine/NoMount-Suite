@@ -4,9 +4,11 @@ pub fn ksu_manager_present() -> bool {
 }
 
 pub fn kernel_umount_enabled() -> Option<bool> {
-    let out = std::process::Command::new("/data/adb/ksu/bin/ksud")
-        .args(["feature", "get", "kernel_umount"])
-        .output()
+    let mut cmd = std::process::Command::new("/data/adb/ksu/bin/ksud");
+    cmd.args(["feature", "get", "kernel_umount"]);
+    // Bounded: ksud is the daemon this module is loaded by, and a wedged one would
+    // otherwise hold a `nomount check` open with no deadline anywhere in the chain.
+    let out = crate::nm::Nm::run_within(cmd, std::time::Duration::from_secs(10), "ksud feature get")
         .ok()?;
     parse_feature_value(&String::from_utf8_lossy(&out.stdout)).map(|v| v != 0)
 }

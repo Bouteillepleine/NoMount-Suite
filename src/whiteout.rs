@@ -362,10 +362,14 @@ fn app_can_see_probe(path: &str) -> Option<bool> {
     // `ls` absolute and PATH explicit for the same reason as health.rs: with an empty
     // caller environment ksud's `su` leaves the child only /data/adb/ksu/bin on PATH, and
     // a bare `ls` exits 127 - which this would have read as "the app cannot see it".
-    let out = std::process::Command::new("/system/bin/su")
-        .env("PATH", "/system/bin:/system/xbin:/vendor/bin")
-        .args(["9999", "-c", &format!("/system/bin/ls -d {quoted}")])
-        .output()
+    let mut cmd = std::process::Command::new("/system/bin/su");
+    cmd.env("PATH", "/system/bin:/system/xbin:/vendor/bin")
+        .args(["9999", "-c", &format!("/system/bin/ls -d {quoted}")]);
+    // Bounded. `su` here is the manager's own binary and can block on a superuser prompt
+    // or a wedged ksud, and this runs once per pattern-matched candidate from scan() --
+    // so `nomount whiteout suggest` from the WebUI simply never came back. A probe that
+    // cannot answer in ten seconds is not going to.
+    let out = crate::nm::Nm::run_within(cmd, std::time::Duration::from_secs(10), "su 9999 ls")
         .ok()?;
     Some(out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
 }

@@ -223,10 +223,13 @@ impl Fingerprint {
     }
 }
 
+/// Bounded: this runs `uname`, `date` and a `dmesg | grep` pipeline, and a terminal
+/// `nomount check` has nothing wrapping it the way the boot path's `nmto` does -- so one
+/// command that never returns hung the diagnostic that was meant to explain the problem.
 fn read_cmd(prog: &str, args: &[&str]) -> String {
-    Command::new(prog)
-        .args(args)
-        .output()
+    let mut cmd = Command::new(prog);
+    cmd.args(args);
+    crate::nm::Nm::run_within(cmd, std::time::Duration::from_secs(15), prog)
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()

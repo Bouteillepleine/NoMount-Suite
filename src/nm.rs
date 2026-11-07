@@ -56,17 +56,29 @@ impl Nm {
         args: &[&str],
         deadline: Duration,
     ) -> std::io::Result<std::process::Output> {
-        let spawn = || {
-            Command::new(&self.bin)
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
+        let mut c = Command::new(&self.bin);
+        c.args(args);
+        Nm::run_within(c, deadline, &format!("nm {}", args.join(" ")))
+    }
+
+    /// Run any command under the same deadline, kill and reap this always had.
+    ///
+    /// `Command::output()` waits forever, and the probes that shell out all reached it:
+    /// `su` on these devices is the manager's own binary, which can block on a superuser
+    /// prompt or a wedged daemon, and `nomount whiteout suggest` from the WebUI then
+    /// never returned. Associated rather than free so the body below is unchanged.
+    /// `what` only names the command in the timeout error.
+    pub(crate) fn run_within(
+        mut cmd: Command,
+        deadline: Duration,
+        what: &str,
+    ) -> std::io::Result<std::process::Output> {
+        let spawn = |cmd: &mut Command| {
+            cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         };
         let mut tries = 0;
         let mut child = loop {
-            match spawn() {
+            match spawn(&mut cmd) {
                 Err(e) if e.raw_os_error() == Some(26) && tries < 20 => {
                     tries += 1;
                     std::thread::sleep(Duration::from_millis(5));
@@ -105,7 +117,7 @@ impl Nm {
             }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("nm {} did not answer in {deadline:?}", args.join(" ")),
+                format!("{what} did not answer in {deadline:?}"),
             ));
         };
 
