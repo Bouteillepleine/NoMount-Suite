@@ -322,6 +322,13 @@ enum {
     NOMOUNT_ATTR_VERSION,
     NOMOUNT_ATTR_PAYLOAD,
     NOMOUNT_ATTR_MODVER,
+    /* Live knob state, so userspace can tell what the engine HOLDS from what a
+     * config file asked for. A reply without it is an engine too old to answer,
+     * which callers must grade as unmeasured rather than as agreement.
+     *   bits 0-1  hide_isolated (0-3)
+     *   bit  2    vdir_erofs_size
+     */
+    NOMOUNT_ATTR_KNOBS,
     __NOMOUNT_ATTR_MAX,
 };
 

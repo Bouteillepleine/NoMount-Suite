@@ -5361,6 +5361,18 @@ static int nomount_nl_get_version(struct sk_buff *req, struct nlmsghdr *req_nlh)
         return -EMSGSIZE;
     }
 
+    /* The knobs are write-only through NM_CMD_SET_KNOB, so nothing could ask what
+     * the engine actually holds -- and `nomount doctor` reported uidhide.conf, the
+     * value that was REQUESTED, as though it were in effect. A boot sync that never
+     * ran then read as agreement. This rides the version reply rather than taking a
+     * command of its own, so one round trip answers both. */
+    if (nla_put_u32(msg, NOMOUNT_ATTR_KNOBS,
+                    (READ_ONCE(nm_hide_isolated) & 3) |
+                    (READ_ONCE(nm_vdir_erofs_size) ? 4U : 0U))) {
+        nlmsg_free(msg);
+        return -EMSGSIZE;
+    }
+
     nlmsg_end(msg, hdr);
     return nlmsg_unicast(nm_nl_sk, msg, portid);
 }
@@ -5373,6 +5385,7 @@ static const struct nla_policy nomount_genl_policy[__NOMOUNT_ATTR_MAX] = {
     [NOMOUNT_ATTR_VERSION]      = { .type = NLA_U32 },
     [NOMOUNT_ATTR_PAYLOAD]      = { .type = NLA_BINARY },
     [NOMOUNT_ATTR_MODVER]       = { .type = NLA_NUL_STRING, .len = 31 },
+    [NOMOUNT_ATTR_KNOBS]        = { .type = NLA_U32 },
 };
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)

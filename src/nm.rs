@@ -210,6 +210,19 @@ impl Nm {
         self.run(&["k", "i", &mode.to_string()]).map(drop)
     }
 
+    /// What the engine HOLDS, as opposed to what `uidhide.conf` asked for: the
+    /// isolated-pool mode and the erofs dir-size knob. `nm k` only ever wrote these,
+    /// so a boot sync that never ran was indistinguishable from one that took. An
+    /// engine predating the read-back answers an error, which callers must grade as
+    /// unmeasured rather than as agreement.
+    pub fn knobs_live(&self) -> Result<(u32, bool)> {
+        let out = self.run(&["knobs"])?;
+        match parse_knobs(&out) {
+            Some(k) => Ok(k),
+            None => bail!("nm knobs: unparseable answer {:?}", out.trim()),
+        }
+    }
+
     pub fn uid_list_live(&self) -> Result<Vec<u32>> {
         let out = self.run(&["l", "u"])?;
         let mut uids = Vec::new();
@@ -419,6 +432,17 @@ pub(crate) struct LiveRule {
     pub uid: u32,
     pub kind: LiveKind,
     pub public: bool,
+}
+
+/// `isolated=N erofs=N`, the whole of what `nm knobs` prints. A missing field is None
+/// rather than a default: the read-back exists to tell an engine that reports its knobs
+/// from one that does not, and a silent zero would defeat that.
+pub(crate) fn parse_knobs(out: &str) -> Option<(u32, bool)> {
+    let field = |name: &str| -> Option<u32> {
+        out.split_whitespace()
+            .find_map(|t| t.strip_prefix(name)?.parse::<u32>().ok())
+    };
+    Some((field("isolated=")?, field("erofs=")? != 0))
 }
 
 pub(crate) fn parse_list(list: &str) -> Vec<LiveRule> {
@@ -880,5 +904,19 @@ mod tests {
         let v = parse_list("/system/etc/a -> b -> /data/adb/modules/M/x\n");
         assert_eq!(v[0].target, PathBuf::from("/system/etc/a -> b"));
         assert_eq!(v[0].source.as_deref(), Some(Path::new("/data/adb/modules/M/x")));
+    }
+
+    #[test]
+    fn an_engine_that_reports_no_knobs_is_not_one_reporting_zero() {
+        assert_eq!(parse_knobs("isolated=3 erofs=1\n"), Some((3, true)));
+        assert_eq!(parse_knobs("isolated=0 erofs=0\n"), Some((0, false)));
+        // The whole point of the read-back: a missing field must not read as a value.
+        assert_eq!(parse_knobs("isolated=2\n"), None);
+        assert_eq!(parse_knobs("erofs=1\n"), None);
+        assert_eq!(parse_knobs(""), None);
+        // What an older engine prints on stdout before exiting non-zero, if it prints
+        // anything at all -- the version reply's own fields, which must not be mistaken
+        // for knobs.
+        assert_eq!(parse_knobs("3 1.3.208\n"), None);
     }
 }
