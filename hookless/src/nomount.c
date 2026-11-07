@@ -4005,7 +4005,7 @@ static void nm_drop_cached_vpath(const char *v_path, u16 v_len,
 
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 {
-    struct nomount_rule *irule, *ex, *current_rule = target_rule;
+    struct nomount_rule *irule, *ex, *uid_clash, *current_rule = target_rule;
     char orig_v_path, *v_path = nm_get_vpath(target_rule);
     int parent_len, p_len = target_rule->v_len;
     const char *child_name, *lookup_path;
@@ -4055,9 +4055,16 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         if (i > 0) v_path[i] = '\0';
 
         found_virtual = false;
+        uid_clash = NULL;
         hash_for_each_possible(nomount_rules_ht, ex, vpath_node, h_parent) {
-            if (ex->v_len == parent_len && memcmp(nm_get_vpath(ex), v_path, parent_len) == 0 &&
-                (ex->target_uid == 0 || ex->target_uid == target_rule->target_uid)) {
+            if (ex->v_len == parent_len && memcmp(nm_get_vpath(ex), v_path, parent_len) == 0) {
+                /* Keep walking past a parent scoped to some other uid: a compatible rule
+                 * may be further down the bucket, and which one came first was previously
+                 * decided by hash order. */
+                if (ex->target_uid != 0 && ex->target_uid != target_rule->target_uid) {
+                    uid_clash = ex;
+                    continue;
+                }
                 if (!(ex->flags & (NM_FLAG_VIRTUAL_DIR | NM_FLAG_IS_DIR))) {
                     err = -ENOTDIR;
                     break;
@@ -4095,6 +4102,17 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 found_virtual = true;
                 break;
             }
+        }
+
+        /* __nomount_add_rule refuses a second rule on a v_path another uid owns, but the
+         * intermediates minted below bypass that check and are always target_uid 0. Falling
+         * through here used to add one for a path an explicit uid-scoped rule already held,
+         * leaving two rules on one v_path with a child slot each: a lookup resolved to
+         * whichever the bucket yielded first and the other one's children went dark. */
+        if (!found_virtual && !err && uid_clash) {
+            nm_warn("refusing to build '%.*s' for uid %u: uid %u already owns that directory\n",
+                    (int)parent_len, v_path, target_rule->target_uid, uid_clash->target_uid);
+            err = -EEXIST;
         }
 
         if (unlikely(err)) { if (i > 0) v_path[i] = orig_v_path; break; }
