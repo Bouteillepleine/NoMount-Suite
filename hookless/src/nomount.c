@@ -47,6 +47,8 @@ static const struct cred *nm_root_cred;
 static void nm_dir_node_put(struct nomount_dir_node *dir_node);
 static void nomount_restore_dir_node(struct nomount_dir_node *dir_node);
 static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule);
+static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *victims, bool prune);
+static void nm_free_rule(struct nomount_rule *rule);
 static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
 static int nm_read_secctx(struct inode *in, char *dst, u16 *dlen)
@@ -2657,17 +2659,34 @@ static void nomount_hijacked_put_super(struct super_block *sb)
     struct nm_sop *nm_sop = __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
     void (*orig_put)(struct super_block *) = NULL;
     struct nomount_rule *rule;
+    struct hlist_node *tmp;
     int bkt;
+    HLIST_HEAD(victims);
 
+    /* Remove the rule outright, not just its child entry.
+     *
+     * This used to call __nomount_delete_child_locked(), which unhooks the rule from its
+     * parent directory and nulls ->parent_dir but leaves the rule itself in
+     * nomount_rules_ht. It therefore kept being printed by NM_CMD_GET_LIST and kept
+     * matching __nomount_del_rule, while injecting nothing -- userspace's picture of the
+     * rule set silently diverging from the kernel's for every rule on the filesystem
+     * going away. nm_detach_rule_locked() does both halves, and the victims/
+     * synchronize_rcu/free protocol is the one __nomount_clear_all uses.
+     */
     mutex_lock(&nomount_write_mutex);
-    hash_for_each(nomount_rules_ht, bkt, rule, vpath_node) {
+    hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {
         struct nomount_dir_node *d;
 
         d = rule->parent_dir;
         if (d && !(d->_tag_ptr & 1UL) && d->dir_inode && d->dir_inode->i_sb == sb)
-            __nomount_delete_child_locked(d, rule);
+            nm_detach_rule_locked(rule, &victims, false);
     }
     mutex_unlock(&nomount_write_mutex);
+    if (!hlist_empty(&victims)) {
+        synchronize_rcu();
+        hlist_for_each_entry_safe(rule, tmp, &victims, victim_node)
+            nm_free_rule(rule);
+    }
 
     if (nm_sop) {
         int i = 0;
