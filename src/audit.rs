@@ -189,7 +189,7 @@ pub(crate) const N_ZERO_MOUNT: &str = "zero-mount posture";
 pub(crate) const N_SURFACES: &str = "kernel surfaces";
 pub(crate) const N_DINO_STAT: &str = "readdir ino vs stat ino";
 pub(crate) const N_INODE_BAND: &str = "injected inode band";
-pub(crate) const N_OVERLAY_DIR_INO: &str = "overlay dir inode range";
+pub(crate) const N_SYNTH_DIR_INO: &str = "synthesized dir inode range";
 pub(crate) const N_DIR_INO_COLLIDE: &str = "synthesized inode collision";
 pub(crate) const N_EROFS_SHAPE: &str = "erofs directory shape";
 pub(crate) const N_MAPS_DELETED: &str = "injected files in maps";
@@ -202,7 +202,7 @@ pub(crate) const N_XATTR_HIDDEN: &str = "xattr agrees with open for a hidden app
 #[cfg(test)]
 pub(crate) const ALL_CHECK_NAMES: [&str; 14] = [
     N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DINO_STAT,
-    N_INODE_BAND, N_OVERLAY_DIR_INO, N_DIR_INO_COLLIDE, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
+    N_INODE_BAND, N_SYNTH_DIR_INO, N_DIR_INO_COLLIDE, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
     N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN,
 ];
 
@@ -776,17 +776,23 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     .owner("the kernel engine")
 }
 
-fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
+fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut unranged = Vec::new();
     let mut examined = 0usize;
     let mut unread = 0usize;
     let subjects: Vec<PathBuf> =
         targets.iter().chain(engine_dirs.iter()).cloned().collect();
+    // Not gated on fs_type == "overlay" any more.
+    //
+    // It used to be, and that is why `nomount check` reported nothing while
+    // `find /product/priv-app -maxdepth 1 -type d -inum +1000` on a CPH2747 returned
+    // exactly the two injected directories: /product is erofs, so every parent was
+    // skipped and the check answered NotApplicable. Nothing in the test below is
+    // overlay-specific -- it compares a synthesized directory's inode against the
+    // largest STOCK directory inode in the same parent on the same device, which any
+    // filesystem can answer.
     for parent in parents_of(&subjects) {
-        if fs_type(&parent) != "overlay" {
-            continue;
-        }
         let Ok(rd) = fs::read_dir(&parent) else {
             unread += 1;
             continue;
@@ -835,10 +841,10 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
             examined += 1;
         }
     }
-    overlay_dir_verdict(examined, unread, &outliers, &unranged)
+    synth_dir_verdict(examined, unread, &outliers, &unranged)
 }
 
-fn overlay_dir_verdict(
+fn synth_dir_verdict(
     examined: usize,
     unread: usize,
     outliers: &[String],
@@ -861,14 +867,14 @@ fn overlay_dir_verdict(
     if examined == 0 {
         if unread > 0 {
             return unmeasured(
-                N_OVERLAY_DIR_INO,
-                format!("{unread} overlay directory(ies) could not be read"),
+                N_SYNTH_DIR_INO,
+                format!("{unread} parent directory(ies) could not be read"),
             )
             .meaning("The folders this needed to read would not open, so this was not tested.");
         }
         if !unranged.is_empty() {
             return unmeasured(
-                N_OVERLAY_DIR_INO,
+                N_SYNTH_DIR_INO,
                 format!(
                     "{} synthesized dir(s) on a device no stock dir beside them uses, so none \
                      could be compared: {}",
@@ -879,12 +885,12 @@ fn overlay_dir_verdict(
             .meaning(format!("{} This was not tested.", unranged_meaning(unranged.len())));
         }
         return na(
-            N_OVERLAY_DIR_INO,
-            "no directory the engine synthesized on an overlay mount, beside a stock one".into(),
+            N_SYNTH_DIR_INO,
+            "no directory the engine synthesized beside a stock one to compare it with".into(),
         )
         .meaning(
-            "This one only applies to folders the Suite creates on an overlayfs ROM, and you \
-             have none.",
+            "This one needs a folder the Suite created sitting beside stock folders on the same \
+             device, and you have none.",
         );
     }
     if outliers.is_empty() && (unread > 0 || !unranged.is_empty()) {
@@ -903,9 +909,9 @@ fn overlay_dir_verdict(
             why.push(unranged_meaning(unranged.len()));
         }
         return unmeasured(
-            N_OVERLAY_DIR_INO,
+            N_SYNTH_DIR_INO,
             format!(
-                "{examined} overlay dir(s) clean, but {} and were not checked",
+                "{examined} parent(s) clean, but {} and were not checked",
                 skipped.join(" and ")
             ),
         )
@@ -913,13 +919,13 @@ fn overlay_dir_verdict(
     }
     if outliers.is_empty() {
         pass(
-            N_OVERLAY_DIR_INO,
-            format!("{examined} overlay dir(s): synthesized inodes sit inside the stock range"),
+            N_SYNTH_DIR_INO,
+            format!("{examined} parent(s): synthesized inodes sit inside the stock range"),
         )
         .meaning("Folders the Suite creates carry identity numbers the ROM could plausibly issue.")
     } else {
         soft(
-            N_OVERLAY_DIR_INO,
+            N_SYNTH_DIR_INO,
             outliers.join("; "),
             "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
         )
@@ -1606,7 +1612,7 @@ const RULE_DEPENDENT: [&str; 8] = [
     N_DINO_STAT,
     N_DIR_INO_COLLIDE,
     N_INODE_BAND,
-    N_OVERLAY_DIR_INO,
+    N_SYNTH_DIR_INO,
     N_EROFS_SHAPE,
     N_MAPS_DELETED,
     N_PM_OPEN,
@@ -1786,7 +1792,7 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         check_surfaces(),
         check_dino_matches_stat(&targets),
         check_inode_band(&targets, &engine_dirs),
-        check_overlay_dir_ino(&targets, &engine_dirs),
+        check_synth_dir_ino(&targets, &engine_dirs),
         check_dir_ino_collision(&targets, &engine_dirs),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&all_inject_targets),
@@ -2244,24 +2250,24 @@ mod tests {
     #[test]
     fn a_synthesized_dir_with_no_stock_dir_on_its_device_is_not_a_pass() {
         let off = vec!["/product/overlay/Vdir dev 35".to_string()];
-        let c = overlay_dir_verdict(1, 0, &[], &off);
+        let c = synth_dir_verdict(1, 0, &[], &off);
         assert_eq!(c.verdict.tag(), "UNMEASURED", "{}", c.evidence);
         assert!(c.evidence.contains("/product/overlay/Vdir dev 35"), "{}", c.evidence);
 
-        let c = overlay_dir_verdict(0, 0, &[], &off);
+        let c = synth_dir_verdict(0, 0, &[], &off);
         assert_eq!(c.verdict.tag(), "UNMEASURED", "compared nothing, but there was a subject");
 
-        assert_eq!(overlay_dir_verdict(1, 0, &[], &[]).verdict.tag(), "PASS");
-        assert_eq!(overlay_dir_verdict(0, 0, &[], &[]).verdict.tag(), "N/A");
+        assert_eq!(synth_dir_verdict(1, 0, &[], &[]).verdict.tag(), "PASS");
+        assert_eq!(synth_dir_verdict(0, 0, &[], &[]).verdict.tag(), "N/A");
         let hit = vec!["/product/overlay/V ino=83232001 (stock max here 26)".to_string()];
-        assert_eq!(overlay_dir_verdict(1, 0, &hit, &off).verdict.tag(), "WARN");
+        assert_eq!(synth_dir_verdict(1, 0, &hit, &off).verdict.tag(), "WARN");
         assert_eq!(
-            overlay_dir_verdict(2, 1, &[], &[]).evidence,
-            "2 overlay dir(s) clean, but 1 could not be read and were not checked"
+            synth_dir_verdict(2, 1, &[], &[]).evidence,
+            "2 parent(s) clean, but 1 could not be read and were not checked"
         );
 
         let many: Vec<String> = (0..7).map(|i| format!("/product/overlay/V{i} dev 35")).collect();
-        let c = overlay_dir_verdict(0, 0, &[], &many);
+        let c = synth_dir_verdict(0, 0, &[], &many);
         assert!(c.evidence.ends_with("/product/overlay/V4 dev 35, +2 more"), "{}", c.evidence);
     }
 
