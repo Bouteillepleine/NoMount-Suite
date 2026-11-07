@@ -3890,37 +3890,31 @@ static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
         return nm_place_ino(pop, spread);
     }
 
-    /* Gap-fit first, exactly as a file does.
+    /* Placed ABOVE every inode the scan saw, band tell and all. Do not "fix" this by
+     * gap-fitting through nm_place_ino() -- that was tried, shipped, and measured.
      *
-     * The placement below puts a directory above max(dmax, amax, ...), and amax comes
-     * from nm_dmax_actor(), which takes the largest inode of ANY kind in the seeded
-     * tree -- files included, and files both outnumber directories and carry the high
-     * numbers. So a synthesized directory landed above the biggest FILE inode on the
-     * device. Measured on CPH2747: injected /product/priv-app/Mms at 89,750,659 beside
-     * stock siblings at 34, 212, 213, 237 and 238, and /product's own largest inode is
-     * 4,770,560. `find /product/priv-app -maxdepth 1 -type d -inum +1000` returned the
-     * injected directories and nothing else -- one command, no timing, no comparison.
+     * The tell is real: amax comes from nm_dmax_actor(), which records the largest inode
+     * of ANY kind, so a synthesized directory lands above the biggest FILE on the device.
+     * On a CPH2747 that put /product/priv-app/Mms at 89,750,659 beside stock siblings at
+     * 4..34, and `find /product/priv-app -maxdepth 1 -type d -inum +1000` returned the
+     * injected directories and nothing else.
      *
-     * amax is not arbitrary: placing above every real inode guarantees the number
-     * collides with nothing, and a virtual directory sharing st_dev+st_ino with a real
-     * file is a hardlink claim that does not hold up. But that is a two-stat test
-     * against a file the caller has to find first, where the band is a one-command
-     * sweep -- and nm_place_ino() already takes the gap-fitting side of exactly this
-     * trade for every injected FILE. Directories taking the other side was the
-     * asymmetry, not a considered difference, so they now fit the same way and the
-     * above-everything placement stays only for a population with no gaps to use.
+     * But gap-fitting through nm_place_ino() replaced it with a WORSE one. That tests
+     * candidates with nm_ino_taken(pop, ...), and pop holds a sample of the parent's
+     * DIRECT entries only, so ino 109 and 110 were free there and taken one level down:
+     * Mms collided with /product/priv-app/GlobalDrag/oat and NumberRecognition with
+     * GlobalSearch/oat. Two names on one filesystem cannot share (st_dev, st_ino) unless
+     * they are the same file, so one pass over the partition grouped by that pair names
+     * every entry the engine invented -- the same single scan the band cost -- and
+     * anything using the pair as file identity now conflates the two.
+     *
+     * Inode numbers are unique per filesystem regardless of type, so the only number that
+     * cannot collide is one above every inode: that is what amax buys and why it is here.
+     * An in-band number that is also genuinely free needs the partition's used-inode set,
+     * which nm_dmax_scan() already has the walk for (NM_DMAX_DIRS entries) and
+     * nm_ino_pop::bloom_mask already has an unused field for. Until that exists, loud and
+     * harmless beats quiet and colliding.
      */
-    {
-        unsigned long fitted = nm_place_ino(pop, spread);
-
-        if (fitted) {
-            nm_debug("inoplace: dev=%u:%u gap-fitted ino=%lu (dmax=%llu amax=%llu)\n",
-                     MAJOR(pop->dev), MINOR(pop->dev), fitted,
-                     (unsigned long long)di->dmax, (unsigned long long)di->amax);
-            return fitted;
-        }
-    }
-
     c = di->dmax;
     if (di->amax > c) { c = di->amax;  won = "di->amax"; }
     if (pop->hw > c)  { c = pop->hw;   won = "pop->hw"; }
