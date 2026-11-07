@@ -3890,6 +3890,37 @@ static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
         return nm_place_ino(pop, spread);
     }
 
+    /* Gap-fit first, exactly as a file does.
+     *
+     * The placement below puts a directory above max(dmax, amax, ...), and amax comes
+     * from nm_dmax_actor(), which takes the largest inode of ANY kind in the seeded
+     * tree -- files included, and files both outnumber directories and carry the high
+     * numbers. So a synthesized directory landed above the biggest FILE inode on the
+     * device. Measured on CPH2747: injected /product/priv-app/Mms at 89,750,659 beside
+     * stock siblings at 34, 212, 213, 237 and 238, and /product's own largest inode is
+     * 4,770,560. `find /product/priv-app -maxdepth 1 -type d -inum +1000` returned the
+     * injected directories and nothing else -- one command, no timing, no comparison.
+     *
+     * amax is not arbitrary: placing above every real inode guarantees the number
+     * collides with nothing, and a virtual directory sharing st_dev+st_ino with a real
+     * file is a hardlink claim that does not hold up. But that is a two-stat test
+     * against a file the caller has to find first, where the band is a one-command
+     * sweep -- and nm_place_ino() already takes the gap-fitting side of exactly this
+     * trade for every injected FILE. Directories taking the other side was the
+     * asymmetry, not a considered difference, so they now fit the same way and the
+     * above-everything placement stays only for a population with no gaps to use.
+     */
+    {
+        unsigned long fitted = nm_place_ino(pop, spread);
+
+        if (fitted) {
+            nm_debug("inoplace: dev=%u:%u gap-fitted ino=%lu (dmax=%llu amax=%llu)\n",
+                     MAJOR(pop->dev), MINOR(pop->dev), fitted,
+                     (unsigned long long)di->dmax, (unsigned long long)di->amax);
+            return fitted;
+        }
+    }
+
     c = di->dmax;
     if (di->amax > c) { c = di->amax;  won = "di->amax"; }
     if (pop->hw > c)  { c = pop->hw;   won = "pop->hw"; }
