@@ -204,9 +204,10 @@ _bak=/data/adb/nomount.bak
 if [ -d "$_bak" ]; then
     _rn=0
     _fail=0
+    # KEEP IN SYNC with the stash list in uninstall.sh and lib.sh's nm_consume_stash().
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-              uidconceal ghostpaths \
+              uidconceal ghostpaths kmsg incident.log nomount.ko \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
@@ -232,7 +233,13 @@ unset _bak
 CONF="$NMDIR/spoof.conf"
 [ -f "$CONF" ] && set_perm "$CONF" 0 0 0600 u:object_r:adb_data_file:s0
 
+# Both inotifyd handlers need the exec bit: inotifyd execs them directly, and the
+# manager's own set_permissions pass leaves every file 0644 regardless of the mode
+# stored in the zip. Without this, inotifyd stays resident and silently fails to exec
+# its handler on every event -- checkwatch.sh shipped that way and the WebUI's
+# check-on-request never answered.
 [ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
+[ -f "$MODPATH/checkwatch.sh" ] && set_perm "$MODPATH/checkwatch.sh" 0 0 0755
 
 [ -f "$MODPATH/lib.sh" ] && set_perm "$MODPATH/lib.sh" 0 0 0644
 [ -d "$MODPATH/webroot" ] && set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644

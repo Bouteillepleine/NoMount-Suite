@@ -72,9 +72,19 @@ elif [ -d /data/adb/nomount ]; then
     rm -rf "$_bak"
     if mkdir -p "$_bak" 2>/dev/null && chmod 0700 "$_bak" 2>/dev/null; then
         chcon u:object_r:adb_data_file:s0 "$_bak" 2>/dev/null
+        # KEEP IN SYNC with the restore lists in customize.sh and lib.sh's
+        # nm_consume_stash(). A name here that is missing there is stashed and never
+        # given back; a name there that is missing here is simply never stashed.
+        #
+        # nomount.ko is the one that is not a setting: lkm-load.sh copies the chosen
+        # engine module here precisely so an update cannot remove it, then prunes the
+        # bundled per-KMI set from $MODDIR after the first good boot - so on an LKM
+        # device this file is the only copy left, and the wipe below used to delete it.
+        # kmsg and incident.log are a user setting and the incident record, and the
+        # record mattering most is the one from the install someone is upgrading to fix.
         for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
                   absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-                  uidconceal ghostpaths \
+                  uidconceal ghostpaths kmsg incident.log nomount.ko \
                   absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
             [ -e "/data/adb/nomount/$_f" ] || continue
             if cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null; then

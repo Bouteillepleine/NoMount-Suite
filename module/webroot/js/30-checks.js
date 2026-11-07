@@ -25,6 +25,12 @@
     return !!(r.checks || []).some(function (c) { return c.section === s; });
   }
 
+  // Did this report actually measure anything? "No findings" and "no checks" are not the
+  // same answer, and only one of them is clean. Mirrors paintModuleMetric in 40-rules.js.
+  function measuredReport(r) {
+    return !!(r && Array.isArray(r.checks) && r.checks.length && r.summary);
+  }
+
   function findCheck(r, id) {
     const cs = (r && r.checks) || [];
     for (var i = 0; i < cs.length; i++) if (cs[i].id === id) return cs[i];
@@ -181,7 +187,10 @@
     return null;
   }
   // The report to display, preferring one that could actually measure.
-  async function runCheck() {
+  // NOT the button handler: that is runCheck(btn) above, which owns the spinner and the
+  // single-flight guard. Naming both runCheck shadowed the handler, so every Check button
+  // called this one and threw its report away.
+  async function fetchCheckReport() {
     const viaWatcher = await checkViaWatcher();
     if (viaWatcher) return viaWatcher;
     const r0 = await nm("check --json --write");
@@ -195,7 +204,7 @@
 
   async function checkPass() {
     $("findlist").innerHTML = '<div class="empty">Checking...</div>';
-    const rep = await runCheck();
+    const rep = await fetchCheckReport();
     if (rep && !rep.error) CHECK = rep;
     else toast("Check did not run: " + ((rep && rep.error) || "no output"), "bad");
     renderCheck(CHECK);
@@ -213,7 +222,7 @@
   }
   async function autoPass() {
     try {
-      const r = await runCheck();
+      const r = await fetchCheckReport();
       if (r && !r.error) {
         CHECK = r; renderCheck(CHECK); refreshStealth(); refreshStatus(); paintModuleMetric();
       }
@@ -244,7 +253,7 @@
       return;
     }
 
-    // runCheck does not set NM_REDACT_HIDE_LIST, so the raw report carries real appids. This
+    // fetchCheckReport does not set NM_REDACT_HIDE_LIST, so the raw report carries real appids. This
     // pane is the one users screenshot and paste into a bug report, and copyReport already
     // redacts on the way out - the same rule has to hold here.
     $("auditout").textContent = redactUids(JSON.stringify(r, null, 1));
@@ -266,6 +275,12 @@
     }
     else if (!ranSection(r, "device")) { chip.textContent = "plan only"; chip.className = "chip info"; }
     else if (unmeasured.length) { chip.textContent = unmeasured.length + " not measured"; chip.className = "chip info"; }
+    // A report with no checks at all, or no summary, has measured nothing - and this chip
+    // is what shows while the card is collapsed. It used to fall through to "all clear"
+    // because the ladder only ever looked at rows it had FILTERED OUT as uninteresting,
+    // never at whether there were any to begin with. paintModuleMetric in 40-rules.js
+    // already reasons this way; this ladder did not.
+    else if (!measuredReport(r)) { chip.textContent = "not measured"; chip.className = "chip info"; }
     else { chip.textContent = "all clear"; chip.className = "chip ok"; }
 
     const s = r.summary || {};
@@ -296,6 +311,13 @@
       return;
     }
     if (!rows.length && ranSection(r, "device")) {
+      if (!measuredReport(r)) {
+        sub.textContent =
+          "This report carries no checks, so it says nothing about this device - not that " +
+          "there is nothing to report. Re-run the check.";
+        list.innerHTML = "";
+        return;
+      }
       sub.textContent = clean + " check" + (clean === 1 ? "" : "s") +
         " ran across " + (r.sections || []).join(" and ") + ". Nothing to report.";
       list.innerHTML = "";
@@ -431,7 +453,7 @@
       lines.push("[" + String(c.verdict).toUpperCase() + "] " + c.name + " (" + c.section + ")");
       if (c.owner) lines.push("  from: " + c.owner);
       // BOTH label formats: audit.rs writes "uid N (hidden)", doctor.rs writes
-      // "hidden uid N". `runCheck` does not set NM_REDACT_HIDE_LIST, so the real appid is in
+      // "hidden uid N". `fetchCheckReport` does not set NM_REDACT_HIDE_LIST, so the real appid is in
       // the JSON and this is the only thing standing between it and a pasted bug report.
       lines.push("  measured: " + redactUids(c.evidence));
       if (c.meaning) lines.push("  means: " + redactUids(c.meaning));

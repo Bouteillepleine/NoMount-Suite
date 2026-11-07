@@ -64,13 +64,21 @@ COMMANDS = {
     "dev": 'echo "$(getprop ro.product.marketname)|$(getprop ro.product.manufacturer)|'
            '$(getprop ro.product.model)|$(getprop ro.build.version.release)|'
            '$(getprop ro.build.version.sdk)|$(uname -r)"',
-    "stealth": 'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat '
+    # Kept character-for-character in step with 10-status.js's stealthProbe: a test in
+    # src/mount.rs pins the two together, because a fixture captured with a DIFFERENT
+    # command is a fixture the page itself could never have produced.
+    "stealth": 'export PATH=/system/bin:/system/xbin:/vendor/bin; '
+               'q() { v=$(eval "$2" 2>/dev/null); case "$v" in "") v="?";; esac; echo "$1=$v"; }; '
+               'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat '
                '| grep -q ENABLED && echo 1 || echo 0)"; '
                'echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; '
-               'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; '
-               'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; '
-               'echo "se=$(getenforce 2>/dev/null)"',
-    "appnm": 'su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"',
+               'n=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null); '
+               'case "$n" in ""|*[!0-9]*) n="?";; esac; echo "root_nm=$n"; '
+               'q fp "getprop ro.build.fingerprint"; '
+               'q se "getenforce"; '
+               'echo "done=1"',
+    "appnm": 'export PATH=/system/bin:/system/xbin:/vendor/bin; '
+             'su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"',
     "disabled": "[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0",
     "incident": "cat /data/adb/nomount/incident.log 2>/dev/null",
     "snapshot": "[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0",

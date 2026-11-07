@@ -1316,7 +1316,20 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let engine = nm.version().ok();
     let live_ok = engine.is_some();
 
-    let follow_ksu = crate::blocklist::follow_ksu_denylist();
+    let follow_ksu_set = crate::blocklist::follow_ksu_denylist();
+    if follow_ksu_set.is_none() {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "per-UID settings unreadable",
+            detail: "uidhide.conf exists and could not be read, so whether the hide list \
+                 follows KernelSU's DenyList is unknown. `nomount uid apply` treats that as \
+                 unknown and un-hides nothing, but it also cannot apply the DenyList, so \
+                 newly installed apps it covers are not picked up. Check the file's mode \
+                 and SELinux label - it should be 0600 root:root, u:object_r:adb_data_file."
+                .to_string(),
+        });
+    }
+    let follow_ksu = follow_ksu_set.unwrap_or(false);
     let ksu_default = crate::ksu::global_umount_default();
     if follow_ksu && !crate::ksu::available() {
         f.push(Finding {

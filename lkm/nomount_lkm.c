@@ -27,6 +27,38 @@ static int (* const pathhide_ctl)(const char *buf, size_t count) =
 static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz) =
 	nm_pathhide_get_rule_fwd;
 
+/* Every guard reports whether it armed, and all five return codes used to be thrown
+ * away: module_init returned 0 unconditionally, insmod succeeded, and lkm-load.sh's probe
+ * asks only whether the ENGINE answers -- so a cloak with three of five guards off looked
+ * exactly like a healthy one, with the only trace a pr_warn in a ring buffer nobody reads.
+ * These files argue repeatedly that an inconsistent cloak is worse than an absent one;
+ * this was the path that made the two indistinguishable from outside the kernel.
+ *
+ * This reports; it deliberately does NOT fail the load. Two reasons. Several guards
+ * legitimately cannot arm on older KMIs (the pagemap arm needs 6.7, the pathhide guards
+ * need 5.4), so a partial cloak is the normal state there. And by this point fn() has
+ * already brought the engine up -- netlink socket, slab caches, hijacked vtables -- while
+ * returning an error from module_init means module_exit never runs, so the teardown that
+ * undoes all of that would be skipped and the module unloaded out from under it. Making
+ * the failure loud is the fix; making it fatal here would be a worse bug than the one
+ * being fixed.
+ */
+#define NM_GUARD(name, call)						\
+	do {								\
+		int _g = (call);					\
+		nm_guard_n++;						\
+		if (_g) {						\
+			pr_warn("nomount: guard %-9s OFF (%d)\n",	\
+				name, _g);				\
+		} else {						\
+			nm_guard_ok++;					\
+			pr_info("nomount: guard %-9s armed\n", name);	\
+		}							\
+	} while (0)
+
+static int nm_guard_n;
+static int nm_guard_ok;
+
 #undef fs_initcall
 #define fs_initcall(fn)							\
 	static int __init nm_lkm_init(void)				\
@@ -35,11 +67,19 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz) =
 									\
 		if (rc)							\
 			return rc;					\
-		nm_maps_spoof_init();					\
-		nm_xattr_guard_init();					\
-		nm_mount_filter_init();					\
-		nm_ghost_probes_init();					\
-		nm_pathhide_probes_init();				\
+		NM_GUARD("maps",     nm_maps_spoof_init());		\
+		NM_GUARD("xattr",    nm_xattr_guard_init());		\
+		NM_GUARD("mount",    nm_mount_filter_init());		\
+		NM_GUARD("ghost",    nm_ghost_probes_init());		\
+		NM_GUARD("pathhide", nm_pathhide_probes_init());	\
+		if (!nm_guard_ok)					\
+			pr_err("nomount: NO guard armed - the engine is "\
+			       "serving with every detection surface it "\
+			       "closes left open\n");			\
+		else if (nm_guard_ok != nm_guard_n)			\
+			pr_warn("nomount: %d of %d guards armed - the "	\
+				"surfaces named OFF above stay open\n",	\
+				nm_guard_ok, nm_guard_n);		\
 		nm_module_hide();					\
 		return 0;						\
 	}								\

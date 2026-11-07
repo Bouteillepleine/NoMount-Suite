@@ -130,22 +130,37 @@
   function stealthProbe() {
     if (STEALTH_PROBE) return STEALTH_PROBE;
     STEALTH_PROBE = (async function () {
+      // Every substitution here used to run a BARE command, and the exec this page gets
+      // can arrive with no PATH at all (the same gap that made `su 2000 -c stat` exit 127
+      // and is why 30-checks.js uses absolute paths). Each one then produced nothing,
+      // `root_nm` parsed as 0 = "no mounts", and the card said "Fully mountless" having
+      // measured none of it. Set PATH once, mark anything unmeasured with '?' rather than
+      // letting it fall through as a clean value, and finish with a trailer -- the exit
+      // status of a run of `echo`s is the last echo's, so r.errno could never report this.
       const r = await exec(
+        'export PATH=/system/bin:/system/xbin:/vendor/bin; ' +
+        'q() { v=$(eval "$2" 2>/dev/null); case "$v" in "") v="?";; esac; echo "$1=$v"; }; ' +
         'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat | grep -q ENABLED && echo 1 || echo 0)"; ' +
         'echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; ' +
-        'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; ' +
-        'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; ' +
-        'echo "se=$(getenforce 2>/dev/null)";'
+        'n=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null); ' +
+        'case "$n" in ""|*[!0-9]*) n="?";; esac; echo "root_nm=$n"; ' +
+        'q fp "getprop ro.build.fingerprint"; ' +
+        'q se "getenforce"; ' +
+        'echo "done=1";'
       );
       const kv = {};
       r.stdout.split("\n").forEach((l) => { const i = l.indexOf("="); if (i > 0) kv[l.slice(0, i)] = l.slice(i + 1).trim(); });
-      const rootNm = parseInt(kv.root_nm || "0", 10);
+      // -1 is "not measured" and is NEVER treated as zero mounts anywhere below.
+      const rootNm = /^\d+$/.test(kv.root_nm || "") ? parseInt(kv.root_nm, 10) : -1;
       let appNm = 0;
       if (rootNm > 0) {
-        const appOut = ((await exec('su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"')).stdout || "").trim();
+        const appOut = ((await exec(
+          'export PATH=/system/bin:/system/xbin:/vendor/bin; ' +
+          'su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"'
+        )).stdout || "").trim();
         appNm = /^\d+$/.test(appOut) ? parseInt(appOut, 10) : -1;
       }
-      return { ok: r.errno === 0, kv: kv, rootNm: rootNm, appNm: appNm };
+      return { ok: r.errno === 0 && kv.done === "1" && rootNm >= 0, kv: kv, rootNm: rootNm, appNm: appNm };
     })();
     return STEALTH_PROBE;
   }
@@ -180,8 +195,10 @@
     const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
     const fmnt = measured ? bad.length : -1;
 
-    const fp = kv.fp || "";
-    const se = (kv.se || "").trim();
+    // '?' is the probe saying it could not read this, which the "" path already treats as
+    // not-measured. Folding them keeps one meaning for one empty string.
+    const fp = kv.fp === "?" ? "" : (kv.fp || "");
+    const se = kv.se === "?" ? "" : (kv.se || "").trim();
     const keyMatch = fp === "" ? null : fp.match(/test-keys|dev-keys|userdebug|:eng\//);
     const seTell = se !== "" && se !== "Enforcing";
     const tells = [];
@@ -198,7 +215,9 @@
         : noKsud ? { k: "Root · su", v: "not measured", t: "off" }
         : { k: "Root · su", v: "external", t: "off" },
     ];
-    if (rootNm > 0) {
+    if (rootNm < 0) {
+      rows.push({ k: "Real mounts", v: "not measured", t: "off" });
+    } else if (rootNm > 0) {
       rows.push(appNm === 0 ? { k: "Real mounts", v: "root " + rootNm + " · apps 0, hidden", t: "vfs" }
               : appNm > 0 ? { k: "Real mounts", v: "apps see " + appNm + " · VISIBLE", t: "info" }
               : { k: "Real mounts", v: "root " + rootNm + " · app-view n/a", t: "off" });
@@ -247,6 +266,13 @@
         "There are no mounts because there is nothing being served. This card cannot say " +
         "anything about how you look to an app until the engine answers. Open " +
         "<b>Checks</b>.");
+    } else if (!probe.ok) {
+      // Ahead of every "clean" arm on purpose: without this, a probe that read nothing
+      // fell through to "Fully mountless · zero mounts, nothing to hide".
+      say("info", "Posture not measured", "the probe could not read this device",
+        "None of the mount, build-key or SELinux readings on this card ran here, so this " +
+        "says nothing either way - it is not a clean result. This is usually a shell with " +
+        "no <code>PATH</code>. Run <code>nomount check</code> from a terminal.");
     } else if (appNm > 0) {
       say("info", "Mount visible to apps", "uid 2000 sees " + appNm + " nomount_* mount(s)",
         "A live non-root check sees <code>nomount_*</code> mounts. This build is <b>fully " +

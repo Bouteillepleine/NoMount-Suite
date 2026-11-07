@@ -34,7 +34,11 @@ fn unblock_message(target: &str, uid: Option<u32>, existed: bool, unhid: bool) -
 }
 
 fn still_covered_by(entries: &[String], installed: &[(String, u32)], id: u32) -> Option<String> {
-    if blocklist::follow_ksu_denylist() && crate::ksu::uid_should_umount(id) == Some(true) {
+    // Some(reason) means "keep this one hidden". If we cannot tell whether the DenyList is
+    // followed, keeping it is the safe answer -- the alternative is un-hiding on a guess.
+    if blocklist::follow_ksu_denylist().unwrap_or(true)
+        && crate::ksu::uid_should_umount(id) == Some(true)
+    {
         return Some("the KernelSU DenyList".to_string());
     }
     entries
@@ -190,8 +194,15 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
             return rep;
         }
     };
-    let follow_ksu = blocklist::follow_ksu_denylist();
-    if entries.is_empty() && cache.is_empty() && !follow_ksu {
+    // An unreadable config is NOT "stop following the DenyList". Read that way, every
+    // DenyList-derived appid drops out of `desired`, and the retire pass below then
+    // un-hides each one and reports "retired N, failed 0". Treated as unknown instead,
+    // exactly like a DenyList that answered and then stopped.
+    let (follow_ksu, conf_unreadable) = match blocklist::follow_ksu_denylist() {
+        Some(v) => (v, false),
+        None => (false, true),
+    };
+    if entries.is_empty() && cache.is_empty() && !follow_ksu && !conf_unreadable {
         return rep;
     }
     let mut live = nm.uid_list_live().unwrap_or_default();
@@ -201,6 +212,15 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
     let installed = installed.unwrap_or_default();
     if !early && !can_retire {
         rep.failed += 1;
+    }
+    if conf_unreadable {
+        can_retire = false;
+        rep.failed += 1;
+        eprintln!(
+            "nomount: could not read the per-UID settings, so whether the hide list follows \
+             KernelSU's DenyList is unknown - every app already hidden is left hidden, and \
+             nothing is un-hidden this pass"
+        );
     }
     let mut desired: BTreeMap<String, u32> = BTreeMap::new();
 
@@ -351,11 +371,16 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
 }
 
 fn report_ksu_source(nm: &Nm) -> Result<()> {
-    let following = blocklist::follow_ksu_denylist();
+    let setting = blocklist::follow_ksu_denylist();
     println!(
         "follow KernelSU DenyList\t{}",
-        if following { "on" } else { "off" }
+        match setting {
+            Some(true) => "on",
+            Some(false) => "off",
+            None => "unknown - uidhide.conf could not be read",
+        }
     );
+    let following = setting.unwrap_or(false);
     let Some(info) = crate::ksu::info() else {
         println!("KernelSU driver\tno answer - nothing to follow");
         return Ok(());
@@ -704,7 +729,7 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     text,
                 });
             }
-            if blocklist::follow_ksu_denylist() {
+            if blocklist::follow_ksu_denylist().unwrap_or(false) {
                 match blocklist::ksu_denylist(&installed) {
                     Some(hits) => {
                         for (key, uid) in hits {

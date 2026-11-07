@@ -211,15 +211,44 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     unset _ph _ph_rc
 fi
 
+# inotifyd EXECS its handler, so the handler carries the exec bit -- and the installer's
+# modes do not reliably survive it. checkwatch.sh shipped 0644: inotifyd started, stayed
+# resident, wrote its pid, and then failed to exec the handler on every single event, in
+# silence, because the spawn itself had succeeded. Re-assert the bit here the way
+# post-fs-data.sh and metamount.sh already re-assert $BIN's, so a device already in that
+# state heals on its next boot instead of waiting for a reflash.
+#
+# Note what this does NOT do: a liveness check on the spawned pid cannot see that bug,
+# because inotifyd is the process that lives and the handler is what fails later. The
+# -x test is the one that catches it, and it is deterministic.
+nm_watch() {
+    _w_h="$1"; _w_dir="$2"; _w_mask="$3"; _w_label="$4"
+    NM_WATCH_PID=""
+    if [ ! -f "$_w_h" ]; then
+        nmlog "⛔ $_w_label watcher NOT started: $_w_h is missing"
+        return 1
+    fi
+    [ -x "$_w_h" ] || chmod 0755 "$_w_h" 2>/dev/null
+    if [ ! -x "$_w_h" ]; then
+        nmlog "⛔ $_w_label watcher NOT started: $_w_h is not executable and chmod failed"
+        return 1
+    fi
+    inotifyd "$_w_h" "$_w_dir:$_w_mask" >/dev/null 2>&1 &
+    NM_WATCH_PID=$!
+    nmlog "$_w_label watcher started (pid $NM_WATCH_PID)"
+    return 0
+}
+
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
-    inotifyd "$MODDIR/uidwatch.sh" /data/system:cewDMmynd >/dev/null 2>&1 &
-    nmlog "hide-list package watcher started"
+    _watchers=""
+    nm_watch "$MODDIR/uidwatch.sh" /data/system cewDMmynd "hide-list-package" \
+        && _watchers="$_watchers $NM_WATCH_PID=hide-list-package"
     # Started regardless of the knob: uidwatch.sh drops .allowlist events while it is
     # off, so turning it on takes effect without a reboot.
     if [ -d /data/adb/ksu ]; then
-        inotifyd "$MODDIR/uidwatch.sh" /data/adb/ksu:cewDMmynd >/dev/null 2>&1 &
-        nmlog "KernelSU DenyList watcher started"
+        nm_watch "$MODDIR/uidwatch.sh" /data/adb/ksu cewDMmynd "KernelSU-DenyList" \
+            && _watchers="$_watchers $NM_WATCH_PID=KernelSU-DenyList"
     fi
     # Lets the WebUI have a check run OUTSIDE its own context. Its exec inherits the
     # manager app's seccomp filter, which denies setgroups, so four device checks cannot
@@ -228,11 +257,26 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
     if [ -f "$MODDIR/checkwatch.sh" ]; then
         mkdir -p "$NMDIR/request" 2>/dev/null
         chmod 700 "$NMDIR/request" 2>/dev/null
+        # Also clears a request left behind by a watcher that could not exec its handler:
+        # the handler is what deletes it, so a stale one sits there and, because `touch`
+        # on an existing file raises only IN_ATTRIB, no later request matches the cn mask.
         rm -f "$NMDIR/request"/* 2>/dev/null
-        inotifyd "$MODDIR/checkwatch.sh" "$NMDIR/request":cn >/dev/null 2>&1 &
-        echo $! > "$NMDIR/.checkwatch.pid" 2>/dev/null
-        nmlog "check-on-request watcher started (pid $(cat "$NMDIR/.checkwatch.pid" 2>/dev/null))"
+        rm -f "$NMDIR/.checkwatch.pid" 2>/dev/null
+        if nm_watch "$MODDIR/checkwatch.sh" "$NMDIR/request" cn "check-on-request"; then
+            echo "$NM_WATCH_PID" > "$NMDIR/.checkwatch.pid" 2>/dev/null
+            _watchers="$_watchers $NM_WATCH_PID=check-on-request"
+        fi
     fi
+
+    # The fork always succeeds, so inotifyd failing to exec shows only as the child
+    # already being gone. Swept here rather than at each spawn so the intervening work
+    # gives a doomed exec time to land; still a race, so silence here is weaker evidence
+    # than the -x test above, and a complaint is worth believing.
+    for _w in $_watchers; do
+        kill -0 "${_w%%=*}" 2>/dev/null \
+            || nmlog "⛔ ${_w#*=} watcher died immediately after starting (pid ${_w%%=*})"
+    done
+    unset _w _watchers NM_WATCH_PID
 fi
 
 if [ ! -x "$BIN" ]; then

@@ -6,6 +6,7 @@
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/jiffies.h>
+#include <linux/atomic.h>
 
 #include "nm_hide.h"
 #include "nm_maps_spoof.h"
@@ -122,6 +123,44 @@ static bool nm_maps_take(const void *m, dev_t *dev, unsigned long *ino)
 	return got;
 }
 
+/* Did the second probe ever actually fire?
+ *
+ * show_vma_header_prefix() has two callers in fs/proc/task_mmu.c - show_map_vma() and
+ * show_smaps_rollup(). Clang is free to inline it into the hot one and keep an
+ * out-of-line copy for the other: kallsyms_lookup_name() then finds the symbol,
+ * register_kprobe() succeeds, "maps spoof active" prints, and nm_kp_hdr_prefix never
+ * runs for a /proc/<pid>/maps read. Every injected mapping reports its real dev:ino
+ * while the module says the spoof is on. The slot table cannot see it either: a slot
+ * that is never taken is cleared by the staleness reclaim, which is exactly what a
+ * legitimately-reclaimed one looks like.
+ *
+ * This is the same failure already documented for vfs_getattr in nm_ghost_probes.c
+ * ("registered without error and never fired once"), and README.md:71 notes none of
+ * this has run on hardware - so it is the one worth being able to detect from a log.
+ */
+#define NM_MAPS_FIRING_AFTER 64
+static atomic_t nm_maps_noted = ATOMIC_INIT(0);
+static atomic_t nm_maps_fired = ATOMIC_INIT(0);
+static bool nm_maps_firing_settled;
+
+static void nm_maps_check_firing(void)
+{
+	if (READ_ONCE(nm_maps_firing_settled))
+		return;
+	if (atomic_read(&nm_maps_noted) < NM_MAPS_FIRING_AFTER)
+		return;
+
+	/* One-shot either way: once it has fired the question is answered, and once it
+	 * has not the answer will not change on this kernel. */
+	WRITE_ONCE(nm_maps_firing_settled, true);
+	if (atomic_read(&nm_maps_fired) > 0)
+		return;
+	pr_warn("nomount: maps spoof registered but has not fired after %d shadowed "
+		"mapping(s): show_vma_header_prefix is inlined on this kernel, so every "
+		"injected mapping is reporting its real dev:ino in /proc/<pid>/maps\n",
+		NM_MAPS_FIRING_AFTER);
+}
+
 /* show_map_vma(m, vma): the seq_file in x0, the vma in x1. */
 static int nm_kp_map_vma(struct kprobe *p, struct pt_regs *regs)
 {
@@ -148,10 +187,13 @@ static int nm_kp_map_vma(struct kprobe *p, struct pt_regs *regs)
 	was_ino = ino = inode->i_ino;
 	vfs_map_meta_override(inode, &dev, &ino);
 
-	if (dev == was_dev && ino == was_ino)
+	if (dev == was_dev && ino == was_ino) {
 		nm_maps_forget(m);
-	else
+	} else {
 		nm_maps_note(m, dev, ino);
+		atomic_inc(&nm_maps_noted);
+		nm_maps_check_firing();
+	}
 	return 0;
 }
 
@@ -166,6 +208,7 @@ static int nm_kp_hdr_prefix(struct kprobe *p, struct pt_regs *regs)
 	if (!nm_maps_take(m, &dev, &ino))
 		return 0;
 
+	atomic_inc(&nm_maps_fired);
 	regs->regs[5] = (u64)dev;
 	regs->regs[6] = (u64)ino;
 	return 0;

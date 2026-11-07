@@ -750,9 +750,47 @@ pub(crate) fn unmount_before_serving(
         }
         return true;
     }
-    if crate::absorb::umount_detach(target) {
+    // Whatever is mounted here is about to be MNT_DETACHed, which no later pass can undo,
+    // so establish it is the module system's before touching it. Without this, hiding a
+    // path silently destroyed an unrelated mount at the same place -- `whiteout add
+    // /system/etc/hosts` taking down an ad-blocker's bind, with no record of what it was.
+    // absorb proves ownership this way before every unmount it does; this path did not.
+    let depth = match crate::absorb::mounts_here_are_ours(target) {
+        Some((true, n)) => n,
+        Some((false, _)) => {
+            eprintln!(
+                "nomount: {} carries a mount the module system did not make; unmounting it \
+                 would destroy whatever owns it, so this is left unserved",
+                target.display()
+            );
+            return false;
+        }
+        None => {
+            eprintln!(
+                "nomount: could not read the mount table to tell who owns the mount on {}, \
+                 so it is left unserved rather than unmounted on a guess",
+                target.display()
+            );
+            return false;
+        }
+    };
+
+    // Pop exactly the stack that was verified, re-checking each time: one umount2 clears
+    // one mount, and the old single call left a two-deep stack half-popped -- the top one
+    // destroyed, nothing served, and the system in neither the before nor the after state.
+    for _ in 0..depth {
+        if !crate::absorb::still_mounted(target) {
+            break;
+        }
+        if crate::absorb::mounts_here_are_ours(target).map(|(ours, _)| ours) != Some(true) {
+            break;
+        }
+        if !crate::absorb::umount_detach(target) {
+            break;
+        }
         eprintln!("nomount: unmounted {} before serving it", target.display());
     }
+
     let gone = !crate::absorb::still_mounted(target);
     if !gone {
         eprintln!(
@@ -1342,7 +1380,10 @@ pub fn run_mount() -> Result<()> {
             PlanKind::Inject => {}
         }
     }
-    let tmpfs_hidden = crate::absorb::reapply_tmpfs_whiteouts(&nm);
+    // Re-read rather than reusing `mounted`: the apply loop above has been unmounting and
+    // binding, so the snapshot taken before it is stale by exactly the rows that matter.
+    let mounted_now = crate::absorb::mounted_targets().unwrap_or_else(|| mounted.clone());
+    let tmpfs_hidden = crate::absorb::reapply_tmpfs_whiteouts(&nm, &mounted_now);
     let (ksu_umount, _) = crate::bind::register_try_umount();
 
     crate::rulestate::write(&injected_pairs(&plan, &applied_apks));
@@ -2213,9 +2254,16 @@ mod tests {
             r#"grep su_compat "#,
             r#"| grep -q ENABLED && echo 1 || echo 0)"; "#,
             r#"echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; "#,
-            r#"echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; "#,
-            r#"echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; "#,
-            r#"echo "se=$(getenforce 2>/dev/null)""#,
+            // Every reading is marked '?' when it could not be taken, and the run ends
+            // with a trailer: the exit status of a list of `echo`s is the last echo's, so
+            // a probe where nothing resolved still exited 0 and its empty `root_nm` parsed
+            // as zero mounts. Those three pieces are what stop that, so pin them here --
+            // and pin PATH, because an exec with none is how it happened.
+            r#"export PATH=/system/bin:/system/xbin:/vendor/bin; "#,
+            r#"case "$n" in ""|*[!0-9]*) n="?";; esac; echo "root_nm=$n"; "#,
+            r#"q fp "getprop ro.build.fingerprint"; "#,
+            r#"q se "getenforce"; "#,
+            r#"echo "done=1""#,
         ] {
             assert!(PAGE.contains(frag), "index.html's stealth probe lost: {frag:?}");
             assert!(

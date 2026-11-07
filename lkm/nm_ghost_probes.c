@@ -407,6 +407,34 @@ static const char * const nm_gp_surface[] = {
 	"a hidden abstract socket still answers connect() instead of refusing it",
 };
 
+/* Where a probed name is a static inline on some kernels, the out-of-line function the
+ * inline forwards to, which is what kallsyms actually has there. Indexed with nm_gp_krp.
+ *
+ * user_path_at is the live case: include/linux/namei.h defines it as
+ *
+ *     static inline int user_path_at(int dfd, const char __user *name,
+ *                                    unsigned flags, struct path *path)
+ *     { return user_path_at_empty(dfd, name, flags, path, NULL); }
+ *
+ * on 5.4 through 6.6, and only android16-6.12 exports it as a real function. Without the
+ * fallback, register_kretprobe returns -ENOENT on every earlier KMI and the broadest
+ * ghost guard silently never arms -- access(), open(), readlink(), chmod, chown, rename,
+ * truncate, utimes and the four *xattr path entry points all keep resolving hidden paths.
+ *
+ * Safe to share handlers because the first four arguments are identical and in the same
+ * order, and nm_gp_upa_entry reads only regs[3] (struct path *, arg 4 on arm64).
+ */
+static const char * const nm_gp_alt[] = {
+	NULL,			/* do_filp_open */
+	NULL,			/* __arm64_sys_getpriority */
+	NULL,			/* __arm64_sys_setpriority */
+	"user_path_at_empty",	/* user_path_at */
+	NULL,			/* vfs_getattr */
+	NULL,			/* vfs_getattr_nosec */
+	NULL,			/* security_inode_getattr */
+	NULL,			/* unix_find_other */
+};
+
 static bool nm_gp_armed[ARRAY_SIZE(nm_gp_krp)];
 
 int nm_ghost_probes_init(void)
@@ -414,13 +442,31 @@ int nm_ghost_probes_init(void)
 	size_t i;
 	int armed = 0;
 
+	/* A misindexed alias would probe an unrelated function with these handlers, which
+	 * is worse than not probing at all. BUILD_BUG_ON rather than static_assert: the
+	 * compile-test matrix reaches back to 4.9, and static_assert only arrived in 5.1.
+	 */
+	BUILD_BUG_ON(ARRAY_SIZE(nm_gp_alt) != ARRAY_SIZE(nm_gp_krp));
+	BUILD_BUG_ON(ARRAY_SIZE(nm_gp_surface) != ARRAY_SIZE(nm_gp_krp));
+
 	for (i = 0; i < ARRAY_SIZE(nm_gp_krp); i++) {
+		const char *want = nm_gp_krp[i].kp.symbol_name;
 		int rc = register_kretprobe(&nm_gp_krp[i]);
+
+		if (rc && nm_gp_alt[i]) {
+			nm_gp_krp[i].kp.symbol_name = nm_gp_alt[i];
+			rc = register_kretprobe(&nm_gp_krp[i]);
+			if (rc)
+				nm_gp_krp[i].kp.symbol_name = want;
+			else
+				nm_say("nomount: ghost guard: %s is inlined on this kernel; probed %s instead\n",
+					want, nm_gp_alt[i]);
+		}
 
 		if (rc) {
 			nm_gp_armed[i] = false;
 			pr_warn("nomount: ghost guard: cannot probe %s (%d). %s.\n",
-				nm_gp_krp[i].kp.symbol_name, rc, nm_gp_surface[i]);
+				want, rc, nm_gp_surface[i]);
 			continue;
 		}
 		nm_gp_armed[i] = true;

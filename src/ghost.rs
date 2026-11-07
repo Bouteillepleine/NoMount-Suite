@@ -20,6 +20,10 @@ pub struct Summary {
     pub dump_failed: bool,
     pub probe_failed: bool,
     pub cloak_unknown: bool,
+    /// ghostpaths / uidconceal existed but could not be read, so that table was left
+    /// alone rather than replaced with a set we could not build. Stale, still hiding.
+    pub extra_unreadable: bool,
+    pub conceal_unreadable: bool,
 }
 
 impl Summary {
@@ -48,6 +52,18 @@ impl Summary {
                  cloaked - the path table is EMPTY and the existence oracles are open"
                     .into(),
             );
+        }
+        if self.extra_unreadable || self.conceal_unreadable {
+            let which = match (self.extra_unreadable, self.conceal_unreadable) {
+                (true, true) => "ghostpaths and uidconceal",
+                (true, false) => "ghostpaths",
+                _ => "uidconceal",
+            };
+            return Some(format!(
+                "⚠ ghost cloak: could not read {which} - that table was LEFT AS IT WAS rather \
+                 than replaced, so it is whatever the last good sync wrote. Fix the file's \
+                 permissions and re-run `nomount ghost sync`"
+            ));
         }
         let mut parts: Vec<String> = Vec::new();
         if self.rejected > 0 {
@@ -155,16 +171,29 @@ fn expand_ghost_uids(appids: &[u32], users: &[u32]) -> Vec<u32> {
 /// does not serve has nothing to probe.
 pub const EXTRA_PATHS: &str = "/data/adb/nomount/ghostpaths";
 
-fn extra_paths() -> Vec<String> {
-    match std::fs::read_to_string(EXTRA_PATHS) {
-        // '@name' is an abstract socket, not a path; the kernel takes both in
-        // this list and only the socket guard ever looks the '@' form up.
-        Ok(raw) => parse_conceal(&raw)
+/// A cloak list from disk, or `None` when the file is there and could not be read.
+///
+/// The two must stay apart. An empty set reaches `push` as a table REPLACEMENT, and when
+/// there is nothing at all to send `push` issues `-`, which flushes the kernel's table
+/// outright -- so folding a read error into "empty" turns one unreadable file into a
+/// silent un-cloaking. Never created is the ordinary case and really does mean empty.
+fn read_list(path: &str) -> Option<Vec<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Some(parse_conceal(&raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => None,
+    }
+}
+
+fn extra_paths() -> Option<Vec<String>> {
+    // '@name' is an abstract socket, not a path; the kernel takes both in this list
+    // and only the socket guard ever looks the '@' form up.
+    Some(
+        read_list(EXTRA_PATHS)?
             .into_iter()
             .filter(|p| p.starts_with('/') || p.starts_with('@'))
             .collect(),
-        Err(_) => Vec::new(),
-    }
+    )
 }
 
 pub const CONCEAL_PATH: &str = "/data/adb/nomount/uidconceal";
@@ -177,11 +206,8 @@ fn parse_conceal(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn conceal_entries() -> Vec<String> {
-    match std::fs::read_to_string(CONCEAL_PATH) {
-        Ok(raw) => parse_conceal(&raw),
-        Err(_) => Vec::new(),
-    }
+fn conceal_entries() -> Option<Vec<String>> {
+    read_list(CONCEAL_PATH)
 }
 
 /// Resolve the conceal list to every raw uid the kernel will be asked about.
@@ -189,14 +215,16 @@ fn conceal_entries() -> Vec<String> {
 /// Expanded through the same path as the hide list: getpriority(PRIO_USER) is
 /// asked about a raw uid, so an appid-only table would leave the app visible in
 /// every secondary profile and in its sandbox.
-fn conceal_uids() -> Vec<u32> {
-    let entries = conceal_entries();
+/// `None` means the conceal set could not be resolved -- either the list itself was
+/// unreadable or the package map was. An empty `Some` is a real "nothing to conceal".
+fn conceal_uids() -> Option<Vec<u32>> {
+    let entries = conceal_entries()?;
     if entries.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    let Some(installed) = crate::blocklist::installed_packages() else {
-        return Vec::new();
-    };
+    // There ARE entries and we cannot map them to uids. Reporting that as an empty set
+    // would flush the kernel's conceal table and quietly turn getpriority concealment off.
+    let installed = crate::blocklist::installed_packages()?;
     let mut appids: Vec<u32> = Vec::new();
     for e in &entries {
         if let Ok(hits) = crate::blocklist::expand(e, &installed) {
@@ -210,7 +238,7 @@ fn conceal_uids() -> Vec<u32> {
     }
     appids.sort_unstable();
     appids.dedup();
-    expand_ghost_uids(&appids, &device_user_ids())
+    Some(expand_ghost_uids(&appids, &device_user_ids()))
 }
 
 fn ghost_uids(live: &[u32]) -> Vec<u32> {
@@ -407,17 +435,34 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
     };
     out.ghostable = ghostable.len();
 
-    let mut paths = ghostable;
-    for e in extra_paths() {
-        if !paths.contains(&e) {
-            paths.push(e);
+    // An unreadable list is not an empty one. `push` sends the first chunk as `=`, which
+    // REPLACES the kernel's table, and sends `-` outright when there is nothing to send --
+    // so pushing a set we failed to build is what un-cloaks the device. Skip the push
+    // instead: the kernel keeps the table it already has, which is stale but still hiding,
+    // and say so rather than reporting an ordinary success.
+    match extra_paths() {
+        Some(extra) => {
+            let mut paths = ghostable;
+            for e in extra {
+                if !paths.contains(&e) {
+                    paths.push(e);
+                }
+            }
+            push(nm, 'p', &paths, &mut out);
         }
+        None => out.extra_unreadable = true,
     }
-    push(nm, 'p', &paths, &mut out);
+
     let uid_strs: Vec<String> = uids.iter().map(u32::to_string).collect();
     push(nm, 'u', &uid_strs, &mut out);
-    let conceal: Vec<String> = conceal_uids().iter().map(u32::to_string).collect();
-    push(nm, 'c', &conceal, &mut out);
+
+    match conceal_uids() {
+        Some(conceal) => {
+            let strs: Vec<String> = conceal.iter().map(u32::to_string).collect();
+            push(nm, 'c', &strs, &mut out);
+        }
+        None => out.conceal_unreadable = true,
+    }
     Ok(Some(out))
 }
 
@@ -481,6 +526,60 @@ pub fn sync_after_pass(nm: &Nm) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreadable_cloak_list_is_not_an_empty_one() {
+        // Thread id as well as pid: tests share a process and run in parallel, and
+        // absent_to_distinguishes_present_from_missing builds "nm-ghost-<pid>" too -- with
+        // the same name this test's remove_dir_all deleted that one's fixture mid-run.
+        let d = std::env::temp_dir().join(format!(
+            "nm-ghost-readlist-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+
+        // Never created: a real "nothing to cloak".
+        let missing = d.join("absent");
+        assert_eq!(read_list(missing.to_str().unwrap()), Some(Vec::new()));
+
+        // Present and readable, including the comment/blank handling.
+        let ok = d.join("list");
+        std::fs::write(&ok, "# note\n\n/dev/socket/adbd\n@abstract\n").unwrap();
+        assert_eq!(
+            read_list(ok.to_str().unwrap()),
+            Some(vec!["/dev/socket/adbd".to_string(), "@abstract".to_string()])
+        );
+
+        // Present and unreadable. A directory where a file belongs is the portable way
+        // to force a non-NotFound error -- the real cases are EACCES and a bad label,
+        // which a test running as root could not reproduce anyway.
+        let unreadable = d.join("wedged");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert_eq!(
+            read_list(unreadable.to_str().unwrap()),
+            None,
+            "an unreadable list must not read as empty: push() turns an empty set into a \
+             table flush, which un-cloaks the device"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_unreadable_list_is_reported_rather_than_passing_as_a_clean_sync() {
+        let s = Summary { conceal_unreadable: true, ..Summary::default() };
+        let w = s.warning().expect("an unreadable conceal list must warn");
+        assert!(w.contains("uidconceal"), "{w}");
+        assert!(w.contains("LEFT AS IT WAS"), "{w}");
+
+        let s = Summary { extra_unreadable: true, ..Summary::default() };
+        assert!(s.warning().unwrap().contains("ghostpaths"));
+
+        // And the ordinary pass still says nothing.
+        assert!(Summary { paths: 3, uids: 2, ..Summary::default() }.warning().is_none());
+    }
 
     /// GH_MAX_UIDS in the kernel's ghost.c. Nothing in the production path trims to it: a
     /// cloak that normalises the uid dedupes the expansion as it stores it (measured on

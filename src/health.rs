@@ -232,40 +232,39 @@ fn read_cmd(prog: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-fn shq(path: &str) -> String {
-    format!("'{}'", path.replace('\'', "'\\''"))
+/// One answer per sampled path, from inside the probe child.
+const PR_AGREE: u32 = 0;
+const PR_DIFFER: u32 = 1;
+const PR_NOSTAT: u32 = 2;
+const PR_UNUSED: u32 = 3;
+
+/// An installed app's uid the hide list does not cover, lowest first for a stable pick.
+///
+/// The canary asks whether a NORMAL app sees what root sees. uid 2000 is shell, which
+/// answers a different question: another uid band, another SELinux domain, and `su` is
+/// ksud, which applies its own per-uid profile to the child. A divergence that hit
+/// untrusted_app while shell agreed with root read as `consistency=ok`.
+///
+/// This still drops uid only -- the child keeps our SELinux domain, so it is not a full
+/// untrusted_app probe. That is the right trade here: the engine keys its hide decision
+/// on the uid (`nomount_is_uid_blocked(current_uid())`), so uid is the axis this canary
+/// is about, and `others_can_search_to` already keeps the sample to paths DAC lets an
+/// app reach.
+fn probe_app_uid(live_hidden: &[u32]) -> Option<u32> {
+    pick_probe_uid(&crate::blocklist::installed_packages()?, live_hidden)
 }
 
-fn app_sizes(uid: u32, paths: &[&str]) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    if paths.is_empty() {
-        return out;
-    }
-    let args = paths.iter().map(|p| shq(p)).collect::<Vec<_>>().join(" ");
-    // Absolute `stat`, and a PATH of our own: ksud's `su` gives the child
-    // `PATH=/data/adb/ksu/bin` alone when the caller's environment is empty, which is
-    // how the manager's WebUI execs us - a bare `stat` then exits 127 with no output and
-    // the canary reads as "probe unavailable" when nothing is actually wrong.
-    let Ok(o) = Command::new("/system/bin/su")
-        .env("PATH", "/system/bin:/system/xbin:/vendor/bin")
-        .args([
-            &uid.to_string(),
-            "-c",
-            &format!("/system/bin/stat -c '%n %s' {args} 2>/dev/null"),
-        ])
-        .output()
-    else {
-        return out;
-    };
-    for line in String::from_utf8_lossy(&o.stdout).lines() {
-        let Some(cut) = line.rfind(' ') else { continue };
-        let (name, size) = (&line[..cut], line[cut + 1..].trim());
-        if size.is_empty() || !size.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        out.insert(name.to_string(), size.to_string());
-    }
-    out
+fn pick_probe_uid(installed: &[(String, u32)], live_hidden: &[u32]) -> Option<u32> {
+    // Compare appids, not raw uids: the same app in a work profile is u10_aNNN, a
+    // different raw uid for the same appid, and the engine hides by normalised appid.
+    let hidden: std::collections::HashSet<u32> =
+        live_hidden.iter().map(|u| crate::blocklist::appid(*u)).collect();
+    installed
+        .iter()
+        .map(|(_, uid)| *uid)
+        .filter(|u| *u >= crate::blocklist::FIRST_APP_APPID)
+        .filter(|u| !hidden.contains(&crate::blocklist::appid(*u)))
+        .min()
 }
 
 fn count_mounts_split() -> Option<(usize, usize)> {
@@ -292,8 +291,6 @@ fn count_mounts_split() -> Option<(usize, usize)> {
     Some((total, by_design))
 }
 
-const PROBE_UID: u32 = 2000;
-
 fn others_can_search_to(target: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     target.ancestors().skip(1).filter(|d| !d.as_os_str().is_empty()).all(|d| {
@@ -301,14 +298,12 @@ fn others_can_search_to(target: &Path) -> bool {
     })
 }
 
-fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<bool>) -> String {
-    match probe_uid_hidden {
-        Some(true) => return "unchecked:probe-uid-hidden".to_string(),
-        None => return "unchecked:probe-uid-unknown".to_string(),
-        Some(false) => {}
-    }
-    // `su <uid>` drops uid in userspace, so an inherited app seccomp filter kills it the
-    // same way it kills an in-process probe. Say so instead of spawning a doomed child.
+fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> String {
+    let Some(probe_uid) = probe_uid else {
+        return "unchecked:no-unhidden-app".to_string();
+    };
+    // Dropping uid needs setgroups/setresuid, which an inherited app filter kills with
+    // SIGSYS. Ask before forking rather than leaving a tombstone per probe.
     if crate::audit::own_seccomp_mode().is_some_and(|m| m != 0) {
         return "unchecked:seccomp-filtered".to_string();
     }
@@ -352,24 +347,61 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid_hidden: Option<boo
         return "unchecked".to_string();
     }
 
+    // Slot 0 is the canary: a plain ROM file with no rule on it. If the child cannot stat
+    // THAT, the probe itself is what failed, not the injection.
     const CANARY: &str = "/system/build.prop";
-    let mut batch: Vec<&str> = vec![CANARY];
-    batch.extend(sample.iter().filter_map(|t| t.to_str()));
-    let seen = app_sizes(PROBE_UID, &batch);
-    if !seen.contains_key(CANARY) {
+    const SLOTS: usize = BUDGET + 1;
+
+    let mut names: Vec<&str> = vec![CANARY];
+    names.extend(sample.iter().filter_map(|t| t.to_str()));
+
+    // Build the CStrings and read root's sizes BEFORE forking: the child then does no
+    // allocation at all, just stat(2) into a fixed array. Anything that can be done
+    // before the fork belongs before it.
+    let mut cpaths: Vec<std::ffi::CString> = Vec::new();
+    let mut root_sizes: Vec<u64> = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
+    for n in names.iter().take(SLOTS) {
+        let (Ok(c), Ok(m)) = (std::ffi::CString::new(*n), fs::metadata(n)) else { continue };
+        cpaths.push(c);
+        root_sizes.push(m.len());
+        kept.push(n);
+    }
+    if kept.first() != Some(&CANARY) {
+        return "unchecked:canary-unreadable".to_string();
+    }
+
+    let answers = match crate::audit::probe_as_uid(probe_uid, move || {
+        let mut out = [PR_UNUSED; SLOTS];
+        for i in 0..cpaths.len().min(SLOTS) {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            out[i] = if unsafe { libc::stat(cpaths[i].as_ptr(), &mut st) } != 0 {
+                PR_NOSTAT
+            } else if st.st_size as u64 == root_sizes[i] {
+                PR_AGREE
+            } else {
+                PR_DIFFER
+            };
+        }
+        out
+    }) {
+        Ok(a) => a,
+        Err(_) => return "unchecked:probe-unavailable".to_string(),
+    };
+
+    if answers[0] != PR_AGREE {
+        // The app could not read a file with no rule on it, so nothing below means
+        // anything -- do not report a mismatch the injection did not cause.
         return "unchecked:probe-unavailable".to_string();
     }
 
     let mut checked = 0;
-    for target in sample {
-        let root = fs::metadata(target).ok().map(|m| m.len().to_string());
-        let Some(root_sz) = root else { continue };
-        let Some(target) = target.to_str() else { continue };
-        checked += 1;
-        let app_sz = seen.get(target).map(String::as_str).unwrap_or("");
-        if app_sz != root_sz {
-            return format!("mismatch:{target}(root={root_sz} app={})",
-                if app_sz.is_empty() { "ENOENT" } else { app_sz });
+    for (i, target) in kept.iter().enumerate().skip(1) {
+        match answers[i] {
+            PR_AGREE => checked += 1,
+            PR_DIFFER => return format!("mismatch:{target}(size differs for uid {probe_uid})"),
+            PR_NOSTAT => return format!("mismatch:{target}(ENOENT for uid {probe_uid})"),
+            _ => {}
         }
     }
     if checked == 0 {
@@ -470,10 +502,10 @@ pub fn gather() -> Fingerprint {
         Ok(v) => v.len().to_string(),
         Err(_) => "unknown".to_string(),
     };
-    let probe_hidden = live
-        .as_ref()
-        .map(|v| v.iter().any(|u| crate::blocklist::appid(*u) == PROBE_UID))
-        .ok();
+    // Chosen from the live hide list so the canary never probes as an app we hide from:
+    // that app is SUPPOSED to see something different, and measuring it would report the
+    // engine working correctly as an inconsistency.
+    let probe_uid = live.as_ref().ok().and_then(|v| probe_app_uid(v));
     let guard = if crate::mount::guard_tripped() { "tripped" } else { "armed" };
     let split = count_mounts_split();
     Fingerprint {
@@ -489,7 +521,7 @@ pub fn gather() -> Fingerprint {
         consistency: if listed.is_err() {
             "unchecked:engine-list-failed".to_string()
         } else {
-            consistency_probe(&live_rules, probe_hidden)
+            consistency_probe(&live_rules, probe_uid)
         },
         served_matches_rule: if listed.is_err() {
             "unchecked:engine-list-failed".to_string()
@@ -978,6 +1010,38 @@ fn redact_app_paths(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_canary_probes_as_a_real_unhidden_app_never_shell() {
+        let pkgs = |v: &[(&str, u32)]| -> Vec<(String, u32)> {
+            v.iter().map(|(p, u)| ((*p).to_string(), *u)).collect()
+        };
+        let installed = pkgs(&[
+            ("android", 1000),
+            ("com.android.shell", 2000),
+            ("com.a", 10050),
+            ("com.b", 10120),
+        ]);
+
+        // Never a system uid: shell is a different uid band AND a different domain, so
+        // "shell agrees with root" was never the question this canary asks.
+        assert_eq!(pick_probe_uid(&installed, &[]), Some(10050));
+
+        // An app we hide from is SUPPOSED to see something different; probing as one
+        // would report the engine working correctly as an inconsistency.
+        assert_eq!(pick_probe_uid(&installed, &[10050]), Some(10120));
+
+        // Hidden in a work profile is the same appid, so it must be excluded too.
+        assert_eq!(
+            pick_probe_uid(&installed, &[1010050]),
+            Some(10120),
+            "appid must be compared after normalising the user id out"
+        );
+
+        // Everything hidden: say so rather than falling back to a system uid.
+        assert_eq!(pick_probe_uid(&installed, &[10050, 10120]), None);
+        assert_eq!(pick_probe_uid(&pkgs(&[("android", 1000)]), &[]), None);
+    }
 
     #[test]
     fn a_version_that_went_backwards_is_drift_not_context() {

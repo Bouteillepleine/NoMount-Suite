@@ -613,6 +613,32 @@ pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
     Some(read_mountinfo(MOUNTINFO).ok()?.into_iter().map(|r| r.target).collect())
 }
 
+/// Is every mount currently at `target` one the module system put there?
+///
+/// `Some(false)` means at least one is not, and `None` means the question could not be
+/// answered -- neither is a licence to unmount. A source under /data/adb is a module tree
+/// or the Suite's own state; anything else is the ROM's, or another tool's, and
+/// MNT_DETACH on it is both silent and irreversible until reboot.
+///
+/// Returns the row count so a caller can pop a stack without over-popping: unmounting
+/// "until it is gone" would take down whatever a concurrent mount put there in between.
+pub(crate) fn mounts_here_are_ours(target: &Path) -> Option<(bool, usize)> {
+    ownership_of(&read_mountinfo(MOUNTINFO).ok()?, target)
+}
+
+fn ownership_of(rows: &[MountRow], target: &Path) -> Option<(bool, usize)> {
+    let roots = fs_roots(rows);
+    let here: Vec<&MountRow> = rows.iter().filter(|r| r.target == target).collect();
+    if here.is_empty() {
+        return None;
+    }
+    // Every row, not just the top one: popping the stack reaches all of them.
+    let ours = here
+        .iter()
+        .all(|r| source_of(r, &roots).is_some_and(|s| s.starts_with("/data/adb")));
+    Some((ours, here.len()))
+}
+
 pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
     read_absorbed_pairs().unwrap_or_default()
 }
@@ -1455,7 +1481,15 @@ fn set_absorbed_tmpfs(entries: &[(PathBuf, String)]) {
     }
 }
 
-pub fn reapply_tmpfs_whiteouts(nm: &Nm) -> u32 {
+/// `mounted` is the live mount-point set, so this pass obeys the same rule as every other
+/// whiteout in `run_mount`: never hide a path that still carries a mount. It used to call
+/// `nm.whiteout` straight after `validate`, with no mount check at all -- and whiteouting
+/// over a live tmpfs leaves its row in every app's mountinfo with no path resolving to it,
+/// which is exactly the residue the rest of this file exists to avoid.
+pub fn reapply_tmpfs_whiteouts(
+    nm: &Nm,
+    mounted: &std::collections::HashSet<PathBuf>,
+) -> u32 {
     let mut n = 0u32;
     let record = match read_absorbed_tmpfs() {
         Ok(v) => v,
@@ -1471,6 +1505,10 @@ pub fn reapply_tmpfs_whiteouts(nm: &Nm) -> u32 {
     for (t, _) in record {
         if crate::whiteout::validate(&t.to_string_lossy()).is_err() {
             eprintln!("nomount: skipping invalid ROM-tmpfs entry {}", t.display());
+            continue;
+        }
+        if !crate::mount::unmount_before_serving(mounted, &t) {
+            failed += 1;
             continue;
         }
         if let Err(e) = nm.whiteout(&t) {
@@ -2127,6 +2165,51 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mount_the_module_system_did_not_make_is_never_ours_to_unmount() {
+        // /data is the fs root for 254:6, so a row's `root` field resolves against it.
+        let mi = concat!(
+            "20 1 254:6 / /data rw - ext4 /dev/block/dm-9 rw\n",
+            // a module's own bind -- ours
+            "40 20 254:6 /adb/modules/mymod/system/etc/hosts /system/etc/hosts rw - ext4 /dev/block/dm-9 rw\n",
+            // an ad-blocker binding from its own data dir -- NOT ours
+            "41 20 254:6 /adb/../misc/adaway/hosts /system/etc/motd rw - ext4 /dev/block/dm-9 rw\n",
+            // something outside /data/adb entirely -- NOT ours
+            "42 20 254:6 /local/tmp/hosts /system/etc/issue rw - ext4 /dev/block/dm-9 rw\n",
+        );
+        let rows = parse_mountinfo_bytes(mi.as_bytes());
+
+        assert_eq!(
+            ownership_of(&rows, Path::new("/system/etc/hosts")),
+            Some((true, 1)),
+            "a bind whose source is a module tree is the module system's"
+        );
+        assert_eq!(
+            ownership_of(&rows, Path::new("/system/etc/issue")),
+            Some((false, 1)),
+            "a source outside /data/adb must never be unmounted on our behalf"
+        );
+        // Nothing mounted here at all: "cannot tell" rather than "yes".
+        assert_eq!(ownership_of(&rows, Path::new("/system/etc/nothing")), None);
+    }
+
+    #[test]
+    fn a_stack_is_ours_only_if_every_row_in_it_is() {
+        // Two mounts at one path: ours on the bottom, a foreign one stacked on top. The
+        // old code popped exactly one, which would have destroyed the foreign mount.
+        let mi = concat!(
+            "20 1 254:6 / /data rw - ext4 /dev/block/dm-9 rw\n",
+            "40 20 254:6 /adb/modules/mymod/system/etc/hosts /system/etc/hosts rw - ext4 /dev/block/dm-9 rw\n",
+            "41 20 254:6 /local/tmp/hosts /system/etc/hosts rw - ext4 /dev/block/dm-9 rw\n",
+        );
+        let rows = parse_mountinfo_bytes(mi.as_bytes());
+        assert_eq!(
+            ownership_of(&rows, Path::new("/system/etc/hosts")),
+            Some((false, 2)),
+            "one foreign row in the stack makes the whole target untouchable"
+        );
+    }
 
     #[test]
     fn only_an_already_injected_mount_may_be_unmounted_in_another_namespace() {

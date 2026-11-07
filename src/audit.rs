@@ -17,8 +17,13 @@ fn pass(name: &'static str, evidence: String) -> Check {
 fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Fail, evidence).oracle(oracle)
 }
+/// A tell the audit MEASURED. Every call site is the else-branch of a probe, so it
+/// fires only on a positive hit -- which must read as attention, not as info. It stays
+/// out of `open_failures()` so the exit code is unchanged; boot scripts branch on that.
+/// By-design arms (the two `N_ZERO_MOUNT` ones) build their own `Verdict::Note` and are
+/// deliberately not routed through here.
 fn soft(name: &'static str, evidence: String, oracle: &'static str) -> Check {
-    chk(name, Verdict::Note, evidence).oracle(oracle)
+    chk(name, Verdict::Warn, evidence).oracle(oracle)
 }
 fn na(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::NotApplicable, evidence)
@@ -258,9 +263,16 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
     Some(out)
 }
 
-fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
+/// The live rule set, plus the number of non-blank lines the parser could not read.
+///
+/// `parse_list` drops those silently, which made a listing whose grammar the engine had
+/// changed come back SHORT rather than unreadable -- every rule-dependent check below then
+/// took its "no live rules" branch, reported N/A, and the report read `clean` on a device
+/// serving hundreds of rules. The count has to come out with the rules so the caller can
+/// say so. `doctor.rs` has used `parse_list_counted` for this reason since it was added.
+fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>, usize)> {
     let listed = Nm::new().list().ok()?;
-    let rules = crate::nm::parse_list(&listed);
+    let (rules, unread) = crate::nm::parse_list_counted(&listed);
     let targets = rules
         .iter()
         .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
@@ -278,7 +290,7 @@ fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
         .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
         .map(|r| r.target.clone())
         .collect();
-    Some((targets, dirs, all_targets))
+    Some((targets, dirs, all_targets, unread))
 }
 
 fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
@@ -1658,7 +1670,7 @@ fn xattr_verdict(who: &str, files: usize, leaked: u32, inverse: u32, denied: u32
 }
 
 pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
-    let Some((targets, engine_dirs, all_inject_targets)) = live_rules() else {
+    let Some((targets, engine_dirs, all_inject_targets, unread_rules)) = live_rules() else {
         let live = check_engine_live();
         let answered = live.verdict != Verdict::Fail;
         let mut checks = vec![live];
@@ -1693,7 +1705,7 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         return (checks, None, None);
     };
     let parents = parents_of(&targets);
-    let checks = vec![
+    let mut checks = vec![
         check_engine_live(),
         check_zero_mount(),
         check_surfaces(),
@@ -1708,6 +1720,28 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         check_no_rom_tmpfs(),
         check_no_foreign_rom_mount(),
     ];
+    if unread_rules > 0 {
+        // The checks above ran, but over a rule set we know is short, so a PASS from any of
+        // them covers only what parsed. This row is what stops the whole report settling on
+        // "clean": one Unmeasured makes Tally::complete() false, and the headline becomes
+        // "not fully measured" instead.
+        checks.push(
+            unmeasured(
+                N_RULE_DUMP,
+                format!(
+                    "{unread_rules} line(s) of the engine's rule list could not be read, so \
+                     the {} check(s) that read live rules saw an incomplete set",
+                    RULE_DEPENDENT.len()
+                ),
+            )
+            .meaning(
+                "The engine listed its rules and some lines were in a shape this build does \
+                 not know -- usually an engine newer than the Suite. Rules missing from the \
+                 list look exactly like rules that went away, so nothing below that counts \
+                 rules is a clean result. Update the Suite to match the engine.",
+            ),
+        );
+    }
     (checks, Some(targets.len()), Some(parents.len()))
 }
 
@@ -1984,12 +2018,65 @@ mod tests {
     }
 
     #[test]
-    fn an_unprobed_tell_is_a_note_and_keeps_its_oracle() {
+    fn a_rule_list_that_did_not_fully_parse_cannot_report_clean() {
+        // The engine answers, so `nm list` succeeds and the "would not list its rules" arm
+        // never fires -- but lines the parser cannot read are dropped, and a rule missing
+        // from the list is indistinguishable from a rule that went away. Every
+        // RULE_DEPENDENT check then took its vacuous branch and the report read `clean` on
+        // a device serving hundreds of rules.
+        let (rules, unread) = crate::nm::parse_list_counted(
+            "/a -> /b\n!! not a rule line !!\n/c (virtual dir)\n\n",
+        );
+        assert_eq!(rules.len(), 2);
+        assert_eq!(unread, 1, "a line the parser could not read must be counted, not dropped");
+
+        // One Unmeasured row is the whole guardrail: it makes complete() false, so the
+        // ladder in check.rs can never fall through to "clean".
+        let row = unmeasured(N_RULE_DUMP, "1 line(s) ... could not be read".into());
+        assert!(!crate::check::Tally::of(std::slice::from_ref(&row)).complete());
+        let r = crate::check::Report {
+            cache_kept: None,
+            ts: 0,
+            sections: vec![crate::check::Section::Device],
+            engine: Some(34),
+            rules: Some(0),
+            directories: Some(0),
+            facts: Vec::new(),
+            checks: vec![row, pass(N_SURFACES, "none".into())],
+        };
+        assert_ne!(r.verdict(), "clean", "a short rule list must never read as clean");
+        assert!(r.verdict().contains("not fully measured"), "{}", r.verdict());
+
+        // And pin the call itself: live_rules() going back to the uncounted parser is
+        // exactly the regression, and it is invisible at runtime.
+        let src = include_str!("audit.rs");
+        let body = &src[src.find("fn live_rules(").expect("live_rules exists")..];
+        let body = &body[..body.find("\n}\n").expect("live_rules has an end")];
+        assert!(
+            body.contains("parse_list_counted("),
+            "live_rules must keep the dropped-line count"
+        );
+        assert!(
+            !body.contains("crate::nm::parse_list("),
+            "live_rules must not use the uncounted parser"
+        );
+    }
+
+    #[test]
+    fn a_measured_tell_is_a_warning_and_keeps_its_oracle() {
+        // This pinned NOTE until 1.3.209. Every soft() site is a probe's else-branch and
+        // passes measured evidence, so grading it "info" let a report that had just named
+        // a live oracle still read `verdict: clean`.
         let s = soft(N_INODE_BAND, "evidence".into(), "the recipe");
-        assert_eq!(s.verdict.tag(), "NOTE", "a tell nothing probes must not read as attention");
-        assert_eq!(s.verdict.severity(), "info");
+        assert_eq!(s.verdict.tag(), "WARN", "a tell the audit measured must read as attention");
+        assert_eq!(s.verdict.severity(), "attention");
         assert_eq!(s.oracle.as_deref(), Some("the recipe"));
-        assert_ne!(s.verdict.tag(), Verdict::Warn.tag());
+        assert_ne!(s.verdict.tag(), Verdict::Note.tag());
+        assert_eq!(
+            crate::check::Tally::of(std::slice::from_ref(&s)).open_failures(),
+            0,
+            "a measured tell must not change the exit code"
+        );
     }
 
     #[test]
@@ -2092,7 +2179,7 @@ mod tests {
         assert_eq!(overlay_dir_verdict(1, 0, &[], &[]).verdict.tag(), "PASS");
         assert_eq!(overlay_dir_verdict(0, 0, &[], &[]).verdict.tag(), "N/A");
         let hit = vec!["/product/overlay/V ino=83232001 (stock max here 26)".to_string()];
-        assert_eq!(overlay_dir_verdict(1, 0, &hit, &off).verdict.tag(), "NOTE");
+        assert_eq!(overlay_dir_verdict(1, 0, &hit, &off).verdict.tag(), "WARN");
         assert_eq!(
             overlay_dir_verdict(2, 1, &[], &[]).evidence,
             "2 overlay dir(s) clean, but 1 could not be read and were not checked"
@@ -2130,12 +2217,12 @@ mod tests {
     fn a_measured_xattr_disagreement_is_reported_even_when_nothing_was_hidden() {
         let who = "uid 10384 (hidden)";
         let c = xattr_verdict(who, 40, 0, 3, 0);
-        assert_eq!(c.verdict.tag(), "NOTE", "{}", c.evidence);
+        assert_eq!(c.verdict.tag(), "WARN", "{}", c.evidence);
         assert!(c.evidence.contains("3 of 40"), "{}", c.evidence);
 
         assert_eq!(xattr_verdict(who, 40, 0, 0, 0).verdict.tag(), "UNMEASURED");
         assert_eq!(xattr_verdict(who, 40, 0, 0, 5).verdict.tag(), "PASS");
-        assert_eq!(xattr_verdict(who, 40, 0, 2, 5).verdict.tag(), "NOTE");
+        assert_eq!(xattr_verdict(who, 40, 0, 2, 5).verdict.tag(), "WARN");
         assert_eq!(xattr_verdict(who, 40, 1, 2, 5).verdict.tag(), "FAIL");
     }
 
