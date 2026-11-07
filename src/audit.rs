@@ -276,6 +276,11 @@ struct LiveRules {
     engine_dirs: Vec<PathBuf>,
     /// Inject targets for every uid, not just 0.
     all_inject_targets: Vec<PathBuf>,
+    /// Where each uid-0 Inject target is served FROM. A check that wants to know whether
+    /// the engine is actually serving a module's bytes has to compare against this; root's
+    /// view of the target answers a different question, because a rule that is live but
+    /// ineffective serves the stock file to root too.
+    inject_sources: std::collections::HashMap<PathBuf, PathBuf>,
     /// Non-blank lines of the engine's listing the parser could not read.
     unread: usize,
 }
@@ -300,7 +305,18 @@ fn live_rules() -> Option<LiveRules> {
         .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
         .map(|r| r.target.clone())
         .collect();
-    Some(LiveRules { targets, engine_dirs: dirs, all_inject_targets: all_targets, unread })
+    let inject_sources = rules
+        .iter()
+        .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
+        .filter_map(|r| r.source.as_ref().map(|s| (r.target.clone(), s.clone())))
+        .collect();
+    Some(LiveRules {
+        targets,
+        engine_dirs: dirs,
+        all_inject_targets: all_targets,
+        inject_sources,
+        unread,
+    })
 }
 
 fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
@@ -1352,7 +1368,10 @@ fn size_and_ends(mut f: fs::File) -> Option<(u64, Vec<u8>)> {
     Some((len, bytes))
 }
 
-fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
+fn check_pm_apks_open_when_hidden(
+    targets: &[PathBuf],
+    sources: &std::collections::HashMap<PathBuf, PathBuf>,
+) -> Check {
     const NAME: &str = N_PM_OPEN;
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
     if apks.is_empty() {
@@ -1375,13 +1394,33 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         return na(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()))
             .meaning("You have not hidden any apps yet, so there is nothing to test here. Hide one and this check starts running.");
     };
+    // Read the rule's SOURCE, not root's view of the target.
+    //
+    // `ours` used to be the target opened as root, and the child's read was compared
+    // against that -- so a rule that is live but ineffective, where the engine holds it
+    // and serves the ROM's original to EVERY caller, matched and passed. The text then
+    // claimed the app "gets a file whose first and last 4 KiB match your module's" on the
+    // strength of having matched root's copy, which this check never established was the
+    // module's. Comparing against the file the rule names answers the question asked.
     let readable: Vec<(&PathBuf, (u64, Vec<u8>))> = apks
         .iter()
-        .filter_map(|p| fs::File::open(p).ok().and_then(size_and_ends).map(|s| (*p, s)))
+        .filter_map(|p| {
+            let src = sources.get(p.as_path())?;
+            fs::File::open(src).ok().and_then(size_and_ends).map(|s| (*p, s))
+        })
         .collect();
     if readable.is_empty() {
-        return unmeasured(NAME, format!("{} PM-published file rule(s), none readable as root", apks.len()))
-            .meaning("None of the published files could be opened even as root, so the question this check asks could not be put.");
+        return unmeasured(
+            NAME,
+            format!(
+                "{} PM-published file rule(s), none whose source could be read as root",
+                apks.len()
+            ),
+        )
+        .meaning(
+            "None of the files these rules serve FROM could be opened even as root, so there \
+             was nothing to compare the app's read against and the question could not be put.",
+        );
     }
 
     let counts = probe_as_uid(appid, || {
@@ -1424,13 +1463,14 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             NAME,
             format!(
                 "{who} opened all {tested} PM-published rule target(s): same size, first and \
-                 last 4 KiB as the copy we serve"
+                 last 4 KiB as the file each rule serves from"
             ),
         )
         .meaning(
             "A hidden app can still open every file Android told it about, and gets a file of \
-             the same size whose first and last 4 KiB match your module's. This is what stops \
-             hiding from crashing apps.",
+             the same size whose first and last 4 KiB match the module's own copy -- compared \
+             against the file the rule names, not against what root happens to see at that \
+             path. This is what stops hiding from crashing apps.",
         );
     }
     if denied == 0 {
@@ -1698,8 +1738,13 @@ fn xattr_verdict(who: &str, files: usize, leaked: u32, inverse: u32, denied: u32
 }
 
 pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
-    let Some(LiveRules { targets, engine_dirs, all_inject_targets, unread: unread_rules }) =
-        live_rules()
+    let Some(LiveRules {
+        targets,
+        engine_dirs,
+        all_inject_targets,
+        inject_sources,
+        unread: unread_rules,
+    }) = live_rules()
     else {
         let live = check_engine_live();
         let answered = live.verdict != Verdict::Fail;
@@ -1745,7 +1790,7 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         check_dir_ino_collision(&targets, &engine_dirs),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&all_inject_targets),
-        check_pm_apks_open_when_hidden(&targets),
+        check_pm_apks_open_when_hidden(&targets, &inject_sources),
         check_xattr_agrees_when_hidden(&targets),
         check_no_rom_tmpfs(),
         check_no_foreign_rom_mount(),
