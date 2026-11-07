@@ -143,10 +143,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     ) &
 fi
 
-if [ "$booted" = "1" ]; then
-    rm -f "$NMDIR/bootcount"
-    nmlog "boot completed, guard counter reset"
-else
+if [ "$booted" != "1" ]; then
     nmlog "boot_completed never set - leaving guard counter armed"
 fi
 
@@ -209,6 +206,19 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
 ' "$_ph" | tail -1)"
     fi
     unset _ph _ph_rc
+fi
+
+# Reset the bootloop counter HERE, not at boot_completed.
+#
+# It used to clear as soon as sys.boot_completed went to 1, which is before whiteout
+# apply, uid apply, ghost sync and pathhide sync have run -- the four passes that install
+# rules in the kernel, and so the four most likely to panic. A panic in any of them
+# produced a reboot cycle that reached boot_completed every time, cleared the counter
+# every time, and therefore never reached GUARD_MAX: the guard could not park the Suite,
+# and the only way out was recovery. The passes above have all returned by this line.
+if [ "$booted" = "1" ]; then
+    rm -f "$NMDIR/bootcount"
+    nmlog "boot completed and the late passes returned, guard counter reset"
 fi
 
 # inotifyd EXECS its handler, so the handler carries the exec bit -- and the installer's
