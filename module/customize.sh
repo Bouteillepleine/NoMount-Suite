@@ -297,6 +297,22 @@ if [ -e "$NMDIR/disabled" ]; then
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
 fi
 
+# A metamodule is only served if the MANAGER knows what one is: ksud is what invokes
+# metamount.sh, and a build without that support never calls it. Until now the install
+# probed only the ENGINE, so on such a build the Suite reported "Prism engine responding,
+# next step: reboot" and then injected nothing -- the user learned otherwise from
+# incident.log after a boot, which service.sh:47 names as a top failure mode. Say it here,
+# while they are still looking at the installer.
+if command -v ksud >/dev/null 2>&1 && ! ksud module metamodule >/dev/null 2>&1; then
+    ui_print "*********************************************************"
+    ui_print "! This manager does not support metamodules."
+    ui_print "! NoMount will install and then inject NOTHING: metamount.sh"
+    ui_print "! is never invoked, so no module is ever served."
+    ui_print "! Update to a KernelSU/SukiSU/APatch build that supports"
+    ui_print "! them. The engine being present does not help on its own."
+    ui_print "*********************************************************"
+fi
+
 if [ "$_eng" = 1 ] && [ ! -e "$NMDIR/disabled" ]; then
     ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
     ui_print "- next step: reboot. Nothing is served until you do."

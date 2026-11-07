@@ -175,6 +175,13 @@ WEBROOT = os.path.join(ROOT, "module", "webroot")
 LINK_RE = re.compile(r'[ \t]*<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>[ \t]*\n?')
 SRC_RE = re.compile(r'[ \t]*<script[^>]*\ssrc="([^"]+)"[^>]*>\s*</script>[ \t]*\n?')
 
+# The harness INLINES every script and stylesheet into one file so it can be opened over
+# file://, and `script-src 'self'` does not admit inline content -- hence the relaxation.
+# It is not a hole in the shipped page: the real index.html keeps `script-src 'self'`, and
+# the invariant that makes that work (no inline <script>, no style=, no on*= handler) is
+# asserted against the shipped file by the_csp_still_refuses_inline_script_and_inline_style
+# in src/mount.rs, which runs under `cargo test` in CI. Change that test, not this string,
+# if the policy ever moves.
 HARNESS_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
                "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 CSP_RE = re.compile(r'(<meta http-equiv="Content-Security-Policy" content=")([^"]*)(")')
