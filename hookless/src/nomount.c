@@ -2684,6 +2684,25 @@ static void nomount_hijacked_put_super(struct super_block *sb)
             nm_sop->fake_xattr = NULL;
         }
         WRITE_ONCE(nm_sop->sb, NULL);
+        /* Drop it from the list and free it, rather than leaving a dead entry behind.
+         *
+         * This path only nulled ->sb, so every unmount of a hijacked filesystem leaked
+         * one nm_sop and left nomount_sb_list a little longer -- unbounded across
+         * mount/unmount cycles, with nomount_restore_superblocks() walking the corpses
+         * each time it runs.
+         *
+         * Freeing is safe exactly here: s_op was restored with a store-release above, so
+         * no NEW reader can reach this object through it, and every existing reader is
+         * inside an RCU read-side section (nm_orig_sop), which is what kfree_rcu waits
+         * for. The list itself is serialised by nomount_write_mutex, which guards the
+         * list_add_tail_rcu in nomount_hijack_superblock and the walk in
+         * nomount_restore_superblocks -- and this runs outside the mutex taken above, so
+         * it has to be retaken. put_super may sleep, so that is allowed.
+         */
+        mutex_lock(&nomount_write_mutex);
+        list_del_rcu(&nm_sop->list);
+        mutex_unlock(&nomount_write_mutex);
+        kfree_rcu(nm_sop, rcu);
     }
     if (orig_put) orig_put(sb);
 }
