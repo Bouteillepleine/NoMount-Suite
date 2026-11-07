@@ -1713,7 +1713,12 @@ static void nm_dir_stat_fix(struct nm_inode_info *info, struct kstat *stat)
 
     if (!info->dir_node || !info->r_path.dentry)
         return;
-    if (d_backing_inode(info->r_path.dentry)->i_sb->s_magic != EROFS_SUPER_MAGIC_V1)
+    /* The knob gates here too. The injected side accepts it as an alternative to the
+     * erofs magic and this did not, so with it set on a non-erofs /system an injected
+     * directory got the synthesized size and the stock directory holding it did not --
+     * one getdents64 and one stat on each is enough to see them disagree. */
+    if (d_backing_inode(info->r_path.dentry)->i_sb->s_magic != EROFS_SUPER_MAGIC_V1 &&
+        !READ_ONCE(nm_vdir_erofs_size))
         return;
 
     nm_dir_deltas(info->dir_node, &nld, &delta);
@@ -1779,7 +1784,9 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
     if (stat->nlink != 1)
         nm_dir_nlink_fix(stat, nld);
 
-    if (delta && inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 &&
+    /* Same gate as nm_dir_stat_fix: a victim left unfixed among fixed children is the tell. */
+    if (delta && (inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 ||
+                  READ_ONCE(nm_vdir_erofs_size)) &&
         stat->size > 0 && stat->size < 4096) {
         loff_t fixed = stat->size + delta;
         if (fixed > 0 && fixed < 4096)
