@@ -6,6 +6,15 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MODULE_DIR="$PROJECT_ROOT/module"
 RELEASE_DIR="$PROJECT_ROOT/release"
 
+# How many engine modules the 01_ (LKM) zip must carry. The source of truth is the
+# ko-build matrix in .github/workflows/build.yaml (android12-5.10, android13-5.10,
+# android13-5.15, android14-5.15, android14-6.1, android15-6.6, android16-6.12,
+# android17-6.18), and build.yaml asserts the same number after staging them. Both
+# have to move together; a zip built with fewer is an LKM zip that boots to nothing
+# on the KMIs it is missing, which nothing downstream can detect.
+# Override only for a local partial build, never for a release:  NM_LKM_EXPECT=3 ...
+LKM_EXPECT="${NM_LKM_EXPECT:-8}"
+
 CURRENT_VERSION="$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 VERSION=""
 BUILD=false
@@ -142,8 +151,25 @@ fi
 # this pipeline has ever produced was stamped +dirty for them alone - the
 # released v1.3.204 included. They are build output being placed where it
 # belongs, not a modified checkout, so they do not count as dirt.
+#
+# The three stamped files cannot be excluded by PATH, though: the exclusion could not tell
+# "the two lines package.sh just wrote" from any other edit, so an edit to module.prop --
+# the one file that decides where every device fetches its next root module from -- was
+# invisible and the zip shipped stamped clean. Ask the precise question instead: was the
+# file already modified BEFORE this build touched it? $_stamp_saved holds exactly that
+# pre-stamp content, so comparing it against HEAD leaves package.sh's own writes out
+# without blinding the check to anything else.
 _dirt="$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null \
           | grep -vE ' (Cargo\.toml|Cargo\.lock|module/module\.prop|module/lkm/nomount-[^/]*\.ko)$' || true)"
+for _sf in Cargo.toml Cargo.lock module/module.prop; do
+    _saved="$_stamp_saved/$(basename "$_sf")"
+    [ -f "$_saved" ] || continue
+    if ! git -C "$PROJECT_ROOT" show "HEAD:$_sf" 2>/dev/null | cmp -s - "$_saved"; then
+        _dirt="${_dirt}${_dirt:+
+} M $_sf (edited before this build, not by the version stamp)"
+    fi
+done
+unset _sf _saved
 if [ -n "$_dirt" ]; then
     BUILD_COMMIT="${BUILD_COMMIT}+dirty"
 fi
@@ -333,18 +359,33 @@ package_zip() {
     # installs and is quietly wrong: sha256sums derive from the staging tree so they
     # cannot see an absence, customize.sh's set_perm calls are [ -f ] guarded, and
     # CI lints a file that never reached the zip.
-    for src in "$MODULE_DIR"/*.sh; do
-        local base
-        base=$(basename "$src")
-        case " ${SCRIPTS[*]} " in
-            *" $base "*) ;;
-            *)
-                echo "fatal: module/$base exists but is not in SCRIPTS - it would ship missing" >&2
-                rm -rf "$staging"
-                exit 1
-                ;;
+    # Everything staged below is named explicitly, so anything in module/ that no rule
+    # claims ships missing. The old form of this gate globbed module/*.sh alone, which
+    # caught a new script and nothing else: a .conf, a .rc, a prop fragment or a whole
+    # subdirectory was simply never looked at. Verified by adding module/default-rules.conf
+    # and module/hooks.d/a.sh -- both were omitted from the zip with no gate and, once
+    # committed, no +dirty tell either.
+    local unaccounted=0 rel
+    while IFS= read -r rel; do
+        case "$rel" in
+            module.prop|loader) continue ;;
+            # Staged by their own code further down: bin/ per-ABI, webroot/ wholesale.
+            bin/*|webroot/*) continue ;;
+            # lkm/ is the engine modules plus a README that is deliberately not shipped;
+            # the count gate for the .ko files is in the lkm block below.
+            lkm/*) continue ;;
         esac
-    done
+        case " ${SCRIPTS[*]} " in
+            *" $rel "*) continue ;;
+        esac
+        echo "fatal: module/$rel is shipped by no rule in package.sh - it would install missing" >&2
+        echo "       Add it to SCRIPTS, or stage it explicitly and allow it here." >&2
+        unaccounted=1
+    done < <(cd "$MODULE_DIR" && find . -type f | sed 's|^\./||' | sort)
+    if [ "$unaccounted" -ne 0 ]; then
+        rm -rf "$staging"
+        exit 1
+    fi
 
     if [ ! -f "$MODULE_DIR/module.prop" ]; then
         echo "fatal: missing module.prop" >&2
@@ -354,6 +395,20 @@ package_zip() {
     cp "$MODULE_DIR/module.prop" "$staging/module.prop"
 
     sed -i "s/^version=.*/version=${VERSION}/" "$staging/module.prop"
+
+    # The two flavors are different artifacts and need different OTA endpoints. Both used
+    # to ship the SAME module.prop, so both pointed at update.json, which only ever names
+    # the 00_ (lite) zip -- every LKM user was updated onto a build carrying no engine
+    # module. nm_lkm_keep's persisted copy is what kept that from bricking them outright.
+    if [ "$variant" = "lkm" ]; then
+        sed -i 's#/main/update\.json$#/main/update-lkm.json#' "$staging/module.prop"
+        grep -q '^updateJson=.*/update-lkm\.json$' "$staging/module.prop" || {
+            echo "fatal: [$profile] could not point the LKM zip at update-lkm.json; it would" >&2
+            echo "       ship offering the lite zip as its own update." >&2
+            rm -rf "$staging"
+            exit 1
+        }
+    fi
 
     local want=${#ABI_TARGET[@]}
     local found_nomount=0 found_nm=0
@@ -421,18 +476,32 @@ package_zip() {
     elif [ -d "$PROJECT_ROOT/staging/lkm" ]; then
         lkm_src="$PROJECT_ROOT/staging/lkm"
     fi
+    # An LKM zip IS its engine modules: with none, it installs clean, reports success,
+    # and the device boots with nothing injected. module/lkm/README is tracked, so the
+    # directory always exists and "no .ko" cannot be inferred from its absence -- the
+    # count is the only real test, and it has to be fatal rather than a printed note.
+    n_ko=0
     if [ -n "$lkm_src" ]; then
         n_ko=$(find "$lkm_src" -name 'nomount-*.ko' | wc -l)
-        if [ "$n_ko" -gt 0 ]; then
-            mkdir -p "$staging/lkm"
-            cp "$lkm_src"/nomount-*.ko "$staging/lkm/"
-            echo "    lkm: $n_ko module(s) -> $(find "$staging/lkm" -name 'nomount-*.ko' -printf '%f ')"
-        else
-            echo "    lkm: directory present but empty - zip carries NO engine modules"
-        fi
-    else
-        echo "    lkm: none bundled - this zip needs a kernel with CONFIG_NOMOUNT=y"
     fi
+    if [ "$n_ko" -ne "$LKM_EXPECT" ]; then
+        if [ "$n_ko" -eq 0 ]; then
+            echo "fatal: [$profile] the LKM zip carries NO engine modules." >&2
+            echo "       Looked in: ${lkm_src:-$MODULE_DIR/lkm and $PROJECT_ROOT/staging/lkm}" >&2
+            echo "       Build them first, or package only the lite (00_) zip." >&2
+        else
+            echo "fatal: [$profile] the LKM zip carries $n_ko engine module(s), expected $LKM_EXPECT." >&2
+            find "$lkm_src" -name 'nomount-*.ko' -printf '         have: %f\n' >&2
+            echo "       A short set ships an LKM zip that boots to nothing on every KMI it" >&2
+            echo "       is missing. Rebuild the full set, or set NM_LKM_EXPECT for a" >&2
+            echo "       deliberate partial build (never for a release)." >&2
+        fi
+        rm -rf "$staging"
+        exit 1
+    fi
+    mkdir -p "$staging/lkm"
+    cp "$lkm_src"/nomount-*.ko "$staging/lkm/"
+    echo "    lkm: $n_ko module(s) -> $(find "$staging/lkm" -name 'nomount-*.ko' -printf '%f ')"
 
     else
         echo "    lkm: omitted (lite) - for a kernel that has NoMount built in"

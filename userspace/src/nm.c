@@ -37,7 +37,7 @@ void c_main(long *sp) {
         { "add", 'a' },   { "del", 'd' },     { "w", 'w' },
         { "block", 'b' }, { "unblock", 'u' },  { "clear", 'c' },
         { "list", 'l' },  { "l", 'l' },        { "v", 'v' },
-        { "k", 'k' },
+        { "k", 'k' },     { "knobs", 'n' },
     };
     char cmd = 0;
     for (unsigned int ci = 0; ci < sizeof(nm_cmds) / sizeof(nm_cmds[0]); ci++) {
@@ -196,6 +196,31 @@ void c_main(long *sp) {
         if (vlen_rx < 0) print_refused("the version query", vlen_rx);
         else print_err("nm: the engine did not answer with a version - it may be too old, or "
                        "built with a different NOMOUNT_NL_PROTO\n");
+        exit_code = 1; goto do_exit;
+
+    } else if (cmd == 'n') {
+        /* The same GET_VERSION round trip, read for its knobs attribute instead.
+         * `v` is not extended with a third field because callers scrape it for
+         * digits, and an engine that answers a version but no knobs must stay
+         * distinguishable from one that reports them as zero. */
+        int klen = do_nm_cmd(fd, 1, 0, (void *)0, 0, 1, &mem);
+        struct nlmsghdr *kh = (struct nlmsghdr *)mem.rx_buf;
+
+        if (nm_timed_out(klen)) goto do_timeout;
+        if (klen >= 16 && kh->nlmsg_len <= (unsigned int)klen) {
+            unsigned int *kn = get_attr(mem.rx_buf, 8, 4);
+            if (kn) {
+                print_str("isolated=");
+                print_uint(*kn & 3);
+                print_str(" erofs=");
+                print_uint((*kn >> 2) & 1);
+                print_str("\n");
+                exit_code = 0; goto do_exit;
+            }
+        }
+        if (klen < 0) print_refused("the knob query", klen);
+        else print_err("nm: this engine answers no knob state - it predates the "
+                       "read-back, so what it holds cannot be checked\n");
         exit_code = 1; goto do_exit;
 
     } else if (cmd == 'l') {

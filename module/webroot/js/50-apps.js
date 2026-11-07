@@ -352,14 +352,40 @@
       </div>`;
   }
   async function usApply(btn) {
-    const picks = [...US.entries()].filter(function ([, e]) { return e.pick; }).map(function ([p]) { return p; });
-    if (!picks.length) return;
+    const all = [...US.entries()].filter(function ([, e]) { return e.pick; }).map(function ([p]) { return p; });
+    // Every other route into `uid block` validates against UID_TARGET_RE first. This one
+    // took the US map's keys straight from uidscan.sh's stdout and only shq()'d them --
+    // which makes a name shell-safe but cannot stop a leading "-" being read as a FLAG by
+    // `nomount uid block`. Quoting is not the fix for that; the allowlist is, and this
+    // was the single path missing it.
+    const picks = all.filter(function (p) { return UID_TARGET_RE.test(p); });
+    const skipped = all.length - picks.length;
+    if (!picks.length) {
+      if (skipped) toast(skipped + " name(s) rejected by the name check", "bad");
+      return;
+    }
     const done = busy(btn, "Hiding...");
     const b = await bin();
     const nmClient = b.replace(/nomount$/, "nm");
-    await exec(`NM_BIN=${shq(nmClient)} ` +
+    // `export`, not a VAR=val prefix: a prefix applies only to the FIRST command of a
+    // ";"-separated list, so picks 2..N ran without NM_BIN set at all.
+    const r = await exec(`export NM_BIN=${shq(nmClient)}; ` +
                picks.map(function (p) { return `${shq(b)} uid block ${shq(p)}`; }).join("; "));
     const after = await nm("uid list");
+    // Correctness here rests entirely on reading the list back. If THAT failed, every
+    // pick counts as failed and the toast says "0 hidden, N failed" -- when the blocks
+    // may all have landed. Say what is actually known instead.
+    if (after.errno !== 0) {
+      done();
+      refreshBlocked();
+      toast("Applied, but the hide list could not be read back, so this cannot confirm which", "bad");
+      return;
+    }
+    if (r.errno !== 0) {
+      // A timeout here means the run was cut off mid-list, so the readback below is a
+      // sample of a half-finished pass rather than a result.
+      toast("The hide run did not finish; counts below may be partial", "bad");
+    }
     const listed = {};
     (after.stdout || "").split("\n").forEach(function (l) {
       const n = (l.split("\t")[0] || "").trim();
@@ -372,7 +398,9 @@
     done();
     usRender();
     refreshBlocked();
-    toast(bad ? `${ok} hidden, ${bad} failed` : `${ok} app(s) hidden`, bad ? "bad" : "ok");
+    const tail = skipped ? `, ${skipped} rejected by the name check` : "";
+    toast(bad || skipped ? `${ok} hidden, ${bad} failed${tail}` : `${ok} app(s) hidden`,
+          bad || skipped ? "bad" : "ok");
   }
   async function addGlobs(btn) {
     const done = busy(btn, "Adding...");

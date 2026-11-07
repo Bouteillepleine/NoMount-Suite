@@ -362,10 +362,14 @@ fn app_can_see_probe(path: &str) -> Option<bool> {
     // `ls` absolute and PATH explicit for the same reason as health.rs: with an empty
     // caller environment ksud's `su` leaves the child only /data/adb/ksu/bin on PATH, and
     // a bare `ls` exits 127 - which this would have read as "the app cannot see it".
-    let out = std::process::Command::new("/system/bin/su")
-        .env("PATH", "/system/bin:/system/xbin:/vendor/bin")
-        .args(["9999", "-c", &format!("/system/bin/ls -d {quoted}")])
-        .output()
+    let mut cmd = std::process::Command::new("/system/bin/su");
+    cmd.env("PATH", "/system/bin:/system/xbin:/vendor/bin")
+        .args(["9999", "-c", &format!("/system/bin/ls -d {quoted}")]);
+    // Bounded. `su` here is the manager's own binary and can block on a superuser prompt
+    // or a wedged ksud, and this runs once per pattern-matched candidate from scan() --
+    // so `nomount whiteout suggest` from the WebUI simply never came back. A probe that
+    // cannot answer in ten seconds is not going to.
+    let out = crate::nm::Nm::run_within(cmd, std::time::Duration::from_secs(10), "su 9999 ls")
         .ok()?;
     Some(out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
 }
@@ -543,6 +547,38 @@ mod tests {
         ] {
             assert!(validate(p).is_ok(), "{p} must be allowed");
             assert!(crate::mount::can_whiteout(Path::new(p)).is_ok(), "{p}");
+        }
+    }
+
+    #[test]
+    fn a_file_inside_a_boot_critical_directory_is_refused_not_just_the_directory() {
+        // The directory arm matched exactly two components, so each of these was accepted,
+        // written to whiteouts.txt and re-applied every boot: three failed boots, then the
+        // guard parks the Suite and recovery is the only way back.
+        for p in [
+            "/system/lib64/libc.so",
+            "/system/lib/libdl.so",
+            "/system/apex/com.android.runtime/apex_manifest.pb",
+            "/vendor/lib64/hw/anything.so",
+            "/system_ext/lib64/libx.so",
+            "/system/etc/ld.config.txt",
+            "/system/etc/ld.config.arm64.txt",
+        ] {
+            assert!(validate(p).is_err(), "{p} must be refused");
+            assert!(
+                crate::mount::can_whiteout(Path::new(p)).is_err(),
+                "{p}: the two predicates must agree"
+            );
+        }
+        // ...while the directories these sit beside stay whiteoutable, which is the
+        // whole point of the mechanism.
+        for p in [
+            "/system/etc/hosts",
+            "/system/etc/init/some-module.rc",
+            "/vendor/etc/foo.conf",
+            "/system/bin/install-recovery.sh",
+        ] {
+            assert!(crate::mount::can_whiteout(Path::new(p)).is_ok(), "{p} must stay allowed");
         }
     }
 

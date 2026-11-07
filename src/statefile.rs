@@ -42,6 +42,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+
     #[test]
     fn replaces_content_and_forces_0600() {
         let d = tempdir();
@@ -113,6 +114,20 @@ mod tests {
             "absorbed-tmpfs.list",
             "binds.list",
             "apkstate.list",
+            // Cloak inputs. These were in the three lists but nothing required them to be,
+            // and losing either is a silent de-cloak rather than a visible failure.
+            "uidconceal",
+            "ghostpaths",
+            // A user setting (the kmsg opt-in) and the incident record -- the record that
+            // matters most belongs to the install someone is upgrading to fix.
+            "kmsg",
+            "incident.log",
+            // Not a setting: lkm-load.sh copies the chosen engine module to the state dir
+            // "so an update cannot remove it", then prunes the bundled per-KMI set from
+            // $MODDIR after the first good boot. On an LKM device this is the only copy
+            // left, so leaving it out of the stash meant every upgrade deleted the engine
+            // and the module came back installed-but-inert.
+            "nomount.ko",
         ] {
             assert!(saved.iter().any(|f| f == must), "{must} is not carried across an update");
         }

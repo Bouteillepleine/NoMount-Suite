@@ -17,8 +17,13 @@ fn pass(name: &'static str, evidence: String) -> Check {
 fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Fail, evidence).oracle(oracle)
 }
+/// A tell the audit MEASURED. Every call site is the else-branch of a probe, so it
+/// fires only on a positive hit -- which must read as attention, not as info. It stays
+/// out of `open_failures()` so the exit code is unchanged; boot scripts branch on that.
+/// By-design arms (the two `N_ZERO_MOUNT` ones) build their own `Verdict::Note` and are
+/// deliberately not routed through here.
 fn soft(name: &'static str, evidence: String, oracle: &'static str) -> Check {
-    chk(name, Verdict::Note, evidence).oracle(oracle)
+    chk(name, Verdict::Warn, evidence).oracle(oracle)
 }
 fn na(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::NotApplicable, evidence)
@@ -184,7 +189,7 @@ pub(crate) const N_ZERO_MOUNT: &str = "zero-mount posture";
 pub(crate) const N_SURFACES: &str = "kernel surfaces";
 pub(crate) const N_DINO_STAT: &str = "readdir ino vs stat ino";
 pub(crate) const N_INODE_BAND: &str = "injected inode band";
-pub(crate) const N_OVERLAY_DIR_INO: &str = "overlay dir inode range";
+pub(crate) const N_SYNTH_DIR_INO: &str = "synthesized dir inode range";
 pub(crate) const N_DIR_INO_COLLIDE: &str = "synthesized inode collision";
 pub(crate) const N_EROFS_SHAPE: &str = "erofs directory shape";
 pub(crate) const N_MAPS_DELETED: &str = "injected files in maps";
@@ -197,7 +202,7 @@ pub(crate) const N_XATTR_HIDDEN: &str = "xattr agrees with open for a hidden app
 #[cfg(test)]
 pub(crate) const ALL_CHECK_NAMES: [&str; 14] = [
     N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DINO_STAT,
-    N_INODE_BAND, N_OVERLAY_DIR_INO, N_DIR_INO_COLLIDE, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
+    N_INODE_BAND, N_SYNTH_DIR_INO, N_DIR_INO_COLLIDE, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
     N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN,
 ];
 
@@ -258,9 +263,31 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
     Some(out)
 }
 
-fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
+/// The live rule set, plus the number of non-blank lines the parser could not read.
+///
+/// `parse_list` drops those silently, which made a listing whose grammar the engine had
+/// changed come back SHORT rather than unreadable -- every rule-dependent check below then
+/// took its "no live rules" branch, reported N/A, and the report read `clean` on a device
+/// serving hundreds of rules. The count has to come out with the rules so the caller can
+/// say so. `doctor.rs` has used `parse_list_counted` for this reason since it was added.
+struct LiveRules {
+    /// uid-0 Inject targets, which is what most device checks reason over.
+    targets: Vec<PathBuf>,
+    engine_dirs: Vec<PathBuf>,
+    /// Inject targets for every uid, not just 0.
+    all_inject_targets: Vec<PathBuf>,
+    /// Where each uid-0 Inject target is served FROM. A check that wants to know whether
+    /// the engine is actually serving a module's bytes has to compare against this; root's
+    /// view of the target answers a different question, because a rule that is live but
+    /// ineffective serves the stock file to root too.
+    inject_sources: std::collections::HashMap<PathBuf, PathBuf>,
+    /// Non-blank lines of the engine's listing the parser could not read.
+    unread: usize,
+}
+
+fn live_rules() -> Option<LiveRules> {
     let listed = Nm::new().list().ok()?;
-    let rules = crate::nm::parse_list(&listed);
+    let (rules, unread) = crate::nm::parse_list_counted(&listed);
     let targets = rules
         .iter()
         .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
@@ -278,7 +305,18 @@ fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
         .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
         .map(|r| r.target.clone())
         .collect();
-    Some((targets, dirs, all_targets))
+    let inject_sources = rules
+        .iter()
+        .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
+        .filter_map(|r| r.source.as_ref().map(|s| (r.target.clone(), s.clone())))
+        .collect();
+    Some(LiveRules {
+        targets,
+        engine_dirs: dirs,
+        all_inject_targets: all_targets,
+        inject_sources,
+        unread,
+    })
 }
 
 fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
@@ -392,11 +430,24 @@ fn check_zero_mount() -> Check {
             .collect();
 
         let tracked = crate::bind::tracked_result();
-        let ours: std::collections::HashSet<std::path::PathBuf> = tracked
+        // Match on (target, source), not on the target alone. binds.list records both, and
+        // the source was being thrown away here -- so a module re-creating its own bind
+        // over a my_* path the Suite also binds (the case the text below actually
+        // describes) matched by path and was counted as ours. A real mount serving
+        // SOMEONE ELSE'S content over the ROM, visible in every app's mountinfo, then
+        // reported as "Nothing is wrong here".
+        let roots = crate::absorb::fs_roots(&rows);
+        let ours: std::collections::HashSet<(std::path::PathBuf, std::path::PathBuf)> = tracked
             .as_ref()
-            .map(|v| v.iter().map(|(t, _)| t.clone()).collect())
+            .map(|v| v.iter().cloned().collect())
             .unwrap_or_default();
-        let mine = leaked.iter().filter(|(r, _)| ours.contains(&r.target)).count();
+        let mine = leaked
+            .iter()
+            .filter(|(r, _)| {
+                crate::absorb::source_of(r, &roots)
+                    .is_some_and(|s| ours.contains(&(r.target.clone(), s)))
+            })
+            .count();
         let mut why = if let Err(e) = &tracked {
             format!(
                 "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
@@ -432,9 +483,14 @@ fn check_zero_mount() -> Check {
                 leaked.len()
             )
         };
+        // Target-only here on purpose: this asks "is there a recorded bind at this path",
+        // not "is that bind ours" -- a my_* target cannot be taken over while Android is
+        // running whoever made the mount sitting on it.
+        let our_targets: std::collections::HashSet<&std::path::Path> =
+            ours.iter().map(|(t, _)| t.as_path()).collect();
         let deferred: Vec<&str> = deferred
             .into_iter()
-            .filter(|t| !ours.contains(std::path::Path::new(t)))
+            .filter(|t| !our_targets.contains(std::path::Path::new(t)))
             .collect();
         if !deferred.is_empty() {
             why.push_str(&format!(
@@ -720,17 +776,23 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     .owner("the kernel engine")
 }
 
-fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
+fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut unranged = Vec::new();
     let mut examined = 0usize;
     let mut unread = 0usize;
     let subjects: Vec<PathBuf> =
         targets.iter().chain(engine_dirs.iter()).cloned().collect();
+    // Not gated on fs_type == "overlay" any more.
+    //
+    // It used to be, and that is why `nomount check` reported nothing while
+    // `find /product/priv-app -maxdepth 1 -type d -inum +1000` on a CPH2747 returned
+    // exactly the two injected directories: /product is erofs, so every parent was
+    // skipped and the check answered NotApplicable. Nothing in the test below is
+    // overlay-specific -- it compares a synthesized directory's inode against the
+    // largest STOCK directory inode in the same parent on the same device, which any
+    // filesystem can answer.
     for parent in parents_of(&subjects) {
-        if fs_type(&parent) != "overlay" {
-            continue;
-        }
         let Ok(rd) = fs::read_dir(&parent) else {
             unread += 1;
             continue;
@@ -779,10 +841,10 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
             examined += 1;
         }
     }
-    overlay_dir_verdict(examined, unread, &outliers, &unranged)
+    synth_dir_verdict(examined, unread, &outliers, &unranged)
 }
 
-fn overlay_dir_verdict(
+fn synth_dir_verdict(
     examined: usize,
     unread: usize,
     outliers: &[String],
@@ -805,14 +867,14 @@ fn overlay_dir_verdict(
     if examined == 0 {
         if unread > 0 {
             return unmeasured(
-                N_OVERLAY_DIR_INO,
-                format!("{unread} overlay directory(ies) could not be read"),
+                N_SYNTH_DIR_INO,
+                format!("{unread} parent directory(ies) could not be read"),
             )
             .meaning("The folders this needed to read would not open, so this was not tested.");
         }
         if !unranged.is_empty() {
             return unmeasured(
-                N_OVERLAY_DIR_INO,
+                N_SYNTH_DIR_INO,
                 format!(
                     "{} synthesized dir(s) on a device no stock dir beside them uses, so none \
                      could be compared: {}",
@@ -823,12 +885,12 @@ fn overlay_dir_verdict(
             .meaning(format!("{} This was not tested.", unranged_meaning(unranged.len())));
         }
         return na(
-            N_OVERLAY_DIR_INO,
-            "no directory the engine synthesized on an overlay mount, beside a stock one".into(),
+            N_SYNTH_DIR_INO,
+            "no directory the engine synthesized beside a stock one to compare it with".into(),
         )
         .meaning(
-            "This one only applies to folders the Suite creates on an overlayfs ROM, and you \
-             have none.",
+            "This one needs a folder the Suite created sitting beside stock folders on the same \
+             device, and you have none.",
         );
     }
     if outliers.is_empty() && (unread > 0 || !unranged.is_empty()) {
@@ -847,9 +909,9 @@ fn overlay_dir_verdict(
             why.push(unranged_meaning(unranged.len()));
         }
         return unmeasured(
-            N_OVERLAY_DIR_INO,
+            N_SYNTH_DIR_INO,
             format!(
-                "{examined} overlay dir(s) clean, but {} and were not checked",
+                "{examined} parent(s) clean, but {} and were not checked",
                 skipped.join(" and ")
             ),
         )
@@ -857,13 +919,13 @@ fn overlay_dir_verdict(
     }
     if outliers.is_empty() {
         pass(
-            N_OVERLAY_DIR_INO,
-            format!("{examined} overlay dir(s): synthesized inodes sit inside the stock range"),
+            N_SYNTH_DIR_INO,
+            format!("{examined} parent(s): synthesized inodes sit inside the stock range"),
         )
         .meaning("Folders the Suite creates carry identity numbers the ROM could plausibly issue.")
     } else {
         soft(
-            N_OVERLAY_DIR_INO,
+            N_SYNTH_DIR_INO,
             outliers.join("; "),
             "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
         )
@@ -1312,7 +1374,10 @@ fn size_and_ends(mut f: fs::File) -> Option<(u64, Vec<u8>)> {
     Some((len, bytes))
 }
 
-fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
+fn check_pm_apks_open_when_hidden(
+    targets: &[PathBuf],
+    sources: &std::collections::HashMap<PathBuf, PathBuf>,
+) -> Check {
     const NAME: &str = N_PM_OPEN;
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
     if apks.is_empty() {
@@ -1335,13 +1400,33 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         return na(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()))
             .meaning("You have not hidden any apps yet, so there is nothing to test here. Hide one and this check starts running.");
     };
+    // Read the rule's SOURCE, not root's view of the target.
+    //
+    // `ours` used to be the target opened as root, and the child's read was compared
+    // against that -- so a rule that is live but ineffective, where the engine holds it
+    // and serves the ROM's original to EVERY caller, matched and passed. The text then
+    // claimed the app "gets a file whose first and last 4 KiB match your module's" on the
+    // strength of having matched root's copy, which this check never established was the
+    // module's. Comparing against the file the rule names answers the question asked.
     let readable: Vec<(&PathBuf, (u64, Vec<u8>))> = apks
         .iter()
-        .filter_map(|p| fs::File::open(p).ok().and_then(size_and_ends).map(|s| (*p, s)))
+        .filter_map(|p| {
+            let src = sources.get(p.as_path())?;
+            fs::File::open(src).ok().and_then(size_and_ends).map(|s| (*p, s))
+        })
         .collect();
     if readable.is_empty() {
-        return unmeasured(NAME, format!("{} PM-published file rule(s), none readable as root", apks.len()))
-            .meaning("None of the published files could be opened even as root, so the question this check asks could not be put.");
+        return unmeasured(
+            NAME,
+            format!(
+                "{} PM-published file rule(s), none whose source could be read as root",
+                apks.len()
+            ),
+        )
+        .meaning(
+            "None of the files these rules serve FROM could be opened even as root, so there \
+             was nothing to compare the app's read against and the question could not be put.",
+        );
     }
 
     let counts = probe_as_uid(appid, || {
@@ -1384,13 +1469,14 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             NAME,
             format!(
                 "{who} opened all {tested} PM-published rule target(s): same size, first and \
-                 last 4 KiB as the copy we serve"
+                 last 4 KiB as the file each rule serves from"
             ),
         )
         .meaning(
             "A hidden app can still open every file Android told it about, and gets a file of \
-             the same size whose first and last 4 KiB match your module's. This is what stops \
-             hiding from crashing apps.",
+             the same size whose first and last 4 KiB match the module's own copy -- compared \
+             against the file the rule names, not against what root happens to see at that \
+             path. This is what stops hiding from crashing apps.",
         );
     }
     if denied == 0 {
@@ -1526,7 +1612,7 @@ const RULE_DEPENDENT: [&str; 8] = [
     N_DINO_STAT,
     N_DIR_INO_COLLIDE,
     N_INODE_BAND,
-    N_OVERLAY_DIR_INO,
+    N_SYNTH_DIR_INO,
     N_EROFS_SHAPE,
     N_MAPS_DELETED,
     N_PM_OPEN,
@@ -1658,7 +1744,14 @@ fn xattr_verdict(who: &str, files: usize, leaked: u32, inverse: u32, denied: u32
 }
 
 pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
-    let Some((targets, engine_dirs, all_inject_targets)) = live_rules() else {
+    let Some(LiveRules {
+        targets,
+        engine_dirs,
+        all_inject_targets,
+        inject_sources,
+        unread: unread_rules,
+    }) = live_rules()
+    else {
         let live = check_engine_live();
         let answered = live.verdict != Verdict::Fail;
         let mut checks = vec![live];
@@ -1693,21 +1786,43 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         return (checks, None, None);
     };
     let parents = parents_of(&targets);
-    let checks = vec![
+    let mut checks = vec![
         check_engine_live(),
         check_zero_mount(),
         check_surfaces(),
         check_dino_matches_stat(&targets),
         check_inode_band(&targets, &engine_dirs),
-        check_overlay_dir_ino(&targets, &engine_dirs),
+        check_synth_dir_ino(&targets, &engine_dirs),
         check_dir_ino_collision(&targets, &engine_dirs),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&all_inject_targets),
-        check_pm_apks_open_when_hidden(&targets),
+        check_pm_apks_open_when_hidden(&targets, &inject_sources),
         check_xattr_agrees_when_hidden(&targets),
         check_no_rom_tmpfs(),
         check_no_foreign_rom_mount(),
     ];
+    if unread_rules > 0 {
+        // The checks above ran, but over a rule set we know is short, so a PASS from any of
+        // them covers only what parsed. This row is what stops the whole report settling on
+        // "clean": one Unmeasured makes Tally::complete() false, and the headline becomes
+        // "not fully measured" instead.
+        checks.push(
+            unmeasured(
+                N_RULE_DUMP,
+                format!(
+                    "{unread_rules} line(s) of the engine's rule list could not be read, so \
+                     the {} check(s) that read live rules saw an incomplete set",
+                    RULE_DEPENDENT.len()
+                ),
+            )
+            .meaning(
+                "The engine listed its rules and some lines were in a shape this build does \
+                 not know -- usually an engine newer than the Suite. Rules missing from the \
+                 list look exactly like rules that went away, so nothing below that counts \
+                 rules is a clean result. Update the Suite to match the engine.",
+            ),
+        );
+    }
     (checks, Some(targets.len()), Some(parents.len()))
 }
 
@@ -1984,12 +2099,65 @@ mod tests {
     }
 
     #[test]
-    fn an_unprobed_tell_is_a_note_and_keeps_its_oracle() {
+    fn a_rule_list_that_did_not_fully_parse_cannot_report_clean() {
+        // The engine answers, so `nm list` succeeds and the "would not list its rules" arm
+        // never fires -- but lines the parser cannot read are dropped, and a rule missing
+        // from the list is indistinguishable from a rule that went away. Every
+        // RULE_DEPENDENT check then took its vacuous branch and the report read `clean` on
+        // a device serving hundreds of rules.
+        let (rules, unread) = crate::nm::parse_list_counted(
+            "/a -> /b\n!! not a rule line !!\n/c (virtual dir)\n\n",
+        );
+        assert_eq!(rules.len(), 2);
+        assert_eq!(unread, 1, "a line the parser could not read must be counted, not dropped");
+
+        // One Unmeasured row is the whole guardrail: it makes complete() false, so the
+        // ladder in check.rs can never fall through to "clean".
+        let row = unmeasured(N_RULE_DUMP, "1 line(s) ... could not be read".into());
+        assert!(!crate::check::Tally::of(std::slice::from_ref(&row)).complete());
+        let r = crate::check::Report {
+            cache_kept: None,
+            ts: 0,
+            sections: vec![crate::check::Section::Device],
+            engine: Some(34),
+            rules: Some(0),
+            directories: Some(0),
+            facts: Vec::new(),
+            checks: vec![row, pass(N_SURFACES, "none".into())],
+        };
+        assert_ne!(r.verdict(), "clean", "a short rule list must never read as clean");
+        assert!(r.verdict().contains("not fully measured"), "{}", r.verdict());
+
+        // And pin the call itself: live_rules() going back to the uncounted parser is
+        // exactly the regression, and it is invisible at runtime.
+        let src = include_str!("audit.rs");
+        let body = &src[src.find("fn live_rules(").expect("live_rules exists")..];
+        let body = &body[..body.find("\n}\n").expect("live_rules has an end")];
+        assert!(
+            body.contains("parse_list_counted("),
+            "live_rules must keep the dropped-line count"
+        );
+        assert!(
+            !body.contains("crate::nm::parse_list("),
+            "live_rules must not use the uncounted parser"
+        );
+    }
+
+    #[test]
+    fn a_measured_tell_is_a_warning_and_keeps_its_oracle() {
+        // This pinned NOTE until 1.3.209. Every soft() site is a probe's else-branch and
+        // passes measured evidence, so grading it "info" let a report that had just named
+        // a live oracle still read `verdict: clean`.
         let s = soft(N_INODE_BAND, "evidence".into(), "the recipe");
-        assert_eq!(s.verdict.tag(), "NOTE", "a tell nothing probes must not read as attention");
-        assert_eq!(s.verdict.severity(), "info");
+        assert_eq!(s.verdict.tag(), "WARN", "a tell the audit measured must read as attention");
+        assert_eq!(s.verdict.severity(), "attention");
         assert_eq!(s.oracle.as_deref(), Some("the recipe"));
-        assert_ne!(s.verdict.tag(), Verdict::Warn.tag());
+        assert_ne!(s.verdict.tag(), Verdict::Note.tag());
+        assert_eq!(
+            crate::check::Tally::of(std::slice::from_ref(&s)).open_failures(),
+            0,
+            "a measured tell must not change the exit code"
+        );
     }
 
     #[test]
@@ -2082,24 +2250,24 @@ mod tests {
     #[test]
     fn a_synthesized_dir_with_no_stock_dir_on_its_device_is_not_a_pass() {
         let off = vec!["/product/overlay/Vdir dev 35".to_string()];
-        let c = overlay_dir_verdict(1, 0, &[], &off);
+        let c = synth_dir_verdict(1, 0, &[], &off);
         assert_eq!(c.verdict.tag(), "UNMEASURED", "{}", c.evidence);
         assert!(c.evidence.contains("/product/overlay/Vdir dev 35"), "{}", c.evidence);
 
-        let c = overlay_dir_verdict(0, 0, &[], &off);
+        let c = synth_dir_verdict(0, 0, &[], &off);
         assert_eq!(c.verdict.tag(), "UNMEASURED", "compared nothing, but there was a subject");
 
-        assert_eq!(overlay_dir_verdict(1, 0, &[], &[]).verdict.tag(), "PASS");
-        assert_eq!(overlay_dir_verdict(0, 0, &[], &[]).verdict.tag(), "N/A");
+        assert_eq!(synth_dir_verdict(1, 0, &[], &[]).verdict.tag(), "PASS");
+        assert_eq!(synth_dir_verdict(0, 0, &[], &[]).verdict.tag(), "N/A");
         let hit = vec!["/product/overlay/V ino=83232001 (stock max here 26)".to_string()];
-        assert_eq!(overlay_dir_verdict(1, 0, &hit, &off).verdict.tag(), "NOTE");
+        assert_eq!(synth_dir_verdict(1, 0, &hit, &off).verdict.tag(), "WARN");
         assert_eq!(
-            overlay_dir_verdict(2, 1, &[], &[]).evidence,
-            "2 overlay dir(s) clean, but 1 could not be read and were not checked"
+            synth_dir_verdict(2, 1, &[], &[]).evidence,
+            "2 parent(s) clean, but 1 could not be read and were not checked"
         );
 
         let many: Vec<String> = (0..7).map(|i| format!("/product/overlay/V{i} dev 35")).collect();
-        let c = overlay_dir_verdict(0, 0, &[], &many);
+        let c = synth_dir_verdict(0, 0, &[], &many);
         assert!(c.evidence.ends_with("/product/overlay/V4 dev 35, +2 more"), "{}", c.evidence);
     }
 
@@ -2130,12 +2298,12 @@ mod tests {
     fn a_measured_xattr_disagreement_is_reported_even_when_nothing_was_hidden() {
         let who = "uid 10384 (hidden)";
         let c = xattr_verdict(who, 40, 0, 3, 0);
-        assert_eq!(c.verdict.tag(), "NOTE", "{}", c.evidence);
+        assert_eq!(c.verdict.tag(), "WARN", "{}", c.evidence);
         assert!(c.evidence.contains("3 of 40"), "{}", c.evidence);
 
         assert_eq!(xattr_verdict(who, 40, 0, 0, 0).verdict.tag(), "UNMEASURED");
         assert_eq!(xattr_verdict(who, 40, 0, 0, 5).verdict.tag(), "PASS");
-        assert_eq!(xattr_verdict(who, 40, 0, 2, 5).verdict.tag(), "NOTE");
+        assert_eq!(xattr_verdict(who, 40, 0, 2, 5).verdict.tag(), "WARN");
         assert_eq!(xattr_verdict(who, 40, 1, 2, 5).verdict.tag(), "FAIL");
     }
 

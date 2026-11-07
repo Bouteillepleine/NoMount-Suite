@@ -597,7 +597,16 @@
       "stays off until you reboot.",
       "Delete and re-arm"))) return;
     btn.disabled = true;
-    await exec("rm -rf /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
-    toast("Guard re-armed · reboot to re-enable", "ok");
+    // Branch on the result. The toast is what the user reads before rebooting, so
+    // announcing "re-armed" on an rm that failed -- a denial, a read-only /data -- sent
+    // them into a reboot still parked. refreshGuard() repaints afterwards, but by then
+    // they have already acted on the toast.
+    const r = await exec("/system/bin/rm -rf /data/adb/nomount/disabled /data/adb/nomount/bootcount /data/adb/nomount/incident.log");
+    if (r.errno === 0) {
+      toast("Guard re-armed · reboot to re-enable", "ok");
+    } else {
+      toast("Could not re-arm the guard; it is still parked. " +
+            ((r.stderr || "").trim().split("\n")[0] || "the delete was refused"), "bad");
+    }
     btn.disabled = false; refreshGuard(); refreshIncident();
   }

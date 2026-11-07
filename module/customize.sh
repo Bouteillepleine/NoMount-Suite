@@ -204,9 +204,10 @@ _bak=/data/adb/nomount.bak
 if [ -d "$_bak" ]; then
     _rn=0
     _fail=0
+    # KEEP IN SYNC with the stash list in uninstall.sh and lib.sh's nm_consume_stash().
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-              uidconceal ghostpaths \
+              uidconceal ghostpaths kmsg incident.log nomount.ko \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
@@ -232,7 +233,13 @@ unset _bak
 CONF="$NMDIR/spoof.conf"
 [ -f "$CONF" ] && set_perm "$CONF" 0 0 0600 u:object_r:adb_data_file:s0
 
+# Both inotifyd handlers need the exec bit: inotifyd execs them directly, and the
+# manager's own set_permissions pass leaves every file 0644 regardless of the mode
+# stored in the zip. Without this, inotifyd stays resident and silently fails to exec
+# its handler on every event -- checkwatch.sh shipped that way and the WebUI's
+# check-on-request never answered.
 [ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
+[ -f "$MODPATH/checkwatch.sh" ] && set_perm "$MODPATH/checkwatch.sh" 0 0 0755
 
 [ -f "$MODPATH/lib.sh" ] && set_perm "$MODPATH/lib.sh" 0 0 0644
 [ -d "$MODPATH/webroot" ] && set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644
@@ -288,6 +295,22 @@ rm -f "$NMDIR/bootcount"
 if [ -e "$NMDIR/disabled" ]; then
     ui_print "- ℹ️  The Suite is disabled on this device - it will inject nothing at boot."
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
+fi
+
+# A metamodule is only served if the MANAGER knows what one is: ksud is what invokes
+# metamount.sh, and a build without that support never calls it. Until now the install
+# probed only the ENGINE, so on such a build the Suite reported "Prism engine responding,
+# next step: reboot" and then injected nothing -- the user learned otherwise from
+# incident.log after a boot, which service.sh:47 names as a top failure mode. Say it here,
+# while they are still looking at the installer.
+if command -v ksud >/dev/null 2>&1 && ! ksud module metamodule >/dev/null 2>&1; then
+    ui_print "*********************************************************"
+    ui_print "! This manager does not support metamodules."
+    ui_print "! NoMount will install and then inject NOTHING: metamount.sh"
+    ui_print "! is never invoked, so no module is ever served."
+    ui_print "! Update to a KernelSU/SukiSU/APatch build that supports"
+    ui_print "! them. The engine being present does not help on its own."
+    ui_print "*********************************************************"
 fi
 
 if [ "$_eng" = 1 ] && [ ! -e "$NMDIR/disabled" ]; then

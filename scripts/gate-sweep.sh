@@ -10,7 +10,7 @@ extract_positive() {
     cond=$(grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' "$@" || true)
     ie=$(grep -ohE 'IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+' "$@" || true)
     all=$(printf '%s\n%s\n' "$cond" "$ie" | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
-    neg=$(printf '%s\n' "$cond" | grep -E '(ifndef|![[:space:]]*defined)' \
+    neg=$(printf '%s\n' "$cond" | grep -E '(ifndef|![[:space:]]*(defined|IS_ENABLED))' \
           | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u || true)
     [ -n "$all" ] || return 0
     if [ -n "$neg" ]; then
@@ -22,7 +22,7 @@ extract_positive() {
 
 extract_negative() {
     grep -ohE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$' "$@" 2>/dev/null \
-        | { grep -E '(ifndef|![[:space:]]*defined)' || true; } \
+        | { grep -E '(ifndef|![[:space:]]*(defined|IS_ENABLED))' || true; } \
         | { grep -oE 'CONFIG_[A-Z0-9_]+' || true; } | sort -u
 }
 
@@ -46,6 +46,7 @@ cat > "$T/a.c" <<'EOF'
 #if defined(CONFIG_C)
 #elif defined(CONFIG_D)
 #if !defined(CONFIG_E)
+#if !IS_ENABLED(CONFIG_K)
 #if IS_ENABLED(CONFIG_F)
   x = IS_ENABLED(CONFIG_G);
 #if defined(CONFIG_H) && defined(CONFIG_I)
@@ -59,7 +60,7 @@ check "every positive gating form is seen" \
       "CONFIG_A CONFIG_C CONFIG_D CONFIG_F CONFIG_G CONFIG_H CONFIG_I CONFIG_J "
 check "negative gating forms are reported, not asserted" \
       "$(extract_negative "$T/a.c" "$T/a.h" | tr '\n' ' ')" \
-      "CONFIG_B CONFIG_E "
+      "CONFIG_B CONFIG_E CONFIG_K "
 
 cat > "$T/b.c" <<'EOF'
 #ifndef EROFS_SUPER_MAGIC_V1

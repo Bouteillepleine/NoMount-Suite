@@ -17,19 +17,44 @@ _nmlog() {
     fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') [uninstall] $*" >> /data/adb/nomount/boot.log 2>/dev/null
 }
+# This runs inside the boot sequence when a `remove` flag is set, and on every upgrade.
+# An engine that blocks on the netlink socket (proto 29 is SELinux-gated, so a denial can
+# read as a stall rather than an error) hangs that stage with nothing on the console to
+# say why. lib.sh is deliberately not sourced here -- this has to work when the module
+# tree is half-gone -- so nmto's shape is reproduced locally.
+_nmto() {
+    _t=$1
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$_t" "$@"
+        return $?
+    fi
+    "$@" &
+    _p=$!
+    _n=0
+    while [ "$_n" -lt "$_t" ]; do
+        kill -0 "$_p" 2>/dev/null || break
+        sleep 1
+        _n=$((_n + 1))
+    done
+    if kill -0 "$_p" 2>/dev/null; then
+        kill -TERM "$_p" 2>/dev/null
+        sleep 1
+        kill -KILL "$_p" 2>/dev/null
+        wait "$_p" 2>/dev/null
+        return 124
+    fi
+    wait "$_p"
+}
+
 _ran=0
 for _abi in arm64-v8a armeabi-v7a x86_64 x86; do
     _nmbin="$MODDIR/bin/$_abi/nomount"
     _nmcli="$MODDIR/bin/$_abi/nm"
     [ -x "$_nmbin" ] || continue
     _ran=1
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 30 "$_nmbin" unbind >/dev/null 2>&1
-        _urc=$?
-    else
-        "$_nmbin" unbind >/dev/null 2>&1
-        _urc=$?
-    fi
+    _nmto 30 "$_nmbin" unbind >/dev/null 2>&1
+    _urc=$?
     if [ "$_urc" -eq 0 ]; then
         _nmlog "recorded binds umounted and source labels restored"
     else
@@ -43,7 +68,7 @@ for _abi in arm64-v8a armeabi-v7a x86_64 x86; do
     # the next reboot, and any mapping of it reads "(deleted)". Clearing the
     # table makes the uninstall take effect now.
     if [ -x "$_nmcli" ]; then
-        if "$_nmcli" c >/dev/null 2>&1; then
+        if _nmto 15 "$_nmcli" c >/dev/null 2>&1; then
             _nmlog "engine rule table cleared"
         else
             _nmlog "⚠ could not clear the engine rule table - injected paths keep being served until the next reboot"
@@ -72,9 +97,19 @@ elif [ -d /data/adb/nomount ]; then
     rm -rf "$_bak"
     if mkdir -p "$_bak" 2>/dev/null && chmod 0700 "$_bak" 2>/dev/null; then
         chcon u:object_r:adb_data_file:s0 "$_bak" 2>/dev/null
+        # KEEP IN SYNC with the restore lists in customize.sh and lib.sh's
+        # nm_consume_stash(). A name here that is missing there is stashed and never
+        # given back; a name there that is missing here is simply never stashed.
+        #
+        # nomount.ko is the one that is not a setting: lkm-load.sh copies the chosen
+        # engine module here precisely so an update cannot remove it, then prunes the
+        # bundled per-KMI set from $MODDIR after the first good boot - so on an LKM
+        # device this file is the only copy left, and the wipe below used to delete it.
+        # kmsg and incident.log are a user setting and the incident record, and the
+        # record mattering most is the one from the install someone is upgrading to fix.
         for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
                   absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-                  uidconceal ghostpaths \
+                  uidconceal ghostpaths kmsg incident.log nomount.ko \
                   absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
             [ -e "/data/adb/nomount/$_f" ] || continue
             if cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null; then

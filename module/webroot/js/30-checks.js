@@ -25,6 +25,12 @@
     return !!(r.checks || []).some(function (c) { return c.section === s; });
   }
 
+  // Did this report actually measure anything? "No findings" and "no checks" are not the
+  // same answer, and only one of them is clean. Mirrors paintModuleMetric in 40-rules.js.
+  function measuredReport(r) {
+    return !!(r && Array.isArray(r.checks) && r.checks.length && r.summary);
+  }
+
   function findCheck(r, id) {
     const cs = (r && r.checks) || [];
     for (var i = 0; i < cs.length; i++) if (cs[i].id === id) return cs[i];
@@ -151,7 +157,12 @@
   // and only fall back to running the check in here when it is not alive.
   const CHECK_REQ = "/data/adb/nomount/request/check";
   const CHECK_CACHE = "/data/adb/nomount/audit.json";
-  const CHECK_WAIT_MS = 500, CHECK_WAIT_TRIES = 40;
+  // checkwatch.sh runs the check under `nmto 90`, so anything under 90s of waiting gives
+  // up on a watcher that is still working and falls back to running the check in THIS
+  // page's shell -- which carries the manager app's seccomp filter, cannot drop uid, and
+  // leaves a SIGSYS tombstone per probe. 20s did exactly that on a slow device. Wait past
+  // the watcher's own budget instead, so the fallback only fires when it really died.
+  const CHECK_WAIT_MS = 500, CHECK_WAIT_TRIES = 200;
 
   // Absolute toybox paths, not bare names: this pane's exec environment is the one whose
   // missing PATH made `su 2000 -c stat` exit 127 and report the canary as unmeasurable.
@@ -166,22 +177,28 @@
   }
   async function checkViaWatcher() {
     if (!(await watcherAlive())) return null;
-    // Baseline off the FILE, not off CHECK: on a first open CHECK is null, and any
-    // pre-existing report would then satisfy "newer" before the watcher had run at all.
-    const prev = await readCheckCache();
-    const before = (prev && typeof prev.ts === "number") ? prev.ts : 0;
+    // The floor is the moment we ASKED, not the previous report's timestamp. Baselining
+    // off the file meant a torn read -- the engine rewrites it, and a half-written file
+    // parses as null -- degraded the floor to 0, after which any complete-but-old report
+    // satisfied "newer" and was handed back as the answer to a request just made. The
+    // page then showed a stale verdict under "Checked just now". Same clock on both
+    // sides: the report's ts is epoch seconds, as refreshStatus already assumes.
+    const asked = Math.floor(Date.now() / 1000);
     if ((await exec("/system/bin/touch " + CHECK_REQ)).errno !== 0) return null;
     for (let i = 0; i < CHECK_WAIT_TRIES; i++) {
       await new Promise((r) => setTimeout(r, CHECK_WAIT_MS));
       const rep = await readCheckCache();
-      if (rep && typeof rep.ts === "number" && rep.ts > before && ranSection(rep, "device")) {
+      if (rep && typeof rep.ts === "number" && rep.ts >= asked && ranSection(rep, "device")) {
         return rep;
       }
     }
     return null;
   }
   // The report to display, preferring one that could actually measure.
-  async function runCheck() {
+  // NOT the button handler: that is runCheck(btn) above, which owns the spinner and the
+  // single-flight guard. Naming both runCheck shadowed the handler, so every Check button
+  // called this one and threw its report away.
+  async function fetchCheckReport() {
     const viaWatcher = await checkViaWatcher();
     if (viaWatcher) return viaWatcher;
     const r0 = await nm("check --json --write");
@@ -195,7 +212,7 @@
 
   async function checkPass() {
     $("findlist").innerHTML = '<div class="empty">Checking...</div>';
-    const rep = await runCheck();
+    const rep = await fetchCheckReport();
     if (rep && !rep.error) CHECK = rep;
     else toast("Check did not run: " + ((rep && rep.error) || "no output"), "bad");
     renderCheck(CHECK);
@@ -213,7 +230,7 @@
   }
   async function autoPass() {
     try {
-      const r = await runCheck();
+      const r = await fetchCheckReport();
       if (r && !r.error) {
         CHECK = r; renderCheck(CHECK); refreshStealth(); refreshStatus(); paintModuleMetric();
       }
@@ -244,7 +261,7 @@
       return;
     }
 
-    // runCheck does not set NM_REDACT_HIDE_LIST, so the raw report carries real appids. This
+    // fetchCheckReport does not set NM_REDACT_HIDE_LIST, so the raw report carries real appids. This
     // pane is the one users screenshot and paste into a bug report, and copyReport already
     // redacts on the way out - the same rule has to hold here.
     $("auditout").textContent = redactUids(JSON.stringify(r, null, 1));
@@ -266,6 +283,12 @@
     }
     else if (!ranSection(r, "device")) { chip.textContent = "plan only"; chip.className = "chip info"; }
     else if (unmeasured.length) { chip.textContent = unmeasured.length + " not measured"; chip.className = "chip info"; }
+    // A report with no checks at all, or no summary, has measured nothing - and this chip
+    // is what shows while the card is collapsed. It used to fall through to "all clear"
+    // because the ladder only ever looked at rows it had FILTERED OUT as uninteresting,
+    // never at whether there were any to begin with. paintModuleMetric in 40-rules.js
+    // already reasons this way; this ladder did not.
+    else if (!measuredReport(r)) { chip.textContent = "not measured"; chip.className = "chip info"; }
     else { chip.textContent = "all clear"; chip.className = "chip ok"; }
 
     const s = r.summary || {};
@@ -296,6 +319,13 @@
       return;
     }
     if (!rows.length && ranSection(r, "device")) {
+      if (!measuredReport(r)) {
+        sub.textContent =
+          "This report carries no checks, so it says nothing about this device - not that " +
+          "there is nothing to report. Re-run the check.";
+        list.innerHTML = "";
+        return;
+      }
       sub.textContent = clean + " check" + (clean === 1 ? "" : "s") +
         " ran across " + (r.sections || []).join(" and ") + ". Nothing to report.";
       list.innerHTML = "";
@@ -431,7 +461,7 @@
       lines.push("[" + String(c.verdict).toUpperCase() + "] " + c.name + " (" + c.section + ")");
       if (c.owner) lines.push("  from: " + c.owner);
       // BOTH label formats: audit.rs writes "uid N (hidden)", doctor.rs writes
-      // "hidden uid N". `runCheck` does not set NM_REDACT_HIDE_LIST, so the real appid is in
+      // "hidden uid N". `fetchCheckReport` does not set NM_REDACT_HIDE_LIST, so the real appid is in
       // the JSON and this is the only thing standing between it and a pasted bug report.
       lines.push("  measured: " + redactUids(c.evidence));
       if (c.meaning) lines.push("  means: " + redactUids(c.meaning));
@@ -530,9 +560,17 @@
       "The saved crash from the boot that disabled the Suite is removed for good. It is the only " +
       "copy, and it usually names the file that caused the failure.",
       "Delete"))) return;
-    { const el = $("incwarn"); if (el) el.hidden = true; }
     btn.disabled = true;
-    await exec("/system/bin/rm -f /data/adb/nomount/incident.log");
-    toast("Incident record cleared", "ok");
+    // The banner used to be hidden BEFORE the delete and the result discarded, so a
+    // refused rm left the record on disk with nothing on screen saying so.
+    const r = await exec("/system/bin/rm -f /data/adb/nomount/incident.log");
+    if (r.errno === 0) {
+      const el = $("incwarn");
+      if (el) el.hidden = true;
+      toast("Incident record cleared", "ok");
+    } else {
+      toast("Could not delete the incident record; it is still there. " +
+            ((r.stderr || "").trim().split("\n")[0] || "the delete was refused"), "bad");
+    }
     btn.disabled = false; refreshIncident();
   }

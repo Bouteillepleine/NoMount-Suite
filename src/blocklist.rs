@@ -169,11 +169,16 @@ fn parse_package_for_uid(list: &str, uid: u32) -> Option<String> {
     None
 }
 
+/// `Ok(None)` means the list was read and the package is not in it. A list we could not
+/// read is an error, not an absent package.
+///
+/// Swallowing the error made `nomount uid block <pkg>` answer "saved - not installed now,
+/// will apply when it is" and exit 0 for an app that was installed and running, and made
+/// the boot pass report "hidden 0, not installed N, failed 0". `installed_packages()`
+/// returns an Option for exactly this distinction; this was the one path that dropped it.
 fn uid_for_package(pkg: &str) -> Result<Option<u32>> {
-    let list = match fs::read_to_string(PACKAGES_LIST) {
-        Ok(s) => s,
-        Err(_) => return Ok(None),
-    };
+    let list = fs::read_to_string(PACKAGES_LIST)
+        .with_context(|| format!("read {PACKAGES_LIST}"))?;
     Ok(parse_uid_for_package(&list, pkg))
 }
 
@@ -384,8 +389,20 @@ fn conf_value(raw: &str, key: &str) -> Option<String> {
     })
 }
 
-fn conf_read() -> String {
-    fs::read_to_string(CONF_PATH).unwrap_or_default()
+/// `None` when uidhide.conf is there and could not be read. Absent is `Some("")`, where
+/// every knob takes its default -- that is what a fresh install has.
+///
+/// Folding the two together is not safe here. `follow_ksu_denylist` defaults to false, so
+/// an unreadable config reads as "stop following the DenyList", every appid it covers
+/// drops out of the desired set, and the retire pass un-hides all of them while reporting
+/// success. `parse_hide_isolated` right below fails the other way, to its default, which
+/// is why only this one needed the distinction.
+fn conf_read() -> Option<String> {
+    match fs::read_to_string(CONF_PATH) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(String::new()),
+        Err(_) => None,
+    }
 }
 
 fn parse_hide_isolated(raw: &str) -> u32 {
@@ -402,11 +419,13 @@ fn parse_follow_ksu(raw: &str) -> bool {
 }
 
 pub fn hide_isolated() -> u32 {
-    parse_hide_isolated(&conf_read())
+    // Fails closed: an unreadable config hides BOTH isolated pools, the stricter setting.
+    parse_hide_isolated(&conf_read().unwrap_or_default())
 }
 
-pub fn follow_ksu_denylist() -> bool {
-    parse_follow_ksu(&conf_read())
+/// `None` means the setting could not be read. Callers must not treat that as `false`.
+pub fn follow_ksu_denylist() -> Option<bool> {
+    conf_read().map(|raw| parse_follow_ksu(&raw))
 }
 
 fn write_conf(isolated: u32, follow_ksu: bool) -> Result<()> {
@@ -421,13 +440,19 @@ fn write_conf(isolated: u32, follow_ksu: bool) -> Result<()> {
     .context("write uidhide.conf")
 }
 
+// Both knobs live in one file, so setting either rewrites the whole thing. Reading it
+// blind would write the OTHER knob's default over whatever the user had chosen, so a
+// config we cannot read is a refusal rather than a silent reset.
+const CONF_UNREADABLE: &str =
+    "read uidhide.conf -- refusing to rewrite it, which would reset the other setting";
+
 pub fn set_hide_isolated(mode: u32) -> Result<()> {
-    let raw = conf_read();
+    let raw = conf_read().context(CONF_UNREADABLE)?;
     write_conf(mode, parse_follow_ksu(&raw))
 }
 
 pub fn set_follow_ksu_denylist(on: bool) -> Result<()> {
-    let raw = conf_read();
+    let raw = conf_read().context(CONF_UNREADABLE)?;
     write_conf(parse_hide_isolated(&raw), on)
 }
 

@@ -64,13 +64,21 @@ COMMANDS = {
     "dev": 'echo "$(getprop ro.product.marketname)|$(getprop ro.product.manufacturer)|'
            '$(getprop ro.product.model)|$(getprop ro.build.version.release)|'
            '$(getprop ro.build.version.sdk)|$(uname -r)"',
-    "stealth": 'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat '
+    # Kept character-for-character in step with 10-status.js's stealthProbe: a test in
+    # src/mount.rs pins the two together, because a fixture captured with a DIFFERENT
+    # command is a fixture the page itself could never have produced.
+    "stealth": 'export PATH=/system/bin:/system/xbin:/vendor/bin; '
+               'q() { v=$(eval "$2" 2>/dev/null); case "$v" in "") v="?";; esac; echo "$1=$v"; }; '
+               'echo "sucompat=$(/data/adb/ksud feature list 2>/dev/null | grep su_compat '
                '| grep -q ENABLED && echo 1 || echo 0)"; '
                'echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; '
-               'echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; '
-               'echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; '
-               'echo "se=$(getenforce 2>/dev/null)"',
-    "appnm": 'su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"',
+               'n=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null); '
+               'case "$n" in ""|*[!0-9]*) n="?";; esac; echo "root_nm=$n"; '
+               'q fp "getprop ro.build.fingerprint"; '
+               'q se "getenforce"; '
+               'echo "done=1"',
+    "appnm": 'export PATH=/system/bin:/system/xbin:/vendor/bin; '
+             'su 2000 -c "grep -c \'^nomount_\' /proc/self/mounts"',
     "disabled": "[ -e /data/adb/nomount/disabled ] && echo 1 || echo 0",
     "incident": "cat /data/adb/nomount/incident.log 2>/dev/null",
     "snapshot": "[ -f /data/adb/nomount/snapshot.txt ] && echo 1 || echo 0",
@@ -167,6 +175,13 @@ WEBROOT = os.path.join(ROOT, "module", "webroot")
 LINK_RE = re.compile(r'[ \t]*<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>[ \t]*\n?')
 SRC_RE = re.compile(r'[ \t]*<script[^>]*\ssrc="([^"]+)"[^>]*>\s*</script>[ \t]*\n?')
 
+# The harness INLINES every script and stylesheet into one file so it can be opened over
+# file://, and `script-src 'self'` does not admit inline content -- hence the relaxation.
+# It is not a hole in the shipped page: the real index.html keeps `script-src 'self'`, and
+# the invariant that makes that work (no inline <script>, no style=, no on*= handler) is
+# asserted against the shipped file by the_csp_still_refuses_inline_script_and_inline_style
+# in src/mount.rs, which runs under `cargo test` in CI. Change that test, not this string,
+# if the policy ever moves.
 HARNESS_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
                "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 CSP_RE = re.compile(r'(<meta http-equiv="Content-Security-Policy" content=")([^"]*)(")')

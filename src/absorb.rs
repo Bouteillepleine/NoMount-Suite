@@ -24,9 +24,16 @@ const BUILTIN_SKIPS: &[&str] = &[
     "/system/bin/app_process",
 ];
 
-fn skip_list() -> (Vec<String>, &'static str) {
+/// The opt-out list, and whether a file that exists could not be read.
+///
+/// The two must stay apart. Absorb unmounts and whiteouts, and neither has an in-session
+/// undo, so a pass that cannot see the opt-out list must not proceed as though the list
+/// were empty -- that is the one direction a wrong answer cannot be taken back. The
+/// message alone was not enough: it printed and the pass absorbed anyway.
+fn skip_list() -> (Vec<String>, &'static str, bool) {
     let mut entries: Vec<String> = BUILTIN_SKIPS.iter().map(|s| (*s).to_string()).collect();
     let mut from = "the built-in list";
+    let mut unreadable = false;
     for f in [SKIP_FILE, SKIP_FILE_LEGACY] {
         match std::fs::read_to_string(f) {
             Ok(s) => {
@@ -41,15 +48,18 @@ fn skip_list() -> (Vec<String>, &'static str) {
                 );
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => eprintln!(
-                "nomount: could not read {f} ({e}) -- absorbing as if you had opted nothing \
-                 out; check its permissions before trusting this pass"
-            ),
+            Err(e) => {
+                unreadable = true;
+                eprintln!(
+                    "nomount: could not read {f} ({e}) -- this pass is abandoned rather than \
+                     absorbing as if you had opted nothing out; fix its permissions"
+                );
+            }
         }
     }
     entries.sort();
     entries.dedup();
-    (entries, from)
+    (entries, from, unreadable)
 }
 
 pub(crate) fn is_hook_framework(module_dir: &Path) -> bool {
@@ -274,6 +284,33 @@ fn mnt_ns_of(pid: &str) -> Option<String> {
     fs::read_link(format!("/proc/{pid}/ns/mnt")).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
+/// The processes whose mount namespace an app can end up in.
+///
+/// Only `zygote`/`zygote64` were surveyed, which misses every pre-forked descendant:
+/// `webview_zygote` and `app_zygote` are started separately and hold their own view, and
+/// the `usap` pool members are forked ahead of time. An unmount performed in zygote's
+/// namespace does not reach a namespace that was already copied from it, so a leaked bind
+/// can live on in an isolated WebView renderer while the survey reports nothing found.
+///
+/// Adding names is close to free: `survey_elsewhere` dedupes on the namespace inode, so a
+/// process that shares one with something already surveyed costs a readlink and nothing
+/// more. It is only the genuinely distinct namespaces that get walked.
+const NAMESPACE_PROBE_NAMES: &[&str] = &[
+    "zygote",
+    "zygote64",
+    "zygote32",
+    "zygote64_32",
+    // Android 17. nm_mount_filter.c's header is about this one: it runs in a COPY of
+    // init's namespace, which still carries the hook framework's bind, so a single
+    // isolated read of /proc/self/mountinfo there names the module that owns it.
+    // Present on an OP15 running A17, and missed by a zygote64-only match.
+    "zygote_next",
+    "webview_zygote",
+    "app_zygote",
+    "usap32",
+    "usap64",
+];
+
 fn namespace_probes() -> Vec<(String, String)> {
     let mut out = vec![("init".to_string(), "1".to_string())];
     let Ok(rd) = fs::read_dir("/proc") else { return out };
@@ -284,7 +321,7 @@ fn namespace_probes() -> Vec<(String, String)> {
         }
         let Ok(raw) = fs::read_to_string(format!("/proc/{pid}/cmdline")) else { continue };
         let name = raw.split('\0').next().unwrap_or("").trim();
-        if name == "zygote64" || name == "zygote" {
+        if NAMESPACE_PROBE_NAMES.contains(&name) {
             out.push((name.to_string(), pid));
         }
     }
@@ -455,7 +492,7 @@ pub fn survey() -> Result<Vec<Surveyed>> {
 pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
     let rows = read_mountinfo(mountinfo).context("read mountinfo")?;
     let roots = fs_roots(&rows);
-    let (skips, skip_src) = skip_list();
+    let (skips, skip_src, _) = skip_list();
     let hookers = hooking_modules(&rows, &roots, &skips);
     let red = Redundancy::new(&Nm::new().list().unwrap_or_default(), &rows);
 
@@ -613,6 +650,67 @@ pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
     Some(read_mountinfo(MOUNTINFO).ok()?.into_iter().map(|r| r.target).collect())
 }
 
+/// Is every mount currently at `target` one the module system put there?
+///
+/// `Some(false)` means at least one is not, and `None` means the question could not be
+/// answered -- neither is a licence to unmount. A source under /data/adb is a module tree
+/// or the Suite's own state; anything else is the ROM's, or another tool's, and
+/// MNT_DETACH on it is both silent and irreversible until reboot.
+///
+/// Returns the row count so a caller can pop a stack without over-popping: unmounting
+/// "until it is gone" would take down whatever a concurrent mount put there in between.
+/// Pop at most `pops` mounts from `target`, re-proving ownership before each one.
+///
+/// `pops` is counted from a single mountinfo read and was then replayed blind. Anything
+/// that mounted on the path in between -- another module's service.sh running alongside
+/// the post-boot pass, or ksud's own mounting -- was taken down by the surplus, having
+/// never been validated, and `MNT_DETACH` is not reversible. So the count is treated as a
+/// ceiling and each pop is re-checked instead of trusted.
+///
+/// The re-check is "the module system owns everything here", which is weaker than the
+/// per-candidate proof `live_unmounts_needed` made of the original rows: it will still
+/// stop a ROM or third-party mount being detached, but not a DIFFERENT module's bind that
+/// appeared in the same instant. Closing that would mean carrying the candidate set down
+/// here, and the window is one mountinfo read wide.
+pub(crate) fn pop_owned(target: &Path, pops: usize) -> usize {
+    let mut done = 0;
+    for _ in 0..pops {
+        if !still_mounted(target) {
+            break;
+        }
+        if mounts_here_are_ours(target).map(|(ours, _)| ours) != Some(true) {
+            eprintln!(
+                "nomount: {} now carries a mount the module system did not make (or the \
+                 mount table could not be read); stopping rather than detaching it",
+                target.display()
+            );
+            break;
+        }
+        if !umount_detach(target) {
+            break;
+        }
+        done += 1;
+    }
+    done
+}
+
+pub(crate) fn mounts_here_are_ours(target: &Path) -> Option<(bool, usize)> {
+    ownership_of(&read_mountinfo(MOUNTINFO).ok()?, target)
+}
+
+fn ownership_of(rows: &[MountRow], target: &Path) -> Option<(bool, usize)> {
+    let roots = fs_roots(rows);
+    let here: Vec<&MountRow> = rows.iter().filter(|r| r.target == target).collect();
+    if here.is_empty() {
+        return None;
+    }
+    // Every row, not just the top one: popping the stack reaches all of them.
+    let ours = here
+        .iter()
+        .all(|r| source_of(r, &roots).is_some_and(|s| s.starts_with("/data/adb")));
+    Some((ours, here.len()))
+}
+
 pub fn absorbed_pairs() -> Vec<(PathBuf, PathBuf)> {
     read_absorbed_pairs().unwrap_or_default()
 }
@@ -678,7 +776,7 @@ fn prune_absorbed_record(early: bool) {
         return;
     }
     let (kept, gone) = prune_absorbed_pairs(all, module_on_disk, |p| early || p.exists());
-    let (skips, _) = skip_list();
+    let (skips, _, _) = skip_list();
     let mut released: Vec<String> = Vec::new();
     let kept: Vec<(PathBuf, PathBuf)> = kept
         .into_iter()
@@ -1346,9 +1444,7 @@ fn take_over_empty_dir(
     if ours {
         let _ = nm.del(target);
     }
-    for _ in 0..pops {
-        let _ = umount_detach(target);
-    }
+    pop_owned(target, pops);
     if still_mounted(target) {
         eprintln!(
             "nomount: {} still has a mount on it after the unmount - leaving it for the \
@@ -1455,7 +1551,15 @@ fn set_absorbed_tmpfs(entries: &[(PathBuf, String)]) {
     }
 }
 
-pub fn reapply_tmpfs_whiteouts(nm: &Nm) -> u32 {
+/// `mounted` is the live mount-point set, so this pass obeys the same rule as every other
+/// whiteout in `run_mount`: never hide a path that still carries a mount. It used to call
+/// `nm.whiteout` straight after `validate`, with no mount check at all -- and whiteouting
+/// over a live tmpfs leaves its row in every app's mountinfo with no path resolving to it,
+/// which is exactly the residue the rest of this file exists to avoid.
+pub fn reapply_tmpfs_whiteouts(
+    nm: &Nm,
+    mounted: &std::collections::HashSet<PathBuf>,
+) -> u32 {
     let mut n = 0u32;
     let record = match read_absorbed_tmpfs() {
         Ok(v) => v,
@@ -1471,6 +1575,10 @@ pub fn reapply_tmpfs_whiteouts(nm: &Nm) -> u32 {
     for (t, _) in record {
         if crate::whiteout::validate(&t.to_string_lossy()).is_err() {
             eprintln!("nomount: skipping invalid ROM-tmpfs entry {}", t.display());
+            continue;
+        }
+        if !crate::mount::unmount_before_serving(mounted, &t) {
+            failed += 1;
             continue;
         }
         if let Err(e) = nm.whiteout(&t) {
@@ -1501,7 +1609,14 @@ struct TmpfsPass {
 fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
     let mut st = TmpfsPass::default();
     let Ok(raw) = fs::read(MOUNTINFO) else { return st };
-    let (skips, _) = skip_list();
+    let (skips, _, skips_unreadable) = skip_list();
+    // This pass unmounts a ROM tmpfs and replaces it with a whiteout, which nothing in the
+    // session undoes. Running it against a skip list we could not read means ignoring
+    // every opt-out the user wrote.
+    if skips_unreadable {
+        st.failed += 1;
+        return st;
+    }
     let nm = Nm::new();
     let Some(boot) = boot_id() else {
         eprintln!(
@@ -1529,6 +1644,13 @@ fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
         .filter_map(|l| std::str::from_utf8(l).ok())
         .filter_map(rom_tmpfs_target)
     {
+        // `/` as the source, because a tmpfs has none: it serves content from nowhere, so
+        // there is nothing to attribute it to a module with. That means only the
+        // `/`-prefixed TARGET keys in absorb-skip.txt can match here -- a module-id entry
+        // (the documented form, and what someone writes to keep absorb off their module)
+        // never covers a tmpfs that module mounted, and `is_hook_framework` cannot shield
+        // one either. Honouring an id here needs the mount attributed to a module first,
+        // which mountinfo does not carry for a tmpfs.
         if is_skipped(Path::new("/"), &target, &skips) {
             if record.iter().any(|(t, _)| *t == target) {
                 if dry_run {
@@ -1891,9 +2013,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 dropped += 1;
                 continue;
             }
-            for _ in 0..pops {
-                let _ = umount_detach(&c.target);
-            }
+            pop_owned(&c.target, pops);
             if still_mounted(&c.target) {
                 eprintln!(
                     "nomount: redundant {} still has a mount on it after the unmount - \
@@ -2004,9 +2124,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             }
             continue;
         }
-        for _ in 0..pops {
-            let _ = umount_detach(&c.target);
-        }
+        pop_owned(&c.target, pops);
         if still_mounted(&c.target) {
             eprintln!(
                 "nomount: {} still has a mount on it after the unmount - leaving it for the \
@@ -2127,6 +2245,51 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mount_the_module_system_did_not_make_is_never_ours_to_unmount() {
+        // /data is the fs root for 254:6, so a row's `root` field resolves against it.
+        let mi = concat!(
+            "20 1 254:6 / /data rw - ext4 /dev/block/dm-9 rw\n",
+            // a module's own bind -- ours
+            "40 20 254:6 /adb/modules/mymod/system/etc/hosts /system/etc/hosts rw - ext4 /dev/block/dm-9 rw\n",
+            // an ad-blocker binding from its own data dir -- NOT ours
+            "41 20 254:6 /adb/../misc/adaway/hosts /system/etc/motd rw - ext4 /dev/block/dm-9 rw\n",
+            // something outside /data/adb entirely -- NOT ours
+            "42 20 254:6 /local/tmp/hosts /system/etc/issue rw - ext4 /dev/block/dm-9 rw\n",
+        );
+        let rows = parse_mountinfo_bytes(mi.as_bytes());
+
+        assert_eq!(
+            ownership_of(&rows, Path::new("/system/etc/hosts")),
+            Some((true, 1)),
+            "a bind whose source is a module tree is the module system's"
+        );
+        assert_eq!(
+            ownership_of(&rows, Path::new("/system/etc/issue")),
+            Some((false, 1)),
+            "a source outside /data/adb must never be unmounted on our behalf"
+        );
+        // Nothing mounted here at all: "cannot tell" rather than "yes".
+        assert_eq!(ownership_of(&rows, Path::new("/system/etc/nothing")), None);
+    }
+
+    #[test]
+    fn a_stack_is_ours_only_if_every_row_in_it_is() {
+        // Two mounts at one path: ours on the bottom, a foreign one stacked on top. The
+        // old code popped exactly one, which would have destroyed the foreign mount.
+        let mi = concat!(
+            "20 1 254:6 / /data rw - ext4 /dev/block/dm-9 rw\n",
+            "40 20 254:6 /adb/modules/mymod/system/etc/hosts /system/etc/hosts rw - ext4 /dev/block/dm-9 rw\n",
+            "41 20 254:6 /local/tmp/hosts /system/etc/hosts rw - ext4 /dev/block/dm-9 rw\n",
+        );
+        let rows = parse_mountinfo_bytes(mi.as_bytes());
+        assert_eq!(
+            ownership_of(&rows, Path::new("/system/etc/hosts")),
+            Some((false, 2)),
+            "one foreign row in the stack makes the whole target untouchable"
+        );
+    }
 
     #[test]
     fn only_an_already_injected_mount_may_be_unmounted_in_another_namespace() {
@@ -3081,7 +3244,7 @@ mod tests {
 
     #[test]
     fn user_skip_entries_add_to_the_builtins() {
-        let (list, _) = skip_list();
+        let (list, _, _) = skip_list();
         for b in BUILTIN_SKIPS {
             assert!(list.iter().any(|e| e == b), "built-in {b} must always be present");
         }
