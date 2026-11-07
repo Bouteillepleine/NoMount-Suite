@@ -24,9 +24,16 @@ const BUILTIN_SKIPS: &[&str] = &[
     "/system/bin/app_process",
 ];
 
-fn skip_list() -> (Vec<String>, &'static str) {
+/// The opt-out list, and whether a file that exists could not be read.
+///
+/// The two must stay apart. Absorb unmounts and whiteouts, and neither has an in-session
+/// undo, so a pass that cannot see the opt-out list must not proceed as though the list
+/// were empty -- that is the one direction a wrong answer cannot be taken back. The
+/// message alone was not enough: it printed and the pass absorbed anyway.
+fn skip_list() -> (Vec<String>, &'static str, bool) {
     let mut entries: Vec<String> = BUILTIN_SKIPS.iter().map(|s| (*s).to_string()).collect();
     let mut from = "the built-in list";
+    let mut unreadable = false;
     for f in [SKIP_FILE, SKIP_FILE_LEGACY] {
         match std::fs::read_to_string(f) {
             Ok(s) => {
@@ -41,15 +48,18 @@ fn skip_list() -> (Vec<String>, &'static str) {
                 );
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => eprintln!(
-                "nomount: could not read {f} ({e}) -- absorbing as if you had opted nothing \
-                 out; check its permissions before trusting this pass"
-            ),
+            Err(e) => {
+                unreadable = true;
+                eprintln!(
+                    "nomount: could not read {f} ({e}) -- this pass is abandoned rather than \
+                     absorbing as if you had opted nothing out; fix its permissions"
+                );
+            }
         }
     }
     entries.sort();
     entries.dedup();
-    (entries, from)
+    (entries, from, unreadable)
 }
 
 pub(crate) fn is_hook_framework(module_dir: &Path) -> bool {
@@ -482,7 +492,7 @@ pub fn survey() -> Result<Vec<Surveyed>> {
 pub fn survey_of(mountinfo: &str) -> Result<Vec<Surveyed>> {
     let rows = read_mountinfo(mountinfo).context("read mountinfo")?;
     let roots = fs_roots(&rows);
-    let (skips, skip_src) = skip_list();
+    let (skips, skip_src, _) = skip_list();
     let hookers = hooking_modules(&rows, &roots, &skips);
     let red = Redundancy::new(&Nm::new().list().unwrap_or_default(), &rows);
 
@@ -731,7 +741,7 @@ fn prune_absorbed_record(early: bool) {
         return;
     }
     let (kept, gone) = prune_absorbed_pairs(all, module_on_disk, |p| early || p.exists());
-    let (skips, _) = skip_list();
+    let (skips, _, _) = skip_list();
     let mut released: Vec<String> = Vec::new();
     let kept: Vec<(PathBuf, PathBuf)> = kept
         .into_iter()
@@ -1566,7 +1576,14 @@ struct TmpfsPass {
 fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
     let mut st = TmpfsPass::default();
     let Ok(raw) = fs::read(MOUNTINFO) else { return st };
-    let (skips, _) = skip_list();
+    let (skips, _, skips_unreadable) = skip_list();
+    // This pass unmounts a ROM tmpfs and replaces it with a whiteout, which nothing in the
+    // session undoes. Running it against a skip list we could not read means ignoring
+    // every opt-out the user wrote.
+    if skips_unreadable {
+        st.failed += 1;
+        return st;
+    }
     let nm = Nm::new();
     let Some(boot) = boot_id() else {
         eprintln!(
@@ -1594,6 +1611,13 @@ fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
         .filter_map(|l| std::str::from_utf8(l).ok())
         .filter_map(rom_tmpfs_target)
     {
+        // `/` as the source, because a tmpfs has none: it serves content from nowhere, so
+        // there is nothing to attribute it to a module with. That means only the
+        // `/`-prefixed TARGET keys in absorb-skip.txt can match here -- a module-id entry
+        // (the documented form, and what someone writes to keep absorb off their module)
+        // never covers a tmpfs that module mounted, and `is_hook_framework` cannot shield
+        // one either. Honouring an id here needs the mount attributed to a module first,
+        // which mountinfo does not carry for a tmpfs.
         if is_skipped(Path::new("/"), &target, &skips) {
             if record.iter().any(|(t, _)| *t == target) {
                 if dry_run {
@@ -3191,7 +3215,7 @@ mod tests {
 
     #[test]
     fn user_skip_entries_add_to_the_builtins() {
-        let (list, _) = skip_list();
+        let (list, _, _) = skip_list();
         for b in BUILTIN_SKIPS {
             assert!(list.iter().any(|e| e == b), "built-in {b} must always be present");
         }
