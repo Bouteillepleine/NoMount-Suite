@@ -1802,7 +1802,11 @@ mod tests {
         for lit in [
             "^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$",
             r"IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+",
-            "(ifndef|![[:space:]]*defined)",
+            // `!IS_ENABLED(CONFIG_X)` is a negative gate, but it is also matched by the
+            // IS_ENABLED grep above, so without it here the symbol landed in the POSITIVE
+            // set and the matrix demanded CONFIG_X=y -- the opposite of what the code
+            // needs, failing every leg.
+            "(ifndef|![[:space:]]*(defined|IS_ENABLED))",
         ] {
             assert!(
                 ENGINE_MATRIX.contains(lit) && GATE_SWEEP.contains(lit),

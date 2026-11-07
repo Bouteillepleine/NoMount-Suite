@@ -414,11 +414,24 @@ fn check_zero_mount() -> Check {
             .collect();
 
         let tracked = crate::bind::tracked_result();
-        let ours: std::collections::HashSet<std::path::PathBuf> = tracked
+        // Match on (target, source), not on the target alone. binds.list records both, and
+        // the source was being thrown away here -- so a module re-creating its own bind
+        // over a my_* path the Suite also binds (the case the text below actually
+        // describes) matched by path and was counted as ours. A real mount serving
+        // SOMEONE ELSE'S content over the ROM, visible in every app's mountinfo, then
+        // reported as "Nothing is wrong here".
+        let roots = crate::absorb::fs_roots(&rows);
+        let ours: std::collections::HashSet<(std::path::PathBuf, std::path::PathBuf)> = tracked
             .as_ref()
-            .map(|v| v.iter().map(|(t, _)| t.clone()).collect())
+            .map(|v| v.iter().cloned().collect())
             .unwrap_or_default();
-        let mine = leaked.iter().filter(|(r, _)| ours.contains(&r.target)).count();
+        let mine = leaked
+            .iter()
+            .filter(|(r, _)| {
+                crate::absorb::source_of(r, &roots)
+                    .is_some_and(|s| ours.contains(&(r.target.clone(), s)))
+            })
+            .count();
         let mut why = if let Err(e) = &tracked {
             format!(
                 "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
@@ -454,9 +467,14 @@ fn check_zero_mount() -> Check {
                 leaked.len()
             )
         };
+        // Target-only here on purpose: this asks "is there a recorded bind at this path",
+        // not "is that bind ours" -- a my_* target cannot be taken over while Android is
+        // running whoever made the mount sitting on it.
+        let our_targets: std::collections::HashSet<&std::path::Path> =
+            ours.iter().map(|(t, _)| t.as_path()).collect();
         let deferred: Vec<&str> = deferred
             .into_iter()
-            .filter(|t| !ours.contains(std::path::Path::new(t)))
+            .filter(|t| !our_targets.contains(std::path::Path::new(t)))
             .collect();
         if !deferred.is_empty() {
             why.push_str(&format!(

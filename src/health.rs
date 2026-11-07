@@ -462,6 +462,12 @@ fn drift_probe(rules: &[crate::nm::LiveRule]) -> String {
         }
         let (ta, sa) = (target.to_string(), source.to_string());
         let (Some(a), Some(b)) = (head(&ta, DRIFT_BYTES), head(&sa, DRIFT_BYTES)) else {
+            // head() returns None only on a READ error, and a path that stats as a
+            // regular file of exactly the right size and then refuses to read is the
+            // "registered but not actually served" case this probe exists to find.
+            // `continue` left it in the ok:partial bucket, which grades as a Pass; it
+            // belongs with the stat failures, which do not.
+            unreadable += 1;
             continue;
         };
         bytes_checked += 1;
