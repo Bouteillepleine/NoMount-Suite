@@ -157,7 +157,12 @@
   // and only fall back to running the check in here when it is not alive.
   const CHECK_REQ = "/data/adb/nomount/request/check";
   const CHECK_CACHE = "/data/adb/nomount/audit.json";
-  const CHECK_WAIT_MS = 500, CHECK_WAIT_TRIES = 40;
+  // checkwatch.sh runs the check under `nmto 90`, so anything under 90s of waiting gives
+  // up on a watcher that is still working and falls back to running the check in THIS
+  // page's shell -- which carries the manager app's seccomp filter, cannot drop uid, and
+  // leaves a SIGSYS tombstone per probe. 20s did exactly that on a slow device. Wait past
+  // the watcher's own budget instead, so the fallback only fires when it really died.
+  const CHECK_WAIT_MS = 500, CHECK_WAIT_TRIES = 200;
 
   // Absolute toybox paths, not bare names: this pane's exec environment is the one whose
   // missing PATH made `su 2000 -c stat` exit 127 and report the canary as unmeasurable.
@@ -172,15 +177,18 @@
   }
   async function checkViaWatcher() {
     if (!(await watcherAlive())) return null;
-    // Baseline off the FILE, not off CHECK: on a first open CHECK is null, and any
-    // pre-existing report would then satisfy "newer" before the watcher had run at all.
-    const prev = await readCheckCache();
-    const before = (prev && typeof prev.ts === "number") ? prev.ts : 0;
+    // The floor is the moment we ASKED, not the previous report's timestamp. Baselining
+    // off the file meant a torn read -- the engine rewrites it, and a half-written file
+    // parses as null -- degraded the floor to 0, after which any complete-but-old report
+    // satisfied "newer" and was handed back as the answer to a request just made. The
+    // page then showed a stale verdict under "Checked just now". Same clock on both
+    // sides: the report's ts is epoch seconds, as refreshStatus already assumes.
+    const asked = Math.floor(Date.now() / 1000);
     if ((await exec("/system/bin/touch " + CHECK_REQ)).errno !== 0) return null;
     for (let i = 0; i < CHECK_WAIT_TRIES; i++) {
       await new Promise((r) => setTimeout(r, CHECK_WAIT_MS));
       const rep = await readCheckCache();
-      if (rep && typeof rep.ts === "number" && rep.ts > before && ranSection(rep, "device")) {
+      if (rep && typeof rep.ts === "number" && rep.ts >= asked && ranSection(rep, "device")) {
         return rep;
       }
     }
@@ -552,9 +560,17 @@
       "The saved crash from the boot that disabled the Suite is removed for good. It is the only " +
       "copy, and it usually names the file that caused the failure.",
       "Delete"))) return;
-    { const el = $("incwarn"); if (el) el.hidden = true; }
     btn.disabled = true;
-    await exec("/system/bin/rm -f /data/adb/nomount/incident.log");
-    toast("Incident record cleared", "ok");
+    // The banner used to be hidden BEFORE the delete and the result discarded, so a
+    // refused rm left the record on disk with nothing on screen saying so.
+    const r = await exec("/system/bin/rm -f /data/adb/nomount/incident.log");
+    if (r.errno === 0) {
+      const el = $("incwarn");
+      if (el) el.hidden = true;
+      toast("Incident record cleared", "ok");
+    } else {
+      toast("Could not delete the incident record; it is still there. " +
+            ((r.stderr || "").trim().split("\n")[0] || "the delete was refused"), "bad");
+    }
     btn.disabled = false; refreshIncident();
   }
