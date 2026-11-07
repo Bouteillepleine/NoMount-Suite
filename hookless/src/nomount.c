@@ -987,14 +987,31 @@ static int nm_mmap_prepare(struct vm_area_desc *desc)
 static long nm_ioctl_as_stock(struct file *file, unsigned int cmd, unsigned long arg, bool compat)
 {
     struct nm_inode_info *info = file_inode(file)->i_private;
+    const struct path *src;
     struct file *sf;
     long ret;
 
-    if (unlikely(!info) || !info->s_path.dentry)
+    if (unlikely(!info))
+        return -ENOTTY;
+
+    /* Answer as the stock file where there is one; otherwise answer from the file we
+     * actually serve.
+     *
+     * A purely injected path has no stock counterpart -- its vpath did not exist when
+     * the rule was added, so nm_alloc_rule never set s_path -- and this returned -ENOTTY
+     * outright for those. That made one ioctl() a clean separator: a genuine erofs, ext4
+     * or f2fs file answers FS_IOC_GETFLAGS, FS_IOC_FSGETXATTR and FS_IOC_GETVERSION, and
+     * every injected file refused all three. "As stock" is undefined with no stock file,
+     * and the backing file is what the injected one IS.
+     */
+    src = info->s_path.dentry ? &info->s_path
+        : info->r_path.dentry ? &info->r_path
+        : NULL;
+    if (!src)
         return -ENOTTY;
 
     {
-        struct inode *si = d_backing_inode(info->s_path.dentry);
+        struct inode *si = d_backing_inode(src->dentry);
 
         if (si && si->i_fop && !si->i_fop->unlocked_ioctl
 #ifdef CONFIG_COMPAT
@@ -1004,7 +1021,7 @@ static long nm_ioctl_as_stock(struct file *file, unsigned int cmd, unsigned long
             return -ENOTTY;
     }
 
-    sf = dentry_open(&info->s_path, O_RDONLY | O_LARGEFILE, current_cred());
+    sf = dentry_open(src, O_RDONLY | O_LARGEFILE, current_cred());
     if (IS_ERR(sf))
         return -ENOTTY;
 
