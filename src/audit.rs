@@ -270,7 +270,17 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
 /// took its "no live rules" branch, reported N/A, and the report read `clean` on a device
 /// serving hundreds of rules. The count has to come out with the rules so the caller can
 /// say so. `doctor.rs` has used `parse_list_counted` for this reason since it was added.
-fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>, usize)> {
+struct LiveRules {
+    /// uid-0 Inject targets, which is what most device checks reason over.
+    targets: Vec<PathBuf>,
+    engine_dirs: Vec<PathBuf>,
+    /// Inject targets for every uid, not just 0.
+    all_inject_targets: Vec<PathBuf>,
+    /// Non-blank lines of the engine's listing the parser could not read.
+    unread: usize,
+}
+
+fn live_rules() -> Option<LiveRules> {
     let listed = Nm::new().list().ok()?;
     let (rules, unread) = crate::nm::parse_list_counted(&listed);
     let targets = rules
@@ -290,7 +300,7 @@ fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>, usize)> {
         .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
         .map(|r| r.target.clone())
         .collect();
-    Some((targets, dirs, all_targets, unread))
+    Some(LiveRules { targets, engine_dirs: dirs, all_inject_targets: all_targets, unread })
 }
 
 fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
@@ -1670,7 +1680,9 @@ fn xattr_verdict(who: &str, files: usize, leaked: u32, inverse: u32, denied: u32
 }
 
 pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
-    let Some((targets, engine_dirs, all_inject_targets, unread_rules)) = live_rules() else {
+    let Some(LiveRules { targets, engine_dirs, all_inject_targets, unread: unread_rules }) =
+        live_rules()
+    else {
         let live = check_engine_live();
         let answered = live.verdict != Verdict::Fail;
         let mut checks = vec![live];
