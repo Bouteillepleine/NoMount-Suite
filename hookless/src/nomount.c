@@ -3099,6 +3099,9 @@ static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
                     s->amax = a;
                     s->dmax_valid = true;
                 }
+                nm_debug("inoseed: retry dev=%u:%u seed='%s' err=%d dmax=%llu amax=%llu\n",
+                         MAJOR(dev), MINOR(dev), seed, err,
+                         (unsigned long long)s->dmax, (unsigned long long)s->amax);
             }
             return s;
         }
@@ -3127,6 +3130,14 @@ static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
         s->amax = a;
     }
     s->valid = true;
+    /* The seed path is what the dmax/amax scan walked, and this table is 16 slots with
+     * round-robin eviction -- a device with more partitions than that can have an entry
+     * re-seeded from a DIFFERENT path later. Both facts decide the number a synthesized
+     * directory ends up with, and neither was visible from outside. */
+    nm_debug("inoseed: dev=%u:%u seed='%s' err=%d dmax=%llu amax=%llu slot=%d\n",
+             MAJOR(dev), MINOR(dev), seed, err,
+             (unsigned long long)s->dmax, (unsigned long long)s->amax,
+             (int)(s - nm_dev_ino_tab));
     return s;
 }
 
@@ -3756,24 +3767,46 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
     }
 }
 
+/* A synthesized DIRECTORY is placed one above the highest number in play, with no attempt
+ * to fit it between the stock entries beside it -- unlike nm_place_ino(), which searches
+ * the gaps. That is deliberate (a directory inode colliding with a real one is worse than
+ * a conspicuous one), but it is also exactly why `find <mount> -type d -inum +N` returns
+ * precisely the directories this engine invented.
+ *
+ * Measured on an OP15: /product holds 106 entries topping out at ino 4,770,560, and the
+ * two directories injected into it came out at 89,750,657 and ...658 -- nineteen times
+ * the partition's own ceiling, so the high-water mark that produced them is NOT this
+ * partition's. These lines say which of the four inputs it actually was; one boot with
+ * NOMOUNT_DEBUG answers it.
+ */
 static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
 {
     struct nm_dev_ino *di = nm_dev_ino_get(pop->dev, NULL);
-    u64 c;
+    const char *won = "dmax";
+    u64 c, start;
 
-    if (!di || !di->dmax_valid)
+    if (!di || !di->dmax_valid) {
+        nm_debug("inoplace: dev=%u:%u no dmax (di=%d err=%d) -> gap-fit via nm_place_ino\n",
+                 MAJOR(pop->dev), MINOR(pop->dev), !!di, di ? di->dmax_err : 0);
         return nm_place_ino(pop, spread);
+    }
 
     c = di->dmax;
-    if (di->amax > c)
-        c = di->amax;
-    if (pop->hw > c)
-        c = pop->hw;
-    if (di->hw > c)
-        c = di->hw;
+    if (di->amax > c) { c = di->amax;  won = "di->amax"; }
+    if (pop->hw > c)  { c = pop->hw;   won = "pop->hw"; }
+    if (di->hw > c)   { c = di->hw;    won = "di->hw"; }
     c++;
+    start = c;
     while (nm_ino_taken(pop, c))
         c++;
+    nm_debug("inoplace: dev=%u:%u dmax=%llu amax=%llu di_hw=%llu pop_hw=%llu pop_n=%d "
+             "pop_lo=%llu pop_hi=%llu -> ino=%llu (winner=%s, +%llu for collisions)\n",
+             MAJOR(pop->dev), MINOR(pop->dev),
+             (unsigned long long)di->dmax, (unsigned long long)di->amax,
+             (unsigned long long)di->hw, (unsigned long long)pop->hw, pop->n,
+             (unsigned long long)(pop->n ? pop->v[0] : 0),
+             (unsigned long long)(pop->n ? pop->v[pop->n - 1] : 0),
+             (unsigned long long)c, won, (unsigned long long)(c - start));
     return nm_ino_take(pop, c);
 }
 
