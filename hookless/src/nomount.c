@@ -678,9 +678,41 @@ static void nm_inode_info_rcu_free(struct rcu_head *head)
     kmem_cache_free(nm_inode_cachep, container_of(head, struct nm_inode_info, rcu));
 }
 
+static void nomount_hijacked_destroy_inode(struct inode *inode);
+
+/* The original super_operations behind a hijacked superblock, or NULL.
+ *
+ * nomount_restore_superblocks() frees the nm_sop with kfree_rcu(), which only waits for
+ * readers that are INSIDE an RCU read-side critical section. These callbacks had none:
+ * a reader preempted between loading s_op and dereferencing the nm_sop it points at can
+ * resume after a full grace period has elapsed and then call through freed memory. The
+ * window is teardown-only (restore_superblocks runs from the module exit path), but the
+ * call it makes is an indirect one, so landing in freed memory is arbitrary execution.
+ *
+ * Only the nm_sop read is inside the section, and the pointer is copied out. orig_sop
+ * points at the filesystem's own const super_operations, which outlives us, so the call
+ * itself MUST stay outside: evict_inode and statfs both sleep, and sleeping under
+ * rcu_read_lock is a bug in its own right.
+ */
+static const struct super_operations *nm_orig_sop(struct super_block *sb)
+{
+    const struct super_operations *orig = NULL;
+    struct nm_sop *nm_sop;
+
+    if (unlikely(!sb))
+        return NULL;
+    rcu_read_lock();
+    nm_sop = __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop,
+                      destroy_inode, nomount_hijacked_destroy_inode);
+    if (nm_sop)
+        orig = nm_sop->orig_sop;
+    rcu_read_unlock();
+    return orig;
+}
+
 static void nomount_hijacked_destroy_inode(struct inode *inode)
 {
-    struct nm_sop *nm_sop;
+    const struct super_operations *orig;
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         if (inode->i_private) {
             struct nm_inode_info *info = inode->i_private;
@@ -696,38 +728,38 @@ static void nomount_hijacked_destroy_inode(struct inode *inode)
             call_rcu(&info->rcu, nm_inode_info_rcu_free);
         }
     }
-    nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
-    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->destroy_inode) {
-        nm_sop->orig_sop->destroy_inode(inode);
+    orig = nm_orig_sop(inode->i_sb);
+    if (orig && orig->destroy_inode) {
+        orig->destroy_inode(inode);
     }
 }
 
 static int nomount_hijacked_drop_inode(struct inode *inode)
 {
-    struct nm_sop *nm_sop;
+    const struct super_operations *orig;
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         return !inode->i_nlink || inode_unhashed(inode);
     }
 
-    nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
-    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->drop_inode) {
-        return nm_sop->orig_sop->drop_inode(inode);
+    orig = nm_orig_sop(inode->i_sb);
+    if (orig && orig->drop_inode) {
+        return orig->drop_inode(inode);
     }
-    
+
     return !inode->i_nlink || inode_unhashed(inode);
 }
 
 static void nomount_hijacked_evict_inode(struct inode *inode)
 {
-    struct nm_sop *nm_sop;
+    const struct super_operations *orig;
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         truncate_inode_pages_final(&inode->i_data);
         clear_inode(inode);
         return;
     }
-    nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
-    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->evict_inode) {
-        nm_sop->orig_sop->evict_inode(inode);
+    orig = nm_orig_sop(inode->i_sb);
+    if (orig && orig->evict_inode) {
+        orig->evict_inode(inode);
     } else {
         truncate_inode_pages_final(&inode->i_data);
         clear_inode(inode);
@@ -1057,16 +1089,15 @@ static void nm_mirror_blocks(const struct nm_inode_info *info, struct kstat *sta
 static int nomount_hijacked_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
     struct inode *inode = d_backing_inode(dentry);
-    struct nm_sop *nm_sop;
+    const struct super_operations *orig;
 
     if (inode && (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) &&
         unlikely(nm_hidden_from_caller(inode->i_private)))
         return -ENOENT;
 
-    nm_sop = __get_nm(smp_load_acquire(&dentry->d_sb->s_op), struct nm_sop, fake_sop,
-                      destroy_inode, nomount_hijacked_destroy_inode);
-    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->statfs)
-        return nm_sop->orig_sop->statfs(dentry, buf);
+    orig = nm_orig_sop(dentry->d_sb);
+    if (orig && orig->statfs)
+        return orig->statfs(dentry, buf);
     return -ENOSYS;
 }
 
