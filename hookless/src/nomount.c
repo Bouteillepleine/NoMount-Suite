@@ -2934,6 +2934,43 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
     dir_node->dir_inode = NULL;
 }
 
+/* Once a rule exists, this module can never be unloaded again.
+ *
+ * A victim directory is hijacked by pointing inode->i_op at a per-inode copy of its
+ * own vtable whose lookup/getattr are ours, and the engine's own inodes point i_op
+ * straight at nm_dir_iops/nm_file_iops. nomount_restore_dir_node() does not put
+ * either pointer back -- it NEUTERS the hijack by clearing nm_iop->dir_node so the
+ * handlers fall through, and that is deliberate: the VFS treats i_op as immutable
+ * for an inode's lifetime and dereferences it as a plain stable pointer, so there is
+ * no sequence -- synchronize_rcu() included -- that proves no CPU is mid-flight
+ * through the copy at the moment it would be restored. Installing a superset once is
+ * safe; uninstalling it is not.
+ *
+ * So those pointers outlive every rule, and shrink_dcache_sb() only reclaims UNUSED
+ * dentries: a directory that is some process's cwd or has an open fd keeps its
+ * inode, and its i_op keeps pointing into this module's text. Unloading then leaves
+ * the next lookup on it jumping into freed text, and kmem_cache_destroy() on the
+ * vfs_iops cache runs with objects still installed.
+ *
+ * Refusing the unload is the honest answer: rmmod returns -EBUSY instead. The pin is
+ * never dropped, including across `nomount clear`, because clearing rules does not
+ * take the pointers back. nomount_exit() can therefore only run on a module that
+ * never held a rule, where the caches it destroys are empty.
+ *
+ * __module_get, not try_module_get: we are inside a netlink command, so this
+ * module's refcount is already non-zero and the get cannot fail. Both are no-ops
+ * when THIS_MODULE is NULL, which is what a CONFIG_NOMOUNT=y build has.
+ */
+static void nm_pin_module(void)
+{
+    static bool pinned;
+
+    if (!pinned) {
+        pinned = true;
+        __module_get(THIS_MODULE);
+    }
+}
+
 static void nomount_restore_superblocks(void)
 {
     struct nm_sop *nm_sop, *tmp;
@@ -4961,6 +4998,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     hash_add_rcu(nomount_rules_ht, &rule->vpath_node, rule->v_hash);
     atomic_inc(&nm_rule_gen);
+    nm_pin_module();
 
     nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len, rule);
     if (unlikely(victim))
