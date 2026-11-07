@@ -274,6 +274,33 @@ fn mnt_ns_of(pid: &str) -> Option<String> {
     fs::read_link(format!("/proc/{pid}/ns/mnt")).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
+/// The processes whose mount namespace an app can end up in.
+///
+/// Only `zygote`/`zygote64` were surveyed, which misses every pre-forked descendant:
+/// `webview_zygote` and `app_zygote` are started separately and hold their own view, and
+/// the `usap` pool members are forked ahead of time. An unmount performed in zygote's
+/// namespace does not reach a namespace that was already copied from it, so a leaked bind
+/// can live on in an isolated WebView renderer while the survey reports nothing found.
+///
+/// Adding names is close to free: `survey_elsewhere` dedupes on the namespace inode, so a
+/// process that shares one with something already surveyed costs a readlink and nothing
+/// more. It is only the genuinely distinct namespaces that get walked.
+const NAMESPACE_PROBE_NAMES: &[&str] = &[
+    "zygote",
+    "zygote64",
+    "zygote32",
+    "zygote64_32",
+    // Android 17. nm_mount_filter.c's header is about this one: it runs in a COPY of
+    // init's namespace, which still carries the hook framework's bind, so a single
+    // isolated read of /proc/self/mountinfo there names the module that owns it.
+    // Present on an OP15 running A17, and missed by a zygote64-only match.
+    "zygote_next",
+    "webview_zygote",
+    "app_zygote",
+    "usap32",
+    "usap64",
+];
+
 fn namespace_probes() -> Vec<(String, String)> {
     let mut out = vec![("init".to_string(), "1".to_string())];
     let Ok(rd) = fs::read_dir("/proc") else { return out };
@@ -284,7 +311,7 @@ fn namespace_probes() -> Vec<(String, String)> {
         }
         let Ok(raw) = fs::read_to_string(format!("/proc/{pid}/cmdline")) else { continue };
         let name = raw.split('\0').next().unwrap_or("").trim();
-        if name == "zygote64" || name == "zygote" {
+        if NAMESPACE_PROBE_NAMES.contains(&name) {
             out.push((name.to_string(), pid));
         }
     }
