@@ -659,6 +659,41 @@ pub(crate) fn mounted_targets() -> Option<std::collections::HashSet<PathBuf>> {
 ///
 /// Returns the row count so a caller can pop a stack without over-popping: unmounting
 /// "until it is gone" would take down whatever a concurrent mount put there in between.
+/// Pop at most `pops` mounts from `target`, re-proving ownership before each one.
+///
+/// `pops` is counted from a single mountinfo read and was then replayed blind. Anything
+/// that mounted on the path in between -- another module's service.sh running alongside
+/// the post-boot pass, or ksud's own mounting -- was taken down by the surplus, having
+/// never been validated, and `MNT_DETACH` is not reversible. So the count is treated as a
+/// ceiling and each pop is re-checked instead of trusted.
+///
+/// The re-check is "the module system owns everything here", which is weaker than the
+/// per-candidate proof `live_unmounts_needed` made of the original rows: it will still
+/// stop a ROM or third-party mount being detached, but not a DIFFERENT module's bind that
+/// appeared in the same instant. Closing that would mean carrying the candidate set down
+/// here, and the window is one mountinfo read wide.
+pub(crate) fn pop_owned(target: &Path, pops: usize) -> usize {
+    let mut done = 0;
+    for _ in 0..pops {
+        if !still_mounted(target) {
+            break;
+        }
+        if mounts_here_are_ours(target).map(|(ours, _)| ours) != Some(true) {
+            eprintln!(
+                "nomount: {} now carries a mount the module system did not make (or the \
+                 mount table could not be read); stopping rather than detaching it",
+                target.display()
+            );
+            break;
+        }
+        if !umount_detach(target) {
+            break;
+        }
+        done += 1;
+    }
+    done
+}
+
 pub(crate) fn mounts_here_are_ours(target: &Path) -> Option<(bool, usize)> {
     ownership_of(&read_mountinfo(MOUNTINFO).ok()?, target)
 }
@@ -1409,9 +1444,7 @@ fn take_over_empty_dir(
     if ours {
         let _ = nm.del(target);
     }
-    for _ in 0..pops {
-        let _ = umount_detach(target);
-    }
+    pop_owned(target, pops);
     if still_mounted(target) {
         eprintln!(
             "nomount: {} still has a mount on it after the unmount - leaving it for the \
@@ -1980,9 +2013,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
                 dropped += 1;
                 continue;
             }
-            for _ in 0..pops {
-                let _ = umount_detach(&c.target);
-            }
+            pop_owned(&c.target, pops);
             if still_mounted(&c.target) {
                 eprintln!(
                     "nomount: redundant {} still has a mount on it after the unmount - \
@@ -2093,9 +2124,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             }
             continue;
         }
-        for _ in 0..pops {
-            let _ = umount_detach(&c.target);
-        }
+        pop_owned(&c.target, pops);
         if still_mounted(&c.target) {
             eprintln!(
                 "nomount: {} still has a mount on it after the unmount - leaving it for the \

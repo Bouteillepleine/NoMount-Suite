@@ -771,7 +771,16 @@ pub(crate) fn unmount_before_serving(
             );
             return false;
         }
-        return true;
+        // `targets` is a SNAPSHOT, taken before teardown_all() and before an apply loop
+        // that then runs for hundreds of process spawns with module scripts and ksud
+        // live. A mount that appeared after it was taken is simply absent from it, and
+        // returning "safe to serve" on that basis injects straight over a live mount --
+        // stranding its row in mountinfo with no path reaching it, which is the one
+        // outcome this function exists to prevent. Treat the snapshot as a fast path and
+        // confirm anything it does not know about against the live table.
+        if !crate::absorb::still_mounted(target) {
+            return true;
+        }
     }
     // Whatever is mounted here is about to be MNT_DETACHed, which no later pass can undo,
     // so establish it is the module system's before touching it. Without this, hiding a
@@ -1216,6 +1225,16 @@ pub fn run_reload() -> Result<()> {
 
 pub(crate) const MODULE_SUMMARY: &str = "/data/adb/nomount/modules.tsv";
 
+/// Written just before a pass tears everything down, removed once it has rebuilt.
+///
+/// `run_mount` unmounts every recorded bind, wipes the whole engine rule table and only
+/// then rebuilds, with no rollback: killed in between -- and module/lib.sh runs it under
+/// `nmto 60`, which SIGKILLs -- the device finishes booting with no rules and no binds,
+/// serving nothing, with every whiteout un-applied. A real rollback is not available once
+/// the kernel table is cleared, so the next pass at least gets to know it happened instead
+/// of reading a half-built state as the truth.
+const PASS_INFLIGHT: &str = "/data/adb/nomount/.mount.inflight";
+
 fn write_module_summary(plan: &[PlanEntry]) -> std::io::Result<()> {
     use std::collections::BTreeMap;
     let mut per: BTreeMap<&str, (usize, bool, bool)> = BTreeMap::new();
@@ -1303,6 +1322,15 @@ pub fn run_mount() -> Result<()> {
     let mounted = crate::absorb::mounted_targets().context(
         "cannot read /proc/self/mountinfo - refusing to serve, because assuming \"nothing is mounted\" injects over live mounts and strands each one in mountinfo until reboot",
     )?;
+
+    if std::path::Path::new(PASS_INFLIGHT).exists() {
+        eprintln!(
+            "nomount: the previous mount pass was cut off between tearing down and \
+             rebuilding, so what is on this device now is a partial pass, not a result. \
+             This one rebuilds from the plan, which is the recovery."
+        );
+    }
+    let _ = crate::statefile::write_atomic(PASS_INFLIGHT, b"");
 
     if !crate::bind::teardown_all() {
         eprintln!(
@@ -1448,6 +1476,8 @@ pub fn run_mount() -> Result<()> {
     if !pm.is_empty() {
         println!("nomount: re-parsed {} changed system APK(s) (package cache)", pm.len());
     }
+    // The pass reached the end, so what is on the device is a whole one.
+    let _ = fs::remove_file(PASS_INFLIGHT);
     crate::ghost::sync_after_pass(&nm);
     Ok(())
 }
