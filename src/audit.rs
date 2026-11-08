@@ -190,6 +190,7 @@ pub(crate) const N_SURFACES: &str = "kernel surfaces";
 pub(crate) const N_DINO_STAT: &str = "readdir ino vs stat ino";
 pub(crate) const N_INODE_BAND: &str = "injected inode band";
 pub(crate) const N_SYNTH_DIR_INO: &str = "synthesized dir inode range";
+pub(crate) const N_ACCEPTED: &str = "accepted rows";
 pub(crate) const N_DIR_INO_COLLIDE: &str = "synthesized inode collision";
 pub(crate) const N_EROFS_SHAPE: &str = "erofs directory shape";
 pub(crate) const N_MAPS_DELETED: &str = "injected files in maps";
@@ -200,10 +201,10 @@ pub(crate) const N_RULE_DUMP: &str = "engine rule dump";
 pub(crate) const N_XATTR_HIDDEN: &str = "xattr agrees with open for a hidden app";
 
 #[cfg(test)]
-pub(crate) const ALL_CHECK_NAMES: [&str; 14] = [
+pub(crate) const ALL_CHECK_NAMES: [&str; 15] = [
     N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DINO_STAT,
     N_INODE_BAND, N_SYNTH_DIR_INO, N_DIR_INO_COLLIDE, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
-    N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN,
+    N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN, N_ACCEPTED,
 ];
 
 #[repr(C)]
@@ -1856,19 +1857,37 @@ fn accepted_rows(raw: Option<&str>) -> Vec<String> {
 /// Deliberately only Warn. An Unmeasured row cannot be accepted away, because "I know" is
 /// not something you can say about a thing that was never measured, and Fail/Reboot are
 /// about the Suite being broken rather than visible.
-fn apply_accepted(checks: &mut [Check], accepted: &[String]) {
+fn apply_accepted(checks: &mut Vec<Check>, accepted: &[String]) {
     if accepted.is_empty() {
         return;
     }
-    for c in checks.iter_mut() {
-        if c.verdict != Verdict::Warn {
-            continue;
+    let mut taken: Vec<String> = Vec::new();
+    checks.retain(|c| {
+        let hit = c.verdict == Verdict::Warn && accepted.iter().any(|a| a == &c.id || a == &c.name);
+        if hit {
+            taken.push(format!("{} ({})", c.name, c.evidence));
         }
-        if accepted.iter().any(|a| a == &c.id || a == &c.name) {
-            c.verdict = Verdict::Note;
-            c.evidence = format!("{} [accepted on this device]", c.evidence);
-        }
+        !hit
+    });
+    if taken.is_empty() {
+        return;
     }
+    // One line, and it is not optional. Dropping a row the audit MEASURED without saying so
+    // is the false-clean bug this whole ladder exists to prevent -- the report would name no
+    // oracle and read clean while one was live. Accepting a trade is the owner's to make;
+    // concealing that a trade was made is not.
+    checks.push(
+        chk(
+            N_ACCEPTED,
+            Verdict::Note,
+            format!("{} row(s) accepted in {ACCEPTED_PATH}: {}", taken.len(), taken.join("; ")),
+        )
+        .meaning(
+            "These were measured and are still true; you have marked them as trades you \
+             have chosen, so they are kept out of the findings. Remove a line from that \
+             file to hear about one again.",
+        ),
+    );
 }
 
 #[cfg(test)]
@@ -2206,18 +2225,19 @@ mod tests {
     }
 
     #[test]
-    fn only_a_named_warn_can_be_accepted_and_only_when_asked() {
+    fn an_accepted_row_leaves_the_findings_but_never_leaves_silently() {
         let mk_warn = || soft(N_SYNTH_DIR_INO, "ino=89750657".into(), "a filtered find");
         let mk_unmeasured = || unmeasured(N_RULE_DUMP, "3 line(s) unread".into());
 
         // Unreadable or absent accepts NOTHING. Not being able to read the file is not
-        // permission to go quiet -- that is the whole bug this audit opened with.
+        // permission to go quiet -- that is the bug this audit opened with.
         assert!(accepted_rows(None).is_empty());
         let mut v = vec![mk_warn()];
         apply_accepted(&mut v, &accepted_rows(None));
+        assert_eq!(v.len(), 1);
         assert_eq!(v[0].verdict.tag(), "WARN", "silence must be asked for");
 
-        // Named by id it becomes a Note and says so, keeping its evidence and its oracle.
+        // Named, the row goes -- and a Note takes its place naming it and its evidence.
         let id = mk_warn().id;
         let acc = accepted_rows(Some(&format!("# mine\n{id}\n\n")));
         let mut v = vec![
@@ -2226,26 +2246,32 @@ mod tests {
             pass(N_INODE_BAND, "every injected inode shares a bucket".into()),
         ];
         apply_accepted(&mut v, &acc);
-        assert_eq!(v[0].verdict.tag(), "NOTE");
-        assert!(v[0].evidence.contains("ino=89750657"), "evidence must survive: {}", v[0].evidence);
-        assert!(v[0].evidence.contains("accepted on this device"));
-        assert_eq!(v[0].oracle.as_deref(), Some("a filtered find"), "the oracle still stands");
+        assert!(
+            !v.iter().any(|c| c.id == id),
+            "the accepted row must not stay in the findings"
+        );
+        let note = v.iter().find(|c| c.name == N_ACCEPTED).expect("the disclosure is not optional");
+        assert_eq!(note.verdict.tag(), "NOTE");
+        assert!(note.evidence.contains(N_SYNTH_DIR_INO), "{}", note.evidence);
+        assert!(note.evidence.contains("ino=89750657"), "evidence survives: {}", note.evidence);
 
-        // Nothing else moves. An Unmeasured row in particular cannot be accepted away:
-        // "I know" is not sayable about something that was never measured.
-        assert_eq!(v[1].verdict.tag(), "UNMEASURED");
-        assert_eq!(v[2].verdict.tag(), "PASS");
+        // Nothing else moves. An Unmeasured row cannot be accepted away: "I know" is not
+        // sayable about something that was never measured.
+        assert!(v.iter().any(|c| c.verdict.tag() == "UNMEASURED"));
+        assert!(v.iter().any(|c| c.verdict.tag() == "PASS"));
         let u_id = mk_unmeasured().id;
         let mut only_u = vec![mk_unmeasured()];
         apply_accepted(&mut only_u, &accepted_rows(Some(&format!("{u_id}\n"))));
+        assert_eq!(only_u.len(), 1, "no disclosure row, because nothing was accepted");
         assert_eq!(only_u[0].verdict.tag(), "UNMEASURED");
 
-        // Accepting by display name works too, and an unknown name is inert.
+        // By display name too; an unknown name is inert and adds no Note.
         let mut v = vec![mk_warn()];
         apply_accepted(&mut v, &accepted_rows(Some(&format!("{N_SYNTH_DIR_INO}\n"))));
-        assert_eq!(v[0].verdict.tag(), "NOTE");
+        assert!(v.iter().any(|c| c.name == N_ACCEPTED));
         let mut v = vec![mk_warn()];
         apply_accepted(&mut v, &accepted_rows(Some("no-such-check\n")));
+        assert_eq!(v.len(), 1);
         assert_eq!(v[0].verdict.tag(), "WARN");
     }
 
