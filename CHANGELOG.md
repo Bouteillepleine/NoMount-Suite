@@ -6,6 +6,17 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.210 — engine v34 (the engine fixes below need a kernel rebuild)
+
+- `statmount`/`listmount` handed a hide-listed app the module mounts that
+  `/proc/<pid>/mountinfo` already hid. Both are filtered now, so the two views agree.
+- Every app granted root is concealed automatically, and a conceal entry naming a
+  package that is gone is reported instead of sitting there.
+- A finding you have accepted stays out of the findings and is named once as a note.
+- The engine pins itself once a rule exists, so `rmmod` cannot free a live vtable.
+- A virtual parent another uid already owns is refused instead of stolen.
+- `nm knobs` reads the live knob state back out of the engine.
+
 ## v1.3.208 — engine v34 (unchanged)
 
 - `nomount check` from the WebUI could not run the four checks that need an app's uid

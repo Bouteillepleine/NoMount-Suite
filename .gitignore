@@ -39,3 +39,7 @@
 # an import would stamp the zip +dirty.
 __pycache__/
 *.pyc
+
+# Built LKM objects. `package.sh` puts them here for the 01_ zip; they are build
+# output, not source -- tracking them would stamp every later build +dirty.
+module/lkm/*.ko
