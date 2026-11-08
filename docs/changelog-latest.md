@@ -1,14 +1,19 @@
-**v1.3.210 — engine v34 (needs a kernel rebuild)**
+**v1.3.210 — engine v34 (the engine fixes below need a kernel rebuild)**
 
-- statmount/listmount leak closed
-- root-granted apps concealed automatically
-- accepted findings kept out of the report
-- module pinned while rules are live
-- `nm knobs` reads the live knob state
+- `statmount`/`listmount` handed a hide-listed app the module mounts that
+  `/proc/<pid>/mountinfo` already hid. Both are filtered now, so the two views agree.
+- Every app granted root is concealed automatically, and a conceal entry naming a
+  package that is gone is reported instead of sitting there.
+- A finding you have accepted stays out of the findings and is named once as a note.
+- The engine pins itself once a rule exists, so `rmmod` cannot free a live vtable.
+- A virtual parent another uid already owns is refused instead of stolen.
+- `nm knobs` reads the live knob state back out of the engine.
+- `nomount check` no longer calls a check unmeasured when it looked and there was
+  nothing yet to look at.
 
-> `00_` for a kernel with NoMount built in, `01_` LKM for one without.
+> `00_NoMount-Module` for a kernel with NoMount built in, `01_NoMount-Module-LKM` for one without.
 
 ```
-4ae0e3b8e723b03a84b457e59072411bac13650e9786cac92a5fba8aad1e2f41  00_NoMount-Module-v1.3.210.zip
-4c2c43b2752813240cb45edeb381dd50659f4ef7eeb3b2b8df68121c033ce037  01_NoMount-Module-LKM-v1.3.210.zip
+bb41e261375ea94c01cd54227c87f080bd588a2e68bca99c4ecaad5858bad200  00_NoMount-Module-v1.3.210.zip
+e27c5f4eb5f7afdfd9f840d30de98178623f7a40a2dd75a269b32ff9176d23ba  01_NoMount-Module-LKM-v1.3.210.zip
 ```
