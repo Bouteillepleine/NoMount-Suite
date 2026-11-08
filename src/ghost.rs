@@ -210,6 +210,79 @@ fn conceal_entries() -> Option<Vec<String>> {
     read_list(CONCEAL_PATH)
 }
 
+/// KernelSU's app-profile store. Every app that has been GRANTED ROOT is in here.
+pub const KSU_ALLOWLIST: &str = "/data/adb/ksu/.allowlist";
+
+/// Package-shaped ASCII runs in a binary blob.
+///
+/// Why this is worth doing: the conceal list is hand-maintained by package NAME, and a
+/// repackaged manager gets a new random name every time it is rebuilt. The old name stays
+/// in the file, the new one is never added, and the getpriority oracle silently reopens --
+/// measured on an OP15 on 2026-11-08, where one uid with live tasks and no package the
+/// caller could name took Duck Detector's Dangerous Apps card from INFO to Warning, and the
+/// file still carried three dead manager names from earlier rebuilds.
+///
+/// A re-spoofed manager has to be granted root again before it is of any use, so it lands
+/// here under its new name on its own. Reading it makes the common case self-healing
+/// instead of a thing someone has to remember.
+fn package_names_in(blob: &[u8]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let flush = |cur: &mut String, out: &mut Vec<String>| {
+        // A package name needs a dot, and every run must be label-shaped: this is a blob,
+        // so anything looser picks up field names and paths that happen to contain a dot.
+        let ok = cur.len() >= 3
+            && cur.contains('.')
+            && !cur.starts_with('.')
+            && !cur.ends_with('.')
+            && !cur.contains("..")
+            && cur.split('.').all(|l| {
+                !l.is_empty()
+                    && l.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                    && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+        if ok && !out.contains(cur) {
+            out.push(cur.clone());
+        }
+        cur.clear();
+    };
+    for &b in blob {
+        let c = b as char;
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+            cur.push(c);
+        } else {
+            flush(&mut cur, &mut out);
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// Apps KernelSU has granted root, or an empty list when the store cannot be read.
+///
+/// Empty on failure is right here: these are ADDED to the hand-maintained list, so a store
+/// we cannot read costs the automatic half and leaves the explicit half exactly as written.
+fn root_granted_packages() -> Vec<String> {
+    match std::fs::read(KSU_ALLOWLIST) {
+        Ok(b) => package_names_in(&b),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Entries that name a package this device does not have installed.
+///
+/// Reported, never dropped: a stale name is the fingerprint of a manager that was rebuilt
+/// under a new random name, which is exactly when the list needs a human to look at it.
+pub fn stale_conceal_entries(entries: &[String], installed: &[(String, u32)]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| {
+            !e.contains('*') && !installed.iter().any(|(p, _)| p == *e)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Resolve the conceal list to every raw uid the kernel will be asked about.
 ///
 /// Expanded through the same path as the hide list: getpriority(PRIO_USER) is
@@ -219,12 +292,18 @@ fn conceal_entries() -> Option<Vec<String>> {
 /// unreadable or the package map was. An empty `Some` is a real "nothing to conceal".
 fn conceal_uids() -> Option<Vec<u32>> {
     let entries = conceal_entries()?;
-    if entries.is_empty() {
+    if entries.is_empty() && root_granted_packages().is_empty() {
         return Some(Vec::new());
     }
     // There ARE entries and we cannot map them to uids. Reporting that as an empty set
     // would flush the kernel's conceal table and quietly turn getpriority concealment off.
     let installed = crate::blocklist::installed_packages()?;
+    let mut entries = entries;
+    for p in root_granted_packages() {
+        if !entries.contains(&p) {
+            entries.push(p);
+        }
+    }
     let mut appids: Vec<u32> = Vec::new();
     for e in &entries {
         if let Ok(hits) = crate::blocklist::expand(e, &installed) {
@@ -500,6 +579,27 @@ pub fn run_sync(verbose: bool) -> Result<()> {
                         s.cuids
                     );
                 }
+                // A name in the list that is not installed is the fingerprint of an app --
+                // in practice a repackaged root manager -- rebuilt under a new random name.
+                // The entry it left behind conceals nothing and the new name is in no list,
+                // so the getpriority oracle reopens with nothing on screen to say so.
+                if let (Some(entries), Some(installed)) =
+                    (conceal_entries(), crate::blocklist::installed_packages())
+                {
+                    let stale = stale_conceal_entries(&entries, &installed);
+                    if !stale.is_empty() {
+                        println!(
+                            "nomount ghost: {} conceal entr{} name a package that is not installed: {}",
+                            stale.len(),
+                            if stale.len() == 1 { "y" } else { "ies" },
+                            stale.join(", ")
+                        );
+                        println!(
+                            "nomount ghost: that is what a rebuilt manager leaves behind. Apps granted \
+                             root are concealed automatically; drop a dead name or replace it."
+                        );
+                    }
+                }
             }
             Ok(())
         }
@@ -525,6 +625,42 @@ pub fn sync_after_pass(nm: &Nm) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_rebuilt_manager_is_concealed_by_grant_and_its_dead_name_is_reported() {
+        // The store is a blob: only label-shaped runs with a dot are package names, or
+        // field names and paths come along too.
+        let blob = b"\x00\x01allow\x00com.example.app\x00\x10\x10ehcnsovvne.smxv6a5.zrk687nl\
+\x00/data/adb/ksu/.allowlist\x00..bad\x00trailing.\x00a.b\x00";
+        let found = package_names_in(blob);
+        assert!(found.contains(&"com.example.app".to_string()), "{found:?}");
+        assert!(found.contains(&"ehcnsovvne.smxv6a5.zrk687nl".to_string()), "{found:?}");
+        assert!(found.contains(&"a.b".to_string()), "{found:?}");
+        for junk in ["..bad", "trailing.", "/data/adb/ksu/.allowlist", ".allowlist"] {
+            assert!(!found.contains(&junk.to_string()), "picked up {junk}: {found:?}");
+        }
+        // A path's last component is label-shaped on its own; the slash ends the run, so
+        // what survives must not be the whole path.
+        assert!(!found.iter().any(|p| p.contains('/')), "{found:?}");
+
+        // Stale = named but not installed. That is the fingerprint of a rebuilt manager,
+        // and it is reported rather than dropped.
+        let installed = vec![
+            ("com.example.app".to_string(), 10001u32),
+            ("io.github.muntashirakon.AppManager".to_string(), 10002),
+        ];
+        let entries = vec![
+            "com.example.app".to_string(),
+            "mfwtvm.dryrdf.wdodpp".to_string(),
+            "yktuwp.apjvhz.adavin".to_string(),
+            "*.duckdetector".to_string(),
+        ];
+        let stale = stale_conceal_entries(&entries, &installed);
+        assert_eq!(stale, vec!["mfwtvm.dryrdf.wdodpp", "yktuwp.apjvhz.adavin"]);
+        // A glob is a pattern, not a name, so it is never called stale.
+        assert!(!stale.iter().any(|e| e.contains('*')), "{stale:?}");
+        assert!(stale_conceal_entries(&[], &installed).is_empty());
+    }
     use super::*;
 
     #[test]
