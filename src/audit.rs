@@ -1823,7 +1823,52 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
             ),
         );
     }
+    apply_accepted(&mut checks, &accepted_rows(fs::read_to_string(ACCEPTED_PATH).ok().as_deref()));
     (checks, Some(targets.len()), Some(parents.len()))
+}
+
+/// Rows the owner of this device has accepted, one id or name per line, `#` comments.
+pub(crate) const ACCEPTED_PATH: &str = "/data/adb/nomount/accepted.list";
+
+/// Parse that file. `None` (unreadable, or absent) accepts nothing.
+///
+/// Silence has to be ASKED for. A read that failed must never produce it, which is the same
+/// rule the fail-open reads in ghost.rs and blocklist.rs follow: not being able to tell is
+/// not permission.
+fn accepted_rows(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or_default().trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Downgrade a named Warn to a Note, and say so in its own evidence.
+///
+/// The ladder rule on `soft()` is untouched and must stay that way: a tell the audit
+/// MEASURED reads as attention by default, because grading a live oracle as info is what
+/// let a report name one and still say `verdict: clean`. This changes nothing about what is
+/// measured, what evidence is printed, or what oracle is quoted -- the row still says a
+/// detector can see it. It only lets the owner mark a row as a trade they have chosen, so
+/// it stops competing for attention with the ones they have not seen yet.
+///
+/// Deliberately only Warn. An Unmeasured row cannot be accepted away, because "I know" is
+/// not something you can say about a thing that was never measured, and Fail/Reboot are
+/// about the Suite being broken rather than visible.
+fn apply_accepted(checks: &mut [Check], accepted: &[String]) {
+    if accepted.is_empty() {
+        return;
+    }
+    for c in checks.iter_mut() {
+        if c.verdict != Verdict::Warn {
+            continue;
+        }
+        if accepted.iter().any(|a| a == &c.id || a == &c.name) {
+            c.verdict = Verdict::Note;
+            c.evidence = format!("{} [accepted on this device]", c.evidence);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2158,6 +2203,50 @@ mod tests {
             0,
             "a measured tell must not change the exit code"
         );
+    }
+
+    #[test]
+    fn only_a_named_warn_can_be_accepted_and_only_when_asked() {
+        let mk_warn = || soft(N_SYNTH_DIR_INO, "ino=89750657".into(), "a filtered find");
+        let mk_unmeasured = || unmeasured(N_RULE_DUMP, "3 line(s) unread".into());
+
+        // Unreadable or absent accepts NOTHING. Not being able to read the file is not
+        // permission to go quiet -- that is the whole bug this audit opened with.
+        assert!(accepted_rows(None).is_empty());
+        let mut v = vec![mk_warn()];
+        apply_accepted(&mut v, &accepted_rows(None));
+        assert_eq!(v[0].verdict.tag(), "WARN", "silence must be asked for");
+
+        // Named by id it becomes a Note and says so, keeping its evidence and its oracle.
+        let id = mk_warn().id;
+        let acc = accepted_rows(Some(&format!("# mine\n{id}\n\n")));
+        let mut v = vec![
+            mk_warn(),
+            mk_unmeasured(),
+            pass(N_INODE_BAND, "every injected inode shares a bucket".into()),
+        ];
+        apply_accepted(&mut v, &acc);
+        assert_eq!(v[0].verdict.tag(), "NOTE");
+        assert!(v[0].evidence.contains("ino=89750657"), "evidence must survive: {}", v[0].evidence);
+        assert!(v[0].evidence.contains("accepted on this device"));
+        assert_eq!(v[0].oracle.as_deref(), Some("a filtered find"), "the oracle still stands");
+
+        // Nothing else moves. An Unmeasured row in particular cannot be accepted away:
+        // "I know" is not sayable about something that was never measured.
+        assert_eq!(v[1].verdict.tag(), "UNMEASURED");
+        assert_eq!(v[2].verdict.tag(), "PASS");
+        let u_id = mk_unmeasured().id;
+        let mut only_u = vec![mk_unmeasured()];
+        apply_accepted(&mut only_u, &accepted_rows(Some(&format!("{u_id}\n"))));
+        assert_eq!(only_u[0].verdict.tag(), "UNMEASURED");
+
+        // Accepting by display name works too, and an unknown name is inert.
+        let mut v = vec![mk_warn()];
+        apply_accepted(&mut v, &accepted_rows(Some(&format!("{N_SYNTH_DIR_INO}\n"))));
+        assert_eq!(v[0].verdict.tag(), "NOTE");
+        let mut v = vec![mk_warn()];
+        apply_accepted(&mut v, &accepted_rows(Some("no-such-check\n")));
+        assert_eq!(v[0].verdict.tag(), "WARN");
     }
 
     #[test]
