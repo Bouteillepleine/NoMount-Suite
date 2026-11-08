@@ -146,6 +146,20 @@ jobs:
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "release $TAG already exists: replacing its asset and notes in place"
+            # --clobber is silent about WHAT it replaced. A release assembled by
+            # hand before the tag was pushed carries different bytes under the
+            # same names, and overwriting them unannounced is how the notes, the
+            # SHA256SUMS asset and the zips end up disagreeing. Name it.
+            _pre="$(mktemp -d)"
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D "$_pre" --pattern '*.zip' --clobber 2>/dev/null || true
+            for _f in "$_pre"/*.zip; do
+              [ -e "$_f" ] || continue
+              _b="$(basename "$_f")"
+              if [ -f "dist/$_b" ] && ! cmp -s "$_f" "dist/$_b"; then
+                echo "::warning::$_b already on the release differs from the one this run built; replacing it"
+              fi
+            done
+            rm -rf "$_pre"
             gh release upload "$TAG" "$zip" --repo "$GITHUB_REPOSITORY" --clobber
             lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1 || true)
             [ -n "$lkmzip" ] && gh release upload "$TAG" "$lkmzip" --repo "$GITHUB_REPOSITORY" --clobber
@@ -159,6 +173,30 @@ jobs:
               --title "NoMount Suite $TAG" \
               --notes-file /tmp/notes.md
           fi
+
+      # The notes quote the hashes, SHA256SUMS carries them, and the zips are
+      # the thing itself. Within one run they are built from the same dist/, but
+      # nothing re-read them afterwards -- so an interleaved manual upload could
+      # leave all three disagreeing and the run still green. Read them back.
+      - name: Verify the published assets match the notes
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          v="$(mktemp -d)"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D "$v" --clobber
+          ( cd "$v" && sha256sum -c SHA256SUMS )
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$v/notes.md"
+          bad=0
+          while read -r d n; do
+            [ -n "${d:-}" ] || continue
+            grep -qF "$d  $n" "$v/notes.md" || { echo "::error::release notes do not carry the published hash of $n ($d)"; bad=1; }
+          done < "$v/SHA256SUMS"
+          [ "$bad" = 0 ] || exit 1
+          echo "published assets, SHA256SUMS and notes all agree"
+          rm -rf "$v"
 
       - name: Point update.json at this release
         if: ${{ inputs.dry_run != 'true' }}
