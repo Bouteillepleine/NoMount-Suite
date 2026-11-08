@@ -16,6 +16,8 @@
 - The engine pins itself once a rule exists, so `rmmod` cannot free a live vtable.
 - A virtual parent another uid already owns is refused instead of stolen.
 - `nm knobs` reads the live knob state back out of the engine.
+- `nomount check` no longer calls a check unmeasured when it looked and there was
+  nothing yet to look at.
 
 ## v1.3.208 — engine v34 (unchanged)
 

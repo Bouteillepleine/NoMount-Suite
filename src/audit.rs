@@ -1280,16 +1280,24 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             .meaning("Some processes could not be read, so a clean result is not proven.");
         }
         if mappers == 0 {
-            return unmeasured(
+            // Measured, and there is nothing the tell could attach to: it is an injected
+            // file reading as deleted in a map, and no process maps one. Unmeasured would
+            // be wrong -- the scan succeeded -- and it is the only verdict Tally::complete()
+            // counts, so every report between a reboot and the first app launch would read
+            // "not fully measured" over a check that has nothing to be wrong about.
+            return chk(
                 N_MAPS_DELETED,
+                Verdict::Note,
                 format!(
-                    "{scanned} process(es) scanned, none has an injected file mapped at all -- \
-                     nothing to measure yet (the normal state at boot)"
+                    "{scanned} process(es) scanned, none maps an injected file yet -- nothing \
+                     can read as deleted while nothing is mapped"
                 ),
             )
             .meaning(
-                "No app has opened an injected file yet, so there was nothing to look at. Run \
-                 this again once you have used the apps your modules change.",
+                "This looks for an injected file that reads as deleted in a process's memory \
+                 map. No process maps one yet, which is the normal state until you have used \
+                 the apps your modules change, so there is nothing here that could be wrong. \
+                 It becomes a measured pass once one is mapped.",
             );
         }
         return pass(
