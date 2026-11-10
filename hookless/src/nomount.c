@@ -277,6 +277,8 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
             struct nomount_rule *rule = smp_load_acquire(&child->rule);
             if (nm_rule_visible(rule)) {
                 rule_info->flags = rule->flags;
+                if (rule->target_uid || rule->uid_end || rule->deny_end)
+                    rule_info->flags |= NM_FLAG_UID_SCOPED;
                 rule_info->v_ino = rule->v_ino;
                 rule_info->v_dino = rule->v_dino;
                 rule_info->v_pdino = rule->v_pdino;
@@ -2530,6 +2532,11 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
             return -ECHILD;
         rinfo = READ_ONCE(ino->i_private);
         if (!rinfo || READ_ONCE(rinfo->gen) != (u32)atomic_read(&nm_rule_gen))
+            return -ECHILD;
+        /* A scope is per-caller but this cached verdict is not, so RCU cannot
+         * honour it. Hand scoped names to the ref-walk path, which re-matches.
+         */
+        if (rinfo->flags & NM_FLAG_UID_SCOPED)
             return -ECHILD;
         if (nm_uid_hidden(rinfo->flags) &&
             (rinfo->flags & NM_FLAG_SHADOWS_STOCK) && !rinfo->s_path.dentry)
