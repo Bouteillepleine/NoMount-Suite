@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn a_scoped_rule_is_flagged_and_does_not_bleed_into_the_source_path() {
         let line = "/data/app/x/base.apk -> /data/adb/modules/m/base.apk \
-[SCOPE: 0-4294967295] [DENY: 1000-1000]";
+[SCOPE: 0-4294967295] [DENY: 10397]";
         let r = parse_line(line.replace(" \\\n", " ").as_str()).expect("parsed");
         assert_eq!(r.target, PathBuf::from("/data/app/x/base.apk"));
         assert_eq!(
@@ -557,7 +557,24 @@ mod tests {
             Some(PathBuf::from("/data/adb/modules/m/base.apk")),
             "the scope markers must not end up in the source path"
         );
-        assert!(r.scoped, "a ranged rule is not ours to prune");
+        assert!(r.scoped, "a scoped rule is not ours to prune");
+        assert_eq!(r.uid, 0);
+    }
+
+    /// The deny list is a comma-separated set of appids, not a range. The commas
+    /// must not be read as a field separator anywhere in the parse, or a rule
+    /// hiding from two apps would truncate to one and look prunable.
+    #[test]
+    fn a_multi_appid_deny_parses_and_stays_scoped() {
+        let r = parse_line("/data/app/x/base.apk -> /data/adb/rvhc/m.apk [DENY: 10170,10397]")
+            .expect("parsed");
+        assert_eq!(r.target, PathBuf::from("/data/app/x/base.apk"));
+        assert_eq!(
+            r.source,
+            Some(PathBuf::from("/data/adb/rvhc/m.apk")),
+            "a comma in the deny set must not bleed into the source path"
+        );
+        assert!(r.scoped);
         assert_eq!(r.uid, 0);
     }
 

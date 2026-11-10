@@ -17,7 +17,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.35.1"
+#define NM_MODULE_VERSION "1.35.2"
 
 #define NOMOUNT_VERSION    35
 #define NOMOUNT_HASH_BITS  12
@@ -33,6 +33,7 @@
 #define NM_FLAG_UID_SCOPED  (1 << 9)  /* derived, never accepted from userspace */
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
+#define NM_DENY_MAX         8   /* excluded appids per rule */
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
 #define kvzalloc(size, flags) kzalloc((size), (flags))
@@ -169,8 +170,8 @@ struct nomount_dir_node {
 struct nm_uid_scope {
     unsigned int uid;
     unsigned int uid_end;
-    unsigned int deny_start;
-    unsigned int deny_end;
+    unsigned int deny[NM_DENY_MAX];
+    unsigned int deny_n;
 };
 
 struct nomount_rule {
@@ -202,8 +203,8 @@ struct nomount_rule {
     u16 flags;
     unsigned int target_uid;
     unsigned int uid_end;
-    unsigned int deny_start;
-    unsigned int deny_end;
+    unsigned int deny_appid[NM_DENY_MAX];
+    u8 deny_n;
 
     char paths[]; 
 };
@@ -345,17 +346,20 @@ enum {
      *   bit  2    vdir_erofs_size
      */
     NOMOUNT_ATTR_KNOBS,
-    /* Per-rule uid scoping. All three default to 0, which is the legacy shape:
+    /* Per-rule uid scoping. Both default to absent, which is the legacy shape:
      * uid_end 0 means NOMOUNT_ATTR_UID is an appid matched across every user,
-     * deny_end 0 means no exclusion. An engine that predates them ignores them
-     * (we parse liberally), so a client MUST check NOMOUNT_ATTR_VERSION >= 35
-     * before relying on a range -- otherwise the scope is silently widened to
-     * whatever ATTR_UID alone meant, which is the opposite of what the caller
-     * asked for.
+     * and no DENY_APPIDS means no exclusion. DENY_APPIDS is a packed array of
+     * at most NM_DENY_MAX u32 APPIDS (uid % NM_PER_USER_RANGE), sorted and
+     * unique, so ONE rule hides from an app in every user -- work profile and
+     * secondary users included. A raw-uid deny cannot express that: an appid is
+     * 10397 under user 0 and 1010397 under user 10, which is not a range.
+     * An engine that predates these ignores them (we parse liberally), so a
+     * client MUST check NOMOUNT_ATTR_VERSION >= 35 before relying on them --
+     * otherwise the scope is silently widened to whatever ATTR_UID alone meant,
+     * which is the opposite of what the caller asked for.
      */
     NOMOUNT_ATTR_UID_END,
-    NOMOUNT_ATTR_DENY_START,
-    NOMOUNT_ATTR_DENY_END,
+    NOMOUNT_ATTR_DENY_APPIDS,
     __NOMOUNT_ATTR_MAX,
 };
 

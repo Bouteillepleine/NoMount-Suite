@@ -55,7 +55,8 @@ void c_main(long *sp) {
     unsigned int add_flags = 0;
     const char *p_args[64];
     int p_count = 0;
-    unsigned int sc_uid = 0, sc_uid_end = 0, sc_deny_lo = 0, sc_deny_hi = 0;
+    unsigned int sc_uid = 0, sc_uid_end = 0, sc_deny[NM_DENY_MAX];
+    int sc_deny_n = 0;
     int scoped = 0;
     int arg_start = 2;
 
@@ -80,8 +81,10 @@ void c_main(long *sp) {
             if (!sc_uid_end) sc_uid_end = sc_uid;
             scoped = 1;
         } else if (strcmp(argv[i], "--uid-excluded") == 0 && i + 1 < argc) {
-            if (parse_range(argv[++i], &sc_deny_lo, &sc_deny_hi)) {
-                print_err("nm: --uid-excluded takes C-D\n"); exit_code = 3; goto do_exit; }
+            if (parse_appid_list(argv[++i], sc_deny, NM_DENY_MAX, &sc_deny_n)) {
+                print_err("nm: --uid-excluded takes up to 8 distinct appids, "
+                          "comma separated, each below 100000 (e.g. 10397,10170)\n");
+                exit_code = 3; goto do_exit; }
             scoped = 1;
         } else if (argv[i][0] == '-' && argv[i][1] == '-') {
             print_err("nm: unknown option\n");
@@ -254,9 +257,10 @@ void c_main(long *sp) {
             }
             at[n].type = 4;  at[n].len = 4; at[n].data = &sc_uid;      n++;
             if (sc_uid_end) { at[n].type = 9;  at[n].len = 4; at[n].data = &sc_uid_end; n++; }
-            if (sc_deny_hi) {
-                at[n].type = 10; at[n].len = 4; at[n].data = &sc_deny_lo; n++;
-                at[n].type = 11; at[n].len = 4; at[n].data = &sc_deny_hi; n++;
+            if (sc_deny_n) {
+                at[n].type = 10;
+                at[n].len  = (unsigned short)(sc_deny_n * 4);
+                at[n].data = sc_deny; n++;
             }
 
             int rc = do_nm_cmd_multi(fd, (cmd == 'A') ? 2 : 3, at, n, 5, &mem);
@@ -370,8 +374,10 @@ void c_main(long *sp) {
                     unsigned int *flags = get_attr(msg, 3, 4);
                     unsigned int *uid = get_attr(msg, 4, 4);
                     unsigned int *uid_end = get_attr(msg, 9, 4);
-                    unsigned int *deny_lo = get_attr(msg, 10, 4);
-                    unsigned int *deny_hi = get_attr(msg, 11, 4);
+                    unsigned int *deny = get_attr(msg, 10, 4);
+                    int deny_n = deny
+                        ? ((int)*(unsigned short *)((char *)deny - 4) - 4) / 4 : 0;
+                    if (deny_n > NM_DENY_MAX) deny_n = NM_DENY_MAX;
 
                     if (v && r) {
                         int is_whiteout    = (flags && (*flags & 4));
@@ -392,9 +398,13 @@ void c_main(long *sp) {
                             print_str(" [SCOPE: "); print_uint(uid ? *uid : 0);
                             print_str("-"); print_uint(*uid_end); print_str("]");
                         }
-                        if (deny_hi && *deny_hi) {
-                            print_str(" [DENY: "); print_uint(deny_lo ? *deny_lo : 0);
-                            print_str("-"); print_uint(*deny_hi); print_str("]");
+                        if (deny_n > 0) {
+                            print_str(" [DENY: ");
+                            for (int di = 0; di < deny_n; di++) {
+                                if (di) print_str(",");
+                                print_uint(deny[di]);
+                            }
+                            print_str("]");
                         }
                         print_str("\n");
                     }

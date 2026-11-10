@@ -161,6 +161,39 @@ static noinline int parse_u32(const char *s, unsigned int *out) {
 /* "all" or "A-B". "all" is the whole uid space, which is how a rule says
  * "everyone" while still carrying an exclusion.
  */
+#define NM_DENY_MAX        8
+#define NM_PER_USER_RANGE  100000u
+
+/* Comma-separated APPIDS, e.g. "10397,10170". Sorted and de-duplicated here so
+ * the engine's canonical-order check passes whatever order the caller typed. A
+ * duplicate is an error rather than silently dropped: it usually means someone
+ * passed raw uids for the same app under two users, which is the mistake this
+ * whole appid model exists to prevent.
+ */
+static noinline int parse_appid_list(const char *s, unsigned int *out, int max, int *n_out) {
+    int n = 0;
+
+    for (;;) {
+        char buf[16];
+        int i = 0, j, k;
+        unsigned int v;
+
+        while (*s && *s != ',') { if (i >= 15) return -1; buf[i++] = *s++; }
+        buf[i] = 0;
+        if (!i || parse_u32(buf, &v)) return -1;
+        if (v >= NM_PER_USER_RANGE) return -1;     /* an appid, not a raw uid */
+        for (j = 0; j < n; j++) if (out[j] == v) return -1;
+        if (n >= max) return -1;
+        for (j = 0; j < n && out[j] < v; j++) ;
+        for (k = n; k > j; k--) out[k] = out[k - 1];
+        out[j] = v; n++;
+        if (!*s) break;
+        s++;
+    }
+    *n_out = n;
+    return 0;
+}
+
 static noinline int parse_range(const char *s, unsigned int *lo, unsigned int *hi) {
     char head[16];
     int i = 0;

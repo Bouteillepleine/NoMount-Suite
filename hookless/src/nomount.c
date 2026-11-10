@@ -132,12 +132,18 @@ static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
             return false;
     }
 
-    /* Exclusion is raw and applies to both modes. deny_end 0 means none, so a
-     * deny of exactly 0-0 is not expressible -- root is not an app uid and
-     * nothing scopes injections to it, so that hole is deliberate.
+    /* Exclusion is by APPID, so one entry covers that app under every user -- a
+     * work profile included. It applies to both modes: the scope above selects
+     * raw uids, this subtracts apps from whatever it selected.
      */
-    if (rule->deny_end && uid >= rule->deny_start && uid <= rule->deny_end)
-        return false;
+    if (rule->deny_n) {
+        unsigned int appid = uid % NM_PER_USER_RANGE;
+        u8 i;
+
+        for (i = 0; i < rule->deny_n; i++)
+            if (rule->deny_appid[i] == appid)
+                return false;
+    }
 
     return true;
 }
@@ -150,10 +156,16 @@ static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
 static __always_inline bool nm_scope_eq(const struct nomount_rule *rule,
                                         const struct nm_uid_scope *scope)
 {
-    return rule->target_uid == scope->uid &&
-           rule->uid_end    == scope->uid_end &&
-           rule->deny_start == scope->deny_start &&
-           rule->deny_end   == scope->deny_end;
+    u8 i;
+
+    if (rule->target_uid != scope->uid ||
+        rule->uid_end    != scope->uid_end ||
+        rule->deny_n     != scope->deny_n)
+        return false;
+    for (i = 0; i < rule->deny_n; i++)
+        if (rule->deny_appid[i] != scope->deny[i])
+            return false;
+    return true;
 }
 
 /* Reject a scope that cannot mean what the caller wrote, rather than silently
@@ -161,25 +173,46 @@ static __always_inline bool nm_scope_eq(const struct nomount_rule *rule,
  */
 static __always_inline bool nm_scope_invalid(const struct nm_uid_scope *scope)
 {
+    unsigned int i;
+
     if (scope->uid_end && scope->uid_end < scope->uid)
         return true;
-    if (scope->deny_end) {
-        if (scope->deny_end < scope->deny_start)
+    if (scope->deny_n > NM_DENY_MAX)
+        return true;
+    /* Sorted and strictly increasing, so the delete key is canonical: two rules
+     * hiding from the same apps must compare equal whatever order the caller
+     * listed them in, and a duplicate would make deny_n overstate the count.
+     */
+    for (i = 0; i < scope->deny_n; i++) {
+        if (scope->deny[i] >= NM_PER_USER_RANGE)
             return true;
-        /* An exclusion outside the selected range is a no-op the caller did not
-         * intend; upstream rejects it too.
-         */
-        if (scope->uid_end) {
-            if (scope->deny_start < scope->uid || scope->deny_end > scope->uid_end)
-                return true;
-        } else if (scope->uid) {
-            /* Legacy mode selects an appid modulo the per-user range, so a raw
-             * exclusion cannot be reasoned about against it.
-             */
+        if (i && scope->deny[i] <= scope->deny[i - 1])
             return true;
-        }
     }
     return false;
+}
+
+/* Read the scope off a parsed message. DENY_APPIDS is one packed array rather
+ * than a repeated attribute because nlmsg_parse() keeps only the last instance
+ * of a repeated attr, which would silently drop every appid but one.
+ */
+static int nm_scope_from_attrs(struct nm_uid_scope *scope, struct nlattr **attrs)
+{
+    const struct nlattr *a = attrs[NOMOUNT_ATTR_DENY_APPIDS];
+
+    memset(scope, 0, sizeof(*scope));
+    scope->uid     = attrs[NOMOUNT_ATTR_UID]     ? nla_get_u32(attrs[NOMOUNT_ATTR_UID])     : 0;
+    scope->uid_end = attrs[NOMOUNT_ATTR_UID_END] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID_END]) : 0;
+    if (a) {
+        int blen = nla_len(a);
+
+        if (blen <= 0 || blen % (int)sizeof(scope->deny[0]) ||
+            blen > (int)sizeof(scope->deny))
+            return -EINVAL;
+        memcpy(scope->deny, nla_data(a), blen);
+        scope->deny_n = blen / (int)sizeof(scope->deny[0]);
+    }
+    return 0;
 }
 
 static __always_inline bool nm_uid_hidden(u32 flags)
@@ -277,7 +310,7 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
             struct nomount_rule *rule = smp_load_acquire(&child->rule);
             if (nm_rule_visible(rule)) {
                 rule_info->flags = rule->flags;
-                if (rule->target_uid || rule->uid_end || rule->deny_end)
+                if (rule->target_uid || rule->uid_end || rule->deny_n)
                     rule_info->flags |= NM_FLAG_UID_SCOPED;
                 rule_info->v_ino = rule->v_ino;
                 rule_info->v_dino = rule->v_dino;
@@ -4762,8 +4795,9 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
     rule->flags = flags & NM_FLAGS_USER_MASK;
     rule->target_uid = scope->uid;
     rule->uid_end    = scope->uid_end;
-    rule->deny_start = scope->deny_start;
-    rule->deny_end   = scope->deny_end;
+    rule->deny_n     = (u8)scope->deny_n;
+    memcpy(rule->deny_appid, scope->deny,
+           scope->deny_n * sizeof(scope->deny[0]));
     rule->v_len = (u16)nm_norm_vpath(nm_get_vpath(rule), v_path, v_len);
     rule->v_hash = full_name_hash(NULL, nm_get_vpath(rule), rule->v_len);
 
@@ -5232,14 +5266,10 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
         int v_len = strnlen(v_str, nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]));
         int r_len = strnlen(r_str, nla_len(attrs[NOMOUNT_ATTR_REAL_PATH]));
         u32 flags = attrs[NOMOUNT_ATTR_FLAGS] ? nla_get_u32(attrs[NOMOUNT_ATTR_FLAGS]) : 0;
-        struct nm_uid_scope scope = {
-            .uid        = attrs[NOMOUNT_ATTR_UID]        ? nla_get_u32(attrs[NOMOUNT_ATTR_UID])        : 0,
-            .uid_end    = attrs[NOMOUNT_ATTR_UID_END]    ? nla_get_u32(attrs[NOMOUNT_ATTR_UID_END])    : 0,
-            .deny_start = attrs[NOMOUNT_ATTR_DENY_START] ? nla_get_u32(attrs[NOMOUNT_ATTR_DENY_START]) : 0,
-            .deny_end   = attrs[NOMOUNT_ATTR_DENY_END]   ? nla_get_u32(attrs[NOMOUNT_ATTR_DENY_END])   : 0,
-        };
+        struct nm_uid_scope scope;
 
         if (v_len == 0) return -EINVAL;
+        if (nm_scope_from_attrs(&scope, attrs)) return -EINVAL;
         if (nm_scope_invalid(&scope)) return -EINVAL;
         return __nomount_add_rule(v_str, r_str, v_len, r_len, flags, &scope, NULL);
     }
@@ -5276,12 +5306,10 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
     } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) {
         char *v_path = nla_data(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
         int v_len = strnlen(v_path, nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]));
-        struct nm_uid_scope scope = {
-            .uid        = attrs[NOMOUNT_ATTR_UID]        ? nla_get_u32(attrs[NOMOUNT_ATTR_UID])        : 0,
-            .uid_end    = attrs[NOMOUNT_ATTR_UID_END]    ? nla_get_u32(attrs[NOMOUNT_ATTR_UID_END])    : 0,
-            .deny_start = attrs[NOMOUNT_ATTR_DENY_START] ? nla_get_u32(attrs[NOMOUNT_ATTR_DENY_START]) : 0,
-            .deny_end   = attrs[NOMOUNT_ATTR_DENY_END]   ? nla_get_u32(attrs[NOMOUNT_ATTR_DENY_END])   : 0,
-        };
+        struct nm_uid_scope scope;
+
+        if (nm_scope_from_attrs(&scope, attrs)) return -EINVAL;
+        if (nm_scope_invalid(&scope)) return -EINVAL;
 
         mutex_lock(&nomount_write_mutex);
         if (__nomount_del_rule(v_path, v_len, &scope, &r_victims) == -EBUSY)
@@ -5346,9 +5374,10 @@ static int nomount_nl_dump_rules(struct sk_buff *skb, struct netlink_callback *c
              */
             if ((rule->uid_end &&
                  nla_put_u32(skb, NOMOUNT_ATTR_UID_END, rule->uid_end)) ||
-                (rule->deny_end &&
-                 (nla_put_u32(skb, NOMOUNT_ATTR_DENY_START, rule->deny_start) ||
-                  nla_put_u32(skb, NOMOUNT_ATTR_DENY_END, rule->deny_end)))) {
+                (rule->deny_n &&
+                 nla_put(skb, NOMOUNT_ATTR_DENY_APPIDS,
+                         rule->deny_n * (int)sizeof(rule->deny_appid[0]),
+                         rule->deny_appid))) {
                 nlmsg_cancel(skb, hdr);
                 goto out;
             }
@@ -5553,8 +5582,8 @@ static const struct nla_policy nomount_genl_policy[__NOMOUNT_ATTR_MAX] = {
     [NOMOUNT_ATTR_MODVER]       = { .type = NLA_NUL_STRING, .len = 31 },
     [NOMOUNT_ATTR_KNOBS]        = { .type = NLA_U32 },
     [NOMOUNT_ATTR_UID_END]      = { .type = NLA_U32 },
-    [NOMOUNT_ATTR_DENY_START]   = { .type = NLA_U32 },
-    [NOMOUNT_ATTR_DENY_END]     = { .type = NLA_U32 },
+    [NOMOUNT_ATTR_DENY_APPIDS]  = { .type = NLA_BINARY,
+                                    .len = NM_DENY_MAX * sizeof(u32) },
 };
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
