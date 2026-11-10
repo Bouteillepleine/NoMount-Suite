@@ -17,9 +17,9 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.35.2"
+#define NM_MODULE_VERSION "1.36.0"
 
-#define NOMOUNT_VERSION    35
+#define NOMOUNT_VERSION    36
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -354,7 +354,7 @@ enum {
      * secondary users included. A raw-uid deny cannot express that: an appid is
      * 10397 under user 0 and 1010397 under user 10, which is not a range.
      * An engine that predates these ignores them (we parse liberally), so a
-     * client MUST check NOMOUNT_ATTR_VERSION >= 35 before relying on them --
+     * client MUST check NOMOUNT_ATTR_VERSION >= 36 before relying on them --
      * otherwise the scope is silently widened to whatever ATTR_UID alone meant,
      * which is the opposite of what the caller asked for.
      */

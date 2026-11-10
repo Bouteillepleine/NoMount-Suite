@@ -226,9 +226,9 @@ void c_main(long *sp) {
             int vrx = do_nm_cmd(fd, 1, 0, (void *)0, 0, 1, &mem);
             unsigned int *ver = (vrx >= 16) ? get_attr(mem.rx_buf, 5, 4) : (void *)0;
             if (nm_timed_out(vrx)) goto do_timeout;
-            if (!ver || *ver < 35) {
+            if (!ver || *ver < 36) {
                 print_err("nm: this engine is too old for --uid/--uid-range/--uid-excluded "
-                          "(needs 35, has ");
+                          "(needs 36, has ");
                 if (ver) print_num(2, *ver); else print_err("none");
                 print_err(") - it would serve the rule to every uid instead\n");
                 exit_code = 1; goto do_exit;
