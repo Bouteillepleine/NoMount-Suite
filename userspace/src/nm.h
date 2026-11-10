@@ -145,6 +145,37 @@ static noinline int strcmp(const char *s1, const char *s2) {
     return *(unsigned char *)s1 - *(unsigned char *)s2;
 }
 
+/* Decimal only, no sign, no libc. Returns 0 on success. */
+static noinline int parse_u32(const char *s, unsigned int *out) {
+    unsigned long long v = 0;
+    if (!s || !*s) return -1;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10ull + (unsigned long long)(*s - '0');
+        if (v > 0xFFFFFFFFull) return -1;
+    }
+    *out = (unsigned int)v;
+    return 0;
+}
+
+/* "all" or "A-B". "all" is the whole uid space, which is how a rule says
+ * "everyone" while still carrying an exclusion.
+ */
+static noinline int parse_range(const char *s, unsigned int *lo, unsigned int *hi) {
+    char head[16];
+    int i = 0;
+
+    if (strcmp(s, "all") == 0) { *lo = 0; *hi = 0xFFFFFFFFu; return 0; }
+    for (; s[i] && s[i] != '-'; i++) {
+        if (i >= 15) return -1;
+        head[i] = s[i];
+    }
+    if (s[i] != '-') return -1;
+    head[i] = 0;
+    if (parse_u32(head, lo)) return -1;
+    return parse_u32(s + i + 1, hi);
+}
+
 static noinline void print_str(const char *s) {
     long len = 0;
     while (s[len]) len++;
@@ -235,6 +266,55 @@ static noinline int nm_read(int fd, struct nm_mem *mem) {
 }
 
 static noinline int nm_timed_out(int res) { return res == NM_ERR_TIMEOUT; }
+
+/* Several attributes in one message. do_nm_cmd() writes exactly one and does not
+ * pad it, which is safe for a single trailing attribute but wrong for a list:
+ * the kernel walks attributes with nla_next(), which advances by
+ * NLA_ALIGN(nla_len), so every attribute but the last needs padding to 4.
+ */
+struct nm_attr { unsigned short type; unsigned short len; const void *data; };
+
+static noinline int do_nm_cmd_multi(int fd, int cmd, const struct nm_attr *a, int n,
+                                    int flags, struct nm_mem *mem) {
+    struct nlmsghdr *nlh = (void *)mem->tx_buf;
+    unsigned int off = 16;
+
+    nlh->nlmsg_type = NM_TYPE_BASE + cmd;
+    nlh->nlmsg_flags = flags;
+    nlh->nlmsg_seq = 0;
+    nlh->nlmsg_pid = 0;
+
+    for (int i = 0; i < n; i++) {
+        unsigned int alen = 4u + a[i].len;
+        unsigned int padded = (alen + 3u) & ~3u;
+        unsigned short *nla;
+
+        if (off + padded > TX_BUF_SIZE) return NM_ERR_PROTO;
+        nla = (void *)(mem->tx_buf + off);
+        nla[0] = (unsigned short)alen;
+        nla[1] = a[i].type;
+        memcpy(nla + 2, a[i].data, a[i].len);
+        for (unsigned int z = alen; z < padded; z++) mem->tx_buf[off + z] = 0;
+        off += padded;
+    }
+    nlh->nlmsg_len = off;
+
+    int res = sys3(SYS_WRITE, fd, (long)nlh, nlh->nlmsg_len);
+    if (res < 0) return res;
+    res = nm_read(fd, mem);
+    if (res < 0) return res;
+
+    if (res < 16) return NM_ERR_PROTO;
+    {
+        unsigned int mlen = ((struct nlmsghdr *)mem->rx_buf)->nlmsg_len;
+        if (mlen < 16 || mlen > (unsigned int)res) return NM_ERR_PROTO;
+    }
+    if (res >= 20 && ((struct nlmsghdr *)mem->rx_buf)->nlmsg_type == 2) {
+        int err = *(int *)(mem->rx_buf + 16);
+        return err > 0 ? NM_ERR_PROTO : err;
+    }
+    return res;
+}
 
 static noinline int do_nm_cmd(int fd, int cmd, int atype, const void *data, int len, int flags, struct nm_mem *mem) {
     struct nlmsghdr *nlh = (void *)mem->tx_buf;
