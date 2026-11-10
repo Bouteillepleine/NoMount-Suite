@@ -61,6 +61,27 @@ if [ ! -e "$NMDIR/disabled" ]; then
     nm_delink_ksud service
 fi
 
+# Integrators that drive NoMount do not look here. Morphe, for one, probes
+# exactly /data/adb/modules/nomount/bin/nm, /data/adb/ksu/bin/nm and
+# /data/adb/ap/bin/nm, and gives up if none is executable -- which is why
+# "NoMount only" reported NoMount unavailable on a device that was running it.
+#
+# A symlink refreshed at every boot rather than a copy dropped at install: those
+# directories belong to the root manager and are rewritten when it updates, so a
+# copy goes quiet the first time the manager is upgraded. Never create the
+# directory (its absence means that manager is not installed) and never replace
+# a real file, which would be somebody else's nm.
+for _nmd in /data/adb/ksu/bin /data/adb/ap/bin; do
+    [ -d "$_nmd" ] || continue
+    [ -e "$_nmd/nm" ] && [ ! -L "$_nmd/nm" ] && continue
+    [ "$(readlink "$_nmd/nm" 2>/dev/null)" = "$NM_BIN" ] && continue
+    rm -f "$_nmd/nm" 2>/dev/null
+    if ln -s "$NM_BIN" "$_nmd/nm" 2>/dev/null; then
+        nmlog "linked $_nmd/nm -> $NM_BIN so NoMount-aware installers can find the CLI"
+    fi
+done
+unset _nmd
+
 _bh_dir=/data/adb/bindhosts
 _bh_ovr="$_bh_dir/mode_override.sh"
 if [ -d "$_bh_dir" ] && [ -d /data/adb/modules/bindhosts ] &&
