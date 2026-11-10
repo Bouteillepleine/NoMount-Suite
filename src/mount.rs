@@ -973,10 +973,22 @@ enum LiveRule {
     Whiteout,
 }
 
-fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
-    crate::nm::parse_list(list)
+/// Returns the rules this Suite could own, and a count of the ones it cannot.
+///
+/// A scoped rule -- a uid range or an exclusion -- was put there by another
+/// writer, because the Suite only ever adds legacy-shaped rules. Keeping it out
+/// of the reconciler's map is what stops the prune pass from trying to delete
+/// it: the delete key is the whole scope, `nm del <path>` sends none of it, so
+/// the attempt could never succeed and would be retried on every single pass.
+fn parse_live_rules(list: &str) -> (HashMap<(PathBuf, u32), LiveRule>, u32) {
+    let mut foreign = 0u32;
+    let map = crate::nm::parse_list(list)
         .into_iter()
         .filter_map(|r| {
+            if r.scoped {
+                foreign += 1;
+                return None;
+            }
             let kind = match r.kind {
                 crate::nm::LiveKind::Inject => LiveRule::Inject(r.source?),
                 crate::nm::LiveKind::Whiteout => LiveRule::Whiteout,
@@ -984,7 +996,8 @@ fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
             };
             Some(((r.target, r.uid), kind))
         })
-        .collect()
+        .collect();
+    (map, foreign)
 }
 
 fn prune_order(live: &HashMap<(PathBuf, u32), LiveRule>) -> Vec<&(PathBuf, u32)> {
@@ -1015,7 +1028,7 @@ pub fn run_reload() -> Result<()> {
         .context("hookless NoMount engine not responding - is the CONFIG_NOMOUNT kernel loaded?")?;
 
     let live_txt = nm.list().context("nm list failed during reload")?;
-    let live = parse_live_rules(&live_txt);
+    let (live, foreign) = parse_live_rules(&live_txt);
     // What the engine was last given per target: a source path can be unchanged
     // while the file behind it is not, and the live rule text cannot show that.
     let last_served = crate::rulestate::read();
@@ -1203,7 +1216,8 @@ pub fn run_reload() -> Result<()> {
 
     println!(
         "nomount reload: +{added} ~{changed} -{removed} rules, +{bind_added} -{bind_removed} binds, \
-         {failed} failed, {skipped} blocklisted (gap-free)"
+         {failed} failed, {skipped} blocklisted{} (gap-free)",
+        if foreign > 0 { format!(", {foreign} left to another writer") } else { String::new() }
     );
     if !pm.is_empty() {
         let shown: Vec<String> =
@@ -2714,7 +2728,7 @@ mod tests {
 
     #[test]
     fn stale_rules_are_pruned_deepest_first() {
-        let live = parse_live_rules(
+        let (live, _) = parse_live_rules(
             "/system/etc/d -> /m/d\n\
              /system/etc/d/a/b -> /m/d/a/b\n\
              /system/etc/d/a -> /m/d/a\n\
@@ -2769,7 +2783,7 @@ mod tests {
 
     #[test]
     fn live_rules_are_keyed_including_uid() {
-        let m = parse_live_rules("/a -> /b\n/a -> /c [UID: 1000]\n/d (whiteout)\n/e (virtual dir)\n");
+        let (m, _) = parse_live_rules("/a -> /b\n/a -> /c [UID: 1000]\n/d (whiteout)\n/e (virtual dir)\n");
         assert_eq!(m.len(), 3);
         assert!(m.contains_key(&(PathBuf::from("/a"), 0)));
         assert!(m.contains_key(&(PathBuf::from("/a"), 1000)));

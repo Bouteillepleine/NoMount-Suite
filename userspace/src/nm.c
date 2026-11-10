@@ -369,6 +369,9 @@ void c_main(long *sp) {
                     char *r = get_attr_str(msg, 2);
                     unsigned int *flags = get_attr(msg, 3, 4);
                     unsigned int *uid = get_attr(msg, 4, 4);
+                    unsigned int *uid_end = get_attr(msg, 9, 4);
+                    unsigned int *deny_lo = get_attr(msg, 10, 4);
+                    unsigned int *deny_hi = get_attr(msg, 11, 4);
 
                     if (v && r) {
                         int is_whiteout    = (flags && (*flags & 4));
@@ -381,6 +384,18 @@ void c_main(long *sp) {
                         else { print_str(" -> "); print_str(r); }
                         if (is_public) print_str(" (public)");
                         if (uid && *uid != 0) { print_str(" [UID: "); print_uint(*uid); print_str("]"); }
+                        /* Only printed when set, so a legacy rule's line is
+                         * unchanged. A reader that wants to DELETE a rule needs
+                         * these: the delete key is the whole scope.
+                         */
+                        if (uid_end && *uid_end) {
+                            print_str(" [SCOPE: "); print_uint(uid ? *uid : 0);
+                            print_str("-"); print_uint(*uid_end); print_str("]");
+                        }
+                        if (deny_hi && *deny_hi) {
+                            print_str(" [DENY: "); print_uint(deny_lo ? *deny_lo : 0);
+                            print_str("-"); print_uint(*deny_hi); print_str("]");
+                        }
                         print_str("\n");
                     }
                 }

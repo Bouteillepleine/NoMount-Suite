@@ -432,6 +432,11 @@ pub(crate) struct LiveRule {
     pub uid: u32,
     pub kind: LiveKind,
     pub public: bool,
+    /// The rule carries a uid range or an exclusion, which the Suite never asks
+    /// for -- so something else put it there. It matters because the delete key
+    /// is the whole scope: a plain `nm del <path>` cannot match one of these,
+    /// and pruning it would fail on every pass forever.
+    pub scoped: bool,
 }
 
 /// `isolated=N erofs=N`, the whole of what `nm knobs` prints. A missing field is None
@@ -468,11 +473,24 @@ pub(crate) fn parse_list_counted(list: &str) -> (Vec<LiveRule>, usize) {
 }
 
 fn parse_line(line: &str) -> Option<LiveRule> {
-    let uid: u32 = line
-        .split_once(" [UID:")
-        .and_then(|(_, r)| r.trim_start().trim_end_matches(']').trim().parse().ok())
+    // Markers trail the path section and any of them may be absent: a Morphe
+    // rule is uid 0, so it prints no [UID:] at all and only [SCOPE:]/[DENY:].
+    // Cutting at the FIRST marker present keeps a scope out of the source path.
+    let cut = ["[UID:", "[SCOPE:", "[DENY:"]
+        .iter()
+        .filter_map(|m| line.find(m))
+        .min();
+    let (head, tail) = match cut {
+        Some(i) => line.split_at(i),
+        None => (line, ""),
+    };
+    let uid: u32 = tail
+        .split_once("[UID:")
+        .and_then(|(_, r)| r.split(']').next())
+        .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
-    let mut l = line.split(" [UID:").next().unwrap_or(line).trim();
+    let scoped = tail.contains("[SCOPE:") || tail.contains("[DENY:");
+    let mut l = head.trim();
     if l.is_empty() {
         return None;
     }
@@ -503,6 +521,7 @@ fn parse_line(line: &str) -> Option<LiveRule> {
             uid,
             kind,
             public,
+            scoped,
         });
     }
     let (t, s) = l.rsplit_once(" -> ")?;
@@ -516,12 +535,42 @@ fn parse_line(line: &str) -> Option<LiveRule> {
         uid,
         kind: LiveKind::Inject,
         public,
+        scoped,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Morphe rule is uid 0, so it prints no [UID:] marker at all -- only
+    /// [SCOPE:] and [DENY:]. Splitting on " [UID:" alone would leave those
+    /// markers glued to the source path and silently corrupt it.
+    #[test]
+    fn a_scoped_rule_is_flagged_and_does_not_bleed_into_the_source_path() {
+        let line = "/data/app/x/base.apk -> /data/adb/modules/m/base.apk \
+[SCOPE: 0-4294967295] [DENY: 1000-1000]";
+        let r = parse_line(line.replace(" \\\n", " ").as_str()).expect("parsed");
+        assert_eq!(r.target, PathBuf::from("/data/app/x/base.apk"));
+        assert_eq!(
+            r.source,
+            Some(PathBuf::from("/data/adb/modules/m/base.apk")),
+            "the scope markers must not end up in the source path"
+        );
+        assert!(r.scoped, "a ranged rule is not ours to prune");
+        assert_eq!(r.uid, 0);
+    }
+
+    #[test]
+    fn a_legacy_rule_is_unchanged_and_not_scoped() {
+        let r = parse_line("/a -> /b [UID: 1000]").expect("parsed");
+        assert_eq!(r.uid, 1000);
+        assert_eq!(r.source, Some(PathBuf::from("/b")));
+        assert!(!r.scoped);
+        let r2 = parse_line("/a -> /b").expect("parsed");
+        assert_eq!(r2.uid, 0);
+        assert!(!r2.scoped);
+    }
 
     #[test]
     fn public_adds_the_flag_before_the_paths() {
