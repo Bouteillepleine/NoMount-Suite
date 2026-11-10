@@ -19,7 +19,7 @@
 
 #define NM_MODULE_VERSION "1.34.6"
 
-#define NOMOUNT_VERSION    34
+#define NOMOUNT_VERSION    35
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -160,6 +160,18 @@ struct nomount_dir_node {
     };
 };
 
+/* Who a rule is served to. Flat fields rather than a bitmap because the two
+ * modes mean different things: a legacy uid is an APPID (matched modulo
+ * NM_PER_USER_RANGE, so it follows an app across users), while a range is RAW
+ * uids and deliberately does not.
+ */
+struct nm_uid_scope {
+    unsigned int uid;
+    unsigned int uid_end;
+    unsigned int deny_start;
+    unsigned int deny_end;
+};
+
 struct nomount_rule {
     struct hlist_node vpath_node;
     struct hlist_node victim_node;
@@ -188,6 +200,9 @@ struct nomount_rule {
     u16 v_len;
     u16 flags;
     unsigned int target_uid;
+    unsigned int uid_end;
+    unsigned int deny_start;
+    unsigned int deny_end;
 
     char paths[]; 
 };
@@ -204,7 +219,7 @@ static const struct inode_operations nm_dir_iops;
 static const struct dentry_operations nm_dops;
 
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule);
-static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid);
+static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, const struct nm_uid_scope *scope);
 static void nm_free_rule(struct nomount_rule *rule);
 static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *victims, bool prune);
 struct nm_rule_info {
@@ -329,6 +344,17 @@ enum {
      *   bit  2    vdir_erofs_size
      */
     NOMOUNT_ATTR_KNOBS,
+    /* Per-rule uid scoping. All three default to 0, which is the legacy shape:
+     * uid_end 0 means NOMOUNT_ATTR_UID is an appid matched across every user,
+     * deny_end 0 means no exclusion. An engine that predates them ignores them
+     * (we parse liberally), so a client MUST check NOMOUNT_ATTR_VERSION >= 35
+     * before relying on a range -- otherwise the scope is silently widened to
+     * whatever ATTR_UID alone meant, which is the opposite of what the caller
+     * asked for.
+     */
+    NOMOUNT_ATTR_UID_END,
+    NOMOUNT_ATTR_DENY_START,
+    NOMOUNT_ATTR_DENY_END,
     __NOMOUNT_ATTR_MAX,
 };
 
