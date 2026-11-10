@@ -111,7 +111,7 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             println!("ok");
         }
         VfsAction::Del { virtual_path } => {
-            nm.del(Path::new(&virtual_path))?;
+            nm.del_any(Path::new(&virtual_path))?;
             println!("ok");
         }
         VfsAction::Whiteout { path } => {

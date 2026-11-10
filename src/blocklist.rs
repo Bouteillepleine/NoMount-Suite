@@ -21,6 +21,43 @@ pub const PER_USER_RANGE: u32 = 100_000;
 
 pub const FIRST_APP_APPID: u32 = 10_000;
 
+pub const APKSCOPE_PATH: &str = "/data/adb/nomount/apkscope";
+
+/// Apps that must not see an absorbed APK injection: one package, glob or appid per
+/// line, `#` comments, same shape as the uidconceal list. Absent or empty means OFF,
+/// which is the shipped behaviour.
+///
+/// This is opt in on purpose. Scoping an APK rule costs it the RCU fast path, and it
+/// changes what Play Protect reads for an app the operator never mentioned, so it is
+/// not something a module update should start doing by itself.
+///
+/// An unreadable or unresolvable list is an Err, never an empty Vec: falling back to
+/// "no exclusions" would serve the patched APK to the very app the operator was
+/// hiding it from, silently, which is the one outcome worse than not serving it.
+pub fn apk_scope() -> Result<Vec<u32>> {
+    let raw = match std::fs::read_to_string(APKSCOPE_PATH) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).context("read apkscope"),
+    };
+    apk_scope_from(&raw, &installed_packages().unwrap_or_default())
+        .with_context(|| APKSCOPE_PATH.to_string())
+}
+
+/// The testable half: file contents and `installed` injected.
+pub fn apk_scope_from(raw: &str, installed: &[(String, u32)]) -> Result<Vec<u32>> {
+    let spec = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(",");
+    if spec.is_empty() {
+        return Ok(Vec::new());
+    }
+    resolve_appid_list_in(&spec, installed)
+}
+
 /// The engine holds at most this many excluded appids per rule.
 pub const DENY_MAX: usize = 8;
 
@@ -543,6 +580,33 @@ mod tests {
             ("com.android.vending".to_string(), 10170),
             ("com.google.android.gms.supervision".to_string(), 1010159),
         ]
+    }
+
+    #[test]
+    fn an_absent_or_comment_only_apkscope_means_off() {
+        use super::apk_scope_from;
+        assert!(apk_scope_from("", &pm()).expect("ok").is_empty());
+        assert!(apk_scope_from("# nothing here\n\n", &pm()).expect("ok").is_empty());
+    }
+
+    /// Comments and blank lines are skipped, names resolve, and the result is the
+    /// canonical sorted set the engine demands.
+    #[test]
+    fn apkscope_reads_a_commented_package_list() {
+        use super::apk_scope_from;
+        let raw = "# apps that must not see absorbed APKs\n\
+                   com.google.android.gms\n\
+                   \n\
+                   com.android.vending\n";
+        assert_eq!(apk_scope_from(raw, &pm()).expect("ok"), vec![10170, 10397]);
+    }
+
+    /// A list naming something unresolvable must be an Err, not an empty Vec: empty
+    /// would serve the patched APK to the app being hidden from.
+    #[test]
+    fn an_unresolvable_apkscope_is_an_error_not_silently_off() {
+        use super::apk_scope_from;
+        assert!(apk_scope_from("com.not.installed\n", &pm()).is_err());
     }
 
     #[test]

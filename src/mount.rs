@@ -1161,7 +1161,7 @@ pub fn run_reload() -> Result<()> {
         if !prunable(t, *uid, wanted, &durable_whiteouts, &absorbed) {
             continue;
         }
-        if nm.del(t).is_ok() {
+        if nm.del_any(t).is_ok() {
             removed += 1;
         } else {
             failed += 1;

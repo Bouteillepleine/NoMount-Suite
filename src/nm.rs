@@ -217,6 +217,40 @@ impl Nm {
         self.run(&["del", path_str(virtual_path)?]).map(drop)
     }
 
+    /// Remove a rule whatever its scope. `nm del` sends no scope, and the delete key is
+    /// the WHOLE scope, so a plain delete cannot match a scoped rule -- it would fail
+    /// forever and leave an orphan. Only a failure pays for the extra list, so the
+    /// unscoped case still costs one call.
+    pub fn del_any(&self, virtual_path: &Path) -> Result<()> {
+        if self.del(virtual_path).is_ok() {
+            return Ok(());
+        }
+        let listing = self.list()?;
+        let deny = crate::nm::parse_list(&listing)
+            .into_iter()
+            .find(|r| r.target == virtual_path && !r.deny.is_empty())
+            .map(|r| r.deny)
+            .unwrap_or_default();
+        if deny.is_empty() {
+            bail!("no rule to delete at {}", virtual_path.display());
+        }
+        self.del_scoped(virtual_path, &deny)
+    }
+
+    pub fn del_scoped(&self, virtual_path: &Path, deny: &[u32]) -> Result<()> {
+        let list = deny.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+        self.run(&[
+            "rule",
+            "del",
+            "--uid-range",
+            "all",
+            "--uid-excluded",
+            &list,
+            path_str(virtual_path)?,
+        ])
+        .map(drop)
+    }
+
     pub fn whiteout(&self, path: &Path) -> Result<()> {
         self.run(&["w", path_str(path)?]).map(drop)
     }
@@ -462,6 +496,8 @@ pub(crate) struct LiveRule {
     /// is the whole scope: a plain `nm del <path>` cannot match one of these,
     /// and pruning it would fail on every pass forever.
     pub scoped: bool,
+    /// The excluded appids, parsed from `[DENY: a,b]`. Empty when unscoped.
+    pub deny: Vec<u32>,
 }
 
 /// `isolated=N erofs=N`, the whole of what `nm knobs` prints. A missing field is None
@@ -515,6 +551,11 @@ fn parse_line(line: &str) -> Option<LiveRule> {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
     let scoped = tail.contains("[SCOPE:") || tail.contains("[DENY:");
+    let deny: Vec<u32> = tail
+        .split_once("[DENY:")
+        .and_then(|(_, r)| r.split(']').next())
+        .map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+        .unwrap_or_default();
     let mut l = head.trim();
     if l.is_empty() {
         return None;
@@ -547,6 +588,7 @@ fn parse_line(line: &str) -> Option<LiveRule> {
             kind,
             public,
             scoped,
+            deny,
         });
     }
     let (t, s) = l.rsplit_once(" -> ")?;
@@ -561,6 +603,7 @@ fn parse_line(line: &str) -> Option<LiveRule> {
         kind: LiveKind::Inject,
         public,
         scoped,
+        deny,
     })
 }
 
@@ -601,6 +644,11 @@ mod tests {
         );
         assert!(r.scoped);
         assert_eq!(r.uid, 0);
+        assert_eq!(
+            r.deny,
+            vec![10170, 10397],
+            "del_any deletes using exactly this set, so a misparse orphans the rule"
+        );
     }
 
     #[test]
