@@ -188,6 +188,31 @@ impl Nm {
             .map(drop)
     }
 
+    /// Serve the rule to everyone EXCEPT these appids. The scope is `all` because that
+    /// is what an exclusion means on its own: visible by default, minus the named apps.
+    pub fn add_scoped(&self, virtual_path: &Path, real: &Path, deny: &[u32]) -> Result<()> {
+        if deny.is_empty() {
+            return self.add(virtual_path, real);
+        }
+        let public = crate::pmcache::is_public(virtual_path);
+        let list = deny
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut args: Vec<&str> = vec!["rule", "add"];
+        if public {
+            args.push("--public");
+        }
+        args.push("--uid-range");
+        args.push("all");
+        args.push("--uid-excluded");
+        args.push(&list);
+        args.push(path_str(virtual_path)?);
+        args.push(path_str(real)?);
+        self.run(&args).map(drop)
+    }
+
     pub fn del(&self, virtual_path: &Path) -> Result<()> {
         self.run(&["del", path_str(virtual_path)?]).map(drop)
     }

@@ -21,6 +21,60 @@ pub const PER_USER_RANGE: u32 = 100_000;
 
 pub const FIRST_APP_APPID: u32 = 10_000;
 
+/// The engine holds at most this many excluded appids per rule.
+pub const DENY_MAX: usize = 8;
+
+/// Comma-separated appids, package names or globs -> sorted, unique appids.
+///
+/// Names go through the same `expand` the hide list uses, so `com.google.android.gms`,
+/// `*.gms` and a bare appid all behave here exactly as they do in `nomount uid`. A raw
+/// uid is refused rather than normalised: someone passing 1010397 means "that app under
+/// user 10", and silently widening it to every user is the kind of guess that hides a
+/// mistake instead of surfacing it.
+pub fn resolve_appid_list(spec: &str) -> Result<Vec<u32>> {
+    resolve_appid_list_in(spec, &installed_packages().unwrap_or_default())
+}
+
+/// The testable half: `installed` injected rather than shelled out of `pm`.
+pub fn resolve_appid_list_in(spec: &str, installed: &[(String, u32)]) -> Result<Vec<u32>> {
+    let mut out: Vec<u32> = Vec::new();
+
+    for raw in spec.split(',') {
+        let e = raw.trim();
+        if e.is_empty() {
+            anyhow::bail!("empty entry in the excluded-app list");
+        }
+        if let Ok(n) = e.parse::<u32>() {
+            if n >= PER_USER_RANGE {
+                anyhow::bail!(
+                    "{e} is a raw uid, not an appid. Pass {} or the package name - one \
+                     appid already covers that app under every user.",
+                    appid(n)
+                );
+            }
+            out.push(n);
+            continue;
+        }
+        let hits = expand(e, installed)?;
+        if hits.is_empty() {
+            anyhow::bail!("{e} matches no installed package");
+        }
+        for (_, uid) in hits {
+            out.push(appid(uid));
+        }
+    }
+
+    out.sort_unstable();
+    out.dedup();
+    if out.len() > DENY_MAX {
+        anyhow::bail!(
+            "{} apps named; the engine holds at most {DENY_MAX} per rule",
+            out.len()
+        );
+    }
+    Ok(out)
+}
+
 pub fn appid(uid: u32) -> u32 {
     uid % PER_USER_RANGE
 }
@@ -481,6 +535,68 @@ pub fn ksu_denylist(installed: &[(String, u32)]) -> Option<Vec<(String, u32)>> {
 
 #[cfg(test)]
 mod tests {
+    use super::{resolve_appid_list_in, DENY_MAX};
+
+    fn pm() -> Vec<(String, u32)> {
+        vec![
+            ("com.google.android.gms".to_string(), 10397),
+            ("com.android.vending".to_string(), 10170),
+            ("com.google.android.gms.supervision".to_string(), 1010159),
+        ]
+    }
+
+    #[test]
+    fn a_package_name_becomes_its_appid() {
+        let got = resolve_appid_list_in("com.google.android.gms", &pm()).expect("resolved");
+        assert_eq!(got, vec![10397]);
+    }
+
+    /// The whole point of the appid model: a package installed in a secondary user
+    /// normalises to the SAME appid, so one rule covers it everywhere.
+    #[test]
+    fn a_secondary_user_package_normalises_to_its_appid() {
+        let got =
+            resolve_appid_list_in("com.google.android.gms.supervision", &pm()).expect("resolved");
+        assert_eq!(got, vec![10159], "1010159 must normalise to appid 10159");
+    }
+
+    #[test]
+    fn mixed_names_and_appids_come_back_sorted_and_unique() {
+        let got = resolve_appid_list_in("com.google.android.gms,10170,10397", &pm())
+            .expect("resolved");
+        assert_eq!(got, vec![10170, 10397], "sorted, and the duplicate 10397 folded");
+    }
+
+    /// A raw uid is refused rather than normalised: it usually means the caller thinks
+    /// the exclusion is per-user, and silently widening it would hide that mistake.
+    #[test]
+    fn a_raw_uid_is_refused_with_the_appid_to_use() {
+        let why = resolve_appid_list_in("1010397", &pm()).expect_err("must refuse");
+        let msg = why.to_string();
+        assert!(msg.contains("raw uid"), "{msg}");
+        assert!(msg.contains("10397"), "the message must name the appid to use: {msg}");
+    }
+
+    #[test]
+    fn an_unknown_package_is_refused_not_silently_dropped() {
+        let why = resolve_appid_list_in("com.not.installed", &pm()).expect_err("must refuse");
+        assert!(why.to_string().contains("no installed package"), "{why}");
+    }
+
+    #[test]
+    fn more_than_the_engine_holds_is_refused() {
+        let spec = (1..=(DENY_MAX as u32 + 1))
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let why = resolve_appid_list_in(&spec, &pm()).expect_err("must refuse");
+        assert!(why.to_string().contains("at most"), "{why}");
+    }
+
+    #[test]
+    fn an_empty_entry_is_refused() {
+        assert!(resolve_appid_list_in("10397,,10170", &pm()).is_err());
+    }
     use super::*;
 
     #[test]
