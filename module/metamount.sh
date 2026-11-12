@@ -21,7 +21,7 @@ nm_state_dir_repair
 
 nm_boot_log_rotate
 
-rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" 2>/dev/null
+rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" "$NMDIR/.checkwatch.lock" 2>/dev/null
 
 nm_consume_stash
 
@@ -72,6 +72,14 @@ if nm_guard_bump "ksu/apatch metamount path"; then
     fi
 fi
 
+# Tell ksud that mounting is finished HERE, as soon as it actually is. Everything below
+# is cosmetic - counting modules and writing the description card - and it ends in a call
+# back into the very daemon that is waiting for this signal. Leaving the notify to the
+# EXIT trap put nm_rule_counts' 15s plus an UNTIMED ksud round trip between the mount
+# pass and the handoff, on every boot, with a re-entrant call in the middle of it. The
+# trap stays as the safety net for the paths that exit before reaching this.
+nm_notify_mounted
+
 if command -v ksud >/dev/null 2>&1; then
     _nmods=0
     if [ ! -e "$NMDIR/disabled" ]; then
@@ -104,7 +112,12 @@ if command -v ksud >/dev/null 2>&1; then
     else
         _desc="✅ $_rules rules · $_rro RRO$_wof · $_mods modules · mountless"
     fi
-    KSU_MODULE=meta-nomount ksud module config set --temp override.description "$_desc" >/dev/null 2>&1
+    # The one blocking call in the boot set that had no timeout. It is a description
+    # card; it is never worth hanging a boot for. `env` because nmto execs "$@", so a
+    # VAR=val prefix would be taken as the command name.
+    nmto 10 env KSU_MODULE=meta-nomount ksud module config set --temp \
+        override.description "$_desc" >/dev/null 2>&1 \
+        || nmlog "⚠ could not write the module description card (ksud slow or refused)"
 fi
 
 exit 0

@@ -159,7 +159,11 @@ a kallsyms redirect.
 
 - A kernel you cannot rebuild, where in-tree is not on the table at all.
 - Bring-up and bisecting: `insmod` / `rmmod` beats a flash-and-reboot cycle when
-  you are chasing one behaviour.
+  you are chasing one behaviour. Note that `rmmod` only works until the engine
+  takes its first rule: hijacking a directory points its `inode->i_op` at a copy
+  of its vtable that the VFS will not let us put back, so from the first rule
+  onward the module pins itself and `rmmod` returns `-EBUSY`. Unload before the
+  Suite's boot scripts program rules, or reboot.
 - A device whose KMI you can match but whose source you do not have.
 
 If you *can* build the kernel, build it in-tree. See the repository root readme.

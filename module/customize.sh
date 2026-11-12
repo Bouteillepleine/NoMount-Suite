@@ -42,7 +42,14 @@ for mp in /data/adb/modules/*/module.prop; do
     [ "$id" = "meta-nomount" ] && continue
     [ -f "$mdir/remove" ] && continue
     [ -f "$mdir/disable" ] && continue
-    if grep -q '^metamodule=1' "$mp"; then
+    # Mirror ksud's is_metamodule() (trim, then "1" or a case-insensitive
+    # "true") rather than prefix-matching "metamodule=1". maxsteeel/nomount
+    # writes metamodule=true, so the one metamodule likely to sit beside ours
+    # was the one this guard could not see - and two installed at once is
+    # silent: ksud points /data/adb/metamodule at whichever was flashed last
+    # and never calls the loser's metamount.sh. The old pattern also tripped
+    # on metamodule=10, which ksud does not count as one.
+    if grep -qiE '^metamodule[[:space:]]*=[[:space:]]*(1|true)[[:space:]]*$' "$mp"; then
         other="$(grep '^name=' "$mp" | head -n1 | cut -d= -f2-)"
         ui_print "*********************************************************"
         ui_print "! Another metamodule is already installed:"
@@ -84,11 +91,27 @@ export NM_LKM_SAY NM_LKM_NM NM_LKM_LOADER
 [ -f "$MODPATH/lkm-load.sh" ] && . "$MODPATH/lkm-load.sh"
 [ -f "$NM_LKM_LOADER" ] && chmod 0755 "$NM_LKM_LOADER" 2>/dev/null
 
+# Read before the probe, not after: from recovery there is no running engine to
+# answer, so "no answer" means something different there, and both the block
+# below and the next step at the end of the file have to say so.
+_booted=$(getprop sys.boot_completed 2>/dev/null)
+
+# Whether this zip carries an engine module at all. The lite zip ships none by
+# design, so "nothing loaded" there is not a fact about the kernel - it used to
+# be printed as one, which reads as "your kernel is incompatible" and sends
+# people to reflash a kernel instead of to the LKM zip.
+_bundled=0
+for _k in "$MODPATH"/lkm/nomount-*.ko; do
+    [ -f "$_k" ] && { _bundled=1; break; }
+done
+unset _k
+
 # _eng, not _ev: the engine can be up while its version is unreadable, and the
 # messages at the end of this file are about whether anything will be injected,
 # not about whether we could read a number.
 _eng=0
 _lrc=1
+_denied=0
 if [ -x "$_nm" ]; then
     _evl=$("$_nm" v 2>/dev/null | head -n 1)
     _ev=$(printf '%s' "${_evl%% *}" | tr -dc '0-9')
@@ -125,14 +148,42 @@ if [ -x "$_nm" ]; then
         ui_print "! Re-flash this zip; do not reflash the kernel."
         ui_print "*********************************************************"
     else
+        # nm already tells the two failures apart (userspace/src/nm.c: errno
+        # 1/13 = the socket was denied, so the engine may well be loaded; 93/97
+        # = no such protocol = no engine). The probe above discards stderr, so
+        # re-run it on this path only to read the errno back - telling someone
+        # to reflash their kernel over an SELinux denial is the worst advice
+        # this script can give.
+        _nmerr=$("$_nm" v 2>&1 >/dev/null)
+        _nmerrno=$(printf '%s' "$_nmerr" | sed -n 's/.*(errno \([0-9]*\)).*/\1/p' | head -n 1)
+        case "$_nmerrno" in 1|13) _denied=1 ;; esac
+
         ui_print "*********************************************************"
-        ui_print "! The kernel's NoMount engine did not answer, and no"
-        ui_print "! bundled module loads on it either."
+        if [ "$_denied" = 1 ]; then
+            ui_print "! The netlink socket was DENIED, not missing - this kernel"
+            ui_print "! may well have NoMount. Do NOT reflash it. Look for a"
+            ui_print "! denied netlink_socket create on the domain running nm,"
+            ui_print "! then reinstall."
+        elif [ "$_bundled" = 0 ]; then
+            ui_print "! This zip bundles NO engine module - it is the lite zip,"
+            ui_print "! for a kernel that already has NoMount built in. Nothing"
+            ui_print "! here can load one, so this says nothing about whether"
+            ui_print "! your kernel is capable."
+            ui_print "! Flash 01_NoMount-Module-LKM from the same release - it"
+            ui_print "! carries a module per KMI - or drop a matching one at"
+            ui_print "! /data/adb/nomount/nomount.ko."
+        else
+            ui_print "! The kernel's NoMount engine did not answer, and no"
+            ui_print "! bundled module loads on it either."
+            ui_print "! Flash a NoMount-enabled kernel, or drop a matching"
+            ui_print "! nomount.ko at /data/adb/nomount/nomount.ko."
+        fi
         ui_print "!   kernel: $(uname -r)"
-        ui_print "! From recovery this is normal - there is no running kernel"
-        ui_print "! to load into. Reboot, then reinstall to find out."
-        ui_print "! Otherwise: flash a NoMount-enabled kernel, or drop a"
-        ui_print "! matching nomount.ko at /data/adb/nomount/nomount.ko."
+        ui_print "!   nm: netlink proto 29, errno ${_nmerrno:-unknown}"
+        if [ "$_booted" != "1" ] && [ "$_denied" != 1 ]; then
+            ui_print "! From recovery the engine cannot answer at all - reboot,"
+            ui_print "! then reinstall to find out."
+        fi
         ui_print "*********************************************************"
     fi
 else
@@ -153,9 +204,10 @@ _bak=/data/adb/nomount.bak
 if [ -d "$_bak" ]; then
     _rn=0
     _fail=0
+    # KEEP IN SYNC with the stash list in uninstall.sh and lib.sh's nm_consume_stash().
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-              uidconceal ghostpaths \
+              uidconceal ghostpaths kmsg incident.log nomount.ko \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
@@ -181,7 +233,13 @@ unset _bak
 CONF="$NMDIR/spoof.conf"
 [ -f "$CONF" ] && set_perm "$CONF" 0 0 0600 u:object_r:adb_data_file:s0
 
+# Both inotifyd handlers need the exec bit: inotifyd execs them directly, and the
+# manager's own set_permissions pass leaves every file 0644 regardless of the mode
+# stored in the zip. Without this, inotifyd stays resident and silently fails to exec
+# its handler on every event -- checkwatch.sh shipped that way and the WebUI's
+# check-on-request never answered.
 [ -f "$MODPATH/uidwatch.sh" ] && set_perm "$MODPATH/uidwatch.sh" 0 0 0755
+[ -f "$MODPATH/checkwatch.sh" ] && set_perm "$MODPATH/checkwatch.sh" 0 0 0755
 
 [ -f "$MODPATH/lib.sh" ] && set_perm "$MODPATH/lib.sh" 0 0 0644
 [ -d "$MODPATH/webroot" ] && set_perm_recursive "$MODPATH/webroot" 0 0 0755 0644
@@ -239,7 +297,22 @@ if [ -e "$NMDIR/disabled" ]; then
     ui_print "     Clear it in the WebUI, or: rm $NMDIR/disabled"
 fi
 
-_booted=$(getprop sys.boot_completed 2>/dev/null)
+# A metamodule is only served if the MANAGER knows what one is: ksud is what invokes
+# metamount.sh, and a build without that support never calls it. Until now the install
+# probed only the ENGINE, so on such a build the Suite reported "Prism engine responding,
+# next step: reboot" and then injected nothing -- the user learned otherwise from
+# incident.log after a boot, which service.sh:47 names as a top failure mode. Say it here,
+# while they are still looking at the installer.
+if command -v ksud >/dev/null 2>&1 && ! ksud module metamodule >/dev/null 2>&1; then
+    ui_print "*********************************************************"
+    ui_print "! This manager does not support metamodules."
+    ui_print "! NoMount will install and then inject NOTHING: metamount.sh"
+    ui_print "! is never invoked, so no module is ever served."
+    ui_print "! Update to a KernelSU/SukiSU/APatch build that supports"
+    ui_print "! them. The engine being present does not help on its own."
+    ui_print "*********************************************************"
+fi
+
 if [ "$_eng" = 1 ] && [ ! -e "$NMDIR/disabled" ]; then
     ui_print "- Modules under /data/adb/modules are injected mountlessly at boot."
     ui_print "- next step: reboot. Nothing is served until you do."
@@ -249,9 +322,17 @@ elif [ ! -d "$MODPATH/bin/${_abi}" ]; then
 elif [ ! -x "$_nm" ]; then
     ui_print "- next step: re-flash this zip. The engine could not be probed (see above),"
     ui_print "  so we cannot tell you whether your kernel has NoMount."
+elif [ "$_denied" = 1 ]; then
+    ui_print "- next step: clear the SELinux denial above, then reinstall. Reflashing"
+    ui_print "  the kernel is the wrong move - the socket was refused, not absent."
 elif [ "$_eng" != 1 ] && [ "$_booted" != "1" ]; then
     ui_print "- Installed from recovery, where the engine cannot answer."
     ui_print "- next step: reboot, then open the WebUI - it says whether your kernel has it."
+elif [ "$_eng" != 1 ] && [ "$_bundled" = 0 ]; then
+    ui_print "- next step: flash 01_NoMount-Module-LKM from the same release - this"
+    ui_print "  lite zip carries no engine module - or a kernel built with CONFIG_NOMOUNT."
+    ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases"
+    ui_print "  Until you do, this module is installed and doing nothing."
 elif [ "$_eng" != 1 ]; then
     ui_print "- next step: flash a kernel built with CONFIG_NOMOUNT, then reboot."
     ui_print "  OnePlus prebuilts: github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases"
@@ -266,7 +347,10 @@ fi
 # last thing we print, so the two cannot be read as agreeing.
 if [ "$_eng" != 1 ]; then
     ui_print "*********************************************************"
-    if [ "$_booted" != "1" ]; then
+    if [ "$_denied" = 1 ]; then
+        ui_print "! INSTALLED BUT INACTIVE - the engine could not be reached."
+        ui_print "! The kernel is not implicated. See the next step above."
+    elif [ "$_booted" != "1" ]; then
         ui_print "! INSTALLED - engine state UNKNOWN (no running kernel to"
         ui_print "! ask). Reboot and re-check before relying on it."
     else
@@ -276,4 +360,4 @@ if [ "$_eng" != 1 ]; then
     ui_print "! Any success line below refers to the files, not the engine."
     ui_print "*********************************************************"
 fi
-unset _booted _eng _lrc
+unset _booted _eng _lrc _bundled _denied _nmerr _nmerrno

@@ -47,6 +47,8 @@ static const struct cred *nm_root_cred;
 static void nm_dir_node_put(struct nomount_dir_node *dir_node);
 static void nomount_restore_dir_node(struct nomount_dir_node *dir_node);
 static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule);
+static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *victims, bool prune);
+static void nm_free_rule(struct nomount_rule *rule);
 static DEFINE_STATIC_KEY_FALSE(nomount_active_uids);
 
 static int nm_read_secctx(struct inode *in, char *dst, u16 *dlen)
@@ -112,12 +114,105 @@ bool nm_uid_blocked(uid_t uid)
 
 static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
 {
-    unsigned int target;
+    unsigned int uid;
 
     if (!rule) return false;
-    target = rule->target_uid;
-    return target == 0 ||
-           (target % NM_PER_USER_RANGE) == (current_uid().val % NM_PER_USER_RANGE);
+    uid = current_uid().val;
+
+    if (rule->uid_end) {
+        /* Range mode: RAW uids, and deliberately not per-user. "every uid except
+         * system_server" works because system_server is 1000 on every user; a
+         * range like 10200-10200 matches user 0 only, which is the point.
+         */
+        if (uid < rule->target_uid || uid > rule->uid_end)
+            return false;
+    } else if (rule->target_uid) {
+        /* Legacy mode, unchanged: target_uid is an appid, matched across users. */
+        if ((rule->target_uid % NM_PER_USER_RANGE) != (uid % NM_PER_USER_RANGE))
+            return false;
+    }
+
+    /* Exclusion is by APPID, so one entry covers that app under every user -- a
+     * work profile included. It applies to both modes: the scope above selects
+     * raw uids, this subtracts apps from whatever it selected.
+     */
+    if (rule->deny_n) {
+        unsigned int appid = uid % NM_PER_USER_RANGE;
+        u8 i;
+
+        for (i = 0; i < rule->deny_n; i++)
+            if (rule->deny_appid[i] == appid)
+                return false;
+    }
+
+    return true;
+}
+
+/* Two rules on one vpath are the SAME rule only if they are served to the same
+ * set of uids. Scope is therefore part of both the add-clash key and the delete
+ * key -- delete has always matched target_uid exactly rather than as a wildcard,
+ * and widening that now would let a narrow delete remove a broad rule.
+ */
+static __always_inline bool nm_scope_eq(const struct nomount_rule *rule,
+                                        const struct nm_uid_scope *scope)
+{
+    u8 i;
+
+    if (rule->target_uid != scope->uid ||
+        rule->uid_end    != scope->uid_end ||
+        rule->deny_n     != scope->deny_n)
+        return false;
+    for (i = 0; i < rule->deny_n; i++)
+        if (rule->deny_appid[i] != scope->deny[i])
+            return false;
+    return true;
+}
+
+/* Reject a scope that cannot mean what the caller wrote, rather than silently
+ * serving a different set of uids than they asked for.
+ */
+static __always_inline bool nm_scope_invalid(const struct nm_uid_scope *scope)
+{
+    unsigned int i;
+
+    if (scope->uid_end && scope->uid_end < scope->uid)
+        return true;
+    if (scope->deny_n > NM_DENY_MAX)
+        return true;
+    /* Sorted and strictly increasing, so the delete key is canonical: two rules
+     * hiding from the same apps must compare equal whatever order the caller
+     * listed them in, and a duplicate would make deny_n overstate the count.
+     */
+    for (i = 0; i < scope->deny_n; i++) {
+        if (scope->deny[i] >= NM_PER_USER_RANGE)
+            return true;
+        if (i && scope->deny[i] <= scope->deny[i - 1])
+            return true;
+    }
+    return false;
+}
+
+/* Read the scope off a parsed message. DENY_APPIDS is one packed array rather
+ * than a repeated attribute because nlmsg_parse() keeps only the last instance
+ * of a repeated attr, which would silently drop every appid but one.
+ */
+static int nm_scope_from_attrs(struct nm_uid_scope *scope, struct nlattr **attrs)
+{
+    const struct nlattr *a = attrs[NOMOUNT_ATTR_DENY_APPIDS];
+
+    memset(scope, 0, sizeof(*scope));
+    scope->uid     = attrs[NOMOUNT_ATTR_UID]     ? nla_get_u32(attrs[NOMOUNT_ATTR_UID])     : 0;
+    scope->uid_end = attrs[NOMOUNT_ATTR_UID_END] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID_END]) : 0;
+    if (a) {
+        int blen = nla_len(a);
+
+        if (blen <= 0 || blen % (int)sizeof(scope->deny[0]) ||
+            blen > (int)sizeof(scope->deny))
+            return -EINVAL;
+        memcpy(scope->deny, nla_data(a), blen);
+        scope->deny_n = blen / (int)sizeof(scope->deny[0]);
+    }
+    return 0;
 }
 
 static __always_inline bool nm_uid_hidden(u32 flags)
@@ -215,6 +310,8 @@ static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_n
             struct nomount_rule *rule = smp_load_acquire(&child->rule);
             if (nm_rule_visible(rule)) {
                 rule_info->flags = rule->flags;
+                if (rule->target_uid || rule->uid_end || rule->deny_n)
+                    rule_info->flags |= NM_FLAG_UID_SCOPED;
                 rule_info->v_ino = rule->v_ino;
                 rule_info->v_dino = rule->v_dino;
                 rule_info->v_pdino = rule->v_pdino;
@@ -678,9 +775,41 @@ static void nm_inode_info_rcu_free(struct rcu_head *head)
     kmem_cache_free(nm_inode_cachep, container_of(head, struct nm_inode_info, rcu));
 }
 
+static void nomount_hijacked_destroy_inode(struct inode *inode);
+
+/* The original super_operations behind a hijacked superblock, or NULL.
+ *
+ * nomount_restore_superblocks() frees the nm_sop with kfree_rcu(), which only waits for
+ * readers that are INSIDE an RCU read-side critical section. These callbacks had none:
+ * a reader preempted between loading s_op and dereferencing the nm_sop it points at can
+ * resume after a full grace period has elapsed and then call through freed memory. The
+ * window is teardown-only (restore_superblocks runs from the module exit path), but the
+ * call it makes is an indirect one, so landing in freed memory is arbitrary execution.
+ *
+ * Only the nm_sop read is inside the section, and the pointer is copied out. orig_sop
+ * points at the filesystem's own const super_operations, which outlives us, so the call
+ * itself MUST stay outside: evict_inode and statfs both sleep, and sleeping under
+ * rcu_read_lock is a bug in its own right.
+ */
+static const struct super_operations *nm_orig_sop(struct super_block *sb)
+{
+    const struct super_operations *orig = NULL;
+    struct nm_sop *nm_sop;
+
+    if (unlikely(!sb))
+        return NULL;
+    rcu_read_lock();
+    nm_sop = __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop,
+                      destroy_inode, nomount_hijacked_destroy_inode);
+    if (nm_sop)
+        orig = nm_sop->orig_sop;
+    rcu_read_unlock();
+    return orig;
+}
+
 static void nomount_hijacked_destroy_inode(struct inode *inode)
 {
-    struct nm_sop *nm_sop;
+    const struct super_operations *orig;
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         if (inode->i_private) {
             struct nm_inode_info *info = inode->i_private;
@@ -696,38 +825,38 @@ static void nomount_hijacked_destroy_inode(struct inode *inode)
             call_rcu(&info->rcu, nm_inode_info_rcu_free);
         }
     }
-    nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
-    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->destroy_inode) {
-        nm_sop->orig_sop->destroy_inode(inode);
+    orig = nm_orig_sop(inode->i_sb);
+    if (orig && orig->destroy_inode) {
+        orig->destroy_inode(inode);
     }
 }
 
 static int nomount_hijacked_drop_inode(struct inode *inode)
 {
-    struct nm_sop *nm_sop;
+    const struct super_operations *orig;
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         return !inode->i_nlink || inode_unhashed(inode);
     }
 
-    nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
-    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->drop_inode) {
-        return nm_sop->orig_sop->drop_inode(inode);
+    orig = nm_orig_sop(inode->i_sb);
+    if (orig && orig->drop_inode) {
+        return orig->drop_inode(inode);
     }
-    
+
     return !inode->i_nlink || inode_unhashed(inode);
 }
 
 static void nomount_hijacked_evict_inode(struct inode *inode)
 {
-    struct nm_sop *nm_sop;
+    const struct super_operations *orig;
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         truncate_inode_pages_final(&inode->i_data);
         clear_inode(inode);
         return;
     }
-    nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
-    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->evict_inode) {
-        nm_sop->orig_sop->evict_inode(inode);
+    orig = nm_orig_sop(inode->i_sb);
+    if (orig && orig->evict_inode) {
+        orig->evict_inode(inode);
     } else {
         truncate_inode_pages_final(&inode->i_data);
         clear_inode(inode);
@@ -953,14 +1082,31 @@ static int nm_mmap_prepare(struct vm_area_desc *desc)
 static long nm_ioctl_as_stock(struct file *file, unsigned int cmd, unsigned long arg, bool compat)
 {
     struct nm_inode_info *info = file_inode(file)->i_private;
+    const struct path *src;
     struct file *sf;
     long ret;
 
-    if (unlikely(!info) || !info->s_path.dentry)
+    if (unlikely(!info))
+        return -ENOTTY;
+
+    /* Answer as the stock file where there is one; otherwise answer from the file we
+     * actually serve.
+     *
+     * A purely injected path has no stock counterpart -- its vpath did not exist when
+     * the rule was added, so nm_alloc_rule never set s_path -- and this returned -ENOTTY
+     * outright for those. That made one ioctl() a clean separator: a genuine erofs, ext4
+     * or f2fs file answers FS_IOC_GETFLAGS, FS_IOC_FSGETXATTR and FS_IOC_GETVERSION, and
+     * every injected file refused all three. "As stock" is undefined with no stock file,
+     * and the backing file is what the injected one IS.
+     */
+    src = info->s_path.dentry ? &info->s_path
+        : info->r_path.dentry ? &info->r_path
+        : NULL;
+    if (!src)
         return -ENOTTY;
 
     {
-        struct inode *si = d_backing_inode(info->s_path.dentry);
+        struct inode *si = d_backing_inode(src->dentry);
 
         if (si && si->i_fop && !si->i_fop->unlocked_ioctl
 #ifdef CONFIG_COMPAT
@@ -970,7 +1116,7 @@ static long nm_ioctl_as_stock(struct file *file, unsigned int cmd, unsigned long
             return -ENOTTY;
     }
 
-    sf = dentry_open(&info->s_path, O_RDONLY | O_LARGEFILE, current_cred());
+    sf = dentry_open(src, O_RDONLY | O_LARGEFILE, current_cred());
     if (IS_ERR(sf))
         return -ENOTTY;
 
@@ -1057,16 +1203,15 @@ static void nm_mirror_blocks(const struct nm_inode_info *info, struct kstat *sta
 static int nomount_hijacked_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
     struct inode *inode = d_backing_inode(dentry);
-    struct nm_sop *nm_sop;
+    const struct super_operations *orig;
 
     if (inode && (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) &&
         unlikely(nm_hidden_from_caller(inode->i_private)))
         return -ENOENT;
 
-    nm_sop = __get_nm(smp_load_acquire(&dentry->d_sb->s_op), struct nm_sop, fake_sop,
-                      destroy_inode, nomount_hijacked_destroy_inode);
-    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->statfs)
-        return nm_sop->orig_sop->statfs(dentry, buf);
+    orig = nm_orig_sop(dentry->d_sb);
+    if (orig && orig->statfs)
+        return orig->statfs(dentry, buf);
     return -ENOSYS;
 }
 
@@ -1663,7 +1808,12 @@ static void nm_dir_stat_fix(struct nm_inode_info *info, struct kstat *stat)
 
     if (!info->dir_node || !info->r_path.dentry)
         return;
-    if (d_backing_inode(info->r_path.dentry)->i_sb->s_magic != EROFS_SUPER_MAGIC_V1)
+    /* The knob gates here too. The injected side accepts it as an alternative to the
+     * erofs magic and this did not, so with it set on a non-erofs /system an injected
+     * directory got the synthesized size and the stock directory holding it did not --
+     * one getdents64 and one stat on each is enough to see them disagree. */
+    if (d_backing_inode(info->r_path.dentry)->i_sb->s_magic != EROFS_SUPER_MAGIC_V1 &&
+        !READ_ONCE(nm_vdir_erofs_size))
         return;
 
     nm_dir_deltas(info->dir_node, &nld, &delta);
@@ -1729,7 +1879,9 @@ static int nomount_hijacked_getattr(IDMAP_ARG const struct path *path, struct ks
     if (stat->nlink != 1)
         nm_dir_nlink_fix(stat, nld);
 
-    if (delta && inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 &&
+    /* Same gate as nm_dir_stat_fix: a victim left unfixed among fixed children is the tell. */
+    if (delta && (inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 ||
+                  READ_ONCE(nm_vdir_erofs_size)) &&
         stat->size > 0 && stat->size < 4096) {
         loff_t fixed = stat->size + delta;
         if (fixed > 0 && fixed < 4096)
@@ -2414,6 +2566,11 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
         rinfo = READ_ONCE(ino->i_private);
         if (!rinfo || READ_ONCE(rinfo->gen) != (u32)atomic_read(&nm_rule_gen))
             return -ECHILD;
+        /* A scope is per-caller but this cached verdict is not, so RCU cannot
+         * honour it. Hand scoped names to the ref-walk path, which re-matches.
+         */
+        if (rinfo->flags & NM_FLAG_UID_SCOPED)
+            return -ECHILD;
         if (nm_uid_hidden(rinfo->flags) &&
             (rinfo->flags & NM_FLAG_SHADOWS_STOCK) && !rinfo->s_path.dentry)
             return -ECHILD;
@@ -2626,17 +2783,34 @@ static void nomount_hijacked_put_super(struct super_block *sb)
     struct nm_sop *nm_sop = __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
     void (*orig_put)(struct super_block *) = NULL;
     struct nomount_rule *rule;
+    struct hlist_node *tmp;
     int bkt;
+    HLIST_HEAD(victims);
 
+    /* Remove the rule outright, not just its child entry.
+     *
+     * This used to call __nomount_delete_child_locked(), which unhooks the rule from its
+     * parent directory and nulls ->parent_dir but leaves the rule itself in
+     * nomount_rules_ht. It therefore kept being printed by NM_CMD_GET_LIST and kept
+     * matching __nomount_del_rule, while injecting nothing -- userspace's picture of the
+     * rule set silently diverging from the kernel's for every rule on the filesystem
+     * going away. nm_detach_rule_locked() does both halves, and the victims/
+     * synchronize_rcu/free protocol is the one __nomount_clear_all uses.
+     */
     mutex_lock(&nomount_write_mutex);
-    hash_for_each(nomount_rules_ht, bkt, rule, vpath_node) {
+    hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {
         struct nomount_dir_node *d;
 
         d = rule->parent_dir;
         if (d && !(d->_tag_ptr & 1UL) && d->dir_inode && d->dir_inode->i_sb == sb)
-            __nomount_delete_child_locked(d, rule);
+            nm_detach_rule_locked(rule, &victims, false);
     }
     mutex_unlock(&nomount_write_mutex);
+    if (!hlist_empty(&victims)) {
+        synchronize_rcu();
+        hlist_for_each_entry_safe(rule, tmp, &victims, victim_node)
+            nm_free_rule(rule);
+    }
 
     if (nm_sop) {
         int i = 0;
@@ -2653,6 +2827,25 @@ static void nomount_hijacked_put_super(struct super_block *sb)
             nm_sop->fake_xattr = NULL;
         }
         WRITE_ONCE(nm_sop->sb, NULL);
+        /* Drop it from the list and free it, rather than leaving a dead entry behind.
+         *
+         * This path only nulled ->sb, so every unmount of a hijacked filesystem leaked
+         * one nm_sop and left nomount_sb_list a little longer -- unbounded across
+         * mount/unmount cycles, with nomount_restore_superblocks() walking the corpses
+         * each time it runs.
+         *
+         * Freeing is safe exactly here: s_op was restored with a store-release above, so
+         * no NEW reader can reach this object through it, and every existing reader is
+         * inside an RCU read-side section (nm_orig_sop), which is what kfree_rcu waits
+         * for. The list itself is serialised by nomount_write_mutex, which guards the
+         * list_add_tail_rcu in nomount_hijack_superblock and the walk in
+         * nomount_restore_superblocks -- and this runs outside the mutex taken above, so
+         * it has to be retaken. put_super may sleep, so that is allowed.
+         */
+        mutex_lock(&nomount_write_mutex);
+        list_del_rcu(&nm_sop->list);
+        mutex_unlock(&nomount_write_mutex);
+        kfree_rcu(nm_sop, rcu);
     }
     if (orig_put) orig_put(sb);
 }
@@ -2839,6 +3032,43 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
     spin_unlock(&t_inode->i_lock);
     iput(t_inode);
     dir_node->dir_inode = NULL;
+}
+
+/* Once a rule exists, this module can never be unloaded again.
+ *
+ * A victim directory is hijacked by pointing inode->i_op at a per-inode copy of its
+ * own vtable whose lookup/getattr are ours, and the engine's own inodes point i_op
+ * straight at nm_dir_iops/nm_file_iops. nomount_restore_dir_node() does not put
+ * either pointer back -- it NEUTERS the hijack by clearing nm_iop->dir_node so the
+ * handlers fall through, and that is deliberate: the VFS treats i_op as immutable
+ * for an inode's lifetime and dereferences it as a plain stable pointer, so there is
+ * no sequence -- synchronize_rcu() included -- that proves no CPU is mid-flight
+ * through the copy at the moment it would be restored. Installing a superset once is
+ * safe; uninstalling it is not.
+ *
+ * So those pointers outlive every rule, and shrink_dcache_sb() only reclaims UNUSED
+ * dentries: a directory that is some process's cwd or has an open fd keeps its
+ * inode, and its i_op keeps pointing into this module's text. Unloading then leaves
+ * the next lookup on it jumping into freed text, and kmem_cache_destroy() on the
+ * vfs_iops cache runs with objects still installed.
+ *
+ * Refusing the unload is the honest answer: rmmod returns -EBUSY instead. The pin is
+ * never dropped, including across `nomount clear`, because clearing rules does not
+ * take the pointers back. nomount_exit() can therefore only run on a module that
+ * never held a rule, where the caches it destroys are empty.
+ *
+ * __module_get, not try_module_get: we are inside a netlink command, so this
+ * module's refcount is already non-zero and the get cannot fail. Both are no-ops
+ * when THIS_MODULE is NULL, which is what a CONFIG_NOMOUNT=y build has.
+ */
+static void nm_pin_module(void)
+{
+    static bool pinned;
+
+    if (!pinned) {
+        pinned = true;
+        __module_get(THIS_MODULE);
+    }
 }
 
 static void nomount_restore_superblocks(void)
@@ -3068,6 +3298,9 @@ static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
                     s->amax = a;
                     s->dmax_valid = true;
                 }
+                nm_debug("inoseed: retry dev=%u:%u seed='%s' err=%d dmax=%llu amax=%llu\n",
+                         MAJOR(dev), MINOR(dev), seed, err,
+                         (unsigned long long)s->dmax, (unsigned long long)s->amax);
             }
             return s;
         }
@@ -3096,6 +3329,14 @@ static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
         s->amax = a;
     }
     s->valid = true;
+    /* The seed path is what the dmax/amax scan walked, and this table is 16 slots with
+     * round-robin eviction -- a device with more partitions than that can have an entry
+     * re-seeded from a DIFFERENT path later. Both facts decide the number a synthesized
+     * directory ends up with, and neither was visible from outside. */
+    nm_debug("inoseed: dev=%u:%u seed='%s' err=%d dmax=%llu amax=%llu slot=%d\n",
+             MAJOR(dev), MINOR(dev), seed, err,
+             (unsigned long long)s->dmax, (unsigned long long)s->amax,
+             (int)(s - nm_dev_ino_tab));
     return s;
 }
 
@@ -3725,24 +3966,71 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
     }
 }
 
+/* A synthesized DIRECTORY is placed one above the highest number in play, with no attempt
+ * to fit it between the stock entries beside it -- unlike nm_place_ino(), which searches
+ * the gaps. That is deliberate (a directory inode colliding with a real one is worse than
+ * a conspicuous one), but it is also exactly why `find <mount> -type d -inum +N` returns
+ * precisely the directories this engine invented.
+ *
+ * Measured on an OP15: /product holds 106 entries topping out at ino 4,770,560, and the
+ * two directories injected into it came out at 89,750,657 and ...658 -- nineteen times
+ * the partition's own ceiling, so the high-water mark that produced them is NOT this
+ * partition's. These lines say which of the four inputs it actually was; one boot with
+ * NOMOUNT_DEBUG answers it.
+ */
 static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
 {
     struct nm_dev_ino *di = nm_dev_ino_get(pop->dev, NULL);
-    u64 c;
+    const char *won = "dmax";
+    u64 c, start;
 
-    if (!di || !di->dmax_valid)
+    if (!di || !di->dmax_valid) {
+        nm_debug("inoplace: dev=%u:%u no dmax (di=%d err=%d) -> gap-fit via nm_place_ino\n",
+                 MAJOR(pop->dev), MINOR(pop->dev), !!di, di ? di->dmax_err : 0);
         return nm_place_ino(pop, spread);
+    }
 
+    /* Placed ABOVE every inode the scan saw, band tell and all. Do not "fix" this by
+     * gap-fitting through nm_place_ino() -- that was tried, shipped, and measured.
+     *
+     * The tell is real: amax comes from nm_dmax_actor(), which records the largest inode
+     * of ANY kind, so a synthesized directory lands above the biggest FILE on the device.
+     * On a CPH2747 that put /product/priv-app/Mms at 89,750,659 beside stock siblings at
+     * 4..34, and `find /product/priv-app -maxdepth 1 -type d -inum +1000` returned the
+     * injected directories and nothing else.
+     *
+     * But gap-fitting through nm_place_ino() replaced it with a WORSE one. That tests
+     * candidates with nm_ino_taken(pop, ...), and pop holds a sample of the parent's
+     * DIRECT entries only, so ino 109 and 110 were free there and taken one level down:
+     * Mms collided with /product/priv-app/GlobalDrag/oat and NumberRecognition with
+     * GlobalSearch/oat. Two names on one filesystem cannot share (st_dev, st_ino) unless
+     * they are the same file, so one pass over the partition grouped by that pair names
+     * every entry the engine invented -- the same single scan the band cost -- and
+     * anything using the pair as file identity now conflates the two.
+     *
+     * Inode numbers are unique per filesystem regardless of type, so the only number that
+     * cannot collide is one above every inode: that is what amax buys and why it is here.
+     * An in-band number that is also genuinely free needs the partition's used-inode set,
+     * which nm_dmax_scan() already has the walk for (NM_DMAX_DIRS entries) and
+     * nm_ino_pop::bloom_mask already has an unused field for. Until that exists, loud and
+     * harmless beats quiet and colliding.
+     */
     c = di->dmax;
-    if (di->amax > c)
-        c = di->amax;
-    if (pop->hw > c)
-        c = pop->hw;
-    if (di->hw > c)
-        c = di->hw;
+    if (di->amax > c) { c = di->amax;  won = "di->amax"; }
+    if (pop->hw > c)  { c = pop->hw;   won = "pop->hw"; }
+    if (di->hw > c)   { c = di->hw;    won = "di->hw"; }
     c++;
+    start = c;
     while (nm_ino_taken(pop, c))
         c++;
+    nm_debug("inoplace: dev=%u:%u dmax=%llu amax=%llu di_hw=%llu pop_hw=%llu pop_n=%d "
+             "pop_lo=%llu pop_hi=%llu -> ino=%llu (winner=%s, +%llu for collisions)\n",
+             MAJOR(pop->dev), MINOR(pop->dev),
+             (unsigned long long)di->dmax, (unsigned long long)di->amax,
+             (unsigned long long)di->hw, (unsigned long long)pop->hw, pop->n,
+             (unsigned long long)(pop->n ? pop->v[0] : 0),
+             (unsigned long long)(pop->n ? pop->v[pop->n - 1] : 0),
+             (unsigned long long)c, won, (unsigned long long)(c - start));
     return nm_ino_take(pop, c);
 }
 
@@ -3879,7 +4167,7 @@ static void nm_drop_cached_vpath(const char *v_path, u16 v_len,
 
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
 {
-    struct nomount_rule *irule, *ex, *current_rule = target_rule;
+    struct nomount_rule *irule, *ex, *uid_clash, *current_rule = target_rule;
     char orig_v_path, *v_path = nm_get_vpath(target_rule);
     int parent_len, p_len = target_rule->v_len;
     const char *child_name, *lookup_path;
@@ -3929,9 +4217,16 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         if (i > 0) v_path[i] = '\0';
 
         found_virtual = false;
+        uid_clash = NULL;
         hash_for_each_possible(nomount_rules_ht, ex, vpath_node, h_parent) {
-            if (ex->v_len == parent_len && memcmp(nm_get_vpath(ex), v_path, parent_len) == 0 &&
-                (ex->target_uid == 0 || ex->target_uid == target_rule->target_uid)) {
+            if (ex->v_len == parent_len && memcmp(nm_get_vpath(ex), v_path, parent_len) == 0) {
+                /* Keep walking past a parent scoped to some other uid: a compatible rule
+                 * may be further down the bucket, and which one came first was previously
+                 * decided by hash order. */
+                if (ex->target_uid != 0 && ex->target_uid != target_rule->target_uid) {
+                    uid_clash = ex;
+                    continue;
+                }
                 if (!(ex->flags & (NM_FLAG_VIRTUAL_DIR | NM_FLAG_IS_DIR))) {
                     err = -ENOTDIR;
                     break;
@@ -3969,6 +4264,17 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 found_virtual = true;
                 break;
             }
+        }
+
+        /* __nomount_add_rule refuses a second rule on a v_path another uid owns, but the
+         * intermediates minted below bypass that check and are always target_uid 0. Falling
+         * through here used to add one for a path an explicit uid-scoped rule already held,
+         * leaving two rules on one v_path with a child slot each: a lookup resolved to
+         * whichever the bucket yielded first and the other one's children went dark. */
+        if (!found_virtual && !err && uid_clash) {
+            nm_warn("refusing to build '%.*s' for uid %u: uid %u already owns that directory\n",
+                    (int)parent_len, v_path, target_rule->target_uid, uid_clash->target_uid);
+            err = -EEXIST;
         }
 
         if (unlikely(err)) { if (i > 0) v_path[i] = orig_v_path; break; }
@@ -4470,7 +4776,7 @@ static size_t nm_norm_vpath(char *dst, const char *src, size_t len)
     return o;
 }
 
-static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid)
+static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, const struct nm_uid_scope *scope)
 {
     struct nomount_rule *rule;
     bool is_whiteout = (flags & NM_FLAG_WHITEOUT);
@@ -4487,7 +4793,11 @@ static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path
 
     INIT_HLIST_NODE(&rule->vpath_node);
     rule->flags = flags & NM_FLAGS_USER_MASK;
-    rule->target_uid = target_uid;
+    rule->target_uid = scope->uid;
+    rule->uid_end    = scope->uid_end;
+    rule->deny_n     = (u8)scope->deny_n;
+    memcpy(rule->deny_appid, scope->deny,
+           scope->deny_n * sizeof(scope->deny[0]));
     rule->v_len = (u16)nm_norm_vpath(nm_get_vpath(rule), v_path, v_len);
     rule->v_hash = full_name_hash(NULL, nm_get_vpath(rule), rule->v_len);
 
@@ -4747,8 +5057,8 @@ static bool nm_vpath_in_pm_scandir(const struct nomount_rule *rule)
     return false;
 }
 
-static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid,
-                              struct hlist_head *victims)
+static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags,
+                              const struct nm_uid_scope *scope, struct hlist_head *victims)
 {
     struct nomount_rule *rule, *existing, *victim = NULL;
     int err = 0;
@@ -4761,7 +5071,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     mutex_lock(&nomount_write_mutex);
 
-    rule = nm_alloc_rule(v_path, r_path, v_len, r_len, flags, target_uid);
+    rule = nm_alloc_rule(v_path, r_path, v_len, r_len, flags, scope);
     if (IS_ERR(rule)) {
         mutex_unlock(&nomount_write_mutex);
         return PTR_ERR(rule);
@@ -4769,10 +5079,10 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     hash_for_each_possible(nomount_rules_ht, existing, vpath_node, rule->v_hash) {
         if (existing->v_hash == rule->v_hash && existing->v_len == rule->v_len &&
-            existing->target_uid != target_uid &&
+            !nm_scope_eq(existing, scope) &&
             memcmp(nm_get_vpath(existing), nm_get_vpath(rule), rule->v_len) == 0) {
             nm_warn("refusing rule on '%.*s' for uid %u: uid %u already owns this path\n",
-                    (int)rule->v_len, nm_get_vpath(rule), target_uid, existing->target_uid);
+                    (int)rule->v_len, nm_get_vpath(rule), scope->uid, existing->target_uid);
             mutex_unlock(&nomount_write_mutex);
             nm_free_rule(rule);
             return -EEXIST;
@@ -4781,7 +5091,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     hash_for_each_possible(nomount_rules_ht, existing, vpath_node, rule->v_hash) {
         if (existing->v_hash == rule->v_hash && existing->v_len == rule->v_len &&
-             existing->target_uid == target_uid &&
+             nm_scope_eq(existing, scope) &&
              memcmp(nm_get_vpath(existing), nm_get_vpath(rule), rule->v_len) == 0) {
             if (existing->this_dir &&
                 !idr_is_empty(&existing->this_dir->children_idr)) {
@@ -4817,6 +5127,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     hash_add_rcu(nomount_rules_ht, &rule->vpath_node, rule->v_hash);
     atomic_inc(&nm_rule_gen);
+    nm_pin_module();
 
     nm_drop_cached_vpath(nm_get_vpath(rule), rule->v_len, rule);
     if (unlikely(victim))
@@ -4838,7 +5149,7 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     return 0;
 }
 
-static int __nomount_del_rule(const char *v_path, size_t v_len, unsigned int target_uid, struct hlist_head *r_victims)
+static int __nomount_del_rule(const char *v_path, size_t v_len, const struct nm_uid_scope *scope, struct hlist_head *r_victims)
 {
     struct nomount_rule *rule;
     char *norm = NULL;
@@ -4856,7 +5167,7 @@ static int __nomount_del_rule(const char *v_path, size_t v_len, unsigned int tar
     hash = full_name_hash(NULL, v_path, v_len);
 
     hash_for_each_possible(nomount_rules_ht, rule, vpath_node, hash) {
-        if (rule->v_hash == hash && rule->v_len == v_len && rule->target_uid == target_uid &&
+        if (rule->v_hash == hash && rule->v_len == v_len && nm_scope_eq(rule, scope) &&
                 memcmp(nm_get_vpath(rule), v_path, v_len) == 0) {
             if (rule->this_dir && !idr_is_empty(&rule->this_dir->children_idr)) {
                 ret = -EBUSY;
@@ -4925,7 +5236,14 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
 
             v_ptr = data + pos; pos += vp_len;
             r_ptr = data + pos;  pos += rp_len;
-            err = __nomount_add_rule(v_ptr, r_ptr, vp_len, rp_len, flags, target_uid, &a_victims);
+            {
+                /* The batch payload carries no scope fields and keeps its
+                 * layout, so a batch entry is always legacy-shaped. Ranges go
+                 * through the single-rule attribute form.
+                 */
+                struct nm_uid_scope scope = { .uid = target_uid };
+                err = __nomount_add_rule(v_ptr, r_ptr, vp_len, rp_len, flags, &scope, &a_victims);
+            }
             if (err) {
                 nm_err("Failed to inject rule batch entry (err: %d)\n", err);
                 nfail++;
@@ -4948,10 +5266,12 @@ static int nomount_nl_add_rule(struct nlattr **attrs)
         int v_len = strnlen(v_str, nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]));
         int r_len = strnlen(r_str, nla_len(attrs[NOMOUNT_ATTR_REAL_PATH]));
         u32 flags = attrs[NOMOUNT_ATTR_FLAGS] ? nla_get_u32(attrs[NOMOUNT_ATTR_FLAGS]) : 0;
-        u32 target_uid = attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID]) : 0;
+        struct nm_uid_scope scope;
 
         if (v_len == 0) return -EINVAL;
-        return __nomount_add_rule(v_str, r_str, v_len, r_len, flags, target_uid, NULL);
+        if (nm_scope_from_attrs(&scope, attrs)) return -EINVAL;
+        if (nm_scope_invalid(&scope)) return -EINVAL;
+        return __nomount_add_rule(v_str, r_str, v_len, r_len, flags, &scope, NULL);
     }
     return -EINVAL;
 }
@@ -4974,8 +5294,11 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
             u32 target_uid = get_unaligned((const u32 *)(data + pos));
             u16 vp_len     = get_unaligned((const u16 *)(data + pos + 4));
             pos += 6; if (pos + vp_len > len) break;
-            if (__nomount_del_rule(data + pos, vp_len, target_uid, &r_victims) == -EBUSY)
-                busy = true;
+            {
+                struct nm_uid_scope scope = { .uid = target_uid };
+                if (__nomount_del_rule(data + pos, vp_len, &scope, &r_victims) == -EBUSY)
+                    busy = true;
+            }
             pos += vp_len;
         }
         atomic_inc(&nm_rule_gen);
@@ -4983,10 +5306,13 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
     } else if (attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) {
         char *v_path = nla_data(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
         int v_len = strnlen(v_path, nla_len(attrs[NOMOUNT_ATTR_VIRTUAL_PATH]));
-        u32 target_uid = attrs[NOMOUNT_ATTR_UID] ? nla_get_u32(attrs[NOMOUNT_ATTR_UID]) : 0;
+        struct nm_uid_scope scope;
+
+        if (nm_scope_from_attrs(&scope, attrs)) return -EINVAL;
+        if (nm_scope_invalid(&scope)) return -EINVAL;
 
         mutex_lock(&nomount_write_mutex);
-        if (__nomount_del_rule(v_path, v_len, target_uid, &r_victims) == -EBUSY)
+        if (__nomount_del_rule(v_path, v_len, &scope, &r_victims) == -EBUSY)
             busy = true;
         atomic_inc(&nm_rule_gen);
         mutex_unlock(&nomount_write_mutex);
@@ -5039,6 +5365,19 @@ static int nomount_nl_dump_rules(struct sk_buff *skb, struct netlink_callback *c
                 nla_put_string(skb, NOMOUNT_ATTR_REAL_PATH, nm_get_rpath(rule)) ||
                 nla_put_u32(skb, NOMOUNT_ATTR_FLAGS, rule->flags) ||
                 nla_put_u32(skb, NOMOUNT_ATTR_UID, rule->target_uid)) {
+                nlmsg_cancel(skb, hdr);
+                goto out;
+            }
+            /* Emitted only when set, so a legacy rule's list entry keeps its
+             * exact size and shape. A reader that wants to DELETE what it lists
+             * needs these: the delete key is the whole scope, not the uid.
+             */
+            if ((rule->uid_end &&
+                 nla_put_u32(skb, NOMOUNT_ATTR_UID_END, rule->uid_end)) ||
+                (rule->deny_n &&
+                 nla_put(skb, NOMOUNT_ATTR_DENY_APPIDS,
+                         rule->deny_n * (int)sizeof(rule->deny_appid[0]),
+                         rule->deny_appid))) {
                 nlmsg_cancel(skb, hdr);
                 goto out;
             }
@@ -5217,6 +5556,18 @@ static int nomount_nl_get_version(struct sk_buff *req, struct nlmsghdr *req_nlh)
         return -EMSGSIZE;
     }
 
+    /* The knobs are write-only through NM_CMD_SET_KNOB, so nothing could ask what
+     * the engine actually holds -- and `nomount doctor` reported uidhide.conf, the
+     * value that was REQUESTED, as though it were in effect. A boot sync that never
+     * ran then read as agreement. This rides the version reply rather than taking a
+     * command of its own, so one round trip answers both. */
+    if (nla_put_u32(msg, NOMOUNT_ATTR_KNOBS,
+                    (READ_ONCE(nm_hide_isolated) & 3) |
+                    (READ_ONCE(nm_vdir_erofs_size) ? 4U : 0U))) {
+        nlmsg_free(msg);
+        return -EMSGSIZE;
+    }
+
     nlmsg_end(msg, hdr);
     return nlmsg_unicast(nm_nl_sk, msg, portid);
 }
@@ -5229,6 +5580,10 @@ static const struct nla_policy nomount_genl_policy[__NOMOUNT_ATTR_MAX] = {
     [NOMOUNT_ATTR_VERSION]      = { .type = NLA_U32 },
     [NOMOUNT_ATTR_PAYLOAD]      = { .type = NLA_BINARY },
     [NOMOUNT_ATTR_MODVER]       = { .type = NLA_NUL_STRING, .len = 31 },
+    [NOMOUNT_ATTR_KNOBS]        = { .type = NLA_U32 },
+    [NOMOUNT_ATTR_UID_END]      = { .type = NLA_U32 },
+    [NOMOUNT_ATTR_DENY_APPIDS]  = { .type = NLA_BINARY,
+                                    .len = NM_DENY_MAX * sizeof(u32) },
 };
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)

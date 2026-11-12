@@ -183,6 +183,18 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
 
 const BOOT_CRITICAL_PARTITIONS: &[&str] = &["system", "system_ext", "vendor", "odm", "product"];
 const BOOT_CRITICAL_DIRS: &[&str] = &["bin", "lib", "lib64", "framework", "etc", "apex"];
+/// The subset of those where nothing INSIDE may be made absent either, at any depth.
+///
+/// A shared library or an apex payload is replaced by injecting over it, never by hiding
+/// it, and hiding one does not break a feature -- it stops the device booting.
+///
+/// `bin`, `etc` and `framework` stay out deliberately. The first two are what this
+/// mechanism is for (`/system/bin/install-recovery.sh`, `/vendor/etc/foo.conf`), and
+/// `/system/framework` holds OEM jars that debloating legitimately removes -- pinned by
+/// whiteout_refuses_what_init_the_linker_and_zygote_need. Note that leaves the core jars
+/// in that directory acceptable to whiteout; refusing those needs a name list, not a
+/// subtree rule.
+const BOOT_CRITICAL_SUBTREES: &[&str] = &["lib", "lib64", "apex"];
 const ZYGOTE_BINARIES: &[&str] = &["app_process", "app_process32", "app_process64"];
 
 fn is_boot_critical(target: &Path) -> bool {
@@ -193,7 +205,18 @@ fn is_boot_critical(target: &Path) -> bool {
         .collect();
     match parts.as_slice() {
         [part, dir] => BOOT_CRITICAL_PARTITIONS.contains(part) && BOOT_CRITICAL_DIRS.contains(dir),
+        // The arm above matches EXACTLY two components, so everything one level deeper
+        // fell straight through to false: `/system/lib64/libc.so` was accepted, written to
+        // whiteouts.txt and re-applied on every boot, which costs three failed boots
+        // before the guard parks the Suite and leaves recovery as the only way back.
+        [part, dir, ..]
+            if BOOT_CRITICAL_PARTITIONS.contains(part) && BOOT_CRITICAL_SUBTREES.contains(dir) =>
+        {
+            true
+        }
         ["system", "bin", name] => name.starts_with("linker") || ZYGOTE_BINARIES.contains(name),
+        // The linker reads these before anything links; an absent one is a dead boot.
+        ["system", "etc", name] => name.starts_with("ld.config"),
         _ => false,
     }
 }
@@ -748,11 +771,58 @@ pub(crate) fn unmount_before_serving(
             );
             return false;
         }
-        return true;
+        // `targets` is a SNAPSHOT, taken before teardown_all() and before an apply loop
+        // that then runs for hundreds of process spawns with module scripts and ksud
+        // live. A mount that appeared after it was taken is simply absent from it, and
+        // returning "safe to serve" on that basis injects straight over a live mount --
+        // stranding its row in mountinfo with no path reaching it, which is the one
+        // outcome this function exists to prevent. Treat the snapshot as a fast path and
+        // confirm anything it does not know about against the live table.
+        if !crate::absorb::still_mounted(target) {
+            return true;
+        }
     }
-    if crate::absorb::umount_detach(target) {
+    // Whatever is mounted here is about to be MNT_DETACHed, which no later pass can undo,
+    // so establish it is the module system's before touching it. Without this, hiding a
+    // path silently destroyed an unrelated mount at the same place -- `whiteout add
+    // /system/etc/hosts` taking down an ad-blocker's bind, with no record of what it was.
+    // absorb proves ownership this way before every unmount it does; this path did not.
+    let depth = match crate::absorb::mounts_here_are_ours(target) {
+        Some((true, n)) => n,
+        Some((false, _)) => {
+            eprintln!(
+                "nomount: {} carries a mount the module system did not make; unmounting it \
+                 would destroy whatever owns it, so this is left unserved",
+                target.display()
+            );
+            return false;
+        }
+        None => {
+            eprintln!(
+                "nomount: could not read the mount table to tell who owns the mount on {}, \
+                 so it is left unserved rather than unmounted on a guess",
+                target.display()
+            );
+            return false;
+        }
+    };
+
+    // Pop exactly the stack that was verified, re-checking each time: one umount2 clears
+    // one mount, and the old single call left a two-deep stack half-popped -- the top one
+    // destroyed, nothing served, and the system in neither the before nor the after state.
+    for _ in 0..depth {
+        if !crate::absorb::still_mounted(target) {
+            break;
+        }
+        if crate::absorb::mounts_here_are_ours(target).map(|(ours, _)| ours) != Some(true) {
+            break;
+        }
+        if !crate::absorb::umount_detach(target) {
+            break;
+        }
         eprintln!("nomount: unmounted {} before serving it", target.display());
     }
+
     let gone = !crate::absorb::still_mounted(target);
     if !gone {
         eprintln!(
@@ -903,10 +973,30 @@ enum LiveRule {
     Whiteout,
 }
 
-fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
-    crate::nm::parse_list(list)
+/// Returns the rules this Suite could own, and a count of the ones it cannot.
+///
+/// A scoped rule -- a uid range or an exclusion -- was put there by another
+/// writer, because the Suite only ever adds legacy-shaped rules. Keeping it out
+/// of the reconciler's map is what stops the prune pass from trying to delete
+/// it: the delete key is the whole scope, `nm del <path>` sends none of it, so
+/// the attempt could never succeed and would be retried on every single pass.
+fn parse_live_rules(
+    list: &str,
+    ours: &HashSet<PathBuf>,
+) -> (HashMap<(PathBuf, u32), LiveRule>, u32) {
+    let mut foreign = 0u32;
+    let map = crate::nm::parse_list(list)
         .into_iter()
         .filter_map(|r| {
+            if r.scoped {
+                // A scope on a target we absorbed is one WE wrote, under apkscope.
+                // Counting it as another writer's would report the Suite's own rule
+                // back to the operator as something it must not touch.
+                if !ours.contains(&r.target) {
+                    foreign += 1;
+                }
+                return None;
+            }
             let kind = match r.kind {
                 crate::nm::LiveKind::Inject => LiveRule::Inject(r.source?),
                 crate::nm::LiveKind::Whiteout => LiveRule::Whiteout,
@@ -914,7 +1004,8 @@ fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
             };
             Some(((r.target, r.uid), kind))
         })
-        .collect()
+        .collect();
+    (map, foreign)
 }
 
 fn prune_order(live: &HashMap<(PathBuf, u32), LiveRule>) -> Vec<&(PathBuf, u32)> {
@@ -944,8 +1035,17 @@ pub fn run_reload() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding - is the CONFIG_NOMOUNT kernel loaded?")?;
 
+    // Read before the live listing: a scoped rule on one of these targets is one WE
+    // put there (an absorbed APK rule under apkscope), not another writer's.
+    let mut absorbed = crate::absorb::read_absorbed_targets()
+        .context("cannot read the absorbed-rule record - refusing to reload, because an empty record here would prune every absorbed rule")?;
+    absorbed.extend(
+        crate::absorb::read_absorbed_tmpfs_targets()
+            .context("cannot read the ROM-tmpfs takeover record - refusing to reload, because an empty record here would prune every takeover whiteout")?,
+    );
+
     let live_txt = nm.list().context("nm list failed during reload")?;
-    let live = parse_live_rules(&live_txt);
+    let (live, foreign) = parse_live_rules(&live_txt, &absorbed);
     // What the engine was last given per target: a source path can be unchanged
     // while the file behind it is not, and the live rule text cannot show that.
     let last_served = crate::rulestate::read();
@@ -989,13 +1089,6 @@ pub fn run_reload() -> Result<()> {
     )
     .into_iter()
     .collect();
-    let mut absorbed = crate::absorb::read_absorbed_targets()
-        .context("cannot read the absorbed-rule record - refusing to reload, because an empty record here would prune every absorbed rule")?;
-    absorbed.extend(
-        crate::absorb::read_absorbed_tmpfs_targets()
-            .context("cannot read the ROM-tmpfs takeover record - refusing to reload, because an empty record here would prune every takeover whiteout")?,
-    );
-
     let (mut added, mut changed, mut removed, mut failed) = (0u32, 0u32, 0u32, 0u32);
     let mounted = crate::absorb::mounted_targets().context(
         "cannot read /proc/self/mountinfo - refusing to serve, because assuming \"nothing is mounted\" injects over live mounts and strands each one in mountinfo until reboot",
@@ -1078,7 +1171,7 @@ pub fn run_reload() -> Result<()> {
         if !prunable(t, *uid, wanted, &durable_whiteouts, &absorbed) {
             continue;
         }
-        if nm.del(t).is_ok() {
+        if nm.del_any(t).is_ok() {
             removed += 1;
         } else {
             failed += 1;
@@ -1133,7 +1226,8 @@ pub fn run_reload() -> Result<()> {
 
     println!(
         "nomount reload: +{added} ~{changed} -{removed} rules, +{bind_added} -{bind_removed} binds, \
-         {failed} failed, {skipped} blocklisted (gap-free)"
+         {failed} failed, {skipped} blocklisted{} (gap-free)",
+        if foreign > 0 { format!(", {foreign} left to another writer") } else { String::new() }
     );
     if !pm.is_empty() {
         let shown: Vec<String> =
@@ -1154,6 +1248,16 @@ pub fn run_reload() -> Result<()> {
 }
 
 pub(crate) const MODULE_SUMMARY: &str = "/data/adb/nomount/modules.tsv";
+
+/// Written just before a pass tears everything down, removed once it has rebuilt.
+///
+/// `run_mount` unmounts every recorded bind, wipes the whole engine rule table and only
+/// then rebuilds, with no rollback: killed in between -- and module/lib.sh runs it under
+/// `nmto 60`, which SIGKILLs -- the device finishes booting with no rules and no binds,
+/// serving nothing, with every whiteout un-applied. A real rollback is not available once
+/// the kernel table is cleared, so the next pass at least gets to know it happened instead
+/// of reading a half-built state as the truth.
+const PASS_INFLIGHT: &str = "/data/adb/nomount/.mount.inflight";
 
 fn write_module_summary(plan: &[PlanEntry]) -> std::io::Result<()> {
     use std::collections::BTreeMap;
@@ -1242,6 +1346,15 @@ pub fn run_mount() -> Result<()> {
     let mounted = crate::absorb::mounted_targets().context(
         "cannot read /proc/self/mountinfo - refusing to serve, because assuming \"nothing is mounted\" injects over live mounts and strands each one in mountinfo until reboot",
     )?;
+
+    if std::path::Path::new(PASS_INFLIGHT).exists() {
+        eprintln!(
+            "nomount: the previous mount pass was cut off between tearing down and \
+             rebuilding, so what is on this device now is a partial pass, not a result. \
+             This one rebuilds from the plan, which is the recovery."
+        );
+    }
+    let _ = crate::statefile::write_atomic(PASS_INFLIGHT, b"");
 
     if !crate::bind::teardown_all() {
         eprintln!(
@@ -1342,7 +1455,10 @@ pub fn run_mount() -> Result<()> {
             PlanKind::Inject => {}
         }
     }
-    let tmpfs_hidden = crate::absorb::reapply_tmpfs_whiteouts(&nm);
+    // Re-read rather than reusing `mounted`: the apply loop above has been unmounting and
+    // binding, so the snapshot taken before it is stale by exactly the rows that matter.
+    let mounted_now = crate::absorb::mounted_targets().unwrap_or_else(|| mounted.clone());
+    let tmpfs_hidden = crate::absorb::reapply_tmpfs_whiteouts(&nm, &mounted_now);
     let (ksu_umount, _) = crate::bind::register_try_umount();
 
     crate::rulestate::write(&injected_pairs(&plan, &applied_apks));
@@ -1384,6 +1500,8 @@ pub fn run_mount() -> Result<()> {
     if !pm.is_empty() {
         println!("nomount: re-parsed {} changed system APK(s) (package cache)", pm.len());
     }
+    // The pass reached the end, so what is on the device is a whole one.
+    let _ = fs::remove_file(PASS_INFLIGHT);
     crate::ghost::sync_after_pass(&nm);
     Ok(())
 }
@@ -1738,7 +1856,11 @@ mod tests {
         for lit in [
             "^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)([^A-Za-z0-9_].*)?$",
             r"IS_ENABLED\([[:space:]]*CONFIG_[A-Z0-9_]+",
-            "(ifndef|![[:space:]]*defined)",
+            // `!IS_ENABLED(CONFIG_X)` is a negative gate, but it is also matched by the
+            // IS_ENABLED grep above, so without it here the symbol landed in the POSITIVE
+            // set and the matrix demanded CONFIG_X=y -- the opposite of what the code
+            // needs, failing every leg.
+            "(ifndef|![[:space:]]*(defined|IS_ENABLED))",
         ] {
             assert!(
                 ENGINE_MATRIX.contains(lit) && GATE_SWEEP.contains(lit),
@@ -2213,9 +2335,16 @@ mod tests {
             r#"grep su_compat "#,
             r#"| grep -q ENABLED && echo 1 || echo 0)"; "#,
             r#"echo "ksud=$([ -x /data/adb/ksud ] && echo 1 || echo 0)"; "#,
-            r#"echo "root_nm=$(grep -c \'^nomount_\' /proc/self/mounts 2>/dev/null)"; "#,
-            r#"echo "fp=$(getprop ro.build.fingerprint 2>/dev/null)"; "#,
-            r#"echo "se=$(getenforce 2>/dev/null)""#,
+            // Every reading is marked '?' when it could not be taken, and the run ends
+            // with a trailer: the exit status of a list of `echo`s is the last echo's, so
+            // a probe where nothing resolved still exited 0 and its empty `root_nm` parsed
+            // as zero mounts. Those three pieces are what stop that, so pin them here --
+            // and pin PATH, because an exec with none is how it happened.
+            r#"export PATH=/system/bin:/system/xbin:/vendor/bin; "#,
+            r#"case "$n" in ""|*[!0-9]*) n="?";; esac; echo "root_nm=$n"; "#,
+            r#"q fp "getprop ro.build.fingerprint"; "#,
+            r#"q se "getenforce"; "#,
+            r#"echo "done=1""#,
         ] {
             assert!(PAGE.contains(frag), "index.html's stealth probe lost: {frag:?}");
             assert!(
@@ -2609,11 +2738,13 @@ mod tests {
 
     #[test]
     fn stale_rules_are_pruned_deepest_first() {
-        let live = parse_live_rules(
-            "/system/etc/d -> /m/d\n\
+        let (live, _) = parse_live_rules(
+            &"/system/etc/d -> /m/d\n\
              /system/etc/d/a/b -> /m/d/a/b\n\
              /system/etc/d/a -> /m/d/a\n\
-             /system/etc/z -> /m/z\n",
+             /system/etc/z -> /m/z\n"
+                .to_string(),
+            &HashSet::new(),
         );
         let order: Vec<String> =
             prune_order(&live).iter().map(|(t, _)| t.display().to_string()).collect();
@@ -2662,9 +2793,30 @@ mod tests {
         }
     }
 
+    /// A scoped rule on a target we absorbed is one the Suite wrote itself, under
+    /// apkscope. Counting it as another writer's made reload report the Suite's own
+    /// rule back to the operator as untouchable.
+    #[test]
+    fn our_own_scoped_absorbed_rule_is_not_foreign() {
+        let line = "/data/app/x/base.apk -> /data/adb/rvhc/m.apk [SCOPE: 0-4294967295] [DENY: 10397]\n";
+        let (_, foreign) = parse_live_rules(line, &HashSet::new());
+        assert_eq!(foreign, 1, "with no absorbed record it IS another writer's");
+
+        let ours: HashSet<PathBuf> = [PathBuf::from("/data/app/x/base.apk")].into_iter().collect();
+        let (map, foreign) = parse_live_rules(line, &ours);
+        assert_eq!(foreign, 0, "a scope on a target we absorbed is ours");
+        assert!(
+            !map.contains_key(&(PathBuf::from("/data/app/x/base.apk"), 0)),
+            "it still stays out of the map: the prune pass has no key for a scoped delete"
+        );
+    }
+
     #[test]
     fn live_rules_are_keyed_including_uid() {
-        let m = parse_live_rules("/a -> /b\n/a -> /c [UID: 1000]\n/d (whiteout)\n/e (virtual dir)\n");
+        let (m, _) = parse_live_rules(
+            "/a -> /b\n/a -> /c [UID: 1000]\n/d (whiteout)\n/e (virtual dir)\n",
+            &HashSet::new(),
+        );
         assert_eq!(m.len(), 3);
         assert!(m.contains_key(&(PathBuf::from("/a"), 0)));
         assert!(m.contains_key(&(PathBuf::from("/a"), 1000)));

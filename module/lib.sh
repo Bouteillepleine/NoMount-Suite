@@ -66,9 +66,10 @@ nm_consume_stash() {
     [ -d "$_bak" ] || { unset _bak; return 0; }
     _rn=0
     _fail=0
+    # KEEP IN SYNC with the stash list in uninstall.sh and the restore in customize.sh.
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
-              uidconceal ghostpaths \
+              uidconceal ghostpaths kmsg incident.log nomount.ko \
               absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue

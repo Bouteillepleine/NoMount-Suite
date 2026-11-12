@@ -724,6 +724,18 @@ fn count_files(dir: &Path, depth: usize) -> usize {
     n
 }
 
+/// The keyword `nomount uid isolated` takes, so a finding can quote a command that
+/// works. cli::handlers has its own speller for the same modes, phrased as a sentence
+/// fragment for `uid isolated` with no argument.
+fn isolated_mode_word(mode: u32) -> &'static str {
+    match mode {
+        0 => "off",
+        1 => "appzygote",
+        2 => "platform",
+        _ => "both",
+    }
+}
+
 fn fd_note_applies(kind: crate::nm::LiveKind) -> bool {
     kind == crate::nm::LiveKind::Inject
 }
@@ -1316,7 +1328,20 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
     let engine = nm.version().ok();
     let live_ok = engine.is_some();
 
-    let follow_ksu = crate::blocklist::follow_ksu_denylist();
+    let follow_ksu_set = crate::blocklist::follow_ksu_denylist();
+    if follow_ksu_set.is_none() {
+        f.push(Finding {
+            level: Level::Warn,
+            check: "per-UID settings unreadable",
+            detail: "uidhide.conf exists and could not be read, so whether the hide list \
+                 follows KernelSU's DenyList is unknown. `nomount uid apply` treats that as \
+                 unknown and un-hides nothing, but it also cannot apply the DenyList, so \
+                 newly installed apps it covers are not picked up. Check the file's mode \
+                 and SELinux label - it should be 0600 root:root, u:object_r:adb_data_file."
+                .to_string(),
+        });
+    }
+    let follow_ksu = follow_ksu_set.unwrap_or(false);
     let ksu_default = crate::ksu::global_umount_default();
     if follow_ksu && !crate::ksu::available() {
         f.push(Finding {
@@ -1611,10 +1636,18 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
                     f.push(Finding {
                         level: Level::Unmeasured,
                         check: "ghost cloak not verified",
-                        detail: format!(
-                            "none of the {attempted} sampled path(s) could be probed (the test process \
-             could not run), so the cloak was not tested on this kernel. This is not a pass"
-                        ),
+                        detail: {
+                            // Appended as its own sentence, not folded into the parenthesis:
+                            // nesting it there made the one line that has to be read unreadable.
+                            let why = crate::audit::probe_blocked_reason()
+                                .map(|r| format!(" {r}"))
+                                .unwrap_or_default();
+                            format!(
+                                "none of the {attempted} sampled path(s) could be probed (the test \
+             process could not run), so the cloak was not tested on this kernel. This is not a \
+             pass.{why}"
+                            )
+                        },
                     });
                 } else if visible.is_empty() && leaked.is_empty() {
                     f.push(Finding {
@@ -1684,18 +1717,45 @@ pub fn plan_checks() -> Result<(Vec<Check>, Vec<crate::check::Fact>)> {
         let hidden_any = !hidden_apps.is_empty();
         let mode = crate::blocklist::hide_isolated();
         if hidden_any {
-            f.push(Finding {
-                level: if mode == 0 { Level::Warn } else { Level::Info },
-                check: "isolated-process pools",
-                detail: match mode {
-                    0 => "Neither isolated pool is hidden, so a hidden app can read through its own isolated child. `nomount uid isolated both` closes that."
-                        .to_string(),
-                    3 => "Both isolated pools hidden (default). The trade: an unhidden app can tell its own view from its isolated child's. `nomount uid isolated none` takes the other side."
-                        .to_string(),
-                    m => format!(
-                        "hiding covers {} only. Same trade as the default, on one pool.",
-                        if m == 1 { "the app-zygote pool" } else { "the platform pool" }
+            // uidhide.conf records what was REQUESTED. `nm k i` only ever wrote the knob, so
+            // reporting the config as the posture in force made a boot sync that never ran --
+            // or an engine that refused the knob -- read as agreement. Ask what it holds, and
+            // only when something is hidden: there is nothing to confirm otherwise.
+            let live = nm.knobs_live();
+            f.push(match &live {
+                Err(e) => Finding {
+                    level: Level::Unmeasured,
+                    check: "isolated-process pools",
+                    detail: format!(
+                        "uidhide.conf asks for `{}`, and the engine could not be asked what it \
+                         actually holds, so the posture in force is unknown: {e}",
+                        isolated_mode_word(mode)
                     ),
+                },
+                Ok((iso, _)) if *iso != mode => Finding {
+                    level: Level::Warn,
+                    check: "isolated-process pools",
+                    detail: format!(
+                        "uidhide.conf asks for `{}` but the engine holds `{}`, so the setting \
+                         never took. `nomount uid isolated {}` pushes it again.",
+                        isolated_mode_word(mode),
+                        isolated_mode_word(*iso),
+                        isolated_mode_word(mode)
+                    ),
+                },
+                Ok(_) => Finding {
+                    level: if mode == 0 { Level::Warn } else { Level::Info },
+                    check: "isolated-process pools",
+                    detail: match mode {
+                        0 => "Neither isolated pool is hidden, so a hidden app can read through its own isolated child. `nomount uid isolated both` closes that."
+                            .to_string(),
+                        3 => "Both isolated pools hidden (default). The trade: an unhidden app can tell its own view from its isolated child's. `nomount uid isolated none` takes the other side."
+                            .to_string(),
+                        m => format!(
+                            "hiding covers {} only. Same trade as the default, on one pool.",
+                            if m == 1 { "the app-zygote pool" } else { "the platform pool" }
+                        ),
+                    },
                 },
             });
         }

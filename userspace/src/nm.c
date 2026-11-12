@@ -37,7 +37,11 @@ void c_main(long *sp) {
         { "add", 'a' },   { "del", 'd' },     { "w", 'w' },
         { "block", 'b' }, { "unblock", 'u' },  { "clear", 'c' },
         { "list", 'l' },  { "l", 'l' },        { "v", 'v' },
-        { "k", 'k' },
+        { "k", 'k' },     { "knobs", 'n' },
+        /* Morphe and anything else written against upstream's CLI call
+         * `nm version` and `nm rule add|del`. Same engine, same answers.
+         */
+        { "version", 'v' }, { "rule", 'R' },
     };
     char cmd = 0;
     for (unsigned int ci = 0; ci < sizeof(nm_cmds) / sizeof(nm_cmds[0]); ci++) {
@@ -51,10 +55,37 @@ void c_main(long *sp) {
     unsigned int add_flags = 0;
     const char *p_args[64];
     int p_count = 0;
+    unsigned int sc_uid = 0, sc_uid_end = 0, sc_deny[NM_DENY_MAX];
+    int sc_deny_n = 0;
+    int scoped = 0;
+    int arg_start = 2;
 
-    for (int i = 2; i < argc; i++) {
+    if (cmd == 'R') {
+        if (argc < 3) { print_err("nm: rule add|del\n"); exit_code = 3; goto do_exit; }
+        if (strcmp(argv[2], "add") == 0) cmd = 'A';
+        else if (strcmp(argv[2], "del") == 0) cmd = 'D';
+        else { print_err("nm: rule add|del\n"); exit_code = 3; goto do_exit; }
+        arg_start = 3;
+    }
+
+    for (int i = arg_start; i < argc; i++) {
         if (strcmp(argv[i], "--public") == 0) {
             add_flags |= 64;
+        } else if (strcmp(argv[i], "--uid") == 0 && i + 1 < argc) {
+            if (parse_u32(argv[++i], &sc_uid)) {
+                print_err("nm: --uid takes a number\n"); exit_code = 3; goto do_exit; }
+            scoped = 1;
+        } else if (strcmp(argv[i], "--uid-range") == 0 && i + 1 < argc) {
+            if (parse_range(argv[++i], &sc_uid, &sc_uid_end)) {
+                print_err("nm: --uid-range takes all or A-B\n"); exit_code = 3; goto do_exit; }
+            if (!sc_uid_end) sc_uid_end = sc_uid;
+            scoped = 1;
+        } else if (strcmp(argv[i], "--uid-excluded") == 0 && i + 1 < argc) {
+            if (parse_appid_list(argv[++i], sc_deny, NM_DENY_MAX, &sc_deny_n)) {
+                print_err("nm: --uid-excluded takes up to 8 distinct appids, "
+                          "comma separated, each below 100000 (e.g. 10397,10170)\n");
+                exit_code = 3; goto do_exit; }
+            scoped = 1;
         } else if (argv[i][0] == '-' && argv[i][1] == '-') {
             print_err("nm: unknown option\n");
             exit_code = 3; goto do_exit;
@@ -179,6 +210,66 @@ void c_main(long *sp) {
         exit_code = (rc < 0);
         goto do_exit;
 
+    } else if (cmd == 'A' || cmd == 'D') {
+        /* Single scoped rule, sent as attributes rather than through the batch
+         * payload: the batch header has no room for a scope and keeps its
+         * layout, so it stays legacy-shaped on purpose.
+         */
+        int want = (cmd == 'A') ? 2 : 1;
+        if (p_count < want) { print_err("nm: missing operand\n"); exit_code = 3; goto do_exit; }
+
+        if (scoped) {
+            /* An engine older than 35 silently ignores the scope attributes and
+             * serves the rule to everyone. Refuse rather than hand back a
+             * narrower promise than the kernel will keep.
+             */
+            int vrx = do_nm_cmd(fd, 1, 0, (void *)0, 0, 1, &mem);
+            unsigned int *ver = (vrx >= 16) ? get_attr(mem.rx_buf, 5, 4) : (void *)0;
+            if (nm_timed_out(vrx)) goto do_timeout;
+            if (!ver || *ver < 36) {
+                print_err("nm: this engine is too old for --uid/--uid-range/--uid-excluded "
+                          "(needs 36, has ");
+                if (ver) print_num(2, *ver); else print_err("none");
+                print_err(") - it would serve the rule to every uid instead\n");
+                exit_code = 1; goto do_exit;
+            }
+        }
+
+        {
+            const char *cwd = (sys3(SYS_GETCWD, (long)mem.cwd_buf, PATH_MAX, 0) > 0) ? mem.cwd_buf : "/";
+            char *v_end = resolve_path(mem.v_resolved, cwd, p_args[0]);
+            int v_len = v_end ? (int)(v_end - mem.v_resolved) : 0;
+            int r_len = 0;
+            struct nm_attr at[7];
+            int n = 0;
+
+            if (!v_len) { print_err("nm: path too long\n"); exit_code = 3; goto do_exit; }
+            mem.v_resolved[v_len] = 0;
+            at[n].type = 1; at[n].len = (unsigned short)(v_len + 1); at[n].data = mem.v_resolved; n++;
+
+            if (cmd == 'A') {
+                char *r_end = resolve_path(mem.r_resolved, cwd, p_args[1]);
+                r_len = r_end ? (int)(r_end - mem.r_resolved) : 0;
+                if (!r_len) { print_err("nm: path too long\n"); exit_code = 3; goto do_exit; }
+                mem.r_resolved[r_len] = 0;
+                at[n].type = 2; at[n].len = (unsigned short)(r_len + 1); at[n].data = mem.r_resolved; n++;
+                at[n].type = 3; at[n].len = 4; at[n].data = &add_flags; n++;
+            }
+            at[n].type = 4;  at[n].len = 4; at[n].data = &sc_uid;      n++;
+            if (sc_uid_end) { at[n].type = 9;  at[n].len = 4; at[n].data = &sc_uid_end; n++; }
+            if (sc_deny_n) {
+                at[n].type = 10;
+                at[n].len  = (unsigned short)(sc_deny_n * 4);
+                at[n].data = sc_deny; n++;
+            }
+
+            int rc = do_nm_cmd_multi(fd, (cmd == 'A') ? 2 : 3, at, n, 5, &mem);
+            if (nm_timed_out(rc)) goto do_timeout;
+            if (rc < 0) { print_refused((cmd == 'A') ? "the rule" : "the delete", rc);
+                          exit_code = 1; goto do_exit; }
+            exit_code = 0; goto do_exit;
+        }
+
     } else if (cmd == 'v') {
         int vlen_rx = do_nm_cmd(fd, 1, 0, (void *)0, 0, 1, &mem);
         if (nm_timed_out(vlen_rx)) goto do_timeout;
@@ -196,6 +287,31 @@ void c_main(long *sp) {
         if (vlen_rx < 0) print_refused("the version query", vlen_rx);
         else print_err("nm: the engine did not answer with a version - it may be too old, or "
                        "built with a different NOMOUNT_NL_PROTO\n");
+        exit_code = 1; goto do_exit;
+
+    } else if (cmd == 'n') {
+        /* The same GET_VERSION round trip, read for its knobs attribute instead.
+         * `v` is not extended with a third field because callers scrape it for
+         * digits, and an engine that answers a version but no knobs must stay
+         * distinguishable from one that reports them as zero. */
+        int klen = do_nm_cmd(fd, 1, 0, (void *)0, 0, 1, &mem);
+        struct nlmsghdr *kh = (struct nlmsghdr *)mem.rx_buf;
+
+        if (nm_timed_out(klen)) goto do_timeout;
+        if (klen >= 16 && kh->nlmsg_len <= (unsigned int)klen) {
+            unsigned int *kn = get_attr(mem.rx_buf, 8, 4);
+            if (kn) {
+                print_str("isolated=");
+                print_uint(*kn & 3);
+                print_str(" erofs=");
+                print_uint((*kn >> 2) & 1);
+                print_str("\n");
+                exit_code = 0; goto do_exit;
+            }
+        }
+        if (klen < 0) print_refused("the knob query", klen);
+        else print_err("nm: this engine answers no knob state - it predates the "
+                       "read-back, so what it holds cannot be checked\n");
         exit_code = 1; goto do_exit;
 
     } else if (cmd == 'l') {
@@ -257,6 +373,11 @@ void c_main(long *sp) {
                     char *r = get_attr_str(msg, 2);
                     unsigned int *flags = get_attr(msg, 3, 4);
                     unsigned int *uid = get_attr(msg, 4, 4);
+                    unsigned int *uid_end = get_attr(msg, 9, 4);
+                    unsigned int *deny = get_attr(msg, 10, 4);
+                    int deny_n = deny
+                        ? ((int)*(unsigned short *)((char *)deny - 4) - 4) / 4 : 0;
+                    if (deny_n > NM_DENY_MAX) deny_n = NM_DENY_MAX;
 
                     if (v && r) {
                         int is_whiteout    = (flags && (*flags & 4));
@@ -269,6 +390,22 @@ void c_main(long *sp) {
                         else { print_str(" -> "); print_str(r); }
                         if (is_public) print_str(" (public)");
                         if (uid && *uid != 0) { print_str(" [UID: "); print_uint(*uid); print_str("]"); }
+                        /* Only printed when set, so a legacy rule's line is
+                         * unchanged. A reader that wants to DELETE a rule needs
+                         * these: the delete key is the whole scope.
+                         */
+                        if (uid_end && *uid_end) {
+                            print_str(" [SCOPE: "); print_uint(uid ? *uid : 0);
+                            print_str("-"); print_uint(*uid_end); print_str("]");
+                        }
+                        if (deny_n > 0) {
+                            print_str(" [DENY: ");
+                            for (int di = 0; di < deny_n; di++) {
+                                if (di) print_str(",");
+                                print_uint(deny[di]);
+                            }
+                            print_str("]");
+                        }
                         print_str("\n");
                     }
                 }

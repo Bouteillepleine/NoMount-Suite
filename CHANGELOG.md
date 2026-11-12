@@ -6,7 +6,37 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
-## Unreleased
+## v1.3.212 — engine v36 (the engine changes below need a kernel rebuild)
+
+- A rule can be hidden from named apps: `nomount vfs add --uid-excluded <pkg,...>`.
+  One appid covers that app under every user, work profile included.
+- `absorb` can hide an absorbed APK from those apps too. Opt in by listing them in
+  `/data/adb/nomount/apkscope`; absent means off.
+- A uid-scoped rule was served to every uid once any permitted uid had looked the path
+  up. Fixed, and the legacy `--uid` scope leaked the same way.
+
+## v1.3.210 — engine v34 (the engine fixes below need a kernel rebuild)
+
+- `statmount`/`listmount` handed a hide-listed app the module mounts that
+  `/proc/<pid>/mountinfo` already hid. Both are filtered now, so the two views agree.
+- Every app granted root is concealed automatically, and a conceal entry naming a
+  package that is gone is reported instead of sitting there.
+- A finding you have accepted stays out of the findings and is named once as a note.
+- The engine pins itself once a rule exists, so `rmmod` cannot free a live vtable.
+- A virtual parent another uid already owns is refused instead of stolen.
+- `nm knobs` reads the live knob state back out of the engine.
+- `nomount check` no longer calls a check unmeasured when it looked and there was
+  nothing yet to look at.
+
+## v1.3.208 — engine v34 (unchanged)
+
+- `nomount check` from the WebUI could not run the four checks that need an app's uid
+  — it crashed once per check instead. It now says why, and runs them through a
+  watcher that can.
+- A check that measured nothing no longer overwrites one that measured everything.
+- The `su` probes use absolute paths, so they work when the caller has no `PATH`.
+
+## v1.3.207 — engine v34 (the engine fixes below need a kernel rebuild)
 
 - The LKM's path and stat guards no longer fail open under load: the kretprobes that
   carry them have room for 64 concurrent calls per core, not 8.
@@ -27,6 +57,16 @@
   and it keeps `binds.list` when it could not find a binary to unbind with.
 - An engine module that loads but whose `nm` probe does not answer says so, instead
   of reporting that no module loads on this kernel.
+- The lite zip says it carries no engine module, and names the LKM zip. It bundles
+  none by design, so "no bundled module loads on it either" read as a verdict on
+  the kernel and sent people to reflash one.
+- A netlink socket that was *denied* is told apart from one the kernel does not
+  have. `nm` already reported the difference and the installer discarded it, so an
+  SELinux denial was answered with "flash a kernel built with CONFIG_NOMOUNT".
+- Another metamodule is recognised when its `module.prop` says `metamodule=true`,
+  not only `1`. The manager accepts either spelling, so the guard had been blind to
+  the one upstream NoMount uses, and two installed at once is silent - whichever
+  was flashed last takes the role and the loser's `metamount.sh` is never called.
 - Installing no longer deletes the bundled engine modules. It decided they were
   surplus from `lsmod` showing nothing, which is also what a loaded-and-hidden
   module shows.

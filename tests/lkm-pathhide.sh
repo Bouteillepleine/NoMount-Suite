@@ -57,9 +57,15 @@ if [ "${rules:-0}" = 0 ]; then
 	exit 0
 fi
 
-# A hidden LKM takes its own symbols out of kallsyms, so finding the engine
-# there means the engine is part of the kernel image.
-if grep -qE ' (vfs_map_meta_override|nm_uid_blocked)$' /proc/kallsyms 2>/dev/null; then
+# A hidden LKM takes its own symbols out of kallsyms, so finding the engine there
+# USUALLY means it is part of the kernel image -- but not on the hide=0 build, where the
+# module is loaded and its symbols are visible. That build was classified in-tree, and
+# this script then asserted the accounting arm that an LKM build does not have, failing a
+# device that was behaving correctly. Whether the module is loaded is unambiguous; ask
+# that first and fall back to kallsyms only for the hidden case.
+if grep -q '^nomount ' /proc/modules 2>/dev/null || [ -d /sys/module/nomount ]; then
+	VARIANT=lkm
+elif grep -qE ' (vfs_map_meta_override|nm_uid_blocked)$' /proc/kallsyms 2>/dev/null; then
 	VARIANT=in-tree
 else
 	VARIANT=lkm

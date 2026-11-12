@@ -17,9 +17,9 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NM_MODULE_VERSION "1.34.6"
+#define NM_MODULE_VERSION "1.36.0"
 
-#define NOMOUNT_VERSION    34
+#define NOMOUNT_VERSION    36
 #define NOMOUNT_HASH_BITS  12
 #define NM_FLAG_IS_DIR      (1 << 0)
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
@@ -30,8 +30,10 @@
 #define NM_FLAG_PUBLIC      (1 << 6)
 #define NM_FLAG_STOCK_ONLY  (1 << 7)
 #define NM_FLAG_HAVE_VOWN   (1 << 8)
+#define NM_FLAG_UID_SCOPED  (1 << 9)  /* derived, never accepted from userspace */
 #define NM_FLAGS_USER_MASK  (NM_FLAG_WHITEOUT | NM_FLAG_PUBLIC)
 #define NM_CTX_MAX          96
+#define NM_DENY_MAX         8   /* excluded appids per rule */
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)
 #define kvzalloc(size, flags) kzalloc((size), (flags))
@@ -160,6 +162,18 @@ struct nomount_dir_node {
     };
 };
 
+/* Who a rule is served to. Flat fields rather than a bitmap because the two
+ * modes mean different things: a legacy uid is an APPID (matched modulo
+ * NM_PER_USER_RANGE, so it follows an app across users), while a range is RAW
+ * uids and deliberately does not.
+ */
+struct nm_uid_scope {
+    unsigned int uid;
+    unsigned int uid_end;
+    unsigned int deny[NM_DENY_MAX];
+    unsigned int deny_n;
+};
+
 struct nomount_rule {
     struct hlist_node vpath_node;
     struct hlist_node victim_node;
@@ -188,6 +202,9 @@ struct nomount_rule {
     u16 v_len;
     u16 flags;
     unsigned int target_uid;
+    unsigned int uid_end;
+    unsigned int deny_appid[NM_DENY_MAX];
+    u8 deny_n;
 
     char paths[]; 
 };
@@ -204,7 +221,7 @@ static const struct inode_operations nm_dir_iops;
 static const struct dentry_operations nm_dops;
 
 static int nomount_generate_virtual_topology(struct nomount_rule *target_rule);
-static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid);
+static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, const struct nm_uid_scope *scope);
 static void nm_free_rule(struct nomount_rule *rule);
 static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *victims, bool prune);
 struct nm_rule_info {
@@ -322,6 +339,27 @@ enum {
     NOMOUNT_ATTR_VERSION,
     NOMOUNT_ATTR_PAYLOAD,
     NOMOUNT_ATTR_MODVER,
+    /* Live knob state, so userspace can tell what the engine HOLDS from what a
+     * config file asked for. A reply without it is an engine too old to answer,
+     * which callers must grade as unmeasured rather than as agreement.
+     *   bits 0-1  hide_isolated (0-3)
+     *   bit  2    vdir_erofs_size
+     */
+    NOMOUNT_ATTR_KNOBS,
+    /* Per-rule uid scoping. Both default to absent, which is the legacy shape:
+     * uid_end 0 means NOMOUNT_ATTR_UID is an appid matched across every user,
+     * and no DENY_APPIDS means no exclusion. DENY_APPIDS is a packed array of
+     * at most NM_DENY_MAX u32 APPIDS (uid % NM_PER_USER_RANGE), sorted and
+     * unique, so ONE rule hides from an app in every user -- work profile and
+     * secondary users included. A raw-uid deny cannot express that: an appid is
+     * 10397 under user 0 and 1010397 under user 10, which is not a range.
+     * An engine that predates these ignores them (we parse liberally), so a
+     * client MUST check NOMOUNT_ATTR_VERSION >= 36 before relying on them --
+     * otherwise the scope is silently widened to whatever ATTR_UID alone meant,
+     * which is the opposite of what the caller asked for.
+     */
+    NOMOUNT_ATTR_UID_END,
+    NOMOUNT_ATTR_DENY_APPIDS,
     __NOMOUNT_ATTR_MAX,
 };
 

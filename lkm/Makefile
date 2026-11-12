@@ -17,6 +17,22 @@ endif
 
 ccflags-y += -I$(src) -I$(src)/../hookless/src
 
+# make ... NM_DEBUG=1  turns nm_debug()/nm_info() from no_printk into real printk.
+# Off by default: these fire per rule, and a mount pass installs hundreds.
+#
+# What it is for right now: the `inoseed:` and `inoplace:` lines in nm_place_dir_ino()
+# and nm_dev_ino_get(). A synthesized directory is placed one above the highest number
+# in play, and on an OP15 that came out nineteen times above the victim partition's own
+# ceiling -- those lines name which of the four inputs produced it, and which path was
+# scanned to seed it. One boot is enough:
+#
+#   dmesg | grep -E 'NoMount.*ino(seed|place)'
+#
+# KERN_DEBUG, so raise the console loglevel or read the buffer rather than the console.
+ifeq ($(NM_DEBUG),1)
+ccflags-y += -DNOMOUNT_DEBUG
+endif
+
 # The engine is in-tree code being built somewhere it was not written for.
 # These are the warnings that produces and that are not defects:
 #   unused-function        -- vfs_map_meta_override() has no caller in a module

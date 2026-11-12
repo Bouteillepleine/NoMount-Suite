@@ -61,7 +61,26 @@ const sandbox = {
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 sandbox.window.addEventListener = () => {};
-sandbox.ksu = undefined; // no root manager, exactly what a desktop browser is
+// A RECORDING bridge, not `undefined`.
+//
+// With no bridge at all, exec() short-circuits on its first line and returns "no webui
+// env" -- so not one command string was ever built, quoted or parsed, and this gate
+// exercised only the no-bridge error branch of every function. It would pass with
+// `shq = (s) => s`. Recording what the page asks the shell to run lets the commands
+// themselves be checked, which is the thing worth gating: these run as uid 0.
+const execCalls = [];
+sandbox.ksu = {
+  exec(cmd, optsJson, cbName) {
+    execCalls.push(String(cmd));
+    try {
+      JSON.parse(optsJson);
+    } catch (e) {
+      seen.errors.push('exec opts were not JSON: ' + optsJson);
+    }
+    const cb = sandbox[cbName];
+    if (typeof cb === 'function') setTimeout(() => cb(0, '', ''), 0);
+  },
+};
 
 const ctx = vm.createContext(sandbox);
 process.on('unhandledRejection', (e) => seen.errors.push('unhandledRejection: ' + e));
@@ -102,5 +121,83 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
     }
     process.exit(1);
   }
+  // Every string the page handed the bridge has to be valid shell. `sh -n` parses
+  // without executing, so a quoting bug -- an unbalanced quote out of shq(), a value
+  // interpolated raw -- is a parse error here rather than something that runs as uid 0
+  // on a device. This is what the gate was missing: it is cheap, and it fails loudly.
+  if (!execCalls.length) {
+    console.error('the page never asked the bridge to run anything, so nothing was checked');
+    process.exit(1);
+  }
+  const { spawnSync } = require('child_process');
+
+  // shq() is the only thing between a device-supplied string -- a package name, an app
+  // label, a path -- and a command that runs as uid 0. Checking the commands the page
+  // happens to build at boot does NOT exercise it: those values are all benign, so they
+  // parse with or without quoting. Verified here by round-trip: hand the quoted form to
+  // a real shell and require the exact original byte string back.
+  const shq = ctx.shq;
+  if (typeof shq !== 'function') {
+    console.error('no shq() in scope - the shell-quoting helper is what makes exec safe');
+    process.exit(1);
+  }
+  const NASTY = [
+    "a'b", 'a b', 'a;id', 'a$(id)', 'a`id`', 'a|id', 'a&&id', 'a\nb', 'a*b', '--force',
+    "';id;'", '$HOME', 'a"b', 'a\\b',
+  ];
+  let unsafe = 0;
+  for (const raw of NASTY) {
+    const r = spawnSync('sh', ['-c', 'printf %s ' + shq(raw)], { encoding: 'utf8' });
+    if (r.status !== 0 || r.stdout !== raw) {
+      unsafe++;
+      console.error('shq() does not round-trip ' + JSON.stringify(raw) +
+                    ' -> ' + JSON.stringify(shq(raw)) +
+                    ' gave ' + JSON.stringify(r.stdout) + ' (status ' + r.status + ')');
+    }
+  }
+  if (unsafe) {
+    console.error(unsafe + ' of ' + NASTY.length + ' values survive shq() unquoted or mangled');
+    process.exit(1);
+  }
+
+  // esc() is the same question for the DOM: an app chooses its own label, and that label
+  // reaches innerHTML on a page holding the root bridge.
+  // `esc` is a top-level `const`, and in a vm context those do not become properties of
+  // the context object the way `function` declarations and `var` do -- they live in the
+  // global lexical environment, reachable only by evaluating in the context.
+  const esc = vm.runInContext('typeof esc === "function" ? esc : null', ctx);
+  if (typeof esc !== 'function') {
+    console.error('no esc() in scope - the HTML-escaping helper is what keeps a label inert');
+    process.exit(1);
+  }
+  const escaped = esc('<img src=x onerror=alert(1)>&"\'');
+  // The four that open a tag or close an attribute must be gone outright. `&` cannot be
+  // checked that way -- escaping PRODUCES it, as the first character of every entity --
+  // so instead require that nothing is left once the known entities are removed.
+  for (const ch of ['<', '>', '"', "'"]) {
+    if (escaped.includes(ch)) {
+      console.error('esc() leaves ' + JSON.stringify(ch) + ' raw: ' + JSON.stringify(escaped));
+      process.exit(1);
+    }
+  }
+  if (escaped.replace(/&(amp|lt|gt|quot|#39);/g, '').includes('&')) {
+    console.error('esc() leaves a bare & behind: ' + JSON.stringify(escaped));
+    process.exit(1);
+  }
+
+  let bad = 0;
+  for (const cmd of execCalls) {
+    const r = spawnSync('sh', ['-n', '-c', cmd], { encoding: 'utf8' });
+    if (r.status !== 0) {
+      bad++;
+      console.error('not valid shell: ' + JSON.stringify(cmd));
+      console.error('  ' + String(r.stderr || '').trim().split('\n')[0]);
+    }
+  }
+  if (bad) {
+    console.error(bad + ' of ' + execCalls.length + ' command(s) the page built do not parse');
+    process.exit(1);
+  }
   console.log('load order OK across ' + srcs.length + ' parts');
+  console.log(execCalls.length + ' built command(s) parse as shell');
 })();

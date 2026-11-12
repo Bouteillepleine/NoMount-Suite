@@ -10,7 +10,11 @@ mkdir -p "$NMDIR" && chmod 0700 "$NMDIR"
 
 nm_boot_log_rotate
 
-rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" 2>/dev/null
+# .checkwatch.lock belongs here too: it holds a pid, and after a reboot that pid is just
+# an integer. If anything now owns it, checkwatch.sh's `kill -0` says the holder is alive,
+# the noclobber acquire fails and every WebUI check request is dropped in silence for the
+# whole boot -- which sends the page back to running the check in its own seccomp context.
+rm -f "$NMDIR/.uidwatch.lock" "$NMDIR/.uidwatch.digest" "$NMDIR/.checkwatch.lock" 2>/dev/null
 nm_consume_stash
 nm_lkm_boot_load
 if [ -n "$KSU" ] || [ -n "$APATCH" ]; then

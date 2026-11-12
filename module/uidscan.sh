@@ -28,6 +28,17 @@ _J=$(nproc 2>/dev/null)
 case "$_J" in ''|*[!0-9]*) _J=4 ;; esac
 J=$((_J * 2))
 unset _J
+
+# -P is not in POSIX xargs: toybox has never had it and busybox only since 1.31 with
+# FEATURE_XARGS_SUPPORT_PARALLEL. Where it is missing the usage error failed the whole
+# scan, which falls back to the previous cache and reports success -- so the WebUI's Scan
+# button showed permanently stale results, or nothing at all on a first run. Probe once.
+# shellcheck disable=SC2089
+XARGS_P="-P $J"
+if ! printf 'x\0' | xargs -0 -P 2 -n1 true >/dev/null 2>&1; then
+    XARGS_P=""
+    nmlog "xargs has no -P here; scanning serially (slower, same result)"
+fi
 [ "$J" -gt 24 ] && J=24
 [ "$J" -lt 4 ] && J=4
 
@@ -41,7 +52,8 @@ if [ -z "$PKGS" ]; then
 fi
 
 # shellcheck disable=SC2016  # single quotes are the point: this is the body of
-printf '%s\n' "$PKGS" | tr '\n' '\0' | xargs -0 -P "$J" -n1 sh -c '
+# shellcheck disable=SC2086,SC2090  # XARGS_P is "-P <n>" or empty, built just above
+printf '%s\n' "$PKGS" | tr '\n' '\0' | xargs -0 $XARGS_P -n1 sh -c '
     apk="${1%=*}"; pkg="${1##*=}"
     [ -n "$pkg" ] || exit 0
     reasons=""

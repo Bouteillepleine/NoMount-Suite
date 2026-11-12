@@ -205,6 +205,8 @@ pub struct Report {
     pub directories: Option<usize>,
     pub facts: Vec<Fact>,
     pub checks: Vec<Check>,
+    /// `ts` of the cached report `--write` kept instead of overwriting it with this one.
+    pub cache_kept: Option<i64>,
 }
 
 pub const CACHE: &str = "/data/adb/nomount/audit.json";
@@ -292,6 +294,13 @@ impl Report {
                 J::Arr(self.sections.iter().map(|x| J::s(x.slug())).collect()),
             ),
             ("verdict", J::s(self.verdict())),
+            (
+                "cache_kept_ts",
+                match self.cache_kept {
+                    Some(ts) => J::Num(ts),
+                    None => J::Null,
+                },
+            ),
             ("summary", self.tally().json()),
             (
                 "facts",
@@ -375,6 +384,13 @@ impl Report {
         if t.unmeasured > 0 {
             let _ = writeln!(s, "note: an unmeasured check was not verified. It is not a pass.");
         }
+        if let Some(ts) = self.cache_kept {
+            let _ = writeln!(
+                s,
+                "note: the cached report was NOT replaced - the one on disk (ts={ts}) measured \
+                 everything this run could not, and is the better record of this boot."
+            );
+        }
         s
     }
 }
@@ -418,9 +434,78 @@ pub fn build(plan: bool, device: bool) -> Result<Report> {
     if device {
         sections.push(Section::Device);
     }
-    let mut r = Report { ts: now_secs(), sections, engine, rules, directories, facts, checks };
+    let mut r =
+        Report { ts: now_secs(), sections, engine, rules, directories, facts, checks, cache_kept: None };
     r.sort();
     Ok(r)
+}
+
+/// `now - uptime`, or `None` when either is unreadable. Mirrors service.sh's
+/// `_bootepoch`, including its sanity floor: a bogus clock must read as "do not know"
+/// rather than as "everything is from this boot".
+fn boot_epoch() -> Option<i64> {
+    let up = std::fs::read_to_string("/proc/uptime").ok()?;
+    let secs: f64 = up.split_whitespace().next()?.parse().ok()?;
+    let epoch = now_secs() - secs as i64;
+    (epoch >= 1_000_000_000).then_some(epoch)
+}
+
+/// Whether `--write` should keep the cached report rather than replace it with `r`.
+///
+/// A run that could not measure must not overwrite one that did: the manager's WebUI
+/// execs from an app-spawned root shell whose inherited seccomp filter denies setgroups,
+/// so four device checks cannot run there at all, and a tap used to replace a clean
+/// report with "not fully measured (4 checks)". Only kept while the cached report still
+/// describes this boot and this live state - a stale "clean" is worse than an honest
+/// "not measured".
+fn cached_report_to_keep(r: &Report) -> Option<i64> {
+    let cached = std::fs::read_to_string(HEALTH).unwrap_or_default();
+    keep_cached(
+        !r.tally().complete(),
+        crate::audit::probe_blocked_reason().is_some(),
+        &cached,
+        boot_epoch(),
+        &r.facts,
+    )
+}
+
+/// The decision on its own, so the staleness rules can be tested rather than trusted.
+/// Facts compared deliberately exclude `consistency`: that is the field the two runs
+/// disagree about, and it is why one of them is incomplete.
+const KEEP_IF_UNCHANGED: [&str; 5] = ["version", "engine", "rules", "blocked", "modules"];
+
+fn keep_cached(
+    incomplete: bool,
+    probe_blocked: bool,
+    cached: &str,
+    boot_epoch: Option<i64>,
+    facts: &[Fact],
+) -> Option<i64> {
+    // A run that measured everything always wins, and a run that fell short for any
+    // reason other than its own context has nothing to defer to.
+    if !incomplete || !probe_blocked {
+        return None;
+    }
+    let kv: std::collections::HashMap<&str, &str> = cached
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .collect();
+    if kv.get("complete").copied() != Some("yes") {
+        return None;
+    }
+    let ts: i64 = kv.get("ts")?.parse().ok()?;
+    // An unknown boot epoch reads as "do not know", never as "from this boot".
+    if ts < boot_epoch? {
+        return None;
+    }
+    for key in KEEP_IF_UNCHANGED {
+        let live = facts.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        if live.is_none() || live != kv.get(key).copied() {
+            return None;
+        }
+    }
+    Some(ts)
 }
 
 pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()> {
@@ -431,18 +516,25 @@ pub fn run_check(plan: bool, device: bool, json: bool, write: bool) -> Result<()
     // just a half-applied pass. pass_lock waits 25s and then proceeds anyway, so a stuck pass
     // delays the diagnosis rather than blocking it.
     let _pass = crate::mount::pass_lock();
-    let r = build(plan, device)?;
+    let mut r = build(plan, device)?;
 
     // Persist before printing. SIGPIPE is SIG_DFL, so a reader that closes early kills
     // the process mid-print and --write never runs, silently leaving service.sh's
     // health.txt stale while the check itself succeeded.
     if write {
-        let _ = crate::statefile::write_atomic(CACHE, r.json());
-        if want_device {
-            let mut body = r.fingerprint_text();
-            body.push_str(&format!("verdict={}\n", r.verdict()));
-            body.push_str(&format!("ts={}\n", r.ts));
-            let _ = crate::statefile::write_atomic(HEALTH, body);
+        r.cache_kept = cached_report_to_keep(&r);
+        if r.cache_kept.is_none() {
+            let _ = crate::statefile::write_atomic(CACHE, r.json());
+            if want_device {
+                let mut body = r.fingerprint_text();
+                body.push_str(&format!(
+                    "complete={}\n",
+                    if r.tally().complete() { "yes" } else { "no" }
+                ));
+                body.push_str(&format!("verdict={}\n", r.verdict()));
+                body.push_str(&format!("ts={}\n", r.ts));
+                let _ = crate::statefile::write_atomic(HEALTH, body);
+            }
         }
     }
 
@@ -466,9 +558,57 @@ mod tests {
         Check::new(Section::Device, id, id, v, "evidence")
     }
 
+    fn facts5() -> Vec<Fact> {
+        [("version", "1.3.207"), ("engine", "v34"), ("rules", "287"), ("blocked", "21"), ("modules", "5")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+    const CACHED_OK: &str = "version=1.3.207\nengine=v34\nrules=287\nblocked=21\nmodules=5\n\
+                             consistency=ok\ncomplete=yes\nverdict=clean\nts=2000\n";
+
+    #[test]
+    fn a_run_that_could_not_measure_keeps_the_better_cached_report() {
+        let f = facts5();
+        // The case this exists for: filtered run, cached report complete and from this boot.
+        assert_eq!(keep_cached(true, true, CACHED_OK, Some(1000), &f), Some(2000));
+        // A complete run always writes, and so does an incomplete one whose gap is the
+        // device rather than this process.
+        assert_eq!(keep_cached(false, true, CACHED_OK, Some(1000), &f), None);
+        assert_eq!(keep_cached(true, false, CACHED_OK, Some(1000), &f), None);
+    }
+
+    #[test]
+    fn a_cached_report_is_kept_only_while_it_still_describes_this_boot_and_this_state() {
+        let f = facts5();
+        // Stale "clean" is worse than honest "not measured": a report from before this
+        // boot describes uids and rules that no longer exist.
+        assert_eq!(keep_cached(true, true, CACHED_OK, Some(3000), &f), None);
+        // An unreadable clock must not be read as "everything is from this boot".
+        assert_eq!(keep_cached(true, true, CACHED_OK, None, &f), None);
+        // Itself incomplete, or saying nothing about it: nothing to defer to.
+        let no = CACHED_OK.replace("complete=yes", "complete=no");
+        assert_eq!(keep_cached(true, true, &no, Some(1000), &f), None);
+        let absent = CACHED_OK.replace("complete=yes\n", "");
+        assert_eq!(keep_cached(true, true, &absent, Some(1000), &f), None);
+        assert_eq!(keep_cached(true, true, "", Some(1000), &f), None);
+        // Any fact that moved means the measurement no longer describes what is live.
+        for (k, v) in [("rules", "288"), ("blocked", "22"), ("modules", "4"), ("engine", "v35"), ("version", "1.3.208")] {
+            let drifted: Vec<Fact> = f
+                .iter()
+                .map(|(fk, fv)| (fk.clone(), if fk == k { v.to_string() } else { fv.clone() }))
+                .collect();
+            assert_eq!(keep_cached(true, true, CACHED_OK, Some(1000), &drifted), None, "{k}");
+        }
+        // A fact the live run could not produce at all is not a match either.
+        let short: Vec<Fact> = f.iter().filter(|(k, _)| k != "rules").cloned().collect();
+        assert_eq!(keep_cached(true, true, CACHED_OK, Some(1000), &short), None);
+    }
+
     #[test]
     fn the_verdict_line_ranks_and_names_what_it_counts() {
         let r = |v: Vec<Check>| Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![Section::Device],
             engine: None,
@@ -517,6 +657,7 @@ mod tests {
     #[test]
     fn a_dead_engine_sorts_above_every_other_failure() {
         let mut r = Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![Section::Device],
             engine: None,
@@ -541,6 +682,7 @@ mod tests {
     #[test]
     fn a_run_with_nothing_open_but_something_unmeasured_is_not_clean() {
         let r = Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![Section::Device],
             engine: Some(18),
@@ -558,6 +700,7 @@ mod tests {
         assert_eq!(Verdict::Note.severity(), "info");
         assert_eq!(Verdict::Warn.severity(), "attention");
         let r = |v: Vec<Check>| Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![Section::Device],
             engine: None,
@@ -575,6 +718,7 @@ mod tests {
     #[test]
     fn an_unread_rule_list_prints_as_unread_not_as_zero() {
         let r = Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![Section::Device],
             engine: Some(30),
@@ -590,6 +734,7 @@ mod tests {
         assert!(r.json().contains("\"directories\":null"), "{}", r.json());
 
         let ok = Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![Section::Device],
             engine: Some(30),
@@ -613,6 +758,7 @@ mod tests {
     #[test]
     fn a_section_that_found_nothing_still_reports_as_having_run() {
         let clean_plan = Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![Section::Plan, Section::Device],
             engine: Some(32),
@@ -626,6 +772,7 @@ mod tests {
         assert!(clean_plan.json().contains(r#""sections":["plan","device"]"#), "{}", clean_plan.json());
 
         let device_only = Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![Section::Device],
             engine: Some(32),
@@ -641,6 +788,7 @@ mod tests {
     #[test]
     fn the_fingerprint_renders_as_key_equals_value() {
         let r = Report {
+            cache_kept: None,
             ts: 7,
             sections: vec![Section::Device],
             engine: Some(18),

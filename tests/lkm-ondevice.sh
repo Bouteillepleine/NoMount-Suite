@@ -28,7 +28,19 @@ bad()  { echo "FAIL $*"; fail=1; }
 [ "$(id -u)" = 0 ] || { echo "fatal: needs root"; exit 1; }
 
 echo "== variant =="
-if grep -qE ' (vfs_map_meta_override|nm_uid_blocked)$' /proc/kallsyms 2>/dev/null; then
+# There are THREE states here and the kallsyms test alone separates only two:
+#
+#   hidden LKM  not in kallsyms      not in /proc/modules
+#   hide=0 LKM  IS in kallsyms       IS in /proc/modules
+#   in-tree     IS in kallsyms       not in /proc/modules
+#
+# Keying on kallsyms alone put the hide=0 build in the in-tree bucket -- and that is
+# precisely the build these tests get run against, because it is the only one you can
+# rmmod. The run then printed SKIP and exited 0, which reads as a pass for a run that
+# tested nothing. Ask whether the module is LOADED first; that answer is unambiguous.
+if grep -q '^nomount ' /proc/modules 2>/dev/null || [ -d /sys/module/nomount ]; then
+	echo "variant: LKM (hide=0 - the module is listed, so its symbols are visible)"
+elif grep -qE ' (vfs_map_meta_override|nm_uid_blocked)$' /proc/kallsyms 2>/dev/null; then
 	echo "SKIP: this kernel has NoMount built in, so the LKM's guards are not"
 	echo "      present and nothing below can be observed. Boot a stock GKI"
 	echo "      kernel and run this there."

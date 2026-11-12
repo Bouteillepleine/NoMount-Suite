@@ -70,9 +70,18 @@ jobs:
           fi
           zip=$(ls dist/00_NoMount-Module-*.zip | head -1)
           test -s "$zip"
+          # `-` sorts before `.`, so `ls | head -1` picks the -debug zip over the release
+          # one when both are present -- and the `%-debug` strip below then made the
+          # version gate accept it. Refuse outright instead: a debug build must never be
+          # what gets published.
+          case "$zip" in
+            *-debug.zip)
+              echo "FATAL: $zip is a debug build; refusing to publish it." >&2
+              echo "       dist/ should hold only release zips at this point." >&2
+              exit 1 ;;
+          esac
           zipver="${zip##*00_NoMount-Module-}"
           zipver="${zipver%.zip}"
-          zipver="${zipver%-debug}"
           if [ "$zipver" != "$TAG" ]; then
             echo "FATAL: tag $TAG does not match the packaged version $zipver." >&2
             echo "       Bump Cargo.toml and re-tag; do not publish a mismatch." >&2
@@ -137,6 +146,20 @@ jobs:
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "release $TAG already exists: replacing its asset and notes in place"
+            # --clobber is silent about WHAT it replaced. A release assembled by
+            # hand before the tag was pushed carries different bytes under the
+            # same names, and overwriting them unannounced is how the notes, the
+            # SHA256SUMS asset and the zips end up disagreeing. Name it.
+            _pre="$(mktemp -d)"
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D "$_pre" --pattern '*.zip' --clobber 2>/dev/null || true
+            for _f in "$_pre"/*.zip; do
+              [ -e "$_f" ] || continue
+              _b="$(basename "$_f")"
+              if [ -f "dist/$_b" ] && ! cmp -s "$_f" "dist/$_b"; then
+                echo "::warning::$_b already on the release differs from the one this run built; replacing it"
+              fi
+            done
+            rm -rf "$_pre"
             gh release upload "$TAG" "$zip" --repo "$GITHUB_REPOSITORY" --clobber
             lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1 || true)
             [ -n "$lkmzip" ] && gh release upload "$TAG" "$lkmzip" --repo "$GITHUB_REPOSITORY" --clobber
@@ -150,6 +173,30 @@ jobs:
               --title "NoMount Suite $TAG" \
               --notes-file /tmp/notes.md
           fi
+
+      # The notes quote the hashes, SHA256SUMS carries them, and the zips are
+      # the thing itself. Within one run they are built from the same dist/, but
+      # nothing re-read them afterwards -- so an interleaved manual upload could
+      # leave all three disagreeing and the run still green. Read them back.
+      - name: Verify the published assets match the notes
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          v="$(mktemp -d)"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D "$v" --clobber
+          ( cd "$v" && sha256sum -c SHA256SUMS )
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$v/notes.md"
+          bad=0
+          while read -r d n; do
+            [ -n "${d:-}" ] || continue
+            grep -qF "$d  $n" "$v/notes.md" || { echo "::error::release notes do not carry the published hash of $n ($d)"; bad=1; }
+          done < "$v/SHA256SUMS"
+          [ "$bad" = 0 ] || exit 1
+          echo "published assets, SHA256SUMS and notes all agree"
+          rm -rf "$v"
 
       - name: Point update.json at this release
         if: ${{ inputs.dry_run != 'true' }}
@@ -174,6 +221,30 @@ jobs:
             '}' > /tmp/update.json
           cat /tmp/update.json
 
+          # One endpoint per flavor. The LKM zip carries updateJson=.../update-lkm.json
+          # (stamped by package.sh), so without this file its users are offered nothing --
+          # and with the two sharing one endpoint they were offered the LITE zip, which has
+          # no engine module in it at all.
+          lkmzip=$(ls dist/01_NoMount-Module-LKM-*.zip 2>/dev/null | head -1)
+          if [ -z "$lkmzip" ]; then
+            echo "FATAL: no 01_ zip in dist/, but update-lkm.json must name one" >&2; exit 1
+          fi
+          lkmcode=$(unzip -p "$lkmzip" module.prop | sed -n 's/^versionCode=//p' | head -1)
+          if [ "$lkmcode" != "$vcode" ]; then
+            echo "FATAL: 00_ is versionCode $vcode but 01_ is $lkmcode" >&2; exit 1
+          fi
+          unzip -p "$lkmzip" module.prop | grep -q '^updateJson=.*/update-lkm\.json$' || {
+            echo "FATAL: the 01_ zip does not point at update-lkm.json, so it would be" >&2
+            echo "       updated onto the lite build" >&2; exit 1; }
+          printf '%s\n' \
+            '{' \
+            "  \"version\": \"$TAG\"," \
+            "  \"versionCode\": $vcode," \
+            "  \"zipUrl\": \"$base/releases/download/$TAG/$(basename "$lkmzip")\"," \
+            "  \"changelog\": \"$raw/docs/changelog-latest.md\"" \
+            '}' > /tmp/update-lkm.json
+          cat /tmp/update-lkm.json
+
           git clone --depth 1 --branch main \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" /tmp/mainwt
           live=$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /tmp/mainwt/update.json 2>/dev/null | head -1 || true)
@@ -182,14 +253,15 @@ jobs:
             exit 0
           fi
           cp /tmp/update.json /tmp/mainwt/update.json
+          cp /tmp/update-lkm.json /tmp/mainwt/update-lkm.json
           # The manager fetches `changelog` and shows it verbatim, so it gets THIS
           # version's section only -- the same /tmp/notes.md the release notes use,
           # not the whole history of CHANGELOG.md.
           mkdir -p /tmp/mainwt/docs
           cp /tmp/notes.md /tmp/mainwt/docs/changelog-latest.md
           cd /tmp/mainwt
-          git add update.json docs/changelog-latest.md
-          if git diff --cached --quiet -- update.json docs/changelog-latest.md; then
+          git add update.json update-lkm.json docs/changelog-latest.md
+          if git diff --cached --quiet -- update.json update-lkm.json docs/changelog-latest.md; then
             echo "update.json already current -- nothing to commit."
             exit 0
           fi

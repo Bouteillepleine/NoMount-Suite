@@ -198,16 +198,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { kmi: android12-5.10, tag: '20251104' }
-          - { kmi: android13-5.10, tag: '20251104' }
-          - { kmi: android13-5.15, tag: '20251104' }
-          - { kmi: android14-5.15, tag: '20251104' }
-          - { kmi: android14-6.1,  tag: '20251104' }
-          - { kmi: android15-6.6,  tag: '20251104' }
-          - { kmi: android16-6.12, tag: '20251104' }
-          - { kmi: android17-6.18, tag: '20260828' }
+          # Pinned by digest, not by tag. This container compiles the engine modules that
+          # ship in the 01_ zip and get insmod'd as root, so whoever controls the tag
+          # controls that code -- a re-push of the same tag would be picked up silently by
+          # the next release, through a green run. Every actions/ use, the NDK and zig are
+          # already pinned or checksummed; this was the one dependency that was not.
+          #
+          # The tag is kept for readability: docker resolves `name:tag@digest` by digest.
+          # To move one, read the new digest off the registry rather than trusting a pull:
+          #   TOKEN=$(curl -s 'https://ghcr.io/token?scope=repository%3Aylarod%2Fddk%3Apull&service=ghcr.io' | jq -r .token)
+          #   curl -sI -H "Authorization: Bearer $TOKEN" \
+          #     -H 'Accept: application/vnd.oci.image.index.v1+json' \
+          #     https://ghcr.io/v2/ylarod/ddk/manifests/<kmi>-<tag> | grep -i docker-content-digest
+          - { kmi: android12-5.10, tag: '20251104', digest: 'sha256:23b571c67d0375557fde0485183d372d572afb0b96b2c92e84b1d56eb4ac2037' }
+          - { kmi: android13-5.10, tag: '20251104', digest: 'sha256:37c2187c81e8e4870a8f7a8596c96d6b9de13d1d0d465c0bef8a62d0e52f9e63' }
+          - { kmi: android13-5.15, tag: '20251104', digest: 'sha256:593b73918e06a3f73b5c97a8b395d6d8bd1dc925d6a9a85384938c74183ed2d9' }
+          - { kmi: android14-5.15, tag: '20251104', digest: 'sha256:9b4ba1f841d559552e37c6fed6a4e50b3b6ada00fd6ea1a8e554514b0b478349' }
+          - { kmi: android14-6.1,  tag: '20251104', digest: 'sha256:b71b1fbde7234a2784bb8f8cf367ecc2ed50c5e4544a924135fa3e9ef96cf3bd' }
+          - { kmi: android15-6.6,  tag: '20251104', digest: 'sha256:e2a1c36aef4837865d0d269401f1403fdefda1b39affdb7a9eab66735f6defff' }
+          - { kmi: android16-6.12, tag: '20251104', digest: 'sha256:86216ff10dbe3e6d73477ac7fc3512414f394429b18b2f7be32182f34700ebd1' }
+          - { kmi: android17-6.18, tag: '20260828', digest: 'sha256:c3ae36f7d5ead49cd6e099b2d787564fffc0e38f7e357b39c73bf391c62c4268' }
     container:
-      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-${{ matrix.tag }}
+      image: ghcr.io/ylarod/ddk:${{ matrix.kmi }}-${{ matrix.tag }}@${{ matrix.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

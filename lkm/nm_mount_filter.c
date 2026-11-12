@@ -45,6 +45,7 @@
 
 #include "nm_hide.h"
 #include "nm_mount_filter.h"
+#include "nm_oot.h"
 
 /* The engine's own "do we hide from this caller" predicate, the same one the
  * in-tree _ghost guard consults. It lives in nomount.c, which is part of this
@@ -60,25 +61,35 @@ struct nm_mf_ctx {
  * and never worse than it. */
 #define NM_MF_PATH_MAX 256
 
-/* mountinfo field 4 is the mount's root WITHIN its own filesystem. A bind out
- * of the userdata f2fs renders as /adb/modules/... because that filesystem's
- * root is presented at /data; /data/adb/modules/ covers layouts that render it
- * in full. Neither spelling is ever a real lookup path, so matching them cannot
- * over-hide. */
-static bool nm_mf_module_rooted(struct vfsmount *mnt)
+/* A bind out of the userdata f2fs renders as /adb/modules/... because that
+ * filesystem's root is presented at /data; /data/adb/modules/ covers layouts that
+ * render it in full. Whether matching those two spellings can over-hide depends on
+ * what the dentry is: see each caller. */
+static bool nm_mf_dentry_module_rooted(struct dentry *dentry)
 {
 	char buf[NM_MF_PATH_MAX];
 	char *p;
 
-	if (!mnt || !mnt->mnt_root)
+	if (!dentry)
 		return false;
 
-	p = dentry_path_raw(mnt->mnt_root, buf, sizeof(buf));
+	p = dentry_path_raw(dentry, buf, sizeof(buf));
 	if (IS_ERR(p))
 		return false;
 
 	return !strncmp(p, "/adb/modules/", 13) ||
 	       !strncmp(p, "/data/adb/modules/", 18);
+}
+
+/* mountinfo field 4 is the mount's root WITHIN its own filesystem, which is what
+ * this renders. Neither spelling is ever a real lookup path, so for a mount root
+ * matching them cannot over-hide. */
+static bool nm_mf_module_rooted(struct vfsmount *mnt)
+{
+	if (!mnt)
+		return false;
+
+	return nm_mf_dentry_module_rooted(mnt->mnt_root);
 }
 
 static int nm_mf_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
@@ -96,6 +107,54 @@ static int nm_mf_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 	if (ctx->hide)
 		regs->regs[0] = (unsigned long)SEQ_SKIP;
+	return 0;
+}
+
+/* statmount(2) and listmount(2), 6.8 and newer, do not go anywhere near the three
+ * handlers above: they walk the namespace's mount rbtree and format in kernel code.
+ * Measured on CPH2747 6.12.69 as a hide-listed uid: mountinfo showed no module bind
+ * and statmount handed over root=/adb/modules/zygisk_lsposed/bin/dex2oat64 with its
+ * mountpoint and fs type. That is worse than an uncovered surface -- the two views
+ * disagree for one caller, which says both that a module is there and that something
+ * is hiding it. tests/statmount-check.sh is the measurement, and the acceptance test.
+ *
+ * is_path_reachable() is the one point both syscalls share. do_statmount() calls it as
+ * is_path_reachable(m, m->mnt.mnt_root, &root) and returns -EPERM to a caller without
+ * CAP_SYS_ADMIN when it is false; do_listmount()'s enumeration loop calls it per mount
+ * and `continue`s on false. Forcing false therefore removes the mount from listmount
+ * entirely, so statmount is never asked about an id that was never offered and no new
+ * contradiction appears. It is also a non-static global declared in fs/pnode.h and
+ * called from fs/pnode.c, so an out-of-line copy exists to probe, and x1 is already
+ * the mount's own root dentry -- struct kstatmount is private to fs/namespace.c and
+ * struct mount to fs/mount.h, and this needs the layout of neither.
+ *
+ * This one CAN over-hide, unlike the root matches above, and the case is narrow: a
+ * hide-listed uid calling openat2() with RESOLVE_BENEATH or RESOLVE_IN_ROOT on a path
+ * inside the module tree reaches the same function through path_is_under() from
+ * complete_walk(), and gets -EXDEV. pivot_root() and the propagation callers are
+ * CAP_SYS_ADMIN, which a hide-listed app uid does not have.
+ *
+ * If LTO inlines the two fs/namespace.c call sites while keeping the out-of-line copy
+ * for fs/pnode.c, this arms and never fires. Nothing detects that from here, which is
+ * why the probe script exists: run it as a hide-listed uid and require "verdict: clean".
+ */
+static int nm_mf_reach_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_mf_ctx *ctx = (struct nm_mf_ctx *)ri->data;
+
+	ctx->hide = nm_uid_blocked(__kuid_val(current_uid())) &&
+		    nm_mf_dentry_module_rooted((struct dentry *)regs->regs[1]);
+	return 0;
+}
+
+static int nm_mf_reach_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_mf_ctx *ctx = (struct nm_mf_ctx *)ri->data;
+
+	/* bool, so w0; writing x0 clears it. "Not reachable from your root" is the
+	 * kernel's own verb for this, the same way SEQ_SKIP is for a seq_file row. */
+	if (ctx->hide)
+		regs->regs[0] = 0;
 	return 0;
 }
 
@@ -124,12 +183,30 @@ static struct kretprobe nm_mf_krp[] = {
 		.data_size      = sizeof(struct nm_mf_ctx),
 		.maxactive      = 64,
 	},
+	{
+		.kp.symbol_name = "is_path_reachable",
+		.entry_handler  = nm_mf_reach_entry,
+		.handler        = nm_mf_reach_ret,
+		.data_size      = sizeof(struct nm_mf_ctx),
+		.maxactive      = 64,
+	},
 };
+
+/* The statmount arm is the only one with a runtime gate. Arming it on a kernel
+ * that has no such syscall buys nothing and still carries the openat2 case above,
+ * and a LINUX_VERSION_CODE test would miss a backport into an older GKI. */
+#define NM_MF_REACH 3
+
+static bool nm_mf_statmount_present(void)
+{
+	return nm_oot_lookup_opt("__arm64_sys_statmount") != 0;
+}
 
 static const char * const nm_mf_surface[] = {
 	"/proc/<pid>/mountinfo keeps naming the module that owns a bind",
 	"/proc/<pid>/mounts keeps listing a module-rooted bind",
 	"/proc/<pid>/mountstats keeps listing a module-rooted bind",
+	"statmount(2)/listmount(2) keep handing over a module-rooted bind",
 };
 
 static bool nm_mf_armed[ARRAY_SIZE(nm_mf_krp)];
@@ -137,10 +214,17 @@ static bool nm_mf_armed[ARRAY_SIZE(nm_mf_krp)];
 int nm_mount_filter_init(void)
 {
 	size_t i;
-	int armed = 0;
+	int armed = 0, want = 0;
 
 	for (i = 0; i < ARRAY_SIZE(nm_mf_krp); i++) {
-		int rc = register_kretprobe(&nm_mf_krp[i]);
+		int rc;
+
+		if (i == NM_MF_REACH && !nm_mf_statmount_present()) {
+			nm_mf_armed[i] = false;
+			continue;
+		}
+		want++;
+		rc = register_kretprobe(&nm_mf_krp[i]);
 
 		if (rc) {
 			nm_mf_armed[i] = false;
@@ -158,8 +242,7 @@ int nm_mount_filter_init(void)
 		return -ENOENT;
 	}
 
-	nm_say("nomount: mount filter active (%d/%zu surfaces)\n",
-		armed, ARRAY_SIZE(nm_mf_krp));
+	nm_say("nomount: mount filter active (%d/%d surfaces)\n", armed, want);
 	return 0;
 }
 

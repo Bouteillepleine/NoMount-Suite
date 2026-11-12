@@ -61,6 +61,27 @@ if [ ! -e "$NMDIR/disabled" ]; then
     nm_delink_ksud service
 fi
 
+# Integrators that drive NoMount do not look here. Morphe, for one, probes
+# exactly /data/adb/modules/nomount/bin/nm, /data/adb/ksu/bin/nm and
+# /data/adb/ap/bin/nm, and gives up if none is executable -- which is why
+# "NoMount only" reported NoMount unavailable on a device that was running it.
+#
+# A symlink refreshed at every boot rather than a copy dropped at install: those
+# directories belong to the root manager and are rewritten when it updates, so a
+# copy goes quiet the first time the manager is upgraded. Never create the
+# directory (its absence means that manager is not installed) and never replace
+# a real file, which would be somebody else's nm.
+for _nmd in /data/adb/ksu/bin /data/adb/ap/bin; do
+    [ -d "$_nmd" ] || continue
+    [ -e "$_nmd/nm" ] && [ ! -L "$_nmd/nm" ] && continue
+    [ "$(readlink "$_nmd/nm" 2>/dev/null)" = "$NM_BIN" ] && continue
+    rm -f "$_nmd/nm" 2>/dev/null
+    if ln -s "$NM_BIN" "$_nmd/nm" 2>/dev/null; then
+        nmlog "linked $_nmd/nm -> $NM_BIN so NoMount-aware installers can find the CLI"
+    fi
+done
+unset _nmd
+
 _bh_dir=/data/adb/bindhosts
 _bh_ovr="$_bh_dir/mode_override.sh"
 if [ -d "$_bh_dir" ] && [ -d /data/adb/modules/bindhosts ] &&
@@ -143,10 +164,7 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     ) &
 fi
 
-if [ "$booted" = "1" ]; then
-    rm -f "$NMDIR/bootcount"
-    nmlog "boot completed, guard counter reset"
-else
+if [ "$booted" != "1" ]; then
     nmlog "boot_completed never set - leaving guard counter armed"
 fi
 
@@ -211,16 +229,85 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     unset _ph _ph_rc
 fi
 
+# Reset the bootloop counter HERE, not at boot_completed.
+#
+# It used to clear as soon as sys.boot_completed went to 1, which is before whiteout
+# apply, uid apply, ghost sync and pathhide sync have run -- the four passes that install
+# rules in the kernel, and so the four most likely to panic. A panic in any of them
+# produced a reboot cycle that reached boot_completed every time, cleared the counter
+# every time, and therefore never reached GUARD_MAX: the guard could not park the Suite,
+# and the only way out was recovery. The passes above have all returned by this line.
+if [ "$booted" = "1" ]; then
+    rm -f "$NMDIR/bootcount"
+    nmlog "boot completed and the late passes returned, guard counter reset"
+fi
+
+# inotifyd EXECS its handler, so the handler carries the exec bit -- and the installer's
+# modes do not reliably survive it. checkwatch.sh shipped 0644: inotifyd started, stayed
+# resident, wrote its pid, and then failed to exec the handler on every single event, in
+# silence, because the spawn itself had succeeded. Re-assert the bit here the way
+# post-fs-data.sh and metamount.sh already re-assert $BIN's, so a device already in that
+# state heals on its next boot instead of waiting for a reflash.
+#
+# Note what this does NOT do: a liveness check on the spawned pid cannot see that bug,
+# because inotifyd is the process that lives and the handler is what fails later. The
+# -x test is the one that catches it, and it is deterministic.
+nm_watch() {
+    _w_h="$1"; _w_dir="$2"; _w_mask="$3"; _w_label="$4"
+    NM_WATCH_PID=""
+    if [ ! -f "$_w_h" ]; then
+        nmlog "⛔ $_w_label watcher NOT started: $_w_h is missing"
+        return 1
+    fi
+    [ -x "$_w_h" ] || chmod 0755 "$_w_h" 2>/dev/null
+    if [ ! -x "$_w_h" ]; then
+        nmlog "⛔ $_w_label watcher NOT started: $_w_h is not executable and chmod failed"
+        return 1
+    fi
+    inotifyd "$_w_h" "$_w_dir:$_w_mask" >/dev/null 2>&1 &
+    NM_WATCH_PID=$!
+    nmlog "$_w_label watcher started (pid $NM_WATCH_PID)"
+    return 0
+}
+
 if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ] \
    && command -v inotifyd >/dev/null 2>&1 && [ -f "$MODDIR/uidwatch.sh" ]; then
-    inotifyd "$MODDIR/uidwatch.sh" /data/system:cewDMmynd >/dev/null 2>&1 &
-    nmlog "hide-list package watcher started"
+    _watchers=""
+    nm_watch "$MODDIR/uidwatch.sh" /data/system cewDMmynd "hide-list-package" \
+        && _watchers="$_watchers $NM_WATCH_PID=hide-list-package"
     # Started regardless of the knob: uidwatch.sh drops .allowlist events while it is
     # off, so turning it on takes effect without a reboot.
     if [ -d /data/adb/ksu ]; then
-        inotifyd "$MODDIR/uidwatch.sh" /data/adb/ksu:cewDMmynd >/dev/null 2>&1 &
-        nmlog "KernelSU DenyList watcher started"
+        nm_watch "$MODDIR/uidwatch.sh" /data/adb/ksu cewDMmynd "KernelSU-DenyList" \
+            && _watchers="$_watchers $NM_WATCH_PID=KernelSU-DenyList"
     fi
+    # Lets the WebUI have a check run OUTSIDE its own context. Its exec inherits the
+    # manager app's seccomp filter, which denies setgroups, so four device checks cannot
+    # run there at all; this watcher is reparented to init and carries no filter. Its own
+    # directory, not $NMDIR, so the Suite's own writes do not spawn a handler per event.
+    if [ -f "$MODDIR/checkwatch.sh" ]; then
+        mkdir -p "$NMDIR/request" 2>/dev/null
+        chmod 700 "$NMDIR/request" 2>/dev/null
+        # Also clears a request left behind by a watcher that could not exec its handler:
+        # the handler is what deletes it, so a stale one sits there and, because `touch`
+        # on an existing file raises only IN_ATTRIB, no later request matches the cn mask.
+        rm -f "$NMDIR/request"/* 2>/dev/null
+        rm -f "$NMDIR/.checkwatch.pid" 2>/dev/null
+        if nm_watch "$MODDIR/checkwatch.sh" "$NMDIR/request" cn "check-on-request"; then
+            echo "$NM_WATCH_PID" > "$NMDIR/.checkwatch.pid" 2>/dev/null
+            _watchers="$_watchers $NM_WATCH_PID=check-on-request"
+        fi
+    fi
+
+    # The fork always succeeds, so inotifyd failing to exec shows only as the child
+    # already being gone. Swept here rather than at each spawn so the intervening work
+    # gives a doomed exec time to land; still a race, so silence here is weaker evidence
+    # than the -x test above, and a complaint is worth believing.
+    for _w in $_watchers; do
+        kill -0 "${_w%%=*}" 2>/dev/null \
+            || nmlog "⛔ ${_w#*=} watcher died immediately after starting (pid ${_w%%=*})"
+    done
+    unset _w _watchers NM_WATCH_PID
 fi
 
 if [ ! -x "$BIN" ]; then
@@ -239,6 +326,10 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ]; then
             break
         fi
         case "$_cons" in
+            # probe-unavailable is the one unchecked value a retry can clear: it means the
+            # probe machinery itself did not answer, not that there was nothing to sample.
+            # Treating it as settled is why every boot logged "settle tries=0".
+            unchecked:probe-unavailable) ;;
             ok|unchecked*|"") break ;;
         esac
         _try=$((_try + 1))

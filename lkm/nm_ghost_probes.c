@@ -256,6 +256,39 @@ static int nm_gp_prio_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
+/* ioprio_get(2) asks the same question as getpriority(2) and answers it the same way:
+ * IOPRIO_WHO_USER walks the tasks a uid owns and returns -ESRCH when there are none.
+ * ghost.c's own contract names both ("getpriority()/ioprio_get() answer -ESRCH for it"),
+ * but only getpriority and setpriority were probed -- so a sweep of ioprio_get across the
+ * app uid range found exactly the uid getpriority had been taught to conceal, and the two
+ * answers disagreeing is a louder signal than either alone.
+ *
+ * It needs its own entry handler rather than sharing nm_gp_prio_entry: the `which`
+ * constants are NOT the same namespace. getpriority uses PRIO_USER == 2, ioprio_get uses
+ * IOPRIO_WHO_USER == 3, so reusing that gate would have tested the wrong value and
+ * matched IOPRIO_WHO_PGRP instead. The return handler IS shared: -ESRCH is -ESRCH.
+ */
+#define NM_GP_IOPRIO_WHO_USER 3
+
+static int nm_gp_ioprio_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
+	struct pt_regs *args = (struct pt_regs *)regs->regs[0];
+	int which, who;
+
+	ctx->hide = false;
+	if (!args)
+		return 0;
+
+	which = (int)args->regs[0];
+	who = (int)args->regs[1];
+	if (which != NM_GP_IOPRIO_WHO_USER || !who)
+		return 0;
+
+	ctx->hide = ghost_uid_task_hidden((u32)who);
+	return 0;
+}
+
 static int nm_gp_prio_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct nm_gp_ctx *ctx = (struct nm_gp_ctx *)ri->data;
@@ -360,6 +393,13 @@ static struct kretprobe nm_gp_krp[] = {
 		.maxactive      = NM_GP_MAXACTIVE_COLD,
 	},
 	{
+		.kp.symbol_name = "__arm64_sys_ioprio_get",
+		.entry_handler  = nm_gp_ioprio_entry,
+		.handler        = nm_gp_prio_ret,
+		.data_size      = sizeof(struct nm_gp_ctx),
+		.maxactive      = NM_GP_MAXACTIVE_COLD,
+	},
+	{
 		.kp.symbol_name = "user_path_at",
 		.entry_handler  = nm_gp_upa_entry,
 		.handler        = nm_gp_upa_ret,
@@ -400,11 +440,41 @@ static const char * const nm_gp_surface[] = {
 	"an invisible-character path still opens a directory the plain name cannot",
 	"a concealed uid still reports running tasks to getpriority()",
 	"a concealed uid still reports running tasks to setpriority()",
+	"a concealed uid still reports running tasks to ioprio_get()",
 	"a hidden path still resolves for access(), open() and getxattr()",
 	"a hidden path still answers stat() instead of reporting it is absent",
 	"a hidden path still answers stat() on the no-security path",
 	"a hidden path answers EACCES instead of ENOENT when SELinux denies it",
 	"a hidden abstract socket still answers connect() instead of refusing it",
+};
+
+/* Where a probed name is a static inline on some kernels, the out-of-line function the
+ * inline forwards to, which is what kallsyms actually has there. Indexed with nm_gp_krp.
+ *
+ * user_path_at is the live case: include/linux/namei.h defines it as
+ *
+ *     static inline int user_path_at(int dfd, const char __user *name,
+ *                                    unsigned flags, struct path *path)
+ *     { return user_path_at_empty(dfd, name, flags, path, NULL); }
+ *
+ * on 5.4 through 6.6, and only android16-6.12 exports it as a real function. Without the
+ * fallback, register_kretprobe returns -ENOENT on every earlier KMI and the broadest
+ * ghost guard silently never arms -- access(), open(), readlink(), chmod, chown, rename,
+ * truncate, utimes and the four *xattr path entry points all keep resolving hidden paths.
+ *
+ * Safe to share handlers because the first four arguments are identical and in the same
+ * order, and nm_gp_upa_entry reads only regs[3] (struct path *, arg 4 on arm64).
+ */
+static const char * const nm_gp_alt[] = {
+	NULL,			/* do_filp_open */
+	NULL,			/* __arm64_sys_getpriority */
+	NULL,			/* __arm64_sys_setpriority */
+	NULL,			/* __arm64_sys_ioprio_get */
+	"user_path_at_empty",	/* user_path_at */
+	NULL,			/* vfs_getattr */
+	NULL,			/* vfs_getattr_nosec */
+	NULL,			/* security_inode_getattr */
+	NULL,			/* unix_find_other */
 };
 
 static bool nm_gp_armed[ARRAY_SIZE(nm_gp_krp)];
@@ -414,13 +484,31 @@ int nm_ghost_probes_init(void)
 	size_t i;
 	int armed = 0;
 
+	/* A misindexed alias would probe an unrelated function with these handlers, which
+	 * is worse than not probing at all. BUILD_BUG_ON rather than static_assert: the
+	 * compile-test matrix reaches back to 4.9, and static_assert only arrived in 5.1.
+	 */
+	BUILD_BUG_ON(ARRAY_SIZE(nm_gp_alt) != ARRAY_SIZE(nm_gp_krp));
+	BUILD_BUG_ON(ARRAY_SIZE(nm_gp_surface) != ARRAY_SIZE(nm_gp_krp));
+
 	for (i = 0; i < ARRAY_SIZE(nm_gp_krp); i++) {
+		const char *want = nm_gp_krp[i].kp.symbol_name;
 		int rc = register_kretprobe(&nm_gp_krp[i]);
+
+		if (rc && nm_gp_alt[i]) {
+			nm_gp_krp[i].kp.symbol_name = nm_gp_alt[i];
+			rc = register_kretprobe(&nm_gp_krp[i]);
+			if (rc)
+				nm_gp_krp[i].kp.symbol_name = want;
+			else
+				nm_say("nomount: ghost guard: %s is inlined on this kernel; probed %s instead\n",
+					want, nm_gp_alt[i]);
+		}
 
 		if (rc) {
 			nm_gp_armed[i] = false;
 			pr_warn("nomount: ghost guard: cannot probe %s (%d). %s.\n",
-				nm_gp_krp[i].kp.symbol_name, rc, nm_gp_surface[i]);
+				want, rc, nm_gp_surface[i]);
 			continue;
 		}
 		nm_gp_armed[i] = true;

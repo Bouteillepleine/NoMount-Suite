@@ -17,8 +17,13 @@ fn pass(name: &'static str, evidence: String) -> Check {
 fn fail(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Fail, evidence).oracle(oracle)
 }
+/// A tell the audit MEASURED. Every call site is the else-branch of a probe, so it
+/// fires only on a positive hit -- which must read as attention, not as info. It stays
+/// out of `open_failures()` so the exit code is unchanged; boot scripts branch on that.
+/// By-design arms (the two `N_ZERO_MOUNT` ones) build their own `Verdict::Note` and are
+/// deliberately not routed through here.
 fn soft(name: &'static str, evidence: String, oracle: &'static str) -> Check {
-    chk(name, Verdict::Note, evidence).oracle(oracle)
+    chk(name, Verdict::Warn, evidence).oracle(oracle)
 }
 fn na(name: &'static str, evidence: String) -> Check {
     chk(name, Verdict::NotApplicable, evidence)
@@ -30,10 +35,40 @@ fn reboot(name: &'static str, evidence: String, oracle: &'static str) -> Check {
     chk(name, Verdict::Reboot, evidence).oracle(oracle)
 }
 
+/// `Seccomp:` from `/proc/self/status`: 0 = no filter, 1 = strict, 2 = filter.
+pub(crate) fn own_seccomp_mode() -> Option<u32> {
+    seccomp_mode_from_status(&fs::read_to_string("/proc/self/status").ok()?)
+}
+
+fn seccomp_mode_from_status(status: &str) -> Option<u32> {
+    status.lines().find_map(|l| l.strip_prefix("Seccomp:")).and_then(|v| v.trim().parse().ok())
+}
+
+/// One sentence naming why no uid-dropping probe can run in this process, or `None`
+/// when one can. A seccomp filter survives both `fork()` and `exec()`, and Android's
+/// app filter allows neither `setgroups` nor `setresuid`, so a root shell spawned by an
+/// app - the manager's WebUI - cannot take on another uid by any route, its own `su`
+/// included (ksud drops uid in userspace).
+pub(crate) fn probe_blocked_reason() -> Option<String> {
+    match own_seccomp_mode() {
+        Some(mode) if mode != 0 => Some(format!(
+            "This run carries an app's seccomp filter (Seccomp mode {mode}) and so cannot drop \
+             uid at all: the manager's WebUI runs commands from a root shell spawned by an app, \
+             which inherits that app's filter. Run `nomount check` from a terminal instead."
+        )),
+        _ => None,
+    }
+}
+
 pub(crate) fn probe_as_uid<const N: usize>(
     uid: u32,
     probe: impl FnOnce() -> [u32; N],
 ) -> Result<[u32; N], ProbeFail> {
+    // Ask before forking. Under an inherited app filter the child is killed by SIGSYS on
+    // its first `setgroups`, which measures nothing and leaves one tombstone per probe.
+    if let Some(mode) = own_seccomp_mode().filter(|m| *m != 0) {
+        return Err(ProbeFail::Filtered(mode));
+    }
     let width = std::mem::size_of::<[u32; N]>();
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
@@ -81,6 +116,9 @@ pub(crate) fn probe_as_uid<const N: usize>(
     if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == EXIT_NOT_DROPPED {
         return Err(ProbeFail::NotDropped);
     }
+    if libc::WIFSIGNALED(status) {
+        return Err(ProbeFail::Killed(libc::WTERMSIG(status)));
+    }
     if got != width as isize {
         return Err(ProbeFail::Silent);
     }
@@ -98,23 +136,51 @@ pub(crate) enum ProbeFail {
     Start,
     Silent,
     NotDropped,
+    /// This process carries a seccomp filter, so it cannot drop uid. Carries the mode.
+    Filtered(u32),
+    /// The child died on a signal - SIGSYS means seccomp refused a syscall it needed.
+    Killed(libc::c_int),
 }
 
 impl ProbeFail {
     fn into_check(self, name: &'static str) -> Check {
-        let (evidence, meaning) = match self {
-            Self::Setup => ("pipe() failed", "The probe could not be set up, so this was not tested."),
-            Self::Start => ("fork() failed", "The probe could not be started, so this was not tested."),
+        let (evidence, meaning): (String, &'static str) = match self {
+            Self::Setup => (
+                "pipe() failed".into(),
+                "The probe could not be set up, so this was not tested.",
+            ),
+            Self::Start => (
+                "fork() failed".into(),
+                "The probe could not be started, so this was not tested.",
+            ),
             Self::Silent => (
-                "probe child said nothing",
+                "probe child said nothing".into(),
                 "The probe exited without answering, so this was not tested.",
             ),
             Self::NotDropped => (
-                "could not drop to the hidden app's uid",
+                "could not drop to the hidden app's uid".into(),
                 "The probe could not take on the hidden app's identity, so this was not tested.",
             ),
+            Self::Filtered(mode) => (
+                format!("not run: seccomp mode {mode} here, so this process cannot drop uid"),
+                "This report was written by a root shell that carries an app's seccomp filter - \
+                 the manager's WebUI runs commands that way. The filter survives fork and exec \
+                 and allows neither setgroups nor setresuid, so no uid-dropping probe can run \
+                 here and none was attempted. Run `nomount check` from a terminal, or read the \
+                 report the boot pass writes: both run unfiltered and do measure this.",
+            ),
+            Self::Killed(sig) if sig == libc::SIGSYS => (
+                "probe child killed by SIGSYS - seccomp refused a syscall it needed".into(),
+                "The probe child was killed for calling a syscall its seccomp filter does not \
+                 allow, so this was not tested. Taking on another uid needs setgroups and \
+                 setresuid, which Android's app filter denies.",
+            ),
+            Self::Killed(sig) => (
+                format!("probe child killed by signal {sig}"),
+                "The probe child died before answering, so this was not tested.",
+            ),
         };
-        unmeasured(name, evidence.into()).meaning(meaning)
+        unmeasured(name, evidence).meaning(meaning)
     }
 }
 
@@ -123,7 +189,8 @@ pub(crate) const N_ZERO_MOUNT: &str = "zero-mount posture";
 pub(crate) const N_SURFACES: &str = "kernel surfaces";
 pub(crate) const N_DINO_STAT: &str = "readdir ino vs stat ino";
 pub(crate) const N_INODE_BAND: &str = "injected inode band";
-pub(crate) const N_OVERLAY_DIR_INO: &str = "overlay dir inode range";
+pub(crate) const N_SYNTH_DIR_INO: &str = "synthesized dir inode range";
+pub(crate) const N_ACCEPTED: &str = "accepted rows";
 pub(crate) const N_DIR_INO_COLLIDE: &str = "synthesized inode collision";
 pub(crate) const N_EROFS_SHAPE: &str = "erofs directory shape";
 pub(crate) const N_MAPS_DELETED: &str = "injected files in maps";
@@ -134,10 +201,10 @@ pub(crate) const N_RULE_DUMP: &str = "engine rule dump";
 pub(crate) const N_XATTR_HIDDEN: &str = "xattr agrees with open for a hidden app";
 
 #[cfg(test)]
-pub(crate) const ALL_CHECK_NAMES: [&str; 14] = [
+pub(crate) const ALL_CHECK_NAMES: [&str; 15] = [
     N_ENGINE_LIVE, N_ZERO_MOUNT, N_SURFACES, N_DINO_STAT,
-    N_INODE_BAND, N_OVERLAY_DIR_INO, N_DIR_INO_COLLIDE, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
-    N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN,
+    N_INODE_BAND, N_SYNTH_DIR_INO, N_DIR_INO_COLLIDE, N_EROFS_SHAPE, N_MAPS_DELETED, N_PM_OPEN,
+    N_ROM_TMPFS, N_FOREIGN_MOUNT, N_RULE_DUMP, N_XATTR_HIDDEN, N_ACCEPTED,
 ];
 
 #[repr(C)]
@@ -197,9 +264,31 @@ pub fn getdents(dir: &Path) -> Option<Vec<Entry>> {
     Some(out)
 }
 
-fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
+/// The live rule set, plus the number of non-blank lines the parser could not read.
+///
+/// `parse_list` drops those silently, which made a listing whose grammar the engine had
+/// changed come back SHORT rather than unreadable -- every rule-dependent check below then
+/// took its "no live rules" branch, reported N/A, and the report read `clean` on a device
+/// serving hundreds of rules. The count has to come out with the rules so the caller can
+/// say so. `doctor.rs` has used `parse_list_counted` for this reason since it was added.
+struct LiveRules {
+    /// uid-0 Inject targets, which is what most device checks reason over.
+    targets: Vec<PathBuf>,
+    engine_dirs: Vec<PathBuf>,
+    /// Inject targets for every uid, not just 0.
+    all_inject_targets: Vec<PathBuf>,
+    /// Where each uid-0 Inject target is served FROM. A check that wants to know whether
+    /// the engine is actually serving a module's bytes has to compare against this; root's
+    /// view of the target answers a different question, because a rule that is live but
+    /// ineffective serves the stock file to root too.
+    inject_sources: std::collections::HashMap<PathBuf, PathBuf>,
+    /// Non-blank lines of the engine's listing the parser could not read.
+    unread: usize,
+}
+
+fn live_rules() -> Option<LiveRules> {
     let listed = Nm::new().list().ok()?;
-    let rules = crate::nm::parse_list(&listed);
+    let (rules, unread) = crate::nm::parse_list_counted(&listed);
     let targets = rules
         .iter()
         .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
@@ -217,7 +306,18 @@ fn live_rules() -> Option<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
         .filter(|r| r.kind == crate::nm::LiveKind::VirtualDir)
         .map(|r| r.target.clone())
         .collect();
-    Some((targets, dirs, all_targets))
+    let inject_sources = rules
+        .iter()
+        .filter(|r| r.uid == 0 && r.kind == crate::nm::LiveKind::Inject)
+        .filter_map(|r| r.source.as_ref().map(|s| (r.target.clone(), s.clone())))
+        .collect();
+    Some(LiveRules {
+        targets,
+        engine_dirs: dirs,
+        all_inject_targets: all_targets,
+        inject_sources,
+        unread,
+    })
 }
 
 fn parents_of(targets: &[PathBuf]) -> Vec<PathBuf> {
@@ -331,11 +431,24 @@ fn check_zero_mount() -> Check {
             .collect();
 
         let tracked = crate::bind::tracked_result();
-        let ours: std::collections::HashSet<std::path::PathBuf> = tracked
+        // Match on (target, source), not on the target alone. binds.list records both, and
+        // the source was being thrown away here -- so a module re-creating its own bind
+        // over a my_* path the Suite also binds (the case the text below actually
+        // describes) matched by path and was counted as ours. A real mount serving
+        // SOMEONE ELSE'S content over the ROM, visible in every app's mountinfo, then
+        // reported as "Nothing is wrong here".
+        let roots = crate::absorb::fs_roots(&rows);
+        let ours: std::collections::HashSet<(std::path::PathBuf, std::path::PathBuf)> = tracked
             .as_ref()
-            .map(|v| v.iter().map(|(t, _)| t.clone()).collect())
+            .map(|v| v.iter().cloned().collect())
             .unwrap_or_default();
-        let mine = leaked.iter().filter(|(r, _)| ours.contains(&r.target)).count();
+        let mine = leaked
+            .iter()
+            .filter(|(r, _)| {
+                crate::absorb::source_of(r, &roots)
+                    .is_some_and(|s| ours.contains(&(r.target.clone(), s)))
+            })
+            .count();
         let mut why = if let Err(e) = &tracked {
             format!(
                 "{} mount(s) laid over the ROM are readable by any app in its own mount table. \
@@ -371,9 +484,14 @@ fn check_zero_mount() -> Check {
                 leaked.len()
             )
         };
+        // Target-only here on purpose: this asks "is there a recorded bind at this path",
+        // not "is that bind ours" -- a my_* target cannot be taken over while Android is
+        // running whoever made the mount sitting on it.
+        let our_targets: std::collections::HashSet<&std::path::Path> =
+            ours.iter().map(|(t, _)| t.as_path()).collect();
         let deferred: Vec<&str> = deferred
             .into_iter()
-            .filter(|t| !ours.contains(std::path::Path::new(t)))
+            .filter(|t| !our_targets.contains(std::path::Path::new(t)))
             .collect();
         if !deferred.is_empty() {
             why.push_str(&format!(
@@ -659,17 +777,23 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     .owner("the kernel engine")
 }
 
-fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
+fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut unranged = Vec::new();
     let mut examined = 0usize;
     let mut unread = 0usize;
     let subjects: Vec<PathBuf> =
         targets.iter().chain(engine_dirs.iter()).cloned().collect();
+    // Not gated on fs_type == "overlay" any more.
+    //
+    // It used to be, and that is why `nomount check` reported nothing while
+    // `find /product/priv-app -maxdepth 1 -type d -inum +1000` on a CPH2747 returned
+    // exactly the two injected directories: /product is erofs, so every parent was
+    // skipped and the check answered NotApplicable. Nothing in the test below is
+    // overlay-specific -- it compares a synthesized directory's inode against the
+    // largest STOCK directory inode in the same parent on the same device, which any
+    // filesystem can answer.
     for parent in parents_of(&subjects) {
-        if fs_type(&parent) != "overlay" {
-            continue;
-        }
         let Ok(rd) = fs::read_dir(&parent) else {
             unread += 1;
             continue;
@@ -718,10 +842,10 @@ fn check_overlay_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check 
             examined += 1;
         }
     }
-    overlay_dir_verdict(examined, unread, &outliers, &unranged)
+    synth_dir_verdict(examined, unread, &outliers, &unranged)
 }
 
-fn overlay_dir_verdict(
+fn synth_dir_verdict(
     examined: usize,
     unread: usize,
     outliers: &[String],
@@ -744,14 +868,14 @@ fn overlay_dir_verdict(
     if examined == 0 {
         if unread > 0 {
             return unmeasured(
-                N_OVERLAY_DIR_INO,
-                format!("{unread} overlay directory(ies) could not be read"),
+                N_SYNTH_DIR_INO,
+                format!("{unread} parent directory(ies) could not be read"),
             )
             .meaning("The folders this needed to read would not open, so this was not tested.");
         }
         if !unranged.is_empty() {
             return unmeasured(
-                N_OVERLAY_DIR_INO,
+                N_SYNTH_DIR_INO,
                 format!(
                     "{} synthesized dir(s) on a device no stock dir beside them uses, so none \
                      could be compared: {}",
@@ -762,12 +886,12 @@ fn overlay_dir_verdict(
             .meaning(format!("{} This was not tested.", unranged_meaning(unranged.len())));
         }
         return na(
-            N_OVERLAY_DIR_INO,
-            "no directory the engine synthesized on an overlay mount, beside a stock one".into(),
+            N_SYNTH_DIR_INO,
+            "no directory the engine synthesized beside a stock one to compare it with".into(),
         )
         .meaning(
-            "This one only applies to folders the Suite creates on an overlayfs ROM, and you \
-             have none.",
+            "This one needs a folder the Suite created sitting beside stock folders on the same \
+             device, and you have none.",
         );
     }
     if outliers.is_empty() && (unread > 0 || !unranged.is_empty()) {
@@ -786,9 +910,9 @@ fn overlay_dir_verdict(
             why.push(unranged_meaning(unranged.len()));
         }
         return unmeasured(
-            N_OVERLAY_DIR_INO,
+            N_SYNTH_DIR_INO,
             format!(
-                "{examined} overlay dir(s) clean, but {} and were not checked",
+                "{examined} parent(s) clean, but {} and were not checked",
                 skipped.join(" and ")
             ),
         )
@@ -796,13 +920,13 @@ fn overlay_dir_verdict(
     }
     if outliers.is_empty() {
         pass(
-            N_OVERLAY_DIR_INO,
-            format!("{examined} overlay dir(s): synthesized inodes sit inside the stock range"),
+            N_SYNTH_DIR_INO,
+            format!("{examined} parent(s): synthesized inodes sit inside the stock range"),
         )
         .meaning("Folders the Suite creates carry identity numbers the ROM could plausibly issue.")
     } else {
         soft(
-            N_OVERLAY_DIR_INO,
+            N_SYNTH_DIR_INO,
             outliers.join("; "),
             "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
         )
@@ -1156,16 +1280,24 @@ fn check_maps_not_deleted(targets: &[PathBuf]) -> Check {
             .meaning("Some processes could not be read, so a clean result is not proven.");
         }
         if mappers == 0 {
-            return unmeasured(
+            // Measured, and there is nothing the tell could attach to: it is an injected
+            // file reading as deleted in a map, and no process maps one. Unmeasured would
+            // be wrong -- the scan succeeded -- and it is the only verdict Tally::complete()
+            // counts, so every report between a reboot and the first app launch would read
+            // "not fully measured" over a check that has nothing to be wrong about.
+            return chk(
                 N_MAPS_DELETED,
+                Verdict::Note,
                 format!(
-                    "{scanned} process(es) scanned, none has an injected file mapped at all -- \
-                     nothing to measure yet (the normal state at boot)"
+                    "{scanned} process(es) scanned, none maps an injected file yet -- nothing \
+                     can read as deleted while nothing is mapped"
                 ),
             )
             .meaning(
-                "No app has opened an injected file yet, so there was nothing to look at. Run \
-                 this again once you have used the apps your modules change.",
+                "This looks for an injected file that reads as deleted in a process's memory \
+                 map. No process maps one yet, which is the normal state until you have used \
+                 the apps your modules change, so there is nothing here that could be wrong. \
+                 It becomes a measured pass once one is mapped.",
             );
         }
         return pass(
@@ -1251,7 +1383,10 @@ fn size_and_ends(mut f: fs::File) -> Option<(u64, Vec<u8>)> {
     Some((len, bytes))
 }
 
-fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
+fn check_pm_apks_open_when_hidden(
+    targets: &[PathBuf],
+    sources: &std::collections::HashMap<PathBuf, PathBuf>,
+) -> Check {
     const NAME: &str = N_PM_OPEN;
     let apks: Vec<&PathBuf> = targets.iter().filter(|t| crate::pmcache::is_pm_published(t)).collect();
     if apks.is_empty() {
@@ -1274,13 +1409,33 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
         return na(NAME, format!("{} PM-published file rule(s), but no app is hidden", apks.len()))
             .meaning("You have not hidden any apps yet, so there is nothing to test here. Hide one and this check starts running.");
     };
+    // Read the rule's SOURCE, not root's view of the target.
+    //
+    // `ours` used to be the target opened as root, and the child's read was compared
+    // against that -- so a rule that is live but ineffective, where the engine holds it
+    // and serves the ROM's original to EVERY caller, matched and passed. The text then
+    // claimed the app "gets a file whose first and last 4 KiB match your module's" on the
+    // strength of having matched root's copy, which this check never established was the
+    // module's. Comparing against the file the rule names answers the question asked.
     let readable: Vec<(&PathBuf, (u64, Vec<u8>))> = apks
         .iter()
-        .filter_map(|p| fs::File::open(p).ok().and_then(size_and_ends).map(|s| (*p, s)))
+        .filter_map(|p| {
+            let src = sources.get(p.as_path())?;
+            fs::File::open(src).ok().and_then(size_and_ends).map(|s| (*p, s))
+        })
         .collect();
     if readable.is_empty() {
-        return unmeasured(NAME, format!("{} PM-published file rule(s), none readable as root", apks.len()))
-            .meaning("None of the published files could be opened even as root, so the question this check asks could not be put.");
+        return unmeasured(
+            NAME,
+            format!(
+                "{} PM-published file rule(s), none whose source could be read as root",
+                apks.len()
+            ),
+        )
+        .meaning(
+            "None of the files these rules serve FROM could be opened even as root, so there \
+             was nothing to compare the app's read against and the question could not be put.",
+        );
     }
 
     let counts = probe_as_uid(appid, || {
@@ -1323,13 +1478,14 @@ fn check_pm_apks_open_when_hidden(targets: &[PathBuf]) -> Check {
             NAME,
             format!(
                 "{who} opened all {tested} PM-published rule target(s): same size, first and \
-                 last 4 KiB as the copy we serve"
+                 last 4 KiB as the file each rule serves from"
             ),
         )
         .meaning(
             "A hidden app can still open every file Android told it about, and gets a file of \
-             the same size whose first and last 4 KiB match your module's. This is what stops \
-             hiding from crashing apps.",
+             the same size whose first and last 4 KiB match the module's own copy -- compared \
+             against the file the rule names, not against what root happens to see at that \
+             path. This is what stops hiding from crashing apps.",
         );
     }
     if denied == 0 {
@@ -1465,7 +1621,7 @@ const RULE_DEPENDENT: [&str; 8] = [
     N_DINO_STAT,
     N_DIR_INO_COLLIDE,
     N_INODE_BAND,
-    N_OVERLAY_DIR_INO,
+    N_SYNTH_DIR_INO,
     N_EROFS_SHAPE,
     N_MAPS_DELETED,
     N_PM_OPEN,
@@ -1597,7 +1753,14 @@ fn xattr_verdict(who: &str, files: usize, leaked: u32, inverse: u32, denied: u32
 }
 
 pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
-    let Some((targets, engine_dirs, all_inject_targets)) = live_rules() else {
+    let Some(LiveRules {
+        targets,
+        engine_dirs,
+        all_inject_targets,
+        inject_sources,
+        unread: unread_rules,
+    }) = live_rules()
+    else {
         let live = check_engine_live();
         let answered = live.verdict != Verdict::Fail;
         let mut checks = vec![live];
@@ -1632,22 +1795,107 @@ pub fn device_checks() -> (Vec<Check>, Option<usize>, Option<usize>) {
         return (checks, None, None);
     };
     let parents = parents_of(&targets);
-    let checks = vec![
+    let mut checks = vec![
         check_engine_live(),
         check_zero_mount(),
         check_surfaces(),
         check_dino_matches_stat(&targets),
         check_inode_band(&targets, &engine_dirs),
-        check_overlay_dir_ino(&targets, &engine_dirs),
+        check_synth_dir_ino(&targets, &engine_dirs),
         check_dir_ino_collision(&targets, &engine_dirs),
         check_erofs_dir_shape(&targets),
         check_maps_not_deleted(&all_inject_targets),
-        check_pm_apks_open_when_hidden(&targets),
+        check_pm_apks_open_when_hidden(&targets, &inject_sources),
         check_xattr_agrees_when_hidden(&targets),
         check_no_rom_tmpfs(),
         check_no_foreign_rom_mount(),
     ];
+    if unread_rules > 0 {
+        // The checks above ran, but over a rule set we know is short, so a PASS from any of
+        // them covers only what parsed. This row is what stops the whole report settling on
+        // "clean": one Unmeasured makes Tally::complete() false, and the headline becomes
+        // "not fully measured" instead.
+        checks.push(
+            unmeasured(
+                N_RULE_DUMP,
+                format!(
+                    "{unread_rules} line(s) of the engine's rule list could not be read, so \
+                     the {} check(s) that read live rules saw an incomplete set",
+                    RULE_DEPENDENT.len()
+                ),
+            )
+            .meaning(
+                "The engine listed its rules and some lines were in a shape this build does \
+                 not know -- usually an engine newer than the Suite. Rules missing from the \
+                 list look exactly like rules that went away, so nothing below that counts \
+                 rules is a clean result. Update the Suite to match the engine.",
+            ),
+        );
+    }
+    apply_accepted(&mut checks, &accepted_rows(fs::read_to_string(ACCEPTED_PATH).ok().as_deref()));
     (checks, Some(targets.len()), Some(parents.len()))
+}
+
+/// Rows the owner of this device has accepted, one id or name per line, `#` comments.
+pub(crate) const ACCEPTED_PATH: &str = "/data/adb/nomount/accepted.list";
+
+/// Parse that file. `None` (unreadable, or absent) accepts nothing.
+///
+/// Silence has to be ASKED for. A read that failed must never produce it, which is the same
+/// rule the fail-open reads in ghost.rs and blocklist.rs follow: not being able to tell is
+/// not permission.
+fn accepted_rows(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or_default().trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Downgrade a named Warn to a Note, and say so in its own evidence.
+///
+/// The ladder rule on `soft()` is untouched and must stay that way: a tell the audit
+/// MEASURED reads as attention by default, because grading a live oracle as info is what
+/// let a report name one and still say `verdict: clean`. This changes nothing about what is
+/// measured, what evidence is printed, or what oracle is quoted -- the row still says a
+/// detector can see it. It only lets the owner mark a row as a trade they have chosen, so
+/// it stops competing for attention with the ones they have not seen yet.
+///
+/// Deliberately only Warn. An Unmeasured row cannot be accepted away, because "I know" is
+/// not something you can say about a thing that was never measured, and Fail/Reboot are
+/// about the Suite being broken rather than visible.
+fn apply_accepted(checks: &mut Vec<Check>, accepted: &[String]) {
+    if accepted.is_empty() {
+        return;
+    }
+    let mut taken: Vec<String> = Vec::new();
+    checks.retain(|c| {
+        let hit = c.verdict == Verdict::Warn && accepted.iter().any(|a| a == &c.id || a == &c.name);
+        if hit {
+            taken.push(format!("{} ({})", c.name, c.evidence));
+        }
+        !hit
+    });
+    if taken.is_empty() {
+        return;
+    }
+    // One line, and it is not optional. Dropping a row the audit MEASURED without saying so
+    // is the false-clean bug this whole ladder exists to prevent -- the report would name no
+    // oracle and read clean while one was live. Accepting a trade is the owner's to make;
+    // concealing that a trade was made is not.
+    checks.push(
+        chk(
+            N_ACCEPTED,
+            Verdict::Note,
+            format!("{} row(s) accepted in {ACCEPTED_PATH}: {}", taken.len(), taken.join("; ")),
+        )
+        .meaning(
+            "These were measured and are still true; you have marked them as trades you \
+             have chosen, so they are kept out of the findings. Remove a line from that \
+             file to hear about one again.",
+        ),
+    );
 }
 
 #[cfg(test)]
@@ -1663,6 +1911,43 @@ mod tests {
         // that legitimately answered it was reported as unmeasured.
         assert_eq!(probe_as_uid(me, || [u32::MAX]), Ok([u32::MAX]));
         assert_eq!(probe_as_uid(me, || [u32::MAX, 1]), Ok([u32::MAX, 1]));
+    }
+
+    #[test]
+    fn the_seccomp_field_is_read_and_not_confused_with_the_filter_count() {
+        // Seccomp_filters sorts next to Seccomp and is a different number: reading the
+        // wrong one would call an unfiltered process filtered, or the reverse.
+        let st = "Name:\tnomount\nSeccomp:\t2\nSeccomp_filters:\t1\nSpeculation_Store_Bypass:\tthread vulnerable\n";
+        assert_eq!(seccomp_mode_from_status(st), Some(2));
+        assert_eq!(
+            seccomp_mode_from_status("Seccomp_filters:\t1\nSeccomp:\t0\n"),
+            Some(0)
+        );
+        // No field at all is "do not know", which must not read as "filtered".
+        assert_eq!(seccomp_mode_from_status("Name:\tnomount\n"), None);
+        assert_eq!(seccomp_mode_from_status("Seccomp:\t\n"), None);
+    }
+
+    #[test]
+    fn a_filtered_run_says_why_it_measured_nothing_rather_than_going_silent() {
+        // The WebUI execs us from an app-spawned root shell, which carries that app's
+        // seccomp filter; the filter survives fork and exec and denies setgroups, so no
+        // uid-dropping probe can run. Reported as "probe child said nothing", that cost
+        // a long hunt - the text has to name the cause and the way round it.
+        let c = ProbeFail::Filtered(2).into_check(N_PM_OPEN);
+        assert_eq!(c.verdict, Verdict::Unmeasured);
+        assert!(c.evidence.contains("seccomp mode 2"), "{}", c.evidence);
+        assert!(!c.evidence.contains("said nothing"), "{}", c.evidence);
+        assert!(c.meaning.contains("WebUI"), "{}", c.meaning);
+        assert!(c.meaning.contains("from a terminal"), "{}", c.meaning);
+
+        // And a child that was killed anyway names the signal rather than silence.
+        let k = ProbeFail::Killed(libc::SIGSYS).into_check(N_PM_OPEN);
+        assert_eq!(k.verdict, Verdict::Unmeasured);
+        assert!(k.evidence.contains("SIGSYS"), "{}", k.evidence);
+        let other = ProbeFail::Killed(libc::SIGKILL).into_check(N_PM_OPEN);
+        assert!(other.evidence.contains("signal 9"), "{}", other.evidence);
+        assert!(!other.evidence.contains("SIGSYS"), "{}", other.evidence);
     }
 
     #[test]
@@ -1886,12 +2171,116 @@ mod tests {
     }
 
     #[test]
-    fn an_unprobed_tell_is_a_note_and_keeps_its_oracle() {
+    fn a_rule_list_that_did_not_fully_parse_cannot_report_clean() {
+        // The engine answers, so `nm list` succeeds and the "would not list its rules" arm
+        // never fires -- but lines the parser cannot read are dropped, and a rule missing
+        // from the list is indistinguishable from a rule that went away. Every
+        // RULE_DEPENDENT check then took its vacuous branch and the report read `clean` on
+        // a device serving hundreds of rules.
+        let (rules, unread) = crate::nm::parse_list_counted(
+            "/a -> /b\n!! not a rule line !!\n/c (virtual dir)\n\n",
+        );
+        assert_eq!(rules.len(), 2);
+        assert_eq!(unread, 1, "a line the parser could not read must be counted, not dropped");
+
+        // One Unmeasured row is the whole guardrail: it makes complete() false, so the
+        // ladder in check.rs can never fall through to "clean".
+        let row = unmeasured(N_RULE_DUMP, "1 line(s) ... could not be read".into());
+        assert!(!crate::check::Tally::of(std::slice::from_ref(&row)).complete());
+        let r = crate::check::Report {
+            cache_kept: None,
+            ts: 0,
+            sections: vec![crate::check::Section::Device],
+            engine: Some(34),
+            rules: Some(0),
+            directories: Some(0),
+            facts: Vec::new(),
+            checks: vec![row, pass(N_SURFACES, "none".into())],
+        };
+        assert_ne!(r.verdict(), "clean", "a short rule list must never read as clean");
+        assert!(r.verdict().contains("not fully measured"), "{}", r.verdict());
+
+        // And pin the call itself: live_rules() going back to the uncounted parser is
+        // exactly the regression, and it is invisible at runtime.
+        let src = include_str!("audit.rs");
+        let body = &src[src.find("fn live_rules(").expect("live_rules exists")..];
+        let body = &body[..body.find("\n}\n").expect("live_rules has an end")];
+        assert!(
+            body.contains("parse_list_counted("),
+            "live_rules must keep the dropped-line count"
+        );
+        assert!(
+            !body.contains("crate::nm::parse_list("),
+            "live_rules must not use the uncounted parser"
+        );
+    }
+
+    #[test]
+    fn a_measured_tell_is_a_warning_and_keeps_its_oracle() {
+        // This pinned NOTE until 1.3.209. Every soft() site is a probe's else-branch and
+        // passes measured evidence, so grading it "info" let a report that had just named
+        // a live oracle still read `verdict: clean`.
         let s = soft(N_INODE_BAND, "evidence".into(), "the recipe");
-        assert_eq!(s.verdict.tag(), "NOTE", "a tell nothing probes must not read as attention");
-        assert_eq!(s.verdict.severity(), "info");
+        assert_eq!(s.verdict.tag(), "WARN", "a tell the audit measured must read as attention");
+        assert_eq!(s.verdict.severity(), "attention");
         assert_eq!(s.oracle.as_deref(), Some("the recipe"));
-        assert_ne!(s.verdict.tag(), Verdict::Warn.tag());
+        assert_ne!(s.verdict.tag(), Verdict::Note.tag());
+        assert_eq!(
+            crate::check::Tally::of(std::slice::from_ref(&s)).open_failures(),
+            0,
+            "a measured tell must not change the exit code"
+        );
+    }
+
+    #[test]
+    fn an_accepted_row_leaves_the_findings_but_never_leaves_silently() {
+        let mk_warn = || soft(N_SYNTH_DIR_INO, "ino=89750657".into(), "a filtered find");
+        let mk_unmeasured = || unmeasured(N_RULE_DUMP, "3 line(s) unread".into());
+
+        // Unreadable or absent accepts NOTHING. Not being able to read the file is not
+        // permission to go quiet -- that is the bug this audit opened with.
+        assert!(accepted_rows(None).is_empty());
+        let mut v = vec![mk_warn()];
+        apply_accepted(&mut v, &accepted_rows(None));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].verdict.tag(), "WARN", "silence must be asked for");
+
+        // Named, the row goes -- and a Note takes its place naming it and its evidence.
+        let id = mk_warn().id;
+        let acc = accepted_rows(Some(&format!("# mine\n{id}\n\n")));
+        let mut v = vec![
+            mk_warn(),
+            mk_unmeasured(),
+            pass(N_INODE_BAND, "every injected inode shares a bucket".into()),
+        ];
+        apply_accepted(&mut v, &acc);
+        assert!(
+            !v.iter().any(|c| c.id == id),
+            "the accepted row must not stay in the findings"
+        );
+        let note = v.iter().find(|c| c.name == N_ACCEPTED).expect("the disclosure is not optional");
+        assert_eq!(note.verdict.tag(), "NOTE");
+        assert!(note.evidence.contains(N_SYNTH_DIR_INO), "{}", note.evidence);
+        assert!(note.evidence.contains("ino=89750657"), "evidence survives: {}", note.evidence);
+
+        // Nothing else moves. An Unmeasured row cannot be accepted away: "I know" is not
+        // sayable about something that was never measured.
+        assert!(v.iter().any(|c| c.verdict.tag() == "UNMEASURED"));
+        assert!(v.iter().any(|c| c.verdict.tag() == "PASS"));
+        let u_id = mk_unmeasured().id;
+        let mut only_u = vec![mk_unmeasured()];
+        apply_accepted(&mut only_u, &accepted_rows(Some(&format!("{u_id}\n"))));
+        assert_eq!(only_u.len(), 1, "no disclosure row, because nothing was accepted");
+        assert_eq!(only_u[0].verdict.tag(), "UNMEASURED");
+
+        // By display name too; an unknown name is inert and adds no Note.
+        let mut v = vec![mk_warn()];
+        apply_accepted(&mut v, &accepted_rows(Some(&format!("{N_SYNTH_DIR_INO}\n"))));
+        assert!(v.iter().any(|c| c.name == N_ACCEPTED));
+        let mut v = vec![mk_warn()];
+        apply_accepted(&mut v, &accepted_rows(Some("no-such-check\n")));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].verdict.tag(), "WARN");
     }
 
     #[test]
@@ -1918,6 +2307,7 @@ mod tests {
         assert_eq!(by_design.verdict.tag(), "NOTE");
         assert_eq!(by_design.verdict.severity(), "info");
         let r = crate::check::Report {
+            cache_kept: None,
             ts: 0,
             sections: vec![crate::check::Section::Device],
             engine: Some(31),
@@ -1983,24 +2373,24 @@ mod tests {
     #[test]
     fn a_synthesized_dir_with_no_stock_dir_on_its_device_is_not_a_pass() {
         let off = vec!["/product/overlay/Vdir dev 35".to_string()];
-        let c = overlay_dir_verdict(1, 0, &[], &off);
+        let c = synth_dir_verdict(1, 0, &[], &off);
         assert_eq!(c.verdict.tag(), "UNMEASURED", "{}", c.evidence);
         assert!(c.evidence.contains("/product/overlay/Vdir dev 35"), "{}", c.evidence);
 
-        let c = overlay_dir_verdict(0, 0, &[], &off);
+        let c = synth_dir_verdict(0, 0, &[], &off);
         assert_eq!(c.verdict.tag(), "UNMEASURED", "compared nothing, but there was a subject");
 
-        assert_eq!(overlay_dir_verdict(1, 0, &[], &[]).verdict.tag(), "PASS");
-        assert_eq!(overlay_dir_verdict(0, 0, &[], &[]).verdict.tag(), "N/A");
+        assert_eq!(synth_dir_verdict(1, 0, &[], &[]).verdict.tag(), "PASS");
+        assert_eq!(synth_dir_verdict(0, 0, &[], &[]).verdict.tag(), "N/A");
         let hit = vec!["/product/overlay/V ino=83232001 (stock max here 26)".to_string()];
-        assert_eq!(overlay_dir_verdict(1, 0, &hit, &off).verdict.tag(), "NOTE");
+        assert_eq!(synth_dir_verdict(1, 0, &hit, &off).verdict.tag(), "WARN");
         assert_eq!(
-            overlay_dir_verdict(2, 1, &[], &[]).evidence,
-            "2 overlay dir(s) clean, but 1 could not be read and were not checked"
+            synth_dir_verdict(2, 1, &[], &[]).evidence,
+            "2 parent(s) clean, but 1 could not be read and were not checked"
         );
 
         let many: Vec<String> = (0..7).map(|i| format!("/product/overlay/V{i} dev 35")).collect();
-        let c = overlay_dir_verdict(0, 0, &[], &many);
+        let c = synth_dir_verdict(0, 0, &[], &many);
         assert!(c.evidence.ends_with("/product/overlay/V4 dev 35, +2 more"), "{}", c.evidence);
     }
 
@@ -2031,12 +2421,12 @@ mod tests {
     fn a_measured_xattr_disagreement_is_reported_even_when_nothing_was_hidden() {
         let who = "uid 10384 (hidden)";
         let c = xattr_verdict(who, 40, 0, 3, 0);
-        assert_eq!(c.verdict.tag(), "NOTE", "{}", c.evidence);
+        assert_eq!(c.verdict.tag(), "WARN", "{}", c.evidence);
         assert!(c.evidence.contains("3 of 40"), "{}", c.evidence);
 
         assert_eq!(xattr_verdict(who, 40, 0, 0, 0).verdict.tag(), "UNMEASURED");
         assert_eq!(xattr_verdict(who, 40, 0, 0, 5).verdict.tag(), "PASS");
-        assert_eq!(xattr_verdict(who, 40, 0, 2, 5).verdict.tag(), "NOTE");
+        assert_eq!(xattr_verdict(who, 40, 0, 2, 5).verdict.tag(), "WARN");
         assert_eq!(xattr_verdict(who, 40, 1, 2, 5).verdict.tag(), "FAIL");
     }
 
