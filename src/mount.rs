@@ -2739,11 +2739,10 @@ mod tests {
     #[test]
     fn stale_rules_are_pruned_deepest_first() {
         let (live, _) = parse_live_rules(
-            &"/system/etc/d -> /m/d\n\
+            "/system/etc/d -> /m/d\n\
              /system/etc/d/a/b -> /m/d/a/b\n\
              /system/etc/d/a -> /m/d/a\n\
-             /system/etc/z -> /m/z\n"
-                .to_string(),
+             /system/etc/z -> /m/z\n",
             &HashSet::new(),
         );
         let order: Vec<String> =
