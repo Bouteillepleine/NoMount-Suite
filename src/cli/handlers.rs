@@ -63,7 +63,7 @@ fn pass_guard() -> Option<crate::mount::PassLock> {
 pub fn handle_vfs(action: VfsAction) -> Result<()> {
     let nm = Nm::new();
     match action {
-        VfsAction::Add { virtual_path, real_path } => {
+        VfsAction::Add { virtual_path, real_path, uid_excluded } => {
             let virt = Path::new(&virtual_path);
             let real = Path::new(&real_path);
             // is_partition_root counts the components as typed; nm does not normalise and
@@ -101,11 +101,17 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
                     real.display()
                 );
             }
-            nm.add(Path::new(&virtual_path), real)?;
+            match uid_excluded {
+                None => nm.add(Path::new(&virtual_path), real)?,
+                Some(spec) => {
+                    let deny = crate::blocklist::resolve_appid_list(&spec)?;
+                    nm.add_scoped(Path::new(&virtual_path), real, &deny)?;
+                }
+            }
             println!("ok");
         }
         VfsAction::Del { virtual_path } => {
-            nm.del(Path::new(&virtual_path))?;
+            nm.del_any(Path::new(&virtual_path))?;
             println!("ok");
         }
         VfsAction::Whiteout { path } => {

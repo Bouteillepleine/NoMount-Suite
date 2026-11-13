@@ -254,6 +254,40 @@ pub(crate) fn source_of(row: &MountRow, roots: &HashMap<String, PathBuf>) -> Opt
     })
 }
 
+/// The operator's opt-in APK exclusion list, resolved once per process: resolving it
+/// shells out to `pm`, and one absorb pass can touch many rules.
+fn apk_scope_cached() -> &'static std::result::Result<Vec<u32>, String> {
+    static S: std::sync::OnceLock<std::result::Result<Vec<u32>, String>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| crate::blocklist::apk_scope().map_err(|e| e.to_string()))
+}
+
+/// Install an injection, scoped when the target is an APK and the operator opted in by
+/// listing apps in apkscope. Everything else keeps the legacy unscoped shape, so the
+/// RCU fast path is only given up where it was asked for.
+///
+/// A list we cannot resolve REFUSES the rule. Serving it unscoped would hand the patched
+/// APK to the very app being hidden from, and silently -- the operator would believe the
+/// exclusion held.
+fn add_rule(nm: &Nm, target: &Path, source: &Path) -> bool {
+    if !is_app_apk(target) {
+        return nm.add(target, source).is_ok();
+    }
+    match apk_scope_cached() {
+        Ok(deny) if deny.is_empty() => nm.add(target, source).is_ok(),
+        Ok(deny) => nm.add_scoped(target, source, deny).is_ok(),
+        Err(why) => {
+            eprintln!(
+                "nomount: absorb: not serving {} - {} could not be resolved ({why}); serving it \
+                 unscoped would show the patched APK to the app you are hiding it from",
+                target.display(),
+                crate::blocklist::APKSCOPE_PATH
+            );
+            false
+        }
+    }
+}
+
 pub(crate) fn is_app_apk(target: &Path) -> bool {
     if !target.starts_with("/data/app/") {
         return false;
@@ -914,7 +948,7 @@ fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> u32 {
         if is_app_apk(target) && !label_apk_readable(source) {
             continue;
         }
-        if nm.add(target, source).is_ok() {
+        if add_rule(nm, target, source) {
             n += 1;
         }
     }
@@ -1079,12 +1113,12 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
         Some(cur) if cur.as_path() == source && already_serving(target, source) => true,
         Some(prev) => {
             let prev = prev.clone();
-            let _ = nm.del(target);
-            if nm.add(target, source).is_ok() {
+            let _ = nm.del_any(target);
+            if add_rule(nm, target, source) {
                 return true;
             }
             #[allow(clippy::needless_return)]
-            if nm.add(target, &prev).is_ok() {
+            if add_rule(nm, target, &prev) {
                 eprintln!(
                     "nomount: absorb: could not re-point {} at {} -- restored the previous rule",
                     target.display(),
@@ -1099,7 +1133,7 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
             false
         }
         None => {
-            if nm.add(target, source).is_ok() {
+            if add_rule(nm, target, source) {
                 return true;
             }
             eprintln!(
@@ -1261,7 +1295,7 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
             Ok(Some(now)) if now != *target => {
                 if add_repointing(nm, &now, &source, &live) {
                     rewrite_absorbed_after_refresh(&[(target.to_path_buf(), now.clone())], &[]);
-                    let _ = nm.del(target);
+                    let _ = nm.del_any(target);
                     moved.push((target.to_path_buf(), now));
                     repointed += 1;
                 } else {
@@ -1274,7 +1308,7 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                 }
             }
             Ok(_) => {
-                let _ = nm.del(target);
+                let _ = nm.del_any(target);
                 dropped.push(target.to_path_buf());
                 stale += 1;
             }
@@ -1442,7 +1476,7 @@ fn take_over_empty_dir(
     let was_durable = durable.contains(&t_str);
     let ours = was_durable || record.iter().any(|(t, _)| t == target);
     if ours {
-        let _ = nm.del(target);
+        let _ = nm.del_any(target);
     }
     pop_owned(target, pops);
     if still_mounted(target) {
@@ -1659,7 +1693,7 @@ fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
                         target.display()
                     );
                 } else {
-                    let _ = nm.del(&target);
+                    let _ = nm.del_any(&target);
                     record.retain(|(t, _)| *t != target);
                     println!(
                         "released the hide on {} (now on the opt-out list)",
@@ -1740,7 +1774,7 @@ fn absorb_rom_tmpfs(dry_run: bool, early: bool) -> TmpfsPass {
         if tmpfs_entry_lives(seen.contains(t), seen_boot, &boot, is_mounted) {
             return true;
         }
-        let _ = nm.del(t);
+        let _ = nm.del_any(t);
         println!(
             "restored {}: nothing mounts a tmpfs there any more, so it is no longer hidden",
             t.display()

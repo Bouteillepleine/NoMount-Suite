@@ -137,6 +137,10 @@ pub enum VfsAction {
         virtual_path: String,
         /// The file that actually gets served, normally under /data/adb
         real_path: String,
+        /// Apps that must NOT see it - package names, globs or appids, comma separated
+        /// (e.g. com.google.android.gms). One entry covers that app under every user.
+        #[arg(long, value_name = "APPS")]
+        uid_excluded: Option<String>,
     },
     /// Remove one live rule
     Del {
@@ -303,7 +307,11 @@ mod tests {
             Commands::Reload,
             Commands::Absorb { dry_run: false, include_dirs: false, early: false },
             Commands::Vfs {
-                action: VfsAction::Add { virtual_path: "/a".into(), real_path: "/b".into() },
+                action: VfsAction::Add {
+                    virtual_path: "/a".into(),
+                    real_path: "/b".into(),
+                    uid_excluded: None,
+                },
             },
             Commands::Vfs { action: VfsAction::Whiteout { path: "/a".into() } },
             Commands::Whiteout { action: WhiteoutAction::Add { path: "/a".into(), force: false } },
@@ -357,7 +365,11 @@ mod tests {
                 },
             },
             Commands::Vfs {
-                action: VfsAction::Add { virtual_path: "/a".into(), real_path: "/b".into() },
+                action: VfsAction::Add {
+                    virtual_path: "/a".into(),
+                    real_path: "/b".into(),
+                    uid_excluded: None,
+                },
             },
             Commands::Vfs { action: VfsAction::Del { virtual_path: "/a".into() } },
             Commands::Vfs { action: VfsAction::Whiteout { path: "/a".into() } },

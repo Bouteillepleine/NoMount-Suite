@@ -188,8 +188,67 @@ impl Nm {
             .map(drop)
     }
 
+    /// Serve the rule to everyone EXCEPT these appids. The scope is `all` because that
+    /// is what an exclusion means on its own: visible by default, minus the named apps.
+    pub fn add_scoped(&self, virtual_path: &Path, real: &Path, deny: &[u32]) -> Result<()> {
+        if deny.is_empty() {
+            return self.add(virtual_path, real);
+        }
+        let public = crate::pmcache::is_public(virtual_path);
+        let list = deny
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut args: Vec<&str> = vec!["rule", "add"];
+        if public {
+            args.push("--public");
+        }
+        args.push("--uid-range");
+        args.push("all");
+        args.push("--uid-excluded");
+        args.push(&list);
+        args.push(path_str(virtual_path)?);
+        args.push(path_str(real)?);
+        self.run(&args).map(drop)
+    }
+
     pub fn del(&self, virtual_path: &Path) -> Result<()> {
         self.run(&["del", path_str(virtual_path)?]).map(drop)
+    }
+
+    /// Remove a rule whatever its scope. `nm del` sends no scope, and the delete key is
+    /// the WHOLE scope, so a plain delete cannot match a scoped rule -- it would fail
+    /// forever and leave an orphan. Only a failure pays for the extra list, so the
+    /// unscoped case still costs one call.
+    pub fn del_any(&self, virtual_path: &Path) -> Result<()> {
+        if self.del(virtual_path).is_ok() {
+            return Ok(());
+        }
+        let listing = self.list()?;
+        let deny = crate::nm::parse_list(&listing)
+            .into_iter()
+            .find(|r| r.target == virtual_path && !r.deny.is_empty())
+            .map(|r| r.deny)
+            .unwrap_or_default();
+        if deny.is_empty() {
+            bail!("no rule to delete at {}", virtual_path.display());
+        }
+        self.del_scoped(virtual_path, &deny)
+    }
+
+    pub fn del_scoped(&self, virtual_path: &Path, deny: &[u32]) -> Result<()> {
+        let list = deny.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+        self.run(&[
+            "rule",
+            "del",
+            "--uid-range",
+            "all",
+            "--uid-excluded",
+            &list,
+            path_str(virtual_path)?,
+        ])
+        .map(drop)
     }
 
     pub fn whiteout(&self, path: &Path) -> Result<()> {
@@ -432,6 +491,13 @@ pub(crate) struct LiveRule {
     pub uid: u32,
     pub kind: LiveKind,
     pub public: bool,
+    /// The rule carries a uid range or an exclusion, which the Suite never asks
+    /// for -- so something else put it there. It matters because the delete key
+    /// is the whole scope: a plain `nm del <path>` cannot match one of these,
+    /// and pruning it would fail on every pass forever.
+    pub scoped: bool,
+    /// The excluded appids, parsed from `[DENY: a,b]`. Empty when unscoped.
+    pub deny: Vec<u32>,
 }
 
 /// `isolated=N erofs=N`, the whole of what `nm knobs` prints. A missing field is None
@@ -468,11 +534,29 @@ pub(crate) fn parse_list_counted(list: &str) -> (Vec<LiveRule>, usize) {
 }
 
 fn parse_line(line: &str) -> Option<LiveRule> {
-    let uid: u32 = line
-        .split_once(" [UID:")
-        .and_then(|(_, r)| r.trim_start().trim_end_matches(']').trim().parse().ok())
+    // Markers trail the path section and any of them may be absent: a Morphe
+    // rule is uid 0, so it prints no [UID:] at all and only [SCOPE:]/[DENY:].
+    // Cutting at the FIRST marker present keeps a scope out of the source path.
+    let cut = ["[UID:", "[SCOPE:", "[DENY:"]
+        .iter()
+        .filter_map(|m| line.find(m))
+        .min();
+    let (head, tail) = match cut {
+        Some(i) => line.split_at(i),
+        None => (line, ""),
+    };
+    let uid: u32 = tail
+        .split_once("[UID:")
+        .and_then(|(_, r)| r.split(']').next())
+        .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
-    let mut l = line.split(" [UID:").next().unwrap_or(line).trim();
+    let scoped = tail.contains("[SCOPE:") || tail.contains("[DENY:");
+    let deny: Vec<u32> = tail
+        .split_once("[DENY:")
+        .and_then(|(_, r)| r.split(']').next())
+        .map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    let mut l = head.trim();
     if l.is_empty() {
         return None;
     }
@@ -503,6 +587,8 @@ fn parse_line(line: &str) -> Option<LiveRule> {
             uid,
             kind,
             public,
+            scoped,
+            deny,
         });
     }
     let (t, s) = l.rsplit_once(" -> ")?;
@@ -516,12 +602,65 @@ fn parse_line(line: &str) -> Option<LiveRule> {
         uid,
         kind: LiveKind::Inject,
         public,
+        scoped,
+        deny,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Morphe rule is uid 0, so it prints no [UID:] marker at all -- only
+    /// [SCOPE:] and [DENY:]. Splitting on " [UID:" alone would leave those
+    /// markers glued to the source path and silently corrupt it.
+    #[test]
+    fn a_scoped_rule_is_flagged_and_does_not_bleed_into_the_source_path() {
+        let line = "/data/app/x/base.apk -> /data/adb/modules/m/base.apk \
+[SCOPE: 0-4294967295] [DENY: 10397]";
+        let r = parse_line(line.replace(" \\\n", " ").as_str()).expect("parsed");
+        assert_eq!(r.target, PathBuf::from("/data/app/x/base.apk"));
+        assert_eq!(
+            r.source,
+            Some(PathBuf::from("/data/adb/modules/m/base.apk")),
+            "the scope markers must not end up in the source path"
+        );
+        assert!(r.scoped, "a scoped rule is not ours to prune");
+        assert_eq!(r.uid, 0);
+    }
+
+    /// The deny list is a comma-separated set of appids, not a range. The commas
+    /// must not be read as a field separator anywhere in the parse, or a rule
+    /// hiding from two apps would truncate to one and look prunable.
+    #[test]
+    fn a_multi_appid_deny_parses_and_stays_scoped() {
+        let r = parse_line("/data/app/x/base.apk -> /data/adb/rvhc/m.apk [DENY: 10170,10397]")
+            .expect("parsed");
+        assert_eq!(r.target, PathBuf::from("/data/app/x/base.apk"));
+        assert_eq!(
+            r.source,
+            Some(PathBuf::from("/data/adb/rvhc/m.apk")),
+            "a comma in the deny set must not bleed into the source path"
+        );
+        assert!(r.scoped);
+        assert_eq!(r.uid, 0);
+        assert_eq!(
+            r.deny,
+            vec![10170, 10397],
+            "del_any deletes using exactly this set, so a misparse orphans the rule"
+        );
+    }
+
+    #[test]
+    fn a_legacy_rule_is_unchanged_and_not_scoped() {
+        let r = parse_line("/a -> /b [UID: 1000]").expect("parsed");
+        assert_eq!(r.uid, 1000);
+        assert_eq!(r.source, Some(PathBuf::from("/b")));
+        assert!(!r.scoped);
+        let r2 = parse_line("/a -> /b").expect("parsed");
+        assert_eq!(r2.uid, 0);
+        assert!(!r2.scoped);
+    }
 
     #[test]
     fn public_adds_the_flag_before_the_paths() {

@@ -59,6 +59,17 @@ The WebUI does all of this. From a shell: `nomount check`, `reload`,
 rest. To report a problem, attach what **Checks → Developer tools → Export**
 writes.
 
+To hide one rule from named apps, rather than from everyone:
+
+```sh
+nomount vfs add --uid-excluded com.google.android.gms /rom/path /data/adb/...
+```
+
+Entries are package names, globs or appids, comma separated. An appid covers that
+app under every user, work profile included. To hide an **absorbed APK** the same
+way, list those apps in `/data/adb/nomount/apkscope`, one per line — absent means
+off, which is the default.
+
 ## Building
 
 ```sh

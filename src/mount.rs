@@ -973,10 +973,30 @@ enum LiveRule {
     Whiteout,
 }
 
-fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
-    crate::nm::parse_list(list)
+/// Returns the rules this Suite could own, and a count of the ones it cannot.
+///
+/// A scoped rule -- a uid range or an exclusion -- was put there by another
+/// writer, because the Suite only ever adds legacy-shaped rules. Keeping it out
+/// of the reconciler's map is what stops the prune pass from trying to delete
+/// it: the delete key is the whole scope, `nm del <path>` sends none of it, so
+/// the attempt could never succeed and would be retried on every single pass.
+fn parse_live_rules(
+    list: &str,
+    ours: &HashSet<PathBuf>,
+) -> (HashMap<(PathBuf, u32), LiveRule>, u32) {
+    let mut foreign = 0u32;
+    let map = crate::nm::parse_list(list)
         .into_iter()
         .filter_map(|r| {
+            if r.scoped {
+                // A scope on a target we absorbed is one WE wrote, under apkscope.
+                // Counting it as another writer's would report the Suite's own rule
+                // back to the operator as something it must not touch.
+                if !ours.contains(&r.target) {
+                    foreign += 1;
+                }
+                return None;
+            }
             let kind = match r.kind {
                 crate::nm::LiveKind::Inject => LiveRule::Inject(r.source?),
                 crate::nm::LiveKind::Whiteout => LiveRule::Whiteout,
@@ -984,7 +1004,8 @@ fn parse_live_rules(list: &str) -> HashMap<(PathBuf, u32), LiveRule> {
             };
             Some(((r.target, r.uid), kind))
         })
-        .collect()
+        .collect();
+    (map, foreign)
 }
 
 fn prune_order(live: &HashMap<(PathBuf, u32), LiveRule>) -> Vec<&(PathBuf, u32)> {
@@ -1014,8 +1035,17 @@ pub fn run_reload() -> Result<()> {
     nm.version()
         .context("hookless NoMount engine not responding - is the CONFIG_NOMOUNT kernel loaded?")?;
 
+    // Read before the live listing: a scoped rule on one of these targets is one WE
+    // put there (an absorbed APK rule under apkscope), not another writer's.
+    let mut absorbed = crate::absorb::read_absorbed_targets()
+        .context("cannot read the absorbed-rule record - refusing to reload, because an empty record here would prune every absorbed rule")?;
+    absorbed.extend(
+        crate::absorb::read_absorbed_tmpfs_targets()
+            .context("cannot read the ROM-tmpfs takeover record - refusing to reload, because an empty record here would prune every takeover whiteout")?,
+    );
+
     let live_txt = nm.list().context("nm list failed during reload")?;
-    let live = parse_live_rules(&live_txt);
+    let (live, foreign) = parse_live_rules(&live_txt, &absorbed);
     // What the engine was last given per target: a source path can be unchanged
     // while the file behind it is not, and the live rule text cannot show that.
     let last_served = crate::rulestate::read();
@@ -1059,13 +1089,6 @@ pub fn run_reload() -> Result<()> {
     )
     .into_iter()
     .collect();
-    let mut absorbed = crate::absorb::read_absorbed_targets()
-        .context("cannot read the absorbed-rule record - refusing to reload, because an empty record here would prune every absorbed rule")?;
-    absorbed.extend(
-        crate::absorb::read_absorbed_tmpfs_targets()
-            .context("cannot read the ROM-tmpfs takeover record - refusing to reload, because an empty record here would prune every takeover whiteout")?,
-    );
-
     let (mut added, mut changed, mut removed, mut failed) = (0u32, 0u32, 0u32, 0u32);
     let mounted = crate::absorb::mounted_targets().context(
         "cannot read /proc/self/mountinfo - refusing to serve, because assuming \"nothing is mounted\" injects over live mounts and strands each one in mountinfo until reboot",
@@ -1148,7 +1171,7 @@ pub fn run_reload() -> Result<()> {
         if !prunable(t, *uid, wanted, &durable_whiteouts, &absorbed) {
             continue;
         }
-        if nm.del(t).is_ok() {
+        if nm.del_any(t).is_ok() {
             removed += 1;
         } else {
             failed += 1;
@@ -1203,7 +1226,8 @@ pub fn run_reload() -> Result<()> {
 
     println!(
         "nomount reload: +{added} ~{changed} -{removed} rules, +{bind_added} -{bind_removed} binds, \
-         {failed} failed, {skipped} blocklisted (gap-free)"
+         {failed} failed, {skipped} blocklisted{} (gap-free)",
+        if foreign > 0 { format!(", {foreign} left to another writer") } else { String::new() }
     );
     if !pm.is_empty() {
         let shown: Vec<String> =
@@ -2714,11 +2738,12 @@ mod tests {
 
     #[test]
     fn stale_rules_are_pruned_deepest_first() {
-        let live = parse_live_rules(
+        let (live, _) = parse_live_rules(
             "/system/etc/d -> /m/d\n\
              /system/etc/d/a/b -> /m/d/a/b\n\
              /system/etc/d/a -> /m/d/a\n\
              /system/etc/z -> /m/z\n",
+            &HashSet::new(),
         );
         let order: Vec<String> =
             prune_order(&live).iter().map(|(t, _)| t.display().to_string()).collect();
@@ -2767,9 +2792,30 @@ mod tests {
         }
     }
 
+    /// A scoped rule on a target we absorbed is one the Suite wrote itself, under
+    /// apkscope. Counting it as another writer's made reload report the Suite's own
+    /// rule back to the operator as untouchable.
+    #[test]
+    fn our_own_scoped_absorbed_rule_is_not_foreign() {
+        let line = "/data/app/x/base.apk -> /data/adb/rvhc/m.apk [SCOPE: 0-4294967295] [DENY: 10397]\n";
+        let (_, foreign) = parse_live_rules(line, &HashSet::new());
+        assert_eq!(foreign, 1, "with no absorbed record it IS another writer's");
+
+        let ours: HashSet<PathBuf> = [PathBuf::from("/data/app/x/base.apk")].into_iter().collect();
+        let (map, foreign) = parse_live_rules(line, &ours);
+        assert_eq!(foreign, 0, "a scope on a target we absorbed is ours");
+        assert!(
+            !map.contains_key(&(PathBuf::from("/data/app/x/base.apk"), 0)),
+            "it still stays out of the map: the prune pass has no key for a scoped delete"
+        );
+    }
+
     #[test]
     fn live_rules_are_keyed_including_uid() {
-        let m = parse_live_rules("/a -> /b\n/a -> /c [UID: 1000]\n/d (whiteout)\n/e (virtual dir)\n");
+        let (m, _) = parse_live_rules(
+            "/a -> /b\n/a -> /c [UID: 1000]\n/d (whiteout)\n/e (virtual dir)\n",
+            &HashSet::new(),
+        );
         assert_eq!(m.len(), 3);
         assert!(m.contains_key(&(PathBuf::from("/a"), 0)));
         assert!(m.contains_key(&(PathBuf::from("/a"), 1000)));
