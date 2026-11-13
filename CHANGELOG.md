@@ -6,14 +6,11 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
-## v1.3.212 — engine v36 (the engine changes below need a kernel rebuild)
+## v1.3.212 — engine v36 (needs a kernel rebuild)
 
-- A rule can be hidden from named apps: `nomount vfs add --uid-excluded <pkg,...>`.
-  One appid covers that app under every user, work profile included.
-- `absorb` can hide an absorbed APK from those apps too. Opt in by listing them in
-  `/data/adb/nomount/apkscope`; absent means off.
-- A uid-scoped rule was served to every uid once any permitted uid had looked the path
-  up. Fixed, and the legacy `--uid` scope leaked the same way.
+- Hide a rule from named apps: `nomount vfs add --uid-excluded <pkg,...>`. One entry covers that app under every user.
+- `absorb` can do the same for an absorbed APK. Opt in with `/data/adb/nomount/apkscope`.
+- A uid-scoped rule leaked to every uid once a permitted one looked it up. Legacy `--uid` too.
 
 ## v1.3.210 — engine v34 (the engine fixes below need a kernel rebuild)
 
