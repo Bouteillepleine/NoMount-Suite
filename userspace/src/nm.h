@@ -158,20 +158,52 @@ static noinline int parse_u32(const char *s, unsigned int *out) {
     return 0;
 }
 
+#define NM_DENY_MAX        8
+#define NM_PER_USER_RANGE  100000u
+
 /* "all" or "A-B". "all" is the whole uid space, which is how a rule says
  * "everyone" while still carrying an exclusion.
  */
-#define NM_DENY_MAX        8
-#define NM_PER_USER_RANGE  100000u
+static noinline int parse_range(const char *s, unsigned int *lo, unsigned int *hi) {
+    char head[16];
+    int i = 0;
+
+    if (strcmp(s, "all") == 0) { *lo = 0; *hi = 0xFFFFFFFFu; return 0; }
+    for (; s[i] && s[i] != '-'; i++) {
+        if (i >= 15) return -1;
+        head[i] = s[i];
+    }
+    if (s[i] != '-') return -1;
+    head[i] = 0;
+    if (parse_u32(head, lo)) return -1;
+    return parse_u32(s + i + 1, hi);
+}
 
 /* Comma-separated APPIDS, e.g. "10397,10170". Sorted and de-duplicated here so
  * the engine's canonical-order check passes whatever order the caller typed. A
  * duplicate is an error rather than silently dropped: it usually means someone
  * passed raw uids for the same app under two users, which is the mistake this
  * whole appid model exists to prevent.
+ *
+ * Upstream's C-D range is taken too, as the appids C..D: integrators written
+ * against upstream's CLI send it (Morphe: 1000-1000). Same rules as the list --
+ * appids below NM_PER_USER_RANGE, at most `max` of them.
  */
 static noinline int parse_appid_list(const char *s, unsigned int *out, int max, int *n_out) {
+    const char *p = s;
     int n = 0;
+
+    while (*p && *p != '-') p++;
+    if (*p) {
+        unsigned int lo, hi, t;
+
+        if (parse_range(s, &lo, &hi)) return -1;
+        if (lo > hi) { t = lo; lo = hi; hi = t; }  /* upstream's engine swaps too */
+        if (hi >= NM_PER_USER_RANGE || hi - lo >= (unsigned int)max) return -1;
+        while (lo <= hi) out[n++] = lo++;
+        *n_out = n;
+        return 0;
+    }
 
     for (;;) {
         char buf[16];
@@ -192,21 +224,6 @@ static noinline int parse_appid_list(const char *s, unsigned int *out, int max, 
     }
     *n_out = n;
     return 0;
-}
-
-static noinline int parse_range(const char *s, unsigned int *lo, unsigned int *hi) {
-    char head[16];
-    int i = 0;
-
-    if (strcmp(s, "all") == 0) { *lo = 0; *hi = 0xFFFFFFFFu; return 0; }
-    for (; s[i] && s[i] != '-'; i++) {
-        if (i >= 15) return -1;
-        head[i] = s[i];
-    }
-    if (s[i] != '-') return -1;
-    head[i] = 0;
-    if (parse_u32(head, lo)) return -1;
-    return parse_u32(s + i + 1, hi);
 }
 
 static noinline void print_str(const char *s) {

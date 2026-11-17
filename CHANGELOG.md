@@ -6,6 +6,11 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.213 — engine v36 (unchanged)
+
+- `nm --uid-excluded` takes upstream's `C-D` range again, read as those appids, so Morphe's "NoMount only" installs work. v1.3.212 took only a comma-separated list and refused `1000-1000`.
+- `nm rule list` answers, which Morphe uses to spot an existing redirect and clear a stale one.
+
 ## v1.3.212 — engine v36 (needs a kernel rebuild)
 
 - Hide a rule from named apps: `nomount vfs add --uid-excluded <pkg,...>`. One entry covers that app under every user.

@@ -331,6 +331,13 @@ jobs:
           install -Dm755 /tmp/kol/lkmloader module/bin/ko-loader-arm64
           file module/bin/ko-loader-arm64
 
+      - name: Check nm's --uid-excluded parsing (upstream C-D form)
+        run: |
+          zig cc -target x86_64-linux -Oz -static -nostdlib -ffreestanding \
+            -fno-unwind-tables -Wno-invalid-noreturn -Wl,--entry=_start \
+            tests/nm-parse-check.c -o "$RUNNER_TEMP/nm-parse-check"
+          "$RUNNER_TEMP/nm-parse-check"
+
       - name: Build nm (freestanding netlink client)
         run: |
           make -C userspace/tools/sstrip

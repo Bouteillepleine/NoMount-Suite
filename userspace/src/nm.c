@@ -61,10 +61,11 @@ void c_main(long *sp) {
     int arg_start = 2;
 
     if (cmd == 'R') {
-        if (argc < 3) { print_err("nm: rule add|del\n"); exit_code = 3; goto do_exit; }
+        if (argc < 3) { print_err("nm: rule add|del|list\n"); exit_code = 3; goto do_exit; }
         if (strcmp(argv[2], "add") == 0) cmd = 'A';
         else if (strcmp(argv[2], "del") == 0) cmd = 'D';
-        else { print_err("nm: rule add|del\n"); exit_code = 3; goto do_exit; }
+        else if (strcmp(argv[2], "list") == 0) cmd = 'l';
+        else { print_err("nm: rule add|del|list\n"); exit_code = 3; goto do_exit; }
         arg_start = 3;
     }
 
@@ -83,7 +84,8 @@ void c_main(long *sp) {
         } else if (strcmp(argv[i], "--uid-excluded") == 0 && i + 1 < argc) {
             if (parse_appid_list(argv[++i], sc_deny, NM_DENY_MAX, &sc_deny_n)) {
                 print_err("nm: --uid-excluded takes up to 8 distinct appids, "
-                          "comma separated, each below 100000 (e.g. 10397,10170)\n");
+                          "each below 100000, comma separated (e.g. 10397,10170) "
+                          "or as a range (e.g. 1000-1000)\n");
                 exit_code = 3; goto do_exit; }
             scoped = 1;
         } else if (argv[i][0] == '-' && argv[i][1] == '-') {

@@ -1,14 +1,11 @@
-**v1.3.210 — engine v34 (needs a kernel rebuild)**
+**v1.3.213 — engine v36 (unchanged)**
 
-- statmount/listmount leak closed
-- root-granted apps concealed automatically
-- accepted findings kept out of the report
-- module pinned while rules are live
-- `nm knobs` reads the live knob state
+- `nm --uid-excluded` takes upstream's `C-D` range again, read as those appids, so Morphe's "NoMount only" installs work. v1.3.212 took only a comma-separated list and refused `1000-1000`.
+- `nm rule list` answers, which Morphe uses to spot an existing redirect and clear a stale one.
 
-> `00_` for a kernel with NoMount built in, `01_` LKM for one without.
+> `00_NoMount-Module` for a kernel with NoMount built in, `01_NoMount-Module-LKM` for one without.
 
 ```
-4ae0e3b8e723b03a84b457e59072411bac13650e9786cac92a5fba8aad1e2f41  00_NoMount-Module-v1.3.210.zip
-4c2c43b2752813240cb45edeb381dd50659f4ef7eeb3b2b8df68121c033ce037  01_NoMount-Module-LKM-v1.3.210.zip
+caf7d6fd0fbeb02ea2869af2a343b836e8d2312978d7250c078b5145e64f445d  00_NoMount-Module-v1.3.213.zip
+8a747426c2f201f43c446198a89c890e61c4ae1686d8793144a9baea58e3b231  01_NoMount-Module-LKM-v1.3.213.zip
 ```
