@@ -1,12 +1,11 @@
-**v1.3.212 — engine v36 (needs a kernel rebuild)**
+**v1.3.213 — engine v36 (unchanged)**
 
-- Hide a rule from named apps: `nomount vfs add --uid-excluded <pkg,...>`. One entry covers that app under every user.
-- `absorb` can do the same for an absorbed APK. Opt in with `/data/adb/nomount/apkscope`.
-- A uid-scoped rule leaked to every uid once a permitted one looked it up. Legacy `--uid` too.
+- `nm --uid-excluded` takes upstream's `C-D` range again, read as those appids, so Morphe's "NoMount only" installs work. v1.3.212 took only a comma-separated list and refused `1000-1000`.
+- `nm rule list` answers, which Morphe uses to spot an existing redirect and clear a stale one.
 
 > `00_NoMount-Module` for a kernel with NoMount built in, `01_NoMount-Module-LKM` for one without.
 
 ```
-ad5e378ba4cf0a11eba8b2bfcfdb58970c869e450a0c973637a06d1c9390d957  00_NoMount-Module-v1.3.212.zip
-e2325130a43a40a2218b138001f2245615b70368e5a502a59a6be46c2271a06c  01_NoMount-Module-LKM-v1.3.212.zip
+caf7d6fd0fbeb02ea2869af2a343b836e8d2312978d7250c078b5145e64f445d  00_NoMount-Module-v1.3.213.zip
+8a747426c2f201f43c446198a89c890e61c4ae1686d8793144a9baea58e3b231  01_NoMount-Module-LKM-v1.3.213.zip
 ```
