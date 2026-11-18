@@ -2972,6 +2972,7 @@ static void nm_tag_passthrough_dentry(struct dentry *dentry)
 static void nm_retag_passthrough_dentry(struct dentry *dentry)
 {
     const struct dentry_operations *orig, *chain;
+    bool drop = false;
 
     spin_lock(&dentry->d_lock);
 #ifdef DCACHE_DONTCACHE
@@ -2998,11 +2999,33 @@ static void nm_retag_passthrough_dentry(struct dentry *dentry)
 
     spin_lock(&dentry->d_lock);
     if (dentry->d_op == orig) {
-        WRITE_ONCE(dentry->d_op, chain);
-        if (!(dentry->d_flags & DCACHE_OP_REVALIDATE))
-            smp_store_release(&dentry->d_flags, dentry->d_flags | DCACHE_OP_REVALIDATE);
+        if (dentry->d_flags & DCACHE_OP_REVALIDATE) {
+            /* Both tables answer d_revalidate, so swapping the pointer is the
+             * whole job: a walker reads one or the other and either way has a
+             * call it can make.
+             */
+            WRITE_ONCE(dentry->d_op, chain);
+        } else {
+            /* No flag means the table being replaced has no d_revalidate, and
+             * raising it on a hashed dentry is not safe at any kernel version:
+             * fs/namei.c does
+             *     if (dentry->d_flags & DCACHE_OP_REVALIDATE)
+             *             return dentry->d_op->d_revalidate(...);
+             * unconditionally, and an RCU walker on another CPU reads those two
+             * with nothing ordering them on its side, so it can pair the new
+             * flag with the stale d_op and call through a NULL pointer. A
+             * release store here cannot close that: the missing barrier is the
+             * reader's. Unhash instead -- the next lookup comes back through
+             * nomount_hijacked_lookup and is tagged while still unhashed, which
+             * is safe everywhere.
+             */
+            drop = true;
+        }
     }
     spin_unlock(&dentry->d_lock);
+
+    if (drop)
+        d_drop(dentry);
 }
 
 static void nomount_hijacked_put_super(struct super_block *sb)
