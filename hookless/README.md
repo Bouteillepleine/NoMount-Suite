@@ -80,8 +80,8 @@ Turning off CFI or LTO, or passing `-fno-plt`, changes nothing, and the two
 asserts must not be edited out to get past it. The engine now carries weak
 default definitions that a tree with the cloaks overrides, so if you meet that
 message on an older engine, update `nomount.c` rather than the linker script.
-The compile matrix builds objects and never links a kernel, which is how this
-stayed green.
+The compile matrix only built objects then, which is how this stayed green; it
+now links one kernel from this directory alone.
 
 SUSFS and the engine go into the same kernel: all three builders above apply
 both, and that combination is what ships. They apply this patch first, at
