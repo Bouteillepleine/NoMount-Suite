@@ -338,7 +338,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            bc bison flex libssl-dev libelf-dev cpio kmod python3 \
+            bc bison flex libssl-dev libelf-dev libdw-dev cpio kmod python3 \
             build-essential git ca-certificates rsync ccache \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu clang lld llvm
           clang --version | head -1
@@ -392,7 +392,7 @@ jobs:
           grep -q '^CONFIG_NOMOUNT=y' out/.config || { echo "FATAL: CONFIG_NOMOUNT did not stick"; exit 1; }
           if ! make $MAKEOPTS -j"$(nproc)" vmlinux > /tmp/nm_link.log 2>&1; then
             grep -E 'error|undefined symbol|Unexpected' /tmp/nm_link.log | sort | uniq -c | head -40 || true
-            echo "FATAL: a kernel built from hookless/ alone does not link"
+            echo "FATAL: a kernel built from hookless/ alone does not build through to a linked vmlinux"
             exit 1
           fi
           tail -3 /tmp/nm_link.log
