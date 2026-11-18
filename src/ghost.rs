@@ -292,8 +292,18 @@ pub fn stale_conceal_entries(entries: &[String], installed: &[(String, u32)]) ->
 /// unreadable or the package map was. An empty `Some` is a real "nothing to conceal".
 fn conceal_uids() -> Option<Vec<u32>> {
     let entries = conceal_entries()?;
+    // The manager is in no list and cannot usefully be in one: a repackaged manager is
+    // rebuilt under a NEW random package name every time, so a name-keyed table goes
+    // stale in silence -- the old name stops resolving, the new one is never added, and
+    // the getpriority UID-visibility oracle reopens on the manager's own running tasks.
+    // Observed twice on the same device, 2026-11-08 and 2026-11-18. Ask the kernel which
+    // appid holds manager status instead; KSUN, SukiSU and ReSukiSU all answer ('K', 10).
+    let manager = crate::ksu::manager_appid().filter(|a| *a != 0);
     if entries.is_empty() && root_granted_packages().is_empty() {
-        return Some(Vec::new());
+        return Some(match manager {
+            Some(a) => expand_ghost_uids(&[a], &device_user_ids()),
+            None => Vec::new(),
+        });
     }
     // There ARE entries and we cannot map them to uids. Reporting that as an empty set
     // would flush the kernel's conceal table and quietly turn getpriority concealment off.
@@ -305,6 +315,9 @@ fn conceal_uids() -> Option<Vec<u32>> {
         }
     }
     let mut appids: Vec<u32> = Vec::new();
+    if let Some(a) = manager {
+        appids.push(a);
+    }
     for e in &entries {
         if let Ok(hits) = crate::blocklist::expand(e, &installed) {
             for (_, uid) in hits {
@@ -595,8 +608,9 @@ pub fn run_sync(verbose: bool) -> Result<()> {
                             stale.join(", ")
                         );
                         println!(
-                            "nomount ghost: that is what a rebuilt manager leaves behind. Apps granted \
-                             root are concealed automatically; drop a dead name or replace it."
+                            "nomount ghost: that is what a rebuilt manager leaves behind. The \
+                             manager itself is resolved from the kernel and stays concealed either \
+                             way, so a dead name conceals nothing and is safe to drop."
                         );
                     }
                 }

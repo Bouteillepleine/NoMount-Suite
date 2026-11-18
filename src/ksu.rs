@@ -26,6 +26,7 @@ const fn ioc(dir: u32, nr: u32, size: u32) -> u32 {
 const GET_INFO: u32 = ioc(DIR_READ, 2, 16);
 const GET_INFO_LEGACY: u32 = ioc(DIR_READ, 2, 0);
 const UID_SHOULD_UMOUNT: u32 = ioc(DIR_READ | DIR_WRITE, 9, 0);
+const GET_MANAGER_APPID: u32 = ioc(DIR_READ, 10, 0);
 const ADD_TRY_UMOUNT: u32 = ioc(DIR_WRITE, 18, 0);
 
 const UMOUNT_ADD: u8 = 1;
@@ -50,6 +51,12 @@ pub struct Info {
 struct ShouldUmountCmd {
     uid: u32,
     should_umount: u8,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ManagerAppidCmd {
+    appid: u32,
 }
 
 #[repr(C, align(8))]
@@ -132,6 +139,22 @@ pub fn uid_should_umount(uid: u32) -> Option<bool> {
     Some(cmd.should_umount != 0)
 }
 
+/// The appid holding manager status, straight from the kernel.
+///
+/// A repackaged manager is rebuilt under a new random package name every time, so
+/// no name-keyed list can track it -- see the conceal set in `ghost.rs`. KernelSU
+/// Next, SukiSU and ReSukiSU all answer this same ioctl with the same struct.
+///
+/// `None` means the question could not be put to the kernel -- never "no manager".
+pub fn manager_appid() -> Option<u32> {
+    if !available() {
+        return None;
+    }
+    let mut cmd = ManagerAppidCmd::default();
+    ksuctl(GET_MANAGER_APPID, &mut cmd).ok()?;
+    Some(cmd.appid)
+}
+
 pub fn global_umount_default() -> Option<bool> {
     uid_should_umount(UNPROFILED_UID)
 }
@@ -162,6 +185,7 @@ mod tests {
         assert_eq!(GET_INFO, 0x8010_4B02);
         assert_eq!(GET_INFO_LEGACY, 0x8000_4B02);
         assert_eq!(UID_SHOULD_UMOUNT, 0xC000_4B09);
+        assert_eq!(GET_MANAGER_APPID, 0x8000_4B0A);
         assert_eq!(ADD_TRY_UMOUNT, 0x4000_4B12);
     }
 }
