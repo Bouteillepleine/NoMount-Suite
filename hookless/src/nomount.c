@@ -290,6 +290,27 @@ static __always_inline bool nm_name_has_hidden_uid_rule(struct nomount_dir_node 
     return found;
 }
 
+/* Whether a rule covers this name at all, visible to the caller or not. */
+static __always_inline bool nm_name_has_rule(struct nomount_dir_node *dir_node,
+                                             const char *name, size_t len, u32 hash)
+{
+    struct nomount_child_node *child;
+    bool found = false;
+
+    if (unlikely(!dir_node)) return false;
+    if (!(READ_ONCE(dir_node->bloom_mask) & (1ULL << (hash & 63)))) return false;
+
+    rcu_read_lock();
+    hash_for_each_possible_rcu(dir_node->children_ht, child, hnode, hash) {
+        if (child->name_hash == hash && child->name_len == len && memcmp(child->name, name, len) == 0) {
+            found = READ_ONCE(child->rule) != NULL;
+            break;
+        }
+    }
+    rcu_read_unlock();
+    return found;
+}
+
 static __always_inline bool nomount_get_rule_info(struct nomount_dir_node *dir_node, const char *name, size_t len, u32 hash, struct nm_rule_info *rule_info, bool get_path)
 {
     struct nomount_child_node *child;
@@ -704,18 +725,29 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
     }
 
 fallback:
-    if (pdir && nomount_is_uid_blocked(current_uid().val) &&
-        nomount_get_rule_info(pdir, name, len,
-                              full_name_hash(NULL, name, len), &rule_info, false)) {
-        nm_tag_passthrough_dentry(dentry);
-        nm_put_rule_info(&rule_info);
-    } else if (pdir && nm_name_has_hidden_uid_rule(pdir, name, len,
-                                                   full_name_hash(NULL, name, len))) {
-        nm_tag_passthrough_dentry(dentry);
-    }
+    {
+        /* Any name a rule covers, whoever is asking: a caller the rule leaves on
+         * the real file (scoped out, deny-listed, hidden from) or one whose
+         * materialization failed. The real dentry it gets must carry
+         * nm_d_revalidate, or the next caller -- one the rule does apply to --
+         * is handed it straight from the dcache. As upstream's nm_hijacked_lookup.
+         */
+        bool tagged = pdir && nm_name_has_rule(pdir, name, len,
+                                               full_name_hash(NULL, name, len));
 
-    if (orig_iop && orig_iop->lookup)
-        ret = orig_iop->lookup(dir, dentry, flags);
+        if (tagged)
+            nm_tag_passthrough_dentry(dentry);
+
+        if (orig_iop && orig_iop->lookup)
+            ret = orig_iop->lookup(dir, dentry, flags);
+
+        /* After the filesystem's lookup, which may set d_op itself (fscrypt and
+         * casefold before 6.9) or splice in an alias, on whatever the caller is
+         * handed.
+         */
+        if (tagged && !IS_ERR(ret))
+            nm_retag_passthrough_dentry(ret ? ret : dentry);
+    }
 
 out:
     if (pdir) nm_dir_node_put(pdir);
@@ -2647,6 +2679,17 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
             return 0;
         return injected ? nm_reval_fresh(dentry, gen) : nm_reval_stale(dentry);
     }
+    /* The name has a rule this caller is scoped out of (system_server under
+     * --uid-excluded 1000), and the dentry is the real one: that is what this
+     * caller should get, so it stays cached for them rather than being looked
+     * up again on every open. A caller the rule does apply to drops it above.
+     * As upstream does since d6cb715.
+     */
+    if (!injected && nm_name_has_hidden_uid_rule(pdir, dentry->d_name.name,
+                                                 dentry->d_name.len, hash)) {
+        nm_dir_node_put(pdir);
+        return 1;
+    }
     nm_dir_node_put(pdir);
     if (injected && nm_stock_only_mismatch(dentry))
         return 0;
@@ -2777,6 +2820,190 @@ static const struct inode_operations nm_dir_iops = {
 static const struct dentry_operations nm_dops = {
     .d_revalidate = nm_d_revalidate,
 };
+
+/* A passthrough dentry is the real one a lookup hands a caller that a scoped
+ * rule leaves on the stock file (system_server under --uid-excluded 1000), or
+ * that a hidden rule is hidden from. The next caller of the name may be one the
+ * rule redirects, and only nm_d_revalidate tells them apart. Without it that
+ * caller reuses the stock dentry from the dcache and never reaches the hijacked
+ * lookup -- nor does anyone after it, while any process keeps the file open.
+ *
+ * nm_dops can only go on a dentry that has no d_op. Where the superblock hands
+ * one out at d_alloc (f2fs and ext4 with casefold or fscrypt since 6.6: every
+ * dentry on Android's /data), the tag used to stop at DCACHE_DONTCACHE. Here
+ * such a dentry gets a copy of its own d_op with d_revalidate chained: ours
+ * first, then the filesystem's, so casefold hashing and fscrypt's no-key-name
+ * checks are kept.
+ *
+ * Copies are made once per original d_op and kept for good: dentries point at
+ * them past every rule, as they do at nm_dops, and the originals are the
+ * filesystems' static tables. One slot per distinct table, not per dentry:
+ * Android uses one to three (casefold, fscrypt, both). The table is static, so
+ * nothing is allocated in lookup; should it ever fill, the dentry is unhashed
+ * after the lookup instead (nm_retag_passthrough_dentry).
+ */
+#define NM_DOPS_CHAIN_MAX 16
+
+struct nm_dops_chain {
+    struct dentry_operations ops;
+    const struct dentry_operations *orig;
+};
+
+static struct nm_dops_chain nm_dops_chains[NM_DOPS_CHAIN_MAX];
+static int nm_dops_chain_n;
+static DEFINE_SPINLOCK(nm_dops_chain_lock);
+
+static bool nm_is_dops_chain(const struct dentry_operations *ops)
+{
+    const void *p = ops;
+
+    return p >= (const void *)nm_dops_chains &&
+           p < (const void *)(nm_dops_chains + NM_DOPS_CHAIN_MAX);
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
+static int nm_d_revalidate_chain(struct inode *dir, const struct qstr *name,
+                                 struct dentry *dentry, unsigned int flags)
+{
+    const struct nm_dops_chain *c =
+        container_of(READ_ONCE(dentry->d_op), const struct nm_dops_chain, ops);
+    int r = nm_d_revalidate(dir, name, dentry, flags);
+
+    if (r <= 0 || !c->orig->d_revalidate) return r;
+    return c->orig->d_revalidate(dir, name, dentry, flags);
+}
+#else
+static int nm_d_revalidate_chain(struct dentry *dentry, unsigned int flags)
+{
+    const struct nm_dops_chain *c =
+        container_of(READ_ONCE(dentry->d_op), const struct nm_dops_chain, ops);
+    int r = nm_d_revalidate(dentry, flags);
+
+    if (r <= 0 || !c->orig->d_revalidate) return r;
+    return c->orig->d_revalidate(dentry, flags);
+}
+#endif
+
+static const struct dentry_operations *nm_get_dops_chain(const struct dentry_operations *orig)
+{
+    const struct dentry_operations *ret = NULL;
+    static bool warned;
+    int i;
+
+    spin_lock(&nm_dops_chain_lock);
+    for (i = 0; i < nm_dops_chain_n; i++) {
+        if (nm_dops_chains[i].orig == orig) {
+            ret = &nm_dops_chains[i].ops;
+            goto out;
+        }
+    }
+    if (nm_dops_chain_n < NM_DOPS_CHAIN_MAX) {
+        struct nm_dops_chain *c = &nm_dops_chains[nm_dops_chain_n];
+
+        c->ops = *orig;
+        c->ops.d_revalidate = nm_d_revalidate_chain;
+        c->orig = orig;
+        /* Readers find the entry through a dentry's d_op, never through the
+         * count, so publishing the count needs no ordering of its own.
+         */
+        nm_dops_chain_n++;
+        ret = &c->ops;
+    } else if (!warned) {
+        warned = true;
+        nm_warn("out of chained dentry ops; unhashing rule dentries on this filesystem instead\n");
+    }
+out:
+    spin_unlock(&nm_dops_chain_lock);
+    return ret;
+}
+
+/* Whether the filesystem's own lookup will d_set_d_op() this dentry: before
+ * 6.9, ext4 and f2fs do so for every dentry on a casefold-capable superblock
+ * (generic_set_encrypted_ci_d_ops). Setting ours first would only be replaced,
+ * with a WARN from d_set_d_op on the way.
+ *
+ * Read off the parent rather than sb->s_encoding, which only exists under
+ * CONFIG_UNICODE: the lookup that made the parent gave it the same ops, so it
+ * carries DCACHE_OP_HASH/COMPARE -- and keeps them through a chain copy, which
+ * only replaces d_revalidate. From 6.9 the dentry already has its d_op from
+ * d_alloc, and this is never asked.
+ */
+static bool nm_fs_sets_d_op_in_lookup(const struct dentry *dentry)
+{
+    return !dentry->d_op &&
+           (READ_ONCE(dentry->d_parent->d_flags) & (DCACHE_OP_HASH | DCACHE_OP_COMPARE));
+}
+
+/* Before the filesystem's lookup. The dentry is still in lookup, hashed nowhere
+ * a path walk looks, so its d_op and flags can be set outright -- the safe time
+ * to do it. Done here wherever the filesystem will leave it alone.
+ */
+static void nm_tag_passthrough_dentry(struct dentry *dentry)
+{
+    const struct dentry_operations *orig = dentry->d_op, *chain;
+
+#ifdef DCACHE_DONTCACHE
+    dentry->d_flags |= DCACHE_DONTCACHE;
+#endif
+    if (orig == &nm_dops || nm_is_dops_chain(orig) || nm_fs_sets_d_op_in_lookup(dentry))
+        return;
+    if (!orig) {
+        nm_install_dentry_ops(dentry);
+        return;
+    }
+    chain = nm_get_dops_chain(orig);
+    if (!chain)
+        return;
+    dentry->d_op = chain;
+    dentry->d_flags |= DCACHE_OP_REVALIDATE;
+}
+
+/* After the filesystem's lookup, on the dentry the caller gets: whatever the
+ * filesystem set inside its lookup (casefold before 6.9), or an alias it
+ * spliced in. It is hashed by now and a path walk may be reading it under RCU.
+ *
+ * With DCACHE_OP_REVALIDATE already set, swapping the d_op pointer is enough:
+ * a walker sees the old table or the new one, and both have a d_revalidate.
+ * Without it the flag has to be raised too, and that is upstream's way
+ * (nm_hijack_dentry_ops): d_op first, then the flags with release semantics,
+ * so a walker that sees the flag finds a d_op that answers it. The walker's
+ * side has no matching barrier, which is the narrow window upstream accepts.
+ */
+static void nm_retag_passthrough_dentry(struct dentry *dentry)
+{
+    const struct dentry_operations *orig, *chain;
+
+    spin_lock(&dentry->d_lock);
+#ifdef DCACHE_DONTCACHE
+    dentry->d_flags |= DCACHE_DONTCACHE;
+#endif
+    orig = dentry->d_op;
+    if (orig == &nm_dops || nm_is_dops_chain(orig)) {
+        spin_unlock(&dentry->d_lock);
+        return;
+    }
+    spin_unlock(&dentry->d_lock);
+
+    chain = orig ? nm_get_dops_chain(orig) : &nm_dops;
+    if (!chain) {
+        /* No slot left for this d_op. Unhash the dentry rather than leave a
+         * real one without nm_d_revalidate in the dcache: this caller still
+         * opens the file it was handed, and every later lookup of the name
+         * misses and comes back through the hijacked lookup. While it stays
+         * open, /proc shows it as "(deleted)".
+         */
+        d_drop(dentry);
+        return;
+    }
+
+    spin_lock(&dentry->d_lock);
+    if (dentry->d_op == orig) {
+        WRITE_ONCE(dentry->d_op, chain);
+        if (!(dentry->d_flags & DCACHE_OP_REVALIDATE))
+            smp_store_release(&dentry->d_flags, dentry->d_flags | DCACHE_OP_REVALIDATE);
+    }
+    spin_unlock(&dentry->d_lock);
+}
 
 static void nomount_hijacked_put_super(struct super_block *sb)
 {
