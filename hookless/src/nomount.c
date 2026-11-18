@@ -2837,9 +2837,12 @@ static const struct dentry_operations nm_dops = {
  *
  * Copies are made once per original d_op and kept for good: dentries point at
  * them past every rule, as they do at nm_dops, and the originals are the
- * filesystems' static tables.
+ * filesystems' static tables. One slot per distinct table, not per dentry:
+ * Android uses one to three (casefold, fscrypt, both). The table is static, so
+ * nothing is allocated in lookup; should it ever fill, the dentry is unhashed
+ * after the lookup instead (nm_retag_passthrough_dentry).
  */
-#define NM_DOPS_CHAIN_MAX 8
+#define NM_DOPS_CHAIN_MAX 16
 
 struct nm_dops_chain {
     struct dentry_operations ops;
@@ -2907,7 +2910,7 @@ static const struct dentry_operations *nm_get_dops_chain(const struct dentry_ope
         ret = &c->ops;
     } else if (!warned) {
         warned = true;
-        nm_warn("out of chained dentry ops; scoped rules may leak the stock file\n");
+        nm_warn("out of chained dentry ops; unhashing rule dentries on this filesystem instead\n");
     }
 out:
     spin_unlock(&nm_dops_chain_lock);
@@ -2979,8 +2982,16 @@ static void nm_retag_passthrough_dentry(struct dentry *dentry)
     spin_unlock(&dentry->d_lock);
 
     chain = orig ? nm_get_dops_chain(orig) : &nm_dops;
-    if (!chain)
+    if (!chain) {
+        /* No slot left for this d_op. Unhash the dentry rather than leave a
+         * real one without nm_d_revalidate in the dcache: this caller still
+         * opens the file it was handed, and every later lookup of the name
+         * misses and comes back through the hijacked lookup. While it stays
+         * open, /proc shows it as "(deleted)".
+         */
+        d_drop(dentry);
         return;
+    }
 
     spin_lock(&dentry->d_lock);
     if (dentry->d_op == orig) {
