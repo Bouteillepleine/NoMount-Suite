@@ -302,3 +302,116 @@ jobs:
             /tmp/nm_sparse.log
           if-no-files-found: ignore
 
+  # The legs above build objects and never link a kernel, so an engine that
+  # compiles everywhere can still be unlinkable: its weak references to the cloak
+  # patches failed every arm64 vmlinux link without them for three months while
+  # this matrix stayed green. One real link, from hookless/ alone, closes that.
+  link:
+    name: link 6.12 (no cloak patches)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      KREF: android16-6.12
+      CCACHE_MAXSIZE: '3G'
+      CCACHE_DIR: /home/runner/.ccache
+    steps:
+      - name: Select
+        id: sel
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          if [ -z "$ONLY" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          for v in ${ONLY//,/ }; do
+            if [ "$v" = "6.12" ] || [ "$v" = "link" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          done
+          echo "run=0" >> "$GITHUB_OUTPUT"
+          echo "::notice::Skipped the link job (neither 6.12 nor link is in the 'only' filter)"
+
+      - name: Checkout hookless (src + patches)
+        if: steps.sel.outputs.run == '1'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+
+      - name: Install build deps
+        if: steps.sel.outputs.run == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev cpio kmod python3 \
+            build-essential git ca-certificates rsync ccache \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu clang lld llvm
+          clang --version | head -1
+          for n in clang clang++ gcc g++ cc c++; do
+            sudo ln -sf /usr/bin/ccache "/usr/lib/ccache/$n"
+          done
+          echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+
+      - name: Restore ccache
+        if: steps.sel.outputs.run == '1'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ccache
+          key: ccache-link-6.12-${{ github.run_id }}
+          restore-keys: |
+            ccache-link-6.12-
+
+      - name: Restore kernel clone
+        if: steps.sel.outputs.run == '1'
+        id: kcache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ksrc
+          key: ksrc-6.12-android16-6.12-v1
+
+      - name: Clone kernel source on cache miss
+        if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
+        run: git clone --depth 1 -b "$KREF" https://android.googlesource.com/kernel/common ksrc
+
+      - name: Apply hookless patch + drop in source
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -e
+          cd ksrc
+          patch -p1 --forward --fuzz=0 < "$GITHUB_WORKSPACE/repo/hookless/patches/nomount_kernel_integration.patch"
+          cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.c" fs/nomount.c
+          cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.h" fs/nomount.h
+
+      - name: Link vmlinux
+        if: steps.sel.outputs.run == '1'
+        run: |
+          cd ksrc
+          MAKEOPTS="ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-"
+          make $MAKEOPTS gki_defconfig 2>&1 | tail -3
+          # LTO, BTF and Rust only cost time here: the failure this job exists
+          # for was reproduced with all three off.
+          ./scripts/config --file out/.config -e NOMOUNT \
+            -d LTO_CLANG_THIN -d LTO_CLANG_FULL -e LTO_NONE \
+            -d DEBUG_INFO_BTF -d RUST -d WERROR
+          make $MAKEOPTS olddefconfig 2>&1 | tail -3
+          grep -q '^CONFIG_NOMOUNT=y' out/.config || { echo "FATAL: CONFIG_NOMOUNT did not stick"; exit 1; }
+          if ! make $MAKEOPTS -j"$(nproc)" vmlinux > /tmp/nm_link.log 2>&1; then
+            grep -E 'error|undefined symbol|Unexpected' /tmp/nm_link.log | sort | uniq -c | head -40 || true
+            echo "FATAL: a kernel built from hookless/ alone does not link"
+            exit 1
+          fi
+          tail -3 /tmp/nm_link.log
+          aarch64-linux-gnu-nm out/vmlinux | grep -q ' vfs_map_meta_override$' || {
+            echo "FATAL: vmlinux linked, but without the engine in it"; exit 1; }
+          echo "LINK_OK"
+          ccache -s 2>/dev/null | grep -iE 'hit|miss' || true
+
+      - name: Save ccache
+        if: ${{ always() && steps.sel.outputs.run == '1' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ccache
+          key: ccache-link-6.12-${{ github.run_id }}
+
+      - name: Upload log
+        if: ${{ always() && steps.sel.outputs.run == '1' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: log-link-6.12
+          path: /tmp/nm_link.log
+          if-no-files-found: ignore
