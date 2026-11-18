@@ -2921,14 +2921,17 @@ out:
  * 6.9, ext4 and f2fs do so for every dentry on a casefold-capable superblock
  * (generic_set_encrypted_ci_d_ops). Setting ours first would only be replaced,
  * with a WARN from d_set_d_op on the way.
+ *
+ * Read off the parent rather than sb->s_encoding, which only exists under
+ * CONFIG_UNICODE: the lookup that made the parent gave it the same ops, so it
+ * carries DCACHE_OP_HASH/COMPARE -- and keeps them through a chain copy, which
+ * only replaces d_revalidate. From 6.9 the dentry already has its d_op from
+ * d_alloc, and this is never asked.
  */
 static bool nm_fs_sets_d_op_in_lookup(const struct dentry *dentry)
 {
-#ifdef CONFIG_UNICODE
-    return !dentry->d_op && dentry->d_sb->s_encoding;
-#else
-    return false;
-#endif
+    return !dentry->d_op &&
+           (READ_ONCE(dentry->d_parent->d_flags) & (DCACHE_OP_HASH | DCACHE_OP_COMPARE));
 }
 
 /* Before the filesystem's lookup. The dentry is still in lookup, hashed nowhere
