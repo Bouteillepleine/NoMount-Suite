@@ -6,6 +6,10 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.214 — engine v36 (unchanged)
+
+- `uidconceal` no longer needs the manager: its appid comes from the kernel, so a repackaged manager rebuilt under a new random name stays concealed.
+
 ## v1.3.213 — engine v36 (unchanged)
 
 - `nm --uid-excluded` takes upstream's `C-D` range again, read as those appids, so Morphe's "NoMount only" installs work. v1.3.212 took only a comma-separated list and refused `1000-1000`.
