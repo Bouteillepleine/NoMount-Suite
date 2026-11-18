@@ -473,13 +473,12 @@ static inline void nm_install_dentry_ops(struct dentry *dentry)
     dentry->d_flags |= DCACHE_OP_REVALIDATE;
 }
 
-static inline void nm_tag_passthrough_dentry(struct dentry *dentry)
-{
-#ifdef DCACHE_DONTCACHE
-    dentry->d_flags |= DCACHE_DONTCACHE;
-#endif
-    if (!dentry->d_op)
-        nm_install_dentry_ops(dentry);
-}
+/* Tags the real dentry a lookup hands a caller a scoped or hidden rule leaves on
+ * the stock file. Before the filesystem's lookup: nm_tag_passthrough_dentry().
+ * After it, on whatever the lookup returned: nm_retag_passthrough_dentry().
+ * Both live in nomount.c beside nm_dops.
+ */
+static void nm_tag_passthrough_dentry(struct dentry *dentry);
+static void nm_retag_passthrough_dentry(struct dentry *dentry);
 
 #endif
