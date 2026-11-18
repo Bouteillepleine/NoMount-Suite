@@ -72,6 +72,24 @@ dev/ino rewrite and the xattr guard — and none of the existence or maps cloaks
 `nomount check` will report the cloaks as unavailable, which is correct and not
 a fault in the build.
 
+That build also has to link, and with engines up to v1.3.213 it did not on
+arm64: the engine referred to the cloaks' control functions as weak undefined symbols, the address
+of a symbol that may be absent is loaded through the GOT there, and
+`vmlinux.lds` refuses the result with `Unexpected GOT/PLT entries detected!`.
+Turning off CFI or LTO, or passing `-fno-plt`, changes nothing, and the two
+asserts must not be edited out to get past it. The engine now carries weak
+default definitions that a tree with the cloaks overrides, so if you meet that
+message on an older engine, update `nomount.c` rather than the linker script.
+The compile matrix builds objects and never links a kernel, which is how this
+stayed green.
+
+SUSFS and the engine go into the same kernel: all three builders above apply
+both, and that combination is what ships. They apply this patch first, at
+`--fuzz=0`, and SUSFS after it. SUSFS also patches `fs/proc/task_mmu.c`, so if
+you apply them the other way round, do not let this patch in with fuzz: check
+that `vfs_map_meta_override()` landed in `show_map_vma()` and not in
+`show_smap()`, whose dev/ino lines read the same.
+
 ## A drift this repository cannot catch
 
 `nomount_lkm.c` `#include`s `../hookless/src/nomount.c` rather than copying it,

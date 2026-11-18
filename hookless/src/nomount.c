@@ -28,16 +28,30 @@
 #define NM_SDKSANDBOX_OFF   10000
 
 #define NM_GHOST_RULE_MAX 200
+/* The cloaks are optional companions, so the engine must link without them.
+ * These are weak DEFINITIONS that a tree carrying _ghost/_pathhide overrides
+ * with its own. They used to be weak undefined references tested as pointers,
+ * and on arm64 the address of a symbol that may be absent is loaded through
+ * the GOT: a kernel without the companion patches then failed its vmlinux link
+ * on "Unexpected GOT/PLT entries detected!". -ENOSYS is the absent marker; the
+ * real functions answer a NULL buffer with -EINVAL and never return it.
+ */
 #ifndef NM_OOT_COMPANION_STUBS
-extern int ghost_ctl(const char *buf, size_t count) __attribute__((weak));
-extern int ghost_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
+int ghost_ctl(const char *buf, size_t count);
+int ghost_get_rule(int idx, char *out, size_t outsz);
+int __weak ghost_ctl(const char *buf, size_t count) { return -ENOSYS; }
+int __weak ghost_get_rule(int idx, char *out, size_t outsz) { return -ENOSYS; }
 #endif
+#define nm_have_ghost() (ghost_get_rule(0, NULL, 0) != -ENOSYS)
 
 #define NM_PATHHIDE_RULE_MAX 128
 #ifndef NM_OOT_COMPANION_STUBS
-extern int pathhide_ctl(const char *buf, size_t count) __attribute__((weak));
-extern int pathhide_get_rule(int idx, char *out, size_t outsz) __attribute__((weak));
+int pathhide_ctl(const char *buf, size_t count);
+int pathhide_get_rule(int idx, char *out, size_t outsz);
+int __weak pathhide_ctl(const char *buf, size_t count) { return -ENOSYS; }
+int __weak pathhide_get_rule(int idx, char *out, size_t outsz) { return -ENOSYS; }
 #endif
+#define nm_have_pathhide() (pathhide_get_rule(0, NULL, 0) != -ENOSYS)
 
 static atomic_t nm_rule_gen = ATOMIC_INIT(0);
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
@@ -5736,7 +5750,7 @@ static int nomount_nl_dump_ghost(struct sk_buff *skb, struct netlink_callback *c
     int idx = cb->args[0];
     void *hdr;
 
-    if (!ghost_get_rule)
+    if (!nm_have_ghost())
         return 0;
 
     while (ghost_get_rule(idx, rule, sizeof(rule)) > 0) {
@@ -5761,7 +5775,7 @@ static int nomount_nl_dump_pathhide(struct sk_buff *skb, struct netlink_callback
     int idx = cb->args[0];
     void *hdr;
 
-    if (!pathhide_get_rule)
+    if (!nm_have_pathhide())
         return 0;
 
     while (pathhide_get_rule(idx, rule, sizeof(rule)) > 0) {
@@ -5915,13 +5929,13 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
         return 0;
     }
     case NM_KNOB_GHOST:
-        if (!ghost_ctl)
+        if (!nm_have_ghost())
             return -EINVAL;
         if (vlen == 0)
             return 0;
         return ghost_ctl(val, vlen);
     case NM_KNOB_PATHHIDE:
-        if (!pathhide_ctl)
+        if (!nm_have_pathhide())
             return -EINVAL;
         if (vlen == 0)
             return 0;
