@@ -17,6 +17,14 @@
 #include <linux/sched.h>
 #include "nomount.h"
 
+#if IS_ENABLED(CONFIG_OVERLAY_FS) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && \
+    defined(__has_include)
+#if __has_include("overlayfs/ovl_entry.h")
+#include "overlayfs/ovl_entry.h"
+#define NM_OVL_LAST_INO 1
+#endif
+#endif
+
 #define NM_PER_USER_RANGE   100000
 #define NM_APPZYGOTE_START  90000
 #define NM_APPZYGOTE_END    98999
@@ -3537,6 +3545,7 @@ struct nm_dev_ino {
     u64 dmax;
     u64 amax;
     unsigned long *used;
+    char *seed;
     int dmax_err;
     bool dmax_valid;
     bool valid;
@@ -3572,6 +3581,8 @@ static int nm_dev_ino_seed(struct nm_dev_ino *s, const char *seed)
         memset(s->used, 0, sz);
     else
         s->used = kvzalloc(sz, GFP_KERNEL | __GFP_NOWARN);
+    kfree(s->seed);
+    s->seed = kstrdup(seed, GFP_KERNEL);
     err = nm_subtree_dir_ino_max(seed, s->dev, &lo, &m, &a, s->used);
     s->dmax_err = err;
     if (err == 0 && s->used) {
@@ -4287,6 +4298,31 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
     }
 }
 
+/* On a non-samefs overlay without xino, directory numbers come from ofs->last_ino, which
+ * only grows. Taking the next one is what overlayfs does for its own directories, and it
+ * never hands that number to anything else. dmax above the counter means the numbers on
+ * this mount are not counter-issued. */
+static u64 nm_ovl_reserve_dir_ino(struct nm_dev_ino *di)
+{
+    u64 c = 0;
+#ifdef NM_OVL_LAST_INO
+    struct super_block *sb;
+    struct path p;
+
+    if (!di->seed || kern_path(di->seed, LOOKUP_FOLLOW, &p) != 0)
+        return 0;
+    sb = p.dentry->d_sb;
+    if (sb->s_magic == OVERLAYFS_SUPER_MAGIC && sb->s_dev == di->dev) {
+        struct ovl_fs *ofs = sb->s_fs_info;
+
+        if (di->dmax && di->dmax <= (u64)atomic_long_read(&ofs->last_ino))
+            c = (u64)atomic_long_inc_return(&ofs->last_ino);
+    }
+    path_put(&p);
+#endif
+    return c;
+}
+
 /* A synthesized DIRECTORY is placed one above the highest number in play, with no attempt
  * to fit it between the stock entries beside it -- unlike nm_place_ino(), which searches
  * the gaps. That is deliberate (a directory inode colliding with a real one is worse than
@@ -4333,6 +4369,13 @@ static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
      * partition's used-inode set the only number that cannot collide is one above every
      * inode. That set is di->used; this path is what remains when it is missing or full.
      */
+    c = nm_ovl_reserve_dir_ino(di);
+    if (c) {
+        nm_used_add(di->used, c);
+        nm_debug("inoplace: dev=%u:%u overlay counter -> ino=%llu\n",
+                 MAJOR(pop->dev), MINOR(pop->dev), (unsigned long long)c);
+        return nm_ino_take(pop, c);
+    }
     if (di->used && di->dmax > di->dmin + 1) {
         u64 span = di->dmax - di->dmin - 1;
         u64 lim = span < 65536 ? span : 65536;
@@ -6106,8 +6149,10 @@ static void __exit nomount_exit(void)
     {
         int i;
 
-        for (i = 0; i < NM_DEV_INO_SLOTS; i++)
+        for (i = 0; i < NM_DEV_INO_SLOTS; i++) {
             kvfree(nm_dev_ino_tab[i].used);
+            kfree(nm_dev_ino_tab[i].seed);
+        }
     }
     kmem_cache_destroy(nm_dir_cachep);
     kmem_cache_destroy(nm_inode_cachep);
