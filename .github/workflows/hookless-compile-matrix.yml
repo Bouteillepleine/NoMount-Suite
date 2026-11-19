@@ -190,7 +190,7 @@ jobs:
 
           echo "== defconfig =="
           make $MAKEOPTS defconfig 2>&1 | tail -5
-          ./scripts/config --file out/.config -e NOMOUNT
+          ./scripts/config --file out/.config -e NOMOUNT -e OVERLAY_FS
           make $MAKEOPTS olddefconfig 2>&1 | tail -5
           grep -q '^CONFIG_NOMOUNT=y' out/.config || {
             echo "FATAL: CONFIG_NOMOUNT did not stick in .config for ${{ matrix.ver }}"; exit 1; }
