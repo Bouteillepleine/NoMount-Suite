@@ -3528,11 +3528,15 @@ struct nm_ino_pop {
 
 #define NM_DEV_INO_SLOTS 16
 
+#define NM_USED_ORDER 20
+
 struct nm_dev_ino {
     dev_t dev;
     u64 hw;
+    u64 dmin;
     u64 dmax;
     u64 amax;
+    unsigned long *used;
     int dmax_err;
     bool dmax_valid;
     bool valid;
@@ -3540,13 +3544,59 @@ struct nm_dev_ino {
 
 static struct nm_dev_ino nm_dev_ino_tab[NM_DEV_INO_SLOTS];
 static int nm_dev_ino_next;
-static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max,
-                                  u64 *out_any);
+static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_min,
+                                  u64 *out_max, u64 *out_any, unsigned long *used);
+
+/* Bloom over every inode number the subtree scan saw: a clear bit is never a used number. */
+static void nm_used_add(unsigned long *used, u64 ino)
+{
+    if (!used)
+        return;
+    __set_bit(hash_64(ino, NM_USED_ORDER), used);
+    __set_bit(hash_64(ror64(ino, 32) + 1, NM_USED_ORDER), used);
+}
+
+static bool nm_used_test(const unsigned long *used, u64 ino)
+{
+    return test_bit(hash_64(ino, NM_USED_ORDER), used) &&
+           test_bit(hash_64(ror64(ino, 32) + 1, NM_USED_ORDER), used);
+}
+
+static int nm_dev_ino_seed(struct nm_dev_ino *s, const char *seed)
+{
+    size_t sz = BITS_TO_LONGS(1UL << NM_USED_ORDER) * sizeof(long);
+    u64 lo = 0, m = 0, a = 0;
+    int err;
+
+    if (s->used)
+        memset(s->used, 0, sz);
+    else
+        s->used = kvzalloc(sz, GFP_KERNEL | __GFP_NOWARN);
+    err = nm_subtree_dir_ino_max(seed, s->dev, &lo, &m, &a, s->used);
+    s->dmax_err = err;
+    if (err == 0 && s->used) {
+        struct nomount_rule *r;
+        int bkt;
+
+        /* The scan skips injected paths; the numbers already handed out stay taken. */
+        hash_for_each(nomount_rules_ht, bkt, r, vpath_node)
+            nm_used_add(s->used, r->v_ino);
+    }
+    if (err == 0) {
+        s->dmin = lo;
+        s->dmax = m;
+        s->amax = a;
+        s->dmax_valid = true;
+    } else {
+        kvfree(s->used);
+        s->used = NULL;
+    }
+    return err;
+}
 
 static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
 {
     struct nm_dev_ino *s = NULL;
-    u64 m = 0, a = 0;
     int i, err;
 
     if (!dev)
@@ -3555,13 +3605,7 @@ static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
         if (nm_dev_ino_tab[i].valid && nm_dev_ino_tab[i].dev == dev) {
             s = &nm_dev_ino_tab[i];
             if (!s->dmax_valid && s->dmax_err == -ENOMEM && seed) {
-                err = nm_subtree_dir_ino_max(seed, dev, &m, &a);
-                s->dmax_err = err;
-                if (err == 0) {
-                    s->dmax = m;
-                    s->amax = a;
-                    s->dmax_valid = true;
-                }
+                err = nm_dev_ino_seed(s, seed);
                 nm_debug("inoseed: retry dev=%u:%u seed='%s' err=%d dmax=%llu amax=%llu\n",
                          MAJOR(dev), MINOR(dev), seed, err,
                          (unsigned long long)s->dmax, (unsigned long long)s->amax);
@@ -3583,15 +3627,11 @@ static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
     }
     s->dev = dev;
     s->hw = 0;
+    s->dmin = 0;
     s->dmax = 0;
     s->amax = 0;
-    err = nm_subtree_dir_ino_max(seed, dev, &m, &a);
-    s->dmax_err = err;
-    s->dmax_valid = err == 0;
-    if (s->dmax_valid) {
-        s->dmax = m;
-        s->amax = a;
-    }
+    s->dmax_valid = false;
+    err = nm_dev_ino_seed(s, seed);
     s->valid = true;
     /* The seed path is what the dmax/amax scan walked, and this table is 16 slots with
      * round-robin eviction -- a device with more partitions than that can have an entry
@@ -3953,6 +3993,7 @@ struct nm_dmax_scan {
     int seen;
     int skip;
     u64 amax;
+    unsigned long *used;
     bool more;
     bool unknown_dt;
 };
@@ -3970,6 +4011,7 @@ static NM_ACTOR_RET nm_dmax_actor(struct dir_context *ctx, const char *name,
 
     if (ino > s->amax)
         s->amax = ino;
+    nm_used_add(s->used, ino);
 
     if (dt == DT_UNKNOWN) {
         s->unknown_dt = true;
@@ -3991,12 +4033,12 @@ static NM_ACTOR_RET nm_dmax_actor(struct dir_context *ctx, const char *name,
     return NM_ACTOR_CONTINUE;
 }
 
-static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max,
-                                  u64 *out_any)
+static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_min,
+                                  u64 *out_max, u64 *out_any, unsigned long *used)
 {
     char **queue;
     struct nm_dmax_scan *sc;
-    u64 max = 0, any = 0;
+    u64 min = 0, max = 0, any = 0;
     int qhead = 0, qtail = 0, visited = 0, ret = 0, i, skip;
     int cap = NM_DMAX_DIRS;
 
@@ -4050,6 +4092,17 @@ static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max,
         kfree(queue[qtail]);
         queue[qtail] = up;
     }
+    {
+        struct path rp;
+        struct kstat rk;
+
+        if (kern_path(queue[qtail], LOOKUP_FOLLOW, &rp) == 0) {
+            if (nm_path_stat(&rp, &rk) == 0 && rk.dev == dev)
+                nm_used_add(used, rk.ino);
+            path_put(&rp);
+        }
+    }
+    sc->used = used;
     qtail++;
 
     while (qhead < qtail && ret == 0) {
@@ -4112,6 +4165,9 @@ static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_max,
 
                     path_put(&fp);
                     if (r == 0 && S_ISDIR(fk.mode) && fk.dev == dev) {
+                        nm_used_add(used, fk.ino);
+                        if (!min || fk.ino < min)
+                            min = fk.ino;
                         if (fk.ino > max)
                             max = fk.ino;
                         if (qtail < cap) {
@@ -4145,6 +4201,7 @@ out:
     if (ret == 0 && !max)
         ret = -ENOENT;
     if (ret == 0) {
+        *out_min = min;
         *out_max = max;
         *out_any = any > max ? any : max;
     }
@@ -4272,13 +4329,30 @@ static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
      * every entry the engine invented -- the same single scan the band cost -- and
      * anything using the pair as file identity now conflates the two.
      *
-     * Inode numbers are unique per filesystem regardless of type, so the only number that
-     * cannot collide is one above every inode: that is what amax buys and why it is here.
-     * An in-band number that is also genuinely free needs the partition's used-inode set,
-     * which nm_dmax_scan() already has the walk for (NM_DMAX_DIRS entries) and
-     * nm_ino_pop::bloom_mask already has an unused field for. Until that exists, loud and
-     * harmless beats quiet and colliding.
+     * Inode numbers are unique per filesystem regardless of type, so without the
+     * partition's used-inode set the only number that cannot collide is one above every
+     * inode. That set is di->used; this path is what remains when it is missing or full.
      */
+    if (di->used && di->dmax > di->dmin + 1) {
+        u64 span = di->dmax - di->dmin - 1;
+        u64 lim = span < 65536 ? span : 65536;
+        u64 i;
+
+        /* Strictly inside the directory band the scan measured. On overlayfs these are
+         * handed out by a per-sb counter that only grows, so a number below dmax that is
+         * free now is never issued later; dmax + 1 would be. */
+        for (i = 0; i < lim; i++) {
+            c = di->dmin + 1 + (spread + i) % span;
+            if (nm_used_test(di->used, c) || nm_ino_taken(pop, c))
+                continue;
+            nm_used_add(di->used, c);
+            nm_debug("inoplace: dev=%u:%u dir band %llu..%llu -> ino=%llu (in-band, try %llu)\n",
+                     MAJOR(pop->dev), MINOR(pop->dev),
+                     (unsigned long long)di->dmin, (unsigned long long)di->dmax,
+                     (unsigned long long)c, (unsigned long long)i);
+            return nm_ino_take(pop, c);
+        }
+    }
     c = di->dmax;
     if (di->amax > c) { c = di->amax;  won = "di->amax"; }
     if (pop->hw > c)  { c = pop->hw;   won = "pop->hw"; }
@@ -6029,6 +6103,12 @@ static void __exit nomount_exit(void)
 
     rcu_barrier();
 
+    {
+        int i;
+
+        for (i = 0; i < NM_DEV_INO_SLOTS; i++)
+            kvfree(nm_dev_ino_tab[i].used);
+    }
     kmem_cache_destroy(nm_dir_cachep);
     kmem_cache_destroy(nm_inode_cachep);
     kmem_cache_destroy(nm_iop_cachep);
