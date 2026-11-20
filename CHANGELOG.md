@@ -6,6 +6,11 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.215 — engine v36 (the engine fixes below need a kernel rebuild; the LKM zip carries them)
+
+- A synthesized directory took an inode number above every number on the mount, so one `find -type d -inum +1000` named the injected directories. Each now takes a free number from inside the range its stock siblings occupy.
+- On an overlay mount that number is reserved from overlayfs's own counter, which never issues it again, so a directory added when the range is already dense stays in band too.
+
 ## v1.3.214 — engine v36 (unchanged)
 
 - `uidconceal` no longer needs the manager: its appid comes from the kernel, so a repackaged manager rebuilt under a new random name stays concealed.
