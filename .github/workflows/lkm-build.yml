@@ -1,12 +1,27 @@
 name: NoMount LKM - out-of-tree build
 
+# Renamed from build-lkm.yml, and the rename IS the fix. That file's workflow record was
+# registered on 2026-08-29 from the `lkm-port` branch, back when `on.push.branches` read
+# [lkm-port]; `a618cf3` pointed it at main on 2026-10-15 and GitHub re-read the file, but the
+# record never delivered another push event. At least eight pushes to main afterwards changed
+# files under lkm/ or hookless/src/ -- f057a61, 4cf55a6, 5ead4f5, 6f6d620, 4a188fa, 86b9a61,
+# dbf1066, 8dee149 -- and it produced ZERO runs, while tag.yml, which has the same trigger
+# shape (push + branches:[main] + an include-style paths:), fired on those same pushes. The
+# file itself is fine: it parses, state was `active`, Actions were enabled, no other workflow
+# record held the missing runs, and a fork dispatched this same file to success. A new path
+# forces GitHub to register a new workflow record, which is the only lever outside the UI.
+#
+# So the engine and the LKM went unbuilt by CI from 2026-10-15 to 2026-11-21. If this file
+# ever stops firing again, check `actions/workflows/<id>/runs` total_count against the pushes
+# that touched these paths before trusting a green board.
+
 on:
   push:
     branches: [main]
     paths:
       - 'lkm/**'
       - 'hookless/src/**'
-      - '.github/workflows/build-lkm.yml'
+      - '.github/workflows/lkm-build.yml'
   workflow_dispatch:
     inputs:
       only:
