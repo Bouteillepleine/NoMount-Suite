@@ -161,8 +161,26 @@ jobs:
           fi
           echo "MAKEOPTS=$M" >> "$GITHUB_ENV"
           make $M defconfig
-          ./scripts/config --enable CONFIG_KPROBES --enable CONFIG_MODULES
+          # OVERLAY_FS, so this build actually compiles nm_ovl_reserve_dir_ino().
+          # nomount.c gates it on IS_ENABLED(CONFIG_OVERLAY_FS) && >= 5.10 &&
+          # __has_include("overlayfs/ovl_entry.h"), and 9e1a53b added -I$(srctree)/fs so
+          # the header resolves out of tree. But with OVERLAY_FS off the OUTER guard
+          # excludes the whole block, the #else that warns about a missing header never
+          # runs either, and a green build with no warning proves nothing at all -- the
+          # function stays an unconditional `return 0` and the 01_ zip keeps placing
+          # directory inodes differently from the 00_ one. hookless-matrix.yml has
+          # enabled it since 4317cde; this build never did.
+          ./scripts/config --enable CONFIG_KPROBES --enable CONFIG_MODULES \
+                           --enable CONFIG_OVERLAY_FS
           make $M olddefconfig
+          # Asserted, because olddefconfig silently drops a symbol whose dependencies are
+          # not met, and an enable nobody checks is the no-op this whole step exists to
+          # stop. Either =y or =m satisfies IS_ENABLED() and both ship the header.
+          grep -qE '^CONFIG_OVERLAY_FS=[ym]' .config || {
+            echo "::error::CONFIG_OVERLAY_FS did not stick for ${{ matrix.ver }}, so the"
+            echo "::error::overlay dir-inode reservation is NOT being compiled and this"
+            echo "::error::job cannot tell you whether it builds."
+            exit 1; }
           make $M -j"$(nproc)" modules_prepare
 
       - name: Build the module
