@@ -262,6 +262,43 @@ jobs:
           done
           ls -l "out/nomount-${{ matrix.kmi }}.ko"
 
+      - name: Is this module actually built for the KMI its name claims?
+        run: |
+          set -eu
+          KO="out/nomount-${{ matrix.kmi }}.ko"
+          KMI="${{ matrix.kmi }}"
+          # Until this step, the KMI in the filename was pure convention: the matrix row
+          # picked a DDK image AND wrote the name, so a row pointing at the wrong image --
+          # a copy-paste in the digest, an upstream retag, a reordered matrix -- shipped a
+          # module labelled for a kernel it was never built against. The only gate
+          # afterwards was `package` counting eight files, which a wrong eight satisfies.
+          # ko-loader then rewrites vermagic on install, so the label is also the LAST
+          # chance to catch it: on the device the module stops declining to load.
+          #
+          # modinfo if the image has kmod, otherwise read .modinfo out of the ELF - its
+          # entries are NUL-terminated strings, so tr makes each one a line.
+          if command -v modinfo >/dev/null 2>&1; then
+            VM=$(modinfo -F vermagic "$KO" | head -1)
+          else
+            VM=$(tr '\0' '\n' < "$KO" | grep -a -m1 '^vermagic=' | cut -d= -f2-)
+          fi
+          [ -n "$VM" ] || {
+            echo "::error::no vermagic in $KO, so nothing here can say which kernel it is for"
+            exit 1; }
+          rel="${KMI%%-*}"   # android16
+          ver="${KMI##*-}"   # 6.12
+          echo "$KMI -> vermagic: $VM"
+          echo "- \`$KMI\` -> \`$VM\`" >> "$GITHUB_STEP_SUMMARY"
+          case "$VM" in
+            "$ver".*) ;;
+            *) echo "::error::$KO is named $KMI but its vermagic starts $VM"; exit 1 ;;
+          esac
+          case "$VM" in
+            *-"$rel"-*|*-"$rel"\ *) ;;
+            *) echo "::error::$KO is named $KMI but its vermagic does not carry -$rel-: $VM"
+               exit 1 ;;
+          esac
+
       - name: Relocations the arm64 module loader cannot apply
         run: |
           set -eu
@@ -326,6 +363,18 @@ jobs:
           n=$(find module/lkm -name 'nomount-*.ko' | wc -l)
           find module/lkm -name 'nomount-*.ko' -printf '  %f  %s bytes\n' | sort
           [ "$n" -eq 8 ] || { echo "::error::expected 8 engine modules, got $n"; exit 1; }
+          # The count alone is satisfied by eight copies of one module. Each ko job now
+          # asserts its own vermagic against its KMI, which catches a row built against
+          # the wrong image; this catches the other half -- the artifact download or the
+          # `cp` above collapsing two rows onto one file, where every name is right and
+          # one kernel silently gets another's module. Eight names, eight contents.
+          d=$(find module/lkm -name 'nomount-*.ko' -exec sha256sum {} + \
+              | awk '{print $1}' | sort -u | wc -l)
+          [ "$d" -eq 8 ] || {
+            echo "::error::8 engine modules but only $d distinct, so a KMI is shipping"
+            echo "::error::another KMI's module under its own name"
+            find module/lkm -name 'nomount-*.ko' -exec sha256sum {} + | sort
+            exit 1; }
 
       - name: Setup zig
         env:

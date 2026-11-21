@@ -119,11 +119,22 @@ int nm_pathhide_get_rule_fwd(int idx, char *out, size_t outsz)
 	return -EOPNOTSUPP;
 }
 
+/* -EOPNOTSUPP, not 0. NM_GUARD reads 0 as "armed": it printed
+ * `guard pathhide armed` for this build and counted it toward nm_guard_ok, so nm_guard_ok == nm_guard_n and the short-count warning never
+ * fired either. Both channels claimed a complete cloak on a kernel where not one line
+ * of pathhide.c is compiled. The macro has a third state for this now: counted apart
+ * from both armed and OFF, and reported through nm_say() rather than pr_warn() -- a
+ * guard that CANNOT exist on this KMI is expected, not a failure, and a loud line here
+ * would name the module in the ring buffer on every boot of every pre-5.10 hiding
+ * build, which is the leak 20118c8 closed.
+ *
+ * It prints nothing of its own: NM_GUARD names the guard and the state, and a second
+ * line explaining WHY would be prose for lkm-ondevice.sh's dmesg filter to key on. The
+ * reason is the comment at the top of this file -- the page-walk and mmap-lock
+ * interfaces pathhide.c is written against do not exist before 5.10. */
 int nm_pathhide_probes_init(void)
 {
-	nm_say("nomount: pathhide guards unavailable: this kernel predates the "
-	       "page-walk and mmap-lock interfaces the cloak is written against\n");
-	return 0;
+	return -EOPNOTSUPP;
 }
 
 void nm_pathhide_probes_exit(void)

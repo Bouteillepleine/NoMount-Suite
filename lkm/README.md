@@ -188,32 +188,42 @@ repository, and this variant cannot silently drift from the in-tree one.
 
 ### Building it in CI
 
-Two workflows, and the difference between them is the difference between "it
-still compiles" and "here is a module you can load".
+Two jobs, in two different workflows, and the difference between them is the
+difference between "it still compiles" and "here is a module you can load".
 
-| workflow | what it does | cost |
+| where | what it does | cost |
 | :--- | :--- | :--- |
-| **NoMount LKM - out-of-tree build** | compile gate across all ten kernels on every push. Stops at `modules_prepare`, so there is no `Module.symvers` and modpost cannot tell an exported symbol from a missing one. Its `.ko` is not evidence of anything. | ~10 min |
-| **NoMount LKM - build a loadable module** | dispatch-only, one version at a time. Builds the kernel far enough for a real `Module.symvers`, so the link is genuine, then uploads `nomount.ko`. | ~40-60 min |
+| **`.github/workflows/lkm-build.yml`** - *NoMount LKM - out-of-tree build* | compile gate across all ten kernels, on every push to `main` touching `lkm/**`, `hookless/src/**` or the workflow itself. Stops at `modules_prepare`, so there is no `Module.symvers` and modpost cannot tell an exported symbol from a missing one. Its `.ko` is not evidence of anything. Dispatchable with `only: 4.9,6.12` to run a subset. | ~10 min |
+| **the `kmi-modules` job in `.github/workflows/build.yaml`** | the eight modules that actually ship. One job per KMI in `ghcr.io/ylarod/ddk:<kmi>`, a digest-pinned image whose tree already has a real `Module.symvers`, so the link is genuine. Output is `nomount-<kmi>.ko`, staged into `module/lkm/` and packaged into the `01_` zip. | ~5 min |
 
-Run the second from the Actions tab. It lives on `main` - GitHub only offers a
-`workflow_dispatch` file that sits on the default branch - and checks this
-branch out to build.
+There is no dispatch-only "build me a loadable module" workflow. An earlier
+version of this file described one, with `kernel_repo`/`kernel_ref`/`defconfig`
+inputs; it never existed in this repository. To get a module for a kernel the
+DDK images do not cover, build it yourself against that kernel's own tree -
+`make -C <ktree> M=$PWD modules` from `lkm/`, which is what the top of this file
+documents.
 
-**A downloaded `nomount.ko` will not load on an arbitrary device.** An
+**A `.ko` from the `01_` zip is not bound to your kernel by its filename.** An
 out-of-tree module requires a matching vermagic, and with `CONFIG_MODVERSIONS`
-matching symbol CRCs too. Built against a stock GKI `defconfig` it will refuse
-your OnePlus kernel, correctly. To get one that loads, pass `kernel_repo`,
-`kernel_ref` and `defconfig` pointing at the source your kernel was actually
-built from, then compare:
+matching symbol CRCs too, and a GKI `.ko` built for `android16-6.12` will
+refuse a 6.12 kernel from a different point release - correctly. That is what
+`module/bin/ko-loader-arm64` is for, and it defeats BOTH gates: it rewrites
+vermagic to whatever the kernel asks for, and it pre-resolves the module's
+undefined symbols out of `/proc/kallsyms`, writing each address in as `SHN_ABS`.
+`simplify_symbols()` only version-checks `SHN_UNDEF` symbols, so a pre-resolved
+one never reaches `check_version()` - `CONFIG_MODVERSIONS` is bypassed rather
+than satisfied. That is sound only while "same KMI => same struct layout" holds,
+which is the GKI contract and the reason `module/lkm-load.sh` refuses to use
+ko-loader for a module whose KMI it had to guess. To see what you have:
 
 ```
 cat /proc/version      # on the phone
-modinfo nomount.ko     # what CI built
+modinfo nomount-<kmi>.ko | grep vermagic
 ```
 
-If those disagree, `insmod` fails with *"version magic ... should be ..."* - the
-module declining to enter a kernel whose struct layouts it does not share.
+If those disagree and ko-loader did not reconcile them, `insmod` fails with
+*"version magic ... should be ..."* - the module declining to enter a kernel
+whose struct layouts it does not share.
 
 ### Testing the pathhide guards on a device
 

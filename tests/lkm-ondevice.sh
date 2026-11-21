@@ -74,14 +74,21 @@ echo "== does it name itself in the ring buffer? =="
 # lib.sh's nmlog writes to /dev/kmsg only when /data/adb/nomount/kmsg exists, so the
 # opt-in marker still governs those lines.
 #
-# The engine's own boot report is NOT governed by it: NM_GUARD in lkm/nomount_lkm.c
-# prints "guard <name> armed" with raw pr_info and "guard <name> OFF (rc)" with raw
-# pr_warn, plus an "N of M guards armed" summary -- none of them the hide-aware nm_say.
-# They land in dmesg on EVERY build, so counting every 'nomount:' line made this section
-# fail on every LKM build, for lines the module is built to print. Filter the boot report
-# out and keep failing on anything else, which is what the section is actually about.
+# The engine's own boot report is only PARTLY governed by it. NM_GUARD in
+# lkm/nomount_lkm.c prints `guard <name> armed` and `guard <name> unavailable` through
+# nm_say(), so a hide=1 build suppresses those; `guard <name> OFF (rc)` and the summary
+# are raw pr_warn/pr_err and land on every build, deliberately -- an OFF guard should be
+# findable. This gate is run against a hide=0 build (see the header), where all of them
+# print, so counting every 'nomount:' line made the section fail on every LKM build for
+# lines the module is built to print. Filter the boot report out and keep failing on
+# anything else, which is what the section is actually about.
+#
+# Keyed on the `nomount: guard <name>` PREFIX, not on the state words. The filter used to
+# spell out (armed|OFF); when NM_GUARD grew a third state the unmatched line would have
+# been counted as a leak and failed this section on every pre-5.10 build. A per-guard
+# line is a per-guard line whatever it ends with.
 k=$(dmesg 2>/dev/null | grep 'nomount:' \
-	| grep -vE 'guard [a-z_]+ +(armed|OFF)|[0-9]+ of [0-9]+ guards armed' \
+	| grep -vE 'nomount: guard [a-z_]+ |[0-9]+ of [0-9]+ guards armed' \
 	| grep -c .)
 if [ -e /data/adb/nomount/kmsg ]; then
 	note "kmsg opt-in marker present, so $k line(s) is expected"

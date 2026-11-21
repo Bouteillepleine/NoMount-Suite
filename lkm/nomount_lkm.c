@@ -1,3 +1,4 @@
+#include <linux/errno.h>
 #include "nm_oot.h"
 #include "nm_maps_spoof.h"
 #include "nm_xattr_guard.h"
@@ -36,7 +37,8 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz) =
  *
  * This reports; it deliberately does NOT fail the load. Two reasons. Several guards
  * legitimately cannot arm on older KMIs (the pagemap arm needs 6.7, the pathhide guards
- * need 5.4), so a partial cloak is the normal state there. And by this point fn() has
+ * 5.10 -- NM_PH_SUPPORTED), so a partial cloak is the normal state there. And by this
+ * point fn() has
  * already brought the engine up -- netlink socket, slab caches, hijacked vtables -- while
  * returning an error from module_init means module_exit never runs, so the teardown that
  * undoes all of that would be skipped and the module unloaded out from under it. Making
@@ -52,12 +54,28 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz) =
  *
  * The OFF, NO-guard and short-count lines below stay loud on purpose: each fires only
  * when a guard has actually failed, and then being findable beats being hidden.
+ *
+ * Which is why "cannot exist on this KMI" needs its OWN state and does not borrow
+ * either of the other two. Returning 0 was the bug: the pre-5.10 pathhide stub did
+ * that, so this macro printed `guard pathhide armed` for a build containing none of
+ * pathhide.c, counted it toward nm_guard_ok, and left nm_guard_ok == nm_guard_n so the
+ * short-count line never fired either -- a complete cloak claimed through both channels.
+ * Returning any other errno would be wrong in the opposite direction: an arm that is
+ * impossible by construction is not a failure, and the loud pr_warn would then name the
+ * module in the ring buffer on every boot of every pre-5.10 hiding build. So
+ * -EOPNOTSUPP, specifically, means unavailable: counted in nm_guard_na, reported with
+ * nm_say(), and excluded from the short-count test, which now fires only when some
+ * guard that COULD have armed did not. No other guard's init returns -EOPNOTSUPP.
  */
 #define NM_GUARD(name, call)						\
 	do {								\
 		int _g = (call);					\
 		nm_guard_n++;						\
-		if (_g) {						\
+		if (_g == -EOPNOTSUPP) {				\
+			nm_guard_na++;					\
+			nm_say("nomount: guard %-9s unavailable on this "\
+			       "kernel\n", name);			\
+		} else if (_g) {					\
 			pr_warn("nomount: guard %-9s OFF (%d)\n",	\
 				name, _g);				\
 		} else {						\
@@ -68,6 +86,7 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz) =
 
 static int nm_guard_n;
 static int nm_guard_ok;
+static int nm_guard_na;
 
 #undef fs_initcall
 #define fs_initcall(fn)							\
@@ -86,10 +105,15 @@ static int nm_guard_ok;
 			pr_err("nomount: NO guard armed - the engine is "\
 			       "serving with every detection surface it "\
 			       "closes left open\n");			\
-		else if (nm_guard_ok != nm_guard_n)			\
-			pr_warn("nomount: %d of %d guards armed - the "	\
-				"surfaces named OFF above stay open\n",	\
-				nm_guard_ok, nm_guard_n);		\
+		else if (nm_guard_ok + nm_guard_na != nm_guard_n)	\
+			pr_warn("nomount: %d of %d guards armed, %d "	\
+				"unavailable - the surfaces named OFF "	\
+				"above stay open\n", nm_guard_ok,	\
+				nm_guard_n, nm_guard_na);		\
+		else if (nm_guard_na)					\
+			nm_say("nomount: %d of %d guards armed, %d "	\
+			       "unavailable on this kernel\n",		\
+			       nm_guard_ok, nm_guard_n, nm_guard_na);	\
 		nm_module_hide();					\
 		return 0;						\
 	}								\
