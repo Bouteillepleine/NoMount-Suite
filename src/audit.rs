@@ -784,24 +784,30 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     .owner("the kernel engine")
 }
 
-/// How far outside a stock interval an inode landed, if it is outside it at all.
+/// Whether a synthesized directory's inode is isolated at either end of its stock siblings.
 ///
-/// The engine places either inside the partition's directory band or, when the used-set is
-/// absent or full, just above a partition-wide ceiling -- and `amax` counts inodes of every
-/// kind, so that ceiling can sit far above the directories beside it while still being under
-/// 8x this one parent's max. The old one-sided `ino > max * 8` test therefore passed both
-/// that fallback and anything placed BELOW the local range.
+/// The question is NOT how far away it is. The oracle is one `find -type d -inum +N`, and
+/// that isolates our directories whenever no stock sibling carries a higher number --
+/// however close ours sits. So the test is membership of the closed interval the stock
+/// population spans, with no slack at either end.
 ///
-/// `ABOVE_SLACK` keeps the one legitimate way out of the interval from reading as a tell: an
-/// overlay reservation takes the superblock counter's next number, which outruns the stock
-/// directories beside it by however many inodes the mount has issued since.
-const ABOVE_SLACK: u64 = 4096;
-
+/// A slack was tried and is wrong. The intent was to let the one legitimate way out of the
+/// interval pass: an overlay reservation takes the superblock counter's next number, which
+/// outruns the stock directories beside it by however far the mount's counter has run. But
+/// being counter-issued protects against a COLLISION, not against isolation -- a
+/// counter-issued number is still the only thing above the local population, so the same
+/// find still returns exactly it. And a slack wide enough for the counter swallowed a real
+/// tell: measured on a CPH2747, stock siblings ran 2..74 while the engine's two sat at
+/// 201 and 202, and `find -maxdepth 1 -type d -inum +100` returned exactly those two,
+/// while `band_side` with a 4096 slack called it clean.
+///
+/// The predecessor of both was `ino > stock_max * 8`, one-sided and multiplicative, which
+/// passed anything placed BELOW the stock range as well as the `amax + 1` fallback.
 fn band_side(lo: u64, hi: u64, ino: u64) -> Option<(&'static str, u64)> {
     if lo > 0 && ino < lo {
         return Some(("below", lo - ino));
     }
-    if hi > 0 && ino > hi.saturating_add(ABOVE_SLACK) {
+    if hi > 0 && ino > hi {
         return Some(("above", ino - hi));
     }
     None
@@ -872,7 +878,8 @@ fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             ranged = true;
             if let Some((side, dist)) = band_side(lo, sm, i) {
                 outliers.push(format!(
-                    "{} ino={i} sits {dist} {side} the stock range here ({lo}..{sm})",
+                    "{} ino={i} is {dist} {side} every stock sibling here ({lo}..{sm}), so one \
+                     filtered find returns it alone",
                     p.display()
                 ));
             }
@@ -1964,9 +1971,12 @@ mod tests {
         // directories happen to sit high in the partition's band. The old test passed it.
         assert_eq!(band_side(100, 900, 99), Some(("below", 1)));
         assert_eq!(band_side(1_800_000, 2_000_000, 5_101), Some(("below", 1_794_899)));
-        // Above it, but only past the slack an overlay counter reservation needs.
-        assert_eq!(band_side(100, 900, 900 + ABOVE_SLACK), None);
-        assert_eq!(band_side(100, 900, 900 + ABOVE_SLACK + 1), Some(("above", ABOVE_SLACK + 1)));
+        // One above the top stock sibling is already the oracle: nothing stock is above it,
+        // so `find -inum +900` returns it alone. No slack, however small.
+        assert_eq!(band_side(100, 900, 901), Some(("above", 1)));
+        // The live CPH2747 shape a 4096 slack called clean: stock 2..74, engine at 201.
+        assert_eq!(band_side(2, 74, 201), Some(("above", 127)));
+        assert_eq!(band_side(2, 74, 202), Some(("above", 128)));
         // The amax+1 fallback the kernel comment calls a real tell: 9,000,001 against a
         // parent whose stock max is 2,000,000 is under 8x it, so the old test passed it.
         assert_eq!(
