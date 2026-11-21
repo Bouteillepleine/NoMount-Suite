@@ -285,7 +285,6 @@ jobs:
           [ -n "$VM" ] || {
             echo "::error::no vermagic in $KO, so nothing here can say which kernel it is for"
             exit 1; }
-          rel="${KMI%%-*}"   # android16
           ver="${KMI##*-}"   # 6.12
           echo "$KMI -> vermagic: $VM"
           echo "- \`$KMI\` -> \`$VM\`" >> "$GITHUB_STEP_SUMMARY"
@@ -293,11 +292,27 @@ jobs:
             "$ver".*) ;;
             *) echo "::error::$KO is named $KMI but its vermagic starts $VM"; exit 1 ;;
           esac
-          case "$VM" in
-            *-"$rel"-*|*-"$rel"\ *) ;;
-            *) echo "::error::$KO is named $KMI but its vermagic does not carry -$rel-: $VM"
-               exit 1 ;;
-          esac
+          # The VERSION is all that can be checked, and that is a measured limit, not
+          # laziness. This step first also asserted the android release -- `-$rel-` --
+          # on the assumption that a GKI vermagic carries it. Seven of the eight DDK
+          # images do not. Measured 2026-11-22, all eight:
+          #
+          #   android12-5.10  5.10.245-dirty
+          #   android13-5.10  5.10.245-dirty          <-- byte-identical to android12
+          #   android13-5.15  5.15.194-android13-5.15.194_r00-dirty   <-- the only one
+          #   android14-5.15  5.15.194-dirty
+          #   android14-6.1   6.1.155-dirty
+          #   android15-6.6   6.6.111-4k-geb31ef0a789d-dirty
+          #   android16-6.12  6.12.52-4k
+          #   android17-6.18  6.18.32-4k-g47cc22554442-dirty
+          #
+          # So the android release is NOT witnessable from the module, and the two 5.10
+          # rows are indistinguishable by vermagic even in principle -- which is also
+          # why the kernel's own vermagic gate cannot refuse the wrong one of that pair
+          # on a 5.10 device, and why module/lkm-load.sh goes strict (no ko-loader) for
+          # a module whose KMI it had to guess. What is left: the version, checked here,
+          # and `package`'s eight-distinct-sha256, which catches two rows collapsing
+          # onto one file. The android-release half of the label stays convention.
 
       - name: Relocations the arm64 module loader cannot apply
         run: |
