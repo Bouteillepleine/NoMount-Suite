@@ -3568,6 +3568,20 @@ static void nm_mark_public_up(struct nomount_rule *rule)
     }
 }
 
+/* Does any surviving child still carry NM_FLAG_PUBLIC? Callers hold
+ * nomount_write_mutex. Only reached when a child stopped being public, so the walk is
+ * off the common path. */
+static bool nm_dir_has_public(struct nomount_dir_node *dir_node)
+{
+    struct nomount_child_node *c;
+    int id = 0;
+
+    idr_for_each_entry(&dir_node->children_idr, c, id)
+        if (c->flags & NM_FLAG_PUBLIC)
+            return true;
+    return false;
+}
+
 static int __nomount_inject_child_locked(struct nomount_dir_node *dir_node, struct nomount_rule *rule, const char *name, size_t name_len)
 {
     struct nomount_child_node *child;
@@ -3578,6 +3592,8 @@ static int __nomount_inject_child_locked(struct nomount_dir_node *dir_node, stru
     hash_for_each_possible(dir_node->children_ht, child, hnode, name_hash) {
         if (child->name_hash == name_hash && child->name_len == name_len &&
             memcmp(child->name, name, name_len) == 0) {
+            bool was_pub = child->flags & NM_FLAG_PUBLIC;
+
             if (child->rule && child->rule != rule)
                 child->rule->parent_dir = NULL;
             WRITE_ONCE(child->flags, rule->flags);
@@ -3587,6 +3603,14 @@ static int __nomount_inject_child_locked(struct nomount_dir_node *dir_node, stru
             rule->parent_dir = dir_node;
             if (rule->flags & NM_FLAG_PUBLIC)
                 WRITE_ONCE(dir_node->has_public, true);
+            else if (was_pub)
+                /* The same latch as the delete path, in its other form: this branch
+                 * REPLACES a child in place, so replacing the node's last PUBLIC child
+                 * with a rule that is not public clears the bit on the child and used to
+                 * leave it set on the node -- keeping blocked uids on the hijacked lookup
+                 * path for children that are no longer public. Only walked when a public
+                 * child actually stopped being one, so the common replace is untouched. */
+                WRITE_ONCE(dir_node->has_public, nm_dir_has_public(dir_node));
             return 0;
         }
     }
@@ -3644,9 +3668,21 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, str
         }
     } else {
         u64 mask = 0;
-        idr_for_each_entry(&dir_node->children_idr, child, id)
+        /* has_public was write-only in the whole engine: set true at three sites, given
+         * false once at allocation, and never recomputed. So removing the last PUBLIC
+         * child left the node latched public for its lifetime, and a blocked uid stayed
+         * on the hijacked lookup path for children that are no longer public at all --
+         * `nomount clear` included, since it frees nodes rather than rebuilding them.
+         * Rebuilt from the survivors here, in the same walk that rebuilds bloom_mask;
+         * the child carries the bit too (nm_mark_public_up sets both). */
+        bool pub = false;
+        idr_for_each_entry(&dir_node->children_idr, child, id) {
             mask |= (1ULL << (child->name_hash & 63));
+            if (child->flags & NM_FLAG_PUBLIC)
+                pub = true;
+        }
         WRITE_ONCE(dir_node->bloom_mask, mask);
+        WRITE_ONCE(dir_node->has_public, pub);
     }
 }
 
@@ -4871,10 +4907,21 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     anc_cap = ex->v_cap;
                     have_anc = true;
                 }
-                if (target_rule->flags & NM_FLAG_PUBLIC)
-                    nm_mark_public_up(ex);
                 err = __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
                 if (unlikely(err)) break;
+                /* AFTER the inject, not before it. nm_mark_public_up() mutates live state
+                 * in place -- rule->flags, child->flags and pd->has_public -- and the
+                 * failure path in __nomount_add_rule frees the incoming rule without any
+                 * undo. Done first, an -ENOMEM in the inject above left the ancestor
+                 * virtual directories permanently PUBLIC: NM_FLAG_PUBLIC is the bit that
+                 * makes an entry served to a blocked uid, and has_public is what keeps a
+                 * blocked uid on the hijacked lookup path at all, so a failed add handed
+                 * the DenyList apps, isolated processes and app_zygotes the exact
+                 * visibility the uid gating exists to deny. Nothing read it in between:
+                 * the mark decides ancestor visibility on later lookup and readdir, and
+                 * __nomount_inject_child_locked does not consult it. */
+                if (target_rule->flags & NM_FLAG_PUBLIC)
+                    nm_mark_public_up(ex);
                 found_virtual = true;
                 break;
             }
