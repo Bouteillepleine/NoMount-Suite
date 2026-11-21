@@ -3830,9 +3830,20 @@ static int nm_dev_ino_seed(struct nm_dev_ino *s, const char *seed)
         struct nomount_rule *r;
         int bkt;
 
-        /* The scan skips injected paths; the numbers already handed out stay taken. */
-        hash_for_each(nomount_rules_ht, bkt, r, vpath_node)
+        /* The scan skips injected paths; the numbers already handed out stay taken.
+         *
+         * v_dino as well as v_ino. An overlay-flagged virtual ancestor carries a second,
+         * independently assigned number -- (v_hash & 0x03FFFFFF) | 0x02000000 | 1, set
+         * directly rather than through the placer -- and it entered no exclusion set
+         * anywhere. It is app-visible: it is what the parent's dirent reports for that
+         * child and what "." reports inside it, so it shows up in `ls -i`. Two ancestors
+         * whose hashes collide, or an overlay-counter placement landing in that band,
+         * would hand the same number to two entries. */
+        hash_for_each(nomount_rules_ht, bkt, r, vpath_node) {
             nm_used_add(s->used, r->v_ino);
+            if (r->v_dino && r->v_dino != r->v_ino)
+                nm_used_add(s->used, r->v_dino);
+        }
     }
     if (err == 0) {
         s->dmin = lo;
@@ -4211,6 +4222,13 @@ struct nm_range_slot {
     u16 len;
     bool want_dir;
     bool valid;
+    /* The path itself, because (hash, len, want_dir) is not a key. full_name_hash is
+     * 32-bit, so two different parents of the same length that collide used to be served
+     * each other's inode population -- and that population is what the placer samples,
+     * so the result is a directory placed from the wrong parent's numbers: precisely the
+     * mis-placement the rest of this machinery exists to avoid. The slot already owns a
+     * ~2 KB nm_ino_pop, so one small string is not a cost. */
+    char *path;
     struct nm_ino_pop pop;
 };
 static struct nm_range_slot nm_range_cache[NM_RANGE_SLOTS];
@@ -4226,12 +4244,15 @@ static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_d
     for (i = 0; i < NM_RANGE_SLOTS; i++) {
         sl = &nm_range_cache[i];
         if (sl->valid && sl->hash == h && sl->len == (u16)len &&
-            sl->want_dir == want_dir)
+            sl->want_dir == want_dir &&
+            sl->path && !memcmp(sl->path, dirpath, len))
             return &sl->pop;
     }
     sl = &nm_range_cache[nm_range_cache_next];
     nm_range_cache_next = (nm_range_cache_next + 1) % NM_RANGE_SLOTS;
     sl->valid = false;
+    kfree(sl->path);
+    sl->path = NULL;
     if (nm_dir_ino_pop(dirpath, want_dir, &sl->pop) != 0)
         return NULL;
     nm_dev_ino_get(sl->pop.dev, dirpath);
@@ -4239,8 +4260,27 @@ static struct nm_ino_pop *nm_dir_ino_pop_cached(const char *dirpath, bool want_d
     sl->hash = h;
     sl->len = (u16)len;
     sl->want_dir = want_dir;
-    sl->valid = true;
+    sl->path = kstrndup(dirpath, len, GFP_KERNEL);
+    /* Only cached once it can be identified again. On an allocation failure this answer
+     * is still correct for THIS caller, so hand it back -- but leave the slot invalid so
+     * the next lookup re-scans instead of trusting a slot nothing can key. */
+    sl->valid = sl->path != NULL;
     return &sl->pop;
+}
+
+/* Invalid implies no path. The two rule-removal callers only cleared `valid`, which left
+ * a string attached to a slot nothing would look at until its turn came round again --
+ * bounded by NM_RANGE_SLOTS and freed on recycle, so not a leak today, but it stops
+ * being bounded the moment someone adds a teardown path. */
+static void nm_range_cache_flush(void)
+{
+    int i;
+
+    for (i = 0; i < NM_RANGE_SLOTS; i++) {
+        nm_range_cache[i].valid = false;
+        kfree(nm_range_cache[i].path);
+        nm_range_cache[i].path = NULL;
+    }
 }
 
 #define NM_DMAX_NAMES 128
@@ -5915,7 +5955,6 @@ static int __nomount_del_rule(const char *v_path, size_t v_len, const struct nm_
     struct nomount_rule *rule;
     char *norm = NULL;
     int ret = -ENOENT;
-    int i;
     u32 hash;
 
     while (v_len > 1 && v_path[v_len - 1] == '/') v_len--;
@@ -5936,8 +5975,7 @@ static int __nomount_del_rule(const char *v_path, size_t v_len, const struct nm_
             }
             nm_detach_rule_locked(rule, r_victims, true);
             nm_sib_cache_valid = false;
-            for (i = 0; i < NM_RANGE_SLOTS; i++)
-                nm_range_cache[i].valid = false;
+            nm_range_cache_flush();
             ret = 0;
             break;
         }
@@ -5950,12 +5988,11 @@ static void __nomount_clear_all(bool is_exit)
 {
     struct nomount_rule *rule;
     struct hlist_node *tmp;
-    int bkt, i;
+    int bkt;
     HLIST_HEAD(r_victims);
 
     nm_sib_cache_valid = false;
-    for (i = 0; i < NM_RANGE_SLOTS; i++)
-        nm_range_cache[i].valid = false;
+    nm_range_cache_flush();
 
     static_branch_disable(&nomount_active_uids);
     hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {
