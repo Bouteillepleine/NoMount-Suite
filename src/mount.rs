@@ -1396,6 +1396,39 @@ pub fn run_mount() -> Result<()> {
         );
     }
 
+    // A module plan entry on a target absorb has already taken over was invisible here:
+    // dedupe_by_target only sees collisions WITHIN the plan, and run_reload is the only
+    // pass that ever read the absorbed record (it needs it to decide what not to prune).
+    // An absorbed APK rule is scoped under apkscope; a plan rule is uid 0, so if the plan
+    // one ends up serving, the apps the operator excluded can see the content again.
+    //
+    // REPORTED, not reordered. Dropping the plan entry is the other option, but a module
+    // is the original owner of its own content and absorb only took over a bind it found,
+    // so which should win is a policy question -- and I have not verified what the engine
+    // does when a uid-0 rule meets a scoped one on the same vpath. Making it visible is
+    // the part that is unambiguously right.
+    //
+    // Non-fatal, unlike run_reload's read of the same record: there it decides what to
+    // prune, here only what to print, and refusing to serve at boot over a reporting
+    // feature would be the worse failure.
+    match crate::absorb::read_absorbed_targets() {
+        Ok(absorbed) => {
+            for e in plan.iter().filter(|e| absorbed.contains(&e.target)) {
+                eprintln!(
+                    "nomount: {} is already served as an absorbed rule and {} claims it too \
+                     - if the plan rule wins it serves UNSCOPED, so the apps in apkscope see \
+                     it again. Drop it from the module, or from absorbed.list.",
+                    e.target.display(),
+                    e.module
+                );
+            }
+        }
+        Err(e) => eprintln!(
+            "nomount: cannot read the absorbed-rule record ({e:#}) - a module plan entry on an \
+             absorbed target is not reported this pass"
+        ),
+    }
+
     if let Err(e) = write_module_summary(&plan) {
         eprintln!("nomount: could not write {MODULE_SUMMARY}: {e} - per-module badges will be stale");
     }
@@ -1933,7 +1966,14 @@ mod tests {
             (
                 "tests/nm-parse-check.c",
                 "the host check of nm's --uid-excluded parsing, the contract Morphe's \
-                 \"NoMount only\" installs depend on",
+                 \"NoMount only\" installs depend on, plus do_nm_cmd's single-attribute \
+                 bound -- without it an over-length payload overflows tx_buf again",
+            ),
+            (
+                "scripts/contract-sweep.py quoting",
+                "the WebUI root-call quoting sweep: every value interpolated or \
+                 concatenated into a root shell string goes through shq(), which is \
+                 otherwise only a convention",
             ),
         ] {
             assert!(
