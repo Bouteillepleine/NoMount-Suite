@@ -6432,6 +6432,13 @@ static int nomount_nl_set_knob(struct nlattr **attrs)
     case NM_KNOB_VDIR_EROFS_SIZE:
         if (vlen <= 0)
             return 0;
+        /* Validated, like NM_KNOB_HIDE_ISOLATED below. `val[0] == '1'` alone meant any
+         * other value set the knob to FALSE and reported success, so a typo -- `nm k d 7`
+         * -- silently turned off the thing that makes a synthesized directory report an
+         * erofs-shaped size, which is the dir-size tell nm_dir_stat_fix() exists to
+         * close. Silently landing on "off" is the worse direction of the two. */
+        if (vlen != 1 || (val[0] != '0' && val[0] != '1'))
+            return -EINVAL;
         WRITE_ONCE(nm_vdir_erofs_size, val[0] == '1');
         return 0;
     case NM_KNOB_HIDE_ISOLATED: {

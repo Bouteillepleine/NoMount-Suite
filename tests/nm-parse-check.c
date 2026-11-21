@@ -82,6 +82,37 @@ void c_main(long *sp) {
             print_err("FAIL --uid-range needs an explicit A-B\n"); failures++; }
     }
 
+    /* do_nm_cmd's single-attribute bound. It memcpy'd len caller-supplied bytes to
+     * tx_buf + 20 with no check at all, while do_nm_cmd_multi ten lines above checked
+     * `off + padded > TX_BUF_SIZE`; the only thing keeping it in bounds was the
+     * MAX_PAYLOAD convention, re-derived at three call sites with 68 bytes of slack.
+     *
+     * fd is -1 on purpose: SYS_WRITE fails with -EBADF and do_nm_cmd returns it, so an
+     * accepted length is distinguishable from a refused one (NM_ERR_PROTO) without a
+     * socket. Removing the bound makes the over-length cases stop being refused -- and
+     * the last two then overflow the buffer for real, which is the point.
+     */
+    {
+        static struct nm_mem mem;
+        static char big[MAX_PAYLOAD + 64];
+        struct { int len; int refuse; } cases[] = {
+            { 0, 0 }, { 1, 0 }, { MAX_PAYLOAD, 0 },
+            { MAX_PAYLOAD + 1, 1 }, { TX_BUF_SIZE, 1 }, { -1, 1 },
+        };
+
+        for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            int rc = do_nm_cmd(-1, 1, 1, big, cases[i].len, 0, &mem);
+
+            if ((rc == NM_ERR_PROTO) != cases[i].refuse) {
+                print_err("FAIL do_nm_cmd len=");
+                print_uint((unsigned)cases[i].len);
+                print_err(cases[i].refuse ? " must be refused\n"
+                                          : " must be accepted\n");
+                failures++;
+            }
+        }
+    }
+
     if (!failures) print_err("nm-parse-check: ok\n");
     sys1(SYS_EXIT, failures != 0);
     __builtin_unreachable();

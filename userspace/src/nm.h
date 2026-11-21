@@ -376,6 +376,18 @@ static noinline int do_nm_cmd(int fd, int cmd, int atype, const void *data, int 
 
     if (data) {
         unsigned short *nla = (void *)(mem->tx_buf + 16);
+
+        /* do_nm_cmd_multi() ten lines up checks `off + padded > TX_BUF_SIZE`; this path
+         * checked nothing, and memcpy'd len caller-supplied bytes to tx_buf + 20. All
+         * that kept it in bounds was the MAX_PAYLOAD convention -- TX_BUF_SIZE - 88,
+         * re-derived at three separate call sites, 68 bytes of slack -- with nothing
+         * tying the two together. One careless caller is a stack overflow in a client
+         * that runs as root and ships in both zips.
+         *
+         * MAX_PAYLOAD rather than TX_BUF_SIZE - 20, so the invariant is stated once
+         * here instead of assumed everywhere. It also removes the u16 truncation in
+         * `nla[0] = 4 + len` for free: MAX_PAYLOAD is 16296, far under 0xFFFF - 4. */
+        if (len < 0 || len > MAX_PAYLOAD) return NM_ERR_PROTO;
         nla[0] = 4 + len; nla[1] = atype;
         memcpy(nla + 2, data, len);
         nlh->nlmsg_len = 16 + nla[0];
