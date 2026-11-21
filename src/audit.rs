@@ -827,6 +827,56 @@ fn band_side(lo: u64, hi: u64, ino: u64) -> Option<(&'static str, u64)> {
     None
 }
 
+/// Walk `parent`'s subtree and record the lowest and highest STOCK directory inode per
+/// device, bounded so a deep partition cannot turn this into a full scan.
+///
+/// The parent's DIRECT children are the wrong reference for the "above" question. Measured
+/// on a CPH2747: /product/priv-app's direct stock children run 2..74, which looks like the
+/// whole story, but the same overlay mount has already issued up to 200 to directories one
+/// level further down. A synthesized directory at 201 is therefore the next number that
+/// mount's own counter would hand to a real directory, not an outlier - while against the
+/// direct children alone it reads as 127 above everything.
+///
+/// So "above" means above what the filesystem has actually issued. Below the lowest number
+/// in play stays a tell at any depth: nothing legitimate places there.
+fn stock_dev_range(parent: &Path, engine_dirs: &[PathBuf]) -> HashMap<u64, (u64, u64)> {
+    const CAP: usize = 20_000;
+    let mut out: HashMap<u64, (u64, u64)> = HashMap::new();
+    let mut queue: Vec<PathBuf> = vec![parent.to_path_buf()];
+    let mut seen = 0usize;
+
+    while let Some(dir) = queue.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            if seen >= CAP {
+                return out;
+            }
+            seen += 1;
+            let p = e.path();
+            let Ok(md) = fs::symlink_metadata(&p) else { continue };
+            if !md.is_dir() {
+                continue;
+            }
+            let (d, i) = {
+                use std::os::unix::fs::MetadataExt;
+                (md.dev(), md.ino())
+            };
+            queue.push(p.clone());
+            if engine_dirs.contains(&p) {
+                continue;
+            }
+            let ent = out.entry(d).or_insert((i, i));
+            if i < ent.0 {
+                ent.0 = i;
+            }
+            if i > ent.1 {
+                ent.1 = i;
+            }
+        }
+    }
+    out
+}
+
 fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut unranged = Vec::new();
@@ -882,6 +932,15 @@ fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
         if stock_max.is_empty() || dirs.is_empty() {
             continue;
         }
+        // What the filesystem has issued, from the subtree, not just the direct children.
+        let subtree = stock_dev_range(&parent, engine_dirs);
+        // Each directory we placed on this dev legitimately consumes one number from the
+        // mount's counter, so being that many above what stock shows is still consistent
+        // with counter issuance rather than evidence of anything.
+        let mut ours_per_dev: HashMap<u64, u64> = HashMap::new();
+        for (_, d, _) in &dirs {
+            *ours_per_dev.entry(*d).or_insert(0) += 1;
+        }
         let mut ranged = false;
         for (p, d, i) in dirs {
             let Some(&sm) = stock_max.get(&d) else {
@@ -889,11 +948,18 @@ fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
                 continue;
             };
             let lo = stock_min.get(&d).copied().unwrap_or(0);
+            // Prefer the subtree's range where it is wider than the direct children's: an
+            // overlay counter interleaves the numbers of directories further down, so the
+            // next one it would issue sits above the siblings and is not a tell.
+            let (dev_lo, dev_hi) = subtree.get(&d).copied().unwrap_or((lo, sm));
+            let lo = lo.min(if dev_lo > 0 { dev_lo } else { lo });
+            let slack = ours_per_dev.get(&d).copied().unwrap_or(0);
+            let hi = sm.max(dev_hi).saturating_add(slack);
             ranged = true;
-            if let Some((side, dist)) = band_side(lo, sm, i) {
+            if let Some((side, dist)) = band_side(lo, hi, i) {
                 outliers.push(format!(
-                    "{} ino={i} is {dist} {side} every stock sibling here ({lo}..{sm}), so one \
-                     filtered find returns it alone",
+                    "{} ino={i} is {dist} {side} every stock directory on dev {d} \
+                     ({lo}..{hi}), so one filtered find returns it alone",
                     p.display()
                 ));
             }
@@ -1985,12 +2051,20 @@ mod tests {
         // directories happen to sit high in the partition's band. The old test passed it.
         assert_eq!(band_side(100, 900, 99), Some(("below", 1)));
         assert_eq!(band_side(1_800_000, 2_000_000, 5_101), Some(("below", 1_794_899)));
-        // One above the top stock sibling is already the oracle: nothing stock is above it,
-        // so `find -inum +900` returns it alone. No slack, however small.
+        // Above whatever the FILESYSTEM has issued is the oracle, and the caller passes
+        // that range in - a number above the direct siblings but inside the mount's own
+        // span is the next one its counter would hand a real directory, not a tell.
         assert_eq!(band_side(100, 900, 901), Some(("above", 1)));
-        // The live CPH2747 shape a 4096 slack called clean: stock 2..74, engine at 201.
+        // The live CPH2747 shape: priv-app's direct stock children are 2..74, but the same
+        // overlay mount has already issued up to 200 further down, and two directories of
+        // ours take 201 and 202 - so the caller's hi is 200 + 2 and both are in range.
+        assert_eq!(band_side(2, 202, 201), None);
+        assert_eq!(band_side(2, 202, 202), None);
+        // Against the direct children alone they would have read as 127 and 128 above,
+        // which is the comparison this replaced.
         assert_eq!(band_side(2, 74, 201), Some(("above", 127)));
-        assert_eq!(band_side(2, 74, 202), Some(("above", 128)));
+        // The amax+1 fallback is still far outside anything the mount has issued.
+        assert_eq!(band_side(2, 202, 89_750_659), Some(("above", 89_750_457)));
         // The amax+1 fallback the kernel comment calls a real tell: 9,000,001 against a
         // parent whose stock max is 2,000,000 is under 8x it, so the old test passed it.
         assert_eq!(
