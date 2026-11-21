@@ -420,9 +420,22 @@ pub fn remove(entry: &str) -> Result<bool> {
     Ok(true)
 }
 
-pub fn cache_read() -> BTreeMap<String, u32> {
+/// `None` means the mirror is there and could not be read. That is NOT the same answer as
+/// "nothing is mirrored": a caller that cannot tell the two apart will overwrite the file
+/// with whatever it can resolve right now, erasing the record of every appid an earlier
+/// pass hid. A MISSING file really is empty -- that is every first boot -- so it answers
+/// `Some(empty)`, and only a file that exists and will not read answers `None`.
+pub fn cache_read_checked() -> Option<BTreeMap<String, u32>> {
+    let raw = match fs::read_to_string(CACHE_PATH) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    };
+    Some(parse_cache(&raw))
+}
+
+fn parse_cache(raw: &str) -> BTreeMap<String, u32> {
     let mut map = BTreeMap::new();
-    let Ok(raw) = fs::read_to_string(CACHE_PATH) else { return map };
     for line in raw.lines() {
         if let Some((k, v)) = line.split_once('\t') {
             if let Ok(uid) = v.trim().parse::<u32>() {
@@ -431,6 +444,10 @@ pub fn cache_read() -> BTreeMap<String, u32> {
         }
     }
     map
+}
+
+pub fn cache_read() -> BTreeMap<String, u32> {
+    cache_read_checked().unwrap_or_default()
 }
 
 fn cache_write(map: &BTreeMap<String, u32>) {
@@ -572,7 +589,16 @@ pub fn ksu_denylist(installed: &[(String, u32)]) -> Option<Vec<(String, u32)>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_appid_list_in, DENY_MAX};
+    use super::{parse_cache, resolve_appid_list_in, DENY_MAX};
+
+    #[test]
+    fn the_mirror_is_parsed_per_appid_and_a_bad_row_is_dropped_not_fatal() {
+        let m = parse_cache("com.a\t10500\ncom.b\t1010600\njunk\ncom.c\tnotanumber\n");
+        assert_eq!(m.get("com.a"), Some(&10500));
+        assert_eq!(m.get("com.b"), Some(&10600), "a secondary user's uid is the same appid");
+        assert_eq!(m.len(), 2, "a row without a tab or without a number is skipped: {m:?}");
+        assert!(parse_cache("").is_empty(), "a missing mirror parses as empty, not as a fault");
+    }
 
     fn pm() -> Vec<(String, u32)> {
         vec![

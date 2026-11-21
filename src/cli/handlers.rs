@@ -101,16 +101,25 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
                     real.display()
                 );
             }
-            match uid_excluded {
+            // Resolved before the lock is taken: it reads packages.list, and the lock is
+            // meant to be held across the engine write, not across the resolving.
+            let deny = match &uid_excluded {
+                None => None,
+                Some(spec) => Some(crate::blocklist::resolve_appid_list(spec)?),
+            };
+            // Every other verb that mutates live rules takes the pass lock -- `vfs clear`,
+            // all seven uid verbs, whiteout add/remove/apply, absorb, mount and reload.
+            // These three did not, so one landing inside a reconcile pass could be pruned
+            // as drift, or wiped by its `nm clear`, while this still printed ok.
+            let _pass = pass_guard();
+            match deny {
                 None => nm.add(Path::new(&virtual_path), real)?,
-                Some(spec) => {
-                    let deny = crate::blocklist::resolve_appid_list(&spec)?;
-                    nm.add_scoped(Path::new(&virtual_path), real, &deny)?;
-                }
+                Some(deny) => nm.add_scoped(Path::new(&virtual_path), real, &deny)?,
             }
             println!("ok");
         }
         VfsAction::Del { virtual_path } => {
+            let _pass = pass_guard();
             nm.del_any(Path::new(&virtual_path))?;
             println!("ok");
         }
@@ -120,6 +129,7 @@ pub fn handle_vfs(action: VfsAction) -> Result<()> {
             if let Err(why) = crate::mount::path_is_representable(p) {
                 anyhow::bail!("refusing {}: {why}", p.display());
             }
+            let _pass = pass_guard();
             nm.whiteout(p)?;
             println!("ok");
         }
@@ -155,12 +165,34 @@ pub struct ApplyReport {
     pub failed: u32,
     pub retired: u32,
     pub not_installed: u32,
+    /// The engine would not take the isolated-pool mode `uidhide.conf` asks for. Counted
+    /// apart from `failed`, which means "a hide-list entry could not be applied": folding
+    /// the two made a kernel without the knob report hide-list failures that had not
+    /// happened, exit non-zero on every boot, and permanently block the mirror rewrite at
+    /// the end of this function -- which has nothing to do with the knob.
+    pub knob_refused: bool,
 }
 
 impl ApplyReport {
     pub fn fail_note(&self) -> String {
         if self.failed > 0 { format!(", {} failed", self.failed) } else { String::new() }
     }
+}
+
+/// Whether this pass may un-hide an appid and rewrite the resolved-appid mirror.
+///
+/// Every input that could not be read must answer `false`. Un-hiding on a guess exposes
+/// the Suite to an app the operator asked to hide from, and rewriting the mirror on a
+/// guess erases the record that would let a later pass put it right -- after which the
+/// appid stays hidden in the kernel with nothing on disk naming it.
+fn may_retire(
+    early: bool,
+    installed_known: bool,
+    conf_known: bool,
+    live_known: bool,
+    cache_known: bool,
+) -> bool {
+    !early && installed_known && conf_known && live_known && cache_known
 }
 
 /// Retire one appid the hide list no longer wants hidden.
@@ -185,14 +217,32 @@ fn retire_appid(nm: &Nm, live: &mut Vec<u32>, rep: &mut ApplyReport, old: u32) {
 }
 
 pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
-    let mut rep = ApplyReport { hidden: 0, skipped: 0, failed: 0, retired: 0, not_installed: 0 };
+    let mut rep = ApplyReport {
+        hidden: 0,
+        skipped: 0,
+        failed: 0,
+        retired: 0,
+        not_installed: 0,
+        knob_refused: false,
+    };
 
     let mode = blocklist::hide_isolated();
     if nm.set_hide_isolated(mode).is_err() && mode != blocklist::DEFAULT_HIDE_ISOLATED {
-        rep.failed += 1;
+        rep.knob_refused = true;
+        eprintln!(
+            "nomount: this engine would not take the isolated-pool mode {mode} that \
+             uidhide.conf asks for, so isolated processes are hidden as the engine's own \
+             default instead. The hide list is unaffected; `nomount uid isolated both` \
+             clears the setting."
+        );
     }
 
-    let cache = blocklist::cache_read();
+    // `None` is "the mirror exists and could not be read", which is not the same answer as
+    // "nothing is mirrored" -- see may_retire(). A MISSING file is empty, not unknown.
+    let (cache, cache_known) = match blocklist::cache_read_checked() {
+        Some(c) => (c, true),
+        None => (BTreeMap::new(), false),
+    };
     let entries = match blocklist::read() {
         Ok(e) => e,
         Err(_) => {
@@ -208,24 +258,52 @@ pub fn reapply_blocklist(nm: &Nm, early: bool) -> ApplyReport {
         Some(v) => (v, false),
         None => (false, true),
     };
-    if entries.is_empty() && cache.is_empty() && !follow_ksu && !conf_unreadable {
+    if entries.is_empty() && cache.is_empty() && !follow_ksu && !conf_unreadable && cache_known {
         return rep;
     }
-    let mut live = nm.uid_list_live().unwrap_or_default();
+    // An engine that could not be asked which appids it holds is NOT an engine holding
+    // none. Defaulted to empty, retire_appid() took its "this appid is already retired"
+    // shortcut for every stale entry -- counting it retired without ever sending the
+    // unblock -- and because uid_block() still succeeded, rep.failed stayed 0 and the
+    // cache_replace() at the end of this function then erased the only record that those
+    // appids were hidden. The app stayed hidden with nothing on disk naming it, which no
+    // later pass could undo, and `uid unblock <glob>` printed "N package(s) un-hidden"
+    // about work it had not done. The unblock path propagates this same error instead of
+    // defaulting it, and the re-read in the hide loop below exists because it can fail.
+    let live_res = nm.uid_list_live();
+    let live_known = live_res.is_ok();
+    let mut live = live_res.unwrap_or_default();
 
     let installed = if early { None } else { blocklist::installed_packages() };
-    let mut can_retire = !early && installed.is_some();
+    let installed_known = installed.is_some();
     let installed = installed.unwrap_or_default();
-    if !early && !can_retire {
+    let mut can_retire =
+        may_retire(early, installed_known, !conf_unreadable, live_known, cache_known);
+    if !early && !installed_known {
         rep.failed += 1;
     }
     if conf_unreadable {
-        can_retire = false;
         rep.failed += 1;
         eprintln!(
             "nomount: could not read the per-UID settings, so whether the hide list follows \
              KernelSU's DenyList is unknown - every app already hidden is left hidden, and \
              nothing is un-hidden this pass"
+        );
+    }
+    if !live_known {
+        rep.failed += 1;
+        eprintln!(
+            "nomount: the engine could not be asked which appids it is hiding, so nothing is \
+             un-hidden this pass and the resolved-appid mirror is left as it was - rewriting \
+             it now would drop the record of an appid the kernel is still hiding"
+        );
+    }
+    if !cache_known {
+        rep.failed += 1;
+        eprintln!(
+            "nomount: the resolved-appid mirror could not be read, so which appids an earlier \
+             pass hid is unknown - nothing is un-hidden this pass, and the mirror is left \
+             exactly as it is rather than overwritten with a guess"
         );
     }
     let mut desired: BTreeMap<String, u32> = BTreeMap::new();
@@ -843,8 +921,13 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
             let _pass = pass_guard();
             let rep = reapply_blocklist(&nm, early);
             println!(
-                "hidden {}, not installed {}, skipped {}, retired {}, failed {}",
-                rep.hidden, rep.not_installed, rep.skipped, rep.retired, rep.failed
+                "hidden {}, not installed {}, skipped {}, retired {}, failed {}{}",
+                rep.hidden,
+                rep.not_installed,
+                rep.skipped,
+                rep.retired,
+                rep.failed,
+                if rep.knob_refused { " · isolated-pool knob refused" } else { "" }
             );
             if rep.failed > 0 {
                 bail!("{} entr(ies) could not be applied", rep.failed);
@@ -951,6 +1034,32 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_input_that_could_not_be_read_never_retires_or_rewrites_the_mirror() {
+        // The one case that may un-hide: a late pass with every input readable.
+        assert!(may_retire(false, true, true, true, true));
+
+        // Each input on its own is enough to stop it. `live` and `cache` are the two this
+        // test exists for: both were defaulted to empty, so a failed read read as "the
+        // kernel is hiding nothing" / "no earlier pass hid anything", the retire pass
+        // counted every stale appid retired without sending an unblock, and the mirror was
+        // then overwritten -- leaving the appid hidden with nothing on disk naming it.
+        assert!(!may_retire(false, true, true, false, true), "unreadable live uid list");
+        assert!(!may_retire(false, true, true, true, false), "unreadable appid mirror");
+        assert!(!may_retire(false, false, true, true, true), "unreadable package map");
+        assert!(!may_retire(false, true, false, true, true), "unreadable uidhide.conf");
+        assert!(!may_retire(true, true, true, true, true), "the early pass cannot resolve");
+
+        for (i, bad) in [1usize, 2, 3, 4].into_iter().enumerate() {
+            let mut f = [true; 4];
+            f[bad - 1] = false;
+            assert!(
+                !may_retire(false, f[0], f[1], f[2], f[3]),
+                "input {i} unknown still allowed a retire"
+            );
+        }
+    }
 
     #[test]
     fn isolated_mode_words_and_numbers_both_parse() {
