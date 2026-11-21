@@ -278,8 +278,16 @@ pub(crate) fn path_is_representable(p: &Path) -> Result<(), &'static str> {
     if s.contains(" -> ") {
         return Err("its name contains ` -> `, the separator between target and source");
     }
-    if s.contains(" [UID:") {
-        return Err("its name contains ` [UID:`, which `nm list` uses to split the uid off");
+    // `nm list` renders a rule on one line and appends its markers, and the consumer
+    // (nm::parse_line) cuts the line at the first of these it finds. The guard covered
+    // " [UID:" alone and was never extended when the scope work added [SCOPE: and [DENY:,
+    // so a path carrying either truncated the parse -- or forged a scope the rule never
+    // had. Matched without the leading space too, because that is how parse_line searches.
+    for marker in ["[UID:", "[SCOPE:", "[DENY:"] {
+        if s.contains(marker) {
+            return Err("its name contains `[UID:`, `[SCOPE:` or `[DENY:`, which `nm list` \
+                        uses to split a rule's markers off the path");
+        }
     }
     for suffix in [" (whiteout)", " (public)", " (virtual dir)"] {
         if s.ends_with(suffix) {

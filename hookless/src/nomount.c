@@ -2598,6 +2598,38 @@ static bool nm_is_passthrough_child(struct inode *parent_dir, struct dentry *den
            !d_unhashed(cinfo->r_path.dentry);
 }
 
+/* Does this dentry's cached snapshot still describe the rule that is live now?
+ *
+ * nm_reval_fresh() only stamps the generation and returns 1, so an injected dentry was
+ * blessed without ever being rechecked against its rule: after a hot-swap, or a rule
+ * replaced in place with different identity, the caller kept serving the previous one for
+ * as long as the dentry lived.
+ *
+ * Four fields, not nm_dentry_matches_rule()'s six. The other two are r_path.dentry/mnt,
+ * which are only populated when the rule info is fetched with get_path=true -- a path
+ * reference taken and dropped on every revalidate of every injected name, in the lookup
+ * hot path. These four are the identity an app can observe through stat(), and they are
+ * already in the rule_info the caller fetched, so the check costs four comparisons.
+ *
+ * Comparing flags is sound even though rule_info synthesizes NM_FLAG_UID_SCOPED on top of
+ * the rule's own: nm_inode_info.flags is assigned FROM rule_info.flags, so both sides come
+ * through the same synthesis.
+ */
+static bool nm_reval_info_agrees(struct dentry *dentry, const struct nm_rule_info *ri)
+{
+    const struct nm_inode_info *info;
+    struct inode *ino = d_inode(dentry);
+
+    if (!ino || (ino->i_op != &nm_file_iops && ino->i_op != &nm_dir_iops))
+        return false;
+    info = ino->i_private;
+    return info &&
+           info->flags == ri->flags &&
+           info->v_ino == ri->v_ino &&
+           info->v_dev == ri->v_dev &&
+           info->v_dino == ri->v_dino;
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
 static int nm_d_revalidate(struct inode *dir, const struct qstr *name, struct dentry *dentry, unsigned int flags)
 #else
@@ -2692,14 +2724,18 @@ static int nm_d_revalidate(struct dentry *dentry, unsigned int flags)
                 struct nm_inode_info *ii = dentry->d_inode->i_private;
                 if (!(rule_info.flags & NM_FLAG_SHADOWS_STOCK) ||
                     (ii && ii->s_path.dentry))
-                    return nm_reval_fresh(dentry, gen);
+                    return nm_reval_info_agrees(dentry, &rule_info)
+                               ? nm_reval_fresh(dentry, gen) : 0;
                 return 0;
             }
             return 1;
         }
         if (injected && nm_stock_only_mismatch(dentry))
             return 0;
-        return injected ? nm_reval_fresh(dentry, gen) : nm_reval_stale(dentry);
+        if (injected)
+            return nm_reval_info_agrees(dentry, &rule_info)
+                       ? nm_reval_fresh(dentry, gen) : 0;
+        return nm_reval_stale(dentry);
     }
     /* The name has a rule this caller is scoped out of (system_server under
      * --uid-excluded 1000), and the dentry is the real one: that is what this

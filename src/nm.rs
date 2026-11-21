@@ -537,7 +537,13 @@ fn parse_line(line: &str) -> Option<LiveRule> {
     // Markers trail the path section and any of them may be absent: a Morphe
     // rule is uid 0, so it prints no [UID:] at all and only [SCOPE:]/[DENY:].
     // Cutting at the FIRST marker present keeps a scope out of the source path.
-    let cut = ["[UID:", "[SCOPE:", "[DENY:"]
+    // Matched WITH the leading space the renderer emits (" [UID: n]", " [SCOPE: a-b]",
+    // " [DENY: x,y]" in userspace/src/nm.c), not as bare substrings. A bare search cuts
+    // anywhere in the line, including inside the path, so one rule target containing
+    // "[SCOPE:" was enough to truncate the parse. mount::path_is_representable now refuses
+    // such a target as well; this half covers a rule added out of band through `nm add`,
+    // which does not go through that guard.
+    let cut = [" [UID:", " [SCOPE:", " [DENY:"]
         .iter()
         .filter_map(|m| line.find(m))
         .min();
@@ -649,6 +655,24 @@ mod tests {
             vec![10170, 10397],
             "del_any deletes using exactly this set, so a misparse orphans the rule"
         );
+    }
+
+    #[test]
+    fn a_marker_inside_a_path_does_not_cut_the_line() {
+        // The markers were matched as bare substrings, so the first "[SCOPE:" ANYWHERE in
+        // the line ended the path section -- this target parsed as "/a/x" carrying a scope
+        // of 1-2 that no rule ever had. They are matched with the leading space the
+        // renderer emits now, and mount::path_is_representable refuses such a target too.
+        let r = parse_line("/a/x[SCOPE: 1-2]y -> /b/x[SCOPE: 1-2]y").expect("parsed");
+        assert_eq!(r.target, PathBuf::from("/a/x[SCOPE: 1-2]y"));
+        assert_eq!(r.source, Some(PathBuf::from("/b/x[SCOPE: 1-2]y")));
+        assert!(!r.scoped, "a path that merely contains the text is not a scoped rule");
+        assert_eq!(r.uid, 0);
+
+        // ...while a real trailing marker still parses.
+        let s = parse_line("/a/x[DENY: 1]y -> /b [SCOPE: 1-2]").expect("parsed");
+        assert_eq!(s.target, PathBuf::from("/a/x[DENY: 1]y"));
+        assert!(s.scoped);
     }
 
     #[test]

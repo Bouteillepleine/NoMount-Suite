@@ -124,7 +124,34 @@ impl Fingerprint {
             ),
             "unchecked" => mk("per-UID consistency canary", Verdict::Unmeasured, self.consistency.clone())
                 .meaning("No injected file could be sampled, so this was not tested."),
-            other => mk("per-UID consistency canary", Verdict::Fail, other.to_string())
+            "unchecked:no-unhidden-app" => mk(
+                "per-UID consistency canary",
+                Verdict::NotApplicable,
+                self.consistency.clone(),
+            )
+            .meaning(
+                "There is no unhidden app to compare against - every candidate uid is on your \
+                 hide list - so a divergence here would be the hiding working. Nothing to test.",
+            ),
+            "unchecked:canary-unreadable" => mk(
+                "per-UID consistency canary",
+                Verdict::Unmeasured,
+                self.consistency.clone(),
+            )
+            .meaning(
+                "The stock ROM file this compares against could not be read as root, so there \
+                 was no baseline to diff an app's view against. This was not tested.",
+            ),
+            // FAIL is now reserved for the one shape that means a real divergence.
+            //
+            // It used to be the catch-all, and consistency_probe() emits two strings no arm
+            // above matched - "unchecked:no-unhidden-app" and "unchecked:canary-unreadable" -
+            // so two "could not measure" states were reported as "a normal app sees something
+            // different at an injected path than root does ... the d_drop-class kernel
+            // regression", complete with an oracle and the engine named as owner. That is a
+            // false alarm pointing at the kernel, and the catch-all guaranteed that any status
+            // a future probe learns to emit would do the same.
+            s if s.starts_with("mismatch:") => mk("per-UID consistency canary", Verdict::Fail, s.to_string())
                 .meaning(
                     "A normal app sees something different at an injected path than root does. \
                      That is the d_drop-class kernel regression this canary exists to catch.",
@@ -134,6 +161,20 @@ impl Fingerprint {
                      see the injection",
                 )
                 .owner("the kernel engine"),
+            s if s.starts_with("unchecked") => mk(
+                "per-UID consistency canary",
+                Verdict::Unmeasured,
+                s.to_string(),
+            )
+            .meaning(
+                "The canary did not run, and this build does not recognise the reason it gave, \
+                 so nothing was compared.",
+            ),
+            other => mk("per-UID consistency canary", Verdict::Unmeasured, other.to_string())
+                .meaning(
+                    "The canary answered with a status this build does not recognise. That is \
+                     not a measurement, and it is not a kernel fault either.",
+                ),
         });
 
         out.push(match self.served_matches_rule.as_str() {
