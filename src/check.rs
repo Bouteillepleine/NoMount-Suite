@@ -420,10 +420,33 @@ pub fn build(plan: bool, device: bool) -> Result<Report> {
         facts = fp.facts();
     }
     if plan {
-        let (plan_checks, counts) = crate::doctor::plan_checks()?;
-        checks.extend(plan_checks);
-        for (k, v) in counts {
-            facts.push((k, v));
+        // Degrade, do not abandon. `plan_checks` propagates collect_plan()'s error, which
+        // fires when /data/adb/modules cannot be enumerated - and the `?` here threw away
+        // every device check already built above, including the mount-table ones that need
+        // no plan at all, so `nomount check` printed nothing and exited non-zero at the
+        // moment the user most needed to see what WAS measurable. An unmeasured row is how
+        // the rest of this report says "could not look".
+        match crate::doctor::plan_checks() {
+            Ok((plan_checks, counts)) => {
+                checks.extend(plan_checks);
+                for (k, v) in counts {
+                    facts.push((k, v));
+                }
+            }
+            Err(e) => checks.push(
+                Check::new(
+                    Section::Plan,
+                    "plan-unreadable",
+                    "module set could not be read",
+                    Verdict::Unmeasured,
+                    format!("{e:#}"),
+                )
+                .meaning(
+                    "The static half of this report needs to walk the installed modules, and \
+                     that walk failed, so nothing about the module set was checked. What the \
+                     device section measured is still below.",
+                ),
+            ),
         }
     }
 

@@ -294,8 +294,15 @@
       "done < /data/adb/nomount/absorbed.list 2>/dev/null"
     );
     const rows = (r.stdout || "").split("\n").map(x => x.trim()).filter(Boolean);
-    ABSORBED_N = rows.length;
+    // errno, not the row count. A read that failed outright yields zero rows too, and
+    // taking that as "no absorbed rules" states a measurement nobody made. -1 is the
+    // not-measured value, and the metric says so rather than printing a number.
+    ABSORBED_N = r.errno === 0 ? rows.length : -1;
     paintModuleMetric();
+    if (r.errno !== 0) {
+      box.innerHTML = '<div class="empty">Unknown: the absorbed list could not be read.</div>';
+      return;
+    }
     if (!rows.length) { box.innerHTML = ""; return; }
     const owner = (s) => {
       const m = s.match(/\/data\/adb\/modules(?:_update)?\/([^/]+)/);
@@ -319,7 +326,15 @@
   // rather than in a check nobody opens. Painted by whichever of refreshModules
   // and refreshAbsorbed finishes last: they run in parallel.
   function paintModuleMetric() {
-    if (MOD_SERVED < 0) return;
+    // Write the "?" rather than returning and leaving whatever is on screen. Both
+    // refreshModules and refreshAbsorbed call this from the same Promise.all, so after a
+    // pass whose module read failed, whichever of them finished second repainted the
+    // previous pass's served count over the "?" the error arm had just written -- a stale
+    // number presented as current.
+    if (MOD_SERVED < 0) {
+      $("mMod").textContent = "?";
+      return;
+    }
     // "0 unserved" is the strongest claim this page makes: the module set is
     // fully covered. With no cached report -- absent audit.json, or service.sh
     // deleting it after a check that timed out or did not finish -- filtering an
@@ -339,6 +354,7 @@
     // the bare number needs its word, or "4 0 unserved" reads as two figures
     const rest = [];
     if (ABSORBED_N > 0) rest.push(ABSORBED_N + " absorbed");
+    else if (ABSORBED_N < 0) rest.push("absorbed unknown");
     rest.push(unserved < 0 ? "coverage unchecked" : unserved + " unserved");
     $("mMod").innerHTML = MOD_SERVED +
       "<small>served · " + rest.join(" · ") + "</small>";

@@ -62,8 +62,9 @@ impl Fingerprint {
         out.push(match self.consistency.as_str() {
             "ok" => mk("per-UID consistency canary", Verdict::Pass, self.consistency.clone())
                 .meaning(
-                    "A normal app sees the same bytes at an injected path as root does, which is \
-                     what stops an app spotting the injection by diffing its own view.",
+                    "A normal app sees the same size and the same first 4 KiB at an injected path \
+                     as root does, which is what stops an app spotting the injection by diffing \
+                     its own view.",
                 ),
             "unchecked:probe-uid-hidden" => mk(
                 "per-UID consistency canary",
@@ -281,6 +282,29 @@ const PR_AGREE: u32 = 0;
 const PR_DIFFER: u32 = 1;
 const PR_NOSTAT: u32 = 2;
 const PR_UNUSED: u32 = 3;
+/// Size agreed but the bytes did not. Strictly stronger than PR_DIFFER: the whole point of
+/// the canary is that an app and root see the same FILE, and equal length is cheap to
+/// satisfy by accident -- a shadowed APK, an RRO overlay or a prop file replaced with
+/// another of the same length read as agreement, while the PASS row claimed "the same
+/// bytes". Only raised when BOTH sides could read the prefix; a read the child cannot do
+/// falls back to the size answer rather than inventing a divergence, because an injected
+/// file whose stock counterpart is root-only is stock behaviour, not a tell.
+const PR_BYTES: u32 = 4;
+
+/// Bytes of each sampled file folded on both sides. One page: enough to separate two files
+/// of equal length in every case this has to catch, cheap enough to do inside the probe
+/// child with no allocation.
+const PR_PREFIX: usize = 4096;
+
+/// FNV-1a, so the parent and the child fold identically.
+fn prefix_sum(bytes: &[u8]) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in bytes {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
 
 /// An installed app's uid the hide list does not cover, lowest first for a stable pick.
 ///
@@ -404,11 +428,22 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
     // before the fork belongs before it.
     let mut cpaths: Vec<std::ffi::CString> = Vec::new();
     let mut root_sizes: Vec<u64> = Vec::new();
+    // None when root itself could not read the prefix: then the child compares size only,
+    // rather than reporting a divergence the parent never established a baseline for.
+    let mut root_sums: Vec<Option<u32>> = Vec::new();
     let mut kept: Vec<&str> = Vec::new();
     for n in names.iter().take(SLOTS) {
         let (Ok(c), Ok(m)) = (std::ffi::CString::new(*n), fs::metadata(n)) else { continue };
+        let sum = {
+            use std::io::Read;
+            fs::File::open(n).ok().and_then(|f| {
+                let mut buf = Vec::new();
+                f.take(PR_PREFIX as u64).read_to_end(&mut buf).ok().map(|_| prefix_sum(&buf))
+            })
+        };
         cpaths.push(c);
         root_sizes.push(m.len());
+        root_sums.push(sum);
         kept.push(n);
     }
     if kept.first() != Some(&CANARY) {
@@ -419,13 +454,41 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
         let mut out = [PR_UNUSED; SLOTS];
         for i in 0..cpaths.len().min(SLOTS) {
             let mut st: libc::stat = unsafe { std::mem::zeroed() };
-            out[i] = if unsafe { libc::stat(cpaths[i].as_ptr(), &mut st) } != 0 {
-                PR_NOSTAT
-            } else if st.st_size as u64 == root_sizes[i] {
-                PR_AGREE
-            } else {
-                PR_DIFFER
-            };
+            if unsafe { libc::stat(cpaths[i].as_ptr(), &mut st) } != 0 {
+                out[i] = PR_NOSTAT;
+                continue;
+            }
+            if st.st_size as u64 != root_sizes[i] {
+                out[i] = PR_DIFFER;
+                continue;
+            }
+            // Same length. Now the bytes, if root established a baseline for them. No
+            // allocation here: one stack page and read(2) until it is full or the file ends.
+            out[i] = PR_AGREE;
+            let Some(want) = root_sums[i] else { continue };
+            let fd = unsafe { libc::open(cpaths[i].as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                continue;
+            }
+            let mut buf = [0u8; PR_PREFIX];
+            let mut got = 0usize;
+            while got < PR_PREFIX {
+                let r = unsafe {
+                    libc::read(
+                        fd,
+                        buf.as_mut_ptr().add(got) as *mut libc::c_void,
+                        PR_PREFIX - got,
+                    )
+                };
+                if r <= 0 {
+                    break;
+                }
+                got += r as usize;
+            }
+            unsafe { libc::close(fd) };
+            if prefix_sum(&buf[..got]) != want {
+                out[i] = PR_BYTES;
+            }
         }
         out
     }) {
@@ -444,6 +507,9 @@ fn consistency_probe(rules: &[crate::nm::LiveRule], probe_uid: Option<u32>) -> S
         match answers[i] {
             PR_AGREE => checked += 1,
             PR_DIFFER => return format!("mismatch:{target}(size differs for uid {probe_uid})"),
+            PR_BYTES => {
+                return format!("mismatch:{target}(same size, different bytes for uid {probe_uid})")
+            }
             PR_NOSTAT => return format!("mismatch:{target}(ENOENT for uid {probe_uid})"),
             _ => {}
         }
@@ -1060,6 +1126,19 @@ fn redact_app_paths(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_length_contents_fold_to_different_sums() {
+        // What the byte half of the canary rests on. Equal st_size is cheap to satisfy by
+        // accident -- a shadowed prop file, an APK replaced with another of the same length
+        // -- and the comparison was size alone while the PASS row claimed "the same bytes".
+        assert_eq!(prefix_sum(b"abc"), prefix_sum(b"abc"), "the fold must be deterministic");
+        assert_ne!(prefix_sum(b"ro.build.x=1\n"), prefix_sum(b"ro.build.x=2\n"));
+        assert_ne!(prefix_sum(&[0u8; 16]), prefix_sum(&[1u8; 16]));
+        // A short read must not look like the full one either.
+        assert_ne!(prefix_sum(b"abcd"), prefix_sum(b"abc"));
+        assert_ne!(prefix_sum(b""), prefix_sum(b"\0"));
+    }
 
     #[test]
     fn the_canary_probes_as_a_real_unhidden_app_never_shell() {

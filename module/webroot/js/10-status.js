@@ -207,11 +207,16 @@
       const v = c.evidence.match(/(\d+)\s+module mount\(s\) visible/);
       return v ? parseInt(v[1], 10) : 0;
     })();
-    // `zero-mount posture` is emitted as pass/note/fail/unmeasured and NEVER as "warn" -
-    // pinned by audit.rs's own test - so keying on "warn" made this permanently false and
-    // the "Our own my_* binds are visible" arm below unreachable. Ask the question the arm
-    // is actually about: is the Suite's own bind visible to an app?
-    const ourBindsWarn = ourBinds > 0 && appNm > 0;
+    // This arm has now been permanently false twice. First it keyed on verdict === "warn",
+    // which `zero-mount posture` never emits (audit.rs pins pass/note/fail/unmeasured).
+    // The replacement keyed on `appNm > 0`, which cannot happen either: appNm stays 0
+    // unless rootNm > 0, and both counts are `grep -c '^nomount_' /proc/self/mounts` - the
+    // mount SOURCE field - which nothing produces, since the engine makes no mounts and a
+    // module bind's source is /data/adb/modules/...
+    //
+    // `ourBinds` already answers the question the arm is about: it is parsed from the
+    // zero-mount check's own "N module mount(s) visible" evidence, and that check measured
+    // the app-visible mount table. So the branch below tags on `ourBinds` alone.
     const measured = mrows.every(function (c) { return c && c.verdict !== "unmeasured"; });
     const bad = mrows.filter(function (c) { return c && (c.verdict === "fail" || c.verdict === "reboot"); });
     const fmnt = measured ? bad.length : -1;
@@ -247,7 +252,7 @@
               : fmnt < 0 ? { k: "Real mounts", v: "not measured", t: "off" }
               : ourBinds > 0
                 ? { k: "Real mounts", v: ourBinds + " of ours · my_* bind" + (ourBinds > 1 ? "s" : ""),
-                    t: ourBindsWarn ? "info" : "vfs" }
+                    t: "info" }
               : byDesign > 0
                 ? { k: "Real mounts", v: "none of ours · " + byDesign + " left by design", t: "vfs" }
                 : { k: "Real mounts", v: "none, pure Prism", t: "vfs" });
@@ -305,7 +310,7 @@
         esc(redactUids(bad.map(function (c) { return c.meaning || c.name; }).join(" "))) +
         " Open <b>Checks</b>: it names each one, who caused it, and what " +
         "you can do about it.");
-    } else if (ourBindsWarn) {
+    } else if (ourBinds > 0) {
       say("info", "Our own my_* binds are visible",
         ourBinds + " real bind" + (ourBinds > 1 ? "s" : "") + " any app can read",
         esc(redactUids((mrows[0] && (mrows[0].meaning || mrows[0].evidence)) || "")) +

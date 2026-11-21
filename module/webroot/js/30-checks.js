@@ -426,7 +426,7 @@
           (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " · check",
         "device: " + (q[0] || q[5] || "?") + " · Android " + (q[1] || "?") + " · " + (q[2] || "?"),
         "kernel: " + (q[3] || "?") + (q[4] ? " · " + q[4] : ""),
-        "root: " + (q[6] && q[6] !== "0" ? "LKM: kernelsu.ko is loaded, so the running kernel is not a NoMount build" : "built into the kernel, or unknown"),
+        "root: " + (q[6] && q[6] !== "0" ? "kernelsu.ko loaded (KernelSU in LKM mode)" : "no kernelsu.ko in lsmod"),
         "engine: not responding, no CONFIG_NOMOUNT kernel, so no check could run",
       ].join("\n");
       let copied = false;
@@ -458,7 +458,7 @@
         (SUITE_COMMIT && SUITE_COMMIT !== "dev" ? " (" + SUITE_COMMIT + ")" : "") + " · check",
       "device: " + (p[0] || p[5] || "?") + " · Android " + (p[1] || "?") + " · " + (p[2] || "?"),
       "kernel: " + (p[3] || "?") + (p[4] ? " · " + p[4] : ""),
-      "root: " + (p[6] && p[6] !== "0" ? "LKM: kernelsu.ko is loaded, so the running kernel is not a NoMount build" : "built into the kernel, or unknown"),
+      "root: " + (p[6] && p[6] !== "0" ? "kernelsu.ko loaded (KernelSU in LKM mode)" : "no kernelsu.ko in lsmod"),
       "engine: " + (CHECK.engine === null || CHECK.engine === undefined ? "not responding" : "v" + CHECK.engine),
       "sections: " + ((CHECK.sections || []).join(", ") || "?"),
       "rules: " + (CHECK.rules === null || CHECK.rules === undefined
