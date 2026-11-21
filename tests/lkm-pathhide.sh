@@ -171,7 +171,11 @@ else
 	echo "      map_files still lists the address range even when the path is gone."
 fi
 
-dmesg | tail -40 | grep -qiE 'BUG:|Call trace:|Unable to handle kernel' && {
+# Case-SENSITIVE and anchored. The kernel prints these in capitals, and `-i` also matched
+# OPlus's own `osi_debug:` lines, which contain "debug:" -- so on an OPlus device this
+# section failed for vendor logging that has nothing to do with the guards. Measured on a
+# CPH2747, where 21 "fault" lines were all osi_debug.
+dmesg | tail -40 | grep -qE '(^|[[:space:]])BUG:|Call trace:|Unable to handle kernel' && {
 	echo "FAIL kernel complained while the guards ran"; fail=1; }
 
 [ "$fail" = 0 ] && echo "PASS" || echo "FAILED"
