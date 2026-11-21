@@ -140,7 +140,16 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
     fi
     (
         sleep 45
-        [ -e "$NMDIR/disabled" ] && exit 0
+        # This subshell owns the counter reset, because it outlives the foreground script
+        # by ~40s and installs rules the whole way: resetting downstream of boot_completed
+        # but upstream of THIS pass left every crash in it happening at count 1, and the
+        # count back at 0 from the moment the crash became possible.
+        _late_reset() {
+            [ "$booted" = "1" ] || return 0
+            rm -f "$NMDIR/bootcount"
+            nmlog "boot completed and the late passes returned, guard counter reset"
+        }
+        [ -e "$NMDIR/disabled" ] && { _late_reset; exit 0; }
         _rl2_all=$(nmto 60 "$BIN" reload 2>&1)
         _rl2_rc=$?
         if [ "$_rl2_rc" -eq 124 ]; then
@@ -161,7 +170,9 @@ if [ -x "$BIN" ] && [ ! -e "$NMDIR/disabled" ] && [ "$_armed" = 1 ]; then
         else
             nmlog "late absorb pass: $_ab2"
         fi
+        _late_reset
     ) &
+    _late_owns_reset=1
 fi
 
 if [ "$booted" != "1" ]; then
@@ -237,7 +248,11 @@ fi
 # produced a reboot cycle that reached boot_completed every time, cleared the counter
 # every time, and therefore never reached GUARD_MAX: the guard could not park the Suite,
 # and the only way out was recovery. The passes above have all returned by this line.
-if [ "$booted" = "1" ]; then
+#
+# The 45s late reload/absorb has NOT: it is still queued when this line is reached, and it
+# writes the rule table too. So when that subshell was forked it owns the reset and does it
+# as its last act; this line covers only the boots where it never started.
+if [ "$booted" = "1" ] && [ "${_late_owns_reset:-0}" != 1 ]; then
     rm -f "$NMDIR/bootcount"
     nmlog "boot completed and the late passes returned, guard counter reset"
 fi

@@ -777,6 +777,29 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     .owner("the kernel engine")
 }
 
+/// How far outside a stock interval an inode landed, if it is outside it at all.
+///
+/// The engine places either inside the partition's directory band or, when the used-set is
+/// absent or full, just above a partition-wide ceiling -- and `amax` counts inodes of every
+/// kind, so that ceiling can sit far above the directories beside it while still being under
+/// 8x this one parent's max. The old one-sided `ino > max * 8` test therefore passed both
+/// that fallback and anything placed BELOW the local range.
+///
+/// `ABOVE_SLACK` keeps the one legitimate way out of the interval from reading as a tell: an
+/// overlay reservation takes the superblock counter's next number, which outruns the stock
+/// directories beside it by however many inodes the mount has issued since.
+const ABOVE_SLACK: u64 = 4096;
+
+fn band_side(lo: u64, hi: u64, ino: u64) -> Option<(&'static str, u64)> {
+    if lo > 0 && ino < lo {
+        return Some(("below", lo - ino));
+    }
+    if hi > 0 && ino > hi.saturating_add(ABOVE_SLACK) {
+        return Some(("above", ino - hi));
+    }
+    None
+}
+
 fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut outliers = Vec::new();
     let mut unranged = Vec::new();
@@ -799,6 +822,7 @@ fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
             continue;
         };
         let mut stock_max: HashMap<u64, u64> = HashMap::new();
+        let mut stock_min: HashMap<u64, u64> = HashMap::new();
         let mut dirs = Vec::new();
         for e in rd.flatten() {
             let p = e.path();
@@ -822,6 +846,10 @@ fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
                 if i > *cur {
                     *cur = i;
                 }
+                let lo = stock_min.entry(d).or_insert(i);
+                if i < *lo {
+                    *lo = i;
+                }
             }
         }
         if stock_max.is_empty() || dirs.is_empty() {
@@ -833,9 +861,13 @@ fn check_synth_dir_ino(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
                 unranged.push(format!("{} dev {d}", p.display()));
                 continue;
             };
+            let lo = stock_min.get(&d).copied().unwrap_or(0);
             ranged = true;
-            if sm > 0 && i > sm.saturating_mul(8) {
-                outliers.push(format!("{} ino={i} (stock max here {sm})", p.display()));
+            if let Some((side, dist)) = band_side(lo, sm, i) {
+                outliers.push(format!(
+                    "{} ino={i} sits {dist} {side} the stock range here ({lo}..{sm})",
+                    p.display()
+                ));
             }
         }
         if ranged {
@@ -928,7 +960,8 @@ fn synth_dir_verdict(
         soft(
             N_SYNTH_DIR_INO,
             outliers.join("; "),
-            "`find <mount> -type d -inum +N` returns exactly the synthesized directories",
+            "`find <mount> -type d -inum +N` (or `-inum -N`) returns exactly the synthesized \
+             directories",
         )
         .meaning(
             "Folders the Suite created carry inode numbers far outside the ROM's range, so one \
@@ -1911,6 +1944,30 @@ mod tests {
         // that legitimately answered it was reported as unmeasured.
         assert_eq!(probe_as_uid(me, || [u32::MAX]), Ok([u32::MAX]));
         assert_eq!(probe_as_uid(me, || [u32::MAX, 1]), Ok([u32::MAX, 1]));
+    }
+
+    #[test]
+    fn a_synthesized_dir_inode_outside_the_stock_range_is_reported_either_side() {
+        // The test this replaced was `ino > stock_max * 8`, one-sided and multiplicative.
+        // Inside the range: nothing to say.
+        assert_eq!(band_side(100, 900, 500), None);
+        assert_eq!(band_side(100, 900, 100), None);
+        assert_eq!(band_side(100, 900, 900), None);
+        // Below it -- what the in-band placer produces when this parent's own stock
+        // directories happen to sit high in the partition's band. The old test passed it.
+        assert_eq!(band_side(100, 900, 99), Some(("below", 1)));
+        assert_eq!(band_side(1_800_000, 2_000_000, 5_101), Some(("below", 1_794_899)));
+        // Above it, but only past the slack an overlay counter reservation needs.
+        assert_eq!(band_side(100, 900, 900 + ABOVE_SLACK), None);
+        assert_eq!(band_side(100, 900, 900 + ABOVE_SLACK + 1), Some(("above", ABOVE_SLACK + 1)));
+        // The amax+1 fallback the kernel comment calls a real tell: 9,000,001 against a
+        // parent whose stock max is 2,000,000 is under 8x it, so the old test passed it.
+        assert_eq!(
+            band_side(1_800_000, 2_000_000, 9_000_001),
+            Some(("above", 7_000_001))
+        );
+        // A range we could not establish is not an outlier, it is unranged.
+        assert_eq!(band_side(0, 0, 12_345), None);
     }
 
     #[test]

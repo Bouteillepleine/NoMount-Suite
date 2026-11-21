@@ -70,7 +70,8 @@ nm_consume_stash() {
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
               uidconceal ghostpaths kmsg incident.log nomount.ko \
-              absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
+              absorbed.list binds.list absorbed-tmpfs.list apkstate.list \
+              apkscope public.txt accepted.list absorb-skip; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
         if cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null; then
@@ -150,6 +151,11 @@ nm_set_bin() {
 # whenever something else owns it. Safe to call twice: it probes first.
 nm_lkm_boot_load() {
     [ -f "$MODDIR/lkm-load.sh" ] || return 0
+    # The guard's own self-disable has to stop the insmod too: this ran four calls before
+    # the first `disabled` test, so a parked Suite still inserted the engine module.
+    [ -e "$NMDIR/disabled" ] && return 0
+    # Arm the counter before inserting kernel code, never after - see nm_guard_arm.
+    nm_guard_arm || return 0
     nm_set_bin
     NM_LKM_SAY=:
     NM_LKM_NM="$NM_BIN"
@@ -289,24 +295,53 @@ nm_early_absorb() {
     fi
 }
 
-nm_guard_bump() {
+# The counter half of the guard, split out of nm_guard_bump so that the one thing in the
+# boot set which inserts kernel code can arm it FIRST. nm_lkm_boot_load runs before
+# nm_guard_bump on every path (post-fs-data.sh:19 vs :39, metamount.sh:61 vs :65, and the
+# KSU path exits post-fs-data.sh before its own bump), so a .ko that panics on init or in a
+# VFS hot path rebooted with bootcount still at its previous value: every boot was
+# identical, GUARD_MAX was never reached, and the guard could not park the Suite.
+#
+# Idempotent for the boot: guard.ts holds this boot's boot_id once armed, so the later
+# nm_guard_bump consumes this count instead of adding a second one. If boot_id cannot be
+# read we arm unconditionally, which is the old behaviour and errs toward tripping early.
+nm_guard_arm() {
     for _f in bootcount disabled; do
         if [ -e "$NMDIR/$_f" ] && [ ! -f "$NMDIR/$_f" ]; then
             rm -rf "${NMDIR:?}/$_f" 2>/dev/null
             nmlog "⚠ $NMDIR/$_f was not a regular file (the guard cannot use it) - removed"
         fi
     done
-    GUARD_MAX=3
+    unset _f
+    _gid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    if [ -n "$_gid" ] && [ "$(cat "$NMDIR/guard.ts" 2>/dev/null)" = "$_gid" ]; then
+        unset _gid
+        return 0
+    fi
     COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
     case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
     COUNT=$((COUNT + 1))
     echo "$COUNT" > "$NMDIR/bootcount"
     if [ "$(cat "$NMDIR/bootcount" 2>/dev/null)" != "$COUNT" ]; then
         nmlog "⛔ cannot write $NMDIR/bootcount - the bootloop guard cannot arm, so nothing is being injected this boot. /data being full is the usual cause; free space and reboot."
+        unset _gid
         return 3
     fi
-    cat /proc/sys/kernel/random/boot_id > "$NMDIR/guard.ts" 2>/dev/null
+    if [ -n "$_gid" ]; then
+        echo "$_gid" > "$NMDIR/guard.ts" 2>/dev/null
+    else
+        cat /proc/sys/kernel/random/boot_id > "$NMDIR/guard.ts" 2>/dev/null
+    fi
+    unset _gid
     sync 2>/dev/null
+    return 0
+}
+
+nm_guard_bump() {
+    nm_guard_arm || return $?
+    GUARD_MAX=3
+    COUNT=$(cat "$NMDIR/bootcount" 2>/dev/null || echo 0)
+    case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
 
     if [ -e "$NMDIR/disabled" ]; then
         nmlog "disabled, skipping the mount pass"

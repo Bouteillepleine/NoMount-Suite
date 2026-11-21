@@ -19,6 +19,7 @@
       const d = {
         ok: r.errno === 0,
         raw: (r.stdout || "").trim(),
+        err: (r.stderr || "").trim(),
         lines: lines,
         rules: lines.filter(l => !l.includes("(virtual dir)")).length,
         injects: lines.filter(l => !l.includes("(virtual dir)") && !l.includes("(whiteout)"))
@@ -43,12 +44,32 @@
       refreshStealth();
     }
     if (!d.ok) {
-      $("state").textContent = "No kernel driver";
-      $("substate").textContent =
-        "this kernel was not built with NoMount. Flash one that was, then reboot. " +
-        "Nothing is being injected. Prebuilt OnePlus kernels: " +
-        "github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases · " +
-        "source: github.com/Bouteillepleine/NoMount-Suite";
+      // nm already tells the three cases apart on stderr. Reading only errno asserted the
+      // worst one -- "no kernel driver" -- over an SELinux denial on the netlink socket,
+      // where the engine is usually live and injecting.
+      const e = d.err || "";
+      if (/socket was denied/.test(e)) {
+        $("state").textContent = "Engine unreachable";
+        $("substate").textContent =
+          "SELinux denied this page the netlink socket, so the engine could not answer. " +
+          "Injections may well be live - run `nomount check` from a terminal to be sure.";
+      } else if (/no NoMount engine/.test(e)) {
+        $("state").textContent = "No kernel driver";
+        $("substate").textContent =
+          "this kernel was not built with NoMount. Flash one that was, then reboot. " +
+          "Nothing is being injected. Prebuilt OnePlus kernels: " +
+          "github.com/Bouteillepleine/OnePlus-BakaSu_NMS/releases · " +
+          "source: github.com/Bouteillepleine/NoMount-Suite";
+      } else if (/cannot open the NoMount netlink socket/.test(e)) {
+        $("state").textContent = "Engine unreachable";
+        $("substate").textContent =
+          "the engine did not answer. Check dmesg for a nomount line at boot.";
+      } else {
+        $("state").textContent = "Suite not running";
+        $("substate").textContent =
+          "the nomount binary could not be run" + (e ? ": " + e.split("\n")[0] : "") +
+          ". Re-flash the Suite zip.";
+      }
       dot.className = "dot info";
       $("mRules").textContent = " - ";
       $("mOv").textContent = " - ";

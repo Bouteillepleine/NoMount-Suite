@@ -208,7 +208,8 @@ if [ -d "$_bak" ]; then
     for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
               absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
               uidconceal ghostpaths kmsg incident.log nomount.ko \
-              absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
+              absorbed.list binds.list absorbed-tmpfs.list apkstate.list \
+              apkscope public.txt accepted.list absorb-skip; do
         [ -e "$_bak/$_f" ] || continue
         [ -e "$NMDIR/$_f" ] && continue
         if cp -p "$_bak/$_f" "$NMDIR/$_f" 2>/dev/null; then

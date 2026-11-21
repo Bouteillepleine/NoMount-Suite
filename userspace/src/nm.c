@@ -99,6 +99,23 @@ void c_main(long *sp) {
         }
     }
 
+    /* The batch header has no room for a scope and keeps its legacy layout on purpose, so a
+     * scoped add/del takes the same attribute path as `nm rule add|del` -- one rule at a
+     * time, and with that path's refusal of an engine older than 36. Parsing the flags and
+     * sending the batch anyway wrote target_uid 0 into every header, i.e. served the rule to
+     * every uid, and still exited 0. */
+    if (scoped && (cmd == 'a' || cmd == 'd')) {
+        if (p_count > 1 + (cmd == 'a')) {
+            print_err("nm: --uid/--uid-range/--uid-excluded take one rule at a time\n");
+            exit_code = 3; goto do_exit;
+        }
+        cmd = (cmd == 'a') ? 'A' : 'D';
+    } else if (scoped && cmd == 'w') {
+        print_err("nm: w has no scoped form - whiteout everyone with `nm w <path>`, or scope "
+                  "a rule with `nm rule add --uid ...`\n");
+        exit_code = 3; goto do_exit;
+    }
+
     if (cmd == 'a' || cmd == 'd' || cmd == 'w') {
         int step = 1 + (cmd == 'a');
         if (p_count < step) { print_err("nm: missing operand\n"); exit_code = 3; goto do_exit; }

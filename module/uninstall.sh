@@ -110,7 +110,8 @@ elif [ -d /data/adb/nomount ]; then
         for _f in uidhide uidhide.conf uidhide.cache blocklist my_hookless \
                   absorb-skip.txt whiteouts.txt snapshot.txt spoof.conf \
                   uidconceal ghostpaths kmsg incident.log nomount.ko \
-                  absorbed.list binds.list absorbed-tmpfs.list apkstate.list; do
+                  absorbed.list binds.list absorbed-tmpfs.list apkstate.list \
+                  apkscope public.txt accepted.list absorb-skip; do
             [ -e "/data/adb/nomount/$_f" ] || continue
             if cp -p "/data/adb/nomount/$_f" "$_bak/$_f" 2>/dev/null; then
                 _kept=$((_kept + 1))
