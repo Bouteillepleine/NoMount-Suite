@@ -63,6 +63,22 @@ endif
 #   unused-function        -- vfs_map_meta_override() has no caller in a module
 ccflags-y += -Wno-unused-function
 
+# The missing-header #warning above is DELIBERATE and must not be fatal. The DDK
+# containers build with -Werror, so it came back as
+#   error: "overlayfs/ovl_entry.h not found..." [-Werror,-W#warnings]
+# and killed all eight ko jobs of the release pipeline at once. It had never fired there
+# before because 9e1a53b added the #warning and -I$(srctree)/fs in one commit, so the
+# warning only became reachable when the include was reverted.
+#
+# -Wno-error=cpp, not -Wno-error=\#warnings: cpp is the GCC spelling and clang takes it
+# as a compat alias, while clang's own spelling is REJECTED by gcc ("no option
+# -W#warnings"), which would break the gcc half of lkm-build.yml's matrix -- and the #
+# would need escaping here besides. -Wcpp covers #warning directives only, so this masks
+# nothing else, and it is scoped to this module rather than disabling -Werror wholesale.
+# Upside: the warning now reaches the release logs too, so every shipped .ko has a
+# build-time record of which placement variant it is.
+ccflags-y += -Wno-error=cpp
+
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
 all:
