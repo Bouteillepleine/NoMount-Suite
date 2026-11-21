@@ -181,7 +181,15 @@ pub(crate) fn serve_mode(target: &Path) -> Serve {
     Serve::Inject
 }
 
-const BOOT_CRITICAL_PARTITIONS: &[&str] = &["system", "system_ext", "vendor", "odm", "product"];
+/// The dlkm three are here for their `lib/modules` payload: they are standard top-level
+/// partitions from Android 12 on, `NON_PARTITION_ROOTS` does not list them, so a whiteout
+/// on `/vendor_dlkm/lib/modules/*.ko` was accepted, written to whiteouts.txt and
+/// re-applied on every boot -- a kernel module made absent, which is the dead-boot shape
+/// this list exists to refuse.
+const BOOT_CRITICAL_PARTITIONS: &[&str] = &[
+    "system", "system_ext", "vendor", "odm", "product", "vendor_dlkm", "system_dlkm",
+    "odm_dlkm",
+];
 const BOOT_CRITICAL_DIRS: &[&str] = &["bin", "lib", "lib64", "framework", "etc", "apex"];
 /// The subset of those where nothing INSIDE may be made absent either, at any depth.
 ///
@@ -1094,6 +1102,9 @@ pub fn run_reload() -> Result<()> {
         "cannot read /proc/self/mountinfo - refusing to serve, because assuming \"nothing is mounted\" injects over live mounts and strands each one in mountinfo until reboot",
     )?;
     let mut applied_apks: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // Targets this pass could not re-apply. The engine still serves what it served before,
+    // so their recorded identity has to survive -- see rulestate::write_keeping.
+    let mut kept_identity: Vec<PathBuf> = Vec::new();
     for e in apply_order(&plan) {
         let t = e.target.as_path();
         let up_to_date = match live.get(&(t.to_path_buf(), 0)) {
@@ -1113,10 +1124,12 @@ pub fn run_reload() -> Result<()> {
         }
         if !source_resolves(e) {
             failed += 1;
+            keep_identity_of(&mut kept_identity, e);
             continue;
         }
         if !unmount_before_serving(&mounted, &e.target) {
             failed += 1;
+            keep_identity_of(&mut kept_identity, e);
             continue;
         }
         let existed = live.contains_key(&(t.to_path_buf(), 0));
@@ -1139,7 +1152,10 @@ pub fn run_reload() -> Result<()> {
                     applied_apks.push((e.target.clone(), e.source.clone()));
                 }
             }
-            Err(_) => failed += 1,
+            Err(_) => {
+                failed += 1;
+                keep_identity_of(&mut kept_identity, e);
+            }
         }
     }
     for w in &durable_whiteouts {
@@ -1216,7 +1232,11 @@ pub fn run_reload() -> Result<()> {
 
     crate::bind::register_try_umount();
 
-    crate::rulestate::write(&injected_pairs(&plan, &applied_apks));
+    crate::rulestate::write_keeping(
+        &injected_pairs(&plan, &applied_apks),
+        &last_served,
+        &kept_identity,
+    );
 
     let pm = crate::pmcache::sync(&served_apks_applied(
         &applied_apks,
@@ -1509,6 +1529,13 @@ pub fn run_mount() -> Result<()> {
 /// The inject half of what was applied -- the pairs whose backing identity a
 /// later reload compares against. A bind is reconciled on (target, source)
 /// already, and a whiteout has no backing file.
+/// Remember an inject the pass could not land, so its rulestate row is not dropped.
+fn keep_identity_of(kept: &mut Vec<PathBuf>, e: &PlanEntry) {
+    if e.kind == PlanKind::Inject {
+        kept.push(e.target.clone());
+    }
+}
+
 fn injected_pairs(
     plan: &[PlanEntry],
     applied: &[(PathBuf, PathBuf)],
@@ -2669,6 +2696,14 @@ mod tests {
             "/vendor/etc",
             "/odm/lib64",
             "/product/framework",
+            // The dlkm partitions: their whole point is lib/modules, and a .ko made
+            // absent is a dead boot, not a debloat.
+            "/vendor_dlkm/lib",
+            "/vendor_dlkm/lib/modules",
+            "/vendor_dlkm/lib/modules/zram.ko",
+            "/vendor_dlkm/lib/modules/modules.load",
+            "/system_dlkm/lib/modules/foo.ko",
+            "/odm_dlkm/lib/modules/foo.ko",
         ] {
             assert!(can_whiteout(Path::new(p)).is_err(), "{p} must be refused");
             assert!(crate::whiteout::validate(p).is_err(), "{p}: whiteout add must refuse it too");

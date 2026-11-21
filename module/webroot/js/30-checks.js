@@ -184,12 +184,27 @@
     // page then showed a stale verdict under "Checked just now". Same clock on both
     // sides: the report's ts is epoch seconds, as refreshStatus already assumes.
     const asked = Math.floor(Date.now() / 1000);
-    if ((await exec("/system/bin/touch " + CHECK_REQ)).errno !== 0) return null;
+    // Remove before creating. `touch` on an EXISTING request raises only IN_ATTRIB, which
+    // the watcher's `cn` mask does not carry -- service.sh documents the same trap and
+    // clears this directory at boot because of it -- so one request left behind by a
+    // watcher that could not exec its handler swallowed every later request for the rest
+    // of the boot, invisibly: touch exits 0 either way and the loop's only exit was
+    // exhaustion, 100s of spinner per tap.
+    if ((await exec("/system/bin/rm -f " + CHECK_REQ + "; /system/bin/touch " + CHECK_REQ)).errno !== 0) {
+      return null;
+    }
     for (let i = 0; i < CHECK_WAIT_TRIES; i++) {
       await new Promise((r) => setTimeout(r, CHECK_WAIT_MS));
       const rep = await readCheckCache();
       if (rep && typeof rep.ts === "number" && rep.ts >= asked && ranSection(rep, "device")) {
         return rep;
+      }
+      // checkwatch.sh removes the request as its first act, well before it starts the
+      // check, so a request still on disk after ~5s means nothing is consuming requests.
+      // Give up on the watcher now instead of at try 200; the caller falls back.
+      if (i === 9 &&
+          ((await exec("[ -e " + CHECK_REQ + " ] && echo 1")).stdout || "").trim() === "1") {
+        return null;
       }
     }
     return null;

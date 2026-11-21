@@ -46,10 +46,38 @@ pub fn is_stale(previous: &HashMap<PathBuf, String>, target: &Path, source: &Pat
 /// Record what the engine is serving now. Replaces the file: a target no longer
 /// served has no identity worth keeping.
 pub fn write(served: &[(PathBuf, PathBuf)]) {
-    let body: Vec<String> = served
+    write_keeping(served, &HashMap::new(), &[]);
+}
+
+/// As `write`, but carries forward the recorded identity of targets this pass did
+/// not re-apply.
+///
+/// A pass that fails to re-apply a rule leaves the engine serving whatever it
+/// served before. Deriving the file from the applied set alone dropped that
+/// target's row, and `is_stale` reads an unrecorded target as fresh BY DESIGN --
+/// so one transient failure became a permanent silent stale-serve that no later
+/// reload could see.
+///
+/// What is kept is the PREVIOUS identity, never the source's identity now: what
+/// the engine serves did not change just because the file behind the path did.
+/// Recording the new one would be the same bug with extra steps.
+pub fn write_keeping(
+    served: &[(PathBuf, PathBuf)],
+    previous: &HashMap<PathBuf, String>,
+    keep: &[PathBuf],
+) {
+    let mut body: Vec<String> = served
         .iter()
         .filter_map(|(t, s)| Some(format!("{}\t{}", t.display(), identity(s)?)))
         .collect();
+    for t in keep {
+        if served.iter().any(|(st, _)| st == t) {
+            continue;
+        }
+        if let Some(prev) = previous.get(t) {
+            body.push(format!("{}\t{}", t.display(), prev));
+        }
+    }
     if let Err(e) = crate::statefile::write_atomic(STATE, body.join("\n")) {
         eprintln!("nomount: could not write {STATE}: {e} - a hot-swapped module may serve stale bytes until the next boot");
     }

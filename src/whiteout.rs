@@ -149,6 +149,38 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     let t = norm(target.trim());
     validate(&t)?;
     let p = Path::new(&t);
+    // The same two refusals `apply` makes, for the same reasons. `add` went straight to the
+    // engine and made neither, so it could replace what a module is injecting, and it could
+    // hide a live mount -- the incident behind unmount_before_serving was `whiteout add
+    // /system/etc/hosts` taking down an ad-blocker's bind with no record of what it was.
+    let nm = Nm::new();
+    let binds = crate::bind::tracked_result().context(
+        "cannot read binds.list - refusing to hide, because a my_* bind the Suite serves would \
+         be unmounted and hidden instead of left to the module",
+    )?;
+    let served = served_targets(
+        &nm.list().context(
+            "cannot read the engine's rule set - refusing to hide, because a path a module \
+             injects would be replaced by its whiteout",
+        )?,
+        &binds,
+    );
+    if served.contains(p) {
+        anyhow::bail!(
+            "{t} is being served right now - hiding it would replace what that module \
+             injects. Remove the rule first, or hide a different path"
+        );
+    }
+    let mounted = crate::absorb::mounted_targets().context(
+        "cannot read /proc/self/mountinfo - refusing to hide, because assuming \"nothing is \
+         mounted\" hides live mounts and strands each one in mountinfo until reboot",
+    )?;
+    if !crate::mount::unmount_before_serving(&mounted, p) {
+        anyhow::bail!(
+            "{t} has a mount over it that could not be unmounted - hiding it would strand \
+             that mount in every app's mountinfo until the next reboot"
+        );
+    }
     if measurable_hole(p) && !force {
         eprintln!(
             "nomount: note - hiding {t} leaves a measurable hole: its parent is a multi-block \
@@ -173,7 +205,7 @@ pub fn add(target: &str, force: bool) -> Result<()> {
     }
     list.push(t.clone());
     write(&list)?;
-    match Nm::new().whiteout(Path::new(&t)) {
+    match nm.whiteout(Path::new(&t)) {
         Ok(()) => {
             println!("ok: {t} hidden (persists across reboots)");
             Ok(())

@@ -695,13 +695,20 @@ fn check_inode_band(targets: &[PathBuf], engine_dirs: &[PathBuf]) -> Check {
     let mut groups: Vec<(String, u64, u64, usize)> = Vec::new();
     let mut examined = 0usize;
     let mut unread = 0usize;
-    for parent in parents_of(targets) {
+    // Synthesized directories count as subjects, not just injected files. The scan below
+    // already sorts one into `ours_buckets`, but the parent set and the four-subject gate
+    // were built from `targets` alone -- so a parent holding only virtual directories was
+    // never opened, and the only check that looked at a synthesized directory's inode at
+    // all was check_synth_dir_ino. A rule like /product/priv-app/Mms/Mms.apk is exactly
+    // that shape: its own parent is the virtual dir, so /product/priv-app never qualified.
+    let subjects: Vec<PathBuf> = targets.iter().chain(engine_dirs.iter()).cloned().collect();
+    for parent in parents_of(&subjects) {
         let Ok(rd) = fs::read_dir(&parent) else {
             unread += 1;
             continue;
         };
         let injected: Vec<&PathBuf> =
-            targets.iter().filter(|t| t.parent() == Some(parent.as_path())).collect();
+            subjects.iter().filter(|t| t.parent() == Some(parent.as_path())).collect();
         if injected.len() < 4 {
             continue;
         }

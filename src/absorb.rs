@@ -1803,6 +1803,20 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
     nm.version()
         .context("hookless NoMount engine not responding")?;
 
+    // NEITHER half of this pass may run against an opt-out list we could not read. absorb
+    // unmounts and whiteouts, and nothing in the session undoes either, so the documented
+    // invariant on skip_list() is that an unreadable list abandons the pass rather than
+    // treating it as empty. absorb_rom_tmpfs honoured that on its own; survey_of read the
+    // same flag and dropped it on the floor, so the bind half went on to unmount and hide
+    // paths the operator had opted out of.
+    let (_, _, skips_unreadable) = skip_list();
+    if skips_unreadable {
+        anyhow::bail!(
+            "the absorb opt-out list exists but could not be read - this pass is abandoned \
+             rather than absorbing as though you had opted nothing out"
+        );
+    }
+
     if !dry_run {
         prune_absorbed_record(early);
     }

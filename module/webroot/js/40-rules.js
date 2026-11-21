@@ -2,21 +2,33 @@
 
   async function refreshModules() {
     const box = $("modules");
+    // This pane's exec environment has no PATH -- the same gap that made a bare `stat`
+    // exit 127 and report the canary as unmeasurable. `basename` is gone entirely here
+    // (parameter expansion needs no binary) and awk is reached through an exported PATH.
+    // The loop also ends with a sentinel: r.errno is the LAST echo's status and is 0
+    // however the body fared, so a shell missing those commands produced a full-looking
+    // card and drove the served count to 0 -- which is painted as "fully covered".
     const r = (await exec(
+      'export PATH=/system/bin:/system/xbin:/vendor/bin; ' +
       'for d in /data/adb/modules/*/; do [ -d "$d" ] || continue; ' +
-      'id=$(basename "$d"); ' +
+      'id=${d%/}; id=${id##*/}; ' +
       'mnt=$(NM_P="/adb/modules/$id" awk \'$4==ENVIRON["NM_P"] || index($4, ENVIRON["NM_P"] "/")==1 {n++} END{print n+0}\' /proc/self/mountinfo 2>/dev/null); ' +
       '[ "$id" = meta-nomount ] && { echo "$id|suite|$mnt"; continue; }; ' +
       '[ "$id" = kernelnosu ] && { echo "$id|su|$mnt"; continue; }; ' +
       'st=on; { [ -f "$d/disable" ] || [ -f "$d/remove" ] || [ -f "$d/skip_mount" ]; } && st=off; ' +
-      'echo "$id|$st|$mnt"; done'
+      'echo "$id|$st|$mnt"; done; echo "done=1"'
     ));
-    if (r.errno !== 0) {
+    const probed = /(^|\n)done=1$/.test((r.stdout || "").trim());
+    if (r.errno !== 0 || !probed) {
       box.innerHTML = '<div class="empty">Unknown: the module list could not be read.</div>';
       $("modcount").textContent = "?"; $("mMod").textContent = "?";
+      // Nothing was measured, so the served count must not be painted as a claim: -1 is
+      // what paintModuleMetric already treats as "say nothing".
+      MOD_SERVED = -1;
       return;
     }
-    const out = r.stdout.trim();
+    const out = r.stdout.trim().split("\n").filter(function (l) { return l !== "done=1"; })
+      .join("\n");
     if (!out) { box.innerHTML = '<div class="empty">No modules installed.</div>'; $("modcount").textContent = "0"; $("mMod").textContent = "0"; return; }
     const byModule = await planByModule();
     // The check already works out which modules ship files nobody serves

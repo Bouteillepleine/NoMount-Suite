@@ -33,8 +33,16 @@
       box.innerHTML = `<div class="blk-none">Unknown \u2014 the hide list could not be read.</div>`;
       return;
     }
-    const lines = (r.stdout || "").split("\n").map(s => s.trim()).filter(Boolean);
-    const none = !lines.length || lines[0] === "no blocked apps";
+    const raw = (r.stdout || "").split("\n").map(s => s.trim()).filter(Boolean);
+    // Only a tabbed line describes an app. `no blocked apps` is untabbed and is NOT always
+    // first -- a kernel that did not answer the DenyList query prints its own untabbed line
+    // ahead of it -- so testing lines[0] left both as rows, and neither matched the ladder
+    // below, whose default was "live": the card read "Hidden apps - 2" on a device hiding
+    // nothing. Diagnostics still show, under "Could not be checked", counted as neither.
+    const SENTINEL = "no blocked apps";
+    const lines = raw.filter(l => l.indexOf("\t") !== -1);
+    const diag = raw.filter(l => l.indexOf("\t") === -1 && l !== SENTINEL);
+    const none = !lines.length && !diag.length;
     const uc = $("uidchip");
     if (none && uc) uc.textContent = "0";
     if (none) {
@@ -44,14 +52,21 @@
     const rows = lines.map(l => {
       const [name, stateRaw] = l.split("\t");
       const s = (stateRaw || "").trim();
-      let cls = "live";
       // Every string here is one `nomount uid list` really emits. `/unreachable/`
       // used to be in the "gone" set and nothing has ever produced it.
-      if (/unread/.test(s)) cls = "unknown";
+      //
+      // The default is "unknown", not "live": a state this ladder does not recognise is
+      // something we cannot classify, and calling it a hidden app is the one wrong answer
+      // that matters -- it tells you an app is hidden when nobody has established that.
+      // `live` is matched positively instead; state_of() emits exactly "live",
+      // "saved, not applied" or "engine unreadable".
+      let cls = "unknown";
+      if (/unread/.test(s) || /did not answer/.test(s)) cls = "unknown";
       else if (/not installed/.test(s) ||
           /no match/.test(s) || /invalid glob/.test(s)) cls = "gone";
       else if (/not applied/.test(s)) cls = "pending";
       else if (/not saved/.test(s)) cls = "drift";
+      else if (/\blive\b/.test(s)) cls = "live";
       const uidM = s.match(/uid (\d+)/);
       const viaM = s.match(/^via (\S+)/);
       const target = viaM ? viaM[1]
@@ -76,7 +91,13 @@
         ${save}
         ${actionable ? `<button class="bx" title="${esc(xTitle)}" data-act="unblock" data-nmt="${esc(target)}">✕</button>` : ""}
       </div>` };
-    });
+    }).concat(diag.map(function (l) {
+      return {
+        active: false, hiding: false, unknown: true, key: l,
+        html: `<div class="blk unknown"><span class="dot"></span><span class="bmid">` +
+              `<span class="btop"><span class="bn">${esc(l)}</span></span></span></div>`,
+      };
+    }));
     const active = rows.filter(function (x) { return x.active; });
     const unknown = rows.filter(function (x) { return x.unknown; });
     const waiting = rows.filter(function (x) { return !x.active && !x.unknown; });
