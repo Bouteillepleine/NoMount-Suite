@@ -37,7 +37,7 @@ reads one as "this hunk ends at EOF" and refuses to match it mid-file.
 Apply with `patch -p1` from the kernel tree root, then drop fs/nomount.c and
 fs/nomount.h in beside it.
 
-This patch IS checked. .github/workflows/hookless-compile-matrix.yml applies it
+This patch IS checked. .github/workflows/hookless-matrix.yml applies it
 with `patch -p1 --fuzz=3` on all ten kernels and FATALs if any of the four hunks
 fails to land: the fs/Makefile obj line, the fs/Kconfig stanza, the
 vfs_map_meta_override() call, which it asserts sits inside show_map_vma() rather

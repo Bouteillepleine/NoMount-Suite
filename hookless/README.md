@@ -38,7 +38,7 @@ These fire once per rule and a mount pass installs hundreds, so leave the flag
 off outside an investigation.
 
 One patch covers 4.9 through 6.18. Its own header explains why the anchors are
-where they are, and `.github/workflows/hookless-compile-matrix.yml` applies it to
+where they are, and `.github/workflows/hookless-matrix.yml` applies it to
 all ten trees on every push and asserts each hunk lands inside the function it
 is meant for. Read the matrix run rather than hand-checking the result.
 

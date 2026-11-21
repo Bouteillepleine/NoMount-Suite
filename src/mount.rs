@@ -1988,7 +1988,7 @@ mod tests {
              reports as its build string, and the comment that stated this invariant was \
              deleted by the comment strip - so only this test can catch it"
         );
-        const ENGINE_MATRIX: &str = include_str!("../.github/workflows/hookless-compile-matrix.yml");
+        const ENGINE_MATRIX: &str = include_str!("../.github/workflows/hookless-matrix.yml");
         for ver in ["4.9", "4.14", "4.19", "5.4", "5.10", "5.15", "6.1", "6.6", "6.12", "6.18"] {
             assert!(
                 ENGINE_MATRIX.contains(&format!("ver: '{ver}'")),

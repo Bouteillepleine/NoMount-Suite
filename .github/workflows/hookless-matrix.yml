@@ -1,5 +1,19 @@
 name: NoMount hookless - compile-test matrix
 
+# Renamed from hookless-compile-matrix.yml, and the rename IS the fix -- the same fault
+# lkm-build.yml had. The push and pull_request triggers below have been in place since at
+# least 2026-09-30 (d5ca693), seven pushes to main changed files under hookless/** since
+# then -- f057a61, 6f6d620, 4a188fa, 4644599, 86b9a61, dbf1066, 8dee149 -- and this workflow
+# produced ZERO runs, while tag.yml, same trigger shape, fired on those same pushes. So the
+# engine this repo ships was never compile-tested by the gate written to test it, and
+# hookless/README.md's claim that it runs "on every push" was false for the whole period.
+# A new path forces GitHub to register a new workflow record, which is the only lever
+# outside the UI; it worked for lkm-build.yml on 452d259.
+#
+# src/mount.rs include_str!()s this file by path and asserts all ten `ver:` entries are
+# present, so a rename breaks the build unless that test is updated with it. That test
+# exists because c223943 once deleted this workflow outright and nothing compile-tested
+# the shipped engine until someone noticed.
 
 on:
   workflow_dispatch:
@@ -13,12 +27,12 @@ on:
     branches: [prerelease, main]
     paths:
       - 'hookless/**'
-      - '.github/workflows/hookless-compile-matrix.yml'
+      - '.github/workflows/hookless-matrix.yml'
   pull_request:
     branches: [prerelease, main]
     paths:
       - 'hookless/**'
-      - '.github/workflows/hookless-compile-matrix.yml'
+      - '.github/workflows/hookless-matrix.yml'
   workflow_call:
     inputs:
       only:
@@ -134,13 +148,32 @@ jobs:
           restore-keys: |
             ccache-${{ matrix.ver }}-
 
+      # The key was version + branch NAME + a hand-bumped -v1, so a cached tree never expired
+      # when the branch moved and this gate would assert hunk placement against whatever was
+      # cached. lkm-build.yml had the same bug and gated 6.12 against a 26-day-old clone.
+      # ls-remote failing is fatal: an answer we could not get must not read as "the cached
+      # tree is current", and the clone below needs this remote anyway.
+      - name: Resolve the kernel ref to a commit
+        id: kref
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -euo pipefail
+          SHA=$(git ls-remote "${{ matrix.krepo }}" "refs/heads/${{ matrix.kref }}" | cut -f1)
+          [ -n "$SHA" ] || {
+            echo "::error::no refs/heads/${{ matrix.kref }} at ${{ matrix.krepo }} - renamed, or"
+            echo "::error::the remote is unreachable. Not falling back to the branch-name key."
+            exit 1
+          }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.kref }} is at $SHA"
+
       - name: Restore kernel clone
         if: steps.sel.outputs.run == '1'
         id: kcache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ksrc
-          key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+          key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v2-${{ steps.kref.outputs.sha }}
 
       - name: Clone kernel source (${{ matrix.kref }}) on cache miss
         if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
@@ -148,13 +181,14 @@ jobs:
           set -e
           git clone --depth 1 -b "${{ matrix.kref }}" "${{ matrix.krepo }}" ksrc
           echo "Kernel: $(head -3 ksrc/Makefile | tr '\n' ' ')"
+          echo "HEAD: $(git -C ksrc rev-parse HEAD) (keyed on ${{ steps.kref.outputs.sha }})"
 
       - name: Save kernel clone (pristine) on cache miss
         if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ksrc
-          key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v1
+          key: ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v2-${{ steps.kref.outputs.sha }}
 
       - name: Apply hookless patch + drop in source
         if: steps.sel.outputs.run == '1'
@@ -356,17 +390,33 @@ jobs:
           restore-keys: |
             ccache-link-6.12-
 
+      # Same key as the 6.12 compile job above, so this shares the tree that job saved rather
+      # than cloning its own. It must therefore carry the same resolved sha, or this job
+      # misses on every run.
+      - name: Resolve the kernel ref to a commit
+        id: kref
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -euo pipefail
+          SHA=$(git ls-remote https://android.googlesource.com/kernel/common "refs/heads/$KREF" | cut -f1)
+          [ -n "$SHA" ] || { echo "::error::no refs/heads/$KREF on kernel/common"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "$KREF is at $SHA"
+
       - name: Restore kernel clone
         if: steps.sel.outputs.run == '1'
         id: kcache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ksrc
-          key: ksrc-6.12-android16-6.12-v1
+          key: ksrc-6.12-android16-6.12-v2-${{ steps.kref.outputs.sha }}
 
       - name: Clone kernel source on cache miss
         if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
-        run: git clone --depth 1 -b "$KREF" https://android.googlesource.com/kernel/common ksrc
+        run: |
+          set -e
+          git clone --depth 1 -b "$KREF" https://android.googlesource.com/kernel/common ksrc
+          echo "HEAD: $(git -C ksrc rev-parse HEAD) (keyed on ${{ steps.kref.outputs.sha }})"
 
       - name: Apply hookless patch + drop in source
         if: steps.sel.outputs.run == '1'

@@ -62,7 +62,7 @@ jobs:
         # the shell ever sees the line, so a dispatch input containing `"; curl ... | sh #`
         # ran on the runner. It is workflow_dispatch-only, so it needs write access to
         # reach -- but this was the one such sink left in the repo, and the sibling
-        # hookless-compile-matrix.yml already does it this way.
+        # hookless-matrix.yml already does it this way.
         env:
           ONLY: ${{ github.event.inputs.only }}
           VER: ${{ matrix.ver }}
