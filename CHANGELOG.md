@@ -6,6 +6,23 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.217 — engine v36 (the engine fixes below need a kernel rebuild; the LKM zip carries them)
+
+- A file whose name carries an invisible character — an emoji variation selector, a zero-width
+  joiner — can be opened and stat'ed again by an app on the hide list. Every such path was
+  answered "no such file" whether or not a rule named it, so an app could not reach its own
+  downloads, and `open()` refused to create a file in a directory it had just written to.
+- On a 4.9 or 4.14 kernel the LKM armed none of its five guards and never hid itself. The module
+  loaded and reported success; nothing it closes was closed.
+- A bind root added to `ghostpaths` is now hidden from `/proc/self/mountinfo` on the LKM build
+  too. The rule reached the engine and the mount record stayed visible.
+- Synthesized directories report a creation time on a ROM that has one, and answer the same
+  ioctls as a real directory. Both separated them from the directories around them.
+- The `/proc/<pid>/maps` device and inode spoof holds 512 pending answers instead of 64, and says
+  so when it drops one — a dropped answer printed the real device and inode for that mapping.
+- On a kernel too old for the path-hiding guards, the log says they are unavailable instead of
+  reporting them armed, and the guard count no longer reads as a complete cloak.
+
 ## v1.3.216 — engine v36 (the engine fixes below need a kernel rebuild; the LKM zip carries them)
 
 - `apkscope`, `public.txt` and `accepted.list` survive a module update.
