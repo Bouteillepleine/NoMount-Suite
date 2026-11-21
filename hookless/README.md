@@ -86,9 +86,31 @@ now links one kernel from this directory alone.
 SUSFS and the engine go into the same kernel: all three builders above apply
 both, and that combination is what ships. They apply this patch first, at
 `--fuzz=0`, and SUSFS after it. SUSFS also patches `fs/proc/task_mmu.c`, so if
-you apply them the other way round, do not let this patch in with fuzz: check
-that `vfs_map_meta_override()` landed in `show_map_vma()` and not in
-`show_smap()`, whose dev/ino lines read the same.
+you apply them the other way round, do not let this patch in with fuzz.
+
+The reason, corrected by measurement. This used to say the risk was landing in
+`show_smap()`, "whose dev/ino lines read the same". It does not: run
+`44936141801` counted the sites matching `ino = inode->i_ino;` in
+`fs/proc/task_mmu.c` on all ten kernels and found **exactly one** on every one
+of 4.9 through 6.18, so `show_smap()` carries no duplicate block and the hunk
+has nowhere else to go. Read that narrowly — it greps one exact line, so a
+rival with different whitespace, or one reached through a helper, would not be
+counted.
+
+What is real is the mechanism rather than the destination. `--fuzz=3` may
+discard three lines of context, and this hunk's whole anchor is three lines, so
+at fuzz any site with a `dev`/`ino` pair becomes a candidate — and a tree SUSFS
+has already edited is exactly where a second one could appear. The matrix now
+applies at `--fuzz=0` with no fallback and fails rather than fuzzing, and a
+separate step breaks `show_map_vma()`'s anchor on a copy to check the hunk
+cannot be pulled elsewhere; that step is FATAL if it ever can be. So the hand
+check this paragraph used to ask for is the matrix's job now.
+
+The `@@` line numbers in the patch are nominal, which is worth knowing before
+re-anchoring: the `show_map_vma()` anchor sits at line 365 (4.9), 366 (4.14),
+365 (4.19), 366 (5.4), 337 (5.10), 290 (5.15), 293 (6.1), 409 (6.6), 550
+(6.12) and 478 (6.18), against a header that says `@@ -400`. `patch` finds it
+anyway because the context is unique, not because it is near.
 
 ## A drift this repository cannot catch
 

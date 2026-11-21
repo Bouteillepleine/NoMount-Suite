@@ -222,11 +222,19 @@ jobs:
                       /ino = inode->i_ino;/{ if (fn ~ /show_map_vma/) seen=1 }
                       seen && /pgoff = /{ print NR; exit }' fs/proc/task_mmu.c)
           if [ "${rivals:-0}" -lt 2 ] || [ -z "$line" ]; then
-            # Inert rather than passing quietly: say which kernels it could not set up.
-            echo "::warning::${{ matrix.ver }}: cannot build a misplacement case here"
-            echo "::warning::(rival dev/ino sites=$rivals, show_map_vma pgoff anchor=${line:-none})."
-            echo "misplace ${{ matrix.ver }}: SKIPPED"
-            echo "- \`${{ matrix.ver }}\` misplacement probe **skipped** (no rival site)" \
+            # The expected, healthy answer: run 44936141801 measured exactly ONE such site
+            # on all ten kernels, 4.9 through 6.18, so there is nowhere else for the hunk
+            # to land. Printed, and put in the summary, but NOT annotated -- a warning that
+            # fires on every run for the good state is noise, and ten of them was 20 of
+            # that run's 20 warnings.
+            #
+            # It stays visible because the claim is narrow: this greps one exact line, so
+            # a rival written with different whitespace, or reached through a helper, would
+            # not be counted. "sites=1" is one site matching that line, not proven
+            # uniqueness.
+            echo "misplace ${{ matrix.ver }}: SKIPPED - no rival site"
+            echo "  (rival dev/ino sites=$rivals, show_map_vma pgoff anchor=${line:-none})"
+            echo "- \`${{ matrix.ver }}\` no rival dev/ino site (anchor at line ${line:-?})" \
               >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -242,28 +250,21 @@ jobs:
             *show_map_vma*)
               echo "misplace ${{ matrix.ver }}: OK - still landed in show_map_vma" ;;
             *)
-              # REPORTED, not fatal, and deliberately for one round.
-              #
-              # Run against fixtures before this landed, the probe showed the hazard is
-              # reachable at --fuzz=3 even when the rival site LACKS the pgoff anchor:
-              # fuzz 3 may drop three context lines, which is the whole anchor, so two
-              # matching lines are enough. The only reason it does not happen today is
-              # that a pristine tree gives show_map_vma a perfect match and patch takes
-              # the first best one.
-              #
-              # So failing here would redden the matrix for a condition the shipped order
-              # never reaches, while the real fix is structural: if the fuzz0 measurement
-              # above comes back YES on all ten, drop the --fuzz=3 fallback entirely and
-              # apply the way the builders do. Then this becomes unreachable and this arm
-              # becomes a FATAL. One matrix run decides it.
-              echo "::warning::${{ matrix.ver }}: with show_map_vma's anchor broken, the hunk"
-              echo "::warning::landed in $got - the SUSFS-after-us failure hookless/README.md"
-              echo "::warning::warns about, reachable at --fuzz=3. Not a failure today: the"
-              echo "::warning::shipped order applies to a pristine tree at --fuzz=0."
-              echo "misplace ${{ matrix.ver }}: REACHABLE at --fuzz=3 (landed in $got)"
-              echo "- \`${{ matrix.ver }}\` misplacement **reachable at --fuzz=3** (\`$got\`)" \
-                >> "$GITHUB_STEP_SUMMARY"
-              exit 0 ;;
+              # FATAL now. Our own apply is --fuzz=0 only, so this cannot bite us -- but
+              # hookless/README.md tells three kernel builders they may apply SUSFS first
+              # and warns them to hand-check this placement, and the patch header answers
+              # "No hand check is needed after applying; read the matrix run instead". So
+              # the matrix owns that check, and the only way here is a tree that has GAINED
+              # a second dev/ino site. That is the moment the hunk needs tighter anchoring,
+              # before a builder meets it rather than after.
+              echo "FATAL: this tree now has a rival dev/ino site, and with show_map_vma's"
+              echo "       anchor broken the hunk landed in:"
+              echo "         $got"
+              echo "       Our apply is --fuzz=0, so this does not break the matrix build --"
+              echo "       it breaks a BUILDER who applies SUSFS first and lets our patch in"
+              echo "       with fuzz, exactly as hookless/README.md describes. Give the"
+              echo "       task_mmu.c hunk context that cannot match the rival site."
+              exit 1 ;;
             esac
           else
             echo "misplace ${{ matrix.ver }}: OK - refused to apply rather than guessing"
@@ -276,34 +277,31 @@ jobs:
           set -e
           cd ksrc
           P="$GITHUB_WORKSPACE/repo/hookless/patches/nomount_kernel_integration.patch"
-          # --fuzz=0 FIRST, because that is how all three kernel builders apply this patch
-          # (hookless/README.md). Only the 6.12 link job below ever tried it; the matrix
-          # went straight to --fuzz=3, so a kernel that needs fuzz passed here while the
-          # builders' own apply would have failed, and nothing said so. Measured per
-          # kernel now, and reported either way.
+          # --fuzz=0, and no fallback. That is how all three kernel builders apply this
+          # patch (hookless/README.md), so it is the only level whose success means
+          # anything; run 44936141801 measured it applying cleanly on all ten, 4.9 through
+          # 6.18, which is what licensed removing the fallback.
           #
-          # Not fatal when fuzz is needed: AOSP common is not the vendor tree the builders
-          # patch, so needing fuzz here does not prove their apply fails. Measure first.
+          # Until then the matrix went straight to --fuzz=3. A kernel that needed fuzz
+          # passed here while the builders' own apply would have failed, and nothing said
+          # so -- and fuzz 3 may discard three context lines, which is this hunk's whole
+          # anchor, so it was also the one setting in which the hunk could be pulled into
+          # another dev/ino site. Applying at 0 makes that unreachable rather than detected.
           #
-          # The old `git apply --check` probe is gone - it is stricter than
-          # `patch --fuzz=0` about whitespace, so it printed "needs fuzz" for 6.12 this
-          # morning and the link job then applied that same patch at --fuzz=0 without one.
-          if patch -p1 --forward --fuzz=0 --dry-run < "$P" >/dev/null 2>&1; then
-            patch -p1 --forward --fuzz=0 < "$P"
-            echo "fuzz0 ${{ matrix.ver }}: YES - applies the way the builders apply it"
-            echo "- \`${{ matrix.ver }}\` applies at --fuzz=0" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning::${{ matrix.ver }} does NOT take the integration patch at"
-            echo "::warning::--fuzz=0, which is how hookless/README.md says all three kernel"
-            echo "::warning::builders apply it. Falling back to --fuzz=3; the hunk-placement"
-            echo "::warning::assertions below are then the only thing standing between a"
-            echo "::warning::fuzzy match and vfs_map_meta_override() landing in show_smap()."
-            echo "fuzz0 ${{ matrix.ver }}: NO"
-            echo "- \`${{ matrix.ver }}\` needs **fuzz** (builders apply at --fuzz=0)" \
-              >> "$GITHUB_STEP_SUMMARY"
-            if ! patch -p1 --forward --fuzz=3 < "$P"; then
-              echo "FATAL: the integration patch does not apply to ${{ matrix.ver }}, even at --fuzz=3"; exit 1; fi
+          # The old `git apply --check` probe is gone too: it is stricter than
+          # `patch --fuzz=0` about whitespace, so it printed "6.12 needs fuzz" while the
+          # link job applied that same patch at --fuzz=0 without any.
+          if ! patch -p1 --forward --fuzz=0 < "$P"; then
+            echo "FATAL: the integration patch no longer applies to ${{ matrix.ver }} at"
+            echo "       --fuzz=0. It applied on all ten when the fallback was removed, so"
+            echo "       this tree's context has moved. Re-anchor the hunk rather than"
+            echo "       raising the fuzz: all three kernel builders apply at --fuzz=0, so a"
+            echo "       patch that needs fuzz fails for them too, and fuzz is what lets a"
+            echo "       hunk match the wrong function. hookless/README.md has the anchors."
+            exit 1
           fi
+          echo "fuzz0 ${{ matrix.ver }}: YES - applies the way the builders apply it"
+          echo "- \`${{ matrix.ver }}\` applies at --fuzz=0" >> "$GITHUB_STEP_SUMMARY"
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.c" fs/nomount.c
           cp "$GITHUB_WORKSPACE/repo/hookless/src/nomount.h" fs/nomount.h
           grep -n 'CONFIG_NOMOUNT' fs/Makefile fs/Kconfig || true
