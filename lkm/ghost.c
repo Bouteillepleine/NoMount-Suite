@@ -482,6 +482,35 @@ static void ghost_drop_locked(struct gh_rule *r)
 	kfree_rcu(r, rcu);
 }
 
+/* Allocate and fill a rule without linking it. Split out of
+ * ghost_add_path_locked() so a REPLACE can build its whole new set before it destroys
+ * the old one -- see the staged pass in ghost_ctl(). */
+static struct gh_rule *gh_rule_new(const char *s, size_t slen)
+{
+	struct gh_rule *r = kzalloc(sizeof(*r) + slen + 1, GFP_KERNEL);
+
+	if (!r)
+		return NULL;
+	memcpy(r->path, s, slen);
+	r->path[slen] = '\0';
+	r->len = (u16)slen;
+	r->prefix = s[slen - 1] == '/';
+	r->hash = full_name_hash(NULL, s, slen);
+	return r;
+}
+
+/* Link a rule readers can already be walking past. Not sleeping, so a replace that
+ * stages first leaves no allocation inside its window. */
+static void gh_rule_link_locked(struct gh_rule *r)
+{
+	list_add_tail(&r->lnode, &ghost_all);
+	if (r->prefix)
+		hlist_add_head_rcu(&r->hnode, &ghost_prefixes);
+	else
+		hlist_add_head_rcu(&r->hnode, ghost_bucket(r->hash));
+	WRITE_ONCE(ghost_nrules, ghost_nrules + 1);
+}
+
 static int ghost_add_path_locked(const char *s, size_t slen)
 {
 	struct gh_rule *r;
@@ -490,20 +519,10 @@ static int ghost_add_path_locked(const char *s, size_t slen)
 		return 0;
 	if (ghost_nrules >= GH_MAX_RULES)
 		return -ENOSPC;
-	r = kzalloc(sizeof(*r) + slen + 1, GFP_KERNEL);
+	r = gh_rule_new(s, slen);
 	if (!r)
 		return -ENOMEM;
-	memcpy(r->path, s, slen);
-	r->path[slen] = '\0';
-	r->len = (u16)slen;
-	r->prefix = s[slen - 1] == '/';
-	r->hash = full_name_hash(NULL, s, slen);
-	list_add_tail(&r->lnode, &ghost_all);
-	if (r->prefix)
-		hlist_add_head_rcu(&r->hnode, &ghost_prefixes);
-	else
-		hlist_add_head_rcu(&r->hnode, ghost_bucket(r->hash));
-	WRITE_ONCE(ghost_nrules, ghost_nrules + 1);
+	gh_rule_link_locked(r);
 	return 0;
 }
 
@@ -693,10 +712,72 @@ int ghost_ctl(const char *buf, size_t count)
 	}
 
 	mutex_lock(&ghost_mutex);
+	/* A path REPLACE stages the whole new set before it destroys the old one.
+	 *
+	 * It used to clear first and then re-add entry by entry with kzalloc(GFP_KERNEL).
+	 * Readers never take ghost_mutex -- ghost_hidden_path() and
+	 * ghost_abstract_hidden() walk the lists under RCU -- so for the length of that
+	 * rebuild, every sleeping allocation included, they saw a table that was empty and
+	 * then partial and answered "not hidden". The direction is OPEN, not stale: a
+	 * hide-listed app polling access(), truncate() or the xattr entry points during
+	 * `nomount ghost sync` got the real answer. And an -ENOMEM partway through left the
+	 * table permanently short, with the error returned and the old set already gone.
+	 *
+	 * Staging removes every allocation from the window and makes failure harmless: on
+	 * -ENOMEM nothing has been unlinked, so the live table is still the old one. What
+	 * remains is the unlink-then-link sequence itself, which does not sleep. That is a
+	 * much smaller window, not zero -- closing it entirely means making ghost_ht and
+	 * ghost_prefixes a pointer swapped with rcu_assign_pointer(), which rewrites every
+	 * reader's dereference, and this file has never executed on any device. */
+	if (replace && op == 'p') {
+		/* Every token here is already known good: the validation pass above returns
+		 * on a malformed token or an insane rule, and bounds the count, all before
+		 * the mutex. So this only has to allocate -- and the one failure left,
+		 * -ENOMEM, now leaves the live table untouched instead of short. */
+		LIST_HEAD(staged);
+		struct gh_rule *r, *tmp;
+		const char *sp = p;
+		int nstaged = 0;
+
+		while ((len = ghost_next_token(&sp, end, line)) != 0) {
+			if (len < 0) {
+				/* Unreachable: the validation pass returns on this. Recorded
+				 * rather than skipped, so a future change that loosens that
+				 * pass cannot make this truncate the set in silence. */
+				first_err = len;
+				break;
+			}
+			r = gh_rule_new(line, len);
+			if (!r) {
+				first_err = -ENOMEM;
+				break;
+			}
+			list_add_tail(&r->lnode, &staged);
+			nstaged++;
+		}
+		if (first_err || !nstaged) {
+			list_for_each_entry_safe(r, tmp, &staged, lnode) {
+				list_del(&r->lnode);
+				kfree(r);
+			}
+			mutex_unlock(&ghost_mutex);
+			/* !nstaged keeps the old answer for an empty payload: the token
+			 * loop below would have run zero times and returned -EINVAL. */
+			return first_err ? first_err : -EINVAL;
+		}
+		ghost_clear_paths_locked();
+		list_for_each_entry_safe(r, tmp, &staged, lnode) {
+			list_del(&r->lnode);
+			if (ghost_find_locked(r->path, r->len))
+				kfree(r);          /* duplicate within the set */
+			else
+				gh_rule_link_locked(r);
+		}
+		mutex_unlock(&ghost_mutex);
+		return 0;
+	}
 	if (replace) {
-		if (op == 'p')
-			ghost_clear_paths_locked();
-		else if (op == 'c')
+		if (op == 'c')
 			WRITE_ONCE(ghost_ncuids, 0);
 		else
 			WRITE_ONCE(ghost_nuids, 0);
