@@ -1914,7 +1914,8 @@ static void nm_dir_nlink_fix(struct kstat *stat, int nld)
     stat->nlink = (unsigned int)nl;
 }
 
-static void nm_dir_stat_fix(struct nm_inode_info *info, struct kstat *stat)
+static void nm_dir_stat_fix(struct nm_inode_info *info, struct inode *v_inode,
+                            struct kstat *stat)
 {
     int nld;
     s32 delta;
@@ -1922,16 +1923,36 @@ static void nm_dir_stat_fix(struct nm_inode_info *info, struct kstat *stat)
 
     if (!info->dir_node || !info->r_path.dentry)
         return;
+
+    nm_dir_deltas(info->dir_node, &nld, &delta);
+    /* ABOVE the gate. The link count has nothing to do with erofs: a directory that
+     * gained injected children has a higher nlink whatever filesystem it sits on, and
+     * leaving it unfixed on an ext4 or f2fs ROM is a one-stat disagreement with the
+     * children the engine does fix. It matched the victim side at nm_dir_nlink_fix's
+     * other caller and not here.
+     *
+     * No `nlink != 1` test, unlike the victim side: that guard is there because erofs
+     * does not maintain directory link counts and reports 1, so adding to it would
+     * leave one directory at 3 among a partition of 1s. Here stat->nlink comes from
+     * vfs_getattr_nosec() on info->r_path -- the module copy, on ext4, which does
+     * maintain it -- and nm_mirror_stat() does not overwrite nlink, so the value is
+     * never the erofs 1 the guard exists for. */
+    nm_dir_nlink_fix(stat, nld);
+
     /* The knob gates here too. The injected side accepts it as an alternative to the
      * erofs magic and this did not, so with it set on a non-erofs /system an injected
      * directory got the synthesized size and the stock directory holding it did not --
-     * one getdents64 and one stat on each is enough to see them disagree. */
-    if (d_backing_inode(info->r_path.dentry)->i_sb->s_magic != EROFS_SUPER_MAGIC_V1 &&
+     * one getdents64 and one stat on each is enough to see them disagree.
+     *
+     * And the magic read has to be the ROM's. This tested
+     * d_backing_inode(info->r_path.dentry)->i_sb->s_magic -- r_path is the MODULE
+     * directory under /data/adb, so on an ext4 /data the answer was about the wrong
+     * filesystem entirely: the decision is whether the directory the caller is
+     * STAT'ING reports erofs-shaped sizes, and that is v_inode. Same mistake as the one
+     * the paragraph above records, one layer over. */
+    if (v_inode && v_inode->i_sb->s_magic != EROFS_SUPER_MAGIC_V1 &&
         !READ_ONCE(nm_vdir_erofs_size))
         return;
-
-    nm_dir_deltas(info->dir_node, &nld, &delta);
-    nm_dir_nlink_fix(stat, nld);
 
     if (!delta)
         return;
@@ -2102,7 +2123,7 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
         nm_mirror_stat(info, v_inode, stat);
         if (S_ISDIR(stat->mode)) {
             if (!nm_dsnap_size_fix(info, v_inode, stat))
-                nm_dir_stat_fix(info, stat);
+                nm_dir_stat_fix(info, v_inode, stat);
         } else {
             nm_mirror_blocks(info, stat);
         }
