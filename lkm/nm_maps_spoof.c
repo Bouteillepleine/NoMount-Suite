@@ -37,7 +37,22 @@ void vfs_map_meta_override(const struct inode *inode, dev_t *dev,
  * than the task, and a slot older than a tick is reclaimable, so a table that
  * does fill drains itself instead of wedging.
  */
-#define NM_MAPS_SLOTS 64
+/* 512, not 64, and the number is borrowed on purpose: NM_GP_MAXACTIVE_HOT in
+ * nm_ghost_probes.c:469 is the concurrency bound the rest of this module already
+ * reasons about for the same reason -- how many callers can be in flight inside one
+ * of these functions at once. 64 was sized against nothing in particular, and the
+ * cost of being wrong is not a slow path, it is nm_maps_note() storing NOTHING: the
+ * take side then writes neither x5 nor x6 and the kernel prints the SHADOW inode's
+ * real f2fs dev:ino on a line whose path says /system. 512 slots x 32 bytes = 16 KB
+ * static, in a module whose engine already keeps a 128 KB bloom bitmap.
+ *
+ * The scan is linear and runs per shadowed vma, so the size is not free -- but it is
+ * not 512 either: nm_maps_note() returns on the first slot matching @m, and slots fill
+ * from index 0, so a reader's cost is its own slot index, which tracks the number of
+ * CONCURRENT readers rather than the table size. A full 512-iteration scan happens
+ * only when there is no match and no free slot, which is the pressure case that used
+ * to fail silently. Do not shrink this back to make the loop cheaper. */
+#define NM_MAPS_SLOTS 512
 
 /* A maps read renders every vma from one seq_file without sleeping between the
  * two probes, so anything this old is debris from a pair that never completed. */
@@ -52,6 +67,39 @@ struct nm_maps_slot {
 
 static struct nm_maps_slot nm_maps_slots[NM_MAPS_SLOTS];
 static DEFINE_SPINLOCK(nm_maps_lock);
+
+/* Table pressure, reported once.
+ *
+ * nm_maps_check_firing() below answers "did the second probe ever run"; these answer
+ * the other way this cloak fails while reporting itself armed -- the probe runs, finds
+ * no slot, and writes nothing. Both numbers were previously unobservable: a drop left
+ * no trace anywhere, and a steal looks exactly like a legitimately reclaimed slot.
+ *
+ * pr_warn, not nm_say, and one-shot. Same split the rest of the module uses: a guard
+ * that is up stays quiet, a guard that is wrong stays findable -- a silently degraded
+ * cloak reads as a pass, which is the whole argument of this file. Called after the
+ * spinlock is dropped, since this prints and the lock is held with irqs off.
+ */
+static atomic_t nm_maps_drops = ATOMIC_INIT(0);
+static atomic_t nm_maps_steals = ATOMIC_INIT(0);
+static bool nm_maps_pressure_said;
+
+static void nm_maps_check_pressure(void)
+{
+	int d, st;
+
+	if (READ_ONCE(nm_maps_pressure_said))
+		return;
+	d = atomic_read(&nm_maps_drops);
+	st = atomic_read(&nm_maps_steals);
+	if (!d && !st)
+		return;
+
+	WRITE_ONCE(nm_maps_pressure_said, true);
+	pr_warn("nomount: maps spoof note table under pressure (%d dropped, %d stolen "
+		"of %d slots): a dropped note means that mapping printed its real "
+		"dev:ino in /proc/<pid>/maps\n", d, st, NM_MAPS_SLOTS);
+}
 
 static void nm_maps_forget(const void *m)
 {
@@ -92,15 +140,31 @@ static void nm_maps_note(const void *m, dev_t dev, unsigned long ino)
 			stale = i;
 		}
 	}
-	if (free < 0)
+	if (free < 0) {
+		/* Counted, not prevented. The staleness reclaim is deliberate: the
+		 * comment at the top of this file wants a table that fills to drain
+		 * itself rather than wedge, and removing it would trade one wrong
+		 * line for a stuck cloak. But the owner of a slot older than
+		 * NM_MAPS_STALE_JIFFIES may still be in flight between the two
+		 * probes, so a steal can cost that reader its override. Rare once
+		 * the table is 512; never invisible again. */
 		free = stale;
+		if (free >= 0)
+			atomic_inc(&nm_maps_steals);
+	}
 	if (free >= 0) {
 		nm_maps_slots[free].m = m;
 		nm_maps_slots[free].stamp = now;
 		nm_maps_slots[free].dev = dev;
 		nm_maps_slots[free].ino = ino;
+	} else {
+		/* Nothing stored at all: every slot occupied and none reclaimable.
+		 * This is the silent fail-open -- the one case where the spoof is
+		 * armed, firing, and still reports a real dev:ino. */
+		atomic_inc(&nm_maps_drops);
 	}
 	spin_unlock_irqrestore(&nm_maps_lock, flags);
+	nm_maps_check_pressure();
 }
 
 static bool nm_maps_take(const void *m, dev_t *dev, unsigned long *ino)

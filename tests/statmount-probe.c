@@ -175,8 +175,16 @@ int main(void)
 	free(sm);
 	printf("statmount/listmount: %d module-rooted mount(s), %d contradiction(s)\n",
 	       leaked, contradictions);
+	/* "clean" is scoped on purpose, and the scope is the whole point: this loop only
+	 * ever asks about ids listmount RETURNED. The filter's residual is in the ids it
+	 * did not -- an unused id answers ENOENT while the hidden mount's id answers
+	 * EPERM, so sweeping min..max separates them. Nothing here does that sweep, so a
+	 * clean verdict must not be read as "statmount is closed". The prefix stays
+	 * exactly "verdict: clean" because statmount-check.sh globs for it.
+	 */
 	if (leaked == 0)
-		printf("verdict: clean\n");
+		printf("verdict: clean (offered ids only -- the EPERM-vs-ENOENT sweep of "
+		       "unreturned ids is NOT covered; see lkm/nm_mount_filter.c)\n");
 	else
 		printf("verdict: %d leak(s)%s\n", leaked,
 		       contradictions ? " and a disagreement with mountinfo" : "");

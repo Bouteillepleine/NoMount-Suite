@@ -146,11 +146,30 @@ static int nm_mf_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
  * is_path_reachable(m, m->mnt.mnt_root, &root) and returns -EPERM to a caller without
  * CAP_SYS_ADMIN when it is false; do_listmount()'s enumeration loop calls it per mount
  * and `continue`s on false. Forcing false therefore removes the mount from listmount
- * entirely, so statmount is never asked about an id that was never offered and no new
- * contradiction appears. It is also a non-static global declared in fs/pnode.h and
+ * entirely. It is also a non-static global declared in fs/pnode.h and
  * called from fs/pnode.c, so an out-of-line copy exists to probe, and x1 is already
  * the mount's own root dentry -- struct kstatmount is private to fs/namespace.c and
  * struct mount to fs/mount.h, and this needs the layout of neither.
+ *
+ * ⚠ RESIDUAL, and this comment used to deny it. It said that because the mount is
+ * gone from listmount, "statmount is never asked about an id that was never offered and
+ * no new contradiction appears." That assumes the caller only asks about ids it was
+ * offered. It does not have to: listmount's ids are allocated sequentially, so an app
+ * can sweep every id between the min and max it received and ask statmount about the
+ * ones it did not get. An id that never existed answers -ENOENT. The module bind's id
+ * RESOLVES -- it genuinely is in this namespace, which is the whole reason this arm
+ * exists -- and then hits the reachability test we force false, so do_statmount()
+ * answers -EPERM to a caller without CAP_SYS_ADMIN. The record is therefore turned into
+ * a DISTINGUISHABLE HOLE rather than an absence, and on a stock device with root=/ a
+ * hide-listed app has no legitimately unreachable mount, so one -EPERM is anomalous by
+ * itself. Narrower than the record it removes, and not closed.
+ *
+ * Owed: a kretprobe on __arm64_sys_statmount rewriting -EPERM to -ENOENT when this
+ * handler forced false for the current task (a per-task flag cleared in
+ * nm_mf_reach_ret), behind the same nm_mf_statmount_present() gate; plus
+ * tests/statmount-probe.c sweeping the ids listmount did NOT return and requiring
+ * ENOENT for all of them. Not written yet: it needs the 6.8+ device the sweep runs on,
+ * and a guess at the errno here would be a second claim nobody measured.
  *
  * This one CAN over-hide, unlike the root matches above, and the case is narrow: a
  * hide-listed uid calling openat2() with RESOLVE_BENEATH or RESOLVE_IN_ROOT on a path
