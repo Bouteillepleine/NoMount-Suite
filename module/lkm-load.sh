@@ -32,8 +32,28 @@ nm_lkm_echo() {
 # cannot find it. It stays because removing it would change which attempts run,
 # and the attempts after a successful load fail harmlessly either way: a second
 # insmod of a live engine is refused on the netlink socket.
+# $2 = "strict" -> do not use ko-loader for this module.
+#
+# ko-loader rewrites the module's vermagic to whatever the kernel asks for AND
+# pre-resolves its undefined symbols out of /proc/kallsyms, writing each address
+# in as SHN_ABS. simplify_symbols() only version-checks SHN_UNDEF symbols, so a
+# pre-resolved one skips check_version() entirely: between the two, BOTH gates
+# the kernel has against a module built for a different struct layout are gone.
+#
+# That is the intended mechanism for a module whose KMI matches -- a stock
+# android16-6.12 .ko can never match a specific device's 6.12.x-android16-ab...
+# build string, and "same KMI => same layout" is the GKI contract. It is NOT
+# intended for a module picked by guessing the KMI, which is what the "same
+# version, other KMI" fallback in nm_lkm_load_best does, and only ever can on
+# 5.10 and 5.15 -- the two versions shipping two KMIs each (android12/13 and
+# android13/14). There the rewrite forces in a module built across a KABI
+# boundary. Strict mode leaves that path with ksud insmod and insmod, which
+# refuse a wrong-KMI module on vermagic, so the fallback still works where it
+# legitimately should (a custom kernel whose uname carries no androidNN, so no
+# exact match exists, but whose KMI genuinely matches a shipped module).
 nm_lkm_insert() {
 	_ko="$1"
+	_strict="${2:-}"
 	[ -f "$_ko" ] || return 1
 	_out=""
 	_went_in=0
@@ -47,7 +67,13 @@ nm_lkm_insert() {
 		rmmod nomount 2>/dev/null
 	fi
 
-	if [ -x "$NM_LKM_LOADER" ]; then
+	if [ "$_strict" = strict ] && [ -x "$NM_LKM_LOADER" ]; then
+		$NM_LKM_SAY "    not using ko-loader here: this module's KMI was guessed from the"
+		$NM_LKM_SAY "    kernel version alone, and the rewrite would defeat both checks the"
+		$NM_LKM_SAY "    kernel has against a module built for another struct layout"
+	fi
+
+	if [ "$_strict" != strict ] && [ -x "$NM_LKM_LOADER" ]; then
 		# ko-loader is the only step that can rewrite vermagic, so its output is
 		# the one line that explains why a module did or did not go in. Throwing
 		# it away left an install log with two "trying" lines and no reason.
@@ -142,7 +168,10 @@ nm_lkm_load_best() {
 		[ -f "$_ko" ] || continue
 		[ "$_ko" = "$_exact" ] && continue
 		$NM_LKM_SAY "  trying $(basename "$_ko") (same version, other KMI)"
-		nm_lkm_insert "$_ko"; _rc=$?
+		# strict: the KMI here is a GUESS off uname's major.minor, so the kernel's
+		# own vermagic check is the only thing standing between us and a module
+		# built against a different task_struct. See nm_lkm_insert.
+		nm_lkm_insert "$_ko" strict; _rc=$?
 		if [ "$_rc" != 1 ]; then
 			nm_lkm_keep "$_ko" "$_dir"
 			NM_LKM_SOURCE=bundled

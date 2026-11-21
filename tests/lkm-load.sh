@@ -30,13 +30,17 @@ setup() {
 	nm_lkm_kver()  { echo "6.12"; }
 	nm_lkm_akver() { echo "android16"; }
 	nm_lkm_probe() { return 1; }
+	# $2 is recorded too: whether a path asks for strict mode is the whole
+	# protection against ko-loader rewriting vermagic for a module whose KMI was
+	# guessed, and only the caller knows which path it is on.
 	nm_lkm_insert() {
 		PICKED=$(basename "$1")
+		STRICT_OF="$STRICT_OF $PICKED=${2:-no}"
 		case "$LOADABLE" in *" $PICKED "*) return 0;; esac
 		case "$UNCONFIRMED" in *" $PICKED "*) return 2;; esac
 		PICKED=; return 1
 	}
-	PICKED=; NM_LKM_SOURCE=
+	PICKED=; NM_LKM_SOURCE=; STRICT_OF=
 }
 
 mk() { mkdir -p "$(dirname "$1")"; echo ko > "$1"; }
@@ -147,6 +151,70 @@ LOADABLE=" nomount.ko "
 NM_LKM_SOURCE=
 nm_lkm_load_best "$WORK/lkm" >/dev/null
 check "survives a module update that removes lkm/" "$NM_LKM_SOURCE" "device"
+
+echo
+echo "ko-loader is withheld from a guessed KMI"
+
+# Only the "same version, other KMI" loop may pass `strict`, because it is the
+# only path whose KMI is a guess off uname's major.minor. ko-loader rewrites
+# vermagic AND pre-resolves symbols as SHN_ABS, which skips check_version() --
+# so on that path the rewrite would force in a module built across a KABI
+# boundary. On 5.10 and 5.15, the two versions shipping two KMIs each, that is
+# reachable with the modules we actually ship.
+setup "" ""
+mk "$WORK/lkm/nomount-android16-6.12.ko"; mk "$WORK/lkm/nomount-android15-6.12.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "the exact KMI match is NOT strict - the rewrite is its intended use" \
+	"$(echo "$STRICT_OF" | tr ' ' '\n' | grep '^nomount-android16-6.12.ko=' | head -1)" \
+	"nomount-android16-6.12.ko=no"
+check "a guessed KMI IS strict - the kernel's vermagic check is all that is left" \
+	"$(echo "$STRICT_OF" | tr ' ' '\n' | grep '^nomount-android15-6.12.ko=' | head -1)" \
+	"nomount-android15-6.12.ko=strict"
+
+setup "" ""
+mk "$WORK/dev/nomount.ko"; mk "$WORK/lkm/nomount.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "the kernel-supplied .ko is NOT strict" \
+	"$(echo "$STRICT_OF" | tr ' ' '\n' | grep '^nomount.ko=' | head -1)" "nomount.ko=no"
+check "the cached pick is NOT strict - it only loaded because something accepted it" \
+	"$(echo "$STRICT_OF" | tr ' ' '\n' | grep -c '^nomount.ko=strict')" "0"
+
+echo
+echo "nm_lkm_insert honours strict"
+
+# The cases above stub nm_lkm_insert wholesale, so they prove WHICH path asks for
+# strict and nothing about what strict does. This runs the real body against a
+# ko-loader stub that records being called.
+insert_setup() {
+	rm -rf "$WORK/ins"; mkdir -p "$WORK/ins"
+	. "$HERE/module/lkm-load.sh"
+	NM_LKM_SAY=:
+	nm_lkm_probe() { return 1; }
+	NM_LKM_LOADER="$WORK/ins/loader"
+	printf '#!/bin/sh\necho called >> "%s"\nexit 1\n' "$WORK/ins/ran" > "$NM_LKM_LOADER"
+	chmod 755 "$NM_LKM_LOADER"
+	mk "$WORK/ins/nomount.ko"
+	rm -f "$WORK/ins/ran"
+}
+loader_runs() { [ -s "$WORK/ins/ran" ] && echo ran || echo skipped; }
+
+insert_setup
+nm_lkm_insert "$WORK/ins/nomount.ko" >/dev/null 2>&1
+check "without strict, ko-loader is used" "$(loader_runs)" "ran"
+
+insert_setup
+nm_lkm_insert "$WORK/ins/nomount.ko" strict >/dev/null 2>&1
+check "with strict, ko-loader is NOT used" "$(loader_runs)" "skipped"
+
+# Anything other than the exact word must not silently disable the loader: a
+# caller passing a label, or a stray argument, would otherwise withhold the
+# rewrite from a path that is entitled to it and the module would stop loading.
+insert_setup
+nm_lkm_insert "$WORK/ins/nomount.ko" "" >/dev/null 2>&1
+check "an empty second argument is not strict" "$(loader_runs)" "ran"
+insert_setup
+nm_lkm_insert "$WORK/ins/nomount.ko" bundled >/dev/null 2>&1
+check "an unrecognised second argument is not strict" "$(loader_runs)" "ran"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
