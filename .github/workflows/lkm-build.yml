@@ -93,30 +93,61 @@ jobs:
             aarch64-linux-gnu-gcc --version | head -1
           fi
 
+      # The cache key was version + branch NAME + a hand-bumped -v2, so a cached tree never
+      # expired when the branch moved. The first run of this workflow that was actually
+      # listable (44924645198) gated 6.12 against an android16-6.12 clone from 26 days
+      # earlier and reported "All 144 undefined symbols are exported by this kernel" -- a
+      # verdict about a tree nobody ships. A symbol unexported upstream since would have
+      # passed. Keying on the branch HEAD means a moved branch misses and re-clones.
+      #
+      # ls-remote failing is a hard failure, not a fall back to the name-keyed entry: an
+      # answer we could not get must not read as "the cached tree is current". It adds no
+      # new network dependency, since the clone below needs the same remote anyway.
+      - name: Resolve the kernel ref to a commit
+        id: kref
+        if: steps.sel.outputs.run == '1'
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.ver }}" = "6.18" ]; then
+            REMOTE=https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+          else
+            REMOTE=https://android.googlesource.com/kernel/common
+          fi
+          SHA=$(git ls-remote "$REMOTE" "refs/heads/${{ matrix.kref }}" | cut -f1)
+          [ -n "$SHA" ] || {
+            echo "::error::git ls-remote found no refs/heads/${{ matrix.kref }} at $REMOTE -"
+            echo "::error::either the branch was renamed or the remote is unreachable. Not"
+            echo "::error::falling back to the branch-name cache key, which would gate this"
+            echo "::error::build against whatever tree happens to be cached."
+            exit 1
+          }
+          echo "remote=$REMOTE" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.kref }} is at $SHA"
+
       - name: Restore kernel clone
         id: kcache
         if: steps.sel.outputs.run == '1'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ksrc
-          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v2
+          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v3-${{ steps.kref.outputs.sha }}
 
       - name: Clone kernel source on cache miss
         if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
         run: |
           set -e
           git clone --depth 1 -b "${{ matrix.kref }}" \
-            "$( [ "${{ matrix.ver }}" = "6.18" ] \
-                && echo https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
-                || echo https://android.googlesource.com/kernel/common )" ksrc
+            "${{ steps.kref.outputs.remote }}" ksrc
           echo "Kernel: $(head -3 ksrc/Makefile | tr '\n' ' ')"
+          echo "HEAD: $(git -C ksrc rev-parse HEAD) (keyed on ${{ steps.kref.outputs.sha }})"
 
       - name: Save kernel clone
         if: steps.sel.outputs.run == '1' && steps.kcache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ksrc
-          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v2
+          key: lkm-ksrc-${{ matrix.ver }}-${{ matrix.kref }}-v3-${{ steps.kref.outputs.sha }}
 
       - name: Prepare kernel for external modules
         if: steps.sel.outputs.run == '1'
