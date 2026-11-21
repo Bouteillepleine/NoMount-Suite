@@ -75,16 +75,26 @@ static DEFINE_MUTEX(nomount_write_mutex);
 #define nm_get_vpath(rule) ((rule)->paths)
 #define nm_get_rpath(rule) ((rule)->paths + (rule)->v_len + 1)
 
+/* `rcu`: these are freed from nomount_hijacked_destroy_inode(), and only ever via
+ * call_rcu(). An RCU path walk can call ->permission on an inode it holds no reference
+ * to, so the copy has to outlive a grace period even though the inode it belonged to is
+ * already gone. Before this they were never freed at all: the only teardown,
+ * nomount_restore_dir_node(), clears dir_node and iput()s the inode, which is correct
+ * while the inode lives -- i_op cannot be put back -- but orphans both objects once it
+ * is evicted. Half a kilobyte per injected directory, per clear-and-reapply cycle,
+ * unreclaimable for the uptime because the module pins itself. */
 struct nm_iop {
     struct inode_operations fake_iop;
     const struct inode_operations *orig_iop;
     struct nomount_dir_node *dir_node;
+    struct rcu_head rcu;
 };
 
 struct nm_fop {
     struct file_operations fake_fop;
     const struct file_operations *orig_fop;
     struct nomount_dir_node *dir_node;
+    struct rcu_head rcu;
 };
 
 struct nm_sop {

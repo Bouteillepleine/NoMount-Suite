@@ -830,6 +830,9 @@ static void nm_inode_info_rcu_free(struct rcu_head *head)
 }
 
 static void nomount_hijacked_destroy_inode(struct inode *inode);
+/* Defined below, beside the long explanation of why the pin can never be dropped.
+ * Declared here because the three hijack paths now take it before publishing. */
+static void nm_pin_module(void);
 
 /* The original super_operations behind a hijacked superblock, or NULL.
  *
@@ -861,9 +864,21 @@ static const struct super_operations *nm_orig_sop(struct super_block *sb)
     return orig;
 }
 
+static void nm_iop_rcu_free(struct rcu_head *head)
+{
+    kmem_cache_free(nm_iop_cachep, container_of(head, struct nm_iop, rcu));
+}
+
+static void nm_fop_rcu_free(struct rcu_head *head)
+{
+    kmem_cache_free(nm_fop_cachep, container_of(head, struct nm_fop, rcu));
+}
+
 static void nomount_hijacked_destroy_inode(struct inode *inode)
 {
     const struct super_operations *orig;
+    struct nm_iop *dead_iop = NULL;
+    struct nm_fop *dead_fop = NULL;
     if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         if (inode->i_private) {
             struct nm_inode_info *info = inode->i_private;
@@ -878,11 +893,46 @@ static void nomount_hijacked_destroy_inode(struct inode *inode)
             info->dir_node = NULL;
             call_rcu(&info->rcu, nm_inode_info_rcu_free);
         }
+    } else {
+        /* A hijacked STOCK inode on its way out: this is the one moment that knows the
+         * per-inode vtable copies can never be reached again, so it is the only place
+         * they can be freed. Read BEFORE orig->destroy_inode() -- that is the
+         * filesystem's destructor and it frees the inode, so touching inode->i_op
+         * afterwards would itself be a use-after-free.
+         *
+         * lookup then getattr: nomount_hijack_dir_inode() only installs our lookup when
+         * the original had one, and getattr unconditionally, so matching on one field
+         * alone would miss half the cases. __get_nm() only matches a table whose field
+         * already points at OUR function, so neither probe can claim a foreign vtable.
+         *
+         * dir_node must already be NULL here: a live rule holds an igrab on this inode,
+         * so it cannot be dying. If it is not, something detached without restoring and
+         * freeing would orphan a live dir_node -- say so and leak instead. */
+        dead_iop = __get_nm(inode->i_op, struct nm_iop, fake_iop,
+                            lookup, nomount_hijacked_lookup);
+        if (!dead_iop)
+            dead_iop = __get_nm(inode->i_op, struct nm_iop, fake_iop,
+                                getattr, nomount_hijacked_getattr);
+        dead_fop = nm_get_fop(inode->i_fop);
+        if (dead_iop && READ_ONCE(dead_iop->dir_node)) {
+            WARN_ONCE(1, "nomount: inode dying with a live dir_node on its i_op\n");
+            dead_iop = NULL;
+        }
+        if (dead_fop && READ_ONCE(dead_fop->dir_node)) {
+            WARN_ONCE(1, "nomount: inode dying with a live dir_node on its i_fop\n");
+            dead_fop = NULL;
+        }
     }
     orig = nm_orig_sop(inode->i_sb);
     if (orig && orig->destroy_inode) {
         orig->destroy_inode(inode);
     }
+    /* After the destructor: `inode` is gone, these two are not reachable through it any
+     * more, and call_rcu() still covers an RCU walker mid-flight through the copy. */
+    if (dead_iop)
+        call_rcu(&dead_iop->rcu, nm_iop_rcu_free);
+    if (dead_fop)
+        call_rcu(&dead_fop->rcu, nm_fop_rcu_free);
 }
 
 static int nomount_hijacked_drop_inode(struct inode *inode)
@@ -3254,6 +3304,9 @@ static inline int nomount_hijack_superblock(struct super_block *sb)
     }
 
     list_add_tail_rcu(&nm_sop->list, &nomount_sb_list);
+    /* Before the publish, not after a rule succeeds: once s_op names our table an
+     * unload frees the text it points at. See nm_pin_module(). */
+    nm_pin_module();
     smp_store_release(&sb->s_op, &nm_sop->fake_sop);
     nm_debug("Superblock successfully hijacked for dev: 0x%x\n", sb->s_dev);
     return 0;
@@ -3298,6 +3351,9 @@ static inline int nomount_hijack_virtual_parent(struct nomount_dir_node *dir_nod
         nm_fop->fake_fop.iterate = nomount_hijacked_iterate_dir;
 #endif
 
+    /* Before the publish: i_fop can never be put back, so from here on an unload
+     * would leave iterate_shared pointing into freed text. See nm_pin_module(). */
+    nm_pin_module();
     smp_store_release(&inode->i_fop, &nm_fop->fake_fop);
     nm_debug("i_fop successfully hijacked for virtual parent dir (ino: %lu)\n", inode->i_ino);
     return 0;
@@ -3326,6 +3382,8 @@ static inline int nomount_hijack_dir_inode(struct nomount_dir_node *dir_node, st
 
     if (nm_iop->orig_iop->lookup) nm_iop->fake_iop.lookup = nomount_hijacked_lookup;
     nm_iop->fake_iop.getattr = nomount_hijacked_getattr;
+    /* Before the publish, same reason as i_fop above. See nm_pin_module(). */
+    nm_pin_module();
     smp_store_release(&inode->i_op, &nm_iop->fake_iop);
     nm_debug("i_op successfully hijacked for parent dir (ino: %lu)\n", inode->i_ino);
     return 0;
@@ -3393,8 +3451,18 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
  *
  * Refusing the unload is the honest answer: rmmod returns -EBUSY instead. The pin is
  * never dropped, including across `nomount clear`, because clearing rules does not
- * take the pointers back. nomount_exit() can therefore only run on a module that
- * never held a rule, where the caches it destroys are empty.
+ * take the pointers back.
+ *
+ * Taken when a fake vtable is PUBLISHED, not when a rule succeeds. It used to be
+ * called once, from __nomount_add_rule()'s success path, while the three publishes
+ * happen earlier -- so anything failing in between (an order-0 kmalloc in
+ * __nomount_inject_child_locked, or nomount_hijack_superblock() returning
+ * -EOPNOTSUPP on a pre-5.2 fs with no ->destroy_inode) left i_op and i_fop pointing
+ * into module text with nothing pinned. On a hide=0 build rmmod then returned 0, the
+ * text was freed, and the next lookup on that directory was an indirect call into
+ * reclaimed memory. The sentence that used to end this comment -- that nomount_exit()
+ * can only run on a module that never held a rule, so the caches it destroys are
+ * empty -- was true of rules and false of hijacks, which is what hid it.
  *
  * __module_get, not try_module_get: we are inside a netlink command, so this
  * module's refcount is already non-zero and the get cannot fail. Both are no-ops
