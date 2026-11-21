@@ -302,6 +302,18 @@ static inline void nm_publish_real_eof(struct nomount_dir_node *d, loff_t eof_hi
     if (eof_hint > 0 && eof_hint <= (loff_t)(S64_MAX - NM_POS_HEADROOM) && eof_hint > base)
         base = eof_hint;
     if (!base) base = 2;
+    /* MONOTONIC. It used to ignore whatever real_eof already held, so a publish could
+     * move it DOWN -- and one dir_node is driven by two position spaces: a uid-blocked
+     * caller is served info->s_path while everyone else gets info->r_path, and both
+     * published here. Every virtual d_off is real_eof + 1 + id, decoded as
+     * pos - real_eof - 1, so a reader part-way through the injected tail decoded against
+     * a base another reader had moved: duplicate names if it grew, injected children
+     * silently skipped if it shrank. Growing is harmless by comparison -- synthetic
+     * offsets only have to sit above the real range and stay consistent -- so the max
+     * now includes the current value. nm_dir_iterate_dir also no longer publishes at all
+     * for a caller served s_path, which is the root cause; this makes it structural. */
+    if (base < READ_ONCE(d->real_eof))
+        return;
     WRITE_ONCE(d->real_eof, base);
 }
 

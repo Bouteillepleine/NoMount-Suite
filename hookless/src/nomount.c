@@ -2281,6 +2281,18 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
         ctx->pos = proxy_ctx.ctx.pos;
         if (res < 0 || proxy_ctx.emitted > 0 || proxy_ctx.refused) return res;
         if (!dir_node) return res;
+        /* Only a caller being served r_path may write r_path's position space. A
+         * uid-blocked caller gets info->s_path instead (nm_open), and its terminating
+         * pass used to publish the STOCK directory's terminal position into the same
+         * dir_node -- moving the base that every other reader's saved d_off is decoded
+         * against. It has no visible injected children by construction, so there is
+         * nothing to pack a position for either: return after the proxy pass.
+         *
+         * proxy_ctx.dir_info above already computes exactly this test for its own
+         * purposes; reusing the comparison keeps the two from drifting apart. */
+        if (info && info->r_path.dentry &&
+            real_file->f_path.dentry != info->r_path.dentry)
+            return res;
         nm_publish_real_eof(dir_node, ctx->pos);
         ctx->pos = nm_pack_pos(dir_node, 0);
     } else if (info && (info->flags & NM_FLAG_VIRTUAL_DIR)) {

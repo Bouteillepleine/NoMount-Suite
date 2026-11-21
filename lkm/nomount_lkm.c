@@ -42,6 +42,16 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz) =
  * undoes all of that would be skipped and the module unloaded out from under it. Making
  * the failure loud is the fix; making it fatal here would be a worse bug than the one
  * being fixed.
+ *
+ * The armed line is nm_say(), not pr_info(). On the default hide=1 build those five
+ * lines were the only routine mention of the module in the ring buffer, printed moments
+ * before it unlinks itself from /proc/modules, /sys/module and /proc/kallsyms -- so the
+ * three surfaces it closes were closed and a fourth, readable by anything that can get
+ * at dmesg or a ramoops/bugreport copy, was left open. Every guard's own code already
+ * honoured nm_say(); the macro that calls them did not.
+ *
+ * The OFF, NO-guard and short-count lines below stay loud on purpose: each fires only
+ * when a guard has actually failed, and then being findable beats being hidden.
  */
 #define NM_GUARD(name, call)						\
 	do {								\
@@ -52,7 +62,7 @@ static int (* const pathhide_get_rule)(int idx, char *out, size_t outsz) =
 				name, _g);				\
 		} else {						\
 			nm_guard_ok++;					\
-			pr_info("nomount: guard %-9s armed\n", name);	\
+			nm_say("nomount: guard %-9s armed\n", name);	\
 		}							\
 	} while (0)
 
