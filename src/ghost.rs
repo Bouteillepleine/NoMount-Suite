@@ -41,15 +41,17 @@ impl Summary {
         }
         if self.dump_failed {
             return Some(
-                "⚠ ghost cloak: could not read the engine's live state - both tables CLEARED, \
-                 so the existence oracles are open until the next successful sync"
+                "\u{26a0} ghost cloak: could not read the engine's live state, so nothing was \
+                 measured and nothing was pushed - the kernel keeps the tables it already had, \
+                 which still hide but may name paths that have since changed"
                     .into(),
             );
         }
         if self.probe_failed {
             return Some(
                 "\u{26a0} ghost cloak: the absence probe would not run, so no path could be \
-                 cloaked - the path table is EMPTY and the existence oracles are open"
+                 judged ghostable - the kernel keeps the path table it already had rather than \
+                 having it replaced with a set nothing measured"
                     .into(),
             );
         }
@@ -487,11 +489,17 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
     }
     let mut out = Summary::default();
 
+    // Both of these used to answer an unreadable dump by sending `p-` and `u-`, which
+    // CLEARS the kernel's two tables -- the one thing the push path 50 lines below
+    // documents as "what un-cloaks the device", and it fired on a transient nm failure
+    // during any mutating verb, because main.rs re-syncs after each one. A dump that would
+    // not read says nothing about what should be cloaked, so there is nothing to push:
+    // leave the kernel the table it already has, which is stale but still hiding, and let
+    // Summary::warning() say the pass did not measure anything. Measured-empty still
+    // clears, further down -- that is a different answer.
     let mut uids: Vec<u32> = match nm.uid_list_live() {
         Ok(live) => ghost_uids(&live),
         Err(_) => {
-            let _ = nm.ghost_ctl("p-");
-            let _ = nm.ghost_ctl("u-");
             out.dump_failed = true;
             return Ok(Some(out));
         }
@@ -501,8 +509,6 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
     let list = match nm.list() {
         Ok(l) => l,
         Err(_) => {
-            let _ = nm.ghost_ctl("p-");
-            let _ = nm.ghost_ctl("u-");
             out.dump_failed = true;
             return Ok(Some(out));
         }
@@ -532,17 +538,28 @@ pub fn sync(nm: &Nm) -> Result<Option<Summary>> {
     // so pushing a set we failed to build is what un-cloaks the device. Skip the push
     // instead: the kernel keeps the table it already has, which is stale but still hiding,
     // and say so rather than reporting an ordinary success.
-    match extra_paths() {
-        Some(extra) => {
-            let mut paths = ghostable;
-            for e in extra {
-                if !paths.contains(&e) {
-                    paths.push(e);
+    //
+    // This comment described a guard that was not here: a probe that would not run left
+    // `ghostable` empty, and the push below then sent `p-` and cleared the path table for
+    // real. An empty set the probe MEASURED still clears -- a path a module no longer
+    // serves must stop being hidden - but an empty set it never measured must not. Pushing
+    // the extras alone would be worse than skipping, since that replaces the table with
+    // only them and drops every probed path.
+    if out.probe_failed {
+        // nothing measured, so nothing to push
+    } else {
+        match extra_paths() {
+            Some(extra) => {
+                let mut paths = ghostable;
+                for e in extra {
+                    if !paths.contains(&e) {
+                        paths.push(e);
+                    }
                 }
+                push(nm, 'p', &paths, &mut out);
             }
-            push(nm, 'p', &paths, &mut out);
+            None => out.extra_unreadable = true,
         }
-        None => out.extra_unreadable = true,
     }
 
     let uid_strs: Vec<String> = uids.iter().map(u32::to_string).collect();
@@ -574,7 +591,7 @@ pub fn run_sync(verbose: bool) -> Result<()> {
                 println!("nomount ghost: {w}");
             } else if s.probe_failed {
                 println!(
-                    "nomount ghost: the absence probe did not run, so no path could be judged ghostable - the cloak is left empty. This is not \"nothing to ghost\"."
+                    "nomount ghost: the absence probe did not run, so no path could be judged ghostable - the kernel keeps the table it already had. This is not \"nothing to ghost\"."
                 );
             } else if !s.effective() {
                 println!(
@@ -834,7 +851,33 @@ not-a-path -> /q
 
     #[test]
     fn absent_to_on_an_empty_list_is_not_an_error() {
+        // Load-bearing for the push policy: a candidate set the probe MEASURED as empty
+        // must still clear the kernel's path table, because a path a module no longer
+        // serves has to stop being hidden. Only an unmeasured pass skips the push. If this
+        // ever answers None, `nomount vfs clear` stops clearing the cloak with it.
         assert_eq!(absent_to(unsafe { libc::getuid() }, &[]), Some(Vec::new()));
+    }
+
+    #[test]
+    fn an_unmeasured_pass_never_reports_that_it_cleared_anything() {
+        // Both of these used to clear the kernel's tables on a failed read, which is
+        // fail-open on a detection cloak: a transient nm error during any mutating verb
+        // un-cloaked the device until the next successful sync. They now leave the tables
+        // alone, so neither message may claim otherwise.
+        for s in [
+            Summary { dump_failed: true, ..Default::default() },
+            Summary { probe_failed: true, ..Default::default() },
+        ] {
+            let w = s.warning().expect("an unmeasured pass must warn, not pass quietly");
+            assert!(
+                w.contains("keeps the"),
+                "an unmeasured pass must say the kernel kept its table: {w}"
+            );
+            for lie in ["CLEARED", "is EMPTY", "left empty"] {
+                assert!(!w.contains(lie), "nothing is cleared on a failed read: {w}");
+            }
+            assert!(!s.effective(), "an unmeasured pass has established nothing");
+        }
     }
 
     #[test]
