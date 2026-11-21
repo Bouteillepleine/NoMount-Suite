@@ -17,6 +17,18 @@ endif
 
 ccflags-y += -I$(src) -I$(src)/../hookless/src
 
+# -I$(srctree)/fs is what gives the OUT-OF-TREE build the overlay dir-inode
+# reservation. nomount.c gates it on __has_include("overlayfs/ovl_entry.h"), a QUOTED
+# include, resolved against the including file's own directory and then the -I list.
+# In tree the engine is copied to fs/nomount.c, so it finds fs/overlayfs/ovl_entry.h
+# and compiles nm_ovl_reserve_dir_ino(). Out of tree nomount.c stays in hookless/src/
+# and none of the include dirs above has an overlayfs/ subdirectory, so the function
+# was an unconditional `return 0` in nomount.ko -- silently, with no warning and
+# nothing in dmesg -- and the two shipped zips therefore placed directory inodes
+# DIFFERENTLY on the same device. nomount.c now also #warning's when the header is
+# missing, so a build without it says so.
+ccflags-y += -I$(srctree)/fs
+
 # make ... NM_DEBUG=1  turns nm_debug()/nm_info() from no_printk into real printk.
 # Off by default: these fire per rule, and a mount pass installs hundreds.
 #

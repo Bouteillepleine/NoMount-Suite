@@ -22,6 +22,16 @@
 #if __has_include("overlayfs/ovl_entry.h")
 #include "overlayfs/ovl_entry.h"
 #define NM_OVL_LAST_INO 1
+#else
+/* Loud, because this silently changed where directory inodes land. The include is
+ * QUOTED, so it resolves against this file's own directory first and then the -I list:
+ * in tree the engine is copied to fs/nomount.c and finds fs/overlayfs/ovl_entry.h,
+ * while out of tree it stays in hookless/src/ and used to find nothing -- making
+ * nm_ovl_reserve_dir_ino() an unconditional `return 0` in nomount.ko with no warning
+ * at all, so the 00_ and 01_ zips placed directory inodes differently on one device.
+ * lkm/Makefile now passes -I$(srctree)/fs; if you are reading this warning, something
+ * has taken it away again. */
+#warning "overlayfs/ovl_entry.h not found: building WITHOUT the overlay dir-inode reservation (add -I$(srctree)/fs)"
 #endif
 #endif
 
@@ -3727,6 +3737,14 @@ static int nm_dev_ino_next;
 static int nm_subtree_dir_ino_max(const char *root, dev_t dev, u64 *out_min,
                                   u64 *out_max, u64 *out_any, unsigned long *used);
 
+/* Which placement path this build actually compiled, so a dmesg capture identifies the
+ * zip it came from rather than leaving the 00_/01_ difference invisible. */
+#ifdef NM_OVL_LAST_INO
+#define NM_OVL_COMPILED 1
+#else
+#define NM_OVL_COMPILED 0
+#endif
+
 /* Bloom over every inode number the subtree scan saw: a clear bit is never a used number. */
 static void nm_used_add(unsigned long *used, u64 ino)
 {
@@ -3805,7 +3823,16 @@ static struct nm_dev_ino *nm_dev_ino_get(dev_t dev, const char *seed)
     for (i = 0; i < NM_DEV_INO_SLOTS; i++) {
         if (nm_dev_ino_tab[i].valid && nm_dev_ino_tab[i].dev == dev) {
             s = &nm_dev_ino_tab[i];
-            if (!s->dmax_valid && s->dmax_err == -ENOMEM && seed) {
+            /* Every transient failure, not just -ENOMEM. -E2BIG is more than
+             * NM_DMAX_DIRS directories on the partition OR a single DT_UNKNOWN dirent
+             * anywhere in the walk, and -ENOENT is an ascended scan root with no
+             * same-dev subdirectory -- both can differ on the next attempt, and a slot
+             * that failed once used to stay in the degraded path for the rest of the
+             * boot. Still one-shot per call, so the expensive walk is not repeated per
+             * rule; a slot that keeps failing simply keeps answering !dmax_valid. */
+            if (!s->dmax_valid && seed &&
+                (s->dmax_err == -ENOMEM || s->dmax_err == -E2BIG ||
+                 s->dmax_err == -ENOENT)) {
                 err = nm_dev_ino_seed(s, seed);
                 nm_debug("inoseed: retry dev=%u:%u seed='%s' err=%d dmax=%llu amax=%llu\n",
                          MAJOR(dev), MINOR(dev), seed, err,
@@ -4568,9 +4595,32 @@ static unsigned long nm_place_dir_ino(struct nm_ino_pop *pop, u64 spread)
     u64 c, start;
 
     if (!di || !di->dmax_valid) {
-        nm_debug("inoplace: dev=%u:%u no dmax (di=%d err=%d) -> gap-fit via nm_place_ino\n",
-                 MAJOR(pop->dev), MINOR(pop->dev), !!di, di ? di->dmax_err : 0);
-        return nm_place_ino(pop, spread);
+        /* NOT nm_place_ino(): that is the gap fit the comment four lines below forbids
+         * by name, and for want_dir=true the population carries no subtree knowledge at
+         * all -- nm_dir_ino_pop allocates neither dirs nor subnames -- so it would fit a
+         * directory into a gap between sampled FILE inodes. That is the 109/110-beside-oat
+         * state, measured and reverted once already.
+         *
+         * Stay above everything we do know about, which is what the valid path does on
+         * purpose. c3f7733 widened the door here: a failed 128 KB kvzalloc used to leave
+         * dmax_valid true with a NULL bitmap (a NULL deref in nm_used_test), and making it
+         * -ENOMEM routed those adds down this path instead. Trading a crash for a tell was
+         * right; leaving the tell was not.
+         *
+         * With nothing known at all, 0 hands it back to the caller's hash-derived
+         * sibling+1MiB form rather than inventing a number from a same-type sample. */
+        u64 above = 0;
+
+        if (di && di->hw)
+            above = di->hw + 1;
+        else if (pop->hw)
+            above = pop->hw + 1;
+        nm_debug("inoplace: dev=%u:%u no dmax (di=%d err=%d ovl=%d) -> above=%llu (no gap-fit)\n",
+                 MAJOR(pop->dev), MINOR(pop->dev), !!di, di ? di->dmax_err : 0,
+                 NM_OVL_COMPILED, (unsigned long long)above);
+        if (!above)
+            return 0;
+        return nm_ino_take(pop, above);
     }
 
     /* Placed ABOVE every inode the scan saw, band tell and all. Do not "fix" this by
