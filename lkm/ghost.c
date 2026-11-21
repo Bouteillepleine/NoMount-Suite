@@ -297,27 +297,74 @@ static u32 ghost_utf8_next(const char **pp)
 	return c;
 }
 
+/* Every ignorable is above U+007F, and a real path is nearly all ASCII, so the
+ * early return is the branch that runs. */
+static bool ghost_cp_ignorable(u32 c)
+{
+	int i;
+
+	if (c < 0x80)
+		return false;
+	for (i = 0; i < (int)ARRAY_SIZE(ghost_ignorable); i++) {
+		if (c < ghost_ignorable[i].lo)
+			break;	/* table is sorted; no later range can match */
+		if (c <= ghost_ignorable[i].hi)
+			return true;
+	}
+	return false;
+}
+
 bool ghost_name_ignorable(const char *p)
 {
 	if (!p)
 		return false;
 
 	while (*p) {
-		u32 c = ghost_utf8_next(&p);
-		int i;
-
-		/* Every ignorable is above U+007F, and a real path is nearly all
-		 * ASCII, so this is the branch that runs. */
-		if (c < 0x80)
-			continue;
-		for (i = 0; i < (int)ARRAY_SIZE(ghost_ignorable); i++) {
-			if (c < ghost_ignorable[i].lo)
-				break;	/* table is sorted; no later range can match */
-			if (c <= ghost_ignorable[i].hi)
-				return true;
-		}
+		if (ghost_cp_ignorable(ghost_utf8_next(&p)))
+			return true;
 	}
 	return false;
+}
+
+/* Drop every ignorable code point, IN PLACE, and return the new length.
+ *
+ * In place is safe and is why there is no second buffer: stripping only ever
+ * shortens, so the write pointer never passes the read pointer. memmove, not
+ * memcpy, because the two do overlap. @p must be writable -- ghost_hidden_path()
+ * owns the per-CPU buffer d_path() rendered into, and ghost_hidden_name() copies
+ * its const input in first.
+ *
+ * This is what makes the class check rule-ANCHORED. It used to be a standalone
+ * verdict, so for a hide-listed uid EVERY path on the device carrying one of
+ * these code points read as -ENOENT, rule or no rule: a chat download named
+ * IMG<U+FE0F>.jpg could not be stat'ed or opened by the app that owns it while
+ * getdents64 still listed it, and open(O_CREAT) answered ENOENT in a directory
+ * the caller had just written to -- which cannot happen on a stock kernel, so
+ * one pair of syscalls inside the app's own sandbox proved an interposer. The
+ * bypass this was written for only exists where the filesystem folds names
+ * (the emulated-storage tree); on /data/data there is nothing to alias, so the
+ * refusal there was pure collateral. Testing the STRIPPED form against the rule
+ * table still closes the /sdcard/Android/data<U+200B> spelling, because that one
+ * strips to a path a rule names.
+ */
+static size_t ghost_strip_ignorable(char *p)
+{
+	const char *src = p;
+	char *dst = p;
+
+	while (*src) {
+		const char *start = src;
+		size_t n;
+
+		if (ghost_cp_ignorable(ghost_utf8_next(&src)))
+			continue;
+		n = src - start;
+		if (dst != start)
+			memmove(dst, start, n);
+		dst += n;
+	}
+	*dst = '\0';
+	return dst - p;
 }
 
 bool ghost_hidden_path(const struct path *path)
@@ -327,8 +374,11 @@ bool ghost_hidden_path(const struct path *path)
 	bool hit;
 	u32 uid;
 
-	/* No early return on an empty rule table: the invisible-character class
-	 * check below is not expressed as a rule and must still run.
+	/* No early return on an empty rule table. The class check below is now
+	 * rule-anchored, so an empty table does mean "nothing to hide" here -- but
+	 * ghost_path_rcu() already costs nothing with nrules == 0, and keeping the
+	 * shape means the uid-table reasoning below stays the only gate that can
+	 * make these guards dead code.
 	 */
 	/* An empty uid table means "no uid source" only when the engine is not
 	 * the source. Keeping the old combined test here would make every guard
@@ -350,13 +400,77 @@ bool ghost_hidden_path(const struct path *path)
 	if (!IS_ERR(p)) {
 		size_t plen = strlen(p);
 
-		/* the class check first: it needs no rule to be programmed */
-		hit = ghost_name_ignorable(p);
-		if (!hit) {
-			rcu_read_lock();
-			hit = ghost_path_rcu(p, plen);
-			rcu_read_unlock();
+		/* The rule table on the path as rendered, first and always. */
+		rcu_read_lock();
+		hit = ghost_path_rcu(p, plen);
+		rcu_read_unlock();
+
+		/* Then, only if the path actually carries an ignorable code point,
+		 * the same question about its stripped form: that is the aliased
+		 * spelling a folding filesystem would resolve to the same file. The
+		 * strip is in place in the buffer we own, which is why the original
+		 * is tested first -- after this it is gone. */
+		if (!hit && ghost_name_ignorable(p)) {
+			size_t slen = ghost_strip_ignorable(p);
+
+			if (slen) {
+				rcu_read_lock();
+				hit = ghost_path_rcu(p, slen);
+				rcu_read_unlock();
+			}
 		}
+	}
+	put_cpu_ptr(&ghost_pathbuf);
+
+	return hit;
+}
+
+/* The same rule-anchored question about a path STRING the kernel has not resolved.
+ *
+ * do_filp_open() is the only guard openat() passes through -- the vfs_getattr and
+ * user_path_at hooks never see it -- and at its entry the only thing that exists is
+ * struct filename's unresolved name, so this takes a string rather than a struct path.
+ *
+ * ABSOLUTE ONLY, deliberately. A relative name cannot be matched against a table of
+ * absolute rules, and guessing at the caller's cwd would be a second unmeasured claim,
+ * so this answers false and leaves the open alone. The residual is
+ * openat(AT_FDCWD, "a<U+200B>b") with a cwd inside a guarded tree, which is strictly
+ * narrower than what it replaces: a class check that refused EVERY path carrying one of
+ * these code points, for every hide-listed uid, anywhere on the device.
+ *
+ * No uid gate here. The caller holds one (nm_gp_open_entry tests nm_uid_blocked before
+ * asking), and ghost_hidden_path() keeps its own because it is reached from hooks that
+ * do not.
+ */
+bool ghost_hidden_name(const char *name)
+{
+	char (*bufp)[PATH_MAX];
+	size_t len;
+	bool hit;
+
+	if (!name || name[0] != '/')
+		return false;
+	if (!READ_ONCE(ghost_nrules))
+		return false;
+
+	len = strlen(name);
+	if (len >= PATH_MAX)
+		return false;
+
+	rcu_read_lock();
+	hit = ghost_path_rcu(name, len);
+	rcu_read_unlock();
+	if (hit || !ghost_name_ignorable(name))
+		return hit;
+
+	/* @name is kernel memory we do not own, so the strip needs a copy. */
+	bufp = get_cpu_ptr(&ghost_pathbuf);
+	memcpy(*bufp, name, len + 1);
+	len = ghost_strip_ignorable(*bufp);
+	if (len) {
+		rcu_read_lock();
+		hit = ghost_path_rcu(*bufp, len);
+		rcu_read_unlock();
 	}
 	put_cpu_ptr(&ghost_pathbuf);
 

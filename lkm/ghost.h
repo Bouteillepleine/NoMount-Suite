@@ -8,7 +8,13 @@ struct path;
 struct vfsmount;
 
 bool ghost_hidden_path(const struct path *path);
+/* ghost_name_ignorable() has no caller in THIS tree any more -- nm_gp_open_entry()
+ * moved to ghost_hidden_name() below. Kept non-static and declared here on purpose:
+ * ghost.c is also vendored into the kernel tree for the in-tree build, whose _ghost
+ * patch set is not in this repository, so whether anything there calls it cannot be
+ * checked from here. Making it static would be a silent bet on that answer. */
 bool ghost_name_ignorable(const char *p);
+bool ghost_hidden_name(const char *name);
 bool ghost_hidden_mount(struct vfsmount *mnt);
 
 bool ghost_abstract_hidden(const char *name, int len);

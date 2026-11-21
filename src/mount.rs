@@ -2009,6 +2009,36 @@ mod tests {
              that adds a different number of lines than it removes - every prose re-wrap, which \
              is the shape a bulk rewrite makes - shifts the pairs and hides the damage"
         );
+        // The ignorable-code-point refusal is RULE-ANCHORED, and nothing but this says so.
+        // nm_gp_open_entry() used to call ghost_name_ignorable() on the bare filename and
+        // ghost_hidden_path() used it as a standalone verdict, so for a hide-listed uid EVERY
+        // path carrying one of those code points answered -ENOENT with no rule naming it --
+        // an app could not stat or open an emoji-named file it owns, and open(O_CREAT)
+        // returning ENOENT in a directory it had just written to is impossible on a stock
+        // kernel, so two syscalls in its own sandbox proved an interposer. Both are one-word
+        // reverts, and no host test can execute kernel code, so the contract is pinned as
+        // source instead.
+        const GP_C: &str = include_str!("../lkm/nm_ghost_probes.c");
+        const GHOST_C: &str = include_str!("../lkm/ghost.c");
+        assert!(
+            GP_C.contains("ghost_hidden_name(*fname)"),
+            "nm_gp_open_entry() no longer asks ghost_hidden_name(): if it is back on \
+             ghost_name_ignorable(), do_filp_open() refuses every path with an invisible \
+             code point for a hide-listed uid, including the caller's own files"
+        );
+        assert!(
+            !GP_C.contains("ghost_name_ignorable(*fname)"),
+            "the bare class check is back on the open path -- see ghost_hidden_name()"
+        );
+        // Counted, not matched: one definition plus the two call sites, in
+        // ghost_hidden_path() and ghost_hidden_name(). Either call going missing turns that
+        // predicate back into one that cannot see a folded spelling, which is the half of
+        // this that keeps the /sdcard/Android/data<U+200B> bypass closed.
+        assert!(
+            GHOST_C.matches("ghost_strip_ignorable(").count() >= 3,
+            "ghost.c has fewer than three mentions of ghost_strip_ignorable (one definition, \
+             two calls), so one of the two rule-anchored paths has lost its stripped-form test"
+        );
         const NOMOUNT_H: &str = include_str!("../hookless/src/nomount.h");
         let wire = NOMOUNT_H
             .lines()

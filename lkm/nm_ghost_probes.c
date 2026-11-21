@@ -398,7 +398,16 @@ static int nm_gp_open_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	if (!nm_uid_blocked(from_kuid(&init_user_ns, current_uid())))
 		return 0;
 
-	ctx->hide = ghost_name_ignorable(*fname);
+	/* ghost_hidden_name(), not ghost_name_ignorable(). The bare class check made
+	 * every path carrying an ignorable code point read as -ENOENT for a hide-listed
+	 * uid with no rule naming it -- including the caller's own sandbox, where
+	 * open(O_CREAT) answering ENOENT in a directory it had just written to is
+	 * impossible on a stock kernel and so proved an interposer in two syscalls. The
+	 * replacement asks the rule table about the name and about its stripped form, so
+	 * the folded-spelling bypass stays closed and unrelated paths are left alone. See
+	 * the note on ghost_hidden_name() for what it does NOT cover (relative names).
+	 */
+	ctx->hide = ghost_hidden_name(*fname);
 	return 0;
 }
 
