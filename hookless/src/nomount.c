@@ -3050,6 +3050,25 @@ static void nm_retag_passthrough_dentry(struct dentry *dentry)
         d_drop(dentry);
 }
 
+/* The real dir_node a possibly-virtual one hangs beneath.
+ *
+ * A virtual node carries its owner rule in _tag_ptr instead of a dir_inode, and that owner
+ * is itself parented somewhere -- ultimately under a real, hijacked directory. Walking that
+ * chain is what lets a caller ask "which filesystem does this rule really live on?" for a
+ * rule nested under synthesized intermediates.
+ */
+static struct nomount_dir_node *nm_real_dir_node_of(struct nomount_dir_node *d)
+{
+    int guard = 64;
+
+    while (d && (d->_tag_ptr & 1UL) && guard-- > 0) {
+        struct nomount_rule *owner = (struct nomount_rule *)(d->_tag_ptr & ~1UL);
+
+        d = owner ? owner->parent_dir : NULL;
+    }
+    return (d && (d->_tag_ptr & 1UL)) ? NULL : d;
+}
+
 static void nomount_hijacked_put_super(struct super_block *sb)
 {
     struct nm_sop *nm_sop = __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop, destroy_inode, nomount_hijacked_destroy_inode);
@@ -3069,12 +3088,24 @@ static void nomount_hijacked_put_super(struct super_block *sb)
      * going away. nm_detach_rule_locked() does both halves, and the victims/
      * synchronize_rcu/free protocol is the one __nomount_clear_all uses.
      */
+    /* Resolve through virtual parents, do not skip them.
+     *
+     * This used to test `rule->parent_dir` directly and require a real node, so a rule
+     * nested under a synthesized intermediate -- whose parent_dir IS a virtual node --
+     * failed the test and stayed in the table, while the intermediate itself (parented
+     * under a real node on this sb) matched and was freed. nm_free_rule() then dropped the
+     * last reference to the virtual dir_node, and the surviving child was left pointing at
+     * freed slab: the next del or clear did atomic_inc_not_zero() and an idr walk on it.
+     *
+     * Every member of a virtual subtree resolves to the same real node, so each one now
+     * matches in its own iteration of this loop -- no nested removal, and by the time the
+     * victims are freed nm_detach_rule_locked() has nulled every parent_dir among them.
+     */
     mutex_lock(&nomount_write_mutex);
     hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {
-        struct nomount_dir_node *d;
+        struct nomount_dir_node *d = nm_real_dir_node_of(rule->parent_dir);
 
-        d = rule->parent_dir;
-        if (d && !(d->_tag_ptr & 1UL) && d->dir_inode && d->dir_inode->i_sb == sb)
+        if (d && d->dir_inode && d->dir_inode->i_sb == sb)
             nm_detach_rule_locked(rule, &victims, false);
     }
     mutex_unlock(&nomount_write_mutex);
@@ -4235,6 +4266,26 @@ static bool nm_ino_taken(const struct nm_ino_pop *pop, u64 c)
     return false;
 }
 
+/* Taken by this directory's own sample, or by anything on the partition: di->used holds
+ * every inode the subtree scan saw plus every number nm_place_dir_ino() has handed out.
+ *
+ * nm_ino_take() feeds that set too, so the file placer and the directory placer now
+ * exclude each other in BOTH directions. They shared nothing before: a number given to an
+ * injected file was recorded only in that file's parent sample, which the directory placer
+ * never consults, so a directory synthesized later on the same dev could be handed a
+ * number an injected file already held -- and two names sharing (st_dev, st_ino) on one
+ * filesystem is the oracle, not merely untidy.
+ *
+ * The set is a bloom, so it over-reports: a rejected candidate may have been free. That
+ * only costs us the next number along, which is what nm_place_dir_ino() already accepts.
+ */
+static bool nm_ino_unavailable(struct nm_ino_pop *pop, struct nm_dev_ino *di, u64 c)
+{
+    if (nm_ino_taken(pop, c))
+        return true;
+    return di && di->used && nm_used_test(di->used, c);
+}
+
 static unsigned long nm_ino_take(struct nm_ino_pop *pop, u64 c)
 {
     struct nm_dev_ino *di;
@@ -4244,8 +4295,11 @@ static unsigned long nm_ino_take(struct nm_ino_pop *pop, u64 c)
     if (c > pop->hw)
         pop->hw = c;
     di = nm_dev_ino_get(pop->dev, NULL);
-    if (di && c > di->hw)
-        di->hw = c;
+    if (di) {
+        if (c > di->hw)
+            di->hw = c;
+        nm_used_add(di->used, c);
+    }
     return (unsigned long)c;
 }
 
@@ -4260,10 +4314,11 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
 
     if (pop->nmine >= NM_INO_MINE) {
         u64 c = pop->hw + 1;
+        int guard = 4096;
 
         if (c <= dhw)
             c = dhw + 1;
-        while (nm_ino_taken(pop, c))
+        while (nm_ino_unavailable(pop, di, c) && guard--)
             c++;
         return nm_ino_take(pop, c);
     }
@@ -4280,19 +4335,20 @@ static unsigned long nm_place_ino(struct nm_ino_pop *pop, u64 spread)
         for (s = 1; s < (int)room; s++) {
             u64 cand = base + 1 + ((spread + (u64)s) % (room > 1 ? room - 1 : 1));
 
-            if (!nm_ino_taken(pop, cand))
+            if (!nm_ino_unavailable(pop, di, cand))
                 return nm_ino_take(pop, cand);
             cand = base + (u64)s;
-            if (cand > base && !nm_ino_taken(pop, cand))
+            if (cand > base && !nm_ino_unavailable(pop, di, cand))
                 return nm_ino_take(pop, cand);
         }
     }
     {
         u64 c = pop->v[pop->n - 1] + 1;
+        int guard = 4096;
 
         if (c <= dhw)
             c = dhw + 1;
-        while (nm_ino_taken(pop, c))
+        while (nm_ino_unavailable(pop, di, c) && guard--)
             c++;
         return nm_ino_take(pop, c);
     }
@@ -5354,6 +5410,23 @@ static void nm_free_rule(struct nomount_rule *rule)
     if (unlikely(!rule)) return;
     if (rule->r_path.dentry) path_put(&rule->r_path);
     if (rule->s_path.dentry) path_put(&rule->s_path);
+    /* Orphan any child this rule still owns, rather than leave it pointing into the
+     * dir_node we are about to drop the last reference to.
+     *
+     * Every caller is supposed to detach a whole subtree before freeing any of it --
+     * __nomount_add_rule and __nomount_del_rule return -EBUSY rather than free a rule
+     * whose this_dir still has children, and __nomount_clear_all detaches all before
+     * freeing any. put_super got that wrong and the cost was a write-capable UAF, so make
+     * the wrong order merely leave an orphaned rule instead of a dangling pointer.
+     */
+    if (rule->this_dir && !idr_is_empty(&rule->this_dir->children_idr)) {
+        struct nomount_child_node *child;
+        int id;
+
+        idr_for_each_entry(&rule->this_dir->children_idr, child, id)
+            if (child->rule && child->rule->parent_dir == rule->this_dir)
+                child->rule->parent_dir = NULL;
+    }
     nm_dir_node_put(rule->this_dir);
     kfree(rule);
 }
