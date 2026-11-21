@@ -6,6 +6,17 @@
 > `hookless/` source. The Suite runs on an older engine, and `nomount check` names
 > anything that needs a newer one. The WebUI footer shows both, `Suite vX · engine vY`.
 
+## v1.3.216 — engine v36 (the engine fixes below need a kernel rebuild; the LKM zip carries them)
+
+- `apkscope`, `public.txt` and `accepted.list` survive a module update.
+- `nm add|del --uid/--uid-range/--uid-excluded` reach the engine; the short form took the flags and served the rule to every uid.
+- The bootloop guard arms before the engine module loads, honours `disabled`, and now counts a crash in the late reload pass.
+- `nomount check` compares the bytes an app sees, not just the size, and stops reporting a canary it could not run as a kernel fault.
+- A whiteout is refused on `/vendor_dlkm`, `/system_dlkm` and `/odm_dlkm`, and `whiteout add` refuses a path another module serves.
+- Uninstalling removes its `nm` symlinks and no longer keeps `/data/adb/nomount` for good.
+- WebUI: no "reflash your kernel" on an SELinux denial, no counts it could not read, no 100-second wait on a stale check request.
+- Engine: the file and directory inode placers share one exclusion set, a synthesized directory is placed among its own siblings where there is room, and a rule under one is no longer freed with its children still pointing at it.
+
 ## v1.3.215 — engine v36 (the engine fixes below need a kernel rebuild; the LKM zip carries them)
 
 - A synthesized directory took an inode number above every number on the mount, so one `find -type d -inum +1000` named the injected directories. Each now takes a free number from inside the range its stock siblings occupy.
