@@ -948,6 +948,18 @@ fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> u32 {
         if is_app_apk(target) && !label_apk_readable(source) {
             continue;
         }
+        // A recorded pair is re-served without walking leaves, so the refusals `inject`
+        // applies per leaf never ran for it: a source that has since become a symlink, a
+        // .replace marker or anything else the planner refuses was re-served from the
+        // record as though it had been vetted.
+        if let Some(why) = crate::mount::absorb_refusal(source) {
+            eprintln!(
+                "nomount: not re-serving {} from {} - {why}",
+                target.display(),
+                source.display()
+            );
+            continue;
+        }
         if add_rule(nm, target, source) {
             n += 1;
         }
@@ -1102,6 +1114,18 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
     if let Err(why) = crate::mount::path_is_representable(target)
         .and(crate::mount::path_is_representable(source))
     {
+        eprintln!(
+            "nomount: absorb: refusing {} <- {} - {why}",
+            target.display(),
+            source.display()
+        );
+        return false;
+    }
+    // The same refusals `inject` makes per leaf. This is the other door into add_rule --
+    // reached from reapply_pairs and refresh_app_apks, neither of which walks leaves -- so
+    // a source the planner exists to refuse could be served through here, a symlink into a
+    // world-writable place being the one that matters.
+    if let Some(why) = crate::mount::absorb_refusal(source) {
         eprintln!(
             "nomount: absorb: refusing {} <- {} - {why}",
             target.display(),
@@ -1519,6 +1543,22 @@ fn take_over_empty_dir(
         }
         Err(e) => {
             eprintln!("nomount: {} unmounted but the whiteout failed: {e:#}", target.display());
+            // The durable entry was removed above so absorb could take the hide over, and the
+            // record push only happens in the Ok arm - so without this the path is on NEITHER
+            // list: visible now, and nothing re-applies it on the next boot either. An
+            // operator-authored hide must not evaporate because absorb's replacement failed.
+            if was_durable {
+                match crate::whiteout::relist_locked(&t_str) {
+                    Ok(_) => eprintln!(
+                        "nomount: {t_str} is back in whiteouts.txt, so the next boot re-applies it"
+                    ),
+                    Err(e2) => eprintln!(
+                        "nomount: {t_str} could NOT be put back in whiteouts.txt ({e2:#}) - it is \
+                         on neither list now and stops being hidden; re-add it with \
+                         `nomount whiteout add {t_str}`"
+                    ),
+                }
+            }
             false
         }
     }

@@ -813,6 +813,16 @@ pub(crate) fn unmount_before_serving(
             );
             return false;
         }
+        // `ownership_of` answers None for two different things: the mount table could not
+        // be read, and nothing is mounted at this target at all. Only the first is a reason
+        // to refuse. The snapshot is taken before teardown_all(), so a target that carried a
+        // module mount when it was taken and is free now arrives here -- and was refused
+        // with a message blaming an unreadable table for a path that is simply available.
+        //
+        // still_mounted() is the right discriminator because it fails the safe way: an
+        // unreadable table reads as "mounted" (.unwrap_or(true)), so it cannot turn a
+        // read failure into permission to inject over something.
+        None if !crate::absorb::still_mounted(target) => return true,
         None => {
             eprintln!(
                 "nomount: could not read the mount table to tell who owns the mount on {}, \
@@ -945,7 +955,11 @@ fn collect_plan_with(edits: &EngineEdits) -> Result<(Vec<PlanEntry>, u32, Vec<Re
 
 pub fn run_plan() -> Result<()> {
     let (plan, skipped, refused) = collect_plan()?;
-    let (plan, _) = dedupe_by_target(plan);
+    // `plan` is the diagnostic a user runs to understand what a pass WILL do, and it was
+    // the one view that threw the collisions away: two modules claiming one target showed
+    // only the winner, with no hint that anything had been dropped. run_mount and
+    // run_reload both report them.
+    let (plan, collisions) = dedupe_by_target(plan);
     for e in &plan {
         let k = match e.kind {
             PlanKind::Inject => "inject",
@@ -969,6 +983,15 @@ pub fn run_plan() -> Result<()> {
             r.why
         );
     }
+    for c in &collisions {
+        println!(
+            "COLLIDED {} << claimed by {}, serving {}, skipping {}",
+            c.target.display(),
+            c.losers.len() + 1,
+            c.winner,
+            c.losers.join(", ")
+        );
+    }
     let binds = plan.iter().filter(|e| e.kind == PlanKind::Bind).count();
     let dead = plan.iter().filter(|e| !source_resolves(e)).count();
     let declined = plan.iter()
@@ -979,6 +1002,9 @@ pub fn run_plan() -> Result<()> {
     if declined > 0 { extra.push_str(&format!(", {declined} whiteout(s) leaving a measurable hole")); }
     if !refused.is_empty() {
         extra.push_str(&format!(", {} refused", refused.len()));
+    }
+    if !collisions.is_empty() {
+        extra.push_str(&format!(", {} contested target(s)", collisions.len()));
     }
     println!("({} entries: {} binds, {skipped} blocklisted{extra})", plan.len(), binds);
     Ok(())
@@ -1252,11 +1278,20 @@ pub fn run_reload() -> Result<()> {
     ));
     crate::pmcache::add_pending(&pm);
 
+    // No "(gap-free)" trailer. It was printed unconditionally, next to the pass's own
+    // `failed` count, so a reload that failed to apply rules still advertised itself as
+    // gap-free -- and nothing in the repository computed or read the string. The honest
+    // signal is run_mount's warning, which this pass now prints the same way.
     println!(
         "nomount reload: +{added} ~{changed} -{removed} rules, +{bind_added} -{bind_removed} binds, \
-         {failed} failed, {skipped} blocklisted{} (gap-free)",
+         {failed} failed, {skipped} blocklisted{}",
         if foreign > 0 { format!(", {foreign} left to another writer") } else { String::new() }
     );
+    if failed > 0 {
+        eprintln!(
+            "nomount: WARNING {failed} rule(s) failed to apply - the injection set is incomplete"
+        );
+    }
     if !pm.is_empty() {
         let shown: Vec<String> =
             pm.iter().take(3).map(|p| p.display().to_string()).collect();

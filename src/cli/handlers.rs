@@ -477,7 +477,20 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                 if let Some(parsed) = blocklist::Pattern::parse(&target) {
                     parsed?;
                 }
-                let installed = blocklist::installed_packages().unwrap_or_default();
+                // installed_packages() is an Option so that "could not read the map" stays
+                // distinguishable from "no packages" - unwrap_or_default() collapsed the two,
+                // and an empty map makes both guards below pass vacuously: the glob matches
+                // nothing, so it is never too broad and never reaches below the app range.
+                let installed = match blocklist::installed_packages() {
+                    Some(m) => m,
+                    None if force => Default::default(),
+                    None => bail!(
+                        "{target} is a glob and the installed-package map could not be read, so \
+                         how many apps it would hide from - and whether any is below the app \
+                         range - cannot be checked. Add the package by exact name, retry when \
+                         `pm list packages` works, or pass --force to add it unchecked."
+                    ),
+                };
                 let hits = blocklist::expand(&target, &installed)?;
                 const GLOB_HIT_CEILING: usize = 24;
                 if hits.len() > GLOB_HIT_CEILING && !force {
@@ -574,7 +587,18 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                              - it is left hidden"
                         )
                     })?;
-                    let installed = blocklist::installed_packages().unwrap_or_default();
+                    // Un-hiding is the direction that cannot be taken back by guesswork: with
+                    // an empty map still_covered_by() finds no surviving entry, so an app a
+                    // glob entry still covers was un-hidden. reapply_blocklist already gates
+                    // its retirement on installed.is_some() for exactly this reason.
+                    let Some(installed) = blocklist::installed_packages() else {
+                        bail!(
+                            "{target} was removed from the hide list, but the installed-package \
+                             map could not be read, so whether another entry still hides uid \
+                             {uid} is unknown - it is left hidden. Retry when `pm list packages` \
+                             works."
+                        );
+                    };
                     let was_live = live.iter().any(|u| appid(*u) == appid(uid));
                     let kept = if was_live {
                         still_covered_by(&survivors, &installed, appid(uid))
@@ -633,7 +657,16 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                                  appid {old} - it is left hidden"
                             )
                         })?;
-                        let installed = blocklist::installed_packages().unwrap_or_default();
+                        // Same reasoning as the uid path above: an unreadable map must not
+                        // read as "nothing else covers this appid".
+                        let Some(installed) = blocklist::installed_packages() else {
+                            bail!(
+                                "{target} was removed from the hide list, but the \
+                                 installed-package map could not be read, so whether another \
+                                 entry still hides appid {old} is unknown - it is left hidden. \
+                                 Retry when `pm list packages` works."
+                            );
+                        };
                         if live.iter().any(|u| appid(*u) == old)
                             && still_covered_by(&survivors, &installed, old).is_none()
                         {

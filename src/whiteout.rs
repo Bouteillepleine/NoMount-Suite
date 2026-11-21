@@ -234,6 +234,24 @@ pub(crate) fn forget_locked(target: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Put a path back into whiteouts.txt without touching the engine. The inverse of
+/// `forget_locked`.
+///
+/// For a caller that removed the durable entry in order to take the hide over and then
+/// failed to install its own: absorb's `take_over_empty_dir` commits the removal first, so
+/// a failed replacement used to leave the path on NEITHER list - not hidden now, and not
+/// hidden on any later boot either.
+pub(crate) fn relist_locked(target: &str) -> Result<bool> {
+    let t = norm(target.trim());
+    let mut list = read()?;
+    if list.iter().any(|x| *x == t) {
+        return Ok(false);
+    }
+    list.push(t);
+    write(&list)?;
+    Ok(true)
+}
+
 pub(crate) fn remove_locked(target: &str) -> Result<()> {
     let normalised = norm(target.trim());
     let t = normalised.as_str();
