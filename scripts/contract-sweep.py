@@ -6,7 +6,7 @@ breaks: one file emits a literal, another file matches that literal by exact
 text, and a rewrite moves one end without the other. Nothing cargo, clippy,
 shellcheck or the test suite runs can see it.
 
-Two sweeps:
+Three sweeps:
 
   (a) case   - every -/+ line pair in a commit range that is identical apart
                from letter case. scripts/case-sweep.py already does a narrowed
@@ -25,7 +25,22 @@ Two sweeps:
                           userspace/src/*.c, hookless/src/*.c.
                Reports each consumer pattern no other file can produce.
 
-Status: advisory, run by hand. It is deliberately NOT wired into CI.
+  (c) quoting - every value the WebUI interpolates or concatenates into a root
+               shell string must go through shq(). exec() hands KSU.exec() ONE
+               string and nm(args) splices `args` in raw, so quoting is the
+               caller's job at all 50 call sites and nothing checked it. The
+               allowlist is small and each entry is VERIFIED, not asserted: the
+               three unquoted ${}s come from literal data-arg attributes, which
+               the sweep re-reads out of index.html, and the two concatenated
+               path constants must still be `const X = "literal";`.
+
+Status: (a) and (b) are advisory, run by hand. (c) RUNS IN CI (build.yaml,
+"WebUI root-call quoting") because it is clean on a good tree and was proven to
+fail against five planted holes: an unquoted ${} in nm(), a value concatenated
+on either side of a root call, a data-arg that stopped being a literal, and a
+path constant that stopped being one. The leading-concatenation case was found
+BY planting it - the first cut matched only `+ ident` and let `exec(VAR + '...')`
+through.
 
   * `case` reports the whole case-only class, including deliberate repairs - sweeping
     3b05955..v1.3.180 reports four lines, and all four are the round-11 fixes putting
@@ -269,6 +284,184 @@ def sweep_links():
     return 1 if cnt else 0
 
 
+# --- (c) quoting: every value the WebUI sends to root must be shell-quoted ----
+#
+# exec() hands KSU.exec() ONE shell string, and nm(args) interpolates `args`
+# into it raw by design, so quoting is the CALLER's job at every call site --
+# and nothing checked it. The call sites themselves record three bugs that got
+# in exactly this way: a package name with a leading "-" read as a FLAG by
+# `uid block`, a VAR=val prefix that applied only to the first command of a
+# ";"-separated list, and names taken straight from uidscan.sh's stdout. All
+# three are fixed; this is what stops the next one being written.
+#
+# Rule: every ${...} inside an exec()/nm() argument, and every identifier
+# concatenated into one, is shq(...) -- or is named below with the reason it is
+# safe without, and that reason is CHECKED rather than taken on trust.
+
+# Dispatched from a literal data-arg in index.html through the ACTIONS table,
+# never from device output or a text field. The value is the handler name the
+# gate looks for in the HTML.
+QUOTE_ARG_OK = {
+    "op": "uidOp",
+    "mode": "setIsolated",
+    "state": "setKsuSource",
+}
+# Paths concatenated into exec(); the gate proves each is assigned a string
+# literal rather than trusting the name.
+QUOTE_CONST_OK = ("CHECK_REQ", "CHECK_CACHE")
+# The helper that makes this a per-call-site rule at all. Allowed only inside
+# its own definition; a second one would be a second unchecked door.
+QUOTE_RAW_HELPER = ("args", "module/webroot/js/00-core.js")
+
+ROOT_CALL = re.compile(r"(?<![\w.$])(nm|exec)\s*\(")
+INTERP = re.compile(r"\$\{\s*([^{}]*?)\s*\}")
+# A trailing "." or "(" means the identifier is only the head of a larger
+# expression (picks.map(...)), whose own template literal is scanned below.
+#
+# BOTH sides of the "+". The first cut matched only `+ ident`, so `exec(VAR +
+# 'literal')` -- a value concatenated in FRONT of the command -- passed the
+# gate while `exec('literal' + VAR)` was caught. Found by planting the hole
+# rather than by reading, which is the only reason it is here.
+CONCAT_ID = re.compile(
+    r"[+]\s*([A-Za-z_$][\w$]*)\s*(?![\w$(.])"
+    r"|(?<![\w$.])([A-Za-z_$][\w$]*)\s*[+]")
+IDENT = re.compile(r"^[A-Za-z_$][\w$]*$")
+LITERAL_ARG = re.compile(r"^[A-Za-z0-9._-]+$")
+CONST_LIT = r"\bconst\s+%s\s*=\s*\"[^\"$]*\"\s*;"
+
+
+def _call_args(src, open_paren):
+    """Text between a call's parens, following newlines until they balance."""
+    depth = 0
+    for i in range(open_paren, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return src[open_paren + 1:i]
+    return src[open_paren + 1:]
+
+
+def _template_parts(arg):
+    """Only a backtick region can hold a JS ${...}.
+
+    `'id=${d%/}; id=${id##*/}'` in 40-rules.js is a single-quoted JS string
+    carrying SHELL parameter expansion -- the shell expands it, nothing is
+    interpolated by JS, and there is nothing for the caller to quote. Scanning
+    the whole argument reported both as holes.
+    """
+    out, i = [], 0
+    while True:
+        a = arg.find("`", i)
+        if a < 0:
+            return out
+        b = arg.find("`", a + 1)
+        if b < 0:
+            out.append(arg[a + 1:])
+            return out
+        out.append(arg[a + 1:b])
+        i = b + 1
+
+
+def _code_only(arg):
+    """The argument with every string and template literal blanked out.
+
+    Concatenation has to be read at the JS level: `END{print n+0}` inside the
+    awk program in 40-rules.js:11 is `n` followed by `+`, and scanning the raw
+    text reported it as a value concatenated into a root call. Blanking the
+    literals leaves only the code that actually joins them.
+    """
+    out, i, n = [], 0, len(arg)
+    while i < n:
+        c = arg[i]
+        if c in "'\"`":
+            i += 1
+            while i < n and arg[i] != c:
+                i += 2 if arg[i] == "\\" else 1
+            i += 1
+            out.append(" 0 ")
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _data_args_for(html, handler):
+    """Every data-arg on a tag whose data-act is `handler`, order-independent."""
+    out = []
+    for tag in html.split("<"):
+        if ('data-act="%s"' % handler) not in tag:
+            continue
+        m = re.search(r"data-arg\s*=\s*\"([^\"]*)\"", tag)
+        out.append(m.group(1) if m else None)
+    return out
+
+
+def sweep_quoting():
+    bad, checked = [], 0
+    html = read("module/webroot/index.html")
+
+    # The allowlist's own justifications first. A gate whose exceptions go
+    # unverified is an exception list, not a gate.
+    for ident, handler in sorted(QUOTE_ARG_OK.items()):
+        args = _data_args_for(html, handler)
+        if not args:
+            bad.append(("module/webroot/index.html", 0,
+                        "%s is allowlisted as coming from a literal data-arg for %s(), but "
+                        "no data-act=\"%s\" exists" % (ident, handler, handler)))
+        for a in args:
+            if a is None or not LITERAL_ARG.match(a):
+                bad.append(("module/webroot/index.html", 0,
+                            "data-act=\"%s\" carries data-arg %r, so %s is no longer safe "
+                            "unquoted" % (handler, a, ident)))
+
+    for rel in files("module/webroot/js/*.js"):
+        src = read(rel)
+        for name in QUOTE_CONST_OK:
+            if name in src and not re.search(CONST_LIT % name, src):
+                bad.append((rel, 0,
+                            "%s is concatenated into a root call and allowlisted as a string "
+                            "literal, but no `const %s = \"...\";` assigns one here"
+                            % (name, name)))
+        for m in ROOT_CALL.finditer(src):
+            if re.search(r"\bfunction\s+$", src[:m.start(1)]):
+                continue
+            arg = _call_args(src, m.end() - 1)
+            line = src.count("\n", 0, m.start()) + 1
+            checked += 1
+            for expr in [e for part in _template_parts(arg) for e in INTERP.findall(part)]:
+                if expr.startswith("shq("):
+                    continue
+                if IDENT.match(expr) and expr in QUOTE_ARG_OK:
+                    continue
+                if (expr, rel) == QUOTE_RAW_HELPER:
+                    continue
+                bad.append((rel, line,
+                            "%s(): ${%s} reaches a root shell string unquoted - wrap it in "
+                            "shq(), or allowlist it with a checkable reason"
+                            % (m.group(1), expr)))
+            for pre, post in CONCAT_ID.findall(_code_only(arg)):
+                ident = pre or post
+                if ident in QUOTE_CONST_OK or ident in QUOTE_ARG_OK:
+                    continue
+                if ident.startswith("shq"):
+                    continue
+                bad.append((rel, line,
+                            "%s(): `+ %s` concatenates an identifier into a root shell "
+                            "string - wrap it in shq() or make it a literal"
+                            % (m.group(1), ident)))
+
+    print("root call sites examined    : %d" % checked)
+    print("")
+    print("=== values reaching a root shell string unquoted ===")
+    for rel, line, why in sorted(set(bad)):
+        print("  %s:%d  %s" % (rel, line, why))
+    print("")
+    print("%d unquoted value(s)" % len(bad))
+    return 1 if bad else 0
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -278,6 +471,8 @@ def main(argv):
         rc |= sweep_case(argv[2] if len(argv) > 2 else "HEAD~1..HEAD")
     if argv[1] in ("links", "all"):
         rc |= sweep_links()
+    if argv[1] in ("quoting", "all"):
+        rc |= sweep_quoting()
     return rc
 
 

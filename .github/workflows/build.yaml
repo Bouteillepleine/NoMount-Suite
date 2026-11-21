@@ -78,6 +78,12 @@ jobs:
       - name: WebUI load order
         run: node scripts/webui-loadorder.js
 
+      # Only the `quoting` sweep. `links` is exploratory and reports 26 unmatched
+      # patterns on a clean tree, so wiring `all` would fail every run; this one is
+      # clean and was proven to fail against five planted holes.
+      - name: WebUI root-call quoting
+        run: python3 scripts/contract-sweep.py quoting
+
       - name: Case-only-change sweep
         if: github.event_name == 'push' || github.event_name == 'pull_request'
         env:
