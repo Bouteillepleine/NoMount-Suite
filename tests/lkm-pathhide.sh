@@ -110,22 +110,44 @@ fi
 
 # The readers must agree with each other. A mapping that maps denies while
 # map_files resolves it to a path is a louder signal than either leak alone.
+#
+# Measured by the probe, IN the process that owns the mapping. This used to be a loop here
+# over every pid in /proc, run after the probe - a command substitution - had already
+# exited, so the only thing it could find was an unrelated process with an incidental
+# /data/adb mapping, and finding none was reported as agreement. It could not fail for the
+# property it is named after.
 echo "-- do the readers agree? --"
-mf=0
-for p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
-	[ -r "/proc/$p/maps" ] || continue
-	n=$(ls -l "/proc/$p/map_files" 2>/dev/null | grep -c '/data/adb')
-	m=$(grep -c '/data/adb' "/proc/$p/maps" 2>/dev/null)
-	if [ "${n:-0}" != "0" ] && [ "${m:-0}" = "0" ]; then
-		echo "  contradiction: pid $p maps=0 map_files=$n"
-		mf=$((mf + 1))
-	fi
-done
-if [ "$mf" = 0 ]; then
-	echo "ok   map_files: agrees with maps"
-else
-	echo "FAIL map_files: $mf process(es) where map_files resolves what maps denies"
+case "$(field "$ctl" mapfiles)" in
+1) ;;
+*) echo "FAIL control: map_files does not resolve its own mapping - the probe is wrong"; fail=1 ;;
+esac
+case "$(field "$subj" mapfiles)" in
+0)  echo "ok   map_files: no covering entry resolves to the subject's path" ;;
+-1) echo "KNOWN map_files: the probe could not read /proc/self/map_files" ;;
+*)  echo "FAIL map_files: a covering entry still resolves the subject's path while maps denies it"
+    fail=1 ;;
+esac
+
+# "an injected file must not report its backing dev:ino" - the section title, and until now
+# nothing read those columns. The only thing asserted was that root's stat() of the path
+# reported some device other than /data's, which is a different claim. The probe now prints
+# the maps row's own dev and inode beside an fstat of the mapped fd, both from inside the
+# process that owns the mapping.
+echo "-- does the maps row name the backing file? --"
+cmi=$(field "$ctl" mapsino);  csi=$(field "$ctl" statino)
+smi=$(field "$subj" mapsino); ssi=$(field "$subj" statino)
+if [ "${cmi:-0}" != "${csi:-1}" ]; then
+	echo "FAIL control: its maps row reports ino ${cmi:-?}, its fstat says ${csi:-?} - the probe is wrong"
 	fail=1
+elif [ "$(field "$subj" maps)" = 0 ]; then
+	echo "ok   dev:ino: the subject has no maps row, so it reports nothing"
+elif [ "${smi:-0}" = "${ssi:-0}" ]; then
+	echo "FAIL dev:ino: the subject's maps row reports its backing ino $smi (dev $(field "$subj" mapsdev))."
+	echo "     If this build has no dev/ino spoofing arm, that is the finding - say so here"
+	echo "     rather than leaving the section unable to fail."
+	fail=1
+else
+	echo "ok   dev:ino: maps reports ino ${smi:-?} (dev $(field "$subj" mapsdev)), not the backing ${ssi:-?}"
 fi
 
 echo "-- accounting (VmSize / statm) --"

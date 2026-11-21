@@ -141,6 +141,28 @@ window.ksu = {
 window.addEventListener('error', function (e) {
   window.__JSERR = (window.__JSERR || []).concat(String(e.message));
 });
+// Make both diagnostics visible instead of write-only.
+//
+// __UNMATCHED and __JSERR were recorded and then read by nothing in the repository, and
+// `shoot`'s only failure condition was a missing PNG - so a page that threw during boot, or
+// asked for a command this stub cannot match, produced clean-looking screenshots and a zero
+// exit. A banner puts them in every shot, and `check` reads them for a non-zero exit.
+window.__nmDiagBanner = function () {
+  var u = window.__UNMATCHED || [], j = window.__JSERR || [];
+  var el = document.getElementById('__nm_diag');
+  if (!u.length && !j.length) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '__nm_diag';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#7f1d1d;' +
+      'color:#fff;font:12px/1.4 monospace;padding:6px 8px;white-space:pre-wrap';
+    document.body.appendChild(el);
+  }
+  el.textContent =
+    (j.length ? 'JS ERROR x' + j.length + ': ' + j.join(' | ') + '\\n' : '') +
+    (u.length ? 'UNMATCHED x' + u.length + ': ' + u.join(' | ') : '');
+};
+setInterval(window.__nmDiagBanner, 400);
 </script>
 """
 
@@ -211,6 +233,18 @@ def assemble():
 
 
 def build(no_driver=False):
+    # Say what is missing. An absent fixtures file used to surface as a bare
+    # FileNotFoundError traceback, which reads as a broken script rather than as "run
+    # `capture` against a device first".
+    if not os.path.exists(FIXTURES):
+        print(
+            "fatal: no %s\n"
+            "       Run `%s capture` with a device attached first: the fixtures are a\n"
+            "       recording of that device's answers and are deliberately not committed."
+            % (FIXTURES, os.path.basename(__file__)),
+            file=sys.stderr,
+        )
+        sys.exit(2)
     with open(FIXTURES, encoding="utf-8") as f:
         fx = json.load(f)
     if no_driver:

@@ -111,6 +111,31 @@ nm_lkm_prune "$WORK/lkm"
 check "prune DROPS the leftovers when a bundled .ko was used" \
 	"$([ -f "$WORK/lkm/nomount-android14-6.12.ko" ] && echo kept || echo gone)" "gone"
 
+# The kernel changing under a kept module is the one event the bundled set exists for, and
+# it had no case at all: the suite pinned only the deletion. After a bundled load the pick
+# is copied to NM_LKM_DEVICE_KO and the per-KMI set is pruned, so when a different KMI is
+# flashed the device copy is tried, fails on vermagic, is removed - and the search has
+# nothing left to offer. On the lite zip, which ships no lkm/ at all, that is an engineless
+# boot until the full zip is reinstalled.
+#
+# Pinned as it behaves TODAY, deliberately: whether to narrow the prune so the set survives
+# is a disk-space-versus-resilience call for the maintainer, not one this gate should make.
+# What it must not be any more is invisible - this case fails if the prune changes either way.
+setup "nomount-android16-6.12.ko"
+mk "$WORK/lkm/nomount-android16-6.12.ko"; mk "$WORK/lkm/nomount-android13-5.15.ko"
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+nm_lkm_prune "$WORK/lkm"
+check "after a bundled load + prune, no per-KMI candidate is left on disk" \
+	"$(ls "$WORK/lkm"/nomount-*.ko 2>/dev/null | wc -l | tr -d ' ')" "0"
+# Now the kernel changes under it and nothing it kept can load.
+nm_lkm_kver()  { echo "5.15"; }
+nm_lkm_akver() { echo "android13"; }
+LOADABLE=" nomount-android13-5.15.ko "
+UNCONFIRMED=" "
+PICKED=; NM_LKM_SOURCE=
+nm_lkm_load_best "$WORK/lkm" >/dev/null
+check "KNOWN: a KMI change after the prune finds nothing to load" "${PICKED:-none}" "none"
+
 # The whole point of persisting outside $MODDIR: the lite zip ships no lkm/ at
 # all, so a user on a kernel with no built-in engine must not lose it on update.
 setup "nomount-android16-6.12.ko"
