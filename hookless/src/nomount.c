@@ -3632,8 +3632,17 @@ static void nm_used_add(unsigned long *used, u64 ino)
     __set_bit(hash_64(ror64(ino, 32) + 1, NM_USED_ORDER), used);
 }
 
+/* NULL-safe, like nm_used_add() above. It was not, and nm_place_dir_ino() reaches it
+ * twice without a guard: a failed kvzalloc of the 128 KB bitmap left used == NULL while
+ * dmax_valid went true (see nm_dev_ino_seed), and test_bit(nr, NULL) is a NULL deref on
+ * the rule-add path. nm_ino_unavailable() guards with `di->used &&`, which is why only
+ * two of the three call sites could crash. A missing bitmap now also fails the seed, so
+ * this should be unreachable -- that is exactly why it must not depend on one assignment
+ * staying right. No bitmap means nothing is known to be used, so: false. */
 static bool nm_used_test(const unsigned long *used, u64 ino)
 {
+    if (!used)
+        return false;
     return test_bit(hash_64(ino, NM_USED_ORDER), used) &&
            test_bit(hash_64(ror64(ino, 32) + 1, NM_USED_ORDER), used);
 }
@@ -3651,6 +3660,16 @@ static int nm_dev_ino_seed(struct nm_dev_ino *s, const char *seed)
     kfree(s->seed);
     s->seed = kstrdup(seed, GFP_KERNEL);
     err = nm_subtree_dir_ino_max(seed, s->dev, &lo, &m, &a, s->used);
+    /* A failed kvzalloc is a failed seed. The scan takes `used` and nm_used_add() is a
+     * no-op on NULL, so without this the walk returns 0, dmax_err stays 0 -- which is
+     * what nm_dev_ino_get() retries on -- and dmax_valid goes true with no bitmap at
+     * all. Placement then ran with an EMPTY exclusion set, permanently and with no
+     * retry, which is the collision this bitmap exists to prevent; and two of the three
+     * nm_used_test() call sites had no NULL guard, so it was a kernel NULL deref on the
+     * rule-add path rather than only a degradation. -ENOMEM here routes it into the
+     * existing one-shot retry. */
+    if (!err && !s->used)
+        err = -ENOMEM;
     s->dmax_err = err;
     if (err == 0 && s->used) {
         struct nomount_rule *r;
@@ -5825,6 +5844,7 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
     struct nomount_rule *rule;
     struct hlist_node *tmp;
     bool busy = false;
+    int first_err = 0;
     HLIST_HEAD(r_victims);
 
     if (attrs[NOMOUNT_ATTR_PAYLOAD]) {
@@ -5837,7 +5857,22 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
         while (pos + 6 <= len) {
             u32 target_uid = get_unaligned((const u32 *)(data + pos));
             u16 vp_len     = get_unaligned((const u16 *)(data + pos + 4));
-            pos += 6; if (pos + vp_len > len) break;
+
+            pos += 6;
+            /* Both of these used to `break` and leave the overall result to the
+             * victim list, so a batch truncated mid-entry -- or carrying an
+             * oversized length -- reported 0 for the entries it HAD deleted and
+             * nothing about the ones it silently stopped at. The caller cannot
+             * tell a complete delete from a partial one, and the add path already
+             * carries a first_err for exactly this reason. Mirrored here. */
+            if (vp_len >= PATH_MAX) {
+                if (!first_err) first_err = -ENAMETOOLONG;
+                break;
+            }
+            if (pos + vp_len > len) {
+                if (!first_err) first_err = -EINVAL;
+                break;
+            }
             {
                 struct nm_uid_scope scope = { .uid = target_uid };
                 if (__nomount_del_rule(data + pos, vp_len, &scope, &r_victims) == -EBUSY)
@@ -5864,7 +5899,11 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
         return -EINVAL;
     }
 
-    if (hlist_empty(&r_victims)) return busy ? -EBUSY : -ENOENT;
+    /* first_err outranks the rest: a malformed batch is the caller's bug and it must
+     * hear about it even if some entries went through, and even if the rest of the
+     * batch happened to match nothing. */
+    if (hlist_empty(&r_victims))
+        return first_err ? first_err : (busy ? -EBUSY : -ENOENT);
     synchronize_rcu();
 
     hlist_for_each_entry_safe(rule, tmp, &r_victims, victim_node) {
@@ -5872,7 +5911,7 @@ static int nomount_nl_del_rule(struct nlattr **attrs)
         nm_free_rule(rule);
     }
 
-    return busy ? -EBUSY : 0;
+    return first_err ? first_err : (busy ? -EBUSY : 0);
 }
 
 static int nomount_nl_clear_rules(void)

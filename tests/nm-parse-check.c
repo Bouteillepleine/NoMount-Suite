@@ -57,6 +57,31 @@ void c_main(long *sp) {
     expect("100000", 0, 0, 0);
     expect("10397,", 0, 0, 0);
 
+    /* --uid-range, the other scope form. parse_range() is only the parser; the
+     * reason nm.c now REFUSES an end of 0 is this: on the wire uid_end 0 IS the
+     * absent-marker (nomount.h, NOMOUNT_ATTR_UID), so a `0-0` that reached the
+     * engine would be read as "this appid under every user" -- a globally visible
+     * rule. These pin the two facts that argument rests on: that `0-0` parses to
+     * an end of 0, and that `all` does not. */
+    {
+        unsigned int lo = 7, hi = 7;
+
+        if (parse_range("0-0", &lo, &hi) || lo != 0 || hi != 0) {
+            print_err("FAIL --uid-range 0-0 must parse to 0,0\n"); failures++; }
+        lo = hi = 7;
+        if (parse_range("all", &lo, &hi) || lo != 0 || hi != 0xFFFFFFFFu) {
+            print_err("FAIL --uid-range all must parse to 0,0xFFFFFFFF\n"); failures++; }
+        lo = hi = 7;
+        if (parse_range("5-0", &lo, &hi) || lo != 5 || hi != 0) {
+            print_err("FAIL --uid-range 5-0 must parse to 5,0 for nm.c to refuse\n");
+            failures++; }
+        lo = hi = 7;
+        if (parse_range("1000-1000", &lo, &hi) || lo != 1000 || hi != 1000) {
+            print_err("FAIL --uid-range 1000-1000 must still parse\n"); failures++; }
+        if (!parse_range("1000", &lo, &hi)) {
+            print_err("FAIL --uid-range needs an explicit A-B\n"); failures++; }
+    }
+
     if (!failures) print_err("nm-parse-check: ok\n");
     sys1(SYS_EXIT, failures != 0);
     __builtin_unreachable();

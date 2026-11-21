@@ -79,7 +79,21 @@ void c_main(long *sp) {
         } else if (strcmp(argv[i], "--uid-range") == 0 && i + 1 < argc) {
             if (parse_range(argv[++i], &sc_uid, &sc_uid_end)) {
                 print_err("nm: --uid-range takes all or A-B\n"); exit_code = 3; goto do_exit; }
-            if (!sc_uid_end) sc_uid_end = sc_uid;
+            /* A range whose end is 0 cannot be put on the wire: uid_end 0 IS the
+             * absent-marker (nomount.h, NOMOUNT_ATTR_UID), so the engine would read
+             * `0-0` as "this appid, under every user" -- a globally visible rule
+             * instead of the single uid asked for. The old fix-up here was
+             * `if (!sc_uid_end) sc_uid_end = sc_uid;`, which silently turned `0-0`
+             * into exactly that, and `5-0` into `5-5` rather than rejecting a
+             * reversed range. The engine cannot catch either: nm_scope_invalid()
+             * guards `uid_end && uid_end < uid`, and a 0 end fails its first test.
+             * So it is refused here, which is the only place that can tell the
+             * difference. `--uid-range all` is unaffected: it sets 0xFFFFFFFF. */
+            if (sc_uid_end == 0) {
+                print_err("nm: --uid-range end 0 is the absent-marker on the wire, so a\n"
+                          "    range ending at 0 would be sent as a rule visible to every\n"
+                          "    user. Use --uid for a single appid, or all for every uid.\n");
+                exit_code = 3; goto do_exit; }
             scoped = 1;
         } else if (strcmp(argv[i], "--uid-excluded") == 0 && i + 1 < argc) {
             if (parse_appid_list(argv[++i], sc_deny, NM_DENY_MAX, &sc_deny_n)) {
