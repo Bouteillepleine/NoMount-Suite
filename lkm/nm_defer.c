@@ -40,7 +40,17 @@
  * On a full pool the answer is to NOT take the path over, so the caller leaves
  * the return value alone. That fails the guard open for one call, which is worse
  * than hiding it and far better than putting a reference in a context that
- * cannot. The counter says how often it happened.
+ * cannot.
+ *
+ * The counter says how often it happened -- and now SAYS SO WHEN IT HAPPENS, once,
+ * from the overflow arm itself. It used to be printed only from nm_defer_exit(), which
+ * a hiding build can never reach: nm_module_hide() unlinks the module from
+ * /proc/modules, /sys/module and kallsyms, so delete_module() cannot find it and the
+ * exit path never runs. The one surface that recorded this fail-open was therefore
+ * unreachable on exactly the builds that ship. A richer option is the engine's
+ * netlink health reply, which the Suite could then show; this is the version that
+ * needs no cross-module plumbing. pr_warn, because an open guard has to be findable --
+ * the same split nm_say() draws everywhere else.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -51,9 +61,22 @@
 
 #include "nm_defer.h"
 
-/* Comfortably above the maxactive of the two probes that feed this, so a burst
- * of concurrent hidden lookups drains rather than overflows. 32 bytes a slot. */
-#define NM_DEFER_SLOTS 1024
+/* 4096, and sized against DRAIN LATENCY rather than against a maxactive. 32 bytes a
+ * slot, so 128 KB.
+ *
+ * The old comment reasoned from "the maxactive of the two probes that feed this",
+ * which is the wrong quantity: maxactive bounds how many calls are IN FLIGHT at once,
+ * not how many complete before the drain runs. Every completed hidden lookup consumes
+ * a slot, and the pool only turns over when nm_defer_drain() is scheduled -- so the
+ * capacity that matters is puts-per-drain-interval. With the old
+ * schedule_delayed_work(..., 1) that interval was at least one jiffy, i.e. 4 ms at
+ * CONFIG_HZ=250, and 1024 slots meant a sustained ~256k lookups/s emptied the pool.
+ * Two threads looping access() on a hidden path reach that, and the overflow arm fails
+ * the guard OPEN: nm_gp_upa_ret() answers the lookup normally, so access() returns 0
+ * on a path stat() in the same loop still reports as ENOENT. The app does not need to
+ * know which answer is true -- the two disagreeing is the proof.
+ */
+#define NM_DEFER_SLOTS 4096
 
 struct nm_defer_slot {
 	struct llist_node node;
@@ -116,12 +139,24 @@ bool nm_path_put_deferred(struct path *path)
 		s->path = *path;
 		path->dentry = NULL;
 		path->mnt = NULL;
-		if (llist_add(&s->node, &nm_defer_pending))
-			schedule_delayed_work(&nm_defer_work, 1);
+		/* Armed on EVERY claim, delay 0, not only when llist_add() reports the
+		 * list was empty. The old form tied the drain period to the first put
+		 * of a batch: the work was queued once with a one-jiffy delay and
+		 * every put arriving behind it waited for that tick, so the pool's
+		 * capacity per cycle was NM_DEFER_SLOTS per jiffy. schedule_delayed_
+		 * work() on an already-pending work is a no-op, so re-arming costs a
+		 * test, and delay 0 queues it for the next worker wakeup instead of
+		 * the next tick. */
+		llist_add(&s->node, &nm_defer_pending);
+		schedule_delayed_work(&nm_defer_work, 0);
 		return true;
 	}
 
-	atomic_inc(&nm_defer_overflow);
+	if (atomic_inc_return(&nm_defer_overflow) == 1)
+		pr_warn("nomount: the deferred path_put pool (%d slots) overflowed; that "
+			"lookup was answered normally, so access() and stat() can "
+			"disagree about a hidden path until the drain catches up\n",
+			NM_DEFER_SLOTS);
 	return false;
 }
 
@@ -136,6 +171,8 @@ void nm_defer_exit(void)
 	cancel_delayed_work_sync(&nm_defer_work);
 	nm_defer_drain(NULL);
 
+	/* The TOTAL, where the arm in nm_path_put_deferred() prints only the first. Still
+	 * worth keeping for the builds that can be unloaded (hide=0, a test device). */
 	if (nm_defer_overflows())
 		pr_warn("nomount: %lu deferred path_put(s) did not fit the pool; that many lookups were answered normally\n",
 			nm_defer_overflows());

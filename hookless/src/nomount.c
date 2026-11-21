@@ -2111,6 +2111,23 @@ static int nm_file_getattr_common(IDMAP_ARG struct inode *v_inode, struct kstat 
 #else
         generic_fillattr(v_inode, stat);
 #endif
+#if defined(STATX_BTIME) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+        /* generic_fillattr() does not know about btime -- it is per-filesystem -- so it
+         * leaves STATX_BTIME out of result_mask, and nm_mirror_stat() only ever masks
+         * result_mask DOWN (`&= info->v_result_mask`). Between the two, a synthesized
+         * directory could never report a creation time while EVERY real directory on a
+         * btime-capable ROM reports one: a single statx(STATX_BTIME) separated the two
+         * classes, with no rule or timing involved.
+         *
+         * Asserted here rather than in nm_mirror_stat() because only this arm has the
+         * problem -- an injected file mirrors a real inode whose own getattr filled the
+         * bit in. The OR goes BEFORE the mirror on purpose: the `&=` there then keeps
+         * the bit only if the sampled ancestor actually had one, so a ROM without btime
+         * still reports none, and nm_mirror_stat()'s own `else` arm zeroes the value.
+         * v_result_mask and v_btime both reach a synthesized rule from the ancestor
+         * sample (anc_result_mask / anc_btime). */
+        stat->result_mask |= info->v_result_mask & STATX_BTIME;
+#endif
         nm_mirror_stat(info, v_inode, stat);
         stat->nlink = nm_vdir_nlink(info->dir_node);
         if (v_inode->i_sb->s_magic == EROFS_SUPER_MAGIC_V1 || READ_ONCE(nm_vdir_erofs_size)) {
@@ -2956,6 +2973,25 @@ static const struct inode_operations nm_file_iops = {
     .fiemap = nm_fiemap,
 };
 
+/* The ioctl pair is here for the same reason it is on all four nm_file_fops tables, and
+ * its absence here was an omission rather than a decision: a directory served by this
+ * table refused FS_IOC_GETFLAGS, FS_IOC_FSGETXATTR and FS_IOC_GETVERSION outright, so one
+ * ioctl() separated every engine directory from every real one on a filesystem that
+ * answers them.
+ *
+ * nm_ioctl_as_stock() is self-limiting, which is why wiring it in needs no knowledge of
+ * the victim filesystem: it forwards to s_path, else r_path, and first checks whether
+ * that stock inode's own i_fop has an ioctl at all -- returning -ENOTTY when it does not.
+ * So an ext4 or f2fs directory answers exactly what it would have answered, and an erofs
+ * one (erofs_dir_fops has no unlocked_ioctl) still refuses, which is also stock.
+ *
+ * RESIDUAL, narrower and conditional: a SYNTHESIZED directory has neither s_path nor
+ * r_path -- its vpath never existed -- so nm_ioctl_as_stock() finds no source and returns
+ * -ENOTTY. That matches stock on an erofs victim partition and does NOT on an ext4/f2fs
+ * one, where its real siblings would answer. Closing it means answering from sampled
+ * metadata rather than forwarding, and what to sample depends on what the ancestor's
+ * filesystem actually returns for a DIRECTORY -- unmeasured, so not guessed at here.
+ */
 static const struct file_operations nm_dir_fops = {
     .owner = THIS_MODULE,
     .open = nm_open,
@@ -2963,6 +2999,10 @@ static const struct file_operations nm_dir_fops = {
     .llseek = nm_llseek,
     .read = generic_read_dir,
     .fsync = nm_dir_fsync,
+    .unlocked_ioctl = nm_unlocked_ioctl,
+#ifdef CONFIG_COMPAT
+    .compat_ioctl = nm_compat_ioctl,
+#endif
     .iterate_shared = nm_dir_iterate_dir,
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
     .iterate = nm_dir_iterate_dir,
