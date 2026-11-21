@@ -846,7 +846,25 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     text,
                 });
             }
-            if blocklist::follow_ksu_denylist().unwrap_or(false) {
+            // `.unwrap_or(false)` here meant an unreadable uidhide.conf dropped this whole
+            // section in silence, so `uid list` under-reported what is hidden and said
+            // nothing about why -- while still_covered_by() reads the same unreadable file as
+            // "following" and report_ksu_source() prints "unknown". Three callers, three
+            // answers. An unreadable package map did the same thing one branch up, where the
+            // glob arm already says "package map unreadable".
+            let follow = blocklist::follow_ksu_denylist();
+            if follow.is_none() {
+                println!(
+                    "KernelSU DenyList\tunknown - uidhide.conf could not be read, so whether it \
+                     is followed is unknown and nothing below accounts for the apps it covers"
+                );
+            } else if follow == Some(true) && installed_opt.is_none() {
+                println!(
+                    "KernelSU DenyList\tfollowed, but the installed-package map could not be \
+                     read, so which apps it covers cannot be listed"
+                );
+            }
+            if follow == Some(true) && installed_opt.is_some() {
                 match blocklist::ksu_denylist(&installed) {
                     Some(hits) => {
                         for (key, uid) in hits {
@@ -1020,10 +1038,21 @@ pub fn handle_uid(action: UidAction) -> Result<()> {
                     bail!("unknown mode '{m}' - use both | appzygote | platform | off");
                 };
                 let _pass = pass_guard();
-                nm.set_hide_isolated(v).map_err(|e| {
-                    e.context("engine did not accept the isolated-pool knob (kernel too old?)")
-                })?;
+                // Persist BEFORE programming. The engine's copy is volatile and
+                // reapply_blocklist() re-programs it from this file on every boot, so the file
+                // is the source of truth. Programming first left the kernel ahead of the
+                // config whenever the write failed -- the mode reverted at the next reboot
+                // and `nomount uid isolated` reported the config's old value while the engine
+                // held the new one. This way a refusal is reported with the intent recorded,
+                // and the boot pass retries it and says so (ApplyReport::knob_refused).
                 blocklist::set_hide_isolated(v)?;
+                nm.set_hide_isolated(v).map_err(|e| {
+                    e.context(
+                        "saved, but this engine would not take the isolated-pool knob (kernel \
+                         too old?). The setting is on disk and every boot will retry it; \
+                         `nomount uid isolated both` clears it.",
+                    )
+                })?;
                 println!("ok: {}", isolated_mode_name(v));
             }
         },

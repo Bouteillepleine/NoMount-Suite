@@ -132,6 +132,14 @@ pub enum PathhideAction {
 #[derive(Subcommand)]
 pub enum VfsAction {
     /// Serve the contents of <REAL_PATH> at <VIRTUAL_PATH>
+    #[command(after_help = "\
+A rule added here is LIVE, not durable, and the two forms differ in how long they last.
+Without --uid-excluded the rule is unscoped, and `nomount reload` (which the boot
+scripts run, and the WebUI's Reload button) prunes any unscoped rule the installed
+module set does not account for - so it is gone at the next reload or reboot. WITH
+--uid-excluded the rule is scoped, which reload reads as another writer's and leaves
+alone. Neither form is written to disk: for content that must come back every boot,
+ship it in a module, or use `nomount whiteout add` for a durable hide.")]
     Add {
         /// The ROM path an app will read
         virtual_path: String,
@@ -256,6 +264,12 @@ pub enum WhiteoutAction {
     Suggest,
 }
 
+/// Both predicates below listed the verbs they care about and sent everything else to a
+/// `_ => false` catch-all, so a new verb joined the quiet side by default and no test said
+/// which side it was on. For the bootloop guard that is the failure the guard exists to
+/// prevent: a serving verb silently exempt from it keeps injecting on a device that could
+/// not finish booting three times. The catch-alls are gone, so adding a `Commands` variant
+/// now fails to COMPILE until someone classifies it.
 pub fn serves_injections(cmd: &Commands) -> bool {
     match cmd {
         Commands::Mount | Commands::Reload => true,
@@ -266,7 +280,19 @@ pub fn serves_injections(cmd: &Commands) -> bool {
         Commands::Whiteout { action } => {
             matches!(action, WhiteoutAction::Add { .. } | WhiteoutAction::Apply)
         }
-        _ => false,
+        // Diagnosis, removal and the hide list must stay reachable on a parked device: that
+        // is how the operator finds out why it parked and gets out of it. `Unbind` only
+        // unmounts what is already recorded, which is removal too.
+        Commands::Uid { .. }
+        | Commands::Check { .. }
+        | Commands::Plan
+        | Commands::Snapshot
+        | Commands::Verify
+        | Commands::Export { .. }
+        | Commands::Ghost { .. }
+        | Commands::Pathhide { .. }
+        | Commands::Unbind
+        | Commands::Version => false,
     }
 }
 
@@ -292,7 +318,23 @@ pub fn changes_ghost_inputs(cmd: &Commands) -> bool {
             WhiteoutAction::Add { .. } | WhiteoutAction::Remove { .. } | WhiteoutAction::Apply
         ),
         Commands::Absorb { dry_run, .. } => !dry_run,
-        _ => false,
+        // Mount and Reload re-derive the cloak themselves at the end of their own pass
+        // (ghost::sync_after_pass), so routing them through main.rs's post-command resync
+        // would sync twice. Unbind changes which paths exist but not which rules are served,
+        // and ghost::candidates() reads the RULE list. Isolated {mode: Some(_)} writes an
+        // engine knob but not a cloak input: ghost_uids() is built from the live appids,
+        // device users and sdksandbox expansion, and never reads hide_isolated().
+        Commands::Mount
+        | Commands::Reload
+        | Commands::Unbind
+        | Commands::Check { .. }
+        | Commands::Plan
+        | Commands::Snapshot
+        | Commands::Verify
+        | Commands::Export { .. }
+        | Commands::Ghost { .. }
+        | Commands::Pathhide { .. }
+        | Commands::Version => false,
     }
 }
 
@@ -342,6 +384,13 @@ mod tests {
             Commands::Uid { action: UidAction::List },
             Commands::Ghost { action: GhostAction::Sync },
             Commands::Ghost { action: GhostAction::List },
+            Commands::Pathhide { action: PathhideAction::Sync },
+            Commands::Pathhide { action: PathhideAction::List },
+            Commands::Uid { action: UidAction::Isolated { mode: None } },
+            Commands::Uid { action: UidAction::Isolated { mode: Some("off".into()) } },
+            Commands::Uid { action: UidAction::Ksu { state: None, force: false } },
+            Commands::Uid { action: UidAction::Ksu { state: Some("on".into()), force: false } },
+            Commands::Unbind,
             Commands::Version,
         ] {
             assert!(
@@ -406,6 +455,16 @@ mod tests {
             Commands::Verify,
             Commands::Export { dir: None },
             Commands::Ghost { action: GhostAction::List },
+            Commands::Pathhide { action: PathhideAction::Sync },
+            Commands::Pathhide { action: PathhideAction::List },
+            // The write form, which no list enumerated before. It programs the engine's
+            // isolated-pool knob, but ghost_uids() never reads hide_isolated(), so it is
+            // not a cloak input and must NOT trigger a resync.
+            Commands::Uid { action: UidAction::Isolated { mode: Some("both".into()) } },
+            Commands::Uid { action: UidAction::Ksu { state: None, force: false } },
+            // Changes which paths exist, not which rules are served; candidates() reads the
+            // rule list.
+            Commands::Unbind,
             Commands::Version,
         ] {
             assert!(!changes_ghost_inputs(&c), "a read-only verb must not re-derive anything");

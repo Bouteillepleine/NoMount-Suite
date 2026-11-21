@@ -1988,6 +1988,25 @@ mod tests {
              reports as its build string, and the comment that stated this invariant was \
              deleted by the comment strip - so only this test can catch it"
         );
+        // sstrip is vendored from ELFkickers with exactly ONE local change (its README names
+        // the commit): readphdrtable() seeks to e_phoff before reading the program header
+        // table. Upstream has no such seek and works only because e_phoff happens to equal
+        // sizeof(Elf64_Ehdr) for the linkers we use -- so re-extracting the tarball reverts
+        // it in silence, and the first linker that places the phdr table elsewhere makes
+        // sstrip compute the wrong truncation point on a binary we SHIP. The README says
+        // "keep it when refreshing"; this is what makes that more than a note.
+        //
+        // Counted, not matched: commitchanges() carries upstream's identical seek on the
+        // WRITE path, so `contains` passes even with the local change gone. Two is patched,
+        // one is reverted.
+        const SSTRIP_C: &str = include_str!("../userspace/tools/sstrip/sstrip.c");
+        assert_eq!(
+            SSTRIP_C.matches("fseek(thefile, ehdr.e_phoff, SEEK_SET)").count(),
+            2,
+            "sstrip.c must seek to e_phoff in BOTH readphdrtable() and commitchanges(). One \
+             occurrence means a tarball refresh reverted the local read-path seek; see \
+             userspace/tools/sstrip/README.md"
+        );
         const ENGINE_MATRIX: &str = include_str!("../.github/workflows/hookless-matrix.yml");
         for ver in ["4.9", "4.14", "4.19", "5.4", "5.10", "5.15", "6.1", "6.6", "6.12", "6.18"] {
             assert!(

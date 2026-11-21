@@ -1,1 +1,8 @@
-Built by .github/workflows/build-lkm-kmi.yml; one nomount-<kmi>.ko per GKI KMI.
+Built by the `kmi-modules` job in .github/workflows/build.yaml; one
+nomount-<kmi>.ko per GKI KMI, in digest-pinned ghcr.io/ylarod/ddk containers.
+The 01_ (full) zip bundles them; the 00_ (lite) zip ships none.
+
+The old note here named `.github/workflows/build-lkm-kmi.yml`, which has never
+existed in this repository. `lkm-build.yml` is the out-of-tree COMPILE GATE --
+it uploads lkm-gate-log-<ver>, not a .ko -- so it is not where these come from
+either.

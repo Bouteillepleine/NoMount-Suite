@@ -347,7 +347,18 @@ jobs:
           make -C userspace/tools/sstrip
           userspace/tools/sstrip/sstrip -z /tmp/kol/lkmloader
           install -Dm755 /tmp/kol/lkmloader module/bin/ko-loader-arm64
-          file module/bin/ko-loader-arm64
+          # `file` ran here and its output was printed, never tested. `set -eu` catches a
+          # make that FAILS, but not one that succeeds with the wrong architecture: TARGET
+          # is passed on the make line above and upstream's own default is
+          # aarch64-linux-musl, so a renamed variable in a refreshed Makefile would build a
+          # host x86-64 binary, install it as ko-loader-arm64, and ship it in BOTH zips --
+          # where it is the only thing that can load a .ko whose vermagic does not match.
+          readelf -hW module/bin/ko-loader-arm64 | tee /tmp/kol-elf.txt \
+            | grep -E '^ *(Class|Type|Machine):'
+          grep -qE '^ *Machine: *AArch64' /tmp/kol-elf.txt || {
+            echo "::error::ko-loader-arm64 is not an AArch64 ELF - the TARGET on the make"
+            echo "::error::line did not take. Refusing to stage a host binary into the zips."
+            exit 1; }
 
       - name: Check nm's --uid-excluded parsing (upstream C-D form)
         run: |
