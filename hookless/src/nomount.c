@@ -149,6 +149,12 @@ static __always_inline bool nm_rule_visible(const struct nomount_rule *rule)
     unsigned int uid;
 
     if (!rule) return false;
+    /* A minted intermediate is reachable from its parent's children_idr before
+     * the fill pass stamps ino/times/secctx/blksize. Serving it there handed an
+     * unprivileged reader v_ino = the raw name hash and v_blksize = 0 (measured
+     * on an OP15: st_ino 1779265970 beside stock 10..37, st_blksize 1, repaired
+     * ~116us later). Absent until stamped; the acquire orders the metadata. */
+    if (unlikely(smp_load_acquire(&rule->pending))) return false;
     uid = current_uid().val;
 
     if (rule->uid_end) {
@@ -5104,6 +5110,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         irule->v_uid = GLOBAL_ROOT_UID;
         irule->v_gid = GLOBAL_ROOT_GID;
         irule->v_mode = 0755;
+        irule->pending = 1;
 
         memcpy(nm_get_vpath(irule), v_path, parent_len);
         nm_get_vpath(irule)[parent_len] = '\0';
@@ -5168,6 +5175,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 irule->v_attr_mask   = anc_attr_mask;
 #endif
             }
+            smp_store_release(&irule->pending, 0);
             hash_add_rcu(nomount_rules_ht, &irule->vpath_node, irule->v_hash);
         }
         if (!target_rule->v_pdino)
