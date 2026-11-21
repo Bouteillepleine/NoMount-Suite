@@ -892,6 +892,39 @@ fn reassertable_now(target: &Path, early: bool) -> bool {
     early || runtime_droppable(target, &[])
 }
 
+/// Does the live rule's exclusion set still match what apkscope asks for?
+///
+/// `add_rule` decides scope by `is_app_apk(target)`, so the question only applies there:
+/// a non-APK absorbed rule carries no deny set and must not read as permanently stale.
+///
+/// Comparing the slices directly is sound because both ends are canonical --
+/// `resolve_appid_list` sorts and dedups, and the engine refuses a scope that is not
+/// sorted and strictly increasing (`nm_scope_invalid`).
+///
+/// An UNREADABLE apkscope answers true, i.e. leave the rule alone. Every caller reacts to
+/// a mismatch by deleting and re-adding, and `add_rule` refuses an unresolvable list by
+/// design rather than serve unscoped -- so answering false here would delete a working
+/// rule and then fail to put it back. Today an unreadable list leaves the live rule
+/// serving, and that is the direction that cannot be wrong in a way nobody can undo.
+fn apk_scope_current(target: &Path, live_deny: &[u32]) -> bool {
+    scope_decision(is_app_apk(target), apk_scope_cached().as_deref().ok(), live_deny)
+}
+
+/// The decision alone, so it can be tested: apk_scope_cached() is a OnceLock over a path
+/// on the device, and the Err arm -- the one that must answer "leave it alone" -- is
+/// otherwise unreachable from a host test.
+///
+/// `want: None` is an unreadable apkscope.
+fn scope_decision(is_apk: bool, want: Option<&[u32]>, live_deny: &[u32]) -> bool {
+    if !is_apk {
+        return true;
+    }
+    match want {
+        Some(w) => w == live_deny,
+        None => true,
+    }
+}
+
 fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> u32 {
     let Ok(live) = nm.list() else {
         eprintln!(
@@ -900,11 +933,16 @@ fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> u32 {
         );
         return 0;
     };
-    let live_targets: HashSet<PathBuf> = crate::nm::parse_list(&live)
-        .into_iter()
-        .filter(|r| r.kind == crate::nm::LiveKind::Inject)
-        .map(|r| r.target)
-        .collect();
+    // target -> its live exclusion set, not just a set of targets. Dropping `deny` here
+    // is what made editing apkscope inert: the skip below saw the target was live and
+    // moved on, so an absorbed APK kept serving to the very app the operator had just
+    // excluded, until the next reboot did a full clear-and-rebuild.
+    let live_scoped: std::collections::HashMap<PathBuf, Vec<u32>> =
+        crate::nm::parse_list(&live)
+            .into_iter()
+            .filter(|r| r.kind == crate::nm::LiveKind::Inject)
+            .map(|r| (r.target, r.deny))
+            .collect();
     let mut n = 0;
     for (target, source) in pairs {
         if !source.exists() || !target.exists() {
@@ -925,8 +963,26 @@ fn reapply_pairs(nm: &Nm, pairs: &[(PathBuf, PathBuf)], early: bool) -> u32 {
                 continue;
             }
         }
-        if live_targets.contains(target) {
-            continue;
+        if let Some(live_deny) = live_scoped.get(target) {
+            if apk_scope_current(target, live_deny) {
+                continue;
+            }
+            // Live, but with the wrong audience. del first: add_rule would otherwise be a
+            // second rule on a vpath the engine already has, and the delete key is the
+            // whole scope, which is why del_any reads the live deny set back.
+            eprintln!(
+                "nomount: {} is live with a stale exclusion set - re-serving it with the \
+                 current apkscope",
+                target.display()
+            );
+            if nm.del_any(target).is_err() {
+                eprintln!(
+                    "nomount: could not drop the stale rule for {} - it keeps the old \
+                     exclusion set until the next boot",
+                    target.display()
+                );
+                continue;
+            }
         }
         if !reassertable_now(target, early) {
             eprintln!(
@@ -1110,7 +1166,8 @@ fn already_serving(target: &Path, source: &Path) -> bool {
     t.len() == s.len()
 }
 
-fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool {
+fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap,
+                  scopes: &ScopeMap) -> bool {
     if let Err(why) = crate::mount::path_is_representable(target)
         .and(crate::mount::path_is_representable(source))
     {
@@ -1134,7 +1191,17 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
         return false;
     }
     match live.get(target) {
-        Some(cur) if cur.as_path() == source && already_serving(target, source) => true,
+        // `scopes` as well as the source: a rule can be serving the right bytes to the
+        // wrong audience. Without this the arm below short-circuited to "nothing to do"
+        // whenever source and size matched, so an apkscope edit never reached a rule that
+        // was already live -- see apk_scope_current().
+        Some(cur)
+            if cur.as_path() == source
+                && already_serving(target, source)
+                && apk_scope_current(target, scopes.get(target).map_or(&[][..], |d| d)) =>
+        {
+            true
+        }
         Some(prev) => {
             let prev = prev.clone();
             let _ = nm.del_any(target);
@@ -1172,21 +1239,28 @@ fn add_repointing(nm: &Nm, target: &Path, source: &Path, live: &LiveMap) -> bool
 }
 
 type LiveMap = std::collections::HashMap<PathBuf, PathBuf>;
+/// target -> its live exclusion set. Separate from LiveMap so every existing use of
+/// the source map is untouched; only the places that decide "already correct" need it.
+type ScopeMap = std::collections::HashMap<PathBuf, Vec<u32>>;
 
-fn live_injects(nm: &Nm) -> LiveMap {
-    nm.list()
-        .map(|l| {
-            crate::nm::parse_list(&l)
-                .into_iter()
-                .filter(|r| r.uid == 0)
-                .filter_map(|r| r.source.map(|src| (r.target, src)))
-                .collect()
-        })
-        .unwrap_or_default()
+fn live_injects(nm: &Nm) -> (LiveMap, ScopeMap) {
+    let Ok(l) = nm.list() else { return (LiveMap::new(), ScopeMap::new()) };
+    let rules = crate::nm::parse_list(&l);
+    let scopes = rules
+        .iter()
+        .filter(|r| r.uid == 0)
+        .map(|r| (r.target.clone(), r.deny.clone()))
+        .collect();
+    let live = rules
+        .into_iter()
+        .filter(|r| r.uid == 0)
+        .filter_map(|r| r.source.map(|src| (r.target, src)))
+        .collect();
+    (live, scopes)
 }
 
 fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf)>,
-          live: &LiveMap, refused: &mut u32) -> u32 {
+          live: &LiveMap, scopes: &ScopeMap, refused: &mut u32) -> u32 {
     let mut failed = 0u32;
     if source.is_dir() {
         let entries = match std::fs::read_dir(source) {
@@ -1204,7 +1278,7 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
             let child_src = e.path();
             let child_tgt = target.join(e.file_name());
             if ft.is_dir() {
-                failed += inject(nm, &child_src, &child_tgt, out, live, refused);
+                failed += inject(nm, &child_src, &child_tgt, out, live, scopes, refused);
             } else if let Some(why) = crate::mount::absorb_refusal(&child_src) {
                 // A refusal, not a failure: the planner declines the same entry, so absorb
                 // says why and leaves it rather than counting it against the module. It is
@@ -1216,7 +1290,7 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
                     child_tgt.display(),
                     child_src.display()
                 );
-            } else if add_repointing(nm, &child_tgt, &child_src, live) {
+            } else if add_repointing(nm, &child_tgt, &child_src, live, scopes) {
                 out.push((child_tgt, child_src));
             } else {
                 failed += 1;
@@ -1229,7 +1303,7 @@ fn inject(nm: &Nm, source: &Path, target: &Path, out: &mut Vec<(PathBuf, PathBuf
             target.display(),
             source.display()
         );
-    } else if add_repointing(nm, target, source, live) {
+    } else if add_repointing(nm, target, source, live, scopes) {
         out.push((target.to_path_buf(), source.to_path_buf()));
     } else {
         failed += 1;
@@ -1271,6 +1345,11 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
         .iter()
         .filter(|r| r.uid == 0)
         .filter_map(|r| r.source.clone().map(|s| (r.target.clone(), s)))
+        .collect();
+    let scopes: ScopeMap = rules
+        .iter()
+        .filter(|r| r.uid == 0)
+        .map(|r| (r.target.clone(), r.deny.clone()))
         .collect();
     for r in rules {
         let Some(source) = r.source else { continue };
@@ -1317,7 +1396,7 @@ pub fn refresh_app_apks(nm: &Nm) -> (u32, u32) {
                 );
             }
             Ok(Some(now)) if now != *target => {
-                if add_repointing(nm, &now, &source, &live) {
+                if add_repointing(nm, &now, &source, &live, &scopes) {
                     rewrite_absorbed_after_refresh(&[(target.to_path_buf(), now.clone())], &[]);
                     let _ = nm.del_any(target);
                     moved.push((target.to_path_buf(), now));
@@ -2052,7 +2131,7 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         }
     };
     let (mut dropped, mut held) = (0u32, 0u32);
-    let live_map = live_injects(&nm);
+    let (live_map, live_scopes) = live_injects(&nm);
     let mut reasserted: HashSet<PathBuf> = HashSet::new();
     let mut stacks: HashSet<PathBuf> = HashSet::new();
     let mut fresh: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -2117,7 +2196,8 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
             dropped += 1;
             let mut refreshed = Vec::new();
             let mut refused = 0u32;
-            let fails = inject(&nm, &c.source, &at, &mut refreshed, &live_map, &mut refused);
+            let fails =
+                inject(&nm, &c.source, &at, &mut refreshed, &live_map, &live_scopes, &mut refused);
             if fails > 0 {
                 eprintln!(
                     "nomount: {} unmounted but re-asserting {fails} of its rule(s) failed - that content may have reverted to the stock file",
@@ -2224,7 +2304,8 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
         }
         let before = fresh.len();
         let mut refused = 0u32;
-        let fails = inject(&nm, &c.source, &c.target, &mut fresh, &live_map, &mut refused);
+        let fails = inject(&nm, &c.source, &c.target, &mut fresh, &live_map, &live_scopes,
+                           &mut refused);
         let served = fresh.len() - before;
         if let Ok(all) = record.as_mut() {
             if served > 0 {
@@ -2332,6 +2413,28 @@ pub fn run_absorb(dry_run: bool, include_dirs: bool, early: bool) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_unreadable_apkscope_leaves_a_live_rule_alone() {
+        use super::scope_decision;
+
+        // Not an APK: no deny set is expected, so it can never read as stale.
+        assert!(scope_decision(false, Some(&[10397]), &[]));
+        assert!(scope_decision(false, None, &[]));
+
+        // The case the fix exists for: apkscope changed under a live rule.
+        assert!(scope_decision(true, Some(&[10397]), &[10397]), "unchanged -> nothing to do");
+        assert!(!scope_decision(true, Some(&[10170, 10397]), &[10397]), "an app was added");
+        assert!(!scope_decision(true, Some(&[10397]), &[]), "was unscoped, now excluded");
+        assert!(!scope_decision(true, Some(&[]), &[10397]), "exclusion removed");
+
+        // And the trap. Every caller answers a mismatch by deleting and re-adding, while
+        // add_rule REFUSES an unresolvable apkscope rather than serve unscoped -- so
+        // "false" here would delete a working rule and then fail to put it back. An
+        // unreadable list must leave the rule serving.
+        assert!(scope_decision(true, None, &[10397]), "unreadable must not mean stale");
+        assert!(scope_decision(true, None, &[]));
+    }
     use super::*;
 
     #[test]
