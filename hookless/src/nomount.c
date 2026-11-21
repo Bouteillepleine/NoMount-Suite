@@ -23,15 +23,24 @@
 #include "overlayfs/ovl_entry.h"
 #define NM_OVL_LAST_INO 1
 #else
-/* Loud, because this silently changed where directory inodes land. The include is
- * QUOTED, so it resolves against this file's own directory first and then the -I list:
- * in tree the engine is copied to fs/nomount.c and finds fs/overlayfs/ovl_entry.h,
- * while out of tree it stays in hookless/src/ and used to find nothing -- making
- * nm_ovl_reserve_dir_ino() an unconditional `return 0` in nomount.ko with no warning
- * at all, so the 00_ and 01_ zips placed directory inodes differently on one device.
- * lkm/Makefile now passes -I$(srctree)/fs; if you are reading this warning, something
- * has taken it away again. */
-#warning "overlayfs/ovl_entry.h not found: building WITHOUT the overlay dir-inode reservation (add -I$(srctree)/fs)"
+/* EXPECTED out of tree, and loud anyway, because it changes where directory inodes
+ * land. The include is QUOTED, so it resolves against this file's own directory first
+ * and then the -I list: in tree the engine is copied to fs/nomount.c and finds
+ * fs/overlayfs/ovl_entry.h, while out of tree it stays in hookless/src/ and finds
+ * nothing, so nm_ovl_reserve_dir_ino() compiles to `return 0` and the 00_ and 01_ zips
+ * place directory inodes differently on the same device.
+ *
+ * Do NOT close that by adding -I$(srctree)/fs to lkm/Makefile. It was tried
+ * (9e1a53b, reverted the same day): the reservation does
+ * atomic_long_inc_return(&ofs->last_ino) at a BUILD-TIME offset into struct ovl_fs,
+ * which is private to fs/overlayfs/, is not KMI-stable, and has been reordered between
+ * versions -- and the .ko is loaded onto a kernel it was not built against, by design,
+ * since ko-loader rewrites vermagic. A visible placement difference beats a blind write
+ * into another filesystem's superblock state. See the long note in lkm/Makefile.
+ *
+ * So this warning is the record of WHICH build you have; nm_place_dir_ino()'s
+ * `inoplace:` line carries the same bit as ovl=%d at runtime. */
+#warning "overlayfs/ovl_entry.h not found: no overlay dir-inode reservation (expected out of tree; see lkm/Makefile)"
 #endif
 #endif
 

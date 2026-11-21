@@ -161,15 +161,16 @@ jobs:
           fi
           echo "MAKEOPTS=$M" >> "$GITHUB_ENV"
           make $M defconfig
-          # OVERLAY_FS, so this build actually compiles nm_ovl_reserve_dir_ino().
-          # nomount.c gates it on IS_ENABLED(CONFIG_OVERLAY_FS) && >= 5.10 &&
-          # __has_include("overlayfs/ovl_entry.h"), and 9e1a53b added -I$(srctree)/fs so
-          # the header resolves out of tree. But with OVERLAY_FS off the OUTER guard
-          # excludes the whole block, the #else that warns about a missing header never
-          # runs either, and a green build with no warning proves nothing at all -- the
-          # function stays an unconditional `return 0` and the 01_ zip keeps placing
-          # directory inodes differently from the 00_ one. hookless-matrix.yml has
-          # enabled it since 4317cde; this build never did.
+          # OVERLAY_FS, so nomount.c's overlay block is REACHED. Its guard is
+          # IS_ENABLED(CONFIG_OVERLAY_FS) && >= 5.10 && __has_include(
+          # "overlayfs/ovl_entry.h"); out of tree the quoted include finds nothing and
+          # never will -- see the long note in lkm/Makefile for why -I$(srctree)/fs is
+          # deliberately absent -- so nm_ovl_reserve_dir_ino() is `return 0` in every
+          # .ko and the 01_ zip places directory inodes differently from the 00_ one,
+          # knowingly. What this enable buys is the #else arm: with OVERLAY_FS off the
+          # OUTER guard drops the whole block, the missing-header #warning never fires,
+          # and a silent green build cannot tell you which variant it built. With it on,
+          # that warning is in the log of every row.
           ./scripts/config --enable CONFIG_KPROBES --enable CONFIG_MODULES \
                            --enable CONFIG_OVERLAY_FS
           make $M olddefconfig
