@@ -1,3 +1,25 @@
+/* module.h and init.h FIRST, before anything else, and this is load-bearing.
+ *
+ * Further down this file #undef's fs_initcall and module_exit and redefines them, so
+ * that including the engine generates the nm_lkm_init()/nm_lkm_exit() wrappers that
+ * arm the five guards and call nm_module_hide(). The engine then includes
+ * <linux/init.h> and <linux/module.h> itself (nomount.c lines 1 and 10) -- AFTER those
+ * redefinitions. Where the header had already been pulled in transitively its include
+ * guard makes that a no-op and the wrappers survive; where it had not, module.h's own
+ *
+ *   #define fs_initcall(fn)  module_init(fn)
+ *
+ * wins, the wrapper is never generated, and the module comes up with NO guard armed,
+ * no guard summary and nm_module_hide() never called -- silently, on a green build.
+ * That is what happened on 4.9 and 4.14 while 4.19 and up were fine: the only trace
+ * was gcc reporting nm_guard_n/ok/na as "defined but not used" on exactly those two
+ * rows, next to "fs_initcall redefined" from include/linux/module.h.
+ *
+ * Including them here sets the guards before the #undef's, so the redefinitions are the
+ * last word on every version rather than on whichever ones happened to include module.h
+ * through some other header first. */
+#include <linux/init.h>
+#include <linux/module.h>
 #include <linux/errno.h>
 #include "nm_oot.h"
 #include "nm_maps_spoof.h"
@@ -117,6 +139,7 @@ static int nm_guard_na;
 		nm_module_hide();					\
 		return 0;						\
 	}								\
+	static const int nm_lkm_wrapper_built = 1;			\
 	module_init(nm_lkm_init)
 
 #undef module_exit
@@ -131,9 +154,19 @@ static int nm_guard_na;
 		nm_defer_exit();					\
 		fn();							\
 	}								\
-	void cleanup_module(void) __attribute__((alias("nm_lkm_exit")))
+	void cleanup_module(void) __attribute__((alias("nm_lkm_exit")));	\
+	static const int nm_lkm_teardown_built = 1
 
 #include "../hookless/src/nomount.c"
+
+/* The gate for the include order at the top of this file. nm_lkm_wrapper_built is
+ * declared inside the fs_initcall redefinition, so it exists only if the engine's
+ * fs_initcall(nomount_init) expanded to OUR wrapper. If a header re-defined the macro
+ * back to module_init first, this line is a reference to an undeclared identifier and
+ * the build fails here, naming the file -- instead of producing a module that loads,
+ * arms nothing and never hides, which is what a clobbered wrapper silently ships. */
+static const int nm_lkm_wrapper_check __maybe_unused = nm_lkm_wrapper_built;
+static const int nm_lkm_teardown_check __maybe_unused = nm_lkm_teardown_built;
 
 MODULE_DESCRIPTION("NoMount Prism VFS engine (out-of-tree module build)");
 MODULE_INFO(nomount_variant, "lkm");
